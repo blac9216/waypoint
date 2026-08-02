@@ -233,3 +233,5 @@ in its own README as it lands:
   [ADR-0007](adr/0007-frontend.md)) and `npm test`. See `frontend/README.md`.
 - **`deploy/`** — bring-up and the SSE `proxy_buffering off` requirement from
   [ADR-0003](adr/0003-reverse-proxy-nginx.md). See `deploy/README.md`.
+
+<!-- path-filter verification: this line is temporary, PR closed without merge -->
