@@ -13,8 +13,21 @@
  * (CDN <script>/<link> tags, remote fonts/images, analytics beacons) uses an
  * explicit scheme in every toolchain in this stack.
  *
- * ALLOWLIST: three narrow, exact-prefix exceptions for inert strings baked
- * into audited third-party dependencies (React, workbox-window) that this
+ * FILE SELECTION — fail closed, not open. Every file under dist/ is scanned
+ * by default; only the extensions in SKIPPED_BINARY_EXTENSIONS below are
+ * skipped. This is deliberately a denylist and not an allowlist: an
+ * allowlist of "text" extensions silently exempts every file type nobody
+ * thought of (`.mjs`, `.cjs`, `.xml`, and anything with no extension at
+ * all), and `frontend/public/` is copied verbatim into `dist/` with
+ * whatever names it contains — so an allowlist means a new emitted file
+ * type ships unchecked until someone notices. A guard that fails open is
+ * worse than no guard. The cost of the inversion is that a binary file not
+ * on the denylist may decode to a byte sequence that looks like a URL and
+ * fail the build; that is the safe direction to be wrong in, and the fix is
+ * to add the extension here with a reason.
+ *
+ * ALLOWLIST: three narrow, exact exceptions for inert strings baked into
+ * audited third-party dependencies (React, workbox-window) that this
  * project does not author and cannot edit. Each is a literal used for
  * developer-facing diagnostic text, an XML namespace identifier, or a
  * console warning — never a network fetch target, never rendered as a link,
@@ -29,10 +42,42 @@ import { fileURLToPath } from "node:url";
 
 const URL_PATTERN = /https?:\/\/[^\s"'`)<>\\]+/g;
 
-// Extensions that are meaningfully "text" for this check. Binary assets
-// (PNG icons, etc.) are skipped — this project's own binary assets carry no
-// such strings, and treating them as text buys nothing.
-const SCANNED_EXTENSIONS = new Set([".html", ".js", ".css", ".json", ".webmanifest", ".svg", ".txt", ".map"]);
+/**
+ * Known-binary extensions, skipped because decoding them as UTF-8 produces
+ * noise rather than signal. EVERYTHING ELSE IS SCANNED — including
+ * extensionless files, `.mjs`/`.cjs`, `.xml`, and any format added to
+ * `public/` later. Only add an entry here for a format that genuinely
+ * cannot carry a meaningful URL reference in its decoded text.
+ */
+const SKIPPED_BINARY_EXTENSIONS = new Set([
+	// Images
+	".png",
+	".jpg",
+	".jpeg",
+	".gif",
+	".webp",
+	".avif",
+	".ico",
+	".bmp",
+	// Fonts
+	".woff",
+	".woff2",
+	".ttf",
+	".otf",
+	".eot",
+	// Other binary payloads
+	".wasm",
+	".zip",
+	".gz",
+	".br",
+]);
+
+/** True when `file` is a known-binary artifact this check deliberately skips.
+ * Extension matching is case-insensitive; a file with no extension is never
+ * skipped (that was the hole this replaced). */
+export function isSkippedBinary(file) {
+	return SKIPPED_BINARY_EXTENSIONS.has(extname(file).toLowerCase());
+}
 
 export const ALLOWLIST = [
 	{
@@ -43,10 +88,14 @@ export const ALLOWLIST = [
 			"itself; cannot be removed without patching a vendored dependency.",
 	},
 	{
-		pattern: /^http:\/\/www\.w3\.org\//,
+		// Exactly the four namespace URIs actually present in the build, matched
+		// whole (`$`-anchored) rather than by origin prefix — allowing all of
+		// `http://www.w3.org/` would exempt any future w3.org URL, including a
+		// real fetchable one.
+		pattern: /^http:\/\/www\.w3\.org\/(1999\/xlink|2000\/svg|1998\/Math\/MathML|XML\/1998\/namespace)$/,
 		reason:
-			"XML/SVG/MathML namespace URIs used by react-dom's attribute/property tables to set namespaced DOM " +
-			"attributes (xlink:href, xml:lang, SVG/MathML elements). These are XML namespace *names*, a syntactic " +
+			"The four XML/SVG/MathML namespace URIs used by react-dom's attribute/property tables to set namespaced " +
+			"DOM attributes (xlink:href, xml:lang, SVG/MathML elements). These are XML namespace *names*, a syntactic " +
 			"identifier the XML/DOM spec requires to look like a URI — never dereferenced over the network.",
 	},
 	{
@@ -74,17 +123,24 @@ function* walk(dir) {
 }
 
 /**
- * Scans `distDir` and returns `{ violations, allowlisted }`, each an array
- * of `{ file, url }`. Pure function (no process.exit) so it's unit-testable.
+ * Scans `distDir` and returns `{ violations, allowlisted, scanned, skipped }`.
+ * `violations`/`allowlisted` are arrays of `{ file, url }`; `scanned`/`skipped`
+ * are file paths, reported so the CLI can show what the guard actually looked
+ * at rather than asking the reader to trust it. Pure function (no
+ * process.exit) so it's unit-testable.
  */
 export function scanDist(distDir) {
 	const violations = [];
 	const allowlisted = [];
+	const scanned = [];
+	const skipped = [];
 
 	for (const file of walk(distDir)) {
-		if (!SCANNED_EXTENSIONS.has(extname(file))) {
+		if (isSkippedBinary(file)) {
+			skipped.push(file);
 			continue;
 		}
+		scanned.push(file);
 		const content = readFileSync(file, "utf-8");
 		const matches = content.match(URL_PATTERN) ?? [];
 		for (const url of matches) {
@@ -97,7 +153,7 @@ export function scanDist(distDir) {
 		}
 	}
 
-	return { violations, allowlisted };
+	return { violations, allowlisted, scanned, skipped };
 }
 
 function main() {
@@ -134,7 +190,10 @@ function main() {
 		process.exit(1);
 	}
 
-	console.log(`check-no-external-assets: OK — no external references found in ${distDir}.`);
+	console.log(
+		`check-no-external-assets: OK — no external references found in ${distDir} ` +
+			`(${result.scanned.length} file(s) scanned, ${result.skipped.length} known-binary file(s) skipped).`,
+	);
 }
 
 // Only run as a CLI when invoked directly (`node scripts/check-no-external-assets.mjs`),
