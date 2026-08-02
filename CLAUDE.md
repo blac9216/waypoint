@@ -29,6 +29,11 @@ Rules of thumb:
   rewriting history are BOTH required — treat it as an incident, tell the user
   immediately, and do not push anything else until resolved.
 - When in doubt, leave it out and ask.
+- **Local testing**: dev depot tokens and depot configuration are borrowed at runtime
+  from the private sibling repo (`vcf-docker-download`) via gitignored paths
+  (`dev/local/`, `.env`, `config/` — see `.gitignore`). They are used for testing
+  only and are NEVER copied into this repository, echoed into committed fixtures,
+  or pasted into logs/docs. Seed data and test fixtures stay invented.
 
 ## Project Overview
 
@@ -45,10 +50,13 @@ API, job engine, credential store, RBAC, and cross-enclave transfer. One applian
 image deploys on both sides of an air gap — a **connected** instance (all features,
 builds signed export bundles) and **disconnected** instances (consume bundles).
 
-**Current status: planning/design.** No application code yet. The architecture and all
-agreed decisions live in `docs/` — read `docs/architecture.md` and the ADRs in
-`docs/adr/` before proposing or building anything, and keep them updated as decisions
-evolve. Do not contradict an accepted ADR without recording a superseding one.
+**Current status: implementation, milestone M1** (foundation + download vertical
+slice — see `docs/roadmap.md`). Planning (M0) is complete: architecture, decisions,
+security model, UI prototype, and the API contract live in `docs/` — read
+`docs/architecture.md`, `docs/api-contract.md`, and the ADRs in `docs/adr/` before
+building anything, and keep them updated as decisions evolve. Do not contradict an
+accepted ADR without recording a superseding one. All work is issue-driven via the
+`github-workflow` skill.
 
 ## Tech Stack (agreed — see ADRs for rationale)
 

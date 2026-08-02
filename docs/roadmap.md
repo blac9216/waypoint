@@ -14,21 +14,32 @@ and forces exactly one new subsystem into existence.
 
 Next: decompose M1 into epics/issues per the `github-workflow` skill.
 
-## M1 — Job engine wrapping ONE workflow, end to end
+## M1 — Foundation + download vertical slice (current)
+
+Reordered 2026-08-02: the download workflow goes first — it is the easiest end-to-end
+slice (no vCenter discovery, no InSpec/SAF pipeline, one credential) while still
+forcing every foundation into existence.
 
 - Compose stack: nginx + backend + Postgres + frontend shell. **Local auth only.**
-- Job engine (ADR-0008): queue, dispatcher, runspace hosting (ADR-0006), SSE streaming.
-- One workflow wired through: **STIG scan of a vSphere site with live logs in the
-  browser**, using the existing execution modules. Results/history persisted.
+- Job engine (ADR-0008): queue, dispatcher, runspace hosting (ADR-0006), SSE
+  streaming (global + per-run) — proves the riskiest integration (C# ↔ PowerShell)
+  on the simplest workflow.
+- Minimal secrets store (ADR-0005 subset): envelope encryption + write-only API,
+  initially holding just the Broadcom depot token.
+- Wired through end to end: **depot catalog indexing (`catalog-index`) + catalog
+  browser + download jobs (`download`) with live progress, checksum verification,
+  and disk usage**, using the vcf-docker-download modules as the execution layer.
+- Dev-only shortcut: the download tool binary is provisioned into the dev environment
+  by hand (the in-UI install flow stays in M5). **Test depot tokens/config come from
+  the private sibling repo at runtime — gitignored mounts, never committed here.**
+
+## M2 — Sites, credentials & the STIG scan slice
+
+- Full credential store (ownership model) + sites/targets CRUD replacing hand-edited
+  `site.json`; migration path from `secrets.vault` + `site.json`.
 - Discovery job type + cached inventory (needed by the start-a-scan flow).
-- This milestone proves the riskiest integration (C# ↔ PowerShell runspaces) first.
-
-## M2 — Credential store & sites
-
-- Envelope-encrypted secrets (ADR-0005), credential ownership model, write-only API.
-- Sites/targets CRUD replacing hand-edited `site.json`; migration path from
-  `secrets.vault` + `site.json`.
-- Remaining scan transports (NSX, SRG) + attestation/input document store with
+- **STIG scan of a vSphere site with live logs in the browser** (the hero screen),
+  then the remaining transports (NSX, SRG) + attestation/input document store with
   versioning.
 
 ## M3 — Identity & RBAC
