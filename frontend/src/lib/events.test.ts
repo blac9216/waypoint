@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { connectEventStream, type WaypointEvent } from "./events";
+import { connectEventStream, parseSseFrame, type WaypointEvent } from "./events";
 
 interface MockCall {
-	text: string;
+	/** Body delivered as a single chunk. Ignored when `chunks` is set. */
+	text?: string;
+	/** Body delivered as several reader chunks, to exercise frame boundaries
+	 * that straddle a chunk split (e.g. a `\r\n\r\n` cut down the middle). */
+	chunks?: string[];
 	/** If true, the mock reports a clean stream end right after the chunk —
 	 * simulating the server closing the connection, which should make
 	 * connectEventStream reconnect. If false (default), the connection
@@ -19,17 +23,19 @@ function makeSseFetch(callsByIndex: MockCall[], headersSeen: Headers[]): typeof 
 		const thisCall = callsByIndex[callIndex] ?? { text: "" };
 		callIndex += 1;
 		headersSeen.push(new Headers(init?.headers));
-		const bytes = new TextEncoder().encode(thisCall.text);
-		let sentFirstChunk = false;
+		const encoder = new TextEncoder();
+		const pending = (thisCall.chunks ?? [thisCall.text ?? ""]).map((chunk) => encoder.encode(chunk));
+		let sentChunks = 0;
 		const signal = init?.signal;
 
 		const body = {
 			getReader() {
 				return {
 					read(): Promise<{ value: Uint8Array | undefined; done: boolean }> {
-						if (!sentFirstChunk) {
-							sentFirstChunk = true;
-							return Promise.resolve({ value: bytes, done: false });
+						if (sentChunks < pending.length) {
+							const value = pending[sentChunks];
+							sentChunks += 1;
+							return Promise.resolve({ value, done: false });
 						}
 						if (thisCall.endAfterChunk) {
 							return Promise.resolve({ value: undefined, done: true });
@@ -136,5 +142,121 @@ describe("connectEventStream", () => {
 		await vi.waitFor(() => expect(headersSeen.length).toBeGreaterThanOrEqual(2));
 		expect(headersSeen[0].get("Last-Event-ID")).toBeNull();
 		expect(headersSeen[1].get("Last-Event-ID")).toBe("42");
+	});
+
+	/**
+	 * Issue #70. The parser used to split frames on `"\n\n"` only, so a
+	 * CRLF-emitting server (several ASP.NET Core SSE helpers do this, and
+	 * issue #3 hasn't picked a line ending yet) produced a buffer with no
+	 * recognizable boundary — the stream connected, stayed open, and
+	 * delivered nothing, with no error to explain it. These tests fail if
+	 * that regression is reintroduced.
+	 */
+	describe("frame delimiters (issue #70)", () => {
+		const envelope: WaypointEvent = {
+			seq: 7,
+			ts: "2026-08-02T14:07:31Z",
+			type: "job.log",
+			job_id: "j-3021",
+			data: { level: "warn", line: "crlf frame" },
+		};
+
+		it("parses CRLF-delimited frames and advances Last-Event-ID", async () => {
+			// Every terminator is \r\n, including the blank line that ends the frame.
+			const sse = `id: 7\r\nevent: message\r\ndata: ${JSON.stringify(envelope)}\r\n\r\n`;
+			const headersSeen: Headers[] = [];
+			globalThis.fetch = makeSseFetch([{ text: sse, endAfterChunk: true }, { text: "" }], headersSeen);
+
+			const received: WaypointEvent[] = [];
+			activeClose = connectEventStream("/api/v1/events", {
+				getToken: () => "tok",
+				onEvent: (e) => received.push(e),
+				minBackoffMs: 5,
+				maxBackoffMs: 10,
+			});
+
+			await vi.waitFor(() => expect(received).toHaveLength(1));
+			expect(received[0]).toEqual(envelope);
+			// The id must have been recorded, or replay-on-reconnect silently
+			// restarts the stream from the beginning.
+			await vi.waitFor(() => expect(headersSeen.length).toBeGreaterThanOrEqual(2));
+			expect(headersSeen[1].get("Last-Event-ID")).toBe("7");
+		});
+
+		it("parses back-to-back CRLF frames arriving in one chunk", async () => {
+			const a = { ...envelope, seq: 1 };
+			const b = { ...envelope, seq: 2 };
+			const sse =
+				`id: 1\r\ndata: ${JSON.stringify(a)}\r\n\r\n` + `id: 2\r\ndata: ${JSON.stringify(b)}\r\n\r\n`;
+			globalThis.fetch = makeSseFetch([{ text: sse }], []);
+
+			const received: WaypointEvent[] = [];
+			activeClose = connectEventStream("/api/v1/events", {
+				getToken: () => "tok",
+				onEvent: (e) => received.push(e),
+				minBackoffMs: 5,
+				maxBackoffMs: 10,
+			});
+
+			await vi.waitFor(() => expect(received).toHaveLength(2));
+			expect(received.map((e) => e.seq)).toEqual([1, 2]);
+		});
+
+		it("parses a CRLF frame whose boundary is split across two reader chunks", async () => {
+			const frame = `id: 7\r\ndata: ${JSON.stringify(envelope)}\r\n\r\n`;
+			// Cut the stream in the middle of the terminating \r\n\r\n so the
+			// first chunk ends on a lone \r — the case a naive
+			// normalize-then-scan would turn into a phantom boundary.
+			const cut = frame.length - 3;
+			globalThis.fetch = makeSseFetch([{ chunks: [frame.slice(0, cut), frame.slice(cut)] }], []);
+
+			const received: WaypointEvent[] = [];
+			activeClose = connectEventStream("/api/v1/events", {
+				getToken: () => "tok",
+				onEvent: (e) => received.push(e),
+				minBackoffMs: 5,
+				maxBackoffMs: 10,
+			});
+
+			await vi.waitFor(() => expect(received).toHaveLength(1));
+			expect(received[0]).toEqual(envelope);
+		});
+
+		it("still parses the LF-delimited form, and the bare-CR form", async () => {
+			const lf = { ...envelope, seq: 11 };
+			const cr = { ...envelope, seq: 12 };
+			const sse = `id: 11\ndata: ${JSON.stringify(lf)}\n\n` + `id: 12\rdata: ${JSON.stringify(cr)}\r\r`;
+			globalThis.fetch = makeSseFetch([{ text: sse }], []);
+
+			const received: WaypointEvent[] = [];
+			activeClose = connectEventStream("/api/v1/events", {
+				getToken: () => "tok",
+				onEvent: (e) => received.push(e),
+				minBackoffMs: 5,
+				maxBackoffMs: 10,
+			});
+
+			await vi.waitFor(() => expect(received).toHaveLength(2));
+			expect(received.map((e) => e.seq)).toEqual([11, 12]);
+		});
+	});
+
+	describe("parseSseFrame", () => {
+		it("reads id/event/data fields regardless of line terminator", () => {
+			expect(parseSseFrame("id: 5\r\nevent: job.log\r\ndata: {}")).toEqual({
+				id: "5",
+				event: "job.log",
+				data: "{}",
+			});
+			expect(parseSseFrame("id: 5\revent: job.log\rdata: {}")).toEqual({
+				id: "5",
+				event: "job.log",
+				data: "{}",
+			});
+		});
+
+		it("joins multi-line data with \\n and ignores comment/heartbeat lines", () => {
+			expect(parseSseFrame(": heartbeat\r\ndata: line one\r\ndata: line two").data).toBe("line one\nline two");
+		});
 	});
 });

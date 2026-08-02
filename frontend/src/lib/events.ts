@@ -58,6 +58,48 @@ interface SseFrame {
 }
 
 /**
+ * A frame ends at a blank line, and the SSE grammar (WHATWG HTML,
+ * "Interpreting an event stream") accepts `\r\n`, `\n` or `\r` as the line
+ * terminator — so the blank line is any of `\r\n\r\n`, `\n\n` or `\r\r`.
+ * Splitting on `"\n\n"` alone (the original implementation) meant a
+ * CRLF-emitting server produced a buffer with no recognizable boundary: the
+ * stream connected, stayed "open", and delivered zero events forever with
+ * no error and no reconnect. Issue #70.
+ *
+ * Deliberately non-global so `exec` is stateless and always returns the
+ * leftmost boundary. A buffer ending in a partial terminator (e.g. a lone
+ * trailing `\r`) simply doesn't match yet and is carried into the next
+ * chunk, which is what makes this safe across arbitrary chunk splits.
+ */
+const FRAME_BOUNDARY = /\r\n\r\n|\n\n|\r\r/;
+
+/** Line terminators within a single frame — same grammar, one line at a time. */
+const LINE_BOUNDARY = /\r\n|\n|\r/;
+
+/**
+ * Parses one already-delimited frame body into its `id`/`event`/`data`
+ * fields. Exported for unit testing; `connectEventStream` is the only
+ * production caller.
+ */
+export function parseSseFrame(raw: string): SseFrame {
+	const frame: SseFrame = { data: "" };
+	const dataLines: string[] = [];
+	for (const line of raw.split(LINE_BOUNDARY)) {
+		if (line.startsWith("id:")) {
+			frame.id = line.slice(3).trim();
+		} else if (line.startsWith("event:")) {
+			frame.event = line.slice(6).trim();
+		} else if (line.startsWith("data:")) {
+			dataLines.push(line.slice(5).trimStart());
+		}
+		// Anything else (`:` comment/heartbeat lines, `retry:`, unknown fields)
+		// is ignored per the spec.
+	}
+	frame.data = dataLines.join("\n");
+	return frame;
+}
+
+/**
  * Opens a self-reconnecting SSE subscription. Returns a `close()` function;
  * calling it stops reconnection and aborts any in-flight request.
  */
@@ -105,23 +147,14 @@ export function connectEventStream(url: string, options: EventStreamOptions): ()
 				break;
 			}
 			buffer += decoder.decode(value, { stream: true });
-			let boundary: number;
-			// Drain every complete frame currently in the buffer.
-			while ((boundary = buffer.indexOf("\n\n")) !== -1) {
-				const raw = buffer.slice(0, boundary);
-				buffer = buffer.slice(boundary + 2);
-				const frame: SseFrame = { data: "" };
-				const dataLines: string[] = [];
-				for (const line of raw.split("\n")) {
-					if (line.startsWith("id:")) {
-						frame.id = line.slice(3).trim();
-					} else if (line.startsWith("event:")) {
-						frame.event = line.slice(6).trim();
-					} else if (line.startsWith("data:")) {
-						dataLines.push(line.slice(5).trimStart());
-					}
-				}
-				frame.data = dataLines.join("\n");
+			let boundary: RegExpExecArray | null;
+			// Drain every complete frame currently in the buffer. LF, CRLF and
+			// CR delimiters are all accepted (issue #70) — the backend (#3)
+			// hasn't picked one, and getting this wrong fails silently.
+			while ((boundary = FRAME_BOUNDARY.exec(buffer)) !== null) {
+				const raw = buffer.slice(0, boundary.index);
+				buffer = buffer.slice(boundary.index + boundary[0].length);
+				const frame = parseSseFrame(raw);
 				if (frame.id) {
 					lastEventId = frame.id;
 				}
