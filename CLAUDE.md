@@ -123,9 +123,12 @@ Waypoint is licensed **Apache-2.0** (see `LICENSE`). When incorporating third-pa
 code ("cribbing" from prior art):
 
 - **Allowed**: Apache-2.0, MIT, BSD-2/3, ISC — keep the original copyright/license
-  header on copied files or fragments, and note the source in a `NOTICE` file (create
-  it on first use). Check the actual `LICENSE` in the source repo at copy time; do not
-  assume from memory.
+  header on the copied file or fragment, **and** add an entry to the root `NOTICE`
+  file (it exists; use the documented entry format). Check the actual `LICENSE` in the
+  source repo at copy time; do not assume from memory.
+- **`NOTICE` is load-bearing, not bookkeeping.** Apache-2.0 §4(d) obliges anyone
+  redistributing this work to carry that file forward. An attribution recorded only in
+  a commit message, a PR body, or this file does not travel with the code.
 - **Not allowed**: GPL/AGPL/LGPL, SSPL, BSL, or unlicensed code — copyleft would
   encumber the whole appliance; no-license means no permission.
 - **Never redistribute vendor binaries.** Broadcom's `vcf-download-tool` is **not

@@ -28,9 +28,43 @@ compliance operations locally.
 
 ## License
 
-[Apache-2.0](LICENSE). Third-party code may only be incorporated under the borrowing
-policy in [CLAUDE.md](CLAUDE.md) (permissive licenses with attribution; no copyleft;
-no vendor binaries).
+Copyright 2026 Justin Black. Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Third-party code may only be incorporated under the borrowing policy in
+[CLAUDE.md](CLAUDE.md) — permissive licenses with attribution, no copyleft, no vendor
+binaries — and is recorded in [NOTICE](NOTICE).
+
+### No warranty
+
+Waypoint scans and, when explicitly instructed, **modifies production infrastructure**.
+It is provided "AS IS", without warranties or conditions of any kind, and without
+liability, as set out in sections 7 and 8 of the License. Remediation is destructive by
+design: review what a run will change before you confirm it.
+
+### Vendor software is not redistributed
+
+Waypoint orchestrates vendor tooling; it does not ship it.
+
+- Broadcom's `vcf-download-tool` is **never bundled** in this repository or in any
+  Waypoint appliance image. It is installed at runtime by the operator, from their own
+  entitled copy.
+- Broadcom's STIG remediation scripts and the VMware DoD compliance content are used as
+  **unmodified vendor code**, executed from a repository the operator mounts. They are
+  not forked, vendored, or redistributed here.
+
+Obtaining these under your own entitlement, and complying with their licenses, is your
+responsibility as the operator.
+
+### Trademarks
+
+"VMware", "vSphere", "VCF", "vCenter", "ESXi", "NSX", "Aria", "Photon" and "Broadcom"
+are trademarks of Broadcom Inc. and/or its subsidiaries. Other product and company
+names are the marks of their respective owners.
+
+They are used here **only to describe the systems this software interoperates with**,
+which is nominative use. This project is not affiliated with, endorsed by, sponsored by,
+or supported by Broadcom Inc., VMware, or any government agency. Section 6 of the
+License grants no trademark rights.
 
 ## Contributing note
 

@@ -1,0 +1,41 @@
+Waypoint
+Copyright 2026 Justin Black
+
+This product is licensed under the Apache License, Version 2.0 (the "License").
+You may not use this product except in compliance with the License. A copy of the
+License is distributed with this work in the file LICENSE, and is also available at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------------
+Third-party code incorporated into this repository
+--------------------------------------------------------------------------------
+
+None at this time.
+
+When source code from another project is copied into this repository — in whole or
+in part — its attribution is recorded here, in addition to retaining the original
+copyright and license header on the copied file or fragment itself. See the
+"License & Borrowing Policy" section of CLAUDE.md for which licenses may be
+incorporated.
+
+Format for entries:
+
+    <Component or file path>
+    Derived from <project> (<URL>)
+    Copyright <year> <original copyright holder>
+    Licensed under <license>
+
+--------------------------------------------------------------------------------
+Third-party software distributed alongside this product
+--------------------------------------------------------------------------------
+
+Waypoint is designed to be packaged as an appliance (see docs/adr/0001-packaging.md).
+A packaged appliance redistributes third-party software that is NOT part of this
+repository — including but not limited to nginx, PostgreSQL, Keycloak, the .NET
+runtime, Node.js packages, and container base images — each under its own license,
+some of which carry their own NOTICE files that must be propagated.
+
+Those obligations attach to the distributed artifact, not to this source repository,
+and are therefore not enumerated here. A bill of materials and a complete
+attributions bundle are generated as part of the appliance build.
