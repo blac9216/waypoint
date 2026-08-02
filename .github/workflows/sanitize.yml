@@ -29,6 +29,18 @@ jobs:
         with:
           fetch-depth: 0 # gitleaks scans full reachable history, not just HEAD
 
+      # The gate's own logic, verified before the gate is trusted. Running
+      # the scanner against a clean tree proves only that it found nothing —
+      # it cannot distinguish "no findings" from "detector broken". These
+      # tests assert the other half: that each detector still fires on the
+      # pattern class it exists to catch (issue #90). Stdlib unittest, so
+      # there is no dependency to install and nothing to keep in sync.
+      # Deliberately first: a broken detector should be reported as a broken
+      # detector, not masked by whatever else fails afterwards.
+      - name: Sanitization scanner self-tests
+        working-directory: .github/sanitize
+        run: python3 -m unittest discover -p 'test_*.py' -v
+
       # Generic secret/credential shapes: private keys, JWTs, cloud
       # provider keys, high-entropy generic tokens, etc. No GITHUB_TOKEN
       # and no repository secret is used anywhere in this job — the run

@@ -16,8 +16,15 @@ Scans every git-tracked file at HEAD (not just the diff) so the whole tree is
 re-validated on every push, matching the "hard gate on every PR + push" rule
 in issue #79. Exits non-zero (and prints every finding) if anything trips.
 
-Tune false positives here, not by weakening the checks: see ALLOWLIST_FILES
-and ALLOWLIST_FINDINGS below, each with a reason.
+Tune false positives here, not by weakening the checks: see ALLOWLIST_FINDINGS
+below, where every entry names both a path and the specific check(s) waived on
+it, with a reason. There is deliberately no whole-file exemption mechanism —
+see that constant's comment for why.
+
+The detectors themselves are tested by test_scan_repo_specific.py, which the
+sanitize workflow runs before this scan. Running this script against a clean
+tree proves only the absence of findings; the tests prove the presence of
+detection (issue #90).
 """
 
 from __future__ import annotations
@@ -39,19 +46,51 @@ SKIPPED_EXTENSIONS = {
 	".wasm", ".zip", ".gz", ".tgz", ".pdf", ".pem", ".key", ".pfx", ".p12",
 }
 
-# Files this scan does not apply to, with a reason. Keep this list short and
-# specific to one path per entry — never a whole directory or a glob, so a
-# new file under the same directory still gets scanned.
-ALLOWLIST_FILES: dict[str, str] = {
-	"docs/ui/prototype/vcf-ops-console.dc.html": (
-		"Pre-existing M0 design mockup (out of scope for #79 — docs/ui/ is "
-		"owned by other work) uses a *.corp.local fictional naming scheme "
-		"for its mock inventory data instead of the CLAUDE.md-canonical "
-		"*.example.internal form. Tracked as issue #86 rather than silently "
-		"widening this scanner's TLD allowlist, which would blind it to a "
-		"real .corp.local leak anywhere else."
-	),
-}
+# The three checks below, named so an exemption can waive one without
+# switching off the others.
+CHECK_IP = "ip"
+CHECK_FQDN = "fqdn"
+CHECK_DEPOT_TOKEN = "depot-token"
+CHECK_NAMES = frozenset({CHECK_IP, CHECK_FQDN, CHECK_DEPOT_TOKEN})
+
+# Exemptions, keyed by exact repo-relative path, then by the specific check
+# being waived, with a reason. Both halves are mandatory by construction:
+# there is no way to express "exempt this file" — only "exempt this check on
+# this file" — because a whole-file switch-off is the exact shape that has
+# failed open repeatedly in this repo (the frontend air-gap guard's extension
+# allowlist in PR #65 round 1, compressed artifacts in #77, compressed formats
+# in #81). The predecessor of this constant exempted a 204 KB UI mockup from
+# all three checks in order to waive one FQDN naming nit, leaving the IP and
+# depot-token detectors dark on the most likely file in the repo for someone
+# to paste real lab inventory into. That file was re-sanitized instead
+# (issue #86), which is the preferred resolution: fix the content, do not
+# exempt the path.
+#
+# One path per entry — never a directory or a glob, so a new file alongside an
+# exempted one is still fully scanned. Empty is the correct steady state.
+ALLOWLIST_FINDINGS: dict[str, dict[str, str]] = {}
+
+
+def _validate_allowlist() -> None:
+	"""Fail loudly on an exemption naming a check that does not exist.
+
+	A typo'd check name would otherwise be a silently inert entry that reads
+	like a live exemption, which is how an allowlist drifts out of sync with
+	the thing it is exempting.
+	"""
+	for path, waived in ALLOWLIST_FINDINGS.items():
+		unknown = set(waived) - CHECK_NAMES
+		if unknown:
+			raise ValueError(
+				f"ALLOWLIST_FINDINGS['{path}'] names unknown check(s) "
+				f"{sorted(unknown)}; valid checks are {sorted(CHECK_NAMES)}"
+			)
+
+
+def exempt_checks(rel: str) -> set[str]:
+	"""Return the set of check names waived for this repo-relative path."""
+	return set(ALLOWLIST_FINDINGS.get(rel, {}))
+
 
 # --- 1. IPv4 addresses -------------------------------------------------
 
@@ -70,14 +109,45 @@ ALLOWED_IP_NETWORKS = [
 ]
 ALLOWED_IP_EXACT = {"0.0.0.0"}
 
+# A four-part product version standing alone in a field is shape-identical to
+# an IPv4 literal, and Broadcom/VMware versions are routinely four-part, so
+# this repo keeps producing them (issue #89 has the observed examples; this
+# comment deliberately carries no dotted-quad literal of its own, since this
+# scanner reads its own source like any other tracked file). The lookarounds
+# on IPV4_RE only suppress the build-suffixed form
+# (vcf-download-tool-9.0.0.0-24089201.tar.gz, where the trailing dash keeps
+# the quad from standing alone); a version key followed by a bare quoted quad
+# still matched, and was invisible only because the file carrying it was
+# wholesale-exempted.
+#
+# Suppress ONLY when a version key sits immediately before the quad, with
+# nothing between them but a colon/equals, optional whitespace and an opening
+# quote. A mention of the word "version" elsewhere on the line deliberately
+# does NOT suppress: otherwise a sentence that merely said "the vCenter
+# version at the site is" ahead of a real lab address would waive a real leak.
+# Anchored with \Z against the text preceding the match, so it is the
+# immediate context or nothing.
+VERSION_KEY_BEFORE_RE = re.compile(r"(?i)\bversions?\b\s*[:=]?\s*['\"]?\Z")
+
+
+def is_version_string(line: str, start: int) -> bool:
+	"""True if the quad at `start` is introduced by a version key."""
+	return VERSION_KEY_BEFORE_RE.search(line[:start]) is not None
+
 
 def is_allowed_ip(candidate: str) -> bool:
+	"""True if this dotted-quad is a sanctioned address, or not an IP at all.
+
+	A quad with an octet above 255 (e.g. a 2024.1.300.5 version) is not a
+	valid IPv4 literal, so it cannot be the lab address this check exists to
+	catch — it is not a finding.
+	"""
 	if candidate in ALLOWED_IP_EXACT:
 		return True
 	try:
 		addr = ipaddress.ip_address(candidate)
 	except ValueError:
-		return False
+		return True
 	return any(addr in net for net in ALLOWED_IP_NETWORKS)
 
 
@@ -134,42 +204,57 @@ def list_tracked_files() -> list[Path]:
 	return [REPO_ROOT / line for line in result.stdout.splitlines() if line]
 
 
-def scan_file(path: Path) -> list[str]:
-	rel = path.relative_to(REPO_ROOT).as_posix()
-	if rel in ALLOWLIST_FILES:
-		return []
+def scan_text(rel: str, text: str) -> list[str]:
+	"""Run every non-exempt check over one file's text.
+
+	Split out from scan_file so the detectors are testable without touching
+	the filesystem or the git index (issue #90).
+	"""
+	waived = exempt_checks(rel)
+	findings: list[str] = []
+	for lineno, line in enumerate(text.splitlines(), start=1):
+		if CHECK_IP not in waived:
+			for match in IPV4_RE.finditer(line):
+				candidate = match.group(0)
+				if is_allowed_ip(candidate):
+					continue
+				if is_version_string(line, match.start()):
+					continue
+				findings.append(
+					f"{rel}:{lineno}: non-RFC-5737 IP address literal: {candidate}"
+				)
+		if CHECK_FQDN not in waived:
+			for match in FQDN_RE.finditer(line):
+				hostname = match.group(0)
+				if not is_allowed_fqdn(hostname):
+					findings.append(
+						f"{rel}:{lineno}: lab-style FQDN (not *.example.<tld>): {hostname}"
+					)
+		if CHECK_DEPOT_TOKEN not in waived:
+			for match in DEPOT_CONTEXT_RE.finditer(line):
+				token = match.group(2)
+				if not is_placeholder_token(token):
+					findings.append(
+						f"{rel}:{lineno}: possible depot/entitlement token: "
+						f"{match.group(1)}=<redacted, {len(token)} chars>"
+					)
+	return findings
+
+
+def scan_file(path: Path, rel: str | None = None) -> list[str]:
+	if rel is None:
+		rel = path.relative_to(REPO_ROOT).as_posix()
 	if path.suffix.lower() in SKIPPED_EXTENSIONS:
 		return []
 	try:
 		text = path.read_text(encoding="utf-8")
 	except (UnicodeDecodeError, OSError):
 		return []
-
-	findings: list[str] = []
-	for lineno, line in enumerate(text.splitlines(), start=1):
-		for match in IPV4_RE.finditer(line):
-			candidate = match.group(0)
-			if not is_allowed_ip(candidate):
-				findings.append(
-					f"{rel}:{lineno}: non-RFC-5737 IP address literal: {candidate}"
-				)
-		for match in FQDN_RE.finditer(line):
-			hostname = match.group(0)
-			if not is_allowed_fqdn(hostname):
-				findings.append(
-					f"{rel}:{lineno}: lab-style FQDN (not *.example.<tld>): {hostname}"
-				)
-		for match in DEPOT_CONTEXT_RE.finditer(line):
-			token = match.group(2)
-			if not is_placeholder_token(token):
-				findings.append(
-					f"{rel}:{lineno}: possible depot/entitlement token: "
-					f"{match.group(1)}=<redacted, {len(token)} chars>"
-				)
-	return findings
+	return scan_text(rel, text)
 
 
 def main() -> int:
+	_validate_allowlist()
 	all_findings: list[str] = []
 	for path in list_tracked_files():
 		if path.is_file():
@@ -180,9 +265,13 @@ def main() -> int:
 		for finding in all_findings:
 			print(f"  - {finding}")
 		print(
-			"\nSee CLAUDE.md's sanitization policy. If this is a genuine false "
-			"positive, fix the detector in .github/sanitize/scan_repo_specific.py "
-			"with a narrow, documented exception — never widen a TLD/IP range."
+			"\nSee CLAUDE.md's sanitization policy. The first question is whether "
+			"the content should be fixed, not the scanner. If it is a genuine "
+			"false positive, fix the detector in "
+			".github/sanitize/scan_repo_specific.py with a narrow, tested "
+			"exception, or add an ALLOWLIST_FINDINGS entry naming the exact path "
+			"and the exact check — never widen a TLD/IP range, and never waive a "
+			"check you did not have to."
 		)
 		return 1
 

@@ -41,14 +41,29 @@ jobs:
       - name: Install (npm ci)
         run: npm ci
 
-      # This is the gate that matters most in this job: `npm run build` runs
-      # tsc, vite build, and scripts/check-no-external-assets.mjs (the
-      # air-gap guard from ADR-0007) as its last step. It has failed open
-      # twice before (#77, PR #65 round 1) — see the PR body for a proven
-      # failure of this exact step against a deliberately introduced
-      # external asset.
-      - name: Build (typecheck + vite build + external-asset guard)
+      - name: Build (typecheck + vite build)
         run: npm run build
+
+      # The gate that matters most in this job, run as its own step on
+      # purpose. `npm run build` already chains this guard as its last step,
+      # and that wiring stays (it protects local developers, who are the
+      # people most likely to introduce an external asset in the first
+      # place) — but CI must not depend on it. Deleting `&& npm run
+      # check:external-assets` from package.json's build script would
+      # otherwise leave this whole job green with the ADR-0007 air-gap guard
+      # never executed: build exits 0, tests exit 0, and the guard's own unit
+      # tests still pass because they import the module directly and assert
+      # nothing about the wiring.
+      #
+      # This guard has a history of failing open — an extension allowlist
+      # that skipped .mjs (PR #65 round 1), compressed artifacts skipped
+      # entirely (#77), and compressed formats on neither list (#81) — which
+      # is the whole reason issue #79 asked for it on a gate rather than in a
+      # habit. Re-running it here is idempotent and costs about a second
+      # against the already-built dist/; it hard-fails if the script is
+      # missing, renamed, or unwired.
+      - name: Air-gap asset guard (ADR-0007)
+        run: npm run check:external-assets
 
       - name: Test
         run: npm test

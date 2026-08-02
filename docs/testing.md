@@ -183,9 +183,9 @@ GitHub Actions runs four workflows — [`sanitize.yml`](../.github/workflows/san
 
 | Workflow | Triggers on | What it runs |
 | --- | --- | --- |
-| `sanitize` | every PR + push, no path filter (hard gate) | `gitleaks` full-history secret scan, plus a repo-specific scanner (`.github/sanitize/scan_repo_specific.py`) for lab-style FQDNs, non-RFC-5737 IP addresses, and Broadcom/VMware depot-token shapes |
+| `sanitize` | every PR + push, no path filter (hard gate) | the scanner's own test suite (`.github/sanitize/test_scan_repo_specific.py`), then a `gitleaks` full-history secret scan, then a repo-specific scanner (`.github/sanitize/scan_repo_specific.py`) for lab-style FQDNs, non-RFC-5737 IP addresses, and Broadcom/VMware depot-token shapes |
 | `backend` | `backend/**` | `dotnet build -warnaserror`, `dotnet test` with coverage |
-| `frontend` | `frontend/**` | `npm ci`, `npm run build` (runs the ADR-0007 air-gap asset guard), `npm test`, `oxlint` |
+| `frontend` | `frontend/**` | `npm ci`, `npm run build`, the ADR-0007 air-gap asset guard **as its own explicit step**, `npm test`, `oxlint` |
 | `deploy` | `deploy/**`, `scripts/**` | `docker compose config`, `nginx -t` against the shipped `conf.d` with a throwaway generated dev cert, `shellcheck` |
 
 Every job is path-filtered except `sanitize`, which is a hard gate on everything —
@@ -214,10 +214,36 @@ have repeatedly caught real defects no CI run could have seen:
   proves the assertions held, not that the assertions were the right ones to write.
 - **What `sanitize` cannot catch**: it is tuned against today's tree and today's
   known-legitimate patterns (RFC 5737 ranges, `*.example.<tld>`, loopback, Docker's
-  `127.0.0.11`). It is a mechanical backstop for the sanitization policy in
-  `CLAUDE.md`, not a replacement for the diff-by-hand review that policy still
-  requires — a sufficiently well-disguised secret or a lab identifier that doesn't
-  match any of its patterns will not be flagged.
+  `127.0.0.11`, four-part product versions behind a `version:` key). It is a
+  mechanical backstop for the sanitization policy in `CLAUDE.md`, not a replacement
+  for the diff-by-hand review that policy still requires — a sufficiently
+  well-disguised secret or a lab identifier that doesn't match any of its patterns
+  will not be flagged.
+- **Files the scanner does not read**: **none, currently — and that is a property
+  worth keeping.** `ALLOWLIST_FINDINGS` in `scan_repo_specific.py` is empty, so every
+  git-tracked file that isn't a known-binary extension is scanned by all three
+  detectors. This matters because the alternative degrades silently: an exempt path
+  reports clean while never having been looked at, and nothing in a green check
+  distinguishes the two. An earlier revision of this PR exempted one 204 KB UI mockup
+  from *all three* detectors in order to waive a single hostname-naming nit, which
+  left the IP and depot-token detectors dark on the most likely file in the repo for
+  someone to paste real lab inventory into while demoing. That file was re-sanitized
+  instead ([#86](https://github.com/blac9216/waypoint/issues/86)) and the exemption
+  deleted. The replacement mechanism cannot express a whole-file exemption at all —
+  an entry must name both a path and the specific check being waived — so the same
+  hole cannot be reopened by accident. If you are about to add an entry here, the
+  first question is whether the *content* should be fixed instead; if you add one
+  anyway, this bullet is where it gets disclosed, because a file the gate does not
+  look at belongs in the section about what the gate does not cover.
+- **What the scanner would miss if it broke**: nothing detects a detector that has
+  stopped detecting. Running the scanner against a clean tree proves the absence of
+  findings, never the presence of detection — the same asymmetry that let the
+  frontend air-gap guard fail open three times. That is why `sanitize` runs
+  `test_scan_repo_specific.py` (34 assertions covering all three detectors, both
+  allowlist paths, the exit codes, and the documented false-positive exemptions)
+  before it trusts the scan, and why the frontend guard now runs as its own explicit
+  workflow step rather than relying on `package.json`'s `build` script continuing to
+  chain it.
 
 Treat every green run the way this document already asks you to treat a passing
 local test: as one input a contextless reviewer weighs, never as the verdict itself.
