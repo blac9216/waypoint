@@ -63,7 +63,12 @@ reused, not reinvented, by every future endpoint:
   `ApiException.NotFound()`); `Waypoint.Api.Middleware.ErrorHandlingMiddleware` turns it
   into `{ "error": { "code", "message", "detail?" } }`. Auth failures and unmatched
   routes get the same envelope via the `UseStatusCodePages` handler in `Program.cs` —
-  no controller code needed for 401/403/404.
+  no controller code needed for 401/403/404. Model-state 400s (missing field, malformed
+  JSON body, mistyped query parameter) go through
+  `Waypoint.Api.Validation.ValidationErrorFactory`, installed as
+  `ApiBehaviorOptions.InvalidModelStateResponseFactory`, so `[ApiController]` emits
+  `validation_error` in the same envelope instead of RFC 7807 camelCase `ProblemDetails`.
+  All three paths share `ErrorEnvelopeWriter` — do not hand-roll a fourth.
 - **JSON**: `Waypoint.Core.Serialization.WaypointJsonOptions` is the single source of
   snake_case naming, applied to both MVC's serializer and any hand-written JSON in
   middleware. Use it in tests too (`ReadFromJsonAsync(..., WaypointJsonOptions.Default)`).

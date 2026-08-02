@@ -18,4 +18,10 @@
     <ProjectReference Include="..\Waypoint.Infrastructure\Waypoint.Infrastructure.csproj" />
   </ItemGroup>
 
+  <!-- Lets the test project assert on helpers that are deliberately not public API:
+       health-probe URL resolution and validation-detail formatting. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Waypoint.Tests" />
+  </ItemGroup>
+
 </Project>

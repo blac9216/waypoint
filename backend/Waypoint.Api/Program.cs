@@ -1,10 +1,12 @@
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 using Serilog;
 using Serilog.Formatting.Compact;
 using Waypoint.Api.Authentication;
 using Waypoint.Api.Logging;
 using Waypoint.Api.Middleware;
+using Waypoint.Api.Validation;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Serialization;
@@ -40,6 +42,15 @@ try
 	builder.Services
 		.AddControllers()
 		.AddJsonOptions(options => WaypointJsonOptions.Apply(options.JsonSerializerOptions));
+
+	// [ApiController]'s automatic model-state 400 otherwise bypasses the error envelope
+	// entirely and returns RFC 7807 ProblemDetails in camelCase. Route it through the same
+	// writer as every other error so missing fields, malformed JSON and mistyped query
+	// parameters answer with { "error": { "code": "validation_error", ... } }.
+	builder.Services.Configure<ApiBehaviorOptions>(options =>
+	{
+		options.InvalidModelStateResponseFactory = ValidationErrorFactory.Create;
+	});
 
 	builder.Services.AddEndpointsApiExplorer();
 	builder.Services.AddSwaggerGen();
