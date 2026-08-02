@@ -1,0 +1,65 @@
+name: deploy
+
+# Path-filtered: only deploy/** changes (or this workflow file) trigger
+# validation. A docs-only or backend-only PR never runs this job (see #79).
+#
+# This validates the shipped compose/nginx configuration statically — it
+# does NOT bring the stack up (no depot token, no dev/local/ material is
+# available in CI, and the full compose bring-up is out of scope for this
+# PR per the issue's "stack" job — see docs/testing.md).
+on:
+  pull_request:
+    paths:
+      - "deploy/**"
+      - "scripts/**"
+      - ".github/workflows/deploy.yml"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - "scripts/**"
+      - ".github/workflows/deploy.yml"
+
+concurrency:
+  group: deploy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: compose config, nginx -t, shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: docker compose config validates
+        working-directory: deploy
+        run: docker compose config
+
+      # nginx -t needs a cert/key pair to load the TLS server block (dev
+      # certs are git-ignored, generated at bring-up time — see
+      # deploy/README.md). Generate a throwaway pair, exactly the way a
+      # real dev bring-up would, then discard it; nothing here is reused
+      # or committed.
+      - name: Generate throwaway dev TLS cert for the syntax check
+        run: deploy/nginx/certs/generate-dev-certs.sh
+
+      - name: nginx -t against the shipped config
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/deploy/nginx/conf.d:/etc/nginx/conf.d:ro" \
+            -v "${{ github.workspace }}/deploy/nginx/certs:/etc/nginx/certs:ro" \
+            nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 `# 1.27-alpine, matches deploy/docker-compose.yml` \
+            nginx -t
+
+      - name: shellcheck
+        run: |
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version
+          find deploy scripts -type f -name "*.sh" -print0 | xargs -0 --no-run-if-empty shellcheck

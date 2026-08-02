@@ -1,0 +1,48 @@
+name: sanitize
+
+# Hard gate, no path filter: every PR and every push to main is scanned,
+# regardless of which directory changed. This is the mechanical enforcement
+# of the public-repo sanitization policy in CLAUDE.md (see issue #79) — a
+# docs-only change still gets scanned, since a leaked hostname or token is
+# just as real in a markdown file as in code.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: sanitize-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sanitize:
+    name: secret + identifier scan
+    runs-on: ubuntu-latest
+    steps:
+      # Plain `pull_request`, never `pull_request_target` — a fork PR gets
+      # no privileged token or repo secret access (issue #79 constraint).
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0 # gitleaks scans full reachable history, not just HEAD
+
+      # Generic secret/credential shapes: private keys, JWTs, cloud
+      # provider keys, high-entropy generic tokens, etc. No GITHUB_TOKEN
+      # and no repository secret is used anywhere in this job — the run
+      # simply fails if gitleaks finds something; nothing is posted back
+      # to the PR by an authenticated call.
+      - name: gitleaks secret scan (full history)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" \
+            zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f `# v8.30.1` \
+            detect --source /repo --redact -v
+
+      # Repo-specific patterns gitleaks doesn't know about: lab FQDNs,
+      # non-RFC-5737 IP addresses, and Broadcom/VMware depot-token shapes.
+      # See the script's header comment for exactly what is and isn't
+      # flagged, and CLAUDE.md for the policy this mechanises.
+      - name: Repo-specific sanitization scan
+        run: python3 .github/sanitize/scan_repo_specific.py

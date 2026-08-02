@@ -1,0 +1,76 @@
+name: backend
+
+# Path-filtered: only backend/** changes (or this workflow file) trigger a
+# build. A docs-only or frontend-only PR never runs this job (see #79).
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+
+concurrency:
+  group: backend-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: build, test, coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
+        with:
+          dotnet-version: "8.0.x"
+
+      # No packages.lock.json exists (RestorePackagesWithLockFile is unset),
+      # so setup-dotnet's built-in `cache:` input has nothing to key off.
+      # Cache the NuGet package cache directly, keyed on the .csproj files
+      # that declare every PackageReference.
+      - name: Cache NuGet packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Restore
+        working-directory: backend
+        run: dotnet restore Waypoint.sln
+
+      # Warnings as errors: a regression that only warns locally must fail
+      # the gate here, per the issue's job matrix.
+      - name: Build (warnings as errors)
+        working-directory: backend
+        run: dotnet build Waypoint.sln --no-restore -warnaserror
+
+      - name: Test (with coverage)
+        working-directory: backend
+        run: >
+          dotnet test Waypoint.sln --no-build
+          --collect:"XPlat Code Coverage"
+          --results-directory ./TestResults
+
+      # No coverage floor is enforced yet (issue #79 prefers a no-regression
+      # check over a fixed threshold, to avoid the first legitimately-hard-
+      # to-test path forcing a waiver). The report is uploaded so a reviewer
+      # can read it; wiring a regression gate is follow-up work.
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        continue-on-error: true
+        with:
+          name: backend-coverage
+          path: backend/TestResults
+          retention-days: 14

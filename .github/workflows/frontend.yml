@@ -1,0 +1,57 @@
+name: frontend
+
+# Path-filtered: only frontend/** changes (or this workflow file) trigger a
+# build. A docs-only or backend-only PR never runs this job (see #79).
+on:
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"
+
+concurrency:
+  group: frontend-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: build, test, lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install (npm ci)
+        run: npm ci
+
+      # This is the gate that matters most in this job: `npm run build` runs
+      # tsc, vite build, and scripts/check-no-external-assets.mjs (the
+      # air-gap guard from ADR-0007) as its last step. It has failed open
+      # twice before (#77, PR #65 round 1) — see the PR body for a proven
+      # failure of this exact step against a deliberately introduced
+      # external asset.
+      - name: Build (typecheck + vite build + external-asset guard)
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Lint
+        run: npm run lint
