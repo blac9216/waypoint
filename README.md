@@ -20,6 +20,7 @@ compliance operations locally.
 
 - [Architecture](docs/architecture.md) — components, job engine, modes, update flow
 - [Domain model](docs/domain-model.md) — sites, targets, credentials, roles
+- [Security](docs/security.md) — secrets threat model and leakage controls
 - [ADRs](docs/adr/) — the decisions and why
 - [Roadmap](docs/roadmap.md) — build sequencing
 - [UI design brief](docs/ui/design-brief.md) — screen inventory driving the design phase

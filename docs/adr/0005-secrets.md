@@ -22,6 +22,12 @@ Application-managed envelope encryption, the pattern proven by Ansible AWX:
 - Credentials are owned objects (personal vs shared/service) — see `domain-model.md`.
 - A pluggable **external backend interface** (Vault/OpenBao) is a later option, not v1.
 
+**Scope**: this ADR covers **service/shared** credentials — the tier the system must
+decrypt autonomously. Personal credentials are handled differently (not stored in v1):
+see [ADR-0011](0011-credential-tiers.md). The full threat model — what this design
+does and does not protect — and the mandatory leakage controls live in
+[`../security.md`](../security.md).
+
 ## Consequences
 
 - Master key loss = secrets unrecoverable; key backup procedure is mandatory install

@@ -39,14 +39,18 @@ Each target references a **service credential** (`credentialRef`, as today). Dis
 ESXi hosts and VMs are cached inventory under a `vsphere` target, not standalone targets.
 
 ### Credential
-An object in the encrypted store (see [ADR-0005](adr/0005-secrets.md)) with an
-**owner**: a specific user (personal) or shared/system (service account). Targets
-reference service credentials for scheduled/system runs; ad hoc runs may substitute the
-initiating user's personal credential (so vCenter audit logs attribute actions to the
-human). "One global service account" is just the degenerate case where every target
-references the same credential — the model does not assume it.
+Two tiers ([ADR-0011](adr/0011-credential-tiers.md)):
 
-Write-only through the API: a credential can be overwritten or deleted, never read back.
+- **Service/shared** — stored in the encrypted store ([ADR-0005](adr/0005-secrets.md)),
+  decryptable autonomously for scheduled/system runs. Targets reference these via
+  `credentialRef`. "One global service account" is just the degenerate case where
+  every target references the same credential — the model does not assume it.
+- **Personal** — **not stored in v1**. An ad hoc run using "my credentials" prompts
+  the user at run initiation; the value lives in memory for that run only (so vCenter
+  audit logs attribute actions to the human, and there is nothing at rest to steal).
+
+Stored credentials are write-only through the API: overwrite or delete, never read
+back. Threat model and leakage controls: [security.md](security.md).
 
 ### Run and Job
 A **Run** is what a user initiates ("scan site A, products X/Y, these 14 hosts"). The

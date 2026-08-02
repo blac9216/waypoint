@@ -96,7 +96,10 @@ model (personal vs shared/service credentials).
 Envelope encryption in Postgres, AWX-style ([ADR-0005](adr/0005-secrets.md)): per-secret
 data keys wrapped by a master key mounted as a file/Docker secret (same operator model
 as the current `STIG_VAULT_PASSWORD_FILE`). Secrets are write-only through the API.
-External Vault/OpenBao support is a later, pluggable option — not v1.
+Personal credentials are never stored in v1 — prompted at run initiation
+([ADR-0011](adr/0011-credential-tiers.md)). Threat model and mandatory leakage
+controls: [security.md](security.md). External Vault/OpenBao support is a later,
+pluggable option — not v1.
 
 ## Self-update
 

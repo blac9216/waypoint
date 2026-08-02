@@ -15,3 +15,4 @@ not rewritten — a new ADR supersedes it and both note the relationship.
 | [0008](0008-job-engine.md) | Central job engine on a Postgres-backed queue | Accepted |
 | [0009](0009-self-update.md) | Signed update bundles + updater sidecar | Accepted |
 | [0010](0010-deployment-topology.md) | One appliance, connected/disconnected modes | Accepted |
+| [0011](0011-credential-tiers.md) | Credential tiers; ephemeral personal credentials in v1 | Accepted |

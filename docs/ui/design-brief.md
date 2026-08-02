@@ -28,7 +28,9 @@ imports bundles; download features hidden). A top-bar badge always shows the mod
 
 - **Sites** contain targets; multiple targets of a kind per site (e.g. two vCenters).
 - ESXi hosts/VMs are **discovered and cached**: show "last refreshed", refresh action.
-- Credentials have owners (personal vs shared/service); ad hoc runs may use "mine".
+- Credentials have owners (personal vs shared/service); ad hoc runs may use "mine" —
+  choosing "my credentials" **prompts for the password at run initiation** (personal
+  credentials are never stored; no personal-credential CRUD screens in v1 — ADR-0011).
 - STIG config (attestation/input YAML) is per-site per-component with per-target
   overrides, edited in a code-editor pane, **versioned with author + timestamp**.
 - Scans: read-only, schedulable. Remediation: Admin-only, typed confirmation

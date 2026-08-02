@@ -71,6 +71,7 @@ evolve. Do not contradict an accepted ADR without recording a superseding one.
 ├── docs/
 │   ├── architecture.md  # System architecture: components, job engine, modes, update flow
 │   ├── domain-model.md  # Sites, targets, credentials, runs, roles, open questions
+│   ├── security.md      # Secrets threat model + mandatory leakage controls
 │   ├── roadmap.md       # Build sequencing (what gets built first and why)
 │   ├── ui/
 │   │   └── design-brief.md  # Screen inventory, design prompt, data ledger
