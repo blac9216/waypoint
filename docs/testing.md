@@ -175,7 +175,10 @@ reviewer the work of closing it, and quietly weakens what the PR proves.
 
 ## What CI covers — and does not
 
-GitHub Actions runs four workflows (`.github/workflows/`), issue
+GitHub Actions runs four workflows — [`sanitize.yml`](../.github/workflows/sanitize.yml),
+[`backend.yml`](../.github/workflows/backend.yml),
+[`frontend.yml`](../.github/workflows/frontend.yml),
+[`deploy.yml`](../.github/workflows/deploy.yml) — added in issue
 [#79](https://github.com/blac9216/waypoint/issues/79):
 
 | Workflow | Triggers on | What it runs |
