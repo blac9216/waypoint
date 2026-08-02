@@ -26,6 +26,24 @@
  * fail the build; that is the safe direction to be wrong in, and the fix is
  * to add the extension here with a reason.
  *
+ * COMPRESSED ARTIFACTS (.br/.gz/.zip) — fail closed, not skip. These are
+ * NOT on SKIPPED_BINARY_EXTENSIONS, because they are not binary in the
+ * sense that word is used above: Brotli/gzip/zip encode compressed *text*,
+ * and a URL living in that text is exactly what this guard exists to find.
+ * Scanning the compressed bytes as UTF-8 finds nothing (the match target is
+ * gone once compressed) while reporting the same "OK" as a clean file —
+ * which is worse than not scanning at all, because it *looks* thorough. So
+ * a compressed artifact is neither scanned nor silently skipped: its mere
+ * presence in dist/ fails the build (COMPRESSED_EXTENSIONS below), on the
+ * same "never silently pass content it cannot inspect" principle as the
+ * denylist above. The current Vite config emits none of these (no
+ * compression plugin), so this costs nothing today; it exists so that
+ * enabling `vite-plugin-compression` or an nginx `brotli_static`/
+ * `gzip_static` precompression step later is a conscious decision — someone
+ * has to come here and either wire up decompress-and-scan (Node's `zlib`
+ * has both Brotli and gzip built in) or explicitly widen this list, not
+ * discover months later that the guard had a blind spot.
+ *
  * ALLOWLIST: three narrow, exact exceptions for inert strings baked into
  * audited third-party dependencies (React, workbox-window) that this
  * project does not author and cannot edit. Each is a literal used for
@@ -67,16 +85,27 @@ const SKIPPED_BINARY_EXTENSIONS = new Set([
 	".eot",
 	// Other binary payloads
 	".wasm",
-	".zip",
-	".gz",
-	".br",
 ]);
+
+/**
+ * Compressed-text formats: NOT skipped, NOT scanned — their presence in
+ * dist/ fails the build outright (see the COMPRESSED ARTIFACTS header
+ * comment). Kept as a separate set from SKIPPED_BINARY_EXTENSIONS on
+ * purpose, so the two can never be conflated again.
+ */
+const COMPRESSED_EXTENSIONS = new Set([".br", ".gz", ".zip"]);
 
 /** True when `file` is a known-binary artifact this check deliberately skips.
  * Extension matching is case-insensitive; a file with no extension is never
  * skipped (that was the hole this replaced). */
 export function isSkippedBinary(file) {
 	return SKIPPED_BINARY_EXTENSIONS.has(extname(file).toLowerCase());
+}
+
+/** True when `file` is a compressed-text artifact (.br/.gz/.zip) this check
+ * cannot inspect. Extension matching is case-insensitive. */
+export function isCompressedArtifact(file) {
+	return COMPRESSED_EXTENSIONS.has(extname(file).toLowerCase());
 }
 
 export const ALLOWLIST = [
@@ -99,7 +128,13 @@ export const ALLOWLIST = [
 			"identifier the XML/DOM spec requires to look like a URI — never dereferenced over the network.",
 	},
 	{
-		pattern: /^https:\/\/bit\.ly\/wb-precache/,
+		// `$`-anchored, not a prefix: for a URL shortener the path IS the
+		// resource identity, so `bit.ly/wb-precache-evil-shortlink` is a
+		// *different* shortlink that can resolve anywhere — unlike the w3.org
+		// entry above (authority pinned, only the path varies), a prefix match
+		// here would allowlist arbitrary destinations. The workbox string is a
+		// fixed literal, so anchoring costs nothing.
+		pattern: /^https:\/\/bit\.ly\/wb-precache$/,
 		reason:
 			"workbox-window's console.warn() message, shown only if the precache manifest fails to install. " +
 			"Printed diagnostic text, never fetched automatically.",
@@ -123,19 +158,28 @@ function* walk(dir) {
 }
 
 /**
- * Scans `distDir` and returns `{ violations, allowlisted, scanned, skipped }`.
- * `violations`/`allowlisted` are arrays of `{ file, url }`; `scanned`/`skipped`
- * are file paths, reported so the CLI can show what the guard actually looked
- * at rather than asking the reader to trust it. Pure function (no
- * process.exit) so it's unit-testable.
+ * Scans `distDir` and returns
+ * `{ violations, allowlisted, scanned, skipped, compressed }`.
+ * `violations`/`allowlisted` are arrays of `{ file, url }`; `scanned`/
+ * `skipped`/`compressed` are file paths, reported so the CLI can show what
+ * the guard actually looked at rather than asking the reader to trust it.
+ * `compressed` is never scanned and never counted as a violation of its own
+ * — the caller (`main`) is the one that decides a non-empty `compressed`
+ * fails the build, so this stays a pure function (no process.exit) and
+ * unit-testable.
  */
 export function scanDist(distDir) {
 	const violations = [];
 	const allowlisted = [];
 	const scanned = [];
 	const skipped = [];
+	const compressed = [];
 
 	for (const file of walk(distDir)) {
+		if (isCompressedArtifact(file)) {
+			compressed.push(file);
+			continue;
+		}
 		if (isSkippedBinary(file)) {
 			skipped.push(file);
 			continue;
@@ -153,7 +197,7 @@ export function scanDist(distDir) {
 		}
 	}
 
-	return { violations, allowlisted, scanned, skipped };
+	return { violations, allowlisted, scanned, skipped, compressed };
 }
 
 function main() {
@@ -164,6 +208,20 @@ function main() {
 	} catch (err) {
 		console.error(`check-no-external-assets: could not scan "${distDir}": ${err.message}`);
 		console.error(`Did you run "vite build" first?`);
+		process.exit(1);
+	}
+
+	if (result.compressed.length > 0) {
+		console.error(
+			`\ncheck-no-external-assets: FAILED — ${result.compressed.length} compressed artifact(s) found in ${distDir}:`,
+		);
+		for (const file of result.compressed) {
+			console.error(`  ${file}`);
+		}
+		console.error("\nBrotli/gzip/zip encode compressed text, and this guard cannot read inside them — scanning the");
+		console.error("compressed bytes would report a false OK instead of the URL(s) they may carry. The build currently");
+		console.error("emits none of these; if a precompression step was just added, either teach this script to");
+		console.error("decompress-and-scan (node:zlib has both Brotli and gzip built in) or remove the compressed output.");
 		process.exit(1);
 	}
 

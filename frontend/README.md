@@ -80,15 +80,36 @@ step.
 
 **File selection is a denylist, deliberately.** Every file under `dist/` is
 scanned except a short list of known-binary extensions (images, fonts,
-`.wasm`/`.zip`/`.gz`). It is not an allowlist of "text" extensions: that
-shape silently exempts every file type nobody thought of — `.mjs`, `.cjs`,
-`.xml`, and anything with no extension at all — and `public/` is copied
-verbatim into `dist/` with whatever names it contains, so an allowlist means
-a newly emitted file type ships unchecked until someone notices. A guard that
-fails open is worse than no guard (ADR-0007 makes this a hard requirement, not
-a style preference). If a binary format ever trips a false positive, add its
+`.wasm`). It is not an allowlist of "text" extensions: that shape silently
+exempts every file type nobody thought of — `.mjs`, `.cjs`, `.xml`, and
+anything with no extension at all — and `public/` is copied verbatim into
+`dist/` with whatever names it contains, so an allowlist means a newly
+emitted file type ships unchecked until someone notices. A guard that fails
+open is worse than no guard (ADR-0007 makes this a hard requirement, not a
+style preference). If a binary format ever trips a false positive, add its
 extension to `SKIPPED_BINARY_EXTENSIONS` with a reason.
 
+**Compressed artifacts (`.br`/`.gz`/`.zip`) fail the build outright — they
+are never treated as inert binary.** Brotli/gzip/zip encode compressed
+*text*; scanning the compressed bytes as UTF-8 finds nothing (the guard
+would report a false "OK" while inspecting gibberish), which is worse than
+not scanning at all because it looks thorough. The current build emits none
+of these, so this costs nothing today; if a precompression step is ever
+added, the guard fails loudly instead of silently passing content it cannot
+inspect, forcing whoever adds it to either teach the script to
+decompress-and-scan (`node:zlib` has both Brotli and gzip built in) or make
+an explicit, reviewed decision to widen `COMPRESSED_EXTENSIONS`.
+
+The vendor URL allowlist's three entries are all `$`-anchored to the exact
+literal they justify, not prefix-matched — including the `bit.ly` shortlink,
+where the path is the resource identity and a prefix match would allowlist
+an arbitrary destination reachable through a different shortlink sharing the
+same prefix.
+
 `scripts/check-no-external-assets.test.mjs` proves the guard actually fails on
-a deliberate violation — including one inside a `.mjs` chunk and one inside an
-extensionless file, the two shapes the old allowlist let through.
+a deliberate violation — including one inside a `.mjs` chunk, one inside an
+extensionless file, one inside a `.map` source map, one inside a dotfile, one
+behind an uppercase extension, one behind a compressed `.br`/`.gz`/`.zip`
+artifact, and one behind a bit.ly shortlink that only shares the allowlisted
+prefix — the shapes the old allowlist and the two issue #77 holes let
+through.
