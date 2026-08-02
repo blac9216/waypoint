@@ -14,7 +14,7 @@ and forces exactly one new subsystem into existence.
 
 Next: decompose M1 into epics/issues per the `github-workflow` skill.
 
-## M1 — Foundation + download vertical slice (current)
+## M1 — Foundation + download vertical slice (current — epic [#1](https://github.com/blac9216/waypoint/issues/1))
 
 Reordered 2026-08-02: the download workflow goes first — it is the easiest end-to-end
 slice (no vCenter discovery, no InSpec/SAF pipeline, one credential) while still
@@ -33,7 +33,7 @@ forcing every foundation into existence.
   by hand (the in-UI install flow stays in M5). **Test depot tokens/config come from
   the private sibling repo at runtime — gitignored mounts, never committed here.**
 
-## M2 — Sites, credentials & the STIG scan slice
+## M2 — Sites, credentials & the STIG scan slice (epic [#13](https://github.com/blac9216/waypoint/issues/13))
 
 - Full credential store (ownership model) + sites/targets CRUD replacing hand-edited
   `site.json`; migration path from `secrets.vault` + `site.json`.
@@ -42,18 +42,18 @@ forcing every foundation into existence.
   then the remaining transports (NSX, SRG) + attestation/input document store with
   versioning.
 
-## M3 — Identity & RBAC
+## M3 — Identity & RBAC (epic [#14](https://github.com/blac9216/waypoint/issues/14))
 
 - Keycloak (ADR-0004), OIDC integration, role mapping (Viewer/Cyber/Operator/Admin).
 - Scheduling for read-only jobs under service credentials.
 - Audit trail surfaces (who ran what, config version history).
 
-## M4 — Remediation
+## M4 — Remediation (epic [#15](https://github.com/blac9216/waypoint/issues/15))
 
 - Admin-gated, typed-confirmation, never-schedulable remediation via child `pwsh`
   (vendor scripts unmodified). Remediation input documents from the config store.
 
-## M5 — Download manager & managed content
+## M5 — Download manager & managed content (epic [#16](https://github.com/blac9216/waypoint/issues/16))
 
 - Depot catalog indexing into Postgres; catalog browser UI; download jobs with
   progress/verification; content-library + Photon repo management; disk usage.
@@ -64,12 +64,12 @@ forcing every foundation into existence.
   tracked branch, `content-pull` when connected; air-gapped `content-import` lands
   with the M6 bundle format).
 
-## M6 — Transfer & modes
+## M6 — Transfer & modes (epic [#17](https://github.com/blac9216/waypoint/issues/17))
 
 - Connected/disconnected instance modes (ADR-0010); signed bundle format
   (shared with updates); export composer + import/validate/diff.
 
-## M7 — Updater & appliance polish
+## M7 — Updater & appliance polish (epic [#18](https://github.com/blac9216/waypoint/issues/18))
 
 - `upgrade.sh` consuming the update bundle → in-UI self-update via the updater
   sidecar (ADR-0009) → (optional) Packer-built OVA wrapper (ADR-0001).
