@@ -35,10 +35,15 @@ buffering disabled.
   `edge` bridge network, and without re-resolution every route would 502 against
   the stale address until `nginx -s reload`. `127.0.0.11` is Docker-specific: it
   only answers inside a Docker network namespace on a user-defined bridge network.
-  ADR-0001 anticipates an OVA wrapper (issue #47) running this same compose stack
-  on Photon OS under systemd instead of Docker — that topology has no `127.0.0.11`
-  to ask. Reworking the network layer outside Docker (a different container
-  runtime, or the OVA path) must replace the resolver directive with that host's
-  real DNS resolver, or move to static addressing instead. See
+  The constraint is therefore on **Docker's embedded DNS**, not on the packaging:
+  the ADR-0001 OVA wrapper (issue #47) is explicitly "the identical compose stack"
+  in a Packer-built appliance — it still runs Docker, so it keeps `127.0.0.11` and
+  needs no change here. What does need reworking is any topology that stops using
+  Docker networking: a different container runtime (Podman's `aardvark-dns`,
+  Kubernetes cluster DNS), or running the services directly on a host under
+  systemd where `backend` is not a resolvable name at all. Those must repoint
+  `resolver` at that environment's real DNS server — keeping the `$backend_host`
+  pairing, since addresses still change on redeploy — or move to static addressing
+  if the backend gets a stable address. See
   `deploy/nginx/conf.d/default.conf` for the directive and the full reasoning, and
   `deploy/README.md` for the operator-facing note.

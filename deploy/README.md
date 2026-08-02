@@ -50,12 +50,32 @@ dialling the stale one — every route 502s until `nginx -s reload`. The
 `valid=10s` TTL is what bounds that window; drop it and a stale-address 502
 persists indefinitely.
 
-This is a **porting landmine** for any deployment mode that isn't Docker
-Compose. ADR-0001 anticipates a Packer-built OVA wrapper (issue #47) running
-this same compose stack on Photon OS under systemd — that environment has no
-`127.0.0.11` to ask. Reworking the network layer outside Docker (a different
-container runtime, or the OVA path) must point `resolver` at that host's real
-DNS resolver, or replace the dynamic-target approach with static addressing.
+This is a **porting landmine**, and it is worth being precise about which
+deployments it actually fires for — the dependency is on **Docker's embedded
+DNS**, not on any particular way of shipping the stack.
+
+- **The ADR-0001 OVA path (issue #47) is _not_ affected.**
+  [ADR-0001](../docs/adr/0001-packaging.md) describes wrapping "the identical
+  compose stack" in a Packer-built OVA on a minimal OS — "a packaging wrapper,
+  **not a different architecture**". An OVA that boots Photon OS and runs this
+  same `docker compose up` still runs Docker, still gets a user-defined bridge
+  network, and still has `127.0.0.11` answering inside it. Nothing here needs
+  to change for that path.
+- **What _would_ break it is dropping Docker itself**, i.e. any topology where
+  nginx no longer resolves `backend` through Docker's embedded DNS:
+  - **a different container runtime** — e.g. Podman, whose DNS is
+    `aardvark-dns` on its own address, or a Kubernetes-style deployment where
+    the service name resolves through the cluster DNS instead;
+  - **running the services directly on a host** (systemd units, no containers),
+    where `backend` is not a DNS name at all.
+
+  In either case, `resolver 127.0.0.11` must be repointed at that
+  environment's real resolver — and the `$backend_host` variable + `resolver`
+  pairing kept, since the reason for it (re-resolving an address that changes
+  under you on redeploy) survives the move. If the new topology gives the
+  backend a stable address instead, static addressing is the simpler
+  replacement.
+
 See [ADR-0003](../docs/adr/0003-reverse-proxy-nginx.md#consequences) for the
 same note recorded against the reverse-proxy decision.
 
@@ -80,10 +100,32 @@ the frontend bundle).
    cd ..
    ```
 
-   If you skip this, Docker silently creates an empty `frontend/dist`
-   directory the first time you bring the stack up, and nginx serves an
-   empty listing instead of failing loudly — if `curl -k https://.../` in
-   step 5 doesn't return the app shell, check this first.
+   If you skip this, `docker compose up` **fails immediately** rather than
+   coming up half-working:
+
+   ```
+   Error response from daemon: invalid mount config for type "bind":
+   bind source path does not exist: /path/to/waypoint/frontend/dist
+   ```
+
+   That is deliberate. The nginx `frontend/dist` mount uses Compose's long
+   syntax with `bind: {create_host_path: false}` (see `docker-compose.yml`),
+   which turns what would otherwise be a silent failure into a loud one.
+   Docker's *default* behaviour for a missing bind source is to create it —
+   as a **root-owned** empty directory — and the resulting stack looks fine:
+   all three services report `healthy`, and `curl -k https://localhost:8443/`
+   returns a bare nginx **403 Forbidden** (`try_files` falls through to an
+   empty directory with autoindex off), not an empty listing or a 404. Build
+   the bundle and bring the stack up again.
+
+   **If you already have a root-owned `frontend/dist`** — from an older
+   revision of this stack, or another tool — `npm run build` fails with
+   `EACCES: permission denied`. Remove it and rebuild:
+
+   ```bash
+   sudo rm -rf frontend/dist
+   cd frontend && npm run build
+   ```
 
 3. Compute a dev admin password hash so you can log in, and (optionally)
    override the dev Postgres credentials / published HTTPS port. These all
@@ -133,6 +175,15 @@ the frontend bundle).
    # Postgres is not reachable from the host at all (connection refused)
    curl http://localhost:5432/
    ```
+
+   **Known limitation — the browser UI is not usable yet
+   ([#64](https://github.com/blac9216/waypoint/issues/64)).** The stack serves
+   the real frontend bundle and the login endpoint above returns `200` with a
+   token, but the frontend and backend disagree on the login response shape, so
+   logging in through a browser lands you on a page with no navigation chrome
+   and a refresh returns you to the login screen. Verify this stack with the
+   `curl` checks above until #64 lands; the bundle being served and the login
+   round-trip returning `200` are what this layer is responsible for.
 
 6. Tear down:
 

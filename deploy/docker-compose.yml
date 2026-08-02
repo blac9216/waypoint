@@ -26,11 +26,25 @@ services:
       # Real frontend static build (issue #11 / #65), bind-mounted rather
       # than baked into an image so the existing nginx:1.27-alpine image
       # needs no custom build stage - same pattern already used for conf.d
-      # and certs. Build it first: cd frontend && npm run build. If
-      # ../frontend/dist does not exist yet, Docker silently creates an
-      # empty host directory here and nginx serves an empty listing/404
-      # instead of failing loudly - see deploy/README.md "Bring-up".
-      - ../frontend/dist:/usr/share/nginx/html:ro
+      # and certs. Build it first: cd frontend && npm run build.
+      #
+      # Long syntax with `create_host_path: false` on purpose. Docker's
+      # default for a bind mount is to CREATE a missing source path - as a
+      # root-owned empty directory - so forgetting the build step would
+      # bring the stack up "healthy" while nginx served a bare 403 Forbidden
+      # (try_files falls through to an empty dir, autoindex off), and would
+      # leave behind a root-owned ../frontend/dist that a non-root operator
+      # then cannot `npm run build` into (EACCES) without sudo. Refusing the
+      # mount instead fails the `up` immediately with
+      #   invalid mount config for type "bind": bind source path does not
+      #   exist: .../frontend/dist
+      # and creates nothing. See deploy/README.md "Bring-up" step 2.
+      - type: bind
+        source: ../frontend/dist
+        target: /usr/share/nginx/html
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - edge
     healthcheck:
