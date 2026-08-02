@@ -47,9 +47,9 @@ ALLOWLIST_FILES: dict[str, str] = {
 		"Pre-existing M0 design mockup (out of scope for #79 — docs/ui/ is "
 		"owned by other work) uses a *.corp.local fictional naming scheme "
 		"for its mock inventory data instead of the CLAUDE.md-canonical "
-		"*.example.internal form. Flagged to the repo owner as a follow-up "
-		"rather than silently widening this scanner's TLD allowlist, which "
-		"would blind it to a real .corp.local leak anywhere else."
+		"*.example.internal form. Tracked as issue #86 rather than silently "
+		"widening this scanner's TLD allowlist, which would blind it to a "
+		"real .corp.local leak anywhere else."
 	),
 }
 
