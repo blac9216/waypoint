@@ -222,6 +222,45 @@ describe("connectEventStream", () => {
 			expect(received[0]).toEqual(envelope);
 		});
 
+		it("parses the mixed \\r\\n\\n and \\n\\r\\n blank-line forms the grammar also allows", async () => {
+			const a = { ...envelope, seq: 21 };
+			const b = { ...envelope, seq: 22 };
+			// A blank line is any two consecutive terminators, and they need not
+			// be the same terminator twice.
+			const sse = `id: 21\r\ndata: ${JSON.stringify(a)}\r\n\n` + `id: 22\ndata: ${JSON.stringify(b)}\n\r\n`;
+			globalThis.fetch = makeSseFetch([{ text: sse }], []);
+
+			const received: WaypointEvent[] = [];
+			activeClose = connectEventStream("/api/v1/events", {
+				getToken: () => "tok",
+				onEvent: (e) => received.push(e),
+				minBackoffMs: 5,
+				maxBackoffMs: 10,
+			});
+
+			await vi.waitFor(() => expect(received).toHaveLength(2));
+			expect(received.map((e) => e.seq)).toEqual([21, 22]);
+		});
+
+		it("does not treat a single \\r\\n inside a frame as a boundary", async () => {
+			// Guards against the `(?:\r\n|\r|\n){2}` backtracking trap, which
+			// would split this single frame in half and lose its data line.
+			const multi = { ...envelope, seq: 31 };
+			const sse = `id: 31\r\nevent: job.log\r\ndata: ${JSON.stringify(multi)}\r\n\r\n`;
+			globalThis.fetch = makeSseFetch([{ text: sse }], []);
+
+			const received: WaypointEvent[] = [];
+			activeClose = connectEventStream("/api/v1/events", {
+				getToken: () => "tok",
+				onEvent: (e) => received.push(e),
+				minBackoffMs: 5,
+				maxBackoffMs: 10,
+			});
+
+			await vi.waitFor(() => expect(received).toHaveLength(1));
+			expect(received[0]).toEqual(multi);
+		});
+
 		it("still parses the LF-delimited form, and the bare-CR form", async () => {
 			const lf = { ...envelope, seq: 11 };
 			const cr = { ...envelope, seq: 12 };

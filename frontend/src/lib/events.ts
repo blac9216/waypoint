@@ -60,18 +60,28 @@ interface SseFrame {
 /**
  * A frame ends at a blank line, and the SSE grammar (WHATWG HTML,
  * "Interpreting an event stream") accepts `\r\n`, `\n` or `\r` as the line
- * terminator — so the blank line is any of `\r\n\r\n`, `\n\n` or `\r\r`.
+ * terminator — so the blank line is *any two consecutive terminators*:
+ * `\r\n\r\n`, `\n\n`, `\r\r`, and the mixed `\r\n\n` / `\n\r\n`.
  * Splitting on `"\n\n"` alone (the original implementation) meant a
  * CRLF-emitting server produced a buffer with no recognizable boundary: the
  * stream connected, stayed "open", and delivered zero events forever with
  * no error and no reconnect. Issue #70.
  *
+ * Written as `(?:\r\n|\n)(?:\r\n|\n)|\r\r` rather than the tempting
+ * `(?:\r\n|\r|\n){2}`, which is a trap: against a *single* `\r\n` that
+ * pattern backtracks into `\r` + `\n` and reports a frame boundary in the
+ * middle of an ordinary line. This form cannot — a `\r` is only ever
+ * consumed as part of a `\r\n`, or by the explicit `\r\r` alternative.
+ *
  * Deliberately non-global so `exec` is stateless and always returns the
  * leftmost boundary. A buffer ending in a partial terminator (e.g. a lone
  * trailing `\r`) simply doesn't match yet and is carried into the next
- * chunk, which is what makes this safe across arbitrary chunk splits.
+ * chunk, which is what makes this safe across arbitrary chunk splits — and
+ * why the boundary is matched in place rather than normalizing the decode
+ * buffer up front, since `buffer.replace(/\r\n|\r/g, "\n")` turns a chunk
+ * split inside a CRLF pair into a phantom boundary.
  */
-const FRAME_BOUNDARY = /\r\n\r\n|\n\n|\r\r/;
+const FRAME_BOUNDARY = /(?:\r\n|\n)(?:\r\n|\n)|\r\r/;
 
 /** Line terminators within a single frame — same grammar, one line at a time. */
 const LINE_BOUNDARY = /\r\n|\n|\r/;
