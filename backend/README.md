@@ -52,7 +52,48 @@ docker run --rm -p 8080:8080 -e LocalAuth__AdminPasswordHash=<hash> waypoint-api
 ```
 
 The compose stack that wires this image together with Postgres, Keycloak (M3+), and
-nginx lives under [`deploy/`](../deploy/) (separate issue).
+nginx lives under [`deploy/`](../deploy/).
+
+### Container health — the convention for every Waypoint service image
+
+**The image owns how it reports health; the orchestrator only invokes it.** Every service
+image Waypoint ships must expose a health probe executable with *nothing but what the
+image already contains*, declare it as a `HEALTHCHECK` in its own Dockerfile, and let
+compose (or any other orchestrator) call that same probe.
+
+The reason is concrete rather than stylistic. `mcr.microsoft.com/dotnet/aspnet` — like
+most modern slim runtime bases — ships **neither `curl` nor `wget`**. A compose-side
+`test: ["CMD", "wget", ...]` therefore fails *every* probe, the container never becomes
+healthy, and anything gated on `depends_on: condition: service_healthy` (nginx, here)
+never starts at all. The two ways out are to install an HTTP client into the runtime
+image — paying image size and attack surface on every service, forever — or to let the
+application answer its own probe. Waypoint does the latter.
+
+For `Waypoint.Api` that mechanism is a health-check mode on the app itself:
+
+```bash
+dotnet Waypoint.Api.dll --health-check   # exit 0 = healthy, exit 1 = unhealthy
+```
+
+It performs a loopback `GET /api/v1/health`, requires a `200` whose payload reports
+`"status": "ok"`, and never throws — any failure is an unhealthy verdict. The URL is
+derived from `ASPNETCORE_URLS` (wildcard binds such as `http://+:8080` are rewritten to
+loopback; `https://` entries are skipped, so the probe never needs a trusted dev
+certificate), falling back to `http://127.0.0.1:8080/api/v1/health`. Set
+`WAYPOINT_HEALTHCHECK_URL` to override it outright. Implementation:
+`Waypoint.Api/Diagnostics/HealthCheckProbe.cs`.
+
+**Applying this to the next service image:**
+
+1. Give the app a self-contained probe mode — an argument, a subcommand, or a tool the
+   image already carries. Do **not** add `curl`/`wget` to a runtime image just to satisfy
+   a healthcheck.
+2. Declare `HEALTHCHECK` in that service's own Dockerfile, so plain `docker run` and every
+   orchestrator get the correct behaviour by default.
+3. In compose, either omit `healthcheck:` (inheriting the image's) or restate the *same*
+   command. Never invent an orchestrator-side probe the image cannot execute.
+4. Cover it with a test that asserts the **exit code** of the real binary — that is the
+   only thing Docker observes (`Waypoint.Tests/Api/HealthCheckProbeTests.cs`).
 
 ### Startup failure exits non-zero
 

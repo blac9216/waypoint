@@ -2,8 +2,7 @@
 #
 # Topology (docs/architecture.md component view; ADR-0001 packaging):
 #   nginx (edge, TLS + static frontend + /api proxy)
-#     -> backend (REST API; TODO(#3): currently a placeholder, see
-#        backend-stub/conf.d/default.conf)
+#     -> backend (ASP.NET Core REST API, built from ../backend)
 #        -> postgres (internal network only, no published port)
 #
 # Bring-up: see deploy/README.md. Requires deploy/nginx/certs/dev-cert.pem
@@ -34,34 +33,38 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  # TODO(#3): replace this nginx-based stub with the real ASP.NET Core
-  # backend image once it exists. The service name (`backend`), the
-  # /api/v1/health contract, and its position on the edge+internal networks
-  # are the interface nginx and postgres depend on - keep those stable
-  # across the swap.
+  # The real ASP.NET Core backend (#3), replacing the nginx-based stub this
+  # file shipped with. The service name (`backend`), the /api/v1/health
+  # contract, and its position on the edge+internal networks are the
+  # interface nginx and postgres depend on - unchanged across the swap.
   backend:
-    image: nginx:1.27-alpine
+    build:
+      context: ../backend
     container_name: waypoint-backend
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
-      - ./backend-stub/conf.d:/etc/nginx/conf.d:ro
       - artifacts:/var/lib/waypoint/artifacts
       # Dev-only, gitignored, operator-borrowed depot token/config + the
       # hand-provisioned vcf-download-tool binary (see CLAUDE.md and
-      # deploy/README.md "dev/local/ convention"). Not consumed by the
-      # stub; uncomment once the real backend (#3) needs it:
+      # deploy/README.md "dev/local/ convention"). Uncomment once the
+      # download jobs (M1 later slices) need it:
       # - ../dev/local:/dev/local:ro
     networks:
       - edge
       - internal
+    # The image reports its own health; compose only invokes it (see
+    # backend/README.md "Container health"). The .NET runtime image ships
+    # neither wget nor curl, so the previous `wget --spider` probe could
+    # never run - it failed every attempt and nginx, gated on
+    # `condition: service_healthy`, never started.
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/api/v1/health"]
+      test: ["CMD", "dotnet", "Waypoint.Api.dll", "--health-check"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 3
-      start_period: 5s
+      start_period: 20s
     restart: unless-stopped
 
   postgres:

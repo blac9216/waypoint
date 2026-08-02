@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Serilog;
 using Serilog.Formatting.Compact;
 using Waypoint.Api.Authentication;
+using Waypoint.Api.Diagnostics;
 using Waypoint.Api.Logging;
 using Waypoint.Api.Middleware;
 using Waypoint.Api.Validation;
@@ -11,6 +12,14 @@ using Waypoint.Core.Authorization;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Serialization;
 using Waypoint.Infrastructure.DependencyInjection;
+
+// The container health probe (see HealthCheckProbe): the same binary answers
+// `--health-check` with an exit code, so the slim runtime image needs no curl/wget.
+// Handled before any host or logging setup — it must stay cheap and side-effect free.
+if (HealthCheckProbe.IsHealthCheckInvocation(args))
+{
+	return HealthCheckProbe.Run();
+}
 
 // Bootstrap logger: captures anything that happens before the host (and DI, and the
 // redaction hook it resolves) is up. Kept as the static Log.Logger for the lifetime of
