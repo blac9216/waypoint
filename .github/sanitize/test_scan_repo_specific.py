@@ -309,6 +309,20 @@ class FileHandlingTests(unittest.TestCase):
 class ExitCodeTests(unittest.TestCase):
 	"""main() is the gate's actual contract with CI."""
 
+	@staticmethod
+	def _run_main() -> int:
+		"""Call main() with its stdout swallowed.
+
+		main() prints its findings report, and a passing test that echoes
+		"sanitization scan found the following issues" into a green job's log
+		reads like a broken gate to whoever scrolls past it.
+		"""
+		import contextlib
+		import io
+
+		with contextlib.redirect_stdout(io.StringIO()):
+			return scanner.main()
+
 	def setUp(self) -> None:
 		import tempfile
 
@@ -329,18 +343,18 @@ class ExitCodeTests(unittest.TestCase):
 
 	def test_clean_tree_exits_zero(self) -> None:
 		self._track("ok.md", f"host {fqdn('esxi-01', 'example', 'internal')}")
-		self.assertEqual(scanner.main(), 0)
+		self.assertEqual(self._run_main(), 0)
 
 	def test_findings_exit_one(self) -> None:
 		self._track("bad.md", f"host {LAB_IP}")
-		self.assertEqual(scanner.main(), 1)
+		self.assertEqual(self._run_main(), 1)
 
 	def test_invalid_allowlist_fails_the_run(self) -> None:
 		self._track("ok.md", "nothing here")
 		scanner.ALLOWLIST_FINDINGS["ok.md"] = {"not-a-check": "typo"}
 		self.addCleanup(scanner.ALLOWLIST_FINDINGS.pop, "ok.md", None)
 		with self.assertRaises(ValueError):
-			scanner.main()
+			self._run_main()
 
 
 if __name__ == "__main__":
