@@ -1,0 +1,137 @@
+/* Left rail — README "Global Chrome": 212px expanded / 56px collapsed,
+   160ms width transition, --panel bg, 1px --line right border, 8px vertical
+   padding. */
+.left-rail {
+	flex: 0 0 auto;
+	background: var(--panel);
+	border-right: 1px solid var(--line);
+	display: flex;
+	flex-direction: column;
+	padding: 8px 0;
+	transition: width 0.16s ease;
+	overflow: hidden;
+}
+
+.left-rail.is-open {
+	width: 212px;
+}
+
+.left-rail.is-collapsed {
+	width: 56px;
+}
+
+.left-rail__separator {
+	height: 1px;
+	background: var(--line);
+	margin: 9px 12px 0;
+}
+
+.left-rail__group-label {
+	font-size: 9px;
+	letter-spacing: 0.14em;
+	color: var(--txt3);
+	padding: 8px 16px 5px;
+	font-weight: 650;
+	white-space: nowrap;
+}
+
+.left-rail__group-spacer {
+	height: 5px;
+}
+
+.left-rail__item {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 8px 17px;
+	background: transparent;
+	border: 0;
+	border-left: 2px solid transparent;
+	color: var(--txt2);
+	text-align: left;
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.left-rail__item.is-active {
+	background: var(--accd);
+	border-left-color: var(--acc);
+	color: var(--txt);
+}
+
+.left-rail__item.is-disabled {
+	opacity: 0.42;
+	cursor: default;
+}
+
+.left-rail__item:not(.is-disabled):hover {
+	color: var(--txt);
+}
+
+.left-rail__label {
+	font-size: 12.5px;
+	white-space: nowrap;
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.left-rail__badge {
+	font-size: 9.5px;
+	font-family: var(--mono);
+	padding: 1px 4px;
+	border-radius: var(--radius-pill);
+	flex: 0 0 auto;
+}
+
+.left-rail__badge--warn {
+	color: var(--warn);
+	border: 1px solid var(--warnd);
+	background: var(--warnd);
+}
+
+.left-rail__badge--acc {
+	color: var(--acc);
+}
+
+.left-rail__fill {
+	flex: 1;
+}
+
+.left-rail__footer {
+	padding: 10px 17px;
+	border-top: 1px solid var(--soft);
+	margin-top: 8px;
+}
+
+.left-rail__version {
+	font-size: 10px;
+	color: var(--txt3);
+}
+
+.left-rail__update {
+	font-size: 10px;
+	color: var(--warn);
+	margin-top: 3px;
+}
+
+.left-rail__collapse {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 9px 19px;
+	background: transparent;
+	border: 0;
+	color: var(--txt3);
+	text-align: left;
+	width: 100%;
+}
+
+.left-rail__collapse:hover {
+	color: var(--txt2);
+}
+
+.left-rail__collapse span {
+	font-size: 11.5px;
+	white-space: nowrap;
+}

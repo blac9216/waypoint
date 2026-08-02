@@ -1,0 +1,156 @@
+/* Top bar — README "Global Chrome": 46px tall, --panel bg, 1px --line bottom
+   border, 14px gap / 14px horizontal padding. */
+.top-bar {
+	height: 46px;
+	flex: 0 0 46px;
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	padding: 0 14px;
+	background: var(--panel);
+	border-bottom: 1px solid var(--line);
+}
+
+.top-bar__brand {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	min-width: 0;
+}
+
+.top-bar__wordmark {
+	font-size: 13px;
+	font-weight: 650;
+	letter-spacing: 0.14em;
+	white-space: nowrap;
+}
+
+.top-bar__qualifier {
+	font-size: 10px;
+	color: var(--txt3);
+	letter-spacing: 0.1em;
+	padding-top: 2px;
+	white-space: nowrap;
+}
+
+.top-bar__divider {
+	width: 1px;
+	height: 20px;
+	background: var(--line);
+	flex: 0 0 auto;
+}
+
+.top-bar__screen-title {
+	font-size: 13px;
+	color: var(--txt2);
+	font-weight: 500;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.top-bar__spacer {
+	flex: 1;
+	min-width: 0;
+}
+
+.top-bar__stigman {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 4px 9px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-btn);
+	background: var(--panel2);
+	font-size: 11px;
+	color: var(--txt2);
+	flex: 0 0 auto;
+	white-space: nowrap;
+}
+
+.top-bar__stigman-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	flex: 0 0 auto;
+}
+
+.top-bar__stigman-dot.is-ok {
+	background: var(--ok);
+}
+
+.top-bar__stigman-dot.is-off {
+	background: var(--txt3);
+}
+
+.top-bar__mode {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 5px 11px;
+	border-radius: var(--radius-btn);
+	letter-spacing: 0.09em;
+	font-size: 11px;
+	font-weight: 650;
+	white-space: nowrap;
+	flex: 0 0 auto;
+	border: 1px solid var(--line);
+}
+
+.top-bar__mode-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: currentColor;
+	animation: blip 2.4s ease-in-out infinite;
+}
+
+.top-bar__mode--connected {
+	color: var(--ok);
+	background: var(--okd);
+	border-color: var(--ok);
+}
+
+.top-bar__mode--disconnected {
+	color: var(--warn);
+	background: var(--warnd);
+	border-color: var(--warn);
+}
+
+.top-bar__mode--unknown {
+	color: var(--txt3);
+	background: var(--panel2);
+	border-color: var(--line);
+}
+
+.top-bar__user {
+	background: var(--panel2);
+	color: var(--txt);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-btn);
+	padding: 5px 9px;
+	font-size: 11px;
+	flex: 0 0 auto;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 220px;
+}
+
+.top-bar__theme-toggle {
+	width: 28px;
+	height: 28px;
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--panel2);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-btn);
+	color: var(--txt2);
+}
+
+.top-bar__theme-toggle:hover {
+	color: var(--txt);
+	border-color: var(--acc);
+}

@@ -1,0 +1,152 @@
+/* Global job log drawer — README "Global job log drawer". Defaults closed;
+   root is flex: 0 0 auto so it never grows to starve the screen above it
+   (Layout Rules #6). */
+.job-log-drawer {
+	flex: 0 0 auto;
+	border-top: 1px solid var(--line);
+	background: var(--panel);
+}
+
+.job-log-drawer__handle {
+	height: 7px;
+	cursor: ns-resize;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--panel2);
+	border-bottom: 1px solid var(--line);
+}
+
+.job-log-drawer__grip {
+	width: 38px;
+	height: 2px;
+	background: var(--line);
+	border-radius: 2px;
+}
+
+.job-log-drawer__bar {
+	display: flex;
+	align-items: center;
+	gap: 11px;
+	padding: 7px 20px;
+	cursor: pointer;
+	white-space: nowrap;
+	color: var(--txt3);
+	background: transparent;
+	border: 0;
+	width: 100%;
+	text-align: left;
+}
+
+.job-log-drawer__title {
+	font-size: 10.5px;
+	letter-spacing: 0.1em;
+	color: var(--txt3);
+	font-weight: 650;
+	flex: 0 0 auto;
+}
+
+.job-log-drawer__active {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex: 0 0 auto;
+}
+
+.job-log-drawer__dot {
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: var(--acc);
+	animation: blip 1.4s ease-in-out infinite;
+}
+
+.job-log-drawer__active .mono {
+	font-size: 10.5px;
+	color: var(--txt2);
+}
+
+.job-log-drawer__summary {
+	font-size: 10.5px;
+	color: var(--txt3);
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.job-log-drawer__count {
+	font-size: 10.5px;
+	color: var(--txt3);
+	white-space: nowrap;
+	flex: 0 0 auto;
+}
+
+.job-log-drawer__follow,
+.job-log-drawer__download {
+	border: 1px solid var(--line);
+	color: var(--txt2);
+	padding: 3px 9px;
+	border-radius: var(--radius-pill);
+	font-size: 10.5px;
+	flex: 0 0 auto;
+	background: transparent;
+}
+
+.job-log-drawer__follow.is-on {
+	background: var(--accd);
+	color: var(--acc);
+}
+
+/* max-height caps the pane in viewport units even if a bug ever lets logH
+   escape its clamp (belt-and-suspenders for Layout Rules #6). */
+.job-log-drawer__body {
+	max-height: 26vh;
+	overflow: auto;
+	padding: 8px 20px;
+	font-family: var(--mono);
+	font-size: 11.5px;
+	line-height: 1.6;
+	background: var(--bg);
+	border-top: 1px solid var(--soft);
+}
+
+.job-log-drawer__empty {
+	color: var(--txt3);
+}
+
+.job-log-drawer__line {
+	display: flex;
+	gap: 9px;
+	white-space: pre-wrap;
+}
+
+.job-log-drawer__ts {
+	color: var(--txt3);
+	flex: 0 0 auto;
+}
+
+.job-log-drawer__level {
+	width: 44px;
+	flex: 0 0 44px;
+}
+
+.job-log-drawer__level--INFO {
+	color: var(--txt3);
+}
+
+.job-log-drawer__level--OK {
+	color: var(--ok);
+}
+
+.job-log-drawer__level--WARN {
+	color: var(--warn);
+}
+
+.job-log-drawer__level--ERROR {
+	color: var(--bad);
+}
+
+.job-log-drawer__msg {
+	color: var(--txt2);
+}
