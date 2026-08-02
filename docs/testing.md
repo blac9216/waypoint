@@ -143,6 +143,13 @@ Two standing rules for anything you claim in a PR body or review:
    or a named placeholder like `COMMIT_SHA`), then fetch the body back and confirm
    what a reviewer will actually paste.
 
+   Practical note: there is no `gh` CLI here and the raw GitHub API is blocked, so
+   read-back means the MCP tools. `pull_request_read` returns the body **HTML-escaped**
+   (`&amp;`, `&gt;`), so unescape before diffing or every command with a redirect will
+   look wrong. Diff the command lines programmatically rather than eyeballing them —
+   the failure being guarded against is a character that is *silently absent*, which
+   is exactly what the eye skips over.
+
 ## A real browser is available — do not substitute it away
 
 Chromium **is** installable and runnable in these sandboxes:
