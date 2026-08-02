@@ -1,0 +1,119 @@
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Extensions.Logging.Abstractions;
+using Waypoint.Core.Auth;
+using Waypoint.Core.Authorization;
+using Waypoint.Core.Configuration;
+using Waypoint.Infrastructure.Auth;
+using Waypoint.Tests.Support;
+
+namespace Waypoint.Tests.Infrastructure;
+
+public sealed class InMemoryLocalAuthenticationServiceTests
+{
+	private const string Password = "correct-horse-battery-staple";
+
+	[Fact]
+	public void Authenticate_WithNoPasswordHashConfigured_FailsClosed()
+	{
+		InMemoryLocalAuthenticationService service = CreateService(new LocalAuthOptions
+		{
+			AdminUsername = "admin",
+			AdminPasswordHash = null
+		});
+
+		LocalSession? session = service.Authenticate("admin", Password);
+
+		Assert.Null(session);
+	}
+
+	[Fact]
+	public void Authenticate_WithCorrectCredentials_ReturnsAdminSession()
+	{
+		InMemoryLocalAuthenticationService service = CreateService(BuildOptions());
+
+		LocalSession? session = service.Authenticate("admin", Password);
+
+		Assert.NotNull(session);
+		Assert.Equal("admin", session!.Username);
+		Assert.Equal(WaypointRole.Admin, session.Role);
+		Assert.True(session.ExpiresAt > DateTimeOffset.UtcNow);
+	}
+
+	[Fact]
+	public void Authenticate_WithWrongPassword_ReturnsNull()
+	{
+		InMemoryLocalAuthenticationService service = CreateService(BuildOptions());
+
+		LocalSession? session = service.Authenticate("admin", "wrong-password");
+
+		Assert.Null(session);
+	}
+
+	[Fact]
+	public void Authenticate_WithWrongUsername_ReturnsNull()
+	{
+		InMemoryLocalAuthenticationService service = CreateService(BuildOptions());
+
+		LocalSession? session = service.Authenticate("someone-else", Password);
+
+		Assert.Null(session);
+	}
+
+	[Fact]
+	public void ValidateToken_ForIssuedSession_ReturnsSameSession()
+	{
+		InMemoryLocalAuthenticationService service = CreateService(BuildOptions());
+		LocalSession issued = service.Authenticate("admin", Password)!;
+
+		LocalSession? validated = service.ValidateToken(issued.Token);
+
+		Assert.NotNull(validated);
+		Assert.Equal(issued.Token, validated!.Token);
+	}
+
+	[Fact]
+	public void ValidateToken_ForUnknownToken_ReturnsNull()
+	{
+		InMemoryLocalAuthenticationService service = CreateService(BuildOptions());
+
+		LocalSession? validated = service.ValidateToken("not-a-real-token");
+
+		Assert.Null(validated);
+	}
+
+	[Fact]
+	public void ValidateToken_ForExpiredSession_ReturnsNull()
+	{
+		InMemoryLocalAuthenticationService service = CreateService(BuildOptions(sessionLifetime: TimeSpan.FromMilliseconds(1)));
+		LocalSession issued = service.Authenticate("admin", Password)!;
+
+		Thread.Sleep(50);
+		LocalSession? validated = service.ValidateToken(issued.Token);
+
+		Assert.Null(validated);
+	}
+
+	private static InMemoryLocalAuthenticationService CreateService(LocalAuthOptions options)
+	{
+		return new InMemoryLocalAuthenticationService(
+			new StaticOptionsMonitor<LocalAuthOptions>(options),
+			NullLogger<InMemoryLocalAuthenticationService>.Instance);
+	}
+
+	private static LocalAuthOptions BuildOptions(TimeSpan? sessionLifetime = null)
+	{
+		return new LocalAuthOptions
+		{
+			AdminUsername = "admin",
+			AdminPasswordHash = HashPassword(Password),
+			SessionLifetime = sessionLifetime ?? TimeSpan.FromHours(1)
+		};
+	}
+
+	private static string HashPassword(string password)
+	{
+		byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(password));
+		return Convert.ToHexString(hash).ToLowerInvariant();
+	}
+}
