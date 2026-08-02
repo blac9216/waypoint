@@ -13,7 +13,9 @@ using Waypoint.Core.Serialization;
 using Waypoint.Infrastructure.DependencyInjection;
 
 // Bootstrap logger: captures anything that happens before the host (and DI, and the
-// redaction hook it resolves) is up. Replaced by the fully configured logger below.
+// redaction hook it resolves) is up. Kept as the static Log.Logger for the lifetime of
+// the process (see preserveStaticLogger below); it is only ever used by the startup
+// failure path in this file — everything else logs through DI.
 Log.Logger = new LoggerConfiguration()
 	.WriteTo.Console()
 	.CreateBootstrapLogger();
@@ -22,7 +24,12 @@ try
 {
 	WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-	builder.Host.UseSerilog((context, services, loggerConfiguration) =>
+	// preserveStaticLogger: true leaves the bootstrap Log.Logger alone instead of
+	// freezing it into the host's logger. Without it, a second host built in the same
+	// process (every extra WebApplicationFactory in the test suite) calls Freeze() on an
+	// already-frozen global ReloadableLogger and throws "The logger is already frozen."
+	// The host's own logger — the one with the redaction seam — is unaffected either way.
+	builder.Host.UseSerilog(preserveStaticLogger: true, configureLogger: (context, services, loggerConfiguration) =>
 	{
 		// The seam from docs/security.md control 1: every rendered log line passes
 		// through ISecretRedactor before reaching the console sink. Today that's
@@ -103,10 +110,17 @@ try
 	app.MapControllers();
 
 	app.Run();
+
+	return 0;
 }
 catch (Exception exception)
 {
 	Log.Fatal(exception, "Waypoint.Api terminated unexpectedly during startup");
+
+	// Non-zero is load-bearing, not cosmetic: `restart: on-failure`, compose health
+	// gating and any CI that reads $? all treat exit 0 as "the process did its job and
+	// stopped". A backend that cannot bind its port must not report success.
+	return 1;
 }
 finally
 {

@@ -54,6 +54,14 @@ docker run --rm -p 8080:8080 -e LocalAuth__AdminPasswordHash=<hash> waypoint-api
 The compose stack that wires this image together with Postgres, Keycloak (M3+), and
 nginx lives under [`deploy/`](../deploy/) (separate issue).
 
+### Startup failure exits non-zero
+
+`Program.cs` catches a fatal startup exception, logs it, and returns exit code **1**.
+This is load-bearing: `restart: on-failure`, compose's health gating and any CI step that
+reads `$?` all treat exit 0 as "the process did its job and stopped", so a backend that
+cannot bind its port must never report success. `StartupExitCodeTests` pins both
+directions (unbindable URL → non-zero; valid URL → keeps running).
+
 ## Conventions this scaffold establishes
 
 Everything below implements `docs/api-contract.md` Conventions and is meant to be

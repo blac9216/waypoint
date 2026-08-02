@@ -29,4 +29,17 @@
     <ProjectReference Include="..\Waypoint.Api\Waypoint.Api.csproj" />
   </ItemGroup>
 
+  <!--
+    Process exit codes and the container health probe cannot be observed from inside the
+    test process, so those tests launch the API as a real child process. Hand them the
+    path of its runnable output; $(Configuration)/$(TargetFramework) keep it correct for
+    both Debug and Release builds.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>WaypointApiEntryAssembly</_Parameter1>
+      <_Parameter2>$(MSBuildThisFileDirectory)../Waypoint.Api/bin/$(Configuration)/$(TargetFramework)/Waypoint.Api.dll</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>
