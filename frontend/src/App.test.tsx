@@ -1,6 +1,23 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { ConfigurationScreen } from "./screens/screens";
+
+/**
+ * Mount-detecting spy for issue #78: wraps the real `ConfigurationScreen`
+ * (preserving its rendered output, so tests that DO expect it to render —
+ * none currently do, but future ones might — still see the real markup)
+ * while recording every invocation. A React function component's body runs
+ * exactly when React mounts it into the tree, so "the spy was never called"
+ * is equivalent to "the component was never mounted" — a stronger claim
+ * than "the DOM doesn't contain its text", because it holds even before any
+ * of the component's own effects (e.g. a future on-mount fetch) have had a
+ * chance to run.
+ */
+vi.mock("./screens/screens", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./screens/screens")>();
+	return { ...actual, ConfigurationScreen: vi.fn(actual.ConfigurationScreen) };
+});
 
 function jsonResponse(body: unknown, status = 200) {
 	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -43,6 +60,7 @@ describe("App", () => {
 		window.sessionStorage.clear();
 		window.localStorage.clear();
 		window.history.pushState(null, "", "/");
+		vi.mocked(ConfigurationScreen).mockClear();
 	});
 
 	afterEach(() => {
@@ -87,6 +105,68 @@ describe("App", () => {
 		window.dispatchEvent(new PopStateEvent("popstate"));
 
 		await waitFor(() => expect(window.location.pathname).toBe("/"));
+	});
+
+	it("never mounts ConfigurationScreen for a Viewer navigating to /config (issue #78: not just the final URL)", async () => {
+		// This is the regression case for issue #78: with the old
+		// useEffect-based guard, `<ConfigurationScreen />` was created and
+		// mounted in the SAME commit as the disallowed navigation, and only
+		// unmounted on the NEXT commit once the redirect effect fired. A test
+		// that merely asserts `window.location.pathname === "/"` afterwards
+		// (the previous test) cannot see that — it would pass identically
+		// whether or not the disallowed screen mounted first. The mount spy
+		// can.
+		installChromeFetchMock("Viewer");
+		render(<App />);
+		await signIn();
+
+		await waitFor(() => expect(screen.getByText("WAYPOINT")).toBeInTheDocument());
+
+		window.history.pushState(null, "", "/config");
+		window.dispatchEvent(new PopStateEvent("popstate"));
+
+		await waitFor(() => expect(window.location.pathname).toBe("/"));
+		await waitFor(() => expect(screen.getAllByText("Dashboard").length).toBeGreaterThan(0));
+
+		expect(ConfigurationScreen).not.toHaveBeenCalled();
+	});
+
+	it("never mounts ConfigurationScreen for a Viewer who signs in already deep-linked to /config", async () => {
+		// The more direct reproduction of the "mounts for a frame" bug: the
+		// disallowed route is current from the very first render after
+		// sign-in, not reached by an in-app navigation. If the guard only
+		// unwinds a screen that already mounted, this is exactly the case
+		// where a real on-mount fetch (the first data-bearing screen, #12)
+		// would already have fired before any redirect could run.
+		window.history.pushState(null, "", "/config");
+		installChromeFetchMock("Viewer");
+		render(<App />);
+		await signIn();
+
+		await waitFor(() => expect(screen.getByText("WAYPOINT")).toBeInTheDocument());
+		await waitFor(() => expect(window.location.pathname).toBe("/"));
+		expect(screen.getAllByText("Dashboard").length).toBeGreaterThan(0);
+
+		expect(ConfigurationScreen).not.toHaveBeenCalled();
+	});
+
+	it("does mount ConfigurationScreen for an Admin navigating to /config (guard isn't just always false)", async () => {
+		// The counterpart to the two "never mounts" tests above: proves the
+		// mock is a faithful spy on the real component (it renders the real
+		// output) and that the guard actually discriminates by role rather
+		// than accidentally blocking every screen.
+		installChromeFetchMock("Admin");
+		render(<App />);
+		await signIn();
+
+		await waitFor(() => expect(screen.getByText("WAYPOINT")).toBeInTheDocument());
+
+		window.history.pushState(null, "", "/config");
+		window.dispatchEvent(new PopStateEvent("popstate"));
+
+		await waitFor(() => expect(ConfigurationScreen).toHaveBeenCalled());
+		expect(window.location.pathname).toBe("/config");
+		expect(screen.getAllByText("Configuration").length).toBeGreaterThan(0);
 	});
 
 	it("hides the Download Catalog nav item entirely in air-gapped mode (mode-gating, not role-gating)", async () => {
