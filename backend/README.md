@@ -34,9 +34,20 @@ printf '<your-dev-password>' | sha256sum | awk '{print $1}'
 
 cd backend
 export LocalAuth__AdminPasswordHash=<hash from above>
-dotnet run --project Waypoint.Api
+dotnet run --project Waypoint.Api --no-launch-profile
 # GET  http://localhost:5000/api/v1/health         (no auth)
 # POST http://localhost:5000/api/v1/auth/login      { "username": "admin", "password": "<your-dev-password>" }
+```
+
+`--no-launch-profile` is not optional here. Without it, `dotnet run` applies the `http`
+profile in `Waypoint.Api/Properties/launchSettings.json`, whose
+`applicationUrl: http://localhost:5205` **silently overrides both the default port above
+and any `ASPNETCORE_URLS` you export** — so the URLs in this block would refuse
+connections against a perfectly healthy build. Bind a different port explicitly with
+`--urls`, e.g.:
+
+```bash
+dotnet run --project Waypoint.Api --no-launch-profile --urls http://127.0.0.1:5299
 ```
 
 ## Docker
