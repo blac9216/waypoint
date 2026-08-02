@@ -173,6 +173,52 @@ Before writing "no browser available" under `## Verification limits`, try to ins
 one. A disclosed limit is honest; an *unnecessary* disclosed limit still costs the
 reviewer the work of closing it, and quietly weakens what the PR proves.
 
+## Sandbox egress: why `dotnet restore` fails in a Docker build
+
+Agent sandboxes reach the internet through a **TLS-terminating proxy on
+`127.0.0.1:43705`**. Two consequences bite the backend image build, and both look
+like repository defects when they are not:
+
+1. A Docker build container cannot reach the host's `127.0.0.1`, so the proxy is
+   simply absent. `RUN dotnet restore` fails with
+   `NU1301: Unable to load the service index for source https://api.nuget.org/v3/index.json`.
+2. Even once reachable, the proxy re-signs TLS, so NuGet rejects the certificate
+   unless the proxy CA (`/root/.ccr/ca-bundle.crt`) is trusted inside the build.
+
+**This is an environment limitation, not a defect in `backend/Dockerfile`.** On an
+open network the plain `docker compose build` works. Do not file it as a finding, and
+**never modify a repository file to work around it** — a committed proxy workaround is
+both wrong off-sandbox and a sanitization risk.
+
+Two workarounds are verified to work. Either is fine; neither touches the repo:
+
+```bash
+# A. Host networking + trusted CA (works for a direct `docker run` or `docker build`)
+docker build --network=host \
+  --build-arg HTTPS_PROXY=http://127.0.0.1:43705 \
+  --build-arg SSL_CERT_FILE=/ca/ca-bundle.crt \
+  ...
+
+# B. Supply an SDK base image that already trusts the CA
+docker build --build-context <sdk-with-ca> ...
+```
+
+Quick confirmation that egress works at all, without building the image:
+
+```bash
+cd backend && docker run --rm --network=host \
+  -e HTTPS_PROXY=http://127.0.0.1:43705 -e NO_PROXY=localhost,127.0.0.1 \
+  -e SSL_CERT_FILE=/ca/ca-bundle.crt \
+  -v /root/.ccr/ca-bundle.crt:/ca/ca-bundle.crt:ro \
+  -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:8.0 \
+  dotnet restore Waypoint.sln
+```
+
+If you could not build the backend image at all, say so under
+`## Verification limits` and state which workaround you tried — do not report a
+bring-up as passing when the backend never started, and do not attribute the
+failure to the PR under review.
+
 ## Per-component test suites
 
 The stack-level contract is above. Each component owns its own suite and documents it
