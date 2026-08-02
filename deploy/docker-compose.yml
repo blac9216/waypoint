@@ -1,0 +1,107 @@
+# Waypoint M1 dev compose stack (issue #2, epic #1).
+#
+# Topology (docs/architecture.md component view; ADR-0001 packaging):
+#   nginx (edge, TLS + static frontend + /api proxy)
+#     -> backend (REST API; TODO(#3): currently a placeholder, see
+#        backend-stub/conf.d/default.conf)
+#        -> postgres (internal network only, no published port)
+#
+# Bring-up: see deploy/README.md. Requires deploy/nginx/certs/dev-cert.pem
+# and dev-key.pem (deploy/nginx/certs/generate-dev-certs.sh) before `up`.
+
+name: waypoint-dev
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: waypoint-nginx
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${WAYPOINT_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./www:/usr/share/nginx/html:ro
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8081/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # TODO(#3): replace this nginx-based stub with the real ASP.NET Core
+  # backend image once it exists. The service name (`backend`), the
+  # /api/v1/health contract, and its position on the edge+internal networks
+  # are the interface nginx and postgres depend on - keep those stable
+  # across the swap.
+  backend:
+    image: nginx:1.27-alpine
+    container_name: waypoint-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend-stub/conf.d:/etc/nginx/conf.d:ro
+      - artifacts:/var/lib/waypoint/artifacts
+      # Dev-only, gitignored, operator-borrowed depot token/config + the
+      # hand-provisioned vcf-download-tool binary (see CLAUDE.md and
+      # deploy/README.md "dev/local/ convention"). Not consumed by the
+      # stub; uncomment once the real backend (#3) needs it:
+      # - ../dev/local:/dev/local:ro
+    networks:
+      - edge
+      - internal
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: waypoint-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-waypoint}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-waypoint_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-waypoint}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # No `ports:` - reachable only from other containers on the internal
+    # network (ADR-0002; issue #2 acceptance criteria). Not published to
+    # the host, not reachable from the edge network nginx sits on.
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-waypoint} -d ${POSTGRES_DB:-waypoint}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+networks:
+  # nginx <-> backend. Published to the host via nginx's port mapping only.
+  edge:
+    driver: bridge
+  # backend <-> postgres. internal: true means Docker gives this network no
+  # route out (no host access, no default-gateway/internet); only containers
+  # attached to it can reach each other. nginx is deliberately not attached.
+  internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  # Postgres data directory.
+  pgdata:
+  # Downloaded/extracted VCF artifacts and offline-repo storage (see
+  # vcf-docker-download's UMDS/VCSA/VKS/ContentLibrary layout). Unused by
+  # the backend stub; mounted now so the path convention is fixed before
+  # the real backend (#3) and download jobs (M1 later slices) land.
+  artifacts:
