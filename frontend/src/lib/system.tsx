@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { apiGet } from "./api";
 import { useAuth } from "./auth";
+import type { ModeState } from "./router";
 
 /** `GET /api/v1/system` (docs/api-contract.md "System, users, audit"):
  * "Version/build, mode, uptime, disk usage by store, depot sync, update
@@ -24,6 +25,18 @@ interface SystemContextValue {
 	stigman: StigmanStatus | null;
 	/** True once the first fetch attempt (success or failure) has resolved. */
 	ready: boolean;
+	/**
+	 * Tri-state deployment mode (issue #82): `"unknown"` until `ready`,
+	 * `"connected"`/`"disconnected"` from the resolved `SystemInfo`
+	 * afterwards (a failed fetch settles to `"disconnected"`, matching the
+	 * existing "never guess connected" fail-safe below). Anything that
+	 * decides access or visibility for a `connectedOnly` route
+	 * (`evaluateRouteAccess` in `./router`) must read THIS field, not
+	 * `system?.mode ?? null` — that pattern conflated "known disconnected"
+	 * with "not yet known" and was the root cause of #82 (a connected-only
+	 * deep link denied before `GET /api/v1/system` could ever answer).
+	 */
+	mode: ModeState;
 }
 
 const SystemContext = createContext<SystemContextValue | null>(null);
@@ -66,7 +79,19 @@ export function SystemProvider({ children }: { children: ReactNode }) {
 		};
 	}, [status]);
 
-	const value = useMemo(() => ({ system, stigman, ready }), [system, stigman, ready]);
+	// "unknown" only during the window between sign-in and the first /system
+	// fetch settling; once `ready`, a resolved SystemInfo says "connected" or
+	// "disconnected", and a fetch failure (system === null after ready) folds
+	// into "disconnected" — the same fail-safe direction the comment above
+	// already documents for hiding mode-gated nav on an unreachable API.
+	const mode = useMemo<ModeState>(() => {
+		if (!ready) {
+			return "unknown";
+		}
+		return system?.mode === "connected" ? "connected" : "disconnected";
+	}, [ready, system]);
+
+	const value = useMemo(() => ({ system, stigman, ready, mode }), [system, stigman, ready, mode]);
 
 	return <SystemContext.Provider value={value}>{children}</SystemContext.Provider>;
 }

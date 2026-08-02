@@ -1,22 +1,26 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { ConfigurationScreen } from "./screens/screens";
+import { CatalogScreen, ConfigurationScreen } from "./screens/screens";
 
 /**
- * Mount-detecting spy for issue #78: wraps the real `ConfigurationScreen`
- * (preserving its rendered output, so tests that DO expect it to render —
- * none currently do, but future ones might — still see the real markup)
- * while recording every invocation. A React function component's body runs
- * exactly when React mounts it into the tree, so "the spy was never called"
- * is equivalent to "the component was never mounted" — a stronger claim
- * than "the DOM doesn't contain its text", because it holds even before any
- * of the component's own effects (e.g. a future on-mount fetch) have had a
+ * Mount-detecting spy for issue #78 (extended to `CatalogScreen` for issue
+ * #82): wraps the real component (preserving its rendered output, so tests
+ * that DO expect it to render still see the real markup) while recording
+ * every invocation. A React function component's body runs exactly when
+ * React mounts it into the tree, so "the spy was never called" is
+ * equivalent to "the component was never mounted" — a stronger claim than
+ * "the DOM doesn't contain its text", because it holds even before any of
+ * the component's own effects (e.g. a future on-mount fetch) have had a
  * chance to run.
  */
 vi.mock("./screens/screens", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./screens/screens")>();
-	return { ...actual, ConfigurationScreen: vi.fn(actual.ConfigurationScreen) };
+	return {
+		...actual,
+		ConfigurationScreen: vi.fn(actual.ConfigurationScreen),
+		CatalogScreen: vi.fn(actual.CatalogScreen),
+	};
 });
 
 function jsonResponse(body: unknown, status = 200) {
@@ -51,6 +55,39 @@ function installChromeFetchMock(role: "Viewer" | "Admin" = "Admin") {
 	}) as unknown as typeof fetch;
 }
 
+/**
+ * Like `installChromeFetchMock`, but `/api/v1/system` doesn't resolve until
+ * `resolveSystem` (returned) is called — the deferred window issue #82 lives
+ * in. Login and `/stigman` still resolve immediately, matching the real
+ * timing (`/system` and `/stigman` are fired together per `system.tsx`, but
+ * only `/system`'s answer matters for mode-gating).
+ */
+function installDeferredSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = "Operator") {
+	let resolveSystem!: (mode: "connected" | "disconnected") => void;
+	const systemPromise = new Promise<"connected" | "disconnected">((resolve) => {
+		resolveSystem = resolve;
+	});
+
+	globalThis.fetch = vi.fn(async (url: string) => {
+		if (url === "/api/v1/auth/login") {
+			return jsonResponse({ token: "tok-1", user: { username: "j.moreno", role } });
+		}
+		if (url === "/api/v1/system") {
+			const mode = await systemPromise;
+			return jsonResponse({ version: "0.1.0-dev", build: "local", mode, update_available: null });
+		}
+		if (url === "/api/v1/stigman") {
+			return jsonResponse({ connected: false, endpoint: null, collection: null });
+		}
+		if (url.startsWith("/api/v1/events")) {
+			return new Promise(() => {});
+		}
+		return jsonResponse({ error: { code: "not_found", message: "unhandled in test" } }, 404);
+	}) as unknown as typeof fetch;
+
+	return { resolveSystem };
+}
+
 async function signIn() {
 	fireEvent.change(screen.getByLabelText("Username"), { target: { value: "admin" } });
 	fireEvent.change(screen.getByLabelText("Password"), { target: { value: "waypoint-dev" } });
@@ -66,6 +103,7 @@ describe("App", () => {
 		window.localStorage.clear();
 		window.history.pushState(null, "", "/");
 		vi.mocked(ConfigurationScreen).mockClear();
+		vi.mocked(CatalogScreen).mockClear();
 	});
 
 	afterEach(() => {
@@ -203,5 +241,75 @@ describe("App", () => {
 
 		await waitFor(() => expect(screen.getByText("WAYPOINT")).toBeInTheDocument());
 		await waitFor(() => expect(screen.queryByText("Download Catalog")).not.toBeInTheDocument());
+	});
+
+	/**
+	 * Issue #82: a connected-only deep link (`/catalog`) used to be redirected
+	 * to Dashboard because the mode guard decided against `mode: null` before
+	 * `GET /api/v1/system` resolved. These tests hold `/system` open with
+	 * `installDeferredSystemFetchMock` to make that window observable and
+	 * assert on both ends of it: nothing decided while pending (never mounts
+	 * CatalogScreen, never rewrites the URL away), then the correct outcome
+	 * once mode is known — allowed when connected, redirected when not.
+	 */
+	describe("mode-gated deep link waits for /api/v1/system instead of deciding early (issue #82)", () => {
+		it("neither mounts CatalogScreen nor rewrites the URL while mode is still unknown", async () => {
+			window.history.pushState(null, "", "/catalog");
+			const { resolveSystem } = installDeferredSystemFetchMock("Operator");
+			render(<App />);
+			await signIn();
+
+			// Give pending microtasks/effects a turn without ever resolving
+			// /system — if the old bug were present, the redirect effect would
+			// already have fired and rewritten the URL by now.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+
+			expect(window.location.pathname).toBe("/catalog");
+			expect(CatalogScreen).not.toHaveBeenCalled();
+
+			resolveSystem("connected");
+			await waitFor(() => expect(CatalogScreen).toHaveBeenCalled());
+		});
+
+		it("mounts CatalogScreen and keeps the deep-linked URL once mode resolves to connected", async () => {
+			window.history.pushState(null, "", "/catalog");
+			const { resolveSystem } = installDeferredSystemFetchMock("Operator");
+			render(<App />);
+			await signIn();
+
+			resolveSystem("connected");
+
+			await waitFor(() => expect(CatalogScreen).toHaveBeenCalled());
+			// The fix: the URL was never rewritten during the pending window, so
+			// it's still exactly the deep link the user followed.
+			expect(window.location.pathname).toBe("/catalog");
+			expect(screen.getAllByText("Download Catalog").length).toBeGreaterThan(0);
+		});
+
+		it("still redirects to Dashboard once mode resolves to disconnected — the pending window doesn't turn into a silent allow", async () => {
+			window.history.pushState(null, "", "/catalog");
+			const { resolveSystem } = installDeferredSystemFetchMock("Operator");
+			render(<App />);
+			await signIn();
+
+			resolveSystem("disconnected");
+
+			await waitFor(() => expect(window.location.pathname).toBe("/"));
+			expect(CatalogScreen).not.toHaveBeenCalled();
+		});
+
+		it("a role-insufficient deep link is still denied immediately, without waiting on mode at all", async () => {
+			// Role settles synchronously (evaluateRouteAccess checks it first),
+			// so a Viewer hitting /catalog must redirect right away — it should
+			// not sit "pending" just because /catalog also happens to be
+			// connectedOnly.
+			window.history.pushState(null, "", "/catalog");
+			installDeferredSystemFetchMock("Viewer");
+			render(<App />);
+			await signIn();
+
+			await waitFor(() => expect(window.location.pathname).toBe("/"));
+			expect(CatalogScreen).not.toHaveBeenCalled();
+		});
 	});
 });
