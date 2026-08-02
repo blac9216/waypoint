@@ -1,0 +1,40 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Waypoint.Core", "Waypoint.Core\Waypoint.Core.csproj", "{B0EED9E6-1E8A-49BC-98E5-52190E987EE3}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Waypoint.Infrastructure", "Waypoint.Infrastructure\Waypoint.Infrastructure.csproj", "{8FD69386-980B-4F2D-9F87-A79342FF2006}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Waypoint.Api", "Waypoint.Api\Waypoint.Api.csproj", "{1C38B016-75D3-4413-93DE-0BDA8D2082B8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Waypoint.Tests", "Waypoint.Tests\Waypoint.Tests.csproj", "{7ACC6F77-C50D-469C-B4FA-39D37B10E315}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B0EED9E6-1E8A-49BC-98E5-52190E987EE3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B0EED9E6-1E8A-49BC-98E5-52190E987EE3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B0EED9E6-1E8A-49BC-98E5-52190E987EE3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B0EED9E6-1E8A-49BC-98E5-52190E987EE3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8FD69386-980B-4F2D-9F87-A79342FF2006}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8FD69386-980B-4F2D-9F87-A79342FF2006}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8FD69386-980B-4F2D-9F87-A79342FF2006}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8FD69386-980B-4F2D-9F87-A79342FF2006}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1C38B016-75D3-4413-93DE-0BDA8D2082B8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1C38B016-75D3-4413-93DE-0BDA8D2082B8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1C38B016-75D3-4413-93DE-0BDA8D2082B8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1C38B016-75D3-4413-93DE-0BDA8D2082B8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7ACC6F77-C50D-469C-B4FA-39D37B10E315}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7ACC6F77-C50D-469C-B4FA-39D37B10E315}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7ACC6F77-C50D-469C-B4FA-39D37B10E315}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7ACC6F77-C50D-469C-B4FA-39D37B10E315}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
