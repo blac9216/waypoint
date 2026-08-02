@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#141821" />
+    <meta name="description" content="Waypoint — DoD VCF Toolkit: STIG compliance and offline VCF artifact management console." />
+
+    <!--
+      Zero external assets (ADR-0007, CLAUDE.md air-gap constraint): every icon here is a
+      locally built, self-hosted file under public/icons/ (see scripts/gen-icons — the
+      brand mark rasterized at build-prep time), never a remote/CDN reference.
+    -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/icons/favicon-48.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+
+    <title>Waypoint</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

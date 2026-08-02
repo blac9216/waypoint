@@ -1,0 +1,27 @@
+.chrome {
+	height: 100vh;
+	display: flex;
+	flex-direction: column;
+	background: var(--bg);
+	color: var(--txt);
+	overflow: hidden;
+}
+
+.chrome__body {
+	flex: 1;
+	display: flex;
+	min-height: 0;
+}
+
+/*
+  Layout Rule #6 (README): "the scroll boundary must be a single unambiguous
+  container per screen." Chrome does not scroll — each screen owns exactly
+  one overflow:auto container internally.
+*/
+.chrome__main {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}

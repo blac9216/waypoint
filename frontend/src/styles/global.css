@@ -1,0 +1,98 @@
+@import "./tokens.css";
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+	height: 100%;
+	margin: 0;
+	padding: 0;
+}
+
+body {
+	background: var(--bg);
+	color: var(--txt);
+	font-family: var(--sans);
+	font-size: 13px;
+	-webkit-font-smoothing: antialiased;
+	overflow: hidden;
+}
+
+a {
+	color: var(--acc);
+	text-decoration: none;
+}
+
+a:hover {
+	color: var(--txt);
+	text-decoration: underline;
+}
+
+button {
+	font-family: inherit;
+	font-size: inherit;
+	cursor: pointer;
+	color: var(--txt);
+	background: var(--panel2);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-btn);
+	padding: 6px 10px;
+}
+
+button:disabled {
+	cursor: default;
+}
+
+/* Chrome components with their own precise spec (top bar, rail, drawer) set
+   every property explicitly and are unaffected by this default — it exists
+   so an unstyled <button> elsewhere (e.g. today's screen placeholders)
+   still reads as "this system" instead of falling back to UA chrome. */
+
+input,
+select,
+textarea {
+	font-family: inherit;
+	font-size: inherit;
+	color: inherit;
+}
+
+/* Keyboard-focus ring only — the console is mouse-heavy but must stay
+   operable, and DoD accessibility posture expects a visible focus state. */
+:focus-visible {
+	outline: 1.5px solid var(--acc);
+	outline-offset: 1px;
+}
+
+::-webkit-scrollbar {
+	width: 9px;
+	height: 9px;
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--line);
+	border-radius: 5px;
+}
+
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+/* The two animations used anywhere in this system (README "Interactions &
+   Behavior"): blip for pulsing status dots, and 400ms linear width
+   transitions on progress bars (applied inline where progress bars live). */
+@keyframes blip {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.3;
+	}
+}
+
+.mono {
+	font-family: var(--mono);
+}
