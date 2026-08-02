@@ -173,6 +173,52 @@ Before writing "no browser available" under `## Verification limits`, try to ins
 one. A disclosed limit is honest; an *unnecessary* disclosed limit still costs the
 reviewer the work of closing it, and quietly weakens what the PR proves.
 
+## What CI covers — and does not
+
+GitHub Actions runs four workflows (`.github/workflows/`), issue
+[#79](https://github.com/blac9216/waypoint/issues/79):
+
+| Workflow | Triggers on | What it runs |
+| --- | --- | --- |
+| `sanitize` | every PR + push, no path filter (hard gate) | `gitleaks` full-history secret scan, plus a repo-specific scanner (`.github/sanitize/scan_repo_specific.py`) for lab-style FQDNs, non-RFC-5737 IP addresses, and Broadcom/VMware depot-token shapes |
+| `backend` | `backend/**` | `dotnet build -warnaserror`, `dotnet test` with coverage |
+| `frontend` | `frontend/**` | `npm ci`, `npm run build` (runs the ADR-0007 air-gap asset guard), `npm test`, `oxlint` |
+| `deploy` | `deploy/**`, `scripts/**` | `docker compose config`, `nginx -t` against the shipped `conf.d` with a throwaway generated dev cert, `shellcheck` |
+
+Every job is path-filtered except `sanitize`, which is a hard gate on everything —
+a docs-only change still gets scanned, because a leaked hostname or token is just as
+real in a markdown file as in code. Every job sets its own `concurrency` group with
+`cancel-in-progress`, so a superseded push doesn't keep burning runner time. No
+workflow references a repository secret; PR triggers are plain `pull_request`, never
+`pull_request_target`; every third-party action is pinned by full commit SHA.
+
+**A green check is not proof of correctness.** CI is additive to the contextless
+review this repo already relies on — it is never a substitute for it, and reviewers
+have repeatedly caught real defects no CI run could have seen:
+
+- **What CI cannot see at all**: the full `docker compose` bring-up (isolation
+  discipline, the three-way collision described above, whether the stack is actually
+  *your* stack and not someone else's recreated containers), any browser-driven check
+  (mid-animation states, computed transition timing, which element keeps focus/accent
+  after a collapse — see "A real browser is available" above), and anything that
+  depends on the borrowed `dev/local/` depot material, which CI never has access to
+  and never will (per the no-repository-secrets constraint).
+- **What CI cannot judge even when it runs**: whether a passing test is passing for
+  the right reason. This repo's own review history has caught a config that was
+  correct by accident, an isolation test that reused an IP across two "independent"
+  cases, and an unnecessary verification limit a reviewer closed by actually trying
+  the thing instead of disclosing around it. A green `dotnet test` or `npm test` run
+  proves the assertions held, not that the assertions were the right ones to write.
+- **What `sanitize` cannot catch**: it is tuned against today's tree and today's
+  known-legitimate patterns (RFC 5737 ranges, `*.example.<tld>`, loopback, Docker's
+  `127.0.0.11`). It is a mechanical backstop for the sanitization policy in
+  `CLAUDE.md`, not a replacement for the diff-by-hand review that policy still
+  requires — a sufficiently well-disguised secret or a lab identifier that doesn't
+  match any of its patterns will not be flagged.
+
+Treat every green run the way this document already asks you to treat a passing
+local test: as one input a contextless reviewer weighs, never as the verdict itself.
+
 ## Per-component test suites
 
 The stack-level contract is above. Each component owns its own suite and documents it
