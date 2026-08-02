@@ -10,8 +10,9 @@ import type { Role } from "./roles";
  * (issue #3) doesn't exist yet either. This client targets the smallest
  * contract-consistent surface — `POST /api/v1/auth/login` returning a
  * bearer token + the caller's identity, snake_case per Conventions — mocked
- * locally (src/mocks/) until #3 lands. This file is the one place to update
- * if the real shape differs.
+ * locally by the dev-only Vite plugin `frontend/vite-plugins/mock-backend.ts`
+ * (`apply: "serve"`, so it never ships) until #3 lands. This file is the one
+ * place to update if the real shape differs.
  */
 interface LoginResponseWire {
 	token: string;
@@ -30,11 +31,6 @@ interface AuthContextValue {
 	error: string | null;
 	login: (username: string, password: string) => Promise<void>;
 	logout: () => void;
-	/** Dev-only affordance: swap the active role without a real re-login, so
-	 * the role-gating behavior (README "Roles & Permissions") can be
-	 * exercised before the backend issues real role claims. Hidden once a
-	 * production backend is wired (tracked alongside the login endpoint). */
-	setDevRole: (role: Role) => void;
 }
 
 const STORAGE_KEY = "waypoint.session";
@@ -129,21 +125,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 	}, []);
 
-	const setDevRole = useCallback((role: Role) => {
-		setSession((prev) => {
-			if (!prev) {
-				return prev;
-			}
-			const next = { ...prev, user: { ...prev.user, role } };
-			try {
-				window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-			} catch {
-				// best-effort
-			}
-			return next;
-		});
-	}, []);
-
 	const value = useMemo<AuthContextValue>(
 		() => ({
 			user: session?.user ?? null,
@@ -152,9 +133,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			error,
 			login,
 			logout,
-			setDevRole,
 		}),
-		[session, status, error, login, logout, setDevRole],
+		[session, status, error, login, logout],
 	);
 
 	return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

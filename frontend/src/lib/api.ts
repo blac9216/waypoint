@@ -60,11 +60,6 @@ export interface ApiRequestOptions extends Omit<RequestInit, "body"> {
 	unauthenticated?: boolean;
 }
 
-export interface ListResult<T> {
-	items: T[];
-	totalCount: number;
-}
-
 async function parseErrorBody(response: Response): Promise<ApiError> {
 	let code = "unknown_error";
 	let message = `Request failed with status ${response.status}`;
@@ -125,12 +120,12 @@ export async function apiFetch<T = unknown>(path: string, options: ApiRequestOpt
 		return undefined as T;
 	}
 
-	const totalCountHeader = response.headers.get("X-Total-Count");
-	const data = (await response.json().catch(() => undefined)) as T;
-	if (totalCountHeader !== null && data && Array.isArray((data as unknown as { items?: unknown[] }).items)) {
-		return data;
-	}
-	return data;
+	// NOTE: no `X-Total-Count` handling here on purpose. No list endpoint
+	// exists in docs/api-contract.md yet, so there is nothing to shape the
+	// pagination result against; the half-written branch that used to live
+	// here returned the same value from both arms and was removed (PR #65
+	// review, finding #4). Add it with a real endpoint, not before.
+	return (await response.json().catch(() => undefined)) as T;
 }
 
 export function apiGet<T>(path: string, options?: ApiRequestOptions): Promise<T> {
