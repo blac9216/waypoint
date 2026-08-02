@@ -142,15 +142,14 @@ design, not by configuration.
 2. **Retention**: how long do run logs/results live in Postgres before pruning/archival
    (CKL/HDF artifacts may also live on disk under `/reports` as today)?
 3. **Inventory staleness policy**: hard max age before a scan forces re-discovery?
-4. **Download-tool licensing**: confirm Broadcom's `vcf-download-tool` cannot be
-   redistributed in a public appliance image. If confirmed, the prototype's install
-   flow applies (install from local repo / fetch from depot / manual upload with
-   signature verification) and the Dockerfile inheritance from vcf-docker-download
-   changes.
-5. **Depot index without the tool**: the catalog is designed to stay browsable
+4. **Depot index without the tool**: the catalog is designed to stay browsable
    (index-only) when the download tool is absent — verify at M5 whether building the
    index itself requires the tool.
 
 Resolved:
 
 - ~~Operator remediation~~ → **Admin-only in v1** (2026-08-02).
+- ~~Download-tool licensing~~ → **confirmed: the `vcf-download-tool` is never bundled**
+  in the appliance image (2026-08-02). The prototype's install flow applies: install
+  from local repo / fetch from depot (connected) / manual upload with signature
+  verification. The appliance image carries no Broadcom binaries.

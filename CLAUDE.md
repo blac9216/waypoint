@@ -68,8 +68,10 @@ evolve. Do not contradict an accepted ADR without recording a superseding one.
 
 ```
 ├── CLAUDE.md            # This file
+├── LICENSE              # Apache-2.0 (see License & Borrowing Policy below)
 ├── docs/
 │   ├── architecture.md  # System architecture: components, job engine, modes, update flow
+│   ├── api-contract.md  # M0 output: REST resources, SSE events, state machines, schema, data ledger
 │   ├── domain-model.md  # Sites, targets, credentials, runs, roles, open questions
 │   ├── security.md      # Secrets threat model + mandatory leakage controls
 │   ├── roadmap.md       # Build sequencing (what gets built first and why)
@@ -89,6 +91,22 @@ evolve. Do not contradict an accepted ADR without recording a superseding one.
   `github-pr-review` skill. Consult `github-workflow` before writing code.
 - Planning-phase deliverables are docs: keep ADRs short and numbered; supersede rather
   than rewrite accepted ones.
+
+## License & Borrowing Policy
+
+Waypoint is licensed **Apache-2.0** (see `LICENSE`). When incorporating third-party
+code ("cribbing" from prior art):
+
+- **Allowed**: Apache-2.0, MIT, BSD-2/3, ISC — keep the original copyright/license
+  header on copied files or fragments, and note the source in a `NOTICE` file (create
+  it on first use). Check the actual `LICENSE` in the source repo at copy time; do not
+  assume from memory.
+- **Not allowed**: GPL/AGPL/LGPL, SSPL, BSL, or unlicensed code — copyleft would
+  encumber the whole appliance; no-license means no permission.
+- **Never redistribute vendor binaries.** Broadcom's `vcf-download-tool` is **not
+  bundled** in the appliance image (decided 2026-08-02) — it is installed at runtime
+  via the install flow (local repo / depot fetch / manual upload). The same applies to
+  any other vendor-licensed artifact.
 
 ## Key Constraints
 

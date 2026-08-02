@@ -5,12 +5,14 @@ individually; the project risk is trying to build auth + job engine + secrets + 
 product integrations simultaneously.** Each milestone produces something demonstrable
 and forces exactly one new subsystem into existence.
 
-## M0 — Design & contracts (current)
+## M0 — Design & contracts ✅ (closed 2026-08-02)
 
-- UI design pass (screens in [`ui/design-brief.md`](ui/design-brief.md)); hero screen =
-  live run view.
-- "Where does this data come from?" ledger from the design → API contract + DB schema.
-- Job/target state machine and SSE event schema drafted (they constrain everything).
+- ✅ UI design pass — high-fidelity prototype in [`ui/prototype/`](ui/prototype/);
+  reconciliation recorded in [`ui/design-brief.md`](ui/design-brief.md).
+- ✅ Data ledger → API contract + DB schema sketch: [`api-contract.md`](api-contract.md).
+- ✅ Job/target state machines and SSE event schema: [`api-contract.md`](api-contract.md).
+
+Next: decompose M1 into epics/issues per the `github-workflow` skill.
 
 ## M1 — Job engine wrapping ONE workflow, end to end
 
@@ -45,8 +47,8 @@ and forces exactly one new subsystem into existence.
 - Depot catalog indexing into Postgres; catalog browser UI; download jobs with
   progress/verification; content-library + Photon repo management; disk usage.
 - Download-tool install flow (local repo / depot fetch / manual upload with signature
-  verification) — pending the licensing confirmation in `domain-model.md` open
-  questions; catalog stays browsable index-only without the tool.
+  verification) — the tool is never bundled in the image (licensing, decided
+  2026-08-02); catalog stays browsable index-only without the tool.
 - Compliance-content management: the profiles repo as appliance state (pinned tag or
   tracked branch, `content-pull` when connected; air-gapped `content-import` lands
   with the M6 bundle format).

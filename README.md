@@ -23,7 +23,14 @@ compliance operations locally.
 - [Security](docs/security.md) — secrets threat model and leakage controls
 - [ADRs](docs/adr/) — the decisions and why
 - [Roadmap](docs/roadmap.md) — build sequencing
-- [UI design brief](docs/ui/design-brief.md) — screen inventory driving the design phase
+- [UI design brief](docs/ui/design-brief.md) — screen inventory and prototype reconciliation
+- [API contract](docs/api-contract.md) — REST/SSE contract, state machines, data ledger (M0 output)
+
+## License
+
+[Apache-2.0](LICENSE). Third-party code may only be incorporated under the borrowing
+policy in [CLAUDE.md](CLAUDE.md) (permissive licenses with attribution; no copyleft;
+no vendor binaries).
 
 ## Contributing note
 
