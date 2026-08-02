@@ -6,7 +6,8 @@
 #        -> postgres (internal network only, no published port)
 #
 # Bring-up: see deploy/README.md. Requires deploy/nginx/certs/dev-cert.pem
-# and dev-key.pem (deploy/nginx/certs/generate-dev-certs.sh) before `up`.
+# and dev-key.pem (deploy/nginx/certs/generate-dev-certs.sh), and a built
+# ../frontend/dist (npm run build in frontend/) before `up`.
 
 name: waypoint-dev
 
@@ -22,7 +23,14 @@ services:
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/certs:/etc/nginx/certs:ro
-      - ./www:/usr/share/nginx/html:ro
+      # Real frontend static build (issue #11 / #65), bind-mounted rather
+      # than baked into an image so the existing nginx:1.27-alpine image
+      # needs no custom build stage - same pattern already used for conf.d
+      # and certs. Build it first: cd frontend && npm run build. If
+      # ../frontend/dist does not exist yet, Docker silently creates an
+      # empty host directory here and nginx serves an empty listing/404
+      # instead of failing loudly - see deploy/README.md "Bring-up".
+      - ../frontend/dist:/usr/share/nginx/html:ro
     networks:
       - edge
     healthcheck:
@@ -44,6 +52,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      # Dev-grade local auth (ADR-0004 rollout note; backend/README.md "Run
+      # locally"). Empty by default so an unconfigured stack still fails
+      # every login closed instead of shipping a guessable credential (see
+      # Waypoint.Core.Configuration.LocalAuthOptions and
+      # InMemoryLocalAuthenticationService). Set WAYPOINT_ADMIN_PASSWORD_HASH
+      # to the SHA-256 hex digest of a password of your choosing - see
+      # deploy/README.md "Bring-up" for how to compute it. Never commit a
+      # real hash (or the plaintext password it hashes) to this repo.
+      LocalAuth__AdminPasswordHash: "${WAYPOINT_ADMIN_PASSWORD_HASH:-}"
     volumes:
       - artifacts:/var/lib/waypoint/artifacts
       # Dev-only, gitignored, operator-borrowed depot token/config + the
@@ -105,6 +123,6 @@ volumes:
   pgdata:
   # Downloaded/extracted VCF artifacts and offline-repo storage (see
   # vcf-docker-download's UMDS/VCSA/VKS/ContentLibrary layout). Unused by
-  # the backend stub; mounted now so the path convention is fixed before
-  # the real backend (#3) and download jobs (M1 later slices) land.
+  # the backend today; mounted now so the path convention is fixed before
+  # the download jobs (M1 later slices) land.
   artifacts:
