@@ -72,6 +72,23 @@ accepted ADR without recording a superseding one. All work is issue-driven via t
 | Frontend | React + TypeScript PWA, static build, **zero external assets** (air-gap) |
 | Execution | Existing PowerShell modules from the two sibling repos, unmodified where possible |
 
+## Running & Testing — read before `docker compose`
+
+**[`docs/testing.md`](docs/testing.md) is required reading before you run the stack.**
+
+Multiple agents run this stack on the same Docker host concurrently. The compose file
+pins explicit `container_name:` values, which Compose does **not** namespace by
+project — so `docker compose -p <name> up` does *not* isolate you, and a second stack
+silently recreates the first one's containers (issue #68). The failure mode is a
+plausible wrong result, not an error: someone else's healthy container answers your
+probe, or someone else's recreate fails your run.
+
+`docs/testing.md` carries the isolation recipe (unique project + override file for
+container names + unique host port), how to verify isolation *before* trusting a
+result, cleanup discipline, and the two standing verification-honesty rules: never
+claim a check you did not execute, and run every Suggested Test Step exactly as
+written before posting it.
+
 ## Repository Layout
 
 ```
