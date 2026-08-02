@@ -1,0 +1,24 @@
+<Project>
+
+  <!--
+    Repo-wide MSBuild defaults for every .NET project (today: backend/). Placed at the
+    repo root per issue #55 so a future .NET project elsewhere in the tree inherits the
+    same analyzer/format posture without needing its own copy.
+  -->
+  <PropertyGroup>
+    <!-- Roslyn analyzers (CAxxxx) are on and run at build time, not just in the IDE. -->
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <AnalysisMode>Recommended</AnalysisMode>
+
+    <!-- IDE-style diagnostics (IDExxxx, e.g. the IDE0073 file-header rule in .editorconfig)
+         also become build warnings instead of IDE-only suggestions, so `dotnet build`
+         and `dotnet format verify-no-changes` agree on what "clean" means. -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+
+    <!-- Scaffold XML doc comments exist for readability, not a published API surface;
+         don't require every public member to carry one. -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

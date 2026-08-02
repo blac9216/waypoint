@@ -1,3 +1,17 @@
+// Copyright 2026 Justin Black
+//
+// Licensed under the Apache License, Version 2.0 (the "License").
+// You may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
@@ -16,7 +30,7 @@ namespace Waypoint.Infrastructure.Auth;
 /// abstraction is what issue #29 swaps for Keycloak, not this implementation's
 /// persistence model.
 /// </summary>
-public sealed class InMemoryLocalAuthenticationService : ILocalAuthenticationService
+public sealed partial class InMemoryLocalAuthenticationService : ILocalAuthenticationService
 {
 	private readonly ConcurrentDictionary<string, LocalSession> _sessions = new(StringComparer.Ordinal);
 	private readonly IOptionsMonitor<LocalAuthOptions> _options;
@@ -36,9 +50,7 @@ public sealed class InMemoryLocalAuthenticationService : ILocalAuthenticationSer
 
 		if (string.IsNullOrEmpty(options.AdminPasswordHash))
 		{
-			_logger.LogWarning(
-				"Local auth login attempted but LocalAuth:AdminPasswordHash is not configured; " +
-				"refusing every login until an operator sets it.");
+			LogAdminPasswordHashNotConfigured();
 			return null;
 		}
 
@@ -92,4 +104,10 @@ public sealed class InMemoryLocalAuthenticationService : ILocalAuthenticationSer
 	{
 		return Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
 	}
+
+	[LoggerMessage(
+		Level = LogLevel.Warning,
+		Message = "Local auth login attempted but LocalAuth:AdminPasswordHash is not configured; " +
+			"refusing every login until an operator sets it.")]
+	private partial void LogAdminPasswordHashNotConfigured();
 }
