@@ -21,6 +21,25 @@ dotnet build Waypoint.sln
 dotnet test Waypoint.sln
 ```
 
+## Lint and format
+
+The canonical pre-PR command, mirroring the `Invoke-ScriptAnalyzer` convention in the
+sibling PowerShell repos:
+
+```bash
+cd backend
+dotnet format Waypoint.sln --verify-no-changes
+```
+
+`dotnet build` already runs the Roslyn analyzers repo-root `Directory.Build.props`
+turns on (`EnableNETAnalyzers`, `AnalysisLevel=latest`) as build warnings — nullable,
+disposal, async, locale (`CA1305`), and performance (`CA1848`) diagnostics surface
+there, not only in an IDE. Formatting, brace style, naming, and the file-header rule
+below live in the repo-root `.editorconfig`; `dotnet format` (without
+`--verify-no-changes`) applies fixes for all of it, including inserting a missing
+license header. Both a clean `dotnet build` and a clean
+`dotnet format --verify-no-changes` are required before opening a PR.
+
 ## Run locally
 
 Local auth (ADR-0004 rollout note) is a **dev-grade single admin user** — there is no
@@ -152,6 +171,11 @@ reused, not reinvented, by every future endpoint:
 - **Local auth is a seam, not the design.** `Waypoint.Core.Auth.ILocalAuthenticationService`
   is what issue #29 replaces with Keycloak OIDC validation; don't add call sites that
   depend on the in-memory implementation directly.
+- **License headers**: every `.cs` file carries the Apache-2.0 boilerplate from the
+  `LICENSE` appendix (`Copyright 2026 Justin Black`, one punctuation deviation from the
+  verbatim appendix text noted in `.editorconfig` — a tooling limitation, not a license
+  change). This is mechanically enforced, not just documented: `dotnet build` flags a
+  missing/mismatched header as `IDE0073`, and `dotnet format` inserts the correct one.
 
 `Waypoint.Api.Controllers.ScaffoldStubController` exists only to exercise the
 conventions above end-to-end (see its XML doc comment) — delete it once a real

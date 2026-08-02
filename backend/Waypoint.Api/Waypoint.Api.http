@@ -1,6 +1,39 @@
 @Waypoint.Api_HostAddress = http://localhost:5205
 
-GET {{Waypoint.Api_HostAddress}}/weatherforecast/
+### Health — unauthenticated liveness/version probe (see backend/README.md "Container
+### health"). This is what nginx and an operator's monitoring hit first.
+GET {{Waypoint.Api_HostAddress}}/api/v1/health
 Accept: application/json
 
-###
+### Login — dev-grade local auth (ADR-0004 rollout note). Fails closed until
+### LocalAuth__AdminPasswordHash is set on the running process; see backend/README.md
+### "Run locally" for how to compute the hash. Named `login` so later requests can pull
+### the session token out of its response body.
+# @name login
+POST {{Waypoint.Api_HostAddress}}/api/v1/auth/login
+Content-Type: application/json
+Accept: application/json
+
+{
+  "username": "admin",
+  "password": "<your-dev-password>"
+}
+
+### Current user — Viewer role or higher; exercises the LocalSession bearer token.
+GET {{Waypoint.Api_HostAddress}}/api/v1/auth/me
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.token}}
+
+### Scaffold: paginated list, any authenticated role — demonstrates the X-Total-Count
+### convention (docs/api-contract.md Conventions: "Pagination"). Delete this request
+### alongside ScaffoldStubController once a real paginated resource exists.
+GET {{Waypoint.Api_HostAddress}}/api/v1/_stub/items?limit=1&offset=0
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.token}}
+
+### Scaffold: Admin-only — demonstrates 403 (documented error envelope) for an
+### authenticated principal below the required role. Log in as a non-Admin session to
+### see it fail; the in-memory local-auth service only issues Admin sessions today.
+GET {{Waypoint.Api_HostAddress}}/api/v1/_stub/admin-only
+Accept: application/json
+Authorization: Bearer {{login.response.body.$.token}}
