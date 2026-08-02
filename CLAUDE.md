@@ -74,7 +74,8 @@ evolve. Do not contradict an accepted ADR without recording a superseding one.
 │   ├── security.md      # Secrets threat model + mandatory leakage controls
 │   ├── roadmap.md       # Build sequencing (what gets built first and why)
 │   ├── ui/
-│   │   └── design-brief.md  # Screen inventory, design prompt, data ledger
+│   │   ├── design-brief.md  # Screen inventory, reconciliation notes, data ledger
+│   │   └── prototype/       # High-fidelity interactive HTML prototype + design handoff
 │   └── adr/             # Architecture Decision Records (numbered, immutable once accepted)
 ├── backend/             # (skeleton) ASP.NET Core API + job engine + PS hosting
 ├── frontend/            # (skeleton) React + TypeScript PWA

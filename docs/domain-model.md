@@ -23,8 +23,9 @@ erDiagram
 ### Site
 The top-level grouping — roughly "an enclave's VMware estate." A site contains
 **targets of several kinds, with multiples allowed per kind** (e.g. two vCenters).
-Per-site STIG configuration (attestations, inputs, remediation inputs) hangs off the
-site, with per-target overrides. Maps closely to today's `site.json` schema 2.0 rows.
+STIG configuration resolves through three layers — **Global → Site → Target**, most
+specific wins (see STIG configuration documents below). Maps closely to today's
+`site.json` schema 2.0 rows.
 
 ### Target
 A scannable/manageable endpoint within a site. Kinds (from the existing catalog/router):
@@ -56,17 +57,50 @@ back. Threat model and leakage controls: [security.md](security.md).
 A **Run** is what a user initiates ("scan site A, products X/Y, these 14 hosts"). The
 job engine fans it out into **Jobs** (one per target/component), each carrying priority,
 state, logs, and results. Job types: `scan`, `remediate`, `discover`, `download`,
-`catalog-index`, `bundle-export`, `bundle-import`, `content-library-sync`, `update`.
+`catalog-index`, `bundle-export`, `bundle-import`, `content-library-sync`,
+`content-pull`, `content-import`, `update`.
 
-Per-target scan states: `queued → running → attesting → converting → uploaded | done | failed`.
+Per-target scan states: `queued → running → attesting → converting → uploaded | done |
+failed | auth-failed | blocked`.
+
+Run behaviors (from the UI prototype reconciliation, now backend requirements):
+
+- **Auth-failure queue halt**: N consecutive `auth-failed` results (default 3) against
+  the same credential halt that priority queue (`blocked`) instead of continuing —
+  hammering a failing service account locks it out of AD. An Admin can swap the
+  credential and resume, which re-queues the blocked targets.
+- **Run controls**: pause queue (stop dispatching, let in-flight finish) and abort run.
+- Backend keeps the **six** catalog-declared priorities (NSX=1 … VM=5, SRG=6); the UI
+  may group VM+SRG visually, but the priority column is six-valued.
 
 ### STIG configuration documents
 SAF attestation YAML, InSpec input YAML, remediation input files — stored as **documents
 in Postgres** (not parsed into forms; the schemas belong to Broadcom/MITRE and change
-under us). Scoped per site + per component, with per-target overrides. Edited in a
-code-editor pane with validation. **Every save creates a version with author +
-timestamp** — "who changed the attestation that waived this finding" is an auditor
-question the tool must answer.
+under us). Edited in a code-editor pane with validation. **Every save creates a version
+with author + timestamp** — "who changed the attestation that waived this finding" is
+an auditor question the tool must answer.
+
+Content model (refined by the UI design pass):
+
+- **InSpec profiles** (from the compliance-content repo) are the unit of execution. A
+  profile is either **STIG-backed** (married to an XCCDF benchmark synced from STIG
+  Manager or uploaded) or an **SRG** profile with no published STIG — SRG profiles
+  still take inputs and attestations.
+- **Inputs** are values the scan needs to evaluate controls (syslog host, NTP list).
+  **Attestations** are waivers applied after the fact. **Remediation inputs** control
+  what a remediation run may change.
+- All three resolve through three layers — **Global → Site → Target**, most specific
+  wins. A lower layer may set a genuinely *different* value; it is not a tighten-only
+  relationship.
+- **Expired attestations are not applied**: the control reports Open, the run logs a
+  WARN, and Results lists expired attestations explicitly. A lapsed waiver must never
+  be applied silently.
+
+### Compliance content (the profiles repo)
+The VMware DoD compliance-and-automation repo is managed appliance state, not a manual
+mount: pinned tag or tracked branch, recorded commit, last-pull author/time, profile
+inventory. Connected instances pull (`content-pull`); air-gapped instances import
+content bundles (`content-import`) carried by the transfer format.
 
 ### STIG Manager connection
 Global default connection, optional per-site override (different enclaves may report to
@@ -78,7 +112,7 @@ different STIG Manager instances).
 |---|---|
 | **Viewer** | Read-only: dashboards, runs, results |
 | **Cyber** | Viewer + **initiate scans** (using the target's assigned service credential) + export results + full audit history. No config, credentials, downloads, or remediation. |
-| **Operator** | Cyber + ad hoc scans with **their own** stored credentials + download/catalog/content-library management |
+| **Operator** | Cyber + ad hoc scans entering **their own** credentials at run time ([ADR-0011](adr/0011-credential-tiers.md)) + download/catalog/content-library management |
 | **Admin** | Everything: sites, targets, shared credentials, users/roles, STIG config, remediation, updates, transfer |
 
 Rationale notes:
@@ -86,9 +120,13 @@ Rationale notes:
 - Scans are read-only *in effect* (InSpec does log into systems and run commands, but
   changes nothing), which is why Cyber may initiate them with service credentials and
   why they are schedulable.
-- **Remediation is never schedulable**, always requires typed confirmation
-  (`REMEDIATE`, as today), and is never available to Viewer/Cyber.
+- **Remediation is Admin-only in v1** (decided 2026-08-02 at design reconciliation;
+  revisit only if it creates real workflow friction). It is never schedulable and
+  always requires typed confirmation (`REMEDIATE`, as today).
 - Use of **shared/service credentials for anything that writes** is an Admin capability.
+- UI treatment: actions a role cannot take are visible but disabled with a reason —
+  never silently hidden. Mode-gating (air-gapped) is the opposite: absent features are
+  removed.
 
 ## Scheduling
 
@@ -99,11 +137,20 @@ design, not by configuration.
 
 ## Open questions (to resolve before build)
 
-1. **Operator remediation**: may an Operator remediate using their *personal*
-   credential, or is remediation strictly Admin? (Current lean: Admin-only in v1;
-   revisit if it creates workflow friction.)
-2. **Cyber scan scope**: can Cyber scope a scan to arbitrary host/VM subsets, or only
+1. **Cyber scan scope**: can Cyber scope a scan to arbitrary host/VM subsets, or only
    run site/product-level scans as configured?
-3. **Retention**: how long do run logs/results live in Postgres before pruning/archival
+2. **Retention**: how long do run logs/results live in Postgres before pruning/archival
    (CKL/HDF artifacts may also live on disk under `/reports` as today)?
-4. **Inventory staleness policy**: hard max age before a scan forces re-discovery?
+3. **Inventory staleness policy**: hard max age before a scan forces re-discovery?
+4. **Download-tool licensing**: confirm Broadcom's `vcf-download-tool` cannot be
+   redistributed in a public appliance image. If confirmed, the prototype's install
+   flow applies (install from local repo / fetch from depot / manual upload with
+   signature verification) and the Dockerfile inheritance from vcf-docker-download
+   changes.
+5. **Depot index without the tool**: the catalog is designed to stay browsable
+   (index-only) when the download tool is absent — verify at M5 whether building the
+   index itself requires the tool.
+
+Resolved:
+
+- ~~Operator remediation~~ → **Admin-only in v1** (2026-08-02).

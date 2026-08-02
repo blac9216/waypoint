@@ -21,9 +21,16 @@ One **job engine** in the backend serves all job types:
   (NSX=1, VCSA=2, vCenter=3, ESXi=4, VM=5, SRG=6); other job types declare their own.
 - **Workers**: PowerShell runspace pools hosted in-process (ADR-0006) execute the
   existing modules. The predecessor's parallelism module ceases to be the orchestrator.
-- **Streaming**: job log/state events stream to the UI over SSE and persist to Postgres.
+- **Streaming**: job log/state events stream to the UI over SSE and persist to
+  Postgres. Two scopes: a per-run stream (live run view) and a **global event stream**
+  feeding the ever-present job log drawer in the UI.
+- **Run controls**: pause queue (stop dispatching, in-flight jobs finish) and abort run
+  are first-class engine operations.
 - **Failure policy**: Continue — an individual job failure never halts its run
-  (inherited from the predecessors).
+  (inherited from the predecessors). Exception: **N consecutive auth failures (default
+  3) against the same credential halt that queue** (`blocked`) rather than continuing,
+  to avoid locking the service account out of AD; an Admin can swap the credential and
+  resume, re-queueing the blocked jobs.
 - **Scheduling**: read-only job types only (scans, discovery, catalog index) may be
   scheduled, under service credentials. Remediation, bundle apply, and updates are
   never schedulable — by design, not configuration.

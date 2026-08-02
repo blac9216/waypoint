@@ -40,10 +40,16 @@ and forces exactly one new subsystem into existence.
 - Admin-gated, typed-confirmation, never-schedulable remediation via child `pwsh`
   (vendor scripts unmodified). Remediation input documents from the config store.
 
-## M5 — Download manager
+## M5 — Download manager & managed content
 
 - Depot catalog indexing into Postgres; catalog browser UI; download jobs with
   progress/verification; content-library + Photon repo management; disk usage.
+- Download-tool install flow (local repo / depot fetch / manual upload with signature
+  verification) — pending the licensing confirmation in `domain-model.md` open
+  questions; catalog stays browsable index-only without the tool.
+- Compliance-content management: the profiles repo as appliance state (pinned tag or
+  tracked branch, `content-pull` when connected; air-gapped `content-import` lands
+  with the M6 bundle format).
 
 ## M6 — Transfer & modes
 

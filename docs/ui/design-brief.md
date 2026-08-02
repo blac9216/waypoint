@@ -4,6 +4,37 @@ Status: active — this is the working input to the design phase. Update it as t
 iterates; when screens stabilize, extract the **data ledger** (every element → its
 source: Postgres table / SSE stream / catalog / computed) into the API contract.
 
+## Prototype (2026-08-02) and reconciliation
+
+A high-fidelity interactive prototype covering all nine screens lives in
+[`prototype/`](prototype/) — open `vcf-ops-console.dc.html` in a browser; its
+`README.md` is the design handoff (tokens, layout rules, per-screen specs).
+**Mockups are illustrative; `../domain-model.md` and the ADRs are normative** — on
+conflict, the domain model wins and the discrepancy gets logged.
+
+The reconciliation pass adopted the prototype's inventions into the domain model
+(three-layer Global→Site→Target config resolution, the Benchmarks content model,
+compliance-content management, auth-failure queue halt, run controls, global job log
+drawer) and recorded these decisions:
+
+- **Remediation is Admin-only in v1** (the prototype's role summary saying Operator
+  remediates is outdated; its Admin-only copy elsewhere is correct).
+- **Mode badge is read-only in production**; mode changes are a redeploy, not a toggle.
+- **Expired attestations are not applied** — control reports Open, run logs a WARN,
+  Results lists them.
+- The remediation typed-confirmation modal is deliberately undesigned until M4.
+
+Fixes required in the next design iteration:
+
+1. **Personal credentials must not appear stored** (ADR-0011): the start-a-scan
+   "personal" option becomes *enter credentials now* with inline fields; remove
+   `owner: personal` rows from the Credentials tab; fix the Operator role copy
+   ("their own stored credentials" → "credentials entered at run time").
+2. **Remediation copy**: make every mention Admin-only, matching the decision above.
+3. **Priority queues**: P5 "GUEST / SSH TARGETS" may stay as a *visual* group, but the
+   backend has six priorities (VM=5, SRG=6) and dispatch follows six, not five —
+   annotate the queue header rather than flattening the model.
+
 > Public-repo reminder: every mockup uses fictional data — `*.example.internal`
 > hostnames, RFC 5737 IPs, invented finding counts. Never paste real inventory,
 > scan output, or depot account data into designs.
