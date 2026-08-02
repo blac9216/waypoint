@@ -76,5 +76,19 @@ real shape differs once issue #3 lands.
 URL and fails the build if it finds one that isn't in its narrow, justified
 allowlist (three inert strings baked into React/workbox-window — read the
 script's header comment). `npm run build` runs it automatically as the last
-step. `scripts/check-no-external-assets.test.mjs` proves the guard actually
-fails on a deliberate violation, not just that it passes today.
+step.
+
+**File selection is a denylist, deliberately.** Every file under `dist/` is
+scanned except a short list of known-binary extensions (images, fonts,
+`.wasm`/`.zip`/`.gz`). It is not an allowlist of "text" extensions: that
+shape silently exempts every file type nobody thought of — `.mjs`, `.cjs`,
+`.xml`, and anything with no extension at all — and `public/` is copied
+verbatim into `dist/` with whatever names it contains, so an allowlist means
+a newly emitted file type ships unchecked until someone notices. A guard that
+fails open is worse than no guard (ADR-0007 makes this a hard requirement, not
+a style preference). If a binary format ever trips a false positive, add its
+extension to `SKIPPED_BINARY_EXTENSIONS` with a reason.
+
+`scripts/check-no-external-assets.test.mjs` proves the guard actually fails on
+a deliberate violation — including one inside a `.mjs` chunk and one inside an
+extensionless file, the two shapes the old allowlist let through.
