@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [
+      "Bash(curl -sSL *)",
+      "Bash(curl -sS *)",
+      "Bash(git fetch *)",
+      "Bash(git -C *)",
+      "Bash(git worktree *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git pull *)",
+      "Bash(git merge *)",
+      "Bash(git rebase *)",
+      "Bash(git stash *)",
+      "Bash(git remote *)",
+      "Bash(git restore *)",
+      "Bash(git reset *)",
+      "Bash(git revert *)",
+      "Bash(git tag *)",
+      "Bash(gh pr *)",
+      "Bash(gh issue *)",
+      "Bash(gh label *)",
+      "Bash(gh run *)",
+      "Bash(gh workflow *)",
+      "Bash(gh repo *)",
+      "Bash(gh release *)",
+      "Bash(gh api *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(rm *)",
+      "Bash(mv *)",
+      "Bash(mktemp*)",
+      "Bash(touch *)",
+      "Bash(chmod *)"
+    ]
+  }
+}
