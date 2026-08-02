@@ -129,8 +129,19 @@ Two standing rules for anything you claim in a PR body or review:
    final rendered body, before you post it. Several PRs have shipped snippets that
    fail or silently no-op for a reviewer who pastes them — `git revert ` with no SHA,
    a `grep -A3` that stops short of the line it claims to show, an `echo` whose
-   payload was eaten by GitHub's escaping. A broken step makes a healthy PR look
-   broken.
+   payload was eaten. A broken step makes a healthy PR look broken.
+
+3. **Read the stored body back after posting, and re-check every command.** This is
+   not the same as rule 2, and writing the body correctly is *not sufficient*.
+   GitHub strips angle-bracketed text from stored issue and PR bodies, so
+   `<link rel=…>` inside an `echo`, or a `<sha>` placeholder in a Rollback line,
+   silently becomes nothing — turning a correct command into one that writes an empty
+   file or reverts nothing. This has now happened on three separate PRs, twice
+   *after* the author verified the text before posting.
+
+   Prefer avoiding `<…>` in prose and commands altogether (use `printf`, a heredoc,
+   or a named placeholder like `COMMIT_SHA`), then fetch the body back and confirm
+   what a reviewer will actually paste.
 
 ## Per-component test suites
 
