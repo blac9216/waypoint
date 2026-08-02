@@ -8,13 +8,17 @@ import type { IncomingMessage, ServerResponse } from "node:http";
  * contributes nothing to `vite build` output, so it cannot trip the
  * zero-external-assets check and ships nothing to the appliance image.
  *
- * Why this exists: issue #3 (the real ASP.NET Core backend) hasn't landed,
- * and `deploy/backend-stub` (the compose stack's placeholder) only answers
- * `/api/v1/health` — every other path 501s. This mock is what "develop
- * against a local mock" (issue #11's brief) means in practice: it's the
- * thing that makes login, the STIG Manager pill, the mode badge, and the
- * job log drawer's live stream demonstrable today, in the shape the
- * documented contract (docs/api-contract.md) describes.
+ * Why this exists: the real ASP.NET Core backend (issue #3) has landed in
+ * `backend/` and the compose stack's `backend` service builds it directly —
+ * but `npm run dev` runs the Vite dev server standalone, with no proxy to
+ * that (or any) backend container. This mock is what "develop against a
+ * local mock" (issue #11's brief) means in practice: it's the thing that
+ * makes login, the STIG Manager pill, the mode badge, and the job log
+ * drawer's live stream demonstrable today, in the shape the documented
+ * contract (`docs/api-contract.md`'s Auth section) describes — `POST
+ * /auth/login` returns `{token, role, expires_at}` (no `user` object) and
+ * `GET /auth/me` returns `{username, role}`, matching the backend's
+ * `Contracts/AuthContracts.cs` field-for-field.
  *
  * DEV_USERNAME/DEV_PASSWORD are throwaway, fictional dev-loop credentials —
  * not a real secret, not lab data (CLAUDE.md sanitization policy).
@@ -22,6 +26,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 const DEV_USERNAME = "admin";
 const DEV_PASSWORD = "waypoint-dev";
 const DEV_TOKEN = "dev-mock-token";
+const DEV_ROLE = "Admin";
 
 function json(res: ServerResponse, status: number, body: unknown): void {
 	res.statusCode = status;
@@ -110,10 +115,24 @@ export function mockBackendPlugin(): Plugin {
 				if (req.method === "POST" && url === "/api/v1/auth/login") {
 					const body = await readJsonBody(req);
 					if (body.username === DEV_USERNAME && body.password === DEV_PASSWORD) {
-						json(res, 200, { token: DEV_TOKEN, user: { username: DEV_USERNAME, role: "Admin" } });
+						// Matches `LoginResponse` (AuthContracts.cs): token + role +
+						// expires_at, no `user` object. 8h lifetime mirrors
+						// `LocalAuthOptions.SessionLifetime`'s default.
+						const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
+						json(res, 200, { token: DEV_TOKEN, role: DEV_ROLE, expires_at: expiresAt });
 					} else {
 						json(res, 401, errorEnvelope("invalid_credentials", "Invalid username or password."));
 					}
+					return;
+				}
+
+				if (req.method === "GET" && url === "/api/v1/auth/me") {
+					if (!isAuthorized(req)) {
+						json(res, 401, errorEnvelope("unauthorized", "Missing or invalid bearer token."));
+						return;
+					}
+					// Matches `CurrentUserResponse` (AuthContracts.cs).
+					json(res, 200, { username: DEV_USERNAME, role: DEV_ROLE });
 					return;
 				}
 

@@ -24,13 +24,18 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 /** Routes the handful of endpoints the chrome touches on a signed-in mount:
- * login, /system, /stigman, and an /events connection that just stays open
- * (this test isn't exercising the drawer's live-stream behavior — that's
- * events.test.ts / JobLogDrawer.test.ts). */
+ * login, /auth/me, /system, /stigman, and an /events connection that just
+ * stays open (this test isn't exercising the drawer's live-stream behavior
+ * — that's events.test.ts / JobLogDrawer.test.ts). Login/me shapes match
+ * the real backend contract (issue #64 — no `user` object on the login
+ * response; identity comes from a separate /auth/me call). */
 function installChromeFetchMock(role: "Viewer" | "Admin" = "Admin") {
 	globalThis.fetch = vi.fn(async (url: string) => {
 		if (url === "/api/v1/auth/login") {
-			return jsonResponse({ token: "tok-1", user: { username: "j.moreno", role } });
+			return jsonResponse({ token: "tok-1", role, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
+		}
+		if (url === "/api/v1/auth/me") {
+			return jsonResponse({ username: "j.moreno", role });
 		}
 		if (url === "/api/v1/system") {
 			return jsonResponse({ version: "0.1.0-dev", build: "local", mode: "connected", update_available: null });
@@ -172,7 +177,14 @@ describe("App", () => {
 	it("hides the Download Catalog nav item entirely in air-gapped mode (mode-gating, not role-gating)", async () => {
 		globalThis.fetch = vi.fn(async (url: string) => {
 			if (url === "/api/v1/auth/login") {
-				return jsonResponse({ token: "tok-1", user: { username: "j.moreno", role: "Admin" } });
+				return jsonResponse({
+					token: "tok-1",
+					role: "Admin",
+					expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+				});
+			}
+			if (url === "/api/v1/auth/me") {
+				return jsonResponse({ username: "j.moreno", role: "Admin" });
 			}
 			if (url === "/api/v1/system") {
 				return jsonResponse({ version: "0.1.0-dev", build: "local", mode: "disconnected", update_available: null });

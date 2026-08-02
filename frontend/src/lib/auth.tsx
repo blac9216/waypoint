@@ -1,22 +1,30 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiError, apiFetch, setTokenGetter, setUnauthorizedHandler } from "./api";
-import type { Role } from "./roles";
+import { ROLE_ORDER, type Role } from "./roles";
 
 /**
- * ASSUMPTION — flagged, not silent (see the PR description's "Open questions"
- * / the deferred docs issue this links to): docs/api-contract.md documents
- * the *shape* of auth ("OIDC bearer token ... local-auth issuer in M1 —
- * ADR-0004") but not a concrete login endpoint, and the real backend
- * (issue #3) doesn't exist yet either. This client targets the smallest
- * contract-consistent surface — `POST /api/v1/auth/login` returning a
- * bearer token + the caller's identity, snake_case per Conventions — mocked
- * locally by the dev-only Vite plugin `frontend/vite-plugins/mock-backend.ts`
- * (`apply: "serve"`, so it never ships) until #3 lands. This file is the one
- * place to update if the real shape differs.
+ * Local-auth login/session client — the confirmed contract (issue #64,
+ * settled against the real backend, `docs/api-contract.md`'s Auth
+ * section): `POST /api/v1/auth/login` returns `{token, role, expires_at}`
+ * — there is **no `user` object** on the login response, `role` is a flat
+ * PascalCase string (`Role.ToString()` server-side; see `./roles`'s closed
+ * set), and `expires_at` is an ISO-8601 UTC instant. Identity (`username`)
+ * comes from a separate call, `GET /api/v1/auth/me`, once a token exists.
+ * This module is still the one place to update if the contract moves — the
+ * previous `{token, user}` assumption this file made ahead of the real
+ * backend landing was wrong; see the issue for the integration break it
+ * caused (`AuthContext.user` staying `null`, dropping all chrome + the
+ * persisted session on refresh).
  */
 interface LoginResponseWire {
 	token: string;
-	user: { username: string; role: Role };
+	role: Role;
+	expires_at: string;
+}
+
+interface CurrentUserResponseWire {
+	username: string;
+	role: Role;
 }
 
 export interface AuthUser {
@@ -35,27 +43,62 @@ interface AuthContextValue {
 
 const STORAGE_KEY = "waypoint.session";
 
+/** Everything needed to restore a session without another round trip: the
+ * bearer token, the identity fetched from `/auth/me` at login time, and the
+ * server-issued expiry so a stale/expired stored session is rejected on
+ * restore instead of handed back to the app as valid. */
 interface StoredSession {
 	token: string;
-	user: AuthUser;
+	username: string;
+	role: Role;
+	expiresAt: string;
+}
+
+function isRole(value: unknown): value is Role {
+	return typeof value === "string" && (ROLE_ORDER as string[]).includes(value);
 }
 
 function readStoredSession(): StoredSession | null {
 	try {
 		// sessionStorage, not localStorage: this is a dev-grade "session token"
-		// (issue #3's own wording) — it should not outlive the browser/PWA
-		// session. Real SSO sessions (Keycloak, M3) will replace this outright.
+		// (ADR-0004's rollout note) — it should not outlive the browser/PWA
+		// session. Real SSO sessions (Keycloak, #29) will replace this outright.
 		const raw = window.sessionStorage.getItem(STORAGE_KEY);
 		if (!raw) {
 			return null;
 		}
-		const parsed = JSON.parse(raw) as StoredSession;
-		if (parsed && typeof parsed.token === "string" && parsed.user) {
-			return parsed;
+		const parsed = JSON.parse(raw) as Partial<StoredSession> | null;
+		if (
+			!parsed ||
+			typeof parsed.token !== "string" ||
+			typeof parsed.username !== "string" ||
+			typeof parsed.expiresAt !== "string" ||
+			!isRole(parsed.role)
+		) {
+			return null;
 		}
-		return null;
+		if (Number.isNaN(Date.parse(parsed.expiresAt)) || Date.parse(parsed.expiresAt) <= Date.now()) {
+			return null;
+		}
+		return { token: parsed.token, username: parsed.username, role: parsed.role, expiresAt: parsed.expiresAt };
 	} catch {
 		return null;
+	}
+}
+
+function persistSession(session: StoredSession): void {
+	try {
+		window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+	} catch {
+		// best-effort
+	}
+}
+
+function clearStoredSession(): void {
+	try {
+		window.sessionStorage.removeItem(STORAGE_KEY);
+	} catch {
+		// best-effort
 	}
 }
 
@@ -73,16 +116,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		setUnauthorizedHandler(() => {
 			setSession(null);
 			setStatus("signed-out");
-			try {
-				window.sessionStorage.removeItem(STORAGE_KEY);
-			} catch {
-				// best-effort
-			}
+			clearStoredSession();
 		});
 	}, []);
 
 	useEffect(() => {
 		const restored = readStoredSession();
+		if (!restored) {
+			// A stored session that failed to parse/validate (including one that
+			// has simply expired) is not left behind for the next mount to trip
+			// over again.
+			clearStoredSession();
+		}
 		setSession(restored);
 		setStatus(restored ? "signed-in" : "signed-out");
 	}, []);
@@ -91,19 +136,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		setStatus("signing-in");
 		setError(null);
 		try {
-			const response = await apiFetch<LoginResponseWire>("/auth/login", {
+			const loginResponse = await apiFetch<LoginResponseWire>("/auth/login", {
 				method: "POST",
 				body: { username, password },
 				unauthenticated: true,
 			});
-			const next: StoredSession = { token: response.token, user: response.user };
+			// The login response carries no identity, only a token + role — fetch
+			// `/auth/me` with the just-issued token (not yet reflected by
+			// `getToken()`'s state closure, so it's attached explicitly here)
+			// to get the username the rest of the app needs.
+			const me = await apiFetch<CurrentUserResponseWire>("/auth/me", {
+				method: "GET",
+				unauthenticated: true,
+				headers: { Authorization: `Bearer ${loginResponse.token}` },
+			});
+			const next: StoredSession = {
+				token: loginResponse.token,
+				username: me.username,
+				role: loginResponse.role,
+				expiresAt: loginResponse.expires_at,
+			};
 			setSession(next);
 			setStatus("signed-in");
-			try {
-				window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-			} catch {
-				// best-effort
-			}
+			persistSession(next);
 		} catch (err) {
 			setStatus("signed-out");
 			if (err instanceof ApiError) {
@@ -118,16 +173,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	const logout = useCallback(() => {
 		setSession(null);
 		setStatus("signed-out");
-		try {
-			window.sessionStorage.removeItem(STORAGE_KEY);
-		} catch {
-			// best-effort
-		}
+		clearStoredSession();
 	}, []);
 
 	const value = useMemo<AuthContextValue>(
 		() => ({
-			user: session?.user ?? null,
+			user: session ? { username: session.username, role: session.role } : null,
 			token: session?.token ?? null,
 			status,
 			error,

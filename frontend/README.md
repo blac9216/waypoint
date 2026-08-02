@@ -51,24 +51,29 @@ top-bar screen-title binding all have somewhere real to land today. Building
 out an individual screen (Dashboard, Live Run, the Download Catalog, …) is
 future work per the roadmap.
 
-## No real backend yet
+## No real backend in dev
 
-Issue #3 (the ASP.NET Core backend) hasn't landed, and the compose stack's
-`deploy/backend-stub` only answers `/api/v1/health` (everything else 501s).
-`npm run dev` runs a dev-server-only mock (`vite-plugins/mock-backend.ts`,
-`apply: 'serve'` — it contributes nothing to `vite build`) implementing:
+Issue #3 (the ASP.NET Core backend) has landed in `backend/`, and the compose
+stack's `backend` service (`deploy/docker-compose.yml`) builds it directly —
+the old `deploy/backend-stub` nginx placeholder it used to point at is no
+longer wired up. `npm run dev` runs the Vite dev server standalone, with no
+proxy to that or any backend container, so it still uses a dev-server-only
+mock (`vite-plugins/mock-backend.ts`, `apply: 'serve'` — it contributes
+nothing to `vite build`) implementing:
 
-- `POST /api/v1/auth/login` — dev credentials `admin` / `waypoint-dev`
-  (fictional, not a real secret)
+- `POST /api/v1/auth/login`, `GET /api/v1/auth/me` — dev credentials
+  `admin` / `waypoint-dev` (fictional, not a real secret); response shapes
+  match the real backend's `Contracts/AuthContracts.cs` (see
+  `docs/api-contract.md`'s Auth section)
 - `GET /api/v1/system`, `GET /api/v1/stigman` — static mode/version/STIG
   Manager info
 - `GET /api/v1/events` — a synthetic SSE stream (job.state/job.log/
   run.progress/system.notice) for exercising the job log drawer live
 
-`src/lib/auth.tsx`'s header comment flags the one real assumption this app
-makes ahead of the contract: the exact shape of `POST /api/v1/auth/login`,
-which `docs/api-contract.md` doesn't yet specify. Update that one file if the
-real shape differs once issue #3 lands.
+`src/lib/auth.tsx` consumes the confirmed contract: `POST /api/v1/auth/login`
+returns `{token, role, expires_at}` (no `user` object), and identity comes
+from `GET /api/v1/auth/me`. See `docs/api-contract.md`'s Auth section for the
+full shape, including the closed set of PascalCase `role` values.
 
 ## The external-asset guard
 

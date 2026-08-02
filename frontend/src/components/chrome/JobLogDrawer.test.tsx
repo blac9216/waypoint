@@ -111,10 +111,18 @@ describe("JobLogDrawer", () => {
 		}) as unknown as typeof fetch;
 
 		// A signed-in session, restored by AuthProvider on mount — the drawer
-		// renders nothing until status === "signed-in".
+		// renders nothing until status === "signed-in". Shape matches what
+		// lib/auth.tsx's login() actually persists (issue #64): token + role +
+		// expires_at-derived expiresAt + username from /auth/me, not a nested
+		// `user` object.
 		window.sessionStorage.setItem(
 			"waypoint.session",
-			JSON.stringify({ token: "tok-1", user: { username: "j.moreno", role: "Admin" } }),
+			JSON.stringify({
+				token: "tok-1",
+				username: "j.moreno",
+				role: "Admin",
+				expiresAt: new Date(Date.now() + 60_000).toISOString(),
+			}),
 		);
 
 		// jsdom has no layout: scrollHeight is always 0 and scrollTop is not
