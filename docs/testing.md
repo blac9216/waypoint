@@ -143,6 +143,29 @@ Two standing rules for anything you claim in a PR body or review:
    or a named placeholder like `COMMIT_SHA`), then fetch the body back and confirm
    what a reviewer will actually paste.
 
+## A real browser is available — do not substitute it away
+
+Chromium **is** installable and runnable in these sandboxes:
+
+```bash
+npx playwright install chromium     # succeeds
+```
+
+The environment also pre-provisions one (`PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`);
+if a project pins a different Playwright version, launch with
+`executablePath: '/opt/pw-browsers/chromium'` rather than re-downloading.
+
+Two PRs have been submitted claiming browser-dependent steps could not be run,
+substituting jsdom harnesses and endpoint curls. The substitutions were honest and
+clearly disclosed — they were simply **unnecessary**, and a reviewer who tried
+harder ran all of them in real Chromium and found things the substitutes could not
+show (mid-animation width sampling, computed transition timing, which element keeps
+its accent border after a collapse).
+
+Before writing "no browser available" under `## Verification limits`, try to install
+one. A disclosed limit is honest; an *unnecessary* disclosed limit still costs the
+reviewer the work of closing it, and quietly weakens what the PR proves.
+
 ## Per-component test suites
 
 The stack-level contract is above. Each component owns its own suite and documents it
