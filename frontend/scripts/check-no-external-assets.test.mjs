@@ -4,10 +4,50 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliCompressSync, gzipSync } from "node:zlib";
+import * as zlib from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
-import { isCompressedArtifact, scanDist } from "./check-no-external-assets.mjs";
+import { detectMagicByteFormat, isBrotliByExtension, isCompressedArtifact, scanDist } from "./check-no-external-assets.mjs";
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), "check-no-external-assets.mjs");
+
+/**
+ * Realistic-sized (~40 KB) synthetic JS bundle carrying a CDN import, used
+ * by the .zst/.xz negative-control tests below. Issue #81's own
+ * investigation is explicit about why size matters here: a ONE-LINE
+ * `.zst`/`.xz` fixture is caught by accident, because these compressors
+ * store short literals raw and the URL survives verbatim in the compressed
+ * bytes — so a toy fixture "passes" even against the OLD, buggy
+ * extension-list guard, which would give a false "the guard is fine"
+ * reading. Padding this out to bundle-like size (well past where these
+ * formats switch from raw literal storage to real entropy coding) is what
+ * makes the negative control meaningful. This is asserted directly in
+ * "realistic .zst/.xz fixtures do not leak the URL in cleartext" below,
+ * before either fixture is used to test anything about the guard itself.
+ */
+function buildRealisticBundleFixture(url) {
+	const header = `import a from "${url}";\nconsole.log(a);\n`;
+	let filler = "";
+	let i = 0;
+	while (filler.length < 40 * 1024) {
+		filler += `function fn${i}(x){return x*${i}+${i % 7};}\n`;
+		i++;
+	}
+	return header + filler;
+}
+
+const REALISTIC_BUNDLE_URL = "https://cdn.evil.example/payload.js";
+const REALISTIC_BUNDLE = buildRealisticBundleFixture(REALISTIC_BUNDLE_URL);
+
+// node:zlib gained zstd support in Node 22.15 (this repo targets modern
+// Node, but CI images vary); the `.xz` fixture shells out to the system
+// `xz` binary (present in this project's dev/CI sandboxes, and effectively
+// universal on Linux) because Node has no built-in xz encoder. Both are
+// probed once at module load and every dependent test is skipped — not
+// failed — with a clear reason when the capability is absent, per
+// docs/testing.md's "never claim a check you did not execute" rule: an
+// honest skip beats a flaky failure on an environment that lacks the tool.
+const HAS_NATIVE_ZSTD = typeof zlib.zstdCompressSync === "function";
+const HAS_XZ_BINARY = spawnSync("xz", ["--version"]).status === 0;
 
 /** Runs the real CLI (not scanDist) against `dir` and returns its exit code
  * plus stdout/stderr, so tests can prove the whole guard — including the
@@ -253,30 +293,77 @@ describe("check-no-external-assets", () => {
 	});
 
 	/**
-	 * Regression tests for issue #77 finding (a). `.br`/`.gz`/`.zip` used to
+	 * Regression tests for issue #77 finding (a): `.br`/`.gz`/`.zip` used to
 	 * sit on SKIPPED_BINARY_EXTENSIONS, so a dist/ whose only JS payload was
 	 * pre-compressed (carrying an external import in its decoded text) passed
 	 * with "0 file(s) scanned" — reported success while inspecting nothing.
-	 * The guard now fails closed instead: a compressed artifact's mere
-	 * presence fails the build, whether or not it happens to carry a URL.
+	 *
+	 * And for issue #81: after #77, the guard was still an extension list —
+	 * now COMPRESSED_EXTENSIONS = {.br, .gz, .zip} — so a format nobody had
+	 * added to that list yet (`.zst`, `.xz`, `.7z`, `.lz4`, or any of those
+	 * renamed to something else entirely) fell through to the default scan
+	 * branch, decoded as UTF-8, matched nothing, and was reported as
+	 * *scanned*. The detector is now a hybrid: magic-byte sniffing for every
+	 * format that has a header, plus an extension check for Brotli alone
+	 * (which has none) — see the module header comment. The guard fails
+	 * closed either way: a compressed artifact's mere presence fails the
+	 * build, whether or not it happens to carry a URL.
 	 */
 	describe("fails closed on compressed artifacts instead of silently skipping them", () => {
-		it("isCompressedArtifact recognizes .br, .gz and .zip, case-insensitively", () => {
-			expect(isCompressedArtifact("app.js.br")).toBe(true);
-			expect(isCompressedArtifact("app.js.gz")).toBe(true);
-			expect(isCompressedArtifact("bundle.zip")).toBe(true);
-			expect(isCompressedArtifact("APP.JS.BR")).toBe(true);
-			expect(isCompressedArtifact("app.js")).toBe(false);
+		describe("detectMagicByteFormat — the durable half of the detector", () => {
+			it("recognizes every magic-byte format this guard defends against, regardless of filename", () => {
+				// gzip and brotli use real compressor output; the rest use their
+				// documented header bytes directly — the guard only ever looks at
+				// these first few bytes, so a synthetic buffer with the right
+				// header is exactly what a genuine file of that format looks like
+				// to this function.
+				expect(detectMagicByteFormat(gzipSync(Buffer.from("hello")))).toBe("gzip");
+				expect(detectMagicByteFormat(Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00]))).toBe("zstd");
+				expect(detectMagicByteFormat(Buffer.from([0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00]))).toBe("xz");
+				expect(detectMagicByteFormat(Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00]))).toBe("zip");
+				expect(detectMagicByteFormat(Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0x00]))).toBe("7z");
+				expect(detectMagicByteFormat(Buffer.from([0x04, 0x22, 0x4d, 0x18, 0x00]))).toBe("lz4");
+				expect(detectMagicByteFormat(Buffer.from([0x42, 0x5a, 0x68, 0x39]))).toBe("bzip2");
+			});
+
+			it("returns null for ordinary text and for buffers too short to carry a signature", () => {
+				expect(detectMagicByteFormat(Buffer.from("import a from \"/local.js\";"))).toBeNull();
+				expect(detectMagicByteFormat(Buffer.from([]))).toBeNull();
+				expect(detectMagicByteFormat(Buffer.from([0x1f]))).toBeNull();
+			});
+
+			it("is not fooled by filename: a gzip-magic-byte buffer is detected under any name or none", () => {
+				// This is the central #81 regression: detection must not depend on
+				// anyone having listed the right extension. Same bytes, four
+				// different names (including no extension and an unrelated one),
+				// same answer.
+				const gz = gzipSync(Buffer.from("import a from \"https://cdn.evil.example/x.js\";"));
+				for (const name of ["payload.gz", "payload.zst", "payload.dat", "payload"]) {
+					expect(isCompressedArtifact(name, gz)).toBe(true);
+				}
+			});
 		});
 
-		it("scanDist reports a .br file as compressed, not scanned or skipped", () => {
+		it("isBrotliByExtension is the one deliberate extension-based exception — Brotli has no magic number to sniff", () => {
+			expect(isBrotliByExtension("app.js.br")).toBe(true);
+			expect(isBrotliByExtension("APP.JS.BR")).toBe(true);
+			expect(isBrotliByExtension("app.js")).toBe(false);
+			// A real brotli stream has no detectable header — proves the negative
+			// this whole exception exists to cover, so magic-byte sniffing alone
+			// (without the extension check) would miss it.
+			const brotli = brotliCompressSync(Buffer.from("import a from \"https://cdn.evil.example/x.js\";"));
+			expect(detectMagicByteFormat(brotli)).toBeNull();
+			expect(isCompressedArtifact("app.js.br", brotli)).toBe(true);
+		});
+
+		it("scanDist reports a .br file as compressed by extension, not scanned or skipped", () => {
 			dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
 			const payload = `import a from "https://cdn.evil.example/payload.js"; console.log(a);\n`;
 			writeFileSync(join(dir, "app.js.br"), brotliCompressSync(Buffer.from(payload)));
 
 			const { violations, scanned, skipped, compressed } = scanDist(dir);
 
-			expect(compressed).toEqual([join(dir, "app.js.br")]);
+			expect(compressed).toEqual([{ file: join(dir, "app.js.br"), format: "brotli" }]);
 			expect(scanned).toHaveLength(0);
 			expect(skipped).toHaveLength(0);
 			// It is never scanned, so it can never be a "violation" either — its
@@ -284,21 +371,125 @@ describe("check-no-external-assets", () => {
 			expect(violations).toHaveLength(0);
 		});
 
-		it("scanDist reports a .gz file as compressed, not scanned or skipped", () => {
+		it("scanDist reports a .gz file as compressed by magic bytes, not scanned or skipped", () => {
 			dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
 			const payload = `import a from "https://cdn.evil.example/payload.js"; console.log(a);\n`;
 			writeFileSync(join(dir, "app.js.gz"), gzipSync(Buffer.from(payload)));
 
 			const { scanned, skipped, compressed } = scanDist(dir);
 
-			expect(compressed).toEqual([join(dir, "app.js.gz")]);
+			expect(compressed).toEqual([{ file: join(dir, "app.js.gz"), format: "gzip" }]);
 			expect(scanned).toHaveLength(0);
 			expect(skipped).toHaveLength(0);
 		});
 
+		it("scanDist catches a gzip payload under an extension nobody put on any list (the #81 shape)", () => {
+			dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
+			const payload = `import a from "https://cdn.evil.example/payload.js"; console.log(a);\n`;
+			// Neither ".weird-ext" nor ".dat" has ever appeared in
+			// SKIPPED_BINARY_EXTENSIONS or any compressed-extension list — that's
+			// the point. Magic-byte detection doesn't care.
+			writeFileSync(join(dir, "chunk.weird-ext"), gzipSync(Buffer.from(payload)));
+
+			const { violations, scanned, compressed } = scanDist(dir);
+
+			expect(compressed).toEqual([{ file: join(dir, "chunk.weird-ext"), format: "gzip" }]);
+			expect(scanned).toHaveLength(0);
+			expect(violations).toHaveLength(0);
+		});
+
+		/**
+		 * The issue #81 negative control, reproduced from its own repro steps:
+		 * a ~40 KB JS-bundle-shaped fixture carrying a CDN import, compressed
+		 * with zstd and xz. First a sanity check that the fixture is realistic
+		 * enough to matter (the URL does NOT survive in cleartext — unlike a
+		 * one-line fixture, which the issue notes is caught by accident), then
+		 * the actual proof that scanDist/the CLI now fail closed on it.
+		 */
+		describe.skipIf(!HAS_NATIVE_ZSTD)("realistic .zst fixture (issue #81 repro)", () => {
+			it("does not leak the URL in cleartext once compressed (fixture sanity check)", () => {
+				const compressed = zlib.zstdCompressSync(Buffer.from(REALISTIC_BUNDLE));
+				expect(compressed.toString("utf-8")).not.toContain(REALISTIC_BUNDLE_URL);
+			});
+
+			it("scanDist reports it as compressed (format zstd), never scanned", () => {
+				dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
+				writeFileSync(join(dir, "bundle.js.zst"), zlib.zstdCompressSync(Buffer.from(REALISTIC_BUNDLE)));
+
+				const { violations, scanned, compressed } = scanDist(dir);
+
+				expect(compressed).toEqual([{ file: join(dir, "bundle.js.zst"), format: "zstd" }]);
+				expect(scanned).toHaveLength(0);
+				expect(violations).toHaveLength(0);
+			});
+
+			it("CLI fails the build instead of reporting a false OK", () => {
+				dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
+				writeFileSync(join(dir, "bundle.js.zst"), zlib.zstdCompressSync(Buffer.from(REALISTIC_BUNDLE)));
+
+				const { status, stderr } = runCli(dir);
+
+				expect(status).toBe(1);
+				expect(stderr).toMatch(/1 compressed artifact\(s\) found/);
+				expect(stderr).toMatch(/bundle\.js\.zst \(zstd\)/);
+			});
+		});
+
+		describe.skipIf(!HAS_XZ_BINARY)("realistic .xz fixture (issue #81 repro)", () => {
+			function xzCompressSync(buffer) {
+				const result = spawnSync("xz", ["-9", "-c"], { input: buffer, maxBuffer: 10 * 1024 * 1024 });
+				if (result.status !== 0) {
+					throw new Error(`xz compression failed: ${result.stderr}`);
+				}
+				return result.stdout;
+			}
+
+			it("does not leak the URL in cleartext once compressed (fixture sanity check)", () => {
+				const compressed = xzCompressSync(Buffer.from(REALISTIC_BUNDLE));
+				expect(compressed.toString("utf-8")).not.toContain(REALISTIC_BUNDLE_URL);
+			});
+
+			it("scanDist reports it as compressed (format xz), never scanned", () => {
+				dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
+				writeFileSync(join(dir, "bundle.js.xz"), xzCompressSync(Buffer.from(REALISTIC_BUNDLE)));
+
+				const { violations, scanned, compressed } = scanDist(dir);
+
+				expect(compressed).toEqual([{ file: join(dir, "bundle.js.xz"), format: "xz" }]);
+				expect(scanned).toHaveLength(0);
+				expect(violations).toHaveLength(0);
+			});
+
+			it("CLI fails the build instead of reporting a false OK", () => {
+				dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
+				writeFileSync(join(dir, "bundle.js.xz"), xzCompressSync(Buffer.from(REALISTIC_BUNDLE)));
+
+				const { status, stderr } = runCli(dir);
+
+				expect(status).toBe(1);
+				expect(stderr).toMatch(/1 compressed artifact\(s\) found/);
+				expect(stderr).toMatch(/bundle\.js\.xz \(xz\)/);
+			});
+
+			it("CLI: a dist/ with both realistic .zst and .xz payloads (issue #81's exact repro shape) fails, not '2 file(s) scanned' OK", () => {
+				dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
+				writeFileSync(join(dir, "bundle.js.xz"), xzCompressSync(Buffer.from(REALISTIC_BUNDLE)));
+				if (HAS_NATIVE_ZSTD) {
+					writeFileSync(join(dir, "bundle.js.zst"), zlib.zstdCompressSync(Buffer.from(REALISTIC_BUNDLE)));
+				}
+
+				const { status, stderr } = runCli(dir);
+
+				expect(status).toBe(1);
+				expect(stderr).toMatch(/compressed artifact\(s\) found/);
+				// The exact false-OK output issue #81 reproduced against main.
+				expect(stderr).not.toMatch(/OK — no external references found/);
+			});
+		});
+
 		it("CLI: exits 0 (\"0 file(s) scanned\") on the real build with no compressed output", () => {
 			// Sanity check that a clean, uncompressed fixture is unaffected —
-			// the counterpart to the two CLI failure cases below.
+			// the counterpart to the failure cases above and below.
 			dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
 			writeFileSync(join(dir, "index.html"), `<link rel="icon" href="/icons/favicon-32.png">`);
 
@@ -318,11 +509,11 @@ describe("check-no-external-assets", () => {
 
 			expect(status).toBe(1);
 			expect(stderr).toMatch(/2 compressed artifact\(s\) found/);
-			expect(stderr).toMatch(/app\.js\.br/);
-			expect(stderr).toMatch(/app\.js\.gz/);
+			expect(stderr).toMatch(/app\.js\.br \(brotli\)/);
+			expect(stderr).toMatch(/app\.js\.gz \(gzip\)/);
 		});
 
-		it("CLI: a .zip artifact alone also fails the build", () => {
+		it("CLI: a .zip artifact (real PK magic bytes) fails the build", () => {
 			dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
 			writeFileSync(join(dir, "bundle.zip"), Buffer.from("PK\x03\x04not a real zip but has the extension"));
 
@@ -330,6 +521,23 @@ describe("check-no-external-assets", () => {
 
 			expect(status).toBe(1);
 			expect(stderr).toMatch(/1 compressed artifact\(s\) found/);
+			expect(stderr).toMatch(/bundle\.zip \(zip\)/);
+		});
+
+		it("a plain text file merely named .gz/.zip (no real magic bytes) is scanned, not failed — content decides, not the name", () => {
+			// The mirror image of the #81 fix: just as a real compressed payload
+			// under an unrecognized extension must fail, a file that only LOOKS
+			// compressed by name (no genuine header) must not be punished for a
+			// misleading extension. Detection reads bytes, not filenames.
+			dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
+			writeFileSync(join(dir, "not-really.gz"), `import a from "https://cdn.evil.example/x.js";`);
+
+			const { violations, scanned, compressed } = scanDist(dir);
+
+			expect(compressed).toHaveLength(0);
+			expect(scanned).toHaveLength(1);
+			expect(violations).toHaveLength(1);
+			expect(violations[0].url).toBe("https://cdn.evil.example/x.js");
 		});
 	});
 });

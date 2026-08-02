@@ -94,16 +94,33 @@ open is worse than no guard (ADR-0007 makes this a hard requirement, not a
 style preference). If a binary format ever trips a false positive, add its
 extension to `SKIPPED_BINARY_EXTENSIONS` with a reason.
 
-**Compressed artifacts (`.br`/`.gz`/`.zip`) fail the build outright — they
-are never treated as inert binary.** Brotli/gzip/zip encode compressed
-*text*; scanning the compressed bytes as UTF-8 finds nothing (the guard
-would report a false "OK" while inspecting gibberish), which is worse than
-not scanning at all because it looks thorough. The current build emits none
-of these, so this costs nothing today; if a precompression step is ever
-added, the guard fails loudly instead of silently passing content it cannot
-inspect, forcing whoever adds it to either teach the script to
-decompress-and-scan (`node:zlib` has both Brotli and gzip built in) or make
-an explicit, reviewed decision to widen `COMPRESSED_EXTENSIONS`.
+**Compressed artifacts fail the build outright — they are never treated as
+inert binary.** Compressed formats encode compressed *text*; scanning the
+compressed bytes as UTF-8 finds nothing (the guard would report a false "OK"
+while inspecting gibberish), which is worse than not scanning at all because
+it looks thorough. The current build emits none of these, so this costs
+nothing today; if a precompression step is ever added, the guard fails
+loudly instead of silently passing content it cannot inspect, forcing
+whoever adds it to either teach the script to decompress-and-scan
+(`node:zlib` has Brotli, gzip, and zstd built in) or accept the compressed
+output failing the build.
+
+**Detection is magic bytes, not an extension list — deliberately, and this
+is a hybrid, not a single mechanism.** This guard has failed open on the
+compressed-artifact question three times running on the extension-list
+model: an allowlist that skipped `.mjs`/extensionless files (#65), compressed
+formats treated as inert binary (#77), and then — even after #77 added a
+`.br`/`.gz`/`.zip` denylist — any compressed format nobody had added to
+*that* list yet, such as `.zst`/`.xz`/`.7z`/`.lz4` (#81). An extension list
+can only enumerate formats somebody remembered; the fix is to stop relying on
+one as the primary mechanism. `detectMagicByteFormat()` now sniffs the actual
+file header for gzip, zstd, xz, zip, 7z, lz4, and bzip2 — a compressed
+payload is caught no matter what it's named, including a name nobody has
+seen before. **Brotli has no magic number** (a raw Brotli stream is not
+self-identifying), so it is the one format that structurally cannot be
+sniffed and stays on a tiny, dedicated extension list (`BROTLI_EXTENSIONS`,
+just `.br`). Read the script's header comment before changing this — it says
+explicitly not to collapse the hybrid back into one mechanism.
 
 The vendor URL allowlist's three entries are all `$`-anchored to the exact
 literal they justify, not prefix-matched — including the `bit.ly` shortlink,
@@ -114,7 +131,12 @@ same prefix.
 `scripts/check-no-external-assets.test.mjs` proves the guard actually fails on
 a deliberate violation — including one inside a `.mjs` chunk, one inside an
 extensionless file, one inside a `.map` source map, one inside a dotfile, one
-behind an uppercase extension, one behind a compressed `.br`/`.gz`/`.zip`
-artifact, and one behind a bit.ly shortlink that only shares the allowlisted
-prefix — the shapes the old allowlist and the two issue #77 holes let
-through.
+behind an uppercase extension, one behind a compressed artifact detected by
+magic bytes under an extension nobody put on any list, one behind a `.br`
+file caught only because of the extension exception, and one behind a bit.ly
+shortlink that only shares the allowlisted prefix — the shapes the old
+allowlist and the issue #77/#81 holes let through. The `.zst`/`.xz` cases use
+a realistic (~40 KB) bundle-shaped fixture, not a one-line file: a one-line
+fixture is caught by accident because these compressors store short literals
+raw, so the URL survives verbatim in the "compressed" output and a toy test
+would pass even against the old, buggy guard.
