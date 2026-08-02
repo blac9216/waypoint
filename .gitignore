@@ -1,6 +1,14 @@
 # ── Local secrets & operator config — NEVER commit (see CLAUDE.md) ──
 .env
 .env.*
+# Templates are safe to track (no leading slash: applies at every depth,
+# e.g. .env.example, deploy/.env.example) — they document non-secret
+# defaults, never real values. None of the re-ignore patterns below
+# (*.token, *.vault, secrets*.json/yml, *.local.json/yml) end in
+# ".example", so this negation can't reopen a real secret file. It
+# cannot reach inside a fully-ignored directory (config/, dev/local/) —
+# that is a known git limitation, not a gap in this pattern.
+!*.example
 *.token
 *.vault
 vault-pass*
