@@ -113,6 +113,16 @@ docker ps --format '{{.Names}}\t{{.Ports}}'
   ```
   `-v` drops your named volumes; without it, `pgdata` survives and the next run
   inherits state you did not intend.
+- **Never pattern-kill processes.** `pkill -f vite`, `pkill -f node`, `killall dotnet`
+  and friends match every agent's dev server, not just yours. Up to half a dozen run
+  concurrently on this host. Record your own PIDs when you start something and kill
+  those by number:
+  ```bash
+  npm run dev -- --port $PORT & echo $! > /tmp/wp-$SLUG.pid
+  kill "$(cat /tmp/wp-$SLUG.pid)"
+  ```
+  A pattern kill that happens to hit nothing is luck, not method — and the agent whose
+  server you killed will report a failure that never happened.
 - **If you collided anyway**, say so plainly in your report and re-run the affected
   verification under isolation. A contaminated result handed onward is worse than no
   result, because the next person treats it as evidence.
