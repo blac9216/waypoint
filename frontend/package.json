@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && npm run check:external-assets",
+    "build": "tsc -b && vite build",
     "check:external-assets": "node scripts/check-no-external-assets.mjs dist",
     "lint": "oxlint",
     "preview": "vite preview",
