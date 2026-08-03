@@ -1790,6 +1790,113 @@ class UnbracketedPortTests(unittest.TestCase):
 				self.assertEqual(len(scanner.scan_text("f.md", text)), 1, text)
 
 
+class MultiGroupPortRetryTests(unittest.TestCase):
+	"""Issue #131 — the single retry in `_ipv6_address_of()` closes ONE
+	trailing all-digit group; a candidate carrying two still scanned clean.
+
+	The round-3 reviewer judged the original single-group escape a real
+	blocker (PR #115 round 2, finding 1 — see `UnbracketedPortTests` above)
+	but judged the multi-group case non-blocking: every shape the gate's own
+	threat model names (netstat, log lines, inventory exports, URLs) produces
+	exactly one trailing numeric group, so this is hardening, not an
+	emergency. The fix keeps that framing — it is a bound on the NUMBER of
+	trailing digit groups retried, not on any group's WIDTH, which stays
+	deliberately unbounded for the same #119 reason `UnbracketedPortTests`
+	already pins.
+	"""
+
+	def test_two_trailing_all_digit_groups_are_both_retried(self) -> None:
+		"""The issue's own repro: a bare port plus a second numeric group."""
+		text = f"vcenter at {LAB_IPV6_FULL}:443:8443"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6_FULL, findings[0])
+
+	def test_a_zero_group_ahead_of_the_port_is_also_retried(self) -> None:
+		"""The issue's second repro: an all-zero group, still just digits."""
+		text = f"vcenter at {LAB_IPV6_FULL}:0:443"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6_FULL, findings[0])
+
+	def test_two_groups_retried_on_a_second_prefix_and_port_width(self) -> None:
+		"""Not a one-fixture fluke: a different address, port, and group count."""
+		address = ipv6("fe80", "0000", "0000", "0000", "1a2b", "3c4d", "5e6f", "7a8b")
+		text = f"manager {address}:22:2222"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(address, findings[0])
+
+	def test_three_trailing_all_digit_groups_are_all_retried(self) -> None:
+		"""The bound is the group COUNT, and it is not capped at two either.
+
+		Nothing in `_ipv6_address_of()` stops the loop after a fixed number
+		of iterations — it stops when the tail is no longer all-digit, or
+		when there is no more separator. Three is not special; it is simply
+		one more than the issue's own two-group repro, checked so "the loop
+		goes as far as the shape needs" is demonstrated rather than assumed
+		from reading the code.
+		"""
+		text = f"vcenter at {LAB_IPV6_FULL}:1:2:3"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6_FULL, findings[0])
+
+	def test_compressed_address_with_two_trailing_groups_is_unaffected(self) -> None:
+		"""The compressed spelling already absorbed a single port as a legal
+		group (UnbracketedPortTests); a second group does not change that —
+		it is still short of the group count that would make the loop
+		necessary, so this is a control, not a new behaviour.
+		"""
+		text = f"host {LAB_IPV6}:443:1"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+
+	def test_the_controls_from_131_still_pass(self) -> None:
+		"""Every shape #131 explicitly did NOT change: single-group cases."""
+		for text in (
+			f"vcenter at {LAB_IPV6_FULL}:443",
+			f"vcenter at {with_port(LAB_IPV6, 8443)}",
+			f"vcenter at {bracketed_port(LAB_IPV6_FULL, 443)}",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(len(scanner.scan_text("f.md", text)), 1, text)
+
+	def test_the_loop_still_does_not_invent_an_address(self) -> None:
+		"""UnbracketedPortTests' non-address corpus, extended with runs long
+		enough to exercise more than one loop iteration — the loop must still
+		terminate at None rather than eventually stumbling onto a valid parse.
+		"""
+		for text in (
+			"elapsed 01:02:03:04:05",
+			"ports 8443:8443:8443",
+			"cron 0 2 * * * run:12:34:56",
+			"src f.py:123:456:789: warning",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+	def test_a_glued_letter_on_the_final_group_remains_undetected(self) -> None:
+		"""The disclosed residual (issue #131's Root Cause paragraph).
+
+		A trailing group carrying a non-digit character (`443a`) fails the
+		all-digit test on its very FIRST retry attempt, so the loop this
+		issue adds never starts stripping it — this is a different shape
+		from "two numeric groups", not a partially-fixed instance of it, and
+		closing it would need a materially different check (is this tail
+		alphanumeric-with-a-leading-run-of-digits, rather than is it all
+		digits). No shape in the gate's threat model (netstat, log lines,
+		inventory exports, CKL/HDF) produces a glued-letter port, so this
+		stays open by disclosure rather than by omission — pinned here so a
+		future change to the retry either closes it deliberately or has to
+		come and edit this test, matching how this file already treats every
+		other residual (`test_the_known_residual_false_positives_are_still_
+		only_these`, the single-sided dash cases, ...).
+		"""
+		text = f"vcenter at {LAB_IPV6_FULL}:443a"
+		self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+
 class MidRunMatchTests(unittest.TestCase):
 	"""PR #115 round 2, finding 3 — a match that starts inside a longer run.
 
@@ -1972,8 +2079,11 @@ class ImpossibilityClaimTests(unittest.TestCase):
 		"""`_ipv6_address_of` claims the retry cannot manufacture an address.
 
 		Whatever it returns must be a literal the strict parser accepted, on
-		either the candidate itself or the candidate minus one trailing
-		all-digit group. Nothing else is reachable.
+		the candidate itself or on the candidate with SOME number of trailing
+		all-digit groups removed (issue #131 turned the single retry into a
+		loop, so "one trailing group" is no longer the whole story — every
+		successively-shortened head is a legitimate source of the answer, not
+		just the first one).
 		"""
 		for candidate in (
 			LAB_IPV6,
@@ -1982,16 +2092,26 @@ class ImpossibilityClaimTests(unittest.TestCase):
 			"01:02:03",
 			with_port(EUI64_SHAPED, 22),
 			f"{LAB_IPV6_FULL}:443:443",
+			f"{LAB_IPV6_FULL}:0:443",
 		):
 			with self.subTest(candidate=candidate):
 				resolved = scanner._ipv6_address_of(candidate)
 				if resolved is None:
 					continue
-				head = candidate.rpartition(":")[0]
+				# Reachable heads: the candidate itself, plus every head
+				# obtained by stripping trailing ALL-DIGIT groups one at a
+				# time — a transcription independent of the implementation,
+				# so it stops at the same place the loop must (a separator
+				# with a non-digit tail, or no separator left).
+				heads = [candidate]
+				head = candidate
+				while True:
+					head, separator, tail = head.rpartition(":")
+					if not separator or not tail.isdigit():
+						break
+					heads.append(head)
 				accepted = {
-					str(ipaddress.IPv6Address(text))
-					for text in (candidate, head)
-					if _parses(text)
+					str(ipaddress.IPv6Address(text)) for text in heads if _parses(text)
 				}
 				self.assertIn(str(resolved), accepted, candidate)
 
