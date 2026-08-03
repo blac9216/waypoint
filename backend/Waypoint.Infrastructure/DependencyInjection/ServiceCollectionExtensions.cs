@@ -62,7 +62,6 @@ public static class ServiceCollectionExtensions
 		// Placeholder scrubber (issue #6 supplies the real one) — see ISecretRedactor.
 		services.AddSingleton<ISecretRedactor, NoOpSecretRedactor>();
 
-
 		string? connectionString = configuration.GetConnectionString(ConnectionStringName);
 		if (!string.IsNullOrWhiteSpace(connectionString))
 		{

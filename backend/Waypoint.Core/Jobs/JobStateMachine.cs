@@ -23,9 +23,16 @@ namespace Waypoint.Core.Jobs;
 /// state regardless of shape (the auth-failure halt and run-abort are shape-agnostic
 /// engine operations, not pipeline stages).
 ///
-/// This is a validation gate the repository consults before writing a transition -- it
-/// does not itself talk to Postgres. A transition it rejects never reaches a SQL
-/// statement.
+/// This table is the pipeline vocabulary only; it does not talk to Postgres and, as of
+/// this slice, nothing consults it before writing. An earlier revision of this comment
+/// said "a transition it rejects never reaches a SQL statement" -- true only while there
+/// were no writers at all, and #128's <see cref="Waypoint.Core.Jobs.IJobQueueRepository.ReleaseClaimAsync"/>
+/// makes it false: releasing an unexecuted claim writes <c>running</c> -&gt;
+/// <c>queued</c>, which <see cref="CanTransition"/> rejects in both shapes because
+/// requeueing is an engine operation rather than a pipeline stage. That write is
+/// correct; the sentence was not. Separating engine transitions from pipeline ones is
+/// designed on #135 and owned by #129 -- it is a recorded plan, not something that ships
+/// here. Until it does, treat this type as a reference table, not an enforced gate.
 /// </summary>
 public static class JobStateMachine
 {

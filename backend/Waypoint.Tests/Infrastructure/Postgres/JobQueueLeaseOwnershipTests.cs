@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Reflection;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Jobs;
@@ -41,6 +43,15 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// the compare-and-set predicate is load-bearing: each one is accompanied by a control
 /// showing the same call succeeds when ownership does hold, so a method that always
 /// returned <c>false</c> could not pass this file.
+///
+/// **Round 1 review found a fixture monoculture in this very file** (docs/testing.md,
+/// "Fixture monoculture" -- the fifth instance in this repo, and the most embarrassing
+/// one, since the file exists specifically so these three methods stop being untested).
+/// Every fixture above renews while <c>running</c>, so narrowing
+/// <see cref="JobQueueRepository.RenewLeaseAsync"/>'s guard from
+/// <c>state IN ('running', 'attesting', 'converting')</c> to <c>state = 'running'</c>
+/// passed all 201 tests. The properties every fixture here shared, and what was done
+/// about each, are in the "monoculture sweep" section at the bottom of this file.
 /// </summary>
 [Collection("Postgres")]
 public sealed class JobQueueLeaseOwnershipTests : IAsyncLifetime
@@ -264,7 +275,267 @@ public sealed class JobQueueLeaseOwnershipTests : IAsyncLifetime
 		Assert.Equal(JobStates.Done, await GetStateAsync(jobId));
 	}
 
+	// ---- monoculture sweep ------------------------------------------------
+	//
+	// What every fixture above has in common, asked deliberately per docs/testing.md
+	// rather than discovered by a reviewer a second time:
+	//
+	//   1. state at renew is always 'running'          -> LOAD-BEARING. Closed below by
+	//      RenewLease_IsAllowedExactlyInTheStatesAWorkerCanBeExecutingIn.
+	//   2. the lease is always still fresh             -> LOAD-BEARING. Closed below by
+	//      RenewLease_OnAnExpiredButStillOwnedLease_StillSucceeds.
+	//   3. release is always from 'running'            -> LOAD-BEARING, in the opposite
+	//      direction: the release guard is deliberately NARROWER than the renew guard,
+	//      and nothing pinned that asymmetry. Closed below.
+	//   4. attempt_count is always 0 before the claim  -> LOAD-BEARING, but it belongs to
+	//      the claim rather than the lease: see
+	//      JobQueueRepositoryClaimTests.ClaimJobAsync_ClaimsAJobThatAlreadyFailedAnAttempt.
+	//   5. one owner identity ("worker-owner") and one interloper -> judged NOT
+	//      load-bearing, and this is a judgement rather than an omission. claimed_by is
+	//      TEXT and every guard compares it with plain '=', so the only drift a second
+	//      identity shape could catch is a prefix/pattern match (LIKE) or a padded CHAR
+	//      column; neither is reachable without changing the column type or the operator,
+	//      both of which are visible one line away in the same statement the ownership
+	//      tests already drive. Adding fixtures here would raise the case count without
+	//      raising what the file can falsify.
+	//   6. every fixture claims through ClaimJobAsync -> deliberate, and kept: it is what
+	//      makes these tests exercise the real claim path rather than a hand-seeded row.
+	//      The matrix below forces the state afterwards precisely so state is the ONLY
+	//      thing that varies across its cases.
+
+	/// <summary>
+	/// The states a worker may heartbeat in, derived rather than hand-listed. A worker
+	/// holds the lease from its claim (<c>running</c>) until the job reaches a state with
+	/// nowhere left to go, so "a state a worker can be executing in" is exactly: reachable
+	/// from <c>running</c> in either shape, and still has an outgoing transition. Today
+	/// that resolves to running/attesting/converting, but a pipeline stage added to
+	/// <see cref="JobStateMachine"/> later joins this set on its own -- which is the point.
+	/// A hand-written list is a monoculture with extra steps (docs/testing.md).
+	/// </summary>
+	private static readonly HashSet<string> ExecutingStates = DeriveExecutingStates();
+
+	/// <summary>
+	/// The full <c>jobs.state</c> vocabulary, read off <see cref="JobStates"/>'s own
+	/// constants by reflection so a state added there joins this matrix without anyone
+	/// remembering to add it. <see cref="TheStateAxisIsTheWholeSchemaVocabulary"/> pins
+	/// that list against the database's <c>jobs_state_check</c>, so it cannot drift from
+	/// the schema either.
+	/// </summary>
+	public static TheoryData<string> EveryJobState()
+	{
+		TheoryData<string> data = [];
+		foreach (string state in StateVocabulary)
+		{
+			data.Add(state);
+		}
+
+		return data;
+	}
+
+	/// <summary>
+	/// The finding this file was blocked on. Renewal must succeed in every state a worker
+	/// can be mid-execution in and fail in every other, and both halves are asserted from
+	/// one axis so neither can be quietly dropped.
+	///
+	/// Ownership is held constant at the owner and the state is forced directly, so state
+	/// is the only variable -- a case that fails here fails because of the state filter and
+	/// nothing else. Narrowing that filter to <c>state = 'running'</c> fails exactly the
+	/// <c>attesting</c> and <c>converting</c> cases (2 of 12 in this Theory).
+	///
+	/// Why it matters past the count: a <c>Standard</c>-shape job spends <c>attesting</c>
+	/// and <c>converting</c> doing the slowest work in the pipeline (SAF attest,
+	/// <c>hdf2ckl</c>). A worker that cannot heartbeat there loses its lease while
+	/// perfectly healthy, and #129's recovery sweep claws the job back and re-dispatches
+	/// it -- a duplicate execution. #124 records that <c>attesting</c>/<c>converting</c>
+	/// carry no lease-tied CHECK, so there is no schema backstop underneath this test.
+	/// </summary>
+	[Theory]
+	[MemberData(nameof(EveryJobState))]
+	public async Task RenewLease_IsAllowedExactlyInTheStatesAWorkerCanBeExecutingIn(string state)
+	{
+		bool shouldRenew = ExecutingStates.Contains(state);
+
+		Guid jobId = await SeedAndClaimAsync(TimeSpan.FromSeconds(30));
+		await ForceStateAsync(jobId, state);
+		DateTime before = await GetLeaseExpiryAsync(jobId);
+
+		bool renewed = await _repository.RenewLeaseAsync(jobId, Owner, TimeSpan.FromMinutes(10), CancellationToken.None);
+
+		Assert.True(
+			renewed == shouldRenew,
+			$"RenewLeaseAsync returned {renewed} for a job owned by its claimant in state '{state}'; expected {shouldRenew}. " +
+			$"States a worker can be executing in, derived from JobStateMachine: {string.Join(", ", ExecutingStates.Order(StringComparer.Ordinal))}.");
+
+		DateTime after = await GetLeaseExpiryAsync(jobId);
+		if (shouldRenew)
+		{
+			Assert.True(after > before, $"RenewLeaseAsync reported success in state '{state}' but lease_expires_at did not move.");
+		}
+		else
+		{
+			Assert.Equal(before, after);
+		}
+	}
+
+	/// <summary>
+	/// The axis above is only as good as its coverage of the real vocabulary, so it is
+	/// pinned against the database rather than trusted. <see cref="JobStates"/> claims in
+	/// its own doc comment to match <c>jobs_state_check</c> verbatim; this reads the
+	/// constraint back out of Postgres and holds it to that. A state added to the schema
+	/// and not to <see cref="JobStates"/> (or the reverse) fails here, and the renewal
+	/// matrix therefore cannot silently stop covering a state that exists.
+	/// </summary>
+	[Fact]
+	public async Task TheStateAxisIsTheWholeSchemaVocabulary()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand command = new(
+			"SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'jobs_state_check'", connection);
+		string? definition = (string?)await command.ExecuteScalarAsync();
+		Assert.False(string.IsNullOrWhiteSpace(definition), "jobs_state_check is missing from the database.");
+
+		string[] schemaStates = Regex.Matches(definition!, "'([^']+)'::text")
+			.Select(match => match.Groups[1].Value)
+			.Order(StringComparer.Ordinal)
+			.ToArray();
+
+		Assert.Equal(schemaStates, StateVocabulary);
+
+		// And the derived subset must be a real subset of it -- a derivation that produced
+		// a state the schema has never heard of would make every negative case vacuous.
+		Assert.All(ExecutingStates, state => Assert.Contains(state, schemaStates));
+		Assert.NotEmpty(ExecutingStates);
+	}
+
+	/// <summary>
+	/// Every other fixture in this file renews a lease that has not expired yet. That is a
+	/// shared property, and it turns out to be load-bearing: the guard filters on ownership
+	/// and state, deliberately <em>not</em> on <c>lease_expires_at &gt; now()</c>, so a
+	/// worker that stalled just past its lease can still heartbeat its way back.
+	///
+	/// That is the correct behaviour and it is worth pinning, because tightening it looks
+	/// like a safety improvement. It is the opposite: #129's recovery sweep is what decides
+	/// a lease is forfeit, and until the sweep actually moves the row, the claimant is
+	/// still the claimant. If the sweep has taken it, <c>claimed_by</c>/<c>state</c> have
+	/// already changed and the ownership arm rejects the renewal -- which is the
+	/// <c>ByANonOwner</c> test above. Adding a lease-freshness arm here would make a
+	/// momentarily slow worker permanently unable to heartbeat, which is the same
+	/// duplicate-execution failure as the state finding, reached from the other side.
+	/// </summary>
+	[Fact]
+	public async Task RenewLease_OnAnExpiredButStillOwnedLease_StillSucceeds()
+	{
+		Guid jobId = await SeedAndClaimAsync(TimeSpan.FromSeconds(30));
+
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand expire = new(
+				"UPDATE jobs SET lease_expires_at = now() - interval '1 hour' WHERE id = $1", connection);
+			expire.Parameters.AddWithValue(jobId);
+			Assert.Equal(1, await expire.ExecuteNonQueryAsync());
+		}
+
+		DateTime before = await GetLeaseExpiryAsync(jobId);
+		Assert.True(before < DateTime.UtcNow, "The fixture failed to expire the lease, so this test would prove nothing.");
+
+		bool renewed = await _repository.RenewLeaseAsync(jobId, Owner, TimeSpan.FromMinutes(10), CancellationToken.None);
+
+		Assert.True(renewed, "An owner whose lease has expired but whose row no sweep has taken must still be able to heartbeat.");
+		Assert.True(await GetLeaseExpiryAsync(jobId) > DateTime.UtcNow, "The renewed lease is still in the past.");
+	}
+
+	/// <summary>
+	/// The mirror of the renewal matrix, and the reason it is worth having both: the two
+	/// guards look alike and are deliberately different widths. Renewal accepts every
+	/// executing state; release accepts <c>running</c> only, because release means "this
+	/// claim never executed, put it back untouched" -- and a job that has reached
+	/// <c>attesting</c> demonstrably did execute. Requeueing it would re-run completed work
+	/// and, via the <c>attempt_count</c> decrement, hide that it had.
+	///
+	/// Without this test, widening release's filter to match renewal's (an obvious-looking
+	/// consistency tidy-up, made likelier by the renewal matrix now sitting a few lines
+	/// above it) breaks nothing.
+	/// </summary>
+	[Theory]
+	[InlineData(JobStates.Attesting)]
+	[InlineData(JobStates.Converting)]
+	public async Task ReleaseClaim_FromAnExecutingStateOtherThanRunning_Fails(string state)
+	{
+		Assert.Contains(state, ExecutingStates);
+
+		Guid jobId = await SeedAndClaimAsync(TimeSpan.FromMinutes(5));
+		Assert.True(await _repository.RenewLeaseAsync(jobId, Owner, TimeSpan.FromMinutes(5), CancellationToken.None));
+		await ForceStateAsync(jobId, state);
+
+		bool released = await _repository.ReleaseClaimAsync(jobId, Owner, CancellationToken.None);
+
+		Assert.False(released, $"ReleaseClaimAsync requeued a job in '{state}', discarding work that had already run.");
+		Assert.Equal(state, await GetStateAsync(jobId));
+		Assert.Equal(Owner, await GetClaimedByAsync(jobId));
+		Assert.Equal(1, await GetAttemptCountAsync(jobId));
+	}
+
 	// ---- helpers ---------------------------------------------------------
+
+	/// <summary>
+	/// The <c>jobs.state</c> vocabulary, by reflection over <see cref="JobStates"/>'s
+	/// public string constants -- not a hand-written copy of them.
+	/// </summary>
+	private static readonly IReadOnlyList<string> StateVocabulary = typeof(JobStates)
+		.GetFields(BindingFlags.Public | BindingFlags.Static)
+		.Where(field => field is { IsLiteral: true, IsInitOnly: false } && field.FieldType == typeof(string))
+		.Select(field => (string)field.GetRawConstantValue()!)
+		.Order(StringComparer.Ordinal)
+		.ToArray();
+
+	private static HashSet<string> DeriveExecutingStates()
+	{
+		JobShape[] shapes = Enum.GetValues<JobShape>();
+
+		// Everything a job can reach once it has been claimed.
+		HashSet<string> reachableFromAClaim = new(StringComparer.Ordinal) { JobStates.Running };
+		Queue<string> pending = new();
+		pending.Enqueue(JobStates.Running);
+
+		while (pending.Count > 0)
+		{
+			string state = pending.Dequeue();
+			foreach (JobShape shape in shapes)
+			{
+				foreach (string next in JobStateMachine.AllowedNextStates(shape, state))
+				{
+					if (reachableFromAClaim.Add(next))
+					{
+						pending.Enqueue(next);
+					}
+				}
+			}
+		}
+
+		// ...minus the terminal ones. A state with no outgoing transition in any shape is
+		// somewhere a worker has finished, not somewhere it is working.
+		return reachableFromAClaim
+			.Where(state => shapes.Any(shape => JobStateMachine.AllowedNextStates(shape, state).Count > 0))
+			.ToHashSet(StringComparer.Ordinal);
+	}
+
+	private async Task ForceStateAsync(Guid jobId, string state)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// Deliberately bypasses AdvanceStateAsync: this must put the row in the given state
+		// whether or not any legal transition reaches it, so that the guard under test is
+		// the only thing deciding the outcome. The lease is left alone, so
+		// jobs_running_requires_lease_check (#107) stays satisfied.
+		await using NpgsqlCommand update = new("UPDATE jobs SET state = $2 WHERE id = $1", connection);
+		update.Parameters.AddWithValue(jobId);
+		update.Parameters.AddWithValue(state);
+		Assert.Equal(1, await update.ExecuteNonQueryAsync());
+	}
 
 	private async Task<Guid> SeedAndClaimAsync(TimeSpan leaseDuration)
 	{

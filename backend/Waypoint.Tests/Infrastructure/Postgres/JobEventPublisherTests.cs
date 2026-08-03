@@ -13,6 +13,8 @@
 // limitations under the License.
 
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Jobs;
@@ -149,6 +151,119 @@ public sealed class JobEventPublisherTests : IAsyncLifetime
 		Assert.Equal(1L, (long)(await command.ExecuteScalarAsync())!);
 	}
 
+
+	/// <summary>
+	/// #128's own-connection acceptance criterion, which round 1 correctly pointed out had
+	/// no test of its own shape. The two fixtures above that hold a transaction open are
+	/// both *designed to block*, so neither could show an emit COMPLETING beside an open
+	/// caller transaction -- and "did not deadlock" is a much weaker claim than "ran
+	/// independently".
+	///
+	/// The caller here holds a genuine row lock on a committed <c>jobs</c> row for the whole
+	/// emit, and then rolls back. Two things have to hold, and the second is the load-
+	/// bearing one: the emit completes rather than waiting on the caller (so it is not on
+	/// the caller's connection), and its row survives a rollback that undoes the caller's
+	/// own write (so it was not in the caller's transaction). A publisher that quietly
+	/// enlisted in an ambient transaction would pass the first and fail the second.
+	///
+	/// Emitted as <c>system.notice</c> on purpose: it is the one event type
+	/// <c>job_events_scope_check</c> requires to carry neither a job_id nor a run_id, so
+	/// nothing here takes a foreign-key lock on the row the caller is holding. That would
+	/// block for reasons that have nothing to do with connection ownership and would make
+	/// this test prove the opposite of what it says.
+	/// </summary>
+	[Fact]
+	public async Task EmitAsync_WhileTheCallerHoldsAnOpenTransaction_CompletesAndSurvivesTheCallersRollback()
+	{
+		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, NullLogger<JobEventPublisher>.Instance);
+		Guid jobId = await SeedJobAsync();
+		string marker = $"own-connection-{Guid.NewGuid():N}";
+
+		await using NpgsqlConnection caller = new(_fixture.ConnectionString);
+		await caller.OpenAsync();
+		await using NpgsqlTransaction callerTransaction = await caller.BeginTransactionAsync();
+
+		// A real, uncommitted row lock held across the emit.
+		await using (NpgsqlCommand update = new("UPDATE jobs SET note = $2 WHERE id = $1", caller, callerTransaction))
+		{
+			update.Parameters.AddWithValue(jobId);
+			update.Parameters.AddWithValue("held by the caller");
+			Assert.Equal(1, await update.ExecuteNonQueryAsync());
+		}
+
+		Task emit = publisher.EmitAsync(
+			JobEventTypes.SystemNotice, null, null, $$"""{"marker":"{{marker}}"}""", CancellationToken.None);
+
+		Task finished = await Task.WhenAny(emit, Task.Delay(TimeSpan.FromSeconds(20)));
+		Assert.True(
+			ReferenceEquals(finished, emit),
+			"EmitAsync did not complete within 20s while the caller held an open transaction -- it is not running on its own connection.");
+		await emit;
+
+		await callerTransaction.RollbackAsync();
+
+		await using NpgsqlConnection verify = new(_fixture.ConnectionString);
+		await verify.OpenAsync();
+
+		// The caller's write is gone...
+		await using (NpgsqlCommand note = new("SELECT note FROM jobs WHERE id = $1", verify))
+		{
+			note.Parameters.AddWithValue(jobId);
+			Assert.Null(await note.ExecuteScalarAsync() as string);
+		}
+
+		// ...and the event is not, which is the half that distinguishes "own connection"
+		// from "happened not to block this time".
+		await using (NpgsqlCommand count = new("SELECT count(*) FROM job_events WHERE payload ->> 'marker' = $1", verify))
+		{
+			count.Parameters.AddWithValue(marker);
+			Assert.Equal(1L, (long)(await count.ExecuteScalarAsync())!);
+		}
+	}
+
+	/// <summary>
+	/// Pins the measurement the publisher's structure rests on, so it cannot rot into
+	/// folklore (the same reason
+	/// <c>NullLoggerShortCircuitsTheGeneratedBody_WhichIsWhyThisFileExists</c> exists).
+	///
+	/// <see cref="JobEventPublisher"/> decides whether it is allowed to name lock
+	/// contention from *which operation* failed rather than from the exception, because a
+	/// connect that stalls and a command that times out are indistinguishable as exception
+	/// objects. This asserts exactly that: the same type, the same
+	/// <c>IsTransient</c> value, the same inner exception type, from a socket that never
+	/// answers and from a real command timeout against this fixture's live server. If a
+	/// future Npgsql makes them distinguishable, this fails and the comment gets re-read.
+	/// </summary>
+	[Fact]
+	public async Task AStalledConnectAndACommandTimeout_AreIndistinguishableAsExceptions()
+	{
+		using TcpListener silent = new(IPAddress.Loopback, 0);
+		silent.Start();
+		int silentPort = ((IPEndPoint)silent.LocalEndpoint).Port;
+
+		NpgsqlException connectFailure;
+		try
+		{
+			await using NpgsqlConnection stalled = new(
+				$"Host=127.0.0.1;Port={silentPort};Database=waypoint_test;Username=waypoint_test;Password=waypoint_test;Timeout=2");
+			connectFailure = await Assert.ThrowsAsync<NpgsqlException>(() => stalled.OpenAsync());
+		}
+		finally
+		{
+			silent.Stop();
+		}
+
+		await using NpgsqlConnection live = new(_fixture.ConnectionString);
+		await live.OpenAsync();
+		await using NpgsqlCommand slow = new("SELECT pg_sleep(30)", live) { CommandTimeout = 1 };
+		NpgsqlException commandTimeout = await Assert.ThrowsAsync<NpgsqlException>(() => slow.ExecuteNonQueryAsync());
+
+		Assert.Equal(commandTimeout.GetType(), connectFailure.GetType());
+		Assert.Equal(commandTimeout.IsTransient, connectFailure.IsTransient);
+		Assert.Equal(commandTimeout.InnerException?.GetType(), connectFailure.InnerException?.GetType());
+		Assert.IsType<TimeoutException>(connectFailure.InnerException);
+		Assert.True(connectFailure.IsTransient, "Npgsql no longer marks an unreachable server transient; the comment in JobEventPublisher needs re-measuring.");
+	}
 
 	/// <summary>
 	/// Cancellation is the one failure an emit must NOT swallow. Everything else is

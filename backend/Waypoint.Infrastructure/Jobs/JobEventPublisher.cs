@@ -30,6 +30,11 @@ namespace Waypoint.Infrastructure.Jobs;
 /// "emit last, in a short transaction" rule the schema's doc comments and #117 ask for.
 /// A failed emit is logged and swallowed: the event stream is best-effort observability
 /// for issue #6's SSE layer, never the record of truth for job/run state.
+///
+/// Because it is swallowed, the log line is the *only* thing an operator ever sees for a
+/// dropped event, which is why <see cref="EmitAsync"/> goes to some length to say which
+/// of the two failures happened -- never reaching the server, versus reaching it and
+/// being blocked -- rather than guessing from the exception. See the comment there.
 /// </summary>
 public sealed partial class JobEventPublisher : IJobEventPublisher
 {
@@ -52,11 +57,45 @@ public sealed partial class JobEventPublisher : IJobEventPublisher
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(eventType);
 
+		await using NpgsqlConnection connection = new(_connectionString);
+
+		// Opening the connection and running the INSERT are two separate try blocks, and
+		// which one failed is the ONLY thing that decides whether this method is allowed to
+		// mention lock contention. That is not a style preference -- the two failures are
+		// indistinguishable as exception objects. Measured against Npgsql 8.0.5:
+		//
+		//   connect to a closed port       NpgsqlException   IsTransient=true   inner SocketException
+		//   connect that stalls            NpgsqlException   IsTransient=true   inner TimeoutException
+		//   command timeout, server up     NpgsqlException   IsTransient=true   inner TimeoutException
+		//   server kills the backend       PostgresException IsTransient=true   (57P01, no inner)
+		//   bad SQL / bad payload          PostgresException IsTransient=false  (22P02, no inner)
+		//
+		// A stalled connect therefore carries the same type, the same IsTransient flag and
+		// the same inner exception type as a genuine command timeout. No predicate over the
+		// exception can separate them.
+		//
+		// The previous revision keyed the contention diagnosis on `IsTransient`, so with
+		// Postgres simply unreachable it told the operator the emit "timed out after 5s --
+		// likely lock contention on trg_job_events_assign_seq". Nothing had been contended,
+		// no statement had run, and no 5s had elapsed. A confidently wrong diagnosis is
+		// worse than a vague one: it sends someone to inspect a trigger that was never
+		// involved, and this log line is the only visibility a dropped event ever gets.
 		try
 		{
-			await using NpgsqlConnection connection = new(_connectionString);
 			await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+		{
+			throw;
+		}
+		catch (NpgsqlException exception)
+		{
+			LogEventEmitCouldNotReachPostgres(eventType, jobId, runId, exception);
+			return;
+		}
 
+		try
+		{
 			await using NpgsqlCommand command = new(
 				"""
 				INSERT INTO job_events (run_id, job_id, event_type, payload)
@@ -76,27 +115,44 @@ public sealed partial class JobEventPublisher : IJobEventPublisher
 		{
 			throw;
 		}
-		catch (NpgsqlException exception) when (IsLikelyLockContention(exception))
+		catch (NpgsqlException exception) when (IsCommandTimeout(exception))
 		{
-			// A command timeout this short, on a single-row INSERT, is the documented
-			// signature of another writer holding trg_job_events_assign_seq's global
-			// advisory lock past this event's budget -- name that instead of surfacing a
-			// bare Npgsql timeout.
-			LogEventEmitTimedOutOnLockContention(eventType, jobId, runId, _commandTimeoutSeconds, exception);
+			// The connection is open, so the server was reached and this single-row INSERT
+			// did not finish inside its budget -- both stated as facts. Contention on
+			// trg_job_events_assign_seq is what #117 measured and by far the likeliest
+			// cause, but this code has not confirmed it, so the line says "likeliest",
+			// not "is".
+			LogEventEmitTimedOut(eventType, jobId, runId, _commandTimeoutSeconds, exception);
 		}
-		catch (PostgresException exception)
+		catch (NpgsqlException exception)
 		{
+			// Every other Npgsql failure, including a PostgresException (which derives from
+			// NpgsqlException) and a connection lost mid-statement. Catching the base type
+			// rather than PostgresException matters: before the split above, a transient
+			// NpgsqlException that was not a PostgresException only stayed inside the
+			// "never throws" contract because the contention filter happened to swallow it.
 			LogEventEmitFailed(eventType, jobId, runId, exception);
 		}
 	}
 
-	private static bool IsLikelyLockContention(NpgsqlException exception) =>
-		exception.InnerException is TimeoutException || exception is { IsTransient: true };
+	/// <summary>
+	/// Npgsql surfaces an expired <see cref="NpgsqlCommand.CommandTimeout"/> as an
+	/// <see cref="NpgsqlException"/> wrapping a <see cref="TimeoutException"/>. This is only
+	/// a meaningful test once the connection is open -- a connect that stalls produces the
+	/// identical shape (see the table in <see cref="EmitAsync"/>), which is why this is
+	/// never applied to a failure of <see cref="NpgsqlConnection.OpenAsync(CancellationToken)"/>.
+	/// </summary>
+	private static bool IsCommandTimeout(NpgsqlException exception) => exception.InnerException is TimeoutException;
 
 	[LoggerMessage(
 		Level = LogLevel.Error,
-		Message = "job_events emit for {EventType} (job={JobId}, run={RunId}) timed out after {TimeoutSeconds}s -- likely lock contention on trg_job_events_assign_seq; event dropped")]
-	private partial void LogEventEmitTimedOutOnLockContention(string eventType, Guid? jobId, Guid? runId, int timeoutSeconds, Exception exception);
+		Message = "job_events emit for {EventType} (job={JobId}, run={RunId}) reached the server but its INSERT did not finish within {TimeoutSeconds}s; likeliest cause is lock contention on trg_job_events_assign_seq; event dropped")]
+	private partial void LogEventEmitTimedOut(string eventType, Guid? jobId, Guid? runId, int timeoutSeconds, Exception exception);
+
+	[LoggerMessage(
+		Level = LogLevel.Error,
+		Message = "job_events emit for {EventType} (job={JobId}, run={RunId}) could not open a connection to Postgres -- no statement ran, so nothing was contended; event dropped")]
+	private partial void LogEventEmitCouldNotReachPostgres(string eventType, Guid? jobId, Guid? runId, Exception exception);
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "job_events emit for {EventType} (job={JobId}, run={RunId}) failed; event dropped")]
 	private partial void LogEventEmitFailed(string eventType, Guid? jobId, Guid? runId, Exception exception);

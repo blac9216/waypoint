@@ -240,6 +240,51 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 		Assert.NotEqual(first, second);
 	}
 
+	/// <summary>
+	/// Every other fixture in this class -- and in <c>JobsQueueClaimTests</c> -- claims a
+	/// job that has never been attempted, so <c>attempt_count</c> is 0 at claim time in all
+	/// of them. That shared property is load-bearing (docs/testing.md, "Fixture
+	/// monoculture"): a predicate narrowing the claim to first attempts only, such as the
+	/// <c>AND attempt_count = 0</c> in #140's worked example, passes every other test in the
+	/// repository while quietly making a retry unclaimable forever. A job that failed once
+	/// with <c>max_attempts = 3</c> would sit <c>queued</c> and never be dispatched again --
+	/// invisible, because the queue looks healthy and the row looks retryable.
+	///
+	/// This closes the behavioural half of that exposure. The static half -- #140's actual
+	/// subject, that <c>JobQueueClaimSqlParityTests</c> only reads as far as the locking CTE
+	/// and so cannot see a predicate added to the UPDATE's own WHERE -- is still open and
+	/// still owned there; a guard that reads the whole statement catches drift this fixture
+	/// would only catch if it happened to change an observable outcome.
+	/// </summary>
+	[Fact]
+	public async Task ClaimJobAsync_ClaimsAJobThatAlreadyFailedAnAttempt()
+	{
+		Guid retryJobId;
+
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+
+			await using NpgsqlCommand insert = new(
+				"""
+				INSERT INTO jobs (job_type, priority, state, attempt_count, max_attempts, target_name)
+				VALUES ('download', 1, 'queued', 1, 3, $1)
+				RETURNING id
+				""", connection);
+			insert.Parameters.AddWithValue($"retry-{Guid.NewGuid():N}");
+			retryJobId = (Guid)(await insert.ExecuteScalarAsync())!;
+		}
+
+		ClaimedJob? claimed = await _repository.ClaimJobAsync("worker-retry", TimeSpan.FromMinutes(5), CancellationToken.None);
+
+		Assert.NotNull(claimed);
+		Assert.Equal(retryJobId, claimed.Id);
+
+		// The second attempt is counted as the second, not reset to the first: #129's
+		// max_attempts check reads this number to decide when to stop retrying.
+		Assert.Equal(2, claimed.AttemptCount);
+	}
+
 	private async Task SeedQueuedJobsAsync(int count)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

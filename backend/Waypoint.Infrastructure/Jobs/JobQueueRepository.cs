@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Globalization;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using Waypoint.Core.Jobs;
