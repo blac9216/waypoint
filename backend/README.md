@@ -112,10 +112,33 @@ that shape.
   exactly — the claim is an index scan over only the claimable rows, not a table
   scan. `idx_jobs_lease_recovery` (`lease_expires_at) WHERE state = 'running'`)
   serves dead-job recovery from the lease/heartbeat columns present from day one.
-- **`job_events.seq`** is a `BIGINT GENERATED ALWAYS AS IDENTITY` primary key, so
-  both SSE replay scopes in the API contract (global and per-run) are a
-  `seq > $lastEventId ORDER BY seq` index range scan, never a sort —
-  `idx_job_events_run_seq` covers the per-run scope.
+- **`job_events` scoping**: the contract's six event types are not all job-scoped, so
+  neither `job_id` nor `run_id` can be `NOT NULL` for the table as a whole. Three
+  tiers, enforced by `job_events_scope_check` — **job-scoped** (`job_id` required:
+  `job.state`, `job.log`, `download.progress`), **run-scoped** (`run_id` required,
+  `job_id` NULL: `run.progress`, `queue.state`, a "queue" being a *run's* priority
+  queue per ADR-0008 and `domain-model.md`), and **appliance-wide** (both NULL:
+  `system.notice`, which belongs to no job and no run and must still be carriable on
+  the global stream). An unclassified seventh event type fails closed.
+- **`job_events.seq` is assigned in commit order**, which is the guarantee
+  `Last-Event-ID` replay actually needs: *a reader that has observed `seq = N` on a
+  stream can never afterwards miss a committed event with `seq < N`.* A plain
+  `BIGINT GENERATED ALWAYS AS IDENTITY` does **not** provide that — identity values
+  are handed out at `INSERT` time while rows become visible at `COMMIT` time, so a
+  slow writer holding the lower `seq` can commit after a faster writer holding the
+  higher one, and a client that recorded the higher value as its `Last-Event-ID` would
+  never see the lower one again. Instead `trg_job_events_assign_seq` takes a
+  transaction-scoped advisory lock and *then* draws from `job_events_seq_seq`; because
+  the lock is held until commit, a lower `seq` is always already committed before a
+  higher one is even assigned. The lock is global rather than per-run because the API
+  contract's global stream is itself a stream. **Cost, stated plainly**: every
+  `job_events` INSERT serializes against every other, and the lock is held for the
+  remainder of the inserting transaction — write events in short transactions and as
+  late in a transaction as possible. `seq` is *not* gap-free (a rolled-back insert
+  burns its value); replay safety does not depend on gap-freeness.
+- **`job_events` replay shape**: both SSE scopes in the API contract (global and
+  per-run) are a `seq > $lastEventId ORDER BY seq` index range scan, never a sort —
+  `seq` is the primary key and `idx_job_events_run_seq` covers the per-run scope.
 - **`credential_secrets`** carries `ciphertext`, `data_key_wrapped`, and
   `master_key_id` as separate columns (ADR-0005) so master-key rotation is a re-wrap,
   not a schema change.
@@ -124,8 +147,11 @@ that shape.
   columns because checksum verification and catalog-status queries need them.
 
 Tests: `Waypoint.Tests/Infrastructure/Postgres/` runs the real migrations pipeline,
-the queue-claim query, and `job_events.seq` concurrency against a real, disposable
-PostgreSQL 16 container (docker) — see the class doc comments for what each proves.
+the queue-claim query, and the `job_events` scope and commit-order guarantees against
+a real, disposable PostgreSQL 16 container (docker) — see the class doc comments for
+what each proves. `JobEventsSeqTests` deliberately interleaves writers so that
+assignment order and commit order diverge, because a concurrency test whose writers
+all commit before the reader queries cannot fail.
 They share one container per test run via an xUnit collection fixture
 (`PostgresFixture`), isolated per `docs/testing.md`'s recipe (a container name and
 host port unique to the run).

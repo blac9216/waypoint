@@ -185,31 +185,118 @@ CREATE OR REPLACE TRIGGER trg_jobs_updated_at
 
 -- job_events ---------------------------------------------------------
 -- Append-only SSE replay source for both stream scopes in
--- docs/api-contract.md: the global stream (all jobs) and the per-run
--- stream (run_id set). seq is a GENERATED ALWAYS AS IDENTITY bigint and is
--- itself the primary key, so:
---   - global replay ("Last-Event-ID" without a run scope):
---       SELECT ... WHERE seq > $lastSeq ORDER BY seq
---     is a forward range scan on the PK's btree index — never a sort.
+-- docs/api-contract.md: the global stream (every event) and the per-run
+-- stream (run_id set).
+--
+-- Scope. The contract's six event types are NOT all job-scoped, so neither
+-- job_id nor run_id can be NOT NULL for the whole table. Three tiers,
+-- enforced by job_events_scope_check below:
+--   - job-scoped     (job_id required): job.state, job.log,
+--                    download.progress — they describe one job.
+--   - run-scoped     (run_id required, job_id NULL): run.progress,
+--                    queue.state. A "queue" is a run's priority queue
+--                    (ADR-0008 / domain-model.md "halt that priority
+--                    queue"), so a queue.state event names a run, not a job.
+--   - appliance-wide (both NULL): system.notice — it has no job and no run
+--                    at all, and must still be carriable on the global
+--                    stream.
+-- The ELSE false arm is deliberate: if a seventh event type is ever added to
+-- job_events_event_type_check without being classified here, it fails closed
+-- rather than entering the table unscoped.
+--
+-- Ordering. seq is the SSE Last-Event-ID and the primary key, so both replay
+-- scopes are a forward btree range scan, never a sort:
+--   - global replay:  SELECT ... WHERE seq > $lastSeq ORDER BY seq
 --   - per-run replay: the same shape scoped by run_id, served by
---     idx_job_events_run_seq below.
--- run_id is nullable because standalone jobs (download, catalog-index, ...)
--- have no run to scope events to; they still appear on the global stream.
+--                     idx_job_events_run_seq below.
+--
+-- The guarantee that makes that replay safe is COMMIT-ORDERED ASSIGNMENT,
+-- not the ordering of an identity column. A plain GENERATED ALWAYS AS
+-- IDENTITY assigns at INSERT time while rows become visible at COMMIT time,
+-- so a slow writer holding the lower seq can commit *after* a faster writer
+-- holding the higher one. A reader that recorded the higher value as its
+-- Last-Event-ID would then never see the lower one again — a committed,
+-- durable, permanently unreachable event. See
+-- trg_job_events_assign_seq below for how that is closed, and
+-- JobEventsSeqTests for the test that fails without it.
+--
+-- run_id is nullable for job-scoped events too: standalone jobs (download,
+-- catalog-index, ...) have no run to scope events to; they still appear on
+-- the global stream.
+
+-- seq is drawn from this sequence by trg_job_events_assign_seq rather than
+-- by an identity column, because the trigger must take the ordering lock
+-- *before* the value is drawn — column defaults (identity included) are
+-- evaluated before BEFORE-row triggers run, which would leave exactly the
+-- assignment/commit race described above. CACHE 1 is load-bearing: a cached
+-- sequence hands out per-session blocks, which would reintroduce the same
+-- inversion between sessions.
+CREATE SEQUENCE IF NOT EXISTS job_events_seq_seq AS BIGINT CACHE 1;
+
 CREATE TABLE IF NOT EXISTS job_events (
-    seq BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    seq BIGINT PRIMARY KEY,
     run_id UUID NULL,
-    job_id UUID NOT NULL REFERENCES jobs (id),
+    job_id UUID NULL REFERENCES jobs (id),
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT job_events_event_type_check CHECK (event_type IN (
         'job.state', 'job.log', 'run.progress', 'queue.state',
         'download.progress', 'system.notice'
-    ))
+    )),
+    CONSTRAINT job_events_scope_check CHECK (
+        CASE event_type
+            WHEN 'job.state' THEN job_id IS NOT NULL
+            WHEN 'job.log' THEN job_id IS NOT NULL
+            WHEN 'download.progress' THEN job_id IS NOT NULL
+            WHEN 'run.progress' THEN job_id IS NULL AND run_id IS NOT NULL
+            WHEN 'queue.state' THEN job_id IS NULL AND run_id IS NOT NULL
+            WHEN 'system.notice' THEN job_id IS NULL AND run_id IS NULL
+            ELSE false
+        END
+    )
 );
 
+ALTER SEQUENCE job_events_seq_seq OWNED BY job_events.seq;
+
+-- Commit-ordered seq assignment.
+--
+-- pg_advisory_xact_lock is held from here until the inserting transaction
+-- COMMITs or ROLLBACKs, and the sequence value is drawn while holding it.
+-- So for any two events A and B on any stream: if seq(A) < seq(B), then A's
+-- transaction had already committed before B's value was even drawn.
+-- Therefore any reader that can see B can already see A, and advancing
+-- Last-Event-ID to the highest observed seq can never strand a committed
+-- event. This is what issue #6's SSE reader is entitled to assume.
+--
+-- The lock is global rather than per-run on purpose: the API contract's
+-- global stream is itself a stream, so per-run serialization alone would
+-- still let a global reader skip an event committed out of order by a
+-- different run.
+--
+-- Cost, stated plainly: every job_events INSERT serializes against every
+-- other one, and the lock is held for the remainder of the inserting
+-- transaction. Write events in short transactions, and as late in a
+-- transaction as possible — a writer that emits an event and then does
+-- seconds of other work inside the same transaction stalls the whole event
+-- stream for that long. seq is also not gap-free (a rolled-back insert burns
+-- its value); that is acceptable because the guarantee above makes gap
+-- detection unnecessary for replay safety.
+CREATE OR REPLACE FUNCTION job_events_assign_seq()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(875190002);
+    NEW.seq = nextval('job_events_seq_seq');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trg_job_events_assign_seq
+    BEFORE INSERT ON job_events
+    FOR EACH ROW EXECUTE FUNCTION job_events_assign_seq();
+
 CREATE INDEX IF NOT EXISTS idx_job_events_run_seq ON job_events (run_id, seq) WHERE run_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_job_events_job_id ON job_events (job_id);
+CREATE INDEX IF NOT EXISTS idx_job_events_job_id ON job_events (job_id) WHERE job_id IS NOT NULL;
 
 -- depot_artifacts ------------------------------------------------------
 -- Vendor catalog shapes are not ours to normalise (ADR-0002) — everything
