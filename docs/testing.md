@@ -198,6 +198,40 @@ kill "$VITE_PID"
 The liveness check inside the loop is the load-bearing part: without it, "the server
 is up" and "a server is up" are indistinguishable.
 
+## Fixture monoculture: the defect this repo keeps shipping
+
+Every serious defect that reached review in this repo got there the same way — **a
+test suite that passed because every fixture shared an incidental property**, not
+because the code was right. Four instances so far, in four unrelated subsystems:
+
+| Suite | The property every fixture shared | What it hid |
+| --- | --- | --- |
+| sanitize delimiters | lowercase, address mid-sentence | a lab FQDN + IP walked the hard gate at end of sentence |
+| sanitize IPv6 | the one fixture was a *compressed* address | matrix read 14/14 on "colon / port" while an expanded address plus port scanned clean |
+| job engine auth halt | the queued job was always seeded oldest | the halt could be silently suppressed by a newer run |
+| frontend mode guard | one route, role overwritten by a later fetch | the Viewer scenario proved nothing at all |
+
+The counts looked healthy every time. `14/14`, `4 passed`, green CI. **A passing
+suite is evidence about the fixtures, not about the code** — and the fixtures are
+the part nobody re-reads.
+
+Two habits catch it:
+
+1. **Break the code and watch the test fail.** For every guard you add, revert it in
+   isolation and record the failure count. A guard whose reversion breaks nothing is
+   not tested, however many assertions surround it. Record the counts in the PR body
+   so a reviewer re-measures rather than re-reads.
+2. **Ask what every fixture has in common, then add one that doesn't.** If your
+   inputs are all lowercase, add uppercase. All compressed, add expanded. All ordered
+   one way, reverse them. If a shared property turns out to be load-bearing, you have
+   found a real bound and should say so; if it isn't, you have just found the next
+   defect before a reviewer did.
+
+Where a suite enumerates cases against a fixed axis (delimiters, formats, roles,
+states), **derive the axis from the thing under test** rather than hand-listing it —
+a hand-written list is a monoculture with extra steps, and it silently stops covering
+the code the moment the code grows a case the list never heard of.
+
 ## Honest verification
 
 Two standing rules for anything you claim in a PR body or review:
