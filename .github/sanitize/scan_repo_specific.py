@@ -688,6 +688,32 @@ def is_allowed_ipv6(candidate: str) -> bool:
 	return any(addr in net for net in ALLOWED_IPV6_NETWORKS)
 
 
+def _strict_ipv6_literal(candidate: str) -> ipaddress.IPv6Address | None:
+	"""Strict parse after stripping a zone id, but WITHOUT the port retry.
+
+	Used only by _widest_address_start() (issue #133). `_ipv6_address_of()`'s
+	contract is deliberately loose — "does this span DENOTE an address,
+	possibly with a port swallowed" — which is exactly right for judging the
+	final candidate scan_text reports. It is the wrong question for
+	re-anchoring: there the candidate spans are competing to BE the address,
+	and a span that only parses by discarding one of its own trailing groups
+	through the port retry is not really the address, it just contains one
+	glued to something else. Calling `_ipv6_address_of()` here let widest-wins
+	pick a span one hostname character too wide whenever the character right
+	before the real address happened to complete a digit group the retry
+	could then drop — `node99:<address>` re-anchored onto `de99:<address>`,
+	naming a token that never appears on the line, because `de99:<the address
+	minus its own last group>` parsed once the retry stripped that last group
+	as if it were a port.
+
+	A zone id is still stripped here, same as `_ipv6_address_of()` — that
+	strip is unconditionally safe (it only ever removes a suffix `ipaddress`
+	was never going to accept anyway) and has nothing to do with the port
+	retry this function exists to keep out of re-anchoring.
+	"""
+	return _parse_ipv6(candidate.split("%", 1)[0])
+
+
 def _widest_address_start(line: str, run_start: int, match_start: int, end: int) -> int:
 	"""Where the address ending at `end` really begins, re-anchored leftward.
 
@@ -701,7 +727,8 @@ def _widest_address_start(line: str, run_start: int, match_start: int, end: int)
 
 	So a mid-run match is re-anchored: of every span that ends at `end` and
 	starts at or before `match_start` but no earlier than the run does, the
-	WIDEST one that still parses as an address wins. The fragment the engine
+	WIDEST one that STRICTLY parses as an address (`_strict_ipv6_literal()`,
+	not `_ipv6_address_of()` — issue #133) wins. The fragment the engine
 	found is only used if no wider span parses.
 
 	Widest-wins is what makes the two cases come out differently:
@@ -717,9 +744,17 @@ def _widest_address_start(line: str, run_start: int, match_start: int, end: int)
 	leave a finding alone, never invent one. That ordering is load-bearing —
 	without it, `word::hexword` scope-resolution syntax would re-anchor into
 	a parseable address (see MidRunMatchTests).
+
+	This is precision, not correctness: judging candidates strictly changes
+	only WHICH SPAN wins widest, never whether the line is flagged.
+	`_is_ipv6_finding()` — which does use the port-retry-enabled
+	`_ipv6_address_of()` — is still what scan_text calls on the final
+	candidate this function returns, so an address that genuinely needs the
+	port retry to be recognised still is; it just cannot win widest by
+	borrowing part of a real address to do it.
 	"""
 	for start in range(run_start, match_start):
-		if _ipv6_address_of(_trim_delimiter_colons(line[start:end])) is not None:
+		if _strict_ipv6_literal(_trim_delimiter_colons(line[start:end])) is not None:
 			return start
 	return match_start
 
