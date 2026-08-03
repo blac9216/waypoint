@@ -110,14 +110,51 @@ export function useRouter(): RouterContextValue {
 	return ctx;
 }
 
-/** True if `role` may access `route` at all right now (role + mode). Does
- * not consider role-gating of individual in-screen actions — that's each
- * screen's own concern (README: actions stay visible-but-disabled). */
-export function canAccessRoute(route: RouteDef, role: Role, mode: "connected" | "disconnected" | null): boolean {
-	if (route.connectedOnly && mode !== "connected") {
-		return false;
+/** Tri-state deployment mode. `"unknown"` means "not yet known" — genuinely
+ * distinct from `"disconnected"` ("known, and the answer is no"). Conflating
+ * the two was issue #82: a `connectedOnly` route was denied (and the URL
+ * rewritten) before `GET /api/v1/system` had a chance to resolve, because
+ * the old code used `mode: "connected" | "disconnected" | null` and treated
+ * `null` exactly like `"disconnected"`. Defined here (not `./system`, which
+ * imports this type) because route access is the concern that consumes it;
+ * `SystemProvider` computes the value. */
+export type ModeState = "connected" | "disconnected" | "unknown";
+
+/**
+ * Outcome of evaluating whether `role`/`mode` may access `route` right now.
+ * - `"allowed"` — render the route.
+ * - `"denied"` — role is insufficient, or mode is *known* and says no;
+ *   substitute `DEFAULT_ROUTE` and correct the URL.
+ * - `"pending"` — the route is `connectedOnly` and mode is not yet known.
+ *   The caller must not decide in either direction: rendering the requested
+ *   screen risks mounting a connected-only screen on a disconnected
+ *   appliance for a frame (the #78 never-mount property this guard exists
+ *   to protect), while redirecting away risks bouncing a deep link mode
+ *   will turn out to allow (issue #82, the bug this type exists to fix).
+ *   Resolves to `"allowed"` or `"denied"` as soon as mode settles.
+ */
+export type RouteAccess = "allowed" | "denied" | "pending";
+
+/** Evaluates route access as a tri-state (see `RouteAccess`) rather than a
+ * boolean, so a mode-gated route can be held pending instead of forced to a
+ * premature yes/no. Role is checked first and settles immediately — it
+ * needs no async state, so a role failure is always `"denied"`, never
+ * `"pending"`, even before mode is known. Does not consider role-gating of
+ * individual in-screen actions — that's each screen's own concern (README:
+ * actions stay visible-but-disabled). */
+export function evaluateRouteAccess(route: RouteDef, role: Role, mode: ModeState): RouteAccess {
+	if (!roleAtLeast(role, route.requiredRole)) {
+		return "denied";
 	}
-	return roleAtLeast(role, route.requiredRole);
+	if (route.connectedOnly) {
+		if (mode === "unknown") {
+			return "pending";
+		}
+		if (mode !== "connected") {
+			return "denied";
+		}
+	}
+	return "allowed";
 }
 
 export function Link({
