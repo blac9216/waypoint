@@ -115,7 +115,27 @@ written before posting it.
 - All work is issue-driven via the `github-workflow` skill; PRs are reviewed with the
   `github-pr-review` skill. Consult `github-workflow` before writing code.
 - Planning-phase deliverables are docs: keep ADRs short and numbered; supersede rather
-  than rewrite accepted ones.
+  than rewrite accepted ones (see `docs/adr/README.md` for what may be amended).
+
+### Labels are a closed set — never invent one
+
+`scripts/provision-labels.sh` is the **only** source of valid labels, and it has
+already been run. Applying a label outside it does **not** fail: GitHub silently
+creates it, colourless and undescribed, and the taxonomy quietly rots. This has
+already happened (`concern:correctness`, `concern:accessibility` — see issue #95).
+
+| Group | Labels |
+|---|---|
+| Type | `bug` · `enhancement` · `documentation` · `chore` · `epic` |
+| State | `backlog` · `blocked` · `deferred` · `help` |
+| Priority | `priority:high` · `priority:medium` · `priority:low` |
+| Severity | `severity:critical` · `severity:major` · `severity:minor` |
+| Concern | `concern:security` · `concern:tests` · `concern:perf` · `concern:refactor` · `concern:lint` · `concern:style` |
+
+At most one `concern:*` per item. If none fits, pick the closest and explain in the
+body — do **not** coin a new one. If a genuinely new dimension is needed, propose it
+in an issue and add it to the script first: the script is the change, the label is
+the consequence.
 
 ## License & Borrowing Policy
 
