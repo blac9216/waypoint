@@ -157,9 +157,22 @@ Everything above applies to `npm run dev` too, and the failure is sneakier becau
 there is no container to `docker ps`. Two specific traps, both hit during real work
 in this repo:
 
-**`$!` after `npm run dev` is npm's PID, not vite's.** Kill it and you orphan the
-`vite` child, which keeps holding the port; your cleanup reports success and the
-server survives to confuse the next agent.
+**`$!` gives you the wrapper's PID, not the server's.** This has now caught four
+separate agents, on `npm run dev` (npm's PID, not vite's) and on `nohup dotnet …`
+(nohup's, not the app's). Kill the wrapper and you orphan the child that actually
+holds the port; your cleanup reports success and the server survives to confuse the
+next agent. Assume `$!` is wrong for anything launched through a wrapper, and
+**verify the port is actually free after you kill** rather than trusting the exit
+code:
+
+```bash
+kill "$PID"; sleep 1
+curl -sf "http://localhost:$PORT" >/dev/null && echo "STILL UP - wrong PID"
+```
+
+If something is still listening, find the real owner and confirm it is yours before
+killing it — `/proc/<pid>/environ` or `/proc/<pid>/cwd` will tell you. Someone else's
+server on a port you assumed was free is the same hazard from the other direction.
 
 **With `--strictPort`, a busy port makes vite exit — and a naive readiness loop then
 passes anyway.** `until curl -sf localhost:$PORT` is satisfied by *whoever already
