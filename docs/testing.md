@@ -407,11 +407,47 @@ have repeatedly caught real defects no CI run could have seen:
   alternative, rejecting a hash, a pipe and a plus, left the whole suite green
   while three real findings disappeared — one of them an address in a markdown
   table cell, which this repo's docs produce constantly. Recursing closed it;
-  the same mutation now fails four tests. The remaining limit is narrower and
-  is disclosed here rather than found later: what is derived is which
-  characters a guard NAMES, never what the guard does with them, and a guard
-  that names no literal at all (a category, a range, a back-reference) still
-  contributes nothing.
+  the same mutation now fails four tests.
+
+  **The same defect had a second half, and finding one of them did not find
+  the other.** The derivation is two functions: one decides WHERE assertions
+  are (that is the recursion above), the other reads which characters a given
+  assertion body NAMES. Round 1 fixed the first and gave it a structural
+  guard rail; the second kept a hand-written list of body shapes and no rail
+  at all, so a guard whose body was a repeat over a character class, or a
+  branch whose alternatives are more than one node long, named punctuation
+  that nothing derived (PR #138 round 2, finding 1). Measured, and it is the
+  same measurement one level over: either spelling, spliced into the IPv6
+  pattern's bare alternative over the same hash, pipe and plus, left the
+  suite at 141/141 while the same three findings went from one to none. Both
+  functions share ONE descent rule now, and the rail is symmetric: no node
+  kind present in the real detectors may be missing from the shared list, and
+  every kind on that list must be shown — by running a probe pattern, not by
+  reading the code — to carry a guard's characters out to the derived set. A
+  third spelling of the same defect was closed at the same time: a character
+  class RANGE (`[!-/]` names a dot and a dash without either appearing as a
+  literal) is now enumerated over printable ASCII, excluding alphanumerics so
+  the real `[A-Za-z0-9]` guards still contribute nothing. All three closures
+  are no-ops against today's detectors — asserted, not assumed.
+
+  **What remains, disclosed here rather than found later**, and pinned by
+  `test_the_disclosed_extraction_limit_is_what_the_doc_says` so this
+  paragraph cannot drift from the code again:
+
+  - What is derived is which characters a guard NAMES, never what the guard
+    DOES with them — suppress or flag stays the hand-measured verdict table.
+  - A guard that names characters only through an open-ended category
+    (not-a-word, not-a-digit, not-whitespace) contributes none of them:
+    enumerating those would demand a declared row for most of ASCII. This one
+    cannot escape quietly, which is measured rather than argued — splicing a
+    trailing "not a non-word character" guard into the bare alternative fails
+    12 tests outright, because rejecting every non-word neighbour changes the
+    measured verdict of characters the declared table already carries.
+  - A guard that names its characters through a BACK-REFERENCE contributes
+    nothing, and this is the one residual that is neither derived nor loud:
+    the characters are not in the pattern at all, they are whatever the
+    referenced group captured at match time, which no parse-tree read can
+    know.
 
   **The first cut of that detector shipped with a boundary bug, and it is
   worth stating plainly rather than summarising away**: its trailing guard
@@ -589,7 +625,7 @@ have repeatedly caught real defects no CI run could have seen:
   stopped detecting. Running the scanner against a clean tree proves the absence of
   findings, never the presence of detection — the same asymmetry that let the
   frontend air-gap guard fail open three times. That is why `sanitize` runs
-  `test_scan_repo_specific.py` (141 tests covering all four detectors, their
+  `test_scan_repo_specific.py` (145 tests covering all four detectors, their
   case handling, the IPv4/FQDN dash- and underscore-adjacency narrowing from
   issue #111, the padding-width independence from #119, the bound on the IPv6
   swallowed-port retry from #131, both allowlist paths,
