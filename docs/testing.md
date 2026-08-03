@@ -394,6 +394,25 @@ have repeatedly caught real defects no CI run could have seen:
   set, deliberately, so the two are never blended into one list that reads as
   derived when only the axis (not the verdict) is.
 
+  **How much of a pattern the derivation can see, stated because the first
+  cut of it could not see all of one.** It walks EVERY lookaround node in a
+  compiled pattern's parse tree, at any nesting depth — the assertions at the
+  top level and any placed inside a group, an alternation or a repeat. The
+  first version walked the top level only, which was a true statement about
+  the three detectors as written and a false mechanism: a guard nested one
+  group deeper was invisible, and for a punctuation character that no
+  top-level guard mentions *and* the hand-written delimiter lists do not
+  contain, nothing in the suite covered it at all. Measured (PR #138 round 1,
+  finding 2): a trailing guard nested inside the IPv6 pattern's bare
+  alternative, rejecting a hash, a pipe and a plus, left the whole suite green
+  while three real findings disappeared — one of them an address in a markdown
+  table cell, which this repo's docs produce constantly. Recursing closed it;
+  the same mutation now fails four tests. The remaining limit is narrower and
+  is disclosed here rather than found later: what is derived is which
+  characters a guard NAMES, never what the guard does with them, and a guard
+  that names no literal at all (a category, a range, a back-reference) still
+  contributes nothing.
+
   **The first cut of that detector shipped with a boundary bug, and it is
   worth stating plainly rather than summarising away**: its trailing guard
   put a literal `.` inside the lookahead — the exact construction the IPv4
@@ -429,17 +448,38 @@ have repeatedly caught real defects no CI run could have seen:
     the same shape with a zero-padded group ahead of the port,
     `...:0007:0:443`) still failed strict parsing and scanned clean. The
     retry is a loop now, not a single attempt: it strips one trailing
-    all-digit group at a time until the parse succeeds or the tail is no
-    longer all-digit, so the bound is the NUMBER of groups retried, never any
-    one group's width — a second, arbitrary width bound is exactly what #119
-    cost, and this fix does not reintroduce one. **Disclosed, not closed:** a
-    trailing group carrying a non-digit character glued on (`...:0007:443a`)
-    fails the all-digit test on its very first retry attempt, so the loop
-    never starts stripping it — a materially different shape (not a port at
-    all, digit or otherwise), and no artifact this gate's threat model names
-    (netstat, log lines, inventory exports, CKL/HDF) produces it. Pinned by
-    `MultiGroupPortRetryTests.test_a_glued_letter_on_the_final_group_remains_
-    undetected` rather than left to be rediscovered.
+    all-digit group at a time until the parse succeeds, the tail is no longer
+    all-digit, or **two** groups have been stripped. What is bounded is the
+    NUMBER of groups retried, never any one group's width — a 30-digit
+    trailing group still resolves, because an arbitrary width bound is
+    exactly what #119 cost and this fix does not reintroduce one.
+    **Why the loop is bounded at all, and why at two.** Two is the deepest
+    shape any real producer has been shown to emit: all four escaping lines
+    issue #131 measured close at two, and nobody — the issue, the PR, or the
+    round-1 reviewer — has exhibited a three-group shape from the closed list
+    of producers this gate's threat model names (netstat, log lines,
+    inventory exports, CKL/HDF, URLs). Every additional group of slack buys
+    nothing against that list and costs one more group of width on the
+    disclosed #118 false-positive class below, which is otherwise unbounded
+    in record length: an uncapped loop flags ANY colon-separated run whose
+    first eight groups parse and whose remaining groups are all digits.
+    Measured against a corpus of the artifact classes this project handles,
+    an uncapped loop adds four further false-positive classes over the bound
+    — 12- and 16-field numeric records, an EUI-64 string with four trailing
+    numeric fields, and a certificate fingerprint with an all-digit tail.
+    That direction of failure matters as much as the other one here: this
+    gate runs with zero exemptions as a load-bearing property (below), so a
+    false positive has no sanctioned waiver — it stops the gate until content
+    is edited, and a gate that cries wolf gets switched off.
+    **Two residuals, disclosed not closed** — they are the loop's two
+    stopping conditions. A trailing group carrying a non-digit character
+    glued on (`...:0007:443a`) fails the all-digit test on its very first
+    retry attempt, so the loop never starts stripping it — a materially
+    different shape (not a port at all, digit or otherwise). And three or
+    more trailing all-digit groups (`...:0007:1:2:3`) exhaust the bound.
+    Pinned by `MultiGroupPortRetryTests.test_a_glued_letter_on_the_final_
+    group_remains_undetected` and `.test_three_trailing_all_digit_groups_
+    are_a_disclosed_residual` rather than left to be rediscovered.
   - A match that begins *inside* a longer hex/colon run is re-anchored onto
     the widest span that still parses, so a word glued to the front of an
     address no longer reports a fragment of it. **Issue #133 narrowed WHICH
@@ -485,8 +525,17 @@ have repeatedly caught real defects no CI run could have seen:
     `test_the_known_residual_false_positives_are_still_only_these`. A run of
     colon-separated hex groups that happens to be valid IPv6 syntax
     ([#118](https://github.com/blac9216/waypoint/issues/118)); the port retry
-    widens that class by exactly one group, since nine groups ending in digits
-    now resolve to the eight in front of them. And an unbracketed
+    widens that class by the number of groups it is allowed to strip, so a run
+    of **nine or ten** groups whose trailing groups are all digits now
+    resolves to the eight in front of them, and an eleven-group run is where
+    the class stops. That "or ten" is the whole reason the retry loop carries
+    a bound: uncapped, the class would be unbounded in record length — any
+    colon-separated numeric record long enough to have eight parseable groups
+    in front of an all-digit tail — which is a class no test can enumerate
+    and no sentence here can state truthfully.
+    `test_the_known_residual_false_positives_are_still_only_these` pins both
+    ends, the nine- and ten-group runs that fire and the eleven-group run that
+    does not. And an unbracketed
     `<sanctioned address>:<port>` pair, which as written is also a valid,
     different, non-sanctioned address — the gate reports rather than guesses,
     and the bracketed URL form is unambiguous and stays silent.
@@ -526,9 +575,10 @@ have repeatedly caught real defects no CI run could have seen:
   stopped detecting. Running the scanner against a clean tree proves the absence of
   findings, never the presence of detection — the same asymmetry that let the
   frontend air-gap guard fail open three times. That is why `sanitize` runs
-  `test_scan_repo_specific.py` (120 tests covering all four detectors, their
+  `test_scan_repo_specific.py` (140 tests covering all four detectors, their
   case handling, the IPv4/FQDN dash- and underscore-adjacency narrowing from
-  issue #111, the padding-width independence from #119, both allowlist paths,
+  issue #111, the padding-width independence from #119, the bound on the IPv6
+  swallowed-port retry from #131, both allowlist paths,
   the exit codes, a standing false-positive corpus, and every claim of
   impossibility left in the scanner's own comments) before it trusts the scan.
   Delimiter handling is the one part not left to per-detector test-writing:
