@@ -38,43 +38,86 @@
  * on the same "never silently pass content it cannot inspect" principle as
  * the denylist above.
  *
- * WHY MAGIC BYTES, NOT AN EXTENSION LIST — this guard has now failed open
- * THREE times on the extension-list model: an allowlist that skipped
- * `.mjs`/extensionless files (issue #65 round 2), compressed artifacts
- * treated as inert binary (issue #77), and then — after #77 added a
- * `COMPRESSED_EXTENSIONS` denylist of `.br`/`.gz`/`.zip` — compressed
- * formats nobody had added to *that* list yet (`.zst`, `.xz`, `.7z`,
- * `.lz4`, …) falling through to the default scan branch, decoding as UTF-8,
- * matching nothing, and being reported as *scanned* (issue #81). A name-based
- * list is a denylist of formats somebody remembered; it can never enumerate
- * a format nobody thought of, and its failure mode is a silent pass that
- * *looks* like coverage, not a noisy one.
+ * THE DESIGN RULE — FAIL CLOSED BY UNION. A file is compressed/opaque if its
+ * magic bytes match a known signature **OR** its extension is on
+ * `COMPRESSED_EXTENSIONS`. Both signals are checked; either one is enough.
+ * Magic-byte detection may only ever *add* coverage — it must never be able
+ * to *remove* a file from the fail-closed bucket that the extension list
+ * would have caught. This is not belt-and-braces caution, it is the lesson
+ * of four failures, and the fourth is the one that motivates the wording:
  *
- * THE FIX IS A DELIBERATE HYBRID — DO NOT "SIMPLIFY" THIS BACK INTO A SINGLE
- * MECHANISM. Every format below except Brotli self-identifies with a fixed
- * header (magic number) in its first few bytes: gzip, zstd, xz, zip, 7z,
- * lz4, bzip2. `detectMagicByteFormat()` sniffs the actual file content, so a
- * `.zst` (or `.foo`, or extensionless) file carrying a gzip/zstd/xz/zip/7z/
- * lz4/bzip2 header is caught regardless of what anyone named it or whether
- * anyone has heard of that extension yet — no list to maintain, no format to
- * forget. **Brotli has no magic number.** A raw `.br` stream is not
- * self-identifying; there is no fixed byte sequence to sniff for, full stop
- * — this was confirmed during the #80 PR review and is not an oversight to
- * "fix" later. Brotli therefore MUST stay extension-based
- * (`BROTLI_EXTENSIONS` below), and that list is intentionally tiny (one
- * entry) because it exists purely to plug the one gap magic-byte detection
- * cannot reach. Collapsing this back to a single extension list reopens
- * #65/#77/#81 all at once; collapsing it to pure magic-byte sniffing
- * silently stops catching `.br`. Keep both.
+ *   1. issue #65 round 2 — an extension *allowlist* skipped `.mjs` and
+ *      extensionless files.
+ *   2. issue #77 — compressed artifacts sat on the known-binary skip list
+ *      and were silently ignored.
+ *   3. issue #81 — after #77 replaced that with a `.br`/`.gz`/`.zip`
+ *      denylist, formats nobody had added to *that* list yet (`.zst`,
+ *      `.xz`, `.7z`, `.lz4`, …) fell through to the default scan branch,
+ *      decoded as UTF-8, matched nothing, and were reported as *scanned*.
+ *   4. PR #88 round 1 — the fix for #81 *replaced* the extension list with
+ *      magic-byte sniffing instead of *adding* to it. `.gz` and `.zip` came
+ *      off the fail-closed list, so three real shapes that the #77-era guard
+ *      failed the build on started printing `OK … file(s) scanned` again.
+ *
+ * The first three were fixed by editing a list. The fourth happened because
+ * a list was swapped for a mechanism. Hence the union, and hence this
+ * comment: DO NOT "SIMPLIFY" THIS BACK INTO A SINGLE MECHANISM in either
+ * direction.
+ *
+ * WHY BOTH HALVES ARE LOAD-BEARING:
+ *
+ * - Magic bytes catch what no list can enumerate. `detectMagicByteFormat()`
+ *   reads the actual file content, so a gzip/zstd/xz/zip/7z/lz4/bzip2
+ *   payload is caught under `.zst`, `.foo`, or no extension at all — no
+ *   list to maintain, no format to forget. This is the half that closed #81.
+ *
+ * - The extension list catches what has no header to sniff, and what magic
+ *   matching structurally cannot see. **Brotli is NOT the only compressed
+ *   format without a magic number** — an earlier version of this comment
+ *   claimed it was, and that claim was false:
+ *     • **Raw DEFLATE** (RFC 1951) has no header whatsoever. The stream
+ *       opens with bit-packed block data; there is nothing to match.
+ *     • **zlib** (RFC 1950) opens with two bytes (CMF/FLG) that are a
+ *       *checksum constraint*, not a fixed magic: any pair where
+ *       `(CMF << 8 | FLG) % 31 === 0` is valid, and the pair varies with
+ *       compression level and window size. The common `0x78 0x9c` is also
+ *       just ASCII `x` followed by a byte — matching it would false-positive
+ *       on ordinary text.
+ *     • **Brotli**, as before, is not self-identifying either.
+ *   All three are first-class algorithms of `vite-plugin-compression2`,
+ *   whose published type is
+ *   `type CoreAlgorithm = 'gzip' | 'brotliCompress' | 'deflate' | 'deflateRaw' | 'zstandard'`
+ *   and whose default output filename is `[path][base].gz` for everything
+ *   that is not brotli or zstandard. So `compression({ algorithms:
+ *   ['deflate'] })` emits `index-abc.js.gz` containing a **zlib** stream —
+ *   a `.gz` file with no gzip magic. Only the extension list catches that.
+ *   Magic matching is also anchored at offset 0 and matches exact byte
+ *   sequences, so a stream with any leading byte, or a real zip whose first
+ *   record is the empty-archive end-of-central-directory (`PK\x05\x06`)
+ *   rather than a local file header (`PK\x03\x04`), slips past sniffing but
+ *   not past the name.
+ *
+ * The list is therefore NOT "the formats somebody remembered" doing the main
+ * job — that model is what failed in #77/#81 and it is not what this is. It
+ * is a backstop for headerless and offset formats, sitting behind a
+ * content-based detector that needs no list at all.
  *
  * The current Vite config emits no compressed output (no compression
  * plugin), so this costs nothing today; it exists so that enabling
  * `vite-plugin-compression`/`vite-plugin-compression2` or an nginx
  * `brotli_static`/`gzip_static`/`zstd_static` precompression step later is a
  * conscious decision — someone has to come here and either wire up
- * decompress-and-scan (Node's `zlib` has Brotli, gzip, and zstd built in) or
- * explicitly accept the compressed output failing the build, not discover
- * months later that the guard had a blind spot.
+ * decompress-and-scan (Node's `zlib` has Brotli, gzip, deflate/inflate and
+ * zstd built in) or explicitly accept the compressed output failing the
+ * build, not discover months later that the guard had a blind spot.
+ *
+ * The cost of the union is a file that is *named* like a compressed artifact
+ * but is not one: it fails the build on its extension alone. That is the
+ * safe direction to be wrong in, and it costs nothing real — a plaintext
+ * file's URLs would have been caught by the scan branch anyway, so nothing
+ * that the guard could have inspected is lost by refusing to inspect it. The
+ * fix, as everywhere else in this file, is to rename the file or add an
+ * entry here with a reason.
  *
  * ALLOWLIST: three narrow, exact exceptions for inert strings baked into
  * audited third-party dependencies (React, workbox-window) that this
@@ -120,15 +163,37 @@ const SKIPPED_BINARY_EXTENSIONS = new Set([
 ]);
 
 /**
- * The ONE extension-based exception in the compressed-artifact model, and it
- * exists only because Brotli has no magic number to sniff (see the module
- * header comment — "WHY MAGIC BYTES, NOT AN EXTENSION LIST"). Every other
- * compressed format is caught by `detectMagicByteFormat()` below regardless
- * of extension. Do not add more entries here for formats that DO have a
- * magic number (gzip, zstd, xz, zip, 7z, lz4, bzip2, …) — that would just
- * rebuild the extension list that has already failed three times.
+ * Half of the fail-closed union (see the module header comment, "THE DESIGN
+ * RULE"): a file with one of these extensions is treated as compressed
+ * *whatever its bytes say*. This is the backstop for the formats magic-byte
+ * sniffing structurally cannot see — Brotli, raw DEFLATE and zlib have no
+ * fixed header, and a real archive can open with a record this file's
+ * signature table does not list (`PK\x05\x06`) or with leading bytes before
+ * the magic. All three headerless formats are `vite-plugin-compression2`
+ * algorithms and all three default to a `.gz` filename there, so this is the
+ * signal that catches them.
+ *
+ * This list is a backstop, NOT the primary mechanism — `detectMagicByteFormat()`
+ * below is what catches formats nobody enumerated. Adding an entry here is
+ * cheap and safe (worst case a misleadingly-named plaintext file fails the
+ * build); REMOVING one is how PR #88 round 1 reopened the hole. Entries are
+ * only ever added.
  */
-const BROTLI_EXTENSIONS = new Set([".br"]);
+const COMPRESSED_EXTENSIONS = new Set([
+	".br", // brotli — no magic number at all
+	".gz", // gzip; ALSO vite-plugin-compression2's default name for deflate/deflateRaw output
+	".tgz", // gzipped tar
+	".zip", // may open PK\x03\x04, PK\x05\x06 (empty) or PK\x07\x08 (spanned)
+	".zst",
+	".zstd",
+	".xz",
+	".bz2",
+	".7z",
+	".lz4",
+	".zz", // conventional zlib-stream extension — checksum-constrained header, not magic
+	".deflate", // raw DEFLATE — no header whatsoever
+	".lzma",
+]);
 
 /**
  * Magic-number signatures for compressed/archive formats that self-identify
@@ -136,9 +201,14 @@ const BROTLI_EXTENSIONS = new Set([".br"]);
  * compressed-artifact detector: a new format added here needs no
  * corresponding extension anywhere, because detection reads the actual
  * bytes. Sources: gzip (RFC 1952 §2.3.1), zstd (RFC 8878 §3.1.1), xz (the
- * XZ Format spec §2.1.1.1), zip/jar (PKZIP local file header), 7z (7-Zip
- * signature), lz4 frame (LZ4 Frame Format spec), bzip2 (the literal ASCII
- * header bzip2 always writes).
+ * XZ Format spec §2.1.1.1), zip/jar (the three PKZIP record signatures —
+ * local file header, end-of-central-directory for an empty archive, and the
+ * spanned/split marker), 7z (7-Zip signature), lz4 frame (LZ4 Frame Format
+ * spec), bzip2 (the literal ASCII header bzip2 always writes).
+ *
+ * Adding a signature here only ever widens what is caught; it can never take
+ * a file out of the fail-closed bucket, because `isCompressedArtifact()`
+ * ORs this with `COMPRESSED_EXTENSIONS`.
  */
 const MAGIC_BYTE_SIGNATURES = [
 	{ format: "xz", bytes: [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00] },
@@ -148,6 +218,13 @@ const MAGIC_BYTE_SIGNATURES = [
 	{ format: "gzip", bytes: [0x1f, 0x8b] },
 	{ format: "bzip2", bytes: [0x42, 0x5a, 0x68] },
 	{ format: "zip", bytes: [0x50, 0x4b, 0x03, 0x04] },
+	// An archive with no entries starts straight at the end-of-central-
+	// directory record; `zip -X out.zip` on an empty set, and several
+	// bundlers' "empty asset archive", produce exactly this. It is a real
+	// zip, and PR #88 round 1 waved it through because only the local-file-
+	// header signature was listed.
+	{ format: "zip", bytes: [0x50, 0x4b, 0x05, 0x06] },
+	{ format: "zip", bytes: [0x50, 0x4b, 0x07, 0x08] },
 ];
 
 /** Returns the matched format name ("gzip", "zstd", "xz", "zip", "7z",
@@ -164,11 +241,14 @@ export function detectMagicByteFormat(buffer) {
 	return null;
 }
 
-/** True when `file`'s extension is `.br` (case-insensitive) — the one
- * compressed format magic-byte sniffing structurally cannot detect, because
- * a raw Brotli stream has no magic number (see module header comment). */
-export function isBrotliByExtension(file) {
-	return BROTLI_EXTENSIONS.has(extname(file).toLowerCase());
+/** True when `file`'s extension is on `COMPRESSED_EXTENSIONS`
+ * (case-insensitive) — the fail-closed half of the union that catches
+ * headerless formats (brotli, raw DEFLATE, zlib) and archives whose opening
+ * record this file's signature table does not list. Name-only: it never
+ * looks at content, so it is unaffected by anything the bytes do or don't
+ * say. See the module header comment. */
+export function isCompressedByExtension(file) {
+	return COMPRESSED_EXTENSIONS.has(extname(file).toLowerCase());
 }
 
 /** True when `file` is a known-binary artifact this check deliberately skips.
@@ -179,15 +259,17 @@ export function isSkippedBinary(file) {
 }
 
 /**
- * True when `file` is a compressed artifact this check cannot inspect —
- * either its content opens with a known compressed-format magic number, or
- * (the Brotli exception) its extension is `.br`. `buffer` is `file`'s
+ * True when `file` is a compressed artifact this check cannot inspect. The
+ * UNION of both signals: its content opens with a known compressed-format
+ * magic number, **OR** its extension is on `COMPRESSED_EXTENSIONS`. Either
+ * alone is sufficient; neither can veto the other. `buffer` is `file`'s
  * already-read content; pass it so callers doing a single read (`scanDist`)
- * don't pay for a second one. See the module header comment for why this is
- * a hybrid of two mechanisms rather than one.
+ * don't pay for a second one — omitting it degrades to the extension signal
+ * only, never to "not compressed" for a file the extension list covers.
+ * See the module header comment for why both halves exist.
  */
 export function isCompressedArtifact(file, buffer) {
-	return isBrotliByExtension(file) || (buffer !== undefined && detectMagicByteFormat(buffer) !== null);
+	return isCompressedByExtension(file) || (buffer !== undefined && detectMagicByteFormat(buffer) !== null);
 }
 
 export const ALLOWLIST = [
@@ -244,10 +326,13 @@ function* walk(dir) {
  * `{ violations, allowlisted, scanned, skipped, compressed }`.
  * `violations`/`allowlisted` are arrays of `{ file, url }`; `scanned`/
  * `skipped` are file paths; `compressed` is an array of `{ file, format }`
- * (`format` is a magic-byte name like `"gzip"`, or `"brotli"` for the
- * extension-only case) — reported so the CLI can show what the guard
- * actually looked at, and by what mechanism, rather than asking the reader
- * to trust it. `compressed` is never scanned and never counted as a
+ * where `format` is the magic-byte name (`"gzip"`, `"zstd"`, …) when the
+ * content matched a signature, or `"extension .gz"`-style when only the name
+ * did — reported so the CLI shows what the guard caught and *which of the
+ * two signals* caught it, rather than asking the reader to trust it. Magic
+ * is reported in preference to the extension only because it is the more
+ * specific answer; both are checked, and either is disqualifying.
+ * `compressed` is never scanned and never counted as a
  * violation of its own — the caller (`main`) is the one that decides a
  * non-empty `compressed` fails the build, so this stays a pure function (no
  * process.exit) and unit-testable.
@@ -267,13 +352,17 @@ export function scanDist(distDir) {
 	for (const file of walk(distDir)) {
 		const buffer = readFileSync(file);
 
-		if (isBrotliByExtension(file)) {
-			compressed.push({ file, format: "brotli" });
-			continue;
-		}
+		// The union, in the order that yields the most specific label. Magic
+		// bytes first (they name the actual format); extension second (it
+		// catches the headerless/offset cases magic cannot see). A file only
+		// reaches the scan branch when NEITHER signal fired.
 		const magicFormat = detectMagicByteFormat(buffer);
 		if (magicFormat) {
 			compressed.push({ file, format: magicFormat });
+			continue;
+		}
+		if (isCompressedByExtension(file)) {
+			compressed.push({ file, format: `extension ${extname(file).toLowerCase()}` });
 			continue;
 		}
 
@@ -317,11 +406,13 @@ function main() {
 			console.error(`  ${file} (${format})`);
 		}
 		console.error("\nCompressed formats encode compressed text, and this guard cannot read inside them — scanning the");
-		console.error("compressed bytes would report a false OK instead of the URL(s) they may carry. Detection is by magic");
-		console.error("bytes for every format that has one (gzip/zstd/xz/zip/7z/lz4/bzip2); Brotli has no magic number, so");
-		console.error("`.br` is matched by extension instead. The build currently emits none of these; if a precompression");
-		console.error("step was just added, either teach this script to decompress-and-scan (node:zlib has Brotli, gzip,");
-		console.error("and zstd built in) or remove the compressed output.");
+		console.error("compressed bytes would report a false OK instead of the URL(s) they may carry. Detection fails closed");
+		console.error("by UNION: a file is compressed if its magic bytes match a known signature (gzip/zstd/xz/zip/7z/lz4/");
+		console.error("bzip2) OR its extension is on the compressed list. The list is what catches the formats with no");
+		console.error("header to sniff — brotli, raw DEFLATE and zlib — all three of which vite-plugin-compression2 writes");
+		console.error("out named `.gz`. The build currently emits none of these; if a precompression step was just added,");
+		console.error("either teach this script to decompress-and-scan (node:zlib has Brotli, gzip, deflate and zstd built");
+		console.error("in) or remove the compressed output. If a file merely has a misleading name, rename it.");
 		process.exit(1);
 	}
 

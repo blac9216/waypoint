@@ -105,22 +105,36 @@ whoever adds it to either teach the script to decompress-and-scan
 (`node:zlib` has Brotli, gzip, and zstd built in) or accept the compressed
 output failing the build.
 
-**Detection is magic bytes, not an extension list — deliberately, and this
-is a hybrid, not a single mechanism.** This guard has failed open on the
-compressed-artifact question three times running on the extension-list
-model: an allowlist that skipped `.mjs`/extensionless files (#65), compressed
-formats treated as inert binary (#77), and then — even after #77 added a
-`.br`/`.gz`/`.zip` denylist — any compressed format nobody had added to
-*that* list yet, such as `.zst`/`.xz`/`.7z`/`.lz4` (#81). An extension list
-can only enumerate formats somebody remembered; the fix is to stop relying on
-one as the primary mechanism. `detectMagicByteFormat()` now sniffs the actual
-file header for gzip, zstd, xz, zip, 7z, lz4, and bzip2 — a compressed
-payload is caught no matter what it's named, including a name nobody has
-seen before. **Brotli has no magic number** (a raw Brotli stream is not
-self-identifying), so it is the one format that structurally cannot be
-sniffed and stays on a tiny, dedicated extension list (`BROTLI_EXTENSIONS`,
-just `.br`). Read the script's header comment before changing this — it says
-explicitly not to collapse the hybrid back into one mechanism.
+**Detection fails closed by union: magic bytes OR extension, either one
+alone.** A file is treated as compressed if `detectMagicByteFormat()` matches
+its header **or** its extension is on `COMPRESSED_EXTENSIONS`. Magic-byte
+detection may only ever *add* coverage; it can never take a file out of the
+fail-closed bucket that the extension list would have caught.
+
+That rule is the lesson of four failures, not caution for its own sake. The
+first three were the extension-list model failing open: an allowlist that
+skipped `.mjs`/extensionless files (#65), compressed formats treated as inert
+binary (#77), and — even after #77 added a `.br`/`.gz`/`.zip` denylist — any
+format nobody had added to *that* list yet, such as `.zst`/`.xz`/`.7z`/`.lz4`
+(#81). The fourth was the fix for #81 *replacing* the list with content
+sniffing instead of adding to it, which took `.gz` and `.zip` off the
+fail-closed list and let three real shapes back through (PR #88 review).
+
+Both halves are load-bearing. Magic bytes catch what no list can enumerate:
+`detectMagicByteFormat()` sniffs gzip, zstd, xz, zip, 7z, lz4 and bzip2
+headers, so a compressed payload is caught no matter what it is named. The
+extension list catches what has no header to sniff — and **Brotli is not the
+only headerless format**: raw DEFLATE (RFC 1951) has no header at all, and
+zlib's (RFC 1950) two leading bytes are a checksum constraint rather than a
+fixed magic. All three are declared `vite-plugin-compression2` algorithms
+(`'gzip' | 'brotliCompress' | 'deflate' | 'deflateRaw' | 'zstandard'`), and
+that plugin's default output filename is `[path][base].gz` for everything
+except brotli and zstandard — so `algorithms: ['deflate']` emits a `.gz`
+holding a zlib stream with no gzip magic in it, which only the extension
+list can catch. Signature matching is also anchored at offset 0, so a stream
+behind a stray leading byte, or a real zip that opens `PK\x05\x06` instead of
+`PK\x03\x04`, likewise needs the name. Read the script's header comment
+before changing any of this.
 
 The vendor URL allowlist's three entries are all `$`-anchored to the exact
 literal they justify, not prefix-matched — including the `bit.ly` shortlink,
@@ -133,10 +147,15 @@ a deliberate violation — including one inside a `.mjs` chunk, one inside an
 extensionless file, one inside a `.map` source map, one inside a dotfile, one
 behind an uppercase extension, one behind a compressed artifact detected by
 magic bytes under an extension nobody put on any list, one behind a `.br`
-file caught only because of the extension exception, and one behind a bit.ly
-shortlink that only shares the allowlisted prefix — the shapes the old
-allowlist and the issue #77/#81 holes let through. The `.zst`/`.xz` cases use
-a realistic (~40 KB) bundle-shaped fixture, not a one-line file: a one-line
-fixture is caught by accident because these compressors store short literals
-raw, so the URL survives verbatim in the "compressed" output and a toy test
-would pass even against the old, buggy guard.
+file caught only by its extension, and one behind a bit.ly shortlink that
+only shares the allowlisted prefix — the shapes the old allowlist and the
+issue #77/#81 holes let through. A dedicated block covers the union
+property: a zlib stream and a raw-DEFLATE stream named `bundle.js.gz`, an
+empty `PK\x05\x06` zip, and a gzip stream behind one leading byte all fail
+the build, and neither detection signal can veto the other.
+
+Every compressed fixture is a realistic (~40 KB) bundle-shaped file, not a
+one-line one, and is asserted not to contain the URL in cleartext before it
+is used: a one-line fixture is caught by accident because these compressors
+store short literals raw, so the URL survives verbatim in the "compressed"
+output and a toy test would pass even against a broken guard.

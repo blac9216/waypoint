@@ -3,10 +3,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { brotliCompressSync, gzipSync } from "node:zlib";
+import { brotliCompressSync, deflateRawSync, deflateSync, gzipSync } from "node:zlib";
 import * as zlib from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
-import { detectMagicByteFormat, isBrotliByExtension, isCompressedArtifact, scanDist } from "./check-no-external-assets.mjs";
+import {
+	detectMagicByteFormat,
+	isCompressedArtifact,
+	isCompressedByExtension,
+	scanDist,
+} from "./check-no-external-assets.mjs";
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), "check-no-external-assets.mjs");
 
@@ -303,11 +308,20 @@ describe("check-no-external-assets", () => {
 	 * added to that list yet (`.zst`, `.xz`, `.7z`, `.lz4`, or any of those
 	 * renamed to something else entirely) fell through to the default scan
 	 * branch, decoded as UTF-8, matched nothing, and was reported as
-	 * *scanned*. The detector is now a hybrid: magic-byte sniffing for every
-	 * format that has a header, plus an extension check for Brotli alone
-	 * (which has none) — see the module header comment. The guard fails
-	 * closed either way: a compressed artifact's mere presence fails the
-	 * build, whether or not it happens to carry a URL.
+	 * *scanned*.
+	 *
+	 * And for PR #88 round 1, the FOURTH failure: that fix *replaced* the
+	 * extension list with magic-byte sniffing instead of adding to it, so
+	 * `.gz`/`.zip` lost their fail-closed signal and three real shapes the
+	 * #77-era guard caught started printing `OK` again (zlib-in-`.gz`, an
+	 * empty `PK\x05\x06` zip, gzip behind a leading byte). Detection is now a
+	 * strict UNION — magic bytes OR extension, either alone disqualifying —
+	 * see the module header comment. The "union, not substitution" block
+	 * below is the regression coverage for that; it fails if anyone ever
+	 * makes magic-byte detection able to *remove* a file from the
+	 * fail-closed bucket. The guard fails closed either way: a compressed
+	 * artifact's mere presence fails the build, whether or not it happens to
+	 * carry a URL.
 	 */
 	describe("fails closed on compressed artifacts instead of silently skipping them", () => {
 		describe("detectMagicByteFormat — the durable half of the detector", () => {
@@ -344,16 +358,23 @@ describe("check-no-external-assets", () => {
 			});
 		});
 
-		it("isBrotliByExtension is the one deliberate extension-based exception — Brotli has no magic number to sniff", () => {
-			expect(isBrotliByExtension("app.js.br")).toBe(true);
-			expect(isBrotliByExtension("APP.JS.BR")).toBe(true);
-			expect(isBrotliByExtension("app.js")).toBe(false);
-			// A real brotli stream has no detectable header — proves the negative
-			// this whole exception exists to cover, so magic-byte sniffing alone
-			// (without the extension check) would miss it.
-			const brotli = brotliCompressSync(Buffer.from("import a from \"https://cdn.evil.example/x.js\";"));
-			expect(detectMagicByteFormat(brotli)).toBeNull();
-			expect(isCompressedArtifact("app.js.br", brotli)).toBe(true);
+		it("isCompressedByExtension covers the headerless formats magic-byte sniffing structurally cannot see", () => {
+			expect(isCompressedByExtension("app.js.br")).toBe(true);
+			expect(isCompressedByExtension("APP.JS.BR")).toBe(true);
+			expect(isCompressedByExtension("app.js.gz")).toBe(true);
+			expect(isCompressedByExtension("assets.zip")).toBe(true);
+			expect(isCompressedByExtension("app.js")).toBe(false);
+			// The three formats with nothing to sniff for. Each is a declared
+			// `vite-plugin-compression2` algorithm ('brotliCompress', 'deflate',
+			// 'deflateRaw'), and each proves the negative the extension half of
+			// the union exists to cover: magic-byte detection alone misses them.
+			const source = "import a from \"https://cdn.evil.example/x.js\";";
+			expect(detectMagicByteFormat(brotliCompressSync(Buffer.from(source)))).toBeNull();
+			expect(detectMagicByteFormat(deflateSync(Buffer.from(source)))).toBeNull();
+			expect(detectMagicByteFormat(deflateRawSync(Buffer.from(source)))).toBeNull();
+			expect(isCompressedArtifact("app.js.br", brotliCompressSync(Buffer.from(source)))).toBe(true);
+			expect(isCompressedArtifact("app.js.gz", deflateSync(Buffer.from(source)))).toBe(true);
+			expect(isCompressedArtifact("app.js.gz", deflateRawSync(Buffer.from(source)))).toBe(true);
 		});
 
 		it("scanDist reports a .br file as compressed by extension, not scanned or skipped", () => {
@@ -363,7 +384,7 @@ describe("check-no-external-assets", () => {
 
 			const { violations, scanned, skipped, compressed } = scanDist(dir);
 
-			expect(compressed).toEqual([{ file: join(dir, "app.js.br"), format: "brotli" }]);
+			expect(compressed).toEqual([{ file: join(dir, "app.js.br"), format: "extension .br" }]);
 			expect(scanned).toHaveLength(0);
 			expect(skipped).toHaveLength(0);
 			// It is never scanned, so it can never be a "violation" either — its
@@ -509,7 +530,7 @@ describe("check-no-external-assets", () => {
 
 			expect(status).toBe(1);
 			expect(stderr).toMatch(/2 compressed artifact\(s\) found/);
-			expect(stderr).toMatch(/app\.js\.br \(brotli\)/);
+			expect(stderr).toMatch(/app\.js\.br \(extension \.br\)/);
 			expect(stderr).toMatch(/app\.js\.gz \(gzip\)/);
 		});
 
@@ -524,20 +545,128 @@ describe("check-no-external-assets", () => {
 			expect(stderr).toMatch(/bundle\.zip \(zip\)/);
 		});
 
-		it("a plain text file merely named .gz/.zip (no real magic bytes) is scanned, not failed — content decides, not the name", () => {
-			// The mirror image of the #81 fix: just as a real compressed payload
-			// under an unrecognized extension must fail, a file that only LOOKS
-			// compressed by name (no genuine header) must not be punished for a
-			// misleading extension. Detection reads bytes, not filenames.
+		it("a plain text file merely named .gz fails closed on its extension alone (union, not 'content decides')", () => {
+			// This assertion is INVERTED from PR #88 round 1, deliberately. It
+			// used to assert that such a file was *scanned* — "content decides,
+			// not the name" — which sounds principled and is exactly the
+			// substitution that reopened the hole: if the name cannot condemn a
+			// file, then `.gz` carries no fail-closed signal, and the moment the
+			// bytes are unrecognized (zlib, raw DEFLATE, a leading byte) the file
+			// lands in the scanned bucket. Under the union the name alone is
+			// enough. The cost is nil: a genuinely-plaintext file's URLs would
+			// have been caught by the scan branch anyway, so nothing inspectable
+			// is lost — the file just has to be renamed.
 			dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
 			writeFileSync(join(dir, "not-really.gz"), `import a from "https://cdn.evil.example/x.js";`);
 
 			const { violations, scanned, compressed } = scanDist(dir);
 
-			expect(compressed).toHaveLength(0);
-			expect(scanned).toHaveLength(1);
-			expect(violations).toHaveLength(1);
-			expect(violations[0].url).toBe("https://cdn.evil.example/x.js");
+			expect(compressed).toEqual([{ file: join(dir, "not-really.gz"), format: "extension .gz" }]);
+			expect(scanned).toHaveLength(0);
+			expect(violations).toHaveLength(0);
+			expect(runCli(dir).status).toBe(1);
+		});
+
+		/**
+		 * PR #88 round-1 review, finding 1 — the fourth fail-open, and the only
+		 * one that was a *regression against `main`* rather than a gap `main`
+		 * also had. Each case below was verified to print
+		 * `OK — no external references found … (1 file(s) scanned)` with exit 0
+		 * on the round-1 branch, while pre-PR `main`'s extension-list guard
+		 * failed the build on all of them. They exist because magic-byte
+		 * detection replaced the extension list instead of joining it.
+		 *
+		 * Every fixture is bundle-sized (~40 KB) and asserted not to leak the
+		 * URL in cleartext first, for the reason `buildRealisticBundleFixture`
+		 * documents: a one-line fixture leaves the URL verbatim in the
+		 * compressed bytes, so the scan branch catches it by accident and the
+		 * test passes against a guard that is in fact broken. And each asserts
+		 * the CLI **fails** — exit 1 — not merely that a helper returned a
+		 * value, because "the helper says true" and "the build stops" are
+		 * different claims and only the second one is the guard.
+		 */
+		describe("union, not substitution: magic bytes may only ADD coverage (PR #88 round-1 regression)", () => {
+			/** Asserts the whole guard rejects `dir`, and reports why. */
+			function expectCliFailsClosed(fixtureName, bytes) {
+				expect(bytes.toString("latin1")).not.toContain(REALISTIC_BUNDLE_URL);
+				dir = mkdtempSync(join(tmpdir(), "waypoint-fixture-"));
+				writeFileSync(join(dir, fixtureName), bytes);
+
+				const { status, stdout, stderr } = runCli(dir);
+
+				expect(status).toBe(1);
+				expect(stdout).not.toMatch(/OK — no external references found/);
+				expect(stderr).toMatch(/1 compressed artifact\(s\) found/);
+				return stderr;
+			}
+
+			it("(a) a zlib/DEFLATE stream named bundle.js.gz fails the build", () => {
+				// `vite-plugin-compression2` declares
+				// `CoreAlgorithm = 'gzip' | 'brotliCompress' | 'deflate' | 'deflateRaw' | 'zstandard'`
+				// and defaults `filename` to `[path][base].gz` for everything that
+				// is not brotli or zstandard — so `algorithms: ['deflate']` emits
+				// exactly this: a `.gz` file holding a zlib stream, with no gzip
+				// magic anywhere in it. zlib's two leading bytes are a checksum
+				// constraint ((CMF<<8|FLG) % 31 === 0), not a fixed signature,
+				// so there is nothing for `detectMagicByteFormat` to match.
+				const bytes = deflateSync(Buffer.from(REALISTIC_BUNDLE));
+				expect(detectMagicByteFormat(bytes)).toBeNull();
+				expect(expectCliFailsClosed("bundle.js.gz", bytes)).toMatch(/bundle\.js\.gz \(extension \.gz\)/);
+			});
+
+			it("(a2) a raw-DEFLATE stream named bundle.js.gz fails the build (no header at all)", () => {
+				// `algorithms: ['deflateRaw']`, same default `.gz` filename. RFC
+				// 1951 raw DEFLATE opens straight into bit-packed block data —
+				// there is no header whatsoever, so no signature table can ever
+				// reach this case. Only the extension does.
+				const bytes = deflateRawSync(Buffer.from(REALISTIC_BUNDLE));
+				expect(detectMagicByteFormat(bytes)).toBeNull();
+				expect(expectCliFailsClosed("bundle.js.gz", bytes)).toMatch(/bundle\.js\.gz \(extension \.gz\)/);
+			});
+
+			it("(b) an empty zip assets.zip (PK\\x05\\x06, not PK\\x03\\x04) fails the build", () => {
+				// A real, valid zip with no entries: the archive begins at the
+				// end-of-central-directory record, so the local-file-header
+				// signature the round-1 table listed never appears. Caught twice
+				// over now — the signature table gained PK\x05\x06 (so the same
+				// bytes are caught under ANY name, asserted below) and `.zip` is
+				// back on the extension list.
+				const emptyZip = Buffer.concat([
+					Buffer.from([0x50, 0x4b, 0x05, 0x06]),
+					Buffer.alloc(18), // disk numbers, entry counts, size/offset, comment length
+				]);
+				expect(expectCliFailsClosed("assets.zip", emptyZip)).toMatch(/assets\.zip \(zip\)/);
+
+				// The magic-byte half now covers it independently of the name.
+				expect(detectMagicByteFormat(emptyZip)).toBe("zip");
+				expect(isCompressedArtifact("assets.unlisted-ext", emptyZip)).toBe(true);
+			});
+
+			it("(c) a gzip stream with one leading byte before the magic fails the build", () => {
+				// Signature matching is anchored at offset 0, so a single stray
+				// leading byte (a BOM, a concatenation artefact, a length prefix)
+				// hides the gzip magic from sniffing entirely — while leaving the
+				// payload just as unreadable to the scan branch.
+				const bytes = Buffer.concat([Buffer.from([0x00]), gzipSync(Buffer.from(REALISTIC_BUNDLE))]);
+				expect(detectMagicByteFormat(bytes)).toBeNull();
+				expect(expectCliFailsClosed("bundle.js.gz", bytes)).toMatch(/bundle\.js\.gz \(extension \.gz\)/);
+			});
+
+			it("the union is a union: neither signal can veto the other", () => {
+				// The property, stated directly, so a future refactor that turns
+				// the OR back into an if/else fails here rather than in the wild.
+				const gz = gzipSync(Buffer.from(REALISTIC_BUNDLE));
+				const zlibStream = deflateSync(Buffer.from(REALISTIC_BUNDLE));
+
+				// Magic only: unlisted extension, real header.
+				expect(isCompressedArtifact("chunk.unlisted-ext", gz)).toBe(true);
+				// Extension only: listed name, no matchable header.
+				expect(isCompressedArtifact("chunk.gz", zlibStream)).toBe(true);
+				// Extension only, buffer withheld entirely — still compressed.
+				expect(isCompressedArtifact("chunk.gz", undefined)).toBe(true);
+				// Neither: ordinary text under an ordinary name.
+				expect(isCompressedArtifact("chunk.js", Buffer.from("import a from \"/local.js\";"))).toBe(false);
+			});
 		});
 	});
 });
