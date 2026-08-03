@@ -26,7 +26,10 @@ buffering disabled.
 - Cert/key rotation is an operator task; the appliance must document (and ideally
   surface in the UI) cert expiry.
 - `proxy_buffering off` (or per-location equivalent) required on SSE routes.
-- **Backend re-resolution depends on Docker's embedded DNS.** The compose config
+- **Backend re-resolution depends on Docker's embedded DNS.** *(Appended after
+  acceptance — issue #74, PR #84, 2026-08-03. A consequence of the standing
+  decision, not a change to it: Context and Decision above are untouched. See
+  `docs/adr/README.md`, "Amending an accepted ADR".)* The compose config
   points every `proxy_pass` at a `$backend_host` variable (never a literal
   `backend:8080`) and pairs it with `resolver 127.0.0.11 valid=10s ipv6=off;` so
   nginx re-resolves the backend's container IP on every request instead of caching

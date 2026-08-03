@@ -28,7 +28,7 @@ browser --TLS--> nginx --/api--> backend --> postgres (internal network only)
   for a durable way to check this holds.
 - **backend** is the real ASP.NET Core API (issue #3), built from `../backend`.
   Local auth (ADR-0004 rollout note) is a dev-grade single admin user with no
-  compiled-in default password — see "Bring-up" step 2 to enable login.
+  compiled-in default password — see "Bring-up" step 3 to enable login.
 - **postgres** (16) sits on an `internal: true` compose network with no
   published port — reachable only from `backend`, never from the host or
   from `nginx`.
@@ -118,6 +118,15 @@ the frontend bundle).
    empty directory with autoindex off), not an empty listing or a 404. Build
    the bundle and bring the stack up again.
 
+   **The guard covers a *missing* `frontend/dist`, not an *empty* one.** If the
+   directory exists but has no files in it, the mount succeeds, all three
+   services still report `healthy`, and `/` still returns that same bare nginx
+   **403 Forbidden** — verified with the guard in place. This state is easy to
+   reach by accident: `vite build` empties `outDir` before it writes anything,
+   so a build that fails partway leaves exactly an empty `dist/`. If you get a
+   403 from a stack that came up cleanly, check `ls frontend/dist` first and
+   re-run `npm run build` — reading its exit status this time.
+
    **If you already have a root-owned `frontend/dist`** — from an older
    revision of this stack, or another tool — `npm run build` fails with
    `EACCES: permission denied`. Remove it and rebuild:
@@ -177,13 +186,28 @@ the frontend bundle).
    ```
 
    **Known limitation — the browser UI is not usable yet
-   ([#64](https://github.com/blac9216/waypoint/issues/64)).** The stack serves
-   the real frontend bundle and the login endpoint above returns `200` with a
-   token, but the frontend and backend disagree on the login response shape, so
-   logging in through a browser lands you on a page with no navigation chrome
-   and a refresh returns you to the login screen. Verify this stack with the
-   `curl` checks above until #64 lands; the bundle being served and the login
-   round-trip returning `200` are what this layer is responsible for.
+   ([#64](https://github.com/blac9216/waypoint/issues/64)). A successful login
+   leaves you on the login screen, silently — it is not a bad password.** The
+   stack serves the real frontend bundle and the login endpoint above returns
+   `200` with a token, but the frontend and backend disagree on the login
+   response shape: the backend returns `{token, role, expires_at}` while the
+   frontend expects `{token, user: {username, role}}`. `user` therefore comes
+   back `undefined`, `App` renders the login screen whenever there is no user,
+   and what you see in a browser is that **the login screen stays exactly as it
+   was: no navigation chrome, no redirect, and no error message.** Reloading
+   leaves you on the login screen too, for the same reason.
+
+   How to tell this apart from a wrong `WAYPOINT_ADMIN_PASSWORD_HASH` before you
+   go debugging one — in DevTools, a *correct* password gives you both of:
+
+   - `POST /api/v1/auth/login` → **200** (a wrong password gives `401`
+     `invalid_credentials`), and
+   - `sessionStorage["waypoint.session"]` set to `{"token":"..."}` — a token and
+     **no `user` key**, which is the shape mismatch itself.
+
+   Verify this stack with the `curl` checks above until #64 lands; the bundle
+   being served and the login round-trip returning `200` are what this layer is
+   responsible for.
 
 6. Tear down:
 
@@ -206,11 +230,30 @@ change any status code, and doesn't show up in `curl -o /dev/null`. It only
 manifests as a live run whose events never appear in the UI. Verify it two
 ways.
 
+Both checks below name your own stack rather than hardcoding `waypoint-nginx`
+and `8443`. Those are **global** names on this Docker host — per
+[`docs/testing.md`](../docs/testing.md), another agent's in-flight stack may own
+them, and probing someone else's container yields a plausible wrong result
+rather than an error. Set these once, from the same slug and port you brought
+your stack up with (`docs/testing.md` "The recipe"), and run every command below
+from `deploy/`:
+
+```bash
+SLUG=issue60-verify                          # your unique slug
+PORT=18443                                   # your WAYPOINT_HTTPS_PORT
+NGINX=wp-$SLUG-nginx                         # container_name from your override
+PROBE=wp-$SLUG-sse-probe                     # throwaway probe container
+DC="docker compose -p wp-$SLUG -f docker-compose.yml -f /tmp/wp-$SLUG.override.yml"
+```
+
+(On an unisolated default stack those are `NGINX=waypoint-nginx`, `PORT=8443`,
+`DC="docker compose"` — but this repo asks you to isolate, so prefer the above.)
+
 **1. Confirm the directive is actually in the effective config**, not just in
 the source file on disk (`nginx -T` prints what nginx actually loaded):
 
 ```bash
-docker exec waypoint-nginx nginx -T | grep -n -B9 -E '^[[:space:]]*proxy_buffering[[:space:]]'
+docker exec "$NGINX" nginx -T | grep -n -B9 -E '^[[:space:]]*proxy_buffering[[:space:]]'
 ```
 
 Expect exactly one match, and the 9 lines of context above it should show it
@@ -263,32 +306,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
 PYEOF
 
-# Stop the real backend so it doesn't answer instead of the probe, then
-# start the probe aliased as "backend" on the stack's edge network (the
-# same alias nginx's resolver looks up per request - see "Networking"
-# above). Replace PROJECT with your compose project name (the default
-# stack is "waypoint-dev"; docs/testing.md's isolated stacks use "wp-$SLUG").
-docker compose stop backend
-docker run -d --rm --name sse-probe \
-  --network PROJECT_edge --network-alias backend \
+# Stop YOUR backend so it doesn't answer instead of the probe, then start
+# the probe aliased as "backend" on YOUR stack's edge network (the same
+# alias nginx's resolver looks up per request - see "Networking" above).
+# $DC, $PROBE and $PORT come from the variable block at the top of this
+# section; the edge network is "<project>_edge", i.e. wp-$SLUG_edge here.
+$DC stop backend
+docker run -d --rm --name "$PROBE" \
+  --network "wp-${SLUG}_edge" --network-alias backend \
   -v /tmp/sse-probe.py:/sse-probe.py:ro \
   python:3-alpine python /sse-probe.py
 
 # SSE route (location ~ ...events$, proxy_buffering off): expect each tick
 # timestamped roughly 1 second apart.
 echo "SSE /api/v1/events:"
-curl -k -s -N https://localhost:8443/api/v1/events \
+curl -k -s -N "https://localhost:$PORT/api/v1/events" \
   | while IFS= read -r line; do printf '%(%H:%M:%S)T  %s\n' -1 "$line"; done
 
 # Ordinary REST route (location /api/, buffering on): expect nothing until
 # the upstream closes (~4s later), then all 5 ticks at once.
 echo "REST /api/v1/streamtest:"
-curl -k -s -N https://localhost:8443/api/v1/streamtest \
+curl -k -s -N "https://localhost:$PORT/api/v1/streamtest" \
   | while IFS= read -r line; do printf '%(%H:%M:%S)T  %s\n' -1 "$line"; done
 
-# Restore the real backend.
-docker stop sse-probe
-docker compose start backend
+# Restore your real backend.
+docker stop "$PROBE"
+$DC start backend
 ```
 
 Expected shape of the output — timestamps spread out on the SSE route,

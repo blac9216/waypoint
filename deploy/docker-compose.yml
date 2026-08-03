@@ -38,7 +38,14 @@ services:
       # mount instead fails the `up` immediately with
       #   invalid mount config for type "bind": bind source path does not
       #   exist: .../frontend/dist
-      # and creates nothing. See deploy/README.md "Bring-up" step 2.
+      # and creates nothing.
+      #
+      # It guards the ABSENT case only: an ../frontend/dist that exists but is
+      # EMPTY still mounts, still comes up "healthy", and still serves that
+      # same bare 403. `vite build` empties outDir before writing, so a build
+      # that fails partway lands exactly there - the 403 has not gone away,
+      # it just no longer happens from forgetting the build entirely.
+      # See deploy/README.md "Bring-up" step 2.
       - type: bind
         source: ../frontend/dist
         target: /usr/share/nginx/html
