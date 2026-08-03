@@ -6,7 +6,8 @@
 #        -> postgres (internal network only, no published port)
 #
 # Bring-up: see deploy/README.md. Requires deploy/nginx/certs/dev-cert.pem
-# and dev-key.pem (deploy/nginx/certs/generate-dev-certs.sh) before `up`.
+# and dev-key.pem (deploy/nginx/certs/generate-dev-certs.sh), and a built
+# ../frontend/dist (npm run build in frontend/) before `up`.
 
 name: waypoint-dev
 
@@ -22,7 +23,35 @@ services:
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/certs:/etc/nginx/certs:ro
-      - ./www:/usr/share/nginx/html:ro
+      # Real frontend static build (issue #11 / #65), bind-mounted rather
+      # than baked into an image so the existing nginx:1.27-alpine image
+      # needs no custom build stage - same pattern already used for conf.d
+      # and certs. Build it first: cd frontend && npm run build.
+      #
+      # Long syntax with `create_host_path: false` on purpose. Docker's
+      # default for a bind mount is to CREATE a missing source path - as a
+      # root-owned empty directory - so forgetting the build step would
+      # bring the stack up "healthy" while nginx served a bare 403 Forbidden
+      # (try_files falls through to an empty dir, autoindex off), and would
+      # leave behind a root-owned ../frontend/dist that a non-root operator
+      # then cannot `npm run build` into (EACCES) without sudo. Refusing the
+      # mount instead fails the `up` immediately with
+      #   invalid mount config for type "bind": bind source path does not
+      #   exist: .../frontend/dist
+      # and creates nothing.
+      #
+      # It guards the ABSENT case only: an ../frontend/dist that exists but is
+      # EMPTY still mounts, still comes up "healthy", and still serves that
+      # same bare 403. `vite build` empties outDir before writing, so a build
+      # that fails partway lands exactly there - the 403 has not gone away,
+      # it just no longer happens from forgetting the build entirely.
+      # See deploy/README.md "Bring-up" step 2.
+      - type: bind
+        source: ../frontend/dist
+        target: /usr/share/nginx/html
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - edge
     healthcheck:
@@ -44,6 +73,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      # Dev-grade local auth (ADR-0004 rollout note; backend/README.md "Run
+      # locally"). Empty by default so an unconfigured stack still fails
+      # every login closed instead of shipping a guessable credential (see
+      # Waypoint.Core.Configuration.LocalAuthOptions and
+      # InMemoryLocalAuthenticationService). Set WAYPOINT_ADMIN_PASSWORD_HASH
+      # to the SHA-256 hex digest of a password of your choosing - see
+      # deploy/README.md "Bring-up" for how to compute it. Never commit a
+      # real hash (or the plaintext password it hashes) to this repo.
+      LocalAuth__AdminPasswordHash: "${WAYPOINT_ADMIN_PASSWORD_HASH:-}"
     volumes:
       - artifacts:/var/lib/waypoint/artifacts
       # Dev-only, gitignored, operator-borrowed depot token/config + the
@@ -105,6 +144,6 @@ volumes:
   pgdata:
   # Downloaded/extracted VCF artifacts and offline-repo storage (see
   # vcf-docker-download's UMDS/VCSA/VKS/ContentLibrary layout). Unused by
-  # the backend stub; mounted now so the path convention is fixed before
-  # the real backend (#3) and download jobs (M1 later slices) land.
+  # the backend today; mounted now so the path convention is fixed before
+  # the download jobs (M1 later slices) land.
   artifacts:
