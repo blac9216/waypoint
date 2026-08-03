@@ -159,3 +159,10 @@ one-line one, and is asserted not to contain the URL in cleartext before it
 is used: a one-line fixture is caught by accident because these compressors
 store short literals raw, so the URL survives verbatim in the "compressed"
 output and a toy test would pass even against a broken guard.
+
+`scripts/verify-mode-guard-browser.mjs` is the manual counterpart for the
+route guard (issues #78/#82): it drives a real Chromium against `vite dev`
+with `/api/v1/system` delayed, hung, or answering each mode, and records
+every screen mount with a latching `MutationObserver` installed before any
+app script. It needs a browser and a transient `playwright-core`, so it is
+not part of `npm test`; see its header comment for the invocation.

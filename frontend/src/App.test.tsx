@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { SYSTEM_FETCH_TIMEOUT_MS } from "./lib/system";
 import { CatalogScreen, ConfigurationScreen } from "./screens/screens";
 
 /**
@@ -86,6 +87,39 @@ function installDeferredSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = 
 	}) as unknown as typeof fetch;
 
 	return { resolveSystem };
+}
+
+/**
+ * Like `installDeferredSystemFetchMock`, but `/system` and `/stigman` are
+ * never resolved by anyone — the wedged-backend shape from the PR #88
+ * round-1 review, finding 2: the connection is accepted and then no answer
+ * ever comes. Distinct from an error (a 500 rejects, so `ready` flips and
+ * mode folds to `disconnected` already) and the only case that was
+ * unbounded.
+ *
+ * The `AbortSignal` is honoured exactly as the platform `fetch` does — it
+ * rejects with an `AbortError` `DOMException` — so this mock can only be
+ * escaped by the client actually aborting the request. If `apiFetch` sets no
+ * timeout, nothing here ever settles, which is precisely the condition under
+ * test.
+ */
+function installHangingSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = "Operator") {
+	globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+		if (url === "/api/v1/auth/login") {
+			return jsonResponse({ token: "tok-1", user: { username: "j.moreno", role } });
+		}
+		if (url === "/api/v1/system" || url === "/api/v1/stigman") {
+			return new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => {
+					reject(new DOMException("The operation was aborted.", "AbortError"));
+				});
+			});
+		}
+		if (url.startsWith("/api/v1/events")) {
+			return new Promise(() => {});
+		}
+		return jsonResponse({ error: { code: "not_found", message: "unhandled in test" } }, 404);
+	}) as unknown as typeof fetch;
 }
 
 async function signIn() {
@@ -296,6 +330,85 @@ describe("App", () => {
 
 			await waitFor(() => expect(window.location.pathname).toBe("/"));
 			expect(CatalogScreen).not.toHaveBeenCalled();
+		});
+
+		/**
+		 * PR #88 round-1 review, finding 2. `apiFetch` set no `AbortSignal`, so
+		 * a `/system` that hangs rather than errors left `ready` false, `mode`
+		 * `"unknown"` and `access` `"pending"` forever — and `AppShell` renders
+		 * `null` while pending, so `/catalog` was a permanently blank page with
+		 * no chrome, no spinner and no error (measured in Chromium at 1 s,
+		 * 3.5 s and 9.5 s with `bodyTextLen: 0`, where `main` showed a usable
+		 * Dashboard). The fix bounds the fetch; the assertion is that the wait
+		 * *ends*, in the same fail-safe place a 500 already lands.
+		 *
+		 * Fake timers, because the point is a real 8-second wall clock and
+		 * asserting on both sides of it. RTL's `waitFor` cannot drive vitest's
+		 * fake timers (it looks for a `jest` global), so this drives `act`
+		 * directly rather than polling.
+		 */
+		it("bounds the pending window when /api/v1/system hangs, folding to the same fail-safe a 500 takes", async () => {
+			vi.useFakeTimers();
+			try {
+				window.history.pushState(null, "", "/catalog");
+				installHangingSystemFetchMock("Operator");
+				render(<App />);
+				await act(async () => {
+					signIn();
+				});
+
+				// Just before the deadline: still the pathological state the
+				// review measured — nothing rendered at all, not even chrome.
+				await act(async () => {
+					await vi.advanceTimersByTimeAsync(SYSTEM_FETCH_TIMEOUT_MS - 500);
+				});
+				expect(document.body.textContent).toBe("");
+				expect(CatalogScreen).not.toHaveBeenCalled();
+
+				// Past the deadline the fetch is abandoned and rejects, so
+				// `ready` flips, mode folds to "disconnected", /catalog is denied
+				// (not pending), and the operator gets a usable Dashboard.
+				await act(async () => {
+					await vi.advanceTimersByTimeAsync(1000);
+				});
+				expect(screen.getByText("WAYPOINT")).toBeInTheDocument();
+				expect(screen.getAllByText("Dashboard").length).toBeGreaterThan(0);
+				expect(window.location.pathname).toBe("/");
+				// The pending window never turned into a silent allow on the way
+				// out (the #78 never-mount property, across the timeout path).
+				expect(CatalogScreen).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("aborts the hung request rather than leaving it outstanding", async () => {
+			// The mechanism, asserted directly: the mock only ever settles if
+			// the client aborts it, so a `ready` chrome here is proof the
+			// AbortSignal fired. Guards against a future "fix" that flips
+			// `ready` on a bare timer while the request stays open — which
+			// would settle the UI but leak a connection per sign-in.
+			vi.useFakeTimers();
+			try {
+				installHangingSystemFetchMock("Operator");
+				render(<App />);
+				await act(async () => {
+					signIn();
+				});
+				const systemCall = vi.mocked(globalThis.fetch).mock.calls.find(([url]) => url === "/api/v1/system");
+				const signal = (systemCall?.[1] as RequestInit | undefined)?.signal;
+				expect(signal).toBeDefined();
+				expect(signal?.aborted).toBe(false);
+
+				await act(async () => {
+					await vi.advanceTimersByTimeAsync(SYSTEM_FETCH_TIMEOUT_MS + 500);
+				});
+
+				expect(signal?.aborted).toBe(true);
+				expect(screen.getByText("WAYPOINT")).toBeInTheDocument();
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 
 		it("a role-insufficient deep link is still denied immediately, without waiting on mode at all", async () => {
