@@ -279,9 +279,13 @@ ALTER SEQUENCE job_events_seq_seq OWNED BY job_events.seq;
 -- transaction. Write events in short transactions, and as late in a
 -- transaction as possible — a writer that emits an event and then does
 -- seconds of other work inside the same transaction stalls the whole event
--- stream for that long. seq is also not gap-free (a rolled-back insert burns
--- its value); that is acceptable because the guarantee above makes gap
--- detection unnecessary for replay safety.
+-- stream for that long. Holding this lock across other row locks is also a
+-- deadlock surface: emit-then-update-row in one transaction against
+-- update-same-row-then-emit in another deadlocks, and Postgres resolves it by
+-- aborting one of them. "Emit last, in a short transaction" avoids both
+-- problems at once. seq is also not gap-free (a rolled-back insert burns its
+-- value); that is acceptable because the guarantee above makes gap detection
+-- unnecessary for replay safety.
 CREATE OR REPLACE FUNCTION job_events_assign_seq()
 RETURNS TRIGGER AS $$
 BEGIN

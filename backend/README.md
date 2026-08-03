@@ -134,8 +134,10 @@ that shape.
   contract's global stream is itself a stream. **Cost, stated plainly**: every
   `job_events` INSERT serializes against every other, and the lock is held for the
   remainder of the inserting transaction — write events in short transactions and as
-  late in a transaction as possible. `seq` is *not* gap-free (a rolled-back insert
-  burns its value); replay safety does not depend on gap-freeness.
+  late in a transaction as possible. Holding the lock across other row locks is also
+  a deadlock surface (emit-then-update-row versus update-same-row-then-emit), which
+  "emit last, in a short transaction" avoids as well. `seq` is *not* gap-free (a
+  rolled-back insert burns its value); replay safety does not depend on gap-freeness.
 - **`job_events` replay shape**: both SSE scopes in the API contract (global and
   per-run) are a `seq > $lastEventId ORDER BY seq` index range scan, never a sort —
   `seq` is the primary key and `idx_job_events_run_seq` covers the per-run scope.
