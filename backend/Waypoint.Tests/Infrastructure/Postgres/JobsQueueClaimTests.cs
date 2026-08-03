@@ -35,10 +35,21 @@ public sealed class JobsQueueClaimTests : IAsyncLifetime
 	// claimable row existed). One round trip, one implicit transaction. Stamps
 	// lease_expires_at in the same UPDATE that sets state = 'running' -- required since
 	// jobs_running_requires_lease_check landed (issue #107); this is also exactly what
-	// makes the #107 stranded-job state unreachable from this code path. See
-	// Waypoint.Infrastructure.Jobs.JobQueueRepository.ClaimSql for the production
-	// query this test's predicate/order/lock clause matches byte-for-byte.
-	private const string ClaimSql = """
+	// makes the #107 stranded-job state unreachable from this code path.
+	//
+	// This query is NOT byte-identical to the production one. An earlier revision of this
+	// comment said it was, and that was wrong -- see JobQueueClaimSqlParityTests, which
+	// replaces the claim with an executable one. The difference is deliberate: the extra
+	// run_id = $1 predicate scopes this test to its own fixtures, because this class
+	// shares a Postgres container with every other test in the collection and a global
+	// claim would race rows it did not seed. Production
+	// (Waypoint.Infrastructure.Jobs.JobQueueRepository.ClaimSql) is global by design.
+	//
+	// What the two genuinely share is the state = 'queued' predicate and the
+	// ORDER BY / FOR UPDATE SKIP LOCKED / LIMIT clause -- the part this class's
+	// concurrency proof is actually about. That, and only that, is what the parity test
+	// pins.
+	internal const string ClaimSql = """
 		WITH claimable AS (
 			SELECT id FROM jobs
 			WHERE run_id = $1 AND state = 'queued'

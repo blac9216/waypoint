@@ -21,6 +21,15 @@
     <EmbeddedResource Include="Data\Migrations\*.sql" />
   </ItemGroup>
 
+  <!-- Lets JobQueueClaimSqlParityTests read JobQueueRepository.ClaimSql directly. The
+       alternative is a test that restates the SQL it is supposed to be checking, which
+       is the "test that cannot fail" pattern this repo has already shipped three times:
+       a copy agrees with itself no matter how far the original drifts. Matches the
+       pattern Waypoint.Api.csproj already uses for its own internals. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Waypoint.Tests" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
