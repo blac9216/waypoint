@@ -122,6 +122,46 @@ function installHangingSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = "
 	}) as unknown as typeof fetch;
 }
 
+/**
+ * The shape round 2 of the PR #88 review measured, and the round-1 fix did
+ * NOT cover: `/system` answers with a **200 and headers**, then its body
+ * never completes. `fetch` resolves as soon as headers are in, so a timer
+ * cleared in a `finally` attached to the fetch call is already gone by the
+ * time `response.json()` is awaited — and that read is then unbounded.
+ * Identical end state to a full hang: `ready` false forever, `/catalog` a
+ * blank page. Measured at 25 s in real Chromium, three times past the 8 s
+ * bound.
+ *
+ * The body stream here only ever settles by being cancelled, which `fetch`
+ * does when its signal aborts — so a test on this mock cannot pass unless the
+ * deadline genuinely spans the body read.
+ */
+function installStallingBodyFetchMock(role: "Viewer" | "Admin" | "Operator" = "Operator") {
+	globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+		if (url === "/api/v1/auth/login") {
+			return jsonResponse({ token: "tok-1", user: { username: "j.moreno", role } });
+		}
+		if (url === "/api/v1/system" || url === "/api/v1/stigman") {
+			const stream = new ReadableStream({
+				start(controller) {
+					// A first chunk lands, so this is unambiguously a live 200
+					// with a partial body rather than a connect that never
+					// completed — then nothing more ever arrives.
+					controller.enqueue(new TextEncoder().encode('{"version":"0.1.0-dev",'));
+					init?.signal?.addEventListener("abort", () => {
+						controller.error(new DOMException("The operation was aborted.", "AbortError"));
+					});
+				},
+			});
+			return new Response(stream, { status: 200, headers: { "Content-Type": "application/json" } });
+		}
+		if (url.startsWith("/api/v1/events")) {
+			return new Promise(() => {});
+		}
+		return jsonResponse({ error: { code: "not_found", message: "unhandled in test" } }, 404);
+	}) as unknown as typeof fetch;
+}
+
 async function signIn() {
 	fireEvent.change(screen.getByLabelText("Username"), { target: { value: "admin" } });
 	fireEvent.change(screen.getByLabelText("Password"), { target: { value: "waypoint-dev" } });
@@ -406,6 +446,46 @@ describe("App", () => {
 
 				expect(signal?.aborted).toBe(true);
 				expect(screen.getByText("WAYPOINT")).toBeInTheDocument();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		/**
+		 * PR #88 round-2 review, finding 1. The round-1 fix bounded only the
+		 * headers phase — `clearTimeout` ran in a `finally` attached to the
+		 * `fetch` call, which resolves when headers arrive — so a 200 whose
+		 * body stalls left `await response.json()` unbounded and reproduced
+		 * the blank page exactly (measured at 25 s in Chromium, past the 8 s
+		 * bound). The two existing hang tests above could not see it, because
+		 * their `fetch` never resolves at all.
+		 */
+		it("bounds a 200 whose response BODY stalls, not just a connect that never completes", async () => {
+			vi.useFakeTimers();
+			try {
+				window.history.pushState(null, "", "/catalog");
+				installStallingBodyFetchMock("Operator");
+				render(<App />);
+				await act(async () => {
+					signIn();
+				});
+
+				// Headers are in and a first body chunk landed, so the round-1
+				// timer would already have been cleared here. Still blank.
+				await act(async () => {
+					await vi.advanceTimersByTimeAsync(SYSTEM_FETCH_TIMEOUT_MS - 500);
+				});
+				expect(document.body.textContent).toBe("");
+				expect(CatalogScreen).not.toHaveBeenCalled();
+
+				// Past the deadline the body read is abandoned, so `ready`
+				// flips, mode folds to "disconnected", and the chrome renders.
+				await act(async () => {
+					await vi.advanceTimersByTimeAsync(1000);
+				});
+				expect(screen.getByText("WAYPOINT")).toBeInTheDocument();
+				expect(window.location.pathname).toBe("/");
+				expect(CatalogScreen).not.toHaveBeenCalled();
 			} finally {
 				vi.useRealTimers();
 			}

@@ -55,6 +55,12 @@ const SystemContext = createContext<SystemContextValue | null>(null);
  * only unbounded case: a 500, a 404 or a dropped connection all reject, so
  * `ready` flips and mode folds to `disconnected` already.
  *
+ * The bound covers the RESPONSE BODY, not only the connect. Round 2 of the
+ * same review found the first version cleared its timer when `fetch`
+ * resolved — i.e. when headers arrived — so a backend that flushed a 200 and
+ * then wedged mid-body reproduced the identical blank page at 25 s. `apiFetch`
+ * now holds the deadline across `response.json()`; see its `timeoutMs` doc.
+ *
  * 8 seconds, chosen between two hard bounds rather than by feel:
  *
  * - **Floor.** It must not fire on a backend that is merely slow, because

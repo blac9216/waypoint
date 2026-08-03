@@ -19,6 +19,29 @@
  * GitHub may have mangled on its way into a stored body (docs/testing.md,
  * "Honest verification" rule 3).
  *
+ * WHAT THE LATCH CAN AND CANNOT SEE — stated so no scenario here implies
+ * coverage it does not have.
+ *
+ *   CAN: a screen that mounts and unmounts between two samples, including
+ *   within a single synchronous task. The callback reads the delivered
+ *   `MutationRecord`s (`addedNodes`, and `characterData` targets), which hold
+ *   references to the nodes themselves, so a node already detached from the
+ *   DOM is still inspected. Round 2 of the PR #88 review confirmed by control
+ *   that the previous version — which re-read `document.body.innerText`
+ *   inside the callback — reported `false` for exactly that case. Scenario 0
+ *   is that control, kept in the harness so the property is re-proved on every
+ *   run rather than trusted.
+ *
+ *   CANNOT: (a) anything rendered inside a shadow root or an iframe, which a
+ *   document-level observer does not traverse; (b) a screen that mounts
+ *   without ever putting its marker TEXT in the DOM — this harness detects a
+ *   mount by rendered text, not by React internals. Both are why the
+ *   authoritative evidence for the #78/#82 never-mount property is the
+ *   component-level mount spy in `src/App.test.tsx` (a function component's
+ *   body runs exactly when React mounts it, so "the spy was never called" is
+ *   the stronger claim). This harness is corroboration in a real engine, not
+ *   the primary proof.
+ *
  * Requires `playwright-core` (deliberately NOT a dependency of this air-gapped
  * app — install it transiently) and a Chromium:
  *
@@ -54,18 +77,45 @@ async function withPage(fn) {
 			config: "GET /api/v1/credentials",
 		};
 		const seen = { catalog: false, config: false };
-		const sample = () => {
-			const text = document.body ? document.body.innerText : "";
+		const latch = (text) => {
+			if (!text) return;
 			for (const [key, marker] of Object.entries(MARKERS)) {
 				if (text.includes(marker)) {
 					seen[key] = true;
 				}
 			}
 		};
-		new MutationObserver(sample).observe(document, { childList: true, subtree: true, characterData: true });
-		sample();
+		// Latch on the DELIVERED MutationRecords, not on a re-read of the
+		// current DOM. PR #88 round-2 review, finding 5: re-reading
+		// `document.body.innerText` inside the callback means a node that was
+		// added and removed again before the callback ran is already gone from
+		// the DOM by the time it is looked for — the reviewer confirmed that
+		// with a control (added + removed in the same synchronous task latched
+		// `false`). A `MutationRecord` holds a reference to the added node
+		// itself, so `addedNodes` still sees it after it has been detached.
+		const onMutations = (records) => {
+			for (const record of records) {
+				for (const node of record.addedNodes) {
+					latch(node.textContent);
+				}
+				if (record.type === "characterData") {
+					latch(record.target.textContent);
+				}
+			}
+		};
+		new MutationObserver(onMutations).observe(document, { childList: true, subtree: true, characterData: true });
+		latch(document.body ? document.body.innerText : "");
 		window.__seen = seen;
 		window.__bodyTextLen = () => (document.body ? document.body.innerText.length : 0);
+		// Test hook for the positive control below — lets the harness verify the
+		// latch really records, instead of asserting a `false` that could just
+		// as easily mean the observer is inert.
+		window.__latchControl = (marker) => {
+			const node = document.createElement("div");
+			node.textContent = marker;
+			document.body.appendChild(node);
+			node.remove(); // same synchronous task: gone before the callback runs
+		};
 	});
 	try {
 		return await fn(page);
@@ -173,11 +223,128 @@ async function hangingSystem() {
 	});
 }
 
+/**
+ * POSITIVE CONTROL for the latch itself. Every other scenario's headline
+ * result is `catalogEverMounted: false` / `configEverMounted: false` — an
+ * assertion that is equally satisfied by a correct guard and by a broken
+ * observer. This scenario adds a marker node and removes it again inside the
+ * SAME synchronous task, then samples after it is gone from the DOM. It must
+ * report `true`.
+ *
+ * The round-1 version of this harness had an empty observer callback and the
+ * round-2 version re-read the live DOM, both of which report `false` here.
+ * Run this first: if it does not say `true`, nothing the other scenarios claim
+ * about never-mounting means anything.
+ */
+async function latchPositiveControl() {
+	return withPage(async (page) => {
+		await signIn(page);
+		await page.waitForSelector("text=WAYPOINT");
+		return page.evaluate(async () => {
+			window.__latchControl("GET /api/v1/catalog/artifacts");
+			const inDomAfterwards = document.body.innerText.includes("GET /api/v1/catalog/artifacts");
+			// MutationObserver callbacks are delivered at the microtask
+			// checkpoint, so give them one before reading the latch.
+			await new Promise((r) => setTimeout(r, 50));
+			return {
+				markerInDomAfterwards: inDomAfterwards,
+				catalogEverMounted: window.__seen.catalog,
+				note: "expected: markerInDomAfterwards false, catalogEverMounted true",
+			};
+		});
+	});
+}
+
+/**
+ * PR #88 round-2 review, finding 1: `/system` answers with a **200 and
+ * headers**, then its body never completes. `fetch` resolves as soon as
+ * headers arrive, so a deadline cleared at that moment leaves
+ * `response.json()` unbounded — and the page is blank forever, exactly as in
+ * the round-1 finding. The reviewer measured `bodyTextLen: 0` at 25 s, three
+ * times past the 8 s bound.
+ *
+ * This is NOT mocked, and deliberately not a `page.route` fulfilment —
+ * Playwright buffers a fulfilled body, so it cannot express "headers arrived,
+ * body never will". Instead the harness stands up a real `node:http` FRONT
+ * DOOR on its own port and points the browser at that: every request is
+ * reverse-proxied to `BASE` untouched, except `/api/v1/system`, for which the
+ * front door writes the status line, the headers and a first body chunk,
+ * flushes them, and then never writes again. Chromium therefore sees a
+ * genuine same-origin 200 whose response stream is stuck — no CORS in play, no
+ * interception layer, nothing synthesised.
+ */
+async function stallingSystemBody() {
+	const { createServer, request: httpRequest } = await import("node:http");
+	const upstream = new URL(BASE);
+	const sockets = new Set();
+
+	const server = createServer((req, res) => {
+		if (req.url.startsWith("/api/v1/system")) {
+			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+			res.write('{"version":"0.1.0-dev",'); // ... and nothing more, ever.
+			return;
+		}
+		const proxied = httpRequest(
+			{
+				hostname: upstream.hostname,
+				port: upstream.port,
+				path: req.url,
+				method: req.method,
+				headers: { ...req.headers, host: upstream.host },
+				// No keep-alive pooling: a pooled socket to the upstream
+				// outlives the scenario and keeps the event loop (and so the
+				// whole harness) alive after the last sample.
+				agent: false,
+			},
+			(up) => {
+				res.writeHead(up.statusCode ?? 502, up.headers);
+				up.pipe(res);
+			},
+		);
+		proxied.on("error", () => {
+			if (!res.headersSent) res.writeHead(502);
+			res.end();
+		});
+		req.pipe(proxied);
+	});
+	server.on("connection", (socket) => {
+		sockets.add(socket);
+		socket.on("close", () => sockets.delete(socket));
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const front = `http://127.0.0.1:${server.address().port}`;
+
+	try {
+		return await withPage(async (page) => {
+			await page.goto(front + "/");
+			await page.getByLabel("Username").fill("admin");
+			await page.getByLabel("Password").fill("waypoint-dev");
+			await page.getByRole("button", { name: /sign in/i }).click();
+			await page.waitForTimeout(1500);
+			await page.goto(front + "/catalog");
+			const samples = { frontDoor: front, upstream: BASE };
+			const marks = [1000, 3500, 9500, 15000, 25000];
+			let elapsed = 0;
+			for (const m of marks) {
+				await page.waitForTimeout(m - elapsed);
+				elapsed = m;
+				samples["t" + m] = await probe(page);
+			}
+			return samples;
+		});
+	} finally {
+		for (const socket of sockets) socket.destroy();
+		server.close();
+	}
+}
+
 const scenarios = {
+	"0 latch positive control": latchPositiveControl,
 	"1 connected deep link (#82)": delayedConnectedDeepLink,
 	"2 disconnected deep link (#82/#78)": delayedDisconnectedDeepLink,
 	"3 Viewer role deep link (#78)": viewerRoleDeepLink,
-	"4 /system HANGS (finding 2)": hangingSystem,
+	"4 /system HANGS (round-1 finding 2)": hangingSystem,
+	"5 /system 200 then BODY STALLS (round-2 finding 1)": stallingSystemBody,
 };
 
 const only = process.env.ONLY;
@@ -186,3 +353,10 @@ for (const [name, fn] of Object.entries(scenarios)) {
 	console.log(`\n--- ${BASE}  ${name}`);
 	console.log(JSON.stringify(await fn(), null, 1));
 }
+
+// Scenario 5 deliberately leaves an HTTP response that is never ended — that
+// is the condition under test — and the sockets behind it keep Node's event
+// loop alive even after the server is closed. Every result is already printed
+// by this point, so exit explicitly rather than leaving a reviewer staring at
+// a prompt that never returns.
+process.exit(0);
