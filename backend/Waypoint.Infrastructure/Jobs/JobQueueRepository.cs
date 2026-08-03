@@ -102,10 +102,16 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			return null;
 		}
 
-		LogJobClaimed(reader.GetGuid(0), workerId, leaseDuration);
+		// Read once into a local rather than calling reader.GetGuid(0) twice. CA1873 flags
+		// the method call as a possibly-expensive argument to a logging call that may be
+		// discarded -- and it is right in principle even though this particular read is
+		// cheap, because the [LoggerMessage] guard cannot elide an argument already
+		// evaluated at the call site.
+		Guid jobId = reader.GetGuid(0);
+		LogJobClaimed(jobId, workerId, leaseDuration);
 
 		return new ClaimedJob(
-			Id: reader.GetGuid(0),
+			Id: jobId,
 			RunId: reader.IsDBNull(1) ? null : reader.GetGuid(1),
 			JobType: reader.GetString(2),
 			TargetId: reader.IsDBNull(3) ? null : reader.GetGuid(3),
