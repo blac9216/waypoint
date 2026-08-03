@@ -459,8 +459,11 @@ public sealed class JobEventsSeqTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 
+		// 'queued' rather than 'running': this seed only needs a job_id to attach events
+		// to via the FK, and a bare 'running' row (no lease) is no longer representable
+		// since jobs_running_requires_lease_check landed (issue #107).
 		await using NpgsqlCommand insertJob = new(
-			"INSERT INTO jobs (job_type, priority, state) VALUES ('catalog-index', 1, 'running') RETURNING id",
+			"INSERT INTO jobs (job_type, priority, state) VALUES ('catalog-index', 1, 'queued') RETURNING id",
 			connection);
 		return (Guid)(await insertJob.ExecuteScalarAsync())!;
 	}

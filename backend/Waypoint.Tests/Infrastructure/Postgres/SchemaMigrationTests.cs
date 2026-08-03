@@ -45,6 +45,9 @@ public sealed class SchemaMigrationTests
 		"schema_migrations"
 	];
 
+	/// <summary>Embedded migration count as of issue #107 -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 2;
+
 	private readonly PostgresFixture _fixture;
 
 	public SchemaMigrationTests(PostgresFixture fixture)
@@ -78,13 +81,16 @@ public sealed class SchemaMigrationTests
 			Assert.True(await TableExistsAsync(connection, table), $"Expected table '{table}' to exist after a fresh migration.");
 		}
 
-		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM schema_migrations"));
+		// Two embedded migrations as of issue #107 (0001 initial schema, 0002 the
+		// jobs_running_requires_lease_check CHECK) -- ExpectedMigrationCount below is
+		// the single place this test's own count assertions read from.
+		Assert.Equal(ExpectedMigrationCount, await CountAsync(connection, "SELECT count(*) FROM schema_migrations"));
 		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM appliance_state"));
 
-		// (2) Re-apply via the runner: schema_migrations already has this version, so
-		// this must be a pure no-op — not an error, not a second tracking row.
+		// (2) Re-apply via the runner: schema_migrations already has every version, so
+		// this must be a pure no-op — not an error, not a second tracking row per version.
 		await migrator.ApplyAsync();
-		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM schema_migrations"));
+		Assert.Equal(ExpectedMigrationCount, await CountAsync(connection, "SELECT count(*) FROM schema_migrations"));
 		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM appliance_state"));
 
 		foreach (string table in ExpectedTables)
@@ -92,11 +98,15 @@ public sealed class SchemaMigrationTests
 			Assert.True(await TableExistsAsync(connection, table));
 		}
 
-		// (3) Re-run the raw embedded SQL directly, bypassing the tracking table.
-		// If any statement lacked IF NOT EXISTS/OR REPLACE/ON CONFLICT this throws.
-		string sql = await ReadEmbeddedMigrationSqlAsync();
-		await using NpgsqlCommand rawReapply = new(sql, connection);
-		await rawReapply.ExecuteNonQueryAsync();
+		// (3) Re-run every embedded migration's raw SQL directly, in order, bypassing
+		// the tracking table entirely. If any statement in any migration lacked
+		// IF NOT EXISTS/OR REPLACE/ON CONFLICT (or, for 0002's constraint, the
+		// DROP CONSTRAINT IF EXISTS + ADD CONSTRAINT idiom), this throws.
+		foreach (string sql in await ReadEmbeddedMigrationSqlInOrderAsync())
+		{
+			await using NpgsqlCommand rawReapply = new(sql, connection);
+			await rawReapply.ExecuteNonQueryAsync();
+		}
 
 		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM appliance_state"));
 	}
@@ -155,8 +165,11 @@ public sealed class SchemaMigrationTests
 
 		// A client-supplied seq must be overwritten by the server-assigned one; if it
 		// were not, a writer could hand itself a value outside the commit ordering.
+		// 'queued' rather than 'running': this seed only needs a job_id for the FK, and
+		// a bare 'running' row (no lease) is no longer representable since
+		// jobs_running_requires_lease_check landed (issue #107).
 		await using NpgsqlCommand seedJob = new(
-			"INSERT INTO jobs (job_type, priority, state) VALUES ('catalog-index', 1, 'running') RETURNING id",
+			"INSERT INTO jobs (job_type, priority, state) VALUES ('catalog-index', 1, 'queued') RETURNING id",
 			connection);
 		Guid jobId = (Guid)(await seedJob.ExecuteScalarAsync())!;
 
@@ -231,15 +244,30 @@ public sealed class SchemaMigrationTests
 		return (long)(await command.ExecuteScalarAsync())!;
 	}
 
-	private static async Task<string> ReadEmbeddedMigrationSqlAsync()
+	/// <summary>
+	/// Every embedded <c>Data/Migrations/*.sql</c> resource's raw text, ordered the same
+	/// way <c>NpgsqlSchemaMigrator</c> orders them (ordinal on the zero-padded filename
+	/// prefix) -- so re-running them all, in order, outside the tracking table is a
+	/// faithful "what would a from-scratch raw apply do" check, not just of migration 1.
+	/// </summary>
+	private static async Task<IReadOnlyList<string>> ReadEmbeddedMigrationSqlInOrderAsync()
 	{
 		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
-		string resourceName = assembly.GetManifestResourceNames()
-			.Single(name => name.Contains(".Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal));
+		string[] resourceNames = [.. assembly.GetManifestResourceNames()
+			.Where(name => name.Contains(".Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
+			.OrderBy(name => name, StringComparer.Ordinal)];
 
-		await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
-		using StreamReader reader = new(stream);
-		return await reader.ReadToEndAsync();
+		Assert.Equal(ExpectedMigrationCount, resourceNames.Length);
+
+		List<string> statements = new(resourceNames.Length);
+		foreach (string resourceName in resourceNames)
+		{
+			await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+			using StreamReader reader = new(stream);
+			statements.Add(await reader.ReadToEndAsync());
+		}
+
+		return statements;
 	}
 
 	/// <summary>
