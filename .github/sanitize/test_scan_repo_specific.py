@@ -64,6 +64,48 @@ def lab_host(tld: str) -> str:
 	return fqdn("vcenter-prod", "fictionallab", tld)
 
 
+# A second dash-separated endpoint sharing LAB_IP's /24, for issue #111's
+# range-detection tests. Both are fictional (RFC 5737 would be the sanctioned
+# choice for prose, but the *shape* being pinned here is "two lab addresses
+# joined by a bare dash", which needs two non-exempt quads either side).
+RANGE_START = quad(10, 44, 12, 1)
+
+
+def ipv6(*groups: str) -> str:
+	"""Assemble a colon-separated IPv6 literal from hextet parts.
+
+	Joining with ":" means an empty group renders as the "::" compression
+	marker for free — an empty group between two non-empty ones collapses
+	to a double colon, and two empty groups in a row (three empty parts
+	total) render as a bare double colon. Matches the module docstring's
+	discipline for IPv4/FQDN fixtures: no contiguous address-shaped literal
+	ever appears as source text in this file, so this file scans as clean
+	as everything else it is testing against.
+	"""
+	return ":".join(groups)
+
+
+# A unique-local IPv6 literal (RFC 4193; the common fd-prefixed case) of the
+# shape CLAUDE.md forbids, in compressed and fully-expanded form, plus its
+# bracketed-with-port URL form and an RFC 4291 link-local sibling — the
+# three shapes issue #112 names explicitly.
+LAB_IPV6 = ipv6("fd00", "1a2b", "3c4d", "", "7")
+LAB_IPV6_FULL = ipv6("fd00", "1a2b", "3c4d", "0000", "0000", "0000", "0000", "0007")
+LAB_IPV6_LINK_LOCAL = ipv6("fe80", "", "1")
+
+
+def bracketed_port(addr: str, port: int) -> str:
+	"""The `[addr]:port` URL form for an IPv6 literal."""
+	return f"[{addr}]:{port}"
+
+
+# The three IPv6 forms CLAUDE.md/issue #112 sanction: the RFC 3849
+# documentation prefix, loopback, and the unspecified address.
+OK_IPV6_DOC = ipv6("2001", "db8", "", "1")
+OK_IPV6_LOOPBACK = ipv6("", "", "1")
+OK_IPV6_UNSPECIFIED = ipv6("", "", "")  # three empty parts -> "::" (two colons)
+
+
 class DetectorPositiveTests(unittest.TestCase):
 	"""Each detector fires on the pattern class it exists to catch."""
 
@@ -439,15 +481,335 @@ class VersionStringTests(unittest.TestCase):
 		self.assertTrue(findings[0].startswith("f.md:2:"), findings[0])
 
 
+class RangeDetectionTests(unittest.TestCase):
+	"""Issue #111: a dash between two addresses is a range, not a build suffix.
+
+	`test_the_exact_range_from_the_issue` is the literal repro from the issue
+	body; the rest characterise the boundary of the fix — what starts working
+	and, just as importantly, what deliberately keeps not working because it
+	is not the shape the fix targets.
+	"""
+
+	def test_the_exact_range_from_the_issue(self) -> None:
+		"""Verbatim regression for the issue's own failing input.
+
+		Before the fix this was 0 findings (both endpoints invisible); the
+		issue requires >= 2 after. This asserts the precise count and that
+		both endpoints are individually named.
+		"""
+		findings = scanner.scan_text("f.md", f"range {RANGE_START}-{LAB_IP}")
+		self.assertEqual(len(findings), 2, findings)
+		self.assertTrue(any(RANGE_START in f for f in findings), findings)
+		self.assertTrue(any(LAB_IP in f for f in findings), findings)
+
+	def test_range_endpoints_are_still_individually_allow_checked(self) -> None:
+		"""A range with one RFC 5737 endpoint only flags the non-exempt one."""
+		doc_addr = quad(192, 0, 2, 1)
+		findings = scanner.scan_text("f.md", f"{doc_addr}-{LAB_IP}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IP, findings[0])
+
+	def test_three_way_chain_catches_the_touching_pair(self) -> None:
+		"""Not a full chain-walk, but the fix must not regress on one.
+
+		Each end of a three-address chain touches exactly one real quad
+		across its dash, so both are still caught; only the truly interior
+		endpoint (quad-shaped on one side, chain-interior on the other) is
+		not asserted here either way.
+		"""
+		third = quad(10, 44, 12, 9)
+		findings = scanner.scan_text(
+			"f.md", f"{RANGE_START}-{LAB_IP}-{third}"
+		)
+		self.assertGreaterEqual(len(findings), 2, findings)
+		self.assertTrue(any(RANGE_START in f for f in findings), findings)
+
+	def test_build_suffixed_version_still_suppressed_by_the_range_fix(self) -> None:
+		"""The load-bearing negative: the fix must not reopen issue #89.
+
+		Same fixture as VersionStringTests.test_build_suffixed_version_is_
+		allowed, re-asserted here under the name of the mechanism that now
+		has to keep it suppressed (_dash_glues_to_non_address), not the one
+		that used to (the blanket regex guard).
+		"""
+		text = f"vcf-download-tool-{quad(9, 0, 0, 0)}-24089201.tar.gz"
+		self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+	def test_single_sided_dash_adjacency_is_still_suppressed(self) -> None:
+		"""The fix is deliberately narrow: only BOTH sides quad-shaped opens
+		the guard. A dash with an address on only one side stays exactly as
+		invisible as before — these are residual, disclosed gaps (see the PR
+		body), not a regression, and not the shape #111's fix claims to
+		close.
+		"""
+		for text in (
+			f"{LAB_IP}-primary",
+			f"vcenter -{LAB_IP}",
+			f"trailing-{LAB_IP}",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+	def test_cidr_form_is_unaffected(self) -> None:
+		"""CIDR was already caught before #111; the fix must not touch it."""
+		findings = scanner.scan_text("f.md", f"{LAB_IP}/24")
+		self.assertEqual(len(findings), 1, findings)
+
+
+class UnderscoreAdjacencyTests(unittest.TestCase):
+	"""Issue #111: `_` is a separator, not a token-continuation character.
+
+	`\\w` (used by the pre-fix guards) is `[A-Za-z0-9_]`; a letter or digit
+	glued to a quad/hostname is still the build-suffix shape the guards exist
+	to reject, but `_` is how identifiers *separate* words, and treating it
+	as a continuation hid the address outright.
+	"""
+
+	def test_underscore_prefixed_ip_is_flagged(self) -> None:
+		findings = scanner.scan_text("f.md", f"host_{LAB_IP}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IP, findings[0])
+
+	def test_underscore_prefixed_fqdn_is_flagged(self) -> None:
+		text = f"vcenter_{LAB_FQDN}"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_FQDN, findings[0])
+
+	def test_letter_adjacency_still_suppressed_for_ip(self) -> None:
+		"""The load-bearing negative: only `_` was narrowed, not `\\w` at large.
+
+		A letter directly glued to a quad is exactly the build-suffix shape
+		the guard exists to reject, and must stay suppressed. (There is no
+		FQDN analogue of this case: letters are themselves valid DNS label
+		characters, so a letter glued to a hostname is simply absorbed into
+		the label rather than rejected — it was never the guard doing
+		anything there, before or after this fix. A glued *digit* on the IP
+		side is a different case again, covered separately below: it does
+		not test the guard at all, because a digit is a character a real
+		octet is made of.)
+		"""
+		for text in (f"a{LAB_IP}", f"{LAB_IP}a"):
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+	def test_glued_digit_changes_the_address_rather_than_defeating_the_guard(
+		self,
+	) -> None:
+		"""A digit glued to a quad is not a guard question at all.
+
+		Unlike a letter or `-`, a digit is a character a real octet is made
+		of, so gluing one on either forms a different, equally real-looking
+		address (still correctly flagged) or overflows an octet past 255
+		(correctly allowed via the octet-range check, not the boundary
+		guard). Neither outcome exercises `_`-vs-`\\w`; this test exists so
+		that distinction is explicit rather than assumed.
+		"""
+		still_an_address = f"{LAB_IP}9"  # last octet 7 -> 79, still <= 255
+		findings = scanner.scan_text("f.md", still_an_address)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(still_an_address, findings[0])
+
+		overflows_the_octet = f"9{LAB_IP}"  # first octet 10 -> 910, > 255
+		self.assertEqual(scanner.scan_text("f.md", overflows_the_octet), [])
+
+	def test_trailing_underscore_still_suppressed(self) -> None:
+		"""The other load-bearing negative: only the LEADING guard narrowed.
+
+		A trailing `_` must keep blocking, for both detectors — this is what
+		EditorconfigRegressionTests pins against the real false positive that
+		a symmetric (leading-and-trailing) fix produced in this repo's own
+		`.editorconfig`.
+		"""
+		for text in (f"{LAB_IP}_build", f"{LAB_FQDN}_build"):
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+
+class EditorconfigRegressionTests(unittest.TestCase):
+	"""Pins the real false positive a leading-AND-trailing underscore fix
+	produced against this repo's own tracked `.editorconfig`.
+
+	A real, unmodified `.editorconfig` naming-rule key was scanning clean
+	before #111: a dotted key segment ending in a suspicious TLD word,
+	immediately followed by an underscore-joined continuation of the same
+	identifier. Narrowing the trailing guard too — not just the leading one
+	the issue actually asks for — made that TLD-ending segment match as a
+	complete FQDN, because the TLD word immediately followed by "_" was no
+	longer read as a continuation of one identifier. `test_dotnet_naming_rule_
+	ending_in_local_is_not_flagged` below assembles the exact key from parts
+	rather than quoting it whole, for the same reason this docstring
+	describes the shape instead of naming it: quoting it here would trip the
+	very check being pinned. Assembled from the naming convention rather than
+	copy-pasted, so this test keeps meaning what it says if the real file's
+	specific rule names ever change.
+	"""
+
+	def test_dotnet_naming_rule_ending_in_local_is_not_flagged(self) -> None:
+		line = (
+			"dotnet_naming_rule."
+			+ "local_functions_should_be_pascalcase"
+			+ ".severity = suggestion"
+		)
+		self.assertEqual(scanner.scan_text(".editorconfig", line), [], line)
+
+	def test_every_suspicious_tld_as_a_snake_case_prefix_is_not_flagged(self) -> None:
+		"""Generalises the pinned case across every TLD this scanner knows,
+		not just "local" — the mechanism is the trailing guard, not a
+		"local"-specific carve-out, and this is what proves that."""
+		for tld in sorted(scanner.SUSPICIOUS_TLDS):
+			with self.subTest(tld=tld):
+				line = f"dotnet_naming_rule.{tld}_functions_should_be_pascalcase"
+				self.assertEqual(scanner.scan_text("f.md", line), [], line)
+
+
+def zero_pad_quad(dotted_quad: str) -> str:
+	"""Zero-pad each octet of a dotted-quad to 3 digits.
+
+	Assembled at runtime (never written as a padded literal) for the same
+	reason every other address fixture in this file is: the padded form is
+	exactly as address-shaped as the unpadded one, so writing it directly
+	into the source would trip the very check being tested here.
+	"""
+	return ".".join(part.zfill(3) for part in dotted_quad.split("."))
+
+
+class ZeroPaddedQuadTests(unittest.TestCase):
+	"""Issue #111: a zero-padded octet is still a real address.
+
+	Python's `ipaddress` module rejects leading zeros outright (ambiguous
+	octal notation), so the pre-fix `is_allowed_ip` took that as "not an IP
+	at all" and let a zero-padded lab quad through.
+	"""
+
+	def test_zero_padded_lab_quad_is_flagged(self) -> None:
+		padded = zero_pad_quad(LAB_IP)
+		findings = scanner.scan_text("f.md", f"host {padded}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(padded, findings[0])
+
+	def test_zero_padded_rfc5737_address_is_still_allowed(self) -> None:
+		padded = zero_pad_quad(quad(192, 0, 2, 1))
+		self.assertEqual(scanner.scan_text("f.md", f"host {padded}"), [])
+
+	def test_zero_padded_wildcard_is_still_allowed(self) -> None:
+		padded = zero_pad_quad(quad(0, 0, 0, 0))
+		self.assertEqual(scanner.scan_text("f.md", f"bind {padded}"), [])
+
+	def test_octet_over_255_is_still_not_a_finding(self) -> None:
+		"""An invalid octet is not an address regardless of padding."""
+		self.assertEqual(scanner.scan_text("f.md", f"rel {quad(2024, 1, 300, 5)}"), [])
+
+
+class IPv6DetectorTests(unittest.TestCase):
+	"""Issue #112: no detector previously covered this address family at all."""
+
+	def test_compressed_ula_is_flagged(self) -> None:
+		findings = scanner.scan_text("f.md", f"reachable at {LAB_IPV6} today")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn("possible IPv6 address literal", findings[0])
+		self.assertIn(LAB_IPV6, findings[0])
+
+	def test_full_uncompressed_ula_is_flagged(self) -> None:
+		findings = scanner.scan_text("f.md", f"host {LAB_IPV6_FULL}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6_FULL, findings[0])
+
+	def test_link_local_is_flagged(self) -> None:
+		findings = scanner.scan_text("f.md", f"neighbor {LAB_IPV6_LINK_LOCAL}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6_LINK_LOCAL, findings[0])
+
+	def test_bracketed_with_port_is_flagged(self) -> None:
+		url = f"https://{bracketed_port(LAB_IPV6, 8443)}/ui"
+		findings = scanner.scan_text("f.md", url)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6, findings[0])
+		self.assertIn("8443", findings[0])
+
+	def test_zone_id_is_stripped_before_validation(self) -> None:
+		text = f"link-local {LAB_IPV6_LINK_LOCAL}%eth0 seen"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+
+	def test_documentation_prefix_is_allowed(self) -> None:
+		self.assertEqual(scanner.scan_text("f.md", f"example {OK_IPV6_DOC}"), [])
+
+	def test_loopback_is_allowed(self) -> None:
+		self.assertEqual(scanner.scan_text("f.md", f"resolver {OK_IPV6_LOOPBACK}"), [])
+
+	def test_unspecified_is_allowed(self) -> None:
+		self.assertEqual(scanner.scan_text("f.md", f"bind {OK_IPV6_UNSPECIFIED}"), [])
+
+	def test_timestamp_is_not_flagged(self) -> None:
+		"""The exact false-positive shape named in the issue."""
+		self.assertEqual(
+			scanner.scan_text("f.md", "Scan started at 04:34:01 local time"), []
+		)
+
+	def test_mac_address_is_not_flagged(self) -> None:
+		"""Six groups with no `::` can never validate as IPv6 (needs 8)."""
+		mac = ":".join(("aa", "bb", "cc", "dd", "ee", "ff"))
+		self.assertEqual(scanner.scan_text("f.md", f"NIC {mac}"), [])
+
+	def test_sha_hash_is_not_flagged(self) -> None:
+		sha = opaque_token(64)
+		self.assertEqual(scanner.scan_text("f.md", f"commit {sha}"), [])
+
+	def test_windows_path_is_not_flagged(self) -> None:
+		self.assertEqual(
+			scanner.scan_text("f.md", r"log at C:\Users\svc\AppData\Local"), []
+		)
+
+	def test_css_hex_color_is_not_flagged(self) -> None:
+		self.assertEqual(
+			scanner.scan_text("f.md", "border: 1px solid #fe8080;"), []
+		)
+
+	def test_base64_blob_is_not_flagged(self) -> None:
+		# Not "token:" or similar — that keyword-plus-base64 shape is exactly
+		# what gitleaks' own generic-api-key rule exists to catch, and this
+		# fixture has nothing to do with secrets; it is here to prove the
+		# IPv6 detector stays quiet, not to trip a different scanner.
+		blob = "YWJjZGVmMDEyMzQ1Njc4OQ=="
+		self.assertEqual(scanner.scan_text("f.md", f"cached payload {blob}"), [])
+
+	def test_docker_digest_is_not_flagged(self) -> None:
+		"""A single colon (image@sha256:<hex>) is below the 2-colon floor."""
+		digest = "sha256:" + opaque_token(64)
+		self.assertEqual(scanner.scan_text("f.md", f"image@{digest}"), [])
+
+	def test_ipv4_mapped_form_also_trips_the_ipv4_detector(self) -> None:
+		"""Documented overlap, not a bug: both detectors independently fire."""
+		mapped = f"::ffff:{LAB_IP}"
+		findings = scanner.scan_text("f.md", f"legacy client at {mapped}")
+		self.assertEqual(len(findings), 2, findings)
+		self.assertTrue(
+			any("IPv6 address literal" in f for f in findings), findings
+		)
+		self.assertTrue(
+			any("IP address literal" in f for f in findings), findings
+		)
+
+	def test_ipv6_check_is_individually_waivable(self) -> None:
+		self.assertEqual(len(scanner.scan_text("f.md", LAB_IPV6)), 1)
+		scanner.ALLOWLIST_FINDINGS["f.md"] = {scanner.CHECK_IPV6: "test"}
+		try:
+			self.assertEqual(scanner.scan_text("f.md", LAB_IPV6), [])
+		finally:
+			del scanner.ALLOWLIST_FINDINGS["f.md"]
+
+
 class AllowlistTests(unittest.TestCase):
 	"""Exemptions are per-file AND per-check.
 
 	The property that holds is that an exemption must be *enumerated* — every
 	waived check named, each with its own reason. The property that does NOT
 	hold, despite an earlier claim in this repo, is that a whole-file
-	switch-off is impossible: there are three checks, so naming all three is a
-	whole-file exemption. `test_naming_every_check_is_a_whole_file_exemption`
-	pins that honestly rather than leaving the docs asserting otherwise.
+	switch-off is impossible: there are four checks (issue #112 added ipv6
+	as the fourth), so naming all four is a whole-file exemption.
+	`test_naming_every_check_is_a_whole_file_exemption` pins that honestly
+	rather than leaving the docs asserting otherwise.
 	"""
 
 	def setUp(self) -> None:
@@ -514,19 +876,20 @@ class AllowlistTests(unittest.TestCase):
 
 		PR #83 round 2 found the code comment, docs/testing.md and the PR body
 		all asserting that a whole-file exemption was "inexpressible by
-		construction". It is not: CHECK_NAMES has three members, so an entry
-		naming all three silences every detector on that path, and
-		_validate_allowlist() accepts it without complaint. What the mechanism
-		buys is that such an entry has to be spelled out check by check with a
-		reason each, where a reviewer will see it — not that it cannot be
-		written. This test exists so the limitation stays documented in
-		executable form; if a future change really does make it impossible,
-		this test fails and the docs get corrected with it.
+		construction". It is not: CHECK_NAMES has four members (issue #112
+		added ipv6 as the fourth), so an entry naming all four silences every
+		detector on that path, and _validate_allowlist() accepts it without
+		complaint. What the mechanism buys is that such an entry has to be
+		spelled out check by check with a reason each, where a reviewer will
+		see it — not that it cannot be written. This test exists so the
+		limitation stays documented in executable form; if a future change
+		really does make it impossible, this test fails and the docs get
+		corrected with it.
 		"""
 		entry = {check: "documented limitation" for check in scanner.CHECK_NAMES}
-		self.assertEqual(len(entry), 3, entry)
-		text = f"{LAB_FQDN} at {LAB_IP} depot_token: {opaque_token()}"
-		self.assertEqual(len(scanner.scan_text("elsewhere.html", text)), 3)
+		self.assertEqual(len(entry), 4, entry)
+		text = f"{LAB_FQDN} at {LAB_IP} depot_token: {opaque_token()} host {LAB_IPV6}"
+		self.assertEqual(len(scanner.scan_text("elsewhere.html", text)), 4)
 
 		scanner.ALLOWLIST_FINDINGS["mock.html"] = entry
 		scanner._validate_allowlist()  # accepted, no raise

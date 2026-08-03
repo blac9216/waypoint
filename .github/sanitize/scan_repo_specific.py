@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Repo-specific sanitization scan for the public waypoint repo.
 
-Complements gitleaks (generic secret shapes) with three checks CLAUDE.md
+Complements gitleaks (generic secret shapes) with four checks CLAUDE.md
 requires and gitleaks does not know about:
 
   1. IPv4 literals that are not RFC 5737 test-net addresses, loopback, or the
@@ -11,6 +11,10 @@ requires and gitleaks does not know about:
   3. Broadcom/VMware depot-token-shaped values: a depot/activation/entitlement
      keyword sitting next to a long opaque token that isn't an obvious
      placeholder.
+  4. IPv6 literals that are not the RFC 3849 documentation prefix
+     (2001:db8::/32), loopback (::1), or unspecified (::) — the same
+     candidate-lab-address concept as (1), for the other address family
+     (issue #112).
 
 Scans every git-tracked file at HEAD (not just the diff) so the whole tree is
 re-validated on every push, matching the "hard gate on every PR + push" rule
@@ -47,12 +51,13 @@ SKIPPED_EXTENSIONS = {
 	".wasm", ".zip", ".gz", ".tgz", ".pdf", ".pem", ".key", ".pfx", ".p12",
 }
 
-# The three checks below, named so an exemption can waive one without
+# The four checks below, named so an exemption can waive one without
 # switching off the others.
 CHECK_IP = "ip"
 CHECK_FQDN = "fqdn"
 CHECK_DEPOT_TOKEN = "depot-token"
-CHECK_NAMES = frozenset({CHECK_IP, CHECK_FQDN, CHECK_DEPOT_TOKEN})
+CHECK_IPV6 = "ipv6"
+CHECK_NAMES = frozenset({CHECK_IP, CHECK_FQDN, CHECK_DEPOT_TOKEN, CHECK_IPV6})
 
 # Exemptions, keyed by exact repo-relative path, then by the specific check
 # being waived, with a reason for each. Both halves are mandatory: an entry
@@ -60,7 +65,7 @@ CHECK_NAMES = frozenset({CHECK_IP, CHECK_FQDN, CHECK_DEPOT_TOKEN})
 # file", and each waived check carries its own justification.
 #
 # BE PRECISE ABOUT WHAT THAT BUYS. It does NOT make a whole-file exemption
-# impossible: CHECK_NAMES has three members, so naming all three in one entry
+# impossible: CHECK_NAMES has four members, so naming all four in one entry
 # silences every detector on that path and _validate_allowlist() accepts it.
 # An earlier revision of this comment claimed such an entry was "inexpressible
 # by construction", which was simply false (PR #83 round 2 demonstrated it).
@@ -121,12 +126,83 @@ def exempt_checks(rel: str) -> set[str]:
 # match, which is what keeps a five-part version from being read as a
 # four-part address. Written as single-character lookarounds rather than one
 # character class so each guard states which neighbour it is rejecting and why.
+#
+# Two more narrowings, both issue #111:
+#
+# - The LEADING word-character guard now names `[A-Za-z0-9]` explicitly
+#   instead of `\w` (which is `[A-Za-z0-9_]`) — but only the leading one.
+#   An underscore-prefixed quad (an env-var-style key glued directly to its
+#   value, say) needs the character immediately BEFORE the quad to stop
+#   blocking on `_`, because that underscore is a separator, not a
+#   continuation: whatever precedes it is a different token from the address
+#   that follows. The TRAILING guard stays `\w` (underscore still blocks) on
+#   purpose — narrowing it too was tried and reopened a real false positive
+#   in this repo's own `.editorconfig` (see EditorconfigRegressionTests in
+#   the test suite for the pinned case): a dotted `.editorconfig` key ending
+#   in one of `SUSPICIOUS_TLDS` matched as a complete FQDN whenever the next
+#   underscore-joined identifier segment followed immediately, because that
+#   TLD word followed by "_" would no longer be rejected as a continuation
+#   of the same key. On the trailing side "_" reads as MORE of the same
+#   word, not a boundary — the opposite of what it means on the leading
+#   side. A letter or digit glued on either side is still exactly the
+#   build-suffix shape these guards exist to reject (a version quad with a
+#   trailing or leading letter).
+#
+# - The blanket `(?<!-)`/`(?!-)` dash guards are gone from the regex itself.
+#   A dash is still, by default, a rejection — that is what
+#   `_dash_glues_to_non_address()` below implements — but a bare regex
+#   lookaround cannot tell "glued to a build suffix" apart from "the
+#   separator in a dash-joined range" (two dotted-quads back to back), because
+#   both are just "a dash". Making that call needs to look at what is on the
+#   OTHER side of the dash, which needs code, not a lookaround: a range has a
+#   second dotted-quad there, a build suffix does not. Moving the dash rule
+#   out of the regex and into `_dash_glues_to_non_address()` is what lets the
+#   range case through while a bare "-" with nothing quad-shaped across it
+#   (`10.44.12.7-primary`, `vcenter -10.44.12.7`, ...
+#   `vcf-download-tool-9.0.0.0-24089201.tar.gz`) stays exactly as suppressed
+#   as before (see test_build_suffixed_version_is_allowed and
+#   RangeDetectionTests). Single-sided dash adjacency is deliberately left
+#   guarded — this is the narrow fix the issue asks for, not a general
+#   loosening of the dash rule.
 IPV4_RE = re.compile(
-	r"(?<!\w)(?<!\.)(?<!-)"          # not continuing a word/dotted/dashed run
+	r"(?<![A-Za-z0-9])(?<!\.)"       # not continuing an alnum/dotted run
 	r"(?:\d{1,3}\.){3}\d{1,3}"
-	r"(?!\w)(?!-)"                   # not followed by more token characters
+	r"(?!\w)"                        # not followed by more token characters
 	r"(?!\.\d)"                      # ...but a trailing sentence period is fine
 )
+
+# A bare dotted-quad with none of IPV4_RE's boundary guards, used only to
+# answer "is there an address-shaped run touching this exact position" for
+# the dash-glue check below. It has no business being matched against on its
+# own — always go through IPV4_RE (or _dash_glues_to_non_address) for that.
+_BARE_QUAD_RE = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
+
+
+def _quad_ends_at(line: str, pos: int) -> bool:
+	"""True if some dotted-quad in `line` ends exactly at index `pos`."""
+	return any(match.end() == pos for match in _BARE_QUAD_RE.finditer(line, 0, pos))
+
+
+def _quad_starts_at(line: str, pos: int) -> bool:
+	"""True if a dotted-quad starts exactly at index `pos` in `line`."""
+	return _BARE_QUAD_RE.match(line, pos) is not None
+
+
+def _dash_glues_to_non_address(line: str, start: int, end: int) -> bool:
+	"""True if a `-` touching this IPV4_RE match glues it to non-address text.
+
+	IPV4_RE no longer rejects dash adjacency on its own (see the comment
+	above it), so every match reaching this function still needs the dash
+	case resolved: a `-` on either side is a rejection UNLESS the token
+	immediately across it is itself a full dotted-quad — the range case from
+	issue #111. Every other delimiter already terminates a match inside
+	IPV4_RE itself and never reaches here.
+	"""
+	if start > 0 and line[start - 1] == "-" and not _quad_ends_at(line, start - 1):
+		return True
+	if end < len(line) and line[end] == "-" and not _quad_starts_at(line, end + 1):
+		return True
+	return False
 
 # RFC 5737 documentation ranges (CLAUDE.md mandates these for all example
 # data) plus loopback (127.0.0.0/8, including Docker's embedded DNS at
@@ -179,6 +255,34 @@ def is_version_string(line: str, start: int) -> bool:
 	return VERSION_KEY_BEFORE_RE.search(line[:start]) is not None
 
 
+def _parse_ipv4_octets(candidate: str) -> list[int] | None:
+	"""Parse a dotted-quad candidate into its four octet values, or None.
+
+	None means the candidate is not actually a valid IPv4 literal — an octet
+	over 255 (a product-version quad, e.g. "2024.1.300.5") or a part with
+	more than 3 digits — the only invariants IPV4_RE's `\\d{1,3}` shape
+	doesn't already enforce on its own.
+
+	Leading zeros ("010") parse here even though Python's `ipaddress` module
+	rejects them outright as ambiguous octal notation (issue #111): CLAUDE.md
+	cares whether the digits denote a real address, not whether the author
+	zero-padded it, and a zero-padded lab quad is exactly as real a leak as
+	an unpadded one.
+	"""
+	parts = candidate.split(".")
+	if len(parts) != 4:
+		return None
+	octets: list[int] = []
+	for part in parts:
+		if not part.isdigit() or len(part) > 3:
+			return None
+		value = int(part)
+		if value > 255:
+			return None
+		octets.append(value)
+	return octets
+
+
 def is_allowed_ip(candidate: str) -> bool:
 	"""True if this dotted-quad is a sanctioned address, or not an IP at all.
 
@@ -186,12 +290,13 @@ def is_allowed_ip(candidate: str) -> bool:
 	valid IPv4 literal, so it cannot be the lab address this check exists to
 	catch — it is not a finding.
 	"""
-	if candidate in ALLOWED_IP_EXACT:
+	octets = _parse_ipv4_octets(candidate)
+	if octets is None:
 		return True
-	try:
-		addr = ipaddress.ip_address(candidate)
-	except ValueError:
+	normalized = ".".join(str(octet) for octet in octets)
+	if normalized in ALLOWED_IP_EXACT:
 		return True
+	addr = ipaddress.ip_address(normalized)
 	return any(addr in net for net in ALLOWED_IP_NETWORKS)
 
 
@@ -210,8 +315,33 @@ def is_allowed_ip(candidate: str) -> bool:
 # literal of its own: the scanner reads its own source like any other tracked
 # file, and the case fixtures live in the test suite where they are assembled
 # at runtime.)
+#
+# LEADING guard names `[A-Za-z0-9]` rather than `\w`, same reasoning and same
+# issue (#111) as IPV4_RE above, and leading-only for the same reason:
+# FQDN_RE's label characters never include `_` (DNS labels can't), so an
+# underscore directly before the match start cannot be continuing the
+# hostname — it is a separator (an environment-variable-style name prefixed
+# straight onto a hostname, with no space), and the old `\w` guard swallowed
+# the whole hostname by reading that underscore as "more token".
+#
+# The TRAILING guard stays `\w` (still blocks `_`): narrowing it too matched
+# a real, unmodified line inside this repo's own `.editorconfig` as a
+# complete FQDN — a dotted key ending in one of `SUSPICIOUS_TLDS`, followed
+# immediately by another underscore-joined identifier segment, because that
+# TLD word followed by "_" would no longer be read as a continuation of the
+# same key. On the trailing side `_` means MORE of the word that was just
+# matched, not a boundary — see EditorconfigRegressionTests for the pinned
+# case (built from the same naming convention rather than quoting the real
+# file, so this comment carries no matchable literal of its own either).
+#
+# The `-` guards stay exactly as they were: this is the narrow,
+# underscore-only fix, not the dash-adjacency question that IPV4_RE resolves
+# separately (a "range" of two hostnames isn't a shape this repo's content
+# has ever produced, so there is nothing here for the dash-glue mechanism to
+# be load-bearing against — see the PR body for what that means for the two
+# remaining dash-adjacent FQDN shapes from the issue).
 FQDN_RE = re.compile(
-	r"(?<!\w)(?<!\.)(?<!-)"
+	r"(?<![A-Za-z0-9])(?<!\.)(?<!-)"
 	r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
 	r"(?i:local|lan|home|corp|arpa|intra|lab|internal)"
 	r"(?!\w)(?!-)"
@@ -251,6 +381,76 @@ def is_placeholder_token(value: str) -> bool:
 	return any(marker in lowered for marker in PLACEHOLDER_MARKERS)
 
 
+# --- 4. IPv6 addresses (issue #112) ---------------------------------------
+#
+# No detector at all previously covered this address family. The hard part
+# here is not the policy (same "candidate real lab address" concept as IPv4)
+# but the regex: a naive hextet-and-colon pattern false-positives readily on
+# SHA hashes, base64, MAC addresses, CSS/hex colors, Windows drive paths, and
+# — the specific case named in the issue — timestamps (an hours:minutes:
+# seconds run is shape-identical to three short hextet groups).
+#
+# The approach: keep the regex loose (find any plausible run of hex digits,
+# colons, and an optional trailing dotted-quad for the IPv4-mapped form),
+# then let `ipaddress.IPv6Address` be the actual arbiter of validity, exactly
+# as `is_allowed_ip` already lets `ipaddress.ip_address` decide for IPv4.
+# That single check is what rejects the false-positive sources above without
+# hand-enumerating every non-address shape a regex would otherwise need to
+# reject:
+#   - a timestamp has too few groups and no "::" compression — a literal
+#     needs exactly 8 groups without it, so a 3-group HH:MM:SS run never
+#     parses;
+#   - a MAC address is 6 groups with no "::" — also short of the 8 groups a
+#     literal needs without compression, so it never parses either;
+#   - a SHA hash, base64 blob, CSS hex color, or a Windows drive-letter path
+#     carries at most one colon, so `candidate.count(":") < 2` in
+#     `scan_text` discards it before validation is even attempted.
+#
+# The bracketed alternative handles the URL form with a port (an address in
+# brackets with a `:<port>` suffix appended, RFC 3986 style); zone IDs (a
+# `%` followed by an interface name) are matched but stripped before
+# validation, since `ipaddress.IPv6Address` does not accept them.
+IPV6_RE = re.compile(
+	r"(?<![\w:.])"
+	r"(?:"
+	r"\[(?P<bracketed>[0-9A-Fa-f:]+(?:%[\w.-]+)?)\](?::\d+)?"
+	r"|"
+	r"(?P<bare>[0-9A-Fa-f:]+(?:\.\d{1,3}){0,3}(?:%[\w.-]+)?)"
+	r")"
+	r"(?![\w:.])"
+)
+
+# RFC 3849's documentation prefix (CLAUDE.md's IPv6 analogue of RFC 5737),
+# plus loopback and the unspecified address. The RFC 4291 link-local prefix
+# and the RFC 4193 unique-local prefix (the common case sets its 8th bit,
+# which is why lab addresses in that space so often start the same way) are
+# deliberately NOT here — those are exactly the lab-address shapes issue
+# #112 exists to catch, the IPv6 equivalent of RFC 1918 space being
+# unexempted for IPv4. (Same no-literal discipline as the IPv4/FQDN comments
+# above: this note names the RFCs rather than quoting the prefixes, since a
+# quoted prefix is itself an address-shaped string this scanner would catch.)
+ALLOWED_IPV6_NETWORKS = [
+	ipaddress.ip_network("2001:db8::/32"),
+]
+ALLOWED_IPV6_EXACT = {"::1", "::"}
+
+
+def is_allowed_ipv6(candidate: str) -> bool:
+	"""True if this is a sanctioned IPv6 address, or not a valid literal at all.
+
+	Mirrors is_allowed_ip(): a span that fails strict IPv6 parsing is not the
+	lab address this check exists to catch, so it is not a finding either.
+	"""
+	zone_stripped = candidate.split("%", 1)[0]
+	if zone_stripped in ALLOWED_IPV6_EXACT:
+		return True
+	try:
+		addr = ipaddress.IPv6Address(zone_stripped)
+	except ValueError:
+		return True
+	return any(addr in net for net in ALLOWED_IPV6_NETWORKS)
+
+
 def list_tracked_files() -> list[Path]:
 	result = subprocess.run(
 		["git", "ls-files"],
@@ -274,6 +474,8 @@ def scan_text(rel: str, text: str) -> list[str]:
 		if CHECK_IP not in waived:
 			for match in IPV4_RE.finditer(line):
 				candidate = match.group(0)
+				if _dash_glues_to_non_address(line, match.start(), match.end()):
+					continue
 				if is_allowed_ip(candidate):
 					continue
 				if is_version_string(line, match.start()):
@@ -296,6 +498,16 @@ def scan_text(rel: str, text: str) -> list[str]:
 						f"{rel}:{lineno}: possible depot/entitlement token: "
 						f"{match.group(1)}=<redacted, {len(token)} chars>"
 					)
+		if CHECK_IPV6 not in waived:
+			for match in IPV6_RE.finditer(line):
+				candidate = match.group("bracketed") or match.group("bare")
+				if candidate is None or candidate.count(":") < 2:
+					continue
+				if is_allowed_ipv6(candidate):
+					continue
+				findings.append(
+					f"{rel}:{lineno}: possible IPv6 address literal: {match.group(0)}"
+				)
 	return findings
 
 
