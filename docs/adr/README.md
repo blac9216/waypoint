@@ -3,6 +3,26 @@
 Short, numbered records of decisions that shape Waypoint. Once **Accepted**, an ADR is
 not rewritten — a new ADR supersedes it and both note the relationship.
 
+## Amending an accepted ADR
+
+"Not rewritten" governs the **Context** and **Decision** sections. Those record what was
+decided and why; editing them falsifies history. If the decision itself changes,
+supersede it.
+
+**Consequences may be appended to.** A consequence is something you *learn* by living
+with a decision, so an accepted ADR that can never gain one goes stale by design — and
+superseding an ADR merely to record a discovered implication fills the log with noise
+that hides the real reversals.
+
+An append to Consequences must:
+
+- leave Context and Decision byte-identical;
+- record a consequence *of* the standing decision, never a new or narrowed one — if you
+  are writing "instead" or "no longer", you need a superseding ADR;
+- be attributable in the PR to the issue or person that established it. Do not cite a
+  reviewer as endorsing a convention unless they actually did: a reviewer raising a
+  question is not a reviewer answering it.
+
 | # | Decision | Status |
 |---|---|---|
 | [0001](0001-packaging.md) | Docker Compose first; optional OVA wrapper later | Accepted |
