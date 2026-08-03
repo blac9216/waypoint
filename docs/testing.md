@@ -98,6 +98,30 @@ Then confirm what is actually running is yours:
 docker ps --format '{{.Names}}\t{{.Ports}}'
 ```
 
+### `up -d` returning does not mean healthy
+
+`docker compose up -d` returns once containers are *created*, not once they pass a
+healthcheck. nginx here has `start_period: 5s` and `interval: 10s`, so a `docker ps`
+on the very next line reports `health: starting` and an assertion on `healthy` fails
+against a stack that is completely fine three seconds later.
+
+The same shape bites `docker run -d` plus nginx's `resolver … valid=10s`: the
+container exists, but nginx is still dialing the previous address, so your first
+request 502s. Both defects are invisible if you run the commands by hand — typing
+supplies the delay — and appear the moment a reviewer pastes the block. Wait for the
+condition, bounded, rather than sleeping a guessed interval:
+
+```bash
+for _ in $(seq 60); do
+  [ "$(docker inspect -f '{{.State.Health.Status}}' wp-$SLUG-nginx 2>/dev/null)" = healthy ] && break
+  sleep 1
+done
+```
+
+Then run every command block you are going to publish **as a pasted block**, not line
+by line. A step that only works at human typing speed is a step that fails for
+everyone who trusts it.
+
 ## Rules of engagement with other stacks
 
 - **Look before you start.** `docker ps` first. Containers you did not create belong
