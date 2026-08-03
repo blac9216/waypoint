@@ -394,7 +394,7 @@ have repeatedly caught real defects no CI run could have seen:
   stopped detecting. Running the scanner against a clean tree proves the absence of
   findings, never the presence of detection — the same asymmetry that let the
   frontend air-gap guard fail open three times. That is why `sanitize` runs
-  `test_scan_repo_specific.py` (97 assertions covering all four detectors, their
+  `test_scan_repo_specific.py` (99 assertions covering all four detectors, their
   case handling, the IPv4/FQDN dash- and underscore-adjacency narrowing from
   issue #111, the padding-width independence from #119, both allowlist paths,
   the exit codes, and the documented false-positive exemptions) before it

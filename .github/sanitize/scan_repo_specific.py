@@ -442,8 +442,6 @@ def is_placeholder_token(value: str) -> bool:
 #
 #   trailing (?!\w)            - a letter/digit/underscore glued on is more of
 #                                the same token, not an address boundary.
-#   trailing (?!:)             - unreachable after a greedy hex/colon run, kept
-#                                so the intent is stated rather than inferred.
 #   trailing (?!\.[A-Za-z0-9]) - a `.` that CONTINUES the token (the dotted
 #                                quad of the IPv4-mapped form) still rejects;
 #                                a `.` that ends a sentence does not.
@@ -458,6 +456,21 @@ def is_placeholder_token(value: str) -> bool:
 # IPV4_RE (whose leading guard has never rejected `:`). Dropping them cannot
 # resurrect a mid-run match, because matches are non-overlapping and the
 # leftmost one greedily consumes the whole hex/colon run.
+#
+# There is deliberately NO trailing `(?!:)`. It looks like a free statement of
+# intent — the hex/colon class is greedy, so after a bare run the next
+# character can never be a colon anyway — but it is not free: when the match
+# ends in the IPv4-mapped dotted quad or a zone id, a following `:port` DOES
+# reach it, and the guard then rejects the whole match instead of ending it.
+# The IPv4-mapped form written with a port lost its IPv6 finding that way, and
+# the loss was easy to miss because the IPv4 detector still fired on the
+# embedded quad, so the line was not silent. (Spelled out in prose rather than
+# as an example: this scanner reads its own source like any other tracked file,
+# and the mapped-form prefix is itself a valid literal — the same reason the
+# IPv4 and FQDN comments above carry no address-shaped literal either. The
+# concrete case is pinned in IPv6DetectorTests.) A delimiter colon is handled
+# by _trim_delimiter_colons() below, which is where the "a colon next to a
+# literal is not part of it" rule belongs.
 IPV6_RE = re.compile(
 	r"(?<![A-Za-z0-9])"
 	r"(?:"
@@ -466,7 +479,6 @@ IPV6_RE = re.compile(
 	r"(?P<bare>[0-9A-Fa-f:]+(?:\.\d{1,3}){0,3}(?:%[\w.-]+)?)"
 	r")"
 	r"(?!\w)"
-	r"(?!:)"
 	r"(?!\.[A-Za-z0-9])"
 )
 

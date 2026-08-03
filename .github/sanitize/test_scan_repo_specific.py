@@ -965,6 +965,31 @@ class IPv6DetectorTests(unittest.TestCase):
 		self.assertEqual(scanner.scan_text("f.md", f"bind {OK_IPV6_UNSPECIFIED}"), [])
 		self.assertEqual(scanner.scan_text("f.md", f"lo {OK_IPV6_LOOPBACK}"), [])
 
+	def test_mapped_form_with_a_port_is_still_flagged(self) -> None:
+		"""A trailing `:port` must end the match, not reject it.
+
+		`IPV6_RE` briefly carried a trailing "not followed by a colon" guard,
+		on the reasoning that a greedy hex/colon run can never be followed by
+		a colon anyway. That is true only until the match ends in the
+		IPv4-mapped dotted quad (or a zone id), where a `:port` does reach the
+		guard — and rejecting the match there loses the IPv6 finding entirely.
+		The loss was quiet because the IPv4 detector still fired on the
+		embedded quad, so the line was not silent, just under-reported.
+		"""
+		mapped = ipv6("", "", "ffff", LAB_IP)
+		findings = scanner.scan_text("f.md", f"legacy {mapped}:8080")
+		self.assertEqual(len(findings), 2, findings)
+		self.assertTrue(any("IPv6 address literal" in f for f in findings), findings)
+
+	def test_bare_literal_with_a_port_is_flagged(self) -> None:
+		"""The unbracketed `address:port` shape, which is genuinely ambiguous.
+
+		The port digits are hex-legal, so they join the literal; that still
+		resolves to a unique-local address and is still a finding.
+		"""
+		findings = scanner.scan_text("f.md", f"host {LAB_IPV6}:8080")
+		self.assertEqual(len(findings), 1, findings)
+
 	def test_ipv6_check_is_individually_waivable(self) -> None:
 		self.assertEqual(len(scanner.scan_text("f.md", LAB_IPV6)), 1)
 		scanner.ALLOWLIST_FINDINGS["f.md"] = {scanner.CHECK_IPV6: "test"}
