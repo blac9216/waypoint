@@ -591,6 +591,33 @@ If you could not build the backend image at all, say so under
 bring-up as passing when the backend never started, and do not attribute the
 failure to the PR under review.
 
+## A green local build is not evidence that CI is green
+
+The sandbox and CI run **different .NET SDK patch versions** — 8.0.129 locally at the
+time of writing, 8.0.423 in CI. `Directory.Build.props` sets `AnalysisLevel=latest`,
+and "latest" resolves to whatever the *running* SDK ships, so a newer CI SDK enables
+analyzer rules the local one has never heard of.
+
+This is not hypothetical: a PR passed `dotnet build -warnaserror` locally and went red
+in CI on `CA1873` at a `[LoggerMessage]` call site. Nothing was wrong with the local
+run; it simply could not see the rule.
+
+So:
+
+- **Read CI's per-step conclusions from the job log**, not just the overall check
+  colour, and not just the first failure. When a new rule fires, it usually fires in
+  more than one place — audit every call site of the pattern CI flagged rather than
+  fixing only the line it happened to reach first.
+- **Post the PR body after CI has run**, not before. Otherwise the red check is
+  public and the body describes a state that never existed.
+- Do not "fix" this by pinning `AnalysisLevel` down or adding a `global.json` to make
+  the sandbox match — chasing the local SDK would silence rules the shipped build is
+  actually held to. The asymmetry is fine; assuming it away is not.
+
+The general form of this trap is worth remembering beyond .NET: **any tool whose
+behaviour depends on its own version can disagree between here and CI.** A local pass
+is evidence about the local toolchain.
+
 ## Per-component test suites
 
 The stack-level contract is above. Each component owns its own suite and documents it
