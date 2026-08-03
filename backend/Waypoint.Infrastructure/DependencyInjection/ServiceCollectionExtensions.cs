@@ -14,20 +14,29 @@
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Waypoint.Core.Auth;
 using Waypoint.Core.Configuration;
 using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Auth;
+using Waypoint.Infrastructure.Data;
 
 namespace Waypoint.Infrastructure.DependencyInjection;
 
 /// <summary>
-/// Composition-root entry point for everything this project provides. Deliberately DI
-/// wiring only at this milestone (issue #3) — EF Core / Postgres access lands with the
-/// schema in issue #4; PowerShell runspace hosting lands with the job engine.
+/// Composition-root entry point for everything this project provides. Postgres access
+/// lands with the schema (issue #4) as a small raw-SQL migrations pipeline
+/// (<see cref="ISchemaMigrator"/>), not an ORM — see that type's doc comment for why.
+/// PowerShell runspace hosting lands with the job engine.
 /// </summary>
 public static class ServiceCollectionExtensions
 {
+	/// <summary>
+	/// The standard ASP.NET Core connection-string slot this project reads the
+	/// database connection from (<c>ConnectionStrings:Waypoint</c>).
+	/// </summary>
+	public const string ConnectionStringName = "Waypoint";
+
 	public static IServiceCollection AddWaypointInfrastructure(this IServiceCollection services, IConfiguration configuration)
 	{
 		services.AddOptions<LocalAuthOptions>()
@@ -36,10 +45,21 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<WaypointBuildOptions>()
 			.Bind(configuration.GetSection(WaypointBuildOptions.SectionName));
 
+		services.AddOptions<WaypointDatabaseOptions>()
+			.Bind(configuration.GetSection(WaypointDatabaseOptions.SectionName));
+
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
 		// Placeholder scrubber (issue #6 supplies the real one) — see ISecretRedactor.
 		services.AddSingleton<ISecretRedactor, NoOpSecretRedactor>();
+
+		string? connectionString = configuration.GetConnectionString(ConnectionStringName);
+		if (!string.IsNullOrWhiteSpace(connectionString))
+		{
+			services.AddSingleton<ISchemaMigrator>(serviceProvider => new NpgsqlSchemaMigrator(
+				connectionString,
+				serviceProvider.GetRequiredService<ILogger<NpgsqlSchemaMigrator>>()));
+		}
 
 		return services;
 	}

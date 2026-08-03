@@ -1,0 +1,272 @@
+// Copyright 2026 Justin Black
+//
+// Licensed under the Apache License, Version 2.0 (the "License").
+// You may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System.Reflection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
+using Waypoint.Infrastructure.Data;
+using Xunit;
+
+namespace Waypoint.Tests.Infrastructure.Postgres;
+
+/// <summary>
+/// Runs the real migrations pipeline against a real, disposable PostgreSQL 16
+/// container (see <see cref="PostgresFixture"/>) — the acceptance criteria this
+/// covers only mean something proven against the real engine (partial indexes,
+/// advisory locks, <c>CREATE OR REPLACE TRIGGER</c> are all Postgres-specific and
+/// have no meaningful fake).
+/// </summary>
+[Collection("Postgres")]
+public sealed class SchemaMigrationTests
+{
+	private static readonly string[] ExpectedTables =
+	[
+		"credentials",
+		"credential_secrets",
+		"runs",
+		"jobs",
+		"job_events",
+		"depot_artifacts",
+		"downloads",
+		"audit_log",
+		"appliance_state",
+		"schema_migrations"
+	];
+
+	private readonly PostgresFixture _fixture;
+
+	public SchemaMigrationTests(PostgresFixture fixture)
+	{
+		_fixture = fixture;
+	}
+
+	/// <summary>
+	/// The core acceptance criterion, proven in one deterministic sequence rather than
+	/// as separately-ordered [Fact]s (xUnit does not guarantee inter-test ordering):
+	/// (1) applying to a genuinely fresh database creates the full M1 schema; (2)
+	/// re-running the migrator against that now-migrated database is a no-op via the
+	/// schema_migrations tracking table; (3) re-running the embedded migration SQL
+	/// directly — bypassing the tracking table entirely — is *also* a no-op, proving
+	/// the SQL itself is idempotent (IF NOT EXISTS / OR REPLACE / ON CONFLICT), not
+	/// just the runner around it.
+	/// </summary>
+	[Fact]
+	public async Task Migrations_ApplyFreshThenReapplyBothViaRunnerAndRawSql_AreAllIdempotent()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+
+		// (1) Fresh apply.
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		foreach (string table in ExpectedTables)
+		{
+			Assert.True(await TableExistsAsync(connection, table), $"Expected table '{table}' to exist after a fresh migration.");
+		}
+
+		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM schema_migrations"));
+		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM appliance_state"));
+
+		// (2) Re-apply via the runner: schema_migrations already has this version, so
+		// this must be a pure no-op — not an error, not a second tracking row.
+		await migrator.ApplyAsync();
+		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM schema_migrations"));
+		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM appliance_state"));
+
+		foreach (string table in ExpectedTables)
+		{
+			Assert.True(await TableExistsAsync(connection, table));
+		}
+
+		// (3) Re-run the raw embedded SQL directly, bypassing the tracking table.
+		// If any statement lacked IF NOT EXISTS/OR REPLACE/ON CONFLICT this throws.
+		string sql = await ReadEmbeddedMigrationSqlAsync();
+		await using NpgsqlCommand rawReapply = new(sql, connection);
+		await rawReapply.ExecuteNonQueryAsync();
+
+		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM appliance_state"));
+	}
+
+	[Fact]
+	public async Task Migrations_QueueClaimIndex_ExistsAndIsPartial()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// The claim query is `WHERE state = 'queued' ORDER BY priority, created_at`;
+		// the index must both exist and carry that partial predicate, or the queue
+		// scans the whole table under load.
+		await using NpgsqlCommand command = new(
+			"SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_jobs_queue_claim'", connection);
+		object? indexDefinition = await command.ExecuteScalarAsync();
+
+		Assert.NotNull(indexDefinition);
+		Assert.Contains("WHERE (state = 'queued'::text)", (string)indexDefinition!, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// <c>seq</c> is assigned by <c>trg_job_events_assign_seq</c>, not by an identity
+	/// column, because the trigger has to take the ordering advisory lock *before* the
+	/// value is drawn (identity defaults are evaluated before BEFORE-row triggers run).
+	/// Two things must therefore hold: the trigger is installed as a row-level
+	/// <c>BEFORE INSERT</c> trigger, and a client-supplied <c>seq</c> is discarded — the
+	/// server is the only assigner, exactly as <c>GENERATED ALWAYS</c> guaranteed before.
+	/// <see cref="JobEventsSeqTests"/> proves the ordering property the trigger exists for.
+	/// </summary>
+	[Fact]
+	public async Task Migrations_JobEventsSeq_IsServerAssignedByTheOrderingTrigger()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using (NpgsqlCommand triggerQuery = new(
+			"""
+			SELECT action_timing, event_manipulation, action_orientation
+			FROM information_schema.triggers
+			WHERE event_object_table = 'job_events' AND trigger_name = 'trg_job_events_assign_seq'
+			""", connection))
+		{
+			await using NpgsqlDataReader reader = await triggerQuery.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync(), "trg_job_events_assign_seq is not installed on job_events.");
+			Assert.Equal("BEFORE", reader.GetString(0));
+			Assert.Equal("INSERT", reader.GetString(1));
+			Assert.Equal("ROW", reader.GetString(2));
+		}
+
+		// A client-supplied seq must be overwritten by the server-assigned one; if it
+		// were not, a writer could hand itself a value outside the commit ordering.
+		await using NpgsqlCommand seedJob = new(
+			"INSERT INTO jobs (job_type, priority, state) VALUES ('catalog-index', 1, 'running') RETURNING id",
+			connection);
+		Guid jobId = (Guid)(await seedJob.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand insertEvent = new(
+			"""
+			INSERT INTO job_events (seq, job_id, event_type)
+			VALUES (9223372036854775807, $1, 'job.log')
+			RETURNING seq
+			""", connection);
+		insertEvent.Parameters.AddWithValue(jobId);
+
+		Assert.NotEqual(long.MaxValue, (long)(await insertEvent.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// The migrator's observability is a claim <c>backend/README.md</c> makes and startup
+	/// diagnosis depends on: an operator staring at a slow boot needs to see which
+	/// migration is running. Asserted against a genuinely fresh database created for this
+	/// test, so the fresh-apply path is deterministic rather than dependent on which test
+	/// class in the shared "Postgres" collection happened to run first.
+	/// </summary>
+	[Fact]
+	public async Task Migrations_LogWhichVersionTheyApply_ThenLogSkippingItOnReapply()
+	{
+		string connectionString = await CreateFreshDatabaseAsync();
+		CollectingLogger logger = new();
+		NpgsqlSchemaMigrator migrator = new(connectionString, logger);
+
+		await migrator.ApplyAsync();
+
+		Assert.Contains(logger.Messages, message => message == "Applying migration 0001_initial_schema");
+		Assert.Contains(logger.Messages, message => message == "Applied migration 0001_initial_schema");
+
+		logger.Messages.Clear();
+		await migrator.ApplyAsync();
+
+		Assert.Contains(logger.Messages, message => message == "Migration 0001_initial_schema already applied, skipping");
+		Assert.DoesNotContain(logger.Messages, message => message.StartsWith("Applying migration", StringComparison.Ordinal));
+	}
+
+	/// <summary>
+	/// Creates an empty database on the fixture's server and returns a connection string
+	/// for it, so a test can exercise the fresh-apply path independently of the shared
+	/// database every other test in the collection migrates.
+	/// </summary>
+	private async Task<string> CreateFreshDatabaseAsync()
+	{
+		string databaseName = $"waypoint_fresh_{Guid.NewGuid():N}";
+
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand command = new($"CREATE DATABASE {databaseName}", connection);
+			await command.ExecuteNonQueryAsync();
+		}
+
+		return new NpgsqlConnectionStringBuilder(_fixture.ConnectionString) { Database = databaseName }.ToString();
+	}
+
+	private static async Task<bool> TableExistsAsync(NpgsqlConnection connection, string tableName)
+	{
+		await using NpgsqlCommand command = new(
+			"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)",
+			connection);
+		command.Parameters.AddWithValue(tableName);
+		return (bool)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<long> CountAsync(NpgsqlConnection connection, string sql)
+	{
+		await using NpgsqlCommand command = new(sql, connection);
+		return (long)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<string> ReadEmbeddedMigrationSqlAsync()
+	{
+		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
+		string resourceName = assembly.GetManifestResourceNames()
+			.Single(name => name.Contains(".Migrations.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal));
+
+		await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+		using StreamReader reader = new(stream);
+		return await reader.ReadToEndAsync();
+	}
+
+	/// <summary>
+	/// An <see cref="ILogger{TCategoryName}"/> that is enabled at every level and keeps the
+	/// formatted messages, so a test can assert on what the migrator actually logged.
+	/// <see cref="Microsoft.Extensions.Logging.Abstractions.NullLogger{T}"/> reports
+	/// <see cref="ILogger.IsEnabled"/> as <c>false</c>, which silently short-circuits the
+	/// <c>[LoggerMessage]</c>-generated methods before they format anything.
+	/// </summary>
+	private sealed class CollectingLogger : ILogger<NpgsqlSchemaMigrator>
+	{
+		public List<string> Messages { get; } = [];
+
+		public IDisposable? BeginScope<TState>(TState state)
+			where TState : notnull => null;
+
+		public bool IsEnabled(LogLevel logLevel) => true;
+
+		public void Log<TState>(
+			LogLevel logLevel,
+			EventId eventId,
+			TState state,
+			Exception? exception,
+			Func<TState, Exception?, string> formatter)
+		{
+			ArgumentNullException.ThrowIfNull(formatter);
+			Messages.Add(formatter(state, exception));
+		}
+	}
+}
