@@ -17,24 +17,30 @@ import { ROLE_ORDER, type Role } from "./roles";
  * persisted session on refresh).
  *
  * The two interfaces below are those responses exactly as the server sends
- * them, and `role` is typed `unknown` on both — deliberately, not for want
- * of a better type. `apiFetch<T>` casts parsed JSON straight to `T` without
- * inspecting it, so `role: Role` would not be a fact the compiler checked;
- * it would be an assertion about a value the network controls, and
- * TypeScript would then cheerfully let it flow into the app unvalidated.
- * `unknown` makes the compiler *require* the narrowing in `toRole()` below,
- * so the wire path cannot drift back to being laxer than the
+ * them, and **every field is typed `unknown`** — deliberately, not for want
+ * of better types. `apiFetch<T>` casts parsed JSON straight to `T` without
+ * inspecting it, so `token: string` or `role: Role` would not be facts the
+ * compiler checked; they would be assertions about values the network
+ * controls, and TypeScript would then cheerfully let them flow into the app
+ * unvalidated. `unknown` makes the compiler *require* the narrowing helpers
+ * below, so the wire path cannot drift back to being laxer than the
  * `sessionStorage` restore path — which is the asymmetry this file used to
  * have: strict where the network could not reach, absent where it could.
+ *
+ * It is all-or-nothing on purpose. A mixed interface — some fields narrowed,
+ * some asserted — leaves the next reader no way to tell which is which, and
+ * that ambiguity is what produced this bug in the first place. If a field is
+ * listed here, assume nothing about it until it has been through a narrowing
+ * helper.
  */
 interface LoginResponseWire {
-	token: string;
+	token: unknown;
 	role: unknown;
-	expires_at: string;
+	expires_at: unknown;
 }
 
 interface CurrentUserResponseWire {
-	username: string;
+	username: unknown;
 	role: unknown;
 }
 
@@ -103,6 +109,66 @@ function toRole(value: unknown, source: string): Role {
 		);
 	}
 	return value;
+}
+
+/**
+ * Narrow a wire field to a usable non-empty string, or refuse the sign-in.
+ *
+ * "Usable" is the bar, not merely "a string": a `token` of `""` produces a
+ * session that looks valid, attaches no usable credential, and only unwinds
+ * when some later request happens to 401 — a half-accepted state, which is
+ * the thing this module is meant to stop producing. Whitespace-only is
+ * rejected for the same reason it would be for a token: it is not a
+ * credential, and for `username` it renders as a blank name in the top bar.
+ *
+ * As with `toRole()`, the rejected value rides in `detail` rather than the
+ * user-facing `message` (server-controlled text, unbounded length).
+ *
+ * Note this deliberately does **not** touch `readStoredSession()`. The
+ * restore path's acceptance of empty strings is tracked separately in #98
+ * and stays there; this is the wire path only.
+ */
+function toWireText(value: unknown, field: string, source: string): string {
+	if (typeof value !== "string" || value.trim() === "") {
+		throw new ApiError(
+			200,
+			"invalid_field",
+			`${source} returned an unusable ${field} (missing or empty), so the sign-in was refused.`,
+			{ source, field, received: value },
+		);
+	}
+	return value;
+}
+
+/**
+ * Narrow a wire timestamp to a string that actually denotes an instant.
+ *
+ * The bar is "parses to a finite time", nothing stricter. In particular this
+ * does **not** require the expiry to be in the future: the server is
+ * authoritative for session lifetime, and the client's clock may legitimately
+ * be skewed, so rejecting a freshly-issued token because the local clock runs
+ * fast would break login for a problem the client cannot diagnose. An expiry
+ * already in the past is handled where it belongs — `readStoredSession()`
+ * declines to restore it.
+ *
+ * What this does stop is an `expires_at` that is not a parseable instant at
+ * all. Left unchecked, `Date.parse` yields `NaN`, every `NaN <= now`
+ * comparison is false, so the session is persisted as though it were valid
+ * and is then rejected on the *next* restore — the login succeeds and the
+ * refresh signs the user out. Same failure shape as an unrecognized role,
+ * one field over.
+ */
+function toWireInstant(value: unknown, field: string, source: string): string {
+	const text = toWireText(value, field, source);
+	if (!Number.isFinite(Date.parse(text))) {
+		throw new ApiError(
+			200,
+			"invalid_field",
+			`${source} returned an unusable ${field} (not a valid timestamp), so the sign-in was refused.`,
+			{ source, field, received: value },
+		);
+	}
+	return text;
 }
 
 function readStoredSession(): StoredSession | null {
@@ -188,6 +254,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				body: { username, password },
 				unauthenticated: true,
 			});
+			// Narrow the login response before any of it is used — in particular
+			// before `token` is presented as a credential. Sending a bearer
+			// header built from an unvalidated value would spend a round trip to
+			// learn something already knowable here.
+			const token = toWireText(loginResponse.token, "token", "POST /auth/login");
+			const expiresAt = toWireInstant(loginResponse.expires_at, "expires_at", "POST /auth/login");
 			// The login response carries no identity, only a token + role — fetch
 			// `/auth/me` with the just-issued token (not yet reflected by
 			// `getToken()`'s state closure, so it's attached explicitly here)
@@ -195,8 +267,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			const me = await apiFetch<CurrentUserResponseWire>("/auth/me", {
 				method: "GET",
 				unauthenticated: true,
-				headers: { Authorization: `Bearer ${loginResponse.token}` },
+				headers: { Authorization: `Bearer ${token}` },
 			});
+			// Named `meUsername`, not `username`: this block already has a
+			// `username` parameter, and a same-block `const username` would put
+			// the earlier `body: { username, password }` into the temporal dead
+			// zone — a ReferenceError on every login.
+			const meUsername = toWireText(me.username, "username", "GET /auth/me");
 			// Both wire roles are narrowed before either is trusted. `/auth/me`
 			// returns a role as well, and it used to be fetched and silently
 			// discarded — which meant the server's two views of this one session
@@ -225,11 +302,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 					{ login: loginRole, me: meRole },
 				);
 			}
+			// Every field is a narrowed local, not a wire property — so this
+			// object cannot be assembled at all unless the whole response
+			// validated.
 			const next: StoredSession = {
-				token: loginResponse.token,
-				username: me.username,
+				token,
+				username: meUsername,
 				role: loginRole,
-				expiresAt: loginResponse.expires_at,
+				expiresAt,
 			};
 			setSession(next);
 			setStatus("signed-in");

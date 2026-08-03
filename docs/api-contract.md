@@ -64,6 +64,15 @@ divergence is refused too (neither is treated as overriding the other). This is 
 requirement on the client, not a second server-side guard — the API remains the
 enforcement point for every actual permission (see Conventions).
 
+The same holds for the other fields these endpoints return: `token` and `username`
+must be present and non-empty, and `expires_at` must parse to a real instant. A
+client that accepts a response missing any of them builds a session that looks valid
+and comes apart later — an empty token authenticates nothing until some request
+`401`s, and an unparseable `expires_at` compares false against every expiry check, so
+the session survives login only to be rejected on the next restore. Reject the whole
+response instead. This is a rule about *responses*; how a client validates a session
+it has already stored is its own business.
+
 **What #29 (Keycloak) changes, and what it doesn't.** `POST /auth/login` is the
 dev-grade local-auth stand-in the ADR-0004 rollout note describes and is expected to
 disappear outright, replaced by Keycloak's OIDC authorization-code/token endpoints —

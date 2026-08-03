@@ -329,3 +329,154 @@ describe("AuthProvider wire-path role validation (issue #64 — fail closed on a
 		expect(window.sessionStorage.getItem(STORAGE_KEY)).toContain('"role":"Cyber"');
 	});
 });
+
+/**
+ * Wire-path validation of the remaining session fields (PR #93 round 3).
+ *
+ * `role` was hardened first; `token`, `expires_at` and `username` were still
+ * unchecked casts in the same function. Leaving them that way meant the next
+ * reader could not tell which fields in `LoginResponseWire` were guaranteed and
+ * which were merely asserted — the ambiguity that produced this bug originally.
+ * These cases pin the same fail-closed treatment for all of them.
+ *
+ * Scope note: none of this touches `readStoredSession()`. The restore path's
+ * looser handling of empty strings and odd date formats is #98 and stays there.
+ */
+describe("AuthProvider wire-path field validation (issue #64 — token, expires_at, username)", () => {
+	let originalFetch: typeof fetch;
+	const futureExpiry = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
+	const goodMe = { username: "admin", role: "Admin" };
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		window.sessionStorage.clear();
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	async function attemptLogin(loginBody: unknown, meBody: unknown) {
+		mockAuthFetch(loginBody, meBody);
+		render(
+			<AuthProvider>
+				<LoginTrigger />
+				<Probe />
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+		screen.getByText("go").click();
+	}
+
+	async function expectRefused() {
+		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	}
+
+	it.each([
+		["empty string", ""],
+		["whitespace only", "   "],
+		["a number", 12345],
+		["null", null],
+		["an object", { value: "tok" }],
+	])("refuses a login whose token is %s", async (_label, token) => {
+		// An empty/unusable token is the classic half-accepted session: it looks
+		// signed in, carries no usable credential, and only unwinds when some
+		// later request happens to 401.
+		await attemptLogin({ token, role: "Admin", expires_at: futureExpiry() }, goodMe);
+		await expectRefused();
+	});
+
+	it("refuses a login when token is absent entirely", async () => {
+		await attemptLogin({ role: "Admin", expires_at: futureExpiry() }, goodMe);
+		await expectRefused();
+	});
+
+	it.each([
+		["not a parseable date", "whenever"],
+		["an empty string", ""],
+		["a number", 1767225600000],
+		["null", null],
+	])("refuses a login whose expires_at is %s", async (_label, expires_at) => {
+		// Unchecked, Date.parse gives NaN, every `NaN <= now` test is false, the
+		// session is persisted as if valid, and the *next* restore rejects it —
+		// login succeeds, refresh signs you out.
+		await attemptLogin({ token: "tok", role: "Admin", expires_at }, goodMe);
+		await expectRefused();
+	});
+
+	it("refuses a login when expires_at is absent entirely", async () => {
+		await attemptLogin({ token: "tok", role: "Admin" }, goodMe);
+		await expectRefused();
+	});
+
+	it("still accepts an already-past expires_at from the wire (clock skew is the server's call)", async () => {
+		// Deliberately NOT rejected here: the server owns session lifetime and the
+		// client's clock may be skewed. Expiry is enforced on restore instead, so
+		// this signs in now and is declined by readStoredSession() later.
+		await attemptLogin(
+			{ token: "tok-past", role: "Admin", expires_at: new Date(Date.now() - 60_000).toISOString() },
+			goodMe,
+		);
+		await waitFor(() => expect(screen.getByText("signed in as admin (Admin) token=tok-past")).toBeInTheDocument());
+	});
+
+	it.each([
+		["empty string", ""],
+		["whitespace only", "  "],
+		["a number", 7],
+		["null", null],
+	])("refuses a login whose /auth/me username is %s", async (_label, username) => {
+		await attemptLogin({ token: "tok", role: "Admin", expires_at: futureExpiry() }, { username, role: "Admin" });
+		await expectRefused();
+	});
+
+	it("names the offending endpoint and field without echoing the rejected value", async () => {
+		function ErrorProbe() {
+			const { error } = useAuth();
+			return <div data-testid="err">{error ?? "none"}</div>;
+		}
+		mockAuthFetch({ token: "sekrit-looking-garbage", role: "Admin", expires_at: "not-a-date" }, goodMe);
+		render(
+			<AuthProvider>
+				<LoginTrigger />
+				<ErrorProbe />
+			</AuthProvider>,
+		);
+		screen.getByText("go").click();
+
+		await waitFor(() => expect(screen.getByTestId("err")).not.toHaveTextContent("none"));
+		const message = screen.getByTestId("err").textContent ?? "";
+		expect(message).toContain("/auth/login");
+		expect(message).toContain("expires_at");
+		expect(message).not.toContain("not-a-date");
+	});
+
+	it("does not present an unvalidated token as a bearer credential", async () => {
+		// The token is narrowed before /auth/me is called, so a malformed one
+		// costs no round trip and is never put in an Authorization header.
+		const calls: string[] = [];
+		globalThis.fetch = vi.fn(async (url: string) => {
+			calls.push(url);
+			if (url === "/api/v1/auth/login") {
+				return new Response(JSON.stringify({ token: "", role: "Admin", expires_at: futureExpiry() }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as unknown as typeof fetch;
+
+		render(
+			<AuthProvider>
+				<LoginTrigger />
+				<Probe />
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+		screen.getByText("go").click();
+
+		await waitFor(() => expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull());
+		expect(calls).toEqual(["/api/v1/auth/login"]);
+	});
+});
