@@ -1946,6 +1946,77 @@ class MidRunMatchTests(unittest.TestCase):
 					self.assertEqual(len(findings), 1, (text, findings))
 					self.assertIn(address, findings[0])
 
+	def test_a_numeric_hostname_suffix_does_not_widen_into_the_reported_token(
+		self,
+	) -> None:
+		"""Issue #133: `_widest_address_start()` must not accept a span that
+		only parses because `_ipv6_address_of()`'s port retry drops one of the
+		address's OWN trailing groups.
+
+		`node99:<full address>` re-anchored onto `de99:<full address minus its
+		own last group>` before this fix — `de99` is the tail of the hostname
+		`node99`, not part of any address on the line, and the "address" named
+		in the finding was not a string that actually appears there. The
+		FULLY-EXPANDED spelling is what makes this decidable: it needs
+		exactly 8 groups, so prepending a 9th (the hostname's numeric tail)
+		can ONLY parse via the retry that treats the address's own final group
+		as a discardable "port" — which is exactly what `_strict_ipv6_literal`
+		(no port retry) now refuses. Asserted as EXACT equality, not
+		`assertIn`, because a widened-too-far span is a real address SUBSTRING
+		of the correct report and `assertIn` would not have caught the bug.
+		"""
+		for label in ("esxi01", "esxi1", "node99", "vmnic5", "eth0"):
+			text = f"{label}:{LAB_IPV6_FULL}"
+			with self.subTest(text=text):
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, (text, findings))
+				reported = findings[0].rsplit(": ", 1)[1]
+				self.assertEqual(reported, LAB_IPV6_FULL, (text, findings))
+
+	def test_a_numeric_hostname_suffix_before_a_compressed_address_is_a_disclosed_residual(
+		self,
+	) -> None:
+		"""What issue #133's fix does NOT close, pinned rather than left silent.
+
+		A COMPRESSED address has slack a fully-expanded one does not: `"::"`
+		can absorb an extra explicit group without exceeding 8, so a
+		colon-delimited numeric hostname suffix (`esxi01:`, `node99:`, ...)
+		parses as a wider — different, but ALSO syntactically valid — address
+		with no port retry involved at all. This is not the #133 mechanism
+		(there is no port anywhere in these lines) and closing it would need
+		telling "a foreign, colon-delimited label" apart from "more of the
+		same address recovered after a guard rejection" using nothing but the
+		surrounding characters — which is genuinely impossible in general:
+		`X2001:db8::1` (MidRunMatchTests, doc-prefix recovery, wanted) and an
+		`esxi01:`-prefixed lab literal (this test, NOT wanted — see the cases
+		below, assembled rather than spelled out here for the same no-literal
+		reason this module's docstring states) are the identical shape one
+		level up — a single clean group-plus-colon sitting directly
+		before an already-independently-valid address — and widest-wins
+		correctly favours the FIRST case, which is why it cannot also refuse
+		the second. The line is still correctly flagged either way (the
+		invariant re-anchoring exists to protect); only the reported token's
+		span is imprecise here. Kept pinned, not silent, so a future change
+		either closes it deliberately or has to come edit this test.
+		"""
+		second = ipv6("fd00", "1a2b", "3c4d", "", "1")
+		cases = {
+			f"esxi01:{LAB_IPV6}": "01:" + LAB_IPV6,
+			f"esxi1:{LAB_IPV6}": "1:" + LAB_IPV6,
+			f"node99:{LAB_IPV6}": "de99:" + LAB_IPV6,
+			f"vmnic5:{second}": "c5:" + second,
+		}
+		for text, reported_today in cases.items():
+			with self.subTest(text=text):
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, (text, findings))
+				actual = findings[0].rsplit(": ", 1)[1]
+				self.assertEqual(actual, reported_today, (text, findings))
+				# The real address is still a substring of what is reported —
+				# the line is not silent, only wider than it should be.
+				address = text.split(":", 1)[1]
+				self.assertIn(address, actual, (text, findings))
+
 	def test_scope_resolution_syntax_is_not_re_anchored_into_an_address(self) -> None:
 		"""Re-anchoring must not CREATE a finding, only move or drop one.
 
