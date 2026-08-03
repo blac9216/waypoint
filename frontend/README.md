@@ -36,6 +36,8 @@ src/
                        prototype handoff) + global.css (reset, scrollbar, blip)
 scripts/
 ├── check-no-external-assets.mjs        # the air-gap guard (see below)
+├── compare-guard-matrix.mjs            # guard negative-control matrix vs. another revision
+├── verify-mode-guard-browser.mjs       # manual Chromium harness for the route guard
 └── gen-icons.py                          # regenerates public/icons/*.png
 vite-plugins/
 └── mock-backend.ts   # dev-server-only local-auth/system/events mock (see below)
@@ -83,82 +85,123 @@ allowlist (three inert strings baked into React/workbox-window — read the
 script's header comment). `npm run build` runs it automatically as the last
 step.
 
-**File selection is a denylist, deliberately.** Every file under `dist/` is
-scanned except a short list of known-binary extensions (images, fonts,
-`.wasm`). It is not an allowlist of "text" extensions: that shape silently
-exempts every file type nobody thought of — `.mjs`, `.cjs`, `.xml`, and
-anything with no extension at all — and `public/` is copied verbatim into
-`dist/` with whatever names it contains, so an allowlist means a newly
-emitted file type ships unchecked until someone notices. A guard that fails
-open is worse than no guard (ADR-0007 makes this a hard requirement, not a
-style preference). If a binary format ever trips a false positive, add its
-extension to `SKIPPED_BINARY_EXTENSIONS` with a reason.
+**File selection is an ALLOWLIST of what is scannable, not a denylist of what
+is opaque.** This is the important sentence about this script. A file passes
+only if it is one of two things:
 
-**Compressed artifacts fail the build outright — they are never treated as
-inert binary.** Compressed formats encode compressed *text*; scanning the
-compressed bytes as UTF-8 finds nothing (the guard would report a false "OK"
-while inspecting gibberish), which is worse than not scanning at all because
-it looks thorough. The current build emits none of these, so this costs
-nothing today; if a precompression step is ever added, the guard fails
-loudly instead of silently passing content it cannot inspect, forcing
-whoever adds it to either teach the script to decompress-and-scan
-(`node:zlib` has Brotli, gzip, and zstd built in) or accept the compressed
-output failing the build.
+- **scannable** — it decodes as valid UTF-8 and contains no NUL bytes. Those
+  are scanned for external references.
+- **a recognised binary asset** — its **magic bytes** match
+  `KNOWN_BINARY_SIGNATURES`, a short, explicitly justified allowlist of the
+  types a Vite `dist/` legitimately contains (PNG, JPEG, GIF, WebP, AVIF, ICO,
+  WOFF, WOFF2, OTF, TTF, TTC, WASM). Verified by content, never by filename.
+  Those are skipped from the opacity check — but their bytes are still scanned
+  for a *cleartext* URL, because a skip is a licence not to fail for being
+  unreadable, not a licence to ignore what is there.
 
-**Detection fails closed by union: magic bytes OR extension, either one
-alone.** A file is treated as compressed if `detectMagicByteFormat()` matches
-its header **or** its extension is on `COMPRESSED_EXTENSIONS`. Magic-byte
-detection may only ever *add* coverage; it can never take a file out of the
-fail-closed bucket that the extension list would have caught.
+**Everything else fails the build.** Unrecognised, undecodable, compressed,
+archived, UTF-16, truncated or ambiguous — all of it. There is no fallthrough
+bucket, so there is nothing for a novel format to fall through into.
 
-That rule is the lesson of four failures, not caution for its own sake. The
-first three were the extension-list model failing open: an allowlist that
-skipped `.mjs`/extensionless files (#65), compressed formats treated as inert
-binary (#77), and — even after #77 added a `.br`/`.gz`/`.zip` denylist — any
-format nobody had added to *that* list yet, such as `.zst`/`.xz`/`.7z`/`.lz4`
-(#81). The fourth was the fix for #81 *replacing* the list with content
-sniffing instead of adding to it, which took `.gz` and `.zip` off the
-fail-closed list and let three real shapes back through (PR #88 review).
+That inversion is the lesson of **five** fail-opens, and every earlier fix
+corrected the *list* or the *table*: an extension allowlist that skipped
+`.mjs`/extensionless files (#65); compressed artifacts parked on the
+known-binary skip list (#77); formats nobody had added to the `.br`/`.gz`/
+`.zip` denylist such as `.zst`/`.xz`/`.7z`/`.lz4` (#81); a fix for #81 that
+*replaced* the list with magic-byte sniffing instead of adding to it, taking
+`.gz`/`.zip` off the fail-closed list (PR #88 round 1); and then, with a
+magic-bytes-OR-extension union in place, `.Z`, lzop, lzip, RAR, zstd skippable
+frames and a `.tar` of compressed members walking past both halves (PR #88
+round 2).
 
-Both halves are load-bearing. Magic bytes catch what no list can enumerate:
-`detectMagicByteFormat()` sniffs gzip, zstd, xz, zip, 7z, lz4 and bzip2
-headers, so a compressed payload is caught no matter what it is named. The
-extension list catches what has no header to sniff — and **Brotli is not the
-only headerless format**: raw DEFLATE (RFC 1951) has no header at all, and
-zlib's (RFC 1950) two leading bytes are a checksum constraint rather than a
-fixed magic. All three are declared `vite-plugin-compression2` algorithms
-(`'gzip' | 'brotliCompress' | 'deflate' | 'deflateRaw' | 'zstandard'`), and
-that plugin's default output filename is `[path][base].gz` for everything
-except brotli and zstandard — so `algorithms: ['deflate']` emits a `.gz`
-holding a zlib stream with no gzip magic in it, which only the extension
-list can catch. Signature matching is also anchored at offset 0, so a stream
-behind a stray leading byte, or a real zip that opens `PK\x05\x06` instead of
-`PK\x03\x04`, likewise needs the name. Read the script's header comment
-before changing any of this.
+Five is not five unlucky omissions. **The set of opaque formats is unbounded;
+enumerating it can never converge.** So the question changed from "did we
+remember this compression format?" (infinite, and we kept losing) to "is this a
+text format we can actually scan, or a binary asset we explicitly recognise?"
+(finite, and closed). Under the new model `.Z`, lzop, RAR, `.tar`, a file named
+exactly `.gz`, and every format invented after this paragraph fail by default,
+without anyone having heard of them.
+
+**The escape hatch is a justified allowlist entry.** If a build genuinely
+starts emitting a new binary asset type, add its magic bytes and a written
+reason to `KNOWN_BINARY_SIGNATURES` — a deliberate, reviewable line in a diff,
+which is what an air-gap exemption should be. Two formats are deliberately
+absent and fail today: **BMP** (its whole signature is the two ASCII bytes
+`BM`, too weak to license a skip) and **EOT** (no signature at all).
+
+**Compressed-format detection still exists, as diagnostics only.**
+`detectCompressedFormat()` recognises gzip, zstd, xz, zip, 7z, lz4, bzip2,
+`.Z`, lzop, lzip, RAR, zstd skippable frames and tar so a failure message can
+say *"this looks like gzip"* instead of a bare "unscannable". It has no vote in
+the verdict: an unrecognised opaque file fails exactly the same way. The
+`COMPRESSED_EXTENSIONS` name list survives as a narrow **one-way veto** on the
+scan branch — a file *named* `.gz`/`.br`/… is never scanned even if its bytes
+decode cleanly — which can only ever add a failure, and covers the one residual
+the text test cannot: a compressed stream whose bytes coincidentally form valid
+UTF-8. It matches on the basename suffix rather than `extname()`, because
+`extname(".gz")` is the empty string and a file named exactly `.gz` would
+otherwise be invisible to it.
+
+**Why "valid UTF-8, no NUL bytes" is the right criterion.** Every format this
+guard has lost to fails it for reasons intrinsic to the format rather than to
+anyone's memory: gzip, zstd, xz, 7z, `.Z` and lzop all put an illegal UTF-8
+byte in their first two bytes; zip, RAR, tar and every length-prefixed
+container NUL-pad their headers; and brotli, raw DEFLATE and zlib — the three
+headerless `vite-plugin-compression2` algorithms that forced the old model to
+keep an extension list at all — produce high-entropy output that is not valid
+UTF-8 either. It also closes a hole no list ever addressed: UTF-16LE text
+carrying a CDN import, which the old model "scanned", found nothing in, and
+reported OK.
+
+**The residual, stated honestly.** Two things this model cannot see, and they
+are now the *only* two rather than an open-ended list:
+
+1. A file that decodes as clean UTF-8 and smuggles a reference past
+   `URL_PATTERN`, which matches only a contiguous literal scheme — string
+   concatenation, JS escapes, HTML entities, base64, a JSON-escaped
+   `https:\/\/`, or an uppercase `HTTPS://`. That is a property of the
+   *pattern*, not of file selection; tracked in **#110** (and **#105** for the
+   case-sensitivity subset), with the current behaviour pinned by a
+   "known residual" block in the test suite so it stays visible.
+2. A URL inside an allowlisted binary that is not present in cleartext (e.g. a
+   compressed PNG `zTXt` chunk). The cleartext byte-scan covers the
+   uncompressed case; the compressed-metadata case is accepted, because an
+   image cannot execute a fetch.
 
 The vendor URL allowlist's three entries are all `$`-anchored to the exact
 literal they justify, not prefix-matched — including the `bit.ly` shortlink,
-where the path is the resource identity and a prefix match would allowlist
-an arbitrary destination reachable through a different shortlink sharing the
-same prefix.
+where the path is the resource identity and a prefix match would allowlist an
+arbitrary destination reachable through a different shortlink sharing the same
+prefix.
 
 `scripts/check-no-external-assets.test.mjs` proves the guard actually fails on
-a deliberate violation — including one inside a `.mjs` chunk, one inside an
-extensionless file, one inside a `.map` source map, one inside a dotfile, one
-behind an uppercase extension, one behind a compressed artifact detected by
-magic bytes under an extension nobody put on any list, one behind a `.br`
-file caught only by its extension, and one behind a bit.ly shortlink that
-only shares the allowlisted prefix — the shapes the old allowlist and the
-issue #77/#81 holes let through. A dedicated block covers the union
-property: a zlib stream and a raw-DEFLATE stream named `bundle.js.gz`, an
-empty `PK\x05\x06` zip, and a gzip stream behind one leading byte all fail
-the build, and neither detection signal can veto the other.
+a deliberate violation — inside a `.mjs` chunk, an extensionless file, a `.map`
+source map, a dotfile, an uppercase-extension file, and a bit.ly shortlink that
+only shares the allowlisted prefix. Dedicated blocks cover the inverted model:
+the round-2 escapes (`.Z`, lzop, lzip, RAR, a zstd skippable frame, a `.tar` of
+compressed members, files named exactly `.gz` and `.br`), UTF-16LE text, random
+high-entropy bytes, and the property that the diagnostic table **cannot change
+a verdict**. Another block enforces that `scanDist` — the code path the CLI
+runs — routes every file through the single `classifyDistFile` predicate and
+re-derives nothing itself, structurally and by corpus-wide parity: round 1
+shipped a regression precisely because the property test asserted about a helper
+the CLI never called.
 
 Every compressed fixture is a realistic (~40 KB) bundle-shaped file, not a
-one-line one, and is asserted not to contain the URL in cleartext before it
-is used: a one-line fixture is caught by accident because these compressors
-store short literals raw, so the URL survives verbatim in the "compressed"
-output and a toy test would pass even against a broken guard.
+one-line one, and is asserted not to contain the URL in cleartext before it is
+used: a one-line fixture is caught by accident because these compressors store
+short literals raw, so the URL survives verbatim in the "compressed" output and
+a toy test would pass even against a broken guard.
+
+`scripts/compare-guard-matrix.mjs` runs a 46-case negative-control matrix
+against **two** revisions of the guard at once (this one and, by default,
+`origin/main`'s), and exits non-zero if the current guard fails to be a strict
+superset of the baseline — every shape the old guard stopped must still be
+stopped. It prints whether each fixture leaks the marker URL in cleartext, so a
+"caught" verdict that is really the scan branch stumbling over plaintext is
+visible rather than assumed. Two-revision comparison is the only way to see a
+regression like PR #88 round 1's, since each revision looks self-consistent on
+its own.
 
 `scripts/verify-mode-guard-browser.mjs` is the manual counterpart for the
 route guard (issues #78/#82): it drives a real Chromium against `vite dev`

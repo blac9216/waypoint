@@ -13,263 +13,461 @@
  * (CDN <script>/<link> tags, remote fonts/images, analytics beacons) uses an
  * explicit scheme in every toolchain in this stack.
  *
- * FILE SELECTION — fail closed, not open. Every file under dist/ is scanned
- * by default; only the extensions in SKIPPED_BINARY_EXTENSIONS below are
- * skipped. This is deliberately a denylist and not an allowlist: an
- * allowlist of "text" extensions silently exempts every file type nobody
- * thought of (`.mjs`, `.cjs`, `.xml`, and anything with no extension at
- * all), and `frontend/public/` is copied verbatim into `dist/` with
- * whatever names it contains — so an allowlist means a new emitted file
- * type ships unchecked until someone notices. A guard that fails open is
- * worse than no guard. The cost of the inversion is that a binary file not
- * on the denylist may decode to a byte sequence that looks like a URL and
- * fail the build; that is the safe direction to be wrong in, and the fix is
- * to add the extension here with a reason.
+ * ═══════════════════════════════════════════════════════════════════════════
+ * FILE SELECTION IS AN ALLOWLIST OF WHAT IS *SCANNABLE*, NOT A DENYLIST OF
+ * WHAT IS OPAQUE. This is the single most important thing about this file.
+ * ═══════════════════════════════════════════════════════════════════════════
  *
- * COMPRESSED ARTIFACTS — fail closed, not skip, and detected primarily by
- * MAGIC BYTES, not by extension. These are NOT on SKIPPED_BINARY_EXTENSIONS,
- * because they are not binary in the sense that word is used above:
- * compressed formats encode compressed *text*, and a URL living in that text
- * is exactly what this guard exists to find. Scanning the compressed bytes
- * as UTF-8 finds nothing (the match target is gone once compressed) while
- * reporting the same "OK" as a clean file — which is worse than not scanning
- * at all, because it *looks* thorough. So a compressed artifact is neither
- * scanned nor silently skipped: its mere presence in dist/ fails the build,
- * on the same "never silently pass content it cannot inspect" principle as
- * the denylist above.
+ * This guard has failed open five times, and every previous fix corrected the
+ * *list* or the *table*:
  *
- * THE DESIGN RULE — FAIL CLOSED BY UNION. A file is compressed/opaque if its
- * magic bytes match a known signature **OR** its extension is on
- * `COMPRESSED_EXTENSIONS`. Both signals are checked; either one is enough.
- * Magic-byte detection may only ever *add* coverage — it must never be able
- * to *remove* a file from the fail-closed bucket that the extension list
- * would have caught. This is not belt-and-braces caution, it is the lesson
- * of four failures, and the fourth is the one that motivates the wording:
- *
- *   1. issue #65 round 2 — an extension *allowlist* skipped `.mjs` and
- *      extensionless files.
- *   2. issue #77 — compressed artifacts sat on the known-binary skip list
- *      and were silently ignored.
+ *   1. issue #65 round 2 — an extension *allowlist* of "text" types silently
+ *      skipped `.mjs` and extensionless files.
+ *   2. issue #77 — compressed artifacts sat on the known-binary skip list and
+ *      were silently ignored.
  *   3. issue #81 — after #77 replaced that with a `.br`/`.gz`/`.zip`
- *      denylist, formats nobody had added to *that* list yet (`.zst`,
- *      `.xz`, `.7z`, `.lz4`, …) fell through to the default scan branch,
- *      decoded as UTF-8, matched nothing, and were reported as *scanned*.
+ *      denylist, formats nobody had added to *that* list yet (`.zst`, `.xz`,
+ *      `.7z`, `.lz4`, …) fell through to the scan branch, decoded as UTF-8,
+ *      matched nothing, and were reported as *scanned*.
  *   4. PR #88 round 1 — the fix for #81 *replaced* the extension list with
- *      magic-byte sniffing instead of *adding* to it. `.gz` and `.zip` came
- *      off the fail-closed list, so three real shapes that the #77-era guard
- *      failed the build on started printing `OK … file(s) scanned` again.
+ *      magic-byte sniffing instead of adding to it, so `.gz`/`.zip` lost
+ *      their fail-closed signal and three real shapes started printing `OK`.
+ *   5. PR #88 round 2 — with a magic-byte table *and* an extension list in
+ *      union, the reviewer walked straight past both with `.Z` (Unix
+ *      compress), lzop, lzip, RAR, zstd skippable frames and a `.tar` holding
+ *      compressed members.
  *
- * The first three were fixed by editing a list. The fourth happened because
- * a list was swapped for a mechanism. Hence the union, and hence this
- * comment: DO NOT "SIMPLIFY" THIS BACK INTO A SINGLE MECHANISM in either
- * direction.
+ * Five is not five unlucky omissions. It is a structural fact:
  *
- * WHY BOTH HALVES ARE LOAD-BEARING:
+ *   **The set of opaque formats is unbounded. Enumerating it can never
+ *   converge.**
  *
- * - Magic bytes catch what no list can enumerate. `detectMagicByteFormat()`
- *   reads the actual file content, so a gzip/zstd/xz/zip/7z/lz4/bzip2
- *   payload is caught under `.zst`, `.foo`, or no extension at all — no
- *   list to maintain, no format to forget. This is the half that closed #81.
+ * So this file no longer tries. The question it asks is inverted:
  *
- * - The extension list catches what has no header to sniff, and what magic
- *   matching structurally cannot see. **Brotli is NOT the only compressed
- *   format without a magic number** — an earlier version of this comment
- *   claimed it was, and that claim was false:
- *     • **Raw DEFLATE** (RFC 1951) has no header whatsoever. The stream
- *       opens with bit-packed block data; there is nothing to match.
- *     • **zlib** (RFC 1950) opens with two bytes (CMF/FLG) that are a
- *       *checksum constraint*, not a fixed magic: any pair where
- *       `(CMF << 8 | FLG) % 31 === 0` is valid, and the pair varies with
- *       compression level and window size. The common `0x78 0x9c` is also
- *       just ASCII `x` followed by a byte — matching it would false-positive
- *       on ordinary text.
- *     • **Brotli**, as before, is not self-identifying either.
- *   All three are first-class algorithms of `vite-plugin-compression2`,
- *   whose published type is
- *   `type CoreAlgorithm = 'gzip' | 'brotliCompress' | 'deflate' | 'deflateRaw' | 'zstandard'`
- *   and whose default output filename is `[path][base].gz` for everything
- *   that is not brotli or zstandard. So `compression({ algorithms:
- *   ['deflate'] })` emits `index-abc.js.gz` containing a **zlib** stream —
- *   a `.gz` file with no gzip magic. Only the extension list catches that.
- *   Magic matching is also anchored at offset 0 and matches exact byte
- *   sequences, so a stream with any leading byte, or a real zip whose first
- *   record is the empty-archive end-of-central-directory (`PK\x05\x06`)
- *   rather than a local file header (`PK\x03\x04`), slips past sniffing but
- *   not past the name.
+ *   OLD (lost five times): "did we remember this compression format?"
+ *   NEW (finite, closed):  "is this a text format we can actually scan, or a
+ *                           binary asset type we explicitly recognise?"
  *
- * The list is therefore NOT "the formats somebody remembered" doing the main
- * job — that model is what failed in #77/#81 and it is not what this is. It
- * is a backstop for headerless and offset formats, sitting behind a
- * content-based detector that needs no list at all.
+ * THE THREE DISPOSITIONS. `classifyDistFile()` is the ONE predicate that
+ * decides, and `scanDist()` — the code path the CLI actually runs — calls it
+ * for every file. There is deliberately no second implementation anywhere;
+ * `scripts/check-no-external-assets.test.mjs` has a test that fails if
+ * `scanDist` stops routing through it, because "the property test guards a
+ * function the CLI never runs" is how escape #4 shipped.
  *
- * The current Vite config emits no compressed output (no compression
- * plugin), so this costs nothing today; it exists so that enabling
- * `vite-plugin-compression`/`vite-plugin-compression2` or an nginx
- * `brotli_static`/`gzip_static`/`zstd_static` precompression step later is a
- * conscious decision — someone has to come here and either wire up
- * decompress-and-scan (Node's `zlib` has Brotli, gzip, deflate/inflate and
- * zstd built in) or explicitly accept the compressed output failing the
- * build, not discover months later that the guard had a blind spot.
+ *   • SCAN — the file is *confidently text*: it decodes as valid UTF-8 and
+ *     contains no NUL bytes. Only these are scanned for external references.
+ *     (Plus one narrow name-based veto, `COMPRESSED_EXTENSIONS` — see below.)
  *
- * The cost of the union is a file that is *named* like a compressed artifact
- * but is not one: it fails the build on its extension alone. That is the
- * safe direction to be wrong in, and it costs nothing real — a plaintext
- * file's URLs would have been caught by the scan branch anyway, so nothing
- * that the guard could have inspected is lost by refusing to inspect it. The
- * fix, as everywhere else in this file, is to rename the file or add an
- * entry here with a reason.
+ *   • SKIP — the file's **content** matches `KNOWN_BINARY_SIGNATURES`, a
+ *     short, explicitly justified allowlist of binary asset types a Vite
+ *     `dist/` legitimately contains, each verified by magic bytes and never
+ *     by filename. Skipped files are still byte-scanned for a *cleartext*
+ *     URL (see `scanDist`) — the skip is only a licence to not fail for being
+ *     opaque, not a licence to ignore the bytes.
  *
- * ALLOWLIST: three narrow, exact exceptions for inert strings baked into
- * audited third-party dependencies (React, workbox-window) that this
+ *   • FAIL — **everything else.** Unrecognised, undecodable, compressed,
+ *     archived, encrypted, UTF-16, truncated or merely ambiguous: all of it
+ *     fails the build. There is no fallthrough bucket, so there is nothing
+ *     for a novel format to fall through *into*.
+ *
+ * Under this model `.Z`, lzop, lzip, RAR, a `.tar` of compressed members, a
+ * zstd skippable frame, a file named exactly `.gz`, and every format invented
+ * after this comment was written all fail by default, without anyone having
+ * heard of them. That is the whole point: the failure mode of a format nobody
+ * enumerated is now "the build stops", not "OK — 1 file(s) scanned".
+ *
+ * THE OPERATOR'S ESCAPE HATCH is to add a justified entry to
+ * `KNOWN_BINARY_SIGNATURES` with its magic bytes and a reason. That is a
+ * deliberate, reviewable act in a diff — which is exactly what an air-gap
+ * exemption should be, and the opposite of the silent pass a denylist gave.
+ *
+ * COMPRESSED-FORMAT DETECTION IS NOW DIAGNOSTICS, NOT A DECISION.
+ * `detectCompressedFormat()` still recognises gzip/zstd/xz/zip/7z/lz4/bzip2/
+ * `.Z`/lzop/lzip/RAR/zstd-skippable/tar, and `COMPRESSED_EXTENSIONS` still
+ * lists the usual suffixes — but neither decides pass/fail any more. Their
+ * only jobs are (a) to make the error message say "this looks like gzip"
+ * instead of a bare "unscannable", and (b) `COMPRESSED_EXTENSIONS` acts as a
+ * narrow one-way veto on the SCAN branch: a file *named* `.br`/`.gz`/`.zip`/…
+ * is never scanned even if its bytes happen to decode cleanly. That veto can
+ * only ever ADD failures, never remove one, and it exists for the one
+ * residual the text test cannot cover on its own — a compressed stream whose
+ * bytes coincidentally form valid UTF-8 with no NULs. (Vanishingly unlikely
+ * at bundle size: compressed output is high-entropy, and the probability that
+ * ~40 KB of it is valid UTF-8 is astronomically small. But it costs nothing
+ * to keep, and REMOVING a fail-closed signal is literally how escape #4
+ * happened. Entries are only ever added.)
+ *
+ * WHY "VALID UTF-8 AND NO NUL BYTES" IS THE RIGHT TEXT TEST. Every format
+ * this guard has ever lost to fails it, for reasons intrinsic to the format
+ * rather than to anyone's memory:
+ *   • gzip (`1f 8b`), zstd (`28 b5 2f fd`), xz (`fd 37 …`), 7z (`37 7a bc af`),
+ *     `.Z` (`1f 9d`) and lzop (`89 4c 5a 4f`) all place a UTF-8 continuation
+ *     or otherwise-illegal byte in the first two bytes — invalid UTF-8 at
+ *     offset 0 or 1, before any list is consulted.
+ *   • zip, RAR, tar, ICO, WOFF and every length-prefixed container pad their
+ *     headers with NUL bytes.
+ *   • Brotli, raw DEFLATE and zlib have no magic number at all — the reason
+ *     the old model needed an extension list — but their high-entropy output
+ *     is not valid UTF-8 either, so the *content* test catches what no
+ *     *signature* table could.
+ *   • UTF-16/UTF-32 text is full of NULs, so a UTF-16LE bundle carrying a CDN
+ *     import — which the old model happily "scanned" and found nothing in —
+ *     now fails closed.
+ * NUL is the discriminator because it is the one byte that never appears in
+ * real UTF-8 text and always appears in binary containers and wide-encoded
+ * text.
+ *
+ * THE RESIDUAL, STATED HONESTLY. Two things this model still cannot see, both
+ * now the *only* blind spots rather than an open-ended list:
+ *   1. A file that decodes as clean UTF-8 and smuggles a reference the URL
+ *      regex cannot match — string concatenation (`"htt"+"ps://…"`), escape
+ *      sequences (`\x68ttps://…`), a base64 `data:` payload, or an uppercase
+ *      `HTTPS://` scheme (issue #105). These are properties of the *pattern*,
+ *      not of file selection, and are tracked separately.
+ *   2. A URL inside a file on `KNOWN_BINARY_SIGNATURES` that is not present
+ *      in cleartext (e.g. a URL inside a compressed PNG `zTXt` chunk). The
+ *      cleartext byte-scan in `scanDist` covers the uncompressed case; the
+ *      compressed-metadata case is accepted, because an image cannot execute
+ *      a fetch and the allowlist is short enough to reason about.
+ *
+ * ALLOWLIST (URL): three narrow, exact exceptions for inert strings baked
+ * into audited third-party dependencies (React, workbox-window) that this
  * project does not author and cannot edit. Each is a literal used for
  * developer-facing diagnostic text, an XML namespace identifier, or a
  * console warning — never a network fetch target, never rendered as a link,
  * never attacker-influenced. Read the comment on each entry before adding
  * a new one; this list is meant to stay short and justified, not grow into
- * a rubber stamp. See the PR description's "Verification" section for the
- * self-test that proves this guard still fails on a real violation.
+ * a rubber stamp.
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { extname, join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const URL_PATTERN = /https?:\/\/[^\s"'`)<>\\]+/g;
 
 /**
- * Known-binary extensions, skipped because decoding them as UTF-8 produces
- * noise rather than signal. EVERYTHING ELSE IS SCANNED — including
- * extensionless files, `.mjs`/`.cjs`, `.xml`, and any format added to
- * `public/` later. Only add an entry here for a format that genuinely
- * cannot carry a meaningful URL reference in its decoded text.
+ * THE SKIP ALLOWLIST — binary asset types this build legitimately emits,
+ * each recognised by its magic bytes and NEVER by its filename.
+ *
+ * Keep this list short and every entry justified. Adding one is the
+ * operator's escape hatch when a new binary asset type genuinely belongs in
+ * `dist/`, and it is meant to be a visible, reviewable line in a diff.
+ * Anything not here fails the build, which is the correct direction to be
+ * wrong in: a false failure costs one commit, a false pass ships a CDN
+ * reference into an air-gapped enclave.
+ *
+ * `parts` is a list of `{ offset, bytes }` fragments that must all match, so
+ * container formats whose identifying bytes are not at offset 0 (RIFF/WebP,
+ * ISO-BMFF/AVIF) can be recognised properly instead of by a weak prefix.
+ * `null` inside `bytes` is a wildcard for a byte whose value is variable.
+ *
+ * DELIBERATELY ABSENT, and why — each of these fails the build today:
+ *   • BMP — its entire signature is the two ASCII bytes `BM`. That is too
+ *     weak to license a skip; anything starting "BM…" would inherit it.
+ *     Convert a BMP to PNG or WebP (a Vite `dist/` has no reason to carry
+ *     one), or add it here with that trade-off written down.
+ *   • EOT — the Embedded OpenType header is a length/version record with no
+ *     signature at all, so there is nothing to verify. It is an IE8-era
+ *     format Vite does not emit; ship WOFF2.
+ *   • Audio/video (MP4, WebM, MP3, OGG) — not emitted by this build today.
+ *     Add the one you actually ship, with its magic, when you ship it.
  */
-const SKIPPED_BINARY_EXTENSIONS = new Set([
-	// Images
-	".png",
-	".jpg",
-	".jpeg",
-	".gif",
-	".webp",
-	".avif",
-	".ico",
-	".bmp",
-	// Fonts
-	".woff",
-	".woff2",
-	".ttf",
-	".otf",
-	".eot",
-	// Other binary payloads
-	".wasm",
-]);
+const KNOWN_BINARY_SIGNATURES = [
+	// ---- Images ----
+	{
+		format: "png",
+		// PNG signature, RFC 2083 §3.1 — the 0x89 lead byte exists precisely
+		// to make a PNG fail a text test, which is also why it can never be
+		// confused with a scannable file.
+		parts: [{ offset: 0, bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] }],
+	},
+	{
+		format: "jpeg",
+		// SOI marker + the first marker byte (ITU-T T.81). 0xff is never a
+		// legal UTF-8 byte, so this too is unambiguously binary.
+		parts: [{ offset: 0, bytes: [0xff, 0xd8, 0xff] }],
+	},
+	{
+		format: "gif",
+		// "GIF8" + ("7a" | "9a"). Note this header IS ASCII, which is exactly
+		// why the text test runs FIRST: a hand-crafted "GIF89a…https://evil…"
+		// file that is valid UTF-8 gets scanned, not skipped. See
+		// `classifyDistFile`.
+		parts: [{ offset: 0, bytes: [0x47, 0x49, 0x46, 0x38, null, 0x61] }],
+	},
+	{
+		format: "webp",
+		// RIFF container: "RIFF" <uint32 size> "WEBP" (WebP container spec).
+		parts: [
+			{ offset: 0, bytes: [0x52, 0x49, 0x46, 0x46] },
+			{ offset: 8, bytes: [0x57, 0x45, 0x42, 0x50] },
+		],
+	},
+	{
+		// ISO-BMFF box: <uint32 size> "ftyp" then the brand. AVIF images use
+		// the `avif` brand, image sequences `avis` (ISO/IEC 23000-22 §10.1).
+		// Spelled out rather than wildcarded so the allowlist stays exact.
+		format: "avif",
+		parts: [{ offset: 4, bytes: [0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66] }],
+	},
+	{
+		format: "avif (sequence)",
+		parts: [{ offset: 4, bytes: [0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x73] }],
+	},
+	{
+		// ICONDIR: reserved(0x0000) + type, little-endian — 1 = icon, 2 =
+		// cursor. Both types spelled out; a wildcard here would skip any file
+		// opening `00 00 ?? 00`, which is far too much of the binary space to
+		// license from a four-byte match.
+		format: "ico",
+		parts: [{ offset: 0, bytes: [0x00, 0x00, 0x01, 0x00] }],
+	},
+	{
+		format: "cur",
+		parts: [{ offset: 0, bytes: [0x00, 0x00, 0x02, 0x00] }],
+	},
+	// ---- Fonts ----
+	{ format: "woff", parts: [{ offset: 0, bytes: [0x77, 0x4f, 0x46, 0x46] }] }, // "wOFF"
+	{ format: "woff2", parts: [{ offset: 0, bytes: [0x77, 0x4f, 0x46, 0x32] }] }, // "wOF2"
+	{ format: "otf", parts: [{ offset: 0, bytes: [0x4f, 0x54, 0x54, 0x4f] }] }, // "OTTO"
+	{ format: "ttf", parts: [{ offset: 0, bytes: [0x00, 0x01, 0x00, 0x00] }] }, // sfnt 1.0
+	{ format: "ttc", parts: [{ offset: 0, bytes: [0x74, 0x74, 0x63, 0x66] }] }, // "ttcf"
+	// ---- Other ----
+	{
+		format: "wasm",
+		// "\0asm" + version 1 (WebAssembly core spec §5.5.16).
+		parts: [{ offset: 0, bytes: [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00] }],
+	},
+];
 
 /**
- * Half of the fail-closed union (see the module header comment, "THE DESIGN
- * RULE"): a file with one of these extensions is treated as compressed
- * *whatever its bytes say*. This is the backstop for the formats magic-byte
- * sniffing structurally cannot see — Brotli, raw DEFLATE and zlib have no
- * fixed header, and a real archive can open with a record this file's
- * signature table does not list (`PK\x05\x06`) or with leading bytes before
- * the magic. All three headerless formats are `vite-plugin-compression2`
- * algorithms and all three default to a `.gz` filename there, so this is the
- * signal that catches them.
+ * DIAGNOSTICS ONLY — this table no longer decides anything. Its sole job is
+ * to turn "unscannable" into "this looks like gzip", so the operator reading
+ * a failed build knows what to do about it.
  *
- * This list is a backstop, NOT the primary mechanism — `detectMagicByteFormat()`
- * below is what catches formats nobody enumerated. Adding an entry here is
- * cheap and safe (worst case a misleadingly-named plaintext file fails the
- * build); REMOVING one is how PR #88 round 1 reopened the hole. Entries are
- * only ever added.
+ * That is a deliberate demotion. Under the old model this table WAS the
+ * decision, which meant a format missing from it was a silent pass; the
+ * reviewer of PR #88 round 2 duly found five (`.Z`, lzop, lzip, RAR, zstd
+ * skippable frames) plus `.tar`, all of which are now listed here — and all
+ * of which would fail the build anyway if they were not, because failing is
+ * the default. Adding a format here improves an error message. It cannot
+ * change a verdict, in either direction.
+ *
+ * `parts` has the same shape as `KNOWN_BINARY_SIGNATURES` (offset + bytes,
+ * `null` = wildcard).
  */
-const COMPRESSED_EXTENSIONS = new Set([
-	".br", // brotli — no magic number at all
-	".gz", // gzip; ALSO vite-plugin-compression2's default name for deflate/deflateRaw output
-	".tgz", // gzipped tar
-	".zip", // may open PK\x03\x04, PK\x05\x06 (empty) or PK\x07\x08 (spanned)
+const COMPRESSED_SIGNATURES = [
+	{ format: "gzip", parts: [{ offset: 0, bytes: [0x1f, 0x8b] }] },
+	{ format: "Unix compress (.Z)", parts: [{ offset: 0, bytes: [0x1f, 0x9d] }] },
+	{ format: "zstd", parts: [{ offset: 0, bytes: [0x28, 0xb5, 0x2f, 0xfd] }] },
+	{
+		// RFC 8878 §3.1.2: a skippable frame's magic is 0x184D2A5? — the low
+		// nibble of the first byte is free, so 0x50..0x5f all start one. Real
+		// tools emit these to carry side data alongside compressed frames.
+		format: "zstd skippable frame",
+		parts: [{ offset: 1, bytes: [0x2a, 0x4d, 0x18] }],
+		firstByteRange: [0x50, 0x5f],
+	},
+	{ format: "xz", parts: [{ offset: 0, bytes: [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00] }] },
+	{ format: "7z", parts: [{ offset: 0, bytes: [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c] }] },
+	{ format: "lz4", parts: [{ offset: 0, bytes: [0x04, 0x22, 0x4d, 0x18] }] },
+	{ format: "lzop", parts: [{ offset: 0, bytes: [0x89, 0x4c, 0x5a, 0x4f] }] },
+	{ format: "lzip", parts: [{ offset: 0, bytes: [0x4c, 0x5a, 0x49, 0x50] }] },
+	{ format: "bzip2", parts: [{ offset: 0, bytes: [0x42, 0x5a, 0x68] }] },
+	{ format: "rar", parts: [{ offset: 0, bytes: [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07] }] },
+	{ format: "zip", parts: [{ offset: 0, bytes: [0x50, 0x4b, 0x03, 0x04] }] },
+	{ format: "zip (empty archive)", parts: [{ offset: 0, bytes: [0x50, 0x4b, 0x05, 0x06] }] },
+	{ format: "zip (spanned)", parts: [{ offset: 0, bytes: [0x50, 0x4b, 0x07, 0x08] }] },
+	// POSIX/GNU tar writes "ustar" at offset 257 of the first header block. A
+	// tar has no offset-0 magic at all, which is why it needed the fallthrough
+	// bucket to be removed rather than one more entry added.
+	{ format: "tar", parts: [{ offset: 257, bytes: [0x75, 0x73, 0x74, 0x61, 0x72] }] },
+];
+
+/**
+ * Suffixes that veto the SCAN branch by name alone (see the module header,
+ * "COMPRESSED-FORMAT DETECTION IS NOW DIAGNOSTICS"). A file whose name ends
+ * with one of these is never scanned, whatever its bytes decode to.
+ *
+ * This is a ONE-WAY signal: it can only ever move a file from `scan` to
+ * `fail`, never the reverse. It is not the mechanism any more — the text test
+ * is — it is a backstop for a compressed stream that coincidentally decodes
+ * as clean UTF-8. Entries are only ever added; removing one is how PR #88
+ * round 1 reopened the hole.
+ *
+ * Matched against the lowercased BASENAME with `endsWith`, not `extname()`.
+ * `extname(".gz")` is the empty string in Node, so an `extname`-based check
+ * misses a file named exactly `.gz` or `.br` (PR #88 round-2 review, finding
+ * 2). Such a file fails on its content here regardless, but the name signal
+ * should not have a hole in it either.
+ */
+const COMPRESSED_EXTENSIONS = [
+	".br",
+	".gz",
+	".tgz",
+	".zip",
 	".zst",
 	".zstd",
 	".xz",
 	".bz2",
 	".7z",
 	".lz4",
-	".zz", // conventional zlib-stream extension — checksum-constrained header, not magic
-	".deflate", // raw DEFLATE — no header whatsoever
+	".lz",
+	".lzo",
 	".lzma",
-]);
-
-/**
- * Magic-number signatures for compressed/archive formats that self-identify
- * by header, independent of filename. This is the durable half of the
- * compressed-artifact detector: a new format added here needs no
- * corresponding extension anywhere, because detection reads the actual
- * bytes. Sources: gzip (RFC 1952 §2.3.1), zstd (RFC 8878 §3.1.1), xz (the
- * XZ Format spec §2.1.1.1), zip/jar (the three PKZIP record signatures —
- * local file header, end-of-central-directory for an empty archive, and the
- * spanned/split marker), 7z (7-Zip signature), lz4 frame (LZ4 Frame Format
- * spec), bzip2 (the literal ASCII header bzip2 always writes).
- *
- * Adding a signature here only ever widens what is caught; it can never take
- * a file out of the fail-closed bucket, because `isCompressedArtifact()`
- * ORs this with `COMPRESSED_EXTENSIONS`.
- */
-const MAGIC_BYTE_SIGNATURES = [
-	{ format: "xz", bytes: [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00] },
-	{ format: "7z", bytes: [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c] },
-	{ format: "zstd", bytes: [0x28, 0xb5, 0x2f, 0xfd] },
-	{ format: "lz4", bytes: [0x04, 0x22, 0x4d, 0x18] },
-	{ format: "gzip", bytes: [0x1f, 0x8b] },
-	{ format: "bzip2", bytes: [0x42, 0x5a, 0x68] },
-	{ format: "zip", bytes: [0x50, 0x4b, 0x03, 0x04] },
-	// An archive with no entries starts straight at the end-of-central-
-	// directory record; `zip -X out.zip` on an empty set, and several
-	// bundlers' "empty asset archive", produce exactly this. It is a real
-	// zip, and PR #88 round 1 waved it through because only the local-file-
-	// header signature was listed.
-	{ format: "zip", bytes: [0x50, 0x4b, 0x05, 0x06] },
-	{ format: "zip", bytes: [0x50, 0x4b, 0x07, 0x08] },
+	".zz",
+	".deflate",
+	".rar",
+	".tar",
+	".z",
 ];
 
-/** Returns the matched format name ("gzip", "zstd", "xz", "zip", "7z",
- * "lz4", "bzip2") if `buffer` opens with one of the known compressed-format
- * magic numbers, else `null`. Pure byte inspection — no filename involved,
- * so renaming a file cannot hide it from this check and no filename can
- * trigger a false match either. */
-export function detectMagicByteFormat(buffer) {
-	for (const { format, bytes } of MAGIC_BYTE_SIGNATURES) {
-		if (buffer.length >= bytes.length && bytes.every((byte, i) => buffer[i] === byte)) {
-			return format;
+function matchesSignature(buffer, signature) {
+	if (signature.firstByteRange) {
+		const [low, high] = signature.firstByteRange;
+		if (buffer.length === 0 || buffer[0] < low || buffer[0] > high) {
+			return false;
+		}
+	}
+	return signature.parts.every(({ offset, bytes }) => {
+		if (buffer.length < offset + bytes.length) {
+			return false;
+		}
+		return bytes.every((byte, i) => byte === null || buffer[offset + i] === byte);
+	});
+}
+
+/**
+ * Returns the name of the known-binary asset format `buffer` opens with
+ * (`"png"`, `"woff2"`, …), or `null`. Pure byte inspection — no filename is
+ * involved, so renaming a file can neither hide it from nor sneak it into the
+ * skip allowlist.
+ */
+export function detectKnownBinaryFormat(buffer) {
+	for (const signature of KNOWN_BINARY_SIGNATURES) {
+		if (matchesSignature(buffer, signature)) {
+			return signature.format;
 		}
 	}
 	return null;
 }
 
-/** True when `file`'s extension is on `COMPRESSED_EXTENSIONS`
- * (case-insensitive) — the fail-closed half of the union that catches
- * headerless formats (brotli, raw DEFLATE, zlib) and archives whose opening
- * record this file's signature table does not list. Name-only: it never
- * looks at content, so it is unaffected by anything the bytes do or don't
- * say. See the module header comment. */
-export function isCompressedByExtension(file) {
-	return COMPRESSED_EXTENSIONS.has(extname(file).toLowerCase());
-}
-
-/** True when `file` is a known-binary artifact this check deliberately skips.
- * Extension matching is case-insensitive; a file with no extension is never
- * skipped (that was the hole this replaced). */
-export function isSkippedBinary(file) {
-	return SKIPPED_BINARY_EXTENSIONS.has(extname(file).toLowerCase());
+/**
+ * DIAGNOSTIC. Returns a human-readable compressed/archive format name if
+ * `buffer` looks like one, else `null`. Used only to explain a failure — it
+ * has no vote in `classifyDistFile`, by design (see the module header).
+ */
+export function detectCompressedFormat(buffer) {
+	for (const signature of COMPRESSED_SIGNATURES) {
+		if (matchesSignature(buffer, signature)) {
+			return signature.format;
+		}
+	}
+	return null;
 }
 
 /**
- * True when `file` is a compressed artifact this check cannot inspect. The
- * UNION of both signals: its content opens with a known compressed-format
- * magic number, **OR** its extension is on `COMPRESSED_EXTENSIONS`. Either
- * alone is sufficient; neither can veto the other. `buffer` is `file`'s
- * already-read content; pass it so callers doing a single read (`scanDist`)
- * don't pay for a second one — omitting it degrades to the extension signal
- * only, never to "not compressed" for a file the extension list covers.
- * See the module header comment for why both halves exist.
+ * DIAGNOSTIC + one-way scan veto. Returns the matched suffix when `file`'s
+ * lowercased basename ends with a `COMPRESSED_EXTENSIONS` entry, else `null`.
+ * Deliberately NOT `extname()`-based, so a file named exactly `.gz` is caught.
  */
-export function isCompressedArtifact(file, buffer) {
-	return isCompressedByExtension(file) || (buffer !== undefined && detectMagicByteFormat(buffer) !== null);
+export function matchCompressedExtension(file) {
+	const name = basename(file).toLowerCase();
+	for (const ext of COMPRESSED_EXTENSIONS) {
+		if (name.endsWith(ext)) {
+			return ext;
+		}
+	}
+	return null;
+}
+
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * True when `buffer` is *confidently text*: it decodes as valid UTF-8 and
+ * contains no NUL bytes. This is the whole scannability criterion — see the
+ * module header for why these two conditions are the right ones and what
+ * every format the guard has lost to does about them.
+ */
+export function isDecodableText(buffer) {
+	if (buffer.includes(0)) {
+		return false;
+	}
+	try {
+		UTF8_DECODER.decode(buffer);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * THE ONE PREDICATE. Every file under `dist/` gets its disposition from this
+ * function and from nowhere else — `scanDist()`, which is what the CLI runs,
+ * calls it per file and does not re-derive any part of the answer.
+ * `check-no-external-assets.test.mjs` asserts that structurally and
+ * behaviourally, because a property test pointed at a function the CLI does
+ * not run is what let PR #88 round 1's regression ship.
+ *
+ * Returns `{ disposition, format, reason }` where `disposition` is:
+ *   - `"scan"` — confidently text; inspect it for external references.
+ *   - `"skip"` — content matches the known-binary allowlist; do not treat as
+ *     opaque. (`scanDist` still byte-scans it for a cleartext URL.)
+ *   - `"fail"` — anything else. `reason` explains why in operator terms.
+ *
+ * ORDER MATTERS, and text comes first on purpose. Several allowlisted
+ * signatures are ASCII (`GIF89a`, `wOFF`, `OTTO`, `ttcf`), so a hand-crafted
+ * file that opens with one and continues as valid UTF-8 carrying
+ * `https://cdn.evil.example/x.js` would be SKIPPED if the binary check ran
+ * first. Testing text first means such a file is scanned and the URL is
+ * caught; a genuine PNG/JPEG/WOFF/ICO/WASM is never valid UTF-8 (each puts an
+ * illegal byte or a NUL in its first four bytes), so nothing that should be
+ * skipped is scanned instead.
+ */
+export function classifyDistFile(file, buffer) {
+	const compressedName = matchCompressedExtension(file);
+
+	if (isDecodableText(buffer)) {
+		if (compressedName) {
+			return {
+				disposition: "fail",
+				format: null,
+				reason:
+					`named "*${compressedName}", which claims a compressed/opaque artifact — not scanned even though its ` +
+					`bytes happen to decode as text. Rename the file if it is genuinely plain text.`,
+			};
+		}
+		return { disposition: "scan", format: "text", reason: "valid UTF-8, no NUL bytes" };
+	}
+
+	const binaryFormat = detectKnownBinaryFormat(buffer);
+	if (binaryFormat) {
+		return { disposition: "skip", format: binaryFormat, reason: `recognised ${binaryFormat} asset (magic bytes)` };
+	}
+
+	const compressedFormat = detectCompressedFormat(buffer);
+	if (compressedFormat) {
+		return {
+			disposition: "fail",
+			format: compressedFormat,
+			reason: `looks like ${compressedFormat} — compressed/archived content this guard cannot read`,
+		};
+	}
+	if (compressedName) {
+		return {
+			disposition: "fail",
+			format: null,
+			reason: `not decodable as text, and named "*${compressedName}" — presumed compressed/opaque`,
+		};
+	}
+	return {
+		disposition: "fail",
+		format: null,
+		reason: buffer.includes(0)
+			? "not scannable: contains NUL bytes (binary container, or UTF-16/UTF-32 text) and matches no known-binary signature"
+			: "not scannable: not valid UTF-8 and matches no known-binary signature",
+	};
 }
 
 export const ALLOWLIST = [
@@ -323,68 +521,65 @@ function* walk(dir) {
 
 /**
  * Scans `distDir` and returns
- * `{ violations, allowlisted, scanned, skipped, compressed }`.
- * `violations`/`allowlisted` are arrays of `{ file, url }`; `scanned`/
- * `skipped` are file paths; `compressed` is an array of `{ file, format }`
- * where `format` is the magic-byte name (`"gzip"`, `"zstd"`, …) when the
- * content matched a signature, or `"extension .gz"`-style when only the name
- * did — reported so the CLI shows what the guard caught and *which of the
- * two signals* caught it, rather than asking the reader to trust it. Magic
- * is reported in preference to the extension only because it is the more
- * specific answer; both are checked, and either is disqualifying.
- * `compressed` is never scanned and never counted as a
- * violation of its own — the caller (`main`) is the one that decides a
- * non-empty `compressed` fails the build, so this stays a pure function (no
- * process.exit) and unit-testable.
+ * `{ violations, allowlisted, scanned, skipped, unscannable }`.
  *
- * Every file is read once, in full, before any classification decision —
- * the compressed check needs the actual bytes (magic-byte sniffing cannot
- * work off a filename), and reading it also gives the scan branch its
- * content for free, so there is no second read.
+ * - `violations`/`allowlisted` are `{ file, url }`.
+ * - `scanned` is the file paths that were confidently text.
+ * - `skipped` is `{ file, format }` for known-binary assets.
+ * - `unscannable` is `{ file, reason }` — a NON-EMPTY `unscannable` fails the
+ *   build. `main()` is the one that decides that, so this stays a pure,
+ *   unit-testable function with no `process.exit`.
+ *
+ * EVERY disposition comes from `classifyDistFile()`. This function must not
+ * re-derive any of it — the CLI path and the tested path being different code
+ * is the drift vector that shipped PR #88 round 1's regression, and
+ * `check-no-external-assets.test.mjs` asserts this routing directly.
+ *
+ * Known-binary files are byte-scanned for a *cleartext* URL even though they
+ * are skipped. The skip is a licence not to fail for being opaque, not a
+ * licence to ignore the bytes: a URL sitting uncompressed in a PNG `tEXt`
+ * chunk or a font's name table is a real external reference, and pre-#77
+ * `main` caught that shape only by accident (whenever the file happened not
+ * to be on its extension skip list). False positives are not a practical
+ * concern — the literal ASCII `http://` appearing by chance in compressed
+ * image data is a ~1e-14 event per bundle.
  */
 export function scanDist(distDir) {
 	const violations = [];
 	const allowlisted = [];
 	const scanned = [];
 	const skipped = [];
-	const compressed = [];
+	const unscannable = [];
 
-	for (const file of walk(distDir)) {
-		const buffer = readFileSync(file);
-
-		// The union, in the order that yields the most specific label. Magic
-		// bytes first (they name the actual format); extension second (it
-		// catches the headerless/offset cases magic cannot see). A file only
-		// reaches the scan branch when NEITHER signal fired.
-		const magicFormat = detectMagicByteFormat(buffer);
-		if (magicFormat) {
-			compressed.push({ file, format: magicFormat });
-			continue;
-		}
-		if (isCompressedByExtension(file)) {
-			compressed.push({ file, format: `extension ${extname(file).toLowerCase()}` });
-			continue;
-		}
-
-		if (isSkippedBinary(file)) {
-			skipped.push(file);
-			continue;
-		}
-
-		scanned.push(file);
-		const content = buffer.toString("utf-8");
-		const matches = content.match(URL_PATTERN) ?? [];
-		for (const url of matches) {
-			const entry = isAllowlisted(url);
-			if (entry) {
+	const record = (file, text) => {
+		for (const url of text.match(URL_PATTERN) ?? []) {
+			if (isAllowlisted(url)) {
 				allowlisted.push({ file, url });
 			} else {
 				violations.push({ file, url });
 			}
 		}
+	};
+
+	for (const file of walk(distDir)) {
+		const buffer = readFileSync(file);
+		const verdict = classifyDistFile(file, buffer);
+
+		if (verdict.disposition === "fail") {
+			unscannable.push({ file, reason: verdict.reason });
+			continue;
+		}
+		if (verdict.disposition === "skip") {
+			skipped.push({ file, format: verdict.format });
+			// Cleartext-only backstop; see the doc comment above.
+			record(file, buffer.toString("latin1"));
+			continue;
+		}
+		scanned.push(file);
+		record(file, buffer.toString("utf-8"));
 	}
 
-	return { violations, allowlisted, scanned, skipped, compressed };
+	return { violations, allowlisted, scanned, skipped, unscannable };
 }
 
 function main() {
@@ -398,21 +593,24 @@ function main() {
 		process.exit(1);
 	}
 
-	if (result.compressed.length > 0) {
+	if (result.unscannable.length > 0) {
 		console.error(
-			`\ncheck-no-external-assets: FAILED — ${result.compressed.length} compressed artifact(s) found in ${distDir}:`,
+			`\ncheck-no-external-assets: FAILED — ${result.unscannable.length} unscannable file(s) found in ${distDir}:`,
 		);
-		for (const { file, format } of result.compressed) {
-			console.error(`  ${file} (${format})`);
+		for (const { file, reason } of result.unscannable) {
+			console.error(`  ${file}: ${reason}`);
 		}
-		console.error("\nCompressed formats encode compressed text, and this guard cannot read inside them — scanning the");
-		console.error("compressed bytes would report a false OK instead of the URL(s) they may carry. Detection fails closed");
-		console.error("by UNION: a file is compressed if its magic bytes match a known signature (gzip/zstd/xz/zip/7z/lz4/");
-		console.error("bzip2) OR its extension is on the compressed list. The list is what catches the formats with no");
-		console.error("header to sniff — brotli, raw DEFLATE and zlib — all three of which vite-plugin-compression2 writes");
-		console.error("out named `.gz`. The build currently emits none of these; if a precompression step was just added,");
-		console.error("either teach this script to decompress-and-scan (node:zlib has Brotli, gzip, deflate and zstd built");
-		console.error("in) or remove the compressed output. If a file merely has a misleading name, rename it.");
+		console.error("\nThis guard is an ALLOWLIST of what it can inspect, not a denylist of formats it has heard of.");
+		console.error("A file passes only if it is confidently text (valid UTF-8, no NUL bytes) and is then scanned, or");
+		console.error("if its magic bytes match the short known-binary asset allowlist (PNG/JPEG/GIF/WebP/AVIF/ICO/WOFF/");
+		console.error("WOFF2/OTF/TTF/TTC/WASM). Everything else fails, including every compression and archive format —");
+		console.error("enumerating those can never converge, so they are not enumerated. Fix one of these ways:");
+		console.error("  - compressed output (gzip/brotli/zstd/... from a precompression step): remove it, or teach this");
+		console.error("    script to decompress-and-scan (node:zlib has brotli, gzip, deflate and zstd built in);");
+		console.error("  - a genuine binary asset type this build now emits: add its magic bytes to");
+		console.error("    KNOWN_BINARY_SIGNATURES in scripts/check-no-external-assets.mjs, with a written reason;");
+		console.error("  - a text file with a misleading name (*.gz, *.br, ...): rename it;");
+		console.error("  - UTF-16/UTF-32 text: re-encode it as UTF-8.");
 		process.exit(1);
 	}
 
