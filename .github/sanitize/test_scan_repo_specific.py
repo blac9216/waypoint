@@ -323,6 +323,121 @@ MATRIX_SPELLING = {
 }
 
 
+# --- guard-character derivation (see GuardCharacterDelimiterTests) --------
+#
+# Issue #132. `SurroundingContextTests.TRAILING`/`.LEADING` are a hand-written
+# list of neighbour characters, and neither list contains a dash — so a
+# detector's dash-adjacency behaviour, unlike every OTHER boundary property in
+# this file, was never pinned. Demonstrated cost: adding a trailing "not a
+# dash" lookahead to `IPV6_RE` takes an IPv6 range from two findings to one,
+# with the whole 120-test suite green (the #111 defect, for the other address
+# family, silently reopened).
+#
+# The fixture axis was made derived by #115 (`shape_group_names`, which reads
+# a detector's OWN alternations and optional groups off its compiled parse
+# tree). The delimiter axis gets the same treatment here: `guard_characters()`
+# walks a pattern's own leading/trailing boundary lookarounds (the `ASSERT`/
+# `ASSERT_NOT` nodes at the top of its parse tree — exactly the constructs the
+# comments above `IPV4_RE`, `FQDN_RE` and `IPV6_RE` argue about at length) and
+# reads off which punctuation characters those guards actually test for.
+# Alphanumeric RANGES (`A-Za-z0-9`) are deliberately excluded: they mean "more
+# of the same token", not "a candidate delimiter", and are already exercised
+# by every non-boundary fixture in `DetectorPositiveTests`. A bare `\w`
+# category contributes only `_` for the same reason — the alnum half of it is
+# not a new delimiter, the underscore half is.
+#
+# What this buys, concretely: `IPV6_RE` carries no dash anywhere in its own
+# guards (that absence is precisely #132's subject), so `guard_characters()`
+# alone would never put a dash row on IPv6's own account. The completeness
+# test below closes that loophole by checking coverage against the UNION of
+# every detector's guard characters, not each detector's own — so IPv4's and
+# FQDN's dash guards force a dash row onto IPv6 too, and IPv6's silence on
+# that row is exactly what stays pinned as a live behaviour rather than an
+# unexamined gap. Add a character to ANY detector's guard and the union grows;
+# grow the union with no matching entry in `GUARD_LEADING_EXPECTED` /
+# `GUARD_TRAILING_EXPECTED` and `test_every_guard_character_has_a_declared_row`
+# fails — "a guard character with no row" is what that test exists to catch.
+#
+# What is NOT derived, and cannot be: WHETHER a given character suppresses or
+# flags for a given detector is a property of the guard's VALUE, not just its
+# presence, and has to be read off the code by running it — the same
+# "measured, not assumed" discipline `MATRIX_SPELLING` and every comment in
+# `scan_repo_specific.py` already applies. `GUARD_LEADING_EXPECTED` /
+# `GUARD_TRAILING_EXPECTED` are that hand-authored, measured verdict; they are
+# kept in a separate table from the DERIVED character set specifically so the
+# derived and the declared halves are never blended into one list that reads
+# as derived when it is not (the possible-fix note in #132 itself).
+
+try:  # Same 3.11 rename shape_group_names already handles.
+	from re import _parser as _re_parser  # noqa: F811 (re-imported for clarity)
+except ImportError:  # pragma: no cover - older interpreters
+	import sre_parse as _re_parser  # type: ignore[no-redef]  # noqa: F811
+
+
+def _guard_literal_chars(sequence) -> set[str]:
+	"""Punctuation characters a single lookaround's own sub-pattern tests for.
+
+	Handles the three shapes the guards in this file are actually built from:
+	a bare literal (`(?<!-)`), a character class possibly mixing literals and
+	a `\\w` category (`(?!\\w)`, `[A-Za-z0-9]`), and a short subpattern such as
+	`\\.[A-Za-z0-9]` or `\\.\\d` (a literal followed by a class/category).
+	`\\d` (CATEGORY_DIGIT) contributes nothing on its own — a bare digit is an
+	alnum-range concept, not a punctuation delimiter — so only the literal
+	half of a `\\.\\d`-shaped guard shows up here, which is exactly the `.`
+	IPV4_RE's own comment says that guard exists to test.
+	"""
+	chars: set[str] = set()
+	for op, argument in sequence:
+		name = _op_name(op)
+		if name in ("LITERAL", "NOT_LITERAL"):
+			chars.add(chr(argument))
+		elif name == "IN":
+			for sub_op, sub_argument in argument:
+				sub_name = _op_name(sub_op)
+				if sub_name == "LITERAL":
+					chars.add(chr(sub_argument))
+				elif sub_name == "CATEGORY" and "WORD" in str(sub_argument):
+					chars.add("_")
+		elif name == "CATEGORY" and "WORD" in str(argument):
+			chars.add("_")
+		elif name == "SUBPATTERN":
+			chars |= _guard_literal_chars(argument[3])
+	return chars
+
+
+def guard_characters(pattern: re.Pattern[str]) -> tuple[frozenset[str], frozenset[str]]:
+	"""(leading, trailing) punctuation characters this pattern's own boundary
+	guards mention, read from its compiled parse tree.
+
+	Only `ASSERT`/`ASSERT_NOT` nodes at the TOP LEVEL of the pattern count —
+	exactly `IPV4_RE`/`FQDN_RE`/`IPV6_RE`'s own leading and trailing
+	lookarounds, none of which sit inside the IPv6 bracketed/bare alternation
+	or any other nested group. A negative lookbehind (`direction < 0`) is
+	leading; a negative lookahead is trailing.
+	"""
+	parsed = _re_parser.parse(pattern.pattern, pattern.flags)
+	leading: set[str] = set()
+	trailing: set[str] = set()
+	for op, argument in parsed:
+		name = _op_name(op)
+		if name not in ("ASSERT", "ASSERT_NOT"):
+			continue
+		direction, body = argument
+		chars = _guard_literal_chars(body)
+		(leading if direction < 0 else trailing).update(chars)
+	return frozenset(leading), frozenset(trailing)
+
+
+GUARD_CHARS = {check: guard_characters(pattern) for check, pattern in MATRIX_PATTERN.items()}
+
+GUARD_CHARS_LEADING_UNION: frozenset[str] = frozenset().union(
+	*(leading for leading, _trailing in GUARD_CHARS.values())
+)
+GUARD_CHARS_TRAILING_UNION: frozenset[str] = frozenset().union(
+	*(trailing for _leading, trailing in GUARD_CHARS.values())
+)
+
+
 class DetectorPositiveTests(unittest.TestCase):
 	"""Each detector fires on the pattern class it exists to catch."""
 
@@ -697,6 +812,207 @@ class SurroundingContextTests(unittest.TestCase):
 		):
 			with self.subTest(text=text):
 				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+
+class GuardCharacterDelimiterTests(unittest.TestCase):
+	"""Issue #132: the delimiter axis, derived rather than remembered.
+
+	`SurroundingContextTests.TRAILING`/`.LEADING` enumerate delimiters no
+	detector's own guards particularly care about (a comma, a close paren, a
+	tab — every one of them already terminates a match by construction, and
+	the point of exercising them is breadth of coverage, not a specific
+	guard). A dash was never in either list, and neither was a bare
+	underscore or a leading period — the exact set a detector's OWN boundary
+	lookarounds are built to test. `guard_characters()` (above) reads that set
+	off the compiled patterns instead of leaving it to be remembered, so this
+	class is a SECOND, narrower matrix: not "every safe delimiter", but
+	"every character a guard anywhere in this file actually mentions".
+
+	Two tables per direction, kept deliberately separate (per #132's own
+	instruction not to blend a derived list with a declared one):
+
+	  - `GUARD_CHARS` / `GUARD_CHARS_*_UNION` — DERIVED, from the compiled
+	    regexes. `test_every_guard_character_has_a_declared_row` is the guard:
+	    a character newly added to ANY detector's boundary lookaround changes
+	    the union, and an entry missing from the tables below then fails this
+	    test — "a guard character with no row" from the issue, executed.
+	  - `GUARD_LEADING_EXPECTED` / `GUARD_TRAILING_EXPECTED` — DECLARED, a
+	    measured verdict (FLAGGED or SUPPRESSED) for every (check, character)
+	    pair in the union, including pairs the check's OWN guards say nothing
+	    about — IPv4's and FQDN's dash guards force IPv6 to carry a dash row
+	    too, which is exactly the point: IPv6 has no dash guard, and that
+	    absence is now a tested property (FLAGGED) instead of an unexamined
+	    gap. Values were measured against the real detectors with
+	    `python3 -B`, not assumed from reading the regex.
+	"""
+
+	# The `.` row is exercised with a following digit (`.5`), not a bare
+	# trailing period: IPV4_RE's own trailing guard is literally `\.` then a
+	# DIGIT category (`(?!\.\d)`), not `\.` then any alnum, so `.5` is the
+	# precise shape that guard tests for — a bare trailing period is already
+	# covered by SurroundingContextTests.TRAILING's "sentence period" case
+	# and is FLAGGED for every detector (none of the guards reject a
+	# standalone `.`), which would make it useless as a discriminating row
+	# here. FQDN's and IPv6's own trailing dot guards (`\.[A-Za-z0-9]`) also
+	# reject `.5`, a digit being alnum, so the same suffix exercises all
+	# three detectors' actual guard condition rather than three different
+	# ones.
+	TRAILING_SUFFIX = {".": ".5", "-": "-", "_": "_"}
+
+	FLAGGED = "flagged"
+	SUPPRESSED = "suppressed"
+
+	# Measured, not assumed — see the class docstring. A dash trailing an
+	# IPv6 literal is the row #132 is actually about: FLAGGED here is the
+	# executable form of "IPv6 has no dash-adjacency guard at all", and it is
+	# what turns red the moment that absence is (re)closed, e.g. by the
+	# trailing not-a-dash lookahead the issue's own mutation describes.
+	GUARD_LEADING_EXPECTED = {
+		scanner.CHECK_IP: {".": SUPPRESSED, "-": SUPPRESSED},
+		scanner.CHECK_FQDN: {".": SUPPRESSED, "-": SUPPRESSED},
+		scanner.CHECK_IPV6: {".": FLAGGED, "-": FLAGGED},
+	}
+	GUARD_TRAILING_EXPECTED = {
+		scanner.CHECK_IP: {".": SUPPRESSED, "-": SUPPRESSED, "_": SUPPRESSED},
+		scanner.CHECK_FQDN: {".": SUPPRESSED, "-": SUPPRESSED, "_": SUPPRESSED},
+		scanner.CHECK_IPV6: {".": SUPPRESSED, "-": FLAGGED, "_": SUPPRESSED},
+	}
+
+	# Which of SurroundingContextTests.MATRIX_FIXTURES' own IPv6 variants a
+	# guard-character row can actually be run against. The bracketed forms
+	# are excluded because a bracket is its OWN hard boundary (the scanner's
+	# own comment: "the `[` cannot be part of a hex/colon run, so there is
+	# nothing to re-anchor") — a leading/trailing character next to `[`/`]`
+	# never reaches the guard this class is testing at all; measured: the
+	# regex simply re-matches the BARE address just inside the brackets and
+	# the probe character lands beyond the match entirely, at the ALWAYS-safe
+	# `[`/`]` boundary SurroundingContextTests already exercises. The
+	# `ipv4-mapped` and `zone id` variants are excluded for a sharper reason:
+	# their own optional groups (`mapped_quad`'s `(?:\.\d{1,3}){1,3}`, and
+	# `zone`'s `%[\w.-]+`) are THEMSELVES greedy over `.`, `-` and `_` — a
+	# probe character glued on gets absorbed into the address's own trailing
+	# group instead of ever reaching the outer boundary guard, which is a
+	# different (already-covered, by DetectorPositiveTests/IPv6DetectorTests)
+	# property than the one this class exists to pin.
+	IPV6_GUARD_VARIANTS = ("compressed", "fully expanded", "link-local compressed")
+
+	def _variants_for(self, check: str) -> dict[str, str]:
+		if check == scanner.CHECK_IPV6:
+			return {
+				name: fixture
+				for name, fixture in SurroundingContextTests.MATRIX_FIXTURES[check].items()
+				if name in self.IPV6_GUARD_VARIANTS
+			}
+		return dict(SurroundingContextTests.MATRIX_FIXTURES[check])
+
+	def findings_for(self, check: str, text: str) -> list[str]:
+		message = SurroundingContextTests.MATRIX_MESSAGE[check]
+		return [f for f in scanner.scan_text("f.md", text) if message in f]
+
+	def test_every_guard_character_has_a_declared_row(self) -> None:
+		"""The completeness guard: a new guard character fails this, not silently
+		passes the suite.
+
+		Two directions, both load-bearing:
+
+		  - every character `guard_characters()` finds in ANY detector's own
+		    lookarounds must have a declared expectation for EVERY detector
+		    (not just the one whose regex mentions it) — this is what forces
+		    IPv6 to carry a dash row despite IPV6_RE never naming one;
+		  - the declared tables must not carry a character outside that
+		    union either, which would read as derived coverage for a
+		    character no guard actually tests for.
+		"""
+		for check in scanner.CHECK_NAMES - {scanner.CHECK_DEPOT_TOKEN}:
+			with self.subTest(check=check, direction="leading"):
+				self.assertEqual(
+					set(self.GUARD_LEADING_EXPECTED[check]),
+					GUARD_CHARS_LEADING_UNION,
+					f"{check}: declared leading rows must equal the union of "
+					f"every detector's own leading guard characters",
+				)
+			with self.subTest(check=check, direction="trailing"):
+				self.assertEqual(
+					set(self.GUARD_TRAILING_EXPECTED[check]),
+					GUARD_CHARS_TRAILING_UNION,
+					f"{check}: declared trailing rows must equal the union of "
+					f"every detector's own trailing guard characters",
+				)
+		# Each detector's OWN guard characters must be a subset of the union
+		# it is checked against — otherwise the union itself is wrong.
+		for check, (leading, trailing) in GUARD_CHARS.items():
+			self.assertLessEqual(leading, GUARD_CHARS_LEADING_UNION, check)
+			self.assertLessEqual(trailing, GUARD_CHARS_TRAILING_UNION, check)
+		# A dash is asserted explicitly, per #132's stated minimum: whatever
+		# else the derivation finds, a guard-character regression on the dash
+		# specifically must be caught for every detector.
+		self.assertIn("-", GUARD_CHARS_LEADING_UNION)
+		self.assertIn("-", GUARD_CHARS_TRAILING_UNION)
+		for check in (scanner.CHECK_IP, scanner.CHECK_FQDN, scanner.CHECK_IPV6):
+			self.assertIn("-", self.GUARD_LEADING_EXPECTED[check])
+			self.assertIn("-", self.GUARD_TRAILING_EXPECTED[check])
+
+	def test_leading_guard_characters_match_declared_expectation(self) -> None:
+		for check, expected in sorted(self.GUARD_LEADING_EXPECTED.items()):
+			for variant, fixture in sorted(self._variants_for(check).items()):
+				for char, outcome in sorted(expected.items()):
+					text = f"{char}{fixture}"
+					with self.subTest(check=check, variant=variant, char=char):
+						findings = self.findings_for(check, text)
+						want = 1 if outcome == self.FLAGGED else 0
+						self.assertEqual(
+							len(findings), want, (check, variant, char, outcome, findings)
+						)
+
+	def test_trailing_guard_characters_match_declared_expectation(self) -> None:
+		for check, expected in sorted(self.GUARD_TRAILING_EXPECTED.items()):
+			for variant, fixture in sorted(self._variants_for(check).items()):
+				for char, outcome in sorted(expected.items()):
+					suffix = self.TRAILING_SUFFIX[char]
+					text = f"{fixture}{suffix}"
+					with self.subTest(check=check, variant=variant, char=char):
+						findings = self.findings_for(check, text)
+						want = 1 if outcome == self.FLAGGED else 0
+						self.assertEqual(
+							len(findings), want, (check, variant, char, outcome, findings)
+						)
+
+	def test_ipv6_range_both_endpoints_are_caught(self) -> None:
+		"""The regression #132 exists to catch, pinned directly.
+
+		IPv6 has no dash-adjacency guard at all (docs/testing.md states this
+		as a property, not an aspiration), so a dash-separated pair of IPv6
+		addresses is caught in full — mirroring
+		RangeDetectionTests.test_the_exact_range_from_the_issue for IPv4.
+		Demonstrated regression (issue #132): adding a trailing "not a dash"
+		lookahead to IPV6_RE — described in words, not written, because
+		GitHub swallows a lookahead-open immediately followed by a
+		character class even inside a fence — takes this from two findings
+		to one, silently losing the second endpoint, exactly the #111 defect
+		for the other address family. This test is what turns red if that
+		regression is reintroduced; test_trailing_guard_characters_match_
+		declared_expectation's IPv6/dash row (`FLAGGED`) is what turns red
+		first, one line at a time, but this is the literal shape from the
+		issue body.
+		"""
+		second = ipv6("fd00", "1a2b", "3c4d", "", "1")
+		findings = scanner.scan_text("f.md", f"range {LAB_IPV6}-{second}")
+		self.assertEqual(len(findings), 2, findings)
+		self.assertTrue(any(LAB_IPV6 in f for f in findings), findings)
+		self.assertTrue(any(second in f for f in findings), findings)
+
+	def test_ipv6_dash_then_word_matches_the_issue_measurement(self) -> None:
+		"""The first row measured in issue #132's body, verbatim in shape.
+
+		`<address>-x` is 1 finding today (the dash does not terminate the
+		match early, nor does it merge with `x`); the issue's demonstrated
+		mutation takes it to 0. Kept separate from the derived matrix row
+		above (which uses a bare trailing dash) because this is the exact
+		measured input from the issue, not a paraphrase of it.
+		"""
+		findings = scanner.scan_text("f.md", f"dash {LAB_IPV6}-x")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6, findings[0])
 
 
 class CaseSensitivityTests(unittest.TestCase):
