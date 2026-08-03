@@ -16,6 +16,7 @@ using System.Globalization;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using Serilog;
 using Serilog.Formatting.Compact;
 using Waypoint.Api.Authentication;
@@ -24,8 +25,10 @@ using Waypoint.Api.Logging;
 using Waypoint.Api.Middleware;
 using Waypoint.Api.Validation;
 using Waypoint.Core.Authorization;
+using Waypoint.Core.Configuration;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Serialization;
+using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.DependencyInjection;
 
 // The container health probe (see HealthCheckProbe): the same binary answers
@@ -104,6 +107,18 @@ try
 
 	WebApplication app = builder.Build();
 
+	// ADR-0009 expects the schema to be current before the API takes traffic — this
+	// runs (and, on failure, throws into the fatal-startup catch below) before the
+	// request pipeline is wired up at all, not lazily on first request. The "Testing"
+	// environment configuration turns RunMigrationsOnStartup off: the in-process test
+	// host has no Postgres to migrate against (see appsettings.Testing.json).
+	WaypointDatabaseOptions databaseOptions = app.Services.GetRequiredService<IOptions<WaypointDatabaseOptions>>().Value;
+	if (databaseOptions.RunMigrationsOnStartup)
+	{
+		ISchemaMigrator migrator = app.Services.GetRequiredService<ISchemaMigrator>();
+		await migrator.ApplyAsync();
+	}
+
 	app.UseSerilogRequestLogging();
 
 	// Outermost: catch anything that throws before it reaches the client unshaped.
@@ -133,7 +148,7 @@ try
 
 	app.MapControllers();
 
-	app.Run();
+	await app.RunAsync();
 
 	return 0;
 }
