@@ -224,7 +224,10 @@ have repeatedly caught real defects no CI run could have seen:
   proves the assertions held, not that the assertions were the right ones to write.
 - **What `sanitize` cannot catch**: it is tuned against today's tree and today's
   known-legitimate patterns (RFC 5737 ranges, `*.example.<tld>`, loopback, Docker's
-  `127.0.0.11`, four-part product versions behind a `version:` key). It is a
+  `127.0.0.11`, four-part product versions immediately preceded by the word
+  `version` — with or without a `:`/`=` separator, so `version 1.2.3.4`,
+  `--version 1.2.3.4` and `app.version=1.2.3.4` are suppressed as well as
+  `version: '1.2.3.4'`; a `version` mentioned anywhere else on the line is not). It is a
   mechanical backstop for the sanitization policy in `CLAUDE.md`, not a replacement
   for the diff-by-hand review that policy still requires — a sufficiently
   well-disguised secret or a lab identifier that doesn't match any of its patterns
@@ -239,21 +242,41 @@ have repeatedly caught real defects no CI run could have seen:
   left the IP and depot-token detectors dark on the most likely file in the repo for
   someone to paste real lab inventory into while demoing. That file was re-sanitized
   instead ([#86](https://github.com/blac9216/waypoint/issues/86)) and the exemption
-  deleted. The replacement mechanism cannot express a whole-file exemption at all —
-  an entry must name both a path and the specific check being waived — so the same
-  hole cannot be reopened by accident. If you are about to add an entry here, the
-  first question is whether the *content* should be fixed instead; if you add one
-  anyway, this bullet is where it gets disclosed, because a file the gate does not
-  look at belongs in the section about what the gate does not cover.
+  deleted. The replacement mechanism makes a broad exemption **explicit and
+  individually justified — not impossible.** Be precise about that, because an
+  earlier revision of this bullet claimed the stronger thing and was wrong: an entry
+  must name a path *and* each check it waives *and* a reason for each, but there are
+  only three checks, so naming all three is a whole-file exemption and the validator
+  accepts it. What changed is that reopening the hole now takes three enumerated,
+  individually-argued lines a reviewer will see, instead of one bare path that reads
+  like a naming nit while switching off three detectors. The enforcement is the
+  reviewer, not the data structure —
+  `test_naming_every_check_is_a_whole_file_exemption` pins this limitation in
+  executable form so the claim and the code cannot drift apart again. If you are
+  about to add an entry here, the first question is whether the *content* should be
+  fixed instead; if you add one anyway, this bullet is where it gets disclosed,
+  because a file the gate does not look at belongs in the section about what the
+  gate does not cover.
 - **What the scanner would miss if it broke**: nothing detects a detector that has
   stopped detecting. Running the scanner against a clean tree proves the absence of
   findings, never the presence of detection — the same asymmetry that let the
   frontend air-gap guard fail open three times. That is why `sanitize` runs
-  `test_scan_repo_specific.py` (34 assertions covering all three detectors, both
-  allowlist paths, the exit codes, and the documented false-positive exemptions)
-  before it trusts the scan, and why the frontend guard now runs as its own explicit
-  workflow step rather than relying on `package.json`'s `build` script continuing to
-  chain it.
+  `test_scan_repo_specific.py` (52 assertions covering all three detectors, their
+  delimiter and case handling, both allowlist paths, the exit codes, and the
+  documented false-positive exemptions) before it trusts the scan, and why the
+  frontend guard now runs as its own explicit workflow step rather than relying on
+  `package.json`'s `build` script continuing to chain it.
+- **A passing detector suite is not a working detector, either** — one level further
+  down, and this repo has now been bitten by it. The suite's first 34 assertions all
+  passed while both address detectors were defeated by a trailing full stop and the
+  FQDN detector ignored every uppercase lab TLD; a reviewer got a lab FQDN *and* a
+  lab IP past the hard gate in one appended sentence, exit 0 (PR #83 round 2). The
+  assertions were not wrong, they were **uniform**: every fixture was lowercase and
+  put a word after the address, so the suite proved the detectors fired on that one
+  shape. When you add a fixture here, the question is not "does this case pass" but
+  "what property do all my fixtures share that I am therefore not testing" — casing,
+  surrounding delimiters, position on the line, and how many of the enumerated
+  patterns (all eight lab TLDs, not four) are actually exercised.
 
 Treat every green run the way this document already asks you to treat a passing
 local test: as one input a contextless reviewer weighs, never as the verdict itself.

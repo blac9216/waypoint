@@ -18,8 +18,9 @@ in issue #79. Exits non-zero (and prints every finding) if anything trips.
 
 Tune false positives here, not by weakening the checks: see ALLOWLIST_FINDINGS
 below, where every entry names both a path and the specific check(s) waived on
-it, with a reason. There is deliberately no whole-file exemption mechanism —
-see that constant's comment for why.
+it, with a reason. That makes an exemption explicit and individually
+justified; it does not make a broad one impossible — see that constant's
+comment for exactly what it does and does not buy.
 
 The detectors themselves are tested by test_scan_repo_specific.py, which the
 sanitize workflow runs before this scan. Running this script against a clean
@@ -54,20 +55,35 @@ CHECK_DEPOT_TOKEN = "depot-token"
 CHECK_NAMES = frozenset({CHECK_IP, CHECK_FQDN, CHECK_DEPOT_TOKEN})
 
 # Exemptions, keyed by exact repo-relative path, then by the specific check
-# being waived, with a reason. Both halves are mandatory by construction:
-# there is no way to express "exempt this file" — only "exempt this check on
-# this file" — because a whole-file switch-off is the exact shape that has
-# failed open repeatedly in this repo (the frontend air-gap guard's extension
-# allowlist in PR #65 round 1, compressed artifacts in #77, compressed formats
-# in #81). The predecessor of this constant exempted a 204 KB UI mockup from
-# all three checks in order to waive one FQDN naming nit, leaving the IP and
-# depot-token detectors dark on the most likely file in the repo for someone
-# to paste real lab inventory into. That file was re-sanitized instead
-# (issue #86), which is the preferred resolution: fix the content, do not
-# exempt the path.
+# being waived, with a reason for each. Both halves are mandatory: an entry
+# cannot say "exempt this file", only "exempt these named checks on this
+# file", and each waived check carries its own justification.
+#
+# BE PRECISE ABOUT WHAT THAT BUYS. It does NOT make a whole-file exemption
+# impossible: CHECK_NAMES has three members, so naming all three in one entry
+# silences every detector on that path and _validate_allowlist() accepts it.
+# An earlier revision of this comment claimed such an entry was "inexpressible
+# by construction", which was simply false (PR #83 round 2 demonstrated it).
+# What the mechanism actually buys is that a broad exemption has to be
+# WRITTEN OUT — every check enumerated, every one justified — instead of a
+# bare path in a list that reads like a naming nit while switching off three
+# detectors. It converts a silent hole into a visible one. The enforcement is
+# the reviewer who reads the entry, not the data structure.
+#
+# That distinction matters because the whole-file switch-off is the exact
+# shape that has failed open repeatedly in this repo (the frontend air-gap
+# guard's extension allowlist in PR #65 round 1, compressed artifacts in #77,
+# compressed formats in #81). The predecessor of this constant exempted a
+# 204 KB UI mockup from all three checks in order to waive one FQDN naming
+# nit, leaving the IP and depot-token detectors dark on the most likely file
+# in the repo for someone to paste real lab inventory into. That file was
+# re-sanitized instead (issue #86), which is the preferred resolution: fix the
+# content, do not exempt the path.
 #
 # One path per entry — never a directory or a glob, so a new file alongside an
-# exempted one is still fully scanned. Empty is the correct steady state.
+# exempted one is still fully scanned. Empty is the correct steady state, and
+# a non-empty ALLOWLIST_FINDINGS must also be disclosed in docs/testing.md
+# under "What CI covers — and does not".
 ALLOWLIST_FINDINGS: dict[str, dict[str, str]] = {}
 
 
@@ -96,7 +112,21 @@ def exempt_checks(rel: str) -> set[str]:
 
 # A bare dotted-quad, not embedded in a longer dash/dot run (so version
 # strings like "vcf-download-tool-9.0.0.0-24089201.tar.gz" don't match).
-IPV4_RE = re.compile(r"(?<![\w.-])(?:\d{1,3}\.){3}\d{1,3}(?![\w.-])")
+#
+# The trailing guard is deliberately NOT `(?![\w.-])`. That earlier form put a
+# literal `.` inside the class, so an address that ENDS A SENTENCE was never
+# matched at all — "answers at <quad>." scanned clean, and a real lab IP walked
+# through the hard gate (PR #83 round 2). A following `.` now terminates the
+# token; only a `.` that begins another numeric component still rejects the
+# match, which is what keeps a five-part version from being read as a
+# four-part address. Written as single-character lookarounds rather than one
+# character class so each guard states which neighbour it is rejecting and why.
+IPV4_RE = re.compile(
+	r"(?<!\w)(?<!\.)(?<!-)"          # not continuing a word/dotted/dashed run
+	r"(?:\d{1,3}\.){3}\d{1,3}"
+	r"(?!\w)(?!-)"                   # not followed by more token characters
+	r"(?!\.\d)"                      # ...but a trailing sentence period is fine
+)
 
 # RFC 5737 documentation ranges (CLAUDE.md mandates these for all example
 # data) plus loopback (127.0.0.0/8, including Docker's embedded DNS at
@@ -120,13 +150,27 @@ ALLOWED_IP_EXACT = {"0.0.0.0"}
 # still matched, and was invisible only because the file carrying it was
 # wholesale-exempted.
 #
-# Suppress ONLY when a version key sits immediately before the quad, with
-# nothing between them but a colon/equals, optional whitespace and an opening
-# quote. A mention of the word "version" elsewhere on the line deliberately
-# does NOT suppress: otherwise a sentence that merely said "the vCenter
-# version at the site is" ahead of a real lab address would waive a real leak.
-# Anchored with \Z against the text preceding the match, so it is the
-# immediate context or nothing.
+# Suppress ONLY when the word "version"/"versions" sits immediately before the
+# quad, with nothing between them but optional whitespace, an OPTIONAL
+# colon/equals, and an optional opening quote.
+#
+# The separator being optional is deliberate but wider than a "version: 'A.B.C.D'"
+# key/value shape, and the difference is worth stating rather than leaving a
+# reader to derive it: "version A.B.C.D", "--version A.B.C.D", "x-version
+# A.B.C.D" and "app.version=A.B.C.D" are all suppressed too, because release
+# notes, CLI help text and changelogs write versions that way and a hard gate
+# that false-positives on them gets muted. `\b` bounds the word, so
+# "mgmt_version" (underscore is a word character) does NOT suppress, and
+# neither does a backtick before the quad. (Placeholders, not literals: this
+# comment keeps the no-dotted-quad discipline stated above, and the concrete
+# spellings are pinned in test_separator_is_optional_as_documented.)
+#
+# What stays excluded is the thing that matters: a mention of "version" ELSEWHERE
+# on the line does not suppress, because \Z anchors the match to the text
+# immediately preceding the quad. Otherwise a sentence that merely said "the
+# vCenter version at the site is" ahead of a real lab address would waive a real
+# leak. Immediate context or nothing — that bound, not the separator, is what
+# keeps this from becoming a line-wide bypass, and it is what the tests pin.
 VERSION_KEY_BEFORE_RE = re.compile(r"(?i)\bversions?\b\s*[:=]?\s*['\"]?\Z")
 
 
@@ -153,11 +197,25 @@ def is_allowed_ip(candidate: str) -> bool:
 
 # --- 2. Lab-style FQDNs --------------------------------------------------
 
+# Same trailing-delimiter fix as IPV4_RE — a hostname ending a sentence
+# ("Host <fqdn>.") was previously invisible — plus a case-insensitive TLD
+# alternation. The alternation used to be case-sensitive while
+# is_allowed_fqdn() lowercases its input, so case-insensitive matching was
+# clearly the intent but the regex never reached it: any upper- or mixed-case
+# spelling of a lab TLD scanned clean. Uppercase FQDNs are the normal shape in
+# AD/Windows material, exported inventories, CKL/HDF results and certificate
+# CNs — exactly the artifacts CLAUDE.md forbids committing. The `(?i:...)`
+# group scopes the flag to the TLD so it does not widen the rest of the
+# pattern. (Like the version comment above, this one carries no lab-shaped
+# literal of its own: the scanner reads its own source like any other tracked
+# file, and the case fixtures live in the test suite where they are assembled
+# at runtime.)
 FQDN_RE = re.compile(
-	r"(?<![\w.-])"
+	r"(?<!\w)(?<!\.)(?<!-)"
 	r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
-	r"(?:local|lan|home|corp|arpa|intra|lab|internal)"
-	r"(?![\w.-])"
+	r"(?i:local|lan|home|corp|arpa|intra|lab|internal)"
+	r"(?!\w)(?!-)"
+	r"(?!\.[a-zA-Z0-9])"             # trailing sentence period is fine
 )
 
 # TLDs that read as a real internal/home-lab network rather than public

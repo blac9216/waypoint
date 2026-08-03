@@ -56,6 +56,12 @@ OK_FQDN = fqdn("esxi-01", "example", "internal")
 
 # A routable-looking address of the shape CLAUDE.md forbids.
 LAB_IP = quad(10, 44, 12, 7)
+LAB_IP_2 = quad(172, 22, 9, 31)
+
+
+def lab_host(tld: str) -> str:
+	"""A forbidden-shape hostname under an arbitrary lab TLD."""
+	return fqdn("vcenter-prod", "fictionallab", tld)
 
 
 class DetectorPositiveTests(unittest.TestCase):
@@ -108,6 +114,188 @@ class DetectorPositiveTests(unittest.TestCase):
 		text = f"{LAB_FQDN} at {LAB_IP} depot_token: {opaque_token()}"
 		findings = scanner.scan_text("f.md", text)
 		self.assertEqual(len(findings), 3, findings)
+
+
+class SurroundingContextTests(unittest.TestCase):
+	"""An address must be detected wherever it sits on the line.
+
+	Regression cover for the round-2 blocker on PR #83, and for the fixture
+	monoculture that hid it. Every fixture in the original suite placed the
+	address mid-line with a word before it and a word after it, so the suite
+	proved only that the detectors fire on *that* shape. Both regexes ended in
+	`(?![\\w.-])` with a literal `.` in the class, which meant an address
+	ENDING A SENTENCE was never matched — a lab FQDN and a lab IP went through
+	the hard gate on the real tree, exit 0, in a single appended line.
+
+	The lesson generalises past the one bug: a detector's delimiter handling is
+	part of the detector, so the delimiters get enumerated rather than assumed.
+	"""
+
+	# Characters that legitimately end a token in prose, markup, config and
+	# URLs. `_` and `-` are deliberately absent: they continue a token, and
+	# treating them as terminators is what would let a real bypass in.
+	TRAILING = [
+		("end of line", ""),
+		("sentence period", "."),
+		("comma", ","),
+		("semicolon", ";"),
+		("colon / port", ":443"),
+		("question mark", "?"),
+		("close paren", ")"),
+		("close bracket", "]"),
+		("double quote", '"'),
+		("single quote", "'"),
+		("angle bracket", ">"),
+		("url path", "/ui"),
+		("space then word", " today"),
+		("tab", "\t"),
+	]
+
+	LEADING = [
+		("start of line", ""),
+		("space", "at "),
+		("open paren", "("),
+		("open bracket", "["),
+		("double quote", '"'),
+		("single quote", "'"),
+		("angle bracket", "<"),
+		("equals", "="),
+		("url scheme", "https://"),
+		("at sign", "@"),
+	]
+
+	def test_ip_is_flagged_after_every_trailing_delimiter(self) -> None:
+		for name, suffix in self.TRAILING:
+			with self.subTest(delimiter=name):
+				findings = scanner.scan_text("f.md", f"host {LAB_IP}{suffix}")
+				self.assertEqual(len(findings), 1, (name, findings))
+				self.assertIn(LAB_IP, findings[0])
+
+	def test_fqdn_is_flagged_after_every_trailing_delimiter(self) -> None:
+		for name, suffix in self.TRAILING:
+			with self.subTest(delimiter=name):
+				findings = scanner.scan_text("f.md", f"host {LAB_FQDN}{suffix}")
+				self.assertEqual(len(findings), 1, (name, findings))
+				self.assertIn(LAB_FQDN, findings[0])
+
+	def test_ip_is_flagged_after_every_leading_delimiter(self) -> None:
+		for name, prefix in self.LEADING:
+			with self.subTest(delimiter=name):
+				findings = scanner.scan_text("f.md", f"{prefix}{LAB_IP}")
+				self.assertEqual(len(findings), 1, (name, findings))
+
+	def test_fqdn_is_flagged_after_every_leading_delimiter(self) -> None:
+		for name, prefix in self.LEADING:
+			with self.subTest(delimiter=name):
+				findings = scanner.scan_text("f.md", f"{prefix}{LAB_FQDN}")
+				self.assertEqual(len(findings), 1, (name, findings))
+
+	def test_address_alone_on_its_line_is_flagged(self) -> None:
+		"""No surrounding context at all — the extreme of the above."""
+		self.assertEqual(len(scanner.scan_text("f.md", LAB_IP)), 1)
+		self.assertEqual(len(scanner.scan_text("f.md", LAB_FQDN)), 1)
+
+	def test_the_exact_line_that_defeated_the_gate(self) -> None:
+		"""Verbatim regression for the round-2 escape.
+
+		An uppercase lab FQDN and a sentence-final lab IP in one line, which
+		the pre-fix detectors reported as `clean` with exit 0.
+		"""
+		text = f"Lab vCenter {LAB_FQDN.upper()} answers at {LAB_IP}."
+		findings = scanner.scan_text("docs/testing.md", text)
+		self.assertEqual(len(findings), 2, findings)
+		self.assertTrue(any("IP address literal" in f for f in findings), findings)
+		self.assertTrue(any("lab-style FQDN" in f for f in findings), findings)
+
+	def test_two_addresses_on_one_line_each_report(self) -> None:
+		"""Every original fixture carried at most one address of each kind."""
+		findings = scanner.scan_text("f.md", f"pair {LAB_IP} and {LAB_IP_2}.")
+		self.assertEqual(len(findings), 2, findings)
+
+	def test_trailing_period_does_not_resurrect_version_false_positives(self) -> None:
+		"""The fix must not over-correct into the #89 false positives.
+
+		A dotted run longer than four parts is still not an address, even when
+		it ends a sentence, and neither is a build-suffixed version.
+		"""
+		for text in (
+			f"release {quad(1, 2, 3, 4)}.5.",
+			f"build {quad(4, 2, 1, 0)}.0.24304122.",
+			f"vcf-download-tool-{quad(9, 0, 0, 0)}-24089201.tar.gz.",
+			f"version: '{quad(8, 18, 0, 4)}'.",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+
+class CaseSensitivityTests(unittest.TestCase):
+	"""Lab TLDs are matched in any case (round-2 blocker, part b).
+
+	`FQDN_RE`'s TLD alternation had no case-insensitive flag while
+	`is_allowed_fqdn()` lowercases its input — so case-insensitivity was
+	plainly intended and never reached. Every fixture in the original suite
+	was lowercase, so nothing failed. Uppercase FQDNs are the normal shape in
+	AD/Windows material, exported inventories, CKL/HDF results and certificate
+	CNs, which are exactly the artifacts CLAUDE.md forbids committing.
+	"""
+
+	def test_uppercase_lab_fqdn_is_flagged(self) -> None:
+		host = LAB_FQDN.upper()
+		findings = scanner.scan_text("f.md", f"host {host} today")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(host, findings[0])
+
+	def test_mixed_case_lab_fqdn_is_flagged(self) -> None:
+		base = fqdn("vcenter-prod", "fictionallab", "corp")
+		for host in (
+			f"{base}.{'local'.upper()}",          # lowercase host, uppercase TLD
+			f"{base.upper()}.{'local'}",          # uppercase host, lowercase TLD
+			f"{base.title()}.{'local'.title()}",  # title case throughout
+		):
+			with self.subTest(host=host):
+				findings = scanner.scan_text("f.md", f"host {host} today")
+				self.assertEqual(len(findings), 1, (host, findings))
+
+	def test_every_suspicious_tld_fires_in_both_cases(self) -> None:
+		"""Pins the regex alternation to SUSPICIOUS_TLDS.
+
+		The two are separate declarations, so they can drift. The original
+		suite exercised only four of the eight TLDs, and only through the
+		*allowed* `*.example.<tld>` form — dropping `lan`, `home`, `arpa` and
+		`intra` from the alternation passed all 34 assertions silently.
+		"""
+		self.assertTrue(scanner.SUSPICIOUS_TLDS)
+		for tld in sorted(scanner.SUSPICIOUS_TLDS):
+			for spelling in (tld, tld.upper(), tld.capitalize()):
+				with self.subTest(tld=spelling):
+					host = lab_host(spelling)
+					findings = scanner.scan_text("f.md", f"host {host}.")
+					self.assertEqual(len(findings), 1, (host, findings))
+					self.assertIn("lab-style FQDN", findings[0])
+
+	def test_case_insensitivity_does_not_widen_past_the_sanctioned_form(self) -> None:
+		"""`*.example.<tld>` stays allowed in any case, not just lowercase."""
+		for tld in sorted(scanner.SUSPICIOUS_TLDS):
+			for host in (
+				fqdn("esxi-01", "example", tld),
+				fqdn("esxi-01", "example", tld).upper(),
+				fqdn("ESXi-01", "Example", tld.capitalize()),
+			):
+				with self.subTest(host=host):
+					self.assertEqual(scanner.scan_text("f.md", f"see {host}."), [])
+
+	def test_two_label_lab_fqdn_is_flagged(self) -> None:
+		"""Every original FQDN fixture had three or more labels."""
+		host = fqdn("fictionallab", "local")
+		self.assertEqual(len(scanner.scan_text("f.md", f"host {host}.")), 1)
+
+	def test_depot_keyword_is_case_insensitive(self) -> None:
+		"""Every original depot fixture spelled the keyword in lowercase."""
+		token = opaque_token()
+		for keyword in ("DEPOT_TOKEN", "Depot-Token", "ACTIVATION CODE", "Broadcom_Token"):
+			with self.subTest(keyword=keyword):
+				findings = scanner.scan_text("f.md", f"{keyword}: {token}")
+				self.assertEqual(len(findings), 1, (keyword, findings))
 
 
 class LegitimateConventionTests(unittest.TestCase):
@@ -208,9 +396,59 @@ class VersionStringTests(unittest.TestCase):
 		"""An octet above 255 cannot be the lab address this check catches."""
 		self.assertEqual(scanner.scan_text("f.md", f"rel {quad(2024, 1, 300, 5)}"), [])
 
+	def test_separator_is_optional_as_documented(self) -> None:
+		"""The suppression is wider than a `version: 'A.B.C.D'` key/value shape.
+
+		`[:=]?` is optional, so the separator-less and prefixed spellings that
+		release notes and CLI help text actually use are suppressed too. This
+		is documented behaviour, not an accident — pinned here so the code
+		comment and the implementation cannot drift apart.
+		"""
+		version = quad(8, 18, 0, 4)
+		for line in (
+			f"version {version}",
+			f"--version {version}",
+			f"x-version {version}",
+			f"app.version={version}",
+		):
+			with self.subTest(line=line):
+				self.assertEqual(scanner.scan_text("f.md", line), [], line)
+
+	def test_version_word_must_be_whole_and_immediately_before(self) -> None:
+		"""The documented bounds of the suppression, stated as failures.
+
+		These are the spellings that deliberately do NOT waive, and they are
+		what keeps the optional separator above from being a bypass.
+		"""
+		for line in (
+			f"mgmt_version: {LAB_IP}",       # underscore defeats the \\b
+			f"version `{LAB_IP}`",           # backtick is not in ['\"]?
+			f"revision {LAB_IP}",            # not the word "version"
+			f"version of the host; see {LAB_IP}",  # not immediately before
+		):
+			with self.subTest(line=line):
+				findings = scanner.scan_text("f.md", line)
+				self.assertEqual(len(findings), 1, (line, findings))
+				self.assertIn(LAB_IP, findings[0])
+
+	def test_version_suppression_does_not_carry_across_lines(self) -> None:
+		"""The check is per-line; a version key above does not waive below."""
+		text = f"version:\n{LAB_IP}"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertTrue(findings[0].startswith("f.md:2:"), findings[0])
+
 
 class AllowlistTests(unittest.TestCase):
-	"""Exemptions are per-file AND per-check — never a whole-file switch-off."""
+	"""Exemptions are per-file AND per-check.
+
+	The property that holds is that an exemption must be *enumerated* — every
+	waived check named, each with its own reason. The property that does NOT
+	hold, despite an earlier claim in this repo, is that a whole-file
+	switch-off is impossible: there are three checks, so naming all three is a
+	whole-file exemption. `test_naming_every_check_is_a_whole_file_exemption`
+	pins that honestly rather than leaving the docs asserting otherwise.
+	"""
 
 	def setUp(self) -> None:
 		self._saved = dict(scanner.ALLOWLIST_FINDINGS)
@@ -270,6 +508,29 @@ class AllowlistTests(unittest.TestCase):
 	def test_there_is_no_whole_file_allowlist_constant(self) -> None:
 		"""The predecessor mechanism must stay gone, not merely unused."""
 		self.assertFalse(hasattr(scanner, "ALLOWLIST_FILES"))
+
+	def test_naming_every_check_is_a_whole_file_exemption(self) -> None:
+		"""The honest limit of this mechanism, asserted rather than claimed.
+
+		PR #83 round 2 found the code comment, docs/testing.md and the PR body
+		all asserting that a whole-file exemption was "inexpressible by
+		construction". It is not: CHECK_NAMES has three members, so an entry
+		naming all three silences every detector on that path, and
+		_validate_allowlist() accepts it without complaint. What the mechanism
+		buys is that such an entry has to be spelled out check by check with a
+		reason each, where a reviewer will see it — not that it cannot be
+		written. This test exists so the limitation stays documented in
+		executable form; if a future change really does make it impossible,
+		this test fails and the docs get corrected with it.
+		"""
+		entry = {check: "documented limitation" for check in scanner.CHECK_NAMES}
+		self.assertEqual(len(entry), 3, entry)
+		text = f"{LAB_FQDN} at {LAB_IP} depot_token: {opaque_token()}"
+		self.assertEqual(len(scanner.scan_text("elsewhere.html", text)), 3)
+
+		scanner.ALLOWLIST_FINDINGS["mock.html"] = entry
+		scanner._validate_allowlist()  # accepted, no raise
+		self.assertEqual(scanner.scan_text("mock.html", text), [])
 
 
 class FileHandlingTests(unittest.TestCase):
