@@ -331,13 +331,39 @@ have repeatedly caught real defects no CI run could have seen:
   same identifier — narrowing that trailing case too was tried and produced a
   real false positive against this repo's own `.editorconfig`
   (`EditorconfigRegressionTests` pins the specific line), so it was
-  deliberately left as it was. Issue #112 added an IPv6 detector (full/
-  compressed forms, link-local, unique-local, the bracketed-with-port URL
-  form, zone IDs); it has no analogous dash-adjacency guard at all, so an
-  IPv6 range and a chained IPv4 range of any length are both caught in full —
-  the IPv6 gaps that remain are shapes no regex reasonably enumerates (a
-  hex-lettered identifier that happens to also be valid IPv6 syntax) rather
-  than boundary cases the fix chose not to close.
+  deliberately left as it was. Zero-padded octets are recognised at any
+  padding width ([#119](https://github.com/blac9216/waypoint/issues/119)):
+  the per-part digit count is not bounded in the regex at all, and whether a
+  run of digits denotes a real address is decided in one place, by value.
+
+  Issue #112 added an IPv6 detector (full/compressed forms, link-local,
+  unique-local, the bracketed-with-port URL form, zone IDs); it has no
+  analogous dash-adjacency guard at all, so an IPv6 range and a chained IPv4
+  range of any length are both caught in full.
+
+  **The first cut of that detector shipped with a boundary bug, and it is
+  worth stating plainly rather than summarising away**: its trailing guard
+  put a literal `.` inside the lookahead — the exact construction the IPv4
+  detector's own comment warns against at length — so an IPv6 literal that
+  ended a sentence was never matched, and a line ending in a lab ULA scanned
+  `clean` with exit 0 on the real tree (PR #115 round 1, the same escape
+  shape as the round-2 blocker on PR #83). The cause was not the regex, it
+  was the test suite: `SurroundingContextTests` exists to enumerate exactly
+  this, and the new detector simply never joined it. Both are fixed —
+  every address detector is now driven through the same 14 trailing and 10
+  leading delimiters from one table, and a check that appears in neither
+  that table nor an adjacent, written-out exempt list fails a test. A
+  delimiter shape that is *deliberately* left open is disclosed here, in
+  this list, and pinned by a test; there are two, both mirroring the IPv4
+  and FQDN detectors: a literal glued to a following `_` (an underscore
+  reads as more of the same token on the trailing side — the
+  `.editorconfig` reasoning above), and a literal followed by `.` plus an
+  alphanumeric (a dotted continuation such as a hostname, where the
+  address-shaped prefix is not standing alone). Everything else that gets
+  through the IPv6 detector is a shape no regex reasonably enumerates — a
+  hex-lettered identifier that also happens to be valid IPv6 syntax
+  ([#118](https://github.com/blac9216/waypoint/issues/118)), or a
+  deliberate-evasion encoding — not a boundary case.
 - **Files the scanner does not read**: **none, currently — and that is a property
   worth keeping.** `ALLOWLIST_FINDINGS` in `scan_repo_specific.py` is empty, so every
   git-tracked file that isn't a known-binary extension is scanned by all four
@@ -368,10 +394,17 @@ have repeatedly caught real defects no CI run could have seen:
   stopped detecting. Running the scanner against a clean tree proves the absence of
   findings, never the presence of detection — the same asymmetry that let the
   frontend air-gap guard fail open three times. That is why `sanitize` runs
-  `test_scan_repo_specific.py` (86 assertions covering all four detectors, their
-  delimiter and case handling, the IPv4/FQDN dash- and underscore-adjacency
-  narrowing from issue #111, both allowlist paths, the exit codes, and the
-  documented false-positive exemptions) before it trusts the scan, and why the
+  `test_scan_repo_specific.py` (97 assertions covering all four detectors, their
+  case handling, the IPv4/FQDN dash- and underscore-adjacency narrowing from
+  issue #111, the padding-width independence from #119, both allowlist paths,
+  the exit codes, and the documented false-positive exemptions) before it
+  trusts the scan. Delimiter handling is the one part not left to per-detector
+  test-writing: every address detector goes through a single shared matrix of
+  14 trailing and 10 leading delimiters, and a detector can only sit outside it
+  by being named in an exempt list with a written reason — a test compares both
+  against the scanner's own `CHECK_NAMES`. That guard exists because the IPv6
+  detector joined the suite with no delimiter case at all and carried a live
+  boundary bug through a full review round (above). It is also why the
   frontend guard now runs as its own explicit workflow step rather than relying on
   `package.json`'s `build` script continuing to chain it.
 - **A passing detector suite is not a working detector, either** — one level further
@@ -385,6 +418,17 @@ have repeatedly caught real defects no CI run could have seen:
   "what property do all my fixtures share that I am therefore not testing" — casing,
   surrounding delimiters, position on the line, and how many of the enumerated
   patterns (all eight lab TLDs, not four) are actually exercised.
+
+  It then happened a second time, in a variant worth naming separately because
+  the fixture-monoculture question above would not have caught it: the IPv6
+  detector (#112) arrived with the delimiter bug already fixed for the other two
+  detectors, in the same file, directly under the comment explaining it — because
+  the matrix that enumerates delimiters was per-detector *by omission*, so a new
+  detector opted out by simply not appearing (PR #115 round 1). So there is a
+  second question for a new detector: not only "what do my fixtures share", but
+  "which existing matrices should this detector be in, and what makes it
+  impossible to leave it out". Shared coverage that a new case joins by being
+  remembered is coverage that eventually is not.
 
 Treat every green run the way this document already asks you to treat a passing
 local test: as one input a contextless reviewer weighs, never as the verdict itself.

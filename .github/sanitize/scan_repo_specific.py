@@ -164,9 +164,20 @@ def exempt_checks(rel: str) -> set[str]:
 #   RangeDetectionTests). Single-sided dash adjacency is deliberately left
 #   guarded — this is the narrow fix the issue asks for, not a general
 #   loosening of the dash rule.
+#
+# The per-part digit count is deliberately UNBOUNDED (`\d+`, not `\d{1,3}`),
+# issue #119. A bounded shape puts the padding question in two places at once
+# — the regex and _parse_ipv4_octets() — and both were previously capped at 3,
+# so a four-digit-padded quad never even produced a candidate and the
+# zero-padding fix from #111 stopped one digit short of its own stated
+# rationale. Which digit strings denote a real address is a question about
+# VALUE, and it is answered in exactly one place now: _parse_ipv4_octets()
+# strips the padding and rejects anything above 255 or carrying more than
+# three significant digits. Widening the regex alone would change nothing, and
+# narrowing it again would silently re-cap the parser.
 IPV4_RE = re.compile(
 	r"(?<![A-Za-z0-9])(?<!\.)"       # not continuing an alnum/dotted run
-	r"(?:\d{1,3}\.){3}\d{1,3}"
+	r"(?:\d+\.){3}\d+"
 	r"(?!\w)"                        # not followed by more token characters
 	r"(?!\.\d)"                      # ...but a trailing sentence period is fine
 )
@@ -175,7 +186,7 @@ IPV4_RE = re.compile(
 # answer "is there an address-shaped run touching this exact position" for
 # the dash-glue check below. It has no business being matched against on its
 # own — always go through IPV4_RE (or _dash_glues_to_non_address) for that.
-_BARE_QUAD_RE = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
+_BARE_QUAD_RE = re.compile(r"(?:\d+\.){3}\d+")
 
 
 def _quad_ends_at(line: str, pos: int) -> bool:
@@ -259,22 +270,30 @@ def _parse_ipv4_octets(candidate: str) -> list[int] | None:
 	"""Parse a dotted-quad candidate into its four octet values, or None.
 
 	None means the candidate is not actually a valid IPv4 literal — an octet
-	over 255 (a product-version quad, e.g. "2024.1.300.5") or a part with
-	more than 3 digits — the only invariants IPV4_RE's `\\d{1,3}` shape
-	doesn't already enforce on its own.
+	over 255 (a product-version quad, e.g. "2024.1.300.5") or a part carrying
+	more than three SIGNIFICANT digits once its padding is removed. IPV4_RE
+	matches `\\d+` per part and enforces neither, so this is the single place
+	where "do these digits denote a real address" is decided.
 
 	Leading zeros ("010") parse here even though Python's `ipaddress` module
 	rejects them outright as ambiguous octal notation (issue #111): CLAUDE.md
 	cares whether the digits denote a real address, not whether the author
 	zero-padded it, and a zero-padded lab quad is exactly as real a leak as
 	an unpadded one.
+
+	That rationale is padding-WIDTH-insensitive, so the length test counts
+	significant digits rather than characters (issue #119). An earlier version
+	rejected `len(part) > 3`, which meant a four-digit-padded quad
+	("0010.0044...") read as "not an address at all, so allowed" — the
+	original bug one padding digit further out. Any padding width now
+	normalises to the same address.
 	"""
 	parts = candidate.split(".")
 	if len(parts) != 4:
 		return None
 	octets: list[int] = []
 	for part in parts:
-		if not part.isdigit() or len(part) > 3:
+		if not part.isdigit() or len(part.lstrip("0")) > 3:
 			return None
 		value = int(part)
 		if value > 255:
@@ -410,15 +429,68 @@ def is_placeholder_token(value: str) -> bool:
 # brackets with a `:<port>` suffix appended, RFC 3986 style); zone IDs (a
 # `%` followed by an interface name) are matched but stripped before
 # validation, since `ipaddress.IPv6Address` does not accept them.
+#
+# THE BOUNDARY GUARDS ARE THE PART THAT KEEPS GETTING THIS WRONG. The first
+# version of this detector shipped `(?<![\w:.])` / `(?![\w:.])` — a literal
+# `.` inside the class — which is the exact defect the IPv4 comment above
+# spends two paragraphs warning about, reintroduced for the other address
+# family: an IPv6 literal that ENDS A SENTENCE was never matched at all, so
+# "the manager answers at <ula>." scanned clean and walked through the hard
+# gate (PR #115 round 1, the same escape shape as PR #83 round 2). Written
+# as single-character lookarounds so each guard states which neighbour it is
+# rejecting and why:
+#
+#   trailing (?!\w)            - a letter/digit/underscore glued on is more of
+#                                the same token, not an address boundary.
+#   trailing (?!:)             - unreachable after a greedy hex/colon run, kept
+#                                so the intent is stated rather than inferred.
+#   trailing (?!\.[A-Za-z0-9]) - a `.` that CONTINUES the token (the dotted
+#                                quad of the IPv4-mapped form) still rejects;
+#                                a `.` that ends a sentence does not.
+#   leading  (?<![A-Za-z0-9])  - same rule mirrored, and `_` is deliberately
+#                                allowed here exactly as it is on IPV4_RE's
+#                                leading side (issue #111): before the match an
+#                                underscore separates two tokens.
+#
+# The leading guard no longer rejects `:` or `.` either. Those rejections
+# hid `addr:<ula>` and `x.<ula>` — in both, the character is the delimiter
+# between a key/label and the address that follows, exactly as it is for
+# IPV4_RE (whose leading guard has never rejected `:`). Dropping them cannot
+# resurrect a mid-run match, because matches are non-overlapping and the
+# leftmost one greedily consumes the whole hex/colon run.
 IPV6_RE = re.compile(
-	r"(?<![\w:.])"
+	r"(?<![A-Za-z0-9])"
 	r"(?:"
 	r"\[(?P<bracketed>[0-9A-Fa-f:]+(?:%[\w.-]+)?)\](?::\d+)?"
 	r"|"
 	r"(?P<bare>[0-9A-Fa-f:]+(?:\.\d{1,3}){0,3}(?:%[\w.-]+)?)"
 	r")"
-	r"(?![\w:.])"
+	r"(?!\w)"
+	r"(?!:)"
+	r"(?!\.[A-Za-z0-9])"
 )
+
+
+def _trim_delimiter_colons(candidate: str) -> str:
+	"""Drop a leading/trailing `:` that is a delimiter, not part of the address.
+
+	`[0-9A-Fa-f:]+` is greedy, so a colon that merely sits NEXT TO a literal is
+	swallowed into the candidate — `<ula>:` at the end of a clause, or a
+	`key:<ula>` where the leading guard let the match start at the colon. The
+	swallowed colon then makes the candidate fail strict parsing, and
+	is_allowed_ipv6() reads that failure as "not an address" — the same
+	boundary-character-eats-the-finding shape as the trailing `.` bug above.
+
+	Trimming is safe by construction rather than by taste: a valid IPv6
+	literal can only begin or end with a colon as part of `::`, so a SINGLE
+	leading or trailing colon is never part of one. Doubled colons are left
+	alone, which is what keeps `::1`, `::` and a bare `<prefix>::` intact.
+	"""
+	if candidate.endswith(":") and not candidate.endswith("::"):
+		candidate = candidate[:-1]
+	if candidate.startswith(":") and not candidate.startswith("::"):
+		candidate = candidate[1:]
+	return candidate
 
 # RFC 3849's documentation prefix (CLAUDE.md's IPv6 analogue of RFC 5737),
 # plus loopback and the unspecified address. The RFC 4291 link-local prefix
@@ -501,7 +573,10 @@ def scan_text(rel: str, text: str) -> list[str]:
 		if CHECK_IPV6 not in waived:
 			for match in IPV6_RE.finditer(line):
 				candidate = match.group("bracketed") or match.group("bare")
-				if candidate is None or candidate.count(":") < 2:
+				if candidate is None:
+					continue
+				candidate = _trim_delimiter_colons(candidate)
+				if candidate.count(":") < 2:
 					continue
 				if is_allowed_ipv6(candidate):
 					continue

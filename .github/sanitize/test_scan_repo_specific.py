@@ -171,6 +171,17 @@ class SurroundingContextTests(unittest.TestCase):
 
 	The lesson generalises past the one bug: a detector's delimiter handling is
 	part of the detector, so the delimiters get enumerated rather than assumed.
+
+	It generalises once more, and the second lesson cost a round of review too.
+	This matrix originally hard-coded one method per detector, so a NEW
+	detector joined the suite by writing new methods — or, in practice, by not
+	writing them: `CHECK_IPV6` (issue #112) shipped with no delimiter case at
+	all, and the very bug this class exists to catch was sitting in it, in the
+	same file, under the same comment (PR #115 round 1). A shared matrix any
+	detector can opt out of by omission is how that happens. So the matrix is
+	now driven by `MATRIX_FIXTURES` + `MATRIX_EXEMPT`, which between them must
+	account for every name in `scanner.CHECK_NAMES` — opting out is still
+	allowed, but only in writing, with a reason.
 	"""
 
 	# Characters that legitimately end a token in prose, markup, config and
@@ -206,36 +217,71 @@ class SurroundingContextTests(unittest.TestCase):
 		("at sign", "@"),
 	]
 
-	def test_ip_is_flagged_after_every_trailing_delimiter(self) -> None:
-		for name, suffix in self.TRAILING:
-			with self.subTest(delimiter=name):
-				findings = scanner.scan_text("f.md", f"host {LAB_IP}{suffix}")
-				self.assertEqual(len(findings), 1, (name, findings))
-				self.assertIn(LAB_IP, findings[0])
+	# One fixture per detector that matches a bare address-shaped token. The
+	# key is the detector's own check name, so this map is comparable against
+	# scanner.CHECK_NAMES rather than against a list of method names nobody
+	# can diff.
+	MATRIX_FIXTURES = {
+		scanner.CHECK_IP: LAB_IP,
+		scanner.CHECK_FQDN: LAB_FQDN,
+		scanner.CHECK_IPV6: LAB_IPV6,
+	}
 
-	def test_fqdn_is_flagged_after_every_trailing_delimiter(self) -> None:
-		for name, suffix in self.TRAILING:
-			with self.subTest(delimiter=name):
-				findings = scanner.scan_text("f.md", f"host {LAB_FQDN}{suffix}")
-				self.assertEqual(len(findings), 1, (name, findings))
-				self.assertIn(LAB_FQDN, findings[0])
+	# Opting a detector out is legitimate, but it has to be stated and
+	# argued here rather than achieved by writing no test.
+	MATRIX_EXEMPT = {
+		scanner.CHECK_DEPOT_TOKEN: (
+			"not a bare token — the detector matches a keyword, a separator "
+			"and a value as one unit, so 'what character precedes the "
+			"match' is not a property it has. Its context handling is "
+			"enumerated instead by test_every_depot_keyword_variant_fires "
+			"and test_depot_keyword_is_case_insensitive."
+		),
+	}
 
-	def test_ip_is_flagged_after_every_leading_delimiter(self) -> None:
-		for name, prefix in self.LEADING:
-			with self.subTest(delimiter=name):
-				findings = scanner.scan_text("f.md", f"{prefix}{LAB_IP}")
-				self.assertEqual(len(findings), 1, (name, findings))
+	def test_every_detector_is_in_the_matrix_or_explicitly_exempt(self) -> None:
+		"""No detector joins the suite by silently skipping this matrix.
 
-	def test_fqdn_is_flagged_after_every_leading_delimiter(self) -> None:
-		for name, prefix in self.LEADING:
-			with self.subTest(delimiter=name):
-				findings = scanner.scan_text("f.md", f"{prefix}{LAB_FQDN}")
-				self.assertEqual(len(findings), 1, (name, findings))
+		This is the guard that was missing when the IPv6 detector landed: the
+		matrix existed, it was simply never extended, and nothing failed.
+		"""
+		covered = set(self.MATRIX_FIXTURES) | set(self.MATRIX_EXEMPT)
+		self.assertEqual(
+			covered,
+			set(scanner.CHECK_NAMES),
+			"every check in scanner.CHECK_NAMES must appear in "
+			"MATRIX_FIXTURES (enumerated against every delimiter) or in "
+			"MATRIX_EXEMPT (with a written reason)",
+		)
+		self.assertEqual(
+			set(self.MATRIX_FIXTURES) & set(self.MATRIX_EXEMPT),
+			set(),
+			"a check cannot be both enumerated and exempt",
+		)
+		for check, reason in self.MATRIX_EXEMPT.items():
+			with self.subTest(check=check):
+				self.assertTrue(reason.strip(), check)
+
+	def test_every_detector_is_flagged_after_every_trailing_delimiter(self) -> None:
+		for check, fixture in sorted(self.MATRIX_FIXTURES.items()):
+			for name, suffix in self.TRAILING:
+				with self.subTest(check=check, delimiter=name):
+					findings = scanner.scan_text("f.md", f"host {fixture}{suffix}")
+					self.assertEqual(len(findings), 1, (check, name, findings))
+					self.assertIn(fixture, findings[0])
+
+	def test_every_detector_is_flagged_after_every_leading_delimiter(self) -> None:
+		for check, fixture in sorted(self.MATRIX_FIXTURES.items()):
+			for name, prefix in self.LEADING:
+				with self.subTest(check=check, delimiter=name):
+					findings = scanner.scan_text("f.md", f"{prefix}{fixture}")
+					self.assertEqual(len(findings), 1, (check, name, findings))
 
 	def test_address_alone_on_its_line_is_flagged(self) -> None:
 		"""No surrounding context at all — the extreme of the above."""
-		self.assertEqual(len(scanner.scan_text("f.md", LAB_IP)), 1)
-		self.assertEqual(len(scanner.scan_text("f.md", LAB_FQDN)), 1)
+		for check, fixture in sorted(self.MATRIX_FIXTURES.items()):
+			with self.subTest(check=check):
+				self.assertEqual(len(scanner.scan_text("f.md", fixture)), 1)
 
 	def test_the_exact_line_that_defeated_the_gate(self) -> None:
 		"""Verbatim regression for the round-2 escape.
@@ -663,15 +709,18 @@ class EditorconfigRegressionTests(unittest.TestCase):
 				self.assertEqual(scanner.scan_text("f.md", line), [], line)
 
 
-def zero_pad_quad(dotted_quad: str) -> str:
-	"""Zero-pad each octet of a dotted-quad to 3 digits.
+def zero_pad_quad(dotted_quad: str, width: int = 3) -> str:
+	"""Zero-pad each octet of a dotted-quad to `width` digits.
 
 	Assembled at runtime (never written as a padded literal) for the same
 	reason every other address fixture in this file is: the padded form is
 	exactly as address-shaped as the unpadded one, so writing it directly
 	into the source would trip the very check being tested here.
+
+	`width` is a parameter because the padding WIDTH was the bug in issue
+	#119: the fix for #111 handled 3 and stopped there.
 	"""
-	return ".".join(part.zfill(3) for part in dotted_quad.split("."))
+	return ".".join(part.zfill(width) for part in dotted_quad.split("."))
 
 
 class ZeroPaddedQuadTests(unittest.TestCase):
@@ -699,6 +748,63 @@ class ZeroPaddedQuadTests(unittest.TestCase):
 	def test_octet_over_255_is_still_not_a_finding(self) -> None:
 		"""An invalid octet is not an address regardless of padding."""
 		self.assertEqual(scanner.scan_text("f.md", f"rel {quad(2024, 1, 300, 5)}"), [])
+
+	def test_padding_width_is_not_a_bound(self) -> None:
+		"""Issue #119: the first fix stopped one digit short.
+
+		`IPV4_RE`'s `\\d{1,3}` and `_parse_ipv4_octets`' `len(part) > 3` both
+		capped at three digits, so a four-digit-padded quad never produced a
+		candidate and read as "not an address, so allowed" — the #111 bug one
+		padding digit further out. Widening only one of the two would have
+		changed nothing, so both are exercised here across several widths.
+		"""
+		for width in (3, 4, 5, 8):
+			with self.subTest(width=width):
+				padded = zero_pad_quad(LAB_IP, width)
+				findings = scanner.scan_text("f.md", f"host {padded}")
+				self.assertEqual(len(findings), 1, (width, findings))
+				self.assertIn(padded, findings[0])
+
+	def test_mixed_width_padding_from_the_issue_is_flagged(self) -> None:
+		"""The octal-styled shape #119 names, padded unevenly per octet."""
+		parts = quad(250, 54, 14, 7).split(".")
+		padded = ".".join(
+			part.zfill(width) for part, width in zip(parts, (4, 3, 3, 2))
+		)
+		findings = scanner.scan_text("f.md", f"gw {padded}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(padded, findings[0])
+
+	def test_wider_padding_of_an_allowed_address_stays_allowed(self) -> None:
+		"""Widening must not turn the sanctioned ranges into findings."""
+		for width in (4, 6):
+			with self.subTest(width=width):
+				self.assertEqual(
+					scanner.scan_text(
+						"f.md", f"doc {zero_pad_quad(quad(192, 0, 2, 1), width)}"
+					),
+					[],
+				)
+				self.assertEqual(
+					scanner.scan_text(
+						"f.md", f"bind {zero_pad_quad(quad(0, 0, 0, 0), width)}"
+					),
+					[],
+				)
+
+	def test_four_significant_digits_are_not_an_address(self) -> None:
+		"""Padding is stripped; significant digits are still bounded at three.
+
+		Otherwise widening the regex would start reading long dotted number
+		runs (build numbers, dates) as addresses.
+		"""
+		for text in (
+			f"rel {quad(1000, 1, 1, 1)}",
+			f"rel {quad(1, 2, 3, 4096)}",
+			f"seq {quad(2026, 8, 3, 1200)}",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
 
 
 class IPv6DetectorTests(unittest.TestCase):
@@ -781,7 +887,14 @@ class IPv6DetectorTests(unittest.TestCase):
 
 	def test_ipv4_mapped_form_also_trips_the_ipv4_detector(self) -> None:
 		"""Documented overlap, not a bug: both detectors independently fire."""
-		mapped = f"::ffff:{LAB_IP}"
+		# Assembled through ipv6() rather than written as an f-string with
+		# the mapped-form prefix spelled out. With the boundary guards fixed
+		# (PR #115 round 2) that prefix is, on its own, a valid and
+		# non-exempt IPv6 literal — so the old spelling turned this very
+		# file, which the scanner reads like every other tracked file, into
+		# a finding. Content fixed, detector left alone, per this module's
+		# own "fixtures are assembled at runtime" rule.
+		mapped = ipv6("", "", "ffff", LAB_IP)
 		findings = scanner.scan_text("f.md", f"legacy client at {mapped}")
 		self.assertEqual(len(findings), 2, findings)
 		self.assertTrue(
@@ -790,6 +903,67 @@ class IPv6DetectorTests(unittest.TestCase):
 		self.assertTrue(
 			any("IP address literal" in f for f in findings), findings
 		)
+
+	def test_the_line_that_defeated_the_gate_a_second_time(self) -> None:
+		"""Verbatim regression for the PR #115 round-1 escape.
+
+		`IPV6_RE` shipped with a literal `.` inside its trailing lookahead —
+		the same construction the IPv4 comment in the scanner warns against at
+		length — so a sentence-final IPv6 literal was never matched. This is
+		the line that was appended to a real tracked file and still scanned
+		`clean`, exit 0.
+		"""
+		text = f"The NSX manager answers at {LAB_IPV6}."
+		findings = scanner.scan_text("docs/testing.md", text)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6, findings[0])
+
+	def test_sentence_internal_period_does_not_hide_the_literal(self) -> None:
+		findings = scanner.scan_text("f.md", f"host {LAB_IPV6}. Next host is up.")
+		self.assertEqual(len(findings), 1, findings)
+
+	def test_ellipsis_does_not_hide_the_literal(self) -> None:
+		findings = scanner.scan_text("f.md", f"see {LAB_IPV6}...")
+		self.assertEqual(len(findings), 1, findings)
+
+	def test_a_period_that_continues_the_token_still_rejects(self) -> None:
+		"""The other half of the trailing guard, and why it isn't just `(?!\\.)`.
+
+		A `.` followed by an alphanumeric continues a name; the literal is not
+		standing alone and this must stay quiet, or every dotted hostname with
+		a hex-lettered leading label becomes an IPv6 finding.
+		"""
+		self.assertEqual(
+			scanner.scan_text("f.md", f"host {ipv6('fd00', '', '7')}.example.com"), []
+		)
+
+	def test_trailing_colon_delimiter_does_not_hide_the_literal(self) -> None:
+		"""A single trailing `:` is a delimiter — it cannot be part of a literal."""
+		for text in (f"host {LAB_IPV6}:", f"host {LAB_IPV6}: it answers"):
+			with self.subTest(text=text):
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, findings)
+
+	def test_leading_colon_delimiter_does_not_hide_the_literal(self) -> None:
+		"""The `key:<address>` shape, mirroring the IPv4 detector's behaviour."""
+		findings = scanner.scan_text("f.md", f"addr:{LAB_IPV6}")
+		self.assertEqual(len(findings), 1, findings)
+
+	def test_leading_period_delimiter_does_not_hide_the_literal(self) -> None:
+		findings = scanner.scan_text("f.md", f"x.{LAB_IPV6}")
+		self.assertEqual(len(findings), 1, findings)
+
+	def test_double_colon_is_not_trimmed_as_a_delimiter(self) -> None:
+		"""Trimming must not eat a compression marker.
+
+		A bare `<prefix>::` is a complete literal and stays a finding; the
+		sanctioned all-colon forms stay allowed.
+		"""
+		prefix_only = ipv6("fd00", "", "")
+		findings = scanner.scan_text("f.md", f"net {prefix_only}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertEqual(scanner.scan_text("f.md", f"bind {OK_IPV6_UNSPECIFIED}"), [])
+		self.assertEqual(scanner.scan_text("f.md", f"lo {OK_IPV6_LOOPBACK}"), [])
 
 	def test_ipv6_check_is_individually_waivable(self) -> None:
 		self.assertEqual(len(scanner.scan_text("f.md", LAB_IPV6)), 1)
