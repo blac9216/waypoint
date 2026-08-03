@@ -224,6 +224,15 @@ Two standing rules for anything you claim in a PR body or review:
    or a named placeholder like `COMMIT_SHA`), then fetch the body back and confirm
    what a reviewer will actually paste.
 
+   **Angle brackets are not the only casualty, and a fenced code block does not
+   protect you.** A reviewer diffed its posted comment and found a regex lookahead
+   `(?![\w:])` stored as `(?[\w:])` — the `!` silently gone, inside a fence. The
+   swallowed token is a lookahead-open immediately followed by `[`. So when a body
+   or comment must carry a negative-lookahead regex, either space it so `(?!` is not
+   adjacent to `[`, or describe it in words and point at the file — then read it back
+   and diff. A regex that is quoted wrong is worse than one that is omitted, because
+   the reader will paste it and believe the result.
+
    Practical note: there is no `gh` CLI here and the raw GitHub API is blocked, so
    read-back means the MCP tools. `pull_request_read` returns the body **HTML-escaped**
    (`&amp;`, `&gt;`), so unescape before diffing or every command with a redirect will
