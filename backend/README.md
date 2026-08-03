@@ -10,7 +10,7 @@ streaming. See [ADR-0006](../docs/adr/0006-backend-language.md) and
 |---|---|
 | `Waypoint.Api` | ASP.NET Core host: controllers, middleware, authentication, DI composition root (`Program.cs`). |
 | `Waypoint.Core` | Domain layer: roles/authorization, the error envelope, pagination, configuration option types, the local-auth and log-redaction abstractions. No ASP.NET Core hosting dependency beyond the lightweight `Microsoft.AspNetCore.Authorization` package. |
-| `Waypoint.Infrastructure` | DI wiring for the abstractions `Waypoint.Core` declares (today: the in-memory local-auth implementation). EF Core / Postgres access lands with the schema in issue #4; PowerShell runspace hosting lands with the job engine. |
+| `Waypoint.Infrastructure` | DI wiring for the abstractions `Waypoint.Core` declares (the in-memory local-auth implementation) plus Postgres access: the schema migrations pipeline (`Data/`, issue #4). PowerShell runspace hosting lands with the job engine. |
 | `Waypoint.Tests` | xUnit — unit tests for `Core`/`Infrastructure` plus `WebApplicationFactory`-based integration tests against the real HTTP pipeline. |
 
 ## Build and test
@@ -68,6 +68,67 @@ connections against a perfectly healthy build. Bind a different port explicitly 
 ```bash
 dotnet run --project Waypoint.Api --no-launch-profile --urls http://127.0.0.1:5299
 ```
+
+## Database & schema (issue #4)
+
+The M1 subset of the schema — `credentials`, `credential_secrets`, `runs`, `jobs`,
+`job_events`, `depot_artifacts`, `downloads`, `audit_log`, `appliance_state` — is the
+contract in [`docs/api-contract.md`](../docs/api-contract.md) ("Postgres schema
+sketch"); this section is a pointer, not a duplicate. ADR-0002 (Postgres), ADR-0005
+(envelope-encrypted secrets), and ADR-0008 (job engine) are the design rationale for
+that shape.
+
+- **Migrations run before the API takes traffic** (ADR-0009 expectation), not lazily
+  on first request: `Program.cs` calls `Waypoint.Infrastructure.Data.ISchemaMigrator`
+  right after `WebApplicationBuilder.Build()`, before the request pipeline is wired up
+  at all. A migration failure is a fatal startup exception like any other (exit 1).
+- **Pipeline shape**: a small hand-rolled runner (`NpgsqlSchemaMigrator`) over
+  embedded `Data/Migrations/*.sql` files, tracked in a `schema_migrations` table —
+  not EF Core's generated-migration model. The job queue's claim query (ADR-0008) is
+  raw `SELECT ... FOR UPDATE SKIP LOCKED` by nature, so this keeps one data-access
+  story (plain Npgsql) instead of mixing an ORM in for schema only. Every migration
+  file is written to be idempotent on its own (`IF NOT EXISTS` / `OR REPLACE` /
+  `ON CONFLICT`) as defense in depth beyond the tracking table.
+- **Configuration**: the connection string is the standard ASP.NET Core
+  `ConnectionStrings:Waypoint` slot (`ConnectionStrings__Waypoint` env var to
+  override); `Database:RunMigrationsOnStartup` (default `true`) gates whether startup
+  applies migrations at all — `appsettings.Testing.json` turns it off because the
+  in-process `WebApplicationFactory` test host has no Postgres to migrate against.
+  `appsettings.json`'s default connection string matches
+  `deploy/docker-compose.yml`'s `postgres` service defaults (dev-only credentials
+  already committed there), so the image works against the dev stack unmodified.
+- **Deviations from the contract sketch** (both because M2 — sites/targets/inventory
+  — isn't built yet):
+  - `jobs.run_id` is **nullable**. Only the scan/remediate job types are ever fanned
+    out from a Run (ADR-0008); the M1 download vertical slice's job types
+    (`download`, `catalog-index`, ...) are queued as standalone jobs per the
+    per-endpoint "202 → `<type>` job" notes in the API contract.
+  - `runs.site_id` and `jobs.target_id` are **forward references with no FK** — the
+    `sites`/`targets` tables land in M2 (issue #13). `jobs.target_name` carries a
+    human-readable label for job types with no target row at all (e.g. a depot
+    artifact name for a `download` job).
+- **Queue-claim index**: `idx_jobs_queue_claim` is a partial index on
+  `(priority, created_at) WHERE state = 'queued'`, matching the ADR-0008 claim query
+  exactly — the claim is an index scan over only the claimable rows, not a table
+  scan. `idx_jobs_lease_recovery` (`lease_expires_at) WHERE state = 'running'`)
+  serves dead-job recovery from the lease/heartbeat columns present from day one.
+- **`job_events.seq`** is a `BIGINT GENERATED ALWAYS AS IDENTITY` primary key, so
+  both SSE replay scopes in the API contract (global and per-run) are a
+  `seq > $lastEventId ORDER BY seq` index range scan, never a sort —
+  `idx_job_events_run_seq` covers the per-run scope.
+- **`credential_secrets`** carries `ciphertext`, `data_key_wrapped`, and
+  `master_key_id` as separate columns (ADR-0005) so master-key rotation is a re-wrap,
+  not a schema change.
+- **`depot_artifacts.metadata`** is `JSONB` — vendor catalog shapes are not
+  normalised into columns (ADR-0002); `sha256` and `status` are promoted to real
+  columns because checksum verification and catalog-status queries need them.
+
+Tests: `Waypoint.Tests/Infrastructure/Postgres/` runs the real migrations pipeline,
+the queue-claim query, and `job_events.seq` concurrency against a real, disposable
+PostgreSQL 16 container (docker) — see the class doc comments for what each proves.
+They share one container per test run via an xUnit collection fixture
+(`PostgresFixture`), isolated per `docs/testing.md`'s recipe (a container name and
+host port unique to the run).
 
 ## Docker
 
