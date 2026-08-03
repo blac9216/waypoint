@@ -627,23 +627,51 @@ def _ipv6_address_of(candidate: str) -> ipaddress.IPv6Address | None:
 	strict parsing fails, and the failure used to read as "not an address, so
 	allowed" — a lab address in the shape a log line, a netstat, or an
 	inventory export writes it walked the gate, exit 0. So a candidate that
-	does not parse is retried ONCE with a trailing all-digit group removed,
-	and only then declared a non-address.
+	does not parse is retried with a trailing all-digit group removed, and
+	only then declared a non-address.
 
-	The retry cannot manufacture an address out of a non-address: it hands
-	the shortened text to the same strict parser, so what comes back is a
-	real literal or nothing. The port's digit count is deliberately NOT
-	bounded — the "is this an address" question is answered by the parse, and
-	issue #119 is exactly what a second, arbitrary width bound costs.
+	The retry is a LOOP, not a single attempt (issue #131). One retry closes
+	one trailing numeric group; a candidate carrying TWO of them (a
+	zero-padded fully-expanded literal followed by a bare port, e.g.
+	`...:0007:443:8443`, or the same literal with an all-zero group ahead of
+	the port, `...:0007:0:443`) still failed strict parsing after a single
+	retry and read as "not an address, so allowed" — the same escape PR #115
+	round 2 closed for the one-group case, one group further out. The bound
+	that matters is the NUMBER of trailing all-digit groups stripped, not how
+	wide any one of them is: each iteration removes exactly one whole group
+	and re-parses, so the loop terminates the instant a strict parse succeeds
+	or the tail is no longer all-digit — there is nothing here for an
+	attacker to widen. The port's digit count stays deliberately unbounded
+	within each group, for the same #119 reason as before: a second, arbitrary
+	width bound is what that issue cost, and bounding the group WIDTH here
+	would be exactly that mistake with a new coat of paint.
+
+	The retry still cannot manufacture an address out of a non-address: every
+	iteration hands the shortened text to the same strict parser, so what
+	finally comes back is a real literal or nothing
+	(test_the_port_retry_only_ever_returns_what_the_parser_accepts).
+
+	Deliberately NOT closed here: a trailing group carrying a non-digit
+	character glued on (`...:0007:443a`) fails `tail.isdigit()` on its very
+	first iteration, so the loop never starts stripping it. That is a
+	different shape — the group is not a port at all, digit or otherwise —
+	and no shape in this gate's threat model (netstat, log lines, inventory
+	exports, URLs) produces it; disclosed as a residual in
+	UnbracketedPortTests and docs/testing.md rather than silently left for
+	the next reviewer to re-discover.
 	"""
 	base = candidate.split("%", 1)[0]
 	addr = _parse_ipv6(base)
 	if addr is not None:
 		return addr
-	head, separator, tail = base.rpartition(":")
-	if separator and tail.isdigit():
-		return _parse_ipv6(head)
-	return None
+	head = base
+	while True:
+		head, separator, tail = head.rpartition(":")
+		if not separator or not tail.isdigit():
+			return None
+		addr = _parse_ipv6(head)
+		if addr is not None:
+			return addr
 
 
 def is_allowed_ipv6(candidate: str) -> bool:
