@@ -59,6 +59,29 @@ public sealed class PostgresFixture : IAsyncLifetime
 		await RunDockerAsync("rm", "-f", _containerName).ConfigureAwait(false);
 	}
 
+	/// <summary>
+	/// Clears every row the job engine's genuinely *global*, unscoped queries
+	/// (<c>ClaimJobAsync</c>, <c>RecoverExpiredLeasesAsync</c>) would otherwise see
+	/// across test methods and test classes sharing this one container. Every other
+	/// test class in this collection scopes its own queries (by <c>run_id</c>, a unique
+	/// marker, or a specific <c>credential_id</c>) and is unaffected by leftover rows,
+	/// so it never needed this; a test proving a truly global claim/recovery query's
+	/// concurrency guarantee cannot make that same assumption -- an unrelated leftover
+	/// 'queued' or lease-expired 'running' row from an earlier test is exactly as
+	/// claimable/recoverable as the row the test is trying to observe. Call this first
+	/// thing in <c>InitializeAsync</c> from any test class that calls those two methods.
+	/// </summary>
+	public async Task ResetJobEngineDataAsync()
+	{
+		await using NpgsqlConnection connection = new(ConnectionString);
+		await connection.OpenAsync().ConfigureAwait(false);
+
+		await using NpgsqlCommand truncate = new(
+			"TRUNCATE TABLE job_events, downloads, audit_log, jobs, runs, credential_secrets, credentials RESTART IDENTITY CASCADE",
+			connection);
+		await truncate.ExecuteNonQueryAsync().ConfigureAwait(false);
+	}
+
 	private async Task WaitUntilReadyAsync()
 	{
 		Exception? lastError = null;
