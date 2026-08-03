@@ -21,6 +21,8 @@ all. Assembling each fixture from parts keeps that property true.
 
 from __future__ import annotations
 
+import ipaddress
+import re
 import unittest
 from pathlib import Path
 
@@ -71,6 +73,20 @@ def lab_host(tld: str) -> str:
 RANGE_START = quad(10, 44, 12, 1)
 
 
+def zero_pad_quad(dotted_quad: str, width: int = 3) -> str:
+	"""Zero-pad each octet of a dotted-quad to `width` digits.
+
+	Assembled at runtime (never written as a padded literal) for the same
+	reason every other address fixture in this file is: the padded form is
+	exactly as address-shaped as the unpadded one, so writing it directly
+	into the source would trip the very check being tested here.
+
+	`width` is a parameter because the padding WIDTH was the bug in issue
+	#119: the fix for #111 handled 3 and stopped there.
+	"""
+	return ".".join(part.zfill(width) for part in dotted_quad.split("."))
+
+
 def ipv6(*groups: str) -> str:
 	"""Assemble a colon-separated IPv6 literal from hextet parts.
 
@@ -94,16 +110,217 @@ LAB_IPV6_FULL = ipv6("fd00", "1a2b", "3c4d", "0000", "0000", "0000", "0000", "00
 LAB_IPV6_LINK_LOCAL = ipv6("fe80", "", "1")
 
 
+def bracketed(addr: str) -> str:
+	"""The `[addr]` URL form for an IPv6 literal, without a port."""
+	return f"[{addr}]"
+
+
 def bracketed_port(addr: str, port: int) -> str:
 	"""The `[addr]:port` URL form for an IPv6 literal."""
-	return f"[{addr}]:{port}"
+	return f"{bracketed(addr)}:{port}"
 
+
+def zoned(addr: str, interface: str = "eth0") -> str:
+	"""An IPv6 literal carrying an RFC 4007 zone id."""
+	return f"{addr}%{interface}"
+
+
+def with_port(addr: str, port: int) -> str:
+	"""An UNBRACKETED `address:port` pair — the shape a log line writes.
+
+	Deliberately its own builder rather than an f-string at each call site:
+	this is the shape that scanned clean for a whole review round (PR #115
+	round 2, finding 1) because the greedy hex/colon class swallowed the port
+	into the candidate and strict parsing then failed.
+	"""
+	return f"{addr}:{port}"
+
+
+# The IPv4-mapped form and a zone-carrying link-local. Assembled, never
+# written: with the boundary guards fixed the mapped-form prefix is itself a
+# valid non-exempt literal, and this file is scanned like any other.
+LAB_IPV6_MAPPED = ipv6("", "", "ffff", LAB_IP)
+LAB_IPV6_ZONED = zoned(LAB_IPV6_LINK_LOCAL)
+
+# A hex run that is not an address by intent but validates as one anyway —
+# the shape issue #118 owns. Eight colon-separated hex groups is a valid
+# literal to `ipaddress`, whatever the author meant by them. Assembled like
+# every other fixture here, because it IS address-shaped and this file is
+# scanned like any other.
+EUI64_SHAPED = ipv6("aa", "bb", "cc", "dd", "ee", "ff", "00", "11")
+
+
+def _hextets(address: str) -> list[int]:
+	"""The eight hextet values of an IPv6 literal, however it was spelled."""
+	packed = ipaddress.IPv6Address(address).packed
+	return [packed[i] * 256 + packed[i + 1] for i in range(0, 16, 2)]
+
+
+def _parses(text: str) -> bool:
+	"""True if the strict parser accepts this text as an IPv6 literal."""
+	try:
+		ipaddress.IPv6Address(text)
+	except ValueError:
+		return False
+	return True
 
 # The three IPv6 forms CLAUDE.md/issue #112 sanction: the RFC 3849
 # documentation prefix, loopback, and the unspecified address.
 OK_IPV6_DOC = ipv6("2001", "db8", "", "1")
 OK_IPV6_LOOPBACK = ipv6("", "", "1")
 OK_IPV6_UNSPECIFIED = ipv6("", "", "")  # three empty parts -> "::" (two colons)
+
+# A zero-padded lab quad and an uppercase lab FQDN: the same address and the
+# same hostname as LAB_IP / LAB_FQDN, written a different way. Both live at
+# module scope because the delimiter matrix now enumerates spellings as well
+# as shapes — see SurroundingContextTests.
+LAB_IP_PADDED = zero_pad_quad(LAB_IP)
+LAB_FQDN_UPPER = LAB_FQDN.upper()
+
+
+# --- grammar introspection (see SurroundingContextTests) ------------------
+#
+# The delimiter matrix has to know how many fixture VARIANTS each detector
+# owes, and that number must not be a hand-maintained constant — a
+# hand-maintained one is what a reviewer reads as covered while it silently
+# lags the detector. Both numbers below are derived from the detector itself.
+
+try:  # Python 3.11+ renamed the stdlib regex parser.
+	from re import _parser as _re_parser
+except ImportError:  # pragma: no cover - older interpreters
+	import sre_parse as _re_parser  # type: ignore[no-redef]
+
+
+def _op_name(op: object) -> str:
+	"""The parser opcode's name, across the 3.11 rename."""
+	return getattr(op, "name", str(op))
+
+
+def _has_structure(sequence) -> bool:
+	"""True if this branch of the parse tree is more than plain literals."""
+	return any(
+		_op_name(op) in ("SUBPATTERN", "BRANCH") or "REPEAT" in _op_name(op)
+		for op, _ in sequence
+	)
+
+
+def _named_groups(sequence, index_to_name: dict[int, str]) -> set[str]:
+	found: set[str] = set()
+	for op, argument in sequence:
+		name = _op_name(op)
+		if name == "SUBPATTERN":
+			if argument[0] in index_to_name:
+				found.add(index_to_name[argument[0]])
+			found |= _named_groups(argument[3], index_to_name)
+		elif name == "BRANCH":
+			for alternative in argument[1]:
+				found |= _named_groups(alternative, index_to_name)
+		elif "REPEAT" in name:
+			found |= _named_groups(argument[2], index_to_name)
+	return found
+
+
+def shape_group_names(pattern: re.Pattern[str]) -> set[str]:
+	"""Named groups standing for a materially different shape this matches.
+
+	Walks the compiled pattern's own parse tree and collects, as names:
+
+	  - every alternative of an alternation, unless the alternation is
+	    between plain literals (a vocabulary, not a shape);
+	  - every group that may be absent.
+
+	Anything inside a lookaround is skipped (it never contributes to the
+	match), and so is anything nested inside a repetition, where "did it
+	match" has no single answer. A construct in either of the first two
+	categories that is NOT a named group raises here rather than returning
+	quietly — that is the half of the contract which stops a new construct
+	from being added invisibly.
+	"""
+	index_to_name = {index: name for name, index in pattern.groupindex.items()}
+	names: set[str] = set()
+
+	def visit(sequence, inside_repeat: bool) -> None:
+		for op, argument in sequence:
+			name = _op_name(op)
+			if name in ("ASSERT", "ASSERT_NOT"):
+				continue
+			if name == "SUBPATTERN":
+				visit(argument[3], inside_repeat)
+			elif name == "BRANCH":
+				alternatives = argument[1]
+				if not inside_repeat and any(
+					_has_structure(alternative) for alternative in alternatives
+				):
+					for alternative in alternatives:
+						found = _named_groups(alternative, index_to_name)
+						if not found:
+							raise AssertionError(
+								f"{pattern.pattern!r}: an alternation branch is "
+								f"not identifiable — name its group so a "
+								f"fixture can be required to exercise it"
+							)
+						names.update(found)
+				for alternative in alternatives:
+					visit(alternative, inside_repeat)
+			elif "REPEAT" in name:
+				minimum, _maximum, body = argument
+				if minimum == 0 and not inside_repeat and _has_structure(body):
+					if len(body) != 1 or _op_name(body[0][0]) != "SUBPATTERN":
+						raise AssertionError(
+							f"{pattern.pattern!r}: an optional construct is not "
+							f"a single group; wrap and name it"
+						)
+					index = body[0][1][0]
+					if index not in index_to_name:
+						raise AssertionError(
+							f"{pattern.pattern!r}: an optional group is "
+							f"anonymous — name it so a fixture can be "
+							f"required to exercise it"
+						)
+					names.add(index_to_name[index])
+				visit(body, True)
+
+	visit(_re_parser.parse(pattern.pattern, pattern.flags), False)
+	return names
+
+
+def _ipv4_spelling(fixture: str) -> tuple[str, str]:
+	"""(as written, canonical) for the IPv4 address inside a fixture."""
+	match = scanner.IPV4_RE.search(fixture)
+	octets = scanner._parse_ipv4_octets(match.group(0))
+	return match.group(0), ".".join(str(octet) for octet in octets)
+
+
+def _ipv6_spelling(fixture: str) -> tuple[str, str]:
+	"""(as written, canonical) for the IPv6 address inside a fixture."""
+	match = scanner.IPV6_RE.search(fixture)
+	written = match.group("bracketed") or match.group("bare")
+	written = scanner._trim_delimiter_colons(written).split("%", 1)[0]
+	return written, str(scanner._ipv6_address_of(written))
+
+
+def _fqdn_spelling(fixture: str) -> tuple[str, str]:
+	"""(as written, canonical) for the hostname inside a fixture.
+
+	`is_allowed_fqdn` lowercases before deciding, so lower case is this
+	detector's canonical spelling in exactly the sense `ipaddress` gives the
+	address detectors theirs.
+	"""
+	written = scanner.FQDN_RE.search(fixture).group(0)
+	return written, written.lower()
+
+
+MATRIX_PATTERN = {
+	scanner.CHECK_IP: scanner.IPV4_RE,
+	scanner.CHECK_FQDN: scanner.FQDN_RE,
+	scanner.CHECK_IPV6: scanner.IPV6_RE,
+}
+
+MATRIX_SPELLING = {
+	scanner.CHECK_IP: _ipv4_spelling,
+	scanner.CHECK_FQDN: _fqdn_spelling,
+	scanner.CHECK_IPV6: _ipv6_spelling,
+}
 
 
 class DetectorPositiveTests(unittest.TestCase):
@@ -179,9 +396,25 @@ class SurroundingContextTests(unittest.TestCase):
 	all, and the very bug this class exists to catch was sitting in it, in the
 	same file, under the same comment (PR #115 round 1). A shared matrix any
 	detector can opt out of by omission is how that happens. So the matrix is
-	now driven by `MATRIX_FIXTURES` + `MATRIX_EXEMPT`, which between them must
+	driven by `MATRIX_FIXTURES` + `MATRIX_EXEMPT`, which between them must
 	account for every name in `scanner.CHECK_NAMES` — opting out is still
 	allowed, but only in writing, with a reason.
+
+	AND IT GENERALISED A THIRD TIME, one level further in, for a third round.
+	Every detector had exactly ONE fixture, so a green 14/14 row proved
+	"these delimiters are safe for one shape of this address" while reading
+	as if it proved more. It did not: `ipv6` passed "colon / port" only
+	because its single fixture was a COMPRESSED address, whose port digits
+	absorb as a legal eighth group. The fully-expanded spelling of the same
+	address — which lived in this very file, and never met a port or this
+	matrix — produced a ninth group, failed strict parsing, and scanned
+	clean (PR #115 round 2, finding 1). That is the fixture monoculture this
+	class was written about, committed by this class.
+
+	So `MATRIX_FIXTURES` maps each check to SEVERAL named variants, and
+	`test_every_grammar_shape_a_detector_admits_is_exercised` derives from the
+	detector itself — its regex and its validator, not a hand-written list —
+	how many variants it owes and fails when one is missing.
 	"""
 
 	# Characters that legitimately end a token in prose, markup, config and
@@ -217,14 +450,52 @@ class SurroundingContextTests(unittest.TestCase):
 		("at sign", "@"),
 	]
 
-	# One fixture per detector that matches a bare address-shaped token. The
-	# key is the detector's own check name, so this map is comparable against
-	# scanner.CHECK_NAMES rather than against a list of method names nobody
-	# can diff.
+	# Fixture VARIANTS per detector, keyed by the detector's own check name so
+	# this map stays comparable against scanner.CHECK_NAMES rather than
+	# against a list of method names nobody can diff. Every variant is run
+	# against every delimiter, so the cost of a variant is 24 more scans and
+	# the benefit is a whole shape of address that can no longer pass on its
+	# neighbour's behalf.
+	#
+	# Which variants are OWED is not a judgement call and not a list anyone
+	# has to remember to extend — see
+	# test_every_grammar_shape_a_detector_admits_is_exercised, which derives
+	# it from each detector's regex (its optional and alternative constructs)
+	# and from its validator (canonical vs non-canonical spelling of the same
+	# value).
 	MATRIX_FIXTURES = {
-		scanner.CHECK_IP: LAB_IP,
-		scanner.CHECK_FQDN: LAB_FQDN,
-		scanner.CHECK_IPV6: LAB_IPV6,
+		scanner.CHECK_IP: {
+			"dotted quad": LAB_IP,
+			"zero-padded quad": LAB_IP_PADDED,
+		},
+		scanner.CHECK_FQDN: {
+			"lab tld": LAB_FQDN,
+			"uppercase": LAB_FQDN_UPPER,
+		},
+		scanner.CHECK_IPV6: {
+			"compressed": LAB_IPV6,
+			# The variant whose absence cost a review round: a compressed
+			# address absorbs a trailing port as a legal eighth group, so
+			# "colon / port" passed on it while the expanded spelling of the
+			# same address produced a ninth group and scanned clean.
+			"fully expanded": LAB_IPV6_FULL,
+			"link-local compressed": LAB_IPV6_LINK_LOCAL,
+			"ipv4-mapped": LAB_IPV6_MAPPED,
+			"zone id": LAB_IPV6_ZONED,
+			"bracketed": bracketed(LAB_IPV6),
+			"bracketed with port": bracketed_port(LAB_IPV6, 443),
+			"bracketed with zone id": bracketed_port(LAB_IPV6_ZONED, 443),
+		},
+	}
+
+	# Which finding message belongs to which detector. The matrix asserts
+	# "exactly one finding FROM THIS DETECTOR" rather than "exactly one
+	# finding on the line", because the IPv4-mapped variant legitimately
+	# trips the IPv4 detector as well and an overlap is not a delimiter bug.
+	MATRIX_MESSAGE = {
+		scanner.CHECK_IP: "non-RFC-5737 IP address literal",
+		scanner.CHECK_FQDN: "lab-style FQDN",
+		scanner.CHECK_IPV6: "possible IPv6 address literal",
 	}
 
 	# Opting a detector out is legitimate, but it has to be stated and
@@ -261,27 +532,139 @@ class SurroundingContextTests(unittest.TestCase):
 		for check, reason in self.MATRIX_EXEMPT.items():
 			with self.subTest(check=check):
 				self.assertTrue(reason.strip(), check)
+		self.assertEqual(
+			set(self.MATRIX_MESSAGE),
+			set(self.MATRIX_FIXTURES),
+			"every enumerated check needs its finding message declared, or "
+			"the matrix cannot tell that detector's findings from another's",
+		)
+		for check, variants in self.MATRIX_FIXTURES.items():
+			with self.subTest(check=check):
+				self.assertTrue(variants, f"{check} has no fixture variants")
+
+	def findings_for(self, check: str, text: str) -> list[str]:
+		"""Only `check`'s findings on `text` — see MATRIX_MESSAGE."""
+		message = self.MATRIX_MESSAGE[check]
+		return [f for f in scanner.scan_text("f.md", text) if message in f]
 
 	def test_every_detector_is_flagged_after_every_trailing_delimiter(self) -> None:
-		for check, fixture in sorted(self.MATRIX_FIXTURES.items()):
-			for name, suffix in self.TRAILING:
-				with self.subTest(check=check, delimiter=name):
-					findings = scanner.scan_text("f.md", f"host {fixture}{suffix}")
-					self.assertEqual(len(findings), 1, (check, name, findings))
-					self.assertIn(fixture, findings[0])
+		for check, variants in sorted(self.MATRIX_FIXTURES.items()):
+			for variant, fixture in sorted(variants.items()):
+				for name, suffix in self.TRAILING:
+					with self.subTest(check=check, variant=variant, delimiter=name):
+						findings = self.findings_for(check, f"host {fixture}{suffix}")
+						self.assertEqual(
+							len(findings), 1, (check, variant, name, findings)
+						)
 
 	def test_every_detector_is_flagged_after_every_leading_delimiter(self) -> None:
-		for check, fixture in sorted(self.MATRIX_FIXTURES.items()):
-			for name, prefix in self.LEADING:
-				with self.subTest(check=check, delimiter=name):
-					findings = scanner.scan_text("f.md", f"{prefix}{fixture}")
-					self.assertEqual(len(findings), 1, (check, name, findings))
+		for check, variants in sorted(self.MATRIX_FIXTURES.items()):
+			for variant, fixture in sorted(variants.items()):
+				for name, prefix in self.LEADING:
+					with self.subTest(check=check, variant=variant, delimiter=name):
+						findings = self.findings_for(check, f"{prefix}{fixture}")
+						self.assertEqual(
+							len(findings), 1, (check, variant, name, findings)
+						)
 
 	def test_address_alone_on_its_line_is_flagged(self) -> None:
 		"""No surrounding context at all — the extreme of the above."""
-		for check, fixture in sorted(self.MATRIX_FIXTURES.items()):
-			with self.subTest(check=check):
-				self.assertEqual(len(scanner.scan_text("f.md", fixture)), 1)
+		for check, variants in sorted(self.MATRIX_FIXTURES.items()):
+			for variant, fixture in sorted(variants.items()):
+				with self.subTest(check=check, variant=variant):
+					findings = self.findings_for(check, fixture)
+					self.assertEqual(len(findings), 1, (check, variant, findings))
+
+	def test_the_address_is_named_in_its_own_finding(self) -> None:
+		"""A finding has to say which token tripped it.
+
+		Kept separate from the delimiter loops because it is a different
+		property, and because it is spelled per shape: a bracketed or
+		ported form is reported as the address it resolves to, not as the
+		surrounding URL syntax.
+		"""
+		for check, variants in sorted(self.MATRIX_FIXTURES.items()):
+			for variant, fixture in sorted(variants.items()):
+				with self.subTest(check=check, variant=variant):
+					findings = self.findings_for(check, f"host {fixture} today")
+					core = fixture.strip("[]").split("]")[0].split("%")[0]
+					self.assertIn(core, findings[0], (check, variant, findings))
+
+	def test_every_grammar_shape_a_detector_admits_is_exercised(self) -> None:
+		"""A detector with one fixture fails when its grammar admits more.
+
+		The round-2 escape was not "a missing test". Every enumeration was
+		green; the fixture behind them just happened to be the one spelling
+		of the address whose port absorbed as a legal group. So "how many
+		variants does this detector owe" must not be a number anyone
+		remembers to raise — it is derived here from the detector itself, on
+		two axes:
+
+		STRUCTURE, read off the compiled regex. Every construct that makes
+		the pattern match materially different shapes — an alternation, or a
+		group that may be absent — has to be a NAMED group, and every one of
+		those names has to be observed both matched and unmatched across the
+		detector's variants. Adding an optional construct anonymously fails
+		the first half; adding it with no fixture that exercises it fails the
+		second. An alternation between plain literals (`SUSPICIOUS_TLDS` in
+		`FQDN_RE`) is a vocabulary, not a shape, and is exempt — those are
+		enumerated by test_every_suspicious_tld_fires_in_both_cases instead.
+
+		SPELLING, read off the validator the detector delegates to. Every
+		address detector accepts several spellings of one value — compressed
+		and expanded IPv6, padded and unpadded IPv4, upper- and lower-case
+		hostnames — and `ipaddress`/`str.lower` already know which spelling
+		is canonical. So the variant set must contain at least one fixture
+		written canonically and at least one not. This is the axis that was
+		missing: compression is not a construct in `IPV6_RE`, it is a
+		property of the value, and it is precisely what made one fixture
+		cover for the other.
+
+		Known limit, stated rather than left to be discovered: the structure
+		half ignores constructs NESTED INSIDE a repetition, because "did this
+		optional group match" is not answerable when the group matched a
+		different number of times per repetition. `FQDN_RE`'s label-tail
+		group is the one current instance; label-length handling is covered
+		by the FQDN tests directly.
+		"""
+		for check, variants in sorted(self.MATRIX_FIXTURES.items()):
+			pattern = MATRIX_PATTERN[check]
+			shape_groups = shape_group_names(pattern)
+			with self.subTest(check=check, axis="structure"):
+				matched: set[str] = set()
+				unmatched: set[str] = set()
+				for fixture in variants.values():
+					match = pattern.search(f"host {fixture} today")
+					self.assertIsNotNone(match, (check, fixture))
+					for name in shape_groups:
+						(matched if match.group(name) else unmatched).add(name)
+				self.assertEqual(
+					shape_groups - matched,
+					set(),
+					f"{check}: no fixture variant exercises these grammar "
+					f"constructs; add one per name",
+				)
+				self.assertEqual(
+					shape_groups - unmatched,
+					set(),
+					f"{check}: every fixture variant exercises these "
+					f"constructs, so their absence is never tested",
+				)
+			with self.subTest(check=check, axis="spelling"):
+				spellings = {
+					written == canonical
+					for written, canonical in (
+						MATRIX_SPELLING[check](fixture)
+						for fixture in variants.values()
+					)
+				}
+				self.assertEqual(
+					spellings,
+					{True, False},
+					f"{check}: every variant is spelled the same way "
+					f"relative to its validator's canonical form — add a "
+					f"variant that is (or is not) canonical",
+				)
 
 	def test_the_exact_line_that_defeated_the_gate(self) -> None:
 		"""Verbatim regression for the round-2 escape.
@@ -709,20 +1092,6 @@ class EditorconfigRegressionTests(unittest.TestCase):
 				self.assertEqual(scanner.scan_text("f.md", line), [], line)
 
 
-def zero_pad_quad(dotted_quad: str, width: int = 3) -> str:
-	"""Zero-pad each octet of a dotted-quad to `width` digits.
-
-	Assembled at runtime (never written as a padded literal) for the same
-	reason every other address fixture in this file is: the padded form is
-	exactly as address-shaped as the unpadded one, so writing it directly
-	into the source would trip the very check being tested here.
-
-	`width` is a parameter because the padding WIDTH was the bug in issue
-	#119: the fix for #111 handled 3 and stopped there.
-	"""
-	return ".".join(part.zfill(width) for part in dotted_quad.split("."))
-
-
 class ZeroPaddedQuadTests(unittest.TestCase):
 	"""Issue #111: a zero-padded octet is still a real address.
 
@@ -997,6 +1366,408 @@ class IPv6DetectorTests(unittest.TestCase):
 			self.assertEqual(scanner.scan_text("f.md", LAB_IPV6), [])
 		finally:
 			del scanner.ALLOWLIST_FINDINGS["f.md"]
+
+
+class UnbracketedPortTests(unittest.TestCase):
+	"""PR #115 round 2, finding 1 — `address:port` written without brackets.
+
+	The greedy hex/colon class takes the port into the candidate. For a
+	COMPRESSED address the port digits absorb as one more legal group, so the
+	line is flagged anyway and every existing test and the whole delimiter
+	matrix stayed green. For a FULLY-EXPANDED address the port is a ninth
+	group, strict parsing fails, and the failure read as "not an address, so
+	allowed" — zero findings, exit 0, on the exact shape issue #112's Impact
+	paragraph names: log lines, inventory exports, CKL/HDF results.
+	"""
+
+	def test_fully_expanded_literal_with_a_port_is_flagged(self) -> None:
+		"""The blocker itself, at three ports and on both lab prefixes."""
+		for address in (LAB_IPV6_FULL, ipv6(
+			"fe80", "0000", "0000", "0000", "1a2b", "3c4d", "5e6f", "7a8b"
+		)):
+			for port in (443, 8443, 22):
+				text = f"vcenter at {with_port(address, port)}"
+				with self.subTest(text=text):
+					findings = scanner.scan_text("f.md", text)
+					self.assertEqual(len(findings), 1, findings)
+					self.assertIn(address, findings[0])
+
+	def test_the_controls_that_hid_it_still_pass(self) -> None:
+		"""Each of these was already green while the case above was silent."""
+		for text in (
+			f"vcenter at {LAB_IPV6_FULL}",
+			f"vcenter at {with_port(LAB_IPV6, 443)}",
+			f"vcenter at {bracketed_port(LAB_IPV6_FULL, 443)}",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(len(scanner.scan_text("f.md", text)), 1, text)
+
+	def test_both_spellings_of_one_address_behave_the_same(self) -> None:
+		"""Compressed and expanded are the same address, so the same verdict.
+
+		Written as an equality between the two spellings rather than as two
+		separate counts: the defect was precisely that they diverged. Run
+		over the sanctioned addresses as well as the lab ones, because the
+		allowed set used to compare SPELLINGS — so the fully-expanded
+		loopback was a finding while the compressed one was not.
+		"""
+		for address in (OK_IPV6_DOC, OK_IPV6_LOOPBACK, OK_IPV6_UNSPECIFIED, LAB_IPV6):
+			expanded = ipv6(*(f"{group:04x}" for group in _hextets(address)))
+			with self.subTest(address=address):
+				self.assertEqual(
+					len(scanner.scan_text("f.md", f"host {address}")),
+					len(scanner.scan_text("f.md", f"host {expanded}")),
+					(address, expanded),
+				)
+
+	def test_an_unbracketed_port_on_a_sanctioned_address_is_ambiguous(self) -> None:
+		"""A disclosed false positive, pinned so it cannot drift silently.
+
+		`<loopback>:<port>` written WITHOUT brackets is not decidable: as
+		written it is also a valid, different, non-sanctioned address, and
+		nothing on the line says which was meant. The gate resolves it the
+		noisy way — it reports — because over-reporting an ambiguous literal
+		costs a sentence in a PR and under-reporting one costs a leak. The
+		unambiguous spelling is the bracketed URL form, which is what every
+		tool that writes such a pair emits, and it stays silent.
+
+		Not the same question as the blocker this class exists for: there the
+		address was UNSANCTIONED and the port made it silent. Here the address
+		is sanctioned and the port makes it loud.
+		"""
+		self.assertEqual(
+			len(scanner.scan_text("f.md", f"lo {with_port(OK_IPV6_LOOPBACK, 443)}")), 1
+		)
+		self.assertEqual(
+			scanner.scan_text("f.md", f"lo {bracketed_port(OK_IPV6_LOOPBACK, 443)}"), []
+		)
+		expanded = ipv6(*(f"{group:04x}" for group in _hextets(OK_IPV6_LOOPBACK)))
+		self.assertEqual(
+			scanner.scan_text("f.md", f"lo {with_port(expanded, 443)}"), []
+		)
+
+	def test_the_port_retry_does_not_invent_an_address(self) -> None:
+		"""Dropping a trailing digit group must not make a non-address parse."""
+		for text in (
+			"elapsed 01:02:03",
+			"elapsed 01:02:03:04",
+			"ports 8443:8443",
+			"ports 18443:8443:443",
+			"NIC de:ad:be:ef:ca:12",
+			"src f.py:123:456: warning",
+			"cron 0 2 * * * run:12:34",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+	def test_a_port_never_hides_an_address_at_any_width(self) -> None:
+		"""No digit bound on the port, for issue #119's reason.
+
+		A second, arbitrary width bound is what #119 cost: the padding cap
+		lived in two places and one of them was one digit short. The port is
+		not bounded here either — whether the head is an address is settled
+		by the parser, at any port width.
+		"""
+		for port in (0, 22, 443, 65535, 999999):
+			with self.subTest(port=port):
+				text = f"host {with_port(LAB_IPV6_FULL, port)}"
+				self.assertEqual(len(scanner.scan_text("f.md", text)), 1, text)
+
+
+class MidRunMatchTests(unittest.TestCase):
+	"""PR #115 round 2, finding 3 — a match that starts inside a longer run.
+
+	`IPV6_RE`'s leading guard rejects a match glued to an alphanumeric. A
+	rejected START is not a rejected LINE: the engine restarts further along,
+	inside the same hex/colon run, and reports whatever tail still parses.
+	The comment justifying the guard change asserted this could not happen.
+	It did: a word whose tail is hex digits, written straight onto the
+	sanctioned documentation prefix, reported the tail of that prefix as a
+	finding — a false positive introduced by the round-2 fix itself.
+	"""
+
+	GLUED_PREFIXES = ("see", "the", "note", "code", "X", "ref")
+
+	def test_a_word_glued_to_the_documentation_prefix_is_not_a_finding(self) -> None:
+		for prefix in self.GLUED_PREFIXES:
+			for suffix in ("", " is documentation", "."):
+				text = f"{prefix}{OK_IPV6_DOC}{suffix}"
+				with self.subTest(text=text):
+					self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+	def test_a_word_glued_to_a_lab_literal_reports_the_whole_address(self) -> None:
+		"""Re-anchoring relocates the finding; it does not drop it.
+
+		The pre-fix behaviour reported a FRAGMENT of the address here, which
+		is both a wrong answer and the same defect seen from the other side.
+		"""
+		for prefix in self.GLUED_PREFIXES:
+			text = f"{prefix}{LAB_IPV6}"
+			with self.subTest(text=text):
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, findings)
+				self.assertIn(LAB_IPV6, findings[0])
+
+	def test_a_delimited_label_before_the_address_still_flags(self) -> None:
+		"""`label:<address>` stays a finding whatever the label ends with.
+
+		A label ending in a hex digit (`esxi01`, `vmnic5`) and one ending in a
+		letter (`addr`) are the same shape to the regex and must stay the same
+		shape to the gate — the address is delimited, not glued.
+		"""
+		for label in ("addr", "host", "esxi01", "vmnic5", "eth0", "node7"):
+			for address in (LAB_IPV6, LAB_IPV6_FULL):
+				text = f"{label}:{address}"
+				with self.subTest(text=text):
+					findings = scanner.scan_text("f.md", text)
+					self.assertEqual(len(findings), 1, (text, findings))
+					self.assertIn(address, findings[0])
+
+	def test_scope_resolution_syntax_is_not_re_anchored_into_an_address(self) -> None:
+		"""Re-anchoring must not CREATE a finding, only move or drop one.
+
+		`word::hexword` is C++/PowerShell/Rust scope-resolution syntax, and
+		the run it sits in ends in something `ipaddress` accepts. It is only
+		quiet because re-anchoring runs after the fragment has already been
+		judged a finding on its own — reverse that order and every one of
+		these lines becomes a false positive.
+		"""
+		for text in (
+			"std::cafe",
+			"Color::Fade",
+			"Result::Bad",
+			"ns::deadbeef",
+			"[System.Math]::Abs(1)",
+			"std::vector<int> v;",
+			"a::before { content: none; }",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+
+class ImpossibilityClaimTests(unittest.TestCase):
+	"""Every "this cannot happen" in the scanner, executed instead of read.
+
+	Three claims of impossibility in `scan_repo_specific.py` have now been
+	false, in three consecutive rounds of one review: a trailing "not a
+	colon" guard called unreachable (it was reachable, and cost a finding), a
+	leading-guard change called unable to resurrect a mid-run match (it did,
+	and cost a false positive), and — found by auditing the comment that
+	corrected the first one — the claim that a greedy hex/colon run can never
+	be followed by a colon (backtracking says otherwise). Prose cannot carry
+	this kind of statement safely, so each surviving one is pinned here.
+	"""
+
+	def test_a_variable_width_lookbehind_is_rejected_by_the_engine(self) -> None:
+		"""Why the dash rule is code and not a lookaround.
+
+		`IPV4_RE` cannot decide dash adjacency itself: telling a range from a
+		build suffix means looking across the dash at a whole dotted-quad,
+		and a lookbehind that wide is variable-width, which Python's `re`
+		refuses to compile. A hard engine limit, not a preference.
+		"""
+		with self.assertRaises(re.error):
+			re.compile(r"(?<!(?:\d+\.){3}\d+-)x")
+
+	def test_a_bare_hex_run_can_end_with_a_colon_ahead_of_it(self) -> None:
+		"""The corrected half of the "no trailing not-a-colon guard" comment.
+
+		The class is greedy, but the TRAILING GUARDS BACKTRACK: given an
+		address, a port and then a letter, the engine gives characters back
+		until the guards are satisfied, and what satisfies them is the
+		address — with the port's colon immediately after the match. A "not a
+		colon" guard would have rejected these too, so the reason for leaving
+		it out is broader than the mapped-form case that first exposed it.
+		"""
+		observed = 0
+		for text in (
+			f"{with_port(LAB_IPV6, 443)}x",
+			f"{with_port(LAB_IPV6_FULL, 8443)}z",
+			f"{LAB_IPV6}:x",
+		):
+			for match in scanner.IPV6_RE.finditer(text):
+				if text[match.end():match.end() + 1] == ":":
+					observed += 1
+		self.assertEqual(observed, 3, "expected every case to end before a colon")
+
+	def test_every_neighbour_reaches_the_dash_helper(self) -> None:
+		"""The corrected `_dash_glues_to_non_address` docstring.
+
+		It used to claim that every non-dash neighbour "never reaches here".
+		They all reach it; the function simply has nothing to add, because
+		`IPV4_RE`'s own lookarounds have already decided them. Enumerated
+		over every printable neighbour rather than argued.
+		"""
+		reached = set()
+		for neighbour in (chr(code) for code in range(33, 127)):
+			line = f"{neighbour}{LAB_IP}"
+			for match in scanner.IPV4_RE.finditer(line):
+				reached.add(neighbour)
+				scanner._dash_glues_to_non_address(line, match.start(), match.end())
+		self.assertIn("-", reached, "the dash case must reach the helper")
+		self.assertIn(":", reached, "a delimiter colon reaches it too")
+		self.assertIn("_", reached, "the deliberately-allowed underscore reaches it")
+		self.assertNotIn("a", reached, "an alphanumeric is rejected by the regex")
+
+	def test_fqdn_matches_never_contain_an_underscore(self) -> None:
+		"""Why only FQDN_RE's LEADING guard was narrowed to alphanumerics.
+
+		The comment's reasoning is that a DNS label cannot contain `_`, so an
+		underscore before a match is a separator rather than a continuation.
+		That is a property of the pattern, so it is checked as one.
+		"""
+		for text in (
+			f"VCENTER_{LAB_FQDN}",
+			f"prefix_{LAB_FQDN}_suffix",
+			f"{LAB_FQDN}_suffix",
+			f"_{LAB_FQDN}",
+		):
+			with self.subTest(text=text):
+				for match in scanner.FQDN_RE.finditer(text):
+					self.assertNotIn("_", match.group(0), text)
+
+	def test_trimming_never_turns_an_address_into_a_non_address(self) -> None:
+		"""`_trim_delimiter_colons` claims safety in one direction only.
+
+		The claim is that trimming can never LOSE a finding — it can turn an
+		unparseable span into an address (the point of it), never the
+		reverse. Exhausted over every generated candidate rather than
+		asserted: 4 cores x 6 leading x 6 trailing x 3 zone/port tails.
+		"""
+		cores = (LAB_IPV6, LAB_IPV6_FULL, OK_IPV6_LOOPBACK, OK_IPV6_UNSPECIFIED)
+		edges = ("", ":", "::", ":::", "0", "f")
+		tails = ("", "%eth0", ":443")
+		checked = 0
+		for core in cores:
+			for lead in edges:
+				for trail in edges:
+					for tail in tails:
+						candidate = f"{lead}{core}{trail}{tail}"
+						checked += 1
+						before = scanner._ipv6_address_of(candidate)
+						after = scanner._ipv6_address_of(
+							scanner._trim_delimiter_colons(candidate)
+						)
+						if before is not None:
+							self.assertIsNotNone(after, candidate)
+		self.assertEqual(checked, 432)
+
+	def test_the_port_retry_only_ever_returns_what_the_parser_accepts(self) -> None:
+		"""`_ipv6_address_of` claims the retry cannot manufacture an address.
+
+		Whatever it returns must be a literal the strict parser accepted, on
+		either the candidate itself or the candidate minus one trailing
+		all-digit group. Nothing else is reachable.
+		"""
+		for candidate in (
+			LAB_IPV6,
+			with_port(LAB_IPV6_FULL, 443),
+			with_port(LAB_IPV6, 8443),
+			"01:02:03",
+			with_port(EUI64_SHAPED, 22),
+			f"{LAB_IPV6_FULL}:443:443",
+		):
+			with self.subTest(candidate=candidate):
+				resolved = scanner._ipv6_address_of(candidate)
+				if resolved is None:
+					continue
+				head = candidate.rpartition(":")[0]
+				accepted = {
+					str(ipaddress.IPv6Address(text))
+					for text in (candidate, head)
+					if _parses(text)
+				}
+				self.assertIn(str(resolved), accepted, candidate)
+
+
+class FalsePositiveCorpusTests(unittest.TestCase):
+	"""The lines this gate must stay silent on, as an executable corpus.
+
+	Kept in the suite rather than run by hand in a PR body: a corpus that
+	lives in a review comment is re-derived (differently) by whoever comes
+	next, and the round-2 widening of what IPv6 matches is exactly the kind
+	of change that needs to be re-measured against the same list every time.
+	Every entry is a shape seen in this repo or in the sibling repos' output.
+	"""
+
+	CORPUS = (
+		# timestamps and durations
+		"Scan started at 04:34:01 local time",
+		"elapsed 01:02:03.456",
+		"duration 00:00:07",
+		"stamp 2026-08-03T10:28:05Z",
+		# hardware and hashes
+		"NIC de:ad:be:ef:ca:fe",
+		"NIC aa-bb-cc-dd-ee-ff",
+		"image sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		"uuid 123e4567-e89b-12d3-a456-426614174000",
+		# code and markup
+		"colour: #aabbcc;",
+		"a::before { content: none; }",
+		"std::vector<int> v;",
+		"[System.Math]::Abs(1)",
+		"SELECT id::text FROM t",
+		"xpath //child::node()",
+		# paths, ports, binds
+		r"path C:\Users\example\file.txt",
+		"ports 8443:8443",
+		"ports 18443:8443",
+		"listen 0.0.0.0:8443",
+		"bind 127.0.0.1:5432",
+		# sanctioned addresses, in both spellings and with ports
+		"doc 2001:db8::1",
+		"doc 2001:0db8:0000:0000:0000:0000:0000:0001",
+		"lo ::1",
+		"lo 0:0:0:0:0:0:0:1",
+		"any ::",
+		"any 0:0:0:0:0:0:0:0",
+		"lo [::1]:8443",
+		"test 192.0.2.10 and 198.51.100.7 and 203.0.113.9",
+		"padded 192.000.002.010",
+		# #89's build/version shapes
+		"vcf-download-tool-9.0.0.0-24089201.tar.gz",
+		"version: '8.18.0.4'",
+		"--version 9.0.0.0",
+		"app.version=9.0.0.0",
+		# repo conventions
+		"host esxi-01.example.internal",
+		"dotnet_naming_rule.local_functions_should_be_pascalcase",
+		"mail user@example.internal",
+	)
+
+	def test_the_corpus_is_silent(self) -> None:
+		for line in self.CORPUS:
+			with self.subTest(line=line):
+				self.assertEqual(scanner.scan_text("f.md", line), [], line)
+
+	def test_the_corpus_is_scanned_as_one_file_too(self) -> None:
+		"""Line-by-line silence is not the same as whole-file silence."""
+		self.assertEqual(scanner.scan_text("f.md", "\n".join(self.CORPUS)), [])
+
+	def test_the_known_residual_false_positives_are_still_only_these(self) -> None:
+		"""Two lines that DO fire and should not. Pinned, not hidden.
+
+		Both are disclosed in docs/testing.md. They are here so that a future
+		change either keeps them exactly as they are or has to come and edit
+		this test — which is the point at which someone has to think about
+		them again.
+
+		1. A run of colon-separated hex groups that happens to validate as a
+		   literal (issue #118). An 8-group EUI-64-style run already fired
+		   before this round; the swallowed-port retry extends the same class
+		   by one group, since a 9-group run whose last group is all digits
+		   now resolves to the 8-group address in front of it. Same class,
+		   one group wider — not a new one.
+		2. The unbracketed `<sanctioned address>:<port>` ambiguity, argued in
+		   UnbracketedPortTests.
+		"""
+		for line in (
+			f"cols {EUI64_SHAPED}",
+			f"cols {with_port(EUI64_SHAPED, 22)}",
+			f"lo {with_port(OK_IPV6_LOOPBACK, 443)}",
+		):
+			with self.subTest(line=line):
+				self.assertEqual(len(scanner.scan_text("f.md", line)), 1, line)
 
 
 class AllowlistTests(unittest.TestCase):

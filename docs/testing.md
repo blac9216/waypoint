@@ -352,18 +352,55 @@ have repeatedly caught real defects no CI run could have seen:
   this, and the new detector simply never joined it. Both are fixed —
   every address detector is now driven through the same 14 trailing and 10
   leading delimiters from one table, and a check that appears in neither
-  that table nor an adjacent, written-out exempt list fails a test. A
-  delimiter shape that is *deliberately* left open is disclosed here, in
-  this list, and pinned by a test; there are two, both mirroring the IPv4
-  and FQDN detectors: a literal glued to a following `_` (an underscore
-  reads as more of the same token on the trailing side — the
-  `.editorconfig` reasoning above), and a literal followed by `.` plus an
-  alphanumeric (a dotted continuation such as a hostname, where the
-  address-shaped prefix is not standing alone). Everything else that gets
-  through the IPv6 detector is a shape no regex reasonably enumerates — a
-  hex-lettered identifier that also happens to be valid IPv6 syntax
-  ([#118](https://github.com/blac9216/waypoint/issues/118)), or a
-  deliberate-evasion encoding — not a boundary case.
+  that table nor an adjacent, written-out exempt list fails a test.
+
+  **A second boundary case survived that fix, for the same reason one level
+  in.** A round later, a fully-expanded IPv6 literal followed by an
+  unbracketed `:port` was still scanning `clean` on the real tree: the greedy
+  hex/colon class swallowed the port, strict parsing failed on the ninth
+  group, and "does not parse" was read as "not an address, so allowed"
+  (PR #115 round 2). The matrix reported that delimiter as covered because
+  each detector had exactly ONE fixture, and IPv6's was the *compressed*
+  spelling, whose port digits absorb as a legal eighth group. The previous
+  revision of this bullet ended by asserting that nothing left open was
+  "a boundary case". That was wrong when it was written, and it was the second
+  time in two rounds that a sentence in this file or in that scanner asserted
+  an impossibility nobody had executed. So this is now a list of what is
+  actually true, not a summary:
+
+  - The port case is closed: a trailing all-digit group is retried away before
+    a candidate is declared a non-address, at any port width.
+  - A match that begins *inside* a longer hex/colon run is re-anchored onto
+    the widest span that still parses, so a word glued to the front of an
+    address no longer reports a fragment of it.
+  - The matrix enumerates several fixture VARIANTS per detector, and how many
+    it owes is derived from the detector rather than remembered — from its
+    regex's own alternations and optional groups, and from whether its
+    variants cover both the canonical and a non-canonical spelling of the same
+    value (compressed vs expanded, padded vs unpadded, upper vs lower case).
+    Dropping the fully-expanded IPv6 fixture now fails a test.
+  - **Left open on the delimiter side**, both mirroring the IPv4 and FQDN
+    detectors and both pinned: a literal glued to a following `_` (an
+    underscore reads as more of the same token on the trailing side — the
+    `.editorconfig` reasoning above), and a literal followed by `.` plus an
+    alphanumeric (a dotted continuation such as a hostname, where the
+    address-shaped prefix is not standing alone).
+  - **Left open on the false-POSITIVE side** — two shapes this gate reports
+    that are not leaks, pinned by
+    `test_the_known_residual_false_positives_are_still_only_these`. A run of
+    colon-separated hex groups that happens to be valid IPv6 syntax
+    ([#118](https://github.com/blac9216/waypoint/issues/118)); the port retry
+    widens that class by exactly one group, since nine groups ending in digits
+    now resolve to the eight in front of them. And an unbracketed
+    `<sanctioned address>:<port>` pair, which as written is also a valid,
+    different, non-sanctioned address — the gate reports rather than guesses,
+    and the bracketed URL form is unambiguous and stays silent.
+  - **Under-reported rather than silent**: a zero-padded IPv4-mapped literal
+    loses its IPv6 finding while still tripping the IPv4 detector
+    ([#123](https://github.com/blac9216/waypoint/issues/123)).
+  - Everything else is a deliberate-evasion encoding (integer- or hex-encoded
+    addresses, zero-width-space splitting), which is outside this gate's
+    accidental-disclosure threat model rather than a boundary case it missed.
 - **Files the scanner does not read**: **none, currently — and that is a property
   worth keeping.** `ALLOWLIST_FINDINGS` in `scan_repo_specific.py` is empty, so every
   git-tracked file that isn't a known-binary extension is scanned by all four
@@ -394,17 +431,20 @@ have repeatedly caught real defects no CI run could have seen:
   stopped detecting. Running the scanner against a clean tree proves the absence of
   findings, never the presence of detection — the same asymmetry that let the
   frontend air-gap guard fail open three times. That is why `sanitize` runs
-  `test_scan_repo_specific.py` (99 assertions covering all four detectors, their
+  `test_scan_repo_specific.py` (120 tests covering all four detectors, their
   case handling, the IPv4/FQDN dash- and underscore-adjacency narrowing from
   issue #111, the padding-width independence from #119, both allowlist paths,
-  the exit codes, and the documented false-positive exemptions) before it
-  trusts the scan. Delimiter handling is the one part not left to per-detector
-  test-writing: every address detector goes through a single shared matrix of
-  14 trailing and 10 leading delimiters, and a detector can only sit outside it
-  by being named in an exempt list with a written reason — a test compares both
-  against the scanner's own `CHECK_NAMES`. That guard exists because the IPv6
-  detector joined the suite with no delimiter case at all and carried a live
-  boundary bug through a full review round (above). It is also why the
+  the exit codes, a standing false-positive corpus, and every claim of
+  impossibility left in the scanner's own comments) before it trusts the scan.
+  Delimiter handling is the one part not left to per-detector test-writing:
+  every address detector goes through a single shared matrix of 14 trailing and
+  10 leading delimiters, over several fixture variants each, and a detector can
+  only sit outside it by being named in an exempt list with a written reason —
+  a test compares both against the scanner's own `CHECK_NAMES`, and a second
+  test derives from each detector's regex and validator how many variants it
+  owes. Those two guards exist because the IPv6 detector joined the suite with
+  no delimiter case at all, and then joined it with one fixture that hid the
+  next bug — each cost a full review round (above). It is also why the
   frontend guard now runs as its own explicit workflow step rather than relying on
   `package.json`'s `build` script continuing to chain it.
 - **A passing detector suite is not a working detector, either** — one level further
@@ -429,6 +469,22 @@ have repeatedly caught real defects no CI run could have seen:
   "which existing matrices should this detector be in, and what makes it
   impossible to leave it out". Shared coverage that a new case joins by being
   remembered is coverage that eventually is not.
+
+  **And a third time, one level further in, which is the version worth
+  remembering.** The matrix was fixed so no detector could opt out — and every
+  detector in it still had exactly one fixture. A green "14/14 on colon/port"
+  therefore proved that those delimiters are safe *for one shape of one
+  address*, while reading as if it proved more. It did not: IPv6 passed that
+  row only because its single fixture was compressed, so the port absorbed as
+  a legal eighth group; the fully-expanded spelling lived in the same file,
+  never met a port or the matrix, and scanned clean (PR #115 round 2). The
+  third question, then, is **"what does my one fixture per case have that the
+  real inputs will not"** — and the durable answer is not to write more
+  fixtures but to make the count derivable: the suite now reads each
+  detector's own regex for the shapes it admits, and its own validator for
+  the spellings it accepts, and fails when a variant for one of them is
+  missing. A number a person has to remember to raise is a number that lags
+  the code, and reads as covered while it does.
 
 Treat every green run the way this document already asks you to treat a passing
 local test: as one input a contextless reviewer weighs, never as the verdict itself.
