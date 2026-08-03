@@ -185,15 +185,34 @@ reviewer the work of closing it, and quietly weakens what the PR proves.
 
 ## Sandbox egress: why `dotnet restore` fails in a Docker build
 
-Agent sandboxes reach the internet through a **TLS-terminating proxy on
-`127.0.0.1:43705`**. Two consequences bite the backend image build, and both look
-like repository defects when they are not:
+Agent sandboxes reach the internet through a **TLS-terminating proxy bound to
+loopback**. Two consequences bite the backend image build, and both look like
+repository defects when they are not:
 
-1. A Docker build container cannot reach the host's `127.0.0.1`, so the proxy is
-   simply absent. `RUN dotnet restore` fails with
+1. `docker build` runs `RUN` steps in a **bridged** network namespace, where
+   `127.0.0.1` is the container's own loopback, not the host's. The proxy is simply
+   absent, and `RUN dotnet restore` fails with
    `NU1301: Unable to load the service index for source https://api.nuget.org/v3/index.json`.
 2. Even once reachable, the proxy re-signs TLS, so NuGet rejects the certificate
    unless the proxy CA (`/root/.ccr/ca-bundle.crt`) is trusted inside the build.
+
+**Never hardcode the proxy port** — it changes when the proxy restarts, and
+`$HTTPS_PROXY` can go stale in an already-running shell (observed mid-session:
+the variable still said `43705` after the proxy had moved to `36133`, so every
+request through it failed while the proxy itself was perfectly healthy). Resolve it,
+and verify, before you trust it:
+
+```bash
+# Authoritative current value; /root/.ccr/README.md also states it in its first line.
+PROXY_URL="$(grep -oE 'http://127\.0\.0\.1:[0-9]+' /root/.ccr/README.md | head -1)"
+curl -sSf --max-time 10 "$PROXY_URL/__agentproxy/status" >/dev/null \
+  && echo "proxy OK at $PROXY_URL" || echo "stale/down - re-read the README"
+```
+
+A dead proxy and a policy denial look nothing alike: a denial is a **403/407**, and
+per the README it must be reported, not routed around. Everything this repo needs
+(nuget.org, mcr.microsoft.com, the Docker registries, npm, GitHub) is reachable — if
+you get a connection refused, the port moved; you are not blocked.
 
 **This is an environment limitation, not a defect in `backend/Dockerfile`.** On an
 open network the plain `docker compose build` works. Do not file it as a finding, and
@@ -203,21 +222,24 @@ both wrong off-sandbox and a sanitization risk.
 Two workarounds are verified to work. Either is fine; neither touches the repo:
 
 ```bash
-# A. Host networking + trusted CA (works for a direct `docker run` or `docker build`)
+# A. Host networking + trusted CA. --network=host genuinely shares the host's
+#    namespace (verified: a container run this way sees the host's lo/eth0/docker0),
+#    so the loopback proxy is reachable. The docker bridge gateway is NOT an
+#    alternative - the proxy does not listen on it (connection refused).
 docker build --network=host \
-  --build-arg HTTPS_PROXY=http://127.0.0.1:43705 \
+  --build-arg HTTPS_PROXY="$PROXY_URL" \
   --build-arg SSL_CERT_FILE=/ca/ca-bundle.crt \
   ...
 
 # B. Supply an SDK base image that already trusts the CA
-docker build --build-context <sdk-with-ca> ...
+docker build --build-context sdk-with-ca=... ...
 ```
 
 Quick confirmation that egress works at all, without building the image:
 
 ```bash
 cd backend && docker run --rm --network=host \
-  -e HTTPS_PROXY=http://127.0.0.1:43705 -e NO_PROXY=localhost,127.0.0.1 \
+  -e HTTPS_PROXY="$PROXY_URL" -e NO_PROXY=localhost,127.0.0.1 \
   -e SSL_CERT_FILE=/ca/ca-bundle.crt \
   -v /root/.ccr/ca-bundle.crt:/ca/ca-bundle.crt:ro \
   -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:8.0 \
