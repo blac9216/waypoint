@@ -10,8 +10,9 @@ column.
 
 - Base path `/api/v1`, JSON bodies, `snake_case` fields.
 - **Auth**: OIDC bearer token (Keycloak; local-auth issuer in M1 — ADR-0004). Role
-  claims map to Viewer / Cyber / Operator / Admin; the API enforces role guards
-  server-side (the UI's disabled-with-reason treatment is presentation only).
+  claims map to Viewer / Cyber / Operator / Admin — see `### Auth` below for the M1
+  local-auth endpoints and the exact (PascalCase) wire values — the API enforces role
+  guards server-side (the UI's disabled-with-reason treatment is presentation only).
 - **Mode**: every response is mode-aware; endpoints unavailable in the instance mode
   return `409 mode_unavailable` (they exist but cannot function), never `404`.
 - **Errors**: `{ "error": { "code", "message", "detail?" } }`.
@@ -22,6 +23,65 @@ column.
   through the event stream, not polling.
 
 ## Resources
+
+### Auth
+| Endpoint | Methods | Notes |
+|---|---|---|
+| `/auth/login` | POST | Anonymous. Local-auth login (ADR-0004 rollout note — dev-grade M1 stand-in; #29 replaces this flow with Keycloak OIDC). Request: `{username, password}`. 200 → `{token, role, expires_at}` — **no `user` object**. 401 → `{ "error": { "code": "invalid_credentials", "message": "Invalid username or password." } }`. |
+| `/auth/me` | GET | Viewer+. Current session's identity: `{username, role}`. Unaffected by the #29 Keycloak swap — same shape regardless of which issuer authenticated the caller. |
+
+**Session token.** Opaque bearer string; presented on every subsequent request as
+`Authorization: Bearer <token>`, same header the OIDC flow this stands in for uses —
+callers don't need to know which issuer minted it. There is no `/auth/logout`:
+discarding the client-held token ends the session client-side, and the token also
+expires server-side at `expires_at` regardless (M1 local-auth default session
+lifetime: 8 hours from issue). No refresh endpoint in M1 — an expired token requires
+logging in again.
+
+**`role` value casing — read before touching this.** `role` is serialized via the
+backend's `Role.ToString()`, so its value is **PascalCase**, while every *key* in this
+API is `snake_case` (`expires_at`, not `ExpiresAt`). This is a deliberate, narrow
+exception — snake_case governs field *names* here, not the literal values of an enum
+— not an inconsistency to "fix" later. The closed set, matching `domain-model.md`'s
+Roles in the same strictly-increasing order, is exactly:
+
+```
+Viewer | Cyber | Operator | Admin
+```
+
+Do not lowercase these client-side and do not compare against `"admin"` — the values
+above are the entire domain; any other string on the wire is invalid. This casing
+applies everywhere a role appears (`/auth/login`, `/auth/me`, and any future
+role-bearing field), not just these two endpoints.
+
+**Clients validate `role` at the wire seam and fail closed.** Because the set is
+closed, a `role` that is not one of the four is a contract violation, and a client
+must refuse it rather than half-accept it — a client that signs in on an unrecognized
+role reaches a state where every role guard denies while the session claims to be
+valid. `role` is validated on **both** endpoints, not just one: `/auth/login` and
+`/auth/me` each assert a role for the same token, so they must agree, and a
+divergence is refused too (neither is treated as overriding the other). This is a
+requirement on the client, not a second server-side guard — the API remains the
+enforcement point for every actual permission (see Conventions).
+
+The same holds for the other fields these endpoints return: `token` and `username`
+must be present and non-empty, and `expires_at` must parse to a real instant. A
+client that accepts a response missing any of them builds a session that looks valid
+and comes apart later — an empty token authenticates nothing until some request
+`401`s, and an unparseable `expires_at` compares false against every expiry check, so
+the session survives login only to be rejected on the next restore. Reject the whole
+response instead. This is a rule about *responses*; how a client validates a session
+it has already stored is its own business.
+
+**What #29 (Keycloak) changes, and what it doesn't.** `POST /auth/login` is the
+dev-grade local-auth stand-in the ADR-0004 rollout note describes and is expected to
+disappear outright, replaced by Keycloak's OIDC authorization-code/token endpoints —
+its path, request body, and response shape are not part of the durable contract.
+`GET /auth/me` and the role guards it feeds (the client-side disabled-with-reason
+treatment plus every server-side enforcement point) are expected to survive that swap
+unchanged: `/auth/me` keeps returning `{username, role}` no matter which issuer
+authenticated the caller, and role claims keep mapping to the same four
+`Viewer`/`Cyber`/`Operator`/`Admin` values.
 
 ### Sites, targets, inventory
 | Endpoint | Methods | Notes |
