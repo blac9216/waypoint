@@ -2017,17 +2017,24 @@ class MultiGroupPortRetryTests(unittest.TestCase):
 	threat model names (netstat, log lines, inventory exports, URLs) produces
 	exactly one trailing numeric group, so this is hardening, not an
 	emergency. The fix keeps that framing — it bounds the NUMBER of trailing
-	digit groups retried (`_MAX_SWALLOWED_GROUPS`, two) and bounds no group's
-	WIDTH at all, which stays deliberately unlimited for the same #119 reason
-	`UnbracketedPortTests` already pins.
+	digit groups retried (`_MAX_SWALLOWED_GROUPS`, three) and bounds no
+	group's WIDTH at all, which stays deliberately unlimited for the same
+	#119 reason `UnbracketedPortTests` already pins.
 
-	The cap arrived in PR #138 round 1: shipping the loop UNBOUNDED made the
-	disclosed #118 false-positive class unbounded in record length too, which
-	is a class no test can enumerate and no sentence in docs/testing.md can
-	state truthfully. Two is the deepest shape any real producer has been
-	shown to emit — all four of issue #131's own measured escapes close at
-	two — and the cost of stopping there is disclosed by
-	`test_three_trailing_all_digit_groups_are_a_disclosed_residual`.
+	The cap arrived in PR #138 round 1, and the REASON is disclosability, not
+	false positives: shipping the loop UNBOUNDED made the disclosed #118
+	false-positive class unbounded in record length, which is a class no test
+	can enumerate and no sentence in docs/testing.md can state truthfully.
+	A pin named `..._are_still_only_these` cannot bound an infinite set.
+
+	Three rather than two is a priced trade, not a free win — an earlier
+	revision of this class said otherwise on a corpus that happened to
+	contain no 11-group record. Three buys one further leak shape (three
+	trailing numeric groups, which no producer has been shown to emit) and
+	costs three further false-positive families, all 11-group records. The
+	cost of stopping at three is disclosed by
+	`test_four_trailing_all_digit_groups_are_a_disclosed_residual`; the
+	measurement is in `_MAX_SWALLOWED_GROUPS`.
 	"""
 
 	def test_two_trailing_all_digit_groups_are_both_retried(self) -> None:
@@ -2052,7 +2059,7 @@ class MultiGroupPortRetryTests(unittest.TestCase):
 		self.assertEqual(len(findings), 1, findings)
 		self.assertIn(address, findings[0])
 
-	def test_the_bound_is_two_groups_and_is_stated_as_a_number(self) -> None:
+	def test_the_bound_is_three_groups_and_is_stated_as_a_number(self) -> None:
 		"""The cap is a named constant, not a shape the tests infer.
 
 		PR #138 round 1, finding 1: an UNCAPPED loop makes the disclosed #118
@@ -2060,26 +2067,48 @@ class MultiGroupPortRetryTests(unittest.TestCase):
 		any test can enumerate and not a sentence docs/testing.md can state
 		truthfully. The cap is what makes both possible, so the number itself
 		is pinned here — a future change to it has to come through this test
-		and through `_MAX_SWALLOWED_GROUPS`'s own justification comment.
+		and through `_MAX_SWALLOWED_GROUPS`'s own justification comment,
+		which PRICES the choice (one further leak shape bought for three
+		further 11-group false-positive families) rather than asserting it.
 		"""
-		self.assertEqual(scanner._MAX_SWALLOWED_GROUPS, 2)
+		self.assertEqual(scanner._MAX_SWALLOWED_GROUPS, 3)
 
-	def test_three_trailing_all_digit_groups_are_a_disclosed_residual(self) -> None:
+	def test_three_trailing_all_digit_groups_are_all_retried(self) -> None:
+		"""One group past the deepest shape issue #131 itself measured.
+
+		The bound is three, so this closes. It is also the shape PR #138's
+		round-1 reviewer independently verified as closed, kept closed
+		deliberately rather than by accident — `_MAX_SWALLOWED_GROUPS`
+		records what buying it costs on the false-positive side, which is
+		every 11-group colon-separated record.
+		"""
+		for text in (
+			f"vcenter at {LAB_IPV6_FULL}:1:2:3",
+			f"vcenter at {LAB_IPV6_FULL}:443:8443:9443",
+		):
+			with self.subTest(text=text):
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, (text, findings))
+				self.assertIn(LAB_IPV6_FULL, findings[0])
+
+	def test_four_trailing_all_digit_groups_are_a_disclosed_residual(self) -> None:
 		"""What the bound costs, pinned rather than left silent.
 
-		Three trailing all-digit groups exhaust `_MAX_SWALLOWED_GROUPS`, so
+		Four trailing all-digit groups exhaust `_MAX_SWALLOWED_GROUPS`, so
 		the candidate is declared a non-address and the line scans clean.
 		This is the second of the loop's two stopping conditions (the first
 		is the glued letter below), and it is a deliberate trade, measured
-		both ways:
+		in both directions:
 
-		  - nothing gained: no producer in this gate's threat model (netstat,
-		    log lines, inventory exports, CKL/HDF, URLs) has ever been shown
-		    to emit a three-group shape. Issue #131's own four measured
-		    escapes all close at two.
+		  - little gained by going further: no producer in this gate's threat
+		    model (netstat, log lines, inventory exports, CKL/HDF, URLs) has
+		    ever been shown to emit even a three-group shape, let alone four.
+		    Issue #131's own four measured escapes all close at two.
 		  - something real given up on the other side: each additional group
 		    of slack widens the #118 false-positive class by one more group
-		    of colon-separated record, without bound. See
+		    of colon-separated record, without bound. Going from three to
+		    four would add every 12-group record to the class, exactly as
+		    going from two to three added every 11-group one. See
 		    `_MAX_SWALLOWED_GROUPS` for the corpus measurement.
 
 		Pinned here so a future change either closes it deliberately or has
@@ -2087,8 +2116,8 @@ class MultiGroupPortRetryTests(unittest.TestCase):
 		in this file gets.
 		"""
 		for text in (
-			f"vcenter at {LAB_IPV6_FULL}:1:2:3",
-			f"vcenter at {LAB_IPV6_FULL}:443:8443:9443",
+			f"vcenter at {LAB_IPV6_FULL}:1:2:3:4",
+			f"vcenter at {LAB_IPV6_FULL}:443:8443:9443:9444",
 		):
 			with self.subTest(text=text):
 				self.assertEqual(scanner.scan_text("f.md", text), [], text)
@@ -2532,40 +2561,60 @@ class FalsePositiveCorpusTests(unittest.TestCase):
 		1. A run of colon-separated hex groups that happens to validate as a
 		   literal (issue #118). An 8-group EUI-64-style run already fired
 		   before the #131 work. The swallowed-port retry widens that class
-		   by the number of groups the retry is allowed to strip: a run of 9
-		   or 10 groups whose trailing groups are all digits now resolves to
-		   the 8-group address in front of them. `_MAX_SWALLOWED_GROUPS` is
-		   what makes "9 or 10" a number rather than "and upwards" — an
+		   by the number of groups the retry is allowed to strip: a run of 9,
+		   10 or 11 groups whose trailing groups are all digits now resolves
+		   to the 8-group address in front of them. `_MAX_SWALLOWED_GROUPS`
+		   is what makes "9 to 11" a range rather than "and upwards" — an
 		   UNCAPPED loop, which is what this branch carried into round 1,
 		   made the class unbounded in record length and made this test's
 		   name false.
 		2. The unbracketed `<sanctioned address>:<port>` ambiguity, argued in
 		   UnbracketedPortTests.
 
-		The negative half is the half that does the bounding: an 11-group run
+		The negative half is the half that does the bounding: a 12-group run
 		is where the class STOPS, and it is asserted here rather than only
 		described. Raise the cap and this test fails, in the direction that
-		makes someone re-read the disclosure.
+		makes someone re-read the disclosure. Lower it and the firing half
+		fails, for the same reason.
+
+		The 11-group rows are the ones the cap-2-to-cap-3 change ADDED to
+		this class, and they are named rather than folded into a range,
+		because they are what that change cost.
+
+		They are also ASSEMBLED rather than written out, and that is not
+		style: an 11-group all-digit-tailed run IS the new false-positive
+		class, so spelling one out as a literal makes this very file trip the
+		gate it tests. That is measured, not anticipated — writing them as
+		literals took the full-tree scan from clean to two findings, in this
+		file, on the first run after the cap moved. It is the same no-literal
+		reason this module's docstring gives, arriving from a new direction,
+		and it is the sharpest available demonstration that raising the bound
+		has a real cost rather than a theoretical one.
 		"""
-		nine_groups = f"{EUI64_SHAPED}:22"
-		ten_groups = f"{EUI64_SHAPED}:22:2222"
-		eleven_groups = f"{EUI64_SHAPED}:22:2222:1"
+		eleven_numeric = "counters " + ":".join(str(n) for n in range(1, 12))
+		eleven_fingerprint = "SHA1 Fingerprint=" + ":".join(
+			("A1", "B2", "C3", "D4", "E5", "F6", "07", "18", "29", "30", "41")
+		)
+		self.assertEqual(eleven_numeric.split()[1].count(":"), 10, eleven_numeric)
+		self.assertEqual(eleven_fingerprint.count(":"), 10, eleven_fingerprint)
 		for line in (
 			f"cols {EUI64_SHAPED}",
 			f"cols {with_port(EUI64_SHAPED, 22)}",
-			f"cols {nine_groups}",
-			f"cols {ten_groups}",
+			f"cols {EUI64_SHAPED}:22",
+			f"cols {EUI64_SHAPED}:22:2222",
+			# 11 groups — added to the class by the cap 2 -> 3 change.
+			f"cols {EUI64_SHAPED}:22:2222:1",
+			eleven_numeric,
+			eleven_fingerprint,
 			f"lo {with_port(OK_IPV6_LOOPBACK, 443)}",
 		):
 			with self.subTest(line=line, direction="fires"):
 				self.assertEqual(len(scanner.scan_text("f.md", line)), 1, line)
-		# Where the class stops. These are the shapes the round-1 reviewer's
-		# corpus turned up as newly-firing under the uncapped loop; each is a
-		# colon-separated numeric record of more than ten groups, and each is
-		# silent again under the bound.
+		# Where the class stops: 12 colon groups and beyond. Several of these
+		# are the shapes the round-1 reviewer's corpus turned up as
+		# newly-firing under the uncapped loop.
 		for line in (
-			f"cols {eleven_groups}",
-			"counters 1:2:3:4:5:6:7:8:9:10:11",
+			f"cols {EUI64_SHAPED}:22:2222:1:2",
 			"fields 1:2:3:4:5:6:7:8:9:10:11:12",
 			"fields 1:2:3:4:5:6:7:8:9:10:11:12:13:14:15:16",
 			"eui 00:1a:2b:ff:fe:3c:4d:5e:22:2222:1:2",

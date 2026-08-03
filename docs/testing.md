@@ -449,36 +449,46 @@ have repeatedly caught real defects no CI run could have seen:
     `...:0007:0:443`) still failed strict parsing and scanned clean. The
     retry is a loop now, not a single attempt: it strips one trailing
     all-digit group at a time until the parse succeeds, the tail is no longer
-    all-digit, or **two** groups have been stripped. What is bounded is the
+    all-digit, or **three** groups have been stripped. What is bounded is the
     NUMBER of groups retried, never any one group's width — a 30-digit
     trailing group still resolves, because an arbitrary width bound is
     exactly what #119 cost and this fix does not reintroduce one.
-    **Why the loop is bounded at all, and why at two.** Two is the deepest
-    shape any real producer has been shown to emit: all four escaping lines
-    issue #131 measured close at two, and nobody — the issue, the PR, or the
-    round-1 reviewer — has exhibited a three-group shape from the closed list
-    of producers this gate's threat model names (netstat, log lines,
-    inventory exports, CKL/HDF, URLs). Every additional group of slack buys
-    nothing against that list and costs one more group of width on the
-    disclosed #118 false-positive class below, which is otherwise unbounded
-    in record length: an uncapped loop flags ANY colon-separated run whose
-    first eight groups parse and whose remaining groups are all digits.
-    Measured against a corpus of the artifact classes this project handles,
-    an uncapped loop adds four further false-positive classes over the bound
-    — 12- and 16-field numeric records, an EUI-64 string with four trailing
-    numeric fields, and a certificate fingerprint with an all-digit tail.
-    That direction of failure matters as much as the other one here: this
-    gate runs with zero exemptions as a load-bearing property (below), so a
-    false positive has no sanctioned waiver — it stops the gate until content
-    is edited, and a gate that cries wolf gets switched off.
+    **Why the loop is bounded at all: so that this bullet can be true.**
+    Uncapped, the loop flags ANY colon-separated run whose first eight groups
+    parse and whose remaining groups are all digits — so the disclosed #118
+    false-positive class below becomes unbounded in RECORD LENGTH, not merely
+    a group or two wider. That is a class no test can enumerate and no
+    sentence here can state truthfully, and it is exactly how three separate
+    places in this repo came to assert a bound of "exactly one group" that the
+    loop no longer had. A pin named `..._are_still_only_these` cannot bound an
+    infinite set. The false-positive count is a consequence of bounding, not
+    the argument for it.
+    **Why three, and what three costs.** Three is not free relative to two,
+    and an earlier revision of this bullet implied it was — on a corpus that
+    happened to contain no 11-group record, which made two and three look
+    tied. Measured against a corpus with even coverage from 9 to 13 colon
+    groups: cap 2 misses 4 of 10 leak shapes at 10 of 22 false positives; cap
+    3 misses 3 at 13. So three buys one further leak shape — a literal with
+    three trailing numeric groups, which no producer in the closed list this
+    gate's threat model names (netstat, log lines, inventory exports,
+    CKL/HDF, URLs) has ever been shown to emit — and costs three further
+    false-positive families, all of them 11-group records: an EUI-64 string
+    with three trailing numeric fields, a certificate fingerprint with the
+    same, and an 11-field numeric counter record. It is a deliberate trade in
+    favour of the leak direction, not a dominant choice: a missed lab address
+    is an incident under `CLAUDE.md`, while a false positive is a visibly red
+    gate. That the cost is real matters, because this gate runs with zero
+    exemptions as a load-bearing property (below), so a false positive has no
+    sanctioned waiver — it stops the gate until content is edited, and a gate
+    that cries wolf gets switched off.
     **Two residuals, disclosed not closed** — they are the loop's two
     stopping conditions. A trailing group carrying a non-digit character
     glued on (`...:0007:443a`) fails the all-digit test on its very first
     retry attempt, so the loop never starts stripping it — a materially
-    different shape (not a port at all, digit or otherwise). And three or
-    more trailing all-digit groups (`...:0007:1:2:3`) exhaust the bound.
+    different shape (not a port at all, digit or otherwise). And four or
+    more trailing all-digit groups (`...:0007:1:2:3:4`) exhaust the bound.
     Pinned by `MultiGroupPortRetryTests.test_a_glued_letter_on_the_final_
-    group_remains_undetected` and `.test_three_trailing_all_digit_groups_
+    group_remains_undetected` and `.test_four_trailing_all_digit_groups_
     are_a_disclosed_residual` rather than left to be rediscovered.
   - A match that begins *inside* a longer hex/colon run is re-anchored onto
     the widest span that still parses, so a word glued to the front of an
@@ -526,16 +536,20 @@ have repeatedly caught real defects no CI run could have seen:
     colon-separated hex groups that happens to be valid IPv6 syntax
     ([#118](https://github.com/blac9216/waypoint/issues/118)); the port retry
     widens that class by the number of groups it is allowed to strip, so a run
-    of **nine or ten** groups whose trailing groups are all digits now
-    resolves to the eight in front of them, and an eleven-group run is where
-    the class stops. That "or ten" is the whole reason the retry loop carries
-    a bound: uncapped, the class would be unbounded in record length — any
-    colon-separated numeric record long enough to have eight parseable groups
-    in front of an all-digit tail — which is a class no test can enumerate
-    and no sentence here can state truthfully.
+    of **nine, ten or eleven** groups whose trailing groups are all digits now
+    resolves to the eight in front of them, and a twelve-group run is where
+    the class stops. That the range is finite at all is the whole reason the
+    retry loop carries a bound: uncapped, the class would be unbounded in
+    record length — any colon-separated numeric record long enough to have
+    eight parseable groups in front of an all-digit tail — which is a class no
+    test can enumerate and no sentence here can state truthfully. The
+    eleven-group rows specifically are what raising the bound from two to
+    three cost (see the #131 bullet above); they are an EUI-64 string, a
+    certificate fingerprint and a numeric counter record, each with three
+    trailing numeric fields.
     `test_the_known_residual_false_positives_are_still_only_these` pins both
-    ends, the nine- and ten-group runs that fire and the eleven-group run that
-    does not. And an unbracketed
+    ends, the nine- to eleven-group runs that fire and the twelve-group runs
+    that do not. And an unbracketed
     `<sanctioned address>:<port>` pair, which as written is also a valid,
     different, non-sanctioned address — the gate reports rather than guesses,
     and the bracketed URL form is unambiguous and stays silent.
@@ -575,7 +589,7 @@ have repeatedly caught real defects no CI run could have seen:
   stopped detecting. Running the scanner against a clean tree proves the absence of
   findings, never the presence of detection — the same asymmetry that let the
   frontend air-gap guard fail open three times. That is why `sanitize` runs
-  `test_scan_repo_specific.py` (140 tests covering all four detectors, their
+  `test_scan_repo_specific.py` (141 tests covering all four detectors, their
   case handling, the IPv4/FQDN dash- and underscore-adjacency narrowing from
   issue #111, the padding-width independence from #119, the bound on the IPv6
   swallowed-port retry from #131, both allowlist paths,

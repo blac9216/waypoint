@@ -444,13 +444,13 @@ def is_placeholder_token(value: str) -> bool:
 # Both "never parses" claims survive the swallowed-port retry in
 # _ipv6_address_of(), and that is checked rather than assumed: the retry only
 # ever REMOVES trailing groups (up to `_MAX_SWALLOWED_GROUPS` of them), which
-# takes a 3-group timestamp to 1 group and a 6-group MAC to 4 — further from
+# takes a 3-group timestamp to nothing and a 6-group MAC to 3 — further from
 # the 8 an uncompressed literal needs, never closer. What the retry does reach
-# is a NINE- or TEN-group run whose trailing groups are all digits, which is
-# the address-plus-port shape it exists for; the corresponding false-positive
-# question ("what else is nine or ten colon-separated hex groups?") is
-# enumerated in FalsePositiveCorpusTests rather than dismissed, and bounding
-# the loop is what keeps that question answerable at all — see
+# is a NINE-, TEN- or ELEVEN-group run whose trailing groups are all digits,
+# which is the address-plus-port shape it exists for; the corresponding
+# false-positive question ("what else is nine to eleven colon-separated hex
+# groups?") is enumerated in FalsePositiveCorpusTests rather than dismissed,
+# and bounding the loop is what keeps that question answerable at all — see
 # `_MAX_SWALLOWED_GROUPS`.
 #
 # The bracketed alternative handles the URL form with a port (an address in
@@ -606,46 +606,52 @@ ALLOWED_IPV6_EXACT = frozenset(
 
 
 # How many trailing all-digit groups _ipv6_address_of() will strip before it
-# gives up. Two, and the number is measured rather than chosen for roundness
-# (PR #138 round 1, finding 1).
+# gives up (PR #138 round 1, finding 1).
 #
-# UPWARD, this is the smallest value that closes every shape any real producer
-# has ever been shown to emit. Issue #131's own body measures four escaping
-# lines; the deepest needs two strips (a fully-expanded literal, a bare port,
-# and one further numeric group). Nobody — the issue, the PR, or the round-1
-# reviewer — has exhibited a THREE-group shape from netstat, a log line, an
-# inventory export, a CKL/HDF, or a URL, which is the closed list of producers
-# this gate's threat model names.
+# WHY THERE IS A BOUND AT ALL: disclosability. UNBOUNDED, this loop flags ANY
+# colon-separated run whose first eight groups parse and whose every remaining
+# group is all-digit — so the disclosed #118 false-positive class becomes
+# unbounded in RECORD LENGTH, not merely a group or two wider. That is a class
+# no test can enumerate and no sentence in docs/testing.md can state truthfully,
+# which is exactly how three separate places in this repo came to assert a
+# bound of "exactly one group" that the loop no longer had. A pin named
+# `..._are_still_only_these` cannot bound what it claims to bound unless the
+# class is finite. Bounding is what makes an accurate disclosure possible; the
+# false-positive count is a consequence, not the argument.
+#
+# WHY THREE, AND WHAT IT COSTS. Three is NOT free relative to two, and an
+# earlier revision of this comment implied it was. Measured against a corpus
+# with even coverage from 9 to 13 colon groups (the first corpus had a gap at
+# exactly 11, which made two and three look tied):
+#
+#   cap 2 -> 4 of 10 leak shapes missed, 10 of 22 false positives
+#   cap 3 -> 3 of 10 leak shapes missed, 13 of 22 false positives
+#
+# So three buys ONE further leak shape (a literal with three trailing numeric
+# groups, which no producer in this gate's threat model — netstat, log lines,
+# inventory exports, CKL/HDF, URLs — has ever been shown to emit) and costs
+# THREE further false-positive families, all of them 11-group records: EUI-64
+# with three trailing numeric fields, a certificate fingerprint with the same,
+# and an 11-field numeric counter record. It is a deliberate trade in favour of
+# the leak direction, not a dominant choice: a missed lab address is an
+# incident under CLAUDE.md, a false positive is a visibly red gate. Three also
+# keeps closed the three-group shape PR #138's round-1 reviewer independently
+# verified as closed.
 #
 # DOWNWARD, one is where the retry already was, and one is exactly what #131
-# was filed about, so the bound cannot be lower.
-#
-# The reason there is a bound at all is the other direction of failure. Each
-# additional group of slack widens the disclosed #118 false-positive class by
-# one more group of colon-separated record, and that class is otherwise
-# unbounded in record length: an uncapped loop flags ANY colon-separated run
-# whose first eight groups parse and whose every remaining group is all-digit.
-# Measured against a corpus of the artifact classes this project handles, an
-# uncapped loop adds four further false-positive classes over this bound —
-# 12- and 16-field numeric records, an EUI-64 string with four trailing
-# numeric fields, and a certificate fingerprint with an all-digit tail. This
-# repo runs the gate with ALLOWLIST_FINDINGS == {} as a load-bearing property
-# (docs/testing.md), so a false positive has no sanctioned exemption path: it
-# stops the gate until content is edited. An unbounded false-positive class is
-# therefore a standing threat to the zero-exemption property, and a scanner
-# that cries wolf gets switched off, which fails the sanitization policy as
-# surely as a miss does.
+# was filed about, so the bound cannot be lower than two; two is rejected above
+# on the leak direction.
 #
 # What is deliberately NOT bounded is any group's WIDTH — a 30-digit trailing
 # group still resolves. Issue #119's lesson was against arbitrary width bounds
 # (digit counts), and it is untouched here; a group-COUNT bound is a different
-# axis and is justified above from shapes rather than from taste.
+# axis, and it is the axis that makes the residual class finite.
 #
 # The residual this creates is disclosed and pinned, not silent:
-# MultiGroupPortRetryTests.test_three_trailing_all_digit_groups_are_a_
+# MultiGroupPortRetryTests.test_four_trailing_all_digit_groups_are_a_
 # disclosed_residual, and the false-positive side is enumerated in
 # FalsePositiveCorpusTests.
-_MAX_SWALLOWED_GROUPS = 2
+_MAX_SWALLOWED_GROUPS = 3
 
 
 def _parse_ipv6(text: str) -> ipaddress.IPv6Address | None:
@@ -684,11 +690,12 @@ def _ipv6_address_of(candidate: str) -> ipaddress.IPv6Address | None:
 	retry and read as "not an address, so allowed" — the same escape PR #115
 	round 2 closed for the one-group case, one group further out.
 
-	The loop is BOUNDED, at `_MAX_SWALLOWED_GROUPS` (two) — see that
-	constant for why two and not one, three, or no bound at all. In short:
-	two is the deepest shape any real producer has been shown to emit, and
-	each further group of slack widens the disclosed #118 false-positive
-	class by another group of colon-separated record, without bound.
+	The loop is BOUNDED, at `_MAX_SWALLOWED_GROUPS` (three) — see that
+	constant for the argument and the measured cost. In short: unbounded,
+	the disclosed #118 false-positive class becomes unbounded in record
+	length, which is a class no test can enumerate and no disclosure can
+	state truthfully. Three rather than two is a deliberate trade in favour
+	of the leak direction, priced there rather than asserted free.
 
 	The axis that is bounded is the NUMBER of trailing all-digit groups
 	stripped, never how WIDE any one of them is. Each iteration removes
@@ -712,8 +719,8 @@ def _ipv6_address_of(candidate: str) -> ipaddress.IPv6Address | None:
 	    the group is not a port at all, digit or otherwise. Pinned by
 	    MultiGroupPortRetryTests.test_a_glued_letter_on_the_final_group_
 	    remains_undetected.
-	  - THREE or more trailing all-digit groups (`...:0007:1:2:3`) exhaust
-	    the bound. Pinned by MultiGroupPortRetryTests.test_three_trailing_
+	  - FOUR or more trailing all-digit groups (`...:0007:1:2:3:4`) exhaust
+	    the bound. Pinned by MultiGroupPortRetryTests.test_four_trailing_
 	    all_digit_groups_are_a_disclosed_residual.
 
 	Both are in docs/testing.md as well.
