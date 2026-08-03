@@ -442,13 +442,16 @@ def is_placeholder_token(value: str) -> bool:
 #     validation is even attempted.
 #
 # Both "never parses" claims survive the swallowed-port retry in
-# _ipv6_address_of(), and that is checked rather than assumed: the retry drops
-# ONE trailing all-digit group, which takes a 3-group timestamp to 2 groups and
-# a 6-group MAC to 5 — further from the 8 an uncompressed literal needs, never
-# closer. What the retry does reach is a NINE-group run whose last group is all
-# digits, which is the address-plus-port shape it exists for; the corresponding
-# false-positive question ("what else is nine colon-separated hex groups?") is
-# enumerated in FalsePositiveCorpusTests rather than dismissed.
+# _ipv6_address_of(), and that is checked rather than assumed: the retry only
+# ever REMOVES trailing groups (up to `_MAX_SWALLOWED_GROUPS` of them), which
+# takes a 3-group timestamp to 1 group and a 6-group MAC to 4 — further from
+# the 8 an uncompressed literal needs, never closer. What the retry does reach
+# is a NINE- or TEN-group run whose trailing groups are all digits, which is
+# the address-plus-port shape it exists for; the corresponding false-positive
+# question ("what else is nine or ten colon-separated hex groups?") is
+# enumerated in FalsePositiveCorpusTests rather than dismissed, and bounding
+# the loop is what keeps that question answerable at all — see
+# `_MAX_SWALLOWED_GROUPS`.
 #
 # The bracketed alternative handles the URL form with a port (an address in
 # brackets with a `:<port>` suffix appended, RFC 3986 style); zone IDs (a
@@ -602,6 +605,49 @@ ALLOWED_IPV6_EXACT = frozenset(
 )
 
 
+# How many trailing all-digit groups _ipv6_address_of() will strip before it
+# gives up. Two, and the number is measured rather than chosen for roundness
+# (PR #138 round 1, finding 1).
+#
+# UPWARD, this is the smallest value that closes every shape any real producer
+# has ever been shown to emit. Issue #131's own body measures four escaping
+# lines; the deepest needs two strips (a fully-expanded literal, a bare port,
+# and one further numeric group). Nobody — the issue, the PR, or the round-1
+# reviewer — has exhibited a THREE-group shape from netstat, a log line, an
+# inventory export, a CKL/HDF, or a URL, which is the closed list of producers
+# this gate's threat model names.
+#
+# DOWNWARD, one is where the retry already was, and one is exactly what #131
+# was filed about, so the bound cannot be lower.
+#
+# The reason there is a bound at all is the other direction of failure. Each
+# additional group of slack widens the disclosed #118 false-positive class by
+# one more group of colon-separated record, and that class is otherwise
+# unbounded in record length: an uncapped loop flags ANY colon-separated run
+# whose first eight groups parse and whose every remaining group is all-digit.
+# Measured against a corpus of the artifact classes this project handles, an
+# uncapped loop adds four further false-positive classes over this bound —
+# 12- and 16-field numeric records, an EUI-64 string with four trailing
+# numeric fields, and a certificate fingerprint with an all-digit tail. This
+# repo runs the gate with ALLOWLIST_FINDINGS == {} as a load-bearing property
+# (docs/testing.md), so a false positive has no sanctioned exemption path: it
+# stops the gate until content is edited. An unbounded false-positive class is
+# therefore a standing threat to the zero-exemption property, and a scanner
+# that cries wolf gets switched off, which fails the sanitization policy as
+# surely as a miss does.
+#
+# What is deliberately NOT bounded is any group's WIDTH — a 30-digit trailing
+# group still resolves. Issue #119's lesson was against arbitrary width bounds
+# (digit counts), and it is untouched here; a group-COUNT bound is a different
+# axis and is justified above from shapes rather than from taste.
+#
+# The residual this creates is disclosed and pinned, not silent:
+# MultiGroupPortRetryTests.test_three_trailing_all_digit_groups_are_a_
+# disclosed_residual, and the false-positive side is enumerated in
+# FalsePositiveCorpusTests.
+_MAX_SWALLOWED_GROUPS = 2
+
+
 def _parse_ipv6(text: str) -> ipaddress.IPv6Address | None:
 	"""Strict parse, or None. `ipaddress` is the arbiter; this just softens it."""
 	try:
@@ -636,42 +682,55 @@ def _ipv6_address_of(candidate: str) -> ipaddress.IPv6Address | None:
 	`...:0007:443:8443`, or the same literal with an all-zero group ahead of
 	the port, `...:0007:0:443`) still failed strict parsing after a single
 	retry and read as "not an address, so allowed" — the same escape PR #115
-	round 2 closed for the one-group case, one group further out. The bound
-	that matters is the NUMBER of trailing all-digit groups stripped, not how
-	wide any one of them is: each iteration removes exactly one whole group
-	and re-parses, so the loop terminates the instant a strict parse succeeds
-	or the tail is no longer all-digit — there is nothing here for an
-	attacker to widen. The port's digit count stays deliberately unbounded
-	within each group, for the same #119 reason as before: a second, arbitrary
-	width bound is what that issue cost, and bounding the group WIDTH here
-	would be exactly that mistake with a new coat of paint.
+	round 2 closed for the one-group case, one group further out.
+
+	The loop is BOUNDED, at `_MAX_SWALLOWED_GROUPS` (two) — see that
+	constant for why two and not one, three, or no bound at all. In short:
+	two is the deepest shape any real producer has been shown to emit, and
+	each further group of slack widens the disclosed #118 false-positive
+	class by another group of colon-separated record, without bound.
+
+	The axis that is bounded is the NUMBER of trailing all-digit groups
+	stripped, never how WIDE any one of them is. Each iteration removes
+	exactly one whole group and re-parses; the port's digit count inside a
+	group stays deliberately unbounded, for the same #119 reason as before —
+	an arbitrary width bound is what that issue cost, and bounding the group
+	WIDTH here would be that mistake with a new coat of paint. A 30-digit
+	trailing group still resolves (UnbracketedPortTests pins the widths).
 
 	The retry still cannot manufacture an address out of a non-address: every
 	iteration hands the shortened text to the same strict parser, so what
 	finally comes back is a real literal or nothing
 	(test_the_port_retry_only_ever_returns_what_the_parser_accepts).
 
-	Deliberately NOT closed here: a trailing group carrying a non-digit
-	character glued on (`...:0007:443a`) fails `tail.isdigit()` on its very
-	first iteration, so the loop never starts stripping it. That is a
-	different shape — the group is not a port at all, digit or otherwise —
-	and no shape in this gate's threat model (netstat, log lines, inventory
-	exports, URLs) produces it; disclosed as a residual in
-	UnbracketedPortTests and docs/testing.md rather than silently left for
-	the next reviewer to re-discover.
+	Two residuals, both disclosed and pinned rather than left for the next
+	reviewer to re-discover — they are the loop's two stopping conditions:
+
+	  - a trailing group carrying a non-digit character glued on
+	    (`...:0007:443a`) fails `tail.isdigit()` on its very first iteration,
+	    so the loop never starts stripping it. A materially different shape:
+	    the group is not a port at all, digit or otherwise. Pinned by
+	    MultiGroupPortRetryTests.test_a_glued_letter_on_the_final_group_
+	    remains_undetected.
+	  - THREE or more trailing all-digit groups (`...:0007:1:2:3`) exhaust
+	    the bound. Pinned by MultiGroupPortRetryTests.test_three_trailing_
+	    all_digit_groups_are_a_disclosed_residual.
+
+	Both are in docs/testing.md as well.
 	"""
 	base = candidate.split("%", 1)[0]
 	addr = _parse_ipv6(base)
 	if addr is not None:
 		return addr
 	head = base
-	while True:
+	for _attempt in range(_MAX_SWALLOWED_GROUPS):
 		head, separator, tail = head.rpartition(":")
 		if not separator or not tail.isdigit():
 			return None
 		addr = _parse_ipv6(head)
 		if addr is not None:
 			return addr
+	return None
 
 
 def is_allowed_ipv6(candidate: str) -> bool:
