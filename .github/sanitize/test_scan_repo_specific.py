@@ -374,17 +374,128 @@ except ImportError:  # pragma: no cover - older interpreters
 	import sre_parse as _re_parser  # type: ignore[no-redef]  # noqa: F811
 
 
+# Every parse-tree node kind that can hold a sub-sequence — i.e. that a guard,
+# or a character a guard names, can hide inside. Pinned against the real
+# patterns rather than assumed, from both directions:
+#   - test_the_guard_walk_descends_every_container_the_detectors_use: no kind
+#     present in the real detectors may be missing from this set;
+#   - test_the_extractor_descends_every_container_kind_it_names: every kind IN
+#     this set must actually be descended into, end to end, by both halves of
+#     the derivation.
+_GUARD_CONTAINER_OPS = frozenset(
+	{
+		"ASSERT",
+		"ASSERT_NOT",
+		"SUBPATTERN",
+		"BRANCH",
+		"MAX_REPEAT",
+		"MIN_REPEAT",
+		"ATOMIC_GROUP",
+	}
+)
+
+
+def _guard_sub_sequences(name: str, argument) -> tuple:
+	"""Every sub-sequence a container parse-tree node holds.
+
+	The single descent rule, deliberately shared by BOTH halves of the
+	derivation — `_collect_guards` (which assertions exist, and where) and
+	`_guard_literal_chars` (which characters a given assertion body names).
+
+	PR #138 round 2, finding 1: those two functions used to carry SEPARATE,
+	hand-written node-kind lists, and only the first one was ever checked
+	against the real parse trees. `_collect_guards` recursed into five
+	container kinds; `_guard_literal_chars` recursed into `SUBPATTERN` alone.
+	So a guard whose BODY was a repeat over a character class, or a branch
+	with multi-character alternatives, named punctuation that nothing
+	derived — the round-1 escape one level over, measured at the same
+	141/141-green-while-three-findings-vanish. Two symmetric functions with
+	asymmetric protection is the shape that produced it, so there is one
+	descent rule now and one set of node kinds (`_GUARD_CONTAINER_OPS`),
+	protected in both directions by the two tests named above it.
+
+	Returning `()` for a non-container is the whole "not a container" answer:
+	a kind that grows a sub-sequence in some future Python must be added
+	here, and the constructive test above fails until it is.
+	"""
+	if name in ("ASSERT", "ASSERT_NOT"):
+		return (argument[1],)
+	if name == "SUBPATTERN":
+		return (argument[3],)
+	if name == "BRANCH":
+		return tuple(argument[1])
+	if name in ("MAX_REPEAT", "MIN_REPEAT"):
+		return (argument[2],)
+	if name == "ATOMIC_GROUP":
+		return (argument,)
+	return ()
+
+
+def _is_word_category(category) -> bool:
+	"""True for `\\w` only — not for `\\W`, which names the complement.
+
+	The first spelling of this test was `"WORD" in str(category)`, which is
+	also true of `CATEGORY_NOT_WORD` and so derived an underscore from a
+	guard that by definition never matches one. Harmless (over-collection is
+	the safe direction) but false, and a false derived character is exactly
+	the kind of thing this file publishes sentences about.
+	"""
+	return str(category).endswith("CATEGORY_WORD")
+
+
+def _punctuation_in_range(low: int, high: int) -> set[str]:
+	"""The printable-ASCII punctuation a character-class RANGE names.
+
+	A range is the third way a guard can name a delimiter, after a literal
+	and a class of literals, and it was the third silent hole: `[!-/]` names
+	a dot and a dash and derived nothing. Only the printable-ASCII slice is
+	considered, so the answer is bounded by 95 code points however wide the
+	range is written; alphanumerics and the underscore are excluded for the
+	same reason a bare `\\w` contributes only the underscore — an alnum range
+	is "more of the same token", not a delimiter candidate, which is why
+	`[A-Za-z0-9]` (in IPV4_RE's and FQDN_RE's real guards) contributes
+	nothing and this addition is a no-op against today's detectors.
+	"""
+	return {
+		chr(code)
+		for code in range(max(low, 0x20), min(high, 0x7E) + 1)
+		if not chr(code).isalnum() and chr(code) != "_"
+	}
+
+
 def _guard_literal_chars(sequence) -> set[str]:
 	"""Punctuation characters a single lookaround's own sub-pattern tests for.
 
-	Handles the three shapes the guards in this file are actually built from:
-	a bare literal (`(?<!-)`), a character class possibly mixing literals and
-	a `\\w` category (`(?!\\w)`, `[A-Za-z0-9]`), and a short subpattern such as
-	`\\.[A-Za-z0-9]` or `\\.\\d` (a literal followed by a class/category).
+	Reads a bare literal (`(?<!-)`), a character class possibly mixing
+	literals and a `\\w` category (`(?!\\w)`, `[A-Za-z0-9]`), and a bare
+	category — at any depth inside the guard body, via `_guard_sub_sequences`.
 	`\\d` (CATEGORY_DIGIT) contributes nothing on its own — a bare digit is an
 	alnum-range concept, not a punctuation delimiter — so only the literal
 	half of a `\\.\\d`-shaped guard shows up here, which is exactly the `.`
 	IPV4_RE's own comment says that guard exists to test.
+
+	It descends rather than handling a fixed set of body shapes because the
+	fixed set was a silent hole (PR #138 round 2, finding 1 — the argument is
+	in `_guard_sub_sequences`). Two spellings measured on the tip that had
+	it: a trailing guard over a class of hash, pipe and plus with a
+	one-or-more quantifier (body = `MAX_REPEAT`), and one over a
+	two-alternative branch with two nodes per alternative (body = `BRANCH`).
+	Each left the suite at 141/141 while an address followed by each of those
+	three characters went from one finding to none — the middle one an
+	address in a markdown table cell.
+
+	A subtlety worth keeping, because it is why only SOME branch spellings
+	escaped: the parser hoists a common leading node out of a branch, so
+	`(?!<class>\\w|<class>\\d)` parses as class-then-branch and was derived
+	correctly even before the fix, while `(?!<class-a>\\w|<class-b>\\w)` was
+	not. That is exactly why the protection below is per-node-kind and
+	constructive rather than a list of remembered examples.
+
+	Descending into a NESTED assertion's body over-collects on purpose: its
+	characters land in the enclosing guard's direction as well as their own
+	(`_collect_guards` visits the same node with the correct direction). A
+	spurious declared row costs one measured line; a missing one costs a
+	silent escape.
 	"""
 	chars: set[str] = set()
 	for op, argument in sequence:
@@ -396,12 +507,14 @@ def _guard_literal_chars(sequence) -> set[str]:
 				sub_name = _op_name(sub_op)
 				if sub_name == "LITERAL":
 					chars.add(chr(sub_argument))
-				elif sub_name == "CATEGORY" and "WORD" in str(sub_argument):
+				elif sub_name == "CATEGORY" and _is_word_category(sub_argument):
 					chars.add("_")
-		elif name == "CATEGORY" and "WORD" in str(argument):
+				elif sub_name == "RANGE":
+					chars |= _punctuation_in_range(*sub_argument)
+		elif name == "CATEGORY" and _is_word_category(argument):
 			chars.add("_")
-		elif name == "SUBPATTERN":
-			chars |= _guard_literal_chars(argument[3])
+		for sub_sequence in _guard_sub_sequences(name, argument):
+			chars |= _guard_literal_chars(sub_sequence)
 	return chars
 
 
@@ -431,6 +544,11 @@ def _collect_guards(sequence, leading: set[str], trailing: set[str]) -> None:
 	`test_the_guard_walk_descends_every_container_the_detectors_use` rather
 	than trusted.
 
+	The descent itself lives in `_guard_sub_sequences`, shared with
+	`_guard_literal_chars`, because keeping two copies of it is precisely how
+	PR #138 round 2's finding happened: this walk was protected and its
+	sibling was not.
+
 	Direction comes from each assertion's own `direction` field at whatever
 	depth it sits, so a nested lookbehind still counts as leading.
 
@@ -447,32 +565,8 @@ def _collect_guards(sequence, leading: set[str], trailing: set[str]) -> None:
 		if name in ("ASSERT", "ASSERT_NOT"):
 			direction, body = argument
 			(leading if direction < 0 else trailing).update(_guard_literal_chars(body))
-			_collect_guards(body, leading, trailing)
-		elif name == "SUBPATTERN":
-			_collect_guards(argument[3], leading, trailing)
-		elif name == "BRANCH":
-			for branch in argument[1]:
-				_collect_guards(branch, leading, trailing)
-		elif name in ("MAX_REPEAT", "MIN_REPEAT"):
-			_collect_guards(argument[2], leading, trailing)
-		elif name == "ATOMIC_GROUP":
-			_collect_guards(argument, leading, trailing)
-
-
-# Every parse-tree node kind that can hold a sub-sequence a guard could hide
-# inside. Pinned against the real patterns rather than assumed — see
-# test_the_guard_walk_descends_every_container_the_detectors_use.
-_GUARD_CONTAINER_OPS = frozenset(
-	{
-		"ASSERT",
-		"ASSERT_NOT",
-		"SUBPATTERN",
-		"BRANCH",
-		"MAX_REPEAT",
-		"MIN_REPEAT",
-		"ATOMIC_GROUP",
-	}
-)
+		for sub_sequence in _guard_sub_sequences(name, argument):
+			_collect_guards(sub_sequence, leading, trailing)
 
 
 def guard_characters(pattern: re.Pattern[str]) -> tuple[frozenset[str], frozenset[str]]:
@@ -1168,6 +1262,249 @@ class GuardCharacterDelimiterTests(unittest.TestCase):
 			_GUARD_CONTAINER_OPS,
 			f"container node kinds not descended into: {sorted(seen - _GUARD_CONTAINER_OPS)}",
 		)
+
+	# --- the EXTRACTOR's reach (PR #138 round 2, finding 1) --------------
+	#
+	# The two tests below are the same protection one level over. Round 1
+	# fixed WHERE the derivation looks for assertions and guarded that with
+	# the structural test above; the sibling that extracts characters OUT of
+	# an assertion body kept a fixed node-kind list and no guard rail at all,
+	# so a guard body that was a repeat or a branch named punctuation nothing
+	# derived — measured at 141/141 green while the same three findings
+	# vanished. Both functions share one descent rule now
+	# (`_guard_sub_sequences`), and both directions of it are pinned.
+
+	@staticmethod
+	def _literal_chars_without_container_recursion(sequence) -> set[str]:
+		"""The superseded extractor, kept as an executable control.
+
+		Byte-for-byte the pre-fix body shapes: literals, one level of
+		character class, a bare category, and recursion into `SUBPATTERN`
+		alone. Its only purpose is to be asserted to MISS what the real
+		extractor finds, so "the derivation reads a guard body at any depth"
+		stays a measurement rather than a claim.
+		"""
+		chars: set[str] = set()
+		for op, argument in sequence:
+			name = _op_name(op)
+			if name in ("LITERAL", "NOT_LITERAL"):
+				chars.add(chr(argument))
+			elif name == "IN":
+				for sub_op, sub_argument in argument:
+					sub_name = _op_name(sub_op)
+					if sub_name == "LITERAL":
+						chars.add(chr(sub_argument))
+					elif sub_name == "CATEGORY" and "WORD" in str(sub_argument):
+						chars.add("_")
+			elif name == "CATEGORY" and "WORD" in str(argument):
+				chars.add("_")
+			elif name == "SUBPATTERN":
+				chars |= GuardCharacterDelimiterTests._literal_chars_without_container_recursion(
+					argument[3]
+				)
+		return chars
+
+	# The two guard-body spellings the round-2 review exhibited, each as the
+	# TAIL of a trailing lookahead over the three probe characters: a repeat
+	# over a character class, and a branch with two nodes per alternative.
+	# Written as (label, body-source) so the escape is executed, not recalled.
+	BODY_SHAPE_SPELLINGS = (
+		("repeat over a class", "[{probe}]+"),
+		("branch, two nodes per alternative", "[{first}]\\w|[{rest}]\\w"),
+	)
+
+	def test_a_guard_body_container_is_read_by_the_extractor(self) -> None:
+		"""A guard body that is a repeat, or a branch, still names its characters.
+
+		This is round 1's finding 2 one level over, executed. The recursion
+		fix made `guard_characters()` see an assertion wherever it sits; this
+		is about what it can read once it is there. Both spellings below were
+		measured on the tip that had the fixed extractor list: the suite
+		stayed at **141/141 OK** while `manager <address>` followed by each
+		of hash, pipe and plus went from one finding to none.
+
+		Each spelling is spliced into the real `IPV6_RE` at the same anchor
+		the nested-guard test uses, and the superseded extractor is asserted
+		to miss what the real one finds. The union built from the mutated
+		detector must also demand rows the declared tables do not have —
+		i.e. the completeness test would fail, which is what turns the
+		escape red.
+
+		One spelling deliberately NOT in the list, because it is why this
+		needs to be per-node-kind rather than per-example: a branch whose
+		alternatives share a leading node (`[hash pipe plus]\\w|[hash pipe
+		plus]\\d`) is hoisted by the parser into class-then-branch, so its
+		characters sat at the top of the body and were derived correctly
+		even before the fix. Remembering examples would have "covered" the
+		branch case while leaving the escaping spelling open.
+		"""
+		probe = "".join(self.NESTED_PROBE_CHARS)
+		anchor = r"(?P<zone>%[\w.-]+)?"
+		source = scanner.IPV6_RE.pattern
+		self.assertIn(anchor, source, "IPV6_RE's bare alternative no longer ends as expected")
+		for label, spelling in self.BODY_SHAPE_SPELLINGS:
+			body = spelling.format(
+				probe=probe,
+				first=self.NESTED_PROBE_CHARS[0] + self.NESTED_PROBE_CHARS[1],
+				rest=self.NESTED_PROBE_CHARS[2],
+			)
+			mutated = re.compile(source.replace(anchor, anchor + "(?!" + body + ")", 1))
+			_leading, trailing = guard_characters(mutated)
+			flat = self._literal_chars_without_container_recursion(
+				_re_parser.parse("(?!" + body + ")")[0][1][1]
+			)
+			for char in self.NESTED_PROBE_CHARS:
+				with self.subTest(body=label, char=char):
+					self.assertIn(char, trailing)
+					self.assertNotIn(char, flat)
+			with self.subTest(body=label, check="undeclared row"):
+				self.assertFalse(
+					set(trailing) <= set(self.GUARD_TRAILING_EXPECTED[scanner.CHECK_IPV6]),
+					"a guard body the extractor cannot read must create an undeclared row",
+				)
+
+	def test_a_guard_naming_punctuation_by_a_range_is_read(self) -> None:
+		"""The third spelling of "names a character": a class RANGE.
+
+		`[!-/]` names a dot and a dash without either appearing as a literal
+		node, so the pre-fix extractor derived nothing from it — the same
+		defect as the container one, in the character half rather than the
+		structure half. Closed by `_punctuation_in_range`, bounded to
+		printable ASCII and to non-alphanumerics so `[A-Za-z0-9]` (which the
+		real IPv4 and FQDN guards use) still contributes nothing, which is
+		why closing it changed no derived set.
+		"""
+		low, high = self.NESTED_PROBE_CHARS[0], self.NESTED_PROBE_CHARS[2]  # hash .. plus
+		anchor = r"(?P<zone>%[\w.-]+)?"
+		source = scanner.IPV6_RE.pattern
+		self.assertIn(anchor, source, "IPV6_RE's bare alternative no longer ends as expected")
+		body = "[" + low + "-" + high + "]"
+		mutated = re.compile(source.replace(anchor, anchor + "(?!" + body + ")", 1))
+		_leading, trailing = guard_characters(mutated)
+		flat = self._literal_chars_without_container_recursion(
+			_re_parser.parse("(?!" + body + ")")[0][1][1]
+		)
+		for char in (low, high):
+			with self.subTest(char=char):
+				self.assertIn(char, trailing)
+				self.assertNotIn(char, flat)
+		self.assertFalse(
+			set(trailing) <= set(self.GUARD_TRAILING_EXPECTED[scanner.CHECK_IPV6]),
+			"a guard naming punctuation by a range must create an undeclared row",
+		)
+		# The bound that keeps this safe rather than explosive: an alnum
+		# range still contributes nothing, so today's real guards are
+		# unaffected and the derived sets did not move when this landed.
+		self.assertEqual(_punctuation_in_range(ord("0"), ord("9")), set())
+		self.assertEqual(_punctuation_in_range(ord("a"), ord("z")), set())
+
+	def test_the_disclosed_extraction_limit_is_what_the_doc_says(self) -> None:
+		"""The limit that REMAINS, executed rather than asserted in prose.
+
+		`docs/testing.md` states exactly two things the derivation cannot do
+		with the characters a guard names, and both are pinned here so the
+		published sentence cannot drift from the code:
+
+		  1. A guard that names characters only through a category other
+		     than "word" (`\\S`, `\\W`, `\\D`) contributes nothing — those
+		     name open-ended sets, not delimiters, and enumerating them would
+		     demand a declared row for most of ASCII. Unlike the container
+		     and range holes this one cannot escape SILENTLY, which is
+		     measured rather than argued: splicing a trailing "not a
+		     non-word character" guard into the bare alternative fails 12
+		     tests outright, because a guard rejecting every non-word
+		     neighbour changes the measured verdict of characters the
+		     declared table already carries.
+		  2. A guard that names its characters through a back-reference
+		     contributes nothing — the characters are not in the guard at
+		     all, they are whatever the referenced group captured at match
+		     time, which no parse-tree read can know. That one is the real
+		     residual: neither derived nor loud.
+
+		If either is ever closed, this test fails and the doc gets re-read —
+		which is the only mechanism that has actually kept this file honest.
+		"""
+		for label, body in (
+			("non-word category", r"\S"),
+			("negated word category", r"\W"),
+			("back-reference", r"(?P=zone)"),
+		):
+			with self.subTest(spelling=label):
+				pattern = re.compile(r"(?P<zone>a)b(?!" + body + r")")
+				leading, trailing = guard_characters(pattern)
+				self.assertEqual(
+					(leading, trailing),
+					(frozenset(), frozenset()),
+					f"{label} now contributes characters — update the disclosed "
+					f"limit in docs/testing.md",
+				)
+
+	# One regex spelling per container node kind, used to prove — by
+	# construction rather than by reading the code — that a character sitting
+	# inside a node of that kind inside a guard reaches the derived set. A
+	# kind added to `_GUARD_CONTAINER_OPS` without a spelling here fails the
+	# test below rather than being taken on trust.
+	CONTAINER_PROBE_BODIES = {
+		"ASSERT": "(?<={c})",
+		"ASSERT_NOT": "(?!{c})",
+		"SUBPATTERN": "(?P<probe>{c})",
+		"BRANCH": "{c}y|zx",
+		"MAX_REPEAT": "{c}+",
+		"MIN_REPEAT": "{c}+?",
+		"ATOMIC_GROUP": "(?>{c})",
+	}
+
+	def test_the_extractor_descends_every_container_kind_it_names(self) -> None:
+		"""Every container kind is descended into — checked by running it.
+
+		The structural test above closes the other direction: a kind present
+		in the real detectors may not be missing from `_GUARD_CONTAINER_OPS`.
+		This one closes THIS direction: a kind that IS in that set must
+		actually carry a guard's characters out to the derived set, through
+		both `_collect_guards` and `_guard_literal_chars`. Listing a kind and
+		not descending into it is the exact defect round 2 found, and reading
+		the code is how it survived round 1.
+
+		Each kind is probed with a real compiled pattern whose parse tree is
+		first asserted to CONTAIN that kind — the parser rewrites some
+		spellings (it hoists a branch's common leading node, and drops a
+		non-capturing group that wraps nothing), so a spelling that no longer
+		produces the node it is named for fails loudly instead of silently
+		testing something else.
+		"""
+		missing = sorted(_GUARD_CONTAINER_OPS - set(self.CONTAINER_PROBE_BODIES))
+		self.assertFalse(missing, f"container kinds with no probe spelling: {missing}")
+		probe_char = "~"
+		self.assertNotIn(
+			probe_char,
+			GUARD_CHARS_LEADING_UNION | GUARD_CHARS_TRAILING_UNION,
+			"probe character must not be one a real detector already names",
+		)
+		for kind in sorted(_GUARD_CONTAINER_OPS):
+			with self.subTest(container=kind):
+				body = self.CONTAINER_PROBE_BODIES[kind].format(c=re.escape(probe_char))
+				pattern = re.compile(r"a(?!" + body + r")")
+				kinds_present: set[str] = set()
+
+				def note(sequence) -> None:
+					for op, argument in sequence:
+						name = _op_name(op)
+						kinds_present.add(name)
+						for sub_sequence in _guard_sub_sequences(name, argument):
+							note(sub_sequence)
+
+				note(_re_parser.parse(pattern.pattern, pattern.flags))
+				self.assertIn(
+					kind,
+					kinds_present,
+					f"probe spelling for {kind} no longer parses to that node kind",
+				)
+				leading, trailing = guard_characters(pattern)
+				self.assertIn(
+					probe_char,
+					leading | trailing,
+					f"a character inside a {kind} inside a guard is not derived",
+				)
 
 	def test_leading_guard_characters_match_declared_expectation(self) -> None:
 		for check, expected in sorted(self.GUARD_LEADING_EXPECTED.items()):
