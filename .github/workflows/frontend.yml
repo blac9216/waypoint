@@ -1,0 +1,72 @@
+name: frontend
+
+# Path-filtered: only frontend/** changes (or this workflow file) trigger a
+# build. A docs-only or backend-only PR never runs this job (see #79).
+on:
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"
+
+concurrency:
+  group: frontend-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: build, test, lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install (npm ci)
+        run: npm ci
+
+      - name: Build (typecheck + vite build)
+        run: npm run build
+
+      # The gate that matters most in this job, run as its own step on
+      # purpose. `npm run build` already chains this guard as its last step,
+      # and that wiring stays (it protects local developers, who are the
+      # people most likely to introduce an external asset in the first
+      # place) — but CI must not depend on it. Deleting `&& npm run
+      # check:external-assets` from package.json's build script would
+      # otherwise leave this whole job green with the ADR-0007 air-gap guard
+      # never executed: build exits 0, tests exit 0, and the guard's own unit
+      # tests still pass because they import the module directly and assert
+      # nothing about the wiring.
+      #
+      # This guard has a history of failing open — an extension allowlist
+      # that skipped .mjs (PR #65 round 1), compressed artifacts skipped
+      # entirely (#77), and compressed formats on neither list (#81) — which
+      # is the whole reason issue #79 asked for it on a gate rather than in a
+      # habit. Re-running it here is idempotent and costs about a second
+      # against the already-built dist/; it hard-fails if the script is
+      # missing, renamed, or unwired.
+      - name: Air-gap asset guard (ADR-0007)
+        run: npm run check:external-assets
+
+      - name: Test
+        run: npm test
+
+      - name: Lint
+        run: npm run lint

@@ -35,6 +35,9 @@ obj/
 node_modules/
 dist/
 frontend/build/
+# Python bytecode from the sanitize scanner and its test suite
+__pycache__/
+*.pyc
 
 # Editor/OS noise
 .vscode/
