@@ -127,6 +127,40 @@ docker ps --format '{{.Names}}\t{{.Ports}}'
   verification under isolation. A contaminated result handed onward is worse than no
   result, because the next person treats it as evidence.
 
+## Dev servers collide the same way containers do
+
+Everything above applies to `npm run dev` too, and the failure is sneakier because
+there is no container to `docker ps`. Two specific traps, both hit during real work
+in this repo:
+
+**`$!` after `npm run dev` is npm's PID, not vite's.** Kill it and you orphan the
+`vite` child, which keeps holding the port; your cleanup reports success and the
+server survives to confuse the next agent.
+
+**With `--strictPort`, a busy port makes vite exit — and a naive readiness loop then
+passes anyway.** `until curl -sf localhost:$PORT` is satisfied by *whoever already
+owns that port*, so you probe another agent's app and record the result as your own.
+This is exactly the plausible-wrong-result hazard the container section opens with.
+
+Start vite directly, take its real PID, and assert the process is alive **before**
+you probe:
+
+```bash
+PORT=5873                      # yours; check nothing else is on it first
+npx vite --port "$PORT" --strictPort & VITE_PID=$!
+sleep 2
+kill -0 "$VITE_PID" 2>/dev/null || { echo "vite died - port $PORT taken"; exit 1; }
+until curl -sf "http://localhost:$PORT" >/dev/null; do
+  kill -0 "$VITE_PID" 2>/dev/null || { echo "vite exited during startup"; exit 1; }
+  sleep 0.5
+done
+# ... your checks ...
+kill "$VITE_PID"
+```
+
+The liveness check inside the loop is the load-bearing part: without it, "the server
+is up" and "a server is up" are indistinguishable.
+
 ## Honest verification
 
 Two standing rules for anything you claim in a PR body or review:
