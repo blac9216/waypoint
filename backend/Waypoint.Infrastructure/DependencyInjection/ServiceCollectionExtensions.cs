@@ -15,11 +15,14 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Waypoint.Core.Auth;
 using Waypoint.Core.Configuration;
+using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Auth;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Infrastructure.Jobs;
 
 namespace Waypoint.Infrastructure.DependencyInjection;
 
@@ -27,7 +30,9 @@ namespace Waypoint.Infrastructure.DependencyInjection;
 /// Composition-root entry point for everything this project provides. Postgres access
 /// lands with the schema (issue #4) as a small raw-SQL migrations pipeline
 /// (<see cref="ISchemaMigrator"/>), not an ORM — see that type's doc comment for why.
-/// PowerShell runspace hosting lands with the job engine.
+/// The job engine (issue #5: dispatcher, lease/heartbeat/recovery, run fan-out and
+/// pause/abort) is wired here too, behind the same "no connection string, no wiring"
+/// guard as the migrator. PowerShell runspace hosting lands with #6.
 /// </summary>
 public static class ServiceCollectionExtensions
 {
@@ -48,10 +53,19 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<WaypointDatabaseOptions>()
 			.Bind(configuration.GetSection(WaypointDatabaseOptions.SectionName));
 
+		services.AddOptions<JobEngineOptions>()
+			.Bind(configuration.GetSection(JobEngineOptions.SectionName));
+
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
 		// Placeholder scrubber (issue #6 supplies the real one) — see ISecretRedactor.
 		services.AddSingleton<ISecretRedactor, NoOpSecretRedactor>();
+
+		// No IJobHandler is registered by this issue (#5) — #8/#9 add the first ones by
+		// registering their own `services.AddSingleton<IJobHandler, ...>()` before this
+		// call. An empty registry is a legal, working configuration: every claimed job
+		// simply fails with "no handler registered" until one exists.
+		services.AddSingleton<JobHandlerRegistry>();
 
 		string? connectionString = configuration.GetConnectionString(ConnectionStringName);
 		if (!string.IsNullOrWhiteSpace(connectionString))
@@ -59,6 +73,23 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<ISchemaMigrator>(serviceProvider => new NpgsqlSchemaMigrator(
 				connectionString,
 				serviceProvider.GetRequiredService<ILogger<NpgsqlSchemaMigrator>>()));
+
+			services.AddSingleton<IJobQueueRepository>(serviceProvider => new JobQueueRepository(
+				connectionString,
+				serviceProvider.GetRequiredService<ILogger<JobQueueRepository>>()));
+
+			services.AddSingleton<IJobEventPublisher>(serviceProvider =>
+			{
+				JobEngineOptions options = serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>().Value;
+				return new JobEventPublisher(
+					connectionString,
+					options.EventCommandTimeoutSeconds,
+					serviceProvider.GetRequiredService<ILogger<JobEventPublisher>>());
+			});
+
+			services.AddSingleton<JobDispatcherHostedService>();
+			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());
+			services.AddHostedService<LeaseRecoveryHostedService>();
 		}
 
 		return services;
