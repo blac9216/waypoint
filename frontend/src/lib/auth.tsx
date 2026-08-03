@@ -15,16 +15,27 @@ import { ROLE_ORDER, type Role } from "./roles";
  * backend landing was wrong; see the issue for the integration break it
  * caused (`AuthContext.user` staying `null`, dropping all chrome + the
  * persisted session on refresh).
+ *
+ * The two interfaces below are those responses exactly as the server sends
+ * them, and `role` is typed `unknown` on both — deliberately, not for want
+ * of a better type. `apiFetch<T>` casts parsed JSON straight to `T` without
+ * inspecting it, so `role: Role` would not be a fact the compiler checked;
+ * it would be an assertion about a value the network controls, and
+ * TypeScript would then cheerfully let it flow into the app unvalidated.
+ * `unknown` makes the compiler *require* the narrowing in `toRole()` below,
+ * so the wire path cannot drift back to being laxer than the
+ * `sessionStorage` restore path — which is the asymmetry this file used to
+ * have: strict where the network could not reach, absent where it could.
  */
 interface LoginResponseWire {
 	token: string;
-	role: Role;
+	role: unknown;
 	expires_at: string;
 }
 
 interface CurrentUserResponseWire {
 	username: string;
-	role: Role;
+	role: unknown;
 }
 
 export interface AuthUser {
@@ -56,6 +67,42 @@ interface StoredSession {
 
 function isRole(value: unknown): value is Role {
 	return typeof value === "string" && (ROLE_ORDER as string[]).includes(value);
+}
+
+/**
+ * Narrow a `role` that arrived over the network to the closed `Role` set, or
+ * refuse the sign-in. The same `isRole()` predicate that guards the
+ * `sessionStorage` restore path — applied to the path that actually faces
+ * the network.
+ *
+ * **Fails closed**, consistent with how the rest of the role model already
+ * behaves: every comparison routes through `roleAtLeast` → `roleRank` →
+ * `ROLE_ORDER.indexOf`, an unrecognized role yields `-1`, and `-1 >= 0` is
+ * false, so it is denied everywhere. Signing in *anyway* on an out-of-domain
+ * role is the worst of the options — it produces exactly the half-accepted
+ * state issue #64 exists to close: `login()` reports success, every guard
+ * denies (blank nav, Configuration silently redirecting to Dashboard), and
+ * the next page refresh signs the user out because `readStoredSession()`
+ * correctly rejects what `login()` just wrote.
+ *
+ * The offending value goes in `detail`, never in `message`: `message` is
+ * rendered on the login screen, and this is server-controlled text of
+ * unbounded length.
+ *
+ * `status` is 200 on purpose — the transport succeeded and the server
+ * answered; it is the *body* that violates the contract. Reporting a
+ * synthetic 5xx here would misdescribe what happened on the wire.
+ */
+function toRole(value: unknown, source: string): Role {
+	if (!isRole(value)) {
+		throw new ApiError(
+			200,
+			"invalid_role",
+			`${source} returned a role Waypoint does not recognize, so the sign-in was refused.`,
+			{ source, received: value, expected: ROLE_ORDER },
+		);
+	}
+	return value;
 }
 
 function readStoredSession(): StoredSession | null {
@@ -150,10 +197,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				unauthenticated: true,
 				headers: { Authorization: `Bearer ${loginResponse.token}` },
 			});
+			// Both wire roles are narrowed before either is trusted. `/auth/me`
+			// returns a role as well, and it used to be fetched and silently
+			// discarded — which meant the server's two views of this one session
+			// could disagree and nothing would ever notice.
+			//
+			// Neither endpoint "wins" a disagreement, because there is no honest
+			// way to pick: `/auth/login` is authoritative for the *session*
+			// (token, expiry) and `/auth/me` for *identity* (username), but
+			// `role` is the single field both assert, for the same token, from
+			// the same server, milliseconds apart. A divergence there is a
+			// contract violation — not a race worth papering over — so the
+			// sign-in is refused rather than resolved. That is the fail-closed
+			// reading, it matches an unrecognized role being denied everywhere,
+			// and the remedy is one retry. (Today divergence is unreachable: M1
+			// local auth serves a single config-fixed role. If #29's issuer ever
+			// makes it legitimate, `/auth/me` is the value that should win — it
+			// survives the Keycloak swap and can be re-queried — but that must
+			// be decided there, deliberately, not defaulted to here.)
+			const loginRole = toRole(loginResponse.role, "POST /auth/login");
+			const meRole = toRole(me.role, "GET /auth/me");
+			if (loginRole !== meRole) {
+				throw new ApiError(
+					200,
+					"role_mismatch",
+					"The Waypoint API reported two different roles for this session, so the sign-in was refused.",
+					{ login: loginRole, me: meRole },
+				);
+			}
 			const next: StoredSession = {
 				token: loginResponse.token,
 				username: me.username,
-				role: loginResponse.role,
+				role: loginRole,
 				expiresAt: loginResponse.expires_at,
 			};
 			setSession(next);

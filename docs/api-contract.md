@@ -54,6 +54,16 @@ above are the entire domain; any other string on the wire is invalid. This casin
 applies everywhere a role appears (`/auth/login`, `/auth/me`, and any future
 role-bearing field), not just these two endpoints.
 
+**Clients validate `role` at the wire seam and fail closed.** Because the set is
+closed, a `role` that is not one of the four is a contract violation, and a client
+must refuse it rather than half-accept it — a client that signs in on an unrecognized
+role reaches a state where every role guard denies while the session claims to be
+valid. `role` is validated on **both** endpoints, not just one: `/auth/login` and
+`/auth/me` each assert a role for the same token, so they must agree, and a
+divergence is refused too (neither is treated as overriding the other). This is a
+requirement on the client, not a second server-side guard — the API remains the
+enforcement point for every actual permission (see Conventions).
+
 **What #29 (Keycloak) changes, and what it doesn't.** `POST /auth/login` is the
 dev-grade local-auth stand-in the ADR-0004 rollout note describes and is expected to
 disappear outright, replaced by Keycloak's OIDC authorization-code/token endpoints —
