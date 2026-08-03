@@ -373,7 +373,26 @@ have repeatedly caught real defects no CI run could have seen:
   Issue #112 added an IPv6 detector (full/compressed forms, link-local,
   unique-local, the bracketed-with-port URL form, zone IDs); it has no
   analogous dash-adjacency guard at all, so an IPv6 range and a chained IPv4
-  range of any length are both caught in full.
+  range of any length are both caught in full. That property used to be
+  documentation only — nothing in the suite would have noticed if it stopped
+  being true. Issue #132 found the gap the hard way: adding a trailing "not a
+  dash" lookahead to the IPv6 pattern (described in words rather than written,
+  for the reason given a few paragraphs down) took a dash-separated pair of
+  IPv6 addresses from two findings to one — silently losing the second
+  endpoint, the #111 defect for the other address family — with the full
+  120-test suite green. It is pinned now: `GuardCharacterDelimiterTests`
+  derives the set of punctuation characters that MATTER for this file's
+  boundary guards straight off the compiled regexes (the same "read it off
+  the detector instead of remembering it" treatment #115 gave the fixture
+  count), and a dash is one of them because `FQDN_RE` names one explicitly —
+  which is what forces IPv6 to carry a dash row too, even though `IPV6_RE`
+  itself names none. Add a punctuation character to any detector's boundary
+  lookaround and the derived set grows; leave the matching declared row out
+  and the completeness test fails. Where the derivation stops — WHETHER a
+  given character suppresses or flags for a given detector — is a measured,
+  hand-authored verdict kept in a separate table from the derived character
+  set, deliberately, so the two are never blended into one list that reads as
+  derived when only the axis (not the verdict) is.
 
   **The first cut of that detector shipped with a boundary bug, and it is
   worth stating plainly rather than summarising away**: its trailing guard
@@ -402,11 +421,53 @@ have repeatedly caught real defects no CI run could have seen:
   an impossibility nobody had executed. So this is now a list of what is
   actually true, not a summary:
 
-  - The port case is closed: a trailing all-digit group is retried away before
-    a candidate is declared a non-address, at any port width.
+  - The single-group port case is closed: a trailing all-digit group is
+    retried away before a candidate is declared a non-address, at any port
+    width. Issue #131 found the retry ran only ONCE, so a candidate carrying
+    TWO trailing all-digit groups (a fully-expanded literal followed by a
+    bare port followed by a second numeric group — `...:0007:443:8443`, or
+    the same shape with a zero-padded group ahead of the port,
+    `...:0007:0:443`) still failed strict parsing and scanned clean. The
+    retry is a loop now, not a single attempt: it strips one trailing
+    all-digit group at a time until the parse succeeds or the tail is no
+    longer all-digit, so the bound is the NUMBER of groups retried, never any
+    one group's width — a second, arbitrary width bound is exactly what #119
+    cost, and this fix does not reintroduce one. **Disclosed, not closed:** a
+    trailing group carrying a non-digit character glued on (`...:0007:443a`)
+    fails the all-digit test on its very first retry attempt, so the loop
+    never starts stripping it — a materially different shape (not a port at
+    all, digit or otherwise), and no artifact this gate's threat model names
+    (netstat, log lines, inventory exports, CKL/HDF) produces it. Pinned by
+    `MultiGroupPortRetryTests.test_a_glued_letter_on_the_final_group_remains_
+    undetected` rather than left to be rediscovered.
   - A match that begins *inside* a longer hex/colon run is re-anchored onto
     the widest span that still parses, so a word glued to the front of an
-    address no longer reports a fragment of it.
+    address no longer reports a fragment of it. **Issue #133 narrowed WHICH
+    parser decides "still parses" for this purpose.** Re-anchoring used to
+    call the same port-retry-enabled parser the final candidate is checked
+    with, so a span could win "widest" by discarding one of the real
+    address's OWN trailing groups as if it were a port — `node99:<fully
+    expanded address>` re-anchored onto `de99:<the address minus its own last
+    group>`, naming a token that is not a string that appears on the line
+    (`de99` is the tail of the hostname `node99`). Re-anchoring now judges
+    candidate spans with the strict parser only; the port retry still applies
+    to the final candidate scan_text reports, so an address that genuinely
+    needs it to be recognised still is. This is precision, not correctness —
+    the line was always a real finding, only the reported span was too wide.
+    **Disclosed, not closed:** a colon-delimited numeric hostname suffix
+    before a COMPRESSED address (an `esxi01:`-style label directly ahead of a
+    `::`-compressed lab literal, reporting the label's own trailing digits as
+    part of the address) is the same imprecision, one level over, with no
+    port anywhere in the line — `"::"` gives a compressed address enough
+    slack that prepending a short, independently-valid, colon-delimited group
+    parses without any retry at all. Telling that shape apart from the
+    legitimate glued-word-recovery case it is otherwise identical to
+    (`X2001:db8::1`, MidRunMatchTests) needs information this gate's regex
+    genuinely does not have — both are "one clean group-plus-colon directly
+    before an already-valid address", and widest-wins correctly favours the
+    case it exists for, which is why it cannot also refuse this one. Pinned
+    by `MidRunMatchTests.test_a_numeric_hostname_suffix_before_a_compressed_
+    address_is_a_disclosed_residual`.
   - The matrix enumerates several fixture VARIANTS per detector, and how many
     it owes is derived from the detector rather than remembered — from its
     regex's own alternations and optional groups, and from whether its
