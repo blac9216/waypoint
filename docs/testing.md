@@ -273,7 +273,7 @@ GitHub Actions runs four workflows — [`sanitize.yml`](../.github/workflows/san
 
 | Workflow | Triggers on | What it runs |
 | --- | --- | --- |
-| `sanitize` | every PR + push, no path filter (hard gate) | the scanner's own test suite (`.github/sanitize/test_scan_repo_specific.py`), then a `gitleaks` full-history secret scan, then a repo-specific scanner (`.github/sanitize/scan_repo_specific.py`) for lab-style FQDNs, non-RFC-5737 IP addresses, and Broadcom/VMware depot-token shapes |
+| `sanitize` | every PR + push, no path filter (hard gate) | the scanner's own test suite (`.github/sanitize/test_scan_repo_specific.py`), then a `gitleaks` full-history secret scan, then a repo-specific scanner (`.github/sanitize/scan_repo_specific.py`) for lab-style FQDNs, non-RFC-5737 IPv4 addresses, non-documentation/non-loopback/non-unspecified IPv6 addresses (issue #112), and Broadcom/VMware depot-token shapes |
 | `backend` | `backend/**` | `dotnet build -warnaserror`, `dotnet test` with coverage |
 | `frontend` | `frontend/**` | `npm ci`, `npm run build`, the ADR-0007 air-gap asset guard **as its own explicit step**, `npm test`, `oxlint` |
 | `deploy` | `deploy/**`, `scripts/**` | `docker compose config`, `nginx -t` against the shipped `conf.d` with a throwaway generated dev cert, `shellcheck` |
@@ -312,9 +312,35 @@ have repeatedly caught real defects no CI run could have seen:
   for the diff-by-hand review that policy still requires — a sufficiently
   well-disguised secret or a lab identifier that doesn't match any of its patterns
   will not be flagged.
+
+  Issue #111 narrowed the IPv4/FQDN adjacency guards just far enough to catch a
+  dash-separated address range (illustratively, `192.0.2.1-192.0.2.7` — both
+  endpoints, using an RFC 5737 pair here so the example itself stays
+  allow-listed rather than tripping this very scanner) and an
+  underscore-prefixed address (`host_` glued straight onto an address, or an
+  identifier prefix glued straight onto a `*.example.<tld>`-shaped hostname)
+  without reopening #89's build-suffix suppression — deliberately, not every
+  adjacent-dash shape from that issue is closed. What still gets through, by
+  design: a dash-adjacent address with nothing address-shaped on the *other*
+  side of the dash (an address immediately followed by `-primary`, or preceded
+  by a bare `-` with a word before it, or a hostname with a trailing
+  `-01`-style suffix); a range whose separating dash falls exactly at a line
+  break (only the endpoint that doesn't touch the break is caught — the check
+  is per-line, same as the `version` suppression above); and a suspicious-TLD
+  hostname immediately followed by an underscore-joined continuation of the
+  same identifier — narrowing that trailing case too was tried and produced a
+  real false positive against this repo's own `.editorconfig`
+  (`EditorconfigRegressionTests` pins the specific line), so it was
+  deliberately left as it was. Issue #112 added an IPv6 detector (full/
+  compressed forms, link-local, unique-local, the bracketed-with-port URL
+  form, zone IDs); it has no analogous dash-adjacency guard at all, so an
+  IPv6 range and a chained IPv4 range of any length are both caught in full —
+  the IPv6 gaps that remain are shapes no regex reasonably enumerates (a
+  hex-lettered identifier that happens to also be valid IPv6 syntax) rather
+  than boundary cases the fix chose not to close.
 - **Files the scanner does not read**: **none, currently — and that is a property
   worth keeping.** `ALLOWLIST_FINDINGS` in `scan_repo_specific.py` is empty, so every
-  git-tracked file that isn't a known-binary extension is scanned by all three
+  git-tracked file that isn't a known-binary extension is scanned by all four
   detectors. This matters because the alternative degrades silently: an exempt path
   reports clean while never having been looked at, and nothing in a green check
   distinguishes the two. An earlier revision of this PR exempted one 204 KB UI mockup
@@ -326,10 +352,11 @@ have repeatedly caught real defects no CI run could have seen:
   individually justified — not impossible.** Be precise about that, because an
   earlier revision of this bullet claimed the stronger thing and was wrong: an entry
   must name a path *and* each check it waives *and* a reason for each, but there are
-  only three checks, so naming all three is a whole-file exemption and the validator
-  accepts it. What changed is that reopening the hole now takes three enumerated,
-  individually-argued lines a reviewer will see, instead of one bare path that reads
-  like a naming nit while switching off three detectors. The enforcement is the
+  only four checks (issue #112 added `ipv6` as the fourth), so naming all four is a
+  whole-file exemption and the validator accepts it. What changed is that reopening
+  the hole now takes four enumerated, individually-argued lines a reviewer will see,
+  instead of one bare path that reads like a naming nit while switching off every
+  detector. The enforcement is the
   reviewer, not the data structure —
   `test_naming_every_check_is_a_whole_file_exemption` pins this limitation in
   executable form so the claim and the code cannot drift apart again. If you are
@@ -341,8 +368,9 @@ have repeatedly caught real defects no CI run could have seen:
   stopped detecting. Running the scanner against a clean tree proves the absence of
   findings, never the presence of detection — the same asymmetry that let the
   frontend air-gap guard fail open three times. That is why `sanitize` runs
-  `test_scan_repo_specific.py` (52 assertions covering all three detectors, their
-  delimiter and case handling, both allowlist paths, the exit codes, and the
+  `test_scan_repo_specific.py` (86 assertions covering all four detectors, their
+  delimiter and case handling, the IPv4/FQDN dash- and underscore-adjacency
+  narrowing from issue #111, both allowlist paths, the exit codes, and the
   documented false-positive exemptions) before it trusts the scan, and why the
   frontend guard now runs as its own explicit workflow step rather than relying on
   `package.json`'s `build` script continuing to chain it.
