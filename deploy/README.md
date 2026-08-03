@@ -317,6 +317,14 @@ docker run -d --rm --name "$PROBE" \
   -v /tmp/sse-probe.py:/sse-probe.py:ro \
   python:3-alpine python /sse-probe.py
 
+# Wait for the handover before probing, or you get a 502 for the first second
+# or two: the probe needs a moment to bind, and nginx caches the "backend"
+# lookup for the `resolver ... valid=10s` window (see "Networking"). The probe
+# serves no /api/v1/health route, so a 404 there means the probe - not the real
+# backend - is what nginx is now reaching.
+until [ "$(curl -k -s -o /dev/null -w '%{http_code}' --max-time 5 \
+  "https://localhost:$PORT/api/v1/health")" = "404" ]; do sleep 1; done
+
 # SSE route (location ~ ...events$, proxy_buffering off): expect each tick
 # timestamped roughly 1 second apart.
 echo "SSE /api/v1/events:"
