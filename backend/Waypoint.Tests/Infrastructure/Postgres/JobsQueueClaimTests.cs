@@ -32,7 +32,12 @@ public sealed class JobsQueueClaimTests : IAsyncLifetime
 {
 	// Standard Postgres "claim one queued row" idiom: SELECT ... FOR UPDATE SKIP LOCKED
 	// inside a CTE, then UPDATE the row it found, RETURNING the id (or nothing, if no
-	// claimable row existed). One round trip, one implicit transaction.
+	// claimable row existed). One round trip, one implicit transaction. Stamps
+	// lease_expires_at in the same UPDATE that sets state = 'running' -- required since
+	// jobs_running_requires_lease_check landed (issue #107); this is also exactly what
+	// makes the #107 stranded-job state unreachable from this code path. See
+	// Waypoint.Infrastructure.Jobs.JobQueueRepository.ClaimSql for the production
+	// query this test's predicate/order/lock clause matches byte-for-byte.
 	private const string ClaimSql = """
 		WITH claimable AS (
 			SELECT id FROM jobs
@@ -41,7 +46,7 @@ public sealed class JobsQueueClaimTests : IAsyncLifetime
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
-		UPDATE jobs SET state = 'running', claimed_by = $2, claimed_at = now()
+		UPDATE jobs SET state = 'running', claimed_by = $2, claimed_at = now(), lease_expires_at = now() + interval '5 minutes'
 		WHERE id IN (SELECT id FROM claimable)
 		RETURNING id
 		""";
