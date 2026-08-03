@@ -184,12 +184,18 @@ async function viewerRoleDeepLink() {
 		// it issued, and a forged token gets a 401 that signs the session
 		// straight back out (which would silently make this scenario prove
 		// nothing).
-		await page.route("**/api/v1/auth/login", async (route) => {
-			const response = await route.fetch();
-			const body = await response.json();
-			body.user.role = "Viewer";
-			await route.fulfill({ response, body: JSON.stringify(body) });
-		});
+		// Both halves of the auth contract carry the role (issue #64/#93:
+		// `POST /auth/login` returns `{token, role, expires_at}` and identity
+		// comes from `GET /auth/me`), so both have to be downgraded or the
+		// session re-reads Admin from the one that was left alone.
+		for (const path of ["**/api/v1/auth/login", "**/api/v1/auth/me"]) {
+			await page.route(path, async (route) => {
+				const response = await route.fetch();
+				const body = await response.json();
+				body.role = "Viewer";
+				await route.fulfill({ response, body: JSON.stringify(body) });
+			});
+		}
 		await signIn(page);
 		await page.waitForSelector("text=WAYPOINT");
 		await page.goto(BASE + "/config");

@@ -71,7 +71,10 @@ function installDeferredSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = 
 
 	globalThis.fetch = vi.fn(async (url: string) => {
 		if (url === "/api/v1/auth/login") {
-			return jsonResponse({ token: "tok-1", user: { username: "j.moreno", role } });
+			return jsonResponse({ token: "tok-1", role, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
+		}
+		if (url === "/api/v1/auth/me") {
+			return jsonResponse({ username: "j.moreno", role });
 		}
 		if (url === "/api/v1/system") {
 			const mode = await systemPromise;
@@ -106,7 +109,10 @@ function installDeferredSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = 
 function installHangingSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = "Operator") {
 	globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
 		if (url === "/api/v1/auth/login") {
-			return jsonResponse({ token: "tok-1", user: { username: "j.moreno", role } });
+			return jsonResponse({ token: "tok-1", role, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
+		}
+		if (url === "/api/v1/auth/me") {
+			return jsonResponse({ username: "j.moreno", role });
 		}
 		if (url === "/api/v1/system" || url === "/api/v1/stigman") {
 			return new Promise<Response>((_resolve, reject) => {
@@ -139,7 +145,10 @@ function installHangingSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = "
 function installStallingBodyFetchMock(role: "Viewer" | "Admin" | "Operator" = "Operator") {
 	globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
 		if (url === "/api/v1/auth/login") {
-			return jsonResponse({ token: "tok-1", user: { username: "j.moreno", role } });
+			return jsonResponse({ token: "tok-1", role, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
+		}
+		if (url === "/api/v1/auth/me") {
+			return jsonResponse({ username: "j.moreno", role });
 		}
 		if (url === "/api/v1/system" || url === "/api/v1/stigman") {
 			const stream = new ReadableStream({
