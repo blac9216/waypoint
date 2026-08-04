@@ -82,7 +82,7 @@ public sealed class AbortedRunNeverResumesTests : IAsyncLifetime
 	private async Task<Guid> SeedRunAsync(string state)
 	{
 		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
-		await using NpgsqlCommand q = new("INSERT INTO runs (run_type, scope, state) VALUES ('test', '{}', $1) RETURNING id", c);
+		await using NpgsqlCommand q = new("INSERT INTO runs (run_type, scope, state) VALUES ('download', '{}', $1) RETURNING id", c);
 		q.Parameters.AddWithValue(state); return (Guid)(await q.ExecuteScalarAsync())!;
 	}
 
