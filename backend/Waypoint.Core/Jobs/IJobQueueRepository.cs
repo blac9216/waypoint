@@ -70,6 +70,35 @@ public interface IJobQueueRepository
 	/// <summary>The run state and queue flags, or null when it does not exist.</summary>
 	Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken);
 
+	/// <summary>Creates a pending run and returns its identifier.</summary>
+	Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Atomically creates all jobs for a run and marks the run running. A spec whose
+	/// credential is queue-halted (see <see cref="CheckConsecutiveAuthFailuresAsync"/>)
+	/// is created <c>blocked</c> rather than <c>queued</c> -- enforced by migration
+	/// 0005's trigger, not by this method -- and the run itself is blocked with the
+	/// halt reason.
+	/// </summary>
+	Task<IReadOnlyList<Guid>> FanOutJobsAsync(Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken);
+
+	/// <summary>Pauses dispatch for a pending or running run; in-flight work continues.</summary>
+	Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken);
+
+	/// <summary>Resumes dispatch for an existing non-terminal run.</summary>
+	Task<bool> ResumeRunAsync(Guid runId, CancellationToken cancellationToken);
+
+	/// <summary>Aborts a run and reports jobs requiring cooperative cancellation.</summary>
+	Task<AbortRunResult> AbortRunAsync(Guid runId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Blocks queued work after the credential's most recent resolved outcomes are
+	/// consecutive authentication failures, and durably halts the credential
+	/// (<c>credentials.queue_halted</c>) so later fan-outs, requeues and releases for
+	/// it are created/coerced <c>blocked</c> until an explicit unblock flow clears it.
+	/// </summary>
+	Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken);
+
 	/// <summary>
 	/// Puts a job this process just claimed back into <c>queued</c>, clearing the
 	/// lease/claim fields -- used when a claim turns out to belong to a run that must
@@ -83,3 +112,9 @@ public interface IJobQueueRepository
 
 /// <summary>Run-level fields needed after a global job claim.</summary>
 public sealed record RunQueueState(string State, bool Paused, bool Blocked, string? BlockedReason);
+
+/// <summary>The database effects of aborting a run.</summary>
+public sealed record AbortRunResult(IReadOnlyList<Guid> CancelledJobIds, IReadOnlyList<Guid> InFlightJobIds);
+
+/// <summary>The database effects of tripping a credential authentication-failure halt.</summary>
+public sealed record AuthFailureHaltResult(IReadOnlyList<Guid> BlockedRunIds, IReadOnlyList<Guid> BlockedJobIds);

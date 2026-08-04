@@ -40,6 +40,7 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 	private readonly PostgresFixture _fixture;
 	private JobQueueRepository _repository = null!;
 	private JobEventPublisher _events = null!;
+	private CapturingLogger<JobDispatcherHostedService> _dispatcherLogger = null!;
 
 	public JobDispatcherHostedServiceTests(PostgresFixture fixture)
 	{
@@ -53,6 +54,7 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		await _fixture.ResetJobEngineDataAsync();
 		_repository = new JobQueueRepository(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
 		_events = new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, NullLogger<JobEventPublisher>.Instance);
+		_dispatcherLogger = new CapturingLogger<JobDispatcherHostedService>();
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
@@ -61,7 +63,7 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 	{
 		JobEngineOptions effective = options ?? new JobEngineOptions { Enabled = true };
 		return new JobDispatcherHostedService(
-			_repository, _events, new JobHandlerRegistry(handlers), Options.Create(effective), NullLogger<JobDispatcherHostedService>.Instance);
+			_repository, _events, new JobHandlerRegistry(handlers), Options.Create(effective), _dispatcherLogger);
 	}
 
 	[Fact]
@@ -170,6 +172,161 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		{
 			await dispatcher.StopAsync(CancellationToken.None);
 		}
+	}
+
+	[Fact]
+	public async Task PausedRun_ReleasesClaimsUntilResume_ThenExecutes()
+	{
+		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
+		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
+		Assert.True(await _repository.PauseRunAsync(runId, CancellationToken.None));
+		int calls = 0;
+		FakeJobHandler handler = new("download", (_, _) => { Interlocked.Increment(ref calls); return Task.FromResult(JobExecutionOutcome.Succeeded()); });
+		JobDispatcherHostedService dispatcher = CreateDispatcher(new JobEngineOptions { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(25) }, handler);
+
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await Task.Delay(TimeSpan.FromMilliseconds(250));
+			Assert.Equal(0, Volatile.Read(ref calls));
+			Assert.Equal(JobStates.Queued, await GetJobStateAsync(jobId));
+			Assert.True(await dispatcher.ResumeRunAsync(runId, CancellationToken.None));
+			await PollUntilAsync(() => GetJobStateAsync(jobId), state => state == JobStates.Done);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+		Assert.Equal(1, calls);
+	}
+
+	[Fact]
+	public async Task AbortRun_CancelsLocallyRunningHandlerAndJob()
+	{
+		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
+		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
+		TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		FakeJobHandler handler = new("download", async (_, ct) =>
+		{
+			entered.SetResult();
+			await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+			return JobExecutionOutcome.Succeeded();
+		});
+		JobDispatcherHostedService dispatcher = CreateDispatcher(new JobEngineOptions { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(25) }, handler);
+
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await entered.Task.WaitAsync(PollTimeout);
+			await dispatcher.AbortRunAsync(runId, CancellationToken.None);
+			await PollUntilAsync(() => GetJobStateAsync(jobId), state => state == JobStates.Cancelled);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+	}
+
+	[Fact]
+	public async Task ThirdAuthFailure_BlocksRemainingQueueAndEmitsOperatorEvents()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("download", "{}", credentialId, "tester", CancellationToken.None);
+		await SeedTerminalAuthFailureAsync(runId, credentialId);
+		await SeedTerminalAuthFailureAsync(runId, credentialId);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec("download", 1, CredentialId: credentialId), new JobSpec("download", 2, CredentialId: credentialId)],
+			"tester",
+			CancellationToken.None);
+		FakeJobHandler handler = new("download", (_, _) => Task.FromResult(JobExecutionOutcome.AuthFailed("rejected")));
+		JobDispatcherHostedService dispatcher = CreateDispatcher(
+			new JobEngineOptions { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(25), MaxConcurrency = 1, ConsecutiveAuthFailureThreshold = 3 }, handler);
+
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilAsync(() => GetRunBlockedAsync(runId), blocked => blocked);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal(JobStates.AuthFailed, await GetJobStateAsync(jobIds[0]));
+		Assert.Equal(JobStates.Blocked, await GetJobStateAsync(jobIds[1]));
+		Assert.Contains(_dispatcherLogger.Entries, entry => entry.Message.Contains("queue halted", StringComparison.Ordinal));
+		Assert.True(await EventTypeExistsAsync(JobEventTypes.QueueState, runId));
+		Assert.True(await EventTypeExistsAsync(JobEventTypes.SystemNotice, null));
+	}
+
+	[Fact]
+	public async Task FirstAuthFailure_DoesNotHaltOrEmitQueueEvents()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("download", "{}", credentialId, null, CancellationToken.None);
+		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1, CredentialId: credentialId)], null, CancellationToken.None));
+		FakeJobHandler handler = new("download", (_, _) => Task.FromResult(JobExecutionOutcome.AuthFailed()));
+		JobDispatcherHostedService dispatcher = CreateDispatcher(
+			new JobEngineOptions { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(25), ConsecutiveAuthFailureThreshold = 3 }, handler);
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilAsync(() => GetJobStateAsync(jobId), state => state == JobStates.AuthFailed);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+		Assert.False(await GetRunBlockedAsync(runId));
+		Assert.False(await EventTypeExistsAsync(JobEventTypes.QueueState, runId));
+		Assert.DoesNotContain(_dispatcherLogger.Entries, entry => entry.Message.Contains("queue halted", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public async Task AbortWithNoKnownOrLocallyOwnedWork_IsSafe()
+	{
+		JobDispatcherHostedService dispatcher = CreateDispatcher(new JobEngineOptions { Enabled = true });
+		await dispatcher.AbortRunAsync(Guid.NewGuid(), CancellationToken.None);
+
+		Guid runId = await _repository.CreateRunAsync("download", "{}", null, null, CancellationToken.None);
+		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], null, CancellationToken.None));
+		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("other-worker", TimeSpan.FromMinutes(1), CancellationToken.None));
+		Assert.Equal(jobId, claimed.Id);
+		await dispatcher.AbortRunAsync(runId, CancellationToken.None);
+		Assert.Equal(JobStates.Running, await GetJobStateAsync(jobId));
+		Assert.True(await EventTypeExistsAsync(JobEventTypes.RunProgress, runId));
+	}
+
+	private async Task<Guid> SeedCredentialAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("INSERT INTO credentials (name, credential_type) VALUES ($1, 'service') RETURNING id", connection);
+		command.Parameters.AddWithValue($"cred-{Guid.NewGuid():N}");
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private async Task SeedTerminalAuthFailureAsync(Guid runId, Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"INSERT INTO jobs (run_id, job_type, priority, state, credential_id, finished_at) VALUES ($1, 'download', 1, 'auth-failed', $2, now())", connection);
+		command.Parameters.AddWithValue(runId);
+		command.Parameters.AddWithValue(credentialId);
+		await command.ExecuteNonQueryAsync();
+	}
+
+	private async Task<bool> EventTypeExistsAsync(string eventType, Guid? runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT EXISTS (SELECT 1 FROM job_events WHERE event_type = $1 AND run_id IS NOT DISTINCT FROM $2)", connection);
+		command.Parameters.AddWithValue(eventType);
+		command.Parameters.AddWithValue((object?)runId ?? DBNull.Value);
+		return (bool)(await command.ExecuteScalarAsync())!;
 	}
 
 	private async Task<Guid> SeedQueuedJobAsync(string jobType)

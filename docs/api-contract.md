@@ -210,6 +210,11 @@ additional recovery/control edges: lease recovery or claim release may move `run
 queued`, and abort may move active work to `cancelled`. These edges are validated
 separately so a handler cannot requeue itself and bypass retry accounting.
 
+The consecutive-auth-failure window is the credential's most recent resolved job
+outcomes: rows without `finished_at` are excluded, and equal finish times are ordered by
+job id. Newly queued work therefore cannot displace a resolved failure or suppress the
+halt; a successful resolved outcome still breaks the consecutive sequence.
+
 ## Postgres schema sketch
 
 `sites` · `targets` (site_id, kind, connection jsonb, credential_id, discovery_status)

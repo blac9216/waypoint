@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -39,6 +40,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	private readonly JobHandlerRegistry _handlers;
 	private readonly IOptions<JobEngineOptions> _options;
 	private readonly ILogger<JobDispatcherHostedService> _logger;
+	private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _inFlight = new();
 
 	public JobDispatcherHostedService(
 		IJobQueueRepository repository,
@@ -70,6 +72,36 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	/// <summary>This process's claimant identity, stamped into <c>jobs.claimed_by</c>.</summary>
 	public string WorkerId { get; }
 
+
+	/// <summary>Aborts a run and immediately cancels work owned by this dispatcher; other workers observe the database state through heartbeat.</summary>
+	public async Task AbortRunAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		AbortRunResult result = await _repository.AbortRunAsync(runId, cancellationToken).ConfigureAwait(false);
+		foreach (Guid jobId in result.InFlightJobIds)
+		{
+			if (_inFlight.TryGetValue(jobId, out CancellationTokenSource? cts))
+			{
+				await cts.CancelAsync().ConfigureAwait(false);
+			}
+		}
+
+		if (result.CancelledJobIds.Count > 0 || result.InFlightJobIds.Count > 0)
+		{
+			string payload = JsonSerializer.Serialize(new
+			{
+				aborted = true,
+				cancelled_job_count = result.CancelledJobIds.Count,
+				in_flight_job_count = result.InFlightJobIds.Count
+			});
+			await _events.EmitAsync(JobEventTypes.RunProgress, null, runId, payload, cancellationToken).ConfigureAwait(false);
+		}
+	}
+
+	/// <summary>Stops new dispatch for a run while allowing in-flight jobs to finish.</summary>
+	public Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken) => _repository.PauseRunAsync(runId, cancellationToken);
+
+	/// <summary>Restores dispatch for a paused non-terminal run.</summary>
+	public Task<bool> ResumeRunAsync(Guid runId, CancellationToken cancellationToken) => _repository.ResumeRunAsync(runId, cancellationToken);
 
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
 	{
@@ -174,6 +206,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	private async Task RunJobAsync(ClaimedJob job, SemaphoreSlim gate, CancellationToken hostToken)
 	{
 		using CancellationTokenSource jobCts = CancellationTokenSource.CreateLinkedTokenSource(hostToken);
+		_inFlight[job.Id] = jobCts;
 
 		try
 		{
@@ -250,9 +283,15 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 				JsonSerializer.Serialize(new { from = context.CurrentState, to = finalState, note = finalNote }),
 				hostToken).ConfigureAwait(false);
 
+			if (string.Equals(finalState, JobStates.AuthFailed, StringComparison.Ordinal) && job.CredentialId is Guid credentialId)
+			{
+				await HandleAuthFailureAsync(credentialId, hostToken).ConfigureAwait(false);
+			}
+
 		}
 		finally
 		{
+			_inFlight.TryRemove(job.Id, out _);
 			gate.Release();
 		}
 	}
@@ -291,6 +330,38 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		}
 	}
 
+
+	private async Task HandleAuthFailureAsync(Guid credentialId, CancellationToken cancellationToken)
+	{
+		JobEngineOptions options = _options.Value;
+		AuthFailureHaltResult halt = await _repository
+			.CheckConsecutiveAuthFailuresAsync(credentialId, options.ConsecutiveAuthFailureThreshold, cancellationToken)
+			.ConfigureAwait(false);
+
+		if (halt.BlockedRunIds.Count == 0 && halt.BlockedJobIds.Count == 0)
+		{
+			return;
+		}
+
+		int blockedRunCount = halt.BlockedRunIds.Count;
+		int blockedJobCount = halt.BlockedJobIds.Count;
+		LogQueueHalted(credentialId, options.ConsecutiveAuthFailureThreshold, blockedRunCount, blockedJobCount);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			blocked = true,
+			credential_id = credentialId,
+			threshold = options.ConsecutiveAuthFailureThreshold,
+			blocked_job_count = blockedJobCount
+		});
+
+		foreach (Guid runId in halt.BlockedRunIds)
+		{
+			await _events.EmitAsync(JobEventTypes.QueueState, null, runId, payload, cancellationToken).ConfigureAwait(false);
+		}
+
+		await _events.EmitAsync(JobEventTypes.SystemNotice, null, null, payload, cancellationToken).ConfigureAwait(false);
+	}
 
 	private static async Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
 	{
@@ -333,5 +404,8 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Job {JobId}: heartbeat observed run {RunId} aborted; cancelling")]
 	private partial void LogHeartbeatObservedAbort(Guid jobId, Guid runId);
+
+	[LoggerMessage(Level = LogLevel.Error, Message = "Credential {CredentialId} queue halted: {Threshold} consecutive auth failures, {BlockedRunCount} run(s), {BlockedJobCount} job(s) blocked")]
+	private partial void LogQueueHalted(Guid credentialId, int threshold, int blockedRunCount, int blockedJobCount);
 
 }

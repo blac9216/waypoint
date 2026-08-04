@@ -45,8 +45,8 @@ public sealed class SchemaMigrationTests
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #129 -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 3;
+	/// <summary>Embedded migration count as of issue #130 -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 5;
 
 	private readonly PostgresFixture _fixture;
 
@@ -81,8 +81,9 @@ public sealed class SchemaMigrationTests
 			Assert.True(await TableExistsAsync(connection, table), $"Expected table '{table}' to exist after a fresh migration.");
 		}
 
-		// Three embedded migrations through issue #129: initial schema, running-lease CHECK,
-		// and the aborted-run queued-job invariant -- ExpectedMigrationCount below is
+		// Five embedded migrations through issue #130: initial schema, running-lease CHECK,
+		// the aborted-run queued-job invariant, the resolved-auth-outcome index, and the
+		// credential queue-halt state/trigger -- ExpectedMigrationCount below is
 		// the single place this test's own count assertions read from.
 		Assert.Equal(ExpectedMigrationCount, await CountAsync(connection, "SELECT count(*) FROM schema_migrations"));
 		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM appliance_state"));
@@ -109,6 +110,20 @@ public sealed class SchemaMigrationTests
 		}
 
 		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM appliance_state"));
+	}
+
+	[Fact]
+	public async Task Migrations_ResolvedCredentialOutcomeIndex_MatchesWindowOrder()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_jobs_credential_resolved_outcomes'", connection);
+		string definition = Assert.IsType<string>(await command.ExecuteScalarAsync());
+		Assert.Contains("credential_id, finished_at DESC, id DESC", definition, StringComparison.Ordinal);
+		Assert.Contains("finished_at IS NOT NULL", definition, StringComparison.Ordinal);
 	}
 
 	[Fact]

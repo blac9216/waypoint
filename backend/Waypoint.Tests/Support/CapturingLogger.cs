@@ -56,7 +56,10 @@ public sealed class CapturingLogger<T> : ILogger<T>
 	{
 		ArgumentNullException.ThrowIfNull(formatter);
 
-		_entries.Enqueue(new CapturedLogEntry(logLevel, eventId, formatter(state, exception), exception));
+		Dictionary<string, object?> properties = state is IEnumerable<KeyValuePair<string, object?>> structured
+			? structured.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal)
+			: [];
+		_entries.Enqueue(new CapturedLogEntry(logLevel, eventId, formatter(state, exception), exception, properties));
 	}
 
 	/// <summary>The one entry at <paramref name="level"/>; throws if there is not exactly one.</summary>
@@ -77,4 +80,9 @@ public sealed class CapturingLogger<T> : ILogger<T>
 }
 
 /// <summary>One captured log call, already rendered through the generated formatter.</summary>
-public sealed record CapturedLogEntry(LogLevel Level, EventId EventId, string Message, Exception? Exception);
+public sealed record CapturedLogEntry(
+	LogLevel Level,
+	EventId EventId,
+	string Message,
+	Exception? Exception,
+	IReadOnlyDictionary<string, object?> Properties);
