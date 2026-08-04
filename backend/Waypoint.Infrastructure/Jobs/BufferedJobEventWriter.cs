@@ -81,7 +81,7 @@ public sealed partial class BufferedJobEventWriter : BackgroundService, IJobLogB
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(eventType);
 
-		string payload = string.IsNullOrWhiteSpace(payloadJson) ? "{}" : payloadJson;
+		string payload = string.IsNullOrWhiteSpace(payloadJson) ? "{}" : _redactor.Redact(payloadJson);
 		if (_buffer.Writer.TryWrite(new PendingEvent(eventType, jobId, runId, payload)))
 		{
 			return true;
