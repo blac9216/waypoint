@@ -261,7 +261,7 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 			"""
 			SELECT seq, event_type, job_id, run_id, payload::text, created_at
 			FROM job_events
-			WHERE seq >= $1 AND seq <= $2 AND ($3::uuid IS NULL OR run_id = $3)
+			WHERE seq > $1 AND seq <= $2 AND ($3::uuid IS NULL OR run_id = $3)
 			ORDER BY seq
 			""", connection);
 		command.Parameters.AddWithValue(afterSeq);
