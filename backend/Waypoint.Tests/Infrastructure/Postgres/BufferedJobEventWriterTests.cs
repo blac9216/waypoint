@@ -252,6 +252,74 @@ public sealed class BufferedJobEventWriterTests : IAsyncLifetime
 			$"2000 events took {stopwatch.Elapsed.TotalSeconds:F1}s end to end -- the batch path has regressed toward row-at-a-time writes.");
 	}
 
+	/// <summary>#153: a batch INSERT stuck behind the ordering lock must log the
+	/// contention-naming line the README promises for this path -- and drop the batch,
+	/// not fault the host.</summary>
+	[Fact]
+	public async Task AFlushBlockedByTheOrderingLock_LogsContentionAndDropsTheBatch()
+	{
+		CapturingLogger<BufferedJobEventWriter> logger = new();
+		BufferedJobEventWriter writer = CreateWriter(
+			options: new JobEngineOptions { EventCommandTimeoutSeconds = 1, EventFlushInterval = TimeSpan.FromMilliseconds(100) },
+			logger: logger);
+
+		await using NpgsqlConnection blocker = new(_fixture.ConnectionString);
+		await blocker.OpenAsync();
+		await using NpgsqlTransaction holdLock = await blocker.BeginTransactionAsync();
+		await using (NpgsqlCommand acquire = new("SELECT pg_advisory_xact_lock(875190002)", blocker, holdLock))
+		{
+			await acquire.ExecuteNonQueryAsync();
+		}
+
+		Assert.True(writer.TryEnqueue(JobEventTypes.JobLog, _jobId, null, "{}"));
+		await writer.StartAsync(CancellationToken.None);
+		try
+		{
+			Stopwatch stopwatch = Stopwatch.StartNew();
+			while (stopwatch.Elapsed < TimeSpan.FromSeconds(15) &&
+				!logger.EntriesAt(LogLevel.Error).Any(entry => entry.Message.Contains("lock contention", StringComparison.Ordinal)))
+			{
+				await Task.Delay(TimeSpan.FromMilliseconds(100));
+			}
+		}
+		finally
+		{
+			await holdLock.RollbackAsync();
+			await writer.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Contains(
+			logger.EntriesAt(LogLevel.Error),
+			entry => entry.Message.Contains("trg_job_events_assign_seq", StringComparison.Ordinal));
+	}
+
+	/// <summary>#153: an exception that is not an NpgsqlException (here: a connection
+	/// string Npgsql rejects at construction) is logged and dropped -- ExecuteAsync must
+	/// complete, because a faulted BackgroundService stops the entire host.</summary>
+	[Fact]
+	public async Task ANonNpgsqlFlushFailure_IsDroppedWithoutFaultingTheHost()
+	{
+		CapturingLogger<BufferedJobEventWriter> logger = new();
+		BufferedJobEventWriter writer = CreateWriter(
+			options: new JobEngineOptions { EventFlushInterval = TimeSpan.FromMilliseconds(50) },
+			logger: logger,
+			connectionString: "this is not a connection string");
+
+		Assert.True(writer.TryEnqueue(JobEventTypes.JobLog, _jobId, null, "{}"));
+		await writer.StartAsync(CancellationToken.None);
+		Stopwatch stopwatch = Stopwatch.StartNew();
+		while (stopwatch.Elapsed < TimeSpan.FromSeconds(10) && logger.EntriesAt(LogLevel.Error).Count == 0)
+		{
+			await Task.Delay(TimeSpan.FromMilliseconds(50));
+		}
+
+		await writer.StopAsync(CancellationToken.None);
+
+		Assert.Null(writer.ExecuteTask!.Exception);
+		Assert.True(writer.ExecuteTask.IsCompletedSuccessfully);
+		Assert.Contains(logger.EntriesAt(LogLevel.Error), entry => entry.Message.Contains("batch flush", StringComparison.Ordinal));
+	}
+
 	private async Task<long> CountEventsAsync(string marker)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

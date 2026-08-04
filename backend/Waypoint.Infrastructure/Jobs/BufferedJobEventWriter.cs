@@ -159,10 +159,17 @@ public sealed partial class BufferedJobEventWriter : BackgroundService, IJobLogB
 			payloads[index] = batch[index].PayloadJson;
 		}
 
+		bool connectionOpened = false;
 		try
 		{
+			// Mirrors JobEventPublisher's open-versus-insert split (see the exception
+			// table there): only a failure after a successful open may mention the
+			// ordering lock, and no exception of any type may escape -- a faulted
+			// BackgroundService stops the whole host (StopHost default), and
+			// observability must never take the appliance down (#153).
 			await using NpgsqlConnection connection = new(_connectionString);
 			await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+			connectionOpened = true;
 
 			// One statement in autocommit IS the transaction: the ordering trigger's
 			// advisory lock is acquired once, held for exactly this INSERT, released at
@@ -188,11 +195,12 @@ public sealed partial class BufferedJobEventWriter : BackgroundService, IJobLogB
 		{
 			throw;
 		}
-		catch (NpgsqlException exception)
+		catch (NpgsqlException exception) when (exception.InnerException is TimeoutException && connectionOpened)
 		{
-			// Same best-effort contract as JobEventPublisher, whose doc comment carries
-			// the full open-vs-insert diagnosis rationale; at batch granularity the
-			// actionable fact is simpler -- how many events just vanished.
+			LogBatchFlushTimedOut(batch.Count, _options.Value.EventCommandTimeoutSeconds, exception);
+		}
+		catch (Exception exception)
+		{
 			LogBatchFlushFailed(batch.Count, exception);
 		}
 	}
@@ -204,4 +212,9 @@ public sealed partial class BufferedJobEventWriter : BackgroundService, IJobLogB
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "job_events batch flush of {BatchSize} event(s) failed; batch dropped")]
 	private partial void LogBatchFlushFailed(int batchSize, Exception exception);
+
+	[LoggerMessage(
+		Level = LogLevel.Error,
+		Message = "job_events batch flush of {BatchSize} event(s) reached the server but its INSERT did not finish within {TimeoutSeconds}s; likeliest cause is lock contention on trg_job_events_assign_seq; batch dropped")]
+	private partial void LogBatchFlushTimedOut(int batchSize, int timeoutSeconds, Exception exception);
 }
