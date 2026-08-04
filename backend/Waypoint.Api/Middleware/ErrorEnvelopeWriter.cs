@@ -14,6 +14,8 @@
 
 using System.Net;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Serialization;
 
@@ -27,10 +29,30 @@ namespace Waypoint.Api.Middleware;
 /// produced by authentication/authorization/routing without an exception ever being
 /// thrown), so both paths emit byte-identical shapes.
 /// </summary>
-public static class ErrorEnvelopeWriter
+public static partial class ErrorEnvelopeWriter
 {
+	[LoggerMessage(
+		Level = LogLevel.Error,
+		Message = "Error '{Code}' ({StatusCode}) occurred after the response started; envelope cannot be written -- aborting the connection")]
+	private static partial void LogEnvelopeAfterResponseStarted(ILogger logger, string code, int statusCode);
+
 	public static Task WriteAsync(HttpContext context, HttpStatusCode statusCode, ErrorDetail error)
 	{
+		// Once the first byte has been flushed (an SSE stream mid-fault, #7/#76),
+		// Clear() and the StatusCode setter both throw -- attempting the envelope
+		// would bury the original fault under a secondary InvalidOperationException.
+		// Nothing useful can be sent at that point: log loudly and abort the
+		// connection so the client sees a hard break, not a plausible-looking
+		// truncated success.
+		if (context.Response.HasStarted)
+		{
+			LogEnvelopeAfterResponseStarted(
+				context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(ErrorEnvelopeWriter).FullName!),
+				error.Code, (int)statusCode);
+			context.Abort();
+			return Task.CompletedTask;
+		}
+
 		context.Response.Clear();
 		context.Response.StatusCode = (int)statusCode;
 		context.Response.ContentType = "application/json; charset=utf-8";
