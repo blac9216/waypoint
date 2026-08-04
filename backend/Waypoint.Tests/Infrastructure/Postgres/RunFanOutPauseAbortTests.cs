@@ -69,6 +69,7 @@ public sealed class RunFanOutPauseAbortTests : IAsyncLifetime
 		Assert.Equal(3, jobIds.Count);
 		Assert.Equal(3, jobIds.Distinct().Count());
 		Assert.Contains(_logger.EntriesAt(LogLevel.Information), entry => entry.Message.Contains("Fanned out 3", StringComparison.Ordinal));
+		Assert.Equal(3, _logger.EntriesAt(LogLevel.Information).Single().Properties["JobCount"]);
 
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
