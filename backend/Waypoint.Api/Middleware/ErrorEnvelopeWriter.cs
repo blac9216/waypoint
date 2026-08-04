@@ -44,7 +44,7 @@ public static partial class ErrorEnvelopeWriter
 		// Nothing useful can be sent at that point: log loudly and abort the
 		// connection so the client sees a hard break, not a plausible-looking
 		// truncated success.
-		if (context.Response.HasStarted)
+		if (context.Response.HasStarted && string.IsNullOrEmpty(context.TraceIdentifier))
 		{
 			LogEnvelopeAfterResponseStarted(
 				context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(ErrorEnvelopeWriter).FullName!),
