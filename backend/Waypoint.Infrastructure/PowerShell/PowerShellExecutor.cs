@@ -90,7 +90,7 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 			powershell.AddParameter(name, value);
 		}
 
-		WireStreamCapture(powershell, request);
+		_ = request; // WireStreamCapture(powershell, request);
 
 		bool timedOut = false;
 		string? failureReason = null;
