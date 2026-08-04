@@ -199,7 +199,7 @@ public sealed partial class BufferedJobEventWriter : BackgroundService, IJobLogB
 		{
 			LogBatchFlushTimedOut(batch.Count, _options.Value.EventCommandTimeoutSeconds, exception);
 		}
-		catch (NpgsqlException exception)
+		catch (Exception exception)
 		{
 			LogBatchFlushFailed(batch.Count, exception);
 		}
