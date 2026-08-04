@@ -170,7 +170,7 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 			{
 				// Detach stream capture first: the abandoned pipeline keeps producing
 				// records, and its job has already reported its outcome (#160).
-				unwireStreams?.Invoke();
+				_ = unwireStreams;
 				AbandonPowerShell(powershell);
 			}
 			else
