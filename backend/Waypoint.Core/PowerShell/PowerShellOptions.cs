@@ -33,6 +33,20 @@ public sealed class PowerShellOptions
 	/// </summary>
 	public IList<string> ModulePreloadPaths { get; } = [];
 
+	/// <summary>
+	/// Case-insensitive substrings of a failure reason that classify it as an
+	/// authentication failure (-> <c>auth-failed</c>, feeding the #5 consecutive-
+	/// failure queue halt) rather than an ordinary failure. Deliberately coarse:
+	/// the vcf modules surface vendor/HTTP wording, not typed exceptions, and a
+	/// false 'failed' merely skips the halt while a false 'auth-failed' only
+	/// counts toward it -- three in a row are required to act.
+	/// </summary>
+	public IList<string> AuthFailureMarkers { get; } =
+	[
+		"401", "403", "unauthorized", "forbidden", "authentication failed",
+		"invalid credential", "incorrect user", "login failed", "access denied",
+	];
+
 	/// <summary>Per-invocation wall-clock budget when the request does not carry its own.</summary>
 	public TimeSpan DefaultInvocationTimeout { get; set; } = TimeSpan.FromMinutes(30);
 
