@@ -373,7 +373,81 @@ have repeatedly caught real defects no CI run could have seen:
   Issue #112 added an IPv6 detector (full/compressed forms, link-local,
   unique-local, the bracketed-with-port URL form, zone IDs); it has no
   analogous dash-adjacency guard at all, so an IPv6 range and a chained IPv4
-  range of any length are both caught in full.
+  range of any length are both caught in full. That property used to be
+  documentation only — nothing in the suite would have noticed if it stopped
+  being true. Issue #132 found the gap the hard way: adding a trailing "not a
+  dash" lookahead to the IPv6 pattern (described in words rather than written,
+  for the reason given a few paragraphs down) took a dash-separated pair of
+  IPv6 addresses from two findings to one — silently losing the second
+  endpoint, the #111 defect for the other address family — with the full
+  120-test suite green. It is pinned now: `GuardCharacterDelimiterTests`
+  derives the set of punctuation characters that MATTER for this file's
+  boundary guards straight off the compiled regexes (the same "read it off
+  the detector instead of remembering it" treatment #115 gave the fixture
+  count), and a dash is one of them because `FQDN_RE` names one explicitly —
+  which is what forces IPv6 to carry a dash row too, even though `IPV6_RE`
+  itself names none. Add a punctuation character to any detector's boundary
+  lookaround and the derived set grows; leave the matching declared row out
+  and the completeness test fails. Where the derivation stops — WHETHER a
+  given character suppresses or flags for a given detector — is a measured,
+  hand-authored verdict kept in a separate table from the derived character
+  set, deliberately, so the two are never blended into one list that reads as
+  derived when only the axis (not the verdict) is.
+
+  **How much of a pattern the derivation can see, stated because the first
+  cut of it could not see all of one.** It walks EVERY lookaround node in a
+  compiled pattern's parse tree, at any nesting depth — the assertions at the
+  top level and any placed inside a group, an alternation or a repeat. The
+  first version walked the top level only, which was a true statement about
+  the three detectors as written and a false mechanism: a guard nested one
+  group deeper was invisible, and for a punctuation character that no
+  top-level guard mentions *and* the hand-written delimiter lists do not
+  contain, nothing in the suite covered it at all. Measured (PR #138 round 1,
+  finding 2): a trailing guard nested inside the IPv6 pattern's bare
+  alternative, rejecting a hash, a pipe and a plus, left the whole suite green
+  while three real findings disappeared — one of them an address in a markdown
+  table cell, which this repo's docs produce constantly. Recursing closed it;
+  the same mutation now fails four tests.
+
+  **The same defect had a second half, and finding one of them did not find
+  the other.** The derivation is two functions: one decides WHERE assertions
+  are (that is the recursion above), the other reads which characters a given
+  assertion body NAMES. Round 1 fixed the first and gave it a structural
+  guard rail; the second kept a hand-written list of body shapes and no rail
+  at all, so a guard whose body was a repeat over a character class, or a
+  branch whose alternatives are more than one node long, named punctuation
+  that nothing derived (PR #138 round 2, finding 1). Measured, and it is the
+  same measurement one level over: either spelling, spliced into the IPv6
+  pattern's bare alternative over the same hash, pipe and plus, left the
+  suite at 141/141 while the same three findings went from one to none. Both
+  functions share ONE descent rule now, and the rail is symmetric: no node
+  kind present in the real detectors may be missing from the shared list, and
+  every kind on that list must be shown — by running a probe pattern, not by
+  reading the code — to carry a guard's characters out to the derived set. A
+  third spelling of the same defect was closed at the same time: a character
+  class RANGE (`[!-/]` names a dot and a dash without either appearing as a
+  literal) is now enumerated over printable ASCII, excluding alphanumerics so
+  the real `[A-Za-z0-9]` guards still contribute nothing. All three closures
+  are no-ops against today's detectors — asserted, not assumed.
+
+  **What remains, disclosed here rather than found later**, and pinned by
+  `test_the_disclosed_extraction_limit_is_what_the_doc_says` so this
+  paragraph cannot drift from the code again:
+
+  - What is derived is which characters a guard NAMES, never what the guard
+    DOES with them — suppress or flag stays the hand-measured verdict table.
+  - A guard that names characters only through an open-ended category
+    (not-a-word, not-a-digit, not-whitespace) contributes none of them:
+    enumerating those would demand a declared row for most of ASCII. This one
+    cannot escape quietly, which is measured rather than argued — splicing a
+    trailing "not a non-word character" guard into the bare alternative fails
+    12 tests outright, because rejecting every non-word neighbour changes the
+    measured verdict of characters the declared table already carries.
+  - A guard that names its characters through a BACK-REFERENCE contributes
+    nothing, and this is the one residual that is neither derived nor loud:
+    the characters are not in the pattern at all, they are whatever the
+    referenced group captured at match time, which no parse-tree read can
+    know.
 
   **The first cut of that detector shipped with a boundary bug, and it is
   worth stating plainly rather than summarising away**: its trailing guard
@@ -402,11 +476,84 @@ have repeatedly caught real defects no CI run could have seen:
   an impossibility nobody had executed. So this is now a list of what is
   actually true, not a summary:
 
-  - The port case is closed: a trailing all-digit group is retried away before
-    a candidate is declared a non-address, at any port width.
+  - The single-group port case is closed: a trailing all-digit group is
+    retried away before a candidate is declared a non-address, at any port
+    width. Issue #131 found the retry ran only ONCE, so a candidate carrying
+    TWO trailing all-digit groups (a fully-expanded literal followed by a
+    bare port followed by a second numeric group — `...:0007:443:8443`, or
+    the same shape with a zero-padded group ahead of the port,
+    `...:0007:0:443`) still failed strict parsing and scanned clean. The
+    retry is a loop now, not a single attempt: it strips one trailing
+    all-digit group at a time until the parse succeeds, the tail is no longer
+    all-digit, or **three** groups have been stripped. What is bounded is the
+    NUMBER of groups retried, never any one group's width — a 30-digit
+    trailing group still resolves, because an arbitrary width bound is
+    exactly what #119 cost and this fix does not reintroduce one.
+    **Why the loop is bounded at all: so that this bullet can be true.**
+    Uncapped, the loop flags ANY colon-separated run whose first eight groups
+    parse and whose remaining groups are all digits — so the disclosed #118
+    false-positive class below becomes unbounded in RECORD LENGTH, not merely
+    a group or two wider. That is a class no test can enumerate and no
+    sentence here can state truthfully, and it is exactly how three separate
+    places in this repo came to assert a bound of "exactly one group" that the
+    loop no longer had. A pin named `..._are_still_only_these` cannot bound an
+    infinite set. The false-positive count is a consequence of bounding, not
+    the argument for it.
+    **Why three, and what three costs.** Three is not free relative to two,
+    and an earlier revision of this bullet implied it was — on a corpus that
+    happened to contain no 11-group record, which made two and three look
+    tied. Measured against a corpus with even coverage from 9 to 13 colon
+    groups: cap 2 misses 4 of 10 leak shapes at 10 of 22 false positives; cap
+    3 misses 3 at 13. So three buys one further leak shape — a literal with
+    three trailing numeric groups, which no producer in the closed list this
+    gate's threat model names (netstat, log lines, inventory exports,
+    CKL/HDF, URLs) has ever been shown to emit — and costs three further
+    false-positive families, all of them 11-group records: an EUI-64 string
+    with three trailing numeric fields, a certificate fingerprint with the
+    same, and an 11-field numeric counter record. It is a deliberate trade in
+    favour of the leak direction, not a dominant choice: a missed lab address
+    is an incident under `CLAUDE.md`, while a false positive is a visibly red
+    gate. That the cost is real matters, because this gate runs with zero
+    exemptions as a load-bearing property (below), so a false positive has no
+    sanctioned waiver — it stops the gate until content is edited, and a gate
+    that cries wolf gets switched off.
+    **Two residuals, disclosed not closed** — they are the loop's two
+    stopping conditions. A trailing group carrying a non-digit character
+    glued on (`...:0007:443a`) fails the all-digit test on its very first
+    retry attempt, so the loop never starts stripping it — a materially
+    different shape (not a port at all, digit or otherwise). And four or
+    more trailing all-digit groups (`...:0007:1:2:3:4`) exhaust the bound.
+    Pinned by `MultiGroupPortRetryTests.test_a_glued_letter_on_the_final_
+    group_remains_undetected` and `.test_four_trailing_all_digit_groups_
+    are_a_disclosed_residual` rather than left to be rediscovered.
   - A match that begins *inside* a longer hex/colon run is re-anchored onto
     the widest span that still parses, so a word glued to the front of an
-    address no longer reports a fragment of it.
+    address no longer reports a fragment of it. **Issue #133 narrowed WHICH
+    parser decides "still parses" for this purpose.** Re-anchoring used to
+    call the same port-retry-enabled parser the final candidate is checked
+    with, so a span could win "widest" by discarding one of the real
+    address's OWN trailing groups as if it were a port — `node99:<fully
+    expanded address>` re-anchored onto `de99:<the address minus its own last
+    group>`, naming a token that is not a string that appears on the line
+    (`de99` is the tail of the hostname `node99`). Re-anchoring now judges
+    candidate spans with the strict parser only; the port retry still applies
+    to the final candidate scan_text reports, so an address that genuinely
+    needs it to be recognised still is. This is precision, not correctness —
+    the line was always a real finding, only the reported span was too wide.
+    **Disclosed, not closed:** a colon-delimited numeric hostname suffix
+    before a COMPRESSED address (an `esxi01:`-style label directly ahead of a
+    `::`-compressed lab literal, reporting the label's own trailing digits as
+    part of the address) is the same imprecision, one level over, with no
+    port anywhere in the line — `"::"` gives a compressed address enough
+    slack that prepending a short, independently-valid, colon-delimited group
+    parses without any retry at all. Telling that shape apart from the
+    legitimate glued-word-recovery case it is otherwise identical to
+    (`X2001:db8::1`, MidRunMatchTests) needs information this gate's regex
+    genuinely does not have — both are "one clean group-plus-colon directly
+    before an already-valid address", and widest-wins correctly favours the
+    case it exists for, which is why it cannot also refuse this one. Pinned
+    by `MidRunMatchTests.test_a_numeric_hostname_suffix_before_a_compressed_
+    address_is_a_disclosed_residual`.
   - The matrix enumerates several fixture VARIANTS per detector, and how many
     it owes is derived from the detector rather than remembered — from its
     regex's own alternations and optional groups, and from whether its
@@ -424,8 +571,21 @@ have repeatedly caught real defects no CI run could have seen:
     `test_the_known_residual_false_positives_are_still_only_these`. A run of
     colon-separated hex groups that happens to be valid IPv6 syntax
     ([#118](https://github.com/blac9216/waypoint/issues/118)); the port retry
-    widens that class by exactly one group, since nine groups ending in digits
-    now resolve to the eight in front of them. And an unbracketed
+    widens that class by the number of groups it is allowed to strip, so a run
+    of **nine, ten or eleven** groups whose trailing groups are all digits now
+    resolves to the eight in front of them, and a twelve-group run is where
+    the class stops. That the range is finite at all is the whole reason the
+    retry loop carries a bound: uncapped, the class would be unbounded in
+    record length — any colon-separated numeric record long enough to have
+    eight parseable groups in front of an all-digit tail — which is a class no
+    test can enumerate and no sentence here can state truthfully. The
+    eleven-group rows specifically are what raising the bound from two to
+    three cost (see the #131 bullet above); they are an EUI-64 string, a
+    certificate fingerprint and a numeric counter record, each with three
+    trailing numeric fields.
+    `test_the_known_residual_false_positives_are_still_only_these` pins both
+    ends, the nine- to eleven-group runs that fire and the twelve-group runs
+    that do not. And an unbracketed
     `<sanctioned address>:<port>` pair, which as written is also a valid,
     different, non-sanctioned address — the gate reports rather than guesses,
     and the bracketed URL form is unambiguous and stays silent.
@@ -465,9 +625,10 @@ have repeatedly caught real defects no CI run could have seen:
   stopped detecting. Running the scanner against a clean tree proves the absence of
   findings, never the presence of detection — the same asymmetry that let the
   frontend air-gap guard fail open three times. That is why `sanitize` runs
-  `test_scan_repo_specific.py` (120 tests covering all four detectors, their
+  `test_scan_repo_specific.py` (145 tests covering all four detectors, their
   case handling, the IPv4/FQDN dash- and underscore-adjacency narrowing from
-  issue #111, the padding-width independence from #119, both allowlist paths,
+  issue #111, the padding-width independence from #119, the bound on the IPv6
+  swallowed-port retry from #131, both allowlist paths,
   the exit codes, a standing false-positive corpus, and every claim of
   impossibility left in the scanner's own comments) before it trusts the scan.
   Delimiter handling is the one part not left to per-detector test-writing:

@@ -323,6 +323,296 @@ MATRIX_SPELLING = {
 }
 
 
+# --- guard-character derivation (see GuardCharacterDelimiterTests) --------
+#
+# Issue #132. `SurroundingContextTests.TRAILING`/`.LEADING` are a hand-written
+# list of neighbour characters, and neither list contains a dash — so a
+# detector's dash-adjacency behaviour, unlike every OTHER boundary property in
+# this file, was never pinned. Demonstrated cost: adding a trailing "not a
+# dash" lookahead to `IPV6_RE` takes an IPv6 range from two findings to one,
+# with the whole 120-test suite green (the #111 defect, for the other address
+# family, silently reopened).
+#
+# The fixture axis was made derived by #115 (`shape_group_names`, which reads
+# a detector's OWN alternations and optional groups off its compiled parse
+# tree). The delimiter axis gets the same treatment here: `guard_characters()`
+# walks a pattern's own leading/trailing boundary lookarounds (the `ASSERT`/
+# `ASSERT_NOT` nodes at the top of its parse tree — exactly the constructs the
+# comments above `IPV4_RE`, `FQDN_RE` and `IPV6_RE` argue about at length) and
+# reads off which punctuation characters those guards actually test for.
+# Alphanumeric RANGES (`A-Za-z0-9`) are deliberately excluded: they mean "more
+# of the same token", not "a candidate delimiter", and are already exercised
+# by every non-boundary fixture in `DetectorPositiveTests`. A bare `\w`
+# category contributes only `_` for the same reason — the alnum half of it is
+# not a new delimiter, the underscore half is.
+#
+# What this buys, concretely: `IPV6_RE` carries no dash anywhere in its own
+# guards (that absence is precisely #132's subject), so `guard_characters()`
+# alone would never put a dash row on IPv6's own account. The completeness
+# test below closes that loophole by checking coverage against the UNION of
+# every detector's guard characters, not each detector's own — so IPv4's and
+# FQDN's dash guards force a dash row onto IPv6 too, and IPv6's silence on
+# that row is exactly what stays pinned as a live behaviour rather than an
+# unexamined gap. Add a character to ANY detector's guard and the union grows;
+# grow the union with no matching entry in `GUARD_LEADING_EXPECTED` /
+# `GUARD_TRAILING_EXPECTED` and `test_every_guard_character_has_a_declared_row`
+# fails — "a guard character with no row" is what that test exists to catch.
+#
+# What is NOT derived, and cannot be: WHETHER a given character suppresses or
+# flags for a given detector is a property of the guard's VALUE, not just its
+# presence, and has to be read off the code by running it — the same
+# "measured, not assumed" discipline `MATRIX_SPELLING` and every comment in
+# `scan_repo_specific.py` already applies. `GUARD_LEADING_EXPECTED` /
+# `GUARD_TRAILING_EXPECTED` are that hand-authored, measured verdict; they are
+# kept in a separate table from the DERIVED character set specifically so the
+# derived and the declared halves are never blended into one list that reads
+# as derived when it is not (the possible-fix note in #132 itself).
+
+try:  # Same 3.11 rename shape_group_names already handles.
+	from re import _parser as _re_parser  # noqa: F811 (re-imported for clarity)
+except ImportError:  # pragma: no cover - older interpreters
+	import sre_parse as _re_parser  # type: ignore[no-redef]  # noqa: F811
+
+
+# Every parse-tree node kind that can hold a sub-sequence — i.e. that a guard,
+# or a character a guard names, can hide inside. Pinned against the real
+# patterns rather than assumed, from both directions:
+#   - test_the_guard_walk_descends_every_container_the_detectors_use: no kind
+#     present in the real detectors may be missing from this set;
+#   - test_the_extractor_descends_every_container_kind_it_names: every kind IN
+#     this set must actually be descended into, end to end, by both halves of
+#     the derivation.
+_GUARD_CONTAINER_OPS = frozenset(
+	{
+		"ASSERT",
+		"ASSERT_NOT",
+		"SUBPATTERN",
+		"BRANCH",
+		"MAX_REPEAT",
+		"MIN_REPEAT",
+		"ATOMIC_GROUP",
+	}
+)
+
+# Atomic groups were added to Python's stdlib ``re`` parser in 3.11. This
+# suite deliberately supports the repository's generic ``python3`` command,
+# including 3.10, so a structural probe must cover only node kinds that the
+# running parser can actually construct. On a runtime that supports atomic
+# groups the entry remains in the shared descent set and the constructive rail
+# below exercises it; on an older runtime it cannot be a skipped parse-tree
+# node in the first place.
+try:
+	re.compile(r"(?>x)")
+except re.error:
+	_GUARD_CONTAINER_OPS -= frozenset({"ATOMIC_GROUP"})
+
+
+def _guard_sub_sequences(name: str, argument) -> tuple:
+	"""Every sub-sequence a container parse-tree node holds.
+
+	The single descent rule, deliberately shared by BOTH halves of the
+	derivation — `_collect_guards` (which assertions exist, and where) and
+	`_guard_literal_chars` (which characters a given assertion body names).
+
+	PR #138 round 2, finding 1: those two functions used to carry SEPARATE,
+	hand-written node-kind lists, and only the first one was ever checked
+	against the real parse trees. `_collect_guards` recursed into five
+	container kinds; `_guard_literal_chars` recursed into `SUBPATTERN` alone.
+	So a guard whose BODY was a repeat over a character class, or a branch
+	with multi-character alternatives, named punctuation that nothing
+	derived — the round-1 escape one level over, measured at the same
+	141/141-green-while-three-findings-vanish. Two symmetric functions with
+	asymmetric protection is the shape that produced it, so there is one
+	descent rule now and one set of node kinds (`_GUARD_CONTAINER_OPS`),
+	protected in both directions by the two tests named above it.
+
+	Returning `()` for a non-container is the whole "not a container" answer:
+	a kind that grows a sub-sequence in some future Python must be added
+	here, and the constructive test above fails until it is.
+	"""
+	if name in ("ASSERT", "ASSERT_NOT"):
+		return (argument[1],)
+	if name == "SUBPATTERN":
+		return (argument[3],)
+	if name == "BRANCH":
+		return tuple(argument[1])
+	if name in ("MAX_REPEAT", "MIN_REPEAT"):
+		return (argument[2],)
+	if name == "ATOMIC_GROUP":
+		return (argument,)
+	return ()
+
+
+def _is_word_category(category) -> bool:
+	"""True for `\\w` only — not for `\\W`, which names the complement.
+
+	The first spelling of this test was `"WORD" in str(category)`, which is
+	also true of `CATEGORY_NOT_WORD` and so derived an underscore from a
+	guard that by definition never matches one. Harmless (over-collection is
+	the safe direction) but false, and a false derived character is exactly
+	the kind of thing this file publishes sentences about.
+	"""
+	return str(category).endswith("CATEGORY_WORD")
+
+
+def _punctuation_in_range(low: int, high: int) -> set[str]:
+	"""The printable-ASCII punctuation a character-class RANGE names.
+
+	A range is the third way a guard can name a delimiter, after a literal
+	and a class of literals, and it was the third silent hole: `[!-/]` names
+	a dot and a dash and derived nothing. Only the printable-ASCII slice is
+	considered, so the answer is bounded by 95 code points however wide the
+	range is written; alphanumerics and the underscore are excluded for the
+	same reason a bare `\\w` contributes only the underscore — an alnum range
+	is "more of the same token", not a delimiter candidate, which is why
+	`[A-Za-z0-9]` (in IPV4_RE's and FQDN_RE's real guards) contributes
+	nothing and this addition is a no-op against today's detectors.
+	"""
+	return {
+		chr(code)
+		for code in range(max(low, 0x20), min(high, 0x7E) + 1)
+		if not chr(code).isalnum() and chr(code) != "_"
+	}
+
+
+def _guard_literal_chars(sequence) -> set[str]:
+	"""Punctuation characters a single lookaround's own sub-pattern tests for.
+
+	Reads a bare literal (`(?<!-)`), a character class possibly mixing
+	literals and a `\\w` category (`(?!\\w)`, `[A-Za-z0-9]`), and a bare
+	category — at any depth inside the guard body, via `_guard_sub_sequences`.
+	`\\d` (CATEGORY_DIGIT) contributes nothing on its own — a bare digit is an
+	alnum-range concept, not a punctuation delimiter — so only the literal
+	half of a `\\.\\d`-shaped guard shows up here, which is exactly the `.`
+	IPV4_RE's own comment says that guard exists to test.
+
+	It descends rather than handling a fixed set of body shapes because the
+	fixed set was a silent hole (PR #138 round 2, finding 1 — the argument is
+	in `_guard_sub_sequences`). Two spellings measured on the tip that had
+	it: a trailing guard over a class of hash, pipe and plus with a
+	one-or-more quantifier (body = `MAX_REPEAT`), and one over a
+	two-alternative branch with two nodes per alternative (body = `BRANCH`).
+	Each left the suite at 141/141 while an address followed by each of those
+	three characters went from one finding to none — the middle one an
+	address in a markdown table cell.
+
+	A subtlety worth keeping, because it is why only SOME branch spellings
+	escaped: the parser hoists a common leading node out of a branch, so
+	`(?!<class>\\w|<class>\\d)` parses as class-then-branch and was derived
+	correctly even before the fix, while `(?!<class-a>\\w|<class-b>\\w)` was
+	not. That is exactly why the protection below is per-node-kind and
+	constructive rather than a list of remembered examples.
+
+	Descending into a NESTED assertion's body over-collects on purpose: its
+	characters land in the enclosing guard's direction as well as their own
+	(`_collect_guards` visits the same node with the correct direction). A
+	spurious declared row costs one measured line; a missing one costs a
+	silent escape.
+	"""
+	chars: set[str] = set()
+	for op, argument in sequence:
+		name = _op_name(op)
+		if name in ("LITERAL", "NOT_LITERAL"):
+			chars.add(chr(argument))
+		elif name == "IN":
+			for sub_op, sub_argument in argument:
+				sub_name = _op_name(sub_op)
+				if sub_name == "LITERAL":
+					chars.add(chr(sub_argument))
+				elif sub_name == "CATEGORY" and _is_word_category(sub_argument):
+					chars.add("_")
+				elif sub_name == "RANGE":
+					chars |= _punctuation_in_range(*sub_argument)
+		elif name == "CATEGORY" and _is_word_category(argument):
+			chars.add("_")
+		for sub_sequence in _guard_sub_sequences(name, argument):
+			chars |= _guard_literal_chars(sub_sequence)
+	return chars
+
+
+def _collect_guards(sequence, leading: set[str], trailing: set[str]) -> None:
+	"""Accumulate guard characters from EVERY `ASSERT`/`ASSERT_NOT` in a
+	sub-tree, however deeply it is nested.
+
+	PR #138 round 1, finding 2: the first version of this derivation walked
+	only the nodes at the TOP LEVEL of the pattern. That was a true statement
+	about today's detectors and a false mechanism — a guard placed inside the
+	IPv6 bare/bracketed alternation (or any other group) was invisible, so a
+	character that no top-level guard mentions AND
+	`SurroundingContextTests.TRAILING` does not list was covered by nothing at
+	all. Measured cost of the top-level-only version: a trailing guard nested
+	in the bare group rejecting three punctuation characters (hash, pipe,
+	plus) left the whole suite green while three real findings disappeared —
+	one of them an address in a markdown table cell, which this repo's docs
+	produce constantly.
+
+	So this recurses. The node kinds are a small closed set — the three
+	patterns are built from `IN`, `LITERAL`, `MAX_REPEAT`, `SUBPATTERN`,
+	`BRANCH` and the assertions themselves — and every kind that can CONTAIN
+	a sub-sequence is descended into, including an assertion's own body (a
+	guard inside a guard is still a guard). An unrecognised container would
+	be a silent hole of exactly the kind this fix closes, so
+	`_GUARD_CONTAINER_OPS` is checked against the real parse trees by
+	`test_the_guard_walk_descends_every_container_the_detectors_use` rather
+	than trusted.
+
+	The descent itself lives in `_guard_sub_sequences`, shared with
+	`_guard_literal_chars`, because keeping two copies of it is precisely how
+	PR #138 round 2's finding happened: this walk was protected and its
+	sibling was not.
+
+	Direction comes from each assertion's own `direction` field at whatever
+	depth it sits, so a nested lookbehind still counts as leading.
+
+	This OVER-collects rather than under-collects on purpose: a lookaround
+	that is not really a boundary guard (a per-character assertion inside a
+	repeat, say) contributes a character that then REQUIRES a declared row.
+	That is the safe direction — a spurious row costs one measured line in
+	`GUARD_LEADING_EXPECTED`/`GUARD_TRAILING_EXPECTED`, while a missed one
+	costs a silent escape, which is the defect the whole mechanism exists to
+	prevent.
+	"""
+	for op, argument in sequence:
+		name = _op_name(op)
+		if name in ("ASSERT", "ASSERT_NOT"):
+			direction, body = argument
+			(leading if direction < 0 else trailing).update(_guard_literal_chars(body))
+		for sub_sequence in _guard_sub_sequences(name, argument):
+			_collect_guards(sub_sequence, leading, trailing)
+
+
+def guard_characters(pattern: re.Pattern[str]) -> tuple[frozenset[str], frozenset[str]]:
+	"""(leading, trailing) punctuation characters this pattern's own boundary
+	guards mention, read from its compiled parse tree.
+
+	Every `ASSERT`/`ASSERT_NOT` node in the tree counts, at any depth — not
+	only the ones at the top level (PR #138 round 1, finding 2; the argument
+	is in `_collect_guards`). A negative lookbehind (`direction < 0`) is
+	leading; a negative lookahead is trailing.
+
+	All three detectors happen to carry their guards at the top level today,
+	so recursing changes none of the derived sets. Both halves of that are
+	pinned: `test_recursion_leaves_todays_derived_sets_unchanged` (it is a
+	no-op now) and `test_a_nested_guard_is_seen_by_the_derivation` (it would
+	not be if a guard moved).
+	"""
+	parsed = _re_parser.parse(pattern.pattern, pattern.flags)
+	leading: set[str] = set()
+	trailing: set[str] = set()
+	_collect_guards(parsed, leading, trailing)
+	return frozenset(leading), frozenset(trailing)
+
+
+GUARD_CHARS = {check: guard_characters(pattern) for check, pattern in MATRIX_PATTERN.items()}
+
+GUARD_CHARS_LEADING_UNION: frozenset[str] = frozenset().union(
+	*(leading for leading, _trailing in GUARD_CHARS.values())
+)
+GUARD_CHARS_TRAILING_UNION: frozenset[str] = frozenset().union(
+	*(trailing for _leading, trailing in GUARD_CHARS.values())
+)
+
+
 class DetectorPositiveTests(unittest.TestCase):
 	"""Each detector fires on the pattern class it exists to catch."""
 
@@ -697,6 +987,599 @@ class SurroundingContextTests(unittest.TestCase):
 		):
 			with self.subTest(text=text):
 				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+
+class GuardCharacterDelimiterTests(unittest.TestCase):
+	"""Issue #132: the delimiter axis, derived rather than remembered.
+
+	`SurroundingContextTests.TRAILING`/`.LEADING` enumerate delimiters no
+	detector's own guards particularly care about (a comma, a close paren, a
+	tab — every one of them already terminates a match by construction, and
+	the point of exercising them is breadth of coverage, not a specific
+	guard). A dash was never in either list, and neither was a bare
+	underscore or a leading period — the exact set a detector's OWN boundary
+	lookarounds are built to test. `guard_characters()` (above) reads that set
+	off the compiled patterns instead of leaving it to be remembered, so this
+	class is a SECOND, narrower matrix: not "every safe delimiter", but
+	"every character a guard anywhere in this file actually mentions".
+
+	Two tables per direction, kept deliberately separate (per #132's own
+	instruction not to blend a derived list with a declared one):
+
+	  - `GUARD_CHARS` / `GUARD_CHARS_*_UNION` — DERIVED, from the compiled
+	    regexes. `test_every_guard_character_has_a_declared_row` is the guard:
+	    a character newly added to ANY detector's boundary lookaround changes
+	    the union, and an entry missing from the tables below then fails this
+	    test — "a guard character with no row" from the issue, executed.
+	  - `GUARD_LEADING_EXPECTED` / `GUARD_TRAILING_EXPECTED` — DECLARED, a
+	    measured verdict (FLAGGED or SUPPRESSED) for every (check, character)
+	    pair in the union, including pairs the check's OWN guards say nothing
+	    about — IPv4's and FQDN's dash guards force IPv6 to carry a dash row
+	    too, which is exactly the point: IPv6 has no dash guard, and that
+	    absence is now a tested property (FLAGGED) instead of an unexamined
+	    gap. Values were measured against the real detectors with
+	    `python3 -B`, not assumed from reading the regex.
+	"""
+
+	# The `.` row is exercised with a following digit (`.5`), not a bare
+	# trailing period: IPV4_RE's own trailing guard is literally `\.` then a
+	# DIGIT category (`(?!\.\d)`), not `\.` then any alnum, so `.5` is the
+	# precise shape that guard tests for — a bare trailing period is already
+	# covered by SurroundingContextTests.TRAILING's "sentence period" case
+	# and is FLAGGED for every detector (none of the guards reject a
+	# standalone `.`), which would make it useless as a discriminating row
+	# here. FQDN's and IPv6's own trailing dot guards (`\.[A-Za-z0-9]`) also
+	# reject `.5`, a digit being alnum, so the same suffix exercises all
+	# three detectors' actual guard condition rather than three different
+	# ones.
+	TRAILING_SUFFIX = {".": ".5", "-": "-", "_": "_"}
+
+	FLAGGED = "flagged"
+	SUPPRESSED = "suppressed"
+
+	# Measured, not assumed — see the class docstring. A dash trailing an
+	# IPv6 literal is the row #132 is actually about: FLAGGED here is the
+	# executable form of "IPv6 has no dash-adjacency guard at all", and it is
+	# what turns red the moment that absence is (re)closed, e.g. by the
+	# trailing not-a-dash lookahead the issue's own mutation describes.
+	GUARD_LEADING_EXPECTED = {
+		scanner.CHECK_IP: {".": SUPPRESSED, "-": SUPPRESSED},
+		scanner.CHECK_FQDN: {".": SUPPRESSED, "-": SUPPRESSED},
+		scanner.CHECK_IPV6: {".": FLAGGED, "-": FLAGGED},
+	}
+	GUARD_TRAILING_EXPECTED = {
+		scanner.CHECK_IP: {".": SUPPRESSED, "-": SUPPRESSED, "_": SUPPRESSED},
+		scanner.CHECK_FQDN: {".": SUPPRESSED, "-": SUPPRESSED, "_": SUPPRESSED},
+		scanner.CHECK_IPV6: {".": SUPPRESSED, "-": FLAGGED, "_": SUPPRESSED},
+	}
+
+	# Which of SurroundingContextTests.MATRIX_FIXTURES' own IPv6 variants a
+	# guard-character row can actually be run against. The bracketed forms
+	# are excluded because a bracket is its OWN hard boundary (the scanner's
+	# own comment: "the `[` cannot be part of a hex/colon run, so there is
+	# nothing to re-anchor") — a leading/trailing character next to `[`/`]`
+	# never reaches the guard this class is testing at all; measured: the
+	# regex simply re-matches the BARE address just inside the brackets and
+	# the probe character lands beyond the match entirely, at the ALWAYS-safe
+	# `[`/`]` boundary SurroundingContextTests already exercises. The
+	# `ipv4-mapped` and `zone id` variants are excluded for a sharper reason:
+	# their own optional groups (`mapped_quad`'s `(?:\.\d{1,3}){1,3}`, and
+	# `zone`'s `%[\w.-]+`) are THEMSELVES greedy over `.`, `-` and `_` — a
+	# probe character glued on gets absorbed into the address's own trailing
+	# group instead of ever reaching the outer boundary guard, which is a
+	# different (already-covered, by DetectorPositiveTests/IPv6DetectorTests)
+	# property than the one this class exists to pin.
+	IPV6_GUARD_VARIANTS = ("compressed", "fully expanded", "link-local compressed")
+
+	def _variants_for(self, check: str) -> dict[str, str]:
+		if check == scanner.CHECK_IPV6:
+			return {
+				name: fixture
+				for name, fixture in SurroundingContextTests.MATRIX_FIXTURES[check].items()
+				if name in self.IPV6_GUARD_VARIANTS
+			}
+		return dict(SurroundingContextTests.MATRIX_FIXTURES[check])
+
+	def findings_for(self, check: str, text: str) -> list[str]:
+		message = SurroundingContextTests.MATRIX_MESSAGE[check]
+		return [f for f in scanner.scan_text("f.md", text) if message in f]
+
+	def test_every_guard_character_has_a_declared_row(self) -> None:
+		"""The completeness guard: a new guard character fails this, not silently
+		passes the suite.
+
+		Two directions, both load-bearing:
+
+		  - every character `guard_characters()` finds in ANY detector's own
+		    lookarounds must have a declared expectation for EVERY detector
+		    (not just the one whose regex mentions it) — this is what forces
+		    IPv6 to carry a dash row despite IPV6_RE never naming one;
+		  - the declared tables must not carry a character outside that
+		    union either, which would read as derived coverage for a
+		    character no guard actually tests for.
+		"""
+		for check in scanner.CHECK_NAMES - {scanner.CHECK_DEPOT_TOKEN}:
+			with self.subTest(check=check, direction="leading"):
+				self.assertEqual(
+					set(self.GUARD_LEADING_EXPECTED[check]),
+					GUARD_CHARS_LEADING_UNION,
+					f"{check}: declared leading rows must equal the union of "
+					f"every detector's own leading guard characters",
+				)
+			with self.subTest(check=check, direction="trailing"):
+				self.assertEqual(
+					set(self.GUARD_TRAILING_EXPECTED[check]),
+					GUARD_CHARS_TRAILING_UNION,
+					f"{check}: declared trailing rows must equal the union of "
+					f"every detector's own trailing guard characters",
+				)
+		# Each detector's OWN guard characters must be a subset of the union
+		# it is checked against — otherwise the union itself is wrong.
+		for check, (leading, trailing) in GUARD_CHARS.items():
+			self.assertLessEqual(leading, GUARD_CHARS_LEADING_UNION, check)
+			self.assertLessEqual(trailing, GUARD_CHARS_TRAILING_UNION, check)
+		# A dash is asserted explicitly, per #132's stated minimum: whatever
+		# else the derivation finds, a guard-character regression on the dash
+		# specifically must be caught for every detector.
+		self.assertIn("-", GUARD_CHARS_LEADING_UNION)
+		self.assertIn("-", GUARD_CHARS_TRAILING_UNION)
+		for check in (scanner.CHECK_IP, scanner.CHECK_FQDN, scanner.CHECK_IPV6):
+			self.assertIn("-", self.GUARD_LEADING_EXPECTED[check])
+			self.assertIn("-", self.GUARD_TRAILING_EXPECTED[check])
+
+	# --- the derivation's own reach (PR #138 round 1, finding 2) ---------
+	#
+	# The three tests below are about `guard_characters()` itself rather than
+	# about any detector: they pin HOW MUCH OF A PATTERN it can see. The first
+	# version saw only top-level assertion nodes, which was true of today's
+	# detectors and false as a mechanism — a guard nested one group deeper was
+	# invisible, and for a character that no top-level guard mentions and
+	# `SurroundingContextTests.TRAILING` does not list, nothing else in this
+	# file covered it either.
+
+	# Characters chosen for the nested-guard probes: none of them appears in
+	# any detector's real guards, and none is in SurroundingContextTests'
+	# hand-written delimiter lists — which is exactly what made them the
+	# escape. The middle one is a pipe: an address in a markdown table cell.
+	NESTED_PROBE_CHARS = ("#", "|", "+")
+
+	@staticmethod
+	def _top_level_only(pattern: re.Pattern[str]) -> tuple[frozenset[str], frozenset[str]]:
+		"""The superseded top-level-only walk, kept as an executable control.
+
+		Its whole purpose is to be compared against the real derivation: it
+		is what "the suite stayed at 135/135 while three findings vanished"
+		looked like in code.
+		"""
+		leading: set[str] = set()
+		trailing: set[str] = set()
+		for op, argument in _re_parser.parse(pattern.pattern, pattern.flags):
+			if _op_name(op) not in ("ASSERT", "ASSERT_NOT"):
+				continue
+			direction, body = argument
+			(leading if direction < 0 else trailing).update(_guard_literal_chars(body))
+		return frozenset(leading), frozenset(trailing)
+
+	def test_recursion_leaves_todays_derived_sets_unchanged(self) -> None:
+		"""Recursing is a no-op against the patterns as they stand.
+
+		This is the honesty half of the fix. All three detectors carry their
+		guards at the top level today, so the recursive walk must derive
+		exactly what the top-level-only walk did — otherwise the change
+		quietly altered the expectation tables' meaning rather than only
+		extending their reach. If a guard is ever MOVED inside a group, this
+		test starts failing, which is the correct signal: the two walks have
+		diverged and the nested one is now the truthful one.
+		"""
+		for check, pattern in sorted(MATRIX_PATTERN.items()):
+			with self.subTest(check=check):
+				self.assertEqual(guard_characters(pattern), self._top_level_only(pattern))
+
+	def test_a_nested_guard_is_seen_by_the_derivation(self) -> None:
+		"""The escape itself, executed — a guard one group deeper is found.
+
+		Two probes, because they fail for different reasons if the recursion
+		regresses:
+
+		  1. A standalone fixture pattern whose guards sit inside a named
+		     group, inside an alternation, inside a repeat — the three
+		     container kinds the real detectors are built from, stacked. It
+		     does not depend on any detector's current spelling, so it keeps
+		     working when they change.
+		  2. The real `IPV6_RE`, surgically given the reviewer's own
+		     mutation: one trailing negative lookahead over a three-character
+		     class placed INSIDE the bare alternative. The anchor it splices
+		     onto is asserted first, so a future pattern edit fails this test
+		     loudly instead of silently testing nothing.
+
+		In both, the superseded top-level walk is asserted to MISS what the
+		real one finds. That assertion is the finding: without it, "the
+		derivation covers nested guards" would be a claim rather than a
+		measurement.
+		"""
+		probe = "".join(self.NESTED_PROBE_CHARS)
+		nested_fixture = re.compile(
+			r"(?:(?P<a>x+(?<![" + probe + r"])y)|(?P<b>z(?![" + probe + r"])))+"
+		)
+		leading, trailing = guard_characters(nested_fixture)
+		flat_leading, flat_trailing = self._top_level_only(nested_fixture)
+		for char in self.NESTED_PROBE_CHARS:
+			with self.subTest(probe="fixture", char=char):
+				self.assertIn(char, leading)
+				self.assertIn(char, trailing)
+				self.assertNotIn(char, flat_leading)
+				self.assertNotIn(char, flat_trailing)
+
+		anchor = r"(?P<zone>%[\w.-]+)?"
+		source = scanner.IPV6_RE.pattern
+		self.assertIn(anchor, source, "IPV6_RE's bare alternative no longer ends as expected")
+		mutated = re.compile(
+			source.replace(anchor, anchor + r"(?!" + "[" + probe + "])", 1)
+		)
+		_leading, mutated_trailing = guard_characters(mutated)
+		_flat_leading, flat_mutated_trailing = self._top_level_only(mutated)
+		for char in self.NESTED_PROBE_CHARS:
+			with self.subTest(probe="IPV6_RE", char=char):
+				self.assertIn(char, mutated_trailing)
+				self.assertNotIn(char, flat_mutated_trailing)
+		# And the union built from a mutated detector would demand rows the
+		# declared tables do not have — i.e. the completeness test would fail,
+		# which is the whole point of finding the nested guard.
+		self.assertFalse(
+			set(mutated_trailing) <= set(self.GUARD_TRAILING_EXPECTED[scanner.CHECK_IPV6]),
+			"a nested guard must create an undeclared row",
+		)
+
+	def test_the_guard_walk_descends_every_container_the_detectors_use(self) -> None:
+		"""No node kind in the real patterns holds a sub-sequence we skip.
+
+		`_collect_guards` descends a named list of container node kinds. A
+		kind missing from that list is a silent hole of exactly the sort
+		finding 2 was about, so the list is checked against the real parse
+		trees structurally: any node whose argument contains a `SubPattern`
+		anywhere is a container, and every container found must be one we
+		descend into.
+		"""
+		sub_pattern_type = _re_parser.SubPattern
+
+		def contains_sub_pattern(value) -> bool:
+			if isinstance(value, sub_pattern_type):
+				return True
+			if isinstance(value, (tuple, list)):
+				return any(contains_sub_pattern(item) for item in value)
+			return False
+
+		seen: set[str] = set()
+
+		def walk(sequence) -> None:
+			for op, argument in sequence:
+				name = _op_name(op)
+				if contains_sub_pattern(argument):
+					seen.add(name)
+				if isinstance(argument, (tuple, list)):
+					for item in argument:
+						if isinstance(item, sub_pattern_type):
+							walk(item)
+						elif isinstance(item, (tuple, list)):
+							for inner in item:
+								if isinstance(inner, sub_pattern_type):
+									walk(inner)
+
+		for pattern in MATRIX_PATTERN.values():
+			walk(_re_parser.parse(pattern.pattern, pattern.flags))
+
+		self.assertTrue(seen, "no container nodes found — the walk is not walking")
+		self.assertLessEqual(
+			seen,
+			_GUARD_CONTAINER_OPS,
+			f"container node kinds not descended into: {sorted(seen - _GUARD_CONTAINER_OPS)}",
+		)
+
+	# --- the EXTRACTOR's reach (PR #138 round 2, finding 1) --------------
+	#
+	# The two tests below are the same protection one level over. Round 1
+	# fixed WHERE the derivation looks for assertions and guarded that with
+	# the structural test above; the sibling that extracts characters OUT of
+	# an assertion body kept a fixed node-kind list and no guard rail at all,
+	# so a guard body that was a repeat or a branch named punctuation nothing
+	# derived — measured at 141/141 green while the same three findings
+	# vanished. Both functions share one descent rule now
+	# (`_guard_sub_sequences`), and both directions of it are pinned.
+
+	@staticmethod
+	def _literal_chars_without_container_recursion(sequence) -> set[str]:
+		"""The superseded extractor, kept as an executable control.
+
+		Byte-for-byte the pre-fix body shapes: literals, one level of
+		character class, a bare category, and recursion into `SUBPATTERN`
+		alone. Its only purpose is to be asserted to MISS what the real
+		extractor finds, so "the derivation reads a guard body at any depth"
+		stays a measurement rather than a claim.
+		"""
+		chars: set[str] = set()
+		for op, argument in sequence:
+			name = _op_name(op)
+			if name in ("LITERAL", "NOT_LITERAL"):
+				chars.add(chr(argument))
+			elif name == "IN":
+				for sub_op, sub_argument in argument:
+					sub_name = _op_name(sub_op)
+					if sub_name == "LITERAL":
+						chars.add(chr(sub_argument))
+					elif sub_name == "CATEGORY" and "WORD" in str(sub_argument):
+						chars.add("_")
+			elif name == "CATEGORY" and "WORD" in str(argument):
+				chars.add("_")
+			elif name == "SUBPATTERN":
+				chars |= GuardCharacterDelimiterTests._literal_chars_without_container_recursion(
+					argument[3]
+				)
+		return chars
+
+	# The two guard-body spellings the round-2 review exhibited, each as the
+	# TAIL of a trailing lookahead over the three probe characters: a repeat
+	# over a character class, and a branch with two nodes per alternative.
+	# Written as (label, body-source) so the escape is executed, not recalled.
+	BODY_SHAPE_SPELLINGS = (
+		("repeat over a class", "[{probe}]+"),
+		("branch, two nodes per alternative", "[{first}]\\w|[{rest}]\\w"),
+	)
+
+	def test_a_guard_body_container_is_read_by_the_extractor(self) -> None:
+		"""A guard body that is a repeat, or a branch, still names its characters.
+
+		This is round 1's finding 2 one level over, executed. The recursion
+		fix made `guard_characters()` see an assertion wherever it sits; this
+		is about what it can read once it is there. Both spellings below were
+		measured on the tip that had the fixed extractor list: the suite
+		stayed at **141/141 OK** while `manager <address>` followed by each
+		of hash, pipe and plus went from one finding to none.
+
+		Each spelling is spliced into the real `IPV6_RE` at the same anchor
+		the nested-guard test uses, and the superseded extractor is asserted
+		to miss what the real one finds. The union built from the mutated
+		detector must also demand rows the declared tables do not have —
+		i.e. the completeness test would fail, which is what turns the
+		escape red.
+
+		One spelling deliberately NOT in the list, because it is why this
+		needs to be per-node-kind rather than per-example: a branch whose
+		alternatives share a leading node (`[hash pipe plus]\\w|[hash pipe
+		plus]\\d`) is hoisted by the parser into class-then-branch, so its
+		characters sat at the top of the body and were derived correctly
+		even before the fix. Remembering examples would have "covered" the
+		branch case while leaving the escaping spelling open.
+		"""
+		probe = "".join(self.NESTED_PROBE_CHARS)
+		anchor = r"(?P<zone>%[\w.-]+)?"
+		source = scanner.IPV6_RE.pattern
+		self.assertIn(anchor, source, "IPV6_RE's bare alternative no longer ends as expected")
+		for label, spelling in self.BODY_SHAPE_SPELLINGS:
+			body = spelling.format(
+				probe=probe,
+				first=self.NESTED_PROBE_CHARS[0] + self.NESTED_PROBE_CHARS[1],
+				rest=self.NESTED_PROBE_CHARS[2],
+			)
+			mutated = re.compile(source.replace(anchor, anchor + "(?!" + body + ")", 1))
+			_leading, trailing = guard_characters(mutated)
+			flat = self._literal_chars_without_container_recursion(
+				_re_parser.parse("(?!" + body + ")")[0][1][1]
+			)
+			for char in self.NESTED_PROBE_CHARS:
+				with self.subTest(body=label, char=char):
+					self.assertIn(char, trailing)
+					self.assertNotIn(char, flat)
+			with self.subTest(body=label, check="undeclared row"):
+				self.assertFalse(
+					set(trailing) <= set(self.GUARD_TRAILING_EXPECTED[scanner.CHECK_IPV6]),
+					"a guard body the extractor cannot read must create an undeclared row",
+				)
+
+	def test_a_guard_naming_punctuation_by_a_range_is_read(self) -> None:
+		"""The third spelling of "names a character": a class RANGE.
+
+		`[!-/]` names a dot and a dash without either appearing as a literal
+		node, so the pre-fix extractor derived nothing from it — the same
+		defect as the container one, in the character half rather than the
+		structure half. Closed by `_punctuation_in_range`, bounded to
+		printable ASCII and to non-alphanumerics so `[A-Za-z0-9]` (which the
+		real IPv4 and FQDN guards use) still contributes nothing, which is
+		why closing it changed no derived set.
+		"""
+		low, high = self.NESTED_PROBE_CHARS[0], self.NESTED_PROBE_CHARS[2]  # hash .. plus
+		anchor = r"(?P<zone>%[\w.-]+)?"
+		source = scanner.IPV6_RE.pattern
+		self.assertIn(anchor, source, "IPV6_RE's bare alternative no longer ends as expected")
+		body = "[" + low + "-" + high + "]"
+		mutated = re.compile(source.replace(anchor, anchor + "(?!" + body + ")", 1))
+		_leading, trailing = guard_characters(mutated)
+		flat = self._literal_chars_without_container_recursion(
+			_re_parser.parse("(?!" + body + ")")[0][1][1]
+		)
+		for char in (low, high):
+			with self.subTest(char=char):
+				self.assertIn(char, trailing)
+				self.assertNotIn(char, flat)
+		self.assertFalse(
+			set(trailing) <= set(self.GUARD_TRAILING_EXPECTED[scanner.CHECK_IPV6]),
+			"a guard naming punctuation by a range must create an undeclared row",
+		)
+		# The bound that keeps this safe rather than explosive: an alnum
+		# range still contributes nothing, so today's real guards are
+		# unaffected and the derived sets did not move when this landed.
+		self.assertEqual(_punctuation_in_range(ord("0"), ord("9")), set())
+		self.assertEqual(_punctuation_in_range(ord("a"), ord("z")), set())
+
+	def test_the_disclosed_extraction_limit_is_what_the_doc_says(self) -> None:
+		"""The limit that REMAINS, executed rather than asserted in prose.
+
+		`docs/testing.md` states exactly two things the derivation cannot do
+		with the characters a guard names, and both are pinned here so the
+		published sentence cannot drift from the code:
+
+		  1. A guard that names characters only through a category other
+		     than "word" (`\\S`, `\\W`, `\\D`) contributes nothing — those
+		     name open-ended sets, not delimiters, and enumerating them would
+		     demand a declared row for most of ASCII. Unlike the container
+		     and range holes this one cannot escape SILENTLY, which is
+		     measured rather than argued: splicing a trailing "not a
+		     non-word character" guard into the bare alternative fails 12
+		     tests outright, because a guard rejecting every non-word
+		     neighbour changes the measured verdict of characters the
+		     declared table already carries.
+		  2. A guard that names its characters through a back-reference
+		     contributes nothing — the characters are not in the guard at
+		     all, they are whatever the referenced group captured at match
+		     time, which no parse-tree read can know. That one is the real
+		     residual: neither derived nor loud.
+
+		If either is ever closed, this test fails and the doc gets re-read —
+		which is the only mechanism that has actually kept this file honest.
+		"""
+		for label, body in (
+			("non-word category", r"\S"),
+			("negated word category", r"\W"),
+			("back-reference", r"(?P=zone)"),
+		):
+			with self.subTest(spelling=label):
+				pattern = re.compile(r"(?P<zone>a)b(?!" + body + r")")
+				leading, trailing = guard_characters(pattern)
+				self.assertEqual(
+					(leading, trailing),
+					(frozenset(), frozenset()),
+					f"{label} now contributes characters — update the disclosed "
+					f"limit in docs/testing.md",
+				)
+
+	# One regex spelling per container node kind, used to prove — by
+	# construction rather than by reading the code — that a character sitting
+	# inside a node of that kind inside a guard reaches the derived set. A
+	# kind added to `_GUARD_CONTAINER_OPS` without a spelling here fails the
+	# test below rather than being taken on trust.
+	CONTAINER_PROBE_BODIES = {
+		"ASSERT": "(?<={c})",
+		"ASSERT_NOT": "(?!{c})",
+		"SUBPATTERN": "(?P<probe>{c})",
+		"BRANCH": "{c}y|zx",
+		"MAX_REPEAT": "{c}+",
+		"MIN_REPEAT": "{c}+?",
+	}
+	if "ATOMIC_GROUP" in _GUARD_CONTAINER_OPS:
+		CONTAINER_PROBE_BODIES["ATOMIC_GROUP"] = "(?>{c})"
+
+	def test_the_extractor_descends_every_container_kind_it_names(self) -> None:
+		"""Every container kind is descended into — checked by running it.
+
+		The structural test above closes the other direction: a kind present
+		in the real detectors may not be missing from `_GUARD_CONTAINER_OPS`.
+		This one closes THIS direction: a kind that IS in that set must
+		actually carry a guard's characters out to the derived set, through
+		both `_collect_guards` and `_guard_literal_chars`. Listing a kind and
+		not descending into it is the exact defect round 2 found, and reading
+		the code is how it survived round 1.
+
+		Each kind is probed with a real compiled pattern whose parse tree is
+		first asserted to CONTAIN that kind — the parser rewrites some
+		spellings (it hoists a branch's common leading node, and drops a
+		non-capturing group that wraps nothing), so a spelling that no longer
+		produces the node it is named for fails loudly instead of silently
+		testing something else.
+		"""
+		missing = sorted(_GUARD_CONTAINER_OPS - set(self.CONTAINER_PROBE_BODIES))
+		self.assertFalse(missing, f"container kinds with no probe spelling: {missing}")
+		probe_char = "~"
+		self.assertNotIn(
+			probe_char,
+			GUARD_CHARS_LEADING_UNION | GUARD_CHARS_TRAILING_UNION,
+			"probe character must not be one a real detector already names",
+		)
+		for kind in sorted(_GUARD_CONTAINER_OPS):
+			with self.subTest(container=kind):
+				body = self.CONTAINER_PROBE_BODIES[kind].format(c=re.escape(probe_char))
+				pattern = re.compile(r"a(?!" + body + r")")
+				kinds_present: set[str] = set()
+
+				def note(sequence) -> None:
+					for op, argument in sequence:
+						name = _op_name(op)
+						kinds_present.add(name)
+						for sub_sequence in _guard_sub_sequences(name, argument):
+							note(sub_sequence)
+
+				note(_re_parser.parse(pattern.pattern, pattern.flags))
+				self.assertIn(
+					kind,
+					kinds_present,
+					f"probe spelling for {kind} no longer parses to that node kind",
+				)
+				leading, trailing = guard_characters(pattern)
+				self.assertIn(
+					probe_char,
+					leading | trailing,
+					f"a character inside a {kind} inside a guard is not derived",
+				)
+
+	def test_leading_guard_characters_match_declared_expectation(self) -> None:
+		for check, expected in sorted(self.GUARD_LEADING_EXPECTED.items()):
+			for variant, fixture in sorted(self._variants_for(check).items()):
+				for char, outcome in sorted(expected.items()):
+					text = f"{char}{fixture}"
+					with self.subTest(check=check, variant=variant, char=char):
+						findings = self.findings_for(check, text)
+						want = 1 if outcome == self.FLAGGED else 0
+						self.assertEqual(
+							len(findings), want, (check, variant, char, outcome, findings)
+						)
+
+	def test_trailing_guard_characters_match_declared_expectation(self) -> None:
+		for check, expected in sorted(self.GUARD_TRAILING_EXPECTED.items()):
+			for variant, fixture in sorted(self._variants_for(check).items()):
+				for char, outcome in sorted(expected.items()):
+					suffix = self.TRAILING_SUFFIX[char]
+					text = f"{fixture}{suffix}"
+					with self.subTest(check=check, variant=variant, char=char):
+						findings = self.findings_for(check, text)
+						want = 1 if outcome == self.FLAGGED else 0
+						self.assertEqual(
+							len(findings), want, (check, variant, char, outcome, findings)
+						)
+
+	def test_ipv6_range_both_endpoints_are_caught(self) -> None:
+		"""The regression #132 exists to catch, pinned directly.
+
+		IPv6 has no dash-adjacency guard at all (docs/testing.md states this
+		as a property, not an aspiration), so a dash-separated pair of IPv6
+		addresses is caught in full — mirroring
+		RangeDetectionTests.test_the_exact_range_from_the_issue for IPv4.
+		Demonstrated regression (issue #132): adding a trailing "not a dash"
+		lookahead to IPV6_RE — described in words, not written, because
+		GitHub swallows a lookahead-open immediately followed by a
+		character class even inside a fence — takes this from two findings
+		to one, silently losing the second endpoint, exactly the #111 defect
+		for the other address family. This test is what turns red if that
+		regression is reintroduced; test_trailing_guard_characters_match_
+		declared_expectation's IPv6/dash row (`FLAGGED`) is what turns red
+		first, one line at a time, but this is the literal shape from the
+		issue body.
+		"""
+		second = ipv6("fd00", "1a2b", "3c4d", "", "1")
+		findings = scanner.scan_text("f.md", f"range {LAB_IPV6}-{second}")
+		self.assertEqual(len(findings), 2, findings)
+		self.assertTrue(any(LAB_IPV6 in f for f in findings), findings)
+		self.assertTrue(any(second in f for f in findings), findings)
+
+	def test_ipv6_dash_then_word_matches_the_issue_measurement(self) -> None:
+		"""The first row measured in issue #132's body, verbatim in shape.
+
+		`<address>-x` is 1 finding today (the dash does not terminate the
+		match early, nor does it merge with `x`); the issue's demonstrated
+		mutation takes it to 0. Kept separate from the derived matrix row
+		above (which uses a bare trailing dash) because this is the exact
+		measured input from the issue, not a paraphrase of it.
+		"""
+		findings = scanner.scan_text("f.md", f"dash {LAB_IPV6}-x")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6, findings[0])
 
 
 class CaseSensitivityTests(unittest.TestCase):
@@ -1474,6 +2357,193 @@ class UnbracketedPortTests(unittest.TestCase):
 				self.assertEqual(len(scanner.scan_text("f.md", text)), 1, text)
 
 
+class MultiGroupPortRetryTests(unittest.TestCase):
+	"""Issue #131 — the single retry in `_ipv6_address_of()` closes ONE
+	trailing all-digit group; a candidate carrying two still scanned clean.
+
+	The round-3 reviewer judged the original single-group escape a real
+	blocker (PR #115 round 2, finding 1 — see `UnbracketedPortTests` above)
+	but judged the multi-group case non-blocking: every shape the gate's own
+	threat model names (netstat, log lines, inventory exports, URLs) produces
+	exactly one trailing numeric group, so this is hardening, not an
+	emergency. The fix keeps that framing — it bounds the NUMBER of trailing
+	digit groups retried (`_MAX_SWALLOWED_GROUPS`, three) and bounds no
+	group's WIDTH at all, which stays deliberately unlimited for the same
+	#119 reason `UnbracketedPortTests` already pins.
+
+	The cap arrived in PR #138 round 1, and the REASON is disclosability, not
+	false positives: shipping the loop UNBOUNDED made the disclosed #118
+	false-positive class unbounded in record length, which is a class no test
+	can enumerate and no sentence in docs/testing.md can state truthfully.
+	A pin named `..._are_still_only_these` cannot bound an infinite set.
+
+	Three rather than two is a priced trade, not a free win — an earlier
+	revision of this class said otherwise on a corpus that happened to
+	contain no 11-group record. Three buys one further leak shape (three
+	trailing numeric groups, which no producer has been shown to emit) and
+	costs three further false-positive families, all 11-group records. The
+	cost of stopping at three is disclosed by
+	`test_four_trailing_all_digit_groups_are_a_disclosed_residual`; the
+	measurement is in `_MAX_SWALLOWED_GROUPS`.
+	"""
+
+	def test_two_trailing_all_digit_groups_are_both_retried(self) -> None:
+		"""The issue's own repro: a bare port plus a second numeric group."""
+		text = f"vcenter at {LAB_IPV6_FULL}:443:8443"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6_FULL, findings[0])
+
+	def test_a_zero_group_ahead_of_the_port_is_also_retried(self) -> None:
+		"""The issue's second repro: an all-zero group, still just digits."""
+		text = f"vcenter at {LAB_IPV6_FULL}:0:443"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6_FULL, findings[0])
+
+	def test_two_groups_retried_on_a_second_prefix_and_port_width(self) -> None:
+		"""Not a one-fixture fluke: a different address, port, and group count."""
+		address = ipv6("fe80", "0000", "0000", "0000", "1a2b", "3c4d", "5e6f", "7a8b")
+		text = f"manager {address}:22:2222"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(address, findings[0])
+
+	def test_the_bound_is_three_groups_and_is_stated_as_a_number(self) -> None:
+		"""The cap is a named constant, not a shape the tests infer.
+
+		PR #138 round 1, finding 1: an UNCAPPED loop makes the disclosed #118
+		false-positive class unbounded in record length, which is not a class
+		any test can enumerate and not a sentence docs/testing.md can state
+		truthfully. The cap is what makes both possible, so the number itself
+		is pinned here — a future change to it has to come through this test
+		and through `_MAX_SWALLOWED_GROUPS`'s own justification comment,
+		which PRICES the choice (one further leak shape bought for three
+		further 11-group false-positive families) rather than asserting it.
+		"""
+		self.assertEqual(scanner._MAX_SWALLOWED_GROUPS, 3)
+
+	def test_three_trailing_all_digit_groups_are_all_retried(self) -> None:
+		"""One group past the deepest shape issue #131 itself measured.
+
+		The bound is three, so this closes. It is also the shape PR #138's
+		round-1 reviewer independently verified as closed, kept closed
+		deliberately rather than by accident — `_MAX_SWALLOWED_GROUPS`
+		records what buying it costs on the false-positive side, which is
+		every 11-group colon-separated record.
+		"""
+		for text in (
+			f"vcenter at {LAB_IPV6_FULL}:1:2:3",
+			f"vcenter at {LAB_IPV6_FULL}:443:8443:9443",
+		):
+			with self.subTest(text=text):
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, (text, findings))
+				self.assertIn(LAB_IPV6_FULL, findings[0])
+
+	def test_four_trailing_all_digit_groups_are_a_disclosed_residual(self) -> None:
+		"""What the bound costs, pinned rather than left silent.
+
+		Four trailing all-digit groups exhaust `_MAX_SWALLOWED_GROUPS`, so
+		the candidate is declared a non-address and the line scans clean.
+		This is the second of the loop's two stopping conditions (the first
+		is the glued letter below), and it is a deliberate trade, measured
+		in both directions:
+
+		  - little gained by going further: no producer in this gate's threat
+		    model (netstat, log lines, inventory exports, CKL/HDF, URLs) has
+		    ever been shown to emit even a three-group shape, let alone four.
+		    Issue #131's own four measured escapes all close at two.
+		  - something real given up on the other side: each additional group
+		    of slack widens the #118 false-positive class by one more group
+		    of colon-separated record, without bound. Going from three to
+		    four would add every 12-group record to the class, exactly as
+		    going from two to three added every 11-group one. See
+		    `_MAX_SWALLOWED_GROUPS` for the corpus measurement.
+
+		Pinned here so a future change either closes it deliberately or has
+		to come and edit this test — the same treatment every other residual
+		in this file gets.
+		"""
+		for text in (
+			f"vcenter at {LAB_IPV6_FULL}:1:2:3:4",
+			f"vcenter at {LAB_IPV6_FULL}:443:8443:9443:9444",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+	def test_the_bound_does_not_bound_any_group_s_width(self) -> None:
+		"""#119's lesson, re-checked against the new bound.
+
+		A group-COUNT bound and a group-WIDTH bound are different axes, and
+		the second is the one #119 cost. Both an absurdly wide single port
+		and an absurdly wide pair still resolve.
+		"""
+		wide = "9" * 30
+		for text in (
+			f"vcenter at {LAB_IPV6_FULL}:{wide}",
+			f"vcenter at {LAB_IPV6_FULL}:12345678901234:{wide}",
+		):
+			with self.subTest(text=text):
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, (text, findings))
+				self.assertIn(LAB_IPV6_FULL, findings[0])
+
+	def test_compressed_address_with_two_trailing_groups_is_unaffected(self) -> None:
+		"""The compressed spelling already absorbed a single port as a legal
+		group (UnbracketedPortTests); a second group does not change that —
+		it is still short of the group count that would make the loop
+		necessary, so this is a control, not a new behaviour.
+		"""
+		text = f"host {LAB_IPV6}:443:1"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+
+	def test_the_controls_from_131_still_pass(self) -> None:
+		"""Every shape #131 explicitly did NOT change: single-group cases."""
+		for text in (
+			f"vcenter at {LAB_IPV6_FULL}:443",
+			f"vcenter at {with_port(LAB_IPV6, 8443)}",
+			f"vcenter at {bracketed_port(LAB_IPV6_FULL, 443)}",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(len(scanner.scan_text("f.md", text)), 1, text)
+
+	def test_the_loop_still_does_not_invent_an_address(self) -> None:
+		"""UnbracketedPortTests' non-address corpus, extended with runs long
+		enough to exercise more than one loop iteration — the loop must still
+		terminate at None rather than eventually stumbling onto a valid parse.
+		"""
+		for text in (
+			"elapsed 01:02:03:04:05",
+			"ports 8443:8443:8443",
+			"cron 0 2 * * * run:12:34:56",
+			"src f.py:123:456:789: warning",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+	def test_a_glued_letter_on_the_final_group_remains_undetected(self) -> None:
+		"""The disclosed residual (issue #131's Root Cause paragraph).
+
+		A trailing group carrying a non-digit character (`443a`) fails the
+		all-digit test on its very FIRST retry attempt, so the loop this
+		issue adds never starts stripping it — this is a different shape
+		from "two numeric groups", not a partially-fixed instance of it, and
+		closing it would need a materially different check (is this tail
+		alphanumeric-with-a-leading-run-of-digits, rather than is it all
+		digits). No shape in the gate's threat model (netstat, log lines,
+		inventory exports, CKL/HDF) produces a glued-letter port, so this
+		stays open by disclosure rather than by omission — pinned here so a
+		future change to the retry either closes it deliberately or has to
+		come and edit this test, matching how this file already treats every
+		other residual (`test_the_known_residual_false_positives_are_still_
+		only_these`, the single-sided dash cases, ...).
+		"""
+		text = f"vcenter at {LAB_IPV6_FULL}:443a"
+		self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+
 class MidRunMatchTests(unittest.TestCase):
 	"""PR #115 round 2, finding 3 — a match that starts inside a longer run.
 
@@ -1522,6 +2592,77 @@ class MidRunMatchTests(unittest.TestCase):
 					findings = scanner.scan_text("f.md", text)
 					self.assertEqual(len(findings), 1, (text, findings))
 					self.assertIn(address, findings[0])
+
+	def test_a_numeric_hostname_suffix_does_not_widen_into_the_reported_token(
+		self,
+	) -> None:
+		"""Issue #133: `_widest_address_start()` must not accept a span that
+		only parses because `_ipv6_address_of()`'s port retry drops one of the
+		address's OWN trailing groups.
+
+		`node99:<full address>` re-anchored onto `de99:<full address minus its
+		own last group>` before this fix — `de99` is the tail of the hostname
+		`node99`, not part of any address on the line, and the "address" named
+		in the finding was not a string that actually appears there. The
+		FULLY-EXPANDED spelling is what makes this decidable: it needs
+		exactly 8 groups, so prepending a 9th (the hostname's numeric tail)
+		can ONLY parse via the retry that treats the address's own final group
+		as a discardable "port" — which is exactly what `_strict_ipv6_literal`
+		(no port retry) now refuses. Asserted as EXACT equality, not
+		`assertIn`, because a widened-too-far span is a real address SUBSTRING
+		of the correct report and `assertIn` would not have caught the bug.
+		"""
+		for label in ("esxi01", "esxi1", "node99", "vmnic5", "eth0"):
+			text = f"{label}:{LAB_IPV6_FULL}"
+			with self.subTest(text=text):
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, (text, findings))
+				reported = findings[0].rsplit(": ", 1)[1]
+				self.assertEqual(reported, LAB_IPV6_FULL, (text, findings))
+
+	def test_a_numeric_hostname_suffix_before_a_compressed_address_is_a_disclosed_residual(
+		self,
+	) -> None:
+		"""What issue #133's fix does NOT close, pinned rather than left silent.
+
+		A COMPRESSED address has slack a fully-expanded one does not: `"::"`
+		can absorb an extra explicit group without exceeding 8, so a
+		colon-delimited numeric hostname suffix (`esxi01:`, `node99:`, ...)
+		parses as a wider — different, but ALSO syntactically valid — address
+		with no port retry involved at all. This is not the #133 mechanism
+		(there is no port anywhere in these lines) and closing it would need
+		telling "a foreign, colon-delimited label" apart from "more of the
+		same address recovered after a guard rejection" using nothing but the
+		surrounding characters — which is genuinely impossible in general:
+		`X2001:db8::1` (MidRunMatchTests, doc-prefix recovery, wanted) and an
+		`esxi01:`-prefixed lab literal (this test, NOT wanted — see the cases
+		below, assembled rather than spelled out here for the same no-literal
+		reason this module's docstring states) are the identical shape one
+		level up — a single clean group-plus-colon sitting directly
+		before an already-independently-valid address — and widest-wins
+		correctly favours the FIRST case, which is why it cannot also refuse
+		the second. The line is still correctly flagged either way (the
+		invariant re-anchoring exists to protect); only the reported token's
+		span is imprecise here. Kept pinned, not silent, so a future change
+		either closes it deliberately or has to come edit this test.
+		"""
+		second = ipv6("fd00", "1a2b", "3c4d", "", "1")
+		cases = {
+			f"esxi01:{LAB_IPV6}": "01:" + LAB_IPV6,
+			f"esxi1:{LAB_IPV6}": "1:" + LAB_IPV6,
+			f"node99:{LAB_IPV6}": "de99:" + LAB_IPV6,
+			f"vmnic5:{second}": "c5:" + second,
+		}
+		for text, reported_today in cases.items():
+			with self.subTest(text=text):
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, (text, findings))
+				actual = findings[0].rsplit(": ", 1)[1]
+				self.assertEqual(actual, reported_today, (text, findings))
+				# The real address is still a substring of what is reported —
+				# the line is not silent, only wider than it should be.
+				address = text.split(":", 1)[1]
+				self.assertIn(address, actual, (text, findings))
 
 	def test_scope_resolution_syntax_is_not_re_anchored_into_an_address(self) -> None:
 		"""Re-anchoring must not CREATE a finding, only move or drop one.
@@ -1656,8 +2797,11 @@ class ImpossibilityClaimTests(unittest.TestCase):
 		"""`_ipv6_address_of` claims the retry cannot manufacture an address.
 
 		Whatever it returns must be a literal the strict parser accepted, on
-		either the candidate itself or the candidate minus one trailing
-		all-digit group. Nothing else is reachable.
+		the candidate itself or on the candidate with SOME number of trailing
+		all-digit groups removed (issue #131 turned the single retry into a
+		loop, so "one trailing group" is no longer the whole story — every
+		successively-shortened head is a legitimate source of the answer, not
+		just the first one).
 		"""
 		for candidate in (
 			LAB_IPV6,
@@ -1666,16 +2810,26 @@ class ImpossibilityClaimTests(unittest.TestCase):
 			"01:02:03",
 			with_port(EUI64_SHAPED, 22),
 			f"{LAB_IPV6_FULL}:443:443",
+			f"{LAB_IPV6_FULL}:0:443",
 		):
 			with self.subTest(candidate=candidate):
 				resolved = scanner._ipv6_address_of(candidate)
 				if resolved is None:
 					continue
-				head = candidate.rpartition(":")[0]
+				# Reachable heads: the candidate itself, plus every head
+				# obtained by stripping trailing ALL-DIGIT groups one at a
+				# time — a transcription independent of the implementation,
+				# so it stops at the same place the loop must (a separator
+				# with a non-digit tail, or no separator left).
+				heads = [candidate]
+				head = candidate
+				while True:
+					head, separator, tail = head.rpartition(":")
+					if not separator or not tail.isdigit():
+						break
+					heads.append(head)
 				accepted = {
-					str(ipaddress.IPv6Address(text))
-					for text in (candidate, head)
-					if _parses(text)
+					str(ipaddress.IPv6Address(text)) for text in heads if _parses(text)
 				}
 				self.assertIn(str(resolved), accepted, candidate)
 
@@ -1745,29 +2899,79 @@ class FalsePositiveCorpusTests(unittest.TestCase):
 		self.assertEqual(scanner.scan_text("f.md", "\n".join(self.CORPUS)), [])
 
 	def test_the_known_residual_false_positives_are_still_only_these(self) -> None:
-		"""Two lines that DO fire and should not. Pinned, not hidden.
+		"""The lines that DO fire and should not. Pinned, not hidden — and
+		the set is BOUNDED, which is what this test's name claims and what
+		PR #138 round 1, finding 1 found it no longer doing.
 
-		Both are disclosed in docs/testing.md. They are here so that a future
+		All are disclosed in docs/testing.md. They are here so a future
 		change either keeps them exactly as they are or has to come and edit
 		this test — which is the point at which someone has to think about
 		them again.
 
 		1. A run of colon-separated hex groups that happens to validate as a
 		   literal (issue #118). An 8-group EUI-64-style run already fired
-		   before this round; the swallowed-port retry extends the same class
-		   by one group, since a 9-group run whose last group is all digits
-		   now resolves to the 8-group address in front of it. Same class,
-		   one group wider — not a new one.
+		   before the #131 work. The swallowed-port retry widens that class
+		   by the number of groups the retry is allowed to strip: a run of 9,
+		   10 or 11 groups whose trailing groups are all digits now resolves
+		   to the 8-group address in front of them. `_MAX_SWALLOWED_GROUPS`
+		   is what makes "9 to 11" a range rather than "and upwards" — an
+		   UNCAPPED loop, which is what this branch carried into round 1,
+		   made the class unbounded in record length and made this test's
+		   name false.
 		2. The unbracketed `<sanctioned address>:<port>` ambiguity, argued in
 		   UnbracketedPortTests.
+
+		The negative half is the half that does the bounding: a 12-group run
+		is where the class STOPS, and it is asserted here rather than only
+		described. Raise the cap and this test fails, in the direction that
+		makes someone re-read the disclosure. Lower it and the firing half
+		fails, for the same reason.
+
+		The 11-group rows are the ones the cap-2-to-cap-3 change ADDED to
+		this class, and they are named rather than folded into a range,
+		because they are what that change cost.
+
+		They are also ASSEMBLED rather than written out, and that is not
+		style: an 11-group all-digit-tailed run IS the new false-positive
+		class, so spelling one out as a literal makes this very file trip the
+		gate it tests. That is measured, not anticipated — writing them as
+		literals took the full-tree scan from clean to two findings, in this
+		file, on the first run after the cap moved. It is the same no-literal
+		reason this module's docstring gives, arriving from a new direction,
+		and it is the sharpest available demonstration that raising the bound
+		has a real cost rather than a theoretical one.
 		"""
+		eleven_numeric = "counters " + ":".join(str(n) for n in range(1, 12))
+		eleven_fingerprint = "SHA1 Fingerprint=" + ":".join(
+			("A1", "B2", "C3", "D4", "E5", "F6", "07", "18", "29", "30", "41")
+		)
+		self.assertEqual(eleven_numeric.split()[1].count(":"), 10, eleven_numeric)
+		self.assertEqual(eleven_fingerprint.count(":"), 10, eleven_fingerprint)
 		for line in (
 			f"cols {EUI64_SHAPED}",
 			f"cols {with_port(EUI64_SHAPED, 22)}",
+			f"cols {EUI64_SHAPED}:22",
+			f"cols {EUI64_SHAPED}:22:2222",
+			# 11 groups — added to the class by the cap 2 -> 3 change.
+			f"cols {EUI64_SHAPED}:22:2222:1",
+			eleven_numeric,
+			eleven_fingerprint,
 			f"lo {with_port(OK_IPV6_LOOPBACK, 443)}",
 		):
-			with self.subTest(line=line):
+			with self.subTest(line=line, direction="fires"):
 				self.assertEqual(len(scanner.scan_text("f.md", line)), 1, line)
+		# Where the class stops: 12 colon groups and beyond. Several of these
+		# are the shapes the round-1 reviewer's corpus turned up as
+		# newly-firing under the uncapped loop.
+		for line in (
+			f"cols {EUI64_SHAPED}:22:2222:1:2",
+			"fields 1:2:3:4:5:6:7:8:9:10:11:12",
+			"fields 1:2:3:4:5:6:7:8:9:10:11:12:13:14:15:16",
+			"eui 00:1a:2b:ff:fe:3c:4d:5e:22:2222:1:2",
+			"SHA1 Fingerprint=A1:B2:C3:D4:E5:F6:07:18:29:30:41:52:63:74:85:96:07:18:29:30",
+		):
+			with self.subTest(line=line, direction="silent"):
+				self.assertEqual(scanner.scan_text("f.md", line), [], line)
 
 
 class AllowlistTests(unittest.TestCase):

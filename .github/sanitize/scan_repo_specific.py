@@ -442,13 +442,16 @@ def is_placeholder_token(value: str) -> bool:
 #     validation is even attempted.
 #
 # Both "never parses" claims survive the swallowed-port retry in
-# _ipv6_address_of(), and that is checked rather than assumed: the retry drops
-# ONE trailing all-digit group, which takes a 3-group timestamp to 2 groups and
-# a 6-group MAC to 5 — further from the 8 an uncompressed literal needs, never
-# closer. What the retry does reach is a NINE-group run whose last group is all
-# digits, which is the address-plus-port shape it exists for; the corresponding
-# false-positive question ("what else is nine colon-separated hex groups?") is
-# enumerated in FalsePositiveCorpusTests rather than dismissed.
+# _ipv6_address_of(), and that is checked rather than assumed: the retry only
+# ever REMOVES trailing groups (up to `_MAX_SWALLOWED_GROUPS` of them), which
+# takes a 3-group timestamp to nothing and a 6-group MAC to 3 — further from
+# the 8 an uncompressed literal needs, never closer. What the retry does reach
+# is a NINE-, TEN- or ELEVEN-group run whose trailing groups are all digits,
+# which is the address-plus-port shape it exists for; the corresponding
+# false-positive question ("what else is nine to eleven colon-separated hex
+# groups?") is enumerated in FalsePositiveCorpusTests rather than dismissed,
+# and bounding the loop is what keeps that question answerable at all — see
+# `_MAX_SWALLOWED_GROUPS`.
 #
 # The bracketed alternative handles the URL form with a port (an address in
 # brackets with a `:<port>` suffix appended, RFC 3986 style); zone IDs (a
@@ -602,6 +605,55 @@ ALLOWED_IPV6_EXACT = frozenset(
 )
 
 
+# How many trailing all-digit groups _ipv6_address_of() will strip before it
+# gives up (PR #138 round 1, finding 1).
+#
+# WHY THERE IS A BOUND AT ALL: disclosability. UNBOUNDED, this loop flags ANY
+# colon-separated run whose first eight groups parse and whose every remaining
+# group is all-digit — so the disclosed #118 false-positive class becomes
+# unbounded in RECORD LENGTH, not merely a group or two wider. That is a class
+# no test can enumerate and no sentence in docs/testing.md can state truthfully,
+# which is exactly how three separate places in this repo came to assert a
+# bound of "exactly one group" that the loop no longer had. A pin named
+# `..._are_still_only_these` cannot bound what it claims to bound unless the
+# class is finite. Bounding is what makes an accurate disclosure possible; the
+# false-positive count is a consequence, not the argument.
+#
+# WHY THREE, AND WHAT IT COSTS. Three is NOT free relative to two, and an
+# earlier revision of this comment implied it was. Measured against a corpus
+# with even coverage from 9 to 13 colon groups (the first corpus had a gap at
+# exactly 11, which made two and three look tied):
+#
+#   cap 2 -> 4 of 10 leak shapes missed, 10 of 22 false positives
+#   cap 3 -> 3 of 10 leak shapes missed, 13 of 22 false positives
+#
+# So three buys ONE further leak shape (a literal with three trailing numeric
+# groups, which no producer in this gate's threat model — netstat, log lines,
+# inventory exports, CKL/HDF, URLs — has ever been shown to emit) and costs
+# THREE further false-positive families, all of them 11-group records: EUI-64
+# with three trailing numeric fields, a certificate fingerprint with the same,
+# and an 11-field numeric counter record. It is a deliberate trade in favour of
+# the leak direction, not a dominant choice: a missed lab address is an
+# incident under CLAUDE.md, a false positive is a visibly red gate. Three also
+# keeps closed the three-group shape PR #138's round-1 reviewer independently
+# verified as closed.
+#
+# DOWNWARD, one is where the retry already was, and one is exactly what #131
+# was filed about, so the bound cannot be lower than two; two is rejected above
+# on the leak direction.
+#
+# What is deliberately NOT bounded is any group's WIDTH — a 30-digit trailing
+# group still resolves. Issue #119's lesson was against arbitrary width bounds
+# (digit counts), and it is untouched here; a group-COUNT bound is a different
+# axis, and it is the axis that makes the residual class finite.
+#
+# The residual this creates is disclosed and pinned, not silent:
+# MultiGroupPortRetryTests.test_four_trailing_all_digit_groups_are_a_
+# disclosed_residual, and the false-positive side is enumerated in
+# FalsePositiveCorpusTests.
+_MAX_SWALLOWED_GROUPS = 3
+
+
 def _parse_ipv6(text: str) -> ipaddress.IPv6Address | None:
 	"""Strict parse, or None. `ipaddress` is the arbiter; this just softens it."""
 	try:
@@ -627,22 +679,64 @@ def _ipv6_address_of(candidate: str) -> ipaddress.IPv6Address | None:
 	strict parsing fails, and the failure used to read as "not an address, so
 	allowed" — a lab address in the shape a log line, a netstat, or an
 	inventory export writes it walked the gate, exit 0. So a candidate that
-	does not parse is retried ONCE with a trailing all-digit group removed,
-	and only then declared a non-address.
+	does not parse is retried with a trailing all-digit group removed, and
+	only then declared a non-address.
 
-	The retry cannot manufacture an address out of a non-address: it hands
-	the shortened text to the same strict parser, so what comes back is a
-	real literal or nothing. The port's digit count is deliberately NOT
-	bounded — the "is this an address" question is answered by the parse, and
-	issue #119 is exactly what a second, arbitrary width bound costs.
+	The retry is a LOOP, not a single attempt (issue #131). One retry closes
+	one trailing numeric group; a candidate carrying TWO of them (a
+	zero-padded fully-expanded literal followed by a bare port, e.g.
+	`...:0007:443:8443`, or the same literal with an all-zero group ahead of
+	the port, `...:0007:0:443`) still failed strict parsing after a single
+	retry and read as "not an address, so allowed" — the same escape PR #115
+	round 2 closed for the one-group case, one group further out.
+
+	The loop is BOUNDED, at `_MAX_SWALLOWED_GROUPS` (three) — see that
+	constant for the argument and the measured cost. In short: unbounded,
+	the disclosed #118 false-positive class becomes unbounded in record
+	length, which is a class no test can enumerate and no disclosure can
+	state truthfully. Three rather than two is a deliberate trade in favour
+	of the leak direction, priced there rather than asserted free.
+
+	The axis that is bounded is the NUMBER of trailing all-digit groups
+	stripped, never how WIDE any one of them is. Each iteration removes
+	exactly one whole group and re-parses; the port's digit count inside a
+	group stays deliberately unbounded, for the same #119 reason as before —
+	an arbitrary width bound is what that issue cost, and bounding the group
+	WIDTH here would be that mistake with a new coat of paint. A 30-digit
+	trailing group still resolves (UnbracketedPortTests pins the widths).
+
+	The retry still cannot manufacture an address out of a non-address: every
+	iteration hands the shortened text to the same strict parser, so what
+	finally comes back is a real literal or nothing
+	(test_the_port_retry_only_ever_returns_what_the_parser_accepts).
+
+	Two residuals, both disclosed and pinned rather than left for the next
+	reviewer to re-discover — they are the loop's two stopping conditions:
+
+	  - a trailing group carrying a non-digit character glued on
+	    (`...:0007:443a`) fails `tail.isdigit()` on its very first iteration,
+	    so the loop never starts stripping it. A materially different shape:
+	    the group is not a port at all, digit or otherwise. Pinned by
+	    MultiGroupPortRetryTests.test_a_glued_letter_on_the_final_group_
+	    remains_undetected.
+	  - FOUR or more trailing all-digit groups (`...:0007:1:2:3:4`) exhaust
+	    the bound. Pinned by MultiGroupPortRetryTests.test_four_trailing_
+	    all_digit_groups_are_a_disclosed_residual.
+
+	Both are in docs/testing.md as well.
 	"""
 	base = candidate.split("%", 1)[0]
 	addr = _parse_ipv6(base)
 	if addr is not None:
 		return addr
-	head, separator, tail = base.rpartition(":")
-	if separator and tail.isdigit():
-		return _parse_ipv6(head)
+	head = base
+	for _attempt in range(_MAX_SWALLOWED_GROUPS):
+		head, separator, tail = head.rpartition(":")
+		if not separator or not tail.isdigit():
+			return None
+		addr = _parse_ipv6(head)
+		if addr is not None:
+			return addr
 	return None
 
 
@@ -660,6 +754,32 @@ def is_allowed_ipv6(candidate: str) -> bool:
 	return any(addr in net for net in ALLOWED_IPV6_NETWORKS)
 
 
+def _strict_ipv6_literal(candidate: str) -> ipaddress.IPv6Address | None:
+	"""Strict parse after stripping a zone id, but WITHOUT the port retry.
+
+	Used only by _widest_address_start() (issue #133). `_ipv6_address_of()`'s
+	contract is deliberately loose — "does this span DENOTE an address,
+	possibly with a port swallowed" — which is exactly right for judging the
+	final candidate scan_text reports. It is the wrong question for
+	re-anchoring: there the candidate spans are competing to BE the address,
+	and a span that only parses by discarding one of its own trailing groups
+	through the port retry is not really the address, it just contains one
+	glued to something else. Calling `_ipv6_address_of()` here let widest-wins
+	pick a span one hostname character too wide whenever the character right
+	before the real address happened to complete a digit group the retry
+	could then drop — `node99:<address>` re-anchored onto `de99:<address>`,
+	naming a token that never appears on the line, because `de99:<the address
+	minus its own last group>` parsed once the retry stripped that last group
+	as if it were a port.
+
+	A zone id is still stripped here, same as `_ipv6_address_of()` — that
+	strip is unconditionally safe (it only ever removes a suffix `ipaddress`
+	was never going to accept anyway) and has nothing to do with the port
+	retry this function exists to keep out of re-anchoring.
+	"""
+	return _parse_ipv6(candidate.split("%", 1)[0])
+
+
 def _widest_address_start(line: str, run_start: int, match_start: int, end: int) -> int:
 	"""Where the address ending at `end` really begins, re-anchored leftward.
 
@@ -673,7 +793,8 @@ def _widest_address_start(line: str, run_start: int, match_start: int, end: int)
 
 	So a mid-run match is re-anchored: of every span that ends at `end` and
 	starts at or before `match_start` but no earlier than the run does, the
-	WIDEST one that still parses as an address wins. The fragment the engine
+	WIDEST one that STRICTLY parses as an address (`_strict_ipv6_literal()`,
+	not `_ipv6_address_of()` — issue #133) wins. The fragment the engine
 	found is only used if no wider span parses.
 
 	Widest-wins is what makes the two cases come out differently:
@@ -689,9 +810,17 @@ def _widest_address_start(line: str, run_start: int, match_start: int, end: int)
 	leave a finding alone, never invent one. That ordering is load-bearing —
 	without it, `word::hexword` scope-resolution syntax would re-anchor into
 	a parseable address (see MidRunMatchTests).
+
+	This is precision, not correctness: judging candidates strictly changes
+	only WHICH SPAN wins widest, never whether the line is flagged.
+	`_is_ipv6_finding()` — which does use the port-retry-enabled
+	`_ipv6_address_of()` — is still what scan_text calls on the final
+	candidate this function returns, so an address that genuinely needs the
+	port retry to be recognised still is; it just cannot win widest by
+	borrowing part of a real address to do it.
 	"""
 	for start in range(run_start, match_start):
-		if _ipv6_address_of(_trim_delimiter_colons(line[start:end])) is not None:
+		if _strict_ipv6_literal(_trim_delimiter_colons(line[start:end])) is not None:
 			return start
 	return match_start
 
