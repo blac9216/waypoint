@@ -89,7 +89,7 @@ public sealed class AbortedRunNeverResumesTests : IAsyncLifetime
 	private async Task<Guid> InsertJobAsync(Guid runId, string state, string? worker)
 	{
 		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
-		await using NpgsqlCommand q = new("INSERT INTO jobs (run_id, job_type, priority, state, claimed_by, claimed_at, lease_expires_at, heartbeat_at, attempt_count, max_attempts) VALUES ($1, 'download', 1, $2, $3, CASE WHEN $3 IS NULL THEN NULL ELSE now() END, CASE WHEN $3 IS NULL THEN NULL ELSE now() - interval '1 second' END, CASE WHEN $3 IS NULL THEN NULL ELSE now() - interval '2 seconds' END, CASE WHEN $3 IS NULL THEN 0 ELSE 1 END, 3) RETURNING id", c);
+		await using NpgsqlCommand q = new("INSERT INTO jobs (run_id, job_type, priority, state, claimed_by, claimed_at, lease_expires_at, heartbeat_at, attempt_count, max_attempts) VALUES ($1, 'download', 1, $2, $3::text, CASE WHEN $3::text IS NULL THEN NULL ELSE now() END, CASE WHEN $3::text IS NULL THEN NULL ELSE now() - interval '1 second' END, CASE WHEN $3::text IS NULL THEN NULL ELSE now() - interval '2 seconds' END, CASE WHEN $3::text IS NULL THEN 0 ELSE 1 END, 3) RETURNING id", c);
 		q.Parameters.AddWithValue(runId); q.Parameters.AddWithValue(state); q.Parameters.AddWithValue((object?)worker ?? DBNull.Value); return (Guid)(await q.ExecuteScalarAsync())!;
 	}
 
