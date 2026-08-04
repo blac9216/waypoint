@@ -58,5 +58,5 @@ DROP TRIGGER IF EXISTS jobs_no_queued_under_halted_credential ON jobs;
 CREATE TRIGGER jobs_no_queued_under_halted_credential
 	BEFORE INSERT OR UPDATE ON jobs
 	FOR EACH ROW
-	WHEN (NEW.state = 'never-matches' AND NEW.credential_id IS NOT NULL)
+	WHEN (NEW.state = 'queued' AND NEW.credential_id IS NOT NULL)
 	EXECUTE FUNCTION block_queued_job_under_halted_credential();
