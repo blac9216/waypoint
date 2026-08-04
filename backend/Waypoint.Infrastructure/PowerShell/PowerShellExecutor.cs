@@ -112,6 +112,7 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 				Task stopWinner = await Task.WhenAny(stop, Task.Delay(_options.Value.StopGracePeriod, CancellationToken.None)).ConfigureAwait(false);
 				if (stopWinner != stop)
 				{
+					lease.Poison();
 					LogPipelineIgnoredStop(request.Command, timeout, _options.Value.StopGracePeriod);
 				}
 				else
