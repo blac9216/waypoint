@@ -59,8 +59,11 @@ public static class ServiceCollectionExtensions
 
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
-		// Placeholder scrubber (issue #6 supplies the real one) — see ISecretRedactor.
-		services.AddSingleton<ISecretRedactor, NoOpSecretRedactor>();
+		// One scrubber instance serves both sides of security.md control 1: sinks read
+		// through ISecretRedactor, decrypting code registers through ISecretTracker.
+		services.AddSingleton<InPlaySecretRedactor>();
+		services.AddSingleton<ISecretRedactor>(serviceProvider => serviceProvider.GetRequiredService<InPlaySecretRedactor>());
+		services.AddSingleton<ISecretTracker>(serviceProvider => serviceProvider.GetRequiredService<InPlaySecretRedactor>());
 
 		services.AddSingleton<JobHandlerRegistry>();
 
@@ -81,8 +84,17 @@ public static class ServiceCollectionExtensions
 				return new JobEventPublisher(
 					connectionString,
 					options.EventCommandTimeoutSeconds,
+					serviceProvider.GetRequiredService<ISecretRedactor>(),
 					serviceProvider.GetRequiredService<ILogger<JobEventPublisher>>());
 			});
+
+			services.AddSingleton<BufferedJobEventWriter>(serviceProvider => new BufferedJobEventWriter(
+				connectionString,
+				serviceProvider.GetRequiredService<ISecretRedactor>(),
+				serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
+				serviceProvider.GetRequiredService<ILogger<BufferedJobEventWriter>>()));
+			services.AddSingleton<IJobLogBuffer>(serviceProvider => serviceProvider.GetRequiredService<BufferedJobEventWriter>());
+			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<BufferedJobEventWriter>());
 
 			services.AddSingleton<JobDispatcherHostedService>();
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());

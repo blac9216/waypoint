@@ -16,6 +16,7 @@ using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Tests.Support;
 using Xunit;
@@ -56,7 +57,7 @@ public sealed class JobEventPublisherDiagnosticTests
 	public async Task AnEmitAgainstAClosedPort_SaysItCouldNotReachPostgres()
 	{
 		CapturingLogger<JobEventPublisher> logger = new();
-		JobEventPublisher publisher = new(RefusedConnectionString, commandTimeoutSeconds: 5, logger);
+		JobEventPublisher publisher = new(RefusedConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), logger);
 
 		await publisher.EmitAsync(JobEventTypes.SystemNotice, null, null, "{}", CancellationToken.None);
 
@@ -90,7 +91,7 @@ public sealed class JobEventPublisherDiagnosticTests
 			CapturingLogger<JobEventPublisher> logger = new();
 			JobEventPublisher publisher = new(
 				$"Host=127.0.0.1;Port={port};Database=waypoint_test;Username=waypoint_test;Password=waypoint_test;Timeout=2",
-				commandTimeoutSeconds: 5,
+				commandTimeoutSeconds: 5, new InPlaySecretRedactor(),
 				logger);
 
 			await publisher.EmitAsync(JobEventTypes.SystemNotice, null, null, "{}", CancellationToken.None);
@@ -112,7 +113,7 @@ public sealed class JobEventPublisherDiagnosticTests
 	[Fact]
 	public async Task AnEmitAgainstAnUnreachableServer_DoesNotThrowAtTheCaller()
 	{
-		JobEventPublisher publisher = new(RefusedConnectionString, commandTimeoutSeconds: 5, new CapturingLogger<JobEventPublisher>());
+		JobEventPublisher publisher = new(RefusedConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), new CapturingLogger<JobEventPublisher>());
 
 		Exception? escaped = await Record.ExceptionAsync(
 			() => publisher.EmitAsync(JobEventTypes.JobLog, Guid.NewGuid(), null, "{}", CancellationToken.None));
@@ -136,7 +137,7 @@ public sealed class JobEventPublisherDiagnosticTests
 	public async Task AnEmitCancelledWhileConnecting_RethrowsRatherThanReportingAnUnreachableServer()
 	{
 		CapturingLogger<JobEventPublisher> logger = new();
-		JobEventPublisher publisher = new(RefusedConnectionString, commandTimeoutSeconds: 5, logger);
+		JobEventPublisher publisher = new(RefusedConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), logger);
 		using CancellationTokenSource cts = new();
 		await cts.CancelAsync();
 

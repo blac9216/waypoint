@@ -158,6 +158,30 @@ They share one container per test run via an xUnit collection fixture
 (`PostgresFixture`), isolated per `docs/testing.md`'s recipe (a container name and
 host port unique to the run).
 
+### The job_events write budget (issue #117)
+
+`trg_job_events_assign_seq` serializes every `job_events` INSERT behind one advisory
+lock -- that is what makes `Last-Event-ID` replay safe, and it caps row-at-a-time
+writes at ~900 events/s no matter how many writers (measured in #117). The budget,
+decided in epic #6 slice 1:
+
+- **Volume writers use `IJobLogBuffer`** (`BufferedJobEventWriter`): batches of at
+  most `JobEngine:EventBatchMaxSize` (100) rows per multi-row INSERT, flushed every
+  `JobEngine:EventFlushInterval` (250 ms), so one lock acquisition amortizes across
+  the batch. Delivery is best-effort with a bounded buffer
+  (`JobEngine:EventBufferCapacity`, 10,000): a full buffer or failed flush drops
+  events, counted and logged -- `job_events` is observability, never job/run state.
+- **State-transition emits use `IJobEventPublisher`**: one row, durable now.
+- **Nothing follows an emit inside its transaction.** Both writers emit in their own
+  autocommit statement; holding the ordering lock across other work is the anti-
+  pattern the schema doc comments warn against.
+- Every event INSERT carries `JobEngine:EventCommandTimeoutSeconds` (5 s), not
+  Npgsql's inherited 30 s, and the timeout log line names lock contention as the
+  likeliest cause.
+
+Both paths scrub payloads through `ISecretRedactor` (`InPlaySecretRedactor`) before
+the row is written -- `docs/security.md` control 1 at the Postgres sink.
+
 ## Docker
 
 ```bash

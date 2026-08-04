@@ -75,6 +75,30 @@ public sealed class JobEngineOptions
 	/// </summary>
 	public int EventCommandTimeoutSeconds { get; set; } = 5;
 
+	/// <summary>
+	/// Maximum <c>job_events</c> rows per batched INSERT on the <see cref="IJobLogBuffer"/>
+	/// path -- the #117 budget's batch half. 100 amortizes the ordering lock two orders
+	/// of magnitude versus row-at-a-time while keeping each statement far inside
+	/// <see cref="EventCommandTimeoutSeconds"/> (a 100-row INSERT is low-single-digit
+	/// milliseconds at #117's measured per-row cost).
+	/// </summary>
+	public int EventBatchMaxSize { get; set; } = 100;
+
+	/// <summary>
+	/// How often the buffered event writer flushes -- the #117 budget's latency half.
+	/// 250 ms is imperceptible next to SSE delivery and long enough that a chatty
+	/// scriptblock accumulates real batches instead of degenerating to row-at-a-time.
+	/// </summary>
+	public TimeSpan EventFlushInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+
+	/// <summary>
+	/// Bounded in-memory capacity of the event buffer. At the #117 per-batch ceiling
+	/// this is roughly 25 s of maximum-rate backlog before drops begin; beyond it the
+	/// writer drops new events (counted, logged) rather than grow without bound while
+	/// Postgres is unreachable.
+	/// </summary>
+	public int EventBufferCapacity { get; set; } = 10_000;
+
 	public TimeSpan HeartbeatIntervalOrDefault =>
 		HeartbeatInterval ?? TimeSpan.FromTicks(LeaseDuration.Ticks / 3);
 }

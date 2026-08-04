@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Tests.Support;
@@ -68,7 +69,7 @@ public sealed class AbortedRunNeverResumesTests : IAsyncLifetime
 		int calls = 0;
 		FakeJobHandler handler = new("download", (_, _) => { Interlocked.Increment(ref calls); return Task.FromResult(JobExecutionOutcome.Succeeded()); });
 		JobDispatcherHostedService dispatcher = new(_repository,
-			new JobEventPublisher(_fixture.ConnectionString, 5, NullLogger<JobEventPublisher>.Instance),
+			new JobEventPublisher(_fixture.ConnectionString, 5, new InPlaySecretRedactor(), NullLogger<JobEventPublisher>.Instance),
 			new JobHandlerRegistry([handler]), Options.Create(new JobEngineOptions { PollInterval = TimeSpan.FromMilliseconds(25) }),
 			NullLogger<JobDispatcherHostedService>.Instance);
 		await dispatcher.StartAsync(CancellationToken.None);

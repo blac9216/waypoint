@@ -18,6 +18,7 @@ using System.Net.Sockets;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Xunit;
@@ -55,7 +56,7 @@ public sealed class JobEventPublisherTests : IAsyncLifetime
 	[Fact]
 	public async Task EmitAsync_OrdinaryCase_WritesTheRow()
 	{
-		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, NullLogger<JobEventPublisher>.Instance);
+		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), NullLogger<JobEventPublisher>.Instance);
 		Guid jobId = await SeedJobAsync();
 
 		await publisher.EmitAsync(JobEventTypes.JobLog, jobId, null, """{"line":"hello"}""", CancellationToken.None);
@@ -83,7 +84,7 @@ public sealed class JobEventPublisherTests : IAsyncLifetime
 	public async Task EmitAsync_BlockedByLockContention_GivesUpNearItsOwnBudget_NotTheThirtySecondDefault()
 	{
 		const int budgetSeconds = 2;
-		JobEventPublisher publisher = new(_fixture.ConnectionString, budgetSeconds, NullLogger<JobEventPublisher>.Instance);
+		JobEventPublisher publisher = new(_fixture.ConnectionString, budgetSeconds, new InPlaySecretRedactor(), NullLogger<JobEventPublisher>.Instance);
 		Guid jobId = await SeedJobAsync();
 
 		await using NpgsqlConnection lockHolder = new(_fixture.ConnectionString);
@@ -127,7 +128,7 @@ public sealed class JobEventPublisherTests : IAsyncLifetime
 	[Fact]
 	public async Task EmitAsync_AfterLockIsReleased_SucceedsNormally()
 	{
-		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, NullLogger<JobEventPublisher>.Instance);
+		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), NullLogger<JobEventPublisher>.Instance);
 		Guid jobId = await SeedJobAsync();
 
 		await using (NpgsqlConnection lockHolder = new(_fixture.ConnectionString))
@@ -175,7 +176,7 @@ public sealed class JobEventPublisherTests : IAsyncLifetime
 	[Fact]
 	public async Task EmitAsync_WhileTheCallerHoldsAnOpenTransaction_CompletesAndSurvivesTheCallersRollback()
 	{
-		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, NullLogger<JobEventPublisher>.Instance);
+		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), NullLogger<JobEventPublisher>.Instance);
 		Guid jobId = await SeedJobAsync();
 		string marker = $"own-connection-{Guid.NewGuid():N}";
 
@@ -274,7 +275,7 @@ public sealed class JobEventPublisherTests : IAsyncLifetime
 	[Fact]
 	public async Task EmitAsync_WithAnAlreadyCancelledToken_Rethrows()
 	{
-		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, NullLogger<JobEventPublisher>.Instance);
+		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), NullLogger<JobEventPublisher>.Instance);
 		using CancellationTokenSource cts = new();
 		await cts.CancelAsync();
 

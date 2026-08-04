@@ -59,9 +59,9 @@ try
 	builder.Host.UseSerilog(preserveStaticLogger: true, configureLogger: (context, services, loggerConfiguration) =>
 	{
 		// The seam from docs/security.md control 1: every rendered log line passes
-		// through ISecretRedactor before reaching the console sink. Today that's
-		// NoOpSecretRedactor (see Waypoint.Infrastructure DI wiring); issue #6 swaps
-		// in the real scrubber with no change to this pipeline.
+		// through ISecretRedactor before reaching the console sink. The registered
+		// implementation is InPlaySecretRedactor (epic #6 slice 1) -- it scrubs
+		// whatever secret values are currently Track()ed as in play.
 		ISecretRedactor redactor = services.GetRequiredService<ISecretRedactor>();
 
 		loggerConfiguration

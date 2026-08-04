@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Tests.Support;
@@ -101,7 +102,7 @@ public sealed class JobEngineLoggingTests : IAsyncLifetime
 	public async Task AFailedEmit_IsLoggedAtErrorAndDoesNotThrow()
 	{
 		CapturingLogger<JobEventPublisher> logger = new();
-		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, logger);
+		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), logger);
 		Guid jobId = await SeedQueuedJobAsync();
 
 		await publisher.EmitAsync(JobEventTypes.JobLog, jobId, null, "this is not json", CancellationToken.None);
@@ -117,7 +118,7 @@ public sealed class JobEngineLoggingTests : IAsyncLifetime
 	public async Task ASuccessfulEmit_LogsNothing()
 	{
 		CapturingLogger<JobEventPublisher> logger = new();
-		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, logger);
+		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), logger);
 		Guid jobId = await SeedQueuedJobAsync();
 
 		await publisher.EmitAsync(JobEventTypes.JobLog, jobId, null, """{"line":"hello"}""", CancellationToken.None);
@@ -162,7 +163,7 @@ public sealed class JobEngineLoggingTests : IAsyncLifetime
 	public async Task AnEmitBlockedOnTheOrderingLock_TimesOutOnBudgetAndNamesTheContention()
 	{
 		CapturingLogger<JobEventPublisher> logger = new();
-		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 1, logger);
+		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 1, new InPlaySecretRedactor(), logger);
 		Guid jobId = await SeedQueuedJobAsync();
 
 		await using NpgsqlConnection blocker = new(_fixture.ConnectionString);
@@ -205,7 +206,7 @@ public sealed class JobEngineLoggingTests : IAsyncLifetime
 	public async Task WithTheOrderingLockFree_TheSameEmitSucceeds()
 	{
 		CapturingLogger<JobEventPublisher> logger = new();
-		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 1, logger);
+		JobEventPublisher publisher = new(_fixture.ConnectionString, commandTimeoutSeconds: 1, new InPlaySecretRedactor(), logger);
 		Guid jobId = await SeedQueuedJobAsync();
 
 		await publisher.EmitAsync(JobEventTypes.JobLog, jobId, null, "{}", CancellationToken.None);

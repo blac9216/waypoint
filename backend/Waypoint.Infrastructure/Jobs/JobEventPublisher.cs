@@ -15,6 +15,7 @@
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Logging;
 
 namespace Waypoint.Infrastructure.Jobs;
 
@@ -40,16 +41,19 @@ public sealed partial class JobEventPublisher : IJobEventPublisher
 {
 	private readonly string _connectionString;
 	private readonly int _commandTimeoutSeconds;
+	private readonly ISecretRedactor _redactor;
 	private readonly ILogger<JobEventPublisher> _logger;
 
-	public JobEventPublisher(string connectionString, int commandTimeoutSeconds, ILogger<JobEventPublisher> logger)
+	public JobEventPublisher(string connectionString, int commandTimeoutSeconds, ISecretRedactor redactor, ILogger<JobEventPublisher> logger)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 		ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(commandTimeoutSeconds, 0);
+		ArgumentNullException.ThrowIfNull(redactor);
 		ArgumentNullException.ThrowIfNull(logger);
 
 		_connectionString = connectionString;
 		_commandTimeoutSeconds = commandTimeoutSeconds;
+		_redactor = redactor;
 		_logger = logger;
 	}
 
@@ -107,7 +111,11 @@ public sealed partial class JobEventPublisher : IJobEventPublisher
 			command.Parameters.AddWithValue((object?)runId ?? DBNull.Value);
 			command.Parameters.AddWithValue((object?)jobId ?? DBNull.Value);
 			command.Parameters.AddWithValue(eventType);
-			command.Parameters.AddWithValue(string.IsNullOrWhiteSpace(payloadJson) ? "{}" : payloadJson);
+			// security.md control 1 at the Postgres sink: the payload is scrubbed of
+			// in-play secret values on this path exactly as BufferedJobEventWriter
+			// scrubs the batched path (there at enqueue, here at emit -- this method IS
+			// the emit).
+			command.Parameters.AddWithValue(string.IsNullOrWhiteSpace(payloadJson) ? "{}" : _redactor.Redact(payloadJson));
 
 			await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
