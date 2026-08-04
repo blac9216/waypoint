@@ -394,6 +394,18 @@ _GUARD_CONTAINER_OPS = frozenset(
 	}
 )
 
+# Atomic groups were added to Python's stdlib ``re`` parser in 3.11. This
+# suite deliberately supports the repository's generic ``python3`` command,
+# including 3.10, so a structural probe must cover only node kinds that the
+# running parser can actually construct. On a runtime that supports atomic
+# groups the entry remains in the shared descent set and the constructive rail
+# below exercises it; on an older runtime it cannot be a skipped parse-tree
+# node in the first place.
+try:
+	re.compile(r"(?>x)")
+except re.error:
+	_GUARD_CONTAINER_OPS -= frozenset({"ATOMIC_GROUP"})
+
 
 def _guard_sub_sequences(name: str, argument) -> tuple:
 	"""Every sub-sequence a container parse-tree node holds.
@@ -1451,8 +1463,9 @@ class GuardCharacterDelimiterTests(unittest.TestCase):
 		"BRANCH": "{c}y|zx",
 		"MAX_REPEAT": "{c}+",
 		"MIN_REPEAT": "{c}+?",
-		"ATOMIC_GROUP": "(?>{c})",
 	}
+	if "ATOMIC_GROUP" in _GUARD_CONTAINER_OPS:
+		CONTAINER_PROBE_BODIES["ATOMIC_GROUP"] = "(?>{c})"
 
 	def test_the_extractor_descends_every_container_kind_it_names(self) -> None:
 		"""Every container kind is descended into — checked by running it.
