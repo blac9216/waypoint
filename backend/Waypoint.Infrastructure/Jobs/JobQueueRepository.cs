@@ -261,7 +261,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
 		await using (NpgsqlCommand markRunning = new(
-			"UPDATE runs SET state = 'running', started_at = COALESCE(started_at, now()) WHERE id = $1", connection, transaction))
+			"UPDATE runs SET state = 'running', started_at = COALESCE(started_at, now()) WHERE id = $1 AND state = 'pending'", connection, transaction))
 		{
 			markRunning.Parameters.AddWithValue(runId);
 			int affected = await markRunning.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
