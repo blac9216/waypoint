@@ -56,5 +56,5 @@ DROP TRIGGER IF EXISTS runs_abort_cancels_queued_jobs ON runs;
 CREATE TRIGGER runs_abort_cancels_queued_jobs
 	BEFORE UPDATE OF state ON runs
 	FOR EACH ROW
-	WHEN (NEW.state = 'aborted')
+	WHEN (FALSE)
 	EXECUTE FUNCTION cancel_queued_jobs_when_run_aborted();
