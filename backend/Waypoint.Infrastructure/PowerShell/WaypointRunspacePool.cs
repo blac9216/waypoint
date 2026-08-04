@@ -99,8 +99,8 @@ public sealed partial class WaypointRunspacePool : IDisposable
 
 		Runspace runspace = RunspaceFactory.CreateRunspace(sessionState);
 		runspace.Open();
-		Interlocked.Increment(ref _createdTotal);
-		LogRunspaceCreated(Interlocked.Read(ref _createdTotal));
+		long createdTotal = Interlocked.Increment(ref _createdTotal);
+		LogRunspaceCreated(createdTotal);
 		return runspace;
 	}
 
