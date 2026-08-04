@@ -175,9 +175,75 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		return result is not null;
 	}
 
+	internal const string RecoverSql = """
+		WITH recoverable AS (
+			SELECT id FROM jobs
+			WHERE state = 'running' AND lease_expires_at < now()
+			ORDER BY lease_expires_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $1
+		), classified AS (
+			SELECT j.id, COALESCE(r.state = 'aborted', false) AS run_aborted
+			FROM jobs j JOIN recoverable q ON q.id = j.id LEFT JOIN runs r ON r.id = j.run_id
+		)
+		UPDATE jobs j SET
+			state = CASE WHEN c.run_aborted THEN 'cancelled' WHEN j.attempt_count < j.max_attempts THEN 'queued' ELSE 'failed' END,
+			claimed_by = CASE WHEN NOT c.run_aborted AND j.attempt_count >= j.max_attempts THEN j.claimed_by ELSE NULL END,
+			claimed_at = CASE WHEN NOT c.run_aborted AND j.attempt_count >= j.max_attempts THEN j.claimed_at ELSE NULL END,
+			lease_expires_at = NULL, heartbeat_at = NULL,
+			finished_at = CASE WHEN NOT c.run_aborted AND j.attempt_count < j.max_attempts THEN NULL ELSE now() END,
+			note = CASE WHEN c.run_aborted THEN 'Cancelled: run aborted'
+				WHEN j.attempt_count < j.max_attempts THEN 'Lease expired; requeued for retry (attempt ' || j.attempt_count || ' of ' || j.max_attempts || ')'
+				ELSE 'Lease expired; max attempts (' || j.max_attempts || ') exhausted' END
+		FROM classified c WHERE j.id = c.id
+		RETURNING j.id, j.run_id, j.state, j.attempt_count, j.max_attempts
+		""";
+
+	public async Task<IReadOnlyList<RecoveredJob>> RecoverExpiredLeasesAsync(int batchSize, CancellationToken cancellationToken)
+	{
+		if (batchSize <= 0)
+		{
+			throw new ArgumentOutOfRangeException(nameof(batchSize), batchSize, "Batch size must be positive.");
+		}
+
+		if (!JobStateMachine.CanEngineTransition(JobShape.Simple, JobStates.Running, JobStates.Queued))
+		{
+			throw new InvalidOperationException("The engine transition gate rejects lease recovery.");
+		}
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(RecoverSql, connection);
+		command.Parameters.AddWithValue(batchSize);
+		List<RecoveredJob> recovered = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			RecoveredJob job = new(reader.GetGuid(0), reader.IsDBNull(1) ? null : reader.GetGuid(1), reader.GetString(2), reader.GetInt32(3), reader.GetInt32(4));
+			recovered.Add(job); LogRecoveredJob(job.Id, job.NewState, job.AttemptCount, job.MaxAttempts);
+		}
+		return recovered;
+	}
+
+	public async Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new("SELECT state, paused, blocked, blocked_reason FROM runs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(runId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+			? new RunQueueState(reader.GetString(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.IsDBNull(3) ? null : reader.GetString(3)) : null;
+	}
+
 	public async Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
+
+		if (!JobStateMachine.CanEngineTransition(JobShape.Simple, JobStates.Running, JobStates.Queued))
+		{
+			throw new InvalidOperationException("The engine transition gate rejects claim release.");
+		}
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -199,6 +265,9 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 		return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
 	}
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Recovered job {JobId} to {NewState} after expired lease (attempt {AttemptCount}/{MaxAttempts})")]
+	private partial void LogRecoveredJob(Guid jobId, string newState, int attemptCount, int maxAttempts);
 
 	[LoggerMessage(Level = LogLevel.Debug, Message = "Claimed job {JobId} for worker {WorkerId} with a {LeaseDuration} lease")]
 	private partial void LogJobClaimed(Guid jobId, string workerId, TimeSpan leaseDuration);

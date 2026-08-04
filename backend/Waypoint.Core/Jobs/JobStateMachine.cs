@@ -18,21 +18,11 @@ namespace Waypoint.Core.Jobs;
 /// The <c>jobs.state</c> transition graph from <c>docs/api-contract.md</c> "State
 /// machines", as an explicit, testable table rather than scattered <c>if</c> checks
 /// through the dispatcher. Two shapes share the table (see <see cref="JobShape"/>);
-/// <see cref="Waypoint.Core.Jobs.JobStates.Blocked"/> and
-/// <see cref="Waypoint.Core.Jobs.JobStates.Cancelled"/> are reachable from every active
-/// state regardless of shape (the auth-failure halt and run-abort are shape-agnostic
-/// engine operations, not pipeline stages).
-///
-/// This table is the pipeline vocabulary only; it does not talk to Postgres and, as of
-/// this slice, nothing consults it before writing. An earlier revision of this comment
-/// said "a transition it rejects never reaches a SQL statement" -- true only while there
-/// were no writers at all, and #128's <see cref="Waypoint.Core.Jobs.IJobQueueRepository.ReleaseClaimAsync"/>
-/// makes it false: releasing an unexecuted claim writes <c>running</c> -&gt;
-/// <c>queued</c>, which <see cref="CanTransition"/> rejects in both shapes because
-/// requeueing is an engine operation rather than a pipeline stage. That write is
-/// correct; the sentence was not. Separating engine transitions from pipeline ones is
-/// designed on #135 and owned by #129 -- it is a recorded plan, not something that ships
-/// here. Until it does, treat this type as a reference table, not an enforced gate.
+/// <see cref="Waypoint.Core.Jobs.JobStates.Cancelled"/> is reachable from every active
+/// pipeline state; <see cref="Waypoint.Core.Jobs.JobStates.Blocked"/> is reachable only
+/// from <c>queued</c>. Engine actors have a distinct graph because recovery and claim
+/// release may requeue <c>running</c> work, while handlers must never do so and bypass
+/// retry accounting.
 /// </summary>
 public static class JobStateMachine
 {
@@ -70,6 +60,12 @@ public static class JobStateMachine
 
 		return table.TryGetValue(fromState, out string[]? allowed) && Array.IndexOf(allowed, toState) >= 0;
 	}
+
+	/// <summary>True when an engine actor may perform the transition.</summary>
+	public static bool CanEngineTransition(JobShape shape, string fromState, string toState) =>
+		CanTransition(shape, fromState, toState)
+		|| (string.Equals(fromState, JobStates.Running, StringComparison.Ordinal)
+			&& string.Equals(toState, JobStates.Queued, StringComparison.Ordinal));
 
 	/// <summary>The states a job of the given shape may still reach from <paramref name="fromState"/>.</summary>
 	public static IReadOnlyList<string> AllowedNextStates(JobShape shape, string fromState)

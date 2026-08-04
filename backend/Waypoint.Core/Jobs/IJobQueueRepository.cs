@@ -23,8 +23,8 @@ namespace Waypoint.Core.Jobs;
 /// <see cref="IJobEventPublisher"/>'s "emit last" contract); the caller emits after a
 /// method here has already returned successfully, on its own connection.
 ///
-/// This slice (#128) carries the claim/lease primitives only. Lease-expiry recovery and
-/// the run-state reads land with the dispatcher (#129); run creation, fan-out,
+/// Claim/lease primitives landed in #128. Lease-expiry recovery and the minimum
+/// run-state reads used by the dispatcher land in #129; run creation, fan-out,
 /// pause/abort and the auth-failure halt land with #130.
 /// </summary>
 public interface IJobQueueRepository
@@ -64,6 +64,12 @@ public interface IJobQueueRepository
 	Task<bool> AdvanceStateAsync(
 		Guid jobId, string workerId, string expectedFromState, string toState, string? note, bool clearLease, CancellationToken cancellationToken);
 
+	/// <summary>Recovers expired running leases, cancelling work under aborted runs.</summary>
+	Task<IReadOnlyList<RecoveredJob>> RecoverExpiredLeasesAsync(int batchSize, CancellationToken cancellationToken);
+
+	/// <summary>The run state and queue flags, or null when it does not exist.</summary>
+	Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken);
+
 	/// <summary>
 	/// Puts a job this process just claimed back into <c>queued</c>, clearing the
 	/// lease/claim fields -- used when a claim turns out to belong to a run that must
@@ -74,3 +80,6 @@ public interface IJobQueueRepository
 	/// </summary>
 	Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken);
 }
+
+/// <summary>Run-level fields needed after a global job claim.</summary>
+public sealed record RunQueueState(string State, bool Paused, bool Blocked, string? BlockedReason);
