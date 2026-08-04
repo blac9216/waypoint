@@ -99,6 +99,21 @@ public sealed class JobEngineOptions
 	/// </summary>
 	public int EventBufferCapacity { get; set; } = 10_000;
 
+	/// <summary>
+	/// How often the shared event-stream tail poller queries for new rows (#7). Matches
+	/// <see cref="EventFlushInterval"/> by default: events become visible in batches at
+	/// that cadence anyway, so polling faster only burns queries.
+	/// </summary>
+	public TimeSpan EventStreamPollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+
+	/// <summary>
+	/// Bound of each stream subscriber's live queue. At the #117 write ceiling this is
+	/// several seconds of the worst-case event rate; a client that falls further behind
+	/// is dropped with a resync hint (#7's documented strategy) rather than growing
+	/// memory or stalling the poller.
+	/// </summary>
+	public int EventStreamSubscriberQueueCapacity { get; set; } = 1_000;
+
 	public TimeSpan HeartbeatIntervalOrDefault =>
 		HeartbeatInterval ?? TimeSpan.FromTicks(LeaseDuration.Ticks / 3);
 }

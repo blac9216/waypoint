@@ -105,6 +105,13 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<PowerShell.WaypointRunspacePool>();
 			services.AddSingleton<IPowerShellExecutor, PowerShell.PowerShellExecutor>();
 
+			services.AddSingleton<JobEventStreamService>(serviceProvider => new JobEventStreamService(
+				connectionString,
+				serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
+				serviceProvider.GetRequiredService<ILogger<JobEventStreamService>>()));
+			services.AddSingleton<IJobEventFeed>(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
+			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
+
 			services.AddSingleton<JobDispatcherHostedService>();
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());
 			services.AddHostedService<LeaseRecoveryHostedService>();
