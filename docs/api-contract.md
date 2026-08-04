@@ -205,6 +205,11 @@ arrive as an event, not a poll.
 - **Download**: `queued → downloading → verifying → verified | failed` (checksum
   mismatch ⇒ `failed`, artifact quarantined).
 
+The job graphs above describe handler-driven pipeline transitions. Engine actors have
+additional recovery/control edges: lease recovery or claim release may move `running →
+queued`, and abort may move active work to `cancelled`. These edges are validated
+separately so a handler cannot requeue itself and bypass retry accounting.
+
 ## Postgres schema sketch
 
 `sites` · `targets` (site_id, kind, connection jsonb, credential_id, discovery_status)

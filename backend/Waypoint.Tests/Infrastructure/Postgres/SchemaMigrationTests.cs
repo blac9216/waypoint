@@ -45,8 +45,8 @@ public sealed class SchemaMigrationTests
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #107 -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 2;
+	/// <summary>Embedded migration count as of issue #129 -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 3;
 
 	private readonly PostgresFixture _fixture;
 
@@ -66,7 +66,7 @@ public sealed class SchemaMigrationTests
 	/// just the runner around it.
 	/// </summary>
 	[Fact]
-	public async Task Migrations_ApplyFreshThenReapplyBothViaRunnerAndRawSql_AreAllIdempotent()
+	public async Task Migrations_ApplyFreshThenReapplyAllViaRunnerAndRawSql_AreAllIdempotent()
 	{
 		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
 
@@ -81,8 +81,8 @@ public sealed class SchemaMigrationTests
 			Assert.True(await TableExistsAsync(connection, table), $"Expected table '{table}' to exist after a fresh migration.");
 		}
 
-		// Two embedded migrations as of issue #107 (0001 initial schema, 0002 the
-		// jobs_running_requires_lease_check CHECK) -- ExpectedMigrationCount below is
+		// Three embedded migrations through issue #129: initial schema, running-lease CHECK,
+		// and the aborted-run queued-job invariant -- ExpectedMigrationCount below is
 		// the single place this test's own count assertions read from.
 		Assert.Equal(ExpectedMigrationCount, await CountAsync(connection, "SELECT count(*) FROM schema_migrations"));
 		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM appliance_state"));

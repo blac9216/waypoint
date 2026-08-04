@@ -62,6 +62,8 @@ public static class ServiceCollectionExtensions
 		// Placeholder scrubber (issue #6 supplies the real one) — see ISecretRedactor.
 		services.AddSingleton<ISecretRedactor, NoOpSecretRedactor>();
 
+		services.AddSingleton<JobHandlerRegistry>();
+
 		string? connectionString = configuration.GetConnectionString(ConnectionStringName);
 		if (!string.IsNullOrWhiteSpace(connectionString))
 		{
@@ -81,6 +83,10 @@ public static class ServiceCollectionExtensions
 					options.EventCommandTimeoutSeconds,
 					serviceProvider.GetRequiredService<ILogger<JobEventPublisher>>());
 			});
+
+			services.AddSingleton<JobDispatcherHostedService>();
+			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());
+			services.AddHostedService<LeaseRecoveryHostedService>();
 		}
 
 		return services;

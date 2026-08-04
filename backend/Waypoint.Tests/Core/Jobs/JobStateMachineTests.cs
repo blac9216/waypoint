@@ -75,6 +75,24 @@ public sealed class JobStateMachineTests
 		Assert.Empty(JobStateMachine.AllowedNextStates(shape, terminalState));
 	}
 
+	[Theory]
+	[InlineData(JobShape.Standard)]
+	[InlineData(JobShape.Simple)]
+	public void EngineMayRequeueRunningJobs_ButHandlersMayNot(JobShape shape)
+	{
+		Assert.True(JobStateMachine.CanEngineTransition(shape, JobStates.Running, JobStates.Queued));
+		Assert.False(JobStateMachine.CanTransition(shape, JobStates.Running, JobStates.Queued));
+	}
+
+	[Theory]
+	[InlineData(JobShape.Standard, JobStates.Running, JobStates.Cancelled)]
+	[InlineData(JobShape.Simple, JobStates.Running, JobStates.Failed)]
+	[InlineData(JobShape.Standard, JobStates.Queued, JobStates.Blocked)]
+	public void EngineAlsoRetainsPipelineTransitions(JobShape shape, string from, string to)
+	{
+		Assert.True(JobStateMachine.CanEngineTransition(shape, from, to));
+	}
+
 	[Fact]
 	public void JobShapes_OnlyScanIsStandard()
 	{
