@@ -73,83 +73,161 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 
 		TimeSpan timeout = request.Timeout ?? _options.Value.DefaultInvocationTimeout;
 		using WaypointRunspacePool.RunspaceLease lease = await _pool.RentAsync(cancellationToken).ConfigureAwait(false);
-		using global::System.Management.Automation.PowerShell powershell = global::System.Management.Automation.PowerShell.Create();
-		powershell.Runspace = lease.Runspace;
 
-		if (request.Kind == PowerShellRequestKind.Script)
-		{
-			powershell.AddScript(request.Command);
-		}
-		else
-		{
-			powershell.AddCommand(request.Command);
-		}
-
-		foreach ((string name, object? value) in request.Parameters ?? new Dictionary<string, object?>())
-		{
-			powershell.AddParameter(name, value);
-		}
-
-		WireStreamCapture(powershell, request);
-
-		bool timedOut = false;
-		string? failureReason = null;
-		PSDataCollection<PSObject> output = [];
-
+		// NOT `using`: disposing a PowerShell whose pipeline ignored Stop() blocks the
+		// caller for the life of the hang (PR #157 round 1 measured 13.6s of a 15s hang
+		// spent inside Dispose). A poisoned invocation abandons the object to the same
+		// background-disposal fate as its runspace; the finally below disposes inline
+		// only when the pipeline ended cooperatively.
+		bool abandonPowerShell = false;
+		global::System.Management.Automation.PowerShell powershell = global::System.Management.Automation.PowerShell.Create();
 		try
 		{
-			Task invocation = powershell.InvokeAsync<PSObject, PSObject>(input: null, output);
-			Task winner = await Task.WhenAny(invocation, Task.Delay(timeout, cancellationToken)).ConfigureAwait(false);
-			if (winner != invocation)
-			{
-				cancellationToken.ThrowIfCancellationRequested();
-				timedOut = true;
-				failureReason = string.Format(CultureInfo.InvariantCulture, "Invocation exceeded its {0} timeout and was stopped.", timeout);
+			powershell.Runspace = lease.Runspace;
 
-				// StopAsync itself can hang on the same wedged pipeline, so it gets its
-				// own grace budget; a pipeline that outlives it forfeits the runspace.
-				Task stop = powershell.StopAsync(callback: null, state: null);
-				Task stopWinner = await Task.WhenAny(stop, Task.Delay(_options.Value.StopGracePeriod, CancellationToken.None)).ConfigureAwait(false);
-				if (stopWinner != stop)
-				{
-					lease.Poison();
-					LogPipelineIgnoredStop(request.Command, timeout, _options.Value.StopGracePeriod);
-				}
-				else
-				{
-					// Stop succeeded; observe the (expected) PipelineStoppedException so
-					// the invocation task is not left unobserved.
-					await invocation.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
-				}
+			if (request.Kind == PowerShellRequestKind.Script)
+			{
+				powershell.AddScript(request.Command);
 			}
 			else
 			{
-				await invocation.ConfigureAwait(false);
+				powershell.AddCommand(request.Command);
+			}
+
+			foreach ((string name, object? value) in request.Parameters ?? new Dictionary<string, object?>())
+			{
+				powershell.AddParameter(name, value);
+			}
+
+			WireStreamCapture(powershell, request);
+			ResetNativeExitCode(lease);
+
+			bool timedOut = false;
+			string? failureReason = null;
+			PSDataCollection<PSObject> output = [];
+
+			try
+			{
+				Task invocation = powershell.InvokeAsync<PSObject, PSObject>(input: null, output);
+				Task winner = await Task.WhenAny(invocation, Task.Delay(timeout, cancellationToken)).ConfigureAwait(false);
+				if (winner != invocation)
+				{
+					if (cancellationToken.IsCancellationRequested)
+					{
+						// Cancellation gets the same containment as a timeout (round-1
+						// finding 2): stop with a grace budget, poison-and-abandon a
+						// pipeline that ignores it, THEN propagate the cancellation --
+						// never dispose a wedged pipeline on the caller path.
+						abandonPowerShell = await StopWithGraceAsync(powershell, lease, invocation, request.Command, timeout).ConfigureAwait(false);
+						cancellationToken.ThrowIfCancellationRequested();
+					}
+
+					timedOut = true;
+					failureReason = string.Format(CultureInfo.InvariantCulture, "Invocation exceeded its {0} timeout and was stopped.", timeout);
+					abandonPowerShell = await StopWithGraceAsync(powershell, lease, invocation, request.Command, timeout).ConfigureAwait(false);
+				}
+				else
+				{
+					await invocation.ConfigureAwait(false);
+				}
+			}
+			catch (RuntimeException exception)
+			{
+				// A terminating error: the scriptblock threw, or a cmdlet raised a
+				// pipeline-terminating error. The message has already been redacted on its
+				// way into job.log via the error stream; here it feeds the result only.
+				failureReason = exception.ErrorRecord?.ToString() ?? exception.Message;
+			}
+
+			// SessionStateProxy calls wait for pipeline availability -- on an abandoned
+			// (still-running) pipeline that wait IS the hang, so a poisoned invocation
+			// skips the read; its runspace is being replaced anyway.
+			int? nativeExitCode = abandonPowerShell ? null : ReadNativeExitCode(lease);
+			bool succeeded = !timedOut && failureReason is null && nativeExitCode is null or 0;
+			if (succeeded is false && failureReason is null && nativeExitCode is int code)
+			{
+				failureReason = string.Format(CultureInfo.InvariantCulture, "Native command exited with code {0}.", code);
+			}
+
+			LogInvocationFinished(request.Command, succeeded, timedOut, powershell.HadErrors);
+
+			// ReadAll, not enumeration: PSDataCollection's enumerator BLOCKS while the
+			// collection is still open (an abandoned pipeline's is, for the life of the
+			// hang -- round-1 finding 1's second face). ReadAll drains whatever has
+			// arrived without waiting; for a completed pipeline that is everything.
+			return new PowerShellExecutionResult(
+				succeeded,
+				Output: [.. output.ReadAll().Select(Unwrap)],
+				HadErrors: powershell.HadErrors,
+				TimedOut: timedOut,
+				FailureReason: failureReason,
+				NativeExitCode: nativeExitCode);
+		}
+		finally
+		{
+			if (abandonPowerShell)
+			{
+				AbandonPowerShell(powershell);
+			}
+			else
+			{
+				powershell.Dispose();
 			}
 		}
-		catch (RuntimeException exception)
+	}
+
+	/// <summary>
+	/// Stops a pipeline with the configured grace budget. Returns true when the
+	/// pipeline ignored Stop() -- the lease is poisoned and the caller must abandon
+	/// the PowerShell object rather than dispose it inline.
+	/// </summary>
+	private async Task<bool> StopWithGraceAsync(
+		global::System.Management.Automation.PowerShell powershell,
+		WaypointRunspacePool.RunspaceLease lease,
+		Task invocation,
+		string command,
+		TimeSpan timeout)
+	{
+		// StopAsync itself can hang on the same wedged pipeline, so it gets its own
+		// grace budget; a pipeline that outlives it forfeits the runspace.
+		Task stop = powershell.StopAsync(callback: null, state: null);
+		Task stopWinner = await Task.WhenAny(stop, Task.Delay(_options.Value.StopGracePeriod, CancellationToken.None)).ConfigureAwait(false);
+		if (stopWinner != stop)
 		{
-			// A terminating error: the scriptblock threw, or a cmdlet raised a
-			// pipeline-terminating error. The message has already been redacted on its
-			// way into job.log via the error stream; here it feeds the result only.
-			failureReason = exception.ErrorRecord?.ToString() ?? exception.Message;
+			lease.Poison();
+			LogPipelineIgnoredStop(command, timeout, _options.Value.StopGracePeriod);
+			ObserveFaults(stop);
+			ObserveFaults(invocation);
+			return true;
 		}
 
-		int? nativeExitCode = ReadNativeExitCode(lease);
-		bool succeeded = !timedOut && failureReason is null && nativeExitCode is null or 0;
-		if (succeeded is false && failureReason is null && nativeExitCode is int code)
-		{
-			failureReason = string.Format(CultureInfo.InvariantCulture, "Native command exited with code {0}.", code);
-		}
+		// Stop succeeded; observe the (expected) PipelineStoppedException so the
+		// invocation task is not left unobserved.
+		await invocation.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
+		return false;
+	}
 
-		LogInvocationFinished(request.Command, succeeded, timedOut, powershell.HadErrors);
-		return new PowerShellExecutionResult(
-			succeeded,
-			Output: [.. output.Select(Unwrap)],
-			HadErrors: powershell.HadErrors,
-			TimedOut: timedOut,
-			FailureReason: failureReason,
-			NativeExitCode: nativeExitCode);
+	private static void ObserveFaults(Task task)
+	{
+		_ = task.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
+	}
+
+	private static void AbandonPowerShell(global::System.Management.Automation.PowerShell powershell)
+	{
+		// Same rationale as the pool's background runspace discard: Dispose of a
+		// PowerShell whose pipeline ignored Stop() blocks until the pipeline ends,
+		// which may be never -- that wait cannot happen on the caller path.
+		_ = Task.Run(() =>
+		{
+			try
+			{
+				powershell.Dispose();
+			}
+			catch (Exception)
+			{
+				// The object is abandoned either way; there is nothing left to do.
+			}
+		});
 	}
 
 	/// <summary>Forwards each PowerShell stream into <c>job.log</c> as records arrive. Severity names follow the stream names.</summary>
@@ -184,6 +262,25 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 	private static object? Unwrap(PSObject? item)
 	{
 		return item?.BaseObject is PSCustomObject ? item : item?.BaseObject;
+	}
+
+	/// <summary>
+	/// Clears a previous invocation's <c>$LASTEXITCODE</c> before running (round-1
+	/// finding 3): the variable persists on the reused runspace, so without the reset
+	/// a clean module-function call after a failed native command re-reported the
+	/// stale non-zero code as its own failure.
+	/// </summary>
+	private static void ResetNativeExitCode(WaypointRunspacePool.RunspaceLease lease)
+	{
+		try
+		{
+			lease.Runspace.SessionStateProxy.SetVariable("LASTEXITCODE", null);
+		}
+		catch (Exception)
+		{
+			// A broken runspace fails the invocation itself soon after; the reset must
+			// not be the thing that throws.
+		}
 	}
 
 	private static int? ReadNativeExitCode(WaypointRunspacePool.RunspaceLease lease)

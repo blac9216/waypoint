@@ -168,6 +168,73 @@ public sealed class PowerShellExecutorTests : IDisposable
 		Assert.True(_pool.Health.CreatedTotal >= 2);
 	}
 
+	/// <summary>Round-1 finding 1: poisoning must free the CALLER, not just the pool
+	/// slot -- the hung stub sleeps 30s, so returning in a few seconds proves the
+	/// wedged PowerShell was abandoned to background disposal, not awaited.</summary>
+	[Fact]
+	public async Task AHungPipeline_ReturnsWithinTheGraceBudget_NotTheHangDuration()
+	{
+		PowerShellExecutor executor = CreateExecutor(maxRunspaces: 1, stopGrace: TimeSpan.FromMilliseconds(500));
+		System.Diagnostics.Stopwatch stopwatch = System.Diagnostics.Stopwatch.StartNew();
+		PowerShellExecutionResult hung = await executor.ExecuteAsync(
+			new PowerShellRequest(
+				"Invoke-StubHang",
+				Parameters: new Dictionary<string, object?> { ["Seconds"] = 30 },
+				Timeout: TimeSpan.FromSeconds(1)),
+			CancellationToken.None);
+		stopwatch.Stop();
+
+		Assert.True(hung.TimedOut);
+		Assert.True(
+			stopwatch.Elapsed < TimeSpan.FromSeconds(10),
+			$"Timed-out invocation took {stopwatch.Elapsed.TotalSeconds:F1}s to return -- the caller waited on the hung pipeline's disposal.");
+	}
+
+	/// <summary>Round-1 finding 2: cancellation gets the same containment as a timeout --
+	/// stop, grace, poison-and-abandon -- and then propagates; the caller is never
+	/// parked on a Stop()-resistant pipeline, and the pool recovers.</summary>
+	[Fact]
+	public async Task CancellationOfAHungPipeline_PropagatesQuickly_AndPoisons()
+	{
+		PowerShellExecutor executor = CreateExecutor(maxRunspaces: 1, stopGrace: TimeSpan.FromMilliseconds(500));
+		using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(300));
+		System.Diagnostics.Stopwatch stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => executor.ExecuteAsync(
+			new PowerShellRequest("Invoke-StubHang", Parameters: new Dictionary<string, object?> { ["Seconds"] = 30 }),
+			cts.Token));
+		stopwatch.Stop();
+
+		Assert.True(
+			stopwatch.Elapsed < TimeSpan.FromSeconds(10),
+			$"Cancelled invocation took {stopwatch.Elapsed.TotalSeconds:F1}s to propagate.");
+		Assert.Equal(1, _pool.Health.PoisonedTotal);
+
+		PowerShellExecutionResult next = await executor.ExecuteAsync(
+			new PowerShellRequest("Get-StubEcho", Parameters: new Dictionary<string, object?> { ["Value"] = "alive" }),
+			CancellationToken.None);
+		Assert.True(next.Succeeded);
+	}
+
+	/// <summary>Round-1 finding 3: $LASTEXITCODE persists on a reused runspace -- a clean
+	/// module-function call after a failed native command must not inherit its code.</summary>
+	[Fact]
+	public async Task AStaleNativeExitCode_DoesNotFailTheNextInvocation()
+	{
+		PowerShellExecutor executor = CreateExecutor(maxRunspaces: 1);
+		PowerShellExecutionResult native = await executor.ExecuteAsync(
+			new PowerShellRequest("& sh -c 'exit 3'", PowerShellRequestKind.Script), CancellationToken.None);
+		Assert.False(native.Succeeded);
+		Assert.Equal(3, native.NativeExitCode);
+
+		PowerShellExecutionResult clean = await executor.ExecuteAsync(
+			new PowerShellRequest("Get-StubEcho", Parameters: new Dictionary<string, object?> { ["Value"] = "fresh" }),
+			CancellationToken.None);
+		Assert.True(clean.Succeeded);
+		Assert.Null(clean.NativeExitCode);
+		Assert.Null(clean.FailureReason);
+	}
+
 	[Fact]
 	public async Task ConcurrentInvocationsBeyondThePoolSize_AllComplete()
 	{
