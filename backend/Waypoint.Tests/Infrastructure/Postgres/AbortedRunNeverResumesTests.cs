@@ -47,12 +47,11 @@ public sealed class AbortedRunNeverResumesTests : IAsyncLifetime
 	}
 
 	[Fact]
-	public async Task DirectUpdate_CannotQueueAJobUnderAnAbortedRun()
+	public async Task AbortingRun_CancelsAlreadyQueuedJobsWithoutAnotherJobWrite()
 	{
 		Guid runId = await SeedRunAsync("running");
 		Guid jobId = await InsertJobAsync(runId, "queued", null);
 		await ExecuteAsync("UPDATE runs SET state = 'aborted' WHERE id = $1", runId);
-		await ExecuteAsync("UPDATE jobs SET state = 'queued' WHERE id = $1", jobId);
 		Assert.Equal(JobStates.Cancelled, await GetStateAsync(jobId));
 	}
 
@@ -76,6 +75,55 @@ public sealed class AbortedRunNeverResumesTests : IAsyncLifetime
 		await Task.Delay(TimeSpan.FromMilliseconds(500));
 		await dispatcher.StopAsync(CancellationToken.None);
 		Assert.Equal(0, calls);
+		Assert.Equal(JobStates.Cancelled, await GetStateAsync(jobId));
+	}
+
+	[Theory]
+	[InlineData(true)]
+	[InlineData(false)]
+	public async Task ConcurrentAbortAndQueuedInsert_AlwaysEndsCancelled(bool abortStartsFirst)
+	{
+		Guid runId = await SeedRunAsync("running");
+		await using NpgsqlConnection first = new(_fixture.ConnectionString);
+		await using NpgsqlConnection second = new(_fixture.ConnectionString);
+		await first.OpenAsync(); await second.OpenAsync();
+		await using NpgsqlTransaction firstTransaction = await first.BeginTransactionAsync();
+		await using NpgsqlTransaction secondTransaction = await second.BeginTransactionAsync();
+		NpgsqlConnection abortConnection = abortStartsFirst ? first : second;
+		NpgsqlConnection insertConnection = abortStartsFirst ? second : first;
+		NpgsqlTransaction abortTransaction = abortStartsFirst ? firstTransaction : secondTransaction;
+		NpgsqlTransaction insertTransaction = abortStartsFirst ? secondTransaction : firstTransaction;
+
+		await using NpgsqlCommand abort = new("UPDATE runs SET state = 'aborted' WHERE id = $1", abortConnection, abortTransaction);
+		abort.Parameters.AddWithValue(runId);
+		await using NpgsqlCommand insert = new("INSERT INTO jobs (run_id, job_type, priority, state) VALUES ($1, 'download', 1, 'queued') RETURNING id", insertConnection, insertTransaction);
+		insert.Parameters.AddWithValue(runId);
+
+		Task<object?> firstWrite = abortStartsFirst ? abort.ExecuteScalarAsync() : insert.ExecuteScalarAsync();
+		await firstWrite;
+		Task<object?> secondWrite = abortStartsFirst ? insert.ExecuteScalarAsync() : abort.ExecuteScalarAsync();
+		await Task.Delay(50, CancellationToken.None);
+		Assert.False(secondWrite.IsCompleted, "The second writer must serialize on the run row until the first transaction commits.");
+		if (abortStartsFirst)
+		{
+			await abortTransaction.CommitAsync();
+		}
+		else
+		{
+			await insertTransaction.CommitAsync();
+		}
+
+		object? secondResult = await secondWrite;
+		if (abortStartsFirst)
+		{
+			await insertTransaction.CommitAsync();
+		}
+		else
+		{
+			await abortTransaction.CommitAsync();
+		}
+
+		Guid jobId = abortStartsFirst ? (Guid)secondResult! : (Guid)firstWrite.Result!;
 		Assert.Equal(JobStates.Cancelled, await GetStateAsync(jobId));
 	}
 
