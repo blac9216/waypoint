@@ -236,7 +236,7 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		await SeedTerminalAuthFailureAsync(runId, credentialId);
 		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
 			runId,
-			[new JobSpec("download", 0, CredentialId: credentialId), new JobSpec("download", 1, CredentialId: credentialId)],
+			[new JobSpec("download", 1, CredentialId: credentialId), new JobSpec("download", 2, CredentialId: credentialId)],
 			"tester",
 			CancellationToken.None);
 		FakeJobHandler handler = new("download", (_, _) => Task.FromResult(JobExecutionOutcome.AuthFailed("rejected")));

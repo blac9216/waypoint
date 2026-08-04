@@ -75,7 +75,7 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 
 		Assert.Contains(runId, result.BlockedRunIds);
 		Assert.Contains(stillQueuedJobId, result.BlockedJobIds);
-		Assert.Contains(_logger.EntriesAt(LogLevel.Error), entry => entry.Message.Contains("queue halted", StringComparison.Ordinal));
+		Assert.Contains(_logger.EntriesAt(LogLevel.Error), entry => entry.Message.Contains("consecutive auth failures", StringComparison.Ordinal));
 
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
