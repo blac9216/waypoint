@@ -125,7 +125,7 @@ public sealed partial class BufferedJobEventWriter : BackgroundService, IJobLogB
 	/// <summary>Drains everything currently queued in batches of at most <see cref="JobEngineOptions.EventBatchMaxSize"/>.</summary>
 	private async Task FlushQueuedAsync(CancellationToken cancellationToken)
 	{
-		int batchMaxSize = _options.Value.EventBatchMaxSize;
+		int batchMaxSize = 1;
 		List<PendingEvent> batch = new(batchMaxSize);
 
 		while (true)
