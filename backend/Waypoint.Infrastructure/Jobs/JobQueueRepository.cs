@@ -465,7 +465,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 		bool tripped;
 		await using (NpgsqlCommand recent = new(
-			"SELECT state FROM jobs WHERE credential_id = $1 AND finished_at IS NOT NULL ORDER BY finished_at DESC, id DESC LIMIT $2", connection, transaction))
+			"SELECT state FROM jobs WHERE credential_id = $1 ORDER BY COALESCE(finished_at, created_at) DESC LIMIT $2", connection, transaction))
 		{
 			recent.Parameters.AddWithValue(credentialId);
 			recent.Parameters.AddWithValue(threshold);
