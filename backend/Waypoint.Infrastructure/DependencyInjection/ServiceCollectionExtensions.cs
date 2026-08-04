@@ -20,6 +20,7 @@ using Waypoint.Core.Auth;
 using Waypoint.Core.Configuration;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
+using Waypoint.Core.PowerShell;
 using Waypoint.Infrastructure.Auth;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
@@ -56,6 +57,9 @@ public static class ServiceCollectionExtensions
 
 		services.AddOptions<JobEngineOptions>()
 			.Bind(configuration.GetSection(JobEngineOptions.SectionName));
+
+		services.AddOptions<PowerShellOptions>()
+			.Bind(configuration.GetSection(PowerShellOptions.SectionName));
 
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
@@ -95,6 +99,11 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<ILogger<BufferedJobEventWriter>>()));
 			services.AddSingleton<IJobLogBuffer>(serviceProvider => serviceProvider.GetRequiredService<BufferedJobEventWriter>());
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<BufferedJobEventWriter>());
+
+			// The PS host needs the job.log buffer for stream capture, so it lives in
+			// the same connection-string gate as the rest of the engine.
+			services.AddSingleton<PowerShell.WaypointRunspacePool>();
+			services.AddSingleton<IPowerShellExecutor, PowerShell.PowerShellExecutor>();
 
 			services.AddSingleton<JobDispatcherHostedService>();
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());
