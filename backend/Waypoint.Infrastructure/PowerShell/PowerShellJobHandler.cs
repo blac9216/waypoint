@@ -84,7 +84,7 @@ public sealed class PowerShellJobHandler : IJobHandler
 				result.HadErrors ? "Completed with non-terminating errors (see job log)." : null);
 		}
 
-		string note = result.FailureReason ?? "PowerShell invocation failed with no failure reason.";
+		string note = _redactor.Redact(result.FailureReason ?? "PowerShell invocation failed with no failure reason.");
 		return IsAuthFailure(note) ? JobExecutionOutcome.AuthFailed(note) : JobExecutionOutcome.Failed(note);
 	}
 
