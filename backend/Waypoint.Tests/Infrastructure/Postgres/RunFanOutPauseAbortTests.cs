@@ -218,6 +218,70 @@ public sealed class RunFanOutPauseAbortTests : IAsyncLifetime
 	}
 
 	[Fact]
+	public async Task FanOut_RejectsNullEmptyAndNonPendingRuns()
+	{
+		Guid runId = await _repository.CreateRunAsync("download", "{}", null, null, CancellationToken.None);
+		await Assert.ThrowsAsync<ArgumentNullException>(() => _repository.FanOutJobsAsync(runId, null!, null, CancellationToken.None));
+		await Assert.ThrowsAsync<ArgumentException>(() => _repository.FanOutJobsAsync(runId, [], null, CancellationToken.None));
+		await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], null, CancellationToken.None);
+		await Assert.ThrowsAsync<InvalidOperationException>(() => _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], null, CancellationToken.None));
+	}
+
+	[Fact]
+	public async Task TerminalAndMissingRuns_CannotPauseResumeOrAbort()
+	{
+		Guid missing = Guid.NewGuid();
+		Assert.False(await _repository.PauseRunAsync(missing, CancellationToken.None));
+		Assert.False(await _repository.ResumeRunAsync(missing, CancellationToken.None));
+		Guid runId = await _repository.CreateRunAsync("download", "{}", null, null, CancellationToken.None);
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand complete = new("UPDATE runs SET state = 'completed', completed_at = now() WHERE id = $1", connection);
+			complete.Parameters.AddWithValue(runId);
+			await complete.ExecuteNonQueryAsync();
+		}
+		Assert.False(await _repository.PauseRunAsync(runId, CancellationToken.None));
+		Assert.False(await _repository.ResumeRunAsync(runId, CancellationToken.None));
+		AbortRunResult abort = await _repository.AbortRunAsync(runId, CancellationToken.None);
+		Assert.Empty(abort.CancelledJobIds);
+		Assert.Empty(abort.InFlightJobIds);
+	}
+
+	[Fact]
+	public async Task Abort_CancelsBlockedJobsButLeavesAlreadyTerminalJobsUnchanged()
+	{
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", null, null, CancellationToken.None);
+		IReadOnlyList<Guid> ids = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec("scan", 1), new JobSpec("scan", 2)],
+			null,
+			CancellationToken.None);
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand states = new("UPDATE jobs SET state = CASE id WHEN $1 THEN 'blocked' ELSE 'done' END, finished_at = CASE WHEN id = $2 THEN now() ELSE NULL END WHERE id IN ($1, $2)", connection);
+			states.Parameters.AddWithValue(ids[0]);
+			states.Parameters.AddWithValue(ids[1]);
+			await states.ExecuteNonQueryAsync();
+		}
+		AbortRunResult result = await _repository.AbortRunAsync(runId, CancellationToken.None);
+		Assert.Contains(ids[0], result.CancelledJobIds);
+		Assert.DoesNotContain(ids[1], result.CancelledJobIds);
+		Assert.Equal(JobStates.Cancelled, await GetJobStateAsync(ids[0]));
+		Assert.Equal(JobStates.Done, await GetJobStateAsync(ids[1]));
+	}
+
+	private async Task<string> GetJobStateAsync(Guid jobId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT state FROM jobs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(jobId);
+		return (string)(await command.ExecuteScalarAsync())!;
+	}
+
+	[Fact]
 	public async Task AbortRunAsync_UnknownRun_IsANoOp()
 	{
 		AbortRunResult result = await _repository.AbortRunAsync(Guid.NewGuid(), CancellationToken.None);

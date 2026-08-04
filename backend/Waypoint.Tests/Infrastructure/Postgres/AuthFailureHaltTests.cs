@@ -222,6 +222,35 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		Assert.Equal(1, results.Sum(result => result.BlockedRunIds.Count(id => id == runId)));
 	}
 
+	[Fact]
+	public async Task InvalidThresholdAndMissingCredential_DoNotInspectOutcomes()
+	{
+		await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+			() => _repository.CheckConsecutiveAuthFailuresAsync(Guid.NewGuid(), 0, CancellationToken.None));
+		AuthFailureHaltResult missing = await _repository.CheckConsecutiveAuthFailuresAsync(Guid.NewGuid(), 3, CancellationToken.None);
+		Assert.Empty(missing.BlockedRunIds);
+		Assert.Empty(missing.BlockedJobIds);
+	}
+
+	[Fact]
+	public async Task StandaloneQueuedJob_IsBlockedWithoutInventingARun()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId, null, CancellationToken.None);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new("INSERT INTO jobs (job_type, priority, state, credential_id) VALUES ('scan', 1, 'queued', $1) RETURNING id", connection);
+		insert.Parameters.AddWithValue(credentialId);
+		Guid standaloneId = (Guid)(await insert.ExecuteScalarAsync())!;
+
+		AuthFailureHaltResult result = await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, 3, CancellationToken.None);
+		Assert.Empty(result.BlockedRunIds);
+		Assert.Contains(standaloneId, result.BlockedJobIds);
+	}
+
 	private async Task<Guid> SeedCredentialAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
