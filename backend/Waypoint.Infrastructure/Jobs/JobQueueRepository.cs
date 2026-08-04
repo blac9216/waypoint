@@ -272,14 +272,22 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			}
 		}
 
+		// RETURNING state/note reads the row as stored, i.e. after migration 0005's
+		// BEFORE trigger has had its say: a spec against a queue-halted credential
+		// comes back 'blocked' (with the halt reason as its note), not 'queued'. The
+		// trigger's FOR SHARE on the credentials row is held to the end of this
+		// transaction, so one fan-out observes a consistent halt state for all its
+		// specs and a concurrent halt serializes entirely before or after it.
 		List<Guid> jobIds = new(specs.Count);
+		int blockedCount = 0;
+		string? blockedNote = null;
 		foreach (JobSpec spec in specs)
 		{
 			await using NpgsqlCommand insertJob = new(
 				"""
 				INSERT INTO jobs (run_id, job_type, target_id, target_name, credential_id, priority, payload, created_by, state)
 				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued')
-				RETURNING id
+				RETURNING id, state, note
 				""", connection, transaction);
 			insertJob.Parameters.AddWithValue(runId);
 			insertJob.Parameters.AddWithValue(spec.JobType);
@@ -290,10 +298,35 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			insertJob.Parameters.AddWithValue(string.IsNullOrWhiteSpace(spec.Payload) ? "{}" : spec.Payload);
 			insertJob.Parameters.AddWithValue((object?)createdBy ?? DBNull.Value);
 
-			jobIds.Add((Guid)(await insertJob.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!);
+			await using NpgsqlDataReader reader = await insertJob.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+			jobIds.Add(reader.GetGuid(0));
+			if (string.Equals(reader.GetString(1), JobStates.Blocked, StringComparison.Ordinal))
+			{
+				blockedCount++;
+				blockedNote ??= reader.IsDBNull(2) ? null : reader.GetString(2);
+			}
+		}
+
+		// Mirror what CheckConsecutiveAuthFailuresAsync does to runs that already had
+		// queued work when the halt tripped: a run that fans out into a halt is blocked
+		// with the same reason, so the dispatcher's post-claim guard also stops any of
+		// its jobs that are not credential-bound.
+		if (blockedCount > 0)
+		{
+			await using NpgsqlCommand blockRun = new(
+				"UPDATE runs SET blocked = true, blocked_reason = $2 WHERE id = $1 AND blocked = false", connection, transaction);
+			blockRun.Parameters.AddWithValue(runId);
+			blockRun.Parameters.AddWithValue((object?)blockedNote ?? "Credential queue halted");
+			await blockRun.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		if (blockedCount > 0)
+		{
+			LogFanOutBlocked(runId, blockedCount, jobIds.Count);
+		}
+
 		LogFannedOutJobs(runId, jobIds.Count);
 		return jobIds;
 	}
@@ -497,6 +530,20 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			"{0} consecutive auth failures against this credential; queue halted pending a credential swap.",
 			threshold);
 
+		// Persist the halt on the credential itself, inside the same transaction that
+		// blocks the queued rows. This is what makes the halt a durable state rather
+		// than an event: migration 0005's trigger coerces any later 'queued' write for
+		// this credential (a post-halt fan-out, a lease-recovery requeue, a claim
+		// release) to 'blocked' until an explicit credential-swap/unblock flow clears
+		// queue_halted. The row is already FOR UPDATE-locked above.
+		await using (NpgsqlCommand haltCredential = new(
+			"UPDATE credentials SET queue_halted = true, queue_halted_reason = $2, queue_halted_at = now() WHERE id = $1", connection, transaction))
+		{
+			haltCredential.Parameters.AddWithValue(credentialId);
+			haltCredential.Parameters.AddWithValue(reason);
+			await haltCredential.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
 		// Idempotent under concurrent callers by construction: both queries below only
 		// touch rows still in 'queued', so a second, redundant call (two workers
 		// finishing an auth-failed job around the same moment) finds nothing left to
@@ -543,6 +590,9 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Fanned out {JobCount} job(s) for run {RunId}")]
 	private partial void LogFannedOutJobs(Guid runId, int jobCount);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Run {RunId} fanned out into a credential queue halt: {BlockedCount} of {JobCount} job(s) created blocked; run blocked")]
+	private partial void LogFanOutBlocked(Guid runId, int blockedCount, int jobCount);
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Run {RunId} paused")]
 	private partial void LogRunPaused(Guid runId);

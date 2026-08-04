@@ -73,7 +73,13 @@ public interface IJobQueueRepository
 	/// <summary>Creates a pending run and returns its identifier.</summary>
 	Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken);
 
-	/// <summary>Atomically creates all jobs for a run and marks the run running.</summary>
+	/// <summary>
+	/// Atomically creates all jobs for a run and marks the run running. A spec whose
+	/// credential is queue-halted (see <see cref="CheckConsecutiveAuthFailuresAsync"/>)
+	/// is created <c>blocked</c> rather than <c>queued</c> -- enforced by migration
+	/// 0005's trigger, not by this method -- and the run itself is blocked with the
+	/// halt reason.
+	/// </summary>
 	Task<IReadOnlyList<Guid>> FanOutJobsAsync(Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken);
 
 	/// <summary>Pauses dispatch for a pending or running run; in-flight work continues.</summary>
@@ -85,7 +91,12 @@ public interface IJobQueueRepository
 	/// <summary>Aborts a run and reports jobs requiring cooperative cancellation.</summary>
 	Task<AbortRunResult> AbortRunAsync(Guid runId, CancellationToken cancellationToken);
 
-	/// <summary>Blocks queued work after the credential most recent resolved outcomes are consecutive authentication failures.</summary>
+	/// <summary>
+	/// Blocks queued work after the credential's most recent resolved outcomes are
+	/// consecutive authentication failures, and durably halts the credential
+	/// (<c>credentials.queue_halted</c>) so later fan-outs, requeues and releases for
+	/// it are created/coerced <c>blocked</c> until an explicit unblock flow clears it.
+	/// </summary>
 	Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken);
 
 	/// <summary>

@@ -197,6 +197,11 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 
 		for (int iteration = 0; iteration < 8; iteration++)
 		{
+			// The first iteration durably halts the credential, which would make every
+			// later seed 'blocked' at insert (migration 0005) before the window is even
+			// consulted. Clear the halt each pass so each iteration re-proves that the
+			// resolved-outcome window itself picks the same three rows.
+			await ClearQueueHaltAsync(credentialId);
 			Guid queuedId = await SeedQueuedJobAsync(runId, credentialId);
 			AuthFailureHaltResult result = await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, 3, CancellationToken.None);
 			Assert.Contains(queuedId, result.BlockedJobIds);
@@ -249,6 +254,158 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		AuthFailureHaltResult result = await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, 3, CancellationToken.None);
 		Assert.Empty(result.BlockedRunIds);
 		Assert.Contains(standaloneId, result.BlockedJobIds);
+	}
+
+	/// <summary>PR #144 round 1, finding 1: the halt must be a durable credential state,
+	/// not a point-in-time sweep -- a run fanned out *after* the halt must not create
+	/// claimable work for the halted credential.</summary>
+	[Fact]
+	public async Task FanOutAfterTheHalt_CreatesBlockedJobsAndABlockedRun()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid firstRunId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		await SeedTerminalJobAsync(firstRunId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(firstRunId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(firstRunId, credentialId, JobStates.AuthFailed);
+		AuthFailureHaltResult halt = await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, 3, CancellationToken.None);
+		Assert.True(halt.BlockedRunIds.Count == 0 && halt.BlockedJobIds.Count == 0); // nothing was queued -- the halt is the credential state itself
+
+		Guid laterRunId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			laterRunId,
+			[new JobSpec("scan", 1, CredentialId: credentialId), new JobSpec("scan", 1, CredentialId: credentialId)],
+			"tester",
+			CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		foreach (Guid jobId in jobIds)
+		{
+			await using NpgsqlCommand jobState = new("SELECT state FROM jobs WHERE id = $1", connection);
+			jobState.Parameters.AddWithValue(jobId);
+			Assert.Equal("blocked", (string)(await jobState.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand runBlocked = new("SELECT blocked, blocked_reason FROM runs WHERE id = $1", connection))
+		{
+			runBlocked.Parameters.AddWithValue(laterRunId);
+			await using NpgsqlDataReader reader = await runBlocked.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync());
+			Assert.True(reader.GetBoolean(0));
+			Assert.Contains("consecutive auth failures", reader.GetString(1), StringComparison.Ordinal);
+		}
+
+		// The claim predicate only sees 'queued': nothing from this fan-out is claimable.
+		Assert.Null(await _repository.ClaimJobAsync("worker-post-halt", TimeSpan.FromMinutes(5), CancellationToken.None));
+	}
+
+	/// <summary>The credential row records the halt durably, with the why and when the CHECK demands.</summary>
+	[Fact]
+	public async Task TrippedHalt_PersistsQueueHaltedOnTheCredential()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, 3, CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand halted = new(
+			"SELECT queue_halted, queue_halted_reason, queue_halted_at FROM credentials WHERE id = $1", connection);
+		halted.Parameters.AddWithValue(credentialId);
+		await using NpgsqlDataReader reader = await halted.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		Assert.True(reader.GetBoolean(0));
+		Assert.Contains("consecutive auth failures", reader.GetString(1), StringComparison.Ordinal);
+		Assert.False(reader.IsDBNull(2));
+	}
+
+	/// <summary>PR #144 round 1, finding 1 (interleaving): a fan-out that starts while the
+	/// halt transaction holds the credential's FOR UPDATE lock must wait on the trigger's
+	/// FOR SHARE and then observe the committed halt -- not slip queued rows past it.</summary>
+	[Fact]
+	public async Task FanOutInterleavedWithTheHaltCommit_StillCreatesBlockedJobs()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+
+		await using NpgsqlConnection haltConnection = new(_fixture.ConnectionString);
+		await haltConnection.OpenAsync();
+		await using NpgsqlTransaction haltTransaction = await haltConnection.BeginTransactionAsync();
+		await using (NpgsqlCommand lockAndHalt = new(
+			"UPDATE credentials SET queue_halted = true, queue_halted_reason = 'halted mid-fan-out', queue_halted_at = now() WHERE id = $1",
+			haltConnection, haltTransaction))
+		{
+			lockAndHalt.Parameters.AddWithValue(credentialId);
+			await lockAndHalt.ExecuteNonQueryAsync();
+		}
+
+		Task<IReadOnlyList<Guid>> fanOut = _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 1, CredentialId: credentialId)], "tester", CancellationToken.None);
+
+		// The insert trigger's FOR SHARE must be waiting on the uncommitted halt's row lock.
+		Task completedFirst = await Task.WhenAny(fanOut, Task.Delay(TimeSpan.FromMilliseconds(500)));
+		Assert.NotSame(fanOut, completedFirst);
+
+		await haltTransaction.CommitAsync();
+		IReadOnlyList<Guid> jobIds = await fanOut;
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand jobState = new("SELECT state, note FROM jobs WHERE id = $1", connection);
+		jobState.Parameters.AddWithValue(jobIds.Single());
+		await using NpgsqlDataReader reader = await jobState.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		Assert.Equal("blocked", reader.GetString(0));
+		Assert.Equal("halted mid-fan-out", reader.GetString(1));
+	}
+
+	/// <summary>Lease recovery's running -> queued requeue is also a queued write: under a
+	/// halted credential it must surface as 'blocked', not return claimable work.</summary>
+	[Fact]
+	public async Task LeaseRecoveryUnderAHaltedCredential_RequeuesAsBlocked()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		Guid jobId = await SeedQueuedJobAsync(runId, credentialId);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using (NpgsqlCommand expireRunning = new(
+			"""
+			UPDATE jobs SET state = 'running', claimed_by = 'worker-a', claimed_at = now(),
+				lease_expires_at = now() - interval '1 minute', heartbeat_at = now(), attempt_count = 1, max_attempts = 3
+			WHERE id = $1
+			""", connection))
+		{
+			expireRunning.Parameters.AddWithValue(jobId);
+			await expireRunning.ExecuteNonQueryAsync();
+		}
+
+		await using (NpgsqlCommand haltCredential = new(
+			"UPDATE credentials SET queue_halted = true, queue_halted_reason = 'halted before recovery', queue_halted_at = now() WHERE id = $1", connection))
+		{
+			haltCredential.Parameters.AddWithValue(credentialId);
+			await haltCredential.ExecuteNonQueryAsync();
+		}
+
+		IReadOnlyList<RecoveredJob> recovered = await _repository.RecoverExpiredLeasesAsync(10, CancellationToken.None);
+
+		RecoveredJob job = Assert.Single(recovered, r => r.Id == jobId);
+		Assert.Equal("blocked", job.NewState);
+		Assert.Null(await _repository.ClaimJobAsync("worker-after-recovery", TimeSpan.FromMinutes(5), CancellationToken.None));
+	}
+
+	private async Task ClearQueueHaltAsync(Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand clear = new(
+			"UPDATE credentials SET queue_halted = false, queue_halted_reason = NULL, queue_halted_at = NULL WHERE id = $1", connection);
+		clear.Parameters.AddWithValue(credentialId);
+		await clear.ExecuteNonQueryAsync();
 	}
 
 	private async Task<Guid> SeedCredentialAsync()
