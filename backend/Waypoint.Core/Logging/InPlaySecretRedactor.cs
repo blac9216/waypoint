@@ -14,6 +14,8 @@
 
 using System.Collections.Concurrent;
 using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 
 namespace Waypoint.Core.Logging;
 
@@ -57,6 +59,13 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 	// LAST handle goes away.
 	private readonly ConcurrentDictionary<string, int> _inPlay = new(StringComparer.Ordinal);
 
+	// Key: the raw secret. Value: every needle Redact must look for -- the raw value
+	// plus its JSON-escaped spellings (#152): a payload that went through
+	// System.Text.Json carries `pa"ss` as `pa\u0022ss` (default encoder) or `pa\"ss`
+	// (relaxed encoder), and an ordinal match on the raw value alone would let the
+	// escaped occurrence through, or worse, redact only the unescaped half.
+	private readonly ConcurrentDictionary<string, string[]> _needles = new(StringComparer.Ordinal);
+
 	public IDisposable Track(string secretValue)
 	{
 		ArgumentNullException.ThrowIfNull(secretValue);
@@ -67,6 +76,7 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 		}
 
 		_inPlay.AddOrUpdate(secretValue, 1, (_, count) => count + 1);
+		_needles.TryAdd(secretValue, DeriveNeedles(secretValue));
 		return new TrackHandle(this, secretValue);
 	}
 
@@ -80,7 +90,10 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 		// Snapshot, then order longest-first (see the type comment). The snapshot makes
 		// a concurrent Untrack mid-redaction harmless: the worst case is redacting a
 		// value whose handle was just disposed, never missing one that is still live.
-		string[] secrets = [.. _inPlay.Keys.OrderByDescending(secret => secret.Length)];
+		string[] secrets = [.. _inPlay.Keys
+			.SelectMany(secret => _needles.TryGetValue(secret, out string[]? needles) ? needles : [secret])
+			.Distinct(StringComparer.Ordinal)
+			.OrderByDescending(needle => needle.Length)];
 		StringBuilder? builder = null;
 		foreach (string secret in secrets)
 		{
@@ -100,6 +113,20 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 		return builder?.ToString() ?? line;
 	}
 
+	/// <summary>The raw value plus each distinct JSON-escaped spelling a serializer could
+	/// have written into a payload. Both encoders are derived because both exist in this
+	/// codebase's dependency surface: the default encoder writes \u0022-style escapes,
+	/// the relaxed encoder writes \"-style.</summary>
+	private static string[] DeriveNeedles(string secretValue)
+	{
+		return new[]
+		{
+			secretValue,
+			JsonEncodedText.Encode(secretValue).ToString(),
+			JsonEncodedText.Encode(secretValue, JavaScriptEncoder.UnsafeRelaxedJsonEscaping).ToString(),
+		}.Distinct(StringComparer.Ordinal).ToArray();
+	}
+
 	private void Untrack(string secretValue)
 	{
 		// Decrement-and-remove-at-zero, tolerant of a double Dispose (the second call
@@ -111,6 +138,7 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 			{
 				if (_inPlay.TryRemove(new KeyValuePair<string, int>(secretValue, count)))
 				{
+					_needles.TryRemove(secretValue, out _);
 					return;
 				}
 			}

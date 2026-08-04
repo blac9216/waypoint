@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using Waypoint.Core.Logging;
 using Xunit;
 
@@ -25,6 +27,8 @@ namespace Waypoint.Tests.Core;
 /// </summary>
 public sealed class InPlaySecretRedactorTests
 {
+	private static readonly JsonSerializerOptions RelaxedEncoderOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
 	[Fact]
 	public void TrackedSecret_IsReplacedEverywhere_UntilDisposed()
 	{
@@ -80,6 +84,29 @@ public sealed class InPlaySecretRedactorTests
 		first.Dispose();
 
 		Assert.Equal("[REDACTED]", redactor.Redact("shared-secret-value"));
+	}
+
+	/// <summary>#152: a payload that went through a JSON serializer carries the secret in
+	/// escaped spelling; the ordinal match on the raw value alone would miss it (default
+	/// encoder) or redact only the unescaped half (relaxed encoder).</summary>
+	[Fact]
+	public void ASecretWithJsonEscapableCharacters_IsRedactedInSerializedPayloads()
+	{
+		InPlaySecretRedactor redactor = new();
+		const string canary = "pa\"ss\\wo<rd-invented";
+		using IDisposable handle = redactor.Track(canary);
+
+		string defaultEncoded = JsonSerializer.Serialize(new { line = $"auth {canary} rejected" });
+		string relaxedEncoded = JsonSerializer.Serialize(
+			new { line = $"auth {canary} rejected" }, RelaxedEncoderOptions);
+
+		foreach (string payload in new[] { defaultEncoded, relaxedEncoded })
+		{
+			string redacted = redactor.Redact(payload);
+			Assert.Contains("[REDACTED]", redacted, StringComparison.Ordinal);
+			Assert.DoesNotContain("invented", redacted, StringComparison.Ordinal);
+			Assert.DoesNotContain("ss", redacted, StringComparison.Ordinal);
+		}
 	}
 
 	[Theory]
