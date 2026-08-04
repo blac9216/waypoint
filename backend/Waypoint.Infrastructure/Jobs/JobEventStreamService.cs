@@ -221,7 +221,9 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 					{
 						// The #7 drop+resync strategy: this subscriber alone is
 						// terminated; the exception carries its resync point.
-						_ = subscriber;
+						subscriber.Channel.Writer.TryComplete(new JobEventStreamOverflowException(subscriber.LastQueuedSeq));
+						_subscribers.Remove(subscriber);
+						LogSubscriberDropped(subscriber.LastQueuedSeq);
 					}
 				}
 
