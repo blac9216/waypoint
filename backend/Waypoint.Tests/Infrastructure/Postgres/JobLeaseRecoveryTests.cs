@@ -185,8 +185,11 @@ public sealed class JobLeaseRecoveryTests : IAsyncLifetime
 	/// for this test run against a deliberately naive (non-locking) recovery query,
 	/// where it fails by observing duplicate recoveries.
 	/// </summary>
-	[Fact]
-	public async Task ConcurrentRecoverySweeps_NeverDoubleRecoverTheSameJob()
+	[Theory]
+	[InlineData(1)]
+	[InlineData(2)]
+	[InlineData(3)]
+	public async Task ConcurrentRecoverySweeps_NeverDoubleRecoverTheSameJob(int independentRun)
 	{
 		const int jobCount = 40;
 		TimeSpan lease = TimeSpan.FromMilliseconds(200);
@@ -200,7 +203,7 @@ public sealed class JobLeaseRecoveryTests : IAsyncLifetime
 		JobQueueRepository claimer = new(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
 		for (int i = 0; i < jobCount; i++)
 		{
-			await claimer.ClaimJobAsync($"worker-{i}", lease, CancellationToken.None);
+			await claimer.ClaimJobAsync($"worker-{independentRun}-{i}", lease, CancellationToken.None);
 		}
 
 		await Task.Delay(lease + TimeSpan.FromMilliseconds(400));

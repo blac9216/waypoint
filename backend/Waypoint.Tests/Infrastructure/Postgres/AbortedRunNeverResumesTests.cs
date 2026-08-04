@@ -80,6 +80,40 @@ public sealed class AbortedRunNeverResumesTests : IAsyncLifetime
 	}
 
 	[Fact]
+	public async Task OnlyTheSweepRemains_RecoveryStillCancelsRatherThanRequeues()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using (NpgsqlCommand disable = new("ALTER TABLE jobs DISABLE TRIGGER jobs_no_queued_under_aborted_run", connection))
+		{
+			await disable.ExecuteNonQueryAsync();
+		}
+
+		try
+		{
+			Guid runId = await SeedRunAsync("running");
+			Guid jobId = await InsertJobAsync(runId, "running", "dead-worker");
+			await ExecuteAsync("UPDATE runs SET state = 'aborted' WHERE id = $1", runId);
+			Assert.Equal(JobStates.Cancelled, Assert.Single(await _repository.RecoverExpiredLeasesAsync(10, CancellationToken.None), job => job.Id == jobId).NewState);
+		}
+		finally
+		{
+			await using NpgsqlCommand enable = new("ALTER TABLE jobs ENABLE TRIGGER jobs_no_queued_under_aborted_run", connection);
+			await enable.ExecuteNonQueryAsync();
+		}
+	}
+
+	[Fact]
+	public async Task OnlyTheTriggerRemains_APreFixSweepStillCannotRequeue()
+	{
+		Guid runId = await SeedRunAsync("running");
+		Guid jobId = await InsertJobAsync(runId, "running", "dead-worker");
+		await ExecuteAsync("UPDATE runs SET state = 'aborted' WHERE id = $1", runId);
+		await ExecuteAsync("UPDATE jobs SET state = 'queued', claimed_by = NULL, claimed_at = NULL, lease_expires_at = NULL, heartbeat_at = NULL WHERE id = $1", jobId);
+		Assert.Equal(JobStates.Cancelled, await GetStateAsync(jobId));
+	}
+
+	[Fact]
 	public async Task RunQueueState_ReadsEveryField_AndMissingRunReturnsNull()
 	{
 		Guid runId = await SeedRunAsync("running");
