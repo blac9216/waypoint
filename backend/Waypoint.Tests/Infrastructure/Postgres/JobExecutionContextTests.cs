@@ -15,6 +15,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Xunit;
@@ -45,7 +46,7 @@ public sealed class JobExecutionContextTests : IAsyncLifetime
 		await migrator.ApplyAsync();
 		await _fixture.ResetJobEngineDataAsync();
 		_repository = new JobQueueRepository(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
-		_events = new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, NullLogger<JobEventPublisher>.Instance);
+		_events = new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), NullLogger<JobEventPublisher>.Instance);
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
