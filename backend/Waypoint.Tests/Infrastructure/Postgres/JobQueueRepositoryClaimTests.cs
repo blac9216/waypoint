@@ -95,21 +95,37 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 		_ = dispatcherCount; // documents intent; the two DrainAsync calls above are the two instances.
 	}
 
-	/// <summary>The exact multi-attempt concurrency shape the issue asks for: many concurrent claimers, one job each, none overlapping.</summary>
+	/// <summary>
+	/// The exact multi-attempt concurrency shape the issue asks for: many concurrent
+	/// claimers, one job each, none overlapping. Each round starts from a freshly
+	/// truncated and independently seeded queue. Run all three before asserting so a
+	/// mutation of <c>FOR UPDATE SKIP LOCKED</c> has to survive three scheduling races,
+	/// rather than getting one lucky run.
+	/// </summary>
 	[Fact]
-	public async Task ManyConcurrentClaimers_OneJobEach_NeverClaimTheSameJob()
+	public async Task ManyConcurrentClaimers_AcrossThreeIndependentlySeededRuns_NeverClaimTheSameJob()
 	{
 		const int jobCount = 64;
-		await SeedQueuedJobsAsync(jobCount);
+		List<(int Round, int ClaimedCount, int DistinctClaimedCount)> rounds = [];
 
-		Task<ClaimedJob?>[] claims = [.. Enumerable.Range(0, jobCount)
-			.Select(i => _repository.ClaimJobAsync($"worker-{i}", TimeSpan.FromMinutes(5), CancellationToken.None))];
+		for (int round = 1; round <= 3; round++)
+		{
+			await _fixture.ResetJobEngineDataAsync();
+			await SeedQueuedJobsAsync(jobCount);
 
-		ClaimedJob?[] results = await Task.WhenAll(claims);
-		Guid[] claimedIds = [.. results.Where(job => job is not null).Select(job => job!.Id)];
+			Task<ClaimedJob?>[] claims = [.. Enumerable.Range(0, jobCount)
+				.Select(i => _repository.ClaimJobAsync($"worker-{round}-{i}", TimeSpan.FromMinutes(5), CancellationToken.None))];
 
-		Assert.Equal(jobCount, claimedIds.Length);
-		Assert.Equal(jobCount, claimedIds.Distinct().Count());
+			ClaimedJob?[] results = await Task.WhenAll(claims);
+			Guid[] claimedIds = [.. results.Where(job => job is not null).Select(job => job!.Id)];
+			rounds.Add((round, claimedIds.Length, claimedIds.Distinct().Count()));
+		}
+
+		Assert.True(
+			rounds.All(result => result.ClaimedCount == jobCount && result.DistinctClaimedCount == jobCount),
+			$"Each independently seeded round must claim {jobCount} distinct jobs. " +
+			string.Join("; ", rounds.Select(result =>
+				$"round {result.Round}: claimed {result.ClaimedCount}, distinct {result.DistinctClaimedCount}")));
 	}
 
 	[Fact]
