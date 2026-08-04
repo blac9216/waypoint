@@ -35,6 +35,12 @@ public sealed class ThrowingApiFactory : WaypointApiFactory
 	/// <summary>Route that always throws. Deliberately outside <c>api/v1/_stub</c> — this is not a scaffold convention, it's a fault injector.</summary>
 	public const string ThrowPath = "/api/v1/_test/throw";
 
+	/// <summary>Route that flushes a partial body first, then throws — the started-response fault (#76) an SSE stream would hit mid-flight.</summary>
+	public const string StreamThrowPath = "/api/v1/_test/stream-throw";
+
+	/// <summary>The bytes flushed before the fault; the client must see these and only these.</summary>
+	public const string StreamedPrefix = "data: first-event\n\n";
+
 	/// <summary>
 	/// The exact exception message the test-only route throws. Exposed so the test can
 	/// assert this literal text does <em>not</em> appear anywhere in the response body —
@@ -72,6 +78,14 @@ public sealed class ThrowingApiFactory : WaypointApiFactory
 				{
 					if (string.Equals(context.Request.Path, ThrowPath, StringComparison.Ordinal))
 					{
+						throw new InvalidOperationException(ExceptionMessage);
+					}
+
+					if (string.Equals(context.Request.Path, StreamThrowPath, StringComparison.Ordinal))
+					{
+						context.Response.ContentType = "text/event-stream";
+						await context.Response.WriteAsync(StreamedPrefix);
+						await context.Response.Body.FlushAsync();
 						throw new InvalidOperationException(ExceptionMessage);
 					}
 
