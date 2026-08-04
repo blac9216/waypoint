@@ -15,11 +15,14 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Waypoint.Core.Auth;
 using Waypoint.Core.Configuration;
+using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Auth;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Infrastructure.Jobs;
 
 namespace Waypoint.Infrastructure.DependencyInjection;
 
@@ -27,7 +30,10 @@ namespace Waypoint.Infrastructure.DependencyInjection;
 /// Composition-root entry point for everything this project provides. Postgres access
 /// lands with the schema (issue #4) as a small raw-SQL migrations pipeline
 /// (<see cref="ISchemaMigrator"/>), not an ORM — see that type's doc comment for why.
-/// PowerShell runspace hosting lands with the job engine.
+/// The job engine's queue primitives (issue #128: the claim/lease repository and the
+/// job_events write path) are wired here too, behind the same "no connection string, no
+/// wiring" guard as the migrator. The dispatcher and lease-recovery hosted services land
+/// with #129; PowerShell runspace hosting lands with #6.
 /// </summary>
 public static class ServiceCollectionExtensions
 {
@@ -48,6 +54,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<WaypointDatabaseOptions>()
 			.Bind(configuration.GetSection(WaypointDatabaseOptions.SectionName));
 
+		services.AddOptions<JobEngineOptions>()
+			.Bind(configuration.GetSection(JobEngineOptions.SectionName));
+
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
 		// Placeholder scrubber (issue #6 supplies the real one) — see ISecretRedactor.
@@ -59,6 +68,19 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<ISchemaMigrator>(serviceProvider => new NpgsqlSchemaMigrator(
 				connectionString,
 				serviceProvider.GetRequiredService<ILogger<NpgsqlSchemaMigrator>>()));
+
+			services.AddSingleton<IJobQueueRepository>(serviceProvider => new JobQueueRepository(
+				connectionString,
+				serviceProvider.GetRequiredService<ILogger<JobQueueRepository>>()));
+
+			services.AddSingleton<IJobEventPublisher>(serviceProvider =>
+			{
+				JobEngineOptions options = serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>().Value;
+				return new JobEventPublisher(
+					connectionString,
+					options.EventCommandTimeoutSeconds,
+					serviceProvider.GetRequiredService<ILogger<JobEventPublisher>>());
+			});
 		}
 
 		return services;
