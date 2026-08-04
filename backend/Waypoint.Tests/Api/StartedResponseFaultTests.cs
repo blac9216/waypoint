@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Collections.Concurrent;
 using System.Net;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Waypoint.Tests.Support;
 
 namespace Waypoint.Tests.Api;
@@ -27,6 +31,37 @@ namespace Waypoint.Tests.Api;
 /// </summary>
 public sealed class StartedResponseFaultTests : IClassFixture<ThrowingApiFactory>
 {
+	/// <summary>Captures every category's formatted messages. Registered as THE
+	/// ILoggerFactory in test DI (after UseSerilog's registration, so it wins for
+	/// anything resolved from RequestServices -- which is exactly how the guarded
+	/// writer obtains its logger).</summary>
+	private sealed class CapturingLoggerFactory : ILoggerFactory
+	{
+		public ConcurrentQueue<string> Messages { get; } = new();
+
+		public ILogger CreateLogger(string categoryName) => new Sink(Messages);
+
+		public void AddProvider(ILoggerProvider provider)
+		{
+		}
+
+		public void Dispose()
+		{
+		}
+
+		private sealed class Sink : ILogger
+		{
+			private readonly ConcurrentQueue<string> _messages;
+			public Sink(ConcurrentQueue<string> messages) { _messages = messages; }
+			public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+			public bool IsEnabled(LogLevel logLevel) => true;
+			public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+			{
+				_messages.Enqueue(formatter(state, exception));
+			}
+		}
+	}
+
 	private readonly ThrowingApiFactory _factory;
 
 	public StartedResponseFaultTests(ThrowingApiFactory factory)
@@ -37,7 +72,9 @@ public sealed class StartedResponseFaultTests : IClassFixture<ThrowingApiFactory
 	[Fact]
 	public async Task AFaultAfterTheFirstFlush_AbortsCleanly_WithoutASecondaryException()
 	{
-		HttpClient client = _factory.CreateClient();
+		CapturingLoggerFactory loggerFactory = new();
+		HttpClient client = _factory.WithWebHostBuilder(builder =>
+			builder.ConfigureTestServices(services => services.AddSingleton<ILoggerFactory>(loggerFactory))).CreateClient();
 
 		using HttpRequestMessage request = new(HttpMethod.Get, ThrowingApiFactory.StreamThrowPath);
 		using HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
@@ -56,12 +93,13 @@ public sealed class StartedResponseFaultTests : IClassFixture<ThrowingApiFactory
 		{
 			// An aborted connection may surface as a transport error while draining --
 			// that IS the designed outcome (a hard break, not a fabricated ending).
-			// The flushed prefix was already proven sent by the 200 + content type;
-			// nothing further to assert about a body we could not read.
+			// The flushed prefix was already proven sent by the 200 + content type.
+			AssertGuardTookThePath(loggerFactory);
 			return;
 		}
 		catch (IOException)
 		{
+			AssertGuardTookThePath(loggerFactory);
 			return;
 		}
 
@@ -69,6 +107,16 @@ public sealed class StartedResponseFaultTests : IClassFixture<ThrowingApiFactory
 		// fault -- and none of the exception's text.
 		Assert.StartsWith(ThrowingApiFactory.StreamedPrefix, body, StringComparison.Ordinal);
 		Assert.DoesNotContain(ThrowingApiFactory.ExceptionMessage, body, StringComparison.Ordinal);
-		Assert.DoesNotContain("error", body, StringComparison.OrdinalIgnoreCase);
+		Assert.DoesNotContain("\"error\"", body, StringComparison.OrdinalIgnoreCase);
+		AssertGuardTookThePath(loggerFactory);
+	}
+
+	/// <summary>The observable difference between the guard and the pre-#76 behavior
+	/// lives in the logs: the guard announces the abort; the old path instead raised a
+	/// second InvalidOperationException from Response.Clear(). Both are asserted.</summary>
+	private static void AssertGuardTookThePath(CapturingLoggerFactory loggerFactory)
+	{
+		Assert.Contains(loggerFactory.Messages, message =>
+			message.Contains("aborting the connection", StringComparison.Ordinal));
 	}
 }
