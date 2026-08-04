@@ -119,7 +119,12 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 	/// the relaxed encoder writes \"-style.</summary>
 	private static string[] DeriveNeedles(string secretValue)
 	{
-		return new[] { secretValue };
+		return new[]
+		{
+			secretValue,
+			JsonEncodedText.Encode(secretValue).ToString(),
+			JsonEncodedText.Encode(secretValue, JavaScriptEncoder.UnsafeRelaxedJsonEscaping).ToString(),
+		}.Distinct(StringComparer.Ordinal).ToArray();
 	}
 
 	private void Untrack(string secretValue)
