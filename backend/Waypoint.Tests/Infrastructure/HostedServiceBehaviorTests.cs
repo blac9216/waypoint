@@ -71,6 +71,73 @@ public sealed class HostedServiceBehaviorTests
 	}
 
 	[Fact]
+	public async Task MissingHandlerAndIllegalSuccess_AreLoggedAndFailed()
+	{
+		FakeRepository missingRepository = new() { NextClaim = Job(null) };
+		CapturingLogger<JobDispatcherHostedService> missingLog = new();
+		JobDispatcherHostedService missing = Dispatcher(missingRepository, missingLog);
+		await missing.StartAsync(CancellationToken.None);
+		await WaitAsync(() => missingRepository.Moves.Count > 0);
+		await missing.StopAsync(CancellationToken.None);
+		Assert.Contains(missingLog.EntriesAt(LogLevel.Error), entry => entry.Message.Contains("no handler", StringComparison.OrdinalIgnoreCase));
+
+		FakeRepository illegalRepository = new() { NextClaim = Job(null, "scan") };
+		CapturingLogger<JobDispatcherHostedService> illegalLog = new();
+		FakeJobHandler scan = new("scan", (_, _) => Task.FromResult(JobExecutionOutcome.Succeeded()));
+		JobDispatcherHostedService illegal = Dispatcher(illegalRepository, illegalLog, scan);
+		await illegal.StartAsync(CancellationToken.None);
+		await WaitAsync(() => illegalRepository.Moves.Count > 0);
+		await illegal.StopAsync(CancellationToken.None);
+		Assert.Contains(illegalLog.EntriesAt(LogLevel.Warning), entry => entry.Message.Contains("illegal transition", StringComparison.OrdinalIgnoreCase));
+	}
+
+	[Fact]
+	public async Task CompletionLostAndHandlerException_AreLogged()
+	{
+		FakeRepository repository = new() { NextClaim = Job(null), AdvanceResult = false };
+		CapturingLogger<JobDispatcherHostedService> logger = new();
+		FakeJobHandler handler = new("download", (_, _) => throw new InvalidOperationException("boom"));
+		JobDispatcherHostedService service = Dispatcher(repository, logger, handler);
+		await service.StartAsync(CancellationToken.None);
+		await WaitAsync(() => repository.Moves.Count > 0);
+		await service.StopAsync(CancellationToken.None);
+		Assert.Contains(logger.EntriesAt(LogLevel.Error), entry => entry.Message.Contains("handler threw", StringComparison.OrdinalIgnoreCase));
+		Assert.Contains(logger.EntriesAt(LogLevel.Warning), entry => entry.Message.Contains("lost the race", StringComparison.OrdinalIgnoreCase));
+	}
+
+	[Fact]
+	public async Task HeartbeatObservesAbortAndCancelsHandler()
+	{
+		Guid runId = Guid.NewGuid();
+		FakeRepository repository = new() { NextClaim = Job(runId), RunState = new RunQueueState("running", false, false, null) };
+		CapturingLogger<JobDispatcherHostedService> logger = new();
+		FakeJobHandler handler = new("download", async (_, token) =>
+		{
+			repository.RunState = new RunQueueState("aborted", false, false, null);
+			await Task.Delay(TimeSpan.FromSeconds(2), token);
+			return JobExecutionOutcome.Succeeded();
+		});
+		JobDispatcherHostedService service = Dispatcher(repository, logger, handler);
+		await service.StartAsync(CancellationToken.None);
+		await WaitAsync(() => repository.Moves.Any(move => move.To == JobStates.Cancelled));
+		await service.StopAsync(CancellationToken.None);
+		Assert.Contains(logger.EntriesAt(LogLevel.Warning), entry => entry.Message.Contains("observed run", StringComparison.OrdinalIgnoreCase));
+	}
+
+	[Fact]
+	public async Task HeartbeatOwnershipLoss_IsLoggedWhileHandlerFinishes()
+	{
+		FakeRepository repository = new() { NextClaim = Job(null), RenewResult = false };
+		CapturingLogger<JobDispatcherHostedService> logger = new();
+		FakeJobHandler handler = new("download", async (_, _) => { await Task.Delay(80, CancellationToken.None); return JobExecutionOutcome.Succeeded(); });
+		JobDispatcherHostedService service = Dispatcher(repository, logger, handler);
+		await service.StartAsync(CancellationToken.None);
+		await WaitAsync(() => repository.Moves.Count > 0);
+		await service.StopAsync(CancellationToken.None);
+		Assert.Contains(logger.EntriesAt(LogLevel.Warning), entry => entry.Message.Contains("ownership lost", StringComparison.OrdinalIgnoreCase));
+	}
+
+	[Fact]
 	public async Task RecoveryLoop_LogsFailureThenRecoversAndEmits()
 	{
 		FakeRepository repository = new()
@@ -96,14 +163,15 @@ public sealed class HostedServiceBehaviorTests
 		Assert.Equal(JobOutcomeKind.AuthFailed, JobExecutionOutcome.AuthFailed().Kind);
 	}
 
-	private static JobDispatcherHostedService Dispatcher(FakeRepository repository, CapturingLogger<JobDispatcherHostedService> logger) =>
-		new(repository, new FakeEvents(), new JobHandlerRegistry([]), Options.Create(new JobEngineOptions
+	private static JobDispatcherHostedService Dispatcher(FakeRepository repository, CapturingLogger<JobDispatcherHostedService> logger, params IJobHandler[] handlers) =>
+		new(repository, new FakeEvents(), new JobHandlerRegistry(handlers), Options.Create(new JobEngineOptions
 		{
 			PollInterval = TimeSpan.FromMilliseconds(10),
-			LeaseDuration = TimeSpan.FromSeconds(1)
+			LeaseDuration = TimeSpan.FromSeconds(1),
+			HeartbeatInterval = TimeSpan.FromMilliseconds(10)
 		}), logger);
 
-	private static ClaimedJob Job(Guid runId) => new(Guid.NewGuid(), runId, "download", null, null, null, 1, "{}", 1, 3);
+	private static ClaimedJob Job(Guid? runId, string jobType = "download") => new(Guid.NewGuid(), runId, jobType, null, null, null, 1, "{}", 1, 3);
 	private static async Task WaitAsync(Func<bool> condition)
 	{
 		using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(3));
@@ -129,6 +197,8 @@ public sealed class HostedServiceBehaviorTests
 		public int ThrowRecoveries { get; set; }
 		public int Claims { get; private set; }
 		public int Releases { get; private set; }
+		public bool RenewResult { get; set; } = true;
+		public bool AdvanceResult { get; set; } = true;
 		public List<(string From, string To)> Moves { get; } = [];
 		public Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
 		{
@@ -139,9 +209,9 @@ public sealed class HostedServiceBehaviorTests
 
 			ClaimedJob? value = NextClaim; NextClaim = null; return Task.FromResult(value);
 		}
-		public Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken) => Task.FromResult(true);
+		public Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken) => Task.FromResult(RenewResult);
 		public Task<bool> AdvanceStateAsync(Guid jobId, string workerId, string expectedFromState, string toState, string? note, bool clearLease, CancellationToken cancellationToken)
-		{ Moves.Add((expectedFromState, toState)); return Task.FromResult(true); }
+		{ Moves.Add((expectedFromState, toState)); return Task.FromResult(AdvanceResult); }
 		public Task<IReadOnlyList<RecoveredJob>> RecoverExpiredLeasesAsync(int batchSize, CancellationToken cancellationToken)
 		{
 			if (ThrowRecoveries-- > 0)
