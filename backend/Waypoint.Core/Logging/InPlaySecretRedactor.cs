@@ -54,17 +54,25 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 
 	internal const string Replacement = "[REDACTED]";
 
-	// Key: the secret value. Value: how many concurrent Track handles hold it -- the
-	// same credential decrypted by two overlapping jobs must stay redacted until the
-	// LAST handle goes away.
-	private readonly ConcurrentDictionary<string, int> _inPlay = new(StringComparer.Ordinal);
+	// Count: how many concurrent Track handles hold the secret -- the same credential
+	// decrypted by two overlapping jobs must stay redacted until the LAST handle goes
+	// away. Needles: every spelling Redact must look for -- the raw value plus its
+	// JSON-escaped forms (#152): a payload that went through System.Text.Json carries
+	// `pa"ss` as `pa\u0022ss` (default encoder) or `pa\"ss` (relaxed encoder), and an
+	// ordinal match on the raw value alone would let the escaped occurrence through,
+	// or worse, redact only the unescaped half.
+	//
+	// Count and needles live in ONE dictionary value on purpose (PR #155 round 1): a
+	// two-dictionary split had an interleaving -- last-handle untrack removes the
+	// count entry, a concurrent re-track's needle TryAdd no-ops against the not yet
+	// removed needle entry, the untrack then deletes it -- that left a live tracked
+	// secret with no escaped needles for the life of the new handle. One atomic value
+	// makes that state unrepresentable. The record's value equality is what lets
+	// Untrack's compare-exchange loops work: `with { Count = ... }` keeps the same
+	// needles array reference, so equality is count + array identity.
+	private sealed record TrackedSecret(int Count, string[] Needles);
 
-	// Key: the raw secret. Value: every needle Redact must look for -- the raw value
-	// plus its JSON-escaped spellings (#152): a payload that went through
-	// System.Text.Json carries `pa"ss` as `pa\u0022ss` (default encoder) or `pa\"ss`
-	// (relaxed encoder), and an ordinal match on the raw value alone would let the
-	// escaped occurrence through, or worse, redact only the unescaped half.
-	private readonly ConcurrentDictionary<string, string[]> _needles = new(StringComparer.Ordinal);
+	private readonly ConcurrentDictionary<string, TrackedSecret> _inPlay = new(StringComparer.Ordinal);
 
 	public IDisposable Track(string secretValue)
 	{
@@ -75,8 +83,12 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 				$"Secret values shorter than {MinimumSecretLength} characters cannot be tracked for redaction.", nameof(secretValue));
 		}
 
-		_inPlay.AddOrUpdate(secretValue, 1, (_, count) => count + 1);
-		_needles.TryAdd(secretValue, DeriveNeedles(secretValue));
+		// The add factory may run more than once under contention; DeriveNeedles is
+		// pure, so a discarded extra derivation is harmless.
+		_inPlay.AddOrUpdate(
+			secretValue,
+			static value => new TrackedSecret(1, DeriveNeedles(value)),
+			static (_, existing) => existing with { Count = existing.Count + 1 });
 		return new TrackHandle(this, secretValue);
 	}
 
@@ -90,8 +102,8 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 		// Snapshot, then order longest-first (see the type comment). The snapshot makes
 		// a concurrent Untrack mid-redaction harmless: the worst case is redacting a
 		// value whose handle was just disposed, never missing one that is still live.
-		string[] secrets = [.. _inPlay.Keys
-			.SelectMany(secret => _needles.TryGetValue(secret, out string[]? needles) ? needles : [secret])
+		string[] secrets = [.. _inPlay.Values
+			.SelectMany(tracked => tracked.Needles)
 			.Distinct(StringComparer.Ordinal)
 			.OrderByDescending(needle => needle.Length)];
 		StringBuilder? builder = null;
@@ -132,17 +144,16 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 		// Decrement-and-remove-at-zero, tolerant of a double Dispose (the second call
 		// finds no entry, or a count another handle owns, and must not over-decrement --
 		// TrackHandle guards the double call, this guards the removal race).
-		while (_inPlay.TryGetValue(secretValue, out int count))
+		while (_inPlay.TryGetValue(secretValue, out TrackedSecret? tracked))
 		{
-			if (count <= 1)
+			if (tracked.Count <= 1)
 			{
-				if (_inPlay.TryRemove(new KeyValuePair<string, int>(secretValue, count)))
+				if (_inPlay.TryRemove(new KeyValuePair<string, TrackedSecret>(secretValue, tracked)))
 				{
-					_needles.TryRemove(secretValue, out _);
 					return;
 				}
 			}
-			else if (_inPlay.TryUpdate(secretValue, count - 1, count))
+			else if (_inPlay.TryUpdate(secretValue, tracked with { Count = tracked.Count - 1 }, tracked))
 			{
 				return;
 			}

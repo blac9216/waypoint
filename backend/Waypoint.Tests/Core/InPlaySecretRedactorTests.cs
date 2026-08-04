@@ -109,6 +109,36 @@ public sealed class InPlaySecretRedactorTests
 		}
 	}
 
+	/// <summary>PR #155 round 1: churning Track/Dispose of the same secret on other
+	/// threads must never strip a live handle of its escaped needles -- count and
+	/// needles are one atomic value, so the two-dictionary interleaving that could
+	/// leave a live secret matching only its raw spelling is unrepresentable.</summary>
+	[Fact]
+	public async Task ChurningOverlappingTracks_NeverLoseTheEscapedNeedles()
+	{
+		InPlaySecretRedactor redactor = new();
+		const string canary = "chu\"rn-canary-invented";
+		string escapedPayload = JsonSerializer.Serialize(new { line = canary });
+		using CancellationTokenSource stop = new(TimeSpan.FromSeconds(2));
+
+		Task churn = Task.Run(() =>
+		{
+			while (!stop.IsCancellationRequested)
+			{
+				redactor.Track(canary).Dispose();
+			}
+		});
+
+		while (!stop.IsCancellationRequested)
+		{
+			using IDisposable live = redactor.Track(canary);
+			string redacted = redactor.Redact(escapedPayload);
+			Assert.DoesNotContain("rn-canary-invented", redacted, StringComparison.Ordinal);
+		}
+
+		await churn;
+	}
+
 	[Theory]
 	[InlineData("")]
 	[InlineData("abc")]
