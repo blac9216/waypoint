@@ -89,6 +89,20 @@ public sealed class JobLeaseRecoveryTests : IAsyncLifetime
 		Assert.True(reader.IsDBNull(3), "heartbeat_at must be cleared on requeue.");
 	}
 
+	[Fact]
+	public async Task Recovery_RejectsInvalidBatch_AndCapturingLoggerRecordsRecoveredRow()
+	{
+		await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => _repository.RecoverExpiredLeasesAsync(0, CancellationToken.None));
+		Guid jobId = await SeedQueuedJobAsync(maxAttempts: 3);
+		await _repository.ClaimJobAsync("crashed-worker", TimeSpan.FromMilliseconds(100), CancellationToken.None);
+		await Task.Delay(TimeSpan.FromMilliseconds(250));
+		Waypoint.Tests.Support.CapturingLogger<JobQueueRepository> logger = new();
+		JobQueueRepository capturing = new(_fixture.ConnectionString, logger);
+		Assert.Contains(await capturing.RecoverExpiredLeasesAsync(10, CancellationToken.None), job => job.Id == jobId);
+		Assert.Contains(logger.Entries, entry => entry.Message.Contains(jobId.ToString(), StringComparison.Ordinal));
+	}
+
+
 	/// <summary>A job that has already exhausted its attempts on its last, crashed attempt fails instead of requeuing forever.</summary>
 	[Fact]
 	public async Task CrashedWorkersLease_AtMaxAttempts_FailsInsteadOfRequeuing()

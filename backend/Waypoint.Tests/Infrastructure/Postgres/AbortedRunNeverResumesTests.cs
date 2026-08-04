@@ -79,6 +79,19 @@ public sealed class AbortedRunNeverResumesTests : IAsyncLifetime
 		Assert.Equal(JobStates.Cancelled, await GetStateAsync(jobId));
 	}
 
+	[Fact]
+	public async Task RunQueueState_ReadsEveryField_AndMissingRunReturnsNull()
+	{
+		Guid runId = await SeedRunAsync("running");
+		await ExecuteAsync("UPDATE runs SET paused = true, blocked = true, blocked_reason = 'operator hold' WHERE id = $1", runId);
+		RunQueueState state = Assert.IsType<RunQueueState>(await _repository.GetRunQueueStateAsync(runId, CancellationToken.None));
+		Assert.Equal("running", state.State);
+		Assert.True(state.Paused);
+		Assert.True(state.Blocked);
+		Assert.Equal("operator hold", state.BlockedReason);
+		Assert.Null(await _repository.GetRunQueueStateAsync(Guid.NewGuid(), CancellationToken.None));
+	}
+
 	private async Task<Guid> SeedRunAsync(string state)
 	{
 		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
