@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using Waypoint.Core.Jobs;
@@ -225,6 +226,113 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		return recovered;
 	}
 
+	public async Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(runType);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO runs (run_type, scope, credential_id, initiated_by, state)
+			VALUES ($1, $2::jsonb, $3, $4, 'pending')
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(runType);
+		command.Parameters.AddWithValue(string.IsNullOrWhiteSpace(scopeJson) ? "{}" : scopeJson);
+		command.Parameters.AddWithValue((object?)credentialId ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)initiatedBy ?? DBNull.Value);
+
+		return (Guid)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+	}
+
+	public async Task<IReadOnlyList<Guid>> FanOutJobsAsync(
+		Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(specs);
+		if (specs.Count == 0)
+		{
+			throw new ArgumentException("A run must fan out to at least one job.", nameof(specs));
+		}
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		await using (NpgsqlCommand markRunning = new(
+			"UPDATE runs SET state = 'running', started_at = COALESCE(started_at, now()) WHERE id = $1 AND state = 'pending'", connection, transaction))
+		{
+			markRunning.Parameters.AddWithValue(runId);
+			int affected = await markRunning.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			if (affected == 0)
+			{
+				throw new InvalidOperationException(
+					string.Format(CultureInfo.InvariantCulture, "Run '{0}' is not pending; cannot fan out jobs to it.", runId));
+			}
+		}
+
+		List<Guid> jobIds = new(specs.Count);
+		foreach (JobSpec spec in specs)
+		{
+			await using NpgsqlCommand insertJob = new(
+				"""
+				INSERT INTO jobs (run_id, job_type, target_id, target_name, credential_id, priority, payload, created_by, state)
+				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued')
+				RETURNING id
+				""", connection, transaction);
+			insertJob.Parameters.AddWithValue(runId);
+			insertJob.Parameters.AddWithValue(spec.JobType);
+			insertJob.Parameters.AddWithValue((object?)spec.TargetId ?? DBNull.Value);
+			insertJob.Parameters.AddWithValue((object?)spec.TargetName ?? DBNull.Value);
+			insertJob.Parameters.AddWithValue((object?)spec.CredentialId ?? DBNull.Value);
+			insertJob.Parameters.AddWithValue(spec.Priority);
+			insertJob.Parameters.AddWithValue(string.IsNullOrWhiteSpace(spec.Payload) ? "{}" : spec.Payload);
+			insertJob.Parameters.AddWithValue((object?)createdBy ?? DBNull.Value);
+
+			jobIds.Add((Guid)(await insertJob.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		LogFannedOutJobs(runId, jobIds.Count);
+		return jobIds;
+	}
+
+	public async Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		await using NpgsqlCommand command = new(
+			"UPDATE runs SET paused = true WHERE id = $1 AND state IN ('pending', 'running') RETURNING id", connection);
+		command.Parameters.AddWithValue(runId);
+
+		bool paused = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+		if (paused)
+		{
+			LogRunPaused(runId);
+		}
+
+		return paused;
+	}
+
+	public async Task<bool> ResumeRunAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		await using NpgsqlCommand command = new("UPDATE runs SET paused = false WHERE id = $1 AND state IN ('pending', 'running') RETURNING id", connection);
+		command.Parameters.AddWithValue(runId);
+
+		bool resumed = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+		if (resumed)
+		{
+			LogRunResumed(runId);
+		}
+
+		return resumed;
+	}
+
 	public async Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
@@ -265,6 +373,188 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 		return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
 	}
+
+	public async Task<AbortRunResult> AbortRunAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		await using (NpgsqlCommand lockRun = new(
+			"SELECT state FROM runs WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockRun.Parameters.AddWithValue(runId);
+			object? state = await lockRun.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+			if (state is not string currentState ||
+				(!string.Equals(currentState, "pending", StringComparison.Ordinal) &&
+				 !string.Equals(currentState, "running", StringComparison.Ordinal)))
+			{
+				return new AbortRunResult([], []);
+			}
+		}
+
+		List<Guid> cancelledIds = [];
+		List<Guid> inFlightIds = [];
+		await using (NpgsqlCommand snapshotJobs = new(
+			"SELECT id, state FROM jobs WHERE run_id = $1 FOR UPDATE", connection, transaction))
+		{
+			snapshotJobs.Parameters.AddWithValue(runId);
+			await using NpgsqlDataReader reader = await snapshotJobs.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				string state = reader.GetString(1);
+				if (string.Equals(state, JobStates.Queued, StringComparison.Ordinal) || string.Equals(state, JobStates.Blocked, StringComparison.Ordinal))
+				{
+					cancelledIds.Add(reader.GetGuid(0));
+				}
+				else if (string.Equals(state, JobStates.Running, StringComparison.Ordinal) ||
+					string.Equals(state, JobStates.Attesting, StringComparison.Ordinal) ||
+					string.Equals(state, JobStates.Converting, StringComparison.Ordinal))
+				{
+					inFlightIds.Add(reader.GetGuid(0));
+				}
+			}
+		}
+
+		await using (NpgsqlCommand markAborted = new(
+			"UPDATE runs SET state = 'aborted', paused = false, completed_at = now() WHERE id = $1", connection, transaction))
+		{
+			markAborted.Parameters.AddWithValue(runId);
+			await markAborted.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// Migration 0003's run-side trigger has already cancelled queued rows in this
+		// transaction. Blocked rows are not queued, so finish those explicitly.
+		await using (NpgsqlCommand cancelBlocked = new(
+			"""
+			UPDATE jobs SET state = 'cancelled', finished_at = now(), note = 'Cancelled: run aborted'
+			WHERE run_id = $1 AND state = 'blocked'
+			""", connection, transaction))
+		{
+			cancelBlocked.Parameters.AddWithValue(runId);
+			await cancelBlocked.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		LogRunAborted(runId, cancelledIds.Count, inFlightIds.Count);
+		return new AbortRunResult(cancelledIds, inFlightIds);
+	}
+
+	public async Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken)
+	{
+		if (threshold <= 0)
+		{
+			throw new ArgumentOutOfRangeException(nameof(threshold), threshold, "Threshold must be positive.");
+		}
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		// Serialize checks for one credential and keep the resolved-outcome snapshot
+		// in the same transaction as the block writes. Unresolved jobs have no outcome
+		// and cannot displace a failure; id DESC makes equal finish times total-order.
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+		await using (NpgsqlCommand lockCredential = new("SELECT id FROM credentials WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockCredential.Parameters.AddWithValue(credentialId);
+			if (await lockCredential.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
+			{
+				return new AuthFailureHaltResult([], []);
+			}
+		}
+
+		bool tripped;
+		await using (NpgsqlCommand recent = new(
+			"SELECT state FROM jobs WHERE credential_id = $1 AND finished_at IS NOT NULL ORDER BY finished_at DESC, id DESC LIMIT $2", connection, transaction))
+		{
+			recent.Parameters.AddWithValue(credentialId);
+			recent.Parameters.AddWithValue(threshold);
+
+			int seen = 0;
+			bool allAuthFailed = true;
+			await using NpgsqlDataReader reader = await recent.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				seen++;
+				if (!string.Equals(reader.GetString(0), JobStates.AuthFailed, StringComparison.Ordinal))
+				{
+					allAuthFailed = false;
+				}
+			}
+
+			// "N consecutive" requires at least N jobs to exist for this credential at
+			// all -- fewer than that can never trip the halt regardless of their state.
+			tripped = seen == threshold && allAuthFailed;
+		}
+
+		if (!tripped)
+		{
+			return new AuthFailureHaltResult([], []);
+		}
+
+		string reason = string.Format(
+			CultureInfo.InvariantCulture,
+			"{0} consecutive auth failures against this credential; queue halted pending a credential swap.",
+			threshold);
+
+		// Idempotent under concurrent callers by construction: both queries below only
+		// touch rows still in 'queued', so a second, redundant call (two workers
+		// finishing an auth-failed job around the same moment) finds nothing left to
+		// change and returns an empty result the second time.
+		List<Guid> blockedRunIds = [];
+		await using (NpgsqlCommand blockRuns = new(
+			"""
+			UPDATE runs SET blocked = true, blocked_reason = $2
+			WHERE id IN (SELECT DISTINCT run_id FROM jobs WHERE credential_id = $1 AND state = 'queued' AND run_id IS NOT NULL)
+			AND blocked = false
+			RETURNING id
+			""", connection, transaction))
+		{
+			blockRuns.Parameters.AddWithValue(credentialId);
+			blockRuns.Parameters.AddWithValue(reason);
+			await using NpgsqlDataReader reader = await blockRuns.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				blockedRunIds.Add(reader.GetGuid(0));
+			}
+		}
+
+		List<Guid> blockedJobIds = [];
+		await using (NpgsqlCommand blockJobs = new(
+			"""
+			UPDATE jobs SET state = 'blocked', note = $2
+			WHERE credential_id = $1 AND state = 'queued'
+			RETURNING id
+			""", connection, transaction))
+		{
+			blockJobs.Parameters.AddWithValue(credentialId);
+			blockJobs.Parameters.AddWithValue(reason);
+			await using NpgsqlDataReader reader = await blockJobs.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				blockedJobIds.Add(reader.GetGuid(0));
+			}
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		LogAuthFailureHalt(credentialId, threshold, blockedRunIds.Count, blockedJobIds.Count);
+		return new AuthFailureHaltResult(blockedRunIds, blockedJobIds);
+	}
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Fanned out {JobCount} job(s) for run {RunId}")]
+	private partial void LogFannedOutJobs(Guid runId, int jobCount);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Run {RunId} paused")]
+	private partial void LogRunPaused(Guid runId);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Run {RunId} resumed")]
+	private partial void LogRunResumed(Guid runId);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Run {RunId} aborted: {CancelledCount} queued job(s) cancelled, {InFlightCount} in-flight job(s) signaled")]
+	private partial void LogRunAborted(Guid runId, int cancelledCount, int inFlightCount);
+
+	[LoggerMessage(Level = LogLevel.Error, Message = "Credential {CredentialId} hit {Threshold} consecutive auth failures: {BlockedRunCount} run(s) and {BlockedJobCount} queued job(s) blocked")]
+	private partial void LogAuthFailureHalt(Guid credentialId, int threshold, int blockedRunCount, int blockedJobCount);
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Recovered job {JobId} to {NewState} after expired lease (attempt {AttemptCount}/{MaxAttempts})")]
 	private partial void LogRecoveredJob(Guid jobId, string newState, int attemptCount, int maxAttempts);

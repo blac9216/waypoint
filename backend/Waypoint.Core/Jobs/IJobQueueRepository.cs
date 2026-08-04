@@ -70,6 +70,24 @@ public interface IJobQueueRepository
 	/// <summary>The run state and queue flags, or null when it does not exist.</summary>
 	Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken);
 
+	/// <summary>Creates a pending run and returns its identifier.</summary>
+	Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken);
+
+	/// <summary>Atomically creates all jobs for a run and marks the run running.</summary>
+	Task<IReadOnlyList<Guid>> FanOutJobsAsync(Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken);
+
+	/// <summary>Pauses dispatch for a pending or running run; in-flight work continues.</summary>
+	Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken);
+
+	/// <summary>Resumes dispatch for an existing non-terminal run.</summary>
+	Task<bool> ResumeRunAsync(Guid runId, CancellationToken cancellationToken);
+
+	/// <summary>Aborts a run and reports jobs requiring cooperative cancellation.</summary>
+	Task<AbortRunResult> AbortRunAsync(Guid runId, CancellationToken cancellationToken);
+
+	/// <summary>Blocks queued work after the credential most recent resolved outcomes are consecutive authentication failures.</summary>
+	Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken);
+
 	/// <summary>
 	/// Puts a job this process just claimed back into <c>queued</c>, clearing the
 	/// lease/claim fields -- used when a claim turns out to belong to a run that must
@@ -83,3 +101,9 @@ public interface IJobQueueRepository
 
 /// <summary>Run-level fields needed after a global job claim.</summary>
 public sealed record RunQueueState(string State, bool Paused, bool Blocked, string? BlockedReason);
+
+/// <summary>The database effects of aborting a run.</summary>
+public sealed record AbortRunResult(IReadOnlyList<Guid> CancelledJobIds, IReadOnlyList<Guid> InFlightJobIds);
+
+/// <summary>The database effects of tripping a credential authentication-failure halt.</summary>
+public sealed record AuthFailureHaltResult(IReadOnlyList<Guid> BlockedRunIds, IReadOnlyList<Guid> BlockedJobIds);
