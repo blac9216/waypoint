@@ -80,6 +80,8 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 		// background-disposal fate as its runspace; the finally below disposes inline
 		// only when the pipeline ended cooperatively.
 		bool abandonPowerShell = false;
+		Action? unwireStreams = null;
+		PSDataCollection<PSObject>? output = null;
 		global::System.Management.Automation.PowerShell powershell = global::System.Management.Automation.PowerShell.Create();
 		try
 		{
@@ -99,12 +101,12 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 				powershell.AddParameter(name, value);
 			}
 
-			WireStreamCapture(powershell, request);
+			unwireStreams = WireStreamCapture(powershell, request);
 			ResetNativeExitCode(lease);
 
 			bool timedOut = false;
 			string? failureReason = null;
-			PSDataCollection<PSObject> output = [];
+			output = [];
 
 			try
 			{
@@ -167,11 +169,15 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 		{
 			if (abandonPowerShell)
 			{
-				AbandonPowerShell(powershell);
+				// Detach stream capture first: the abandoned pipeline keeps producing
+				// records, and its job has already reported its outcome (#160).
+				unwireStreams?.Invoke();
+				AbandonPowerShell(powershell, output);
 			}
 			else
 			{
 				powershell.Dispose();
+				output?.Dispose();
 			}
 		}
 	}
@@ -212,11 +218,15 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 		_ = task.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
 	}
 
-	private static void AbandonPowerShell(global::System.Management.Automation.PowerShell powershell)
+	private static void AbandonPowerShell(global::System.Management.Automation.PowerShell powershell, PSDataCollection<PSObject>? output)
 	{
 		// Same rationale as the pool's background runspace discard: Dispose of a
 		// PowerShell whose pipeline ignored Stop() blocks until the pipeline ends,
-		// which may be never -- that wait cannot happen on the caller path.
+		// which may be never -- that wait cannot happen on the caller path. The output
+		// collection is disposed on the same background path, deliberately AFTER the
+		// PowerShell object: its Dispose blocks until the pipeline actually ended, so
+		// the collection is no longer being written to when it is torn down (#160's
+		// second criterion -- the collection is not leaked with the abandoned object).
 		_ = Task.Run(() =>
 		{
 			try
@@ -227,22 +237,47 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 			{
 				// The object is abandoned either way; there is nothing left to do.
 			}
+			finally
+			{
+				output?.Dispose();
+			}
 		});
 	}
 
-	/// <summary>Forwards each PowerShell stream into <c>job.log</c> as records arrive. Severity names follow the stream names.</summary>
-	private void WireStreamCapture(global::System.Management.Automation.PowerShell powershell, PowerShellRequest request)
+	/// <summary>
+	/// Forwards each PowerShell stream into <c>job.log</c> as records arrive. Severity
+	/// names follow the stream names. Returns the unwire action: an abandoned pipeline
+	/// keeps running after its job already reported TimedOut, and without detaching
+	/// these handlers its late records would keep landing in <c>job.log</c> under a
+	/// finished job (#160).
+	/// </summary>
+	private Action WireStreamCapture(global::System.Management.Automation.PowerShell powershell, PowerShellRequest request)
 	{
-		powershell.Streams.Information.DataAdded += (sender, args) =>
+		EventHandler<DataAddedEventArgs> onInformation = (sender, args) =>
 			Emit(request, "information", ((PSDataCollection<InformationRecord>)sender!)[args.Index].ToString());
-		powershell.Streams.Warning.DataAdded += (sender, args) =>
+		EventHandler<DataAddedEventArgs> onWarning = (sender, args) =>
 			Emit(request, "warning", ((PSDataCollection<WarningRecord>)sender!)[args.Index].Message);
-		powershell.Streams.Error.DataAdded += (sender, args) =>
+		EventHandler<DataAddedEventArgs> onError = (sender, args) =>
 			Emit(request, "error", ((PSDataCollection<ErrorRecord>)sender!)[args.Index].ToString());
-		powershell.Streams.Verbose.DataAdded += (sender, args) =>
+		EventHandler<DataAddedEventArgs> onVerbose = (sender, args) =>
 			Emit(request, "verbose", ((PSDataCollection<VerboseRecord>)sender!)[args.Index].Message);
-		powershell.Streams.Debug.DataAdded += (sender, args) =>
+		EventHandler<DataAddedEventArgs> onDebug = (sender, args) =>
 			Emit(request, "debug", ((PSDataCollection<DebugRecord>)sender!)[args.Index].Message);
+
+		powershell.Streams.Information.DataAdded += onInformation;
+		powershell.Streams.Warning.DataAdded += onWarning;
+		powershell.Streams.Error.DataAdded += onError;
+		powershell.Streams.Verbose.DataAdded += onVerbose;
+		powershell.Streams.Debug.DataAdded += onDebug;
+
+		return () =>
+		{
+			powershell.Streams.Information.DataAdded -= onInformation;
+			powershell.Streams.Warning.DataAdded -= onWarning;
+			powershell.Streams.Error.DataAdded -= onError;
+			powershell.Streams.Verbose.DataAdded -= onVerbose;
+			powershell.Streams.Debug.DataAdded -= onDebug;
+		};
 	}
 
 	private void Emit(PowerShellRequest request, string severity, string message)

@@ -235,6 +235,29 @@ public sealed class PowerShellExecutorTests : IDisposable
 		Assert.Null(clean.FailureReason);
 	}
 
+	/// <summary>#160: an abandoned pipeline's stream handlers are detached -- a record
+	/// it emits after the job already reported TimedOut must not land in job.log.</summary>
+	[Fact]
+	public async Task AnAbandonedPipeline_CannotEmitLateEventsAfterTheResult()
+	{
+		PowerShellExecutor executor = CreateExecutor(maxRunspaces: 1, stopGrace: TimeSpan.FromMilliseconds(200));
+		PowerShellExecutionResult hung = await executor.ExecuteAsync(
+			new PowerShellRequest(
+				"Invoke-StubHangThenWrite",
+				Parameters: new Dictionary<string, object?> { ["Milliseconds"] = 2500 },
+				Timeout: TimeSpan.FromMilliseconds(500)),
+			CancellationToken.None);
+		Assert.True(hung.TimedOut);
+
+		int eventsAtResult = _buffer.Events.Count;
+
+		// Outlive the hang: the stub wakes at ~2.5s and writes its warning; with the
+		// handlers detached, nothing new may arrive.
+		await Task.Delay(TimeSpan.FromSeconds(4));
+		Assert.Equal(eventsAtResult, _buffer.Events.Count);
+		Assert.DoesNotContain(_buffer.Events, entry => entry.Payload.Contains("late line", StringComparison.Ordinal));
+	}
+
 	[Fact]
 	public async Task ConcurrentInvocationsBeyondThePoolSize_AllComplete()
 	{

@@ -79,4 +79,13 @@ function Write-StubSecretLeak {
     "output leaks $Secret"
 }
 
-Export-ModuleMember -Function Get-StubInventory, Write-StubStreams, Get-StubEcho, Invoke-StubFailure, Invoke-StubHang, Write-StubSecretLeak
+function Invoke-StubHangThenWrite {
+    [CmdletBinding()]
+    param([int] $Milliseconds = 3000)
+    # Ignores Stop() while sleeping, then emits a late record -- the #160 repro: a
+    # job that already reported TimedOut must not receive this line in its log.
+    [System.Threading.Thread]::Sleep($Milliseconds)
+    Write-Warning 'late line after the job already finished'
+}
+
+Export-ModuleMember -Function Get-StubInventory, Write-StubStreams, Get-StubEcho, Invoke-StubFailure, Invoke-StubHang, Invoke-StubHangThenWrite, Write-StubSecretLeak
