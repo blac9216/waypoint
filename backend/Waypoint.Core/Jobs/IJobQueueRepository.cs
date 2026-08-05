@@ -116,5 +116,10 @@ public sealed record RunQueueState(string State, bool Paused, bool Blocked, stri
 /// <summary>The database effects of aborting a run.</summary>
 public sealed record AbortRunResult(IReadOnlyList<Guid> CancelledJobIds, IReadOnlyList<Guid> InFlightJobIds);
 
-/// <summary>The database effects of tripping a credential authentication-failure halt.</summary>
-public sealed record AuthFailureHaltResult(IReadOnlyList<Guid> BlockedRunIds, IReadOnlyList<Guid> BlockedJobIds);
+/// <summary>
+/// The database effects of a consecutive-auth-failure check. <see cref="HaltTripped"/>
+/// is true whenever the window condition held -- including with zero queued rows to
+/// block (#147: the halt is SSE-visible even when it only flips the durable
+/// credential state), and on a re-check against an already-halted credential.
+/// </summary>
+public sealed record AuthFailureHaltResult(bool HaltTripped, IReadOnlyList<Guid> BlockedRunIds, IReadOnlyList<Guid> BlockedJobIds);

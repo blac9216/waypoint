@@ -290,7 +290,7 @@ public sealed class HostedServiceBehaviorTests
 		public Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken) => Task.FromResult(true);
 		public Task<bool> ResumeRunAsync(Guid runId, CancellationToken cancellationToken) => Task.FromResult(true);
 		public Task<AbortRunResult> AbortRunAsync(Guid runId, CancellationToken cancellationToken) => Task.FromResult(new AbortRunResult([], []));
-		public Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken) => Task.FromResult(new AuthFailureHaltResult([], []));
+		public Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken) => Task.FromResult(new AuthFailureHaltResult(HaltTripped: false, [], []));
 		public Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken)
 		{ Releases++; return Task.FromResult(true); }
 	}

@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Tests.Support;
@@ -268,6 +269,7 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		await SeedTerminalJobAsync(firstRunId, credentialId, JobStates.AuthFailed);
 		await SeedTerminalJobAsync(firstRunId, credentialId, JobStates.AuthFailed);
 		AuthFailureHaltResult halt = await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, 3, CancellationToken.None);
+		Assert.True(halt.HaltTripped); // #147: tripping is visible even with nothing to block
 		Assert.True(halt.BlockedRunIds.Count == 0 && halt.BlockedJobIds.Count == 0); // nothing was queued -- the halt is the credential state itself
 
 		Guid laterRunId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
@@ -396,6 +398,41 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		RecoveredJob job = Assert.Single(recovered, r => r.Id == jobId);
 		Assert.Equal("blocked", job.NewState);
 		Assert.Null(await _repository.ClaimJobAsync("worker-after-recovery", TimeSpan.FromMinutes(5), CancellationToken.None));
+	}
+
+	/// <summary>#147: a fan-out that is born blocked (credential already halted) emits a
+	/// run-scoped queue.state and an appliance-wide system.notice -- the only actor that
+	/// knows this happened is the repository, post-commit.</summary>
+	[Fact]
+	public async Task AFanOutBornBlocked_EmitsQueueStateAndSystemNotice()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid firstRunId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		await SeedTerminalJobAsync(firstRunId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(firstRunId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(firstRunId, credentialId, JobStates.AuthFailed);
+		await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, 3, CancellationToken.None);
+
+		JobQueueRepository emittingRepository = new(
+			_fixture.ConnectionString,
+			NullLogger<JobQueueRepository>.Instance,
+			new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, new InPlaySecretRedactor(), NullLogger<JobEventPublisher>.Instance));
+		Guid laterRunId = await emittingRepository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		await emittingRepository.FanOutJobsAsync(
+			laterRunId, [new JobSpec("scan", 1, CredentialId: credentialId)], "tester", CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using (NpgsqlCommand queueState = new(
+			"SELECT count(*) FROM job_events WHERE event_type = 'queue.state' AND run_id = $1 AND payload->>'blocked' = 'true'", connection))
+		{
+			queueState.Parameters.AddWithValue(laterRunId);
+			Assert.Equal(1L, (long)(await queueState.ExecuteScalarAsync())!);
+		}
+
+		await using NpgsqlCommand notice = new(
+			"SELECT count(*) FROM job_events WHERE event_type = 'system.notice' AND payload->>'born_blocked_job_count' = '1'", connection);
+		Assert.Equal(1L, (long)(await notice.ExecuteScalarAsync())!);
 	}
 
 	private async Task ClearQueueHaltAsync(Guid credentialId)
