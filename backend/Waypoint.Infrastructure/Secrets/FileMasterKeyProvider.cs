@@ -67,9 +67,16 @@ public sealed class FileMasterKeyProvider : IMasterKeyProvider
 				$"The master key file named by {KeyFileEnvironmentVariable} ('{path}') could not be read: {exception.Message}", exception);
 		}
 
-		byte[] key = Normalize(raw, path);
+		// #182: Normalize runs INSIDE the wipe scope, so a malformed file's content is
+		// zeroed on the throw path too. Two documented limitations remain: the hex path
+		// materializes the key as a managed string (unwipeable -- the ADR-0005 trade
+		// recorded on #182), and a file of exactly 32 bytes is always treated as raw,
+		// even if those bytes happen to be ASCII hex characters (raw takes precedence;
+		// a 32-char hex string is not a valid 64-char hex key anyway).
 		try
 		{
+			byte[] key = Normalize(raw, path);
+
 			// Key id: first 8 bytes of SHA-256 of the key material, hex. Deterministic
 			// per key, reveals nothing recoverable, and short enough to read in a log
 			// line or a credential_secrets row.
