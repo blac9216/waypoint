@@ -35,6 +35,8 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 public sealed class JobEventStreamServiceTests : IAsyncLifetime
 #pragma warning restore CA1001
 {
+	private static readonly string[] ExpectedRacedMarkers = ["raced-0", "raced-1", "raced-2"];
+
 	private readonly PostgresFixture _fixture;
 	private JobEventStreamService _service = null!;
 	private CapturingLogger<JobEventStreamService> _logger = null!;
@@ -277,7 +279,7 @@ public sealed class JobEventStreamServiceTests : IAsyncLifetime
 
 		Assert.Equal(3, received.Count);
 		Assert.Equal(
-			new[] { "raced-0", "raced-1", "raced-2" },
+			ExpectedRacedMarkers,
 			received.Select(row => System.Text.Json.JsonDocument.Parse(row.PayloadJson).RootElement.GetProperty("marker").GetString()));
 	}
 
