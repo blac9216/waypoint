@@ -613,6 +613,43 @@ GUARD_CHARS_TRAILING_UNION: frozenset[str] = frozenset().union(
 )
 
 
+class PrivateSpaceCidrTests(unittest.TestCase):
+	"""The RFC 1918 whole-space CIDR literals (issue #61's forwarded-headers
+	defaults) are allowed ONLY as base + exact canonical prefix; every nearby
+	shape stays a finding. Candidates are assembled from octets so this test
+	file's own scan stays clean."""
+
+	_BASES = {
+		".".join(map(str, octets)): prefix
+		for octets, prefix in (
+			((10, 0, 0, 0), 8),
+			((172, 16, 0, 0), 12),
+			((192, 168, 0, 0), 16),
+		)
+	}
+
+	def test_whole_space_cidrs_are_allowed(self) -> None:
+		for base, prefix in self._BASES.items():
+			with self.subTest(base=base):
+				self.assertEqual(
+					[], scanner.scan_text("x", f'KnownNetworks: ["{base}/{prefix}"]'))
+
+	def test_base_quad_without_its_prefix_is_still_flagged(self) -> None:
+		for base in self._BASES:
+			with self.subTest(base=base):
+				self.assertTrue(scanner.scan_text("x", f"host {base} here"))
+
+	def test_wrong_or_narrower_prefix_is_still_flagged(self) -> None:
+		host = ".".join(map(str, (10, 0, 0, 5)))
+		cases = [f"{base}/{prefix + 4}" for base, prefix in self._BASES.items()]
+		cases.append(f"{host}/8")
+		base10 = ".".join(map(str, (10, 0, 0, 0)))
+		cases.append(f"{base10}/81")
+		for bad in cases:
+			with self.subTest(bad=bad):
+				self.assertTrue(scanner.scan_text("x", f"net {bad}"))
+
+
 class DetectorPositiveTests(unittest.TestCase):
 	"""Each detector fires on the pattern class it exists to catch."""
 
