@@ -213,6 +213,18 @@ and replaying `WHERE seq > last` yields every missed event exactly once, in orde
 Merely-monotonic assignment (e.g. an identity column) does NOT provide this — that
 was PR #104's round-1 defect, re-documented here so it is not re-introduced.
 
+`seq` is deliberately **not gap-free**: a rolled-back insert burns its value.
+Clients MUST NOT gap-check (a missing number is not a missing event); the
+commit-order guarantee above is what makes gap detection unnecessary for replay
+safety.
+
+`download.progress` is job-scoped **without exception**: it can never be emitted
+for a download with no job row. Every download — including catalog-index and
+future content-pull work — executes as a job (ADR-0008: "everything is a job"),
+so a progress emitter always has a `job_id`; a hypothetical job-less download
+would need a contract change plus a `job_events_scope_check` relaxation, decided
+here to be rejected rather than left open (#116).
+
 Queue-halt observability (#147): tripping the consecutive-auth-failure halt emits
 `queue.state` for each newly-blocked run and one `system.notice` — including when
 the halt only flips the durable credential state (nothing queued at that instant),
