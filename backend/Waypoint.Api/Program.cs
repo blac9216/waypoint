@@ -134,7 +134,11 @@ try
 		ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor
 			| Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto
 	};
-	if (app.Configuration.GetValue<bool>("ForwardedHeaders:TrustAnyProxy"))
+	// PR #190 round 1: TrustAnyProxy is honoured ONLY in the Testing environment --
+	// in any other environment the flag is ignored outright, so no production
+	// configuration can widen trust to "everyone" (one env var must never be able
+	// to disable a spoofing control).
+	if (app.Environment.IsEnvironment("Testing") && app.Configuration.GetValue<bool>("ForwardedHeaders:TrustAnyProxy"))
 	{
 		forwardedHeaders.KnownNetworks.Clear();
 		forwardedHeaders.KnownProxies.Clear();
@@ -144,9 +148,19 @@ try
 		foreach (string cidr in app.Configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>()
 			?? ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"])
 		{
+			// Fail fast and name the fix: a malformed entry must stop startup with an
+			// operator-actionable message, not an anonymous IndexOutOfRange.
 			string[] parts = cidr.Split('/');
-			forwardedHeaders.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(
-				System.Net.IPAddress.Parse(parts[0]), int.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture)));
+			if (parts.Length != 2
+				|| !System.Net.IPAddress.TryParse(parts[0], out System.Net.IPAddress? network)
+				|| !int.TryParse(parts[1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int prefix)
+				|| prefix is < 0 or > 32)
+			{
+				throw new InvalidOperationException(
+					$"ForwardedHeaders:KnownNetworks entry '{cidr}' is not a valid CIDR (expected e.g. '172.16.0.0/12').");
+			}
+
+			forwardedHeaders.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(network, prefix));
 		}
 	}
 

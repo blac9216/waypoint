@@ -643,6 +643,8 @@ class PrivateSpaceCidrTests(unittest.TestCase):
 		host = ".".join(map(str, (10, 0, 0, 5)))
 		cases = [f"{base}/{prefix + 4}" for base, prefix in self._BASES.items()]
 		cases.append(f"{host}/8")
+		base10 = ".".join(map(str, (10, 0, 0, 0)))
+		cases.append(f"{base10}/81")
 		for bad in cases:
 			with self.subTest(bad=bad):
 				self.assertTrue(scanner.scan_text("x", f"net {bad}"))

@@ -333,7 +333,12 @@ _PRIVATE_SPACE_CIDRS = {
 
 def _is_private_space_cidr(line: str, candidate: str, end: int) -> bool:
 	suffix = _PRIVATE_SPACE_CIDRS.get(candidate)
-	return suffix is not None and line[end:end + len(suffix)] == suffix
+	if suffix is None or line[end:end + len(suffix)] != suffix:
+		return False
+	# The prefix must END there: "/8" followed by another digit is /81 or /800,
+	# not the canonical whole-space prefix (PR #190 round 1, finding 4).
+	after = end + len(suffix)
+	return after >= len(line) or not line[after].isdigit()
 
 
 def is_allowed_ip(candidate: str) -> bool:

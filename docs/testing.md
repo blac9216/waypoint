@@ -595,6 +595,14 @@ have repeatedly caught real defects no CI run could have seen:
   - Everything else is a deliberate-evasion encoding (integer- or hex-encoded
     addresses, zero-width-space splitting), which is outside this gate's
     accidental-disclosure threat model rather than a boundary case it missed.
+- **Value-narrow detector exceptions in force**: one. The three canonical RFC 1918
+  whole-space CIDR literals (base address + exact canonical prefix, e.g. the
+  ten-slash-eight) are not IP findings — they name every private network in
+  existence and can identify no host (added for the #61 forwarded-headers
+  defaults). The bare base quad, any other host, and any wrong, narrower, or
+  digit-extended prefix all remain findings; `PrivateSpaceCidrTests` pins each
+  direction. This is a value-level exception inside the detector, not a file
+  exemption — every file is still scanned by every check.
 - **Files the scanner does not read**: **none, currently — and that is a property
   worth keeping.** `ALLOWLIST_FINDINGS` in `scan_repo_specific.py` is empty, so every
   git-tracked file that isn't a known-binary extension is scanned by all four
