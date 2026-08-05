@@ -112,6 +112,12 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<PowerShell.WaypointRunspacePool>();
 			services.AddSingleton<IPowerShellExecutor, PowerShell.PowerShellExecutor>();
 
+			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
+				connectionString,
+				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
+				serviceProvider.GetRequiredService<ISecretTracker>(),
+				serviceProvider.GetRequiredService<ILogger<Secrets.CredentialSecretStore>>()));
+
 			services.AddSingleton<JobEventStreamService>(serviceProvider => new JobEventStreamService(
 				connectionString,
 				serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),

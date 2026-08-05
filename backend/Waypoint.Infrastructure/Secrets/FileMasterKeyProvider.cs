@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System.Security.Cryptography;
-using System.Text;
 using Waypoint.Core.Secrets;
 
 namespace Waypoint.Infrastructure.Secrets;
@@ -67,9 +66,16 @@ public sealed class FileMasterKeyProvider : IMasterKeyProvider
 				$"The master key file named by {KeyFileEnvironmentVariable} ('{path}') could not be read: {exception.Message}", exception);
 		}
 
-		byte[] key = Normalize(raw, path);
+		// #182: Normalize runs INSIDE the wipe scope, so a malformed file's content is
+		// zeroed on the throw path too. Two documented limitations remain: the hex path
+		// materializes the key as a managed string (unwipeable -- the ADR-0005 trade
+		// recorded on #182), and a file of exactly 32 bytes is always treated as raw,
+		// even if those bytes happen to be ASCII hex characters (raw takes precedence;
+		// a 32-char hex string is not a valid 64-char hex key anyway).
 		try
 		{
+			byte[] key = Normalize(raw, path);
+
 			// Key id: first 8 bytes of SHA-256 of the key material, hex. Deterministic
 			// per key, reveals nothing recoverable, and short enough to read in a log
 			// line or a credential_secrets row.
@@ -91,17 +97,35 @@ public sealed class FileMasterKeyProvider : IMasterKeyProvider
 		}
 
 		// 64 hex chars, tolerating trailing whitespace/newline from shell redirection.
-		string text = Encoding.ASCII.GetString(raw).TrimEnd('\r', '\n', ' ', '\t');
-		if (text.Length == 64)
+		// Decoded byte-by-byte from the raw buffer on purpose (#182 AC2): a managed
+		// string of the key material could never be wiped; these nibbles live only in
+		// the caller-wiped raw buffer and the returned key.
+		int length = raw.Length;
+		while (length > 0 && raw[length - 1] is (byte)'\r' or (byte)'\n' or (byte)' ' or (byte)'\t')
 		{
-			try
+			length--;
+		}
+
+		if (length == 64)
+		{
+			byte[] key = new byte[32];
+			for (int index = 0; index < 32; index++)
 			{
-				return Convert.FromHexString(text);
+				int high = HexNibble(raw[index * 2]);
+				int low = HexNibble(raw[(index * 2) + 1]);
+				if (high < 0 || low < 0)
+				{
+					CryptographicOperations.ZeroMemory(key);
+					key = null!;
+					break;
+				}
+
+				key[index] = (byte)((high << 4) | low);
 			}
-			catch (FormatException)
+
+			if (key is not null)
 			{
-				// Falls through to the size error below -- "64 characters that are not
-				// hex" gets the same operator guidance as any other wrong content.
+				return key;
 			}
 		}
 
@@ -109,4 +133,12 @@ public sealed class FileMasterKeyProvider : IMasterKeyProvider
 			$"The master key file named by {KeyFileEnvironmentVariable} ('{path}') has the wrong format: expected exactly " +
 			$"32 raw bytes or 64 hex characters, found {raw.Length} byte(s). Generate one with 'openssl rand -hex 32'.");
 	}
+
+	private static int HexNibble(byte character) => character switch
+	{
+		>= (byte)'0' and <= (byte)'9' => character - '0',
+		>= (byte)'a' and <= (byte)'f' => character - 'a' + 10,
+		>= (byte)'A' and <= (byte)'F' => character - 'A' + 10,
+		_ => -1,
+	};
 }
