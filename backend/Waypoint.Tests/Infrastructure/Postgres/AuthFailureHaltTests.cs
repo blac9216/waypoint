@@ -159,6 +159,38 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		Assert.Empty(second.BlockedJobIds);
 	}
 
+	/// <summary>Issue #175: when the halt re-trips on a credential that is already halted,
+	/// queue_halted_at must retain the original trip time — it must not drift to the
+	/// latest re-check.</summary>
+	[Fact]
+	public async Task ReTrippingAnAlreadyHaltedCredential_PreservesOriginalHaltTimestamp()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		Guid queuedJobId = await SeedQueuedJobAsync(runId, credentialId);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		Guid thirdJobId = await SeedQueuedJobAsync(runId, credentialId);
+		await TransitionToAuthFailedAsync(thirdJobId);
+
+		// First call — trips the halt
+		await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, threshold: 3, CancellationToken.None);
+
+		// Capture the original halt timestamp
+		DateTime firstHaltTimestamp = await GetQueueHaltedAtAsync(credentialId);
+
+		// Wait briefly so a second call would produce a different timestamp if it overwrote
+		await Task.Delay(10);
+
+		// Second call — re-trips (the window still holds 3 auth-failed outcomes)
+		await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, threshold: 3, CancellationToken.None);
+
+		// The timestamp must be the same as the original — COALESCE(queue_halted_at, now())
+		// preserves the first trip's time
+		DateTime secondHaltTimestamp = await GetQueueHaltedAtAsync(credentialId);
+		Assert.Equal(firstHaltTimestamp, secondHaltTimestamp);
+	}
+
 	[Fact]
 	public async Task NewerQueuedJobsFromASecondRun_DoNotSuppressResolvedFailureStreak()
 	{
@@ -528,5 +560,15 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		bool advanced = await _repository.AdvanceStateAsync(
 			jobId, "worker-a", JobStates.Running, JobStates.AuthFailed, "credential rejected", clearLease: true, CancellationToken.None);
 		Assert.True(advanced);
+	}
+
+	private async Task<DateTime> GetQueueHaltedAtAsync(Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand cmd = new(
+			"SELECT queue_halted_at FROM credentials WHERE id = $1", connection);
+		cmd.Parameters.AddWithValue(credentialId);
+		return (DateTime)(await cmd.ExecuteScalarAsync())!;
 	}
 }
