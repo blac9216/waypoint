@@ -41,6 +41,7 @@ __pycache__/
 
 # Editor/OS noise
 .vscode/
+.instructions/
 .idea/
 .DS_Store
 *.swp
