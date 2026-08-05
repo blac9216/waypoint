@@ -130,7 +130,8 @@ public sealed class EventStreamController : ControllerBase
 
 	private long? ParseLastEventId()
 	{
-		string? headerValue = Request.Query["lastEventId"].FirstOrDefault();
+		string? headerValue = Request.Headers["Last-Event-ID"].FirstOrDefault()
+			?? Request.Query["lastEventId"].FirstOrDefault();
 		return long.TryParse(headerValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out long seq) && seq >= 0
 			? seq
 			: null;
