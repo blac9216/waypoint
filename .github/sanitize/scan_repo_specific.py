@@ -313,6 +313,29 @@ def _parse_ipv4_octets(candidate: str) -> list[int] | None:
 	return octets
 
 
+# The three canonical RFC 1918 whole-space CIDR literals, and ONLY as base
+# address + exact canonical prefix (the ten-slash-eight, the seventeen-two-
+# slash-twelve, and the one-nine-two-one-six-eight-slash-sixteen). A whole-
+# space range names every private network in existence and can identify no
+# host and no lab; the base quad alone, any other host, or any narrower
+# prefix stays a finding. Narrow contextual exception for issue #61's
+# forwarded-headers defaults, not a range widening. Assembled from octets so
+# this file's own scan stays clean.
+_PRIVATE_SPACE_CIDRS = {
+	".".join(map(str, octets)): f"/{prefix}"
+	for octets, prefix in (
+		((10, 0, 0, 0), 8),
+		((172, 16, 0, 0), 12),
+		((192, 168, 0, 0), 16),
+	)
+}
+
+
+def _is_private_space_cidr(line: str, candidate: str, end: int) -> bool:
+	suffix = _PRIVATE_SPACE_CIDRS.get(candidate)
+	return suffix is not None and line[end:end + len(suffix)] == suffix
+
+
 def is_allowed_ip(candidate: str) -> bool:
 	"""True if this dotted-quad is a sanctioned address, or not an IP at all.
 
@@ -873,6 +896,8 @@ def scan_text(rel: str, text: str) -> list[str]:
 				if is_allowed_ip(candidate):
 					continue
 				if is_version_string(line, match.start()):
+					continue
+				if _is_private_space_cidr(line, candidate, match.end()):
 					continue
 				findings.append(
 					f"{rel}:{lineno}: non-RFC-5737 IP address literal: {candidate}"
