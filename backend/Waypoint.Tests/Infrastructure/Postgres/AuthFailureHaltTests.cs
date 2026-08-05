@@ -402,7 +402,9 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 
 	/// <summary>#147: a fan-out that is born blocked (credential already halted) emits a
 	/// run-scoped queue.state and an appliance-wide system.notice -- the only actor that
-	/// knows this happened is the repository, post-commit.</summary>
+	/// knows this happened is the repository, post-commit.
+	/// #174: the payload includes credential_ids so an operator can identify which
+	/// credential caused the block without out-of-band correlation.</summary>
 	[Fact]
 	public async Task AFanOutBornBlocked_EmitsQueueStateAndSystemNotice()
 	{
@@ -433,6 +435,17 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		await using NpgsqlCommand notice = new(
 			"SELECT count(*) FROM job_events WHERE event_type = 'system.notice' AND payload->>'born_blocked_job_count' = '1'", connection);
 		Assert.Equal(1L, (long)(await notice.ExecuteScalarAsync())!);
+
+		// #174: credential_ids must be present in the payload and contain the halted credential
+		await using NpgsqlCommand credentialIds = new(
+			"""
+			SELECT count(*) FROM job_events
+			WHERE event_type = 'system.notice'
+			  AND payload->>'born_blocked_job_count' = '1'
+			  AND payload->'credential_ids'->>0 = $1::text
+			""", connection);
+		credentialIds.Parameters.AddWithValue(credentialId);
+		Assert.Equal(1L, (long)(await credentialIds.ExecuteScalarAsync())!);
 	}
 
 	private async Task ClearQueueHaltAsync(Guid credentialId)

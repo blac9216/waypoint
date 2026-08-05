@@ -288,6 +288,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		List<Guid> jobIds = new(specs.Count);
 		int blockedCount = 0;
 		string? blockedNote = null;
+		HashSet<Guid> blockedCredentialIds = new();
 		foreach (JobSpec spec in specs)
 		{
 			await using NpgsqlCommand insertJob = new(
@@ -312,6 +313,10 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			{
 				blockedCount++;
 				blockedNote ??= reader.IsDBNull(2) ? null : reader.GetString(2);
+				if (spec.CredentialId is not null)
+				{
+					blockedCredentialIds.Add(spec.CredentialId.Value);
+				}
 			}
 		}
 
@@ -332,7 +337,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		if (blockedCount > 0)
 		{
 			LogFanOutBlocked(runId, blockedCount, jobIds.Count);
-			await EmitBornBlockedAsync(runId, blockedCount, jobIds.Count, blockedNote, cancellationToken).ConfigureAwait(false);
+			await EmitBornBlockedAsync(runId, blockedCount, jobIds.Count, blockedNote, [.. blockedCredentialIds], cancellationToken).ConfigureAwait(false);
 		}
 
 		LogFannedOutJobs(runId, jobIds.Count);
@@ -598,9 +603,11 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 	/// <summary>#147: a run fanned out into an already-halted credential is otherwise
 	/// invisible on SSE -- no auth failure occurs, so the dispatcher's halt path never
-	/// runs. Emitted after the transaction committed ("nothing follows an emit in its
+	/// runs. #174: credential_ids identifies which credential(s) caused the block so
+	/// an operator watching the global stream can act without out-of-band correlation.
+	/// Emitted after the transaction committed ("nothing follows an emit in its
 	/// transaction"), best-effort like every event.</summary>
-	private async Task EmitBornBlockedAsync(Guid runId, int blockedCount, int jobCount, string? reason, CancellationToken cancellationToken)
+	private async Task EmitBornBlockedAsync(Guid runId, int blockedCount, int jobCount, string? reason, Guid[] credentialIds, CancellationToken cancellationToken)
 	{
 		if (_events is null)
 		{
@@ -612,7 +619,8 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			blocked = true,
 			born_blocked_job_count = blockedCount,
 			job_count = jobCount,
-			reason
+			reason,
+			credential_ids = credentialIds
 		});
 		await _events.EmitAsync(JobEventTypes.QueueState, null, runId, payload, cancellationToken).ConfigureAwait(false);
 		await _events.EmitAsync(JobEventTypes.SystemNotice, null, null, payload, cancellationToken).ConfigureAwait(false);
