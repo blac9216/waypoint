@@ -24,6 +24,22 @@ namespace Waypoint.Infrastructure.Secrets;
 /// read path in this class. <c>rotated_at</c> is stamped by the caller when a secret
 /// write succeeds.
 /// </summary>
+public enum CredentialWriteOutcome
+{
+	Ok,
+	NotFound,
+	NameTaken,
+}
+
+public enum CredentialDeleteOutcome
+{
+	Deleted,
+	NotFound,
+
+	/// <summary>Jobs or runs still reference the credential; deletion would erase execution history's attribution.</summary>
+	InUse,
+}
+
 public sealed class CredentialRepository
 {
 	private const string ProjectionSql = """
@@ -86,14 +102,25 @@ public sealed class CredentialRepository
 		return result is Guid id ? id : null;
 	}
 
-	public async Task<bool> RenameAsync(Guid id, string name, CancellationToken cancellationToken)
+	public async Task<CredentialWriteOutcome> RenameAsync(Guid id, string name, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new("UPDATE credentials SET name = $2 WHERE id = $1 RETURNING id", connection);
 		command.Parameters.AddWithValue(id);
 		command.Parameters.AddWithValue(name);
-		return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+		try
+		{
+			return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null
+				? CredentialWriteOutcome.Ok
+				: CredentialWriteOutcome.NotFound;
+		}
+		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+		{
+			// PR #187 round 1, finding 2: a rename onto a taken name is the same
+			// conflict Create already maps to 409 -- surface it as data, not a 500.
+			return CredentialWriteOutcome.NameTaken;
+		}
 	}
 
 	/// <summary>Stamped only after a successful secret write -- rotation is a fact about the blob, not the metadata.</summary>
@@ -113,7 +140,7 @@ public sealed class CredentialRepository
 	/// transaction, with the identity captured in detail JSON -- after the FK nulls
 	/// out, that JSON is the surviving attribution.
 	/// </summary>
-	public async Task<bool> DeleteAsync(Guid id, string actor, CancellationToken cancellationToken)
+	public async Task<CredentialDeleteOutcome> DeleteAsync(Guid id, string actor, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -128,7 +155,7 @@ public sealed class CredentialRepository
 
 		if (name is null)
 		{
-			return false;
+			return CredentialDeleteOutcome.NotFound;
 		}
 
 		await using (NpgsqlCommand audit = new(
@@ -141,14 +168,24 @@ public sealed class CredentialRepository
 			await audit.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
-		await using (NpgsqlCommand delete = new("DELETE FROM credentials WHERE id = $1", connection, transaction))
+		try
 		{
+			await using NpgsqlCommand delete = new("DELETE FROM credentials WHERE id = $1", connection, transaction);
 			delete.Parameters.AddWithValue(id);
 			await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
+		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+		{
+			// PR #187 round 1, finding 1: jobs/runs keep plain RESTRICT FKs on
+			// purpose -- nulling job history would erode the auth-halt window and
+			// run attribution. A referenced credential is therefore not deletable;
+			// the caller maps this to 409 credential_in_use. The transaction rolls
+			// back, taking the pre-written audit row with it.
+			return CredentialDeleteOutcome.InUse;
+		}
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-		return true;
+		return CredentialDeleteOutcome.Deleted;
 	}
 
 	private static CredentialResponse Map(NpgsqlDataReader reader)

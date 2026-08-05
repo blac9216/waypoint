@@ -99,9 +99,15 @@ public sealed class CredentialsController : ControllerBase
 			throw NotFoundError(id);
 		}
 
-		if (!string.IsNullOrWhiteSpace(request.Name) && !await _credentials.RenameAsync(id, request.Name, cancellationToken))
+		if (!string.IsNullOrWhiteSpace(request.Name))
 		{
-			throw NotFoundError(id);
+			switch (await _credentials.RenameAsync(id, request.Name, cancellationToken))
+			{
+				case CredentialWriteOutcome.NotFound:
+					throw NotFoundError(id);
+				case CredentialWriteOutcome.NameTaken:
+					throw new ApiException(HttpStatusCode.Conflict, "name_taken", $"A credential named '{request.Name}' already exists.");
+			}
 		}
 
 		if (!string.IsNullOrEmpty(request.Secret))
@@ -118,7 +124,14 @@ public sealed class CredentialsController : ControllerBase
 	public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
 	{
 		string actor = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
-		return await _credentials.DeleteAsync(id, actor, cancellationToken) ? NoContent() : throw NotFoundError(id);
+		return await _credentials.DeleteAsync(id, actor, cancellationToken) switch
+		{
+			CredentialDeleteOutcome.Deleted => NoContent(),
+			CredentialDeleteOutcome.InUse => throw new ApiException(
+				HttpStatusCode.Conflict, "credential_in_use",
+				"Jobs or runs still reference this credential; their history must be removed before it can be deleted."),
+			_ => throw NotFoundError(id),
+		};
 	}
 
 	/// <summary>Secret write + rotation stamp. The store audits with the caller's identity; the value never lands in any response.</summary>

@@ -227,6 +227,40 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		Assert.Equal(HttpStatusCode.NotFound, gone.StatusCode);
 	}
 
+	/// <summary>PR #187 round 1, finding 1: a credential still referenced by jobs/runs
+	/// is 409, not 500 -- job history keeps its attribution (the auth-halt window
+	/// depends on it), and the pre-written deletion audit rolls back with it.</summary>
+	[Fact]
+	public async Task DeletingAnInUseCredential_Is409_AndNothingIsAudited()
+	{
+		Guid id = await CreateCredentialAsync("in-use");
+		await SeedJobAsync(id);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		Assert.Contains("credential_in_use", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand audited = new(
+			"SELECT count(*) FROM audit_log WHERE event_type = 'credential.deleted' AND credential_id = $1", connection);
+		audited.Parameters.AddWithValue(id);
+		Assert.Equal(0L, (long)(await audited.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>PR #187 round 1, finding 2: renaming onto a taken name is the same 409 Create maps.</summary>
+	[Fact]
+	public async Task RenamingOntoATakenName_Is409()
+	{
+		string takenName = $"rename-taken-{Guid.NewGuid():N}";
+		await SendAsync(HttpMethod.Post, "/api/v1/credentials", new { name = takenName, credential_type = "service" });
+		Guid other = await CreateCredentialAsync("rename-source");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Put, $"/api/v1/credentials/{other}", new { name = takenName });
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		Assert.Contains("name_taken", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
 	private async Task<Guid> CreateCredentialAsync(string namePrefix, string? secret = null)
 	{
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/credentials",
