@@ -233,6 +233,54 @@ public sealed class JobEventStreamServiceTests : IAsyncLifetime
 		await stalled.DisposeAsync();
 	}
 
+	/// <summary>PR #168 round 1, finding 1: a prime whose query raced a registration
+	/// (rows committed between the subscriber attaching and the prime result landing)
+	/// must NOT advance the tail past undelivered rows -- reproduced deterministically
+	/// through the internal seam: subscribe, commit rows the poller has not yet seen,
+	/// force a prime, then start the poller and require every row to arrive.</summary>
+	[Fact]
+	public async Task APrimeRacingARegistration_CannotGapTheSubscriber()
+	{
+		// Fresh, NOT-started service: no poller ticks compete with the sequence below.
+		await _service.StopAsync(CancellationToken.None);
+		_service = CreateService(queueCapacity: 1_000);
+
+		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(20));
+		List<StreamedJobEvent> received = [];
+		Task consume = Task.Run(async () =>
+		{
+			await foreach (StreamedJobEvent row in _service.ReadAsync(JobEventStreamScope.Global, afterSeq: null, cts.Token))
+			{
+				received.Add(row);
+				if (received.Count >= 3)
+				{
+					break;
+				}
+			}
+		}, cts.Token);
+
+		// Let the subscriber register (its own initial prime runs with zero
+		// subscribers and is legitimate), then commit rows nobody has delivered.
+		await Task.Delay(TimeSpan.FromMilliseconds(300));
+		for (int index = 0; index < 3; index++)
+		{
+			await InsertEventAsync(_runId, $"raced-{index}");
+		}
+
+		// The racy prime: pre-fix this advanced the tail past raced-0..2 and the
+		// subscriber was permanently gapped; post-fix it is a no-op while anyone is
+		// subscribed, and the poller (started next) delivers through the fan-out.
+		await _service.PrimeTailForTestAsync(CancellationToken.None);
+		await _service.StartAsync(CancellationToken.None);
+
+		await consume;
+
+		Assert.Equal(3, received.Count);
+		Assert.Equal(
+			new[] { "raced-0", "raced-1", "raced-2" },
+			received.Select(row => System.Text.Json.JsonDocument.Parse(row.PayloadJson).RootElement.GetProperty("marker").GetString()));
+	}
+
 	private async Task<Guid> SeedRunAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

@@ -237,6 +237,9 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 		return scope.RunId is not Guid runId || row.RunId == runId;
 	}
 
+	/// <summary>Test seam for the priming race (PR #168 round 1): drives one prime attempt deterministically.</summary>
+	internal Task PrimeTailForTestAsync(CancellationToken cancellationToken) => PrimeTailAsync(cancellationToken);
+
 	private async Task PrimeTailAsync(CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
@@ -245,7 +248,13 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 		long tail = (long)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 		lock (_fanOutLock)
 		{
-			if (_lastDeliveredSeq < tail)
+			// THE invariant (PR #168 round 1, finding 1): once anyone is subscribed,
+			// the tail advances only by fan-out delivery. A prime that raced a
+			// registration (the query ran before the subscriber existed, the result
+			// arrived after) would otherwise skip rows past every registered channel
+			// -- a permanent, silent gap. With subscribers present, the very next
+			// PollOnceAsync delivers those same rows through the fan-out instead.
+			if (_subscribers.Count == 0 && _lastDeliveredSeq < tail)
 			{
 				_lastDeliveredSeq = tail;
 			}
