@@ -254,7 +254,7 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 			// arrived after) would otherwise skip rows past every registered channel
 			// -- a permanent, silent gap. With subscribers present, the very next
 			// PollOnceAsync delivers those same rows through the fan-out instead.
-			if (_lastDeliveredSeq < tail)
+			if (_subscribers.Count == 0 && _lastDeliveredSeq < tail)
 			{
 				_lastDeliveredSeq = tail;
 			}
