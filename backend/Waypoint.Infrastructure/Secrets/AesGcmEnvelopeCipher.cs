@@ -105,7 +105,7 @@ public sealed class AesGcmEnvelopeCipher : IEnvelopeCipher
 
 		RandomNumberGenerator.Fill(nonce);
 		using AesGcm aes = new(key, TagSize);
-		aes.Encrypt(nonce, plaintext, sealedBytes, tag, Encoding.UTF8.GetBytes(associatedContext));
+		aes.Encrypt(nonce, plaintext, sealedBytes, tag);
 		return output;
 	}
 
@@ -122,7 +122,7 @@ public sealed class AesGcmEnvelopeCipher : IEnvelopeCipher
 
 		byte[] plaintext = new byte[sealedBytes.Length];
 		using AesGcm aes = new(key, TagSize);
-		aes.Decrypt(nonce, sealedBytes, tag, plaintext, Encoding.UTF8.GetBytes(associatedContext));
+		aes.Decrypt(nonce, sealedBytes, tag, plaintext);
 		return plaintext;
 	}
 }
