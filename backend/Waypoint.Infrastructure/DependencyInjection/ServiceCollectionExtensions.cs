@@ -71,6 +71,12 @@ public static class ServiceCollectionExtensions
 
 		services.AddSingleton<JobHandlerRegistry>();
 
+		// ADR-0005 crypto core (epic #8 slice 1). Registered unconditionally: the
+		// provider is lazy and fail-closed, so a host without a mounted key boots
+		// fine and refuses secret operations with an operator-actionable error.
+		services.AddSingleton<Waypoint.Core.Secrets.IMasterKeyProvider>(new Secrets.FileMasterKeyProvider());
+		services.AddSingleton<Waypoint.Core.Secrets.IEnvelopeCipher, Secrets.AesGcmEnvelopeCipher>();
+
 		string? connectionString = configuration.GetConnectionString(ConnectionStringName);
 		if (!string.IsNullOrWhiteSpace(connectionString))
 		{
