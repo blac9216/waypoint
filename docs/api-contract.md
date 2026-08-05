@@ -17,8 +17,10 @@ column.
   return `409 mode_unavailable` (they exist but cannot function), never `404`.
 - **Errors**: `{ "error": { "code", "message", "detail?" } }`.
 - **Pagination**: `?limit/offset` + `X-Total-Count` on list endpoints.
-- **Write-only secrets**: credential material and tokens appear in requests, never in
-  responses (enforced at the serialization layer — `security.md` control 3).
+- **Write-only secrets**: stored credential material (and any secret held in the
+  credential store) appears in requests, never in responses (enforced at the
+  serialization layer — `security.md` control 3). The issued session/bearer token is
+  an explicit exception — see `### Auth`.
 - Long-running operations return `202` with a `run_id`/`job_id` and progress flows
   through the event stream, not polling.
 
