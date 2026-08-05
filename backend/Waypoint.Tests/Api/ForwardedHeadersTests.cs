@@ -98,8 +98,11 @@ public sealed class ForwardedHeadersTests
 			builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(new Dictionary<string, string?>
 			{
 				// Explicitly false: exercises the else-branch even though the Testing
-				// environment would be allowed to trust any proxy.
-				["ForwardedHeaders:TrustAnyProxy"] = "false"
+				// environment would be allowed to trust any proxy. The known network is
+				// an RFC 5737 documentation range so every literal in this test is a
+				// sanctioned example address (CLAUDE.md sanitization policy).
+				["ForwardedHeaders:TrustAnyProxy"] = "false",
+				["ForwardedHeaders:KnownNetworks:0"] = "198.51.100.0/24"
 			}));
 			builder.ConfigureTestServices(services => services.AddSingleton<IStartupFilter>(new ForgingStartupFilter()));
 		}
@@ -159,15 +162,15 @@ public sealed class ForwardedHeadersTests
 	{
 		HttpClient client = _gatedFactory.CreateClient();
 		using HttpRequestMessage request = new(HttpMethod.Get, GatedApiFactory.EchoPath);
-		request.Headers.Add(GatedApiFactory.ForgedRemoteHeader, "172.16.0.5");
+		request.Headers.Add(GatedApiFactory.ForgedRemoteHeader, "198.51.100.200");
 		request.Headers.Add("X-Forwarded-Proto", "https");
-		request.Headers.Add("X-Forwarded-For", "198.51.100.7");
+		request.Headers.Add("X-Forwarded-For", "203.0.113.7");
 
 		using HttpResponseMessage response = await client.SendAsync(request);
 		using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 
 		Assert.Equal("https", document.RootElement.GetProperty("scheme").GetString());
-		Assert.Equal("198.51.100.7", document.RootElement.GetProperty("remote_ip").GetString());
+		Assert.Equal("203.0.113.7", document.RootElement.GetProperty("remote_ip").GetString());
 	}
 
 	[Fact]
@@ -175,7 +178,7 @@ public sealed class ForwardedHeadersTests
 	{
 		HttpClient client = _gatedFactory.CreateClient();
 		using HttpRequestMessage request = new(HttpMethod.Get, GatedApiFactory.EchoPath);
-		request.Headers.Add(GatedApiFactory.ForgedRemoteHeader, "198.51.100.9");
+		request.Headers.Add(GatedApiFactory.ForgedRemoteHeader, "203.0.113.9");
 		request.Headers.Add("X-Forwarded-Proto", "https");
 		request.Headers.Add("X-Forwarded-For", "198.51.100.7");
 
@@ -185,7 +188,7 @@ public sealed class ForwardedHeadersTests
 		// The gate rejected the headers: the request keeps describing itself as the
 		// direct plain-HTTP connection it actually is.
 		Assert.Equal("http", document.RootElement.GetProperty("scheme").GetString());
-		Assert.Equal("198.51.100.9", document.RootElement.GetProperty("remote_ip").GetString());
+		Assert.Equal("203.0.113.9", document.RootElement.GetProperty("remote_ip").GetString());
 	}
 
 	[Fact]
