@@ -545,7 +545,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		// release) to 'blocked' until an explicit credential-swap/unblock flow clears
 		// queue_halted. The row is already FOR UPDATE-locked above.
 		await using (NpgsqlCommand haltCredential = new(
-			"UPDATE credentials SET queue_halted = true, queue_halted_reason = $2, queue_halted_at = now() WHERE id = $1", connection, transaction))
+			"UPDATE credentials SET queue_halted = true, queue_halted_reason = $2, queue_halted_at = COALESCE(queue_halted_at, now()) WHERE id = $1", connection, transaction))
 		{
 			haltCredential.Parameters.AddWithValue(credentialId);
 			haltCredential.Parameters.AddWithValue(reason);
