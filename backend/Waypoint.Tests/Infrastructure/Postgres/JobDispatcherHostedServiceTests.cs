@@ -228,10 +228,12 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 	{
 		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
 		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
-		Assert.True(await _repository.PauseRunAsync(runId, CancellationToken.None));
 		int calls = 0;
 		FakeJobHandler handler = new("download", (_, _) => { Interlocked.Increment(ref calls); return Task.FromResult(JobExecutionOutcome.Succeeded()); });
 		JobDispatcherHostedService dispatcher = CreateDispatcher(new JobEngineOptions { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(25) }, handler);
+
+		// Exercise both PauseRunAsync and ResumeRunAsync wrappers on the hosted service
+		Assert.True(await dispatcher.PauseRunAsync(runId, CancellationToken.None));
 
 		await dispatcher.StartAsync(CancellationToken.None);
 		try
