@@ -332,7 +332,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		if (blockedCount > 0)
 		{
 			LogFanOutBlocked(runId, blockedCount, jobIds.Count);
-			await EmitBornBlockedAsync(runId, blockedCount, jobIds.Count, blockedNote, cancellationToken).ConfigureAwait(false);
+			// mutation: emission skipped
 		}
 
 		LogFannedOutJobs(runId, jobIds.Count);
