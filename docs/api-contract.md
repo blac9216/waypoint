@@ -220,8 +220,9 @@ safety.
 
 `download.progress` is job-scoped **without exception**: it can never be emitted
 for a download with no job row. Every download — including catalog-index and
-future content-pull work — executes as a job (ADR-0008: "everything is a job"),
-so a progress emitter always has a `job_id`; a hypothetical job-less download
+future content-pull work — executes as a job on the ADR-0008 engine (all
+execution flows through the job queue), so a progress emitter always has a
+`job_id`; a hypothetical job-less download
 would need a contract change plus a `job_events_scope_check` relaxation, decided
 here to be rejected rather than left open (#116).
 
