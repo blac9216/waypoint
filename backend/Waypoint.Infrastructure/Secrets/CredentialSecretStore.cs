@@ -115,6 +115,8 @@ public sealed partial class CredentialSecretStore : ICredentialSecretStore
 				(byte[])reader[0], (byte[])reader[1], reader.GetString(2), reader.GetString(3));
 		}
 
+		await WriteAuditAsync(connection, transaction, "secret.decrypted", actor, credentialId, jobId, runId,
+			$$"""{"master_key_id":"{{envelope.MasterKeyId}}"}""", cancellationToken).ConfigureAwait(false);
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
 		byte[] plaintext = _cipher.Decrypt(envelope, ContextFor(credentialId));
