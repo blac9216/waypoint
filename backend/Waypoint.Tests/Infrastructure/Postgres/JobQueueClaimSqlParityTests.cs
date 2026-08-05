@@ -71,11 +71,20 @@ public sealed class JobQueueClaimSqlParityTests
 	}
 
 	/// <summary>
-	/// The two claim queries agree on the whole locking CTE except for the test's
+	/// The two claim queries agree on the locking CTE body — everything from
+	/// <c>SELECT id FROM jobs</c> to the closing <c>)</c> — except for the test's
 	/// run-scoping predicate. Asserting the *whole* CTE rather than only the clause is
-	/// what catches a drift the two `Contains` tests above would miss -- for example a
-	/// second predicate added to production (`AND attempt_count = 0`) that silently
-	/// narrows what a dispatcher will ever claim while leaving the proven clause intact.
+	/// what catches a drift the two `Contains` tests above would miss, provided the
+	/// drift lives inside the CTE: for example a second predicate added there
+	/// (`AND attempt_count = 0`) that silently narrows what a dispatcher will ever
+	/// claim while leaving the proven clause intact.
+	///
+	/// <c>ExtractLockingCte</c> reads only up to the first <c>)</c>, so a predicate
+	/// added to the UPDATE's own <c>WHERE</c> clause (one line below the CTE) is
+	/// invisible to this guard. The behavioural half of that exposure is covered by
+	/// <c>JobQueueRepositoryClaimTests.ClaimJobAsync_ClaimsAJobThatAlreadyFailedAnAttempt</c>,
+	/// which seeds a job with <c>attempt_count &gt; 0</c> and asserts it is still
+	/// claimable.
 	/// </summary>
 	[Fact]
 	public void TheLockingCtesAgreeOnceTheTestsRunScopingIsRemoved()
