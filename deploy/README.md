@@ -164,8 +164,23 @@ the frontend bundle).
    ```bash
    cd deploy
    docker compose up -d
+   ```
+
+   `up -d` returns once containers are *started*, not once they pass a
+   healthcheck. nginx declares `start_period: 5s` / `interval: 10s`, so a
+   `docker compose ps` on the very next line reports `health: starting` every
+   time — the stack is fine, nginx just needs 3–10 s for its first healthcheck.
+   Wait for the condition rather than assuming the timing:
+
+   ```bash
+   for _ in $(seq 60); do
+     docker compose ps --format '{{.Name}}\t{{.Status}}' | grep -q 'healthy' || sleep 1
+   done
    docker compose ps          # all three should report "healthy"
    ```
+
+   See [`docs/testing.md`](../docs/testing.md) "`up -d` returning does not mean
+   healthy" for the full explanation and paste-safe patterns.
 
 5. Verify:
 
@@ -322,8 +337,16 @@ docker run -d --rm --name "$PROBE" \
 # lookup for the `resolver ... valid=10s` window (see "Networking"). The probe
 # serves no /api/v1/health route, so a 404 there means the probe - not the real
 # backend - is what nginx is now reaching.
-until [ "$(curl -k -s -o /dev/null -w '%{http_code}' --max-time 5 \
-  "https://localhost:$PORT/api/v1/health")" = "404" ]; do sleep 1; done
+#
+# Bounded to 30 iterations (30 s) so a stuck probe doesn't hang indefinitely
+# with no output — if the probe never takes over, the diagnostic names the
+# next command to run.
+for i in $(seq 1 30); do
+  [ "$(curl -k -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    "https://localhost:$PORT/api/v1/health")" = "404" ] && break
+  [ "$i" = 30 ] && { echo "probe never took over - check: docker logs $PROBE"; break; }
+  sleep 1
+done
 
 # SSE route (location ~ ...events$, proxy_buffering off): expect each tick
 # timestamped roughly 1 second apart.
