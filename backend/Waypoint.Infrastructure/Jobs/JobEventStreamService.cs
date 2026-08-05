@@ -107,7 +107,7 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 			long lastYielded = afterSeq ?? liveFromSeq;
 			if (lastYielded < liveFromSeq)
 			{
-				await foreach (StreamedJobEvent row in QueryRangeAsync(scope, lastYielded, liveFromSeq, cancellationToken).ConfigureAwait(false))
+				await foreach (StreamedJobEvent row in QueryRangeAsync(scope, lastYielded, liveFromSeq, limit: int.MaxValue, cancellationToken).ConfigureAwait(false))
 				{
 					yield return row;
 					lastYielded = row.Seq;
@@ -142,6 +142,12 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
 	{
+		// Same gate as the dispatcher and the buffered writer -- see the note there.
+		if (!_options.Value.Enabled)
+		{
+			return;
+		}
+
 		using PeriodicTimer timer = new(_options.Value.EventStreamPollInterval);
 
 		try
@@ -191,17 +197,33 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 			return;
 		}
 
-		List<StreamedJobEvent> batch = [];
-		await foreach (StreamedJobEvent row in QueryRangeAsync(JobEventStreamScope.Global, Volatile.Read(ref _lastDeliveredSeq), long.MaxValue, cancellationToken).ConfigureAwait(false))
+		// #169: a deep backlog (catch-up after downtime) is drained in bounded chunks,
+		// releasing the fan-out lock between chunks, instead of one unbounded batch.
+		while (!cancellationToken.IsCancellationRequested)
 		{
-			batch.Add(row);
-		}
+			int chunkSize = _options.Value.EventStreamCatchUpChunkSize;
+			List<StreamedJobEvent> batch = new(chunkSize);
+			await foreach (StreamedJobEvent row in QueryRangeAsync(
+				JobEventStreamScope.Global, Volatile.Read(ref _lastDeliveredSeq), long.MaxValue, limit: chunkSize, cancellationToken).ConfigureAwait(false))
+			{
+				batch.Add(row);
+			}
 
-		if (batch.Count == 0)
-		{
-			return;
-		}
+			if (batch.Count == 0)
+			{
+				return;
+			}
 
+			FanOut(batch);
+			if (batch.Count < chunkSize)
+			{
+				return;
+			}
+		}
+	}
+
+	private void FanOut(List<StreamedJobEvent> batch)
+	{
 		lock (_fanOutLock)
 		{
 			foreach (StreamedJobEvent row in batch)
@@ -262,7 +284,7 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 	}
 
 	private async IAsyncEnumerable<StreamedJobEvent> QueryRangeAsync(
-		JobEventStreamScope scope, long afterSeq, long upToSeq, [EnumeratorCancellation] CancellationToken cancellationToken)
+		JobEventStreamScope scope, long afterSeq, long upToSeq, int limit, [EnumeratorCancellation] CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -272,10 +294,12 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 			FROM job_events
 			WHERE seq > $1 AND seq <= $2 AND ($3::uuid IS NULL OR run_id = $3)
 			ORDER BY seq
+			LIMIT $4
 			""", connection);
 		command.Parameters.AddWithValue(afterSeq);
 		command.Parameters.AddWithValue(upToSeq);
 		command.Parameters.AddWithValue((object?)scope.RunId ?? DBNull.Value);
+		command.Parameters.AddWithValue(limit);
 
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))

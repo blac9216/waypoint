@@ -114,6 +114,13 @@ public sealed class JobEngineOptions
 	/// </summary>
 	public int EventStreamSubscriberQueueCapacity { get; set; } = 1_000;
 
+	/// <summary>
+	/// Maximum rows one catch-up chunk of the stream tail poller fans out under a
+	/// single lock hold (#169): a deep backlog after downtime drains in bounded
+	/// chunks instead of one unbounded in-memory batch.
+	/// </summary>
+	public int EventStreamCatchUpChunkSize { get; set; } = 1_000;
+
 	public TimeSpan HeartbeatIntervalOrDefault =>
 		HeartbeatInterval ?? TimeSpan.FromTicks(LeaseDuration.Ticks / 3);
 }
