@@ -67,11 +67,11 @@ public sealed class FileMasterKeyProvider : IMasterKeyProvider
 		}
 
 		// #182: Normalize runs INSIDE the wipe scope, so a malformed file's content is
-		// zeroed on the throw path too. Two documented limitations remain: the hex path
-		// materializes the key as a managed string (unwipeable -- the ADR-0005 trade
-		// recorded on #182), and a file of exactly 32 bytes is always treated as raw,
-		// even if those bytes happen to be ASCII hex characters (raw takes precedence;
-		// a 32-char hex string is not a valid 64-char hex key anyway).
+		// zeroed on the throw path too, and the hex path decodes nibbles directly from
+		// this caller-wiped buffer -- no managed string of key material ever exists.
+		// One documented quirk remains: a file of exactly 32 bytes is always treated
+		// as raw, even if those bytes happen to be ASCII hex characters (raw takes
+		// precedence; a 32-char hex string is not a valid 64-char hex key anyway).
 		try
 		{
 			byte[] key = Normalize(raw, path);
