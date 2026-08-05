@@ -60,6 +60,54 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 
 	public Task DisposeAsync() => Task.CompletedTask;
 
+	/// <summary>#147: the third consecutive auth failure trips the halt with NOTHING
+	/// queued behind it -- the dispatcher must still emit the system.notice, because
+	/// the durable credential state changed even though no rows were blocked.</summary>
+	[Fact]
+	public async Task AHaltWithNothingQueued_StillEmitsASystemNotice()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		await SeedTerminalAuthFailedAsync(credentialId);
+		await SeedTerminalAuthFailedAsync(credentialId);
+		Guid jobId = await SeedQueuedJobAsync("download", credentialId);
+		FakeJobHandler handler = new("download", (_, _) => Task.FromResult(JobExecutionOutcome.AuthFailed("credential rejected (invented)")));
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher(
+			new JobEngineOptions { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(50) }, handler);
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilAsync(() => GetJobStateAsync(jobId), state => state == "auth-failed");
+			await PollUntilAsync(CountHaltNoticesAsync, count => count >= 1);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.True(await CountHaltNoticesAsync() >= 1);
+	}
+
+	private async Task<long> CountHaltNoticesAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand count = new(
+			"SELECT count(*) FROM job_events WHERE event_type = 'system.notice' AND payload->>'blocked' = 'true'", connection);
+		return (long)(await count.ExecuteScalarAsync())!;
+	}
+
+	private async Task SeedTerminalAuthFailedAsync(Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO jobs (job_type, priority, state, credential_id, finished_at) VALUES ('download', 1, 'auth-failed', $1, now())", connection);
+		insert.Parameters.AddWithValue(credentialId);
+		await insert.ExecuteNonQueryAsync();
+		await Task.Delay(TimeSpan.FromMilliseconds(5));
+	}
+
 	private JobDispatcherHostedService CreateDispatcher(JobEngineOptions? options, params IJobHandler[] handlers)
 	{
 		JobEngineOptions effective = options ?? new JobEngineOptions { Enabled = true };
@@ -330,14 +378,17 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		return (bool)(await command.ExecuteScalarAsync())!;
 	}
 
-	private async Task<Guid> SeedQueuedJobAsync(string jobType)
+	private Task<Guid> SeedQueuedJobAsync(string jobType) => SeedQueuedJobAsync(jobType, credentialId: null);
+
+	private async Task<Guid> SeedQueuedJobAsync(string jobType, Guid? credentialId)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 
 		await using NpgsqlCommand insert = new(
-			"INSERT INTO jobs (job_type, priority, state) VALUES ($1, 1, 'queued') RETURNING id", connection);
+			"INSERT INTO jobs (job_type, priority, state, credential_id) VALUES ($1, 1, 'queued', $2) RETURNING id", connection);
 		insert.Parameters.AddWithValue(jobType);
+		insert.Parameters.AddWithValue((object?)credentialId ?? DBNull.Value);
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
 

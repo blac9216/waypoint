@@ -80,7 +80,8 @@ public static class ServiceCollectionExtensions
 
 			services.AddSingleton<IJobQueueRepository>(serviceProvider => new JobQueueRepository(
 				connectionString,
-				serviceProvider.GetRequiredService<ILogger<JobQueueRepository>>()));
+				serviceProvider.GetRequiredService<ILogger<JobQueueRepository>>(),
+				serviceProvider.GetRequiredService<IJobEventPublisher>()));
 
 			services.AddSingleton<IJobEventPublisher>(serviceProvider =>
 			{

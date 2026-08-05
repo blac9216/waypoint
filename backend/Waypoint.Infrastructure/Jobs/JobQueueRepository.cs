@@ -25,13 +25,20 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 	private readonly string _connectionString;
 	private readonly ILogger<JobQueueRepository> _logger;
 
-	public JobQueueRepository(string connectionString, ILogger<JobQueueRepository> logger)
+	// Optional on purpose: the repository is a state store, and events are
+	// observability -- but fan-out is the ONLY actor that knows a job was born
+	// blocked (#147), so it emits post-commit when a publisher is wired (DI always
+	// wires one; tests that do not care may omit it).
+	private readonly IJobEventPublisher? _events;
+
+	public JobQueueRepository(string connectionString, ILogger<JobQueueRepository> logger, IJobEventPublisher? events = null)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 		ArgumentNullException.ThrowIfNull(logger);
 
 		_connectionString = connectionString;
 		_logger = logger;
+		_events = events;
 	}
 
 	// The claim idiom: lock one claimable row inside a CTE with FOR UPDATE SKIP LOCKED,
@@ -325,6 +332,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		if (blockedCount > 0)
 		{
 			LogFanOutBlocked(runId, blockedCount, jobIds.Count);
+			await EmitBornBlockedAsync(runId, blockedCount, jobIds.Count, blockedNote, cancellationToken).ConfigureAwait(false);
 		}
 
 		LogFannedOutJobs(runId, jobIds.Count);
@@ -492,7 +500,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			lockCredential.Parameters.AddWithValue(credentialId);
 			if (await lockCredential.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
 			{
-				return new AuthFailureHaltResult([], []);
+				return new AuthFailureHaltResult(HaltTripped: false, [], []);
 			}
 		}
 
@@ -522,7 +530,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 		if (!tripped)
 		{
-			return new AuthFailureHaltResult([], []);
+			return new AuthFailureHaltResult(HaltTripped: false, [], []);
 		}
 
 		string reason = string.Format(
@@ -585,7 +593,29 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 		LogAuthFailureHalt(credentialId, threshold, blockedRunIds.Count, blockedJobIds.Count);
-		return new AuthFailureHaltResult(blockedRunIds, blockedJobIds);
+		return new AuthFailureHaltResult(HaltTripped: true, blockedRunIds, blockedJobIds);
+	}
+
+	/// <summary>#147: a run fanned out into an already-halted credential is otherwise
+	/// invisible on SSE -- no auth failure occurs, so the dispatcher's halt path never
+	/// runs. Emitted after the transaction committed ("nothing follows an emit in its
+	/// transaction"), best-effort like every event.</summary>
+	private async Task EmitBornBlockedAsync(Guid runId, int blockedCount, int jobCount, string? reason, CancellationToken cancellationToken)
+	{
+		if (_events is null)
+		{
+			return;
+		}
+
+		string payload = System.Text.Json.JsonSerializer.Serialize(new
+		{
+			blocked = true,
+			born_blocked_job_count = blockedCount,
+			job_count = jobCount,
+			reason
+		});
+		await _events.EmitAsync(JobEventTypes.QueueState, null, runId, payload, cancellationToken).ConfigureAwait(false);
+		await _events.EmitAsync(JobEventTypes.SystemNotice, null, null, payload, cancellationToken).ConfigureAwait(false);
 	}
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Fanned out {JobCount} job(s) for run {RunId}")]

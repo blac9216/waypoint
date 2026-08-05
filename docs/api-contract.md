@@ -189,10 +189,46 @@ authenticated the caller, and role claims keep mapping to the same four
 
 Types: `job.state`, `job.log` (level + line, post-scrub), `run.progress` (counts,
 percent), `queue.state` (incl. `blocked` + reason), `download.progress`,
-`system.notice`. `seq` is monotonic per stream; clients reconnect with
-`Last-Event-ID` and the server replays from Postgres. Follow-tail, counters, and every
-progress bar in the prototype bind to these six types — anything the UI animates MUST
-arrive as an event, not a poll.
+`system.notice`. Follow-tail, counters, and every progress bar in the prototype bind
+to these six types — anything the UI animates MUST arrive as an event, not a poll.
+
+Each type has a fixed **scope tier**, enforced by the schema
+(`job_events_scope_check`; decided in #104, recorded here per #116):
+
+| Tier | Types | `job_id` | `run_id` |
+| --- | --- | --- | --- |
+| job-scoped | `job.state`, `job.log`, `download.progress` | required | free (set when the job belongs to a run) |
+| run-scoped | `run.progress`, `queue.state` | must be NULL | required |
+| appliance-wide | `system.notice` | must be NULL | must be NULL |
+
+`queue.state` is run-scoped by decision: ADR-0008's halted "priority queue" belongs
+to a Run. The per-run stream carries a run's run-scoped events plus its jobs'
+job-scoped events; `system.notice` appears only on the global stream.
+
+**Replay guarantee (normative, stronger than "monotonic"):** `seq` is assigned in
+**commit order** — a row visible to any reader has a `seq` greater than every row
+that became visible before it (enforced by `trg_job_events_assign_seq`; #104). This
+is what makes `Last-Event-ID` replay exact: reconnecting with the last seen `seq`
+and replaying `WHERE seq > last` yields every missed event exactly once, in order.
+Merely-monotonic assignment (e.g. an identity column) does NOT provide this — that
+was PR #104's round-1 defect, re-documented here so it is not re-introduced.
+
+`seq` is deliberately **not gap-free**: a rolled-back insert burns its value.
+Clients MUST NOT gap-check (a missing number is not a missing event); the
+commit-order guarantee above is what makes gap detection unnecessary for replay
+safety.
+
+`download.progress` is job-scoped **without exception**: it can never be emitted
+for a download with no job row. Every download — including catalog-index and
+future content-pull work — executes as a job (ADR-0008: "everything is a job"),
+so a progress emitter always has a `job_id`; a hypothetical job-less download
+would need a contract change plus a `job_events_scope_check` relaxation, decided
+here to be rejected rather than left open (#116).
+
+Queue-halt observability (#147): tripping the consecutive-auth-failure halt emits
+`queue.state` for each newly-blocked run and one `system.notice` — including when
+the halt only flips the durable credential state (nothing queued at that instant),
+and when a later fan-out for a halted credential creates born-`blocked` work.
 
 ## State machines
 
