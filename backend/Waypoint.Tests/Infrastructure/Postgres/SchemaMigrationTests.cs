@@ -46,7 +46,7 @@ public sealed class SchemaMigrationTests
 	];
 
 	/// <summary>Embedded migration count as of issue #130 -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 5;
+	private const int ExpectedMigrationCount = 6;
 
 	private readonly PostgresFixture _fixture;
 
@@ -81,9 +81,9 @@ public sealed class SchemaMigrationTests
 			Assert.True(await TableExistsAsync(connection, table), $"Expected table '{table}' to exist after a fresh migration.");
 		}
 
-		// Five embedded migrations through issue #130: initial schema, running-lease CHECK,
+		// Six embedded migrations through issue #180: initial schema, running-lease CHECK,
 		// the aborted-run queued-job invariant, the resolved-auth-outcome index, and the
-		// credential queue-halt state/trigger -- ExpectedMigrationCount below is
+		// credential queue-halt state/trigger, and the audit-survives-delete FK (0006) -- ExpectedMigrationCount below is
 		// the single place this test's own count assertions read from.
 		Assert.Equal(ExpectedMigrationCount, await CountAsync(connection, "SELECT count(*) FROM schema_migrations"));
 		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM appliance_state"));
