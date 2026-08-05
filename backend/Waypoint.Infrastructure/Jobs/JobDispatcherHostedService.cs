@@ -341,7 +341,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		// #147: the halt is a state change worth announcing even when it blocked
 		// nothing (no rows were queued at that instant) -- HaltTripped, not the
 		// blocked counts, is the emission condition.
-		if (!halt.HaltTripped)
+		if (halt.BlockedRunIds.Count == 0 && halt.BlockedJobIds.Count == 0)
 		{
 			return;
 		}
