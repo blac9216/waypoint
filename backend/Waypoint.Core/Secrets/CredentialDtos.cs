@@ -30,8 +30,7 @@ public sealed record CredentialResponse(
 	long UsedByJobCount,
 	DateTimeOffset? RotatedAt,
 	DateTimeOffset CreatedAt,
-	DateTimeOffset UpdatedAt,
-	string? SecretValue = null);
+	DateTimeOffset UpdatedAt);
 
 /// <summary>Create request: metadata plus optional initial secret material (in only; UTF-8).</summary>
 public sealed record CredentialCreateRequest(string? Name, string? CredentialType, string? Owner, string? Secret);
