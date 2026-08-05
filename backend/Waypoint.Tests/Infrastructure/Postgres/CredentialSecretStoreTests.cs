@@ -180,6 +180,14 @@ public sealed class CredentialSecretStoreTests : IAsyncLifetime, IDisposable
 			() => _store.DecryptAsync(_credentialId, "tester", null, null, CancellationToken.None));
 	}
 
+	[Fact]
+	public async Task AnEmptySecret_IsRejected()
+	{
+		ArgumentException error = await Assert.ThrowsAsync<ArgumentException>(
+			() => _store.StoreAsync(_credentialId, [], "tester", CancellationToken.None));
+		Assert.Contains("empty secret", error.Message, StringComparison.Ordinal);
+	}
+
 	private async Task<Guid> SeedCredentialAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

@@ -82,7 +82,7 @@ public sealed partial class CredentialSecretStore : ICredentialSecretStore
 		}
 
 		await WriteAuditAsync(connection, transaction, "secret.stored", actor, credentialId, null, null,
-			$$"""{"master_key_id":"{{envelope.MasterKeyId}}"}""", cancellationToken).ConfigureAwait(false);
+			System.Text.Json.JsonSerializer.Serialize(new { master_key_id = envelope.MasterKeyId }), cancellationToken).ConfigureAwait(false);
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 		LogSecretStored(credentialId, actor, envelope.MasterKeyId);
 	}
@@ -116,7 +116,7 @@ public sealed partial class CredentialSecretStore : ICredentialSecretStore
 		}
 
 		await WriteAuditAsync(connection, transaction, "secret.decrypted", actor, credentialId, jobId, runId,
-			$$"""{"master_key_id":"{{envelope.MasterKeyId}}"}""", cancellationToken).ConfigureAwait(false);
+			System.Text.Json.JsonSerializer.Serialize(new { master_key_id = envelope.MasterKeyId }), cancellationToken).ConfigureAwait(false);
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
 		byte[] plaintext = _cipher.Decrypt(envelope, ContextFor(credentialId));
