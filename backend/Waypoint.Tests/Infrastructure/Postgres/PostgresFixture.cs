@@ -40,8 +40,9 @@ public sealed class PostgresFixture : IAsyncLifetime
 	public async Task InitializeAsync()
 	{
 		int port = ApiProcess.GetFreePort();
+		string host = Environment.GetEnvironmentVariable("WAYPOINT_TEST_PG_HOST") ?? "127.0.0.1";
 		ConnectionString =
-			$"Host=127.0.0.1;Port={port};Database=waypoint_test;Username=waypoint_test;Password=waypoint_test";
+			$"Host={host};Port={port};Database=waypoint_test;Username=waypoint_test;Password=waypoint_test";
 
 		await RunDockerAsync(
 			"run", "-d", "--name", _containerName,

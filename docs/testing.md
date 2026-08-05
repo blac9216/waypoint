@@ -7,6 +7,32 @@ Multiple agents (and humans) run this stack **on the same Docker host at the sam
 time**. The compose file is not safe to run naively: two concurrent stacks collide,
 and the collision is silent. This document is the isolation contract everyone follows.
 
+## Postgres test fixture — remote Docker daemon
+
+The Postgres integration test fixture (`PostgresFixture`) starts a disposable
+PostgreSQL container via `docker run` and connects to it through a published host
+port. By default it assumes the Docker daemon and test process share the same
+network namespace, so it connects to `127.0.0.1`.
+
+If you are running tests against a **remote Docker daemon** or a **mounted host
+Docker socket** (e.g. from a devcontainer), the published port belongs to the
+daemon host — not the test process's loopback — and every Postgres test will
+time out after 60 seconds.
+
+Set `WAYPOINT_TEST_PG_HOST` to the reachable address of the Docker daemon host:
+
+```powershell
+$env:WAYPOINT_TEST_PG_HOST = "<daemon-host-ip>"
+dotnet test backend/Waypoint.sln
+```
+
+```bash
+WAYPOINT_TEST_PG_HOST="<daemon-host-ip>" dotnet test backend/Waypoint.sln
+```
+
+The default remains `127.0.0.1` — local Docker users need not change anything.
+The configured address is only used in the connection string; it is never logged.
+
 ---
 
 ## The rule
