@@ -100,6 +100,15 @@ public sealed partial class BufferedJobEventWriter : BackgroundService, IJobLogB
 
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
 	{
+		// Same gate as the dispatcher: JobEngine:Enabled=false means this process
+		// hosts no engine (the Testing API host) -- without this, every such host
+		// flush-looped against a connection string that resolves nowhere, spamming
+		// error logs (found while wiring #166's endpoint tests).
+		if (!_options.Value.Enabled)
+		{
+			return;
+		}
+
 		TimeSpan flushInterval = _options.Value.EventFlushInterval;
 		using PeriodicTimer timer = new(flushInterval);
 
