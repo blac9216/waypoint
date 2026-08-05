@@ -119,6 +119,39 @@ try
 		await migrator.ApplyAsync();
 	}
 
+	// First in the pipeline (#61): the appliance always sits behind nginx (ADR-0003),
+	// which terminates TLS and forwards the original scheme and client IP. Without
+	// this, every request looks like plain HTTP from the proxy container -- useless
+	// for the audit trail's initiating-identity record (security.md control 4) and
+	// wrong for any scheme-dependent logic. Trust is restricted to the configured
+	// known networks (ForwardedHeaders:KnownNetworks, CIDR list; defaults to the
+	// RFC 1918 docker address pools the compose stack uses) so a client outside the
+	// proxy cannot spoof its source. The Testing host sets
+	// ForwardedHeaders:TrustAnyProxy=true because TestServer connections carry no
+	// remote address to match against.
+	ForwardedHeadersOptions forwardedHeaders = new()
+	{
+		ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor
+			| Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto
+	};
+	if (app.Configuration.GetValue<bool>("ForwardedHeaders:TrustAnyProxy"))
+	{
+		forwardedHeaders.KnownNetworks.Clear();
+		forwardedHeaders.KnownProxies.Clear();
+	}
+	else
+	{
+		foreach (string cidr in app.Configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>()
+			?? ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"])
+		{
+			string[] parts = cidr.Split('/');
+			forwardedHeaders.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(
+				System.Net.IPAddress.Parse(parts[0]), int.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture)));
+		}
+	}
+
+	app.UseForwardedHeaders(forwardedHeaders);
+
 	app.UseSerilogRequestLogging();
 
 	// Outermost: catch anything that throws before it reaches the client unshaped.
@@ -141,8 +174,9 @@ try
 		app.UseSwaggerUI();
 	}
 
-	app.UseHttpsRedirection();
-
+	// No UseHttpsRedirection (#61): TLS is the edge's job (ADR-0003); the backend
+	// never listens on HTTPS in any deployment. The old call was a boot-log warning
+	// today and a latent 307 loop if ASPNETCORE_HTTPS_PORTS ever appeared.
 	app.UseAuthentication();
 	app.UseAuthorization();
 
