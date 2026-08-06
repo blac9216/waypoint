@@ -70,6 +70,17 @@ public interface IJobQueueRepository
 	/// <summary>The run state and queue flags, or null when it does not exist.</summary>
 	Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken);
 
+	/// <summary>
+	/// Full run summary for GET /runs/{id}, including per-job counts derived from the
+	/// jobs table. Returns <c>null</c> when the run does not exist.
+	/// </summary>
+	Task<RunSummary?> GetRunAsync(Guid runId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// All jobs belonging to a run, ordered by priority then created_at.
+	/// </summary>
+	Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken);
+
 	/// <summary>Creates a pending run and returns its identifier.</summary>
 	Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken);
 
