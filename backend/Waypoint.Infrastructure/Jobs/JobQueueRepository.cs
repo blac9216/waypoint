@@ -385,6 +385,94 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			? new RunQueueState(reader.GetString(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.IsDBNull(3) ? null : reader.GetString(3)) : null;
 	}
 
+	public async Task<RunSummary?> GetRunAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT
+				r.id, r.run_type, r.state, r.paused, r.blocked, r.blocked_reason,
+				r.scope::text,
+				r.credential_id, r.initiated_by,
+				r.created_at::text, r.started_at::text, r.completed_at::text,
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL),
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'queued'),
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'running'),
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'done'),
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ('failed', 'auth-failed')),
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'blocked')
+			FROM runs r
+			LEFT JOIN jobs j ON j.run_id = r.id
+			WHERE r.id = $1
+			GROUP BY r.id
+			""", connection);
+		command.Parameters.AddWithValue(runId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			return null;
+		}
+
+		return new RunSummary(
+			Id: reader.GetGuid(0),
+			RunType: reader.GetString(1),
+			State: reader.GetString(2),
+			Paused: reader.GetBoolean(3),
+			Blocked: reader.GetBoolean(4),
+			BlockedReason: reader.IsDBNull(5) ? null : reader.GetString(5),
+			ScopeJson: reader.GetString(6),
+			CredentialId: reader.IsDBNull(7) ? null : reader.GetGuid(7),
+			InitiatedBy: reader.IsDBNull(8) ? null : reader.GetString(8),
+			CreatedAt: reader.GetString(9),
+			StartedAt: reader.IsDBNull(10) ? null : reader.GetString(10),
+			CompletedAt: reader.IsDBNull(11) ? null : reader.GetString(11),
+			JobCount: reader.GetInt32(12),
+			JobCountQueued: reader.GetInt32(13),
+			JobCountRunning: reader.GetInt32(14),
+			JobCountCompleted: reader.GetInt32(15),
+			JobCountFailed: reader.GetInt32(16),
+			JobCountBlocked: reader.GetInt32(17));
+	}
+
+	public async Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT
+				id, run_id, job_type, target_id, target_name,
+				state, stage, priority, attempt_count,
+				created_at::text, started_at::text, finished_at::text
+			FROM jobs
+			WHERE run_id = $1
+			ORDER BY priority, created_at
+			""", connection);
+		command.Parameters.AddWithValue(runId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+		List<JobSummary> jobs = [];
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			jobs.Add(new JobSummary(
+				Id: reader.GetGuid(0),
+				RunId: reader.IsDBNull(1) ? null : reader.GetGuid(1),
+				JobType: reader.GetString(2),
+				TargetId: reader.IsDBNull(3) ? null : reader.GetString(3),
+				TargetName: reader.IsDBNull(4) ? null : reader.GetString(4),
+				State: reader.GetString(5),
+				Stage: reader.IsDBNull(6) ? null : reader.GetString(6),
+				Priority: reader.GetInt16(7),
+				AttemptCount: reader.GetInt32(8),
+				CreatedAt: reader.GetString(9),
+				StartedAt: reader.IsDBNull(10) ? null : reader.GetString(10),
+				FinishedAt: reader.IsDBNull(11) ? null : reader.GetString(11)));
+		}
+
+		return jobs;
+	}
+
 	public async Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
