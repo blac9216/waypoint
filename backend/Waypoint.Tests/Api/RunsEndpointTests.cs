@@ -395,7 +395,10 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 	public Task<RunSummary?> GetRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		_ = cancellationToken;
-		if (!_runs.TryGetValue(runId, out var state)) return Task.FromResult<RunSummary?>(null);
+		if (!_runs.TryGetValue(runId, out var state))
+		{
+			return Task.FromResult<RunSummary?>(null);
+		}
 		return Task.FromResult<RunSummary?>(new RunSummary(
 			Id: runId, RunType: "scan", State: state.State, Paused: state.Paused,
 			Blocked: state.Blocked, BlockedReason: state.BlockedReason,
