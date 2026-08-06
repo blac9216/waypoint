@@ -111,7 +111,9 @@ public sealed class RunsController : ControllerBase
 			throw ApiException.Validation("Run cannot be paused.", $"Run '{id}' is in state '{state.State}'.");
 		}
 
-		return Ok(new RunActionResponse(id.ToString(), state.State));
+		// Re-fetch state after the action to return the post-action state.
+		RunQueueState? newState = await _repository.GetRunQueueStateAsync(id, cancellationToken).ConfigureAwait(false);
+		return Ok(new RunActionResponse(id.ToString(), newState?.State ?? "paused"));
 	}
 
 	/// <summary>
@@ -134,7 +136,9 @@ public sealed class RunsController : ControllerBase
 			throw ApiException.Validation("Run cannot be resumed.", $"Run '{id}' is in state '{state.State}'.");
 		}
 
-		return Ok(new RunActionResponse(id.ToString(), state.State));
+		// Re-fetch state after the action to return the post-action state.
+		RunQueueState? newState = await _repository.GetRunQueueStateAsync(id, cancellationToken).ConfigureAwait(false);
+		return Ok(new RunActionResponse(id.ToString(), newState?.State ?? "running"));
 	}
 
 	/// <summary>
@@ -151,7 +155,8 @@ public sealed class RunsController : ControllerBase
 			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
 		}
 
-		await _repository.AbortRunAsync(id, cancellationToken).ConfigureAwait(false);
+		AbortRunResult result = await _repository.AbortRunAsync(id, cancellationToken).ConfigureAwait(false);
+		_ = result; // AbortRunResult carries cancelled/in-flight job IDs for future enrichment
 		return Ok(new RunActionResponse(id.ToString(), "aborted"));
 	}
 
