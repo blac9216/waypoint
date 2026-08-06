@@ -489,4 +489,10 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 		_ = (jobId, workerId, cancellationToken);
 		return Task.FromResult(true);
 	}
+
+	public Task<CredentialUnblockResult> UnblockCredentialAsync(Guid credentialId, string? reason, CancellationToken cancellationToken)
+	{
+		_ = (credentialId, reason, cancellationToken);
+		return Task.FromResult(new CredentialUnblockResult(WasHalted: false, [], []));
+	}
 }

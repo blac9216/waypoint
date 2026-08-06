@@ -119,6 +119,14 @@ public interface IJobQueueRepository
 	/// itself.
 	/// </summary>
 	Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Clears <c>credentials.queue_halted</c> and transitions that credential's
+	/// <c>blocked</c> jobs back to <c>queued</c> (and their runs unblocked) in one
+	/// transaction, serialized against the halt's <c>FOR UPDATE</c> idiom. This is the
+	/// inverse of <see cref="CheckConsecutiveAuthFailuresAsync"/>.
+	/// </summary>
+	Task<CredentialUnblockResult> UnblockCredentialAsync(Guid credentialId, string? reason, CancellationToken cancellationToken);
 }
 
 /// <summary>Run-level fields needed after a global job claim.</summary>
@@ -134,3 +142,9 @@ public sealed record AbortRunResult(IReadOnlyList<Guid> CancelledJobIds, IReadOn
 /// credential state), and on a re-check against an already-halted credential.
 /// </summary>
 public sealed record AuthFailureHaltResult(bool HaltTripped, IReadOnlyList<Guid> BlockedRunIds, IReadOnlyList<Guid> BlockedJobIds);
+
+/// <summary>
+/// The database effects of unblocking a credential queue halt. <see cref="WasHalted"/>
+/// is false when the credential was not halted (idempotent no-op).
+/// </summary>
+public sealed record CredentialUnblockResult(bool WasHalted, IReadOnlyList<Guid> UnblockedRunIds, IReadOnlyList<Guid> UnblockedJobIds);

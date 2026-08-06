@@ -295,5 +295,7 @@ public sealed class HostedServiceBehaviorTests
 		public Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken) => Task.FromResult(new AuthFailureHaltResult(HaltTripped: false, [], []));
 		public Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken)
 		{ Releases++; return Task.FromResult(true); }
+		public Task<CredentialUnblockResult> UnblockCredentialAsync(Guid credentialId, string? reason, CancellationToken cancellationToken)
+		=> Task.FromResult(new CredentialUnblockResult(WasHalted: false, [], []));
 	}
 }

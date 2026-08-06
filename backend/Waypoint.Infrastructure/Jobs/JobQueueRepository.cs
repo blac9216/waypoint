@@ -684,6 +684,89 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		return new AuthFailureHaltResult(HaltTripped: true, blockedRunIds, blockedJobIds);
 	}
 
+	/// <summary>Issue #146: inverse of <see cref="CheckConsecutiveAuthFailuresAsync"/> — clear
+	/// <c>credentials.queue_halted</c> and transition that credential's <c>blocked</c>
+	/// jobs back to <c>queued</c> (their runs unblocked) in one transaction, serialized
+	/// against the halt's <c>FOR UPDATE</c> idiom so a concurrent halt and unblock
+	/// serialize to a consistent end state.</summary>
+	public async Task<CredentialUnblockResult> UnblockCredentialAsync(Guid credentialId, string? reason, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		// Lock the credential row — the same FOR UPDATE the halt uses — so a concurrent
+		// halt and unblock serialize. Read the current queue_halted flag to decide
+		// whether this is a no-op.
+		bool wasHalted;
+		await using (NpgsqlCommand lockAndRead = new(
+			"SELECT queue_halted FROM credentials WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockAndRead.Parameters.AddWithValue(credentialId);
+			object? result = await lockAndRead.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+			if (result is null)
+			{
+				return new CredentialUnblockResult(WasHalted: false, [], []);
+			}
+			wasHalted = (bool)result;
+		}
+
+		if (!wasHalted)
+		{
+			return new CredentialUnblockResult(WasHalted: false, [], []);
+		}
+
+		// Clear the halt. The row is already FOR UPDATE-locked above.
+		await using (NpgsqlCommand clearHalt = new(
+			"UPDATE credentials SET queue_halted = false, queue_halted_reason = NULL, queue_halted_at = NULL WHERE id = $1", connection, transaction))
+		{
+			clearHalt.Parameters.AddWithValue(credentialId);
+			await clearHalt.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// Unblock blocked jobs for this credential — transition them back to 'queued'.
+		// The trigger (migration 0005) will no longer coerce them because queue_halted
+		// is now false.
+		List<Guid> unblockedJobIds = [];
+		await using (NpgsqlCommand unblockJobs = new(
+			"""
+			UPDATE jobs SET state = 'queued', note = $2
+			WHERE credential_id = $1 AND state = 'blocked'
+			RETURNING id
+			""", connection, transaction))
+		{
+			unblockJobs.Parameters.AddWithValue(credentialId);
+			unblockJobs.Parameters.AddWithValue(reason ?? "Credential queue unblocked");
+			await using NpgsqlDataReader reader = await unblockJobs.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				unblockedJobIds.Add(reader.GetGuid(0));
+			}
+		}
+
+		// Unblock runs that were blocked because of this credential's halt.
+		List<Guid> unblockedRunIds = [];
+		await using (NpgsqlCommand unblockRuns = new(
+			"""
+			UPDATE runs SET blocked = false, blocked_reason = NULL
+			WHERE id IN (SELECT DISTINCT run_id FROM jobs WHERE credential_id = $1 AND run_id IS NOT NULL)
+			AND blocked = true
+			RETURNING id
+			""", connection, transaction))
+		{
+			unblockRuns.Parameters.AddWithValue(credentialId);
+			await using NpgsqlDataReader reader = await unblockRuns.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				unblockedRunIds.Add(reader.GetGuid(0));
+			}
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		LogCredentialUnblocked(credentialId, unblockedRunIds.Count, unblockedJobIds.Count);
+		return new CredentialUnblockResult(WasHalted: true, unblockedRunIds, unblockedJobIds);
+	}
+
 	/// <summary>#147: a run fanned out into an already-halted credential is otherwise
 	/// invisible on SSE -- no auth failure occurs, so the dispatcher's halt path never
 	/// runs. Emitted after the transaction committed ("nothing follows an emit in its
@@ -723,6 +806,9 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "Credential {CredentialId} hit {Threshold} consecutive auth failures: {BlockedRunCount} run(s) and {BlockedJobCount} queued job(s) blocked")]
 	private partial void LogAuthFailureHalt(Guid credentialId, int threshold, int blockedRunCount, int blockedJobCount);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Credential {CredentialId} queue unblocked: {UnblockedRunCount} run(s) and {UnblockedJobCount} blocked job(s) released to queued")]
+	private partial void LogCredentialUnblocked(Guid credentialId, int unblockedRunCount, int unblockedJobCount);
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Recovered job {JobId} to {NewState} after expired lease (attempt {AttemptCount}/{MaxAttempts})")]
 	private partial void LogRecoveredJob(Guid jobId, string newState, int attemptCount, int maxAttempts);

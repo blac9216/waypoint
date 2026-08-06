@@ -467,6 +467,54 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		Assert.Equal(1L, (long)(await notice.ExecuteScalarAsync())!);
 	}
 
+	[Fact]
+	public async Task UnblockCredential_ClearsHaltAndUnblocksJobsAndRuns()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 1, CredentialId: credentialId), new JobSpec("scan", 1, CredentialId: credentialId)], "tester", CancellationToken.None);
+
+		// Trip the halt with 3 consecutive auth failures.
+		await SeedQueuedJobAsync(runId, credentialId);
+		await TransitionToAuthFailedAsync(await SeedQueuedJobAsync(runId, credentialId));
+		await TransitionToAuthFailedAsync(await SeedQueuedJobAsync(runId, credentialId));
+		await TransitionToAuthFailedAsync(await SeedQueuedJobAsync(runId, credentialId));
+
+		CredentialUnblockResult result = await _repository.UnblockCredentialAsync(credentialId, "operator cleared", CancellationToken.None);
+		Assert.True(result.WasHalted);
+		Assert.NotEmpty(result.UnblockedJobIds);
+		Assert.NotEmpty(result.UnblockedRunIds);
+
+		// Credential is no longer halted.
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand cmd = new(
+			"SELECT queue_halted FROM credentials WHERE id = $1", connection);
+		cmd.Parameters.AddWithValue(credentialId);
+		Assert.False((bool)(await cmd.ExecuteScalarAsync())!);
+	}
+
+	[Fact]
+	public async Task UnblockCredential_WhenNotHalted_IsNoOp()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+
+		CredentialUnblockResult result = await _repository.UnblockCredentialAsync(credentialId, "operator cleared", CancellationToken.None);
+		Assert.False(result.WasHalted);
+		Assert.Empty(result.UnblockedJobIds);
+		Assert.Empty(result.UnblockedRunIds);
+	}
+
+	[Fact]
+	public async Task UnblockCredential_ForNonExistentCredential_IsNoOp()
+	{
+		CredentialUnblockResult result = await _repository.UnblockCredentialAsync(Guid.NewGuid(), null, CancellationToken.None);
+		Assert.False(result.WasHalted);
+		Assert.Empty(result.UnblockedJobIds);
+		Assert.Empty(result.UnblockedRunIds);
+	}
+
 	private async Task ClearQueueHaltAsync(Guid credentialId)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
