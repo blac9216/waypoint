@@ -125,6 +125,17 @@ def zoned(addr: str, interface: str = "eth0") -> str:
 	return f"{addr}%{interface}"
 
 
+def backslash_escape_separators(text: str) -> str:
+	"""Insert a `\\` immediately before every `.` and `:` in `text`.
+
+	Builds the issue #137 evasion shape (`10\\.44\\.12\\.7`,
+	`host\\.name\\.dom`, `fd00\\:1a2b\\:\\:7`) from an already-assembled
+	address/hostname fixture, so the escaped form is never itself a literal
+	in this file — same discipline as every other fixture builder here.
+	"""
+	return text.replace(".", "\\.").replace(":", "\\:")
+
+
 def with_port(addr: str, port: int) -> str:
 	"""An UNBRACKETED `address:port` pair — the shape a log line writes.
 
@@ -3105,6 +3116,102 @@ class AllowlistTests(unittest.TestCase):
 		scanner.ALLOWLIST_FINDINGS["mock.html"] = entry
 		scanner._validate_allowlist()  # accepted, no raise
 		self.assertEqual(scanner.scan_text("mock.html", text), [])
+
+
+class BackslashSeparatorEvasionTests(unittest.TestCase):
+	"""Issue #137: a backslash before a separator must not defeat detection.
+
+	`IPV4_RE`, `FQDN_RE` and `IPV6_RE` all anchor on `.` or `:` sitting
+	directly between two components. A backslash inserted immediately before
+	that separator split the candidate into fragments too short to satisfy
+	any detector's structural floor, so the match never formed at all —
+	measured as 0 findings on `10\\.44\\.12\\.7`,
+	`vcenter-prod\\.fictionallab\\.corp\\.local` and
+	`fd00\\:1a2b\\:3c4d\\:\\:7` before this fix. The fix normalizes the
+	escape out of the line before any detector runs (`_unescape_separators`)
+	rather than adding a fourth alternative to each regex.
+	"""
+
+	def test_backslash_before_dot_no_longer_hides_an_ipv4_literal(self) -> None:
+		escaped = backslash_escape_separators(LAB_IP)
+		findings = scanner.scan_text("f.md", f"host {escaped}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn("non-RFC-5737 IP address literal", findings[0])
+		self.assertIn(LAB_IP, findings[0])
+
+	def test_backslash_before_dot_no_longer_hides_a_lab_fqdn(self) -> None:
+		escaped = backslash_escape_separators(LAB_FQDN)
+		findings = scanner.scan_text("f.md", f"host {escaped}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn("lab-style FQDN", findings[0])
+		self.assertIn(LAB_FQDN, findings[0])
+
+	def test_backslash_before_colon_no_longer_hides_an_ipv6_literal(self) -> None:
+		escaped = backslash_escape_separators(LAB_IPV6)
+		findings = scanner.scan_text("f.md", f"host {escaped}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn("possible IPv6 address literal", findings[0])
+		self.assertIn(LAB_IPV6, findings[0])
+
+	def test_fully_expanded_ipv6_survives_backslash_escaping_too(self) -> None:
+		escaped = backslash_escape_separators(LAB_IPV6_FULL)
+		findings = scanner.scan_text("f.md", f"host {escaped}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn("possible IPv6 address literal", findings[0])
+
+	def test_sanctioned_addresses_stay_silent_even_when_backslash_escaped(self) -> None:
+		"""The normalization pass must not manufacture new findings either."""
+		for addr in (
+			quad(192, 0, 2, 1),
+			quad(198, 51, 100, 1),
+			quad(203, 0, 113, 1),
+			quad(127, 0, 0, 1),
+			OK_FQDN,
+			OK_IPV6_DOC,
+			OK_IPV6_LOOPBACK,
+		):
+			with self.subTest(addr=addr):
+				escaped = backslash_escape_separators(addr)
+				self.assertEqual(scanner.scan_text("f.md", f"see {escaped}"), [])
+
+	def test_ordinary_backslash_conventions_are_unaffected(self) -> None:
+		"""A backslash with no separator immediately after it is left alone.
+
+		Windows paths, shell-quoted output and regex source all use `\\` as
+		an escape character with no `.`/`:` glued to it; normalizing every
+		backslash away (rather than only the ones directly before a
+		separator) would risk inventing findings out of those instead of
+		closing this issue's false negative.
+		"""
+		for line in (
+			r"path C:\Users\example\file.txt",
+			r"regex \d+\.\d+ matches a version number",
+			r"escaped newline in a log line\n",
+		):
+			with self.subTest(line=line):
+				self.assertEqual(scanner.scan_text("f.md", line), [])
+
+	def test_version_suppression_still_applies_through_backslash_escaping(self) -> None:
+		"""The #89 version-key suppression must survive the normalization pass."""
+		escaped = backslash_escape_separators(quad(9, 0, 0, 0))
+		self.assertEqual(
+			scanner.scan_text("f.md", f"version: '{escaped}'"), []
+		)
+
+	def test_dash_range_detection_still_applies_through_backslash_escaping(self) -> None:
+		"""The #111 range fix must survive the normalization pass too."""
+		start = backslash_escape_separators(RANGE_START)
+		end = backslash_escape_separators(LAB_IP)
+		findings = scanner.scan_text("f.md", f"range {start}-{end}")
+		self.assertEqual(len(findings), 2, findings)
+
+	def test_multiple_finding_classes_still_all_fire_when_escaped(self) -> None:
+		text = (
+			f"{backslash_escape_separators(LAB_FQDN)} at "
+			f"{backslash_escape_separators(LAB_IP)}"
+		)
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 2, findings)
 
 
 class FileHandlingTests(unittest.TestCase):

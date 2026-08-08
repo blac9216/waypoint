@@ -113,6 +113,75 @@ def exempt_checks(rel: str) -> set[str]:
 	return set(ALLOWLIST_FINDINGS.get(rel, {}))
 
 
+# --- 0. Escape normalization (issue #137) --------------------------------
+#
+# All three address detectors below anchor on a separator character sitting
+# directly between two components (`.` for IPv4/FQDN, `:` for IPv6). A
+# backslash inserted immediately before that separator (see issue #137 for
+# the exact fictional examples measured against each detector) does not
+# trip any leading/trailing guard (a backslash is not in `[A-Za-z0-9]`,
+# `\w`, or `-`, the only classes any guard rejects), but it DOES sit between
+# the separator and the digits or hex on either side, so the digits/hex
+# fragments on each side are too short to independently satisfy `IPV4_RE`'s
+# three-dot requirement, `FQDN_RE`'s multi-label requirement, or `IPV6_RE`'s
+# two-colon floor. The candidate never becomes a match at all — not a
+# suppression, an absence. (This comment deliberately carries no
+# backslash-escaped address literal of its own, the same discipline as
+# every other detector comment in this file: this scanner reads its own
+# source like any other tracked file, and the escaped form is exactly as
+# address-shaped to a human reader as the bare one is to a machine.)
+#
+# This is the same disease #110 names in the frontend air-gap guard's
+# `URL_PATTERN` (a JSON-escaped solidus, `https:\/\/`, defeats a
+# literal-character regex the same way), and the fix follows the same
+# direction rather than adding a fourth alternative to three already-dense
+# regexes per Possible Fix 2 in #137: normalize the escape out of the text
+# BEFORE any detector sees it, once, at the model level, instead of teaching
+# every detector's grammar to admit an optional backslash of its own.
+#
+# The backslash must be DELETED, not replaced with a same-width filler. A
+# filler character sitting where the backslash was still sits BETWEEN the
+# separator and the digits/hex on either side, so it still breaks the
+# contiguous `\d+` run IPV4_RE needs, the contiguous label FQDN_RE needs, or
+# the contiguous hex/colon run IPV6_RE needs — adjacency, not guard
+# rejection, is what actually defeats detection here (measured: an
+# underscore filler still produced zero IPv4/FQDN findings and only a
+# truncated IPv6 fragment; deletion is what closes it). That makes this
+# check's normalized line a DIFFERENT LENGTH from the raw line, which is why
+# it is a self-contained view: every position-based helper below
+# (`_dash_glues_to_non_address`, `_hex_run_start`, `_widest_address_start`,
+# `_trim_delimiter_colons`, ...) is always called with the SAME string it
+# took its `match.start()`/`match.end()` from, inside `scan_text`'s per-check
+# block, and never mixes an offset from one string with a slice of the
+# other. Nothing here reports a raw-line slice keyed by a normalized-line
+# offset; the reported text is always `match.group(...)` from whichever
+# string produced the match.
+#
+# Deliberately narrow: only a backslash immediately before `.` or `:` is
+# deleted. A backslash before anything else (`\Users`, `\n`, `\d`) is left
+# alone — that is an ordinary escape convention (Windows paths, shell
+# quoting, regex source, `.properties` files) with no separator adjacent to
+# it, and deleting every backslash would risk manufacturing false positives
+# out of those (`C:\Users` losing its backslash reads differently), not
+# close a false negative. See FalsePositiveCorpusTests'
+# `C:\Users\example\file.txt` row, which has no backslash immediately before
+# `.` or `:` and is unaffected by this pass either way (measured, not just
+# argued: no corpus line changes under `_unescape_separators`).
+_ESCAPED_SEPARATOR_RE = re.compile(r"\\(?=[.:])")
+
+
+def _unescape_separators(line: str) -> str:
+	"""Drop a backslash sitting immediately before `.` or `:`.
+
+	NOT length-preserving — see the block comment above for why deletion,
+	not same-width substitution, is required, and why that is still safe:
+	callers must use the STRING THIS RETURNS consistently for both matching
+	and any position-based re-inspection of that same match, never mix its
+	offsets with the original line's.
+	"""
+	return _ESCAPED_SEPARATOR_RE.sub("", line)
+
+
 # --- 1. IPv4 addresses -------------------------------------------------
 
 # A bare dotted-quad, not embedded in a longer dash/dot run (so version
@@ -892,7 +961,18 @@ def scan_text(rel: str, text: str) -> list[str]:
 	"""
 	waived = exempt_checks(rel)
 	findings: list[str] = []
-	for lineno, line in enumerate(text.splitlines(), start=1):
+	for lineno, raw_line in enumerate(text.splitlines(), start=1):
+		# The three address detectors below read the ESCAPE-NORMALIZED line
+		# (see _unescape_separators), so a backslash immediately before `.`
+		# or `:` cannot fragment a candidate below each detector's structural
+		# floor (issue #137). This line is used consistently for matching
+		# AND for every position-based helper call in this block — never
+		# mixed with `raw_line`'s offsets, which belong to a different-length
+		# string once a backslash has been dropped. The depot-token check
+		# below is unaffected by this issue (an opaque token has no
+		# structural separator to fragment) and deliberately keeps reading
+		# `raw_line`, narrowing this change to the checks the issue names.
+		line = _unescape_separators(raw_line)
 		if CHECK_IP not in waived:
 			for match in IPV4_RE.finditer(line):
 				candidate = match.group(0)
@@ -915,7 +995,7 @@ def scan_text(rel: str, text: str) -> list[str]:
 						f"{rel}:{lineno}: lab-style FQDN (not *.example.<tld>): {hostname}"
 					)
 		if CHECK_DEPOT_TOKEN not in waived:
-			for match in DEPOT_CONTEXT_RE.finditer(line):
+			for match in DEPOT_CONTEXT_RE.finditer(raw_line):
 				token = match.group(2)
 				if not is_placeholder_token(token):
 					findings.append(
