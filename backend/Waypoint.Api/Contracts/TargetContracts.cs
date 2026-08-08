@@ -113,22 +113,70 @@ public static class TargetConnectionValidator
 		"private_key", "privatekey", "credential", "credentials", "auth_token", "client_secret",
 	];
 
-	/// <summary>Returns the first forbidden key found (for the 400 detail message), or null when the payload is clean.</summary>
+	/// <summary>
+	/// Upper bound on how deep the recursive scan will walk before giving up. A secret
+	/// key at any legitimate depth is far shallower than this; the cap exists only to
+	/// keep a pathologically nested payload (deliberate or accidental) from exhausting
+	/// the stack. The walk is iterative anyway, but bounding depth also bounds work.
+	/// </summary>
+	private const int MaxScanDepth = 64;
+
+	/// <summary>
+	/// Returns the first forbidden key found (for the 400 detail message), or null when
+	/// the payload is clean. The scan is recursive: it walks the whole JSON tree --
+	/// nested objects, array elements, objects inside arrays, arrays inside objects, to
+	/// arbitrary depth -- because the "connection secrets are NEVER embedded" rule is
+	/// defeated the moment a caller can hide a secret one level down
+	/// (<c>{"vc":{"password":"x"}}</c>) or inside an array (<c>{"creds":[{"token":"x"}]}</c>).
+	/// Matching stays exact-key, case-insensitive -- only the traversal depth changes.
+	/// Implemented iteratively (explicit stack) so a deeply nested payload can't overflow
+	/// the call stack; depth is additionally capped at <see cref="MaxScanDepth"/>.
+	/// </summary>
 	public static string? FindForbiddenKey(JsonElement? connection)
 	{
-		if (connection is not { ValueKind: JsonValueKind.Object } element)
+		if (connection is not { } root)
 		{
 			return null;
 		}
 
-		foreach (JsonProperty property in element.EnumerateObject())
+		// (element, depth) work items. Only objects and arrays carry children worth
+		// visiting; scalars are leaves and can never *be* a key, so they're skipped.
+		Stack<(JsonElement Element, int Depth)> pending = new();
+		pending.Push((root, 0));
+
+		while (pending.Count > 0)
 		{
-			foreach (string forbidden in ForbiddenKeys)
+			(JsonElement element, int depth) = pending.Pop();
+			if (depth > MaxScanDepth)
 			{
-				if (string.Equals(property.Name, forbidden, StringComparison.OrdinalIgnoreCase))
-				{
-					return property.Name;
-				}
+				continue;
+			}
+
+			switch (element.ValueKind)
+			{
+				case JsonValueKind.Object:
+					foreach (JsonProperty property in element.EnumerateObject())
+					{
+						foreach (string forbidden in ForbiddenKeys)
+						{
+							if (string.Equals(property.Name, forbidden, StringComparison.OrdinalIgnoreCase))
+							{
+								return property.Name;
+							}
+						}
+
+						pending.Push((property.Value, depth + 1));
+					}
+
+					break;
+
+				case JsonValueKind.Array:
+					foreach (JsonElement item in element.EnumerateArray())
+					{
+						pending.Push((item, depth + 1));
+					}
+
+					break;
 			}
 		}
 

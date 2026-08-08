@@ -179,6 +179,69 @@ public sealed class SitesTargetsApiTests : IAsyncLifetime
 	}
 
 	[Fact]
+	public async Task ConnectionPayloadHidingASecretByNesting_Is400()
+	{
+		Guid siteId = await CreateSiteAsync("nested-secret-guard-site", null);
+
+		// A secret-shaped key at any depth must be rejected -- nesting one (or more)
+		// levels down, or burying it in an array of objects, must not slip past the
+		// guard. Each shape carries a forbidden key somewhere below the top level.
+		object[] payloads =
+		[
+			// nested object, one level down
+			new { host = "vcsa-01.example.internal", vc = new { password = "hunter2" } },
+			// array of objects
+			new { host = "vcsa-01.example.internal", creds = new object[] { new { token = "abc123" } } },
+			// deeply nested (3 levels)
+			new { a = new { b = new { c = new { client_secret = "shh" } } } },
+			// forbidden key inside an array inside an object
+			new { hosts = new object[] { new { inner = new { secret = "x" } } } },
+		];
+
+		foreach (object payload in payloads)
+		{
+			string body = JsonSerializer.Serialize(new { kind = "vsphere", name = "vcsa-nested-secret", connection = payload });
+			HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/sites/{siteId}/targets");
+			request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+			request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+			HttpResponseMessage response = await _client.SendAsync(request);
+
+			Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+			Assert.Contains("secret_in_connection", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+		}
+	}
+
+	[Fact]
+	public async Task LegitimateNestedConnection_WithNoForbiddenKeys_IsAccepted()
+	{
+		Guid siteId = await CreateSiteAsync("nested-clean-connection-site", null);
+
+		// A legitimately nested connection structure with no secret-shaped key must NOT
+		// be over-rejected -- the guard checks *key names*, not depth. TLS options, port
+		// lists, and nested endpoint descriptors are all fine.
+		object connection = new
+		{
+			host = "vcsa-01.example.internal",
+			tls = new { verify = true, min_version = "1.2" },
+			endpoints = new object[]
+			{
+				new { name = "sso", path = "/sts", port = 443 },
+				new { name = "vapi", path = "/api", port = 443 },
+			},
+		};
+
+		string body = JsonSerializer.Serialize(new { kind = "vsphere", name = "vcsa-nested-clean", connection });
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/sites/{siteId}/targets");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+	}
+
+	[Fact]
 	public async Task TargetReferencingACredential_StoresOnlyTheReference_NeverSecretMaterial()
 	{
 		Guid credentialId = await SeedCredentialAsync("vcsa-service-account");
