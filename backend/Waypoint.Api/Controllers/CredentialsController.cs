@@ -17,6 +17,7 @@ using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.Errors;
+using Waypoint.Core.Jobs;
 using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Secrets;
 
@@ -33,15 +34,26 @@ namespace Waypoint.Api.Controllers;
 [Route("api/v1/credentials")]
 public sealed class CredentialsController : ControllerBase
 {
+	/// <summary>
+	/// No scan priority tier applies to a connectivity test (domain-model.md's
+	/// six-valued priority column is for scan/remediate targets); same tier
+	/// <see cref="DiscoveryController"/> uses for its own on-demand, user-visible-latency
+	/// job.
+	/// </summary>
+	private const short CredentialTestPriority = 4;
+
 	private readonly CredentialRepository _credentials;
 	private readonly ICredentialSecretStore _secrets;
+	private readonly IJobQueueRepository _jobs;
 
-	public CredentialsController(CredentialRepository credentials, ICredentialSecretStore secrets)
+	public CredentialsController(CredentialRepository credentials, ICredentialSecretStore secrets, IJobQueueRepository jobs)
 	{
 		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(secrets);
+		ArgumentNullException.ThrowIfNull(jobs);
 		_credentials = credentials;
 		_secrets = secrets;
+		_jobs = jobs;
 	}
 
 	[HttpGet]
@@ -172,18 +184,17 @@ public sealed class CredentialsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Issue #20 minimal test: decrypts the stored secret under the caller's identity
-	/// (audited by <see cref="ICredentialSecretStore.DecryptAsync"/> exactly like any
-	/// other decrypt) and, if that succeeds, marks the credential
-	/// <see cref="CredentialHealthStates.Valid"/>; a missing secret or decrypt failure
-	/// marks it <see cref="CredentialHealthStates.AuthFailing"/>. This does NOT dial
-	/// the target -- see <see cref="CredentialTestResponse"/>'s doc comment for why the
-	/// real connectivity test is a follow-up PowerShell job.
+	/// Issue #245: queues a real <c>credential-test</c> connectivity job (replacing
+	/// issue #20's synchronous decrypt-only 200) -- per docs/api-contract.md
+	/// ("Connectivity check; 202 → job"). One run containing one job, the same
+	/// one-run-per-initiation shape <see cref="DiscoveryController.Discover"/> uses.
+	/// The job's terminal outcome, not this method, flips <c>credentials.health</c>
+	/// (<see cref="Waypoint.Infrastructure.Credentials.CredentialTestJobHandler"/>).
 	/// </summary>
 	[HttpPost("{id:guid}/test")]
 	[RequireAdminRole]
-	[ProducesResponseType(typeof(CredentialTestResponse), StatusCodes.Status200OK)]
-	public async Task<ActionResult<CredentialTestResponse>> Test(Guid id, CancellationToken cancellationToken)
+	[ProducesResponseType(typeof(CredentialTestQueuedResponse), StatusCodes.Status202Accepted)]
+	public async Task<ActionResult<CredentialTestQueuedResponse>> Test(Guid id, CancellationToken cancellationToken)
 	{
 		if (await _credentials.GetAsync(id, cancellationToken) is null)
 		{
@@ -191,28 +202,14 @@ public sealed class CredentialsController : ControllerBase
 		}
 
 		string actor = User.GetRequiredUsername();
-		bool succeeded;
-		string message;
-		try
-		{
-			using DecryptedSecret decrypted = await _secrets.DecryptAsync(id, actor, jobId: null, runId: null, cancellationToken);
-			succeeded = true;
-			message = "Stored secret decrypted successfully. This checks the secret is present and readable; it does not verify connectivity to the target.";
-		}
-		catch (CredentialSecretNotFoundException)
-		{
-			succeeded = false;
-			message = "No secret is stored for this credential.";
-		}
-		catch (MasterKeyUnavailableException)
-		{
-			succeeded = false;
-			message = "The appliance master key is unavailable; the secret could not be decrypted.";
-		}
+		Guid runId = await _jobs.CreateRunAsync("credential-test", "{}", id, actor, cancellationToken).ConfigureAwait(false);
+		IReadOnlyList<Guid> jobIds = await _jobs.FanOutJobsAsync(
+			runId,
+			[new JobSpec("credential-test", CredentialTestPriority, CredentialId: id)],
+			actor,
+			cancellationToken).ConfigureAwait(false);
 
-		await _credentials.MarkTestOutcomeAsync(id, succeeded, cancellationToken);
-		string health = succeeded ? CredentialHealthStates.Valid : CredentialHealthStates.AuthFailing;
-		return Ok(new CredentialTestResponse(id, succeeded, health, message));
+		return Accepted(new CredentialTestQueuedResponse(runId, jobIds[0]));
 	}
 
 	[HttpDelete("{id:guid}")]
