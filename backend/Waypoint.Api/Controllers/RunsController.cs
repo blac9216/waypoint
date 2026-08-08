@@ -69,7 +69,7 @@ public sealed class RunsController : ControllerBase
 				"Runs with no recorded initiator (system/scheduled runs) may only be paused, resumed, or aborted by an Admin.");
 		}
 
-		string caller = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
+		string caller = User.GetRequiredUsername();
 		if (!string.Equals(caller, state.InitiatedBy, StringComparison.Ordinal))
 		{
 			throw ApiException.Forbidden(
@@ -108,7 +108,7 @@ public sealed class RunsController : ControllerBase
 			}
 		}
 
-		string initiatedBy = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
+		string initiatedBy = User.GetRequiredUsername();
 		Guid runId = await _repository.CreateRunAsync(
 			request.RunType, request.Scope, request.CredentialId, initiatedBy, cancellationToken)
 			.ConfigureAwait(false);

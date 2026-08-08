@@ -66,9 +66,15 @@ public sealed class LocalSessionAuthenticationHandler : AuthenticationHandler<Au
 			return Task.FromResult(AuthenticateResult.Fail("The session token is invalid or has expired."));
 		}
 
+		// ClaimTypes.Name (not just NameIdentifier) is required: it's what
+		// ClaimsPrincipalExtensions.GetRequiredUsername() and Identity.Name read, and
+		// what controllers use to attribute a run/credential action to its actual
+		// caller (issue #209 postmortem -- its absence silently collapsed every
+		// caller and every recorded initiator to the fallback literal "admin").
 		Claim[] claims =
 		[
 			new Claim(ClaimTypes.NameIdentifier, session.Username),
+			new Claim(ClaimTypes.Name, session.Username),
 			new Claim(WaypointClaimTypes.Role, session.Role.ToString())
 		];
 
