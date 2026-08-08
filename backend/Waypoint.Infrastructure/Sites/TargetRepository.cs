@@ -1,0 +1,203 @@
+// Copyright 2026 Justin Black
+//
+// Licensed under the Apache License, Version 2.0 (the "License").
+// You may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using Npgsql;
+using Waypoint.Core.Pagination;
+using Waypoint.Core.Sites;
+
+namespace Waypoint.Infrastructure.Sites;
+
+/// <summary>
+/// Storage for targets (issue #19, epic #13): plain Npgsql, no ORM -- same convention
+/// as <see cref="SiteRepository"/>. <c>connection</c> is stored and returned verbatim
+/// as JSONB/JSON text; this layer never inspects it for secret-shaped keys -- that
+/// validation is the API layer's job (<c>TargetsController</c>), so the repository
+/// stays a pure storage seam.
+/// </summary>
+public sealed class TargetRepository
+{
+	private const string ProjectionSql = """
+		SELECT id, site_id, kind, name, connection::text, credential_id, discovery_status, last_refreshed, created_at, updated_at
+		FROM targets
+		""";
+
+	private readonly string _connectionString;
+
+	public TargetRepository(string connectionString)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+		_connectionString = connectionString;
+	}
+
+	/// <summary>Lists targets under one site (the `/sites/{id}/targets` route). Null <paramref name="siteId"/> lists across all sites (the `/targets/{id}` sibling routes need no such call, but the flexibility keeps this one method the single list path).</summary>
+	public async Task<(IReadOnlyList<Target> Items, long TotalCount)> ListAsync(Guid? siteId, PageRequest page, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(page);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		string whereClause = siteId.HasValue ? " WHERE site_id = $1" : string.Empty;
+
+		long total;
+		await using (NpgsqlCommand countCommand = new($"SELECT count(*) FROM targets{whereClause}", connection))
+		{
+			if (siteId.HasValue)
+			{
+				countCommand.Parameters.AddWithValue(siteId.Value);
+			}
+
+			total = (long)(await countCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+		}
+
+		List<Target> items = [];
+		int limitIndex = siteId.HasValue ? 2 : 1;
+		string listSql = $"{ProjectionSql}{whereClause} ORDER BY name LIMIT ${limitIndex} OFFSET ${limitIndex + 1}";
+		await using (NpgsqlCommand listCommand = new(listSql, connection))
+		{
+			if (siteId.HasValue)
+			{
+				listCommand.Parameters.AddWithValue(siteId.Value);
+			}
+
+			listCommand.Parameters.AddWithValue(page.Limit);
+			listCommand.Parameters.AddWithValue(page.Offset);
+			await using NpgsqlDataReader reader = await listCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				items.Add(Map(reader));
+			}
+		}
+
+		return (items, total);
+	}
+
+	public async Task<Target?> GetAsync(Guid id, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new($"{ProjectionSql} WHERE id = $1", connection);
+		command.Parameters.AddWithValue(id);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
+	}
+
+	/// <summary>
+	/// Creates a target under a site. Returns the outcome discriminated union rather
+	/// than throwing for the two known conflict shapes (site missing, name taken within
+	/// the site) so the controller maps each to its documented status code.
+	/// </summary>
+	public async Task<(TargetWriteOutcome Outcome, Guid? Id)> CreateAsync(
+		Guid siteId, string kind, string name, string connectionJson, Guid? credentialId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		await using (NpgsqlCommand siteCheck = new("SELECT 1 FROM sites WHERE id = $1", connection))
+		{
+			siteCheck.Parameters.AddWithValue(siteId);
+			if (await siteCheck.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
+			{
+				return (TargetWriteOutcome.SiteNotFound, null);
+			}
+		}
+
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO targets (site_id, kind, name, connection, credential_id)
+			VALUES ($1, $2, $3, $4::jsonb, $5)
+			ON CONFLICT (site_id, name) DO NOTHING
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(siteId);
+		command.Parameters.AddWithValue(kind);
+		command.Parameters.AddWithValue(name);
+		command.Parameters.AddWithValue(connectionJson);
+		command.Parameters.AddWithValue((object?)credentialId ?? DBNull.Value);
+
+		try
+		{
+			object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+			return result is Guid id ? (TargetWriteOutcome.Ok, id) : (TargetWriteOutcome.NameTaken, null);
+		}
+		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+		{
+			return (TargetWriteOutcome.CredentialNotFound, null);
+		}
+	}
+
+	/// <summary>Full replacement update: a null argument leaves the corresponding column unchanged.</summary>
+	public async Task<TargetWriteOutcome> UpdateAsync(
+		Guid id, string? kind, string? name, string? connectionJson, Guid? credentialId, bool clearCredential, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE targets SET
+				kind = COALESCE($2, kind),
+				name = COALESCE($3, name),
+				connection = COALESCE($4::jsonb, connection),
+				credential_id = CASE WHEN $6 THEN NULL ELSE COALESCE($5, credential_id) END
+			WHERE id = $1
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(id);
+		command.Parameters.AddWithValue((object?)kind ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)name ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)connectionJson ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)credentialId ?? DBNull.Value);
+		command.Parameters.AddWithValue(clearCredential);
+
+		try
+		{
+			return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null
+				? TargetWriteOutcome.Ok
+				: TargetWriteOutcome.NotFound;
+		}
+		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+		{
+			return TargetWriteOutcome.NameTaken;
+		}
+		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+		{
+			return TargetWriteOutcome.CredentialNotFound;
+		}
+	}
+
+	public async Task<TargetDeleteOutcome> DeleteAsync(Guid id, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new("DELETE FROM targets WHERE id = $1 RETURNING id", connection);
+		command.Parameters.AddWithValue(id);
+		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		return result is not null ? TargetDeleteOutcome.Deleted : TargetDeleteOutcome.NotFound;
+	}
+
+	private static Target Map(NpgsqlDataReader reader)
+	{
+		return new Target(
+			reader.GetGuid(0),
+			reader.GetGuid(1),
+			reader.GetString(2),
+			reader.GetString(3),
+			reader.GetString(4),
+			reader.IsDBNull(5) ? null : reader.GetGuid(5),
+			reader.GetString(6),
+			reader.IsDBNull(7) ? null : reader.GetFieldValue<DateTimeOffset>(7),
+			reader.GetFieldValue<DateTimeOffset>(8),
+			reader.GetFieldValue<DateTimeOffset>(9));
+	}
+}
