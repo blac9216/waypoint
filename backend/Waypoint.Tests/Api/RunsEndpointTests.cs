@@ -546,6 +546,29 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	// -- issue #210: truthful abort response ---------------------------------
 
 	[Fact]
+	public async Task AbortRun_OnRunningRun_ReturnsAbortedStateFromReFetch()
+	{
+		// The fake now mutates 'running' -> 'aborted' inside AbortRunAsync itself (same
+		// no-op semantics as the real repository). This test only passes if the
+		// controller re-fetches state AFTER calling AbortRunAsync; re-fetching before
+		// the action (or skipping the re-fetch and returning the pre-action state)
+		// would observe "running" instead. Verified locally by temporarily swapping the
+		// re-fetch above the AbortRunAsync call in RunsController.AbortRun: this test
+		// failed (expected "aborted", got "running"), then the swap was reverted.
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/abort");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.Equal("aborted", doc.RootElement.GetProperty("state").GetString());
+	}
+
+	[Fact]
 	public async Task AbortRun_AlreadyTerminal_ReturnsActualStateNotAbortedLiteral()
 	{
 		// AbortRunAsync is a no-op against a run outside pending/running (see
@@ -737,7 +760,18 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 
 	public Task<AbortRunResult> AbortRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
-		_ = (runId, cancellationToken);
+		_ = cancellationToken;
+		// Mirrors JobQueueRepository.AbortRunAsync's real no-op semantics: only a
+		// 'pending' or 'running' run actually transitions to 'aborted'; anything else
+		// (already terminal) is left untouched. Without this the controller's
+		// re-fetch-after-action fix would be untested against a fake that never
+		// changes state either way.
+		if (_runs.TryGetValue(runId, out var state) &&
+			(string.Equals(state.State, "pending", StringComparison.Ordinal) ||
+			 string.Equals(state.State, "running", StringComparison.Ordinal)))
+		{
+			_runs[runId] = state with { State = "aborted" };
+		}
 		return Task.FromResult(new AbortRunResult([], []));
 	}
 
