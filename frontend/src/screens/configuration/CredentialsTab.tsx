@@ -465,7 +465,13 @@ function CredentialRow({
 				<td className="config-table__truncate mono">{formatTimestamp(credential.rotated_at)}</td>
 				<td>
 					<div className="config-table__row-actions">
-						<button type="button" onClick={onTest} disabled={isTesting}>
+						<button
+							type="button"
+							onClick={onTest}
+							disabled={writeGate.disabled || isTesting}
+							style={!isTesting ? writeGate.style : undefined}
+							title={!isTesting ? writeGate.title : undefined}
+						>
 							{isTesting ? "Testing…" : "Test"}
 						</button>
 						<button type="button" {...writeGate} onClick={onEdit}>

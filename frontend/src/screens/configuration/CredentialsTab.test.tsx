@@ -396,7 +396,7 @@ describe("CredentialsTab (issue #247)", () => {
 		await waitFor(() => expect(screen.queryByText("svc-stig-vm")).not.toBeInTheDocument());
 	});
 
-	it("Viewer sees Add credential / Edit / Delete disabled with a Requires Admin reason, not hidden; Test stays enabled", async () => {
+	it("Viewer sees Add credential / Edit / Delete / Test disabled with a Requires Admin reason, not hidden (issue #325)", async () => {
 		installFetchMock("Viewer");
 		await mount();
 
@@ -407,7 +407,24 @@ describe("CredentialsTab (issue #247)", () => {
 		const row = screen.getByText("Alpha vCenter service account").closest("tr")!;
 		expect(within(row).getByText("Edit")).toBeDisabled();
 		expect(within(row).getByText("Delete")).toBeDisabled();
-		expect(within(row).getByText("Test")).not.toBeDisabled();
+		// Backend CredentialsController.Test carries [RequireAdminRole] (#322) —
+		// a Viewer must see Test disabled with a reason, not fire a 403 (#325).
+		const testButton = within(row).getByText("Test");
+		expect(testButton).toBeDisabled();
+		expect(testButton).toHaveAttribute("title", expect.stringContaining("Requires Admin"));
+	});
+
+	it("Admin can still Test a credential (Test is not gated for the role that is allowed to call it)", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		const row = screen.getByText("Alpha vCenter service account").closest("tr")!;
+		const testButton = within(row).getByText("Test");
+		expect(testButton).not.toBeDisabled();
+
+		fireEvent.click(testButton);
+		expect(within(row).getByText("Testing…")).toBeInTheDocument();
+		await waitFor(() => expect(fetchCalls.some((c) => c.url === "/api/v1/credentials/cred-1/test")).toBe(true));
 	});
 
 	it("unmounting mid-test tears down the SSE stream and never sets state afterward (issue #324 finding 1)", async () => {
