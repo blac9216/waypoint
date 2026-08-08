@@ -20,10 +20,18 @@ namespace Waypoint.Core.Jobs;
 /// of these per target/component; <see cref="IJobQueueRepository.FanOutJobsAsync"/>
 /// inserts them all as one run.
 /// </summary>
+/// <param name="HasEphemeralCredential">
+/// True when this job's caller-supplied "my credentials" secret (ADR-0011 ad hoc flow,
+/// issue #276) is held in <see cref="Waypoint.Core.Secrets.IEphemeralCredentialCache"/>
+/// keyed by the job id <see cref="IJobQueueRepository.FanOutJobsAsync"/> assigns --
+/// never carried on this record or any persisted column. Mutually exclusive with
+/// <paramref name="CredentialId"/>; the caller (<c>RunsController</c>) enforces that.
+/// </param>
 public sealed record JobSpec(
 	string JobType,
 	short Priority,
 	Guid? TargetId = null,
 	string? TargetName = null,
 	Guid? CredentialId = null,
-	string Payload = "{}");
+	string Payload = "{}",
+	bool HasEphemeralCredential = false);

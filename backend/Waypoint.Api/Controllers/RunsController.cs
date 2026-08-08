@@ -22,6 +22,7 @@ using Waypoint.Core.Authorization;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Pagination;
+using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
 using Waypoint.Infrastructure.Sites;
 
@@ -39,19 +40,24 @@ public sealed class RunsController : ControllerBase
 	private const string RemediateConfirmation = "REMEDIATE";
 	private const string ScanRunType = "scan";
 	private const string ScanJobType = "scan";
+	private const string PersonalCredentialKind = "personal";
 
 	private readonly IJobQueueRepository _repository;
 	private readonly SiteRepository _sites;
 	private readonly TargetRepository _targets;
+	private readonly IEphemeralCredentialCache _ephemeralCredentials;
 
-	public RunsController(IJobQueueRepository repository, SiteRepository sites, TargetRepository targets)
+	public RunsController(
+		IJobQueueRepository repository, SiteRepository sites, TargetRepository targets, IEphemeralCredentialCache ephemeralCredentials)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(sites);
 		ArgumentNullException.ThrowIfNull(targets);
+		ArgumentNullException.ThrowIfNull(ephemeralCredentials);
 		_repository = repository;
 		_sites = sites;
 		_targets = targets;
+		_ephemeralCredentials = ephemeralCredentials;
 	}
 
 	/// <summary>
@@ -100,7 +106,9 @@ public sealed class RunsController : ControllerBase
 	/// job per target (issue #273) before the run is created; every other run type
 	/// keeps the pre-#273 behavior of passing <c>scope</c> through uninterpreted (no
 	/// job rows created here -- their initiators, e.g. <c>DownloadsController</c>, own
-	/// their own fan-out).
+	/// their own fan-out). <c>credential</c> (ADR-0011 ad hoc flow, issue #276) requires
+	/// Operator+ on top of the Cyber+ floor and only applies to scan runs -- see
+	/// <see cref="ValidateEphemeralCredentialRequest"/>.
 	/// </summary>
 	[HttpPost]
 	[RequireCyberRole]
@@ -126,6 +134,8 @@ public sealed class RunsController : ControllerBase
 			}
 		}
 
+		ValidateEphemeralCredentialRequest(request);
+
 		string initiatedBy = User.GetRequiredUsername();
 
 		if (string.Equals(request.RunType, ScanRunType, StringComparison.Ordinal))
@@ -138,6 +148,57 @@ public sealed class RunsController : ControllerBase
 			.ConfigureAwait(false);
 
 		return Accepted(new RunCreatedResponse(runId.ToString()));
+	}
+
+	/// <summary>
+	/// Gates the ADR-0011 ad hoc "my credentials" body: Operator+ (the role nuance is
+	/// "Cyber starts scans with SERVICE credentials; ad hoc PERSONAL credentials are the
+	/// Operator tier" -- docs/domain-model.md), scan runs only (personal credentials
+	/// have no scheduling or remediation use -- ADR-0011 "scheduling always uses service
+	/// credentials"), mutually exclusive with <c>credential_id</c>, and only the
+	/// <c>"personal"</c> kind v1 defines.
+	/// </summary>
+	private void ValidateEphemeralCredentialRequest(RunCreateRequest request)
+	{
+		if (request.Credential is null)
+		{
+			return;
+		}
+
+		if (!CallerHasAtLeast(WaypointRole.Operator))
+		{
+			throw ApiException.Forbidden(
+				"Ad hoc credentials require the Operator role.",
+				"Only Operator+ may start a run with an inline \"credential\" (ADR-0011 personal tier); use a stored credential_id, or ask an Operator to start this run.");
+		}
+
+		if (!string.Equals(request.RunType, ScanRunType, StringComparison.Ordinal))
+		{
+			throw ApiException.Validation(
+				"Ad hoc credentials are only valid for scan runs.",
+				$"\"credential\" may only be set when \"run_type\" is \"{ScanRunType}\".");
+		}
+
+		if (request.CredentialId is not null)
+		{
+			throw ApiException.Validation(
+				"credential_id and credential are mutually exclusive.",
+				"Set either a stored \"credential_id\" or an inline \"credential\", never both.");
+		}
+
+		if (!string.Equals(request.Credential.Kind, PersonalCredentialKind, StringComparison.Ordinal))
+		{
+			throw ApiException.Validation(
+				"credential.kind is not supported.",
+				$"\"credential.kind\" must be \"{PersonalCredentialKind}\".");
+		}
+
+		if (string.IsNullOrWhiteSpace(request.Credential.Username) || string.IsNullOrWhiteSpace(request.Credential.Secret))
+		{
+			throw ApiException.Validation(
+				"credential requires both username and secret.",
+				"Set non-empty \"credential.username\" and \"credential.secret\" in the request body.");
+		}
 	}
 
 	/// <summary>
@@ -185,24 +246,55 @@ public sealed class RunsController : ControllerBase
 				$"Site '{siteId}' has no targets; add at least one before starting a scan.");
 		}
 
+		bool useEphemeralCredential = request.Credential is not null;
+
 		List<JobSpec> specs = [];
 		foreach (Target target in targets)
 		{
-			Guid? credentialId = request.CredentialId ?? target.CredentialId;
 			string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId });
-			specs.Add(new JobSpec(
-				ScanJobType,
-				ScanTargetPriority.ForTargetKind(target.Kind),
-				TargetId: target.Id,
-				TargetName: target.Name,
-				CredentialId: credentialId,
-				Payload: payload));
+			if (useEphemeralCredential)
+			{
+				// No credential_id at all for an ad hoc job -- the secret lives only in
+				// IEphemeralCredentialCache, keyed below by the job id FanOutJobsAsync
+				// assigns. Falling back to target.CredentialId here would silently mix
+				// tiers (a "my credentials" run quietly using a stored service secret).
+				specs.Add(new JobSpec(
+					ScanJobType,
+					ScanTargetPriority.ForTargetKind(target.Kind),
+					TargetId: target.Id,
+					TargetName: target.Name,
+					Payload: payload,
+					HasEphemeralCredential: true));
+			}
+			else
+			{
+				Guid? credentialId = request.CredentialId ?? target.CredentialId;
+				specs.Add(new JobSpec(
+					ScanJobType,
+					ScanTargetPriority.ForTargetKind(target.Kind),
+					TargetId: target.Id,
+					TargetName: target.Name,
+					CredentialId: credentialId,
+					Payload: payload));
+			}
 		}
 
 		Guid runId = await _repository.CreateRunAsync(
 			request.RunType, request.Scope, request.CredentialId, initiatedBy, cancellationToken)
 			.ConfigureAwait(false);
-		await _repository.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);
+
+		if (useEphemeralCredential)
+		{
+			// jobIds is returned in the same order as specs (JobQueueRepository.FanOutJobsAsync):
+			// zip rather than re-resolve so each target's ad hoc secret lands on exactly
+			// its own job's cache entry, never a sibling's.
+			EphemeralCredential credential = new(request.Credential!.Username, request.Credential.Secret);
+			for (int i = 0; i < jobIds.Count; i++)
+			{
+				_ephemeralCredentials.Put(jobIds[i], runId, credential, initiatedBy);
+			}
+		}
 
 		return new RunCreatedResponse(runId.ToString());
 	}

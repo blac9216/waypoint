@@ -17,6 +17,27 @@ using Waypoint.Core.Jobs;
 
 namespace Waypoint.Api.Contracts;
 
+/// <summary>
+/// Ad hoc "my credentials" body for <c>POST /api/v1/runs</c> (ADR-0011 personal tier,
+/// issue #276): an alternative to <see cref="RunCreateRequest.CredentialId"/> that
+/// prompts the caller for a username/secret at run initiation instead of referencing a
+/// stored row. <c>kind</c> is carried explicitly (rather than inferred from "credential
+/// present") so the wire shape has room for a future tier without a breaking change;
+/// <c>"personal"</c> is the only value v1 accepts. Never logged, never echoed in any
+/// response, never written past <see cref="Waypoint.Core.Secrets.IEphemeralCredentialCache"/>.
+/// </summary>
+public sealed record EphemeralCredentialRequest(
+	[property: JsonPropertyName("kind")]
+	string Kind,
+
+	/// <summary>The protocol-level login (e.g. vSphere SSO username) the target job presents.</summary>
+	[property: JsonPropertyName("username")]
+	string Username,
+
+	/// <summary>The caller's own password/secret. Held in memory for the run's lifetime only -- see docs/security.md "in-play redaction".</summary>
+	[property: JsonPropertyName("secret")]
+	string Secret);
+
 /// <summary>Request body for <c>POST /api/v1/runs</c>.</summary>
 public sealed record RunCreateRequest(
 	/// <summary>Run type: scan, remediate, etc.</summary>
@@ -38,7 +59,16 @@ public sealed record RunCreateRequest(
 	/// from the request.
 	/// </summary>
 	[property: JsonPropertyName("confirmation")]
-	string? Confirmation);
+	string? Confirmation,
+
+	/// <summary>
+	/// Ad hoc "my credentials" alternative to <see cref="CredentialId"/> for scan runs
+	/// (ADR-0011, issue #276). Mutually exclusive with <c>credential_id</c> and requires
+	/// Operator+ (docs/domain-model.md: "Cyber = initiate scans with service
+	/// credentials, Operator = Cyber + ad hoc scans with personal credentials").
+	/// </summary>
+	[property: JsonPropertyName("credential")]
+	EphemeralCredentialRequest? Credential = null);
 
 /// <summary>Response body for <c>GET /api/v1/runs/{id}</c>.</summary>
 public sealed record RunResponse(
