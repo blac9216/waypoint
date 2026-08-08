@@ -410,6 +410,90 @@ describe("CredentialsTab (issue #247)", () => {
 		expect(within(row).getByText("Test")).not.toBeDisabled();
 	});
 
+	it("unmounting mid-test tears down the SSE stream and never sets state afterward (issue #324 finding 1)", async () => {
+		installFetchMock("Admin");
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		// A stream that never delivers a terminal frame and hangs open, so the
+		// component is guaranteed to still be "testing" (stream open, no
+		// setState yet) at the moment of unmount — the exact window the
+		// blocker described (leaked stream + late setState).
+		let streamAborted = false;
+		let releaseHang: (() => void) | undefined;
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			const method = init?.method ?? "GET";
+			if (url === "/api/v1/credentials" && method === "GET") {
+				return jsonResponse(CREDENTIALS.map((c) => ({ ...c })));
+			}
+			if (url === "/api/v1/credentials/cred-1/test") {
+				return jsonResponse({ run_id: "run-cred-1", job_id: "job-cred-1" }, 202);
+			}
+			if (url === "/api/v1/runs/run-cred-1/events") {
+				const signal = init?.signal;
+				const body = {
+					getReader() {
+						return {
+							read(): Promise<{ value: Uint8Array | undefined; done: boolean }> {
+								return new Promise((_resolve, reject) => {
+									if (signal?.aborted) {
+										streamAborted = true;
+										reject(new DOMException("aborted", "AbortError"));
+										return;
+									}
+									signal?.addEventListener("abort", () => {
+										streamAborted = true;
+										reject(new DOMException("aborted", "AbortError"));
+									});
+									releaseHang = () => reject(new DOMException("aborted", "AbortError"));
+								});
+							},
+							releaseLock() {},
+						};
+					},
+				};
+				return { ok: true, status: 200, body } as unknown as Response;
+			}
+			throw new Error(`unexpected fetch: ${method} ${url}`);
+		}) as unknown as typeof fetch;
+
+		window.sessionStorage.setItem(
+			"waypoint.session",
+			JSON.stringify({
+				token: "tok-1",
+				username: "j.moreno",
+				role: "Admin",
+				expiresAt: new Date(Date.now() + 60_000).toISOString(),
+			}),
+		);
+
+		const { unmount } = render(
+			<AuthProvider>
+				<CredentialsTab />
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("Alpha vCenter service account")).toBeInTheDocument());
+
+		const row = screen.getByText("Alpha vCenter service account").closest("tr")!;
+		fireEvent.click(within(row).getByText("Test"));
+		await waitFor(() => expect(within(row).getByText("Testing…")).toBeInTheDocument());
+		// The stream is open (POST /test resolved, SSE GET issued) — this is
+		// the mid-test window the finding describes.
+		await waitFor(() => expect(releaseHang).toBeDefined());
+
+		unmount();
+
+		// The unmount-scoped cleanup must abort the still-open stream rather
+		// than leaving it to leak.
+		await waitFor(() => expect(streamAborted).toBe(true));
+		// No React "state update on an unmounted component" warning fired —
+		// i.e. nothing in the (now-aborted) stream's callbacks touched state
+		// after unmount.
+		expect(consoleError).not.toHaveBeenCalledWith(expect.stringContaining("unmounted component"));
+
+		consoleError.mockRestore();
+	});
+
 	it("the credential_type dropdown is restricted to exactly vcenter/nsx/ssh/token", async () => {
 		installFetchMock("Admin");
 		await mount();

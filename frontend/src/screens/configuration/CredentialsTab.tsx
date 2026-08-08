@@ -25,6 +25,15 @@
  * server-side source of truth, flipped by `CredentialTestJobHandler`, not by
  * this call — and reflects both the health pill and the terminal note on the
  * row.
+ *
+ * Stream teardown: since a test is started from a click handler rather than
+ * render, its `connectEventStream` `close()` is tracked in a ref keyed by
+ * credential id (`activeStreams`) rather than returned from a `useEffect` —
+ * but the lifecycle guarantee matches `useLiveRun.ts`'s `return close`
+ * cleanup: an unmount closes every still-open stream, a `mountedRef` guard
+ * makes any terminal event that arrives afterward a no-op instead of a
+ * setState-after-unmount, and starting a new test on a row closes that row's
+ * prior stream first so overlapping clicks never leak two.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../../lib/auth";
@@ -111,6 +120,28 @@ export function CredentialsTab() {
 	const tokenRef = useRef(token);
 	tokenRef.current = token;
 
+	/** id -> active test stream's `close`, so an unmount (or a second Test
+	 * click on the same row) can tear down a still-open stream instead of
+	 * leaking its reconnect/abort loop — mirrors useLiveRun.ts's
+	 * `useEffect(() => close, ...)` cleanup, just keyed by credential id
+	 * since a test is started from a click handler, not render. */
+	const activeStreams = useRef<Map<string, () => void>>(new Map());
+	/** Guards the terminal-event setState calls below: once unmounted, a
+	 * terminal `job.state` that arrives afterward (or the refetch that
+	 * follows it) is a no-op instead of a post-unmount setState. */
+	const mountedRef = useRef(true);
+
+	useEffect(() => {
+		const streams = activeStreams.current;
+		return () => {
+			mountedRef.current = false;
+			for (const close of streams.values()) {
+				close();
+			}
+			streams.clear();
+		};
+	}, []);
+
 	const canWrite = user ? roleAtLeast(user.role, "Admin") : false;
 	const writeGate = user ? roleGateProps(user.role, "Admin", `Requires Admin — this action is not available to ${user.role}`) : { disabled: true };
 
@@ -193,10 +224,19 @@ export function CredentialsTab() {
 	);
 
 	const doTest = useCallback(async (id: string) => {
+		// A prior test on this same row (if any) is still following its own
+		// stream — close it before starting a new one so overlapping clicks
+		// never leave two streams open for one credential.
+		activeStreams.current.get(id)?.();
+		activeStreams.current.delete(id);
+
 		setTesting((prev) => new Set(prev).add(id));
 		setTestMessage(null);
 
 		const stopTesting = () => {
+			if (!mountedRef.current) {
+				return;
+			}
 			setTesting((prev) => {
 				const next = new Set(prev);
 				next.delete(id);
@@ -208,8 +248,15 @@ export function CredentialsTab() {
 		try {
 			queued = await testCredential(id);
 		} catch (err) {
-			setTestMessage({ id, succeeded: false, message: err instanceof ApiError ? err.message : "Test failed." });
+			if (mountedRef.current) {
+				setTestMessage({ id, succeeded: false, message: err instanceof ApiError ? err.message : "Test failed." });
+			}
 			stopTesting();
+			return;
+		}
+
+		if (!mountedRef.current) {
+			// Unmounted while the POST was in flight; nothing left to follow.
 			return;
 		}
 
@@ -233,19 +280,27 @@ export function CredentialsTab() {
 				settled = true;
 				const succeeded = data.to === "done";
 				const message = data.note ?? (succeeded ? "Test succeeded." : "Test failed.");
-				setTestMessage({ id, succeeded, message });
+				if (mountedRef.current) {
+					setTestMessage({ id, succeeded, message });
+				}
 				fetchCredential(id)
-					.then((refreshed) => setCredentials((prev) => prev.map((c) => (c.id === id ? refreshed : c))))
+					.then((refreshed) => {
+						if (mountedRef.current) {
+							setCredentials((prev) => prev.map((c) => (c.id === id ? refreshed : c)));
+						}
+					})
 					.catch(() => {
 						// The row keeps its last-known health; the terminal message
 						// above already told the operator the outcome.
 					})
 					.finally(() => {
 						stopTesting();
+						activeStreams.current.delete(id);
 						close();
 					});
 			},
 		});
+		activeStreams.current.set(id, close);
 	}, []);
 
 	return (
