@@ -12,6 +12,7 @@ function baseSnapshot(): RunSnapshot {
 			initiated_by: "j.moreno",
 			credential_name: "svc-stig-scan",
 			state: "running",
+			paused: false,
 			pass: 0,
 			fail: 0,
 			na: 0,

@@ -11,6 +11,7 @@ const HEADER: RunHeader = {
 	initiated_by: "j.moreno",
 	credential_name: "svc-stig-scan",
 	state: "running",
+	paused: false,
 	pass: 0,
 	fail: 0,
 	na: 0,
@@ -256,29 +257,67 @@ describe("LiveRunScreen (issue #283)", () => {
 		second.unmount();
 	});
 
-	it("renders Pause/Abort disabled with the not-yet-built (#285) reason even for an Admin", async () => {
-		// #285 hasn't wired run controls; the block is role-independent, so a
-		// privileged Admin must NOT see enabled Pause/Abort buttons that
-		// silently do nothing — they stay visible-but-disabled with the #285
-		// reason, not the insufficient-role reason.
+	it("enables Pause/Abort for Operator+ and gates them with the role reason for Viewer/Cyber (#285)", async () => {
 		installFetchMock(() => ({ frames: [] }));
-		renderWithAuth("run-0808-0100Z", "Admin");
-
+		const admin = renderWithAuth("run-0808-0100Z", "Admin");
 		await waitFor(() => expect(screen.getByText("run-0808-0100Z")).toBeInTheDocument());
+		expect(screen.getByRole("button", { name: "Pause queue" })).not.toBeDisabled();
+		expect(screen.getByRole("button", { name: "Abort run" })).not.toBeDisabled();
+		admin.unmount();
 
+		installFetchMock(() => ({ frames: [] }));
+		renderWithAuth("run-0808-0100Z", "Viewer");
+		await waitFor(() => expect(screen.getByText("run-0808-0100Z")).toBeInTheDocument());
 		const pause = screen.getByRole("button", { name: "Pause queue" });
 		const abort = screen.getByRole("button", { name: "Abort run" });
 		expect(pause).toBeDisabled();
 		expect(abort).toBeDisabled();
-		// The title explains it's not built yet (#285), not a role denial.
-		expect(pause).toHaveAttribute("title", expect.stringContaining("#285"));
-		expect(abort).toHaveAttribute("title", expect.stringContaining("#285"));
-		expect(pause.getAttribute("title")).not.toMatch(/Requires|role/i);
+		// The title explains the ROLE reason now that the controls are real,
+		// not the old "#285 not built yet" placeholder reason.
+		expect(pause).toHaveAttribute("title", expect.stringMatching(/Requires|role/i));
+		expect(pause.getAttribute("title")).not.toMatch(/#285/);
 	});
 
-	it("shows the blocked banner and a disabled resume control when a queue halts", async () => {
+	it("Pause calls POST /runs/{id}/pause and Abort confirms before calling POST .../abort", async () => {
+		const calls: string[] = [];
+		installFetchMock(() => ({ frames: [] }));
+		const baseFetch = globalThis.fetch;
 		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
+			if (url === "/api/v1/runs/run-0808-0100Z/pause" && init?.method === "POST") {
+				calls.push("pause");
+				return new Response(JSON.stringify({ id: "run-0808-0100Z", state: "running" }), { status: 200 });
+			}
+			if (url === "/api/v1/runs/run-0808-0100Z/abort" && init?.method === "POST") {
+				calls.push("abort");
+				return new Response(JSON.stringify({ id: "run-0808-0100Z", state: "aborted" }), { status: 200 });
+			}
+			return baseFetch(input, init);
+		}) as unknown as typeof fetch;
+
+		const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+		renderWithAuth("run-0808-0100Z", "Admin");
+		await waitFor(() => expect(screen.getByText("run-0808-0100Z")).toBeInTheDocument());
+
+		screen.getByRole("button", { name: "Pause queue" }).click();
+		await waitFor(() => expect(calls).toContain("pause"));
+
+		screen.getByRole("button", { name: "Abort run" }).click();
+		expect(confirmSpy).toHaveBeenCalled();
+		await waitFor(() => expect(calls).toContain("abort"));
+		confirmSpy.mockRestore();
+	});
+
+	/** Shared blocked-run fixture: seeds a halted queue (README screen 1's
+	 * "HALTED — credential failure" thread) with an SSE stream that never
+	 * delivers (this suite only exercises the REST-seeded halt render). */
+	function installBlockedFetchMock(extra?: (url: string, init?: RequestInit) => Response | undefined) {
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			const extraResponse = extra?.(url, init);
+			if (extraResponse) {
+				return extraResponse;
+			}
 			if (url === "/api/v1/runs/run-0808-0100Z" && new Headers(init?.headers).get("Accept") !== "text/event-stream") {
 				const blockedHeader: RunHeader = {
 					...HEADER,
@@ -304,13 +343,172 @@ describe("LiveRunScreen (issue #283)", () => {
 			}
 			throw new Error(`Unhandled fetch: ${url}`);
 		}) as unknown as typeof fetch;
+	}
+
+	it("shows the blocked banner and a disabled resume control for a non-Admin role", async () => {
+		installBlockedFetchMock();
 
 		// Viewer, not Admin — README "Roles & Permissions": credential-swap-resume
 		// is Admin only, and the disabled control must still render (visible but
-		// disabled), not disappear.
+		// disabled), not disappear. No credential picker for a role that can
+		// never use it.
 		renderWithAuth("run-0808-0100Z", "Viewer");
 		await waitFor(() => expect(screen.getByText(/Queue halted/)).toBeInTheDocument());
 		const resumeButton = screen.getByRole("button", { name: /Change credential/ });
 		expect(resumeButton).toBeDisabled();
+		expect(resumeButton).toHaveAttribute("title", expect.stringMatching(/Admin/));
+		expect(screen.queryByLabelText("Replacement credential")).not.toBeInTheDocument();
+	});
+
+	it("Admin swap-resume: picking a credential and confirming calls POST /runs/{id}/resume-blocked with its id", async () => {
+		const resumeCalls: unknown[] = [];
+		installBlockedFetchMock((url, init) => {
+			if (url === "/api/v1/credentials" && init?.method === "GET") {
+				return new Response(
+					JSON.stringify([
+						{
+							id: "cred-1",
+							name: "svc-stig-scan-2",
+							credential_type: "ssh",
+							owner: "shared",
+							health: "unknown",
+							sudo_enabled: false,
+							has_secret: true,
+							used_by_job_count: 0,
+							created_at: "2026-08-01T00:00:00Z",
+							updated_at: "2026-08-01T00:00:00Z",
+						},
+					]),
+					{ status: 200 },
+				);
+			}
+			if (url === "/api/v1/runs/run-0808-0100Z/resume-blocked" && init?.method === "POST") {
+				resumeCalls.push(init.body ? JSON.parse(init.body as string) : null);
+				return new Response(JSON.stringify({ id: "run-0808-0100Z", state: "running" }), { status: 200 });
+			}
+			return undefined;
+		});
+
+		renderWithAuth("run-0808-0100Z", "Admin");
+		await waitFor(() => expect(screen.getByText(/Queue halted/)).toBeInTheDocument());
+
+		const select = await screen.findByLabelText("Replacement credential");
+		await waitFor(() => expect(screen.getByText("svc-stig-scan-2")).toBeInTheDocument());
+
+		const resumeButton = screen.getByRole("button", { name: /Change credential/ });
+		// Nothing selected yet: resume stays disabled even for Admin.
+		expect(resumeButton).toBeDisabled();
+
+		(select as HTMLSelectElement).value = "cred-1";
+		select.dispatchEvent(new Event("change", { bubbles: true }));
+
+		await waitFor(() => expect(resumeButton).not.toBeDisabled());
+		resumeButton.click();
+
+		await waitFor(() => expect(resumeCalls).toEqual([{ credential_id: "cred-1" }]));
+	});
+
+	it("per-job cancel: confirming calls DELETE /jobs/{id} for that job only", async () => {
+		const deleteCalls: string[] = [];
+		installFetchMock(() => ({ frames: [] }));
+		const baseFetch = globalThis.fetch;
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "/api/v1/jobs/j-1" && init?.method === "DELETE") {
+				deleteCalls.push(url);
+				return new Response(null, { status: 204 });
+			}
+			return baseFetch(input, init);
+		}) as unknown as typeof fetch;
+
+		const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+		renderWithAuth("run-0808-0100Z", "Admin");
+		await waitFor(() => expect(screen.getByText("esxi-01.example.internal")).toBeInTheDocument());
+
+		screen.getByRole("button", { name: "Cancel esxi-01.example.internal" }).click();
+		await waitFor(() => expect(deleteCalls).toEqual(["/api/v1/jobs/j-1"]));
+		// The sibling job's cancel control is untouched — no DELETE for j-2.
+		expect(deleteCalls).not.toContain("/api/v1/jobs/j-2");
+		confirmSpy.mockRestore();
+	});
+
+	it("per-job cancel is gated for Viewer with the role reason, same convention as run controls", async () => {
+		installFetchMock(() => ({ frames: [] }));
+		renderWithAuth("run-0808-0100Z", "Viewer");
+		await waitFor(() => expect(screen.getByText("esxi-01.example.internal")).toBeInTheDocument());
+
+		const cancelButton = screen.getByRole("button", { name: "Cancel esxi-01.example.internal" });
+		expect(cancelButton).toBeDisabled();
+		expect(cancelButton).toHaveAttribute("title", expect.stringMatching(/Requires|role/i));
+	});
+
+	it("renders a job's failure note from job.log SSE (README failure story: convert/attest failure notes)", async () => {
+		const FAILURE_NOTE = "hdf→ckl failed — control V-259142 has no matching rule id in V1R2";
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			const accept = new Headers(init?.headers).get("Accept");
+			if (url === "/api/v1/runs/run-0808-0100Z" && accept !== "text/event-stream") {
+				return new Response(JSON.stringify(HEADER), { status: 200 });
+			}
+			if (url === "/api/v1/runs/run-0808-0100Z/jobs") {
+				return new Response(JSON.stringify(JOBS), { status: 200 });
+			}
+			if (url === "/api/v1/auth/me") {
+				return new Response(JSON.stringify({ username: "j.moreno", role: "Admin" }), { status: 200 });
+			}
+			if (url === "/api/v1/runs/run-0808-0100Z/events") {
+				const encoder = new TextEncoder();
+				const stateEnvelope = {
+					seq: 1,
+					ts: "2026-08-08T01:00:00Z",
+					type: "job.state",
+					run_id: "run-0808-0100Z",
+					job_id: "j-1",
+					data: { to: "failed" },
+				};
+				const logEnvelope = {
+					seq: 2,
+					ts: "2026-08-08T01:00:01Z",
+					type: "job.log",
+					run_id: "run-0808-0100Z",
+					job_id: "j-1",
+					data: { line: FAILURE_NOTE },
+				};
+				const chunk = encoder.encode(
+					`id: 1\ndata: ${JSON.stringify(stateEnvelope)}\n\nid: 2\ndata: ${JSON.stringify(logEnvelope)}\n\n`,
+				);
+				let sent = false;
+				const signal = init?.signal;
+				return {
+					ok: true,
+					status: 200,
+					body: {
+						getReader: () => ({
+							read(): Promise<{ value: Uint8Array | undefined; done: boolean }> {
+								if (!sent) {
+									sent = true;
+									return Promise.resolve({ value: chunk, done: false });
+								}
+								return new Promise((_resolve, reject) => {
+									if (signal?.aborted) {
+										reject(new DOMException("aborted", "AbortError"));
+										return;
+									}
+									signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+								});
+							},
+							releaseLock() {},
+						}),
+					},
+				} as unknown as Response;
+			}
+			throw new Error(`Unhandled fetch: ${url}`);
+		}) as unknown as typeof fetch;
+
+		renderWithAuth("run-0808-0100Z", "Admin");
+		await waitFor(() => {
+			const row = screen.getByText("esxi-01.example.internal").closest("tr");
+			expect(row).toHaveTextContent(FAILURE_NOTE);
+		});
 	});
 });

@@ -3,16 +3,25 @@
  * "Runs & jobs" (`GET /runs/{id}`, `GET /runs/{id}/jobs`) and "Event streams
  * (SSE)" (`job.state`, `job.log`, `run.progress`, `queue.state`).
  *
- * Read-only per #283's scope: this module has no pause/resume/abort/
- * resume-blocked calls — those land with #285. State is built two ways that
- * must converge to the same board:
+ * State is built two ways that must converge to the same board:
  *   1. REST seed (`fetchRun` + `fetchRunJobs`) — a snapshot for first paint.
  *   2. SSE events folded by `applyEvent`, a pure reducer, so the exact same
  *      function drives live updates AND Last-Event-ID replay after a reload
  *      (docs/api-contract.md: "commit order" seq guarantee makes replay
  *      exact) — see useLiveRun.ts and LiveRunScreen.test.tsx.
+ *
+ * Run controls (#285): `pauseRun`/`resumeRun`/`abortRun` map to
+ * `/runs/{id}/pause|resume|abort` (Operator+, own runs; Admin any —
+ * api-contract.md "Runs & jobs"); `cancelJob` maps to the per-job cancel
+ * primitive #277 added to the job engine, exposed here at `DELETE
+ * /jobs/{id}` alongside the existing `/jobs/{id}/artifacts/{kind}` path
+ * prefix; `resumeBlockedRun` maps to `/runs/{id}/resume-blocked` (Admin
+ * only — ADR-0008 halt behavior), body `{ credential_id }`. None of these
+ * calls mutate local state directly: the server-side effect is reflected
+ * back through `job.state`/`run.progress`/`queue.state` SSE events per the
+ * "no polling" rule, same as every other animated value on this screen.
  */
-import { apiGet } from "../../lib/api";
+import { apiDelete, apiGet, apiPost } from "../../lib/api";
 import type { WaypointEvent } from "../../lib/events";
 
 /** Target state machine (api-contract.md "State machines" — Scan job). */
@@ -70,6 +79,11 @@ export interface RunHeader {
 	initiated_by: string;
 	credential_name: string;
 	state: "pending" | "running" | "completed" | "completed_with_failures" | "aborted";
+	/** Queue-level flag (api-contract.md "Run" state machine: "paused and
+	 * blocked are queue-level flags, not run states") — distinct from `state`,
+	 * which never itself becomes "paused". Drives the header Pause/Resume
+	 * toggle. */
+	paused: boolean;
 	pass: number;
 	fail: number;
 	na: number;
@@ -93,6 +107,33 @@ export function fetchRun(runId: string): Promise<RunHeader> {
 
 export function fetchRunJobs(runId: string): Promise<RunJob[]> {
 	return apiGet<RunJob[]>(`/runs/${runId}/jobs`);
+}
+
+export interface RunActionResult {
+	id: string;
+	state: string;
+}
+
+export function pauseRun(runId: string): Promise<RunActionResult> {
+	return apiPost<RunActionResult>(`/runs/${runId}/pause`);
+}
+
+export function resumeRun(runId: string): Promise<RunActionResult> {
+	return apiPost<RunActionResult>(`/runs/${runId}/resume`);
+}
+
+export function abortRun(runId: string): Promise<RunActionResult> {
+	return apiPost<RunActionResult>(`/runs/${runId}/abort`);
+}
+
+/** Per-job cancel (#277's cooperative `cancel_requested` primitive). */
+export function cancelJob(jobId: string): Promise<void> {
+	return apiDelete<void>(`/jobs/${jobId}`);
+}
+
+/** Admin credential-swap-resume for a halted run (ADR-0008 / #146). */
+export function resumeBlockedRun(runId: string, credentialId: string): Promise<RunActionResult> {
+	return apiPost<RunActionResult>(`/runs/${runId}/resume-blocked`, { credential_id: credentialId });
 }
 
 /** `job.state` event payload (api-contract.md event envelope example). */
