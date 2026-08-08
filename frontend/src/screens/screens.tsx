@@ -4,6 +4,7 @@ import { PlaceholderScreen } from "./PlaceholderScreen";
 import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
 import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./configuration/ConfigurationScreen";
 import { LiveRunRoute } from "./liverun/LiveRunScreen";
+import { StartScanScreen as StartScanWizardScreen } from "./startscan/StartScanScreen";
 
 export function DashboardScreen() {
 	return <PlaceholderScreen title="Dashboard" reads={["GET /api/v1/dashboard", "global SSE /api/v1/events"]} />;
@@ -14,18 +15,7 @@ export function LiveRunScreen() {
 }
 
 export function StartScanScreen() {
-	return (
-		<PlaceholderScreen
-			title="Start a Scan"
-			reads={[
-				"GET /api/v1/sites",
-				"GET /api/v1/targets",
-				"GET /api/v1/targets/{id}/inventory",
-				"GET /api/v1/profiles",
-				"GET /api/v1/credentials",
-			]}
-		/>
-	);
+	return <StartScanWizardScreen />;
 }
 
 export function ResultsScreen() {
