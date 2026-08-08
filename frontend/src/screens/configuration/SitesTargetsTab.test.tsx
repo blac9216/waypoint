@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
 import { SitesTargetsTab } from "./SitesTargetsTab";
@@ -13,7 +13,20 @@ const SITES: Site[] = [
 		created_at: "2026-01-01T00:00:00Z",
 		updated_at: "2026-01-01T00:00:00Z",
 	},
+	{
+		id: "site-2",
+		name: "Bravo Enclave",
+		description: null,
+		stigman_override: "https://stigman-bravo.example.internal",
+		created_at: "2026-01-01T00:00:00Z",
+		updated_at: "2026-01-01T00:00:00Z",
+	},
 ];
+
+const TARGETS_BY_SITE: Record<string, unknown[]> = {
+	"site-1": [{ id: "t-1" }, { id: "t-2" }],
+	"site-2": [],
+};
 
 const CREDENTIALS = [{ id: "cred-1", name: "svc-stig-scan" }];
 
@@ -68,8 +81,10 @@ describe("SitesTargetsTab (issue #257 slice: shell + sites CRUD)", () => {
 			if (url === "/api/v1/credentials" && method === "GET") {
 				return jsonResponse(CREDENTIALS);
 			}
-			if (url === "/api/v1/sites/site-1/targets" && method === "GET") {
-				return jsonResponse([]);
+			const targetsMatch = url.match(/^\/api\/v1\/sites\/([^/]+)\/targets$/);
+			if (targetsMatch && method === "GET") {
+				const siteId = targetsMatch[1];
+				return jsonResponse(TARGETS_BY_SITE[siteId] ?? []);
 			}
 			throw new Error(`unexpected fetch: ${method} ${url}`);
 		}) as unknown as typeof fetch;
@@ -132,7 +147,8 @@ describe("SitesTargetsTab (issue #257 slice: shell + sites CRUD)", () => {
 		vi.spyOn(window, "confirm").mockReturnValue(true);
 		await mount();
 
-		fireEvent.click(screen.getByText("Delete"));
+		const row = screen.getByText("Alpha Enclave").closest(".config-sidebar__item") as HTMLElement;
+		fireEvent.click(within(row).getByText("Delete"));
 
 		await waitFor(() =>
 			expect(fetchCalls.some((c) => c.url === "/api/v1/sites/site-1" && c.init?.method === "DELETE")).toBe(true),
@@ -147,9 +163,10 @@ describe("SitesTargetsTab (issue #257 slice: shell + sites CRUD)", () => {
 		expect(addSiteButton).toBeDisabled();
 		expect(addSiteButton).toHaveAttribute("title", expect.stringContaining("Requires Admin"));
 
-		const editButton = screen.getByText("Edit");
+		const row = screen.getByText("Alpha Enclave").closest(".config-sidebar__item") as HTMLElement;
+		const editButton = within(row).getByText("Edit");
 		expect(editButton).toBeDisabled();
-		const deleteButton = screen.getByText("Delete");
+		const deleteButton = within(row).getByText("Delete");
 		expect(deleteButton).toBeDisabled();
 	});
 
@@ -158,5 +175,22 @@ describe("SitesTargetsTab (issue #257 slice: shell + sites CRUD)", () => {
 		await mount();
 
 		expect(screen.getByText(/Targets table lands in #258/)).toBeInTheDocument();
+	});
+
+	it("renders a per-site target count in the sidebar, derived from GET /sites/{id}/targets", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		await waitFor(() => expect(screen.getByText("2 targets")).toBeInTheDocument());
+		expect(screen.getByText("0 targets")).toBeInTheDocument();
+	});
+
+	it("shows the STIG Manager binding per site (inherit or override)", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		const inheritSites = screen.getAllByText("STIG Manager: inherit");
+		expect(inheritSites.length).toBeGreaterThan(0);
+		expect(screen.getByText("STIG Manager: override")).toBeInTheDocument();
 	});
 });

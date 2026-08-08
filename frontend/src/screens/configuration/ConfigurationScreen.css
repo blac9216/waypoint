@@ -198,14 +198,32 @@
 	cursor: pointer;
 }
 
+.config-sidebar__row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
 .config-sidebar__name {
 	font-size: 12px;
 	font-weight: 550;
 	color: var(--txt);
+	flex: 1;
+}
+
+.config-sidebar__count {
+	font-size: 10.5px;
+	color: var(--txt3);
 }
 
 .config-sidebar__desc {
 	font-size: 10.5px;
+	color: var(--txt3);
+	margin-top: 3px;
+}
+
+.config-sidebar__stigman {
+	font-size: 10px;
 	color: var(--txt3);
 	margin-top: 3px;
 }

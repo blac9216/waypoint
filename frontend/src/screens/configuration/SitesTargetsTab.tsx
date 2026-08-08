@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "../../lib/api";
-import { createSite, deleteSite, fetchCredentialOptions, fetchSites, updateSite, type CredentialOption, type Site } from "./sites";
+import { createSite, deleteSite, fetchCredentialOptions, fetchSites, fetchTargets, updateSite, type CredentialOption, type Site } from "./sites";
 import { SitesSidebar } from "./SitesSidebar";
 import "./ConfigurationScreen.css";
 
@@ -23,6 +23,12 @@ export function SitesTargetsTab() {
 	// component's main pane — keeping the fetch at this level avoids two
 	// screens independently re-fetching the same /credentials listing.
 	const [, setCredentials] = useState<CredentialOption[]>([]);
+	// The `/sites` resource has no target-count field (docs/api-contract.md
+	// "Site: name, description, stigman_override?" — no count), so the
+	// sidebar's per-site count (docs/ui/prototype/README.md "Sidebar lists
+	// sites with target counts") is derived client-side: one
+	// `/sites/{id}/targets` fetch per site, in parallel, keyed by site id.
+	const [targetCounts, setTargetCounts] = useState<Map<string, number>>(new Map());
 	const [loading, setLoading] = useState(true);
 	const [loadError, setLoadError] = useState<string | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -33,7 +39,7 @@ export function SitesTargetsTab() {
 		setLoading(true);
 		setLoadError(null);
 		Promise.all([fetchSites(), fetchCredentialOptions()])
-			.then(([siteList, credentialList]) => {
+			.then(async ([siteList, credentialList]) => {
 				setSites(siteList);
 				setCredentials(credentialList);
 				setSelectedId((prev) => {
@@ -42,6 +48,20 @@ export function SitesTargetsTab() {
 					}
 					return siteList[0]?.id ?? null;
 				});
+				// Best-effort: a single site's count failing to load should not
+				// block the rest of the screen — the sidebar just shows "—" for
+				// that one site (see SitesSidebar's rendering of a missing count).
+				const counts = await Promise.all(
+					siteList.map(async (site) => {
+						try {
+							const targets = await fetchTargets(site.id);
+							return [site.id, targets.length] as const;
+						} catch {
+							return [site.id, undefined] as const;
+						}
+					}),
+				);
+				setTargetCounts(new Map(counts.filter((c): c is [string, number] => c[1] !== undefined)));
 			})
 			.catch((err: unknown) => {
 				setLoadError(err instanceof ApiError ? err.message : "Could not load sites & targets.");
@@ -128,6 +148,7 @@ export function SitesTargetsTab() {
 				)}
 				<SitesSidebar
 					sites={sites}
+					targetCounts={targetCounts}
 					selectedId={selectedId}
 					onSelect={setSelectedId}
 					onCreate={handleCreate}

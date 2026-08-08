@@ -20,6 +20,7 @@ const EMPTY_FORM: SiteFormState = { name: "", description: "" };
 
 export function SitesSidebar({
 	sites,
+	targetCounts,
 	selectedId,
 	onSelect,
 	onCreate,
@@ -29,6 +30,10 @@ export function SitesSidebar({
 	formError,
 }: {
 	sites: Site[];
+	/** Site id -> target count, derived client-side (see SitesTargetsTab.tsx —
+	 * `/sites` carries no count field). Missing entry (rather than 0) means
+	 * the per-site fetch failed; rendered as "—" rather than a misleading 0. */
+	targetCounts: Map<string, number>;
 	selectedId: string | null;
 	onSelect: (id: string) => void;
 	onCreate: (input: SiteFormState) => void;
@@ -81,42 +86,52 @@ export function SitesSidebar({
 
 			{sites.length === 0 && <div className="config-sidebar__empty">No sites yet.</div>}
 
-			{sites.map((site) => (
-				<div key={site.id} className={`config-sidebar__item ${selectedId === site.id ? "is-selected" : ""}`}>
-					<button type="button" className="config-sidebar__select" onClick={() => onSelect(site.id)}>
-						<div className="config-sidebar__name">{site.name}</div>
-						{site.description && <div className="config-sidebar__desc">{site.description}</div>}
-					</button>
-					<div className="config-sidebar__row-actions">
-						<button
-							type="button"
-							{...writeGate}
-							onClick={() => {
-								setEditForm({ name: site.name, description: site.description ?? "" });
-								setEditingId(editingId === site.id ? null : site.id);
-								setCreating(false);
-							}}
-						>
-							{editingId === site.id ? "Close" : "Edit"}
+			{sites.map((site) => {
+				const count = targetCounts.get(site.id);
+				const countLabel = count === undefined ? "—" : `${count} target${count === 1 ? "" : "s"}`;
+				return (
+					<div key={site.id} className={`config-sidebar__item ${selectedId === site.id ? "is-selected" : ""}`}>
+						<button type="button" className="config-sidebar__select" onClick={() => onSelect(site.id)}>
+							<div className="config-sidebar__row">
+								<div className="config-sidebar__name">{site.name}</div>
+								<div className="config-sidebar__count mono">{countLabel}</div>
+							</div>
+							{site.description && <div className="config-sidebar__desc">{site.description}</div>}
+							<div className="config-sidebar__stigman mono">
+								STIG Manager: {site.stigman_override ? "override" : "inherit"}
+							</div>
 						</button>
-						<button type="button" {...writeGate} onClick={() => onDelete(site.id, site.name)}>
-							Delete
-						</button>
+						<div className="config-sidebar__row-actions">
+							<button
+								type="button"
+								{...writeGate}
+								onClick={() => {
+									setEditForm({ name: site.name, description: site.description ?? "" });
+									setEditingId(editingId === site.id ? null : site.id);
+									setCreating(false);
+								}}
+							>
+								{editingId === site.id ? "Close" : "Edit"}
+							</button>
+							<button type="button" {...writeGate} onClick={() => onDelete(site.id, site.name)}>
+								Delete
+							</button>
+						</div>
+						{editingId === site.id && canWrite && (
+							<SiteForm
+								form={editForm}
+								setForm={setEditForm}
+								saving={saving}
+								onCancel={() => setEditingId(null)}
+								onSubmit={() => {
+									onUpdate(site.id, editForm);
+									setEditingId(null);
+								}}
+							/>
+						)}
 					</div>
-					{editingId === site.id && canWrite && (
-						<SiteForm
-							form={editForm}
-							setForm={setEditForm}
-							saving={saving}
-							onCancel={() => setEditingId(null)}
-							onSubmit={() => {
-								onUpdate(site.id, editForm);
-								setEditingId(null);
-							}}
-						/>
-					)}
-				</div>
-			))}
+				);
+			})}
 		</div>
 	);
 }
