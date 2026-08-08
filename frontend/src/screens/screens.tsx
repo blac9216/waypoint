@@ -3,18 +3,14 @@ import { roleGateProps } from "../lib/roles";
 import { PlaceholderScreen } from "./PlaceholderScreen";
 import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
 import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./configuration/ConfigurationScreen";
+import { LiveRunRoute } from "./liverun/LiveRunScreen";
 
 export function DashboardScreen() {
 	return <PlaceholderScreen title="Dashboard" reads={["GET /api/v1/dashboard", "global SSE /api/v1/events"]} />;
 }
 
 export function LiveRunScreen() {
-	return (
-		<PlaceholderScreen
-			title="Live Run"
-			reads={["GET /api/v1/runs/{id}", "GET /api/v1/runs/{id}/jobs", "SSE /api/v1/runs/{id}/events"]}
-		/>
-	);
+	return <LiveRunRoute />;
 }
 
 export function StartScanScreen() {
