@@ -2,7 +2,22 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
 import { SitesTargetsTab } from "./SitesTargetsTab";
-import type { Site } from "./sites";
+import type { Site, Target } from "./sites";
+
+function makeTarget(id: string, siteId: string, name: string): Target {
+	return {
+		id,
+		site_id: siteId,
+		kind: "vsphere",
+		name,
+		connection: JSON.stringify({ host: `${name}.example.internal` }),
+		credential_ref: null,
+		discovery_status: "never_discovered",
+		last_refreshed: null,
+		created_at: "2026-01-01T00:00:00Z",
+		updated_at: "2026-01-01T00:00:00Z",
+	};
+}
 
 const SITES: Site[] = [
 	{
@@ -23,8 +38,8 @@ const SITES: Site[] = [
 	},
 ];
 
-const TARGETS_BY_SITE: Record<string, unknown[]> = {
-	"site-1": [{ id: "t-1" }, { id: "t-2" }],
+const TARGETS_BY_SITE: Record<string, Target[]> = {
+	"site-1": [makeTarget("t-1", "site-1", "vcsa-01"), makeTarget("t-2", "site-1", "vcsa-02")],
 	"site-2": [],
 };
 
@@ -37,7 +52,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 	});
 }
 
-describe("SitesTargetsTab (issue #257 slice: shell + sites CRUD)", () => {
+describe("SitesTargetsTab (shell + Sites CRUD + wired-in targets panel)", () => {
 	let originalFetch: typeof fetch;
 	let fetchCalls: { url: string; init?: RequestInit }[];
 	let sites: Site[];
@@ -170,11 +185,14 @@ describe("SitesTargetsTab (issue #257 slice: shell + sites CRUD)", () => {
 		expect(deleteButton).toBeDisabled();
 	});
 
-	it("shows the future-PR placeholder for the targets table in the main pane", async () => {
+	it("renders the selected site's targets table in the main pane", async () => {
 		installFetchMock("Admin");
 		await mount();
 
-		expect(screen.getByText(/Targets table lands in #258/)).toBeInTheDocument();
+		// The main pane now hosts the real SiteTargetsPanel (issue #258),
+		// not a placeholder — the selected site's targets are listed.
+		await waitFor(() => expect(screen.getByText("vcsa-01")).toBeInTheDocument());
+		expect(screen.getByText("vcsa-02")).toBeInTheDocument();
 	});
 
 	it("renders a per-site target count in the sidebar, derived from GET /sites/{id}/targets", async () => {
