@@ -1,6 +1,7 @@
 import { useAuth } from "../lib/auth";
 import { roleGateProps } from "../lib/roles";
 import { PlaceholderScreen } from "./PlaceholderScreen";
+import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
 
 export function DashboardScreen() {
 	return <PlaceholderScreen title="Dashboard" reads={["GET /api/v1/dashboard", "global SSE /api/v1/events"]} />;
@@ -57,12 +58,7 @@ export function BenchmarksScreen() {
 }
 
 export function CatalogScreen() {
-	return (
-		<PlaceholderScreen
-			title="Download Catalog"
-			reads={["GET /api/v1/catalog/artifacts", "GET /api/v1/downloads", "GET /api/v1/system"]}
-		/>
-	);
+	return <DownloadCatalogScreen />;
 }
 
 export function LibraryScreen() {
