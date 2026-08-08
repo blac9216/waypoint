@@ -42,11 +42,13 @@ public sealed class SchemaMigrationTests
 		"downloads",
 		"audit_log",
 		"appliance_state",
+		"sites",
+		"targets",
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #10 (0008 adds downloads.run_id) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 8;
+	/// <summary>Embedded migration count as of issue #19 (0008 adds downloads.run_id, 0009 adds sites/targets) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 9;
 
 	private readonly PostgresFixture _fixture;
 

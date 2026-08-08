@@ -102,16 +102,29 @@ that shape.
   `POSTGRES_DB` variables the `postgres` service reads (#103) — an operator who
   overrides those in `deploy/.env` does not need to separately override the
   backend's connection string too; both containers move together.
-- **Deviations from the contract sketch** (both because M2 — sites/targets/inventory
-  — isn't built yet):
+- **Deviations from the contract sketch**:
   - `jobs.run_id` is **nullable**. Only the scan/remediate job types are ever fanned
     out from a Run (ADR-0008); the M1 download vertical slice's job types
     (`download`, `catalog-index`, ...) are queued as standalone jobs per the
     per-endpoint "202 → `<type>` job" notes in the API contract.
-  - `runs.site_id` and `jobs.target_id` are **forward references with no FK** — the
-    `sites`/`targets` tables land in M2 (issue #13). `jobs.target_name` carries a
-    human-readable label for job types with no target row at all (e.g. a depot
-    artifact name for a `download` job).
+  - `runs.site_id` and `jobs.target_id` remain **plain UUID columns with no FK**, even
+    though `sites`/`targets` now exist (migration 0009, issue #19) — adding one now
+    would be an unrelated schema change to tables issue #19 doesn't otherwise touch, and
+    the M2 run/scan slice that actually populates `runs.site_id`/`jobs.target_id` is
+    better placed to decide the FK's `ON DELETE` behavior alongside that work.
+    `jobs.target_name` carries a human-readable label for job types with no target row
+    at all (e.g. a depot artifact name for a `download` job).
+  - `sites`/`targets` (migration 0009, issue #19): `targets.kind` is a `CHECK` against
+    the closed `vsphere`/`nsx-api`/`ssh` set rather than a lookup table (three
+    hand-authored values, per `docs/domain-model.md` "Target" — a table would be
+    over-engineering for a set this size and this stable). `targets.connection` is
+    JSONB (kind-specific fields, e.g. hostname) for the same "shape is still
+    planning-grade" reasoning ADR-0002 already gives `depot_artifacts.metadata`, and
+    the API layer (not the schema) enforces that it never carries secret material —
+    only `credential_ref` ever names a credential. `discovery_status`'s value set
+    (`never_discovered`/`discovering`/`discovered`/`failed`) is invented: neither
+    `docs/domain-model.md` nor `docs/api-contract.md` enumerates it, only the field
+    name.
 - **Queue-claim index**: `idx_jobs_queue_claim` is a partial index on
   `(priority, created_at) WHERE state = 'queued'`, matching the ADR-0008 claim query
   exactly — the claim is an index scan over only the claimable rows, not a table
