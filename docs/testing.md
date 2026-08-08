@@ -618,6 +618,22 @@ have repeatedly caught real defects no CI run could have seen:
   - **Under-reported rather than silent**: a zero-padded IPv4-mapped literal
     loses its IPv6 finding while still tripping the IPv4 detector
     ([#123](https://github.com/blac9216/waypoint/issues/123)).
+  - **Closed, not disclosed**: a backslash inserted immediately before each
+    separator (`.` for IPv4/FQDN, `:` for IPv6) used to defeat all three
+    detectors identically — not a suppression, an absence of any match at
+    all, because the fragments on either side of the escaped separator were
+    too short to independently satisfy a detector's structural floor
+    ([#137](https://github.com/blac9216/waypoint/issues/137)). Unlike the
+    encoding-evasion bucket below, this shape reads as a plausible everyday
+    escaping convention (`.properties` files, some `rsync`/shell-quoted
+    output, certain log formats), not obviously deliberate obfuscation,
+    which is why it was named explicitly rather than folded into that
+    bucket. Fixed at the model level: every line is normalized (a backslash
+    directly before `.` or `:` is dropped) before any of the three
+    detectors runs, rather than adding a fourth alternative to each regex.
+    A backslash with no separator immediately after it (a Windows path, a
+    regex source file, `\n`) is untouched. See
+    `BackslashSeparatorEvasionTests`.
   - Everything else is a deliberate-evasion encoding (integer- or hex-encoded
     addresses, zero-width-space splitting), which is outside this gate's
     accidental-disclosure threat model rather than a boundary case it missed.
