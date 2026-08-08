@@ -26,6 +26,7 @@ using Waypoint.Core.Logging;
 using Waypoint.Core.PowerShell;
 using Waypoint.Infrastructure.Auth;
 using Waypoint.Infrastructure.Catalog;
+using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Discovery;
 using Waypoint.Infrastructure.Downloads;
@@ -141,6 +142,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new SiteRepository(connectionString));
 			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton(new InventoryRepository(connectionString));
+			services.AddSingleton(new ConfigDocRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
