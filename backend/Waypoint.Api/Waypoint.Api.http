@@ -24,16 +24,15 @@ GET {{Waypoint.Api_HostAddress}}/api/v1/auth/me
 Accept: application/json
 Authorization: Bearer {{login.response.body.$.token}}
 
-### Scaffold: paginated list, any authenticated role — demonstrates the X-Total-Count
-### convention (docs/api-contract.md Conventions: "Pagination"). Delete this request
-### alongside ScaffoldStubController once a real paginated resource exists.
-GET {{Waypoint.Api_HostAddress}}/api/v1/_stub/items?limit=1&offset=0
+### Catalog — paginated list, Viewer role or higher — demonstrates the X-Total-Count
+### convention (docs/api-contract.md Conventions: "Pagination").
+GET {{Waypoint.Api_HostAddress}}/api/v1/catalog/artifacts?limit=1&offset=0
 Accept: application/json
 Authorization: Bearer {{login.response.body.$.token}}
 
-### Scaffold: Admin-only — demonstrates 403 (documented error envelope) for an
+### Catalog sync — Admin-only — demonstrates 403 (documented error envelope) for an
 ### authenticated principal below the required role. Log in as a non-Admin session to
 ### see it fail; the in-memory local-auth service only issues Admin sessions today.
-GET {{Waypoint.Api_HostAddress}}/api/v1/_stub/admin-only
+POST {{Waypoint.Api_HostAddress}}/api/v1/catalog/sync
 Accept: application/json
 Authorization: Bearer {{login.response.body.$.token}}

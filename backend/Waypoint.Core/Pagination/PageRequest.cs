@@ -19,9 +19,9 @@ namespace Waypoint.Core.Pagination;
 /// "page of results" wrapper type: per <c>docs/api-contract.md</c> Conventions
 /// ("Pagination: `?limit/offset` + `X-Total-Count` on list endpoints") and
 /// <c>backend/README.md</c>, each collection endpoint returns a bare array and sets the
-/// <c>X-Total-Count</c> response header itself (see <c>ScaffoldStubController</c>) —
-/// there is no generic envelope because every resource's collection endpoint composes
-/// its own query.
+/// <c>X-Total-Count</c> response header itself (see
+/// <c>CatalogController.ListArtifacts</c>) — there is no generic envelope because every
+/// resource's collection endpoint composes its own query.
 /// </summary>
 public sealed class PageRequest
 {

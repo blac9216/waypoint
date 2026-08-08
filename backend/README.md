@@ -270,8 +270,8 @@ reused, not reinvented, by every future endpoint:
   in `docs/domain-model.md`.
 - **Pagination**: accept `Waypoint.Core.Pagination.PageRequest` as a `[FromQuery]`
   parameter and set the `X-Total-Count` response header yourself (see
-  `ScaffoldStubController` for the pattern) — there is no generic list wrapper because
-  each resource's collection endpoint composes its own query.
+  `CatalogController.ListArtifacts` for the pattern) — there is no generic list wrapper
+  because each resource's collection endpoint composes its own query.
 - **Mode gating**: `ApiException.ModeUnavailable()` is reserved for endpoints that exist
   but cannot function in the appliance's current mode (409, per the contract) — not yet
   called by any endpoint; wire it in as connected/disconnected-mode features land
@@ -289,8 +289,3 @@ reused, not reinvented, by every future endpoint:
   verbatim appendix text noted in `.editorconfig` — a tooling limitation, not a license
   change). This is mechanically enforced, not just documented: `dotnet build` flags a
   missing/mismatched header as `IDE0073`, and `dotnet format` inserts the correct one.
-
-`Waypoint.Api.Controllers.ScaffoldStubController` exists only to exercise the
-conventions above end-to-end (see its XML doc comment) — delete it once a real
-paginated, role-guarded resource exists to demonstrate the same shapes in production
-code.
