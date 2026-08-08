@@ -480,19 +480,45 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		await TransitionToAuthFailedAsync(await SeedQueuedJobAsync(runId, credentialId));
 		await TransitionToAuthFailedAsync(await SeedQueuedJobAsync(runId, credentialId));
 		await TransitionToAuthFailedAsync(await SeedQueuedJobAsync(runId, credentialId));
+		AuthFailureHaltResult halt = await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, threshold: 3, CancellationToken.None);
+		Assert.True(halt.HaltTripped);
 
 		CredentialUnblockResult result = await _repository.UnblockCredentialAsync(credentialId, "operator cleared", CancellationToken.None);
 		Assert.True(result.WasHalted);
-		Assert.NotEmpty(result.UnblockedJobIds);
-		Assert.NotEmpty(result.UnblockedRunIds);
+		Assert.Equal(halt.BlockedJobIds.Order(), result.UnblockedJobIds.Order());
+		Assert.Equal(halt.BlockedRunIds.Order(), result.UnblockedRunIds.Order());
 
-		// Credential is no longer halted.
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
-		await using NpgsqlCommand cmd = new(
-			"SELECT queue_halted FROM credentials WHERE id = $1", connection);
-		cmd.Parameters.AddWithValue(credentialId);
-		Assert.False((bool)(await cmd.ExecuteScalarAsync())!);
+
+		// Credential is no longer halted.
+		await using (NpgsqlCommand cmd = new(
+			"SELECT queue_halted FROM credentials WHERE id = $1", connection))
+		{
+			cmd.Parameters.AddWithValue(credentialId);
+			Assert.False((bool)(await cmd.ExecuteScalarAsync())!);
+		}
+
+		// The released jobs are claimably 'queued' again — the 0005 trigger no longer
+		// coerces them.
+		await using (NpgsqlCommand blockedLeft = new(
+			"SELECT count(*) FROM jobs WHERE credential_id = $1 AND state = 'blocked'", connection))
+		{
+			blockedLeft.Parameters.AddWithValue(credentialId);
+			Assert.Equal(0L, (long)(await blockedLeft.ExecuteScalarAsync())!);
+		}
+
+		// Issue #146 acceptance: after unblock, fan-out for the credential creates
+		// 'queued' jobs again instead of born-blocked ones.
+		Guid laterRunId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		Guid laterJobId = Assert.Single(await _repository.FanOutJobsAsync(
+			laterRunId, [new JobSpec("scan", 1, CredentialId: credentialId)], "tester", CancellationToken.None));
+		await using (NpgsqlCommand laterJobState = new(
+			"SELECT state FROM jobs WHERE id = $1", connection))
+		{
+			laterJobState.Parameters.AddWithValue(laterJobId);
+			Assert.Equal("queued", (string)(await laterJobState.ExecuteScalarAsync())!);
+		}
 	}
 
 	[Fact]
