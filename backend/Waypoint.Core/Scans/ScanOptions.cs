@@ -38,6 +38,14 @@ public sealed class ScanOptions
 	/// </summary>
 	public string ProfilePath { get; set; } = "/opt/waypoint/profiles/vsphere";
 
+	/// <summary>
+	/// Fixed InSpec profile path for <c>nsx-api</c> targets (issue #308, same
+	/// single-fixed-profile scope call as <see cref="ProfilePath"/> -- a real
+	/// per-component/per-catalog profile mapping mirroring the sibling repo's catalog is
+	/// deferred to the same future <c>/profiles</c> surface).
+	/// </summary>
+	public string NsxProfilePath { get; set; } = "/opt/waypoint/profiles/nsx";
+
 	/// <summary>Per-invocation InSpec wall-clock budget.</summary>
 	public int TimeoutSeconds { get; set; } = 1800;
 

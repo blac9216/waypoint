@@ -181,4 +181,89 @@ function Invoke-WaypointConvert {
 	return [pscustomobject]@{ Success = $true; CklPath = $CklOutputPath; MetadataApplied = [bool]$BenchmarkId; FailureReason = $null }
 }
 
-Export-ModuleMember -Function Invoke-WaypointScan, Invoke-WaypointAttest, Invoke-WaypointConvert
+# Invented stub for Invoke-WaypointNsxScan (issue #308). Same $env:WAYPOINT_SCAN_STUB_MODE
+# canned outcomes as Invoke-WaypointScan above -- 'success' (default), 'exit100',
+# 'failure', 'auth' -- kept on the SAME env var so a mixed vsphere+nsx run can be driven
+# by one setting per test, plus its own Information-stream canary (password length) so
+# the same non-leakage assertion covers this path too.
+function Invoke-WaypointNsxScan {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$Manager,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$Username,
+
+		[Parameter(Mandatory)]
+		[AllowEmptyString()]
+		[string]$Password,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ProfilePath,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ReportPath,
+
+		[Parameter()]
+		[int]$TimeoutSeconds
+	)
+
+	$InformationPreference = 'Continue'
+	Write-Information "Scanning stub NSX manager '$Manager' as '$Username' (password length $($Password.Length)) profile '$ProfilePath'"
+
+	$Mode = $env:WAYPOINT_SCAN_STUB_MODE
+	if (-not $Mode) { $Mode = 'success' }
+
+	if ($Mode -eq 'failure') {
+		return [pscustomobject]@{
+			Success       = $false
+			ExitCode      = 1
+			ReportPath    = $null
+			FailureReason = 'invented NSX InSpec transport failure (stub).'
+		}
+	}
+
+	if ($Mode -eq 'auth') {
+		return [pscustomobject]@{
+			Success       = $false
+			ExitCode      = 2
+			ReportPath    = $null
+			FailureReason = '401 Unauthorized: invented NSX session token rejection (stub).'
+		}
+	}
+
+	$ReportDirectory = Split-Path -Path $ReportPath -Parent
+	if ($ReportDirectory -and -not (Test-Path -Path $ReportDirectory -PathType Container)) {
+		New-Item -ItemType Directory -Path $ReportDirectory -Force | Out-Null
+	}
+
+	$ExitCode = if ($Mode -eq 'exit100') { 100 } else { 0 }
+	$Hdf = [ordered]@{
+		platform = [ordered]@{ name = 'nsx'; release = 'stub' }
+		profiles = @(
+			[ordered]@{
+				name    = 'invented-stub-nsx-profile'
+				version = '0.0.0'
+				controls = @()
+			}
+		)
+		statistics = [ordered]@{ duration = 0.1 }
+	}
+	($Hdf | ConvertTo-Json -Depth 6) | Set-Content -Path $ReportPath -Encoding utf8
+
+	Write-Information 'NSX scan complete.'
+
+	return [pscustomobject]@{
+		Success       = $true
+		ExitCode      = $ExitCode
+		ReportPath    = $ReportPath
+		FailureReason = $null
+	}
+}
+
+Export-ModuleMember -Function Invoke-WaypointScan, Invoke-WaypointAttest, Invoke-WaypointConvert, Invoke-WaypointNsxScan

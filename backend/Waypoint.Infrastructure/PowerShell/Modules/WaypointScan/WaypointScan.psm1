@@ -399,4 +399,224 @@ function Set-WaypointCklBenchmarkMetadata {
 	$Xml.Save($CklPath)
 }
 
-Export-ModuleMember -Function Invoke-WaypointScan, Invoke-WaypointAttest, Invoke-WaypointConvert
+# NSX transport (issue #308, first sub-issue of the #24 split). NSX InSpec profiles run
+# with the `local` transport and make NSX Manager REST calls via the InSpec http()
+# resource, authenticated with an X-XSRF-TOKEN header and a JSESSIONID cookie -- the
+# same shape the sibling repo's module.transport.nsxapi.ps1 (Get-NsxSessionToken) uses.
+# That vendor function is not dot-sourced here: it depends on that repo's own
+# Write-Log/Get-LogSplat helpers, which is more of that module's parallel-engine
+# machinery than this single-target invocation needs (the same "re-drive the vendor
+# step directly" call Invoke-WaypointScan's doc comment already makes for
+# Get-ScanScriptBlock) -- so the POST /api/session/create call is replicated here,
+# directly, matching the vendor's request/response shape exactly (form-encoded
+# j_username/j_password, X-XSRF-TOKEN response header, JSESSIONID Set-Cookie).
+#
+# The session token and cookie are secret material for as long as they are valid (they
+# grant NSX Manager API access) -- they are held only in local variables for the
+# lifetime of this function call, are never written to $ReportPath or any other file,
+# and are passed to `inspec exec` via a generated inputs file that lives under the
+# artifact store's own directory (not a watched/logged path) exactly as the base
+# vSphere path passes the vCenter password via environment variables rather than argv:
+# neither ever appears in the captured process command line. On any throw the caught
+# exception message is reduced by Get-NsxAuthFailureReason before being returned, so a
+# session-token HTTP failure's exception text (which could otherwise echo the request
+# body) never leaves this function un-redacted.
+function Invoke-WaypointNsxScan {
+	<#
+	.SYNOPSIS
+	    Acquires an NSX Manager session token and runs `inspec exec` (local transport)
+	    against a single NSX target, returning the HDF report path plus outcome.
+
+	.PARAMETER Manager
+	    NSX Manager FQDN or IP (target.connection.host).
+
+	.PARAMETER Username
+	    NSX Manager username, decrypted credential username half.
+
+	.PARAMETER Password
+	    NSX Manager password, bound as a typed parameter -- never interpolated into
+	    script text (security.md controls 1/2), matching Invoke-WaypointScan's Password.
+
+	.PARAMETER ProfilePath
+	    Path to the InSpec profile (compliance content) to execute.
+
+	.PARAMETER ReportPath
+	    Where InSpec writes its JSON (HDF) report.
+
+	.OUTPUTS
+	    One [pscustomobject]: Success (bool), ExitCode (int), ReportPath (string),
+	    FailureReason (string, only set when Success is $false).
+	#>
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$Manager,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$Username,
+
+		[Parameter(Mandatory)]
+		[AllowEmptyString()]
+		[string]$Password,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ProfilePath,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ReportPath,
+
+		[Parameter()]
+		[int]$TimeoutSeconds = 1800,
+
+		[Parameter()]
+		[string]$VmwareStigDockerCommonPath = $Script:VmwareStigDockerCommonModulePath
+	)
+
+	if ([string]::IsNullOrWhiteSpace($VmwareStigDockerCommonPath)) {
+		throw 'WaypointScan: no module.common.ps1 path configured (WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH or -VmwareStigDockerCommonPath).'
+	}
+
+	if (-not (Test-Path -Path $VmwareStigDockerCommonPath -PathType Leaf)) {
+		throw "WaypointScan: module.common.ps1 not found at '$VmwareStigDockerCommonPath'."
+	}
+
+	# Dot-source the unmodified vendor script to bring Invoke-ExternalCommand into scope
+	# (same helper the vSphere path above reuses; the NSX-specific session-token call is
+	# not vendor code -- see the region comment above this function).
+	. $VmwareStigDockerCommonPath
+
+	$ReportDirectory = Split-Path -Path $ReportPath -Parent
+	if ($ReportDirectory -and -not (Test-Path -Path $ReportDirectory -PathType Container)) {
+		New-Item -ItemType Directory -Path $ReportDirectory -Force | Out-Null
+	}
+
+	try {
+		$Session = Get-WaypointNsxSessionToken -Manager $Manager -Username $Username -Password $Password
+	} catch {
+		return [pscustomobject]@{
+			Success       = $false
+			ExitCode      = $null
+			ReportPath    = $null
+			FailureReason = "NSX session token request failed for $Manager`: $(Get-NsxAuthFailureReason -ErrorRecord $_)"
+		}
+	}
+
+	# The token/cookie are written only into this generated inputs file, under the
+	# artifact store's own report directory (not a watched/logged path) -- the same
+	# non-argv, non-log discipline Invoke-WaypointScan's VISERVER_PASSWORD env var uses.
+	# The file is best-effort deleted in `finally` below; on process crash it is left on
+	# an artifact-store volume the operator already controls access to, same exposure as
+	# any other generated-inputs file the sibling repo's own NSX transport writes.
+	$InputsPath = Join-Path $ReportDirectory "$([Guid]::NewGuid().ToString('N')).nsx-inputs.generated.yml"
+	$InputsContent = "nsxManager: '$Manager'`nsessionToken: '$($Session.Token)'`nsessionCookieId: '$($Session.Cookie)'`n"
+
+	try {
+		Set-Content -Path $InputsPath -Value $InputsContent -ErrorAction Stop
+
+		$InspecArguments = "`"$ProfilePath`" -t local --input-file `"$InputsPath`" --reporter=json:`"$ReportPath`" --show-progress --enhanced-outcomes"
+
+		# AllowedExitCodes 0/100/101, same predecessor constraint as the vSphere path:
+		# InSpec exit 100 (compliance failures present) and 101 (skipped controls
+		# present) are both a completed, reportable scan, not a tool failure.
+		$null = Invoke-ExternalCommand -Executable 'inspec' -Arguments "exec $InspecArguments" `
+			-TimeoutMilliseconds ($TimeoutSeconds * 1000) -ProcessName "InSpec NSX scan for $Manager" `
+			-AllowedExitCodes @(0, 100, 101) -Source 'nsx' -SurfaceOutputOnFailure
+
+		if (-not (Test-Path -Path $ReportPath -PathType Leaf)) {
+			return [pscustomobject]@{
+				Success       = $false
+				ExitCode      = $null
+				ReportPath    = $null
+				FailureReason = "InSpec NSX scan completed but report file not found at $ReportPath."
+			}
+		}
+
+		return [pscustomobject]@{
+			Success       = $true
+			ExitCode      = 0
+			ReportPath    = $ReportPath
+			FailureReason = $null
+		}
+	} catch {
+		return [pscustomobject]@{
+			Success       = $false
+			ExitCode      = $null
+			ReportPath    = $null
+			FailureReason = "InSpec NSX scan failed for $Manager`: $($_.Exception.Message)"
+		}
+	} finally {
+		if (Test-Path -Path $InputsPath -PathType Leaf) {
+			Remove-Item -Path $InputsPath -Force -ErrorAction SilentlyContinue
+		}
+	}
+}
+
+# Obtains an NSX Manager API session token and cookie via `POST /api/session/create`,
+# matching the sibling repo's Get-NsxSessionToken request/response shape exactly (form
+# body j_username/j_password, X-XSRF-TOKEN response header, JSESSIONID Set-Cookie) --
+# not dot-sourced from the vendor file, see the region comment above
+# Invoke-WaypointNsxScan for why. Throws on any failure so the caller classifies it.
+function Get-WaypointNsxSessionToken {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[string]$Manager,
+
+		[Parameter(Mandatory)]
+		[string]$Username,
+
+		[Parameter(Mandatory)]
+		[AllowEmptyString()]
+		[string]$Password
+	)
+
+	$Url = "https://$Manager/api/session/create"
+	$Body = @{
+		j_username = $Username
+		j_password = $Password
+	}
+
+	$Response = Invoke-WebRequest -Uri $Url -Method Post -Body $Body `
+		-ContentType 'application/x-www-form-urlencoded' `
+		-SkipCertificateCheck -TimeoutSec 30 -ErrorAction Stop
+
+	$Token = $null
+	$SetCookie = $null
+	foreach ($Key in $Response.Headers.Keys) {
+		if ($Key -ieq 'X-XSRF-TOKEN') { $Token = @($Response.Headers[$Key])[0] }
+		elseif ($Key -ieq 'Set-Cookie') { $SetCookie = @($Response.Headers[$Key]) -join '; ' }
+	}
+	if ([string]::IsNullOrEmpty($Token)) { throw "NSX session create did not return an X-XSRF-TOKEN header" }
+
+	$CookieMatch = [regex]::Match([string]$SetCookie, 'JSESSIONID=[^;,\s]+')
+	if (-not $CookieMatch.Success) { throw "NSX session create did not return a JSESSIONID cookie" }
+
+	return [PSCustomObject]@{
+		Token  = $Token
+		Cookie = $CookieMatch.Value
+	}
+}
+
+# Reduces an ErrorRecord from Get-WaypointNsxSessionToken to a short, safe-to-log
+# reason: Invoke-WebRequest's own exception message for a non-2xx response
+# (Microsoft.PowerShell.Commands.HttpResponseException) already includes the response
+# status line ("401 Unauthorized" etc, which is what AuthFailureClassifier needs to see)
+# without echoing the request body -- j_username/j_password never appear in that
+# message because they were sent as a POST body, not a query string, so no further
+# scrubbing is needed here; this exists to give the returned FailureReason one
+# consistent, short shape regardless of exception type (timeout vs HTTP error vs DNS).
+function Get-NsxAuthFailureReason {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		$ErrorRecord
+	)
+
+	return $ErrorRecord.Exception.Message
+}
+
+Export-ModuleMember -Function Invoke-WaypointScan, Invoke-WaypointAttest, Invoke-WaypointConvert, Invoke-WaypointNsxScan

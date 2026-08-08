@@ -267,6 +267,146 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #308 AC 1: an nsx-api target scans end to end through the same stage
+	/// pipeline (InSpec -&gt; attest -&gt; convert) as vsphere -- proving the ScanJobHandler
+	/// dispatch added for NSX drives Invoke-WaypointNsxScan, persists the HDF the same
+	/// way, and never leaks the resolved NSX credential's password (which the stub's
+	/// session-token call binds the same way the real Invoke-WaypointNsxScan does).
+	/// </summary>
+	[Fact]
+	public async Task NsxTarget_ScanSucceeds_PersistsHdf_ReachesUploaded()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		const string canary = "invented-nsx-e2e-canary-f4a2";
+		(Guid targetId, Guid credentialId) = await SeedNsxTargetAsync(canary);
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", ScanTargetPriority.Nsx, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		string hdfPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.json");
+		Assert.True(File.Exists(hdfPath), $"expected HDF report at '{hdfPath}'.");
+
+		await AssertCanaryNeverLeakedAsync(canary, credentialId);
+	}
+
+	/// <summary>
+	/// Issue #308 AC 2: an NSX session-token auth failure (the stub's "auth" mode, same
+	/// "401" marker Invoke-WaypointNsxScan's real Get-WaypointNsxSessionToken failure
+	/// path would surface) hits the same credential-halt classification as vsphere.
+	/// </summary>
+	[Fact]
+	public async Task NsxTarget_AuthShapedFailure_MapsToAuthFailed()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "auth");
+		(Guid targetId, Guid credentialId) = await SeedNsxTargetAsync("invented-nsx-auth-canary");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", ScanTargetPriority.Nsx, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("auth-failed", await GetJobFieldAsync(jobIds[0], "state"));
+	}
+
+	/// <summary>
+	/// Issue #308 AC 3: a mixed vsphere+nsx run fans out both target kinds under one run
+	/// and the nsx-api job (ScanTargetPriority.Nsx = 1) is claimed for its FIRST (InSpec)
+	/// stage before the vsphere job (ScanTargetPriority.VCenter = 3) is claimed at all --
+	/// proving the dispatcher's `ORDER BY priority, created_at` claim ordering, not just
+	/// that both kinds can run in isolation. Proven via each job's first `job.state`
+	/// event's `seq` (job_events' monotonic, gapless assignment order -- the moment
+	/// ExecuteAsync's InSpec-stage claim begins) rather than a snapshot poll: with
+	/// MaxConcurrency 1 claims are serialized, but this handler's own multi-stage
+	/// pipeline (InSpec -&gt; attest -&gt; convert, each its own claim cycle) means a
+	/// snapshot taken right as nsx reaches its terminal state can race against the very
+	/// next claim tick already picking up vsphere -- the seq comparison is immune to
+	/// that race because it only cares about the FIRST claim of each job, which is
+	/// fully serialized by the priority-ordered claim query.
+	/// </summary>
+	[Fact]
+	public async Task MixedVsphereAndNsxRun_ClaimsNsxBeforeVsphere_InPriorityOrder()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid vsphereTargetId, Guid vsphereCredentialId) = await SeedVsphereTargetAsync("invented-mixed-vsphere-canary");
+		(Guid nsxTargetId, Guid nsxCredentialId) = await SeedNsxTargetAsync("invented-mixed-nsx-canary");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string vspherePayload = JsonSerializer.Serialize(new { target_id = vsphereTargetId });
+		string nsxPayload = JsonSerializer.Serialize(new { target_id = nsxTargetId });
+
+		// vsphere is fanned out FIRST (created_at earlier) to prove ordering is driven by
+		// priority, not insertion order -- if the dispatcher claimed by created_at alone
+		// the vsphere job would go first despite its lower (3 > 1) priority.
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[
+				new JobSpec("scan", ScanTargetPriority.VCenter, TargetId: vsphereTargetId, CredentialId: vsphereCredentialId, Payload: vspherePayload),
+				new JobSpec("scan", ScanTargetPriority.Nsx, TargetId: nsxTargetId, CredentialId: nsxCredentialId, Payload: nsxPayload),
+			],
+			"tester",
+			CancellationToken.None);
+		Guid vsphereJobId = jobIds[0];
+		Guid nsxJobId = jobIds[1];
+
+		JobEngineOptions options = new() { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(50), MaxConcurrency = 1 };
+		JobDispatcherHostedService dispatcher = new(
+			_repository,
+			new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, _redactor, NullLogger<JobEventPublisher>.Instance),
+			new JobHandlerRegistry([_handler]),
+			Options.Create(options),
+			NullLogger<JobDispatcherHostedService>.Instance);
+
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(nsxJobId);
+			await PollUntilTerminalAsync(vsphereJobId);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		long nsxFirstClaimedAtSeq = await GetFirstJobStateEventTimeAsync(nsxJobId);
+		long vsphereFirstClaimedAtSeq = await GetFirstJobStateEventTimeAsync(vsphereJobId);
+		Assert.True(
+			nsxFirstClaimedAtSeq < vsphereFirstClaimedAtSeq,
+			$"expected nsx job's first claim (seq {nsxFirstClaimedAtSeq}) before vsphere's (seq {vsphereFirstClaimedAtSeq}).");
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(nsxJobId, "state"));
+		Assert.Equal("uploaded", await GetJobFieldAsync(vsphereJobId, "state"));
+	}
+
+	/// <summary>
 	/// ADR-0011/#276: a NULL credential_id job takes its secret from the ephemeral
 	/// cache, never falling back to the target's stored credential -- proven here by
 	/// seeding a target WITH a stored credential but fanning the job out with
@@ -582,6 +722,22 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		return (targetId!.Value, credentialId);
 	}
 
+	private async Task<(Guid TargetId, Guid CredentialId)> SeedNsxTargetAsync(
+		string secretValue, Guid? siteId = null, string? username = "admin@example.internal")
+	{
+		Guid resolvedSiteId = siteId ?? (await _sites.CreateAsync($"site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
+		Guid credentialId = (await _credentials.CreateAsync(
+			$"svc-nsx-{Guid.NewGuid():N}@example.internal", CredentialTypes.Nsx, CredentialOwners.Shared, sudoEnabled: false, CancellationToken.None, username))!.Value;
+		await _secretStore.StoreAsync(credentialId, System.Text.Encoding.UTF8.GetBytes(secretValue), "test", CancellationToken.None);
+
+		string connectionJson = JsonSerializer.Serialize(new { host = "nsxmgr-01.example.internal" });
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			resolvedSiteId, TargetKinds.NsxApi, $"target-{Guid.NewGuid():N}", connectionJson, credentialId, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+
+		return (targetId!.Value, credentialId);
+	}
+
 	/// <summary>
 	/// security.md control 1/4 + the epic #6/#8 canary machinery, proven through THIS
 	/// handler: the credential value never reaches job_events payloads, jobs.note, or
@@ -620,6 +776,25 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			audited.Parameters.AddWithValue(id);
 			Assert.True((long)(await audited.ExecuteScalarAsync())! >= 1);
 		}
+	}
+
+	/// <summary>
+	/// The <c>seq</c> (monotonic, gapless assignment order -- see migration 0001) of the
+	/// EARLIEST <c>job.state</c> event for a job -- the moment its first claim began.
+	/// <c>seq</c>, not <c>created_at</c>, is the ordering key: two events committed
+	/// within the same wall-clock tick are still strictly seq-ordered, so this is
+	/// race-free even under a fast poll interval.
+	/// </summary>
+	private async Task<long> GetFirstJobStateEventTimeAsync(Guid jobId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"SELECT seq FROM job_events WHERE event_type = 'job.state' AND job_id = $1 ORDER BY seq ASC LIMIT 1", connection);
+		query.Parameters.AddWithValue(jobId);
+		object? result = await query.ExecuteScalarAsync();
+		Assert.NotNull(result);
+		return (long)result!;
 	}
 
 	private async Task<bool> EventTypeExistsAsync(string eventType, Guid jobId)
