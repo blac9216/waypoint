@@ -28,6 +28,7 @@ using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.SystemState;
 
 namespace Waypoint.Infrastructure.DependencyInjection;
 
@@ -81,6 +82,11 @@ public static class ServiceCollectionExtensions
 
 		services.AddSingleton<JobHandlerRegistry>();
 
+		// Disk usage is a filesystem stat, not a database read -- registered
+		// unconditionally so GET /system still reports store usage on a host with no
+		// connection string configured (issue #226).
+		services.AddSingleton<Waypoint.Core.SystemState.IArtifactStoreDiskUsageProvider, ArtifactStoreDiskUsageProvider>();
+
 		// ADR-0005 crypto core (epic #8 slice 1). Registered unconditionally: the
 		// provider is lazy and fail-closed, so a host without a mounted key boots
 		// fine and refuses secret operations with an operator-actionable error.
@@ -125,6 +131,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new Secrets.CredentialRepository(connectionString));
 			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
 			services.AddSingleton<IDownloadRepository>(new DownloadRepository(connectionString));
+			services.AddSingleton<Waypoint.Core.SystemState.IApplianceStateRepository>(new ApplianceStateRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
