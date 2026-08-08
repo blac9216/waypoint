@@ -655,10 +655,25 @@ have repeatedly caught real defects no CI run could have seen:
   exemption — every file is still scanned by every check.
 - **Files the scanner does not read**: **none, currently — and that is a property
   worth keeping.** `ALLOWLIST_FINDINGS` in `scan_repo_specific.py` is empty, so every
-  git-tracked file that isn't a known-binary extension is scanned by all four
-  detectors. This matters because the alternative degrades silently: an exempt path
-  reports clean while never having been looked at, and nothing in a green check
-  distinguishes the two. An earlier revision of this PR exempted one 204 KB UI mockup
+  git-tracked file that isn't a known-safe binary extension (`KNOWN_SAFE_BINARY_
+  EXTENSIONS` — app icons, fonts, wasm; six `.png` icons today) is scanned by all
+  four detectors. This matters because the alternative degrades silently: an exempt
+  path reports clean while never having been looked at, and nothing in a green check
+  distinguishes the two. That silent-degradation failure mode used to include a
+  whole *category* of file, not just individually-listed paths: before issue #101,
+  `SKIPPED_EXTENSIONS` covered certs/keys (`.pem`, `.key`, `.pfx`, `.p12`) and
+  archives (`.zip`, `.gz`, `.tgz`, `.pdf`) too, and any of those passed clean without
+  ever being read — a `.pem`'s Subject/SAN carries a hostname in plain text, which is
+  exactly the shape this scanner exists to catch, and gitleaks only covers key
+  *material*, not that. The fix split that list in two: `KNOWN_SAFE_BINARY_
+  EXTENSIONS` stays a skip (icons/fonts/wasm cannot carry the kind of text payload
+  these detectors look for), and everything else un-inspectable — the named
+  `UNINSPECTABLE_EXTENSIONS` (certs/keys/archives/PDF) plus anything that simply
+  fails to decode as UTF-8 — now **fails the run** the moment a tracked file matches,
+  before any detector runs, with the finding naming the exact path and telling a
+  human to either remove the file or add its extension to `KNOWN_SAFE_BINARY_
+  EXTENSIONS` with a reason. `UninspectableFileTests` and
+  `MainRefusesUninspectableFilesTests` in `test_scan_repo_specific.py` pin this. An earlier revision of this PR exempted one 204 KB UI mockup
   from *all three* detectors in order to waive a single hostname-naming nit, which
   left the IP and depot-token detectors dark on the most likely file in the repo for
   someone to paste real lab inventory into while demoing. That file was re-sanitized

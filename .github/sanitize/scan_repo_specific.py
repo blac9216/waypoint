@@ -20,11 +20,24 @@ Scans every git-tracked file at HEAD (not just the diff) so the whole tree is
 re-validated on every push, matching the "hard gate on every PR + push" rule
 in issue #79. Exits non-zero (and prints every finding) if anything trips.
 
+A tracked file this scanner cannot read as UTF-8 text is NOT silently skipped
+(issue #101): unless its extension is in KNOWN_SAFE_BINARY_EXTENSIONS (a short,
+named list of asset types this repo actually ships — icons, fonts, wasm — that
+cannot carry the kind of text payload these detectors look for), an
+uninspectable file fails the run outright and must be justified by a human,
+the same "fail loud on the unrecognised, never fall through to a silent pass"
+model frontend/scripts/check-no-external-assets.mjs already uses for the
+build-output guard. See KNOWN_SAFE_BINARY_EXTENSIONS's own comment for the
+full reasoning and _find_uninspectable_tracked_files() for the check itself.
+
 Tune false positives here, not by weakening the checks: see ALLOWLIST_FINDINGS
 below, where every entry names both a path and the specific check(s) waived on
 it, with a reason. That makes an exemption explicit and individually
 justified; it does not make a broad one impossible — see that constant's
-comment for exactly what it does and does not buy.
+comment for exactly what it does and does not buy. ALLOWLIST_FINDINGS only
+waives one of the four text detectors on a file that IS scanned; it has no
+bearing on KNOWN_SAFE_BINARY_EXTENSIONS, which is a separate, extension-keyed
+mechanism for the un-inspectable-content problem.
 
 The detectors themselves are tested by test_scan_repo_specific.py, which the
 sanitize workflow runs before this scan. Running this script against a clean
@@ -42,13 +55,52 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Extensions that are binary or pure noise for a text/secret scan. Same
-# "denylist, not allowlist" philosophy as frontend/scripts/check-no-external-
-# assets.mjs: excluding a short list of known-binary/known-noise types beats
-# an allowlist of "text" extensions that silently exempts anything new.
-SKIPPED_EXTENSIONS = {
-	".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".eot",
-	".wasm", ".zip", ".gz", ".tgz", ".pdf", ".pem", ".key", ".pfx", ".p12",
+# Issue #101: a binary file this scanner cannot read as text used to be
+# skipped and counted as clean in the SAME step as a file that was read and
+# found nothing — a green run could not tell the two apart. A `.pem`'s
+# Subject/SAN carries a hostname verbatim, and an archive can carry anything;
+# silently passing those is exactly the failure CLAUDE.md's sanitization
+# mandate exists to prevent.
+#
+# frontend/scripts/check-no-external-assets.mjs already solved this shape for
+# the frontend build guard, and its header comment is the read: a DEnylist of
+# "known opaque, therefore skip" fails open forever, because the set of opaque
+# formats is unbounded (that file documents five separate times it failed open
+# this way). The fix there was to invert the question from "did we remember
+# this format" to "is this a format we affirmatively recognise as inert" —
+# and default to FAIL, not SKIP, for everything else.
+#
+# This scanner draws that same line, but the two buckets are narrower than the
+# `.mjs` guard's, because this scanner's job is narrower (repo-relative text
+# patterns, not "is there a URL anywhere in these bytes"):
+#
+#   - KNOWN_SAFE_BINARY_EXTENSIONS: image/font/wasm asset types this repo
+#     actually ships (frontend/public/icons/*.png today). These are opaque,
+#     but nothing in this repo's build ever hand-edits their bytes to embed a
+#     hostname or token, and a raster/font/wasm payload is not a text
+#     container the four detectors above could meaningfully run against
+#     anyway. Skipped, exactly as before.
+#
+#   - Everything else un-inspectable — certs/keys (`.pem`, `.key`, `.pfx`,
+#     `.p12`), archives (`.zip`, `.gz`, `.tgz`), and any other extension this
+#     list has never seen — FAILS the scan the moment a tracked file matches
+#     it. `_find_uninspectable_tracked_files()` in main() is what enforces
+#     that; scan_file() no longer special-cases these paths at all, they are
+#     simply files whose extension was never taught to KNOWN_SAFE_BINARY_
+#     EXTENSIONS and so are caught before scan_file ever gets a path.
+#     A human adding a new binary asset type must either name it in
+#     KNOWN_SAFE_BINARY_EXTENSIONS (with a reason, reviewable in the diff —
+#     the same "deliberate, reviewable act" the `.mjs` guard's escape hatch
+#     is) or justify the file's presence some other way; there is no
+#     fallthrough bucket a novel extension can land in unnoticed.
+KNOWN_SAFE_BINARY_EXTENSIONS = {
+	# App/PWA icons under frontend/public/icons/ (issue #101). Raster image
+	# bytes, not a text container; nothing in this repo's build process embeds
+	# identifying strings in them.
+	".png", ".jpg", ".jpeg", ".gif", ".ico",
+	# Web fonts and the one wasm artifact class this repo could ship. Binary
+	# formats with no free-text field this repo's tooling ever populates.
+	".woff", ".woff2", ".ttf", ".eot", ".wasm",
 }
 
 # The four checks below, named so an exemption can waive one without
@@ -1032,10 +1084,21 @@ def scan_text(rel: str, text: str) -> list[str]:
 
 
 def scan_file(path: Path, rel: str | None = None) -> list[str]:
+	"""Scan one tracked file's text for the four detectors above.
+
+	Callers are expected to have already routed anything matching
+	`KNOWN_SAFE_BINARY_EXTENSIONS` away from this function (see
+	`_find_uninspectable_tracked_files` and `main`) — this only decides
+	whether the given path's *content* can be read as UTF-8 text, not
+	whether its extension is trusted. A file that still fails to decode here
+	(a genuinely-unexpected binary that happens to carry an extension not on
+	either list, e.g. a mislabeled `.txt`) is skipped rather than crashing
+	the run; `main()`'s uninspectable-extension check is the loud half of
+	this contract, this is the quiet fallback for content that surprises the
+	extension it was filed under.
+	"""
 	if rel is None:
 		rel = path.relative_to(REPO_ROOT).as_posix()
-	if path.suffix.lower() in SKIPPED_EXTENSIONS:
-		return []
 	try:
 		text = path.read_text(encoding="utf-8")
 	except (UnicodeDecodeError, OSError):
@@ -1043,10 +1106,106 @@ def scan_file(path: Path, rel: str | None = None) -> list[str]:
 	return scan_text(rel, text)
 
 
+# Extensions that name a format this scanner refuses outright, regardless of
+# whether a given instance happens to decode as UTF-8. A PEM certificate or an
+# ASCII-armored key IS valid UTF-8 text — the reason a naive "can this be read
+# as text" test is the wrong question for this bucket. What makes `.pem` and
+# friends dangerous is not that they are binary, it is that they are a format
+# whose *legitimate* content (a Subject/SAN, an archive member's path/text) is
+# exactly the kind of thing CLAUDE.md forbids, and this scanner's four
+# detectors were never built to parse that structure. So this list is named by
+# format, not discovered by a decode attempt: certs/keys and archives, the
+# sharpest cases from issue #101.
+UNINSPECTABLE_EXTENSIONS = {
+	".pem", ".key", ".pfx", ".p12",  # certs/keys — a Subject/SAN carries a
+	# hostname in plain ASCII; gitleaks covers key MATERIAL, not this.
+	".zip", ".gz", ".tgz", ".pdf",  # archives and PDF — contents/text this
+	# scanner has no parser for, at all.
+}
+
+
+def _find_uninspectable_tracked_files(paths: list[Path]) -> list[str]:
+	"""Repo-relative paths of tracked files this scanner refuses to pass clean.
+
+	Issue #101: a tracked file matching UNINSPECTABLE_EXTENSIONS (a named,
+	closed list of cert/key/archive formats — see that constant) is refused
+	outright, never scanned and never silently passed. `main()` fails the run
+	and a human must either remove the file or, if it is a deliberately-kept
+	format this scanner should learn to trust, extend the relevant allowlist
+	with a reason — never widen this by dropping an extension silently.
+
+	Anything else that fails to decode as UTF-8 — a format nobody has named
+	either safe (KNOWN_SAFE_BINARY_EXTENSIONS) or forbidden
+	(UNINSPECTABLE_EXTENSIONS) — is refused too, on the same "when in doubt,
+	leave it out" principle: an unrecognised binary blob is exactly the
+	shape check-no-external-assets.mjs's header comment describes failing
+	open on five separate times when it was allowed to fall through a gap
+	between two enumerated lists. There is no such gap here: recognised-safe,
+	recognised-forbidden, or undecodable are the only three outcomes, and
+	only the first one scans clean without a finding.
+	"""
+	uninspectable: list[str] = []
+	for path in paths:
+		if not path.is_file():
+			continue
+		ext = path.suffix.lower()
+		if ext in KNOWN_SAFE_BINARY_EXTENSIONS:
+			continue
+		if ext in UNINSPECTABLE_EXTENSIONS or _looks_binary(path):
+			uninspectable.append(path.relative_to(REPO_ROOT).as_posix())
+	return sorted(uninspectable)
+
+
+def _looks_binary(path: Path) -> bool:
+	"""True if `path` cannot be read as UTF-8 text.
+
+	This is the fallback dividing line for anything not named by either
+	extension list: a plain-text file with an unfamiliar extension (a new
+	docs format, say) still gets scanned normally, because it decodes fine.
+	Only content that genuinely cannot be read as text — or a format named
+	in UNINSPECTABLE_EXTENSIONS regardless of whether it happens to decode —
+	is escalated to the loud, fail-the-run path.
+	"""
+	try:
+		path.read_text(encoding="utf-8")
+	except (UnicodeDecodeError, OSError):
+		return True
+	return False
+
+
 def main() -> int:
 	_validate_allowlist()
+	tracked = list_tracked_files()
+
+	uninspectable = _find_uninspectable_tracked_files(tracked)
+	if uninspectable:
+		print(
+			"Repo-specific sanitization scan refuses to pass the following "
+			"file(s) clean:\n"
+		)
+		for rel in uninspectable:
+			print(f"  - {rel}")
+		print(
+			"\nEach of these cannot be read as UTF-8 text, so none of this "
+			"scanner's detectors can inspect its content — and CLAUDE.md's "
+			"sanitization mandate ('when in doubt, leave it out') means that is "
+			"a reason to refuse the file, not to pass it clean. A certificate's "
+			"Subject/SAN, a key file, or an archive's contents can all carry a "
+			"lab hostname or a secret that gitleaks and this scanner's own "
+			"text detectors would never see.\n\n"
+			"If this file genuinely does not belong in the repo (a real cert, "
+			"key, or exported artifact), remove it — CLAUDE.md forbids "
+			"committing those regardless of what this scanner does. If it is a "
+			"deliberately-invented, known-safe binary asset (an app icon, a "
+			"font, a wasm build artifact), add its extension to "
+			"KNOWN_SAFE_BINARY_EXTENSIONS in "
+			".github/sanitize/scan_repo_specific.py with a one-line reason — "
+			"that is a reviewable, deliberate act, not a silent exemption."
+		)
+		return 1
+
 	all_findings: list[str] = []
-	for path in list_tracked_files():
+	for path in tracked:
 		if path.is_file():
 			all_findings.extend(scan_file(path))
 
