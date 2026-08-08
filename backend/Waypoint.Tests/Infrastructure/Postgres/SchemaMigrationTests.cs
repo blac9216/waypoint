@@ -226,6 +226,56 @@ public sealed class SchemaMigrationTests
 	}
 
 	/// <summary>
+	/// Reproduces issue #108's exact failure and proves the fix: a session holding the
+	/// migrator's advisory lock (key <c>875190001</c>, see
+	/// <see cref="NpgsqlSchemaMigrator"/>) for longer than Npgsql's default 30s
+	/// <see cref="NpgsqlCommand.CommandTimeout"/> must not make a second instance's
+	/// <see cref="NpgsqlSchemaMigrator.ApplyAsync"/> throw. Before the fix, the
+	/// lock-acquire command inherited that 30s default and the second instance's
+	/// <c>SELECT pg_advisory_lock($1)</c> failed with a client-side
+	/// <see cref="TimeoutException"/> at the 30s mark (verified manually while filing
+	/// #108: exit=1 after 31s, zero tables created). This holds the lock for 32s — just
+	/// past the old default — and asserts <see cref="NpgsqlSchemaMigrator.ApplyAsync"/>
+	/// instead blocks for the hold and then completes successfully once released.
+	/// </summary>
+	[Fact]
+	public async Task ApplyAsync_WaitsPastTheOldThirtySecondDefault_InsteadOfTimingOut()
+	{
+		string connectionString = await CreateFreshDatabaseAsync();
+
+		await using NpgsqlConnection holder = new(connectionString);
+		await holder.OpenAsync();
+		await using (NpgsqlCommand acquire = new("SELECT pg_advisory_lock(875190001)", holder))
+		{
+			await acquire.ExecuteNonQueryAsync();
+		}
+
+		TimeSpan holdDuration = TimeSpan.FromSeconds(32);
+		Task releaseAfterHold = Task.Run(async () =>
+		{
+			await Task.Delay(holdDuration);
+			await using NpgsqlCommand release = new("SELECT pg_advisory_unlock(875190001)", holder);
+			await release.ExecuteNonQueryAsync();
+		});
+
+		NpgsqlSchemaMigrator migrator = new(connectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+
+		DateTimeOffset started = DateTimeOffset.UtcNow;
+		await migrator.ApplyAsync();
+		TimeSpan elapsed = DateTimeOffset.UtcNow - started;
+
+		await releaseAfterHold;
+
+		Assert.True(
+			elapsed >= holdDuration - TimeSpan.FromSeconds(1),
+			$"ApplyAsync returned after only {elapsed.TotalSeconds:F1}s, before the {holdDuration.TotalSeconds:F0}s lock hold released -- it should have blocked, not raced past a still-held lock.");
+
+		await using NpgsqlConnection verify = new(connectionString);
+		await verify.OpenAsync();
+		Assert.True(await TableExistsAsync(verify, "schema_migrations"), "ApplyAsync should have completed the migration once the lock was released.");
+	}
+
+	/// <summary>
 	/// Creates an empty database on the fixture's server and returns a connection string
 	/// for it, so a test can exercise the fresh-apply path independently of the shared
 	/// database every other test in the collection migrates.
