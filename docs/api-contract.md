@@ -106,7 +106,8 @@ authenticated the caller, and role claims keep mapping to the same four
 | `/runs/{id}` | GET | Header, progress, pass/fail/na, per-queue status incl. `blocked`. |
 | `/runs/{id}/jobs` | GET | Per-target rows: state, stage progress, counts, note. |
 | `/runs/{id}/pause` · `/resume` · `/abort` | POST | Operator+ (own runs), Admin any. Runs with no recorded initiator (system/scheduled runs) are Admin-only. |
-| `/runs/{id}/resume-blocked` | POST | Admin; body: replacement credential_ref → re-queues blocked jobs (ADR-0008 halt behavior). |
+| `/runs/{id}/resume-blocked` | POST | Admin only. Body: `{ credential_id }` — the REPLACEMENT credential to swap onto the run's halted jobs (not the halted credential's own id; the server determines that from the run's blocked job set). Swaps `jobs.credential_id` old→new for that job set, audits both credential identities, and re-queues (ADR-0008 halt behavior). 409 when the run has no credential halt to resume from, or when the replacement credential is itself queue-halted; 404 when the replacement credential does not exist; 400 when its `credential_type` does not match the halted credential's. |
+| `/jobs/{id}` | DELETE | Operator+. Cancels one job independent of its run's other jobs (issue #10/#277). 200 body distinguishes an immediate cancel (`state: "cancelled"`, queued/blocked job) from a cooperative in-flight request (`state: "cancel_requested"`, running/attesting/converting job — stops at the dispatcher's next heartbeat tick); 409 if already terminal; 404 if the job does not exist. |
 | `/runs/{id}/artifacts` · `/jobs/{id}/artifacts/{kind}` | GET | CKL/HDF download; `?bundle=zip` for the export button. |
 | `/runs/{id}/attestations-applied` | GET | Waivers that fired: control, scope, justification, author/version, expired-skips. |
 
