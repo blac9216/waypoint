@@ -644,4 +644,169 @@ function Get-NsxAuthFailureReason {
 	return $ErrorRecord.Exception.Message
 }
 
-Export-ModuleMember -Function Invoke-WaypointScan, Invoke-WaypointAttest, Invoke-WaypointConvert, Invoke-WaypointNsxScan
+# SRG (ssh transport) scan (issue #309, second sub-issue of the #24 split). SRG
+# products (Aria Operations/Automation/Lifecycle, vIDM, Photon) have no published DISA
+# STIG -- module.transport.ssh.ps1's own doc comment: "per the VMware repo's own
+# guidance they are NOT treated as STIGs: each scan produces HDF JSON only ... with NO
+# CKL and NO STIG Manager upload." This function re-drives `inspec exec -t
+# ssh://<user>@<host>` directly, the same single-target re-drive Invoke-WaypointScan
+# already does for vmware:// -- the vendor's Build-SshTransportTargets/
+# Get-ScanScriptBlock machinery is coupled to its whole-site parallel engine and
+# catalog, which this single-target invocation does not need (same rationale as
+# Invoke-WaypointScan's doc comment above). Only module.common.ps1 is dot-sourced --
+# for Invoke-ExternalCommand (same as the vSphere path) AND New-InspecSecretConfigFile,
+# which is how the vendor's own SRG branch (module.scan.ps1's Kind -eq 'srg' case) keeps
+# the ssh password and optional sudo password off InSpec's argv (issue #142): both go
+# into a per-invocation --config JSON file, written 0600, removed in `finally`.
+#
+# Predecessor behavior carried forward (module.transport.ssh.ps1's Build-SshTransportTargets):
+# a stale inspec.lock under the profile directory pins absolute paths from a different
+# mount and breaks the wrapper profile's dependency resolution, so any existing lock is
+# removed before `inspec exec` runs, letting InSpec re-resolve fresh every time.
+function Invoke-WaypointSrgScan {
+	<#
+	.SYNOPSIS
+	    Runs `inspec exec` over ssh against a single SRG (Photon/Aria/vIDM) target and
+	    returns the HDF report path plus outcome.
+
+	.PARAMETER SshHost
+	    FQDN or IP of the SRG target (target.connection.host).
+
+	.PARAMETER Username
+	    ssh username, decrypted credential username half.
+
+	.PARAMETER Password
+	    ssh password, bound as a typed parameter -- never interpolated into script text
+	    (security.md controls 1/2) -- and reused as the sudo password when both Sudo and
+	    SudoRequiresPassword are set, matching the vendor's own SRG credential shape (one
+	    resolved credential covers both the ssh login and sudo elevation).
+
+	.PARAMETER ProfilePath
+	    Path to the InSpec wrapper profile (compliance content) to execute.
+
+	.PARAMETER ReportPath
+	    Where InSpec writes its JSON (HDF) report.
+
+	.PARAMETER Sudo
+	    Whether to run InSpec's `--sudo` (issue #309 AC "sudo_enabled honored"; sourced
+	    from the resolved credential's typed SudoEnabled field, #249).
+
+	.PARAMETER SudoRequiresPassword
+	    Whether sudo needs the ssh password supplied via --config (Photon's default sudo
+	    is passwordless; vIDM requires a sudo password) -- ignored when Sudo is $false.
+
+	.OUTPUTS
+	    One [pscustomobject]: Success (bool), ExitCode (int), ReportPath (string),
+	    FailureReason (string, only set when Success is $false).
+	#>
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$SshHost,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$Username,
+
+		[Parameter(Mandatory)]
+		[AllowEmptyString()]
+		[string]$Password,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ProfilePath,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ReportPath,
+
+		[Parameter()]
+		[int]$TimeoutSeconds = 1800,
+
+		[Parameter()]
+		[bool]$Sudo = $false,
+
+		[Parameter()]
+		[bool]$SudoRequiresPassword = $true,
+
+		[Parameter()]
+		[string]$VmwareStigDockerCommonPath = $Script:VmwareStigDockerCommonModulePath
+	)
+
+	if ([string]::IsNullOrWhiteSpace($VmwareStigDockerCommonPath)) {
+		throw 'WaypointScan: no module.common.ps1 path configured (WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH or -VmwareStigDockerCommonPath).'
+	}
+
+	if (-not (Test-Path -Path $VmwareStigDockerCommonPath -PathType Leaf)) {
+		throw "WaypointScan: module.common.ps1 not found at '$VmwareStigDockerCommonPath'."
+	}
+
+	# Dot-source the unmodified vendor script to bring Invoke-ExternalCommand and
+	# New-InspecSecretConfigFile into scope.
+	. $VmwareStigDockerCommonPath
+
+	$ReportDirectory = Split-Path -Path $ReportPath -Parent
+	if ($ReportDirectory -and -not (Test-Path -Path $ReportDirectory -PathType Container)) {
+		New-Item -ItemType Directory -Path $ReportDirectory -Force | Out-Null
+	}
+
+	# Predecessor behavior (module.transport.ssh.ps1's Build-SshTransportTargets): remove
+	# any stale inspec.lock next to the profile before running -- a lock written under a
+	# different mount pins absolute paths that don't exist here and breaks the wrapper
+	# profile's dependency resolution.
+	Remove-Item -Path (Join-Path $ProfilePath 'inspec.lock') -Force -ErrorAction SilentlyContinue
+
+	$InspecArguments = "`"$ProfilePath`" -t ssh://$Username@$SshHost --reporter=json:`"$ReportPath`" --show-progress --enhanced-outcomes"
+
+	$SudoPassword = $null
+	if ($Sudo) {
+		$InspecArguments += " --sudo"
+		if ($SudoRequiresPassword) { $SudoPassword = $Password }
+	}
+
+	# Same non-argv discipline as the vendor's own SRG branch (module.scan.ps1): the ssh
+	# password (and sudo password, when applicable) go into a per-invocation --config
+	# JSON file -- created 0600 before the secret is written -- never into `inspec`'s
+	# argv or a log line.
+	$SecretConfigFile = New-InspecSecretConfigFile -Password $Password -SudoPassword $SudoPassword
+	$InspecArguments += " --config `"$SecretConfigFile`""
+
+	try {
+		# AllowedExitCodes 0/100/101, same predecessor constraint as the vSphere/NSX
+		# paths: InSpec exit 100 (compliance failures present) and 101 (skipped controls
+		# present) are both a completed, reportable scan, not a tool failure.
+		$null = Invoke-ExternalCommand -Executable 'inspec' -Arguments "exec $InspecArguments" `
+			-TimeoutMilliseconds ($TimeoutSeconds * 1000) -ProcessName "InSpec SRG scan for $SshHost" `
+			-AllowedExitCodes @(0, 100, 101) -Source 'srg' -SurfaceOutputOnFailure
+
+		if (-not (Test-Path -Path $ReportPath -PathType Leaf)) {
+			return [pscustomobject]@{
+				Success       = $false
+				ExitCode      = $null
+				ReportPath    = $null
+				FailureReason = "InSpec SRG scan completed but report file not found at $ReportPath."
+			}
+		}
+
+		return [pscustomobject]@{
+			Success       = $true
+			ExitCode      = 0
+			ReportPath    = $ReportPath
+			FailureReason = $null
+		}
+	} catch {
+		return [pscustomobject]@{
+			Success       = $false
+			ExitCode      = $null
+			ReportPath    = $null
+			FailureReason = "InSpec SRG scan failed for $SshHost`: $($_.Exception.Message)"
+		}
+	} finally {
+		if (Test-Path -Path $SecretConfigFile -PathType Leaf) {
+			Remove-Item -Path $SecretConfigFile -Force -ErrorAction SilentlyContinue
+		}
+	}
+}
+
+Export-ModuleMember -Function Invoke-WaypointScan, Invoke-WaypointAttest, Invoke-WaypointConvert, Invoke-WaypointNsxScan, Invoke-WaypointSrgScan

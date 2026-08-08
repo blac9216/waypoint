@@ -270,7 +270,11 @@ public sealed class RunsController : ControllerBase
 		List<JobSpec> specs = [];
 		foreach (Target target in targets)
 		{
-			string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId });
+			// target_kind is the shape-routing signal JobShapes.ForJob reads (issue #309):
+			// every scan fans out as job_type = 'scan' regardless of kind, so the payload
+			// is the only place the dispatcher can learn "this is an ssh (SRG) target"
+			// before a handler ever resolves the target row.
+			string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId, target_kind = target.Kind });
 			if (useEphemeralCredential)
 			{
 				// No credential_id at all for an ad hoc job -- the secret lives only in

@@ -154,7 +154,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 				{
 					if (string.Equals(state.State, "aborted", StringComparison.Ordinal))
 					{
-						if (!JobStateMachine.CanEngineTransition(JobShapes.ForJobType(job.JobType), JobStates.Running, JobStates.Cancelled))
+						if (!JobStateMachine.CanEngineTransition(JobShapes.ForJob(job.JobType, job.Payload), JobStates.Running, JobStates.Cancelled))
 						{
 							throw new InvalidOperationException("The engine transition gate rejects abort cancellation.");
 						}
@@ -210,7 +210,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 
 		try
 		{
-			JobShape shape = JobShapes.ForJobType(job.JobType);
+			JobShape shape = JobShapes.ForJob(job.JobType, job.Payload);
 			JobExecutionContext context = new(job, WorkerId, _events, _repository, shape);
 
 			await _events.EmitAsync(

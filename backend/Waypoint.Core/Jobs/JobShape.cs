@@ -28,13 +28,16 @@ namespace Waypoint.Core.Jobs;
 /// -- there is no attest/convert/upload pipeline stage for a file transfer.
 /// <c>remediate</c>, <c>discover</c>, <c>catalog-index</c>, the bundle/content-* types,
 /// and <c>update</c> all reduce to the same shape for the same reason: none of them
-/// produce a CKL to attest and convert. Only <c>scan</c> is <see cref="Standard"/>.
-/// There is no SRG <c>job_type</c> in <c>jobs_job_type_check</c> yet -- adding one is
-/// out of scope here (see #24); <see cref="Srg"/> exists so the shape is ready and
-/// tested, and <see cref="JobShapes.ForJobType"/> must route that job type to it when
-/// #24 lands. This mapping is a deliberate scope call for epic #5, not yet exercised by
-/// a real handler (#8/#9 land the job types themselves) -- revisit here first if a
-/// future job type needs its own shape.
+/// produce a CKL to attest and convert. Only <c>scan</c> is <see cref="Standard"/> --
+/// except for an <c>ssh</c>-kind target (SRG products: Photon/Aria/vIDM), which is
+/// <see cref="Srg"/> (issue #309, second sub-issue of the #24 split). There is no
+/// separate SRG <c>job_type</c> in <c>jobs_job_type_check</c> -- every scan fans out as
+/// <c>job_type = 'scan'</c> regardless of target kind (<c>ScanTargetPriority</c> already
+/// scores <c>ssh</c> at priority 6) -- so shape selection for a <c>scan</c> job needs one
+/// more signal than <c>job_type</c> alone: <see cref="JobShapes.ForJob"/> reads the
+/// fanned-out job's <c>target_kind</c> (written into <c>jobs.payload</c> at fan-out,
+/// <c>RunsController.CreateScanRunAsync</c>) to tell an <c>ssh</c> scan from a
+/// <c>vsphere</c>/<c>nsx-api</c> one.
 /// </summary>
 public enum JobShape
 {
@@ -56,10 +59,61 @@ public enum JobShape
 /// <summary>Maps a <c>jobs.job_type</c> value to its <see cref="JobShape"/>.</summary>
 public static class JobShapes
 {
+	private const string TargetKindPropertyName = "target_kind";
+
+	/// <summary>
+	/// The job_type-only mapping: correct for every job_type except <c>scan</c>, whose
+	/// shape additionally depends on target kind -- see <see cref="ForJob"/>. Kept for
+	/// callers (e.g. non-scan job types) that have no payload to inspect and for
+	/// backward-compatible tests exercising the job_type-only rule directly.
+	/// </summary>
 	public static JobShape ForJobType(string jobType)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(jobType);
 
 		return string.Equals(jobType, "scan", StringComparison.Ordinal) ? JobShape.Standard : JobShape.Simple;
+	}
+
+	/// <summary>
+	/// The full mapping (issue #309): a <c>scan</c> job whose payload carries
+	/// <c>target_kind: "ssh"</c> (written at fan-out by <c>RunsController.CreateScanRunAsync</c>)
+	/// routes to <see cref="JobShape.Srg"/>; every other <c>scan</c> job (no
+	/// <c>target_kind</c>, or any kind other than <c>ssh</c>) is <see cref="JobShape.Standard"/>,
+	/// matching <see cref="ForJobType"/>'s prior behavior exactly -- so a payload that
+	/// predates this field, or is malformed, degrades to the pre-#309 mapping rather than
+	/// throwing. Non-<c>scan</c> job types never inspect the payload at all.
+	/// </summary>
+	public static JobShape ForJob(string jobType, string payloadJson)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(jobType);
+
+		if (!string.Equals(jobType, "scan", StringComparison.Ordinal))
+		{
+			return JobShape.Simple;
+		}
+
+		return IsSshTargetKind(payloadJson) ? JobShape.Srg : JobShape.Standard;
+	}
+
+	private static bool IsSshTargetKind(string payloadJson)
+	{
+		if (string.IsNullOrWhiteSpace(payloadJson))
+		{
+			return false;
+		}
+
+		try
+		{
+			using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(payloadJson);
+			return document.RootElement.TryGetProperty(TargetKindPropertyName, out System.Text.Json.JsonElement kindElement)
+				&& kindElement.ValueKind == System.Text.Json.JsonValueKind.String
+				&& string.Equals(kindElement.GetString(), "ssh", StringComparison.Ordinal);
+		}
+		catch (System.Text.Json.JsonException)
+		{
+			// Malformed payload JSON: degrade to Standard rather than throwing out of a
+			// shape lookup the dispatcher calls on every claimed job.
+			return false;
+		}
 	}
 }
