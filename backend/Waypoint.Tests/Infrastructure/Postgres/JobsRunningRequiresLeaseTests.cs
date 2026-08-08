@@ -23,12 +23,12 @@ using Xunit;
 namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
-/// Proves issue #107: <c>jobs_running_requires_lease_check</c> makes
-/// <c>state = 'running'</c> with a NULL <c>lease_expires_at</c> unrepresentable, closing
-/// the stranded-job hole (a row in that shape is reachable by neither the claim query,
-/// which filters <c>state = 'queued'</c>, nor the recovery sweep, whose
-/// <c>lease_expires_at &lt; now()</c> predicate is NULL, not true, against a NULL
-/// lease).
+/// Proves issue #107 and its follow-on #124: <c>jobs_running_requires_lease_check</c>
+/// makes <c>state IN ('running', 'attesting', 'converting')</c> with a NULL
+/// <c>lease_expires_at</c> unrepresentable, closing the stranded-job hole (a row in that
+/// shape is reachable by neither the claim query, which filters <c>state = 'queued'</c>,
+/// nor the recovery sweep, whose <c>lease_expires_at &lt; now()</c> predicate is NULL,
+/// not true, against a NULL lease).
 ///
 /// <see cref="Insert_RunningWithNullLease_ViolatesTheConstraint"/> and
 /// <see cref="Update_ToRunningWithNullLease_ViolatesTheConstraint"/> are exactly the two
@@ -39,7 +39,10 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// fail (the insert/update the CHECK is supposed to reject instead succeeds, so
 /// <c>Assert.ThrowsAsync&lt;PostgresException&gt;</c> never observes an exception) --
 /// that is the "for each new test, show the failure count against the pre-fix code"
-/// proof for this constraint.
+/// proof for this constraint. <see cref="Insert_AttestingOrConvertingWithNullLease_ViolatesTheConstraint"/>
+/// and <see cref="Insert_AttestingOrConvertingWithLease_Succeeds"/> are the same pair of
+/// shapes for #124's two added states, run against 0001..0014 (0015 not yet embedded) to
+/// show the equivalent pre-fix failure.
 /// </summary>
 [Collection("Postgres")]
 public sealed class JobsRunningRequiresLeaseTests : IAsyncLifetime
@@ -123,7 +126,51 @@ public sealed class JobsRunningRequiresLeaseTests : IAsyncLifetime
 		Assert.NotNull(id);
 	}
 
-	/// <summary>Every other state is unconstrained by this CHECK -- only 'running' strands.</summary>
+	/// <summary>
+	/// Issue #124's repro: 'attesting' and 'converting' are just as "active, worker-owned"
+	/// as 'running', and before 0015 a job hand-advanced into either with a NULL lease was
+	/// exactly as stranded as the original #107 bug.
+	/// </summary>
+	[Theory]
+	[InlineData("attesting")]
+	[InlineData("converting")]
+	public async Task Insert_AttestingOrConvertingWithNullLease_ViolatesTheConstraint(string state)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand command = new(
+			"INSERT INTO jobs (job_type, priority, state, lease_expires_at) VALUES ('scan', 1, $1, NULL)", connection);
+		command.Parameters.AddWithValue(state);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
+		Assert.Equal("jobs_running_requires_lease_check", exception.ConstraintName);
+	}
+
+	[Theory]
+	[InlineData("attesting")]
+	[InlineData("converting")]
+	public async Task Insert_AttestingOrConvertingWithLease_Succeeds(string state)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO jobs (job_type, priority, state, claimed_by, lease_expires_at)
+			VALUES ('scan', 1, $1, 'worker-a', now() + interval '5 minutes')
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(state);
+
+		object? id = await command.ExecuteScalarAsync();
+		Assert.NotNull(id);
+	}
+
+	/// <summary>
+	/// Every other state is unconstrained by this CHECK -- only 'running', 'attesting',
+	/// and 'converting' strand (see issues #107 and #124).
+	/// </summary>
 	[Theory]
 	[InlineData("queued")]
 	[InlineData("failed")]
@@ -132,9 +179,7 @@ public sealed class JobsRunningRequiresLeaseTests : IAsyncLifetime
 	[InlineData("cancelled")]
 	[InlineData("done")]
 	[InlineData("uploaded")]
-	[InlineData("attesting")]
-	[InlineData("converting")]
-	public async Task NonRunningStates_PermitANullLease(string state)
+	public async Task NonLeasedStates_PermitANullLease(string state)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
@@ -204,12 +249,12 @@ public sealed class JobsRunningRequiresLeaseTests : IAsyncLifetime
 		{
 			string state = (string)field.GetRawConstantValue()!;
 
-			// 'running' is the one state that may not carry a NULL lease -- that is this
-			// migration's whole point -- so it is written with one.
+			// 'running', 'attesting', and 'converting' are the three states that may not
+			// carry a NULL lease (#107, #124) -- so they are written with one.
 			await using NpgsqlCommand insert = new(
 				"""
 				INSERT INTO jobs (job_type, priority, state, lease_expires_at)
-				VALUES ('download', 1, $1, CASE WHEN $1 = 'running' THEN now() + interval '5 minutes' ELSE NULL END)
+				VALUES ('download', 1, $1, CASE WHEN $1 IN ('running', 'attesting', 'converting') THEN now() + interval '5 minutes' ELSE NULL END)
 				RETURNING id
 				""", connection);
 			insert.Parameters.AddWithValue(state);
