@@ -18,13 +18,21 @@ namespace Waypoint.Core.Jobs;
 
 /// <summary>
 /// Everything an <see cref="IJobHandler"/> gets handed for one execution, plus
-/// <see cref="AdvanceAsync"/> for a <see cref="JobShape.Standard"/> handler (the future
-/// <c>scan</c> job type -- not implemented by this issue) to report intermediate
-/// pipeline stages (<c>running -&gt; attesting -&gt; converting</c>) as it reaches them,
-/// each validated against <see cref="JobStateMachine"/> and each emitting its own
-/// <c>job.state</c> event. A <see cref="JobShape.Simple"/> handler never needs to call
-/// this -- the dispatcher moves it straight from <c>running</c> to its terminal state
-/// when <see cref="IJobHandler.ExecuteAsync"/> returns.
+/// <see cref="AdvanceAsync"/> for a <see cref="JobShape.Standard"/> or <see cref="JobShape.Srg"/>
+/// handler to report intermediate pipeline stages (<c>running -&gt; attesting -&gt;
+/// converting</c>) as it reaches them, each validated against <see cref="JobStateMachine"/>
+/// and each emitting its own <c>job.state</c> event. A <see cref="JobShape.Simple"/>
+/// handler never needs to call this -- the dispatcher moves it straight from
+/// <c>running</c> to its terminal state when <see cref="IJobHandler.ExecuteAsync"/>
+/// returns.
+///
+/// <see cref="Job"/>'s <see cref="ClaimedJob.Stage"/> is the routing input for a
+/// multi-stage handler (issue #293): <c>null</c> means "start the pipeline from the
+/// first stage"; any other value is the marker a prior <see cref="JobOutcomeKind.StageComplete"/>
+/// requeue (or the lease-recovery sweep) left, and the handler must resume its own
+/// stage-dispatch switch there rather than re-running earlier stages. This class does
+/// not interpret the marker itself -- it is handler-defined, mirroring how
+/// <c>job_type</c> and <c>payload</c> are already handler-defined.
 /// </summary>
 public sealed class JobExecutionContext
 {

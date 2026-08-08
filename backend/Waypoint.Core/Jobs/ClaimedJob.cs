@@ -14,7 +14,15 @@
 
 namespace Waypoint.Core.Jobs;
 
-/// <summary>A <c>jobs</c> row as returned by a successful claim -- the fields a handler or the dispatcher needs, not every column.</summary>
+/// <summary>
+/// A <c>jobs</c> row as returned by a successful claim -- the fields a handler or the
+/// dispatcher needs, not every column. <see cref="Stage"/> is the durable stage marker
+/// (issue #293's stage-per-execution dispatcher): <c>null</c> for a job claimed for the
+/// first time, or the marker a prior <see cref="JobOutcomeKind.StageComplete"/>
+/// requeue (or the lease-recovery sweep) left on the row -- a multi-stage handler reads
+/// it via <see cref="JobExecutionContext.Stage"/> to resume at that stage instead of
+/// starting over.
+/// </summary>
 public sealed record ClaimedJob(
 	Guid Id,
 	Guid? RunId,
@@ -25,4 +33,5 @@ public sealed record ClaimedJob(
 	short Priority,
 	string Payload,
 	int AttemptCount,
-	int MaxAttempts);
+	int MaxAttempts,
+	string? Stage = null);
