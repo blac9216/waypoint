@@ -266,4 +266,105 @@ function Invoke-WaypointNsxScan {
 	}
 }
 
-Export-ModuleMember -Function Invoke-WaypointScan, Invoke-WaypointAttest, Invoke-WaypointConvert, Invoke-WaypointNsxScan
+# Invented stub for Invoke-WaypointSrgScan (issue #309). Same $env:WAYPOINT_SCAN_STUB_MODE
+# canned outcomes as the other transports -- 'success' (default), 'exit100', 'failure',
+# 'auth' -- plus a Sudo/SudoRequiresPassword-observing Information line so a test can
+# assert the handler passed sudo_enabled through correctly, and an
+# inspec.lock-touching side effect so a test can assert stale-lock cleanup ran (the
+# stub mirrors the real function's Remove-Item, marking cleanup by removing any lock it
+# finds -- assertable by seeding one and observing it gone afterward).
+function Invoke-WaypointSrgScan {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$SshHost,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$Username,
+
+		[Parameter(Mandatory)]
+		[AllowEmptyString()]
+		[string]$Password,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ProfilePath,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ReportPath,
+
+		[Parameter()]
+		[int]$TimeoutSeconds,
+
+		[Parameter()]
+		[bool]$Sudo = $false,
+
+		[Parameter()]
+		[bool]$SudoRequiresPassword = $true,
+
+		[Parameter()]
+		[string]$VmwareStigDockerCommonPath
+	)
+
+	$InformationPreference = 'Continue'
+	Write-Information "Scanning stub SRG host '$SshHost' as '$Username' (password length $($Password.Length)) profile '$ProfilePath' sudo=$Sudo sudoRequiresPassword=$SudoRequiresPassword"
+
+	# Predecessor behavior: remove any stale inspec.lock next to the profile before
+	# "running" -- mirrors the real function's cleanup so a test can seed a lock file and
+	# assert it is gone after this stub returns.
+	Remove-Item -Path (Join-Path $ProfilePath 'inspec.lock') -Force -ErrorAction SilentlyContinue
+
+	$Mode = $env:WAYPOINT_SCAN_STUB_MODE
+	if (-not $Mode) { $Mode = 'success' }
+
+	if ($Mode -eq 'failure') {
+		return [pscustomobject]@{
+			Success       = $false
+			ExitCode      = 1
+			ReportPath    = $null
+			FailureReason = 'invented SRG InSpec transport failure (stub).'
+		}
+	}
+
+	if ($Mode -eq 'auth') {
+		return [pscustomobject]@{
+			Success       = $false
+			ExitCode      = 2
+			ReportPath    = $null
+			FailureReason = '401 Unauthorized: invented SRG ssh credential rejection (stub).'
+		}
+	}
+
+	$ReportDirectory = Split-Path -Path $ReportPath -Parent
+	if ($ReportDirectory -and -not (Test-Path -Path $ReportDirectory -PathType Container)) {
+		New-Item -ItemType Directory -Path $ReportDirectory -Force | Out-Null
+	}
+
+	$ExitCode = if ($Mode -eq 'exit100') { 100 } else { 0 }
+	$Hdf = [ordered]@{
+		platform = [ordered]@{ name = 'srg'; release = 'stub' }
+		profiles = @(
+			[ordered]@{
+				name    = 'invented-stub-srg-profile'
+				version = '0.0.0'
+				controls = @()
+			}
+		)
+		statistics = [ordered]@{ duration = 0.1 }
+	}
+	($Hdf | ConvertTo-Json -Depth 6) | Set-Content -Path $ReportPath -Encoding utf8
+
+	Write-Information 'SRG scan complete.'
+
+	return [pscustomobject]@{
+		Success       = $true
+		ExitCode      = $ExitCode
+		ReportPath    = $ReportPath
+		FailureReason = $null
+	}
+}
+
+Export-ModuleMember -Function Invoke-WaypointScan, Invoke-WaypointAttest, Invoke-WaypointConvert, Invoke-WaypointNsxScan, Invoke-WaypointSrgScan

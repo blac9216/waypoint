@@ -38,9 +38,17 @@ namespace Waypoint.Infrastructure.Scans;
 /// (<c>Stage == "converting"</c>) -- reporting <see cref="JobOutcomeKind.StageComplete"/>
 /// after each non-terminal stage and <see cref="JobOutcomeKind.Succeeded"/> (which the
 /// dispatcher forces to <c>uploaded</c>, this shape's terminal state) after convert.
-/// <c>uploaded</c> here means "artifacts ready" -- the actual STIG Manager upload is
-/// #25, not yet built; this matches how ADR-0012 and docs/api-contract.md already use
-/// the state name (the job-engine terminal, not a completed HTTP upload).
+/// <c>uploaded</c> here means "artifacts ready"; #311/PR #318 added the actual STIG
+/// Manager upload as a post-convert action inside the convert stage (not a new pipeline
+/// stage), gated behind <see cref="ScanUploadCoordinator"/>.
+///
+/// An <c>ssh</c>-kind target (SRG products: Photon/Aria/vIDM) is <see cref="JobShape.Srg"/>
+/// instead (<c>queued -&gt; running -&gt; attesting -&gt; done</c>, issue #309): the InSpec
+/// stage dispatches to <c>Invoke-WaypointSrgScan</c> (sudo-aware) and the attest stage
+/// reports <see cref="JobOutcomeKind.Succeeded"/> directly rather than advancing to
+/// <c>converting</c> -- so the convert stage (and its STIG Manager upload) is
+/// unreachable for SRG by construction, matching the HDF-only, no-CKL,
+/// no-STIG-Manager-upload predecessor behavior.
 ///
 /// Credential resolution mirrors <see cref="Waypoint.Infrastructure.Discovery.DiscoverJobHandler"/>:
 /// a stored credential (<c>jobs.credential_id</c>) is decrypted under job/run
@@ -59,6 +67,7 @@ public sealed class ScanJobHandler : IJobHandler
 	internal const string ConvertingStage = "converting";
 	private const string InvocationCommand = "Invoke-WaypointScan";
 	private const string NsxInvocationCommand = "Invoke-WaypointNsxScan";
+	private const string SrgInvocationCommand = "Invoke-WaypointSrgScan";
 	private const string AttestCommand = "Invoke-WaypointAttest";
 	private const string ConvertCommand = "Invoke-WaypointConvert";
 	private const int LogTailLines = 20;
@@ -158,10 +167,11 @@ public sealed class ScanJobHandler : IJobHandler
 		}
 
 		if (!string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal)
-			&& !string.Equals(target.Kind, TargetKinds.NsxApi, StringComparison.Ordinal))
+			&& !string.Equals(target.Kind, TargetKinds.NsxApi, StringComparison.Ordinal)
+			&& !string.Equals(target.Kind, TargetKinds.Ssh, StringComparison.Ordinal))
 		{
 			return JobExecutionOutcome.Failed(
-				$"target '{payload.TargetId}' is kind '{target.Kind}'; the InSpec stage only supports '{TargetKinds.VSphere}' and '{TargetKinds.NsxApi}'.");
+				$"target '{payload.TargetId}' is kind '{target.Kind}'; the InSpec stage only supports '{TargetKinds.VSphere}', '{TargetKinds.NsxApi}', and '{TargetKinds.Ssh}'.");
 		}
 
 		string? host = TryGetConnectionHost(target.ConnectionJson);
@@ -182,6 +192,7 @@ public sealed class ScanJobHandler : IJobHandler
 
 		string reportPath = Path.Combine(_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.json");
 		bool isNsx = string.Equals(target.Kind, TargetKinds.NsxApi, StringComparison.Ordinal);
+		bool isSrg = string.Equals(target.Kind, TargetKinds.Ssh, StringComparison.Ordinal);
 
 		PowerShellExecutionResult result;
 		try
@@ -195,8 +206,21 @@ public sealed class ScanJobHandler : IJobHandler
 			// invocation the vSphere password already relies on (security.md controls
 			// 1/2). Password is still resolved and bound the same way for both kinds --
 			// NSX authenticates to /api/session/create with it before InSpec ever runs.
-			Dictionary<string, object?> parameters = isNsx
-				? new(StringComparer.Ordinal)
+			//
+			// The SRG (ssh) path passes Sudo/SudoRequiresPassword alongside the same
+			// Host/Username/Password shape (issue #309 AC "sudo_enabled honored"):
+			// SudoEnabled comes from the resolved credential's typed field for a stored
+			// credential (#249), or false for the ephemeral "my credentials" tier, which
+			// carries no sudo flag (ADR-0011 scope -- see ResolveCredentialAsync). The ssh
+			// password doubles as the sudo password when sudo is enabled, matching the
+			// vendor's own module.scan.ps1 SRG branch (Config.Sudo -> --sudo,
+			// SudoRequiresPassword -> the same credential's password via --config).
+			Dictionary<string, object?> parameters;
+			string invocationCommand;
+			if (isNsx)
+			{
+				invocationCommand = NsxInvocationCommand;
+				parameters = new(StringComparer.Ordinal)
 				{
 					["Manager"] = host,
 					["Username"] = resolved.Username,
@@ -204,8 +228,27 @@ public sealed class ScanJobHandler : IJobHandler
 					["ProfilePath"] = _scanOptions.Value.NsxProfilePath,
 					["ReportPath"] = reportPath,
 					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
-				}
-				: new(StringComparer.Ordinal)
+				};
+			}
+			else if (isSrg)
+			{
+				invocationCommand = SrgInvocationCommand;
+				parameters = new(StringComparer.Ordinal)
+				{
+					["SshHost"] = host,
+					["Username"] = resolved.Username,
+					["Password"] = resolved.Secret,
+					["ProfilePath"] = _scanOptions.Value.SrgProfilePath,
+					["ReportPath"] = reportPath,
+					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
+					["Sudo"] = resolved.SudoEnabled,
+					["SudoRequiresPassword"] = true,
+				};
+			}
+			else
+			{
+				invocationCommand = InvocationCommand;
+				parameters = new(StringComparer.Ordinal)
 				{
 					["VCenter"] = host,
 					["Username"] = resolved.Username,
@@ -214,9 +257,10 @@ public sealed class ScanJobHandler : IJobHandler
 					["ReportPath"] = reportPath,
 					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
 				};
+			}
 
 			PowerShellRequest request = new(
-				isNsx ? NsxInvocationCommand : InvocationCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
+				invocationCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
 			result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
 		}
 		finally
@@ -375,10 +419,26 @@ public sealed class ScanJobHandler : IJobHandler
 			// marker -- only `stage` records pipeline position, per ADR-0012). This
 			// stage's own resumption therefore first replays the `running -> attesting`
 			// transition PR #298's InSpec stage made durable on the previous cycle,
-			// before advancing `attesting -> converting` -- both legal per
-			// JobStateMachine, and consistent with how the row's `state` column always
-			// reads 'running' the instant any stage is (re)claimed.
+			// before advancing further -- legal per JobStateMachine for both shapes, and
+			// consistent with how the row's `state` column always reads 'running' the
+			// instant any stage is (re)claimed.
 			await context.AdvanceAsync(JobStates.Attesting, "attest stage claimed.", cancellationToken).ConfigureAwait(false);
+
+			// Issue #309 AC "HDF-only: attest then terminate at done, NO convert, NO CKL,
+			// NO STIG Manager upload": an ssh (SRG) target's attest stage is the Srg
+			// shape's LAST stage (JobStateMachine.SrgTransitions: attesting -> done),
+			// unlike Standard's attesting -> converting. Reporting Succeeded here (rather
+			// than StageComplete(ConvertingStage)) makes ExecuteAsync's Stage switch never
+			// see 'converting' for this target at all -- so the convert stage's STIG
+			// Manager upload path (#311/#318, not yet on main when this slice branched) is
+			// unreachable for SRG by construction, not by a runtime kind check inside
+			// convert. If a future change makes convert reachable independent of shape,
+			// that guard-by-unreachability assumption breaks and needs re-verifying here.
+			if (string.Equals(target.Kind, TargetKinds.Ssh, StringComparison.Ordinal))
+			{
+				return JobExecutionOutcome.Succeeded(note);
+			}
+
 			await context.AdvanceAsync(JobStates.Converting, note, cancellationToken).ConfigureAwait(false);
 			return JobExecutionOutcome.StageComplete(ConvertingStage, note);
 		}
@@ -541,7 +601,12 @@ public sealed class ScanJobHandler : IJobHandler
 					$"job '{context.Job.Id}' has no stored credential and no ephemeral credential is available (never registered, expired, or already claimed).");
 			}
 
-			return new ResolvedCredential(ephemeral.Username, ephemeral.Secret, static () => { });
+			// The ephemeral "my credentials" tier (ADR-0011, #276) carries no sudo flag --
+			// it is a personal, ad hoc secret with no stored typed-credential row to read
+			// SudoEnabled from -- so an SRG scan using an ephemeral credential always runs
+			// without sudo. Sudo (#249's typed credentials field) is only meaningful for a
+			// stored credential.
+			return new ResolvedCredential(ephemeral.Username, ephemeral.Secret, SudoEnabled: false, static () => { });
 		}
 
 		CredentialResponse? credential = await _credentials.GetAsync(credentialId, cancellationToken).ConfigureAwait(false);
@@ -575,7 +640,7 @@ public sealed class ScanJobHandler : IJobHandler
 			throw new ScanCredentialException($"target credential could not be decrypted: {exception.Message}");
 		}
 
-		return new ResolvedCredential(credential.Username!, decrypted.Value, decrypted.Dispose);
+		return new ResolvedCredential(credential.Username!, decrypted.Value, credential.SudoEnabled, decrypted.Dispose);
 	}
 
 	/// <summary>Attribution for the decrypt audit row (security.md control 4): the run's initiator when recorded, falling back to a fixed system marker -- same pattern as DiscoverJobHandler.ResolveActorAsync.</summary>
@@ -686,7 +751,7 @@ public sealed class ScanJobHandler : IJobHandler
 
 	private sealed record ScanPayload(Guid TargetId);
 
-	private sealed record ResolvedCredential(string Username, string Secret, Action Release);
+	private sealed record ResolvedCredential(string Username, string Secret, bool SudoEnabled, Action Release);
 
 	private sealed record ScanInvocationOutput(bool Success, string? ReportPath, string? FailureReason);
 

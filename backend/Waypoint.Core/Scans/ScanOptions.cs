@@ -46,6 +46,12 @@ public sealed class ScanOptions
 	/// </summary>
 	public string NsxProfilePath { get; set; } = "/opt/waypoint/profiles/nsx";
 
+	/// <summary>
+	/// Fixed InSpec profile path for <c>ssh</c> (SRG) targets (issue #309), same
+	/// single-fixed-profile scope call as <see cref="ProfilePath"/>/<see cref="NsxProfilePath"/>.
+	/// </summary>
+	public string SrgProfilePath { get; set; } = "/opt/waypoint/profiles/srg";
+
 	/// <summary>Per-invocation InSpec wall-clock budget.</summary>
 	public int TimeoutSeconds { get; set; } = 1800;
 

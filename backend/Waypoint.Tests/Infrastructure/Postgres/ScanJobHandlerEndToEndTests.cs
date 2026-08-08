@@ -420,6 +420,180 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #309 AC 1: an ssh (SRG) target scans to HDF and terminates at `done` -- the
+	/// Srg shape's terminal (attest then stop, no convert, no CKL, no STIG Manager
+	/// upload). Proves the payload's `target_kind` (RunsController.CreateScanRunAsync)
+	/// actually routes this job to JobShape.Srg (JobShapes.ForJob), not JobShape.Standard
+	/// -- if routing were wrong the job would rest at `attesting` (StageComplete) or fail
+	/// the ADR-0012 stage switch instead of reaching `done`.
+	/// </summary>
+	[Fact]
+	public async Task SrgTarget_ScanSucceeds_PersistsHdf_ReachesDone_NoConvertNoCkl()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		const string canary = "invented-srg-e2e-canary-c8d1";
+		(Guid targetId, Guid credentialId) = await SeedSrgTargetAsync(canary);
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId, target_kind = TargetKinds.Ssh });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", ScanTargetPriority.Srg, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("done", await GetJobFieldAsync(jobIds[0], "state"));
+		string hdfPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.json");
+		Assert.True(File.Exists(hdfPath), $"expected HDF report at '{hdfPath}'.");
+
+		// HDF-only: no CKL is ever produced for an SRG target (the convert stage never runs).
+		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
+		Assert.False(File.Exists(cklPath), $"expected no CKL for an SRG target at '{cklPath}'.");
+
+		await AssertCanaryNeverLeakedAsync(canary, credentialId);
+	}
+
+	/// <summary>
+	/// Issue #309 AC 2: sudo_enabled (#249's typed credential field) is read off the
+	/// resolved stored credential and passed through to Invoke-WaypointSrgScan -- proven
+	/// by asserting the stub's own Sudo/SudoRequiresPassword-echoing Information line
+	/// (job.log) shows sudo=True for a credential seeded with sudoEnabled: true.
+	/// </summary>
+	[Fact]
+	public async Task SrgTarget_SudoEnabledCredential_PassesSudoThroughToInvocation()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedSrgTargetAsync("invented-srg-sudo-canary", sudoEnabled: true);
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId, target_kind = TargetKinds.Ssh });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", ScanTargetPriority.Srg, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("done", await GetJobFieldAsync(jobIds[0], "state"));
+
+		// PowerShell Information-stream lines captured by the executor land as job.log
+		// events (same mechanism the canary assertions elsewhere in this file rely on).
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' AND payload::text LIKE '%sudo=True%'", connection);
+		query.Parameters.AddWithValue(jobIds[0]);
+		Assert.True((long)(await query.ExecuteScalarAsync())! >= 1, "expected the stub's sudo=True Information line in job.log.");
+	}
+
+	/// <summary>Same auth-shaped-failure classification as vsphere/nsx, exercised through the SRG (ssh) path.</summary>
+	[Fact]
+	public async Task SrgTarget_AuthShapedFailure_MapsToAuthFailed()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "auth");
+		(Guid targetId, Guid credentialId) = await SeedSrgTargetAsync("invented-srg-auth-canary");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId, target_kind = TargetKinds.Ssh });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", ScanTargetPriority.Srg, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("auth-failed", await GetJobFieldAsync(jobIds[0], "state"));
+	}
+
+	/// <summary>
+	/// Issue #309 AC 3: a mixed vsphere+SRG run orders the SRG job LAST -- proven the
+	/// same way <see cref="MixedVsphereAndNsxRun_ClaimsNsxBeforeVsphere_InPriorityOrder"/>
+	/// proves NSX-first, via each job's first `job.state` event seq (immune to the same
+	/// multi-stage-pipeline snapshot race that method's doc comment explains).
+	/// ScanTargetPriority.VCenter (3) &lt; ScanTargetPriority.Srg (6, the lowest/last
+	/// priority in the six-valued scheme), so vsphere claims first despite being fanned
+	/// out second below.
+	/// </summary>
+	[Fact]
+	public async Task MixedVsphereAndSrgRun_ClaimsVsphereBeforeSrg_InPriorityOrder()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid srgTargetId, Guid srgCredentialId) = await SeedSrgTargetAsync("invented-mixed-srg-canary");
+		(Guid vsphereTargetId, Guid vsphereCredentialId) = await SeedVsphereTargetAsync("invented-mixed-vsphere2-canary");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string srgPayload = JsonSerializer.Serialize(new { target_id = srgTargetId, target_kind = TargetKinds.Ssh });
+		string vspherePayload = JsonSerializer.Serialize(new { target_id = vsphereTargetId });
+
+		// SRG is fanned out FIRST (created_at earlier) to prove ordering is driven by
+		// priority, not insertion order.
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[
+				new JobSpec("scan", ScanTargetPriority.Srg, TargetId: srgTargetId, CredentialId: srgCredentialId, Payload: srgPayload),
+				new JobSpec("scan", ScanTargetPriority.VCenter, TargetId: vsphereTargetId, CredentialId: vsphereCredentialId, Payload: vspherePayload),
+			],
+			"tester",
+			CancellationToken.None);
+		Guid srgJobId = jobIds[0];
+		Guid vsphereJobId = jobIds[1];
+
+		JobEngineOptions options = new() { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(50), MaxConcurrency = 1 };
+		JobDispatcherHostedService dispatcher = new(
+			_repository,
+			new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, _redactor, NullLogger<JobEventPublisher>.Instance),
+			new JobHandlerRegistry([_handler]),
+			Options.Create(options),
+			NullLogger<JobDispatcherHostedService>.Instance);
+
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(vsphereJobId);
+			await PollUntilTerminalAsync(srgJobId);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		long vsphereFirstClaimedAtSeq = await GetFirstJobStateEventTimeAsync(vsphereJobId);
+		long srgFirstClaimedAtSeq = await GetFirstJobStateEventTimeAsync(srgJobId);
+		Assert.True(
+			vsphereFirstClaimedAtSeq < srgFirstClaimedAtSeq,
+			$"expected vsphere job's first claim (seq {vsphereFirstClaimedAtSeq}) before SRG's (seq {srgFirstClaimedAtSeq}).");
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(vsphereJobId, "state"));
+		Assert.Equal("done", await GetJobFieldAsync(srgJobId, "state"));
+	}
+
+	/// <summary>
 	/// ADR-0011/#276: a NULL credential_id job takes its secret from the ephemeral
 	/// cache, never falling back to the target's stored credential -- proven here by
 	/// seeding a target WITH a stored credential but fanning the job out with
@@ -756,6 +930,22 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		string connectionJson = JsonSerializer.Serialize(new { host = "nsxmgr-01.example.internal" });
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
 			resolvedSiteId, TargetKinds.NsxApi, $"target-{Guid.NewGuid():N}", connectionJson, credentialId, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+
+		return (targetId!.Value, credentialId);
+	}
+
+	private async Task<(Guid TargetId, Guid CredentialId)> SeedSrgTargetAsync(
+		string secretValue, Guid? siteId = null, bool sudoEnabled = false, string? username = "svc-srg@example.internal")
+	{
+		Guid resolvedSiteId = siteId ?? (await _sites.CreateAsync($"site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
+		Guid credentialId = (await _credentials.CreateAsync(
+			$"svc-srg-{Guid.NewGuid():N}@example.internal", CredentialTypes.Ssh, CredentialOwners.Shared, sudoEnabled, CancellationToken.None, username))!.Value;
+		await _secretStore.StoreAsync(credentialId, System.Text.Encoding.UTF8.GetBytes(secretValue), "test", CancellationToken.None);
+
+		string connectionJson = JsonSerializer.Serialize(new { host = "srg-photon-01.example.internal" });
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			resolvedSiteId, TargetKinds.Ssh, $"target-{Guid.NewGuid():N}", connectionJson, credentialId, CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 
 		return (targetId!.Value, credentialId);
