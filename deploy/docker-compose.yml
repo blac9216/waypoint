@@ -14,7 +14,6 @@ name: waypoint-dev
 services:
   nginx:
     image: nginx:1.27-alpine
-    container_name: waypoint-nginx
     depends_on:
       backend:
         condition: service_healthy
@@ -69,7 +68,6 @@ services:
   backend:
     build:
       context: ../backend
-    container_name: waypoint-backend
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,7 +106,6 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    container_name: waypoint-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-waypoint}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-waypoint_dev_only}

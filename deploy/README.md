@@ -175,18 +175,23 @@ the frontend bundle).
    ```bash
    # Exact-match on the health state: a substring test would also match
    # "unhealthy". All three containers must pass, not just the first one.
-   for name in waypoint-nginx waypoint-backend waypoint-postgres; do
+   # docker compose ps -q derives the *actual* container IDs for this
+   # project - correct whether you're on the plain default stack or an
+   # isolated one (see docs/testing.md "The recipe"), since Compose no
+   # longer pins fixed container_name values (issue #68).
+   for id in $(docker compose ps -q); do
      for i in $(seq 1 60); do
-       [ "$(docker inspect -f '{{.State.Health.Status}}' "$name" 2>/dev/null)" = healthy ] && break
-       [ "$i" = 60 ] && { echo "$name never became healthy - check: docker logs $name"; break; }
+       [ "$(docker inspect -f '{{.State.Health.Status}}' "$id" 2>/dev/null)" = healthy ] && break
+       [ "$i" = 60 ] && { echo "$id never became healthy - check: docker logs $id"; break; }
        sleep 1
      done
    done
    docker compose ps          # all three should report "healthy"
    ```
 
-   (If you are running under the `docs/testing.md` isolation recipe, your
-   containers are named `wp-$SLUG-*` — substitute those names.)
+   (If you are running under the `docs/testing.md` isolation recipe, prefix
+   these commands with `docker compose -p wp-$SLUG` to scope them to your
+   own project.)
 
    See [`docs/testing.md`](../docs/testing.md) "`up -d` returning does not mean
    healthy" for the full explanation and paste-safe patterns.
@@ -241,8 +246,8 @@ the frontend bundle).
 
 **Multiple agents/humans on the same Docker host:** see
 [`docs/testing.md`](../docs/testing.md) before running the steps above — it
-covers the mandatory isolation recipe (unique project, container names, and
-host port) this repo requires for concurrent bring-ups.
+covers the mandatory isolation recipe (unique project and host port) this repo
+requires for concurrent bring-ups.
 
 ### Verifying SSE streaming
 
@@ -254,8 +259,8 @@ change any status code, and doesn't show up in `curl -o /dev/null`. It only
 manifests as a live run whose events never appear in the UI. Verify it two
 ways.
 
-Both checks below name your own stack rather than hardcoding `waypoint-nginx`
-and `8443`. Those are **global** names on this Docker host — per
+Both checks below name your own stack rather than hardcoding a fixed container
+name and `8443`. Container names are **global** on this Docker host — per
 [`docs/testing.md`](../docs/testing.md), another agent's in-flight stack may own
 them, and probing someone else's container yields a plausible wrong result
 rather than an error. Set these once, from the same slug and port you brought
@@ -265,13 +270,14 @@ from `deploy/`:
 ```bash
 SLUG=issue60-verify                          # your unique slug
 PORT=18443                                   # your WAYPOINT_HTTPS_PORT
-NGINX=wp-$SLUG-nginx                         # container_name from your override
+NGINX=wp-$SLUG-nginx-1                       # Compose-derived container name (issue #68: no fixed container_name)
 PROBE=wp-$SLUG-sse-probe                     # throwaway probe container
-DC="docker compose -p wp-$SLUG -f docker-compose.yml -f /tmp/wp-$SLUG.override.yml"
+DC="docker compose -p wp-$SLUG"
 ```
 
-(On an unisolated default stack those are `NGINX=waypoint-nginx`, `PORT=8443`,
-`DC="docker compose"` — but this repo asks you to isolate, so prefer the above.)
+(On an unisolated default stack those are `NGINX=waypoint-dev-nginx-1`,
+`PORT=8443`, `DC="docker compose"` — but this repo asks you to isolate, so
+prefer the above.)
 
 **1. Confirm the directive is actually in the effective config**, not just in
 the source file on disk (`nginx -T` prints what nginx actually loaded):
