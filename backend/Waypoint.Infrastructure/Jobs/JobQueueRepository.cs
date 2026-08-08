@@ -747,8 +747,17 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		// this credential (a post-halt fan-out, a lease-recovery requeue, a claim
 		// release) to 'blocked' until an explicit credential-swap/unblock flow clears
 		// queue_halted. The row is already FOR UPDATE-locked above.
+		//
+		// Issue #20: the halt also flips the credential's operator-visible health to
+		// 'auth_failing' (0001's CHECK already allowed the value; nothing before this
+		// wrote it). Health is a separate column from queue_halted on purpose -- a
+		// future non-halt-driven health source (e.g. a failed /test call outside a
+		// job) can set it without needing queue-halt's job/run side effects, and
+		// clearing it is symmetric: only a successful /test call (not a bare
+		// unblock) proves the credential works again. See UnblockCredentialAsync's
+		// comment for why unblock alone does not clear health.
 		await using (NpgsqlCommand haltCredential = new(
-			"UPDATE credentials SET queue_halted = true, queue_halted_reason = $2, queue_halted_at = COALESCE(queue_halted_at, now()) WHERE id = $1", connection, transaction))
+			"UPDATE credentials SET queue_halted = true, queue_halted_reason = $2, queue_halted_at = COALESCE(queue_halted_at, now()), health = 'auth_failing' WHERE id = $1", connection, transaction))
 		{
 			haltCredential.Parameters.AddWithValue(credentialId);
 			haltCredential.Parameters.AddWithValue(reason);
@@ -804,6 +813,15 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 	/// jobs back to <c>queued</c> (their runs unblocked) in one transaction, serialized
 	/// against the halt's <c>FOR UPDATE</c> idiom so a concurrent halt and unblock
 	/// serialize to a consistent end state.</summary>
+	/// <remarks>
+	/// Issue #20: this deliberately does NOT clear <c>credentials.health</c> back to
+	/// healthy. Unblocking re-queues work under the *same* credential -- it is an
+	/// operator's "try again" or a swap that has not yet been proven to work, not
+	/// evidence the credential is valid. Health only clears on a successful
+	/// <c>/credentials/{id}/test</c> result (<see cref="MarkTestOutcomeAsync"/>), so
+	/// the health field's meaning stays "last proven state", not "not currently
+	/// halted".
+	/// </remarks>
 	public async Task<CredentialUnblockResult> UnblockCredentialAsync(Guid credentialId, string? reason, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

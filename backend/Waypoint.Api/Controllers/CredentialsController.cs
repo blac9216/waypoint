@@ -72,7 +72,33 @@ public sealed class CredentialsController : ControllerBase
 			throw new ApiException(HttpStatusCode.BadRequest, "validation_failed", "Both 'name' and 'credential_type' are required.");
 		}
 
-		Guid? id = await _credentials.CreateAsync(request.Name, request.CredentialType, request.Owner ?? "shared", cancellationToken);
+		if (!CredentialTypes.IsValid(request.CredentialType))
+		{
+			throw new ApiException(
+				HttpStatusCode.BadRequest, "invalid_credential_type",
+				$"'credential_type' must be one of: {string.Join(", ", CredentialTypes.All)}.");
+		}
+
+		string owner = request.Owner ?? CredentialOwners.Shared;
+		if (!CredentialOwners.All.Contains(owner))
+		{
+			// ADR-0011: shared/service credentials only in v1 -- there is no
+			// personal-credential row to create, so any other owner value is
+			// rejected rather than silently coerced to 'shared'.
+			throw new ApiException(
+				HttpStatusCode.BadRequest, "invalid_owner",
+				$"'owner' must be one of: {string.Join(", ", CredentialOwners.All)} (ADR-0011: no personal credentials in v1).");
+		}
+
+		bool sudoEnabled = request.SudoEnabled ?? false;
+		if (sudoEnabled && request.CredentialType != CredentialTypes.Ssh)
+		{
+			throw new ApiException(
+				HttpStatusCode.BadRequest, "sudo_requires_ssh",
+				"'sudo_enabled' is only meaningful for credential_type 'ssh'.");
+		}
+
+		Guid? id = await _credentials.CreateAsync(request.Name, request.CredentialType, owner, sudoEnabled, cancellationToken);
 		if (id is not Guid createdId)
 		{
 			throw new ApiException(HttpStatusCode.Conflict, "name_taken", $"A credential named '{request.Name}' already exists.");
@@ -93,7 +119,8 @@ public sealed class CredentialsController : ControllerBase
 	public async Task<ActionResult<CredentialResponse>> Update(Guid id, [FromBody] CredentialUpdateRequest request, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(request);
-		if (await _credentials.GetAsync(id, cancellationToken) is null)
+		CredentialResponse? existing = await _credentials.GetAsync(id, cancellationToken);
+		if (existing is null)
 		{
 			throw NotFoundError(id);
 		}
@@ -109,12 +136,71 @@ public sealed class CredentialsController : ControllerBase
 			}
 		}
 
+		if (request.SudoEnabled is bool sudoEnabled)
+		{
+			if (sudoEnabled && existing.CredentialType != CredentialTypes.Ssh)
+			{
+				throw new ApiException(
+					HttpStatusCode.BadRequest, "sudo_requires_ssh",
+					"'sudo_enabled' is only meaningful for credential_type 'ssh'.");
+			}
+
+			if (await _credentials.UpdateSudoAsync(id, sudoEnabled, cancellationToken) == CredentialWriteOutcome.NotFound)
+			{
+				throw NotFoundError(id);
+			}
+		}
+
 		if (!string.IsNullOrEmpty(request.Secret))
 		{
 			await StoreSecretAsync(id, request.Secret, cancellationToken);
 		}
 
 		return Ok((await _credentials.GetAsync(id, cancellationToken))!);
+	}
+
+	/// <summary>
+	/// Issue #20 minimal test: decrypts the stored secret under the caller's identity
+	/// (audited by <see cref="ICredentialSecretStore.DecryptAsync"/> exactly like any
+	/// other decrypt) and, if that succeeds, marks the credential
+	/// <see cref="CredentialHealthStates.Valid"/>; a missing secret or decrypt failure
+	/// marks it <see cref="CredentialHealthStates.AuthFailing"/>. This does NOT dial
+	/// the target -- see <see cref="CredentialTestResponse"/>'s doc comment for why the
+	/// real connectivity test is a follow-up PowerShell job.
+	/// </summary>
+	[HttpPost("{id:guid}/test")]
+	[RequireAdminRole]
+	[ProducesResponseType(typeof(CredentialTestResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<CredentialTestResponse>> Test(Guid id, CancellationToken cancellationToken)
+	{
+		if (await _credentials.GetAsync(id, cancellationToken) is null)
+		{
+			throw NotFoundError(id);
+		}
+
+		string actor = User.GetRequiredUsername();
+		bool succeeded;
+		string message;
+		try
+		{
+			using DecryptedSecret decrypted = await _secrets.DecryptAsync(id, actor, jobId: null, runId: null, cancellationToken);
+			succeeded = true;
+			message = "Stored secret decrypted successfully. This checks the secret is present and readable; it does not verify connectivity to the target.";
+		}
+		catch (CredentialSecretNotFoundException)
+		{
+			succeeded = false;
+			message = "No secret is stored for this credential.";
+		}
+		catch (MasterKeyUnavailableException)
+		{
+			succeeded = false;
+			message = "The appliance master key is unavailable; the secret could not be decrypted.";
+		}
+
+		await _credentials.MarkTestOutcomeAsync(id, succeeded, cancellationToken);
+		string health = succeeded ? CredentialHealthStates.Valid : CredentialHealthStates.AuthFailing;
+		return Ok(new CredentialTestResponse(id, succeeded, health, message));
 	}
 
 	[HttpDelete("{id:guid}")]

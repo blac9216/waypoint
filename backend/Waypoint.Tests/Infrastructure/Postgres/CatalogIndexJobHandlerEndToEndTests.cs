@@ -195,7 +195,7 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 
 	private async Task<Guid> SeedDepotTokenCredentialAsync(string secretValue)
 	{
-		Guid? credentialId = await _credentials.CreateAsync($"depot-token-{Guid.NewGuid():N}", "depot-token", "test", CancellationToken.None);
+		Guid? credentialId = await _credentials.CreateAsync($"depot-token-{Guid.NewGuid():N}", "depot-token", "shared", sudoEnabled: false, CancellationToken.None);
 		Assert.NotNull(credentialId);
 		await _secretStore.StoreAsync(credentialId!.Value, System.Text.Encoding.UTF8.GetBytes(secretValue), "test", CancellationToken.None);
 		return credentialId.Value;
