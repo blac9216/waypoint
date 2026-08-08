@@ -192,7 +192,9 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	[Fact]
 	public async Task PauseRun_WithOperatorRole_ReturnsOk()
 	{
-		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null));
+		// TestAuthHandler names every principal "test-user"; this run must be owned
+		// by the caller for a non-Admin Operator to act on it (issue #209).
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
 		_factory.Repository.SetPauseResult(true);
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/pause");
@@ -220,7 +222,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	[Fact]
 	public async Task ResumeRun_WithOperatorRole_ReturnsOk()
 	{
-		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", true, false, null));
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", true, false, null, InitiatedBy: "test-user"));
 		_factory.Repository.SetResumeResult(true);
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/resume");
@@ -248,10 +250,105 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	[Fact]
 	public async Task AbortRun_WithOperatorRole_ReturnsOk()
 	{
-		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null));
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/abort");
 		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+	}
+
+	// -- issue #209: run-action ownership ------------------------------------
+	// docs/api-contract.md: "/runs/{id}/pause · /resume · /abort ... Operator+ (own
+	// runs), Admin any." TestAuthHandler names every principal "test-user".
+
+	[Theory]
+	[InlineData("pause")]
+	[InlineData("resume")]
+	[InlineData("abort")]
+	public async Task RunAction_OwnerOperator_ReturnsOk(string action)
+	{
+		// Paused must match the pre-condition each action needs to succeed: resume
+		// requires an already-paused run, pause/abort require an unpaused one.
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", action == "resume", false, null, InitiatedBy: "test-user"));
+		_factory.Repository.SetPauseResult(true);
+		_factory.Repository.SetResumeResult(true);
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/{action}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData("pause")]
+	[InlineData("resume")]
+	[InlineData("abort")]
+	public async Task RunAction_NonOwnerOperator_Returns403(string action)
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", action == "resume", false, null, InitiatedBy: "another-user"));
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/{action}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "forbidden");
+	}
+
+	[Theory]
+	[InlineData("pause")]
+	[InlineData("resume")]
+	[InlineData("abort")]
+	public async Task RunAction_Admin_SucceedsOnNonOwnedRun(string action)
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", action == "resume", false, null, InitiatedBy: "another-user"));
+		_factory.Repository.SetPauseResult(true);
+		_factory.Repository.SetResumeResult(true);
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/{action}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData("pause")]
+	[InlineData("resume")]
+	[InlineData("abort")]
+	public async Task RunAction_OperatorOnOwnerlessRun_Returns403(string action)
+	{
+		// InitiatedBy null simulates a system/scheduled run with no recorded initiator.
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", action == "resume", false, null, InitiatedBy: null));
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/{action}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "forbidden");
+	}
+
+	[Theory]
+	[InlineData("pause")]
+	[InlineData("resume")]
+	[InlineData("abort")]
+	public async Task RunAction_AdminOnOwnerlessRun_ReturnsOk(string action)
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", action == "resume", false, null, InitiatedBy: null));
+		_factory.Repository.SetPauseResult(true);
+		_factory.Repository.SetResumeResult(true);
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/{action}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
 
 		HttpResponseMessage response = await client.SendAsync(request);
 
@@ -330,7 +427,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	[Fact]
 	public async Task PauseRun_AlreadyPaused_Returns400()
 	{
-		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("pending", true, false, null));
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("pending", true, false, null, InitiatedBy: "test-user"));
 		_factory.Repository.SetPauseResult(false);
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/pause");
@@ -345,7 +442,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	[Fact]
 	public async Task ResumeRun_NotPaused_Returns400()
 	{
-		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null));
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
 		_factory.Repository.SetResumeResult(false);
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/resume");
@@ -363,7 +460,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	public async Task PauseRun_ReturnsPostActionState()
 	{
 		// Pre-action state is "running"/not-paused; after pause the fake updates is_paused.
-		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null));
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
 		_factory.Repository.SetPauseResult(true);
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/pause");
@@ -508,7 +605,7 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 		if (_pauseResult && _runs.TryGetValue(runId, out var state))
 		{
 			// Simulate the state transition: after a successful pause, is_paused becomes true.
-			_runs[runId] = new RunQueueState(state.State, true, state.Blocked, state.BlockedReason);
+			_runs[runId] = new RunQueueState(state.State, true, state.Blocked, state.BlockedReason, state.InitiatedBy);
 		}
 		return Task.FromResult(_pauseResult);
 	}
@@ -519,7 +616,7 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 		if (_resumeResult && _runs.TryGetValue(runId, out var state))
 		{
 			// Simulate the state transition: after a successful resume, is_paused becomes false.
-			_runs[runId] = new RunQueueState(state.State, false, state.Blocked, state.BlockedReason);
+			_runs[runId] = new RunQueueState(state.State, false, state.Blocked, state.BlockedReason, state.InitiatedBy);
 		}
 		return Task.FromResult(_resumeResult);
 	}

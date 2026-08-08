@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System.Net;
-using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Waypoint.Core.Authorization;
@@ -123,7 +122,7 @@ public sealed class CredentialsController : ControllerBase
 	[ProducesResponseType(StatusCodes.Status204NoContent)]
 	public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
 	{
-		string actor = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
+		string actor = User.GetRequiredUsername();
 		return await _credentials.DeleteAsync(id, actor, cancellationToken) switch
 		{
 			CredentialDeleteOutcome.Deleted => NoContent(),
@@ -137,7 +136,7 @@ public sealed class CredentialsController : ControllerBase
 	/// <summary>Secret write + rotation stamp. The store audits with the caller's identity; the value never lands in any response.</summary>
 	private async Task StoreSecretAsync(Guid id, string secret, CancellationToken cancellationToken)
 	{
-		string actor = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
+		string actor = User.GetRequiredUsername();
 		byte[] secretBytes = Encoding.UTF8.GetBytes(secret);
 		try
 		{

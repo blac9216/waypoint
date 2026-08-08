@@ -105,7 +105,7 @@ authenticated the caller, and role claims keep mapping to the same four
 | `/runs` | GET, POST | POST body: site_id, scope (products/components + inventory selection), credential (`service` \| inline personal — never persisted), schedule?. Cyber+ for scans; remediation POSTs require Admin + `confirmation: "REMEDIATE"`. |
 | `/runs/{id}` | GET | Header, progress, pass/fail/na, per-queue status incl. `blocked`. |
 | `/runs/{id}/jobs` | GET | Per-target rows: state, stage progress, counts, note. |
-| `/runs/{id}/pause` · `/resume` · `/abort` | POST | Operator+ (own runs), Admin any. |
+| `/runs/{id}/pause` · `/resume` · `/abort` | POST | Operator+ (own runs), Admin any. Runs with no recorded initiator (system/scheduled runs) are Admin-only. |
 | `/runs/{id}/resume-blocked` | POST | Admin; body: replacement credential_ref → re-queues blocked jobs (ADR-0008 halt behavior). |
 | `/runs/{id}/artifacts` · `/jobs/{id}/artifacts/{kind}` | GET | CKL/HDF download; `?bundle=zip` for the export button. |
 | `/runs/{id}/attestations-applied` | GET | Waivers that fired: control, scope, justification, author/version, expired-skips. |
