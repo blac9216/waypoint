@@ -726,6 +726,12 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 		return Task.FromResult<IReadOnlyList<JobSummary>>([]);
 	}
 
+	public Task<JobSummary?> GetJobAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		_ = (jobId, cancellationToken);
+		return Task.FromResult<JobSummary?>(null);
+	}
+
 	/// <summary>Arguments of the last <see cref="CreateRunAsync"/> call, for asserting
 	/// what the controller actually forwarded (issue #208: initiated_by provenance).</summary>
 	public (string RunType, string ScopeJson, Guid? CredentialId, string? InitiatedBy)? LastCreateRun { get; private set; }

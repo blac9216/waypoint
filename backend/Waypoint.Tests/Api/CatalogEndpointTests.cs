@@ -287,6 +287,12 @@ public sealed class CatalogFakeJobQueueRepository : IJobQueueRepository
 		return Task.FromResult<IReadOnlyList<JobSummary>>([]);
 	}
 
+	public Task<JobSummary?> GetJobAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		_ = (jobId, cancellationToken);
+		return Task.FromResult<JobSummary?>(null);
+	}
+
 	public Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		_ = (runId, cancellationToken);

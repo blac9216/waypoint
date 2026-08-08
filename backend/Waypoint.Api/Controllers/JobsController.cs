@@ -13,30 +13,46 @@
 // limitations under the License.
 
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Scans;
 
 namespace Waypoint.Api.Controllers;
 
 /// <summary>
-/// Job-level (as opposed to run-level) endpoints -- currently just the per-job cancel
-/// (issue #291), a thin wrapper over <see cref="IJobQueueRepository.CancelJobAsync"/>
-/// (#277). <c>GET /jobs/{id}/artifacts/{kind}</c> is a documented future addition
-/// (docs/api-contract.md) not yet implemented; this controller is where it belongs
-/// once it lands.
+/// Job-level (as opposed to run-level) endpoints: the per-job cancel (issue #291), a thin
+/// wrapper over <see cref="IJobQueueRepository.CancelJobAsync"/> (#277), and the per-kind
+/// artifact download (issue #299).
 /// </summary>
 [ApiController]
 [Route("api/v1/jobs")]
 public sealed class JobsController : ControllerBase
 {
-	private readonly IJobQueueRepository _repository;
+	/// <summary>
+	/// The closed set of artifact kinds this route serves (docs/api-contract.md
+	/// `/jobs/{id}/artifacts/{kind}`). <c>kind</c> is validated against this set BEFORE it
+	/// ever reaches a file path -- it is never interpolated into
+	/// <see cref="ScanArtifactPaths"/> as a raw user-supplied path segment, only used to
+	/// pick which of the two fixed, server-computed paths to serve.
+	/// </summary>
+	private static readonly Dictionary<string, string> ContentTypesByKind = new(StringComparer.Ordinal)
+	{
+		["hdf"] = "application/json",
+		["ckl"] = "application/xml",
+	};
 
-	public JobsController(IJobQueueRepository repository)
+	private readonly IJobQueueRepository _repository;
+	private readonly IOptions<ScanOptions> _scanOptions;
+
+	public JobsController(IJobQueueRepository repository, IOptions<ScanOptions> scanOptions)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
+		ArgumentNullException.ThrowIfNull(scanOptions);
 		_repository = repository;
+		_scanOptions = scanOptions;
 	}
 
 	/// <summary>
@@ -71,5 +87,53 @@ public sealed class JobsController : ControllerBase
 			default:
 				return Ok(new JobCancelResponse(id.ToString(), "cancelled"));
 		}
+	}
+
+	/// <summary>
+	/// Streams one artifact file for a job (docs/api-contract.md `/jobs/{id}/artifacts/{kind}`:
+	/// "CKL/HDF download"). Viewer+, matching every other run/job read. <paramref name="kind"/>
+	/// is validated against the closed <see cref="ContentTypesByKind"/> set and used only to
+	/// select which fixed, server-computed path (<see cref="ScanArtifactPaths"/>) to serve --
+	/// never concatenated into a path itself, so there is no path-traversal surface here
+	/// regardless of what the caller supplies. 404 covers both "job does not exist" and "the
+	/// job exists but this artifact has not been produced yet" (e.g. requesting <c>ckl</c>
+	/// before the convert stage has run) -- the two are indistinguishable to the caller by
+	/// design, matching how every other not-found resource in this API responds.
+	/// </summary>
+	[HttpGet("{id:guid}/artifacts/{kind}")]
+	[RequireViewerRole]
+	[ProducesResponseType(StatusCodes.Status200OK)]
+	public async Task<IActionResult> GetArtifact(Guid id, string kind, CancellationToken cancellationToken)
+	{
+		if (!ContentTypesByKind.TryGetValue(kind, out string? contentType))
+		{
+			throw ApiException.Validation(
+				"kind is not a supported artifact type.",
+				$"'{kind}' is not supported. Expected one of: {string.Join(", ", ContentTypesByKind.Keys)}.");
+		}
+
+		JobSummary? job = await _repository.GetJobAsync(id, cancellationToken).ConfigureAwait(false);
+		if (job is null)
+		{
+			throw ApiException.NotFound("Job not found.", $"Job '{id}' does not exist.");
+		}
+
+		string artifactStorePath = _scanOptions.Value.ArtifactStorePath;
+		string? path = kind switch
+		{
+			"hdf" => ScanArtifactPaths.ResolveHdf(artifactStorePath, id),
+			"ckl" => ScanArtifactPaths.Ckl(artifactStorePath, id),
+			_ => null,
+		};
+
+		if (path is null || !System.IO.File.Exists(path))
+		{
+			throw ApiException.NotFound(
+				"Artifact not found.",
+				$"Job '{id}' has no '{kind}' artifact yet.");
+		}
+
+		byte[] bytes = await System.IO.File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+		return File(bytes, contentType, Path.GetFileName(path));
 	}
 }
