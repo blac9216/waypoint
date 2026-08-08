@@ -6,14 +6,16 @@
  * (default) and the state board. The third (log-first) is proposed as a
  * follow-up in the PR body to keep this slice review-sized; see #283.
  *
- * Read-only by design: no pause/abort/resume-blocked wiring. The Pause
- * queue / Abort run buttons render visible-but-disabled, pointing at #285
- * (README "Roles & Permissions" treatment — visible, not hidden, with a
- * `title` explaining why), since the prototype's header chrome always shows
- * them.
+ * Read-only by design: no pause/abort/resume wiring. The Pause queue / Abort
+ * run / Change-credential-&-resume buttons render visible-but-disabled for
+ * EVERY role (README "Roles & Permissions" treatment — visible, not hidden,
+ * with a `title` explaining why), since the prototype's header chrome always
+ * shows them but the wiring lands with #285. The block is role-independent, so
+ * these controls are inert regardless of role until #285 wires them; a
+ * privileged Operator/Admin must never see an enabled Abort that does nothing.
  */
 import { useMemo, useState } from "react";
-import { roleGateProps } from "../../lib/roles";
+import { roleGateProps, type Role } from "../../lib/roles";
 import { useAuth } from "../../lib/auth";
 import { formatElapsed, progressPercentForState, type RunJob, type RunSnapshot } from "./liverun";
 import { useLiveRun } from "./useLiveRun";
@@ -200,9 +202,25 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 	const { snapshot, loading, loadError, connectionState } = useLiveRun(runId);
 	const [layout, setLayout] = useState<LayoutMode>("queues");
 
-	const controlGate = user
-		? roleGateProps(user.role, "Operator", "Run controls (pause/abort) ship in a follow-up — see issue #285")
-		: { disabled: true };
+	// Pause/Abort/Resume are not wired yet: the wiring lands with #285, which is
+	// role-independent, so these controls must be inert for EVERY role — an
+	// Operator/Admin must not see an enabled Abort that silently does nothing.
+	// Keep the visible-but-disabled convention: privileged roles get the
+	// "lands with #285" reason; roles below the gate keep the role reason.
+	const notBuiltReason = "Run controls (pause / abort / resume) ship in a follow-up — see issue #285";
+	function inertControlProps(required: Role) {
+		if (!user) {
+			return { disabled: true, style: { opacity: 0.42 }, title: notBuiltReason };
+		}
+		const gate = roleGateProps(user.role, required, notBuiltReason);
+		// If the role gate would allow the action, override to disabled with the
+		// not-yet-built reason so it stays genuinely inert regardless of role.
+		if (!gate.disabled) {
+			return { disabled: true, style: { opacity: 0.42 }, title: notBuiltReason };
+		}
+		return gate;
+	}
+	const controlGate = inertControlProps("Operator");
 
 	if (!runId) {
 		return (
@@ -302,10 +320,7 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 						<span>
 							Queue halted — {header.queues.find((q) => q.blocked)?.blocked_reason ?? "credential failure"}
 						</span>
-						<button
-							type="button"
-							{...roleGateProps(user?.role ?? "Viewer", "Admin", "Credential-swap-resume ships with issue #285")}
-						>
+						<button type="button" {...inertControlProps("Admin")}>
 							Change credential &amp; resume
 						</button>
 					</div>
