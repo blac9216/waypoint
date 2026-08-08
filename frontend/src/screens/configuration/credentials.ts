@@ -17,6 +17,16 @@
  *
  * Owner is always `"shared"` (ADR-0011: no personal-credential rows) — the
  * form never collects it, and it is not sent on create.
+ *
+ * Issue #245/PR #322 changed `POST /credentials/{id}/test` from a synchronous
+ * `{succeeded, health, message}` 200 to a `202 + {run_id, job_id}` — it now
+ * queues a real `credential-test` job (`CredentialTestJobHandler`) instead of
+ * answering inline. The job's terminal outcome is what flips
+ * `credentials.health` server-side, not this call — so the caller (see
+ * `CredentialsTab.tsx`'s `doTest`) must follow the job via the existing SSE
+ * plumbing (`lib/events.ts` / the Live Run board's pattern) to its terminal
+ * `job.state` and then re-fetch the credential to read the authoritative
+ * `health` (issue #323).
  */
 
 import { apiDelete, apiGet, apiPost, apiPut } from "../../lib/api";
@@ -55,6 +65,10 @@ export function fetchCredentials(): Promise<Credential[]> {
 	return apiGet<Credential[]>("/credentials");
 }
 
+export function fetchCredential(id: string): Promise<Credential> {
+	return apiGet<Credential>(`/credentials/${id}`);
+}
+
 export interface CredentialWriteInput {
 	name: string;
 	credential_type: CredentialType;
@@ -90,15 +104,16 @@ export function deleteCredential(id: string): Promise<void> {
 	return apiDelete<void>(`/credentials/${id}`);
 }
 
-export interface CredentialTestResult {
-	id: string;
-	succeeded: boolean;
-	health: CredentialHealth | string;
-	message: string;
+/** `202` body from `POST /credentials/{id}/test` — one run containing one
+ * `credential-test` job (`CredentialsController.Test`). Nothing about the
+ * outcome is known yet; the caller follows `job_id` via SSE. */
+export interface CredentialTestQueuedResponse {
+	run_id: string;
+	job_id: string;
 }
 
-export function testCredential(id: string): Promise<CredentialTestResult> {
-	return apiPost<CredentialTestResult>(`/credentials/${id}/test`);
+export function testCredential(id: string): Promise<CredentialTestQueuedResponse> {
+	return apiPost<CredentialTestQueuedResponse>(`/credentials/${id}/test`);
 }
 
 export function formatHealth(health: string): string {

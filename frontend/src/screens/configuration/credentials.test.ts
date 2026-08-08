@@ -104,9 +104,16 @@ describe("credentials.ts data layer", () => {
 		expect(calls[0]).toEqual({ url: "/api/v1/credentials/cred-1", method: "DELETE", body: undefined });
 	});
 
-	it("testCredential issues POST /credentials/{id}/test", async () => {
-		await testCredential("cred-1");
+	it("testCredential issues POST /credentials/{id}/test and returns the queued run/job ids (issue #323, 202 shape)", async () => {
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			calls.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(init.body as string) : undefined });
+			return jsonResponse({ run_id: "run-1", job_id: "job-1" }, 202);
+		}) as unknown as typeof fetch;
+
+		const result = await testCredential("cred-1");
 		expect(calls[0]).toEqual({ url: "/api/v1/credentials/cred-1/test", method: "POST", body: undefined });
+		expect(result).toEqual({ run_id: "run-1", job_id: "job-1" });
 	});
 });
 
