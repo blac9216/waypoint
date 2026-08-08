@@ -1,23 +1,39 @@
 /**
- * Live Run — docs/ui/prototype/README.md screen 1, the hero screen's read
- * side (issue #283, first slice of #26). Renders a run's per-target board
- * driven entirely by SSE (useLiveRun.ts) — header counters, the layout
- * switcher, and two of the prototype's three layout modes: priority queues
- * (default) and the state board. The third (log-first) is proposed as a
- * follow-up in the PR body to keep this slice review-sized; see #283.
+ * Live Run — docs/ui/prototype/README.md screen 1, the hero screen (issue
+ * #283 read side + #285 write side). Renders a run's per-target board driven
+ * entirely by SSE (useLiveRun.ts) — header counters, the layout switcher, two
+ * of the prototype's three layout modes (priority queues default, state
+ * board), and — as of #285 — the run controls: Pause queue / Abort run
+ * (run-scoped), per-job cancel, and the blocked banner's Admin
+ * credential-swap-resume. The third layout (log-first) is proposed as a
+ * follow-up in the PR body to keep slices review-sized; see #283.
  *
- * Read-only by design: no pause/abort/resume wiring. The Pause queue / Abort
- * run / Change-credential-&-resume buttons render visible-but-disabled for
- * EVERY role (README "Roles & Permissions" treatment — visible, not hidden,
- * with a `title` explaining why), since the prototype's header chrome always
- * shows them but the wiring lands with #285. The block is role-independent, so
- * these controls are inert regardless of role until #285 wires them; a
- * privileged Operator/Admin must never see an enabled Abort that does nothing.
+ * Controls follow the README "Roles & Permissions" visible-but-disabled
+ * convention: an insufficient role still sees the button, disabled, with a
+ * `title` naming the required role (`roleGateProps`) — never silently
+ * hidden. Confirmation before a destructive action (`window.confirm`, same
+ * pattern as CredentialsTab/SiteTargetsPanel deletes) guards Abort and
+ * per-job Cancel; Pause/Resume act immediately since they're reversible.
+ * Every control's server-side effect is reflected back through SSE
+ * (job.state / run.progress / queue.state), never a local optimistic patch —
+ * consistent with the "no polling" rule this screen was built to satisfy.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { ApiError } from "../../lib/api";
 import { roleGateProps, type Role } from "../../lib/roles";
 import { useAuth } from "../../lib/auth";
-import { formatElapsed, progressPercentForState, type RunJob, type RunSnapshot } from "./liverun";
+import { fetchCredentials, type Credential } from "../configuration/credentials";
+import {
+	abortRun,
+	cancelJob,
+	formatElapsed,
+	pauseRun,
+	progressPercentForState,
+	resumeBlockedRun,
+	resumeRun,
+	type RunJob,
+	type RunSnapshot,
+} from "./liverun";
 import { useLiveRun } from "./useLiveRun";
 import { useRunIdFromQuery } from "./useRunIdFromQuery";
 import "./LiveRunScreen.css";
@@ -41,6 +57,11 @@ function stateColor(state: string): string {
 }
 
 const IN_FLIGHT_STATES = new Set(["running", "attesting", "converting"]);
+/** #277's cooperative per-job cancel is honored for queued and in-flight jobs
+ * alike (queued cancels immediately; in-flight sets `cancel_requested` and the
+ * heartbeat loop honors it cooperatively) — a terminal job has nothing left
+ * to cancel. */
+const CANCELLABLE_STATES = new Set(["queued", "running", "attesting", "converting"]);
 
 interface BoardColumn {
 	label: string;
@@ -84,7 +105,20 @@ function buildBoardColumns(jobs: RunJob[]): BoardColumn[] {
 	return columns;
 }
 
-function QueueLayout({ header, jobs }: { header: RunSnapshot["header"]; jobs: RunJob[] }) {
+interface JobControlProps {
+	cancelGate: { disabled: boolean; style?: { opacity: number }; title?: string };
+	onCancel: (job: RunJob) => void;
+}
+
+function QueueLayout({
+	header,
+	jobs,
+	jobControls,
+}: {
+	header: RunSnapshot["header"];
+	jobs: RunJob[];
+	jobControls: JobControlProps;
+}) {
 	const byQueue = useMemo(() => {
 		const groups = new Map<string, RunJob[]>();
 		for (const job of jobs) {
@@ -121,7 +155,7 @@ function QueueLayout({ header, jobs }: { header: RunSnapshot["header"]; jobs: Ru
 						<table className="live-run__table">
 							<tbody>
 								{rows.map((job) => (
-									<TargetRow key={job.job_id} job={job} />
+									<TargetRow key={job.job_id} job={job} jobControls={jobControls} />
 								))}
 							</tbody>
 						</table>
@@ -132,9 +166,10 @@ function QueueLayout({ header, jobs }: { header: RunSnapshot["header"]; jobs: Ru
 	);
 }
 
-function TargetRow({ job }: { job: RunJob }) {
+function TargetRow({ job, jobControls }: { job: RunJob; jobControls: JobControlProps }) {
 	const color = stateColor(job.state);
 	const inFlight = IN_FLIGHT_STATES.has(job.state);
+	const cancellable = CANCELLABLE_STATES.has(job.state);
 	return (
 		<tr className="live-run__row">
 			<td className="live-run__cell live-run__cell--target">
@@ -150,6 +185,20 @@ function TargetRow({ job }: { job: RunJob }) {
 				<div className="live-run__bar">
 					<div className="live-run__bar-fill" style={{ width: `${job.progress_percent}%`, background: color }} />
 				</div>
+			</td>
+			<td className="live-run__cell live-run__cell--controls">
+				{cancellable && (
+					<button
+						type="button"
+						className="live-run__job-cancel"
+						{...jobControls.cancelGate}
+						onClick={() => jobControls.onCancel(job)}
+						aria-label={`Cancel ${job.target}`}
+						title={jobControls.cancelGate.title ?? `Cancel ${job.target}`}
+					>
+						✕
+					</button>
+				)}
 			</td>
 			<td className="live-run__cell live-run__cell--pass mono">{job.pass ?? ""}</td>
 			<td className="live-run__cell live-run__cell--fail mono">{job.fail ?? ""}</td>
@@ -201,26 +250,75 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 	const { user } = useAuth();
 	const { snapshot, loading, loadError, connectionState } = useLiveRun(runId);
 	const [layout, setLayout] = useState<LayoutMode>("queues");
+	const [actionError, setActionError] = useState<string | null>(null);
+	const [pausing, setPausing] = useState(false);
+	const [aborting, setAborting] = useState(false);
+	const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
 
-	// Pause/Abort/Resume are not wired yet: the wiring lands with #285, which is
-	// role-independent, so these controls must be inert for EVERY role — an
-	// Operator/Admin must not see an enabled Abort that silently does nothing.
-	// Keep the visible-but-disabled convention: privileged roles get the
-	// "lands with #285" reason; roles below the gate keep the role reason.
-	const notBuiltReason = "Run controls (pause / abort / resume) ship in a follow-up — see issue #285";
-	function inertControlProps(required: Role) {
-		if (!user) {
-			return { disabled: true, style: { opacity: 0.42 }, title: notBuiltReason };
+	// api-contract.md "Runs & jobs": pause/resume/abort are Operator+ (own
+	// runs), Admin any; the run-ownership check itself is server-side (this is
+	// presentation only, per roles.ts). Per-job cancel rides the same floor —
+	// it is a finer-grained abort, not a separate capability.
+	const runControlGate = user ? roleGateProps(user.role, "Operator") : { disabled: true, style: { opacity: 0.42 } };
+
+	async function handlePauseToggle(paused: boolean) {
+		if (!runId) {
+			return;
 		}
-		const gate = roleGateProps(user.role, required, notBuiltReason);
-		// If the role gate would allow the action, override to disabled with the
-		// not-yet-built reason so it stays genuinely inert regardless of role.
-		if (!gate.disabled) {
-			return { disabled: true, style: { opacity: 0.42 }, title: notBuiltReason };
+		setActionError(null);
+		setPausing(true);
+		try {
+			await (paused ? resumeRun(runId) : pauseRun(runId));
+		} catch (err) {
+			setActionError(err instanceof ApiError ? err.message : paused ? "Could not resume the run." : "Could not pause the run.");
+		} finally {
+			setPausing(false);
 		}
-		return gate;
 	}
-	const controlGate = inertControlProps("Operator");
+
+	async function handleAbort() {
+		if (!runId) {
+			return;
+		}
+		if (!window.confirm("Abort this run? In-flight targets stop cooperatively; queued targets are cancelled. This cannot be undone.")) {
+			return;
+		}
+		setActionError(null);
+		setAborting(true);
+		try {
+			await abortRun(runId);
+		} catch (err) {
+			setActionError(err instanceof ApiError ? err.message : "Could not abort the run.");
+		} finally {
+			setAborting(false);
+		}
+	}
+
+	async function handleCancelJob(job: RunJob) {
+		if (!window.confirm(`Cancel "${job.target}"? This cannot be undone.`)) {
+			return;
+		}
+		setActionError(null);
+		setCancellingJobId(job.job_id);
+		try {
+			await cancelJob(job.job_id);
+		} catch (err) {
+			setActionError(err instanceof ApiError ? err.message : "Could not cancel the job.");
+		} finally {
+			setCancellingJobId(null);
+		}
+	}
+
+	const jobControls: JobControlProps = {
+		cancelGate: runControlGate.disabled
+			? runControlGate
+			: cancellingJobId
+				? { disabled: true, style: { opacity: 0.42 }, title: "Cancelling…" }
+				: { disabled: false },
+		onCancel: (job) => {
+			void handleCancelJob(job);
+		},
+	};
 
 	if (!runId) {
 		return (
@@ -284,11 +382,11 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 						<Counter label="N/A" value={header.na} color="var(--na)" />
 						<div className="live-run__counter-divider" />
 						<div className="live-run__controls">
-							<button type="button" {...controlGate}>
-								Pause queue
+							<button type="button" {...runControlGate} onClick={() => handlePauseToggle(header.paused)}>
+								{pausing ? (header.paused ? "Resuming…" : "Pausing…") : header.paused ? "Resume queue" : "Pause queue"}
 							</button>
-							<button type="button" className="live-run__abort" {...controlGate}>
-								Abort run
+							<button type="button" className="live-run__abort" {...runControlGate} onClick={handleAbort}>
+								{aborting ? "Aborting…" : "Abort run"}
 							</button>
 						</div>
 					</div>
@@ -314,22 +412,109 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 					)}
 				</div>
 
-				{header.blocked && (
-					<div className="live-run__blocked-banner">
-						<span className="live-run__blocked-dot" />
-						<span>
-							Queue halted — {header.queues.find((q) => q.blocked)?.blocked_reason ?? "credential failure"}
-						</span>
-						<button type="button" {...inertControlProps("Admin")}>
-							Change credential &amp; resume
-						</button>
-					</div>
+				{actionError && <div className="live-run__action-error">{actionError}</div>}
+
+				{header.blocked && runId && (
+					<BlockedBanner
+						runId={runId}
+						reason={header.queues.find((q) => q.blocked)?.blocked_reason ?? "credential failure"}
+						role={user?.role}
+						onError={setActionError}
+					/>
 				)}
 			</div>
 
 			<div className="live-run__body">
-				{layout === "queues" ? <QueueLayout header={header} jobs={jobs} /> : <BoardLayout jobs={jobs} />}
+				{layout === "queues" ? (
+					<QueueLayout header={header} jobs={jobs} jobControls={jobControls} />
+				) : (
+					<BoardLayout jobs={jobs} />
+				)}
 			</div>
+		</div>
+	);
+}
+
+/**
+ * Blocked banner (README screen 1: "explains the halt and offers 'Change
+ * credential & resume' (Admin only)"). The #146 unblock flow: Admin picks a
+ * replacement credential from the stored (service/shared) list and calls
+ * `POST /runs/{id}/resume-blocked`. Non-Admin roles still see the button —
+ * visible-but-disabled with the role reason — never hidden. The credential
+ * picker itself only renders for Admin, since a disabled `<select>` with no
+ * chance of ever being used would just be UI noise for every other role.
+ */
+function BlockedBanner({
+	runId,
+	reason,
+	role,
+	onError,
+}: {
+	runId: string;
+	reason: string;
+	role: Role | undefined;
+	onError: (message: string | null) => void;
+}) {
+	const isAdmin = role === "Admin";
+	const [credentials, setCredentials] = useState<Credential[]>([]);
+	const [selectedId, setSelectedId] = useState("");
+	const [resuming, setResuming] = useState(false);
+	const [loadedCredentials, setLoadedCredentials] = useState(false);
+
+	useEffect(() => {
+		if (!isAdmin || loadedCredentials) {
+			return;
+		}
+		setLoadedCredentials(true);
+		fetchCredentials()
+			.then((list) => setCredentials(list))
+			.catch(() => {
+				// Non-fatal: the picker just stays empty and resume stays disabled
+				// until a credential id is chosen; the banner itself must still render.
+			});
+	}, [isAdmin, loadedCredentials]);
+
+	async function handleResume() {
+		if (!selectedId) {
+			return;
+		}
+		onError(null);
+		setResuming(true);
+		try {
+			await resumeBlockedRun(runId, selectedId);
+		} catch (err) {
+			onError(err instanceof ApiError ? err.message : "Could not resume the run.");
+		} finally {
+			setResuming(false);
+		}
+	}
+
+	const resumeGate = isAdmin
+		? { disabled: !selectedId || resuming }
+		: roleGateProps(role ?? "Viewer", "Admin", "Requires Admin — credential swap & resume is not available to your role");
+
+	return (
+		<div className="live-run__blocked-banner">
+			<span className="live-run__blocked-dot" />
+			<span>Queue halted — {reason}</span>
+			{isAdmin && (
+				<select
+					className="live-run__credential-select"
+					value={selectedId}
+					onChange={(e) => setSelectedId(e.target.value)}
+					aria-label="Replacement credential"
+				>
+					<option value="">Select replacement credential…</option>
+					{credentials.map((c) => (
+						<option key={c.id} value={c.id}>
+							{c.name}
+						</option>
+					))}
+				</select>
+			)}
+			<button type="button" {...resumeGate} onClick={handleResume}>
+				{resuming ? "Resuming…" : "Change credential & resume"}
+			</button>
 		</div>
 	);
 }
