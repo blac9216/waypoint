@@ -28,6 +28,7 @@ using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.Sites;
 using Waypoint.Infrastructure.SystemState;
 
 namespace Waypoint.Infrastructure.DependencyInjection;
@@ -132,6 +133,8 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
 			services.AddSingleton<IDownloadRepository>(new DownloadRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.SystemState.IApplianceStateRepository>(new ApplianceStateRepository(connectionString));
+			services.AddSingleton(new SiteRepository(connectionString));
+			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
