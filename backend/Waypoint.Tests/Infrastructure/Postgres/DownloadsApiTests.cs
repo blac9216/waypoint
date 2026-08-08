@@ -136,13 +136,12 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 	}
 
 	/// <summary>
-	/// The N-artifacts fan-out acceptance criterion: queuing three artifacts creates
-	/// three independent single-job runs (Continue policy falls out of "N runs", not
-	/// one run with N jobs -- see DownloadsController's class doc comment) and three
-	/// queued <c>download</c> jobs, one per artifact.
+	/// The N-artifacts fan-out acceptance criterion (ADR-0008): queuing three artifacts
+	/// creates ONE run containing three queued <c>download</c> jobs (one per artifact),
+	/// and the 202 body returns that single run_id -- not three separate runs.
 	/// </summary>
 	[Fact]
-	public async Task PostDownloads_WithAdminRole_QueuesOneDownloadJobPerArtifact()
+	public async Task PostDownloads_WithAdminRole_QueuesOneRunWithOneJobPerArtifact()
 	{
 		string tag = Guid.NewGuid().ToString("N");
 		Guid artifact1 = await SeedArtifactAsync($"{tag}-1");
@@ -162,20 +161,33 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		string[] downloadIds = document.RootElement.GetProperty("download_ids").EnumerateArray().Select(e => e.GetString()!).ToArray();
 		Assert.Equal(3, downloadIds.Length);
 
+		// The 202 returns one honest batch run_id (ADR-0008), not an arbitrary first run.
+		string responseRunId = document.RootElement.GetProperty("run_id").GetString()!;
+
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 
-		await using (NpgsqlCommand jobCount = new(
-			"SELECT count(*) FROM jobs WHERE job_type = 'download' AND state = 'queued'", connection))
-		{
-			Assert.Equal(3L, (long)(await jobCount.ExecuteScalarAsync())!);
-		}
-
+		// All three downloads belong to that single run, and it carries exactly three jobs.
 		await using (NpgsqlCommand runCount = new(
 			"SELECT count(DISTINCT run_id) FROM downloads WHERE id::text = ANY($1)", connection))
 		{
 			runCount.Parameters.AddWithValue(downloadIds);
-			Assert.Equal(3L, (long)(await runCount.ExecuteScalarAsync())!);
+			Assert.Equal(1L, (long)(await runCount.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand jobCount = new(
+			"SELECT count(*) FROM jobs WHERE run_id = $1 AND job_type = 'download' AND state = 'queued'", connection))
+		{
+			jobCount.Parameters.AddWithValue(Guid.Parse(responseRunId));
+			Assert.Equal(3L, (long)(await jobCount.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand runMatch = new(
+			"SELECT count(*) FROM downloads WHERE id::text = ANY($1) AND run_id = $2", connection))
+		{
+			runMatch.Parameters.AddWithValue(downloadIds);
+			runMatch.Parameters.AddWithValue(Guid.Parse(responseRunId));
+			Assert.Equal(3L, (long)(await runMatch.ExecuteScalarAsync())!);
 		}
 	}
 
@@ -215,7 +227,11 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		Assert.Equal(0, row.GetProperty("retry_count").GetInt32());
 	}
 
-	/// <summary>Cancel acceptance criterion: DELETE moves the download to <c>cancelled</c> and aborts its owning run's queued job.</summary>
+	/// <summary>
+	/// Cancel acceptance criterion: DELETE moves the download to <c>cancelled</c> and
+	/// cancels only that download's own queued job (via per-job cancel), without aborting
+	/// the run.
+	/// </summary>
 	[Fact]
 	public async Task DeleteDownload_WithAdminRole_CancelsCleanly()
 	{
@@ -234,9 +250,72 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
-		await using NpgsqlCommand jobState = new("SELECT state FROM jobs WHERE run_id = (SELECT run_id FROM downloads WHERE id = $1)", connection);
-		jobState.Parameters.AddWithValue(Guid.Parse(downloadId));
-		Assert.Equal("cancelled", (string)(await jobState.ExecuteScalarAsync())!);
+
+		// The download's own job is cancelled...
+		await using (NpgsqlCommand jobState = new("SELECT state FROM jobs WHERE id = (SELECT job_id FROM downloads WHERE id = $1)", connection))
+		{
+			jobState.Parameters.AddWithValue(Guid.Parse(downloadId));
+			Assert.Equal("cancelled", (string)(await jobState.ExecuteScalarAsync())!);
+		}
+
+		// ...and the run itself is NOT aborted (per-job cancel, not run abort).
+		await using (NpgsqlCommand runState = new("SELECT state FROM runs WHERE id = (SELECT run_id FROM downloads WHERE id = $1)", connection))
+		{
+			runState.Parameters.AddWithValue(Guid.Parse(downloadId));
+			Assert.NotEqual("aborted", (string)(await runState.ExecuteScalarAsync())!);
+		}
+	}
+
+	/// <summary>
+	/// Per-job cancel isolation: DELETE on one download in a multi-job run cancels only
+	/// that download's job and leaves its sibling queued (the in-run Continue policy /
+	/// per-job cancel guarantee, not run-isolation).
+	/// </summary>
+	[Fact]
+	public async Task DeleteDownload_InMultiJobRun_LeavesSiblingQueued()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		Guid artifact1 = await SeedArtifactAsync($"{tag}-a");
+		Guid artifact2 = await SeedArtifactAsync($"{tag}-b");
+
+		HttpRequestMessage queue = new(HttpMethod.Post, "/api/v1/downloads")
+		{
+			Content = JsonBody(new { depot_artifact_ids = new[] { artifact1.ToString(), artifact2.ToString() } }),
+		};
+		queue.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage queued = await _client.SendAsync(queue);
+		using JsonDocument queuedDoc = JsonDocument.Parse(await queued.Content.ReadAsStringAsync());
+		string[] downloadIds = queuedDoc.RootElement.GetProperty("download_ids").EnumerateArray().Select(e => e.GetString()!).ToArray();
+		string runId = queuedDoc.RootElement.GetProperty("run_id").GetString()!;
+
+		HttpRequestMessage cancel = new(HttpMethod.Delete, $"/api/v1/downloads/{downloadIds[0]}");
+		cancel.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage cancelResponse = await _client.SendAsync(cancel);
+		Assert.Equal(HttpStatusCode.OK, cancelResponse.StatusCode);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// Cancelled one job; the sibling is still queued in the same, non-aborted run.
+		await using (NpgsqlCommand cancelledCount = new(
+			"SELECT count(*) FROM jobs WHERE run_id = $1 AND state = 'cancelled'", connection))
+		{
+			cancelledCount.Parameters.AddWithValue(Guid.Parse(runId));
+			Assert.Equal(1L, (long)(await cancelledCount.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand queuedCount = new(
+			"SELECT count(*) FROM jobs WHERE run_id = $1 AND state = 'queued'", connection))
+		{
+			queuedCount.Parameters.AddWithValue(Guid.Parse(runId));
+			Assert.Equal(1L, (long)(await queuedCount.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand runStillActive = new("SELECT state FROM runs WHERE id = $1", connection))
+		{
+			runStillActive.Parameters.AddWithValue(Guid.Parse(runId));
+			Assert.NotEqual("aborted", (string)(await runStillActive.ExecuteScalarAsync())!);
+		}
 	}
 
 	[Fact]

@@ -154,9 +154,10 @@ public sealed class DownloadJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 	/// <summary>
 	/// Acceptance criterion 2: a corrupted fixture download fails verification,
 	/// quarantines the file, and the failure never blocks a sibling artifact queued in
-	/// the same batch (each artifact is its own run/job -- Continue policy falls out
-	/// of "N independent runs", proven here by running both to completion and checking
-	/// the healthy one still reached verified).
+	/// the same run. Both jobs live in ONE run (ADR-0008 fan-out), so this proves the
+	/// in-run Continue policy -- the core job-engine guarantee that one job failing does
+	/// not halt its siblings -- not run-isolation. The run is asserted to remain
+	/// non-aborted after one of its jobs fails.
 	/// </summary>
 	[Fact]
 	public async Task CorruptedDownload_FailsAndQuarantines_WithoutBlockingSiblingDownload()
@@ -166,8 +167,12 @@ public sealed class DownloadJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		Guid corruptArtifactId = await SeedArtifactAsync(corruptTag, correctSha256: true);
 		Guid healthyArtifactId = await SeedArtifactAsync(healthyTag, correctSha256: true);
 
-		(Guid corruptDownloadId, Guid corruptJobId, _) = await CreateDownloadJobAsync(corruptArtifactId, FixtureSourcePath + "#corrupt");
-		(Guid healthyDownloadId, Guid healthyJobId, _) = await CreateDownloadJobAsync(healthyArtifactId, FixtureSourcePath);
+		// One run, two download jobs (ADR-0008): the corrupt one and its healthy sibling.
+		(Guid runId, IReadOnlyList<(Guid DownloadId, Guid JobId)> jobs) = await CreateDownloadRunAsync(
+			(corruptArtifactId, FixtureSourcePath + "#corrupt"),
+			(healthyArtifactId, FixtureSourcePath));
+		(Guid corruptDownloadId, Guid corruptJobId) = jobs[0];
+		(Guid healthyDownloadId, Guid healthyJobId) = jobs[1];
 
 		JobDispatcherHostedService dispatcher = CreateDispatcher();
 		await dispatcher.StartAsync(CancellationToken.None);
@@ -195,11 +200,14 @@ public sealed class DownloadJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		DepotArtifact? corruptArtifact = await GetArtifactAsync(corruptArtifactId);
 		Assert.Equal("failed", corruptArtifact!.Status);
 
-		// The sibling download is unaffected -- proves the Continue policy applies
-		// across the two independent single-job runs this fan-out shape produces.
+		// The sibling download is unaffected -- proves the Continue policy applies WITHIN
+		// one run: one job's failure never halts a sibling job in the same run.
 		Assert.Equal("done", await GetJobFieldAsync(healthyJobId, "state"));
 		Download? healthyDownload = await _downloads.GetAsync(healthyDownloadId, CancellationToken.None);
 		Assert.Equal(DownloadStates.Verified, healthyDownload!.State);
+
+		// And the run was never aborted by the failing job.
+		Assert.NotEqual("aborted", await GetRunStateAsync(runId));
 	}
 
 	/// <summary>
@@ -250,6 +258,47 @@ public sealed class DownloadJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 
 		await _downloads.SetJobAsync(downloadId, jobIds[0], runId, CancellationToken.None);
 		return (downloadId, jobIds[0], runId);
+	}
+
+	/// <summary>
+	/// Fans several download artifacts into ONE run of N jobs (ADR-0008), mirroring what
+	/// <c>DownloadsController.QueueDownloads</c> does for a multi-artifact request. Returns
+	/// the shared run id and the per-artifact (downloadId, jobId) pairs in request order.
+	/// </summary>
+	private async Task<(Guid RunId, IReadOnlyList<(Guid DownloadId, Guid JobId)> Jobs)> CreateDownloadRunAsync(
+		params (Guid ArtifactId, string SourceUrl)[] artifacts)
+	{
+		Guid runId = await _repository.CreateRunAsync("download", "{}", credentialId: null, "tester", CancellationToken.None);
+
+		List<Guid> downloadIds = [];
+		List<JobSpec> specs = [];
+		foreach ((Guid artifactId, string sourceUrl) in artifacts)
+		{
+			Guid downloadId = await _downloads.CreateAsync(artifactId, jobId: null, "tester", CancellationToken.None);
+			downloadIds.Add(downloadId);
+			string payload = JsonSerializer.Serialize(new { download_id = downloadId, depot_artifact_id = artifactId, source_url = sourceUrl });
+			specs.Add(new JobSpec("download", 6, TargetId: artifactId, Payload: payload));
+		}
+
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(runId, specs, "tester", CancellationToken.None);
+
+		List<(Guid DownloadId, Guid JobId)> pairs = [];
+		for (int i = 0; i < downloadIds.Count; i++)
+		{
+			await _downloads.SetJobAsync(downloadIds[i], jobIds[i], runId, CancellationToken.None);
+			pairs.Add((downloadIds[i], jobIds[i]));
+		}
+
+		return (runId, pairs);
+	}
+
+	private async Task<string> GetRunStateAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new("SELECT state FROM runs WHERE id = $1", connection);
+		query.Parameters.AddWithValue(runId);
+		return (string)(await query.ExecuteScalarAsync())!;
 	}
 
 	private async Task RunDispatcherUntilTerminalAsync(Guid jobId)

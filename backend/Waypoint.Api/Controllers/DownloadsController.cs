@@ -28,14 +28,18 @@ namespace Waypoint.Api.Controllers;
 
 /// <summary>
 /// The api-contract.md <c>/downloads</c> surface (issue #10, M1 vertical slice):
-/// <c>POST /downloads</c> queues one <c>download</c> job per requested artifact,
-/// <c>GET /downloads</c> lists the queue (rate/ETA/retries per the data ledger), and
-/// <c>DELETE /downloads/{id}</c> cancels one. Each queued artifact gets its own
-/// single-job run (mirroring <c>CatalogController.Sync</c>'s fan-out shape but 1:1
-/// rather than N:1) so that cancelling one artifact's download aborts only that run,
-/// never a sibling artifact queued in the same request -- the per-job Continue policy
-/// (ADR-0008) this way falls out of "N independent runs" rather than needing its own
-/// cancel-one-job-of-a-run primitive.
+/// <c>POST /downloads</c> queues N artifacts as ONE run containing N <c>download</c>
+/// jobs (one per artifact), <c>GET /downloads</c> lists the queue (rate/ETA/retries per
+/// the data ledger), and <c>DELETE /downloads/{id}</c> cancels a single download's job.
+/// The one-run-N-jobs fan-out follows ADR-0008 ("a user-initiated Run expands to one
+/// Job per target/component") and reuses the same run-creation + <c>FanOutJobsAsync</c>
+/// path every scan/catalog run uses -- <c>POST</c> returns that single run_id honestly,
+/// and #12's queue UI gets one batch object. The two guarantees this shape relies on are
+/// already core job-engine capabilities: the Continue policy (one job
+/// failing/quarantining never halts its siblings) is inherent to the engine -- nothing
+/// aborts a run on a single job's failure -- and per-download cancel maps to a single-job
+/// cancel (<see cref="IJobQueueRepository.CancelJobAsync"/>) that never touches sibling
+/// jobs in the same run.
 /// </summary>
 [ApiController]
 [Route("api/v1/downloads")]
@@ -59,11 +63,13 @@ public sealed class DownloadsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Queue downloads for one or more indexed depot artifacts. Admin-gated, matching
-	/// <c>CatalogController.Sync</c>'s <c>POST /catalog/sync</c> convention. An unknown
-	/// artifact id in the request fails that one entry with a 404-shaped detail in the
-	/// response rather than rejecting the whole batch -- CLAUDE.md's "individual target
-	/// failures must not halt a run" applies at request-validation time too.
+	/// Queue downloads for one or more indexed depot artifacts as a single run of N jobs.
+	/// Admin-gated for M1 -- api-contract.md scopes this "Operator+", but the Operator role
+	/// does not exist until M3/RBAC, so Admin-only is the correct stricter-for-now floor;
+	/// it widens to Operator+ when RBAC lands (matches <c>CatalogController.Sync</c>). An
+	/// unknown artifact id fails the whole request with a 404 before any run is created --
+	/// the batch is validated up front, then fanned out atomically, so a bad id can never
+	/// leave a half-created run.
 	/// </summary>
 	[HttpPost]
 	[RequireAdminRole]
@@ -83,8 +89,9 @@ public sealed class DownloadsController : ControllerBase
 			.ConfigureAwait(false);
 		Dictionary<Guid, DepotArtifact> byId = catalog.ToDictionary(item => item.Id);
 
-		List<string> downloadIds = [];
-		string? runIdForResponse = null;
+		// Resolve every requested artifact and stage its download row + job spec first, so
+		// an unknown id is a clean 404 before we create the run (no orphaned run/jobs).
+		List<DepotArtifact> resolved = [];
 		foreach (string rawId in request.DepotArtifactIds)
 		{
 			if (!Guid.TryParse(rawId, out Guid artifactId) || !byId.TryGetValue(artifactId, out DepotArtifact? artifact))
@@ -92,7 +99,19 @@ public sealed class DownloadsController : ControllerBase
 				throw ApiException.NotFound("Depot artifact not found.", $"Depot artifact '{rawId}' does not exist.");
 			}
 
+			resolved.Add(artifact);
+		}
+
+		// One run for the whole batch (ADR-0008), then one download job per artifact via
+		// the shared FanOutJobsAsync path -- identical to every scan/catalog run's fan-out.
+		Guid runId = await _jobs.CreateRunAsync("download", "{}", credentialId: null, initiatedBy, cancellationToken).ConfigureAwait(false);
+
+		List<Guid> downloadIds = [];
+		List<JobSpec> specs = [];
+		foreach (DepotArtifact artifact in resolved)
+		{
 			Guid downloadId = await _downloads.CreateAsync(artifact.Id, jobId: null, initiatedBy, cancellationToken).ConfigureAwait(false);
+			downloadIds.Add(downloadId);
 
 			string payload = JsonSerializer.Serialize(new
 			{
@@ -100,18 +119,16 @@ public sealed class DownloadsController : ControllerBase
 				depot_artifact_id = artifact.Id,
 				source_url = BuildSourceUrl(artifact),
 			});
-
-			Guid runId = await _jobs.CreateRunAsync("download", "{}", credentialId: null, initiatedBy, cancellationToken).ConfigureAwait(false);
-			JobSpec[] specs = [new JobSpec("download", DownloadPriority, TargetId: artifact.Id, TargetName: artifact.ExternalId, Payload: payload)];
-			IReadOnlyList<Guid> jobIds = await _jobs.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);
-
-			await _downloads.SetJobAsync(downloadId, jobIds[0], runId, cancellationToken).ConfigureAwait(false);
-
-			downloadIds.Add(downloadId.ToString());
-			runIdForResponse ??= runId.ToString();
+			specs.Add(new JobSpec("download", DownloadPriority, TargetId: artifact.Id, TargetName: artifact.ExternalId, Payload: payload));
 		}
 
-		return Accepted(new DownloadsQueuedResponse(runIdForResponse!, downloadIds));
+		IReadOnlyList<Guid> jobIds = await _jobs.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);
+		for (int i = 0; i < downloadIds.Count; i++)
+		{
+			await _downloads.SetJobAsync(downloadIds[i], jobIds[i], runId, cancellationToken).ConfigureAwait(false);
+		}
+
+		return Accepted(new DownloadsQueuedResponse(runId.ToString(), downloadIds.Select(id => id.ToString()).ToArray()));
 	}
 
 	/// <summary>List the download queue, newest-first. Viewer+, matching <c>CatalogController.ListArtifacts</c>.</summary>
@@ -127,10 +144,13 @@ public sealed class DownloadsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Cancel a queued or in-flight download. Admin, matching this resource's POST
-	/// gate -- aborts the download's owning single-job run (see class doc comment),
-	/// which cooperatively cancels the in-flight <c>download</c> job and never touches
-	/// a sibling artifact's run.
+	/// Cancel a single download within its run. Admin-gated for M1 (see POST -- widens to
+	/// Operator+ with RBAC in M3). Cancels only this download's own <c>download</c> job
+	/// via <see cref="IJobQueueRepository.CancelJobAsync"/>, never aborting the run or
+	/// touching a sibling artifact's job queued in the same batch. A queued job is
+	/// cancelled cleanly; a job already running/terminal is left to finish and its result
+	/// is discarded (the download is marked <c>cancelled</c> either way -- see
+	/// CancelJobAsync's doc for why there is no per-job in-flight cancel signal yet).
 	/// </summary>
 	[HttpDelete("{id:guid}")]
 	[RequireAdminRole]
@@ -143,12 +163,12 @@ public sealed class DownloadsController : ControllerBase
 			throw ApiException.NotFound("Download not found.", $"Download '{id}' does not exist.");
 		}
 
-		if (download.RunId is Guid runId)
+		if (download.JobId is Guid jobId)
 		{
-			// Aborting is a no-op against an already-terminal run (AbortRunAsync's own
-			// contract) -- safe to call even if the download already finished/failed
-			// between the GetAsync above and here.
-			await _jobs.AbortRunAsync(runId, cancellationToken).ConfigureAwait(false);
+			// Per-job cancel: idempotent and no-op against an already-running/terminal
+			// job, so it is safe even if the download finished between the GetAsync above
+			// and here. It never aborts the run, so sibling downloads keep dispatching.
+			await _jobs.CancelJobAsync(jobId, cancellationToken).ConfigureAwait(false);
 		}
 
 		bool alreadyTerminal = download.State is DownloadStates.Verified or DownloadStates.Failed or DownloadStates.Cancelled;

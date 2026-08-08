@@ -618,6 +618,62 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		return new AbortRunResult(cancelledIds, inFlightIds);
 	}
 
+	public async Task<JobCancelOutcome> CancelJobAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		// Lock the row so the cancel and the state check are one atomic decision -- a
+		// concurrent claim cannot move the job from queued to running between our read
+		// and our write.
+		string? currentState;
+		await using (NpgsqlCommand lockJob = new(
+			"SELECT state FROM jobs WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockJob.Parameters.AddWithValue(jobId);
+			object? state = await lockJob.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+			currentState = state as string;
+		}
+
+		if (currentState is null)
+		{
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return JobCancelOutcome.NotFound;
+		}
+
+		bool cancellable = string.Equals(currentState, JobStates.Queued, StringComparison.Ordinal)
+			|| string.Equals(currentState, JobStates.Blocked, StringComparison.Ordinal);
+		if (!cancellable)
+		{
+			// Already running or terminal: no per-job in-flight cancel signal exists
+			// (see IJobQueueRepository.CancelJobAsync doc). Leave the job as-is.
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return JobCancelOutcome.NotCancellable;
+		}
+
+		await using (NpgsqlCommand cancel = new(
+			"""
+			UPDATE jobs SET
+				state = 'cancelled',
+				claimed_by = NULL,
+				claimed_at = NULL,
+				lease_expires_at = NULL,
+				heartbeat_at = NULL,
+				finished_at = now(),
+				note = 'Cancelled by request'
+			WHERE id = $1
+			""", connection, transaction))
+		{
+			cancel.Parameters.AddWithValue(jobId);
+			await cancel.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		LogJobCancelled(jobId);
+		return JobCancelOutcome.Cancelled;
+	}
+
 	public async Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken)
 	{
 		if (threshold <= 0)
@@ -852,6 +908,9 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Run {RunId} aborted: {CancelledCount} queued job(s) cancelled, {InFlightCount} in-flight job(s) signaled")]
 	private partial void LogRunAborted(Guid runId, int cancelledCount, int inFlightCount);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Job {JobId} cancelled by request")]
+	private partial void LogJobCancelled(Guid jobId);
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "Credential {CredentialId} hit {Threshold} consecutive auth failures: {BlockedRunCount} run(s) and {BlockedJobCount} queued job(s) blocked")]
 	private partial void LogAuthFailureHalt(Guid credentialId, int threshold, int blockedRunCount, int blockedJobCount);
