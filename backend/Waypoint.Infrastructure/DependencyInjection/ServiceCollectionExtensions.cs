@@ -79,6 +79,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<DiscoveryOptions>()
 			.Bind(configuration.GetSection(DiscoveryOptions.SectionName));
 
+		services.AddOptions<Waypoint.Core.Scans.ScanOptions>()
+			.Bind(configuration.GetSection(Waypoint.Core.Scans.ScanOptions.SectionName));
+
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
 		// One scrubber instance serves both sides of security.md control 1: sinks read
