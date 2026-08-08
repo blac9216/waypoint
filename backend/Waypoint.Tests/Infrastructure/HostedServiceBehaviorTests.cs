@@ -301,5 +301,9 @@ public sealed class HostedServiceBehaviorTests
 		{ Releases++; return Task.FromResult(true); }
 		public Task<CredentialUnblockResult> UnblockCredentialAsync(Guid credentialId, string? reason, CancellationToken cancellationToken)
 		=> Task.FromResult(new CredentialUnblockResult(WasHalted: false, [], []));
+
+		public Task<CredentialSwapResult> SwapAndResumeBlockedCredentialAsync(
+			Guid runId, Guid replacementCredentialId, string actor, string? reason, CancellationToken cancellationToken)
+		=> Task.FromResult(new CredentialSwapResult(CredentialSwapOutcome.RunNotHalted, null, null, []));
 	}
 }
