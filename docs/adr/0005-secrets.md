@@ -35,3 +35,9 @@ does and does not protect — and the mandatory leakage controls live in
 - Key rotation = re-wrap data keys; design the schema for it (key-id column) from the
   start.
 - Migration tooling from `secrets.vault` should be provided for existing users.
+- _(Appended 2026-08-08.)_ **Withdrawn:** the above migration-tooling consequence no
+  longer holds. Waypoint will **not** import predecessor `secrets.vault`/`site.json`
+  config; all credentials and sites/targets are configured fresh in the UI. Waypoint
+  replicates the sibling repos' functionality and borrows code where sensible, but is
+  not tied to their data formats. The envelope-encryption decision itself is unchanged;
+  only the import path is dropped (tracking issue #246 closed won't-do).
