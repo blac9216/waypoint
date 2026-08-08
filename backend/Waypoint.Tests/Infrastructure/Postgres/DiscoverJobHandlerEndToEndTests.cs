@@ -161,6 +161,17 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		await RunDiscoverOnceAsync(targetId);
 		await AssertInventoryCountAsync(targetId, expectedActive: 3);
 		await AssertItemRemovedAsync(targetId, "host-12");
+		Guid removedHostId = (await GetItemByMorefAsync(targetId, "host-12"))!.Id;
+
+		// Reappear-after-removal: host-12 is reported again in a later discovery. The
+		// moref-keyed upsert must UN-delete the existing row (removed_at -> NULL) rather
+		// than insert a duplicate -- same row id, active again, count back to 4.
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1");
+		await RunDiscoverOnceAsync(targetId);
+		await AssertInventoryCountAsync(targetId, expectedActive: 4);
+		InventoryItem revived = (await GetItemByMorefAsync(targetId, "host-12"))!;
+		Assert.Equal(removedHostId, revived.Id); // no duplicate -- same row un-deleted
+		Assert.Null(revived.RemovedAt);
 
 		await AssertCanaryNeverLeakedAsync(canary, credentialId);
 	}
@@ -222,7 +233,7 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 	{
 		Guid siteId = (await _sites.CreateAsync($"site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
 		Guid credentialId = (await _credentials.CreateAsync(
-			"administrator@vsphere.local", CredentialTypes.VCenter, CredentialOwners.Shared, sudoEnabled: false, CancellationToken.None))!.Value;
+			"svc-discovery@example.internal", CredentialTypes.VCenter, CredentialOwners.Shared, sudoEnabled: false, CancellationToken.None))!.Value;
 		await _secretStore.StoreAsync(credentialId, System.Text.Encoding.UTF8.GetBytes(secretValue), "test", CancellationToken.None);
 
 		string connectionJson = JsonSerializer.Serialize(new { host = "vcsa-01.example.internal" });
@@ -245,6 +256,12 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		InventoryItem? item = all.FirstOrDefault(i => i.Moref == moref);
 		Assert.NotNull(item);
 		Assert.NotNull(item!.RemovedAt);
+	}
+
+	private async Task<InventoryItem?> GetItemByMorefAsync(Guid targetId, string moref)
+	{
+		IReadOnlyList<InventoryItem> all = await _inventory.ListAsync(targetId, includeRemoved: true, CancellationToken.None);
+		return all.FirstOrDefault(i => i.Moref == moref);
 	}
 
 	/// <summary>

@@ -41,8 +41,9 @@ namespace Waypoint.Infrastructure.Discovery;
 /// migration 0010's comment on the still-open credential-shape questions) --
 /// <see cref="Waypoint.Core.Secrets.CredentialResponse.Name"/> is used as the vSphere
 /// SSO username (the natural vCenter convention names a service-account credential
-/// after the account it represents, e.g. <c>administrator@vsphere.local</c>). If a
-/// future slice adds a real username field, this is the one call site to update.
+/// after the account it represents, e.g. an <c>administrator@&lt;sso-domain&gt;</c>
+/// principal). If a future slice adds a real username field, this is the one call
+/// site to update.
 /// </summary>
 public sealed class DiscoverJobHandler : IJobHandler
 {
