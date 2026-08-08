@@ -17,13 +17,17 @@ using System.Net;
 using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
+using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Pagination;
+using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
+using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Sites;
 
 namespace Waypoint.Api.Controllers;
@@ -42,22 +46,37 @@ public sealed class RunsController : ControllerBase
 	private const string ScanJobType = "scan";
 	private const string PersonalCredentialKind = "personal";
 
+	private const string ScanArtifactHdfKind = "hdf";
+	private const string ScanArtifactCklKind = "ckl";
+	private const string UnknownTargetLabel = "unknown";
+
 	private readonly IJobQueueRepository _repository;
 	private readonly SiteRepository _sites;
 	private readonly TargetRepository _targets;
 	private readonly IEphemeralCredentialCache _ephemeralCredentials;
+	private readonly ConfigDocRepository _configDocs;
+	private readonly IOptions<ScanOptions> _scanOptions;
 
 	public RunsController(
-		IJobQueueRepository repository, SiteRepository sites, TargetRepository targets, IEphemeralCredentialCache ephemeralCredentials)
+		IJobQueueRepository repository,
+		SiteRepository sites,
+		TargetRepository targets,
+		IEphemeralCredentialCache ephemeralCredentials,
+		ConfigDocRepository configDocs,
+		IOptions<ScanOptions> scanOptions)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(sites);
 		ArgumentNullException.ThrowIfNull(targets);
 		ArgumentNullException.ThrowIfNull(ephemeralCredentials);
+		ArgumentNullException.ThrowIfNull(configDocs);
+		ArgumentNullException.ThrowIfNull(scanOptions);
 		_repository = repository;
 		_sites = sites;
 		_targets = targets;
 		_ephemeralCredentials = ephemeralCredentials;
+		_configDocs = configDocs;
+		_scanOptions = scanOptions;
 	}
 
 	/// <summary>
@@ -392,7 +411,126 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Pause dispatch for a run. Operator+ (own runs), Admin any — see
+	/// Per-target artifact rows for a run (docs/api-contract.md `/runs/{id}/artifacts`,
+	/// issue #299). Viewer+, matching every other run read. Only <c>scan</c> jobs produce
+	/// artifacts (issue #275's attest/convert stages) -- other job types in the run are
+	/// simply absent from the list, not represented as an empty/zeroed row. CAT I/II/III
+	/// counts are parsed from the job's HDF report (<see cref="HdfSeverityCounter"/>) when
+	/// one exists AND parses; when the HDF is absent or present-but-corrupt the row reports
+	/// <c>counts_available: false</c> with null counts ("could not count"), never a
+	/// fabricated zero (issue #299 round-1 blocker). <c>artifact_kinds</c>
+	/// reflects exactly which files this run has TODAY under <see cref="ScanOptions.ArtifactStorePath"/>
+	/// -- what <c>GET /jobs/{id}/artifacts/{kind}</c> can actually serve, not what the
+	/// pipeline will eventually produce.
+	/// </summary>
+	[HttpGet("{id:guid}/artifacts")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(RunArtifactResponse[]), StatusCodes.Status200OK)]
+	public async Task<ActionResult<IReadOnlyList<RunArtifactResponse>>> GetArtifacts(Guid id, CancellationToken cancellationToken)
+	{
+		RunSummary? run = await _repository.GetRunAsync(id, cancellationToken).ConfigureAwait(false);
+		if (run is null)
+		{
+			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+		}
+
+		IReadOnlyList<JobSummary> jobs = await _repository.GetJobsForRunAsync(id, cancellationToken).ConfigureAwait(false);
+		List<RunArtifactResponse> rows = [];
+		foreach (JobSummary job in jobs)
+		{
+			if (!string.Equals(job.JobType, ScanJobType, StringComparison.Ordinal))
+			{
+				continue;
+			}
+
+			rows.Add(await BuildArtifactRowAsync(job, cancellationToken).ConfigureAwait(false));
+		}
+
+		return Ok(rows);
+	}
+
+	/// <summary>
+	/// The full attestations-applied ledger for a run (docs/api-contract.md
+	/// `/runs/{id}/attestations-applied`: "Waivers that fired: control, scope,
+	/// justification, author/version, expired-skips"). Viewer+.
+	///
+	/// There is no persisted per-control waiver ledger anywhere in this codebase to read
+	/// back -- config-docs resolve as whole YAML bodies per (kind, profile, layer), never
+	/// parsed per-control (docs/domain-model.md, <c>ConfigDocsController.Resolve</c>'s own
+	/// doc comment), and the attest stage (#275) records only a free-text <c>jobs.note</c>
+	/// summary plus one aggregate <c>job.log</c> WARN line, neither of which carries
+	/// scope/justification/author/version structurally. This action instead derives the
+	/// ledger LIVE, per scanned target in the run, by re-running the exact same
+	/// <see cref="ConfigDocResolver.Resolve"/> call <c>ScanJobHandler.ExecuteAttestStageAsync</c>
+	/// made when the job actually ran -- the same live-resolution approach
+	/// <c>frontend/src/screens/results/results.ts</c>'s <c>fetchAttestationResolution</c>
+	/// stand-in already takes against <c>/config-docs/resolve</c> directly (see that
+	/// module's doc comment). One row is emitted per scan job whose target has an
+	/// attestation config-doc resolved (applied or expired-and-skipped) at ANY of the
+	/// three layers -- a target with no attestation doc anywhere contributes no row.
+	/// <c>control</c> carries the fixed <see cref="ScanOptions.AttestationProfile"/> name,
+	/// not a per-control STIG id: there is no control-enumeration catalog in this codebase
+	/// to join the resolved waiver against (flagged in this issue's PR body as a
+	/// documented gap, not silently invented).
+	///
+	/// Because this is live resolution and not recorded history, the WIRE says so (not just
+	/// this code comment): each row carries <c>derivation: "live-resolution"</c> and a
+	/// <c>resolved_at</c> = request time, and the config-doc's last-edit time is surfaced
+	/// only as <c>attestation_updated_at</c>, never mislabeled <c>applied_at</c> -- so a
+	/// consumer can tell that a later edit to an attestation rewrites what this "historical"
+	/// endpoint reports. The persisted at-scan-time ledger (the real fix) is issue #306.
+	/// </summary>
+	[HttpGet("{id:guid}/attestations-applied")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(AppliedAttestationResponse[]), StatusCodes.Status200OK)]
+	public async Task<ActionResult<IReadOnlyList<AppliedAttestationResponse>>> GetAttestationsApplied(Guid id, CancellationToken cancellationToken)
+	{
+		RunSummary? run = await _repository.GetRunAsync(id, cancellationToken).ConfigureAwait(false);
+		if (run is null)
+		{
+			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+		}
+
+		IReadOnlyList<JobSummary> jobs = await _repository.GetJobsForRunAsync(id, cancellationToken).ConfigureAwait(false);
+		string profile = _scanOptions.Value.AttestationProfile;
+		DateTimeOffset now = DateTimeOffset.UtcNow;
+
+		List<AppliedAttestationResponse> rows = [];
+		foreach (JobSummary job in jobs)
+		{
+			if (!string.Equals(job.JobType, ScanJobType, StringComparison.Ordinal) || job.TargetId is not { } targetIdText
+				|| !Guid.TryParse(targetIdText, out Guid targetId))
+			{
+				continue;
+			}
+
+			Target? target = await _targets.GetAsync(targetId, cancellationToken).ConfigureAwait(false);
+			if (target is null)
+			{
+				continue;
+			}
+
+			ConfigDocWithLatestVersion? global = await _configDocs
+				.FindWithLatestVersionAsync(ConfigDocKinds.Attestation, profile, ConfigDocLayers.Global, null, cancellationToken).ConfigureAwait(false);
+			ConfigDocWithLatestVersion? site = await _configDocs
+				.FindWithLatestVersionAsync(ConfigDocKinds.Attestation, profile, ConfigDocLayers.Site, target.SiteId, cancellationToken).ConfigureAwait(false);
+			ConfigDocWithLatestVersion? targetDoc = await _configDocs
+				.FindWithLatestVersionAsync(ConfigDocKinds.Attestation, profile, ConfigDocLayers.Target, target.Id, cancellationToken).ConfigureAwait(false);
+
+			if (global is null && site is null && targetDoc is null)
+			{
+				continue;
+			}
+
+			ConfigDocResolution resolution = ConfigDocResolver.Resolve(
+				ConfigDocKinds.Attestation, profile, global, site, targetDoc, now);
+			rows.Add(MapAttestation(target, resolution, now));
+		}
+
+		return Ok(rows);
+	}
+
+	/// <summary>Pause dispatch for a run. Operator+ (own runs), Admin any — see
 	/// <see cref="EnforceRunOwnership"/>.
 	/// </summary>
 	[HttpPost("{id:guid}/pause")]
@@ -553,6 +691,95 @@ public sealed class RunsController : ControllerBase
 			JobCountCompleted: run.JobCountCompleted,
 			JobCountFailed: run.JobCountFailed,
 			JobCountBlocked: run.JobCountBlocked);
+	}
+
+	/// <summary>
+	/// Builds one <see cref="RunArtifactResponse"/> row for a <c>scan</c> job: resolves
+	/// the target's kind to look up <see cref="ScanOptions.BenchmarkMetadata"/> for a
+	/// benchmark label, checks the artifact store for whichever of the HDF/CKL files
+	/// currently exist, and parses CAT I/II/III counts from the HDF when present.
+	/// </summary>
+	private async Task<RunArtifactResponse> BuildArtifactRowAsync(JobSummary job, CancellationToken cancellationToken)
+	{
+		string artifactStorePath = _scanOptions.Value.ArtifactStorePath;
+		string? hdfPath = ScanArtifactPaths.ResolveHdf(artifactStorePath, job.Id);
+		string cklPath = ScanArtifactPaths.Ckl(artifactStorePath, job.Id);
+
+		List<string> kinds = [];
+		if (hdfPath is not null)
+		{
+			kinds.Add(ScanArtifactHdfKind);
+		}
+
+		if (System.IO.File.Exists(cklPath))
+		{
+			kinds.Add(ScanArtifactCklKind);
+		}
+
+		// null == uncountable (HDF absent, or present-but-unparseable): the wire must NOT
+		// present that as CAT I/II/III = 0 (issue #299 round-1 blocker). counts_available
+		// gates the counts; a corrupt HDF reads as "could not count", never as compliant.
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(hdfPath);
+
+		string? benchmark = null;
+		if (job.TargetId is { } targetIdText && Guid.TryParse(targetIdText, out Guid targetId))
+		{
+			Target? target = await _targets.GetAsync(targetId, cancellationToken).ConfigureAwait(false);
+			if (target is not null && _scanOptions.Value.BenchmarkMetadata.TryGetValue(target.Kind, out ScanBenchmarkMetadata? metadata))
+			{
+				benchmark = metadata.Title ?? metadata.BenchmarkId;
+			}
+		}
+
+		return new RunArtifactResponse(
+			JobId: job.Id.ToString(),
+			Target: job.TargetName ?? job.TargetId ?? UnknownTargetLabel,
+			Benchmark: benchmark,
+			CountsAvailable: counts is not null,
+			CatIOpen: counts?.CatIOpen,
+			CatIIOpen: counts?.CatIIOpen,
+			CatIIIOpen: counts?.CatIIIOpen,
+			ArtifactKinds: kinds,
+			UploadStatus: StigManagerUploadStatus(job.State));
+	}
+
+	/// <summary>
+	/// STIG Manager upload status derived from job state -- the real upload integration is
+	/// issue #25, not yet built, so <c>"uploaded"</c> here means "artifacts ready"
+	/// (<c>ScanJobHandler</c>'s own terminal-state doc comment), never a confirmed HTTP
+	/// upload. <c>"conflict"</c> is never returned: only a real upload attempt can report
+	/// a 409-shaped conflict, and none happens yet.
+	/// </summary>
+	private static string StigManagerUploadStatus(string jobState) => jobState switch
+	{
+		JobStates.Uploaded or JobStates.Done => "uploaded",
+		JobStates.Failed or JobStates.AuthFailed => "not-uploaded",
+		_ => "pending",
+	};
+
+	private const string LiveResolutionDerivation = "live-resolution";
+
+	/// <summary>
+	/// Maps a live config-doc resolution to a wire row. The wire is explicit that this is
+	/// current resolution, not recorded history (issue #299 round-1 blocker, #306): it emits
+	/// <c>derivation: "live-resolution"</c> and a <c>resolved_at</c> stamped from
+	/// <paramref name="resolvedAt"/> (this request's clock), and it surfaces the config-doc's
+	/// last-edit time only as <c>attestation_updated_at</c> -- never as an <c>applied_at</c>
+	/// that would misrepresent a doc-edit time as a scan-time application time.
+	/// </summary>
+	private static AppliedAttestationResponse MapAttestation(Target target, ConfigDocResolution resolution, DateTimeOffset resolvedAt)
+	{
+		return new AppliedAttestationResponse(
+			Control: resolution.Profile,
+			Scope: resolution.Layer ?? ConfigDocLayers.Global,
+			Coverage: target.Name,
+			Justification: resolution.Body ?? string.Empty,
+			Author: resolution.Author ?? string.Empty,
+			Version: resolution.Version ?? 0,
+			Derivation: LiveResolutionDerivation,
+			ResolvedAt: resolvedAt.ToString("O", CultureInfo.InvariantCulture),
+			AttestationUpdatedAt: resolution.UpdatedAt?.ToString("O", CultureInfo.InvariantCulture),
+			Expired: resolution.AttestationExpired);
 	}
 
 	private static JobResponse MapJob(JobSummary job)

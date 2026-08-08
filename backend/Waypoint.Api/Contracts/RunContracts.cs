@@ -224,3 +224,113 @@ public sealed record ResumeBlockedResponse(
 
 	[property: JsonPropertyName("resumed_job_count")]
 	int ResumedJobCount);
+
+/// <summary>
+/// One target row of <c>GET /api/v1/runs/{id}/artifacts</c> (issue #299, docs/api-contract.md
+/// "CKL/HDF download"). Matches <c>frontend/src/screens/results/results.ts</c>'s
+/// <c>RunArtifactRow</c> field-for-field -- that module was built against this documented
+/// shape ahead of the backend landing it (issue #27/#300). Only <c>scan</c>-type jobs
+/// produce artifacts; other job types in the run are simply absent from this list.
+/// </summary>
+public sealed record RunArtifactResponse(
+	[property: JsonPropertyName("job_id")]
+	string JobId,
+
+	[property: JsonPropertyName("target")]
+	string Target,
+
+	[property: JsonPropertyName("benchmark")]
+	string? Benchmark,
+
+	/// <summary>
+	/// <c>false</c> when the HDF is absent or present-but-unparseable -- the CAT counts
+	/// below are then <c>null</c> and mean "could not count", NOT zero (issue #299
+	/// round-1 blocker: a corrupt HDF must never render as a clean, compliant row). A
+	/// consumer must gate on this before trusting the counts.
+	/// </summary>
+	[property: JsonPropertyName("counts_available")]
+	bool CountsAvailable,
+
+	[property: JsonPropertyName("cat_i_open")]
+	int? CatIOpen,
+
+	[property: JsonPropertyName("cat_ii_open")]
+	int? CatIIOpen,
+
+	[property: JsonPropertyName("cat_iii_open")]
+	int? CatIIIOpen,
+
+	/// <summary>Which of <c>hdf</c>/<c>ckl</c> currently have a file on disk for this job -- what <c>GET /jobs/{id}/artifacts/{kind}</c> can actually serve.</summary>
+	[property: JsonPropertyName("artifact_kinds")]
+	IReadOnlyList<string> ArtifactKinds,
+
+	/// <summary>
+	/// STIG Manager upload status derived from job state (docs/api-contract.md): the real
+	/// upload integration is issue #25, not yet built, so this is <c>"pending"</c> until
+	/// the job reaches its <c>uploaded</c>/<c>done</c> terminal ("artifacts ready", per
+	/// <c>ScanJobHandler</c>'s doc comment) and <c>"not-uploaded"</c> on a failed job --
+	/// never <c>"conflict"</c>, which only a real upload attempt can report.
+	/// </summary>
+	[property: JsonPropertyName("upload_status")]
+	string UploadStatus);
+
+/// <summary>
+/// One waiver row of <c>GET /api/v1/runs/{id}/attestations-applied</c> (issue #299,
+/// docs/domain-model.md: "Results lists expired attestations explicitly"). There is no
+/// per-control waiver ledger persisted anywhere -- config-docs resolve as whole YAML
+/// bodies per (kind, profile, layer), never parsed per-control (issue #266's
+/// <c>ConfigDocsController.Resolve</c> doc comment), and the attest stage (#275) records
+/// only a free-text <c>jobs.note</c> summary plus a <c>job.log</c> WARN line, not a
+/// structured ledger. This response is therefore derived live, per scanned target in the
+/// run, by re-running the same <c>ConfigDocResolver.Resolve</c> the attest stage itself
+/// used -- one row per (target, resolved-or-expired-attestation) pair, mirroring exactly
+/// what <c>frontend/src/screens/results/results.ts</c>'s <c>fetchAttestationResolution</c>
+/// stand-in already does client-side against <c>/config-docs/resolve</c> (see that
+/// module's doc comment). <c>control</c> is always the fixed <see cref="Waypoint.Core.Scans.ScanOptions.AttestationProfile"/>
+/// profile name, not a per-control id -- there is no control-enumeration catalog in this
+/// codebase to join against (see this PR's body for the acknowledged gap).
+///
+/// <para>
+/// This response is CURRENT RESOLUTION, not recorded at-scan-time history: <see cref="Derivation"/>
+/// is the constant <c>"live-resolution"</c> and <see cref="ResolvedAt"/> is when THIS request
+/// resolved it, so an API consumer can tell that an attestation edited after the run silently
+/// rewrites what this endpoint reports (issue #299 round-1 blocker). There is deliberately no
+/// <c>applied_at</c> field -- the config-doc's last-edit time (<see cref="AttestationUpdatedAt"/>)
+/// is exactly that, a doc-edit time, and must not be presented as a scan-time application time.
+/// The persisted at-scan-time ledger that WOULD carry a true <c>applied_at</c> is tracked as
+/// issue #306.
+/// </para>
+/// </summary>
+public sealed record AppliedAttestationResponse(
+	[property: JsonPropertyName("control")]
+	string Control,
+
+	[property: JsonPropertyName("scope")]
+	string Scope,
+
+	[property: JsonPropertyName("coverage")]
+	string Coverage,
+
+	[property: JsonPropertyName("justification")]
+	string Justification,
+
+	[property: JsonPropertyName("author")]
+	string Author,
+
+	[property: JsonPropertyName("version")]
+	int Version,
+
+	/// <summary>Always <c>"live-resolution"</c>: derived by re-resolving the config-doc at request time, not read from a recorded scan-time ledger (#306).</summary>
+	[property: JsonPropertyName("derivation")]
+	string Derivation,
+
+	/// <summary>When THIS request resolved the attestation (ISO-8601). NOT a scan-time application time -- see <see cref="Derivation"/>.</summary>
+	[property: JsonPropertyName("resolved_at")]
+	string ResolvedAt,
+
+	/// <summary>The attestation config-doc's own last-modified time (its version timestamp), NOT when it was applied to any scan.</summary>
+	[property: JsonPropertyName("attestation_updated_at")]
+	string? AttestationUpdatedAt,
+
+	[property: JsonPropertyName("expired")]
+	bool Expired);

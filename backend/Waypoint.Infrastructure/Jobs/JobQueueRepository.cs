@@ -597,6 +597,41 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		return jobs;
 	}
 
+	public async Task<JobSummary?> GetJobAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT
+				id, run_id, job_type, target_id, target_name,
+				state, stage, priority, attempt_count,
+				created_at::text, started_at::text, finished_at::text
+			FROM jobs
+			WHERE id = $1
+			""", connection);
+		command.Parameters.AddWithValue(jobId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			return null;
+		}
+
+		return new JobSummary(
+			Id: reader.GetGuid(0),
+			RunId: reader.IsDBNull(1) ? null : reader.GetGuid(1),
+			JobType: reader.GetString(2),
+			TargetId: reader.IsDBNull(3) ? null : reader.GetGuid(3).ToString(),
+			TargetName: reader.IsDBNull(4) ? null : reader.GetString(4),
+			State: reader.GetString(5),
+			Stage: reader.IsDBNull(6) ? null : reader.GetString(6),
+			Priority: reader.GetInt16(7),
+			AttemptCount: reader.GetInt32(8),
+			CreatedAt: reader.GetString(9),
+			StartedAt: reader.IsDBNull(10) ? null : reader.GetString(10),
+			FinishedAt: reader.IsDBNull(11) ? null : reader.GetString(11));
+	}
+
 	public async Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(workerId);

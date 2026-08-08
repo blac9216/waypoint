@@ -119,6 +119,14 @@ public interface IJobQueueRepository
 	/// </summary>
 	Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken);
 
+	/// <summary>
+	/// A single job by id, or <c>null</c> when it does not exist -- the projection
+	/// <c>GET /jobs/{id}/artifacts/{kind}</c> (issue #299) needs to confirm a job exists
+	/// (and read its <see cref="JobSummary.TargetId"/>/<see cref="JobSummary.State"/>)
+	/// without requiring the caller to already know its run.
+	/// </summary>
+	Task<JobSummary?> GetJobAsync(Guid jobId, CancellationToken cancellationToken);
+
 	/// <summary>Creates a pending run and returns its identifier.</summary>
 	Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken);
 
