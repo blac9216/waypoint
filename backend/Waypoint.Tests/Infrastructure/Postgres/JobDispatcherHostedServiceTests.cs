@@ -278,6 +278,89 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		}
 	}
 
+	/// <summary>
+	/// Issue #234: a running job's per-job cancel_requested flag (set by
+	/// <see cref="IJobQueueRepository.CancelJobAsync"/>, the DELETE /downloads/{id} path)
+	/// is observed by the heartbeat loop -- same tick as the pre-existing run-abort
+	/// check -- and stops the handler promptly, releases the lease, and lands the job in
+	/// 'cancelled' with a note that names cancel-by-request rather than run-abort. The
+	/// run itself is untouched (mirrors AbortRun_CancelsLocallyRunningHandlerAndJob, but
+	/// exercises the per-job signal instead of the run-scoped one).
+	/// </summary>
+	[Fact]
+	public async Task CancelRequested_ObservedMidRun_StopsPromptlyAndReleasesLease()
+	{
+		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
+		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
+		TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		FakeJobHandler handler = new("download", async (_, ct) =>
+		{
+			entered.SetResult();
+			await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+			return JobExecutionOutcome.Succeeded();
+		});
+		JobDispatcherHostedService dispatcher = CreateDispatcher(
+			new JobEngineOptions { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(25), HeartbeatInterval = TimeSpan.FromMilliseconds(50) },
+			handler);
+
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await entered.Task.WaitAsync(PollTimeout);
+
+			// The DELETE /downloads/{id} path: request cancel of the running job directly,
+			// without touching the run.
+			JobCancelOutcome outcome = await _repository.CancelJobAsync(jobId, CancellationToken.None);
+			Assert.Equal(JobCancelOutcome.CancelRequested, outcome);
+
+			await PollUntilAsync(() => GetJobStateAsync(jobId), state => state == JobStates.Cancelled);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		string? note = await GetJobNoteAsync(jobId);
+		Assert.Contains("Cancelled by request", note, StringComparison.Ordinal);
+
+		// Result discarded, lease released, run untouched (per-job cancel never aborts the run).
+		Assert.Null(await GetJobLeaseExpiresAtAsync(jobId));
+		Assert.NotEqual("aborted", await GetRunStateAsync(runId));
+	}
+
+	/// <summary>Run-scoped abort must keep working unchanged now that a second, per-job cancel signal shares the same heartbeat tick.</summary>
+	[Fact]
+	public async Task RunScopedAbort_StillCancelsInFlightWork_AlongsidePerJobSignal()
+	{
+		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
+		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
+		TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		FakeJobHandler handler = new("download", async (_, ct) =>
+		{
+			entered.SetResult();
+			await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+			return JobExecutionOutcome.Succeeded();
+		});
+		JobDispatcherHostedService dispatcher = CreateDispatcher(
+			new JobEngineOptions { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(25), HeartbeatInterval = TimeSpan.FromMilliseconds(50) },
+			handler);
+
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await entered.Task.WaitAsync(PollTimeout);
+			await dispatcher.AbortRunAsync(runId, CancellationToken.None);
+			await PollUntilAsync(() => GetJobStateAsync(jobId), state => state == JobStates.Cancelled);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		string? note = await GetJobNoteAsync(jobId);
+		Assert.Contains("run aborted", note, StringComparison.Ordinal);
+	}
+
 	[Fact]
 	public async Task ThirdAuthFailure_BlocksRemainingQueueAndEmitsOperatorEvents()
 	{
@@ -419,6 +502,25 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		await using NpgsqlCommand command = new("SELECT blocked FROM runs WHERE id = $1", connection);
 		command.Parameters.AddWithValue(runId);
 		return (bool)(await command.ExecuteScalarAsync())!;
+	}
+
+	private async Task<string> GetRunStateAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT state FROM runs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(runId);
+		return (string)(await command.ExecuteScalarAsync())!;
+	}
+
+	private async Task<DateTime?> GetJobLeaseExpiresAtAsync(Guid jobId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT lease_expires_at FROM jobs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(jobId);
+		object? result = await command.ExecuteScalarAsync();
+		return result as DateTime?;
 	}
 
 	private static async Task PollUntilAsync<T>(Func<Task<T>> probe, Func<T, bool> isDone)

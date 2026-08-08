@@ -290,4 +290,65 @@ public sealed class RunFanOutPauseAbortTests : IAsyncLifetime
 		Assert.Empty(result.CancelledJobIds);
 		Assert.Empty(result.InFlightJobIds);
 	}
+
+	/// <summary>
+	/// Issue #234, repository layer: a queued job still cancels immediately and cleanly
+	/// -- no regression from adding the running-job cancel_requested path alongside it.
+	/// </summary>
+	[Fact]
+	public async Task CancelJobAsync_Queued_CancelsImmediately()
+	{
+		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
+		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
+
+		JobCancelOutcome outcome = await _repository.CancelJobAsync(jobId, CancellationToken.None);
+
+		Assert.Equal(JobCancelOutcome.Cancelled, outcome);
+		Assert.Equal(JobStates.Cancelled, await GetJobStateAsync(jobId));
+		Assert.False(await _repository.IsCancelRequestedAsync(jobId, CancellationToken.None));
+	}
+
+	/// <summary>
+	/// Issue #234: cancelling an already-running job does not move its state (only the
+	/// dispatcher's heartbeat loop does that, cooperatively) -- it sets cancel_requested
+	/// and reports <see cref="JobCancelOutcome.CancelRequested"/> so the caller knows the
+	/// job is still in flight and will stop on its own.
+	/// </summary>
+	[Fact]
+	public async Task CancelJobAsync_Running_SetsCancelRequestedRatherThanChangingState()
+	{
+		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
+		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
+		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("worker-1", TimeSpan.FromMinutes(5), CancellationToken.None));
+		Assert.Equal(jobId, claimed.Id);
+
+		Assert.False(await _repository.IsCancelRequestedAsync(jobId, CancellationToken.None));
+
+		JobCancelOutcome outcome = await _repository.CancelJobAsync(jobId, CancellationToken.None);
+
+		Assert.Equal(JobCancelOutcome.CancelRequested, outcome);
+		Assert.Equal(JobStates.Running, await GetJobStateAsync(jobId));
+		Assert.True(await _repository.IsCancelRequestedAsync(jobId, CancellationToken.None));
+	}
+
+	/// <summary>A terminal job is left alone -- cancel_requested is meaningless once the job has already finished.</summary>
+	[Fact]
+	public async Task CancelJobAsync_Terminal_IsNotCancellableAndUnchanged()
+	{
+		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
+		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
+		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("worker-1", TimeSpan.FromMinutes(5), CancellationToken.None));
+		Assert.True(await _repository.AdvanceStateAsync(claimed.Id, "worker-1", JobStates.Running, JobStates.Done, "ok", clearLease: true, CancellationToken.None));
+
+		JobCancelOutcome outcome = await _repository.CancelJobAsync(jobId, CancellationToken.None);
+
+		Assert.Equal(JobCancelOutcome.NotCancellable, outcome);
+		Assert.Equal(JobStates.Done, await GetJobStateAsync(jobId));
+	}
+
+	[Fact]
+	public async Task IsCancelRequestedAsync_UnknownJob_ReturnsFalse()
+	{
+		Assert.False(await _repository.IsCancelRequestedAsync(Guid.NewGuid(), CancellationToken.None));
+	}
 }

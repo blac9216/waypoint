@@ -245,6 +245,12 @@ public sealed class CatalogFakeJobQueueRepository : IJobQueueRepository
 		return Task.FromResult(true);
 	}
 
+	public Task<bool> IsCancelRequestedAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		_ = (jobId, cancellationToken);
+		return Task.FromResult(false);
+	}
+
 	public Task<bool> AdvanceStateAsync(Guid jobId, string workerId, string expectedFromState, string toState, string? note, bool clearLease, CancellationToken cancellationToken)
 	{
 		_ = (jobId, workerId, expectedFromState, toState, note, clearLease, cancellationToken);
