@@ -229,3 +229,11 @@ export function apiGet<T>(path: string, options?: ApiRequestOptions): Promise<T>
 export function apiPost<T>(path: string, body?: unknown, options?: ApiRequestOptions): Promise<T> {
 	return apiFetch<T>(path, { ...options, method: "POST", body });
 }
+
+export function apiPut<T>(path: string, body?: unknown, options?: ApiRequestOptions): Promise<T> {
+	return apiFetch<T>(path, { ...options, method: "PUT", body });
+}
+
+export function apiDelete<T = void>(path: string, options?: ApiRequestOptions): Promise<T> {
+	return apiFetch<T>(path, { ...options, method: "DELETE" });
+}
