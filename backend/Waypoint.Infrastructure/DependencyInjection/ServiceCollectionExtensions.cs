@@ -63,6 +63,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<PowerShellOptions>()
 			.Bind(configuration.GetSection(PowerShellOptions.SectionName));
 
+		services.AddOptions<CatalogOptions>()
+			.Bind(configuration.GetSection(CatalogOptions.SectionName));
+
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
 		// One scrubber instance serves both sides of security.md control 1: sinks read
@@ -128,6 +131,12 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<ILogger<JobEventStreamService>>()));
 			services.AddSingleton<IJobEventFeed>(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
+
+			// The first production job handler registration (issue #194, epic #9 slice
+			// 2) -- constructed and registered here, not self-registering, the same
+			// pattern PowerShellJobHandler's doc comment describes for the real job
+			// types (jobs.job_type is a closed CHECK set with no generic member).
+			services.AddSingleton<IJobHandler, Catalog.CatalogIndexJobHandler>();
 
 			services.AddSingleton<JobDispatcherHostedService>();
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());

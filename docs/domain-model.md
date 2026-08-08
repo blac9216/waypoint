@@ -142,9 +142,6 @@ design, not by configuration.
 2. **Retention**: how long do run logs/results live in Postgres before pruning/archival
    (CKL/HDF artifacts may also live on disk under `/reports` as today)?
 3. **Inventory staleness policy**: hard max age before a scan forces re-discovery?
-4. **Depot index without the tool**: the catalog is designed to stay browsable
-   (index-only) when the download tool is absent — verify at M5 whether building the
-   index itself requires the tool.
 
 Resolved:
 
@@ -153,3 +150,19 @@ Resolved:
   in the appliance image (2026-08-02). The prototype's install flow applies: install
   from local repo / fetch from depot (connected) / manual upload with signature
   verification. The appliance image carries no Broadcom binaries.
+- ~~Depot index without the tool~~ → **confirmed: building the index does NOT require
+  the download tool** (2026-08-08, issue #194). `catalog-index` calls
+  `vcf-docker-download`'s `Get-FileManifest` (`vcf-download-manager.common.ps1`), which
+  is a pure filesystem walk (`Get-ChildItem -Recurse` + optional `Get-FileHash`) over
+  files already present on the depot share — it never shells out to
+  `vcf-download-tool` or any other vendor binary, and takes no depot-token parameter at
+  all. The adjacent vendor-catalog readers (`Get-VcsaLatestRelease` /
+  `Get-VcsaCatalogPath`) are the same shape: they parse a local
+  `productVersionCatalog.json` already on disk, not a live vendor call. The download
+  tool (and the depot token) is only needed to *populate or refresh* depot content in
+  the first place — a distinct, already-resolved concern (previous bullet) — not to
+  read back what is already there. This is why `GET /catalog/artifacts` stays
+  browsable with the tool absent, and why `catalog-index`'s depot-token parameter
+  (threaded through under security.md controls 1/2 for forward compatibility with a
+  future vendor-catalog-refresh addition) is accepted but unused by the indexing walk
+  itself.
