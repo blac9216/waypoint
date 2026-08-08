@@ -39,18 +39,52 @@ public sealed class PostgresFixture : IAsyncLifetime
 
 	public async Task InitializeAsync()
 	{
-		int port = ApiProcess.GetFreePort();
-		string host = Environment.GetEnvironmentVariable("WAYPOINT_TEST_PG_HOST") ?? "127.0.0.1";
-		ConnectionString =
-			$"Host={host};Port={port};Database=waypoint_test;Username=waypoint_test;Password=waypoint_test";
+		string? network = Environment.GetEnvironmentVariable("WAYPOINT_TEST_PG_NETWORK");
 
-		await RunDockerAsync(
-			"run", "-d", "--name", _containerName,
-			"-e", "POSTGRES_USER=waypoint_test",
-			"-e", "POSTGRES_PASSWORD=waypoint_test",
-			"-e", "POSTGRES_DB=waypoint_test",
-			"-p", $"{port}:5432",
-			"postgres:16-alpine").ConfigureAwait(false);
+		if (string.IsNullOrEmpty(network))
+		{
+			int port = ApiProcess.GetFreePort();
+			string host = Environment.GetEnvironmentVariable("WAYPOINT_TEST_PG_HOST") ?? "127.0.0.1";
+			ConnectionString =
+				$"Host={host};Port={port};Database=waypoint_test;Username=waypoint_test;Password=waypoint_test";
+
+			await RunDockerAsync(
+				"run", "-d", "--name", _containerName,
+				"-e", "POSTGRES_USER=waypoint_test",
+				"-e", "POSTGRES_PASSWORD=waypoint_test",
+				"-e", "POSTGRES_DB=waypoint_test",
+				"-p", $"{port}:5432",
+				"postgres:16-alpine").ConfigureAwait(false);
+		}
+		else
+		{
+			// Bridge-networked test process (e.g. a devcontainer): published host ports
+			// can be unreachable in both directions (inter-bridge isolation + host DNAT),
+			// so join the given network and dial the container's own address on 5432 —
+			// a unique IP per container, so concurrent test runs on one host cannot
+			// collide. See docs/testing.md.
+			await RunDockerAsync(
+				"run", "-d", "--name", _containerName,
+				"-e", "POSTGRES_USER=waypoint_test",
+				"-e", "POSTGRES_PASSWORD=waypoint_test",
+				"-e", "POSTGRES_DB=waypoint_test",
+				"--network", network,
+				"postgres:16-alpine").ConfigureAwait(false);
+
+			string address = (await RunDockerAsync(
+				"inspect", "--format",
+				$"{{{{(index .NetworkSettings.Networks \"{network}\").IPAddress}}}}",
+				_containerName).ConfigureAwait(false)).Trim();
+
+			if (address.Length == 0)
+			{
+				throw new InvalidOperationException(
+					$"Postgres test container '{_containerName}' has no address on network '{network}'.");
+			}
+
+			ConnectionString =
+				$"Host={address};Port=5432;Database=waypoint_test;Username=waypoint_test;Password=waypoint_test";
+		}
 
 		await WaitUntilReadyAsync().ConfigureAwait(false);
 	}
@@ -106,7 +140,7 @@ public sealed class PostgresFixture : IAsyncLifetime
 			$"Postgres test container '{_containerName}' did not become ready in time.", lastError);
 	}
 
-	private static async Task RunDockerAsync(params string[] arguments)
+	private static async Task<string> RunDockerAsync(params string[] arguments)
 	{
 		ProcessStartInfo startInfo = new("docker")
 		{
@@ -123,6 +157,7 @@ public sealed class PostgresFixture : IAsyncLifetime
 		using Process process = Process.Start(startInfo)
 			?? throw new InvalidOperationException("Failed to start the docker CLI process.");
 
+		Task<string> standardOutput = process.StandardOutput.ReadToEndAsync();
 		string standardError = await process.StandardError.ReadToEndAsync().ConfigureAwait(false);
 		await process.WaitForExitAsync().ConfigureAwait(false);
 
@@ -131,6 +166,8 @@ public sealed class PostgresFixture : IAsyncLifetime
 			throw new InvalidOperationException(
 				$"docker {string.Join(' ', arguments)} exited {process.ExitCode}: {standardError}");
 		}
+
+		return await standardOutput.ConfigureAwait(false);
 	}
 }
 
