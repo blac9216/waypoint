@@ -43,6 +43,9 @@ public static class JobEventTypes
 	/// <summary>Job-scoped (job_id required). Download byte/rate/ETA progress.</summary>
 	public const string DownloadProgress = "download.progress";
 
+	/// <summary>Job-scoped (job_id required). A <c>discover</c> job's item-count progress (issue #21, migration 0011).</summary>
+	public const string DiscoverProgress = "discover.progress";
+
 	/// <summary>Appliance-wide (job_id and run_id both NULL).</summary>
 	public const string SystemNotice = "system.notice";
 }

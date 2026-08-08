@@ -186,6 +186,34 @@ public sealed class TargetRepository
 		return result is not null ? TargetDeleteOutcome.Deleted : TargetDeleteOutcome.NotFound;
 	}
 
+	/// <summary>
+	/// Updates a target's <c>discovery_status</c> (issue #21's <c>discover</c> job
+	/// handler drives this: discovering -&gt; discovered|failed) and, when
+	/// <paramref name="stampLastRefreshed"/> is true, <c>last_refreshed</c> to now --
+	/// the staleness clock <see cref="Waypoint.Core.Discovery.DiscoveryOptions"/>
+	/// measures against. A transition into <c>discovering</c> does not stamp
+	/// <c>last_refreshed</c> (the refresh is not complete yet); the terminal
+	/// discovered/failed transition does.
+	/// </summary>
+	public async Task<bool> SetDiscoveryStatusAsync(Guid id, string discoveryStatus, bool stampLastRefreshed, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(discoveryStatus);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			$"""
+			UPDATE targets SET
+				discovery_status = $2,
+				last_refreshed = {(stampLastRefreshed ? "now()" : "last_refreshed")}
+			WHERE id = $1
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(id);
+		command.Parameters.AddWithValue(discoveryStatus);
+		return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+	}
+
 	private static Target Map(NpgsqlDataReader reader)
 	{
 		return new Target(

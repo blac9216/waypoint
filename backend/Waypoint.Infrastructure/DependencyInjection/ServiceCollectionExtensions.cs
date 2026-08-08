@@ -19,6 +19,7 @@ using Microsoft.Extensions.Options;
 using Waypoint.Core.Auth;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Configuration;
+using Waypoint.Core.Discovery;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -26,6 +27,7 @@ using Waypoint.Core.PowerShell;
 using Waypoint.Infrastructure.Auth;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Infrastructure.Discovery;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Sites;
@@ -72,6 +74,9 @@ public static class ServiceCollectionExtensions
 
 		services.AddOptions<DownloadOptions>()
 			.Bind(configuration.GetSection(DownloadOptions.SectionName));
+
+		services.AddOptions<DiscoveryOptions>()
+			.Bind(configuration.GetSection(DiscoveryOptions.SectionName));
 
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
@@ -135,6 +140,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Waypoint.Core.SystemState.IApplianceStateRepository>(new ApplianceStateRepository(connectionString));
 			services.AddSingleton(new SiteRepository(connectionString));
 			services.AddSingleton(new TargetRepository(connectionString));
+			services.AddSingleton(new InventoryRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
@@ -154,6 +160,7 @@ public static class ServiceCollectionExtensions
 			// types (jobs.job_type is a closed CHECK set with no generic member).
 			services.AddSingleton<IJobHandler, Catalog.CatalogIndexJobHandler>();
 			services.AddSingleton<IJobHandler, Downloads.DownloadJobHandler>();
+			services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 
 			services.AddSingleton<JobDispatcherHostedService>();
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());
