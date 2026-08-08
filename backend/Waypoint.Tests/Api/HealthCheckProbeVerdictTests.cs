@@ -50,10 +50,25 @@ public sealed class HealthCheckListenerFixture : IAsyncLifetime
 		{
 			while (_listener.IsListening)
 			{
+				HttpListenerContext context;
 				try
 				{
-					HttpListenerContext context = await _listener.GetContextAsync();
-					_responses.TryDequeue(out var response);
+					context = await _listener.GetContextAsync();
+				}
+				catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException or InvalidOperationException)
+				{
+					// Listener stopped during GetContextAsync — expected during DisposeAsync.
+					break;
+				}
+
+				// An unqueued request must not kill the serve loop for the rest of the
+				// collection — answer it with a deterministic 500 naming the misuse.
+				(HttpStatusCode Code, string Body) response = _responses.TryDequeue(out (HttpStatusCode Code, string Body) queued)
+					? queued
+					: (HttpStatusCode.InternalServerError, "{\"error\":\"HealthCheckListenerFixture: request arrived with no EnqueueResponse queued\"}");
+
+				try
+				{
 					byte[] payload = Encoding.UTF8.GetBytes(response.Body);
 					context.Response.StatusCode = (int)response.Code;
 					context.Response.ContentType = "application/json; charset=utf-8";
@@ -61,10 +76,10 @@ public sealed class HealthCheckListenerFixture : IAsyncLifetime
 					await context.Response.OutputStream.WriteAsync(payload);
 					context.Response.Close();
 				}
-				catch
+				catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException or IOException)
 				{
-					// Listener stopped during GetContextAsync — expected during DisposeAsync.
-					break;
+					// Client went away mid-response — serve the next request instead of
+					// dying and starving the rest of the collection.
 				}
 			}
 		});
@@ -108,6 +123,19 @@ public sealed class HealthCheckProbeVerdictTests(HealthCheckListenerFixture fixt
 	{
 		int verdict = await ProbeAsync(fixture, HttpStatusCode.OK, "{\"status\":\"ok\",\"version\":\"0.0.0-dev\"}");
 
+		Assert.Equal(0, verdict);
+	}
+
+	/// <summary>Issue #207: a request arriving with nothing enqueued must get a
+	/// deterministic 500, not kill the serve loop and starve every later test in
+	/// the collection.</summary>
+	[Fact]
+	public async Task UnqueuedRequest_Gets500AndLeavesTheListenerAlive()
+	{
+		int starved = await HealthCheckProbe.RunAsync($"{fixture.Prefix}api/v1/health");
+		Assert.Equal(1, starved);
+
+		int verdict = await ProbeAsync(fixture, HttpStatusCode.OK, "{\"status\":\"ok\",\"version\":\"0.0.0-dev\"}");
 		Assert.Equal(0, verdict);
 	}
 
