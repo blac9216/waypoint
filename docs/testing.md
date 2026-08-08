@@ -61,27 +61,34 @@ identifiers.
 ## The rule
 
 **Never run `deploy/docker-compose.yml` without isolating it.** Not "usually", not
-"unless you're quick". Every bring-up gets its own project name, its own container
-names, and its own host port.
+"unless you're quick". Every bring-up gets its own project name and its own host
+port.
 
-## Why `-p` alone does not work
+## Why `-p` alone used to not work — and now does
 
-The natural assumption — `docker compose -p my-name up` gives me my own stack — is
-**wrong here**, and that is the trap.
+The natural assumption — `docker compose -p my-name up` gives me my own stack — used
+to be **wrong here**, and it was a trap: `deploy/docker-compose.yml` used to set
+explicit `container_name:` values (`waypoint-nginx`, `waypoint-backend`,
+`waypoint-postgres`). Explicit container names are **not namespaced by the Compose
+project**. Networks and named volumes are (`<project>_edge`, `<project>_pgdata`), so
+`-p` looked like it worked — but the containers themselves were global, and a second
+stack would reuse and **recreate** the first one's containers.
 
-`deploy/docker-compose.yml` sets explicit `container_name:` values
-(`waypoint-nginx`, `waypoint-backend`, `waypoint-postgres`). Explicit container names
-are **not namespaced by the Compose project**. Networks and named volumes are
-(`<project>_edge`, `<project>_pgdata`), so `-p` looks like it worked — but the
-containers themselves are global. A second stack reuses and **recreates** the first
-one's containers.
+What that cost you was worse than an error message: it was a *plausible wrong
+result*. Someone else's healthy container answers your probe and you record a pass.
+Someone else recreates the backend mid-run and you record a failure that is not
+yours. Both look exactly like evidence. This happened for real between two agents —
+issue [#68](https://github.com/blac9216/waypoint/issues/68).
 
-What that costs you is worse than an error message: it is a *plausible wrong result*.
-Someone else's healthy container answers your probe and you record a pass. Someone
-else recreates the backend mid-run and you record a failure that is not yours. Both
-look exactly like evidence. This has already happened once between two agents
-(issue [#68](https://github.com/blac9216/waypoint/issues/68), which tracks the real
-fix; until it lands, the recipe below is the mitigation).
+**#68 is fixed: `deploy/docker-compose.yml` no longer sets `container_name:` on any
+service.** Without it, Compose derives container names from the project
+(`<project>-<service>-<n>`, e.g. `wp-issue3-fix-nginx-1`), which **is** namespaced by
+`-p`. `-p` alone now isolates containers, networks, and volumes together — the
+override-file workaround below is no longer needed and should not be reintroduced.
+Service-to-service traffic (nginx → `backend`, backend → `postgres`) was never
+affected either way: nginx resolves the Compose **service** name via Docker's
+embedded DNS (`resolver 127.0.0.11`, see `deploy/README.md` "Networking"), which has
+always been per-project, never per-`container_name`.
 
 ## The recipe
 
@@ -93,37 +100,18 @@ Pick a slug unique to your work — the issue you are on plus your role, e.g.
 SLUG=issue3-fix          # your unique slug
 PORT=18443               # your unique host port
 
-# 1. Override file: unique container names. Lives in /tmp, never in the repo.
-cat > /tmp/wp-$SLUG.override.yml <<EOF
-services:
-  nginx:
-    container_name: wp-$SLUG-nginx
-  backend:
-    container_name: wp-$SLUG-backend
-  postgres:
-    container_name: wp-$SLUG-postgres
-EOF
-
-# 2. Bring up: unique project (-p), unique names (override), unique port (env var).
+# Bring up: unique project (-p) + unique port (env var) is now sufficient.
 cd deploy
-WAYPOINT_HTTPS_PORT=$PORT docker compose -p wp-$SLUG \
-  -f docker-compose.yml -f /tmp/wp-$SLUG.override.yml up -d
+WAYPOINT_HTTPS_PORT=$PORT docker compose -p wp-$SLUG up -d
 ```
 
-Three independent things are being separated, and you need all three:
+Two independent things are being separated, and `-p` alone now covers both container
+identity and the rest of the project's namespaced resources:
 
 | Collides on | Isolated by |
 | --- | --- |
-| Container names | the override file (Compose does not namespace these) |
-| Networks, volumes | `-p wp-$SLUG` |
+| Container names, networks, volumes | `-p wp-$SLUG` |
 | Host port `8443` | `WAYPOINT_HTTPS_PORT=$PORT` |
-
-**Use an override file, not `sed` to strip `container_name`.** A stripped *copy* of
-the compose file placed outside `deploy/` breaks every relative bind mount
-(`./nginx/conf.d`, `./www`, …), because Compose resolves those against the first
-compose file's directory. The override approach keeps `deploy/docker-compose.yml`
-as the first `-f`, so paths still resolve — and you are testing the real file rather
-than a mutated one.
 
 ## Verify your isolation before you trust a result
 
@@ -132,16 +120,15 @@ anything**. Check it first:
 
 ```bash
 cd deploy
-WAYPOINT_HTTPS_PORT=$PORT docker compose -p wp-$SLUG \
-  -f docker-compose.yml -f /tmp/wp-$SLUG.override.yml config \
-  | grep -E "^name:|container_name:|published:"
+WAYPOINT_HTTPS_PORT=$PORT docker compose -p wp-$SLUG config \
+  | grep -E "^name:|published:"
 ```
 
-Expect your slug in every container name, your project in `name:`, and your port in
-`published:`. If you see `waypoint-nginx` or `8443`, stop — you are about to
-collide.
+Expect your project in `name:` and your port in `published:`. If you see `8443`
+where you expected your own port, stop — you are about to collide.
 
-Then confirm what is actually running is yours:
+Then confirm what is actually running is yours — Compose-derived names carry your
+project slug as a prefix (`wp-$SLUG-nginx-1`, etc.):
 
 ```bash
 docker ps --format '{{.Names}}\t{{.Ports}}'
@@ -162,7 +149,7 @@ condition, bounded, rather than sleeping a guessed interval:
 
 ```bash
 for _ in $(seq 60); do
-  [ "$(docker inspect -f '{{.State.Health.Status}}' wp-$SLUG-nginx 2>/dev/null)" = healthy ] && break
+  [ "$(docker inspect -f '{{.State.Health.Status}}' wp-$SLUG-nginx-1 2>/dev/null)" = healthy ] && break
   sleep 1
 done
 ```
@@ -180,9 +167,7 @@ everyone who trusts it.
   currently recording.
 - **Tear down only your own project**, and always:
   ```bash
-  cd deploy && docker compose -p wp-$SLUG \
-    -f docker-compose.yml -f /tmp/wp-$SLUG.override.yml down -v
-  rm -f /tmp/wp-$SLUG.override.yml
+  cd deploy && docker compose -p wp-$SLUG down -v
   ```
   `-v` drops your named volumes; without it, `pgdata` survives and the next run
   inherits state you did not intend.
