@@ -1,9 +1,8 @@
-import { useAuth } from "../lib/auth";
-import { roleGateProps } from "../lib/roles";
 import { PlaceholderScreen } from "./PlaceholderScreen";
 import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
 import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./configuration/ConfigurationScreen";
 import { LiveRunRoute } from "./liverun/LiveRunScreen";
+import { ResultsScreen as ResultsHistoryScreen } from "./results/ResultsScreen";
 import { StartScanScreen as StartScanWizardScreen } from "./startscan/StartScanScreen";
 
 export function DashboardScreen() {
@@ -19,20 +18,7 @@ export function StartScanScreen() {
 }
 
 export function ResultsScreen() {
-	const { user } = useAuth();
-	const gate = user ? roleGateProps(user.role, "Admin", "Requires Admin — remediation is not available to your role") : { disabled: true };
-	return (
-		<PlaceholderScreen
-			title="Results & History"
-			reads={["GET /api/v1/runs", "GET /api/v1/runs/{id}", "GET /api/v1/runs/{id}/attestations-applied"]}
-		>
-			{/* Demonstrates the README "Roles & Permissions" treatment: visible
-			    but disabled at opacity 0.42 with a reason, never hidden. */}
-			<button type="button" {...gate} style={{ ...gate.style, marginTop: 6 }}>
-				Remediate findings…
-			</button>
-		</PlaceholderScreen>
-	);
+	return <ResultsHistoryScreen />;
 }
 
 export function BenchmarksScreen() {
