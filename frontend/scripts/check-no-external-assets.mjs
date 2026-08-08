@@ -118,18 +118,58 @@
  * real UTF-8 text and always appears in binary containers and wide-encoded
  * text.
  *
- * THE RESIDUAL, STATED HONESTLY. Two things this model still cannot see, both
- * now the *only* blind spots rather than an open-ended list:
- *   1. A file that decodes as clean UTF-8 and smuggles a reference the URL
- *      regex cannot match — string concatenation (`"htt"+"ps://…"`), escape
- *      sequences (`\x68ttps://…`), a base64 `data:` payload, or an uppercase
- *      `HTTPS://` scheme (issue #105). These are properties of the *pattern*,
- *      not of file selection, and are tracked separately.
+ * PATTERN MATCHING IS CANONICALIZATION, NOT ENUMERATION (issues #110, #105).
+ * The same lesson the file-selection inversion taught applies one level
+ * down: `URL_PATTERN` used to recognise exactly one surface spelling of a
+ * scheme, so every *other* spelling — uppercase (#105), a JSON/JS `\/`
+ * escape, a `\x`/`\u` string escape, an HTML numeric entity — passed
+ * unseen. Rather than adding one regex alternative per obfuscation shape
+ * found (the list-patching move that took five rounds to abandon on the
+ * file-selection side), `canonicalizeForScan()` decodes text through the
+ * closed set of transforms a scheme survives in this toolchain's outputs
+ * BEFORE the pattern runs, so the pattern only ever needs to recognise the
+ * canonical spelling. See `canonicalizeForScan`'s own doc comment for the
+ * transform order and for the two shapes that remain genuinely out of
+ * reach — concatenation and runtime-computed strings (`fromCharCode`,
+ * `atob`) — which are not encodings of a literal at all, and so are not a
+ * pattern-matching problem no matter how the pattern is built.
+ *
+ * KNOWN-BINARY SIGNATURES ARE STRUCTURALLY VALIDATED WHEN THEY ARE SHORT
+ * (issue #121). A signature match alone licenses a `skip`, and `skip` files
+ * are only cleartext-scanned — so a signature short enough to appear by
+ * chance (ICO/CUR/TTF's 4-byte magics) could be worn over an arbitrary,
+ * e.g. compressed, payload with nothing to catch it. The fix is not one
+ * more byte of magic (there is no more real-format magic to add — that is
+ * the whole reason these are 4 bytes) but a `validate` step alongside the
+ * short signatures that checks the bytes are shaped like the *rest* of the
+ * format (an ICONDIR with a real directory entry, an sfnt table directory
+ * that fits the buffer), not just its first four bytes. Strong signatures
+ * (8 bytes, or bytes no valid UTF-8 could ever produce) have no `validate`
+ * and need none — see `matchesSignature`.
+ *
+ * THE RESIDUAL, STATED HONESTLY. What this model still cannot see, now the
+ * *only* blind spots rather than an open-ended list:
+ *   1. A reference assembled at runtime rather than written as a literal —
+ *      string concatenation (`"htt"+"ps://…"`), `String.fromCharCode(...)`,
+ *      a base64 `data:`/`atob()` payload. No static text transform resolves
+ *      these without executing the code; see `canonicalizeForScan`.
  *   2. A URL inside a file on `KNOWN_BINARY_SIGNATURES` that is not present
  *      in cleartext (e.g. a URL inside a compressed PNG `zTXt` chunk). The
  *      cleartext byte-scan in `scanDist` covers the uncompressed case; the
  *      compressed-metadata case is accepted, because an image cannot execute
  *      a fetch and the allowlist is short enough to reason about.
+ *
+ * SKIPPED FILES MAY CARRY INERT, SPEC-MANDATED METADATA URIS (issue #120).
+ * The cleartext backstop on `skip`-dispositioned files exists to catch a
+ * URL smuggled into a binary asset — but standard image metadata (XMP's RDF
+ * namespace, ICC profile fields, PNG `tEXt`/`iTXt`) is REQUIRED by its
+ * spec to contain URI-shaped strings that are never fetched. Conflating
+ * "looks like a URL" with "is a fetch target" false-positives on any
+ * ordinary designer-exported asset. `METADATA_NAMESPACE_ALLOWLIST` (distinct
+ * from the URL `ALLOWLIST` above it) exempts exactly that: it is consulted
+ * ONLY for `skip`-dispositioned files, never for `scan`-dispositioned ones,
+ * so it cannot weaken the strict JS/text scan the way widening the URL
+ * `ALLOWLIST` would (see that allowlist's own warning below).
  *
  * ALLOWLIST (URL): three narrow, exact exceptions for inert strings baked
  * into audited third-party dependencies (React, workbox-window) that this
@@ -144,7 +184,86 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const URL_PATTERN = /https?:\/\/[^\s"'`)<>\\]+/g;
+// The terminator class excludes whitespace, quoting/bracket punctuation, and
+// C0 control bytes (`\x00`-`\x1f`, `\x7f`) — the latter matters for the
+// cleartext byte-scan of `skip`-dispositioned binaries (issue #120): a URL
+// sitting in a PNG tEXt/XMP chunk is immediately followed by the chunk's CRC
+// and the next chunk's own binary header, which is exactly where control
+// bytes show up in an otherwise-cleartext region. Without excluding them the
+// match run-on swallows that trailing binary noise into the "URL", which
+// then fails an exact-match allowlist entry for a reason that has nothing to
+// do with the namespace URI itself.
+// oxlint(eslint/no-control-regex): intentional — see the comment above.
+const URL_PATTERN = /https?:\/\/[^\s"'`)<>\\\x00-\x1f\x7f]+/gi; // eslint-disable-line no-control-regex
+
+/**
+ * NORMALIZATION, NOT ENUMERATION — the fix for issues #110 and #105.
+ *
+ * #105 and #110 found the same disease this module's header already names for
+ * file selection: `URL_PATTERN` recognised exactly one surface spelling of a
+ * scheme (`https://` and `http://`, lowercase, contiguous, unescaped), so
+ * every OTHER spelling of the same bytes — uppercase, JSON's `\/` escape, a
+ * JS `\x`/`\u` string escape, an HTML numeric character reference — passed
+ * unseen. Adding one more regex alternative per shape found is the list-
+ * patching move this guard has already lost five times on the file-selection
+ * side; it does not converge, because the set of encodings is unbounded in
+ * exactly the way the set of opaque formats was.
+ *
+ * So this does not enumerate encodings. It CANONICALIZES: every text file is
+ * decoded through the small, closed set of transforms a URL scheme survives
+ * in this toolchain's outputs (case folding, HTML entity decoding, JS string
+ * escape decoding, JSON solidus-escape decoding) BEFORE `URL_PATTERN` ever
+ * runs, so the pattern only ever has to recognise one spelling: the
+ * canonical one. A new obfuscation shape built from these same primitives
+ * (nest an entity inside a hex escape, mix case with an escaped slash, ...)
+ * is caught for free, because canonicalization composes; a genuinely new
+ * *primitive* (a shape none of these transforms touches) is the same kind of
+ * residual the module header already documents for #110 — recorded honestly
+ * below, not silently claimed away.
+ *
+ * Two shapes are explicitly NOT handled here, and are not regressions to
+ * "fix" — they are not encodings of a literal at all, they are values
+ * assembled at *runtime*, which no static text scan (canonicalizing or not)
+ * can resolve without a JS interpreter:
+ *   - string concatenation (`"htt" + "ps://…"`) — the literal `https://`
+ *     never appears in the source text at all, encoded or otherwise.
+ *   - `String.fromCharCode(...)` / `atob()` / base64 `data:` payloads — the
+ *     scheme is computed, not written.
+ * These remain documented residuals (see the module header's "THE RESIDUAL,
+ * STATED HONESTLY"), not silent gaps: the difference between "we decode what
+ * you wrote" and "we execute what you wrote" is the line this guard draws.
+ *
+ * CANONICALIZATION ORDER — HTML entities first, then JS escapes, then
+ * solidus-unescaping, then case folding — matters because entities and JS
+ * escapes can each produce characters (`\`, `&`, digits) the other stage
+ * consumes; running HTML-entity decoding last would leave an entity-encoded
+ * backslash unavailable to the JS-escape stage, for instance. The order here
+ * is the one that lets each stage feed the next, which is what makes nested/
+ * combined obfuscation (e.g. an entity-encoded hex escape) fall out for free
+ * rather than needing its own case.
+ */
+function canonicalizeForScan(text) {
+	let out = text;
+
+	// HTML numeric character references: &#104; (decimal) / &#x68; (hex).
+	// Bounded to a small numeric run so this cannot runaway-match arbitrary
+	// text; every legitimate use (entity-encoded ASCII) fits comfortably.
+	out = out.replace(/&#x([0-9a-f]{1,6});/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+	out = out.replace(/&#([0-9]{1,7});/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)));
+
+	// JS string escapes: \xHH (hex byte) and \uHHHH / \u{H...} (unicode).
+	// These are what a minifier or an adversary writes to keep a literal out
+	// of a naive string scan while still producing it at parse time.
+	out = out.replace(/\\x([0-9a-f]{2})/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+	out = out.replace(/\\u\{([0-9a-f]{1,6})\}/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+	out = out.replace(/\\u([0-9a-f]{4})/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+
+	// JSON/JS-escaped solidus: `\/` is a legal (and common — several
+	// serializers/minifiers emit it by default) encoding of a literal `/`.
+	out = out.replace(/\\\//g, "/");
+
+	return out;
+}
 
 /**
  * THE SKIP ALLOWLIST — binary asset types this build legitimately emits,
@@ -219,19 +338,32 @@ const KNOWN_BINARY_SIGNATURES = [
 		// ICONDIR: reserved(0x0000) + type, little-endian — 1 = icon, 2 =
 		// cursor. Both types spelled out; a wildcard here would skip any file
 		// opening `00 00 ?? 00`, which is far too much of the binary space to
-		// license from a four-byte match.
+		// license from a four-byte match. Issue #121: the 4-byte magic alone
+		// still licenses a skip over an arbitrary (e.g. compressed) payload
+		// appended after it, so `validate` additionally requires a structurally
+		// plausible ICONDIR — at least one image directory entry, sized to fit.
 		format: "ico",
 		parts: [{ offset: 0, bytes: [0x00, 0x00, 0x01, 0x00] }],
+		validate: (buffer) => validateIconDir(buffer),
 	},
 	{
 		format: "cur",
 		parts: [{ offset: 0, bytes: [0x00, 0x00, 0x02, 0x00] }],
+		validate: (buffer) => validateIconDir(buffer),
 	},
 	// ---- Fonts ----
 	{ format: "woff", parts: [{ offset: 0, bytes: [0x77, 0x4f, 0x46, 0x46] }] }, // "wOFF"
 	{ format: "woff2", parts: [{ offset: 0, bytes: [0x77, 0x4f, 0x46, 0x32] }] }, // "wOF2"
 	{ format: "otf", parts: [{ offset: 0, bytes: [0x4f, 0x54, 0x54, 0x4f] }] }, // "OTTO"
-	{ format: "ttf", parts: [{ offset: 0, bytes: [0x00, 0x01, 0x00, 0x00] }] }, // sfnt 1.0
+	{
+		// sfnt version 1.0. Issue #121: like ICO/CUR, this 4-byte magic alone
+		// licenses a skip over anything that follows. `validate` requires a
+		// plausible sfnt table directory — `numTables` in a sane range and
+		// enough bytes for the directory it claims to have.
+		format: "ttf",
+		parts: [{ offset: 0, bytes: [0x00, 0x01, 0x00, 0x00] }],
+		validate: (buffer) => validateSfntTableDirectory(buffer),
+	},
 	{ format: "ttc", parts: [{ offset: 0, bytes: [0x74, 0x74, 0x63, 0x66] }] }, // "ttcf"
 	// ---- Other ----
 	{
@@ -323,6 +455,61 @@ const COMPRESSED_EXTENSIONS = [
 	".z",
 ];
 
+/**
+ * ICO/CUR structural check (issue #121). Beyond the 4-byte ICONDIR magic,
+ * requires: at least one directory entry (`idCount >= 1`), and that entry's
+ * declared image offset/size stay inside the buffer. This does not fully
+ * parse the image data — that would just move the enumeration problem inside
+ * the format — it only asks whether the bytes are shaped like a real ICONDIR
+ * at all, which an arbitrary payload glued on after 4 magic bytes is not.
+ */
+function validateIconDir(buffer) {
+	const HEADER = 6; // reserved(2) + type(2) + count(2)
+	const ENTRY = 16;
+	if (buffer.length < HEADER) {
+		return false;
+	}
+	const count = buffer.readUInt16LE(4);
+	if (count < 1 || buffer.length < HEADER + ENTRY) {
+		return false;
+	}
+	const entryOffset = buffer.readUInt32LE(HEADER + 12);
+	const entrySize = buffer.readUInt32LE(HEADER + 8);
+	if (entrySize === 0) {
+		return false;
+	}
+	// Guard the addition itself against overflow-style wraparound before
+	// comparing against buffer.length.
+	if (entryOffset > buffer.length || entrySize > buffer.length) {
+		return false;
+	}
+	return entryOffset + entrySize <= buffer.length;
+}
+
+/**
+ * TTF/sfnt structural check (issue #121). Beyond the 4-byte version magic,
+ * requires a plausible sfnt table directory: `numTables` in a sane range,
+ * and the buffer long enough to actually hold that many 16-byte table
+ * records. Real fonts satisfy this trivially; a payload wearing the sfnt
+ * magic as a 4-byte prefix over unrelated (e.g. compressed) bytes does not,
+ * because those bytes are not shaped like a table directory at all.
+ */
+function validateSfntTableDirectory(buffer) {
+	const HEADER = 12; // version(4) + numTables(2) + searchRange(2) + entrySelector(2) + rangeShift(2)
+	const RECORD = 16;
+	if (buffer.length < HEADER) {
+		return false;
+	}
+	const numTables = buffer.readUInt16BE(4);
+	// A real font has at least a handful of tables (cmap/glyf/head/hmtx/...)
+	// and, per the sfnt spec, not an unbounded number. 1..64 comfortably
+	// covers every real font while still requiring real structure.
+	if (numTables < 1 || numTables > 64) {
+		return false;
+	}
+	return buffer.length >= HEADER + numTables * RECORD;
+}
+
 function matchesSignature(buffer, signature) {
 	if (signature.firstByteRange) {
 		const [low, high] = signature.firstByteRange;
@@ -330,12 +517,21 @@ function matchesSignature(buffer, signature) {
 			return false;
 		}
 	}
-	return signature.parts.every(({ offset, bytes }) => {
+	const magicMatches = signature.parts.every(({ offset, bytes }) => {
 		if (buffer.length < offset + bytes.length) {
 			return false;
 		}
 		return bytes.every((byte, i) => byte === null || buffer[offset + i] === byte);
 	});
+	if (!magicMatches) {
+		return false;
+	}
+	// Issue #121: a magic-byte match alone is not always enough to license a
+	// skip. Weak (short) signatures carry an additional structural `validate`
+	// — see KNOWN_BINARY_SIGNATURES — that must also pass; strong signatures
+	// (8 bytes, or bytes no valid UTF-8 could produce) have none and rely on
+	// the magic match alone, which is already unambiguous.
+	return signature.validate ? signature.validate(buffer) : true;
 }
 
 /**
@@ -503,8 +699,74 @@ export const ALLOWLIST = [
 	},
 ];
 
+/**
+ * METADATA-NAMESPACE ALLOWLIST (issue #120) — distinct from `ALLOWLIST` above,
+ * and consulted ONLY inside `scanDist`'s cleartext backstop for `skip`-
+ * dispositioned files (see `classifyDistFile`'s "skip" case). NEVER consulted
+ * for `scan`-dispositioned (JS/CSS/HTML/...) text, which is why this is its
+ * own list rather than an addition to `ALLOWLIST`: an entry here exempts a
+ * namespace URI only when it turns up inside a binary asset's metadata, not
+ * everywhere in the bundle. That scoping is the point — the #120 failure mode
+ * this replaces was the error message telling operators to add the XMP/RDF
+ * namespace URI to the GLOBAL url `ALLOWLIST`, which would have exempted it
+ * inside application JavaScript too, a genuine weakening of the guard.
+ *
+ * Seeded with the handful of inert namespace URIs standard image encoders
+ * write by specification, never dereferenced over the network — the same
+ * "syntactic identifier that must look like a URI" justification as the
+ * w3.org entries in `ALLOWLIST`. Exact literal match ($-anchored), same
+ * reasoning as that list: a prefix match would allowlist more than the
+ * specific namespace name.
+ */
+export const METADATA_NAMESPACE_ALLOWLIST = [
+	{
+		pattern: /^http:\/\/www\.w3\.org\/1999\/02\/22-rdf-syntax-ns#$/,
+		reason: "RDF/XML namespace URI (W3C RDF Syntax spec) — mandatory root of every XMP packet.",
+	},
+	{
+		pattern: /^http:\/\/purl\.org\/dc\/elements\/1\.1\/$/,
+		reason: "Dublin Core namespace URI — the metadata vocabulary XMP uses for title/creator/description fields.",
+	},
+	{
+		pattern: /^http:\/\/ns\.adobe\.com\/xap\/1\.0\/$/,
+		reason: "Adobe XMP namespace URI — written by any encoder (not just Adobe's) that embeds an XMP packet.",
+	},
+	{
+		pattern: /^http:\/\/ns\.adobe\.com\/tiff\/1\.0\/$/,
+		reason: "Adobe XMP TIFF namespace URI — camera/scanner metadata fields (make, model, orientation) in XMP.",
+	},
+	{
+		pattern: /^http:\/\/ns\.adobe\.com\/exif\/1\.0\/$/,
+		reason: "Adobe XMP EXIF namespace URI — photographic metadata fields (exposure, ISO, ...) in XMP.",
+	},
+	{
+		pattern: /^http:\/\/ns\.adobe\.com\/photoshop\/1\.0\/$/,
+		reason: "Adobe XMP Photoshop namespace URI — written by any encoder using Adobe's Photoshop metadata schema.",
+	},
+];
+
+function isAllowlistedMetadataNamespace(url) {
+	return METADATA_NAMESPACE_ALLOWLIST.find((entry) => entry.pattern.test(normalizeAuthorityCase(url)));
+}
+
+/**
+ * Lowercases only the scheme and host of a matched URL, leaving the path
+ * untouched — RFC 3986 §3.1/§3.2.2 make scheme and host case-insensitive
+ * (`HTTPS://REACT.DEV/errors/` and `https://react.dev/errors/` are the same
+ * resource), but the path is not (`/errors/` and `/ERRORS/` need not be).
+ * `ALLOWLIST` patterns are deliberately exact on the path, so folding the
+ * whole URL to lowercase before testing them would let a case-varied path
+ * smuggle past an anchored lowercase pattern — the exact risk #105 flags.
+ * `URL_PATTERN` is itself `i`-flagged so `HTTPS://` is matched at all; this
+ * is what keeps the allowlist's path exactness meaningful once it is.
+ */
+function normalizeAuthorityCase(url) {
+	return url.replace(/^([a-z]+):\/\/([^/\\]*)/i, (_, scheme, host) => `${scheme.toLowerCase()}://${host.toLowerCase()}`);
+}
+
 function isAllowlisted(url) {
-	return ALLOWLIST.find((entry) => entry.pattern.test(url));
+	const normalized = normalizeAuthorityCase(url);
+	return ALLOWLIST.find((entry) => entry.pattern.test(normalized));
 }
 
 function* walk(dir) {
@@ -551,9 +813,14 @@ export function scanDist(distDir) {
 	const skipped = [];
 	const unscannable = [];
 
-	const record = (file, text) => {
-		for (const url of text.match(URL_PATTERN) ?? []) {
-			if (isAllowlisted(url)) {
+	// `isMetadataContext`: whether `text` came from a `skip`-dispositioned
+	// binary (issue #120). Only then is METADATA_NAMESPACE_ALLOWLIST
+	// consulted — a `scan`-dispositioned (JS/CSS/HTML/...) text file gets the
+	// strict URL ALLOWLIST only, exactly as before, so this cannot widen what
+	// application code is permitted to reference.
+	const record = (file, text, isMetadataContext) => {
+		for (const url of canonicalizeForScan(text).match(URL_PATTERN) ?? []) {
+			if (isAllowlisted(url) || (isMetadataContext && isAllowlistedMetadataNamespace(url))) {
 				allowlisted.push({ file, url });
 			} else {
 				violations.push({ file, url });
@@ -572,11 +839,11 @@ export function scanDist(distDir) {
 		if (verdict.disposition === "skip") {
 			skipped.push({ file, format: verdict.format });
 			// Cleartext-only backstop; see the doc comment above.
-			record(file, buffer.toString("latin1"));
+			record(file, buffer.toString("latin1"), true);
 			continue;
 		}
 		scanned.push(file);
-		record(file, buffer.toString("utf-8"));
+		record(file, buffer.toString("utf-8"), false);
 	}
 
 	return { violations, allowlisted, scanned, skipped, unscannable };
@@ -618,8 +885,11 @@ function main() {
 		console.log(`check-no-external-assets: ${result.allowlisted.length} allowlisted vendor URL(s) skipped:`);
 		const seen = new Set();
 		for (const { url } of result.allowlisted) {
-			const entry = isAllowlisted(url);
-			if (!seen.has(entry.pattern.source)) {
+			// Issue #120: an allowlisted match can come from either list — the
+			// strict URL ALLOWLIST (scan context) or METADATA_NAMESPACE_ALLOWLIST
+			// (skip context). Check both rather than assuming the first.
+			const entry = isAllowlisted(url) ?? isAllowlistedMetadataNamespace(url);
+			if (entry && !seen.has(entry.pattern.source)) {
 				seen.add(entry.pattern.source);
 				console.log(`  - ${entry.pattern} — ${entry.reason}`);
 			}
@@ -632,8 +902,13 @@ function main() {
 			console.error(`  ${file}: ${url}`);
 		}
 		console.error("\nAir-gapped appliances cannot ship a build with external references (CLAUDE.md, ADR-0007).");
-		console.error("Vendor the asset locally, or if this is a genuinely inert vendored-library string, add a");
-		console.error("narrowly-scoped, justified entry to ALLOWLIST in scripts/check-no-external-assets.mjs.");
+		console.error("Vendor the asset locally. If this URL was found inside a binary asset (PNG/JPEG/font/...) rather");
+		console.error("than in application code, it is most likely embedded XMP/ICC/tEXt metadata from the tool that");
+		console.error("exported it — strip metadata at export time (e.g. `oxipng --strip all`, `exiftool -all=`) rather");
+		console.error("than editing an allowlist. If it is a genuinely inert vendored-library string in application code,");
+		console.error("add a narrowly-scoped, justified entry to ALLOWLIST in scripts/check-no-external-assets.mjs; if it");
+		console.error("is a genuinely inert metadata namespace URI, add it to METADATA_NAMESPACE_ALLOWLIST instead — never");
+		console.error("to ALLOWLIST, which also exempts the URL inside application JavaScript.");
 		process.exit(1);
 	}
 

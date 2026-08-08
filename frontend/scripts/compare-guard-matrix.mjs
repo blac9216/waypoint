@@ -150,6 +150,37 @@ function realBmp() {
 
 const PLAIN = Buffer.from(`import a from "${URL_MARKER}";\nconsole.log(a);\n`);
 const CLEAN = Buffer.from(`<link rel="icon" href="/icons/favicon-32.png">\n`);
+const HOST = "cdn.evil.example/x.js";
+
+/** A PNG carrying a real XMP `tEXt`-shaped packet — issue #120's exact repro
+ * shape. Builds the chunk directly (rather than via `pngWithTextChunk`,
+ * whose keyword/text framing is fixed) with the mandatory RDF/Dublin-Core/
+ * XMP namespace URIs a real XMP packet contains as its keyword+text. */
+function pngWithXmp() {
+	const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+	const chunk = (type, data) => {
+		const len = Buffer.alloc(4);
+		len.writeUInt32BE(data.length);
+		return Buffer.concat([len, Buffer.from(type, "ascii"), data, Buffer.alloc(4)]);
+	};
+	const ihdr = Buffer.alloc(13);
+	ihdr.writeUInt32BE(1, 0);
+	ihdr.writeUInt32BE(1, 4);
+	ihdr[8] = 8;
+	const xmp =
+		'<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>' +
+		'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF ' +
+		'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" ' +
+		'xmlns:dc="http://purl.org/dc/elements/1.1/" ' +
+		'xmlns:xmp="http://ns.adobe.com/xap/1.0/">' +
+		"</rdf:RDF></x:xmpmeta>";
+	return Buffer.concat([
+		sig,
+		chunk("IHDR", ihdr),
+		chunk("tEXt", Buffer.from(`XML:com.adobe.xmp\0${xmp}`, "latin1")),
+		chunk("IEND", Buffer.alloc(0)),
+	]);
+}
 
 /**
  * `expect` records what SHOULD happen on the candidate guard:
@@ -215,6 +246,35 @@ const cases = [
 	["D05 WASM module (allowlisted)", "mod.wasm", Buffer.concat([Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]), Buffer.alloc(200, 0x11)]), "pass"],
 	["D06 empty file", "empty.txt", Buffer.alloc(0), "pass"],
 	["D07 UTF-8 text with non-ASCII (emoji, accents)", "notes.txt", Buffer.from("café — 🚀 all local: /assets/x.js"), "pass"],
+
+	// ── E. Pattern-level fail-opens (#110, #105) — the CANDIDATE must catch
+	//      every one via canonicalization. NOT superset breaks against `main`:
+	//      main never caught these (they are pattern gaps, not file-selection
+	//      gaps), so "newly caught" here is the expected, intended delta.
+	["E01 uppercase HTTPS scheme (#105)", "app.js", Buffer.from(`import a from "HTTPS://${HOST}";`), "fail"],
+	["E02 JSON-escaped solidus", "app.js.map", Buffer.from(`{"u":"https:\\/\\/${HOST}"}`), "fail"],
+	["E03 JS hex-escape scheme", "app.js", Buffer.from(`import("\\x68ttps://${HOST}");`), "fail"],
+	["E04 HTML numeric entity scheme", "index.html", Buffer.from(`<script src="&#104;ttps://${HOST}"></script>`), "fail"],
+	["E05 uppercase scheme + escaped solidus, combined", "app.js.map", Buffer.from(`{"u":"HTTPS:\\/\\/${HOST}"}`), "fail"],
+
+	// ── F. Still-honest residuals (#110) — the candidate does NOT catch these,
+	//      by design (they are runtime-assembled, not encodings of a literal).
+	//      Recorded here so the matrix states the limitation rather than
+	//      silently having no row for it.
+	["F01 string concatenation (documented residual)", "app.js", Buffer.from(`import("htt"+"ps://${HOST}");`), "pass"],
+
+	// ── G. Weak-magic-byte exploits (#121) — a real signature glued onto an
+	//      opaque payload with no real format structure behind it. NOT
+	//      superset breaks (pre-#121 `main` also skips these, by design of
+	//      the code this repo had before this PR); "newly caught" is again
+	//      the intended delta, which is why the matrix records it as its own
+	//      lettered group rather than folding it into A-C.
+	["G01 ICO magic over a compressed payload hiding a CDN URL", "sprite.ico", Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), deflateRawSync(BUNDLE)]), "fail"],
+	["G02 TTF sfnt magic over a compressed payload hiding a CDN URL", "font.ttf", Buffer.concat([Buffer.from([0x00, 0x01, 0x00, 0x00]), deflateRawSync(BUNDLE)]), "fail"],
+
+	// ── H. Legitimate binary metadata (#120) — must PASS, not merely "not a
+	//      false negative": a real XMP-bearing PNG is an ordinary asset.
+	["H01 PNG carrying a real XMP packet (issue's exact repro)", "logo-xmp.png", pngWithXmp(), "pass"],
 ];
 
 function runGuard(guard, dir) {
@@ -266,9 +326,18 @@ for (const [name, filename, bytesOrNull, expected] of cases) {
 	const mainFailed = mainR.status !== 0;
 	const candFailed = candR.status !== 0;
 	const notes = [];
-	if (mainFailed && !candFailed) {
+	// H-series is the one deliberate exception to the superset property: #120
+	// is specifically that `main`/pre-#120 guards FALSE-POSITIVE (fail) on
+	// legitimate binary-asset metadata, and the whole point of the candidate
+	// change is that it now correctly passes. Treating that as a "break" would
+	// make the matrix reject its own fix. Every other letter group keeps the
+	// superset property un-relaxed.
+	const isIntentionalFalsePositiveFix = name.startsWith("H");
+	if (mainFailed && !candFailed && !isIntentionalFalsePositiveFix) {
 		notes.push("SUPERSET BREAK");
 		supersetBreaks++;
+	} else if (mainFailed && !candFailed && isIntentionalFalsePositiveFix) {
+		notes.push("false-positive fix (#120, expected)");
 	}
 	if ((expected === "fail") !== candFailed) {
 		notes.push("EXPECTATION BREAK");
