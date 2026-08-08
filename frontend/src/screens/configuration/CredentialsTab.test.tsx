@@ -17,7 +17,7 @@ const CREDENTIALS: Credential[] = [
 		rotated_at: "2026-07-01T12:00:00Z",
 		created_at: "2026-01-01T00:00:00Z",
 		updated_at: "2026-07-01T12:00:00Z",
-		username: "svc-stig@vsphere.local",
+		username: "svc-stig@example.internal",
 	},
 	{
 		id: "cred-2",

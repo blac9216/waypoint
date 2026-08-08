@@ -47,7 +47,7 @@ describe("credentials.ts data layer", () => {
 		await createCredential({
 			name: "Alpha vCenter service account",
 			credential_type: "vcenter",
-			username: "svc-stig@vsphere.local",
+			username: "svc-stig@example.internal",
 			sudo_enabled: false,
 			secret: "s3cret-value",
 		});
@@ -57,7 +57,7 @@ describe("credentials.ts data layer", () => {
 			body: {
 				name: "Alpha vCenter service account",
 				credential_type: "vcenter",
-				username: "svc-stig@vsphere.local",
+				username: "svc-stig@example.internal",
 				secret: "s3cret-value",
 			},
 		});

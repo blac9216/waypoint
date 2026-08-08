@@ -436,7 +436,7 @@ function CredentialForm({
 					<input
 						value={form.username}
 						onChange={(e) => setForm({ ...form, username: e.target.value })}
-						placeholder="e.g. administrator@vsphere.local"
+						placeholder="e.g. administrator@example.internal"
 						autoComplete="off"
 					/>
 				</label>
