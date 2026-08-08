@@ -378,11 +378,15 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new("SELECT state, paused, blocked, blocked_reason FROM runs WHERE id = $1", connection);
+		await using NpgsqlCommand command = new("SELECT state, paused, blocked, blocked_reason, initiated_by FROM runs WHERE id = $1", connection);
 		command.Parameters.AddWithValue(runId);
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
-			? new RunQueueState(reader.GetString(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.IsDBNull(3) ? null : reader.GetString(3)) : null;
+			? new RunQueueState(
+				reader.GetString(0), reader.GetBoolean(1), reader.GetBoolean(2),
+				reader.IsDBNull(3) ? null : reader.GetString(3),
+				reader.IsDBNull(4) ? null : reader.GetString(4))
+			: null;
 	}
 
 	public async Task<RunSummary?> GetRunAsync(Guid runId, CancellationToken cancellationToken)

@@ -129,8 +129,13 @@ public interface IJobQueueRepository
 	Task<CredentialUnblockResult> UnblockCredentialAsync(Guid credentialId, string? reason, CancellationToken cancellationToken);
 }
 
-/// <summary>Run-level fields needed after a global job claim.</summary>
-public sealed record RunQueueState(string State, bool Paused, bool Blocked, string? BlockedReason);
+/// <summary>
+/// Run-level fields needed after a global job claim. <see cref="InitiatedBy"/> backs
+/// the pause/resume/abort ownership check (issue #209): null means a system/scheduled
+/// run with no recorded initiator. Trailing default keeps existing positional call
+/// sites compiling.
+/// </summary>
+public sealed record RunQueueState(string State, bool Paused, bool Blocked, string? BlockedReason, string? InitiatedBy = null);
 
 /// <summary>The database effects of aborting a run.</summary>
 public sealed record AbortRunResult(IReadOnlyList<Guid> CancelledJobIds, IReadOnlyList<Guid> InFlightJobIds);

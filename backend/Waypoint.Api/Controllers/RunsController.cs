@@ -49,6 +49,36 @@ public sealed class RunsController : ControllerBase
 		Enum.TryParse(User.FindFirstValue(WaypointClaimTypes.Role), out WaypointRole role) && role >= minimum;
 
 	/// <summary>
+	/// Enforces docs/api-contract.md's pause/resume/abort scope: "Operator+ (own
+	/// runs), Admin any." Admin bypasses the check entirely. A non-Admin caller must
+	/// match the run's recorded initiator; a run with no recorded initiator
+	/// (<see cref="RunQueueState.InitiatedBy"/> null — system/scheduled run) is
+	/// Admin-only, since there is no owner to compare against.
+	/// </summary>
+	private void EnforceRunOwnership(RunQueueState state)
+	{
+		if (CallerHasAtLeast(WaypointRole.Admin))
+		{
+			return;
+		}
+
+		if (state.InitiatedBy is null)
+		{
+			throw ApiException.Forbidden(
+				"This run has no recorded initiator.",
+				"Runs with no recorded initiator (system/scheduled runs) may only be paused, resumed, or aborted by an Admin.");
+		}
+
+		string caller = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
+		if (!string.Equals(caller, state.InitiatedBy, StringComparison.Ordinal))
+		{
+			throw ApiException.Forbidden(
+				"You do not own this run.",
+				"Only the run's initiator or an Admin may pause, resume, or abort it.");
+		}
+	}
+
+	/// <summary>
 	/// Create a new run. Cyber+ for scan runs; remediation requires Admin plus the
 	/// explicit <c>confirmation: "REMEDIATE"</c> body field — remediation is never
 	/// implicit (docs/api-contract.md `/runs`, CLAUDE.md key constraints). The
@@ -123,7 +153,8 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Pause dispatch for a run. Operator+.
+	/// Pause dispatch for a run. Operator+ (own runs), Admin any — see
+	/// <see cref="EnforceRunOwnership"/>.
 	/// </summary>
 	[HttpPost("{id:guid}/pause")]
 	[RequireOperatorRole]
@@ -135,6 +166,8 @@ public sealed class RunsController : ControllerBase
 		{
 			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
 		}
+
+		EnforceRunOwnership(state);
 
 		bool paused = await _repository.PauseRunAsync(id, cancellationToken).ConfigureAwait(false);
 		if (!paused)
@@ -148,7 +181,8 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Resume dispatch for a paused run. Operator+.
+	/// Resume dispatch for a paused run. Operator+ (own runs), Admin any — see
+	/// <see cref="EnforceRunOwnership"/>.
 	/// </summary>
 	[HttpPost("{id:guid}/resume")]
 	[RequireOperatorRole]
@@ -160,6 +194,8 @@ public sealed class RunsController : ControllerBase
 		{
 			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
 		}
+
+		EnforceRunOwnership(state);
 
 		bool resumed = await _repository.ResumeRunAsync(id, cancellationToken).ConfigureAwait(false);
 		if (!resumed)
@@ -173,7 +209,8 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Abort a run. Operator+.
+	/// Abort a run. Operator+ (own runs), Admin any — see
+	/// <see cref="EnforceRunOwnership"/>.
 	/// </summary>
 	[HttpPost("{id:guid}/abort")]
 	[RequireOperatorRole]
@@ -185,6 +222,8 @@ public sealed class RunsController : ControllerBase
 		{
 			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
 		}
+
+		EnforceRunOwnership(state);
 
 		AbortRunResult result = await _repository.AbortRunAsync(id, cancellationToken).ConfigureAwait(false);
 		_ = result; // AbortRunResult carries cancelled/in-flight job IDs for future enrichment
