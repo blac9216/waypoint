@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -138,33 +137,6 @@ public sealed class PowerShellJobHandler : IJobHandler
 		};
 	}
 
-	/// <summary>
-	/// Bare digit-run markers (<c>"401"</c>, <c>"403"</c>, ...) match only as a standalone
-	/// token, not as a substring: an unanchored match on three digits also fires on
-	/// GUIDs, byte counts, ports, or any identifier that happens to embed those digits
-	/// (#162). Word markers keep the original coarse substring match -- the vcf modules
-	/// surface vendor/HTTP wording, not typed exceptions, and there is no digit-run
-	/// ambiguity to guard against there.
-	/// </summary>
-	private bool IsAuthFailure(string failureReason)
-	{
-		foreach (string marker in _options.Value.AuthFailureMarkers)
-		{
-			bool isMatch = IsBareDigitRun(marker)
-				? Regex.IsMatch(failureReason, $@"\b{Regex.Escape(marker)}\b", RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1))
-				: failureReason.Contains(marker, StringComparison.OrdinalIgnoreCase);
-
-			if (isMatch)
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	/// <summary>True for markers like "401"/"403": digits only, no letters/punctuation
-	/// that would already anchor a substring match to auth-ish context.</summary>
-	private static bool IsBareDigitRun(string marker) =>
-		marker.Length > 0 && marker.All(char.IsAsciiDigit);
+	private bool IsAuthFailure(string failureReason) =>
+		AuthFailureClassifier.IsAuthFailure(failureReason, [.. _options.Value.AuthFailureMarkers]);
 }

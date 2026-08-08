@@ -83,6 +83,27 @@ public sealed class CredentialRepository
 		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
 	}
 
+	/// <summary>
+	/// The single credential of a well-known type (e.g. the depot token --
+	/// <see cref="Waypoint.Core.Catalog.CatalogOptions.DepotTokenCredentialType"/>) that
+	/// a job type resolves by type rather than by an id carried on the job row. Returns
+	/// null when none is configured; ambiguous when more than one row shares the type
+	/// (oldest wins, deterministic rather than arbitrary -- an operator who created a
+	/// second one by mistake should see the first keep working, not a random choice).
+	/// </summary>
+	public async Task<CredentialResponse?> FindByTypeAsync(string credentialType, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(credentialType);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			ProjectionSql + " WHERE c.credential_type = $1 ORDER BY c.created_at LIMIT 1", connection);
+		command.Parameters.AddWithValue(credentialType);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
+	}
+
 	/// <summary>Creates the metadata row. Returns null when the name is already taken (the caller maps that to a 409).</summary>
 	public async Task<Guid?> CreateAsync(string name, string credentialType, string owner, CancellationToken cancellationToken)
 	{
