@@ -45,11 +45,13 @@ public sealed class SchemaMigrationTests
 		"sites",
 		"targets",
 		"inventory_items",
+		"config_docs",
+		"config_versions",
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #262 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 12;
+	/// <summary>Embedded migration count as of issue #265 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 13;
 
 	private readonly PostgresFixture _fixture;
 
