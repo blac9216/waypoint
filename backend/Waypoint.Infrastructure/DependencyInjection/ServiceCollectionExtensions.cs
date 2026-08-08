@@ -87,6 +87,19 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<ISecretRedactor>(serviceProvider => serviceProvider.GetRequiredService<InPlaySecretRedactor>());
 		services.AddSingleton<ISecretTracker>(serviceProvider => serviceProvider.GetRequiredService<InPlaySecretRedactor>());
 
+		// ADR-0011 ad hoc "my credentials" flow (issue #276): process-memory only, no
+		// connection-string gate -- registered unconditionally like the redactor above
+		// so a host without Postgres configured still boots (the audit write inside it
+		// no-ops without a connection string, same pattern as other best-effort writes).
+		services.AddSingleton<Waypoint.Core.Secrets.IEphemeralCredentialCache>(serviceProvider =>
+		{
+			string? ephemeralConnectionString = configuration.GetConnectionString(ConnectionStringName);
+			return new Secrets.EphemeralCredentialCache(
+				serviceProvider.GetRequiredService<ISecretTracker>(),
+				ephemeralConnectionString,
+				serviceProvider.GetRequiredService<ILogger<Secrets.EphemeralCredentialCache>>());
+		});
+
 		services.AddSingleton<JobHandlerRegistry>();
 
 		// Disk usage is a filesystem stat, not a database read -- registered
