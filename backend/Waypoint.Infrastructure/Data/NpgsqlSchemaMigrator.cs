@@ -65,6 +65,11 @@ public sealed partial class NpgsqlSchemaMigrator : ISchemaMigrator
 
 		await using (NpgsqlCommand lockCommand = new("SELECT pg_advisory_lock($1)", connection))
 		{
+			// Unbounded, like the migration command below: a second instance blocked
+			// behind another instance's in-progress migration must wait for the lock
+			// to be released, not time out at Npgsql's default 30s CommandTimeout and
+			// crash-loop (issue #108).
+			lockCommand.CommandTimeout = 0;
 			lockCommand.Parameters.AddWithValue(AdvisoryLockKey);
 			await lockCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
