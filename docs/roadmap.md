@@ -35,8 +35,10 @@ forcing every foundation into existence.
 
 ## M2 — Sites, credentials & the STIG scan slice (epic [#13](https://github.com/blac9216/waypoint/issues/13))
 
-- Full credential store (ownership model) + sites/targets CRUD replacing hand-edited
-  `site.json`; migration path from `secrets.vault` + `site.json`.
+- Full credential store (ownership model) + sites/targets CRUD, all configured fresh
+  in the UI. **No importer from the sibling repos' `secrets.vault`/`site.json`** —
+  Waypoint replicates their functionality and borrows code where sensible, but is not
+  tied to their data formats (decision 2026-08-08).
 - Discovery job type + cached inventory (needed by the start-a-scan flow).
 - **STIG scan of a vSphere site with live logs in the browser** (the hero screen),
   then the remaining transports (NSX, SRG) + attestation/input document store with
