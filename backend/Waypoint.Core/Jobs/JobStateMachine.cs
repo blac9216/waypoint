@@ -17,7 +17,7 @@ namespace Waypoint.Core.Jobs;
 /// <summary>
 /// The <c>jobs.state</c> transition graph from <c>docs/api-contract.md</c> "State
 /// machines", as an explicit, testable table rather than scattered <c>if</c> checks
-/// through the dispatcher. Two shapes share the table (see <see cref="JobShape"/>);
+/// through the dispatcher. Three shapes share the table (see <see cref="JobShape"/>);
 /// <see cref="Waypoint.Core.Jobs.JobStates.Cancelled"/> is reachable from every active
 /// pipeline state; <see cref="Waypoint.Core.Jobs.JobStates.Blocked"/> is reachable only
 /// from <c>queued</c>. Engine actors have a distinct graph because recovery and claim
@@ -50,13 +50,25 @@ public static class JobStateMachine
 		[JobStates.Cancelled] = []
 	};
 
+	private static readonly IReadOnlyDictionary<string, string[]> SrgTransitions = new Dictionary<string, string[]>(StringComparer.Ordinal)
+	{
+		[JobStates.Queued] = [JobStates.Running, JobStates.Cancelled, JobStates.Blocked],
+		[JobStates.Running] = [JobStates.Attesting, JobStates.Failed, JobStates.AuthFailed, JobStates.Cancelled],
+		[JobStates.Attesting] = [JobStates.Done, JobStates.Failed, JobStates.Cancelled],
+		[JobStates.Blocked] = [JobStates.Queued],
+		[JobStates.Done] = [],
+		[JobStates.Failed] = [],
+		[JobStates.AuthFailed] = [],
+		[JobStates.Cancelled] = []
+	};
+
 	/// <summary>True if <paramref name="fromState"/> -&gt; <paramref name="toState"/> is a legal transition for <paramref name="shape"/>.</summary>
 	public static bool CanTransition(JobShape shape, string fromState, string toState)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(fromState);
 		ArgumentException.ThrowIfNullOrWhiteSpace(toState);
 
-		IReadOnlyDictionary<string, string[]> table = shape == JobShape.Standard ? StandardTransitions : SimpleTransitions;
+		IReadOnlyDictionary<string, string[]> table = TransitionsFor(shape);
 
 		return table.TryGetValue(fromState, out string[]? allowed) && Array.IndexOf(allowed, toState) >= 0;
 	}
@@ -72,8 +84,15 @@ public static class JobStateMachine
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(fromState);
 
-		IReadOnlyDictionary<string, string[]> table = shape == JobShape.Standard ? StandardTransitions : SimpleTransitions;
+		IReadOnlyDictionary<string, string[]> table = TransitionsFor(shape);
 
 		return table.TryGetValue(fromState, out string[]? allowed) ? allowed : [];
 	}
+
+	private static IReadOnlyDictionary<string, string[]> TransitionsFor(JobShape shape) => shape switch
+	{
+		JobShape.Standard => StandardTransitions,
+		JobShape.Srg => SrgTransitions,
+		_ => SimpleTransitions
+	};
 }
