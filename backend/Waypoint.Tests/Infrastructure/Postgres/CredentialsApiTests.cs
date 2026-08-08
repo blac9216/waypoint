@@ -295,6 +295,31 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		Assert.True(document.RootElement.GetProperty("sudo_enabled").GetBoolean());
 	}
 
+	/// <summary>Issue #262: username is a dedicated, non-secret field -- set at create, round-trips
+	/// in every response, changeable via PUT, and clearable back to null with an empty string.</summary>
+	[Fact]
+	public async Task Username_SetAtCreate_RoundTrips_IsChangeableAndClearable()
+	{
+		HttpResponseMessage created = await SendAsync(HttpMethod.Post, "/api/v1/credentials",
+			new { name = $"vc-{Guid.NewGuid():N}", credential_type = "vcenter", username = "administrator@example.internal" });
+		Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+		using JsonDocument createdDocument = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+		Guid id = createdDocument.RootElement.GetProperty("id").GetGuid();
+		Assert.Equal("administrator@example.internal", createdDocument.RootElement.GetProperty("username").GetString());
+
+		HttpResponseMessage updated = await SendAsync(HttpMethod.Put, $"/api/v1/credentials/{id}",
+			new { username = "svc-account@example.internal" });
+		Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+		using JsonDocument updatedDocument = JsonDocument.Parse(await updated.Content.ReadAsStringAsync());
+		Assert.Equal("svc-account@example.internal", updatedDocument.RootElement.GetProperty("username").GetString());
+
+		Assert.Equal("svc-account@example.internal", await GetFieldAsync(id, "username"));
+
+		HttpResponseMessage cleared = await SendAsync(HttpMethod.Put, $"/api/v1/credentials/{id}", new { username = "" });
+		Assert.Equal(HttpStatusCode.OK, cleared.StatusCode);
+		Assert.Null(await GetFieldAsync(id, "username"));
+	}
+
 	/// <summary>Issue #20: a successful /test decrypts the stored secret (audited like any other decrypt),
 	/// flips health to 'valid', and never returns the secret value itself.</summary>
 	[Fact]

@@ -46,7 +46,7 @@ public sealed class CredentialRepository
 		SELECT c.id, c.name, c.credential_type, c.owner, c.health, c.sudo_enabled,
 			EXISTS (SELECT 1 FROM credential_secrets s WHERE s.credential_id = c.id) AS has_secret,
 			(SELECT count(*) FROM jobs j WHERE j.credential_id = c.id) AS used_by_job_count,
-			c.rotated_at, c.created_at, c.updated_at
+			c.rotated_at, c.created_at, c.updated_at, c.username
 		FROM credentials c
 		""";
 
@@ -104,15 +104,15 @@ public sealed class CredentialRepository
 		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
 	}
 
-	/// <summary>Creates the metadata row. Returns null when the name is already taken (the caller maps that to a 409). <paramref name="sudoEnabled"/> is only meaningful for <see cref="CredentialTypes.Ssh"/>; the controller validates that before this is called.</summary>
-	public async Task<Guid?> CreateAsync(string name, string credentialType, string owner, bool sudoEnabled, CancellationToken cancellationToken)
+	/// <summary>Creates the metadata row. Returns null when the name is already taken (the caller maps that to a 409). <paramref name="sudoEnabled"/> is only meaningful for <see cref="CredentialTypes.Ssh"/>; the controller validates that before this is called. <paramref name="username"/> (migration 0012) is the protocol-level login, distinct from <paramref name="name"/>'s human-facing label -- optional at creation, same as it is thereafter.</summary>
+	public async Task<Guid?> CreateAsync(string name, string credentialType, string owner, bool sudoEnabled, CancellationToken cancellationToken, string? username = null)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			INSERT INTO credentials (name, credential_type, owner, sudo_enabled)
-			VALUES ($1, $2, $3, $4)
+			INSERT INTO credentials (name, credential_type, owner, sudo_enabled, username)
+			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (name) DO NOTHING
 			RETURNING id
 			""", connection);
@@ -120,6 +120,7 @@ public sealed class CredentialRepository
 		command.Parameters.AddWithValue(credentialType);
 		command.Parameters.AddWithValue(owner);
 		command.Parameters.AddWithValue(sudoEnabled);
+		command.Parameters.AddWithValue((object?)username ?? DBNull.Value);
 		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 		return result is Guid id ? id : null;
 	}
@@ -153,6 +154,19 @@ public sealed class CredentialRepository
 		await using NpgsqlCommand command = new("UPDATE credentials SET sudo_enabled = $2 WHERE id = $1 RETURNING id", connection);
 		command.Parameters.AddWithValue(id);
 		command.Parameters.AddWithValue(sudoEnabled);
+		return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null
+			? CredentialWriteOutcome.Ok
+			: CredentialWriteOutcome.NotFound;
+	}
+
+	/// <summary>Issue #262: sets or clears (via null) the dedicated username column. Unlike <see cref="UpdateSudoAsync"/> this is not gated to one credential_type here -- a username is meaningful for any connection-type credential (vcenter/nsx/ssh), and the controller/handlers decide which types require one.</summary>
+	public async Task<CredentialWriteOutcome> UpdateUsernameAsync(Guid id, string? username, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new("UPDATE credentials SET username = $2 WHERE id = $1 RETURNING id", connection);
+		command.Parameters.AddWithValue(id);
+		command.Parameters.AddWithValue((object?)username ?? DBNull.Value);
 		return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null
 			? CredentialWriteOutcome.Ok
 			: CredentialWriteOutcome.NotFound;
@@ -260,6 +274,7 @@ public sealed class CredentialRepository
 			reader.GetInt64(7),
 			reader.IsDBNull(8) ? null : reader.GetFieldValue<DateTimeOffset>(8),
 			reader.GetFieldValue<DateTimeOffset>(9),
-			reader.GetFieldValue<DateTimeOffset>(10));
+			reader.GetFieldValue<DateTimeOffset>(10),
+			reader.IsDBNull(11) ? null : reader.GetString(11));
 	}
 }

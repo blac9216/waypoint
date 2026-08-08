@@ -37,13 +37,13 @@ namespace Waypoint.Infrastructure.Discovery;
 /// Payload contract (JSON object, set by <c>DiscoveryController.Discover</c>):
 /// <c>{"target_id": "&lt;uuid&gt;"}</c>.
 ///
-/// Username convention: <c>credentials</c> has no dedicated username column (see
-/// migration 0010's comment on the still-open credential-shape questions) --
-/// <see cref="Waypoint.Core.Secrets.CredentialResponse.Name"/> is used as the vSphere
-/// SSO username (the natural vCenter convention names a service-account credential
-/// after the account it represents, e.g. an <c>administrator@&lt;sso-domain&gt;</c>
-/// principal). If a future slice adds a real username field, this is the one call
-/// site to update.
+/// Username: migration 0012 (issue #262) added a dedicated
+/// <see cref="Waypoint.Core.Secrets.CredentialResponse.Username"/> column, replacing
+/// the earlier stopgap that overloaded <c>Name</c> (a human-facing label, e.g. "Prod
+/// vCenter admin") as the vSphere SSO login. A vCenter credential with no username
+/// set fails fast here rather than silently falling back to <c>Name</c> -- that
+/// fallback is exactly the conflation this issue exists to undo, and would turn a
+/// credential rename into a silent SSO-login change.
 /// </summary>
 public sealed class DiscoverJobHandler : IJobHandler
 {
@@ -136,6 +136,16 @@ public sealed class DiscoverJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed($"target '{targetId}' has no 'connection.host' to discover.");
 		}
 
+		if (string.IsNullOrWhiteSpace(credential.Username))
+		{
+			// Issue #262: no more falling back to Name as the SSO login -- a vCenter
+			// credential without a dedicated username is a configuration error the
+			// operator must fix (set one via PUT /credentials/{id}), not something
+			// this handler should paper over with the display label.
+			return JobExecutionOutcome.Failed(
+				$"target '{targetId}' references credential '{credential.Id}', which has no username set; set one before discovering this target.");
+		}
+
 		string actor = await ResolveActorAsync(context.Job.RunId, cancellationToken).ConfigureAwait(false);
 
 		await _targets.SetDiscoveryStatusAsync(targetId, TargetDiscoveryStatuses.Discovering, stampLastRefreshed: false, cancellationToken)
@@ -157,7 +167,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 			Dictionary<string, object?> parameters = new(StringComparer.Ordinal)
 			{
 				["VCenter"] = host,
-				["Username"] = credential.Name,
+				["Username"] = credential.Username,
 				["Password"] = decrypted.Value,
 			};
 

@@ -98,7 +98,7 @@ public sealed class CredentialsController : ControllerBase
 				"'sudo_enabled' is only meaningful for credential_type 'ssh'.");
 		}
 
-		Guid? id = await _credentials.CreateAsync(request.Name, request.CredentialType, owner, sudoEnabled, cancellationToken);
+		Guid? id = await _credentials.CreateAsync(request.Name, request.CredentialType, owner, sudoEnabled, cancellationToken, request.Username);
 		if (id is not Guid createdId)
 		{
 			throw new ApiException(HttpStatusCode.Conflict, "name_taken", $"A credential named '{request.Name}' already exists.");
@@ -146,6 +146,18 @@ public sealed class CredentialsController : ControllerBase
 			}
 
 			if (await _credentials.UpdateSudoAsync(id, sudoEnabled, cancellationToken) == CredentialWriteOutcome.NotFound)
+			{
+				throw NotFoundError(id);
+			}
+		}
+
+		if (request.Username is not null)
+		{
+			// Empty string clears the username (same convention PUT semantics use
+			// elsewhere in this controller for optional fields); only a JSON-absent
+			// property leaves it untouched.
+			string? newUsername = string.IsNullOrEmpty(request.Username) ? null : request.Username;
+			if (await _credentials.UpdateUsernameAsync(id, newUsername, cancellationToken) == CredentialWriteOutcome.NotFound)
 			{
 				throw NotFoundError(id);
 			}
