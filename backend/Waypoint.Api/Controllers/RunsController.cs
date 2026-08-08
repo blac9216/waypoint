@@ -472,6 +472,13 @@ public sealed class RunsController : ControllerBase
 	/// not a per-control STIG id: there is no control-enumeration catalog in this codebase
 	/// to join the resolved waiver against (flagged in this issue's PR body as a
 	/// documented gap, not silently invented).
+	///
+	/// Because this is live resolution and not recorded history, the WIRE says so (not just
+	/// this code comment): each row carries <c>derivation: "live-resolution"</c> and a
+	/// <c>resolved_at</c> = request time, and the config-doc's last-edit time is surfaced
+	/// only as <c>attestation_updated_at</c>, never mislabeled <c>applied_at</c> -- so a
+	/// consumer can tell that a later edit to an attestation rewrites what this "historical"
+	/// endpoint reports. The persisted at-scan-time ledger (the real fix) is issue #306.
 	/// </summary>
 	[HttpGet("{id:guid}/attestations-applied")]
 	[RequireViewerRole]
@@ -517,7 +524,7 @@ public sealed class RunsController : ControllerBase
 
 			ConfigDocResolution resolution = ConfigDocResolver.Resolve(
 				ConfigDocKinds.Attestation, profile, global, site, targetDoc, now);
-			rows.Add(MapAttestation(job, target, resolution));
+			rows.Add(MapAttestation(target, resolution, now));
 		}
 
 		return Ok(rows);
@@ -750,9 +757,18 @@ public sealed class RunsController : ControllerBase
 		_ => "pending",
 	};
 
-	private static AppliedAttestationResponse MapAttestation(JobSummary job, Target target, ConfigDocResolution resolution)
+	private const string LiveResolutionDerivation = "live-resolution";
+
+	/// <summary>
+	/// Maps a live config-doc resolution to a wire row. The wire is explicit that this is
+	/// current resolution, not recorded history (issue #299 round-1 blocker, #306): it emits
+	/// <c>derivation: "live-resolution"</c> and a <c>resolved_at</c> stamped from
+	/// <paramref name="resolvedAt"/> (this request's clock), and it surfaces the config-doc's
+	/// last-edit time only as <c>attestation_updated_at</c> -- never as an <c>applied_at</c>
+	/// that would misrepresent a doc-edit time as a scan-time application time.
+	/// </summary>
+	private static AppliedAttestationResponse MapAttestation(Target target, ConfigDocResolution resolution, DateTimeOffset resolvedAt)
 	{
-		_ = job;
 		return new AppliedAttestationResponse(
 			Control: resolution.Profile,
 			Scope: resolution.Layer ?? ConfigDocLayers.Global,
@@ -760,7 +776,9 @@ public sealed class RunsController : ControllerBase
 			Justification: resolution.Body ?? string.Empty,
 			Author: resolution.Author ?? string.Empty,
 			Version: resolution.Version ?? 0,
-			AppliedAt: (resolution.UpdatedAt ?? DateTimeOffset.UtcNow).ToString("O", CultureInfo.InvariantCulture),
+			Derivation: LiveResolutionDerivation,
+			ResolvedAt: resolvedAt.ToString("O", CultureInfo.InvariantCulture),
+			AttestationUpdatedAt: resolution.UpdatedAt?.ToString("O", CultureInfo.InvariantCulture),
 			Expired: resolution.AttestationExpired);
 	}
 

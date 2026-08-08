@@ -330,6 +330,14 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 		Assert.Equal(profile, row.GetProperty("control").GetString());
 		Assert.Equal($"target:{targetId}", row.GetProperty("scope").GetString());
 		Assert.False(row.GetProperty("expired").GetBoolean());
+
+		// Wire must self-describe as live resolution, not recorded history (issue #299
+		// round-1 blocker): derivation + resolved_at present, applied_at absent, and the
+		// doc-edit time surfaced only as attestation_updated_at.
+		Assert.Equal("live-resolution", row.GetProperty("derivation").GetString());
+		Assert.True(DateTimeOffset.TryParse(row.GetProperty("resolved_at").GetString(), out _));
+		Assert.False(row.TryGetProperty("applied_at", out _), "applied_at must not appear -- it mislabels a doc-edit time as a scan-time application time.");
+		Assert.True(row.TryGetProperty("attestation_updated_at", out _));
 		_ = siteId;
 	}
 
