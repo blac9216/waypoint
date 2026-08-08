@@ -78,13 +78,14 @@ public sealed record CredentialResponse(
 	long UsedByJobCount,
 	DateTimeOffset? RotatedAt,
 	DateTimeOffset CreatedAt,
-	DateTimeOffset UpdatedAt);
+	DateTimeOffset UpdatedAt,
+	string? Username = null);
 
-/// <summary>Create request: metadata plus optional initial secret material (in only; UTF-8). <see cref="SudoEnabled"/> is only meaningful for <see cref="CredentialTypes.Ssh"/> (validated at the controller).</summary>
-public sealed record CredentialCreateRequest(string? Name, string? CredentialType, string? Owner, bool? SudoEnabled, string? Secret);
+/// <summary>Create request: metadata plus optional initial secret material (in only; UTF-8). <see cref="SudoEnabled"/> is only meaningful for <see cref="CredentialTypes.Ssh"/> (validated at the controller). <see cref="Username"/> is not secret material (migration 0012) -- it is the protocol-level login a connection-type (vcenter/nsx/ssh) credential's job handler presents, distinct from <see cref="Name"/>'s human-facing label.</summary>
+public sealed record CredentialCreateRequest(string? Name, string? CredentialType, string? Owner, bool? SudoEnabled, string? Secret, string? Username = null);
 
-/// <summary>Update request: rename, flip <see cref="SudoEnabled"/>, and/or rotate. A non-null <paramref name="Secret"/> replaces the stored blob and stamps <c>rotated_at</c>.</summary>
-public sealed record CredentialUpdateRequest(string? Name, bool? SudoEnabled, string? Secret);
+/// <summary>Update request: rename, flip <see cref="SudoEnabled"/>, change <see cref="Username"/>, and/or rotate. A non-null <paramref name="Secret"/> replaces the stored blob and stamps <c>rotated_at</c>.</summary>
+public sealed record CredentialUpdateRequest(string? Name, bool? SudoEnabled, string? Secret, string? Username = null);
 
 /// <summary>
 /// Response for <c>POST /credentials/{id}/test</c>. Carries no secret material (same
