@@ -116,6 +116,12 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<Waypoint.Core.Secrets.IMasterKeyProvider>(new Secrets.FileMasterKeyProvider());
 		services.AddSingleton<Waypoint.Core.Secrets.IEnvelopeCipher, Secrets.AesGcmEnvelopeCipher>();
 
+		// Issue #310: the STIG Manager reachability probe's HTTP boundary. Registered
+		// unconditionally (like the crypto core above) -- IHttpClientFactory itself
+		// needs no connection string, only the repository below does.
+		services.AddHttpClient();
+		services.AddSingleton<Waypoint.Core.StigManager.IStigManagerProbe, StigManager.HttpStigManagerProbe>();
+
 		string? connectionString = configuration.GetConnectionString(ConnectionStringName);
 		if (!string.IsNullOrWhiteSpace(connectionString))
 		{
@@ -159,6 +165,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton(new InventoryRepository(connectionString));
 			services.AddSingleton(new ConfigDocRepository(connectionString));
+			services.AddSingleton(new StigManager.StigManagerRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
