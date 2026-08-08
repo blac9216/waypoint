@@ -434,11 +434,19 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 
 	/// <summary>#147: a fan-out that is born blocked (credential already halted) emits a
 	/// run-scoped queue.state and an appliance-wide system.notice -- the only actor that
-	/// knows this happened is the repository, post-commit.</summary>
+	/// knows this happened is the repository, post-commit.
+	///
+	/// #174: the payload must also identify *which* credential's halt caused the block
+	/// (mirroring the dispatcher's own halt-trip `credential_id`), and it must carry
+	/// only the credential's identity -- a canary plaintext marker planted in
+	/// `credential_secrets.ciphertext` (never read by this path) proves the fix didn't
+	/// somehow widen the payload to include secret material.</summary>
 	[Fact]
-	public async Task AFanOutBornBlocked_EmitsQueueStateAndSystemNotice()
+	public async Task AFanOutBornBlocked_EmitsQueueStateAndSystemNoticeWithCredentialId()
 	{
 		Guid credentialId = await SeedCredentialAsync();
+		string secretCanary = $"do-not-leak-{Guid.NewGuid():N}";
+		await SeedCredentialSecretAsync(credentialId, secretCanary);
 		Guid firstRunId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
 		await SeedTerminalJobAsync(firstRunId, credentialId, JobStates.AuthFailed);
 		await SeedTerminalJobAsync(firstRunId, credentialId, JobStates.AuthFailed);
@@ -456,15 +464,27 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using (NpgsqlCommand queueState = new(
-			"SELECT count(*) FROM job_events WHERE event_type = 'queue.state' AND run_id = $1 AND payload->>'blocked' = 'true'", connection))
+			"SELECT payload FROM job_events WHERE event_type = 'queue.state' AND run_id = $1 AND payload->>'blocked' = 'true'", connection))
 		{
 			queueState.Parameters.AddWithValue(laterRunId);
-			Assert.Equal(1L, (long)(await queueState.ExecuteScalarAsync())!);
+			await using NpgsqlDataReader reader = await queueState.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync());
+			string payload = reader.GetString(0);
+			Assert.Contains(credentialId.ToString(), payload, StringComparison.OrdinalIgnoreCase);
+			Assert.DoesNotContain(secretCanary, payload, StringComparison.Ordinal);
+			Assert.False(await reader.ReadAsync());
 		}
 
-		await using NpgsqlCommand notice = new(
-			"SELECT count(*) FROM job_events WHERE event_type = 'system.notice' AND payload->>'born_blocked_job_count' = '1'", connection);
-		Assert.Equal(1L, (long)(await notice.ExecuteScalarAsync())!);
+		await using (NpgsqlCommand notice = new(
+			"SELECT payload FROM job_events WHERE event_type = 'system.notice' AND payload->>'born_blocked_job_count' = '1'", connection))
+		{
+			await using NpgsqlDataReader reader = await notice.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync());
+			string payload = reader.GetString(0);
+			Assert.Contains(credentialId.ToString(), payload, StringComparison.OrdinalIgnoreCase);
+			Assert.DoesNotContain(secretCanary, payload, StringComparison.Ordinal);
+			Assert.False(await reader.ReadAsync());
+		}
 	}
 
 	[Fact]
@@ -560,6 +580,26 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'service') RETURNING id", connection);
 		insert.Parameters.AddWithValue($"cred-{Guid.NewGuid():N}");
 		return (Guid)(await insert.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>#174 canary support: plants a plaintext marker as if it were the
+	/// decrypted secret, purely so the born-blocked payload test can assert it never
+	/// shows up there. Real secrets are opaque ciphertext (ADR-0005); this stands in for
+	/// "any secret material" without needing the real envelope-encryption machinery.</summary>
+	private async Task SeedCredentialSecretAsync(Guid credentialId, string plaintextMarker)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO credential_secrets (credential_id, ciphertext, data_key_wrapped, master_key_id)
+			VALUES ($1, $2, $3, 'test-master-key')
+			""", connection);
+		insert.Parameters.AddWithValue(credentialId);
+		insert.Parameters.AddWithValue(System.Text.Encoding.UTF8.GetBytes(plaintextMarker));
+		insert.Parameters.AddWithValue(System.Text.Encoding.UTF8.GetBytes("wrapped-key-placeholder"));
+		await insert.ExecuteNonQueryAsync();
 	}
 
 	private async Task SeedTerminalJobWithIdAsync(Guid jobId, Guid runId, Guid credentialId, string terminalState, DateTime finishedAt)

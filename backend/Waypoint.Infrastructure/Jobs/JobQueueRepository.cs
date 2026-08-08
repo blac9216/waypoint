@@ -288,6 +288,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		List<Guid> jobIds = new(specs.Count);
 		int blockedCount = 0;
 		string? blockedNote = null;
+		List<Guid> blockedCredentialIds = new();
 		foreach (JobSpec spec in specs)
 		{
 			await using NpgsqlCommand insertJob = new(
@@ -312,6 +313,15 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			{
 				blockedCount++;
 				blockedNote ??= reader.IsDBNull(2) ? null : reader.GetString(2);
+				// #174: the 0005 trigger coerces per-row keyed by that row's own
+				// credential_id, so a single fan-out can in principle be born blocked by
+				// more than one halted credential -- collect the distinct set actually
+				// observed rather than assuming one. Identity only (id) -- the halt
+				// carries no secret material to leak here.
+				if (spec.CredentialId is Guid blockedCredentialId && !blockedCredentialIds.Contains(blockedCredentialId))
+				{
+					blockedCredentialIds.Add(blockedCredentialId);
+				}
 			}
 		}
 
@@ -332,7 +342,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		if (blockedCount > 0)
 		{
 			LogFanOutBlocked(runId, blockedCount, jobIds.Count);
-			await EmitBornBlockedAsync(runId, blockedCount, jobIds.Count, blockedNote, cancellationToken).ConfigureAwait(false);
+			await EmitBornBlockedAsync(runId, blockedCount, jobIds.Count, blockedNote, blockedCredentialIds, cancellationToken).ConfigureAwait(false);
 		}
 
 		LogFannedOutJobs(runId, jobIds.Count);
@@ -875,8 +885,16 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 	/// <summary>#147: a run fanned out into an already-halted credential is otherwise
 	/// invisible on SSE -- no auth failure occurs, so the dispatcher's halt path never
 	/// runs. Emitted after the transaction committed ("nothing follows an emit in its
-	/// transaction"), best-effort like every event.</summary>
-	private async Task EmitBornBlockedAsync(Guid runId, int blockedCount, int jobCount, string? reason, CancellationToken cancellationToken)
+	/// transaction"), best-effort like every event.
+	///
+	/// #174: <paramref name="blockedCredentialIds"/> identifies which credential(s)'
+	/// halt caused the block, mirroring the dispatcher's own halt-trip payload
+	/// (<c>JobDispatcherHostedService.HandleAuthFailureAsync</c> emits
+	/// <c>credential_id</c>) so an operator watching the stream knows which credential
+	/// needs attention instead of only "a run was born blocked". Identity only (the
+	/// credential id) -- never the secret material behind it.</summary>
+	private async Task EmitBornBlockedAsync(
+		Guid runId, int blockedCount, int jobCount, string? reason, IReadOnlyList<Guid> blockedCredentialIds, CancellationToken cancellationToken)
 	{
 		if (_events is null)
 		{
@@ -888,7 +906,8 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			blocked = true,
 			born_blocked_job_count = blockedCount,
 			job_count = jobCount,
-			reason
+			reason,
+			credential_ids = blockedCredentialIds
 		});
 		await _events.EmitAsync(JobEventTypes.QueueState, null, runId, payload, cancellationToken).ConfigureAwait(false);
 		await _events.EmitAsync(JobEventTypes.SystemNotice, null, null, payload, cancellationToken).ConfigureAwait(false);
