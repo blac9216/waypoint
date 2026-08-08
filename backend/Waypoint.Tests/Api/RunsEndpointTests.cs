@@ -70,6 +70,77 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 	}
 
+	// -- issue #208: remediation gate + initiator provenance ----------------
+
+	[Theory]
+	[InlineData("Cyber")]
+	[InlineData("Operator")]
+	public async Task CreateRun_RemediateBelowAdmin_Returns403(string role)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/runs");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { run_type = "remediate", scope = "{}", confirmation = "REMEDIATE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData(null)]
+	[InlineData("remediate")]
+	[InlineData("yes")]
+	public async Task CreateRun_RemediateWithoutExactConfirmation_Returns400(string? confirmation)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/runs");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { run_type = "remediate", scope = "{}", confirmation }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task CreateRun_RemediateWithAdminAndConfirmation_Returns202()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/runs");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { run_type = "remediate", scope = "{}", confirmation = "REMEDIATE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Assert.Equal("remediate", _factory.Repository.LastCreateRun!.Value.RunType);
+	}
+
+	[Fact]
+	public async Task CreateRun_InitiatedByComesFromIdentity_NotFromBody()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/runs");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Cyber");
+		// initiated_by is no longer part of the contract; a caller supplying it
+		// anyway must not influence the recorded initiator.
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { run_type = "scan", scope = "{}", initiated_by = "mallory" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Assert.Equal("test-user", _factory.Repository.LastCreateRun!.Value.InitiatedBy);
+	}
+
 	[Theory]
 	[InlineData("Viewer")]
 	[InlineData("Cyber")]
@@ -414,9 +485,14 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 		return Task.FromResult<IReadOnlyList<JobSummary>>([]);
 	}
 
+	/// <summary>Arguments of the last <see cref="CreateRunAsync"/> call, for asserting
+	/// what the controller actually forwarded (issue #208: initiated_by provenance).</summary>
+	public (string RunType, string ScopeJson, Guid? CredentialId, string? InitiatedBy)? LastCreateRun { get; private set; }
+
 	public Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken)
 	{
-		_ = (runType, scopeJson, credentialId, initiatedBy, cancellationToken);
+		_ = cancellationToken;
+		LastCreateRun = (runType, scopeJson, credentialId, initiatedBy);
 		return Task.FromResult(Guid.NewGuid());
 	}
 

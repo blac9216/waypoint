@@ -49,6 +49,7 @@ public sealed class TestAuthHandler : AuthenticationHandler<AuthenticationScheme
 		Claim[] claims =
 		[
 			new Claim(ClaimTypes.NameIdentifier, "test-user"),
+			new Claim(ClaimTypes.Name, "test-user"),
 			new Claim(WaypointClaimTypes.Role, roleValues.ToString())
 		];
 

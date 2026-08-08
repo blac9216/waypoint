@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Net;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
@@ -29,6 +30,9 @@ namespace Waypoint.Api.Controllers;
 [Route("api/v1/runs")]
 public sealed class RunsController : ControllerBase
 {
+	private const string RemediateRunType = "remediate";
+	private const string RemediateConfirmation = "REMEDIATE";
+
 	private readonly IJobQueueRepository _repository;
 
 	public RunsController(IJobQueueRepository repository)
@@ -38,8 +42,17 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Create a new run. Cyber+ to create scan runs; Admin for remediation (deferred
-	/// to later milestone — all run types accept Cyber+ for now).
+	/// In-action role check for gates finer than the endpoint's <c>Require*Role</c>
+	/// attribute (which fixes the floor, not per-run-type requirements).
+	/// </summary>
+	private bool CallerHasAtLeast(WaypointRole minimum) =>
+		Enum.TryParse(User.FindFirstValue(WaypointClaimTypes.Role), out WaypointRole role) && role >= minimum;
+
+	/// <summary>
+	/// Create a new run. Cyber+ for scan runs; remediation requires Admin plus the
+	/// explicit <c>confirmation: "REMEDIATE"</c> body field — remediation is never
+	/// implicit (docs/api-contract.md `/runs`, CLAUDE.md key constraints). The
+	/// initiator is recorded from the authenticated identity, never from the body.
 	/// </summary>
 	[HttpPost]
 	[RequireCyberRole]
@@ -48,8 +61,26 @@ public sealed class RunsController : ControllerBase
 		RunCreateRequest request,
 		CancellationToken cancellationToken)
 	{
+		if (string.Equals(request.RunType, RemediateRunType, StringComparison.Ordinal))
+		{
+			if (!CallerHasAtLeast(WaypointRole.Admin))
+			{
+				throw ApiException.Forbidden(
+					"Remediation runs require the Admin role.",
+					"Only an Admin may create a run with run_type 'remediate'.");
+			}
+
+			if (!string.Equals(request.Confirmation, RemediateConfirmation, StringComparison.Ordinal))
+			{
+				throw ApiException.Validation(
+					"Remediation requires explicit confirmation.",
+					$"Set \"confirmation\": \"{RemediateConfirmation}\" in the request body to create a remediation run.");
+			}
+		}
+
+		string initiatedBy = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
 		Guid runId = await _repository.CreateRunAsync(
-			request.RunType, request.Scope, request.CredentialId, request.InitiatedBy, cancellationToken)
+			request.RunType, request.Scope, request.CredentialId, initiatedBy, cancellationToken)
 			.ConfigureAwait(false);
 
 		return Accepted(new RunCreatedResponse(runId.ToString()));

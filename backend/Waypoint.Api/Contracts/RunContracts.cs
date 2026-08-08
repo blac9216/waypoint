@@ -31,9 +31,14 @@ public sealed record RunCreateRequest(
 	[property: JsonPropertyName("credential_id")]
 	Guid? CredentialId,
 
-	/// <summary>Optional: who initiated the run (usually populated from auth context).</summary>
-	[property: JsonPropertyName("initiated_by")]
-	string? InitiatedBy);
+	/// <summary>
+	/// Required for <c>run_type</c> "remediate": must be the literal
+	/// <c>"REMEDIATE"</c> (docs/api-contract.md `/runs`). Ignored for other run
+	/// types. The initiator is always taken from the authenticated identity, never
+	/// from the request.
+	/// </summary>
+	[property: JsonPropertyName("confirmation")]
+	string? Confirmation);
 
 /// <summary>Response body for <c>GET /api/v1/runs/{id}</c>.</summary>
 public sealed record RunResponse(
