@@ -22,9 +22,11 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Secrets;
 using Waypoint.Tests.Support;
 using Xunit;
@@ -73,6 +75,15 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 					provider.GetRequiredService<IEnvelopeCipher>(),
 					provider.GetRequiredService<ISecretTracker>(),
 					NullLogger<CredentialSecretStore>.Instance));
+
+				// Issue #245: /credentials/{id}/test now fans out a job, so the
+				// controller needs IJobQueueRepository -- JobEngine:Enabled is false
+				// in the Testing environment (appsettings.Testing.json), so the real
+				// registration in AddWaypointInfrastructure never runs; register it
+				// directly here, the same pattern CatalogApiTests already uses for
+				// DownloadsController's job fan-out.
+				services.AddSingleton<IJobQueueRepository>(new JobQueueRepository(
+					_connectionString, NullLogger<JobQueueRepository>.Instance));
 			});
 		}
 	}
@@ -320,39 +331,41 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		Assert.Null(await GetFieldAsync(id, "username"));
 	}
 
-	/// <summary>Issue #20: a successful /test decrypts the stored secret (audited like any other decrypt),
-	/// flips health to 'valid', and never returns the secret value itself.</summary>
+	/// <summary>
+	/// Issue #245: /test now queues a real connectivity job instead of running a
+	/// synchronous decrypt-only check (issue #20's old behavior) -- 202 with the
+	/// queued run/job ids, never the secret value. The job's terminal outcome
+	/// flipping <c>credentials.health</c> is proven end to end (dispatcher included)
+	/// by <c>CredentialTestJobHandlerEndToEndTests</c>; this API-level test host runs
+	/// with <c>JobEngine:Enabled = false</c> (appsettings.Testing.json), so no
+	/// dispatcher claims the job here -- only the fan-out contract is asserted.
+	/// </summary>
 	[Fact]
-	public async Task Test_WithAStoredSecret_Succeeds_AndFlipsHealthToValid_AndLeaksNothing()
+	public async Task Test_QueuesAConnectivityJob_Returns202_AndLeaksNothing()
 	{
 		const string canary = "invented-test-endpoint-canary-9f2c";
 		Guid id = await CreateCredentialAsync("test-me", canary);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/credentials/{id}/test", body: null);
-		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		string body = await response.Content.ReadAsStringAsync();
 		Assert.DoesNotContain(canary, body, StringComparison.Ordinal);
 
 		using JsonDocument document = JsonDocument.Parse(body);
-		Assert.True(document.RootElement.GetProperty("succeeded").GetBoolean());
-		Assert.Equal("valid", document.RootElement.GetProperty("health").GetString());
+		Assert.NotEqual(Guid.Empty, document.RootElement.GetProperty("run_id").GetGuid());
+		Assert.NotEqual(Guid.Empty, document.RootElement.GetProperty("job_id").GetGuid());
 
-		Assert.Equal("valid", await GetFieldAsync(id, "health"));
+		// Health is untouched until the job actually runs -- no dispatcher in this
+		// API test host, so it stays at its initial 'unknown'.
+		Assert.Equal("unknown", await GetFieldAsync(id, "health"));
 	}
 
-	/// <summary>Issue #20: testing a credential with no stored secret fails cleanly and flips health to auth_failing.</summary>
+	/// <summary>A missing credential 404s before any job is queued.</summary>
 	[Fact]
-	public async Task Test_WithNoStoredSecret_Fails_AndFlipsHealthToAuthFailing()
+	public async Task Test_OnMissingCredential_Is404()
 	{
-		Guid id = await CreateCredentialAsync("test-no-secret");
-
-		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/credentials/{id}/test", body: null);
-		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-		Assert.False(document.RootElement.GetProperty("succeeded").GetBoolean());
-		Assert.Equal("auth_failing", document.RootElement.GetProperty("health").GetString());
-
-		Assert.Equal("auth_failing", await GetFieldAsync(id, "health"));
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/credentials/{Guid.NewGuid()}/test", body: null);
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 	}
 
 	/// <summary>PR #187 round 1, finding 2: renaming onto a taken name is the same 409 Create maps.</summary>

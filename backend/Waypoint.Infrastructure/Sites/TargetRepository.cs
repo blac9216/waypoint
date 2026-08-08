@@ -94,6 +94,26 @@ public sealed class TargetRepository
 	}
 
 	/// <summary>
+	/// Issue #245: the first (oldest) target that references <paramref name="credentialId"/>,
+	/// used to resolve a host to dial for <c>POST /credentials/{id}/test</c> -- a
+	/// credential has no host of its own (domain-model.md: "One global service
+	/// account" is the degenerate case of many targets sharing one credential), so
+	/// the connectivity job borrows the host from whichever target the credential is
+	/// actually wired to today. Null when no target references it -- the caller
+	/// reports that as a clear failure rather than guessing a host.
+	/// </summary>
+	public async Task<Target?> FindFirstByCredentialAsync(Guid credentialId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			$"{ProjectionSql} WHERE credential_id = $1 ORDER BY created_at ASC LIMIT 1", connection);
+		command.Parameters.AddWithValue(credentialId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
+	}
+
+	/// <summary>
 	/// Creates a target under a site. Returns the outcome discriminated union rather
 	/// than throwing for the two known conflict shapes (site missing, name taken within
 	/// the site) so the controller maps each to its documented status code.

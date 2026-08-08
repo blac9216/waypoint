@@ -88,12 +88,12 @@ public sealed record CredentialCreateRequest(string? Name, string? CredentialTyp
 public sealed record CredentialUpdateRequest(string? Name, bool? SudoEnabled, string? Secret, string? Username = null);
 
 /// <summary>
-/// Response for <c>POST /credentials/{id}/test</c>. Carries no secret material (same
-/// reflection-enforced guarantee as <see cref="CredentialResponse"/>) -- only whether
-/// the stored secret exists and decrypts successfully under the caller's identity, and
-/// the resulting health. This is the minimal decrypt-liveness check (issue #20 split);
-/// it does NOT dial the target (vCenter/NSX/SSH) -- that real connectivity test is a
-/// PowerShell job deferred to a follow-up issue, per the #6/#194 job-handler pattern
-/// it would need to reuse.
+/// Response for <c>POST /credentials/{id}/test</c> (issue #245): 202, the queued
+/// <c>credential-test</c> job's run/job ids, mirroring <c>DiscoverQueuedResponse</c>'s
+/// shape. Replaces the old synchronous 200 <c>CredentialTestResponse</c> (issue #20's
+/// decrypt-liveness-only check) -- the real per-type connectivity probe now runs as a
+/// PowerShell job (<c>Waypoint.Infrastructure.Credentials.CredentialTestJobHandler</c>)
+/// through the #6/#194 job-handler pattern, and its terminal outcome (not the
+/// controller) flips <c>credentials.health</c>.
 /// </summary>
-public sealed record CredentialTestResponse(Guid Id, bool Succeeded, string Health, string Message);
+public sealed record CredentialTestQueuedResponse(Guid RunId, Guid JobId);

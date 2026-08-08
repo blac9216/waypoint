@@ -196,6 +196,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<IJobHandler, Downloads.DownloadJobHandler>();
 			services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 			services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
+			services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();
 
 			services.AddSingleton<JobDispatcherHostedService>();
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());

@@ -51,8 +51,8 @@ public sealed class SchemaMigrationTests
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #311 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage)) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 18;
+	/// <summary>Embedded migration count as of issue #245 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 19;
 
 	private readonly PostgresFixture _fixture;
 
