@@ -186,7 +186,7 @@ public sealed class CatalogTestApiFactory : WaypointApiFactory
 /// <summary>Minimal in-memory fake for controller-level tests; captures the filter/page it was called with.</summary>
 public sealed class FakeDepotArtifactRepository : IDepotArtifactRepository
 {
-	private IReadOnlyList<DepotArtifact> _items = [];
+	private DepotArtifact[] _items = [];
 
 	public DepotArtifactFilter? LastFilter { get; private set; }
 	public PageRequest? LastPage { get; private set; }
@@ -205,7 +205,7 @@ public sealed class FakeDepotArtifactRepository : IDepotArtifactRepository
 		_ = cancellationToken;
 		LastFilter = filter;
 		LastPage = page;
-		return Task.FromResult((_items, (long)_items.Count));
+		return Task.FromResult(((IReadOnlyList<DepotArtifact>)_items, (long)_items.Length));
 	}
 }
 
@@ -309,5 +309,11 @@ public sealed class CatalogFakeJobQueueRepository : IJobQueueRepository
 	{
 		_ = (credentialId, reason, cancellationToken);
 		return Task.FromResult(new CredentialUnblockResult(WasHalted: false, [], []));
+	}
+
+	public Task<RunListResult> ListRunsAsync(int limit, int offset, CancellationToken cancellationToken)
+	{
+		_ = (limit, offset, cancellationToken);
+		return Task.FromResult(new RunListResult([], 0));
 	}
 }
