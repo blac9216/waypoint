@@ -57,6 +57,7 @@ public sealed class ScanJobHandler : IJobHandler
 	internal const string AttestingStage = "attesting";
 	internal const string ConvertingStage = "converting";
 	private const string InvocationCommand = "Invoke-WaypointScan";
+	private const string NsxInvocationCommand = "Invoke-WaypointNsxScan";
 	private const string AttestCommand = "Invoke-WaypointAttest";
 	private const string ConvertCommand = "Invoke-WaypointConvert";
 	private const int LogTailLines = 20;
@@ -151,9 +152,11 @@ public sealed class ScanJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed($"target '{payload.TargetId}' does not exist.");
 		}
 
-		if (!string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal))
+		if (!string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal)
+			&& !string.Equals(target.Kind, TargetKinds.NsxApi, StringComparison.Ordinal))
 		{
-			return JobExecutionOutcome.Failed($"target '{payload.TargetId}' is kind '{target.Kind}'; the InSpec stage only supports '{TargetKinds.VSphere}'.");
+			return JobExecutionOutcome.Failed(
+				$"target '{payload.TargetId}' is kind '{target.Kind}'; the InSpec stage only supports '{TargetKinds.VSphere}' and '{TargetKinds.NsxApi}'.");
 		}
 
 		string? host = TryGetConnectionHost(target.ConnectionJson);
@@ -173,21 +176,42 @@ public sealed class ScanJobHandler : IJobHandler
 		}
 
 		string reportPath = Path.Combine(_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.json");
+		bool isNsx = string.Equals(target.Kind, TargetKinds.NsxApi, StringComparison.Ordinal);
 
 		PowerShellExecutionResult result;
 		try
 		{
-			Dictionary<string, object?> parameters = new(StringComparer.Ordinal)
-			{
-				["VCenter"] = host,
-				["Username"] = resolved.Username,
-				["Password"] = resolved.Secret,
-				["ProfilePath"] = _scanOptions.Value.ProfilePath,
-				["ReportPath"] = reportPath,
-				["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
-			};
+			// The NSX path passes Manager/Username/Password/ProfilePath/ReportPath to
+			// Invoke-WaypointNsxScan, which acquires the session token itself, inside its
+			// own PowerShell invocation -- the token is generated and consumed entirely
+			// within that call and never crosses back into this C# handler, so there is
+			// nothing here to additionally track via ISecretTracker: the token's whole
+			// lifetime sits inside the same bound-parameter, non-argv, non-logged
+			// invocation the vSphere password already relies on (security.md controls
+			// 1/2). Password is still resolved and bound the same way for both kinds --
+			// NSX authenticates to /api/session/create with it before InSpec ever runs.
+			Dictionary<string, object?> parameters = isNsx
+				? new(StringComparer.Ordinal)
+				{
+					["Manager"] = host,
+					["Username"] = resolved.Username,
+					["Password"] = resolved.Secret,
+					["ProfilePath"] = _scanOptions.Value.NsxProfilePath,
+					["ReportPath"] = reportPath,
+					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
+				}
+				: new(StringComparer.Ordinal)
+				{
+					["VCenter"] = host,
+					["Username"] = resolved.Username,
+					["Password"] = resolved.Secret,
+					["ProfilePath"] = _scanOptions.Value.ProfilePath,
+					["ReportPath"] = reportPath,
+					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
+				};
 
-			PowerShellRequest request = new(InvocationCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
+			PowerShellRequest request = new(
+				isNsx ? NsxInvocationCommand : InvocationCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
 			result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
 		}
 		finally
