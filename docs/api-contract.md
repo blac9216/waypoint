@@ -250,6 +250,21 @@ additional recovery/control edges: lease recovery or claim release may move `run
 queued`, and abort may move active work to `cancelled`. These edges are validated
 separately so a handler cannot requeue itself and bypass retry accounting.
 
+**Stage resumability (ADR-0012).** A multi-stage job's pipeline position is recorded
+on a durable `jobs.stage` marker, separate from `jobs.state`. `queued` remains the
+only claimable, unleased state — a job resting between stages (e.g. after finishing
+`attesting`, before `converting` begins) is `queued` with `stage` set to where it left
+off, exactly like a fresh job except for that marker (`stage` is `NULL` for a job that
+has not started its first stage). The claim query hands the marker to the handler
+(`GET /runs/{id}/jobs` already projects `stage` per job), which resumes its internal
+stage dispatch there instead of re-running completed stages. This extends the same
+engine-only privilege `running → queued` already had (see the paragraph above) to
+`attesting → queued` and `converting → queued`: lease recovery and a stage-complete
+requeue may perform these moves, a handler may not. A `failed` job keeps its last
+`stage` marker on the row, so whatever resumes it (a future retry action) re-enters
+the pipeline at that stage rather than from the beginning — the marker is not cleared
+by failure, only by reaching a later stage or a fresh run.
+
 The consecutive-auth-failure window is the credential's most recent resolved job
 outcomes: rows without `finished_at` are excluded, and equal finish times are ordered by
 job id. Newly queued work therefore cannot displace a resolved failure or suppress the

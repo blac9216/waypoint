@@ -36,3 +36,4 @@ An append to Consequences must:
 | [0009](0009-self-update.md) | Signed update bundles + updater sidecar | Accepted |
 | [0010](0010-deployment-topology.md) | One appliance, connected/disconnected modes | Accepted |
 | [0011](0011-credential-tiers.md) | Credential tiers; ephemeral personal credentials in v1 | Accepted |
+| [0012](0012-stage-per-execution-dispatcher.md) | Stage-per-execution dispatcher; resume-from-stage | Accepted |

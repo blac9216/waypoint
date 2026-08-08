@@ -73,11 +73,23 @@ public static class JobStateMachine
 		return table.TryGetValue(fromState, out string[]? allowed) && Array.IndexOf(allowed, toState) >= 0;
 	}
 
-	/// <summary>True when an engine actor may perform the transition.</summary>
+	/// <summary>
+	/// True when an engine actor may perform the transition. Beyond the handler-legal
+	/// graph, an engine actor (lease recovery, claim release, or issue #293's
+	/// stage-complete requeue) may always move an active, lease-bearing state --
+	/// <c>running</c>, or <c>attesting</c>/<c>converting</c> for a <see cref="JobShape.Standard"/>/
+	/// <see cref="JobShape.Srg"/> job resting mid-pipeline -- back to <c>queued</c>.
+	/// <c>queued</c> stays the only claimable/unleased state (the #274 ruling): this is
+	/// what lets a job requeued mid-pipeline re-enter the claim query at all, and what
+	/// makes #282's crashed-attest/convert recovery legal rather than a silent CHECK
+	/// violation waiting to happen.
+	/// </summary>
 	public static bool CanEngineTransition(JobShape shape, string fromState, string toState) =>
 		CanTransition(shape, fromState, toState)
-		|| (string.Equals(fromState, JobStates.Running, StringComparison.Ordinal)
-			&& string.Equals(toState, JobStates.Queued, StringComparison.Ordinal));
+		|| (string.Equals(toState, JobStates.Queued, StringComparison.Ordinal)
+			&& (string.Equals(fromState, JobStates.Running, StringComparison.Ordinal)
+				|| string.Equals(fromState, JobStates.Attesting, StringComparison.Ordinal)
+				|| string.Equals(fromState, JobStates.Converting, StringComparison.Ordinal)));
 
 	/// <summary>The states a job of the given shape may still reach from <paramref name="fromState"/>.</summary>
 	public static IReadOnlyList<string> AllowedNextStates(JobShape shape, string fromState)

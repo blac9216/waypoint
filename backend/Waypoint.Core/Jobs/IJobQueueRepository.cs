@@ -75,6 +75,24 @@ public interface IJobQueueRepository
 	Task<bool> AdvanceStateAsync(
 		Guid jobId, string workerId, string expectedFromState, string toState, string? note, bool clearLease, CancellationToken cancellationToken);
 
+	/// <summary>
+	/// Issue #293's stage-per-execution requeue: moves a claimed job from
+	/// <paramref name="expectedFromState"/> back to <c>queued</c>, clearing the lease
+	/// (same discipline as <see cref="AdvanceStateAsync"/>'s <c>clearLease: true</c>
+	/// path) and durably recording <paramref name="stage"/> in <c>jobs.stage</c> so the
+	/// next claim of this job hands that marker back to the handler via
+	/// <see cref="ClaimedJob.Stage"/>. This is how a <see cref="JobOutcomeKind.StageComplete"/>
+	/// outcome rests a multi-stage job between claim/execute cycles instead of forcing
+	/// a shape-terminal state: <c>queued</c> stays the only claimable/unleased state
+	/// (the ruling on #274), with the stage marker carrying the pipeline position that
+	/// <c>state</c> alone no longer does once the row leaves <c>attesting</c>/<c>converting</c>.
+	/// Fails (returns <c>false</c>) under the same race <see cref="AdvanceStateAsync"/>
+	/// guards against -- the row is no longer <paramref name="expectedFromState"/> or no
+	/// longer owned by <paramref name="workerId"/>.
+	/// </summary>
+	Task<bool> RequeueAtStageAsync(
+		Guid jobId, string workerId, string expectedFromState, string stage, string? note, CancellationToken cancellationToken);
+
 	/// <summary>Recovers expired running leases, cancelling work under aborted runs.</summary>
 	Task<IReadOnlyList<RecoveredJob>> RecoverExpiredLeasesAsync(int batchSize, CancellationToken cancellationToken);
 

@@ -222,6 +222,13 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 			CancelReasonBox cancelReason = new();
 			Task heartbeatTask = RunHeartbeatLoopAsync(job, jobCts, cancelReason, heartbeatStopCts.Token);
 
+			// StageComplete (issue #293) is not a terminal outcome, so it is handled
+			// entirely separately from the finalState/AdvanceStateAsync path below: the
+			// handler has already left the row at a legal non-terminal state via
+			// AdvanceAsync, and this outcome means "requeue it there" rather than "force
+			// the shape's terminal success state". stageOutcome is null for every other
+			// path (no handler, exception, cancellation, or a terminal outcome kind).
+			JobExecutionOutcome? stageOutcome = null;
 			string finalState;
 			string? finalNote;
 
@@ -236,13 +243,22 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 				else
 				{
 					JobExecutionOutcome outcome = await handler.ExecuteAsync(context, jobCts.Token).ConfigureAwait(false);
-					finalState = outcome.Kind switch
+					if (outcome.Kind == JobOutcomeKind.StageComplete)
 					{
-						JobOutcomeKind.Succeeded => shape == JobShape.Standard ? JobStates.Uploaded : JobStates.Done,
-						JobOutcomeKind.AuthFailed => JobStates.AuthFailed,
-						_ => JobStates.Failed
-					};
-					finalNote = outcome.Note;
+						stageOutcome = outcome;
+						finalState = context.CurrentState;
+						finalNote = outcome.Note;
+					}
+					else
+					{
+						finalState = outcome.Kind switch
+						{
+							JobOutcomeKind.Succeeded => shape == JobShape.Standard ? JobStates.Uploaded : JobStates.Done,
+							JobOutcomeKind.AuthFailed => JobStates.AuthFailed,
+							_ => JobStates.Failed
+						};
+						finalNote = outcome.Note;
+					}
 				}
 			}
 			catch (OperationCanceledException) when (jobCts.IsCancellationRequested)
@@ -264,6 +280,12 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 			{
 				await heartbeatStopCts.CancelAsync().ConfigureAwait(false);
 				await heartbeatTask.ConfigureAwait(false);
+			}
+
+			if (stageOutcome is not null)
+			{
+				await RequeueAtStageAsync(job, context, stageOutcome, hostToken).ConfigureAwait(false);
+				return;
 			}
 
 			if (!JobStateMachine.CanTransition(shape, context.CurrentState, finalState))
@@ -299,6 +321,38 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 			_inFlight.TryRemove(job.Id, out _);
 			gate.Release();
 		}
+	}
+
+	/// <summary>
+	/// Issue #293: requeues a job that reported <see cref="JobOutcomeKind.StageComplete"/>
+	/// -- the handler already advanced <paramref name="context"/> to a legal non-terminal
+	/// state via <see cref="JobExecutionContext.AdvanceAsync"/> (e.g. <c>running -&gt;
+	/// attesting</c>); this moves the row the rest of the way back to <c>queued</c> with
+	/// the lease cleared and <c>jobs.stage</c> set to <see cref="JobExecutionOutcome.NextStage"/>,
+	/// so the next claim of this job (this worker or another) hands that marker back via
+	/// <see cref="ClaimedJob.Stage"/>. A lost race (row concurrently aborted/recovered) is
+	/// logged and swallowed exactly like the terminal completion path's own lost-race
+	/// case -- there is nothing left for this worker to do about a row it no longer owns.
+	/// </summary>
+	private async Task RequeueAtStageAsync(ClaimedJob job, JobExecutionContext context, JobExecutionOutcome stageOutcome, CancellationToken hostToken)
+	{
+		string nextStage = stageOutcome.NextStage
+			?? throw new InvalidOperationException($"Job {job.Id}: StageComplete outcome carried no NextStage.");
+
+		bool requeued = await _repository
+			.RequeueAtStageAsync(job.Id, WorkerId, context.CurrentState, nextStage, stageOutcome.Note, hostToken)
+			.ConfigureAwait(false);
+
+		if (!requeued)
+		{
+			LogCompletionLost(job.Id, context.CurrentState, JobStates.Queued);
+			return;
+		}
+
+		await _events.EmitAsync(
+			JobEventTypes.JobState, job.Id, job.RunId,
+			JsonSerializer.Serialize(new { from = context.CurrentState, to = JobStates.Queued, stage = nextStage, note = stageOutcome.Note }),
+			hostToken).ConfigureAwait(false);
 	}
 
 	private async Task RunHeartbeatLoopAsync(ClaimedJob job, CancellationTokenSource jobCts, CancelReasonBox cancelReason, CancellationToken stopToken)

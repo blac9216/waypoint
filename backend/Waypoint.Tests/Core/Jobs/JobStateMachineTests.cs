@@ -117,6 +117,22 @@ public sealed class JobStateMachineTests
 		Assert.True(JobStateMachine.CanEngineTransition(shape, from, to));
 	}
 
+	/// <summary>
+	/// Issue #293: a stage-complete requeue (or #282's lease-recovery sweep) must be
+	/// able to move a Standard-shape job resting mid-pipeline -- attesting or
+	/// converting -- straight back to queued, the same engine-only privilege
+	/// <see cref="JobStates.Running"/> already had. No handler may do this itself
+	/// (<see cref="JobStateMachine.CanTransition"/> stays false for both).
+	/// </summary>
+	[Theory]
+	[InlineData(JobStates.Attesting)]
+	[InlineData(JobStates.Converting)]
+	public void EngineMayRequeueAttestingOrConvertingJobs_ButHandlersMayNot(string fromState)
+	{
+		Assert.True(JobStateMachine.CanEngineTransition(JobShape.Standard, fromState, JobStates.Queued));
+		Assert.False(JobStateMachine.CanTransition(JobShape.Standard, fromState, JobStates.Queued));
+	}
+
 	[Fact]
 	public void JobShapes_OnlyScanIsStandard()
 	{

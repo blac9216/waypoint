@@ -270,6 +270,8 @@ public sealed class HostedServiceBehaviorTests
 		public Task<bool> IsCancelRequestedAsync(Guid jobId, CancellationToken cancellationToken) => Task.FromResult(false);
 		public Task<bool> AdvanceStateAsync(Guid jobId, string workerId, string expectedFromState, string toState, string? note, bool clearLease, CancellationToken cancellationToken)
 		{ Moves.Add((expectedFromState, toState)); return Task.FromResult(AdvanceResult); }
+		public Task<bool> RequeueAtStageAsync(Guid jobId, string workerId, string expectedFromState, string stage, string? note, CancellationToken cancellationToken)
+		{ Moves.Add((expectedFromState, JobStates.Queued)); return Task.FromResult(AdvanceResult); }
 		public async Task<IReadOnlyList<RecoveredJob>> RecoverExpiredLeasesAsync(int batchSize, CancellationToken cancellationToken)
 		{
 			Recoveries++;

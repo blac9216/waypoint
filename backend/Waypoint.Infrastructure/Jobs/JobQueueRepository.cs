@@ -89,7 +89,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			attempt_count = attempt_count + 1,
 			started_at = COALESCE(started_at, now())
 		WHERE id IN (SELECT id FROM claimable)
-		RETURNING id, run_id, job_type, target_id, target_name, credential_id, priority, payload::text, attempt_count, max_attempts
+		RETURNING id, run_id, job_type, target_id, target_name, credential_id, priority, payload::text, attempt_count, max_attempts, stage
 		""";
 
 	public async Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
@@ -127,7 +127,8 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			Priority: reader.GetInt16(6),
 			Payload: reader.GetString(7),
 			AttemptCount: reader.GetInt32(8),
-			MaxAttempts: reader.GetInt32(9));
+			MaxAttempts: reader.GetInt32(9),
+			Stage: reader.IsDBNull(10) ? null : reader.GetString(10));
 	}
 
 	public async Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
@@ -183,10 +184,66 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		return result is not null;
 	}
 
+	/// <summary>
+	/// Issue #293's stage-per-execution requeue -- see <see cref="IJobQueueRepository.RequeueAtStageAsync"/>.
+	/// Same shape as <see cref="AdvanceStateAsync"/>'s <c>clearLease: true</c> path
+	/// (finished_at is deliberately left untouched: the job is not finished, only
+	/// resting) except the target state is always <c>queued</c> and <paramref name="stage"/>
+	/// is written durably so the next claim's <c>RETURNING stage</c> hands it back.
+	/// </summary>
+	public async Task<bool> RequeueAtStageAsync(
+		Guid jobId, string workerId, string expectedFromState, string stage, string? note, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
+		ArgumentException.ThrowIfNullOrWhiteSpace(expectedFromState);
+		ArgumentException.ThrowIfNullOrWhiteSpace(stage);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE jobs SET
+				state = 'queued',
+				stage = $3,
+				note = $4,
+				lease_expires_at = NULL,
+				heartbeat_at = NULL,
+				claimed_by = NULL,
+				claimed_at = NULL
+			WHERE id = $1 AND claimed_by = $2 AND state = $5
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(jobId);
+		command.Parameters.AddWithValue(workerId);
+		command.Parameters.AddWithValue(stage);
+		command.Parameters.AddWithValue((object?)note ?? DBNull.Value);
+		command.Parameters.AddWithValue(expectedFromState);
+
+		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		bool requeued = result is not null;
+		if (requeued)
+		{
+			LogRequeuedAtStage(jobId, stage);
+		}
+
+		return requeued;
+	}
+
+	// #282 (closed by #293): widened from the original 'running'-only predicate to
+	// also cover 'attesting'/'converting' -- the Standard-shape scan pipeline's other
+	// two actively-worked, lease-bearing states (0015's CHECK already treats the three
+	// as one unit; idx_jobs_lease_recovery follows suit in migration 0016). A worker
+	// that crashes mid-attest/convert now recovers exactly like a crashed 'running'
+	// worker: the row's stage column is untouched by this UPDATE (it only ever writes
+	// state/claim/lease/finished/note), so whatever stage marker a prior
+	// StageComplete requeue left in place survives the recovery and the next claim's
+	// RETURNING stage hands it straight back to the handler -- recovery requeues at
+	// the marker, not from the beginning, closing #282's stranding.
 	internal const string RecoverSql = """
 		WITH recoverable AS (
 			SELECT id FROM jobs
-			WHERE state = 'running' AND lease_expires_at < now()
+			WHERE state IN ('running', 'attesting', 'converting') AND lease_expires_at < now()
 			ORDER BY lease_expires_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT $1
@@ -214,7 +271,9 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			throw new ArgumentOutOfRangeException(nameof(batchSize), batchSize, "Batch size must be positive.");
 		}
 
-		if (!JobStateMachine.CanEngineTransition(JobShape.Simple, JobStates.Running, JobStates.Queued))
+		if (!JobStateMachine.CanEngineTransition(JobShape.Simple, JobStates.Running, JobStates.Queued)
+			|| !JobStateMachine.CanEngineTransition(JobShape.Standard, JobStates.Attesting, JobStates.Queued)
+			|| !JobStateMachine.CanEngineTransition(JobShape.Standard, JobStates.Converting, JobStates.Queued))
 		{
 			throw new InvalidOperationException("The engine transition gate rejects lease recovery.");
 		}
@@ -1217,4 +1276,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 	[LoggerMessage(Level = LogLevel.Debug, Message = "Claimed job {JobId} for worker {WorkerId} with a {LeaseDuration} lease")]
 	private partial void LogJobClaimed(Guid jobId, string workerId, TimeSpan leaseDuration);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Job {JobId} requeued at stage '{Stage}'")]
+	private partial void LogRequeuedAtStage(Guid jobId, string stage);
 }
