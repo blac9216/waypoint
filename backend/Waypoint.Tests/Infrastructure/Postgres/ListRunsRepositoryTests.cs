@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Jobs;
@@ -28,8 +29,14 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// fake-repository controller test can exercise: newest-first ordering (with a
 /// deterministic tiebreaker for same-instant rows), a total count that reflects the
 /// full <c>runs</c> table rather than the returned page, correct limit/offset slicing,
-/// and the same per-job <c>FILTER</c> aggregation <see cref="GetRunAsync"/> uses,
-/// grouped per run.
+/// and the same per-job <c>FILTER</c> aggregation <see cref="JobQueueRepository.GetRunAsync"/>
+/// uses, grouped per run.
+///
+/// Also covers <see cref="JobQueueRepository.GetRunAsync"/> itself (round-2 review
+/// finding 2): both methods now share the same <c>RunSummaryProjectionSql</c>
+/// constant, so a defect in that shared SQL has a blast radius covering both call
+/// sites, and both must be pinned by a real Postgres round trip for the sharing to be
+/// safe -- a fake-repository test cannot catch a SQL-assembly bug in either one.
 /// </summary>
 [Collection("Postgres")]
 public sealed class ListRunsRepositoryTests : IAsyncLifetime
@@ -162,18 +169,34 @@ public sealed class ListRunsRepositoryTests : IAsyncLifetime
 		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
 		{
 			await connection.OpenAsync();
+
+			// The 'running' transition alone must stamp a lease -- migration 0002's
+			// jobs_running_requires_lease_check (CHECK (state <> 'running' OR
+			// lease_expires_at IS NOT NULL), issue #107) rejects a bare state flip.
+			// Seeded the same way AuthFailureHaltTests.TransitionToAuthFailedAsync and
+			// JobQueueRepositoryClaimTests claim a job directly by id.
+			await using NpgsqlCommand runningState = new(
+				"""
+				UPDATE jobs SET
+					state = 'running', claimed_by = 'worker-a', claimed_at = now(),
+					lease_expires_at = now() + interval '5 minutes', heartbeat_at = now()
+				WHERE id = $1
+				""", connection);
+			runningState.Parameters.AddWithValue(jobIds[1]);
+			await runningState.ExecuteNonQueryAsync();
+
+			// The other three transitions are terminal/blocked states with no lease
+			// constraint, so a single CASE update is fine for them.
 			await using NpgsqlCommand states = new(
 				"""
 				UPDATE jobs SET state = CASE id
-					WHEN $1 THEN 'running'
-					WHEN $2 THEN 'done'
-					WHEN $3 THEN 'failed'
-					WHEN $4 THEN 'blocked'
+					WHEN $1 THEN 'done'
+					WHEN $2 THEN 'failed'
+					WHEN $3 THEN 'blocked'
 					ELSE state
 				END
-				WHERE id IN ($1, $2, $3, $4)
+				WHERE id IN ($1, $2, $3)
 				""", connection);
-			states.Parameters.AddWithValue(jobIds[1]);
 			states.Parameters.AddWithValue(jobIds[2]);
 			states.Parameters.AddWithValue(jobIds[3]);
 			states.Parameters.AddWithValue(jobIds[4]);
@@ -202,5 +225,123 @@ public sealed class ListRunsRepositoryTests : IAsyncLifetime
 		Assert.Equal(0, noJobs.JobCountCompleted);
 		Assert.Equal(0, noJobs.JobCountFailed);
 		Assert.Equal(0, noJobs.JobCountBlocked);
+	}
+
+	// -- round-2 review finding 2: GetRunAsync coverage (shares RunSummaryProjectionSql
+	// with ListRunsAsync above; a SQL-assembly defect in the shared const has to be
+	// pinned at both call sites, not just one) -----------------------------------------
+
+	[Fact]
+	public async Task GetRunAsync_ReturnsCorrectFields_AndPerJobFilterCounts_ForMixedJobStates()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("scan", """{"targets":["a"]}""", credentialId, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[
+				new JobSpec("scan", 1, TargetName: "a"),
+				new JobSpec("scan", 1, TargetName: "b"),
+				new JobSpec("scan", 1, TargetName: "c"),
+				new JobSpec("scan", 1, TargetName: "d"),
+				new JobSpec("scan", 1, TargetName: "e")
+			],
+			"tester",
+			CancellationToken.None);
+
+		// Same mixed-state seeding idiom as the ListRunsAsync test above: one job stays
+		// queued, and the 'running' transition stamps a lease to satisfy migration
+		// 0002's jobs_running_requires_lease_check.
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+
+			await using NpgsqlCommand runningState = new(
+				"""
+				UPDATE jobs SET
+					state = 'running', claimed_by = 'worker-a', claimed_at = now(),
+					lease_expires_at = now() + interval '5 minutes', heartbeat_at = now()
+				WHERE id = $1
+				""", connection);
+			runningState.Parameters.AddWithValue(jobIds[1]);
+			await runningState.ExecuteNonQueryAsync();
+
+			await using NpgsqlCommand states = new(
+				"""
+				UPDATE jobs SET state = CASE id
+					WHEN $1 THEN 'done'
+					WHEN $2 THEN 'failed'
+					WHEN $3 THEN 'blocked'
+					ELSE state
+				END
+				WHERE id IN ($1, $2, $3)
+				""", connection);
+			states.Parameters.AddWithValue(jobIds[2]);
+			states.Parameters.AddWithValue(jobIds[3]);
+			states.Parameters.AddWithValue(jobIds[4]);
+			await states.ExecuteNonQueryAsync();
+		}
+
+		RunSummary? summary = await _repository.GetRunAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(summary);
+		Assert.Equal(runId, summary!.Id);
+		Assert.Equal("scan", summary.RunType);
+		Assert.Equal("running", summary.State);
+		Assert.False(summary.Paused);
+		Assert.False(summary.Blocked);
+		Assert.Null(summary.BlockedReason);
+		// Parse rather than compare the raw string: jsonb's ::text output normalizes
+		// whitespace (e.g. a space after ':') independently of how the value was
+		// written, so a literal string comparison would be pinning Postgres's
+		// formatting choice rather than the actual round-tripped value.
+		using JsonDocument scopeDocument = JsonDocument.Parse(summary.ScopeJson);
+		Assert.Equal("a", scopeDocument.RootElement.GetProperty("targets")[0].GetString());
+		Assert.Equal(credentialId, summary.CredentialId);
+		Assert.Equal("tester", summary.InitiatedBy);
+		Assert.NotNull(summary.CreatedAt);
+		Assert.Equal(5, summary.JobCount);
+		Assert.Equal(1, summary.JobCountQueued);
+		Assert.Equal(1, summary.JobCountRunning);
+		Assert.Equal(1, summary.JobCountCompleted);
+		Assert.Equal(1, summary.JobCountFailed);
+		Assert.Equal(1, summary.JobCountBlocked);
+	}
+
+	[Fact]
+	public async Task GetRunAsync_RunWithNoJobs_ReportsZeroCounts()
+	{
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", null, "tester", CancellationToken.None);
+
+		RunSummary? summary = await _repository.GetRunAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(summary);
+		Assert.Equal(0, summary!.JobCount);
+		Assert.Equal(0, summary.JobCountQueued);
+		Assert.Equal(0, summary.JobCountRunning);
+		Assert.Equal(0, summary.JobCountCompleted);
+		Assert.Equal(0, summary.JobCountFailed);
+		Assert.Equal(0, summary.JobCountBlocked);
+	}
+
+	[Fact]
+	public async Task GetRunAsync_UnknownRun_ReturnsNull()
+	{
+		RunSummary? summary = await _repository.GetRunAsync(Guid.NewGuid(), CancellationToken.None);
+
+		Assert.Null(summary);
+	}
+
+	/// <summary>Seeds a minimal credential row so a run can carry a real, non-null <c>credential_id</c>.</summary>
+	private async Task<Guid> SeedCredentialAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO credentials (name, credential_type, owner)
+			VALUES ('list-runs-test-credential', 'service', 'shared')
+			RETURNING id
+			""", connection);
+		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
 }

@@ -390,11 +390,20 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 	}
 
 	/// <summary>
-	/// Shared SELECT/FROM/JOIN/GROUP BY for the <see cref="RunSummary"/> projection used
-	/// by both <see cref="GetRunAsync"/> (a <c>WHERE r.id = $1</c> appended by the
-	/// caller) and <see cref="ListRunsAsync"/> (an <c>ORDER BY</c>/<c>LIMIT</c>/<c>OFFSET</c>
-	/// appended instead). Keeping one copy of the 18-column ordinal list means a column
-	/// added here cannot silently drift out of sync with <see cref="ReadRunSummary"/>.
+	/// Shared SELECT/FROM/JOIN for the <see cref="RunSummary"/> projection used by both
+	/// <see cref="GetRunAsync"/> and <see cref="ListRunsAsync"/>. Keeping one copy of
+	/// the 18-column ordinal list means a column added here cannot silently drift out
+	/// of sync with <see cref="ReadRunSummary"/>.
+	///
+	/// IMPORTANT: a C# raw string literal excludes the newline immediately before its
+	/// closing <c>"""</c> delimiter, so this constant's text ends flush at
+	/// <c>...j.run_id = r.id</c> with no trailing whitespace. Every call site MUST
+	/// start its own appended clause with an explicit <c>"\n"</c> (as both call sites
+	/// below do) -- concatenating a bare <c>"WHERE ..."</c>/<c>"GROUP BY ..."</c>
+	/// string directly fuses the last identifier with the next keyword (e.g.
+	/// <c>r.idWHERE</c>) and produces invalid SQL that only a real Postgres round trip
+	/// catches, not a fake-repository test. See the Postgres integration tests for both
+	/// <see cref="GetRunAsync"/> and <see cref="ListRunsAsync"/>, which pin this.
 	/// </summary>
 	private const string RunSummaryProjectionSql = """
 		SELECT
@@ -437,7 +446,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new(RunSummaryProjectionSql + "WHERE r.id = $1\nGROUP BY r.id", connection);
+		await using NpgsqlCommand command = new(RunSummaryProjectionSql + "\nWHERE r.id = $1\nGROUP BY r.id", connection);
 		command.Parameters.AddWithValue(runId);
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -457,7 +466,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		int totalCount = Convert.ToInt32(await countCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
 
 		await using NpgsqlCommand command = new(
-			RunSummaryProjectionSql + """
+			RunSummaryProjectionSql + "\n" + """
 			GROUP BY r.id
 			ORDER BY r.created_at DESC, r.id DESC
 			LIMIT $1 OFFSET $2
