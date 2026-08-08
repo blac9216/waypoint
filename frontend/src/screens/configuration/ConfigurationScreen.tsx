@@ -1,13 +1,14 @@
 /**
  * Configuration screen shell — docs/ui/prototype/README.md "9. Configuration
  * — Six tabs." Issue #237 (split into #256/#257/#258 after PR #255 was too
- * large to review) implements only the first tab (Sites & Targets); the
- * remaining five stay stub text so this shell can be built additively
- * without guessing at unbuilt tabs' shapes. Issue #247 (Credentials tab, not
- * yet dispatched) and future tabs slot in by adding one entry to `TABS` and
- * one branch below — no change to this file's structure.
+ * large to review) implemented the first tab (Sites & Targets); issue #247
+ * adds the second (Credentials). The remaining four stay stub text so this
+ * shell can be built additively without guessing at unbuilt tabs' shapes —
+ * each slots in by adding one entry to `TABS` and one branch below, no
+ * change to this file's structure.
  */
 import { useState } from "react";
+import { CredentialsTab } from "./CredentialsTab";
 import { SitesTargetsTab } from "./SitesTargetsTab";
 import "./ConfigurationScreen.css";
 
@@ -41,7 +42,8 @@ export function ConfigurationScreen() {
 			</div>
 			<div className="config-screen__content">
 				{tab === "sites" && <SitesTargetsTab />}
-				{tab !== "sites" && (
+				{tab === "credentials" && <CredentialsTab />}
+				{tab !== "sites" && tab !== "credentials" && (
 					<div className="config-tab__status">
 						{TABS.find((t) => t.key === tab)?.label} lands in a future PR (docs/ui/prototype/README.md
 						"Configuration").
