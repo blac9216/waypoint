@@ -541,6 +541,55 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		}
 	}
 
+	/// <summary>Issue #20: the halt is also the credential's operator-visible health
+	/// signal -- tripping it flips <c>credentials.health</c> to 'auth_failing', not
+	/// only <c>queue_halted</c>.</summary>
+	[Fact]
+	public async Task ThreeConsecutiveAuthFailures_AlsoFlipsCredentialHealthToAuthFailing()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		Guid thirdFailureJobId = await SeedQueuedJobAsync(runId, credentialId);
+		await TransitionToAuthFailedAsync(thirdFailureJobId);
+
+		AuthFailureHaltResult result = await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, threshold: 3, CancellationToken.None);
+		Assert.True(result.HaltTripped);
+
+		Assert.Equal("auth_failing", await ReadHealthAsync(credentialId));
+	}
+
+	/// <summary>Issue #20: unblocking a halted credential re-queues its work but does
+	/// NOT prove the credential is valid again -- health stays 'auth_failing' until a
+	/// successful <c>/credentials/{id}/test</c> call says otherwise (see
+	/// <c>JobQueueRepository.UnblockCredentialAsync</c>'s doc comment).</summary>
+	[Fact]
+	public async Task UnblockCredential_DoesNotClearHealth()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId, "tester", CancellationToken.None);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		await SeedTerminalJobAsync(runId, credentialId, JobStates.AuthFailed);
+		await TransitionToAuthFailedAsync(await SeedQueuedJobAsync(runId, credentialId));
+		await _repository.CheckConsecutiveAuthFailuresAsync(credentialId, threshold: 3, CancellationToken.None);
+		Assert.Equal("auth_failing", await ReadHealthAsync(credentialId));
+
+		CredentialUnblockResult result = await _repository.UnblockCredentialAsync(credentialId, "operator cleared", CancellationToken.None);
+		Assert.True(result.WasHalted);
+
+		Assert.Equal("auth_failing", await ReadHealthAsync(credentialId));
+	}
+
+	private async Task<string> ReadHealthAsync(Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT health FROM credentials WHERE id = $1", connection);
+		command.Parameters.AddWithValue(credentialId);
+		return (string)(await command.ExecuteScalarAsync())!;
+	}
+
 	[Fact]
 	public async Task UnblockCredential_WhenNotHalted_IsNoOp()
 	{

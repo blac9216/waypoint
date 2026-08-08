@@ -43,7 +43,7 @@ public enum CredentialDeleteOutcome
 public sealed class CredentialRepository
 {
 	private const string ProjectionSql = """
-		SELECT c.id, c.name, c.credential_type, c.owner, c.health,
+		SELECT c.id, c.name, c.credential_type, c.owner, c.health, c.sudo_enabled,
 			EXISTS (SELECT 1 FROM credential_secrets s WHERE s.credential_id = c.id) AS has_secret,
 			(SELECT count(*) FROM jobs j WHERE j.credential_id = c.id) AS used_by_job_count,
 			c.rotated_at, c.created_at, c.updated_at
@@ -104,21 +104,22 @@ public sealed class CredentialRepository
 		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
 	}
 
-	/// <summary>Creates the metadata row. Returns null when the name is already taken (the caller maps that to a 409).</summary>
-	public async Task<Guid?> CreateAsync(string name, string credentialType, string owner, CancellationToken cancellationToken)
+	/// <summary>Creates the metadata row. Returns null when the name is already taken (the caller maps that to a 409). <paramref name="sudoEnabled"/> is only meaningful for <see cref="CredentialTypes.Ssh"/>; the controller validates that before this is called.</summary>
+	public async Task<Guid?> CreateAsync(string name, string credentialType, string owner, bool sudoEnabled, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			INSERT INTO credentials (name, credential_type, owner)
-			VALUES ($1, $2, $3)
+			INSERT INTO credentials (name, credential_type, owner, sudo_enabled)
+			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (name) DO NOTHING
 			RETURNING id
 			""", connection);
 		command.Parameters.AddWithValue(name);
 		command.Parameters.AddWithValue(credentialType);
 		command.Parameters.AddWithValue(owner);
+		command.Parameters.AddWithValue(sudoEnabled);
 		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 		return result is Guid id ? id : null;
 	}
@@ -144,6 +145,19 @@ public sealed class CredentialRepository
 		}
 	}
 
+	/// <summary>Issue #20: flips the SSH-only sudo flag. Not gated on credential_type here -- the controller rejects a sudo flip on a non-ssh credential before this is reached, same split as the rest of this class's validation.</summary>
+	public async Task<CredentialWriteOutcome> UpdateSudoAsync(Guid id, bool sudoEnabled, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new("UPDATE credentials SET sudo_enabled = $2 WHERE id = $1 RETURNING id", connection);
+		command.Parameters.AddWithValue(id);
+		command.Parameters.AddWithValue(sudoEnabled);
+		return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null
+			? CredentialWriteOutcome.Ok
+			: CredentialWriteOutcome.NotFound;
+	}
+
 	/// <summary>Stamped only after a successful secret write -- rotation is a fact about the blob, not the metadata.</summary>
 	public async Task StampRotatedAsync(Guid id, CancellationToken cancellationToken)
 	{
@@ -152,6 +166,30 @@ public sealed class CredentialRepository
 		await using NpgsqlCommand command = new("UPDATE credentials SET rotated_at = now() WHERE id = $1", connection);
 		command.Parameters.AddWithValue(id);
 		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Issue #20: records a <c>/credentials/{id}/test</c> outcome as the credential's
+	/// new health. This is the ONLY path (besides the queue halt, which only ever sets
+	/// <see cref="CredentialHealthStates.AuthFailing"/>) that sets
+	/// <see cref="CredentialHealthStates.Valid"/> -- a bare queue-halt unblock does
+	/// not, because unblocking proves nothing about whether the credential actually
+	/// works (see <c>JobQueueRepository.UnblockCredentialAsync</c>'s doc comment).
+	/// A failed test sets <see cref="CredentialHealthStates.AuthFailing"/> too, so a
+	/// manual test can surface a bad credential without waiting for the halt's
+	/// consecutive-failure threshold.
+	/// </summary>
+	public async Task<CredentialWriteOutcome> MarkTestOutcomeAsync(Guid id, bool succeeded, CancellationToken cancellationToken)
+	{
+		string health = succeeded ? CredentialHealthStates.Valid : CredentialHealthStates.AuthFailing;
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new("UPDATE credentials SET health = $2 WHERE id = $1 RETURNING id", connection);
+		command.Parameters.AddWithValue(id);
+		command.Parameters.AddWithValue(health);
+		return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null
+			? CredentialWriteOutcome.Ok
+			: CredentialWriteOutcome.NotFound;
 	}
 
 	/// <summary>
@@ -218,9 +256,10 @@ public sealed class CredentialRepository
 			reader.GetString(3),
 			reader.GetString(4),
 			reader.GetBoolean(5),
-			reader.GetInt64(6),
-			reader.IsDBNull(7) ? null : reader.GetFieldValue<DateTimeOffset>(7),
-			reader.GetFieldValue<DateTimeOffset>(8),
-			reader.GetFieldValue<DateTimeOffset>(9));
+			reader.GetBoolean(6),
+			reader.GetInt64(7),
+			reader.IsDBNull(8) ? null : reader.GetFieldValue<DateTimeOffset>(8),
+			reader.GetFieldValue<DateTimeOffset>(9),
+			reader.GetFieldValue<DateTimeOffset>(10));
 	}
 }
