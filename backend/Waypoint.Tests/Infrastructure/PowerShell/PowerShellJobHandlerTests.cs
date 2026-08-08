@@ -106,6 +106,43 @@ public sealed class PowerShellJobHandlerTests : IDisposable
 		Assert.Equal(JobOutcomeKind.AuthFailed, outcome.Kind);
 	}
 
+	/// <summary>#162 true positives: a bare digit-run marker ("401"/"403") must still
+	/// trip auth-failed when it appears as a standalone token, including HTTP-status
+	/// shapes that aren't the exact "401 Unauthorized" wording already covered above.</summary>
+	[Theory]
+	[InlineData("HTTP 401 returned by invented depot endpoint")]
+	[InlineData("request failed (401)")]
+	[InlineData("status=401 from invented gateway")]
+	[InlineData("depot responded 403: Forbidden")]
+	public async Task AStandaloneDigitMarker_StillMapsToAuthFailed(string message)
+	{
+		JobExecutionOutcome outcome = await CreateHandler().ExecuteAsync(
+			ContextFor($$$"""{"command":"Invoke-StubFailure","parameters":{"Message":"{{{message}}}"}}"""),
+			CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.AuthFailed, outcome.Kind);
+	}
+
+	/// <summary>#162: bare digit-run markers ("401"/"403") must NOT fire when those three
+	/// digits merely appear inside an unrelated identifier -- a GUID fragment, a byte
+	/// count, a port, or a padded id. Before the fix, plain substring matching classified
+	/// these ordinary, deterministic failures as auth-failed on every attempt, and three
+	/// consecutive misclassifications durably three-strike a healthy credential.</summary>
+	[Theory]
+	[InlineData("downloaded 40123 bytes before invented connection reset")]
+	[InlineData("object 4a401b99-0000-4000-8000-000000000000 not found (invented guid)")]
+	[InlineData("connect to invented-host:14013 refused")]
+	[InlineData("artifact size 4013 mismatch (invented manifest)")]
+	[InlineData("record id-403321 already exists (invented conflict)")]
+	[InlineData("checksum value40199 did not match (invented digest)")]
+	[InlineData("timestamp 1754016401 outside invented retention window")]
+	public async Task ADigitRunInsideAnUnrelatedIdentifier_DoesNotMapToAuthFailed(string message)
+	{
+		JobExecutionOutcome outcome = await CreateHandler().ExecuteAsync(
+			ContextFor($$$"""{"command":"Invoke-StubFailure","parameters":{"Message":"{{{message}}}"}}"""),
+			CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+	}
+
 	/// <summary>jobs.note is a sink (security.md control 1): a failure message that
 	/// embeds an in-play secret reaches the outcome redacted.</summary>
 	[Fact]

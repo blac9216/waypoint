@@ -34,12 +34,17 @@ public sealed class PowerShellOptions
 	public IList<string> ModulePreloadPaths { get; } = [];
 
 	/// <summary>
-	/// Case-insensitive substrings of a failure reason that classify it as an
-	/// authentication failure (-> <c>auth-failed</c>, feeding the #5 consecutive-
-	/// failure queue halt) rather than an ordinary failure. Deliberately coarse:
-	/// the vcf modules surface vendor/HTTP wording, not typed exceptions, and a
-	/// false 'failed' merely skips the halt while a false 'auth-failed' only
-	/// counts toward it -- three in a row are required to act.
+	/// Case-insensitive markers that classify a failure reason as an authentication
+	/// failure (-> <c>auth-failed</c>, feeding the #5 consecutive-failure queue halt)
+	/// rather than an ordinary failure. Word markers (<c>"unauthorized"</c>, etc.) match
+	/// as substrings -- vendor/HTTP wording, not typed exceptions. Markers that are bare
+	/// digit runs (<c>"401"</c>, <c>"403"</c>) are matched only as a standalone token
+	/// (<c>\b401\b</c>), not as a substring: a plain substring match on three digits also
+	/// fires on GUIDs, byte counts, ports, and other identifiers that happen to embed
+	/// those digits, which would misclassify a deterministic ordinary failure as
+	/// auth-failed on every retry and durably three-strike a healthy credential (#162).
+	/// A false 'failed' merely skips the halt while a false 'auth-failed' counts toward
+	/// it -- three in a row are required to act.
 	/// </summary>
 	public IList<string> AuthFailureMarkers { get; } =
 	[
