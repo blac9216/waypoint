@@ -475,6 +475,119 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		Assert.Equal("running", doc.RootElement.GetProperty("state").GetString());
 	}
 
+	// -- issue #210: GET /runs list ------------------------------------------
+
+	[Theory]
+	[InlineData("Viewer")]
+	[InlineData("Cyber")]
+	[InlineData("Operator")]
+	[InlineData("Admin")]
+	public async Task ListRuns_WithAnyAuthenticatedRole_ReturnsOk(string role)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task ListRuns_WithoutAuthentication_Returns401()
+	{
+		HttpClient client = _factory.CreateClient();
+
+		HttpResponseMessage response = await client.GetAsync("/api/v1/runs");
+
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task ListRuns_ForwardsLimitAndOffsetToRepository()
+	{
+		_factory.Repository.SetListRunsResult([], totalCount: 0);
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs?limit=5&offset=10");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal((5, 10), _factory.Repository.LastListRuns);
+	}
+
+	[Fact]
+	public async Task ListRuns_SetsXTotalCountHeader_FromRepositoryTotal_NotPageSize()
+	{
+		RunSummary run = new(
+			Id: Guid.NewGuid(), RunType: "scan", State: "running", Paused: false, Blocked: false,
+			BlockedReason: null, ScopeJson: "{}", CredentialId: null, InitiatedBy: "test-user",
+			CreatedAt: "2026-01-01T00:00:00Z", StartedAt: null, CompletedAt: null,
+			JobCount: 0, JobCountQueued: 0, JobCountRunning: 0, JobCountCompleted: 0,
+			JobCountFailed: 0, JobCountBlocked: 0);
+		// One item on the page, but a much larger total collection -- proves the header
+		// reflects the repository's reported total rather than the returned page size.
+		_factory.Repository.SetListRunsResult([run], totalCount: 42);
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs?limit=1&offset=0");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.True(response.Headers.TryGetValues("X-Total-Count", out IEnumerable<string>? values));
+		Assert.Equal("42", values!.Single());
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.Single(doc.RootElement.EnumerateArray());
+	}
+
+	// -- issue #210: truthful abort response ---------------------------------
+
+	[Fact]
+	public async Task AbortRun_OnRunningRun_ReturnsAbortedStateFromReFetch()
+	{
+		// The fake now mutates 'running' -> 'aborted' inside AbortRunAsync itself (same
+		// no-op semantics as the real repository). This test only passes if the
+		// controller re-fetches state AFTER calling AbortRunAsync; re-fetching before
+		// the action (or skipping the re-fetch and returning the pre-action state)
+		// would observe "running" instead. Verified locally by temporarily swapping the
+		// re-fetch above the AbortRunAsync call in RunsController.AbortRun: this test
+		// failed (expected "aborted", got "running"), then the swap was reverted.
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/abort");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.Equal("aborted", doc.RootElement.GetProperty("state").GetString());
+	}
+
+	[Fact]
+	public async Task AbortRun_AlreadyTerminal_ReturnsActualStateNotAbortedLiteral()
+	{
+		// AbortRunAsync is a no-op against a run outside pending/running (see
+		// JobQueueRepository.AbortRunAsync); the fake mirrors that by leaving the
+		// stored state untouched. The response must report the real ("done") state,
+		// not the previous hardcoded "aborted" literal.
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("done", false, false, null, InitiatedBy: "test-user"));
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/abort");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.Equal("done", doc.RootElement.GetProperty("state").GetString());
+	}
+
 	[Fact]
 	public async Task CreateRun_ReturnsRunId()
 	{
@@ -576,6 +689,30 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 			JobCountCompleted: 0, JobCountFailed: 0, JobCountBlocked: 0));
 	}
 
+	/// <summary>Arguments of the last <see cref="ListRunsAsync"/> call, for asserting the
+	/// controller forwards the bound page's limit/offset values unchanged.</summary>
+	public (int Limit, int Offset)? LastListRuns { get; private set; }
+
+	/// <summary>Total count the fake reports for <see cref="ListRunsAsync"/>; independent
+	/// of how many <see cref="ListRunsItems"/> are returned, so tests can prove the
+	/// header comes from the repository's reported total rather than the page size.</summary>
+	public int ListRunsTotalCount { get; set; }
+
+	public IReadOnlyList<RunSummary> ListRunsItems { get; set; } = [];
+
+	public void SetListRunsResult(IReadOnlyList<RunSummary> items, int totalCount)
+	{
+		ListRunsItems = items;
+		ListRunsTotalCount = totalCount;
+	}
+
+	public Task<RunListResult> ListRunsAsync(int limit, int offset, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		LastListRuns = (limit, offset);
+		return Task.FromResult(new RunListResult(ListRunsItems, ListRunsTotalCount));
+	}
+
 	public Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		_ = (runId, cancellationToken);
@@ -623,7 +760,18 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 
 	public Task<AbortRunResult> AbortRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
-		_ = (runId, cancellationToken);
+		_ = cancellationToken;
+		// Mirrors JobQueueRepository.AbortRunAsync's real no-op semantics: only a
+		// 'pending' or 'running' run actually transitions to 'aborted'; anything else
+		// (already terminal) is left untouched. Without this the controller's
+		// re-fetch-after-action fix would be untested against a fake that never
+		// changes state either way.
+		if (_runs.TryGetValue(runId, out var state) &&
+			(string.Equals(state.State, "pending", StringComparison.Ordinal) ||
+			 string.Equals(state.State, "running", StringComparison.Ordinal)))
+		{
+			_runs[runId] = state with { State = "aborted" };
+		}
 		return Task.FromResult(new AbortRunResult([], []));
 	}
 

@@ -286,6 +286,7 @@ public sealed class HostedServiceBehaviorTests
 		}
 		public Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken) => Task.FromResult(RunState);
 		public Task<RunSummary?> GetRunAsync(Guid runId, CancellationToken cancellationToken) => Task.FromResult<RunSummary?>(null);
+		public Task<RunListResult> ListRunsAsync(int limit, int offset, CancellationToken cancellationToken) => Task.FromResult(new RunListResult([], 0));
 		public Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<JobSummary>>([]);
 		public Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken) => Task.FromResult(Guid.NewGuid());
 		public Task<IReadOnlyList<Guid>> FanOutJobsAsync(Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<Guid>>([]);
