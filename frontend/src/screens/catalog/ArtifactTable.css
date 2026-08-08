@@ -1,0 +1,145 @@
+/* Layout rules from docs/ui/prototype/README.md "Layout Rules Learned the
+   Hard Way": table-layout:fixed with percentage columns summing to 100%;
+   nowrap cells need overflow:hidden on the td; status text must never
+   truncate silently. */
+
+.artifact-table__scroll {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: auto;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-card);
+	background: var(--panel);
+}
+
+.artifact-table {
+	width: 100%;
+	table-layout: fixed;
+	border-collapse: collapse;
+	font-size: 12px;
+}
+
+.artifact-table thead th {
+	position: sticky;
+	top: 0;
+	background: var(--panel2);
+	text-align: left;
+	font-size: 10.5px;
+	font-weight: 650;
+	letter-spacing: 0.09em;
+	color: var(--txt3);
+	padding: 7px 9px;
+	border-bottom: 1px solid var(--line);
+	overflow: hidden;
+	white-space: nowrap;
+}
+
+.artifact-table td {
+	padding: var(--rowpad) 9px;
+	border-bottom: 1px solid var(--soft);
+	overflow: hidden;
+	vertical-align: middle;
+}
+
+.artifact-table__row.is-selected {
+	background: var(--accd);
+}
+
+.artifact-table__row.is-failed {
+	background: color-mix(in oklab, var(--badd) 55%, transparent);
+}
+
+/* "checkbox 7% (7px 6px 7px 14px padding — a 5% column cannot hold a 13px
+   box plus 26px of padding)" */
+.artifact-table__checkbox-cell {
+	padding: 7px 6px 7px 14px !important;
+	width: 7%;
+}
+
+.artifact-table__artifact-cell {
+	min-width: 0;
+}
+
+.artifact-table__name {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.artifact-table__sha {
+	font-size: 10px;
+	color: var(--txt3);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.artifact-table__truncate {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.artifact-table__status-cell {
+	overflow: hidden;
+}
+
+.artifact-table__status {
+	display: inline-block;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 11px;
+}
+
+.artifact-table__status--txt3 {
+	color: var(--txt3);
+}
+
+.artifact-table__status--warn {
+	color: var(--warn);
+}
+
+.artifact-table__status--acc {
+	color: var(--acc);
+}
+
+.artifact-table__status--ok {
+	color: var(--ok);
+}
+
+.artifact-table__status--bad {
+	color: var(--bad);
+}
+
+.artifact-table__progress {
+	height: 4px;
+	margin-top: 4px;
+	background: var(--soft);
+	border-radius: var(--radius-pill);
+	overflow: hidden;
+}
+
+.artifact-table__progress-fill {
+	height: 100%;
+	background: var(--acc);
+	transition: width 400ms linear;
+}
+
+.artifact-table__retry {
+	display: block;
+	margin-top: 4px;
+	padding: 2px 7px;
+	font-size: 10px;
+	background: var(--badd);
+	border: 1px solid var(--bad);
+	color: var(--txt);
+}
+
+.artifact-table__empty {
+	text-align: center;
+	color: var(--txt3);
+	font-size: 11.5px;
+	padding: 24px 0 !important;
+}
