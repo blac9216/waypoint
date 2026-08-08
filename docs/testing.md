@@ -33,6 +33,29 @@ WAYPOINT_TEST_PG_HOST="<daemon-host-ip>" dotnet test backend/Waypoint.sln
 The default remains `127.0.0.1` — local Docker users need not change anything.
 The configured address is only used in the connection string; it is never logged.
 
+### Bridge-networked test process (published ports unreachable at all)
+
+If the test process itself runs in a container on its **own bridge network**
+(e.g. a compose-managed devcontainer with the host's Docker socket mounted),
+`WAYPOINT_TEST_PG_HOST` may not help either: inter-bridge isolation and the
+host's DNAT rules can block the published port from **every** address —
+loopback *and* the daemon-host gateway (verified empirically; issue #219).
+
+Set `WAYPOINT_TEST_PG_NETWORK` to the network the test process is attached to.
+The fixture then starts Postgres on that network (no published port) and
+connects to the container's own address on 5432. Each fixture container gets a
+unique address, so concurrent test runs on the same host cannot collide.
+
+```bash
+# Find your own network, then run the suite on it:
+docker inspect "$(hostname)" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'
+WAYPOINT_TEST_PG_NETWORK="<that-network>" dotnet test backend/Waypoint.sln
+```
+
+`WAYPOINT_TEST_PG_NETWORK` takes precedence over `WAYPOINT_TEST_PG_HOST`.
+Addresses in this section are Docker-internal RFC 1918 values — never real lab
+identifiers.
+
 ---
 
 ## The rule
