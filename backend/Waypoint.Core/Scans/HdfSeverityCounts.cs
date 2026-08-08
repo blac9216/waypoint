@@ -33,10 +33,13 @@ public sealed record HdfSeverityCounts(int CatIOpen, int CatIIOpen, int CatIIIOp
 /// <c>results[].status</c> (a control with at least one non-<c>passed</c>,
 /// non-<c>skipped</c> result -- i.e. <c>failed</c> or <c>error</c> -- counts as one open
 /// finding; a control whose only results are <c>passed</c>/<c>skipped</c>/
-/// <c>not_applicable</c>, or with no results at all, does not). A missing/malformed file
-/// or an empty <c>controls</c> array (the scan stub's own fixture shape) fails safe to
-/// <see cref="HdfSeverityCounts.Zero"/> rather than throwing -- this is a best-effort
-/// summary for the Results table, not a compliance authority.
+/// <c>not_applicable</c>, or with no results at all, does not). An empty <c>controls</c>
+/// array (the scan stub's own fixture shape) is a genuine zero. A missing OR malformed
+/// file, by contrast, is <b>uncountable</b>: <see cref="CountOpenFindings"/> returns
+/// <c>null</c> (never throws, never a fabricated zero) so the caller can present "could
+/// not count" distinctly from "zero open findings" -- a corrupt HDF must never render as
+/// a clean, compliant row (issue #299 round-1 blocker). This is a best-effort summary for
+/// the Results table, not a compliance authority.
 /// </summary>
 public static class HdfSeverityCounter
 {
@@ -47,12 +50,16 @@ public static class HdfSeverityCounter
 	private const string SkippedStatus = "skipped";
 	private const string NotApplicableStatus = "not_applicable";
 
-	/// <summary>Parses the HDF JSON at <paramref name="hdfPath"/>, or returns <see cref="HdfSeverityCounts.Zero"/> if it does not exist or cannot be parsed.</summary>
-	public static HdfSeverityCounts CountOpenFindings(string? hdfPath)
+	/// <summary>
+	/// Parses the HDF JSON at <paramref name="hdfPath"/> and returns its CAT I/II/III open
+	/// counts, or <c>null</c> when the file is absent, unreadable, or not parseable as an
+	/// HDF report ("uncountable" -- distinct from a genuine all-zero count). Never throws.
+	/// </summary>
+	public static HdfSeverityCounts? CountOpenFindings(string? hdfPath)
 	{
 		if (string.IsNullOrWhiteSpace(hdfPath) || !File.Exists(hdfPath))
 		{
-			return HdfSeverityCounts.Zero;
+			return null;
 		}
 
 		try
@@ -63,21 +70,22 @@ public static class HdfSeverityCounter
 		}
 		catch (JsonException)
 		{
-			return HdfSeverityCounts.Zero;
+			return null;
 		}
 		catch (IOException)
 		{
-			return HdfSeverityCounts.Zero;
+			return null;
 		}
 	}
 
-	private static HdfSeverityCounts CountOpenFindings(JsonElement root)
+	private static HdfSeverityCounts? CountOpenFindings(JsonElement root)
 	{
 		int catI = 0, catII = 0, catIII = 0;
 
 		if (!root.TryGetProperty("profiles", out JsonElement profiles) || profiles.ValueKind != JsonValueKind.Array)
 		{
-			return HdfSeverityCounts.Zero;
+			// Well-formed JSON but not an HDF report shape -- uncountable, not zero.
+			return null;
 		}
 
 		foreach (JsonElement profile in profiles.EnumerateArray())
