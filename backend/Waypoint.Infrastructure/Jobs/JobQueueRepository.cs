@@ -439,6 +439,64 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			JobCountBlocked: reader.GetInt32(17));
 	}
 
+	public async Task<RunListResult> ListRunsAsync(int limit, int offset, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		await using NpgsqlCommand countCommand = new("SELECT COUNT(*) FROM runs", connection);
+		int totalCount = Convert.ToInt32(await countCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT
+				r.id, r.run_type, r.state, r.paused, r.blocked, r.blocked_reason,
+				r.scope::text,
+				r.credential_id, r.initiated_by,
+				r.created_at::text, r.started_at::text, r.completed_at::text,
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL),
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'queued'),
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'running'),
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'done'),
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ('failed', 'auth-failed')),
+				COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'blocked')
+			FROM runs r
+			LEFT JOIN jobs j ON j.run_id = r.id
+			GROUP BY r.id
+			ORDER BY r.created_at DESC
+			LIMIT $1 OFFSET $2
+			""", connection);
+		command.Parameters.AddWithValue(limit);
+		command.Parameters.AddWithValue(offset);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+		List<RunSummary> runs = [];
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			runs.Add(new RunSummary(
+				Id: reader.GetGuid(0),
+				RunType: reader.GetString(1),
+				State: reader.GetString(2),
+				Paused: reader.GetBoolean(3),
+				Blocked: reader.GetBoolean(4),
+				BlockedReason: reader.IsDBNull(5) ? null : reader.GetString(5),
+				ScopeJson: reader.GetString(6),
+				CredentialId: reader.IsDBNull(7) ? null : reader.GetGuid(7),
+				InitiatedBy: reader.IsDBNull(8) ? null : reader.GetString(8),
+				CreatedAt: reader.GetString(9),
+				StartedAt: reader.IsDBNull(10) ? null : reader.GetString(10),
+				CompletedAt: reader.IsDBNull(11) ? null : reader.GetString(11),
+				JobCount: reader.GetInt32(12),
+				JobCountQueued: reader.GetInt32(13),
+				JobCountRunning: reader.GetInt32(14),
+				JobCountCompleted: reader.GetInt32(15),
+				JobCountFailed: reader.GetInt32(16),
+				JobCountBlocked: reader.GetInt32(17)));
+		}
+
+		return new RunListResult(runs, totalCount);
+	}
+
 	public async Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

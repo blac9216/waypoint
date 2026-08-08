@@ -77,6 +77,15 @@ public interface IJobQueueRepository
 	Task<RunSummary?> GetRunAsync(Guid runId, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Paginated run summaries for GET /runs, newest-first (<c>ORDER BY created_at
+	/// DESC</c>) per docs/api-contract.md Conventions' <c>?limit/offset</c> pagination.
+	/// Reuses the same per-job <c>FILTER</c> aggregation as <see cref="GetRunAsync"/>,
+	/// grouped per run, plus the full collection's total row count for the caller's
+	/// <c>X-Total-Count</c> response header.
+	/// </summary>
+	Task<RunListResult> ListRunsAsync(int limit, int offset, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// All jobs belonging to a run, ordered by priority then created_at.
 	/// </summary>
 	Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken);
@@ -139,6 +148,9 @@ public sealed record RunQueueState(string State, bool Paused, bool Blocked, stri
 
 /// <summary>The database effects of aborting a run.</summary>
 public sealed record AbortRunResult(IReadOnlyList<Guid> CancelledJobIds, IReadOnlyList<Guid> InFlightJobIds);
+
+/// <summary>A page of run summaries plus the full collection's total row count (for <c>X-Total-Count</c>).</summary>
+public sealed record RunListResult(IReadOnlyList<RunSummary> Items, int TotalCount);
 
 /// <summary>
 /// The database effects of a consecutive-auth-failure check. <see cref="HaltTripped"/>

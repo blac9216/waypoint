@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Globalization;
 using System.Net;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
@@ -19,6 +20,7 @@ using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Pagination;
 
 namespace Waypoint.Api.Controllers;
 
@@ -114,6 +116,23 @@ public sealed class RunsController : ControllerBase
 			.ConfigureAwait(false);
 
 		return Accepted(new RunCreatedResponse(runId.ToString()));
+	}
+
+	/// <summary>
+	/// List run summaries, newest-first. Viewer+ — any authenticated user can inspect
+	/// runs. Paginated per docs/api-contract.md Conventions' <c>?limit/offset</c> +
+	/// <c>X-Total-Count</c> idiom (see <see cref="PageRequest"/>).
+	/// </summary>
+	[HttpGet]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(RunResponse[]), StatusCodes.Status200OK)]
+	public async Task<ActionResult<IReadOnlyList<RunResponse>>> ListRuns(
+		[FromQuery] PageRequest page,
+		CancellationToken cancellationToken)
+	{
+		RunListResult result = await _repository.ListRunsAsync(page.Limit, page.Offset, cancellationToken).ConfigureAwait(false);
+		Response.Headers["X-Total-Count"] = result.TotalCount.ToString(CultureInfo.InvariantCulture);
+		return Ok(result.Items.Select(MapRun).ToArray());
 	}
 
 	/// <summary>
@@ -227,7 +246,12 @@ public sealed class RunsController : ControllerBase
 
 		AbortRunResult result = await _repository.AbortRunAsync(id, cancellationToken).ConfigureAwait(false);
 		_ = result; // AbortRunResult carries cancelled/in-flight job IDs for future enrichment
-		return Ok(new RunActionResponse(id.ToString(), "aborted"));
+
+		// Re-fetch state after the action to return the post-action state (same pattern
+		// as pause/resume) rather than assuming the abort always succeeded: AbortRunAsync
+		// is a no-op against a run that is already terminal, and the response must say so.
+		RunQueueState? newState = await _repository.GetRunQueueStateAsync(id, cancellationToken).ConfigureAwait(false);
+		return Ok(new RunActionResponse(id.ToString(), newState?.State ?? "aborted"));
 	}
 
 	// -- mapping helpers ---------------------------------------------------
