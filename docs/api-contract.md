@@ -96,7 +96,7 @@ authenticated the caller, and role claims keep mapping to the same four
 ### Credentials (service/shared only — ADR-0011)
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/credentials` · `/credentials/{id}` | GET, POST, PUT, DELETE | Admin writes. Metadata out: name, type, used_by_count, rotated_at, health (`valid`\|`auth_failing`). Secret material in only. |
+| `/credentials` · `/credentials/{id}` | GET, POST, PUT, DELETE | Admin writes. Metadata out: name, type, username?, used_by_count, rotated_at, health (`valid`\|`auth_failing`). `username` is the protocol-level login (e.g. `administrator@vcenter-sso-domain`) a connection-type (vcenter/nsx/ssh) credential's job handler presents — distinct from `name`, which is only ever a human-facing label; not secret material, so it round-trips in responses (issue #262). Secret material in only. |
 | `/credentials/{id}/test` | POST | Connectivity check; 202 → job. |
 
 ### Runs & jobs
@@ -258,7 +258,7 @@ halt; a successful resolved outcome still breaks the consecutive sequence.
 
 `sites` · `targets` (site_id, kind, connection jsonb, credential_id, discovery_status)
 · `inventory_items` (target_id, type, parent_id, name, build, maintenance) ·
-`credentials` (owner='shared', type, health, rotated_at) · `credential_secrets`
+`credentials` (owner='shared', type, username?, health, rotated_at) · `credential_secrets`
 (credential_id, ciphertext, data_key_wrapped, master_key_id — ADR-0005) · `runs` ·
 `jobs` (run_id, target_id, priority 1-6, state, stage, counts, note, lease/heartbeat)
 · `job_events` (append-only; seq, type, payload jsonb — SSE replay source) ·
