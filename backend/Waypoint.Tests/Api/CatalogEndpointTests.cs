@@ -257,6 +257,12 @@ public sealed class CatalogFakeJobQueueRepository : IJobQueueRepository
 		return Task.FromResult(true);
 	}
 
+	public Task<bool> RequeueAtStageAsync(Guid jobId, string workerId, string expectedFromState, string stage, string? note, CancellationToken cancellationToken)
+	{
+		_ = (jobId, workerId, expectedFromState, stage, note, cancellationToken);
+		return Task.FromResult(true);
+	}
+
 	public Task<IReadOnlyList<RecoveredJob>> RecoverExpiredLeasesAsync(int batchSize, CancellationToken cancellationToken)
 	{
 		_ = (batchSize, cancellationToken);
