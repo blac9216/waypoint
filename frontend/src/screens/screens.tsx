@@ -2,6 +2,7 @@ import { useAuth } from "../lib/auth";
 import { roleGateProps } from "../lib/roles";
 import { PlaceholderScreen } from "./PlaceholderScreen";
 import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
+import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./configuration/ConfigurationScreen";
 
 export function DashboardScreen() {
 	return <PlaceholderScreen title="Dashboard" reads={["GET /api/v1/dashboard", "global SSE /api/v1/events"]} />;
@@ -70,17 +71,5 @@ export function TransferScreen() {
 }
 
 export function ConfigurationScreen() {
-	return (
-		<PlaceholderScreen
-			title="Configuration"
-			reads={[
-				"GET /api/v1/sites",
-				"GET /api/v1/targets",
-				"GET /api/v1/credentials",
-				"GET /api/v1/stigman",
-				"GET /api/v1/compliance-content",
-				"GET /api/v1/users",
-			]}
-		/>
-	);
+	return <SitesTargetsConfigurationScreen />;
 }
