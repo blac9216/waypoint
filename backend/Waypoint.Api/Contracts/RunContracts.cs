@@ -182,3 +182,45 @@ public sealed record RunActionResponse(
 
 	[property: JsonPropertyName("state")]
 	string State);
+
+/// <summary>
+/// Response body for <c>DELETE /api/v1/jobs/{id}</c> (issue #291, wrapping #277's
+/// <see cref="Waypoint.Core.Jobs.JobCancelOutcome"/>). <see cref="State"/> distinguishes
+/// an immediate cancel (<c>"cancelled"</c>) from a cooperative in-flight request
+/// (<c>"cancel_requested"</c>) -- the caller needs to know which happened, since the
+/// job is not necessarily stopped yet in the second case.
+/// </summary>
+public sealed record JobCancelResponse(
+	[property: JsonPropertyName("job_id")]
+	string JobId,
+
+	[property: JsonPropertyName("state")]
+	string State);
+
+/// <summary>
+/// Request body for <c>POST /api/v1/runs/{id}/resume-blocked</c> (ADR-0008, issue #291).
+/// <see cref="CredentialId"/> is the REPLACEMENT credential to swap onto the run's
+/// halted jobs -- not the id of the halted credential itself, which the server
+/// determines from the run's own blocked job set.
+/// </summary>
+public sealed record ResumeBlockedRequest(
+	[property: JsonPropertyName("credential_id")]
+	string? CredentialId);
+
+/// <summary>
+/// Response body for <c>POST /api/v1/runs/{id}/resume-blocked</c>. Carries both
+/// credential identities so the caller can confirm exactly what was swapped, plus how
+/// many jobs were requeued.
+/// </summary>
+public sealed record ResumeBlockedResponse(
+	[property: JsonPropertyName("run_id")]
+	string RunId,
+
+	[property: JsonPropertyName("old_credential_id")]
+	string OldCredentialId,
+
+	[property: JsonPropertyName("new_credential_id")]
+	string NewCredentialId,
+
+	[property: JsonPropertyName("resumed_job_count")]
+	int ResumedJobCount);
