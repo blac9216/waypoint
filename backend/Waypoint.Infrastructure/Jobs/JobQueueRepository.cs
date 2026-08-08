@@ -1015,20 +1015,30 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		// targets, and no join exists anywhere from a job to a target's `kind`), so the
 		// only type check this primitive can make is against the halted credential's own
 		// type -- see IJobQueueRepository's doc comment.
-		string? replacementType;
-		bool replacementHalted;
+		string? replacementType = null;
+		bool replacementHalted = false;
+		bool replacementFound = false;
 		await using (NpgsqlCommand lockNew = new(
 			"SELECT credential_type, queue_halted FROM credentials WHERE id = $1 FOR UPDATE", connection, transaction))
 		{
 			lockNew.Parameters.AddWithValue(replacementCredentialId);
 			await using NpgsqlDataReader reader = await lockNew.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-			if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
 			{
-				await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-				return new CredentialSwapResult(CredentialSwapOutcome.ReplacementCredentialNotFound, null, null, []);
+				replacementFound = true;
+				replacementType = reader.GetString(0);
+				replacementHalted = reader.GetBoolean(1);
 			}
-			replacementType = reader.GetString(0);
-			replacementHalted = reader.GetBoolean(1);
+		}
+
+		// The reader/command above are fully disposed by this point (the `await using`
+		// blocks closed before falling through here) -- rolling back while a reader is
+		// still open throws NpgsqlOperationInProgressException, so every early exit
+		// below happens strictly after that scope, never from inside it.
+		if (!replacementFound)
+		{
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return new CredentialSwapResult(CredentialSwapOutcome.ReplacementCredentialNotFound, null, null, []);
 		}
 
 		if (replacementHalted)
