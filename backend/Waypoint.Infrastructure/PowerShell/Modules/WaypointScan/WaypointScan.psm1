@@ -31,6 +31,7 @@
 # what it needs from the vendor code: one process-capture helper.
 
 $Script:VmwareStigDockerCommonModulePath = $env:WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH
+$Script:VmwareStigDockerNsxApiModulePath = $env:WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH
 
 function Invoke-WaypointScan {
 	<#
@@ -399,28 +400,64 @@ function Set-WaypointCklBenchmarkMetadata {
 	$Xml.Save($CklPath)
 }
 
+# A minimal Waypoint-owned logging shim so the UNMODIFIED vendor Get-NsxSessionToken
+# (module.transport.nsxapi.ps1) runs as-is when dot-sourced below. That vendor function's
+# only dependencies beyond Invoke-WebRequest are Get-LogSplat (returns a splat hashtable)
+# and one Write-Log Debug line; the sibling repo defines both in module.logging.ps1, which
+# in turn pulls in that repo's whole parallel-engine logging stack (LogQueue thread,
+# Write-LogDirect, Format-LogLine) -- machinery this single-target invocation neither has
+# nor needs. Rather than copy the vendor's function body (its Invoke-WebRequest call,
+# header loop, throw strings, and JSESSIONID regex are the sibling repo's expressive code,
+# and that repo carries no LICENSE -- CLAUDE.md's Borrowing Policy bars unlicensed code),
+# Waypoint provides these two tiny, generic helpers so the vendor function itself can be
+# dot-sourced UNMODIFIED and run as vendor code (the #298 shim pattern, exactly as
+# module.common.ps1 is already dot-sourced for Invoke-ExternalCommand). These shims are
+# only defined if the dot-sourced vendor code has not already brought its own into scope,
+# so if a future common.ps1 provides the real ones they win.
+if (-not (Get-Command -Name 'Get-LogSplat' -ErrorAction SilentlyContinue)) {
+	function Get-LogSplat {
+		[CmdletBinding()]
+		param([Parameter(Position = 0)][AllowNull()][AllowEmptyString()][string]$Source)
+		if ($Source) { return @{ Source = $Source } }
+		return @{}
+	}
+}
+if (-not (Get-Command -Name 'Write-Log' -ErrorAction SilentlyContinue)) {
+	# No-op-to-the-runspace sink: routes the vendor's Debug line to Write-Verbose (never
+	# a stream Waypoint watches/persists, never the token). The vendor Get-NsxSessionToken
+	# never logs the token or credential -- only "Obtained NSX session token for <manager>".
+	function Write-Log {
+		[CmdletBinding()]
+		param(
+			[Parameter(Mandatory, Position = 0)][string]$Message,
+			[Parameter()][string]$Severity = 'Info',
+			[Parameter()][object]$LogQueue = $null,
+			[Parameter()][string]$Source,
+			[Parameter()][datetime]$Timestamp = (Get-Date)
+		)
+		Write-Verbose $Message
+	}
+}
+
 # NSX transport (issue #308, first sub-issue of the #24 split). NSX InSpec profiles run
 # with the `local` transport and make NSX Manager REST calls via the InSpec http()
-# resource, authenticated with an X-XSRF-TOKEN header and a JSESSIONID cookie -- the
-# same shape the sibling repo's module.transport.nsxapi.ps1 (Get-NsxSessionToken) uses.
-# That vendor function is not dot-sourced here: it depends on that repo's own
-# Write-Log/Get-LogSplat helpers, which is more of that module's parallel-engine
-# machinery than this single-target invocation needs (the same "re-drive the vendor
-# step directly" call Invoke-WaypointScan's doc comment already makes for
-# Get-ScanScriptBlock) -- so the POST /api/session/create call is replicated here,
-# directly, matching the vendor's request/response shape exactly (form-encoded
-# j_username/j_password, X-XSRF-TOKEN response header, JSESSIONID Set-Cookie).
+# resource, authenticated with an X-XSRF-TOKEN header and a JSESSIONID cookie. The session
+# token is obtained by the UNMODIFIED vendor Get-NsxSessionToken (module.transport.nsxapi.ps1),
+# dot-sourced at runtime from WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH the same way
+# module.common.ps1 is dot-sourced for Invoke-ExternalCommand (the #298 shim pattern) --
+# nothing from that vendor file is copied into this repo; the two Get-LogSplat/Write-Log
+# helpers it needs are provided as generic Waypoint shims above.
 #
 # The session token and cookie are secret material for as long as they are valid (they
 # grant NSX Manager API access) -- they are held only in local variables for the
 # lifetime of this function call, are never written to $ReportPath or any other file,
 # and are passed to `inspec exec` via a generated inputs file that lives under the
-# artifact store's own directory (not a watched/logged path) exactly as the base
-# vSphere path passes the vCenter password via environment variables rather than argv:
-# neither ever appears in the captured process command line. On any throw the caught
-# exception message is reduced by Get-NsxAuthFailureReason before being returned, so a
-# session-token HTTP failure's exception text (which could otherwise echo the request
-# body) never leaves this function un-redacted.
+# artifact store's own directory (not a watched/logged
+# path) exactly as the base vSphere path passes the vCenter password via environment
+# variables rather than argv: neither ever appears in the captured process command line.
+# On any throw the caught exception message is reduced by Get-NsxAuthFailureReason before
+# being returned, so a session-token HTTP failure's exception text (which could otherwise
+# echo the request body) never leaves this function un-redacted.
 function Invoke-WaypointNsxScan {
 	<#
 	.SYNOPSIS
@@ -473,7 +510,10 @@ function Invoke-WaypointNsxScan {
 		[int]$TimeoutSeconds = 1800,
 
 		[Parameter()]
-		[string]$VmwareStigDockerCommonPath = $Script:VmwareStigDockerCommonModulePath
+		[string]$VmwareStigDockerCommonPath = $Script:VmwareStigDockerCommonModulePath,
+
+		[Parameter()]
+		[string]$VmwareStigDockerNsxApiPath = $Script:VmwareStigDockerNsxApiModulePath
 	)
 
 	if ([string]::IsNullOrWhiteSpace($VmwareStigDockerCommonPath)) {
@@ -484,10 +524,21 @@ function Invoke-WaypointNsxScan {
 		throw "WaypointScan: module.common.ps1 not found at '$VmwareStigDockerCommonPath'."
 	}
 
-	# Dot-source the unmodified vendor script to bring Invoke-ExternalCommand into scope
-	# (same helper the vSphere path above reuses; the NSX-specific session-token call is
-	# not vendor code -- see the region comment above this function).
+	if ([string]::IsNullOrWhiteSpace($VmwareStigDockerNsxApiPath)) {
+		throw 'WaypointScan: no module.transport.nsxapi.ps1 path configured (WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH or -VmwareStigDockerNsxApiPath).'
+	}
+
+	if (-not (Test-Path -Path $VmwareStigDockerNsxApiPath -PathType Leaf)) {
+		throw "WaypointScan: module.transport.nsxapi.ps1 not found at '$VmwareStigDockerNsxApiPath'."
+	}
+
+	# Dot-source the unmodified vendor scripts: module.common.ps1 brings Invoke-ExternalCommand
+	# into scope (same helper the vSphere path reuses), and module.transport.nsxapi.ps1 brings
+	# the vendor Get-NsxSessionToken into scope UNMODIFIED (the #298 shim pattern -- see the
+	# region comment above this function; the Get-LogSplat/Write-Log helpers that function
+	# needs are provided as Waypoint shims above).
 	. $VmwareStigDockerCommonPath
+	. $VmwareStigDockerNsxApiPath
 
 	$ReportDirectory = Split-Path -Path $ReportPath -Parent
 	if ($ReportDirectory -and -not (Test-Path -Path $ReportDirectory -PathType Container)) {
@@ -495,7 +546,13 @@ function Invoke-WaypointNsxScan {
 	}
 
 	try {
-		$Session = Get-WaypointNsxSessionToken -Manager $Manager -Username $Username -Password $Password
+		# The vendor Get-NsxSessionToken takes a [pscredential]; build one from the decrypted
+		# username/password halves the handler bound as parameters (the password is never
+		# interpolated into script text -- security.md controls 1/2 -- it goes straight into
+		# the SecureString the PSCredential holds).
+		$SecurePassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
+		$NsxCredential = [System.Management.Automation.PSCredential]::new($Username, $SecurePassword)
+		$Session = Get-NsxSessionToken -Manager $Manager -Credential $NsxCredential -Source 'nsx'
 	} catch {
 		return [pscustomobject]@{
 			Success       = $false
@@ -555,53 +612,7 @@ function Invoke-WaypointNsxScan {
 	}
 }
 
-# Obtains an NSX Manager API session token and cookie via `POST /api/session/create`,
-# matching the sibling repo's Get-NsxSessionToken request/response shape exactly (form
-# body j_username/j_password, X-XSRF-TOKEN response header, JSESSIONID Set-Cookie) --
-# not dot-sourced from the vendor file, see the region comment above
-# Invoke-WaypointNsxScan for why. Throws on any failure so the caller classifies it.
-function Get-WaypointNsxSessionToken {
-	[CmdletBinding()]
-	param(
-		[Parameter(Mandatory)]
-		[string]$Manager,
-
-		[Parameter(Mandatory)]
-		[string]$Username,
-
-		[Parameter(Mandatory)]
-		[AllowEmptyString()]
-		[string]$Password
-	)
-
-	$Url = "https://$Manager/api/session/create"
-	$Body = @{
-		j_username = $Username
-		j_password = $Password
-	}
-
-	$Response = Invoke-WebRequest -Uri $Url -Method Post -Body $Body `
-		-ContentType 'application/x-www-form-urlencoded' `
-		-SkipCertificateCheck -TimeoutSec 30 -ErrorAction Stop
-
-	$Token = $null
-	$SetCookie = $null
-	foreach ($Key in $Response.Headers.Keys) {
-		if ($Key -ieq 'X-XSRF-TOKEN') { $Token = @($Response.Headers[$Key])[0] }
-		elseif ($Key -ieq 'Set-Cookie') { $SetCookie = @($Response.Headers[$Key]) -join '; ' }
-	}
-	if ([string]::IsNullOrEmpty($Token)) { throw "NSX session create did not return an X-XSRF-TOKEN header" }
-
-	$CookieMatch = [regex]::Match([string]$SetCookie, 'JSESSIONID=[^;,\s]+')
-	if (-not $CookieMatch.Success) { throw "NSX session create did not return a JSESSIONID cookie" }
-
-	return [PSCustomObject]@{
-		Token  = $Token
-		Cookie = $CookieMatch.Value
-	}
-}
-
-# Reduces an ErrorRecord from Get-WaypointNsxSessionToken to a short, safe-to-log
+# Reduces an ErrorRecord from the vendor Get-NsxSessionToken to a short, safe-to-log
 # reason: Invoke-WebRequest's own exception message for a non-2xx response
 # (Microsoft.PowerShell.Commands.HttpResponseException) already includes the response
 # status line ("401 Unauthorized" etc, which is what AuthFailureClassifier needs to see)
