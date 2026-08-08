@@ -173,11 +173,20 @@ the frontend bundle).
    Wait for the condition rather than assuming the timing:
 
    ```bash
-   for _ in $(seq 60); do
-     docker compose ps --format '{{.Name}}\t{{.Status}}' | grep -q 'healthy' || sleep 1
+   # Exact-match on the health state: a substring test would also match
+   # "unhealthy". All three containers must pass, not just the first one.
+   for name in waypoint-nginx waypoint-backend waypoint-postgres; do
+     for i in $(seq 1 60); do
+       [ "$(docker inspect -f '{{.State.Health.Status}}' "$name" 2>/dev/null)" = healthy ] && break
+       [ "$i" = 60 ] && { echo "$name never became healthy - check: docker logs $name"; break; }
+       sleep 1
+     done
    done
    docker compose ps          # all three should report "healthy"
    ```
+
+   (If you are running under the `docs/testing.md` isolation recipe, your
+   containers are named `wp-$SLUG-*` — substitute those names.)
 
    See [`docs/testing.md`](../docs/testing.md) "`up -d` returning does not mean
    healthy" for the full explanation and paste-safe patterns.
