@@ -40,6 +40,17 @@ public sealed class JobStateMachineTests
 	[InlineData(JobShape.Simple, JobStates.Queued, JobStates.Cancelled)]
 	[InlineData(JobShape.Simple, JobStates.Queued, JobStates.Blocked)]
 	[InlineData(JobShape.Simple, JobStates.Blocked, JobStates.Queued)]
+	[InlineData(JobShape.Srg, JobStates.Queued, JobStates.Running)]
+	[InlineData(JobShape.Srg, JobStates.Running, JobStates.Attesting)]
+	[InlineData(JobShape.Srg, JobStates.Attesting, JobStates.Done)]
+	[InlineData(JobShape.Srg, JobStates.Running, JobStates.Failed)]
+	[InlineData(JobShape.Srg, JobStates.Attesting, JobStates.Failed)]
+	[InlineData(JobShape.Srg, JobStates.Running, JobStates.AuthFailed)]
+	[InlineData(JobShape.Srg, JobStates.Queued, JobStates.Cancelled)]
+	[InlineData(JobShape.Srg, JobStates.Running, JobStates.Cancelled)]
+	[InlineData(JobShape.Srg, JobStates.Attesting, JobStates.Cancelled)]
+	[InlineData(JobShape.Srg, JobStates.Queued, JobStates.Blocked)]
+	[InlineData(JobShape.Srg, JobStates.Blocked, JobStates.Queued)]
 	public void CanTransition_LegalMoves_ReturnsTrue(JobShape shape, string from, string to)
 	{
 		Assert.True(JobStateMachine.CanTransition(shape, from, to));
@@ -56,6 +67,13 @@ public sealed class JobStateMachineTests
 	[InlineData(JobShape.Simple, JobStates.Done, JobStates.Running)]
 	[InlineData(JobShape.Simple, JobStates.Running, JobStates.Attesting)]
 	[InlineData(JobShape.Simple, JobStates.Failed, JobStates.Queued)]
+	[InlineData(JobShape.Srg, JobStates.Queued, JobStates.Attesting)]
+	[InlineData(JobShape.Srg, JobStates.Running, JobStates.Done)]
+	[InlineData(JobShape.Srg, JobStates.Running, JobStates.Converting)]
+	[InlineData(JobShape.Srg, JobStates.Attesting, JobStates.Converting)]
+	[InlineData(JobShape.Srg, JobStates.Attesting, JobStates.Uploaded)]
+	[InlineData(JobShape.Srg, JobStates.Done, JobStates.Running)]
+	[InlineData(JobShape.Srg, JobStates.Failed, JobStates.Queued)]
 	public void CanTransition_IllegalMoves_ReturnsFalse(JobShape shape, string from, string to)
 	{
 		Assert.False(JobStateMachine.CanTransition(shape, from, to));
@@ -70,6 +88,10 @@ public sealed class JobStateMachineTests
 	[InlineData(JobShape.Simple, JobStates.Failed)]
 	[InlineData(JobShape.Simple, JobStates.AuthFailed)]
 	[InlineData(JobShape.Simple, JobStates.Cancelled)]
+	[InlineData(JobShape.Srg, JobStates.Done)]
+	[InlineData(JobShape.Srg, JobStates.Failed)]
+	[InlineData(JobShape.Srg, JobStates.AuthFailed)]
+	[InlineData(JobShape.Srg, JobStates.Cancelled)]
 	public void TerminalStates_HaveNoAllowedNextStates(JobShape shape, string terminalState)
 	{
 		Assert.Empty(JobStateMachine.AllowedNextStates(shape, terminalState));
@@ -78,6 +100,7 @@ public sealed class JobStateMachineTests
 	[Theory]
 	[InlineData(JobShape.Standard)]
 	[InlineData(JobShape.Simple)]
+	[InlineData(JobShape.Srg)]
 	public void EngineMayRequeueRunningJobs_ButHandlersMayNot(JobShape shape)
 	{
 		Assert.True(JobStateMachine.CanEngineTransition(shape, JobStates.Running, JobStates.Queued));
@@ -88,6 +111,7 @@ public sealed class JobStateMachineTests
 	[InlineData(JobShape.Standard, JobStates.Running, JobStates.Cancelled)]
 	[InlineData(JobShape.Simple, JobStates.Running, JobStates.Failed)]
 	[InlineData(JobShape.Standard, JobStates.Queued, JobStates.Blocked)]
+	[InlineData(JobShape.Srg, JobStates.Attesting, JobStates.Done)]
 	public void EngineAlsoRetainsPipelineTransitions(JobShape shape, string from, string to)
 	{
 		Assert.True(JobStateMachine.CanEngineTransition(shape, from, to));
@@ -118,11 +142,15 @@ public sealed class JobStateMachineTests
 	[Theory]
 	[InlineData(JobShape.Standard)]
 	[InlineData(JobShape.Simple)]
+	[InlineData(JobShape.Srg)]
 	public void EveryJobState_IsKnownToItsShapeOrDeliberatelyAbsent(JobShape shape)
 	{
-		string[] standardOnly = [JobStates.Attesting, JobStates.Converting, JobStates.Uploaded];
-		string[] simpleOnly = [JobStates.Done];
-		string[] notInThisShape = shape == JobShape.Standard ? simpleOnly : standardOnly;
+		string[] notInThisShape = shape switch
+		{
+			JobShape.Standard => [JobStates.Done],
+			JobShape.Simple => [JobStates.Attesting, JobStates.Converting, JobStates.Uploaded],
+			_ => [JobStates.Converting, JobStates.Uploaded]
+		};
 
 		foreach (string state in AllJobStates())
 		{
@@ -143,6 +171,7 @@ public sealed class JobStateMachineTests
 	[Theory]
 	[InlineData(JobShape.Standard)]
 	[InlineData(JobShape.Simple)]
+	[InlineData(JobShape.Srg)]
 	public void CanTransition_UnknownFromState_ReturnsFalse(JobShape shape)
 	{
 		Assert.False(JobStateMachine.CanTransition(shape, "not-a-state", JobStates.Running));
