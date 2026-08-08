@@ -518,7 +518,13 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 				Id: reader.GetGuid(0),
 				RunId: reader.IsDBNull(1) ? null : reader.GetGuid(1),
 				JobType: reader.GetString(2),
-				TargetId: reader.IsDBNull(3) ? null : reader.GetString(3),
+				// target_id is a uuid column; this Npgsql version refuses a direct
+				// GetString() read of a uuid ("Reading as 'System.String' is not
+				// supported for fields having DataTypeName 'uuid'") -- read it typed
+				// and format to match JobSummary.TargetId's string? wire shape
+				// (issue #273: the first caller to populate a non-null target_id and
+				// exercise this path against real Postgres).
+				TargetId: reader.IsDBNull(3) ? null : reader.GetGuid(3).ToString(),
 				TargetName: reader.IsDBNull(4) ? null : reader.GetString(4),
 				State: reader.GetString(5),
 				Stage: reader.IsDBNull(6) ? null : reader.GetString(6),

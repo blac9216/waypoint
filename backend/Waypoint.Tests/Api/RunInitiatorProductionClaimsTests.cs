@@ -55,9 +55,12 @@ public sealed class RunInitiatorProductionClaimsTests : IClassFixture<RunInitiat
 		HttpClient client = _factory.CreateClient();
 		string token = await LoginAsync(client);
 
+		// Non-scan run_type: this test proves initiator provenance flows from the real
+		// claim, not from the body -- generic CreateRun plumbing, not scan's own
+		// site/target validation (see RunsEndpointTests.CreateRun_WithCyberRole_Returns202).
 		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/runs");
 		request.Headers.Add("Authorization", $"Bearer {token}");
-		request.Content = JsonContent.Create(new { run_type = "scan", scope = "{}" }, options: WaypointJsonOptions.Default);
+		request.Content = JsonContent.Create(new { run_type = "download", scope = "{}" }, options: WaypointJsonOptions.Default);
 
 		HttpResponseMessage response = await client.SendAsync(request);
 

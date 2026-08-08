@@ -1,0 +1,318 @@
+// Copyright 2026 Justin Black
+//
+// Licensed under the Apache License, Version 2.0 (the "License").
+// You may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Npgsql;
+using Waypoint.Core.Jobs;
+using Waypoint.Infrastructure.Data;
+using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.Sites;
+using Waypoint.Tests.Support;
+using Xunit;
+
+namespace Waypoint.Tests.Infrastructure.Postgres;
+
+/// <summary>
+/// Issue #273 (first slice of the #23 split), end to end against real Postgres:
+/// <c>POST /api/v1/runs</c> for a scan run validates <c>scope.site_id</c>/target refs
+/// against <see cref="SiteRepository"/>/<see cref="TargetRepository"/>, fans out one
+/// <c>scan</c> job per target ordered by catalog priority, and isolates per-target
+/// failures as independent job rows. Execution itself (InSpec) is #274 -- not
+/// exercised here.
+/// </summary>
+[Collection("Postgres")]
+#pragma warning disable CA1001 // xUnit owns the lifecycle: DisposeAsync tears down client/factory.
+public sealed class ScanRunFanOutTests : IAsyncLifetime
+{
+	private sealed class ScanRunApiFactory : WaypointApiFactory
+	{
+		private readonly string _connectionString;
+
+		public ScanRunApiFactory(string connectionString)
+		{
+			_connectionString = connectionString;
+		}
+
+		protected override void ConfigureWebHost(IWebHostBuilder builder)
+		{
+			base.ConfigureWebHost(builder);
+
+			builder.ConfigureTestServices(services =>
+			{
+				services
+					.AddAuthentication(TestAuthHandler.SchemeName)
+					.AddScheme<AuthenticationSchemeOptions, TestAuthHandler>(TestAuthHandler.SchemeName, _ => { });
+
+				services.PostConfigure<AuthenticationOptions>(options =>
+				{
+					options.DefaultScheme = TestAuthHandler.SchemeName;
+					options.DefaultAuthenticateScheme = TestAuthHandler.SchemeName;
+					options.DefaultChallengeScheme = TestAuthHandler.SchemeName;
+					options.DefaultForbidScheme = TestAuthHandler.SchemeName;
+				});
+
+				// Same "point the real repositories at the fixture container" pattern
+				// SitesTargetsApiTests uses, extended to IJobQueueRepository so
+				// RunsController's fan-out call lands in the same database the
+				// assertions below read back from.
+				services.AddSingleton(new SiteRepository(_connectionString));
+				services.AddSingleton(new TargetRepository(_connectionString));
+
+				var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IJobQueueRepository));
+				if (jobsDescriptor != null)
+				{
+					services.Remove(jobsDescriptor);
+				}
+
+				services.AddSingleton<IJobQueueRepository>(serviceProvider => new JobQueueRepository(
+					_connectionString, serviceProvider.GetRequiredService<ILogger<JobQueueRepository>>()));
+			});
+		}
+	}
+
+	private readonly PostgresFixture _fixture;
+	private ScanRunApiFactory _factory = null!;
+	private HttpClient _client = null!;
+
+	public ScanRunFanOutTests(PostgresFixture fixture)
+	{
+		_fixture = fixture;
+	}
+
+	public async Task InitializeAsync()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, Microsoft.Extensions.Logging.Abstractions.NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+		await ResetDataAsync();
+
+		_factory = new ScanRunApiFactory(_fixture.ConnectionString);
+		_client = _factory.CreateClient();
+	}
+
+	public Task DisposeAsync()
+	{
+		_client.Dispose();
+		_factory.Dispose();
+		return Task.CompletedTask;
+	}
+
+#pragma warning restore CA1001
+
+	[Fact]
+	public async Task CreateScanRun_FansOutOneJobPerTarget_OrderedByCatalogPriority()
+	{
+		Guid siteId = await CreateSiteAsync("fanout-site");
+		Guid nsx = await CreateTargetAsync(siteId, "nsx-api", "nsx-01", """{"host":"nsx-01.example.internal"}""");
+		Guid vcsa = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+		Guid ssh = await CreateTargetAsync(siteId, "ssh", "photon-01", """{"host":"photon-01.example.internal"}""");
+
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId });
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		string runId = created.RootElement.GetProperty("run_id").GetString()!;
+
+		HttpResponseMessage jobsResponse = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/jobs", "Viewer", body: null);
+		Assert.Equal(HttpStatusCode.OK, jobsResponse.StatusCode);
+		using JsonDocument jobs = JsonDocument.Parse(await jobsResponse.Content.ReadAsStringAsync());
+		JsonElement[] rows = jobs.RootElement.EnumerateArray().ToArray();
+
+		Assert.Equal(3, rows.Length);
+		Assert.All(rows, row => Assert.Equal("scan", row.GetProperty("job_type").GetString()));
+
+		// Priority-ordered: NSX(1) before vCenter/vsphere(3) before SRG/ssh(6) --
+		// GetJobsForRunAsync orders "by priority then created_at".
+		short[] priorities = rows.Select(row => row.GetProperty("priority").GetInt16()).ToArray();
+		Assert.Equal([(short)1, (short)3, (short)6], priorities);
+
+		string[] targetIds = rows.Select(row => row.GetProperty("target_id").GetString()!).ToArray();
+		Assert.Contains(nsx.ToString(), targetIds);
+		Assert.Contains(vcsa.ToString(), targetIds);
+		Assert.Contains(ssh.ToString(), targetIds);
+	}
+
+	[Fact]
+	public async Task CreateScanRun_ScopedToTargetIds_OnlyFansOutThoseTargets()
+	{
+		Guid siteId = await CreateSiteAsync("scoped-site");
+		Guid included = await CreateTargetAsync(siteId, "vsphere", "vcsa-included", """{"host":"vcsa-01.example.internal"}""");
+		await CreateTargetAsync(siteId, "nsx-api", "nsx-excluded", """{"host":"nsx-01.example.internal"}""");
+
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = new[] { included } });
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		string runId = created.RootElement.GetProperty("run_id").GetString()!;
+
+		HttpResponseMessage jobsResponse = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/jobs", "Viewer", body: null);
+		using JsonDocument jobs = JsonDocument.Parse(await jobsResponse.Content.ReadAsStringAsync());
+		JsonElement[] rows = jobs.RootElement.EnumerateArray().ToArray();
+
+		Assert.Single(rows);
+		Assert.Equal(included.ToString(), rows[0].GetProperty("target_id").GetString());
+	}
+
+	[Fact]
+	public async Task CreateScanRun_MissingSiteId_Returns400()
+	{
+		HttpResponseMessage response = await PostRunAsync(new { });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task CreateScanRun_UnknownSiteId_Returns404()
+	{
+		HttpResponseMessage response = await PostRunAsync(new { site_id = Guid.NewGuid() });
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
+	}
+
+	[Fact]
+	public async Task CreateScanRun_UnknownTargetId_Returns404_NoRunCreated()
+	{
+		Guid siteId = await CreateSiteAsync("bad-target-site");
+		Guid bogus = Guid.NewGuid();
+
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = new[] { bogus } });
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
+
+		HttpResponseMessage listResponse = await SendAsync(HttpMethod.Get, "/api/v1/runs", "Viewer", body: null);
+		using JsonDocument list = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync());
+		Assert.Empty(list.RootElement.EnumerateArray());
+	}
+
+	[Fact]
+	public async Task CreateScanRun_TargetFromAnotherSite_Returns404()
+	{
+		Guid siteA = await CreateSiteAsync("site-a");
+		Guid siteB = await CreateSiteAsync("site-b");
+		Guid targetInB = await CreateTargetAsync(siteB, "vsphere", "vcsa-b", """{"host":"vcsa-b.example.internal"}""");
+
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteA, target_ids = new[] { targetInB } });
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task CreateScanRun_SiteWithNoTargets_Returns400()
+	{
+		Guid siteId = await CreateSiteAsync("empty-site");
+
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task CreateScanRun_BelowCyberRole_Returns403()
+	{
+		Guid siteId = await CreateSiteAsync("role-gate-site");
+		await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Viewer",
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId }) });
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task CreateScanRun_EachTargetIsAnIndependentJobRow()
+	{
+		// Isolation constraint (AC): each target's job is its own row, not a shared
+		// one -- proven directly against the jobs table rather than inferred from the
+		// API response, so a future accidental collapse to one job would fail here.
+		Guid siteId = await CreateSiteAsync("isolation-site");
+		await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+		await CreateTargetAsync(siteId, "vsphere", "vcsa-02", """{"host":"vcsa-02.example.internal"}""");
+
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId });
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand count = new("SELECT count(DISTINCT id) FROM jobs WHERE run_id = $1", connection);
+		count.Parameters.AddWithValue(runId);
+		long distinctJobRows = (long)(await count.ExecuteScalarAsync())!;
+
+		Assert.Equal(2, distinctJobRows);
+	}
+
+	private async Task<HttpResponseMessage> PostRunAsync(object scopeBody)
+	{
+		return await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
+			new { run_type = "scan", scope = JsonSerializer.Serialize(scopeBody) });
+	}
+
+	private async Task<Guid> CreateSiteAsync(string namePrefix)
+	{
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/sites", "Admin",
+			new { name = $"{namePrefix}-{Guid.NewGuid():N}" });
+		if (!response.IsSuccessStatusCode)
+		{
+			string errorBody = await response.Content.ReadAsStringAsync();
+			throw new InvalidOperationException($"CreateSiteAsync failed: {(int)response.StatusCode} {errorBody}");
+		}
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		return document.RootElement.GetProperty("id").GetGuid();
+	}
+
+	private async Task<Guid> CreateTargetAsync(Guid siteId, string kind, string name, string connectionJson)
+	{
+		using JsonDocument connectionDocument = JsonDocument.Parse(connectionJson);
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/sites/{siteId}/targets");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		string body = JsonSerializer.Serialize(new { kind, name, connection = connectionDocument.RootElement });
+		request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+		response.EnsureSuccessStatusCode();
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		return document.RootElement.GetProperty("id").GetGuid();
+	}
+
+	private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, string role, object? body)
+	{
+		HttpRequestMessage request = new(method, path);
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+		if (body is not null)
+		{
+			request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+		}
+
+		return await _client.SendAsync(request);
+	}
+
+	private async Task ResetDataAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand truncate = new(
+			"TRUNCATE TABLE jobs, runs, targets, sites RESTART IDENTITY CASCADE", connection);
+		await truncate.ExecuteNonQueryAsync();
+	}
+}

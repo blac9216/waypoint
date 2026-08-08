@@ -163,6 +163,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<IJobHandler, Catalog.CatalogIndexJobHandler>();
 			services.AddSingleton<IJobHandler, Downloads.DownloadJobHandler>();
 			services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
+			services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
 
 			services.AddSingleton<JobDispatcherHostedService>();
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());
