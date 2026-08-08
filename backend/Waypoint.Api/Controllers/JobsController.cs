@@ -19,18 +19,26 @@ using Waypoint.Core.Authorization;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Scans;
+using Waypoint.Core.Sites;
+using Waypoint.Core.StigManager;
+using Waypoint.Infrastructure.Scans;
+using Waypoint.Infrastructure.Sites;
 
 namespace Waypoint.Api.Controllers;
 
 /// <summary>
 /// Job-level (as opposed to run-level) endpoints: the per-job cancel (issue #291), a thin
-/// wrapper over <see cref="IJobQueueRepository.CancelJobAsync"/> (#277), and the per-kind
-/// artifact download (issue #299).
+/// wrapper over <see cref="IJobQueueRepository.CancelJobAsync"/> (#277), the per-kind
+/// artifact download (issue #299), and the STIG Manager upload retry (issue #311, the
+/// shape issue #297 documents but leaves unbuilt -- reused narrowly here for exactly
+/// this one action rather than a general job-retry route).
 /// </summary>
 [ApiController]
 [Route("api/v1/jobs")]
 public sealed class JobsController : ControllerBase
 {
+	private const string ScanJobType = "scan";
+
 	/// <summary>
 	/// The closed set of artifact kinds this route serves (docs/api-contract.md
 	/// `/jobs/{id}/artifacts/{kind}`). <c>kind</c> is validated against this set BEFORE it
@@ -46,13 +54,19 @@ public sealed class JobsController : ControllerBase
 
 	private readonly IJobQueueRepository _repository;
 	private readonly IOptions<ScanOptions> _scanOptions;
+	private readonly TargetRepository _targets;
+	private readonly ScanUploadCoordinator _upload;
 
-	public JobsController(IJobQueueRepository repository, IOptions<ScanOptions> scanOptions)
+	public JobsController(IJobQueueRepository repository, IOptions<ScanOptions> scanOptions, TargetRepository targets, ScanUploadCoordinator upload)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(scanOptions);
+		ArgumentNullException.ThrowIfNull(targets);
+		ArgumentNullException.ThrowIfNull(upload);
 		_repository = repository;
 		_scanOptions = scanOptions;
+		_targets = targets;
+		_upload = upload;
 	}
 
 	/// <summary>
@@ -135,5 +149,63 @@ public sealed class JobsController : ControllerBase
 
 		byte[] bytes = await System.IO.File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
 		return File(bytes, contentType, Path.GetFileName(path));
+	}
+
+	/// <summary>
+	/// Retries a <c>scan</c> job's STIG Manager upload (issue #311; un-stubs the Results
+	/// screen's "Retry failed uploads" button, issue #300). Unlike issue #297's proposed
+	/// general job-retry endpoint (which would move a <c>failed</c> job's <c>state</c>
+	/// back to <c>queued</c> and re-run a whole pipeline stage), this retries only the
+	/// post-convert upload action -- <c>state</c>/<c>stage</c> are untouched, because the
+	/// job itself already reached its terminal (<c>uploaded</c>/<c>done</c>) or failed
+	/// for reasons unrelated to the upload. Requires the CKL artifact to still exist on
+	/// disk (a job whose convert stage never ran, or whose artifact was pruned, has
+	/// nothing to retry). Never throws through to a 500 for an ordinary upload failure --
+	/// same "never fail the caller" contract as the original attempt; the response
+	/// simply reports the fresh outcome, including a repeat failure.
+	/// </summary>
+	[HttpPost("{id:guid}/stigman-upload-retry")]
+	[RequireOperatorRole]
+	[ProducesResponseType(typeof(JobUploadRetryResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<JobUploadRetryResponse>> RetryUpload(Guid id, CancellationToken cancellationToken)
+	{
+		JobSummary? job = await _repository.GetJobAsync(id, cancellationToken).ConfigureAwait(false);
+		if (job is null)
+		{
+			throw ApiException.NotFound("Job not found.", $"Job '{id}' does not exist.");
+		}
+
+		if (!string.Equals(job.JobType, ScanJobType, StringComparison.Ordinal))
+		{
+			throw ApiException.Validation("Only scan jobs have a STIG Manager upload to retry.", $"Job '{id}' is job_type '{job.JobType}'.");
+		}
+
+		if (job.TargetId is not { } targetIdText || !Guid.TryParse(targetIdText, out Guid targetId))
+		{
+			throw ApiException.Validation("Job has no target to resolve a STIG Manager connection for.", $"Job '{id}' has no target_id.");
+		}
+
+		Target? target = await _targets.GetAsync(targetId, cancellationToken).ConfigureAwait(false);
+		if (target is null)
+		{
+			throw ApiException.NotFound("Target not found.", $"Target '{targetId}' no longer exists.");
+		}
+
+		string cklPath = ScanArtifactPaths.Ckl(_scanOptions.Value.ArtifactStorePath, id);
+		if (!System.IO.File.Exists(cklPath))
+		{
+			throw new ApiException(
+				System.Net.HttpStatusCode.Conflict, "no_ckl_artifact",
+				"No CKL artifact exists for this job to retry uploading.", $"Job '{id}' has no CKL at the expected artifact path.");
+		}
+
+		StigManagerUploadResult result = await _upload.UploadAsync(id, target, cklPath, cancellationToken).ConfigureAwait(false);
+		string status = result.Outcome switch
+		{
+			StigManagerUploadOutcome.Uploaded => JobUploadStatuses.Uploaded,
+			StigManagerUploadOutcome.Conflict => JobUploadStatuses.Conflict,
+			_ => JobUploadStatuses.Failed,
+		};
+		return Ok(new JobUploadRetryResponse(id.ToString(), status, result.Detail));
 	}
 }

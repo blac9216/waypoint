@@ -210,6 +210,18 @@ public interface IJobQueueRepository
 	/// </summary>
 	Task<CredentialSwapResult> SwapAndResumeBlockedCredentialAsync(
 		Guid runId, Guid replacementCredentialId, string actor, string? reason, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Issue #311: records a <c>scan</c> job's STIG Manager upload outcome
+	/// (<see cref="JobUploadStatuses"/>) in <c>jobs.upload_status</c>/<c>upload_detail</c>
+	/// -- deliberately independent of <see cref="AdvanceStateAsync"/>/<see cref="RequeueAtStageAsync"/>:
+	/// this column is written after the job has already reached (or independently of)
+	/// its state-machine terminal, and a retry rewrites it without touching
+	/// <c>state</c>/<c>stage</c> at all. Always succeeds for an existing job id
+	/// regardless of its current <c>state</c> -- there is no lease/ownership check here,
+	/// matching a plain projection column rather than a queue-claim field.
+	/// </summary>
+	Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken);
 }
 
 /// <summary>

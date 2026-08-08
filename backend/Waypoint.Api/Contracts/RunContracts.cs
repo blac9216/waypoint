@@ -265,14 +265,31 @@ public sealed record RunArtifactResponse(
 	IReadOnlyList<string> ArtifactKinds,
 
 	/// <summary>
-	/// STIG Manager upload status derived from job state (docs/api-contract.md): the real
-	/// upload integration is issue #25, not yet built, so this is <c>"pending"</c> until
-	/// the job reaches its <c>uploaded</c>/<c>done</c> terminal ("artifacts ready", per
-	/// <c>ScanJobHandler</c>'s doc comment) and <c>"not-uploaded"</c> on a failed job --
-	/// never <c>"conflict"</c>, which only a real upload attempt can report.
+	/// STIG Manager upload status (issue #311): <c>jobs.upload_status</c> when the
+	/// convert stage has actually attempted an upload (<c>uploaded</c>/<c>failed</c>/
+	/// <c>conflict</c>, a real HTTP outcome, not derived), else the same job-state
+	/// fallback issue #299 originally shipped (<c>"pending"</c> before the job reaches
+	/// its <c>uploaded</c>/<c>done</c> terminal, <c>"not-uploaded"</c> after a
+	/// <c>failed</c>/<c>auth-failed</c> job that never reached convert) -- e.g. an
+	/// SRG-only job (#24/#309), which never attempts an upload at all.
 	/// </summary>
 	[property: JsonPropertyName("upload_status")]
-	string UploadStatus);
+	string UploadStatus,
+
+	/// <summary>Short, redacted reason for a <c>failed</c>/<c>conflict</c> upload_status (<c>jobs.upload_detail</c>) -- null when there is nothing to explain.</summary>
+	[property: JsonPropertyName("upload_detail")]
+	string? UploadDetail);
+
+/// <summary>Response for <c>POST /api/v1/jobs/{id}/stigman-upload-retry</c> (issue #311, the retry shape #297 documents).</summary>
+public sealed record JobUploadRetryResponse(
+	[property: JsonPropertyName("job_id")]
+	string JobId,
+
+	[property: JsonPropertyName("upload_status")]
+	string UploadStatus,
+
+	[property: JsonPropertyName("upload_detail")]
+	string? UploadDetail);
 
 /// <summary>
 /// One waiver row of <c>GET /api/v1/runs/{id}/attestations-applied</c> (issue #299,

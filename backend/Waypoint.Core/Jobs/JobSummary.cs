@@ -17,6 +17,10 @@ namespace Waypoint.Core.Jobs;
 /// <summary>
 /// Job row projected for the REST surface (GET /runs/{id}/jobs).
 /// Matches docs/api-contract.md "Runs &amp; jobs" — job detail fields.
+/// <see cref="UploadStatus"/>/<see cref="UploadDetail"/> are issue #311's
+/// <c>jobs.upload_status</c>/<c>upload_detail</c> columns (migration 0018) -- null on
+/// every job type except <c>scan</c>, and null on a <c>scan</c> job until its convert
+/// stage has attempted an upload (see <c>ScanJobHandler</c>).
 /// </summary>
 public sealed record JobSummary(
 	Guid Id,
@@ -30,4 +34,6 @@ public sealed record JobSummary(
 	int AttemptCount,
 	string? CreatedAt,
 	string? StartedAt,
-	string? FinishedAt);
+	string? FinishedAt,
+	string? UploadStatus = null,
+	string? UploadDetail = null);

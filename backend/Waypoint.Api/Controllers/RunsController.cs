@@ -740,22 +740,38 @@ public sealed class RunsController : ControllerBase
 			CatIIOpen: counts?.CatIIOpen,
 			CatIIIOpen: counts?.CatIIIOpen,
 			ArtifactKinds: kinds,
-			UploadStatus: StigManagerUploadStatus(job.State));
+			UploadStatus: StigManagerUploadStatus(job),
+			UploadDetail: job.UploadStatus is null ? null : job.UploadDetail);
 	}
 
 	/// <summary>
-	/// STIG Manager upload status derived from job state -- the real upload integration is
-	/// issue #25, not yet built, so <c>"uploaded"</c> here means "artifacts ready"
-	/// (<c>ScanJobHandler</c>'s own terminal-state doc comment), never a confirmed HTTP
-	/// upload. <c>"conflict"</c> is never returned: only a real upload attempt can report
-	/// a 409-shaped conflict, and none happens yet.
+	/// STIG Manager upload status (issue #311): <c>job.UploadStatus</c> (<c>jobs.upload_status</c>)
+	/// is the real HTTP outcome once the convert stage has attempted an upload -- used
+	/// as-is when present. A null column (SRG-only run, or a job that never reached
+	/// convert) falls back to the original issue #299 job-state derivation so an
+	/// unattempted upload still reads as "pending"/"not-uploaded" rather than a missing
+	/// field.
 	/// </summary>
-	private static string StigManagerUploadStatus(string jobState) => jobState switch
+	private static string StigManagerUploadStatus(JobSummary job)
 	{
-		JobStates.Uploaded or JobStates.Done => "uploaded",
-		JobStates.Failed or JobStates.AuthFailed => "not-uploaded",
-		_ => "pending",
-	};
+		if (job.UploadStatus is { } uploadStatus)
+		{
+			return uploadStatus switch
+			{
+				JobUploadStatuses.Uploaded => "uploaded",
+				JobUploadStatuses.Conflict => "conflict",
+				JobUploadStatuses.Pending => "pending",
+				_ => "not-uploaded",
+			};
+		}
+
+		return job.State switch
+		{
+			JobStates.Uploaded or JobStates.Done => "uploaded",
+			JobStates.Failed or JobStates.AuthFailed => "not-uploaded",
+			_ => "pending",
+		};
+	}
 
 	private const string LiveResolutionDerivation = "live-resolution";
 
