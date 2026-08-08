@@ -1,0 +1,115 @@
+/* STIG Manager tab — global connection summary, per-site override list, and
+ * inline test-outcome rendering. Shares .config-panel / .config-table /
+ * .config-form / .config-tab__grid with ConfigurationScreen.css; this file
+ * only adds what's specific to this tab. */
+
+.stigman-tab__summary {
+	padding: 13px 14px;
+}
+
+.stigman-tab__field {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+	font-size: 11.5px;
+	padding: 4px 0;
+	border-bottom: 1px solid var(--soft);
+}
+
+.stigman-tab__label {
+	color: var(--txt3);
+}
+
+.stigman-tab__test-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-top: 11px;
+}
+
+.stigman-tab__test-row button {
+	background: transparent;
+	border: 1px solid var(--line);
+	color: var(--txt2);
+	padding: 4px 11px;
+	border-radius: var(--radius-btn);
+	font-size: 11px;
+}
+
+.stigman-tab__outcome {
+	font-size: 11px;
+}
+
+.stigman-tab__outcome-label {
+	font-weight: 600;
+}
+
+.stigman-tab__outcome--ok .stigman-tab__outcome-label {
+	color: var(--ok);
+}
+
+.stigman-tab__outcome--bad .stigman-tab__outcome-label {
+	color: var(--bad);
+}
+
+.stigman-tab__outcome--neutral .stigman-tab__outcome-label {
+	color: var(--txt2);
+}
+
+.stigman-tab__outcome-message {
+	color: var(--txt3);
+	margin-top: 2px;
+}
+
+.stigman-tab__site {
+	border-bottom: 1px solid var(--soft);
+}
+
+.stigman-tab__site-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 9px 14px;
+}
+
+.stigman-tab__site-name {
+	font-size: 11.5px;
+	flex: 1;
+}
+
+.stigman-tab__site-row button {
+	background: transparent;
+	border: 1px solid var(--line);
+	color: var(--txt2);
+	padding: 2px 8px;
+	border-radius: 3px;
+	font-size: 10.5px;
+}
+
+.stigman-tab__badge {
+	font-size: 10px;
+	font-family: var(--mono);
+	padding: 1px 6px;
+	border-radius: 2px;
+	border: 1px solid var(--soft);
+}
+
+.stigman-tab__badge.is-override {
+	color: var(--acc);
+	border-color: var(--acc);
+}
+
+.stigman-tab__badge.is-inherit {
+	color: var(--txt3);
+}
+
+.stigman-tab__site-detail {
+	padding: 0 14px 13px;
+	background: var(--panel2);
+}
+
+.stigman-tab__source {
+	font-size: 10.5px;
+	color: var(--txt3);
+	padding: 9px 0 0;
+}
