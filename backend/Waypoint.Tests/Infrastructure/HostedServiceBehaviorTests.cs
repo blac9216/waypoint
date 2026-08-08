@@ -308,5 +308,8 @@ public sealed class HostedServiceBehaviorTests
 		public Task<CredentialSwapResult> SwapAndResumeBlockedCredentialAsync(
 			Guid runId, Guid replacementCredentialId, string actor, string? reason, CancellationToken cancellationToken)
 		=> Task.FromResult(new CredentialSwapResult(CredentialSwapOutcome.RunNotHalted, null, null, []));
+
+		public Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken)
+		=> Task.CompletedTask;
 	}
 }

@@ -347,4 +347,10 @@ public sealed class CatalogFakeJobQueueRepository : IJobQueueRepository
 		_ = (limit, offset, cancellationToken);
 		return Task.FromResult(new RunListResult([], 0));
 	}
+
+	public Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken)
+	{
+		_ = (jobId, uploadStatus, detail, cancellationToken);
+		return Task.CompletedTask;
+	}
 }

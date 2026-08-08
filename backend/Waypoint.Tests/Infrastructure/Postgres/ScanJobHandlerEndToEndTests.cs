@@ -25,6 +25,7 @@ using Waypoint.Core.PowerShell;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
+using Waypoint.Core.StigManager;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
@@ -32,6 +33,7 @@ using Waypoint.Infrastructure.PowerShell;
 using Waypoint.Infrastructure.Scans;
 using Waypoint.Infrastructure.Secrets;
 using Waypoint.Infrastructure.Sites;
+using Waypoint.Infrastructure.StigManager;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Postgres;
@@ -115,8 +117,19 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			SafTimeoutSeconds = 30,
 		});
 
+		// Issue #311: no STIG Manager connection is ever configured in this suite (no
+		// row written to stigman_connections), so ScanUploadCoordinator.UploadAsync
+		// always resolves to "no connection configured" -- a non-fatal Failed outcome,
+		// same as production against an unconfigured appliance. StubStigManagerUploadClient
+		// is never actually invoked by these tests as a result, but is still wired for
+		// completeness/parity with the real DI graph.
+		StigManagerRepository stigman = new(_fixture.ConnectionString);
+		ScanUploadCoordinator uploadCoordinator = new(
+			stigman, new StubStigManagerUploadClient(), _secretStore, _repository, _redactor);
+
 		_handler = new ScanJobHandler(
-			executor, _secretStore, _credentials, _targets, _ephemeralCredentials, _repository, _redactor, wrappedPsOptions, scanOptions, _configDocs);
+			executor, _secretStore, _credentials, _targets, _ephemeralCredentials, _repository, _redactor, wrappedPsOptions, scanOptions, _configDocs,
+			uploadCoordinator);
 	}
 
 	public async Task DisposeAsync()
@@ -542,13 +555,23 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		}
 
 		// Standard shape's terminal (ADR-0012/#298): the dispatcher forces Succeeded to
-		// `uploaded` here ("artifacts ready" -- the STIG Manager upload itself is #25).
+		// `uploaded` here ("artifacts ready" -- the actual HTTP upload attempt happens
+		// inside the convert stage itself, issue #311, and is asserted below).
 		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
 
 		string hdfPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.json");
 		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
 		Assert.True(File.Exists(hdfPath), $"expected HDF at '{hdfPath}'.");
 		Assert.True(File.Exists(cklPath), $"expected CKL at '{cklPath}'.");
+
+		// Issue #311 AC ("upload failure must NEVER fail the scan run"): this suite
+		// never configures a STIG Manager connection (no stigman_connections row, no
+		// site override), so ScanUploadCoordinator.UploadAsync degrades to a
+		// non-fatal "failed" upload_status with an explanatory detail -- proving the
+		// job still reached its terminal `uploaded` state (asserted above) despite the
+		// upload itself never succeeding.
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "upload_status"));
+		Assert.Contains("No STIG Manager connection", await GetJobFieldAsync(jobIds[0], "upload_detail"));
 	}
 
 	/// <summary>
@@ -850,5 +873,27 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		await using NpgsqlCommand command = new(
 			"TRUNCATE TABLE config_versions, config_docs, targets, sites RESTART IDENTITY CASCADE", connection);
 		await command.ExecuteNonQueryAsync();
+	}
+
+	/// <summary>
+	/// Never-called stub (no stigman_connections row exists in this suite, so
+	/// <see cref="Waypoint.Infrastructure.StigManager.StigManagerRepository.ResolveForSiteAsync"/>
+	/// always returns null and <see cref="ScanUploadCoordinator"/> never reaches the
+	/// network boundary) -- present only so <see cref="ScanJobHandler"/> can be
+	/// constructed with the same DI shape production uses.
+	/// </summary>
+	private sealed class StubStigManagerUploadClient : IStigManagerUploadClient
+	{
+		public Task<StigManagerUploadResult> UploadCklAsync(
+			ResolvedStigManagerConnection connection, string? clientSecret, string cklPath, CancellationToken cancellationToken)
+		{
+			throw new InvalidOperationException("Not expected to be called: no STIG Manager connection is configured in this test suite.");
+		}
+
+		public Task<StigManagerBenchmarkMetadata> ResolveBenchmarkMetadataAsync(
+			ResolvedStigManagerConnection connection, string? clientSecret, string benchmarkId, StigManagerBenchmarkMetadata fallback, CancellationToken cancellationToken)
+		{
+			throw new InvalidOperationException("Not expected to be called: no STIG Manager connection is configured in this test suite.");
+		}
 	}
 }

@@ -122,6 +122,11 @@ public static class ServiceCollectionExtensions
 		services.AddHttpClient();
 		services.AddSingleton<Waypoint.Core.StigManager.IStigManagerProbe, StigManager.HttpStigManagerProbe>();
 
+		// Issue #311: the CKL upload + benchmark enrichment HTTP boundary, same
+		// unconditional registration as the #310 probe above (stubbed in tests, no
+		// connection string dependency of its own).
+		services.AddSingleton<Waypoint.Core.StigManager.IStigManagerUploadClient, StigManager.HttpStigManagerUploadClient>();
+
 		string? connectionString = configuration.GetConnectionString(ConnectionStringName);
 		if (!string.IsNullOrWhiteSpace(connectionString))
 		{
@@ -171,6 +176,10 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
 				serviceProvider.GetRequiredService<ISecretTracker>(),
 				serviceProvider.GetRequiredService<ILogger<Secrets.CredentialSecretStore>>()));
+
+			// Issue #311: the convert-stage upload/enrichment coordinator and the
+			// retry route (JobsController) share this one instance.
+			services.AddSingleton<Scans.ScanUploadCoordinator>();
 
 			services.AddSingleton<JobEventStreamService>(serviceProvider => new JobEventStreamService(
 				connectionString,

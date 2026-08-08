@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Net.Http.Json;
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Waypoint.Core.StigManager;
 
@@ -55,7 +53,7 @@ public sealed partial class HttpStigManagerProbe : IStigManagerProbe
 		string? accessToken;
 		try
 		{
-			accessToken = await AcquireTokenAsync(client, connection, clientSecret, cancellationToken).ConfigureAwait(false);
+			accessToken = await StigManagerAuth.AcquireTokenAsync(client, connection, clientSecret, cancellationToken).ConfigureAwait(false);
 		}
 		catch (HttpRequestException exception)
 		{
@@ -75,7 +73,7 @@ public sealed partial class HttpStigManagerProbe : IStigManagerProbe
 
 		try
 		{
-			using HttpRequestMessage request = new(HttpMethod.Get, CombineUri(connection.Endpoint, "api-version"));
+			using HttpRequestMessage request = new(HttpMethod.Get, StigManagerAuth.CombineUri(connection.Endpoint, "api-version"));
 			request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
 			using HttpResponseMessage response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
@@ -104,43 +102,4 @@ public sealed partial class HttpStigManagerProbe : IStigManagerProbe
 		}
 	}
 
-	/// <summary>Discovers the token endpoint from <c>{Authority}/.well-known/openid-configuration</c> and performs the client-credentials grant. Returns null (not throws) when the authority is reachable but issues no token -- the caller reports that as an auth failure, not an unreachable one.</summary>
-	private static async Task<string?> AcquireTokenAsync(HttpClient client, ResolvedStigManagerConnection connection, string? clientSecret, CancellationToken cancellationToken)
-	{
-		Uri discoveryUri = CombineUri(connection.Authority, ".well-known/openid-configuration");
-		using JsonDocument discovery = await client.GetFromJsonAsync<JsonDocument>(discoveryUri, cancellationToken).ConfigureAwait(false)
-			?? throw new HttpRequestException("The OIDC discovery document was empty.");
-
-		if (!discovery.RootElement.TryGetProperty("token_endpoint", out JsonElement tokenEndpointElement) || tokenEndpointElement.GetString() is not string tokenEndpoint)
-		{
-			throw new HttpRequestException("The OIDC discovery document did not contain a token_endpoint.");
-		}
-
-		Dictionary<string, string> form = new()
-		{
-			["grant_type"] = "client_credentials",
-			["client_id"] = connection.ClientId,
-			["scope"] = connection.Scope,
-		};
-		if (!string.IsNullOrEmpty(clientSecret))
-		{
-			form["client_secret"] = clientSecret;
-		}
-
-		using FormUrlEncodedContent content = new(form);
-		using HttpResponseMessage tokenResponse = await client.PostAsync(tokenEndpoint, content, cancellationToken).ConfigureAwait(false);
-		if (!tokenResponse.IsSuccessStatusCode)
-		{
-			return null;
-		}
-
-		using JsonDocument tokenDocument = JsonDocument.Parse(await tokenResponse.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-		return tokenDocument.RootElement.TryGetProperty("access_token", out JsonElement accessTokenElement) ? accessTokenElement.GetString() : null;
-	}
-
-	private static Uri CombineUri(string baseUri, string relativePath)
-	{
-		string normalizedBase = baseUri.EndsWith('/') ? baseUri : baseUri + "/";
-		return new Uri(new Uri(normalizedBase), relativePath);
-	}
 }

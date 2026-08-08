@@ -562,7 +562,8 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			SELECT
 				id, run_id, job_type, target_id, target_name,
 				state, stage, priority, attempt_count,
-				created_at::text, started_at::text, finished_at::text
+				created_at::text, started_at::text, finished_at::text,
+				upload_status, upload_detail
 			FROM jobs
 			WHERE run_id = $1
 			ORDER BY priority, created_at
@@ -591,7 +592,9 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 				AttemptCount: reader.GetInt32(8),
 				CreatedAt: reader.GetString(9),
 				StartedAt: reader.IsDBNull(10) ? null : reader.GetString(10),
-				FinishedAt: reader.IsDBNull(11) ? null : reader.GetString(11)));
+				FinishedAt: reader.IsDBNull(11) ? null : reader.GetString(11),
+				UploadStatus: reader.IsDBNull(12) ? null : reader.GetString(12),
+				UploadDetail: reader.IsDBNull(13) ? null : reader.GetString(13)));
 		}
 
 		return jobs;
@@ -606,7 +609,8 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			SELECT
 				id, run_id, job_type, target_id, target_name,
 				state, stage, priority, attempt_count,
-				created_at::text, started_at::text, finished_at::text
+				created_at::text, started_at::text, finished_at::text,
+				upload_status, upload_detail
 			FROM jobs
 			WHERE id = $1
 			""", connection);
@@ -629,7 +633,23 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 			AttemptCount: reader.GetInt32(8),
 			CreatedAt: reader.GetString(9),
 			StartedAt: reader.IsDBNull(10) ? null : reader.GetString(10),
-			FinishedAt: reader.IsDBNull(11) ? null : reader.GetString(11));
+			FinishedAt: reader.IsDBNull(11) ? null : reader.GetString(11),
+			UploadStatus: reader.IsDBNull(12) ? null : reader.GetString(12),
+			UploadDetail: reader.IsDBNull(13) ? null : reader.GetString(13));
+	}
+
+	public async Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(uploadStatus);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"UPDATE jobs SET upload_status = $1, upload_detail = $2 WHERE id = $3", connection);
+		command.Parameters.AddWithValue(uploadStatus);
+		command.Parameters.AddWithValue((object?)detail ?? DBNull.Value);
+		command.Parameters.AddWithValue(jobId);
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	public async Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken)

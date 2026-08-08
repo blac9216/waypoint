@@ -21,6 +21,7 @@ using Waypoint.Core.PowerShell;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
+using Waypoint.Core.StigManager;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.PowerShell;
 using Waypoint.Infrastructure.Sites;
@@ -72,6 +73,7 @@ public sealed class ScanJobHandler : IJobHandler
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
 	private readonly IOptions<ScanOptions> _scanOptions;
 	private readonly ConfigDocRepository _configDocs;
+	private readonly ScanUploadCoordinator _upload;
 
 	public ScanJobHandler(
 		IPowerShellExecutor executor,
@@ -83,7 +85,8 @@ public sealed class ScanJobHandler : IJobHandler
 		ISecretRedactor redactor,
 		IOptions<PowerShellOptions> powerShellOptions,
 		IOptions<ScanOptions> scanOptions,
-		ConfigDocRepository configDocs)
+		ConfigDocRepository configDocs,
+		ScanUploadCoordinator upload)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(secrets);
@@ -95,6 +98,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
 		ArgumentNullException.ThrowIfNull(scanOptions);
 		ArgumentNullException.ThrowIfNull(configDocs);
+		ArgumentNullException.ThrowIfNull(upload);
 
 		_executor = executor;
 		_secrets = secrets;
@@ -106,6 +110,7 @@ public sealed class ScanJobHandler : IJobHandler
 		_powerShellOptions = powerShellOptions;
 		_scanOptions = scanOptions;
 		_configDocs = configDocs;
+		_upload = upload;
 	}
 
 	public string JobType => "scan";
@@ -426,7 +431,16 @@ public sealed class ScanJobHandler : IJobHandler
 		}
 
 		string cklPath = Path.Combine(_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.ckl");
-		ScanBenchmarkMetadata? metadata = _scanOptions.Value.BenchmarkMetadata.GetValueOrDefault(target.Kind);
+		ScanBenchmarkMetadata? staticMetadata = _scanOptions.Value.BenchmarkMetadata.GetValueOrDefault(target.Kind);
+
+		// Issue #311: enrich the static catalog stamp with STIG Manager's installed
+		// title/release/version when reachable -- degrades to staticMetadata unchanged
+		// on any failure (ScanUploadCoordinator.ResolveBenchmarkMetadataAsync never
+		// throws), so this call site needs no try/catch of its own, matching the
+		// predecessor Resolve-BenchmarkMetadata's "resolution never throws" contract.
+		StigManagerBenchmarkMetadata fallback = new(staticMetadata?.BenchmarkId, staticMetadata?.Title, staticMetadata?.ReleaseInfo, staticMetadata?.Version);
+		StigManagerBenchmarkMetadata metadata = await _upload
+			.ResolveBenchmarkMetadataAsync(context.Job.Id, target, fallback, cancellationToken).ConfigureAwait(false);
 
 		// Same replay as ExecuteAttestStageAsync: a fresh claim always resumes at
 		// `running` (ClaimSql), so this stage first replays `running -> attesting`
@@ -442,10 +456,10 @@ public sealed class ScanJobHandler : IJobHandler
 		{
 			["ConvertInputPath"] = convertInput,
 			["CklOutputPath"] = cklPath,
-			["BenchmarkId"] = metadata?.BenchmarkId,
-			["Title"] = metadata?.Title,
-			["ReleaseInfo"] = metadata?.ReleaseInfo,
-			["Version"] = metadata?.Version,
+			["BenchmarkId"] = metadata.BenchmarkId,
+			["Title"] = metadata.Title,
+			["ReleaseInfo"] = metadata.ReleaseInfo,
+			["Version"] = metadata.Version,
 			["TimeoutSeconds"] = _scanOptions.Value.SafTimeoutSeconds,
 		};
 
@@ -469,7 +483,26 @@ public sealed class ScanJobHandler : IJobHandler
 			return await FailScanAsync(context, "convert invocation reported success but produced no CKL file.", cancellationToken).ConfigureAwait(false);
 		}
 
-		return JobExecutionOutcome.Succeeded($"CKL persisted at '{output.CklPath}' (benchmark metadata applied: {output.MetadataApplied}).");
+		// Issue #311: post-convert upload, not a new pipeline stage -- ADR-0012's
+		// `uploaded` terminal already means "artifacts ready" (PR #302), so this action
+		// runs inside the same convert-stage execution rather than resting the job at a
+		// new intermediate marker. ScanUploadCoordinator.UploadAsync never throws and
+		// always persists a jobs.upload_status regardless of outcome; this stage reports
+		// Succeeded either way (issue #311 AC: "upload failure must NEVER fail the scan
+		// run" -- artifacts stay downloadable, only upload_status reflects the failure).
+		// Only reachable from JobShape.Standard's convert stage, so SRG/HDF-only runs
+		// (#24/#309) never call this -- they terminate at `attesting -> done` and this
+		// method is never entered for them.
+		StigManagerUploadResult uploadResult = await _upload.UploadAsync(context.Job.Id, target, output.CklPath, cancellationToken).ConfigureAwait(false);
+		string uploadNote = uploadResult.Outcome switch
+		{
+			StigManagerUploadOutcome.Uploaded => "uploaded to STIG Manager",
+			StigManagerUploadOutcome.Conflict => "STIG Manager reported a conflict (retry available)",
+			_ => $"STIG Manager upload failed: {uploadResult.Detail ?? "no detail"}",
+		};
+
+		return JobExecutionOutcome.Succeeded(
+			$"CKL persisted at '{output.CklPath}' (benchmark metadata applied: {output.MetadataApplied}; {uploadNote}).");
 	}
 
 	/// <summary>
