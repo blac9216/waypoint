@@ -1,9 +1,11 @@
 /**
  * ResultsScreen — issue #27. Covers: run list rendering + selection, KPI
- * tiles, the per-target artifacts table with severity pills, the
- * "not available yet" fallback when GET /runs/{id}/artifacts 404s, the
- * Remediate Admin gate, and the AC1 severity non-truncation guarantee
- * (design-brief "Layout Rules Learned the Hard Way" #4).
+ * tiles, the per-target artifacts table with severity pills, the load
+ * failure fallback when GET /runs/{id}/artifacts errors, the Remediate
+ * Admin gate, and the AC1 severity non-truncation guarantee (design-brief
+ * "Layout Rules Learned the Hard Way" #4). Issue #307 regressions (snake_case
+ * wire shapes, counts_available, attestations-applied live-resolution
+ * framing) are grouped near the bottom of the describe block.
  */
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -56,15 +58,50 @@ const RUN_JOBS = [
 	},
 ];
 
+/** Snake_case, matching `RunArtifactResponse` (RunContracts.cs) exactly —
+ * the shape the backend actually emits (issue #307). */
 const RUN_ARTIFACTS = [
 	{
+		job_id: "job-1",
 		target: "esxi-01.example.internal",
 		benchmark: "VMware_vSphere_8.0_ESXi_STIG_V2R1",
-		catIOpen: 1,
-		catIIOpen: 8,
-		catIIIOpen: 11,
-		artifactKinds: ["ckl", "hdf"],
-		uploadStatus: "uploaded",
+		counts_available: true,
+		cat_i_open: 1,
+		cat_ii_open: 8,
+		cat_iii_open: 11,
+		artifact_kinds: ["ckl", "hdf"],
+		upload_status: "uploaded",
+	},
+];
+
+/** A row where the HDF was absent/unparseable: `counts_available:false` and
+ * the CAT count properties are omitted from the payload entirely (server
+ * `WhenWritingNull` behavior), not present as `0`. */
+const RUN_ARTIFACTS_UNCOUNTABLE = [
+	{
+		job_id: "job-2",
+		target: "esxi-02.example.internal",
+		benchmark: "VMware_vSphere_8.0_ESXi_STIG_V2R1",
+		counts_available: false,
+		artifact_kinds: [],
+		upload_status: "not-uploaded",
+	},
+];
+
+/** `AppliedAttestationResponse` shape (RunContracts.cs) — live resolution,
+ * no `applied_at`, layer:ref `scope` form. */
+const ATTESTATIONS_APPLIED = [
+	{
+		control: "attestation-profile-a",
+		scope: "target:11111111-1111-1111-1111-111111111111",
+		coverage: "full",
+		justification: "Compensating control documented in POA&M #42.",
+		author: "j.moreno",
+		version: 3,
+		derivation: "live-resolution",
+		resolved_at: "2026-08-08T21:00:00Z",
+		attestation_updated_at: "2026-08-01T10:00:00Z",
+		expired: false,
 	},
 ];
 
@@ -72,8 +109,16 @@ function jsonResponse(body: unknown, headers: Record<string, string> = {}): Resp
 	return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json", ...headers } });
 }
 
-function installFetchMock(options: { artifactsAvailable?: boolean } = {}) {
+function installFetchMock(
+	options: {
+		artifactsAvailable?: boolean;
+		artifacts?: unknown[];
+		attestationsApplied?: unknown[] | "unavailable";
+	} = {},
+) {
 	const artifactsAvailable = options.artifactsAvailable ?? true;
+	const artifacts = options.artifacts ?? RUN_ARTIFACTS;
+	const attestationsApplied = options.attestationsApplied ?? ATTESTATIONS_APPLIED;
 	globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
 		const url = typeof input === "string" ? input : input.toString();
 
@@ -87,7 +132,12 @@ function installFetchMock(options: { artifactsAvailable?: boolean } = {}) {
 			return jsonResponse(RUN_JOBS);
 		}
 		if (url === "/api/v1/runs/RUN-2026-0802-0412/artifacts") {
-			return artifactsAvailable ? jsonResponse(RUN_ARTIFACTS) : new Response("not found", { status: 404 });
+			return artifactsAvailable ? jsonResponse(artifacts) : new Response("not found", { status: 404 });
+		}
+		if (url === "/api/v1/runs/RUN-2026-0802-0412/attestations-applied") {
+			return attestationsApplied === "unavailable"
+				? new Response("not found", { status: 404 })
+				: jsonResponse(attestationsApplied);
 		}
 		if (url.startsWith("/api/v1/config-docs/resolve")) {
 			return jsonResponse([]);
@@ -190,11 +240,11 @@ describe("ResultsScreen", () => {
 		}
 	});
 
-	it("shows a graceful fallback when GET /runs/{id}/artifacts is not yet implemented", async () => {
+	it("shows a graceful fallback when GET /runs/{id}/artifacts fails", async () => {
 		installFetchMock({ artifactsAvailable: false });
 		renderWithAuth();
 
-		await waitFor(() => expect(screen.getByText(/not available yet/)).toBeInTheDocument());
+		await waitFor(() => expect(screen.getByText(/could not be loaded/)).toBeInTheDocument());
 	});
 
 	it("gates the Remediate button to Admin and stubs it disabled regardless of role", async () => {
@@ -260,5 +310,83 @@ describe("ResultsScreen", () => {
 		fireEvent.change(search, { target: { value: "no-such-run" } });
 		expect(within(runList).queryByText("RUN-2026-0802-0412")).not.toBeInTheDocument();
 		expect(within(runList).getByText(/No runs match/)).toBeInTheDocument();
+	});
+
+	// --- Issue #307 regressions: results.ts diverged from the snake_case wire ---
+
+	it("deserializes a snake_case artifact payload with populated counts (issue #307)", async () => {
+		installFetchMock();
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getByText("PER-TARGET ARTIFACTS")).toBeInTheDocument());
+
+		// RUN_ARTIFACTS is snake_case (job_id, cat_i_open, artifact_kinds,
+		// upload_status) exactly as RunArtifactResponse emits it. If results.ts
+		// still read camelCase fields, these counts would be undefined/NaN
+		// instead of the seeded 1/8/11.
+		await waitFor(() => {
+			expect(screen.getByTitle("CAT I open: 1")).toBeInTheDocument();
+			expect(screen.getByTitle("CAT II open: 8")).toBeInTheDocument();
+			expect(screen.getByTitle("CAT III open: 11")).toBeInTheDocument();
+		});
+		expect(screen.getByText("CKL · HDF")).toBeInTheDocument();
+		expect(screen.getByText("uploaded")).toBeInTheDocument();
+	});
+
+	it("renders an uncountable row (counts_available:false) as n/a, never a fabricated 0", async () => {
+		installFetchMock({ artifacts: RUN_ARTIFACTS_UNCOUNTABLE });
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getByText("PER-TARGET ARTIFACTS")).toBeInTheDocument());
+
+		// The uncountable row has no cat_i_open/cat_ii_open/cat_iii_open
+		// properties at all (server omits them) — the table must render an
+		// explicit "n/a" state, never silently treat the missing count as 0
+		// (which would read as a clean, compliant target on a corrupt scan).
+		await waitFor(() => {
+			const pill = screen.getByTitle("CAT I: not available (could not count)");
+			expect(pill).toHaveTextContent("n/a");
+			expect(pill.className).toContain("results__severity--na");
+		});
+		expect(screen.getByTitle("CAT II: not available (could not count)")).toHaveTextContent("n/a");
+		expect(screen.getByTitle("CAT III: not available (could not count)")).toHaveTextContent("n/a");
+
+		// The KPI tiles must not silently sum an uncountable row's counts as 0
+		// either — same rule applied to the aggregate.
+		const catITile = screen.getByText("CAT I OPEN").closest(".results__kpi-tile");
+		expect(within(catITile as HTMLElement).getByText("n/a")).toBeInTheDocument();
+	});
+
+	it("shows the live-resolution caveat and applied waivers in the attestations sidebar", async () => {
+		installFetchMock();
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getByText("ATTESTATIONS APPLIED")).toBeInTheDocument());
+
+		// The sidebar must say plainly that this is current resolution, not a
+		// recorded scan-time ledger (issue #307/#299; the real persisted
+		// ledger is #306) — GET /runs/{id}/attestations-applied has no
+		// applied_at, only derivation:"live-resolution" and resolved_at.
+		expect(screen.getByText(/Live resolution, not scan-time history/)).toBeInTheDocument();
+		expect(screen.getByText(/issue #306/)).toBeInTheDocument();
+
+		// The applied waiver row itself renders (control/coverage/author/version),
+		// parsed from the target:{guid} scope form rather than a bare "target" union.
+		await waitFor(() => expect(screen.getByText("attestation-profile-a")).toBeInTheDocument());
+		expect(screen.getByText(/full · v3 · j\.moreno/)).toBeInTheDocument();
+		// scope "target:{guid}" parses into a "TARGET · {guid}" pill, not a bare
+		// "target" string from a stale union type.
+		expect(screen.getByText(/TARGET · 11111111-1111-1111-1111-111111111111/)).toBeInTheDocument();
+	});
+
+	it("falls back gracefully when GET /runs/{id}/attestations-applied is unavailable", async () => {
+		installFetchMock({ attestationsApplied: "unavailable" });
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getByText("ATTESTATIONS APPLIED")).toBeInTheDocument());
+		// No applied rows loaded — the panel still renders without crashing and
+		// falls back to its expired-only view (empty here, since RUN_ARTIFACTS'
+		// single row has no matching config-doc resolution in this fixture).
+		expect(screen.getByText("No expired attestations resolved for this run.")).toBeInTheDocument();
 	});
 });

@@ -9,19 +9,23 @@
  *   - Run list/detail/jobs: `GET /runs`, `GET /runs/{id}`, `GET /runs/{id}/jobs`
  *     (all merged — RunsController).
  *   - Per-target artifacts + STIG Manager upload status:
- *     `GET /runs/{id}/artifacts` (documented, NOT YET IMPLEMENTED on the
- *     backend — tracked as issue #299). This screen calls it and renders a
- *     graceful "not available yet" empty state on failure rather than
- *     assuming success.
- *   - Attestations-applied: `GET /runs/{id}/attestations-applied` is also not
- *     yet implemented (#299). As a narrower stand-in, the sidebar instead
- *     calls the MERGED `GET /config-docs/resolve?profile&target&kind=attestation`
- *     (issue #266) once per distinct (profile, target) pair from the
- *     artifacts rows, and lists only the EXPIRED ones — the "expired-skips"
- *     half of the sidebar the issue calls out explicitly. The full applied-waiver
- *     ledger (control, justification, author/version for every waiver that
- *     fired, not just expired ones) has no backing endpoint yet; that gap is
- *     real follow-up (#299), not a shortcut — see the PR body.
+ *     `GET /runs/{id}/artifacts` (issue #299/#305). Rows carry
+ *     `counts_available`; the CAT counts are omitted (not zero) when the
+ *     HDF is absent/corrupt, and this screen renders that as an explicit
+ *     "n/a" pill rather than a false "0 open" (issue #307 — a corrupt scan
+ *     must never look clean). Still renders a graceful "not available yet"
+ *     empty state if the call itself fails.
+ *   - Attestations-applied: `GET /runs/{id}/attestations-applied` (#299/#305)
+ *     is the primary source for the sidebar's waiver list. It has **no
+ *     persisted per-control ledger behind it** — every row is derived LIVE,
+ *     at request time, by re-resolving each target's current attestation
+ *     config-doc (see `results.ts`'s `AppliedAttestation` doc comment); the
+ *     panel says so explicitly rather than implying scan-time history
+ *     (issue #307; the real persisted ledger is #306). The sidebar also
+ *     still calls the MERGED `GET /config-docs/resolve?profile&target&kind=attestation`
+ *     (issue #266) to flag which of those rows are currently EXPIRED,
+ *     mirroring exactly what the live-resolution endpoint itself does
+ *     server-side.
  *
  * Severity labels (AC1, design-brief "Layout Rules Learned the Hard Way" #4):
  * always rendered as the full "CAT I"/"CAT II"/"CAT III" text, in a pill wide
@@ -47,15 +51,18 @@ import { roleGateProps } from "../../lib/roles";
 import {
 	artifactDownloadUrl,
 	fetchAttestationResolution,
+	fetchAttestationsApplied,
 	fetchRun,
 	fetchRunArtifacts,
 	fetchRunJobs,
 	fetchRunList,
 	formatRunDuration,
 	formatTimestamp,
+	parseAttestationScope,
 	scopeSiteId,
 	SEVERITIES,
 	stigManagerStatusLabel,
+	type AppliedAttestation,
 	type ConfigDocResolution,
 	type RunArtifactRow,
 	type RunJobItem,
@@ -74,11 +81,21 @@ const SEVERITY_CLASS: Record<Severity, string> = {
 /** Full-text severity pill (AC1 / layout rule 4): the label is always the
  * complete "CAT I"/"CAT II"/"CAT III" string, never a bare numeral, and the
  * pill has no `overflow:hidden`/`text-overflow:ellipsis` — see
- * ResultsScreen.test.tsx for the assertion this backs. */
-function SeverityPill({ severity, count }: { severity: Severity; count: number }) {
+ * ResultsScreen.test.tsx for the assertion this backs.
+ *
+ * `count` is `undefined` when the row's `counts_available` is `false` (HDF
+ * absent/unparseable) — rendered as an explicit "n/a", never a bare `0`.
+ * Collapsing "could not count" into `0` would read as a clean, compliant
+ * target on a corrupt scan (issue #307 / #299 round-1 review blocker). */
+function SeverityPill({ severity, count }: { severity: Severity; count: number | undefined }) {
+	const display = count === undefined ? "n/a" : String(count);
+	const title = count === undefined ? `${severity}: not available (could not count)` : `${severity} open: ${count}`;
 	return (
-		<span className={`results__severity ${SEVERITY_CLASS[severity]}`} title={`${severity} open: ${count}`}>
-			{severity} <span className="mono">{count}</span>
+		<span
+			className={`results__severity ${count === undefined ? "results__severity--na" : SEVERITY_CLASS[severity]}`}
+			title={title}
+		>
+			{severity} <span className="mono">{display}</span>
 		</span>
 	);
 }
@@ -103,6 +120,7 @@ function useRunDetail(runId: string | null, initialRun: RunListItem | null) {
 	const [artifacts, setArtifacts] = useState<RunArtifactRow[] | null>(null);
 	const [artifactsUnavailable, setArtifactsUnavailable] = useState(false);
 	const [expiredAttestations, setExpiredAttestations] = useState<ExpiredAttestation[]>([]);
+	const [attestationsApplied, setAttestationsApplied] = useState<AppliedAttestation[] | null>(null);
 	const [loading, setLoading] = useState(false);
 	const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -117,6 +135,7 @@ function useRunDetail(runId: string | null, initialRun: RunListItem | null) {
 			setArtifacts(null);
 			setArtifactsUnavailable(false);
 			setExpiredAttestations([]);
+			setAttestationsApplied(null);
 			return;
 		}
 
@@ -135,6 +154,11 @@ function useRunDetail(runId: string | null, initialRun: RunListItem | null) {
 			// body; guarded here rather than assumed away.
 			const results: ExpiredAttestation[] = [];
 			for (const row of rows) {
+				// `benchmark` is nullable on the wire (RunArtifactResponse) — a row
+				// with no benchmark has nothing to resolve an attestation against.
+				if (!row.benchmark) {
+					continue;
+				}
 				try {
 					const resolutions = await fetchAttestationResolution(row.benchmark, row.target);
 					for (const resolution of resolutions) {
@@ -177,13 +201,25 @@ function useRunDetail(runId: string | null, initialRun: RunListItem | null) {
 					void loadExpiredAttestations(rows);
 				}
 			} catch {
-				// GET /runs/{id}/artifacts is documented but not yet implemented
-				// (results.ts module doc) — a 404/network failure here is expected
-				// today, not an error to surface as a load failure for the whole
-				// screen. The table renders its own "not available yet" state.
+				// A 404/network failure here must not blank the whole screen — the
+				// table renders its own "not available yet" state so one flaky
+				// sub-fetch doesn't take out KPIs/jobs/sidebar with it.
 				if (!cancelled) {
 					setArtifacts(null);
 					setArtifactsUnavailable(true);
+				}
+			}
+
+			try {
+				const applied = await fetchAttestationsApplied(runId!);
+				if (!cancelled) {
+					setAttestationsApplied(applied);
+				}
+			} catch {
+				// Same best-effort treatment as artifacts above — the sidebar
+				// panel falls back to its existing expired-only view.
+				if (!cancelled) {
+					setAttestationsApplied(null);
 				}
 			}
 		}
@@ -194,21 +230,46 @@ function useRunDetail(runId: string | null, initialRun: RunListItem | null) {
 		};
 	}, [runId]);
 
-	return { run, setRun, jobs, artifacts, artifactsUnavailable, expiredAttestations, loading, loadError };
+	return { run, setRun, jobs, artifacts, artifactsUnavailable, expiredAttestations, attestationsApplied, loading, loadError };
+}
+
+/** Sums a CAT column across rows that have `counts_available:true`, and
+ * separately reports whether every row was countable. A KPI tile summed
+ * across a mix of countable and uncountable rows would silently understate
+ * the true open-finding count as if the uncountable rows were zero — the
+ * same "never fabricate 0" rule `SeverityPill` enforces per-row applies to
+ * the aggregate too, so the tile falls back to "n/a" rather than a
+ * misleadingly precise-looking partial sum whenever any row is uncountable. */
+function sumCatColumn(artifacts: RunArtifactRow[] | null, field: "cat_i_open" | "cat_ii_open" | "cat_iii_open"): number | null {
+	if (!artifacts || artifacts.length === 0) {
+		return null;
+	}
+	if (artifacts.some((a) => !a.counts_available)) {
+		return null;
+	}
+	return artifacts.reduce((sum, a) => sum + (a[field] ?? 0), 0);
 }
 
 function kpiTiles(run: RunListItem | null, artifacts: RunArtifactRow[] | null) {
 	const jobTotal = run?.job_count ?? 0;
 	const jobDone = run?.job_count_completed ?? 0;
 	const compliancePercent = jobTotal > 0 ? Math.round((jobDone / jobTotal) * 1000) / 10 : 0;
-	const catI = artifacts?.reduce((sum, a) => sum + a.catIOpen, 0) ?? 0;
-	const catII = artifacts?.reduce((sum, a) => sum + a.catIIOpen, 0) ?? 0;
-	const catIII = artifacts?.reduce((sum, a) => sum + a.catIIIOpen, 0) ?? 0;
+	const catI = sumCatColumn(artifacts, "cat_i_open");
+	const catII = sumCatColumn(artifacts, "cat_ii_open");
+	const catIII = sumCatColumn(artifacts, "cat_iii_open");
 	return [
 		{ label: "COMPLIANCE", value: `${compliancePercent}%`, className: "results__kpi--ok" },
-		{ label: "CAT I OPEN", value: String(catI), className: "results__kpi--bad" },
-		{ label: "CAT II OPEN", value: String(catII), className: "results__kpi--warn" },
-		{ label: "CAT III OPEN", value: String(catIII), className: "results__kpi--muted" },
+		{ label: "CAT I OPEN", value: catI === null ? "n/a" : String(catI), className: catI === null ? "results__kpi--na" : "results__kpi--bad" },
+		{
+			label: "CAT II OPEN",
+			value: catII === null ? "n/a" : String(catII),
+			className: catII === null ? "results__kpi--na" : "results__kpi--warn",
+		},
+		{
+			label: "CAT III OPEN",
+			value: catIII === null ? "n/a" : String(catIII),
+			className: catIII === null ? "results__kpi--na" : "results__kpi--muted",
+		},
 		{ label: "ATTESTED N/A", value: "—", className: "results__kpi--na" },
 	];
 }
@@ -293,10 +354,8 @@ export function ResultsScreen() {
 		};
 	}, []);
 
-	const { run, jobs, artifacts, artifactsUnavailable, expiredAttestations, loading, loadError } = useRunDetail(
-		selectedRunId,
-		selectedRow,
-	);
+	const { run, jobs, artifacts, artifactsUnavailable, expiredAttestations, attestationsApplied, loading, loadError } =
+		useRunDetail(selectedRunId, selectedRow);
 
 	const filteredRuns = useMemo(() => {
 		const term = search.trim().toLowerCase();
@@ -428,7 +487,7 @@ export function ResultsScreen() {
 						<div className="results__panes">
 							<ArtifactsTable loading={loading} artifacts={artifacts} unavailable={artifactsUnavailable} jobs={jobs} />
 							<div className="results__side-panels">
-								<AttestationsPanel expired={expiredAttestations} />
+								<AttestationsPanel expired={expiredAttestations} applied={attestationsApplied} />
 								<UploadStatusPanel jobs={jobs} />
 							</div>
 						</div>
@@ -480,29 +539,29 @@ function ArtifactsTable({
 					{!loading && unavailable && (
 						<tr>
 							<td colSpan={7} className="results__empty">
-								Per-target artifacts are not available yet — GET /runs/{"{id}"}/artifacts is documented but not yet
-								implemented on the backend (issue #299).
+								Per-target artifacts could not be loaded for this run — GET /runs/{"{id}"}/artifacts failed or returned
+								no data.
 							</td>
 						</tr>
 					)}
 					{!loading &&
 						!unavailable &&
 						artifacts?.map((row) => (
-							<tr key={row.target}>
+							<tr key={row.job_id}>
 								<td className="results__col-target mono">{row.target}</td>
-								<td className="results__col-bench mono">{row.benchmark}</td>
+								<td className="results__col-bench mono">{row.benchmark ?? "—"}</td>
 								<td className="results__col-sev">
-									<SeverityPill severity="CAT I" count={row.catIOpen} />
+									<SeverityPill severity="CAT I" count={row.counts_available ? row.cat_i_open : undefined} />
 								</td>
 								<td className="results__col-sev">
-									<SeverityPill severity="CAT II" count={row.catIIOpen} />
+									<SeverityPill severity="CAT II" count={row.counts_available ? row.cat_ii_open : undefined} />
 								</td>
 								<td className="results__col-sev">
-									<SeverityPill severity="CAT III" count={row.catIIIOpen} />
+									<SeverityPill severity="CAT III" count={row.counts_available ? row.cat_iii_open : undefined} />
 								</td>
-								<td className="results__col-artifacts mono">{row.artifactKinds.join(" · ").toUpperCase()}</td>
+								<td className="results__col-artifacts mono">{row.artifact_kinds.join(" · ").toUpperCase()}</td>
 								<td className="results__col-stigman">
-									<UploadStatusPill status={row.uploadStatus} />
+									<UploadStatusPill status={row.upload_status} />
 								</td>
 							</tr>
 						))}
@@ -519,34 +578,70 @@ function ArtifactsTable({
 	);
 }
 
-function UploadStatusPill({ status }: { status: RunArtifactRow["uploadStatus"] }) {
+function UploadStatusPill({ status }: { status: RunArtifactRow["upload_status"] }) {
 	const label = status === "not-uploaded" ? "not uploaded" : status;
 	return <span className={`results__upload-pill results__upload-pill--${status}`}>{label}</span>;
 }
 
-function AttestationsPanel({ expired }: { expired: ExpiredAttestation[] }) {
+function AttestationsPanel({ expired, applied }: { expired: ExpiredAttestation[]; applied: AppliedAttestation[] | null }) {
 	return (
 		<div className="results__panel results__panel--sidebar">
 			<div className="results__panel-title">ATTESTATIONS APPLIED</div>
 			<div className="results__panel-note">
-				Waivers resolved at scan time. Expired waivers below fell through and left their control Open — full applied-waiver
-				detail (control, justification, author/version for every waiver, not just expired ones) awaits
-				GET /runs/{"{id}"}/attestations-applied (issue #275).
+				{/* Honest framing per issue #307/#299: there is no persisted per-control
+				    waiver ledger yet (issue #306), so every row below is the CURRENT
+				    resolution of each target's attestation config-doc, re-derived at
+				    load time — not a record of what was in effect at scan time. An
+				    attestation edited after this run completed will change what this
+				    panel shows on the next reload. */}
+				Live resolution, not scan-time history: rows reflect each target's attestation config-doc as it resolves right
+				now, re-derived on every load — a waiver edited after this run completed will change what's shown here. The
+				persisted at-scan-time ledger is tracked as issue #306.
 			</div>
-			{expired.length === 0 && <div className="results__panel-empty">No expired attestations resolved for this run.</div>}
-			{expired.map((item, i) => (
-				<div key={`${item.target}-${item.profile}-${i}`} className="results__attest-row">
-					<div className="results__attest-top">
-						<span className="mono results__attest-target">{item.target}</span>
-						<span className="results__attest-scope-pill">EXPIRED</span>
-						<span className="results__spacer" />
-						<span className="mono results__attest-meta">{formatTimestamp(item.resolution.attestation_expires_at)}</span>
-					</div>
-					<div className="results__attest-note">
-						{item.profile} · v{item.resolution.version ?? "—"} · {item.resolution.author ?? "unknown author"}
-					</div>
-				</div>
-			))}
+			{applied && applied.length > 0 && (
+				<>
+					{applied.map((item, i) => {
+						const { layer, ref } = parseAttestationScope(item.scope);
+						return (
+							<div key={`applied-${item.control}-${item.scope}-${i}`} className="results__attest-row">
+								<div className="results__attest-top">
+									<span className="mono results__attest-target">{item.control}</span>
+									<span className={`results__attest-scope-pill ${item.expired ? "" : "results__attest-scope-pill--active"}`}>
+										{item.expired ? "EXPIRED" : layer.toUpperCase()}
+										{ref ? ` · ${ref}` : ""}
+									</span>
+									<span className="results__spacer" />
+									<span className="mono results__attest-meta">
+										resolved {formatTimestamp(item.resolved_at)}
+										{item.attestation_updated_at ? ` · doc edited ${formatTimestamp(item.attestation_updated_at)}` : ""}
+									</span>
+								</div>
+								<div className="results__attest-note">
+									{item.coverage} · v{item.version} · {item.author} — {item.justification}
+								</div>
+							</div>
+						);
+					})}
+				</>
+			)}
+			{(!applied || applied.length === 0) && (
+				<>
+					{expired.length === 0 && <div className="results__panel-empty">No expired attestations resolved for this run.</div>}
+					{expired.map((item, i) => (
+						<div key={`${item.target}-${item.profile}-${i}`} className="results__attest-row">
+							<div className="results__attest-top">
+								<span className="mono results__attest-target">{item.target}</span>
+								<span className="results__attest-scope-pill">EXPIRED</span>
+								<span className="results__spacer" />
+								<span className="mono results__attest-meta">{formatTimestamp(item.resolution.attestation_expires_at)}</span>
+							</div>
+							<div className="results__attest-note">
+								{item.profile} · v{item.resolution.version ?? "—"} · {item.resolution.author ?? "unknown author"}
+							</div>
+						</div>
+					))}
+				</>
+			)}
 			<button
 				type="button"
 				className="results__open-benchmarks-btn"
