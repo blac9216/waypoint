@@ -51,8 +51,8 @@ public sealed class SchemaMigrationTests
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #245 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 19;
+	/// <summary>Embedded migration count as of issue #106 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check, 0020 adds BEFORE UPDATE/DELETE triggers enforcing job_events/audit_log append-only, with a carve-out on audit_log for 0006's FK-driven credential_id SET NULL) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 20;
 
 	private readonly PostgresFixture _fixture;
 
@@ -203,6 +203,153 @@ public sealed class SchemaMigrationTests
 		insertEvent.Parameters.AddWithValue(jobId);
 
 		Assert.NotEqual(long.MaxValue, (long)(await insertEvent.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// Issue #106: <c>job_events</c> is documented append-only (0001's header comment,
+	/// docs/api-contract.md's schema sketch) but nothing enforced it. 0020's trigger must
+	/// reject both mutation forms outright -- no writer legitimately UPDATEs or DELETEs a
+	/// committed row (<see cref="Waypoint.Infrastructure.Jobs.JobEventPublisher"/> only
+	/// INSERTs).
+	/// </summary>
+	[Fact]
+	public async Task Migrations_JobEvents_RejectsUpdateAndDelete()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand seedJob = new(
+			"INSERT INTO jobs (job_type, priority, state) VALUES ('catalog-index', 1, 'queued') RETURNING id",
+			connection);
+		Guid jobId = (Guid)(await seedJob.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand insertEvent = new(
+			"INSERT INTO job_events (job_id, event_type) VALUES ($1, 'job.log') RETURNING seq",
+			connection);
+		insertEvent.Parameters.AddWithValue(jobId);
+		long seq = (long)(await insertEvent.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand update = new(
+			"UPDATE job_events SET event_type = 'job.state' WHERE seq = $1", connection);
+		update.Parameters.AddWithValue(seq);
+		PostgresException updateEx = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Contains("append-only", updateEx.MessageText, StringComparison.Ordinal);
+
+		await using NpgsqlCommand delete = new("DELETE FROM job_events WHERE seq = $1", connection);
+		delete.Parameters.AddWithValue(seq);
+		PostgresException deleteEx = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Contains("append-only", deleteEx.MessageText, StringComparison.Ordinal);
+
+		// The row must still be exactly as inserted -- neither rejected statement should
+		// have partially applied.
+		await using NpgsqlCommand verify = new("SELECT event_type FROM job_events WHERE seq = $1", connection);
+		verify.Parameters.AddWithValue(seq);
+		Assert.Equal("job.log", (string)(await verify.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// Issue #106: <c>audit_log</c> carries the same append-only claim as
+	/// <c>job_events</c>, backed by docs/security.md control 4 (the decrypt audit trail
+	/// that compensates for the service/shared credential exposure tier) -- a trail the
+	/// compromised component can edit compensates for nothing. Direct UPDATE and DELETE
+	/// must both fail.
+	/// </summary>
+	[Fact]
+	public async Task Migrations_AuditLog_RejectsUpdateAndDelete()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO audit_log (event_type, actor) VALUES ('credential.tested', 'test-actor') RETURNING id",
+			connection);
+		Guid id = (Guid)(await insert.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand update = new("UPDATE audit_log SET actor = 'someone-else' WHERE id = $1", connection);
+		update.Parameters.AddWithValue(id);
+		PostgresException updateEx = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Contains("append-only", updateEx.MessageText, StringComparison.Ordinal);
+
+		await using NpgsqlCommand delete = new("DELETE FROM audit_log WHERE id = $1", connection);
+		delete.Parameters.AddWithValue(id);
+		PostgresException deleteEx = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Contains("append-only", deleteEx.MessageText, StringComparison.Ordinal);
+
+		await using NpgsqlCommand verify = new("SELECT actor FROM audit_log WHERE id = $1", connection);
+		verify.Parameters.AddWithValue(id);
+		Assert.Equal("test-actor", (string)(await verify.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// Issue #106's carve-out: 0006 added
+	/// <c>audit_log.credential_id ... ON DELETE SET NULL</c> so a credential delete
+	/// doesn't 500 against the audit trail that should outlive it
+	/// (<c>CredentialRepository.DeleteAsync</c>). That FK action performs its nulling as
+	/// a real UPDATE against audit_log -- the 0020 trigger must let exactly that shape
+	/// through (credential_id non-null -> NULL, every other column unchanged) while
+	/// still blocking every other mutation. This proves the carve-out works end to end
+	/// via an actual credential DELETE, not a hand-crafted UPDATE.
+	/// </summary>
+	[Fact]
+	public async Task Migrations_AuditLog_CredentialDeleteStillNullsCredentialId()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand seedCredential = new(
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'service') RETURNING id", connection);
+		seedCredential.Parameters.AddWithValue($"test-cred-{Guid.NewGuid():N}");
+		Guid credentialId = (Guid)(await seedCredential.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO audit_log (event_type, actor, credential_id) VALUES ('credential.tested', 'test-actor', $1) RETURNING id",
+			connection);
+		insert.Parameters.AddWithValue(credentialId);
+		Guid auditId = (Guid)(await insert.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand deleteCredential = new("DELETE FROM credentials WHERE id = $1", connection);
+		deleteCredential.Parameters.AddWithValue(credentialId);
+		await deleteCredential.ExecuteNonQueryAsync();
+
+		await using (NpgsqlCommand verify = new(
+			"SELECT credential_id, actor, event_type FROM audit_log WHERE id = $1", connection))
+		{
+			verify.Parameters.AddWithValue(auditId);
+			await using NpgsqlDataReader reader = await verify.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync(), "audit_log row must survive the credential delete (0006).");
+			Assert.True(reader.IsDBNull(0), "credential_id must be nulled by the FK action.");
+			Assert.Equal("test-actor", reader.GetString(1));
+			Assert.Equal("credential.tested", reader.GetString(2));
+		}
+
+		// Confirm the carve-out is narrow: a direct attempt to null credential_id via an
+		// UPDATE that *also* touches another column must still be rejected -- only the
+		// exact FK-driven shape (credential_id alone, non-null -> NULL) is permitted.
+		await using NpgsqlCommand seedCredential2 = new(
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'service') RETURNING id", connection);
+		seedCredential2.Parameters.AddWithValue($"test-cred-{Guid.NewGuid():N}");
+		Guid credentialId2 = (Guid)(await seedCredential2.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand insert2 = new(
+			"INSERT INTO audit_log (event_type, actor, credential_id) VALUES ('credential.tested', 'test-actor', $1) RETURNING id",
+			connection);
+		insert2.Parameters.AddWithValue(credentialId2);
+		Guid auditId2 = (Guid)(await insert2.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand disallowedUpdate = new(
+			"UPDATE audit_log SET credential_id = NULL, actor = 'attacker' WHERE id = $1", connection);
+		disallowedUpdate.Parameters.AddWithValue(auditId2);
+		PostgresException ex = await Assert.ThrowsAsync<PostgresException>(() => disallowedUpdate.ExecuteNonQueryAsync());
+		Assert.Contains("append-only", ex.MessageText, StringComparison.Ordinal);
 	}
 
 	/// <summary>
