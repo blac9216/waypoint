@@ -39,7 +39,9 @@ namespace Waypoint.Api.Controllers;
 /// failing/quarantining never halts its siblings) is inherent to the engine -- nothing
 /// aborts a run on a single job's failure -- and per-download cancel maps to a single-job
 /// cancel (<see cref="IJobQueueRepository.CancelJobAsync"/>) that never touches sibling
-/// jobs in the same run.
+/// jobs in the same run. A running download's job now stops promptly too (issue #234):
+/// CancelJobAsync sets <c>cancel_requested</c> on it and the dispatcher's heartbeat loop
+/// observes that flag on its next tick, same as the run-scoped abort check.
 /// </summary>
 [ApiController]
 [Route("api/v1/downloads")]
@@ -148,9 +150,11 @@ public sealed class DownloadsController : ControllerBase
 	/// Operator+ with RBAC in M3). Cancels only this download's own <c>download</c> job
 	/// via <see cref="IJobQueueRepository.CancelJobAsync"/>, never aborting the run or
 	/// touching a sibling artifact's job queued in the same batch. A queued job is
-	/// cancelled cleanly; a job already running/terminal is left to finish and its result
-	/// is discarded (the download is marked <c>cancelled</c> either way -- see
-	/// CancelJobAsync's doc for why there is no per-job in-flight cancel signal yet).
+	/// cancelled cleanly and immediately; a job already running stops cooperatively at the
+	/// dispatcher's next heartbeat tick (issue #234) rather than running to completion. The
+	/// download row is marked <c>cancelled</c> either way -- the API response does not wait
+	/// for the in-flight job to actually stop, matching the queued case's fire-and-forget
+	/// shape.
 	/// </summary>
 	[HttpDelete("{id:guid}")]
 	[RequireAdminRole]

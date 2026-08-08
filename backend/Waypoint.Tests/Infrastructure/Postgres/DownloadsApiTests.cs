@@ -318,6 +318,59 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		}
 	}
 
+	/// <summary>
+	/// Issue #234: DELETE on a download whose job is already running no longer just
+	/// discards the result at completion -- it sets the job's per-job cancel_requested
+	/// flag (the signal <c>JobDispatcherHostedService</c>'s heartbeat loop observes to
+	/// stop the handler cooperatively). No dispatcher runs in this test host, so this
+	/// proves the request-side contract; the actual mid-run stop is
+	/// <c>JobDispatcherHostedServiceTests.CancelRequested_ObservedMidRun_StopsPromptlyAndReleasesLease</c>.
+	/// </summary>
+	[Fact]
+	public async Task DeleteDownload_JobAlreadyRunning_RequestsCancelRatherThanDiscardingSilently()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		Guid artifact = await SeedArtifactAsync(tag);
+		(string downloadId, _) = await QueueDownloadAsync(artifact);
+
+		Guid jobId;
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand getJobId = new("SELECT job_id FROM downloads WHERE id = $1", connection);
+			getJobId.Parameters.AddWithValue(Guid.Parse(downloadId));
+			jobId = (Guid)(await getJobId.ExecuteScalarAsync())!;
+
+			await using NpgsqlCommand claim = new(
+				"UPDATE jobs SET state = 'running', claimed_by = 'test-worker', claimed_at = now(), lease_expires_at = now() + interval '5 minutes' WHERE id = $1",
+				connection);
+			claim.Parameters.AddWithValue(jobId);
+			await claim.ExecuteNonQueryAsync();
+		}
+
+		HttpRequestMessage request = new(HttpMethod.Delete, $"/api/v1/downloads/{downloadId}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("cancelled", document.RootElement.GetProperty("state").GetString());
+
+		await using NpgsqlConnection assertConnection = new(_fixture.ConnectionString);
+		await assertConnection.OpenAsync();
+
+		// The job itself is left running (only the dispatcher's heartbeat loop moves it) --
+		// but cancel_requested is now set, which is the actual per-job stop signal.
+		await using (NpgsqlCommand jobState = new("SELECT state, cancel_requested FROM jobs WHERE id = $1", assertConnection))
+		{
+			jobState.Parameters.AddWithValue(jobId);
+			await using NpgsqlDataReader reader = await jobState.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync());
+			Assert.Equal("running", reader.GetString(0));
+			Assert.True(reader.GetBoolean(1));
+		}
+	}
+
 	[Fact]
 	public async Task DeleteDownload_UnknownId_Returns404()
 	{

@@ -219,7 +219,8 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 				hostToken).ConfigureAwait(false);
 
 			using CancellationTokenSource heartbeatStopCts = new();
-			Task heartbeatTask = RunHeartbeatLoopAsync(job, jobCts, heartbeatStopCts.Token);
+			CancelReasonBox cancelReason = new();
+			Task heartbeatTask = RunHeartbeatLoopAsync(job, jobCts, cancelReason, heartbeatStopCts.Token);
 
 			string finalState;
 			string? finalNote;
@@ -246,8 +247,12 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 			}
 			catch (OperationCanceledException) when (jobCts.IsCancellationRequested)
 			{
+				// Two independent cooperative-cancel signals feed the same jobCts: the
+				// run-scoped abort check (pre-existing) and the per-job cancel_requested
+				// flag (issue #234). cancelReason records which one actually fired this
+				// tick so the note -- and therefore the audit trail -- says which.
 				finalState = JobStates.Cancelled;
-				finalNote = "Cancelled: run aborted";
+				finalNote = cancelReason.Value ?? "Cancelled: run aborted";
 			}
 			catch (Exception exception)
 			{
@@ -296,7 +301,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		}
 	}
 
-	private async Task RunHeartbeatLoopAsync(ClaimedJob job, CancellationTokenSource jobCts, CancellationToken stopToken)
+	private async Task RunHeartbeatLoopAsync(ClaimedJob job, CancellationTokenSource jobCts, CancelReasonBox cancelReason, CancellationToken stopToken)
 	{
 		JobEngineOptions options = _options.Value;
 		using PeriodicTimer timer = new(options.HeartbeatIntervalOrDefault);
@@ -318,9 +323,21 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 					if (string.Equals(runState?.State, "aborted", StringComparison.Ordinal))
 					{
 						LogHeartbeatObservedAbort(job.Id, runId);
+						cancelReason.Value = "Cancelled: run aborted";
 						await jobCts.CancelAsync().ConfigureAwait(false);
 						return;
 					}
+				}
+
+				// Per-job cooperative cancel (issue #234): a running job's own
+				// cancel_requested flag, set by CancelJobAsync (e.g. DELETE
+				// /downloads/{id}) independently of any run-scoped abort.
+				if (await _repository.IsCancelRequestedAsync(job.Id, stopToken).ConfigureAwait(false))
+				{
+					LogHeartbeatObservedCancelRequest(job.Id);
+					cancelReason.Value = "Cancelled by request";
+					await jobCts.CancelAsync().ConfigureAwait(false);
+					return;
 				}
 			}
 		}
@@ -328,6 +345,18 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		{
 			// Expected: either the job finished (heartbeatStopCts) or the host is stopping.
 		}
+	}
+
+	/// <summary>
+	/// Carries which cooperative-cancel signal (run-scoped abort vs. per-job
+	/// cancel_requested) actually fired, from <see cref="RunHeartbeatLoopAsync"/> back to
+	/// <see cref="RunJobAsync"/>'s catch block, so the terminal note names the real cause.
+	/// A plain mutable holder rather than a return value because the heartbeat task is
+	/// fire-and-forget until <see cref="RunJobAsync"/> awaits it in its <c>finally</c>.
+	/// </summary>
+	private sealed class CancelReasonBox
+	{
+		public string? Value { get; set; }
 	}
 
 
@@ -407,6 +436,9 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Job {JobId}: heartbeat observed run {RunId} aborted; cancelling")]
 	private partial void LogHeartbeatObservedAbort(Guid jobId, Guid runId);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Job {JobId}: heartbeat observed cancel_requested; cancelling")]
+	private partial void LogHeartbeatObservedCancelRequest(Guid jobId);
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "Credential {CredentialId} queue halted: {Threshold} consecutive auth failures, {BlockedRunCount} run(s), {BlockedJobCount} job(s) blocked")]
 	private partial void LogQueueHalted(Guid credentialId, int threshold, int blockedRunCount, int blockedJobCount);

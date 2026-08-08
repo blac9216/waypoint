@@ -49,6 +49,17 @@ public interface IJobQueueRepository
 	Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// True when <c>jobs.cancel_requested</c> is set for this job (see <see cref="CancelJobAsync"/>
+	/// on a running/attesting/converting job -- issue #234's per-job cooperative-cancel
+	/// signal, the running-job counterpart to <see cref="GetRunQueueStateAsync"/>'s
+	/// run-scoped <c>aborted</c> check). False (including for an unknown or terminal job
+	/// id) is the safe default: the dispatcher's heartbeat loop calls this every tick
+	/// alongside the lease renewal, so a false-negative merely delays cancellation to the
+	/// next tick while a false-positive would wrongly cancel healthy work.
+	/// </summary>
+	Task<bool> IsCancelRequestedAsync(Guid jobId, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Moves a claimed job from <paramref name="expectedFromState"/> to
 	/// <paramref name="toState"/>. Fails (returns <c>false</c>) if the row is no longer
 	/// in <paramref name="expectedFromState"/> or no longer owned by
@@ -117,12 +128,13 @@ public interface IJobQueueRepository
 	/// (issue #10) so cancelling one artifact's download in a multi-job download run
 	/// never aborts the whole run. A <c>queued</c> or <c>blocked</c> job is moved to
 	/// <c>cancelled</c> in a single statement (DB-authoritative, safe across workers).
-	/// A job already <c>running</c> or terminal is left untouched and the method returns
-	/// <see cref="JobCancelOutcome.NotCancellable"/>: the M1 dispatcher's in-flight
-	/// cooperative-cancel signal is run-scoped (the heartbeat watches
-	/// <c>runs.state='aborted'</c>, not a per-job flag), so honestly there is no per-job
-	/// running-cancel path yet -- the caller records the user's intent at the download
-	/// level and the in-flight job's result is discarded on completion. Returns
+	/// A job already <c>running</c>, <c>attesting</c> or <c>converting</c> sets
+	/// <c>cancel_requested</c> instead (issue #234) and the method returns
+	/// <see cref="JobCancelOutcome.CancelRequested"/>: the dispatcher's heartbeat loop
+	/// observes that flag on its next tick, alongside the existing run-scoped
+	/// <c>runs.state='aborted'</c> check, and cooperatively cancels the in-flight handler
+	/// -- see <c>JobDispatcherHostedService.RunHeartbeatLoopAsync</c>. A terminal job is
+	/// left untouched and returns <see cref="JobCancelOutcome.NotCancellable"/>. Returns
 	/// <see cref="JobCancelOutcome.NotFound"/> when no such job exists.
 	/// </summary>
 	Task<JobCancelOutcome> CancelJobAsync(Guid jobId, CancellationToken cancellationToken);
@@ -167,15 +179,18 @@ public sealed record AbortRunResult(IReadOnlyList<Guid> CancelledJobIds, IReadOn
 
 /// <summary>
 /// The outcome of a single-job cancel (see <see cref="IJobQueueRepository.CancelJobAsync"/>).
-/// <see cref="Cancelled"/>: a queued/blocked job was moved to <c>cancelled</c>.
-/// <see cref="NotCancellable"/>: the job exists but was already running or terminal, so it
-/// was not touched. <see cref="NotFound"/>: no such job row.
+/// <see cref="Cancelled"/>: a queued/blocked job was moved to <c>cancelled</c> immediately.
+/// <see cref="CancelRequested"/>: a running/attesting/converting job had
+/// <c>cancel_requested</c> set; it stops cooperatively at the dispatcher's next heartbeat
+/// tick rather than immediately (issue #234). <see cref="NotCancellable"/>: the job exists
+/// but is already terminal, so it was not touched. <see cref="NotFound"/>: no such job row.
 /// </summary>
 public enum JobCancelOutcome
 {
 	NotFound,
 	Cancelled,
 	NotCancellable,
+	CancelRequested,
 }
 
 /// <summary>A page of run summaries plus the full collection's total row count (for <c>X-Total-Count</c>).</summary>

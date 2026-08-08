@@ -1,0 +1,15 @@
+-- Issue #234: a per-job cooperative-cancel signal for a job that is already RUNNING.
+-- CancelJobAsync (added for #10/DELETE /downloads/{id}) already moves a queued/blocked
+-- job straight to 'cancelled' in one statement; a running job had no equivalent because
+-- the only in-flight cancel signal the dispatcher's heartbeat loop watched was the
+-- run-scoped `runs.state = 'aborted'` flag (JobDispatcherHostedService.RunHeartbeatLoopAsync).
+-- That meant DELETE on an in-flight download recorded intent (the download row moved to
+-- 'cancelled') but let the job run to completion with its result discarded.
+--
+-- cancel_requested is the per-job counterpart to that run-scoped abort flag: CancelJobAsync
+-- sets it (instead of leaving the row untouched) when the job is already running/attesting/
+-- converting, and RunHeartbeatLoopAsync's existing per-tick DB read -- already renewing the
+-- lease and checking run-aborted -- also checks this column and cancels the job's
+-- CancellationTokenSource on the next heartbeat tick, exactly like the abort path already
+-- does. Default false so every existing row and every future INSERT is unaffected.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT false;

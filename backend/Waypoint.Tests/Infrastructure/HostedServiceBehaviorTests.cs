@@ -267,6 +267,7 @@ public sealed class HostedServiceBehaviorTests
 			ClaimedJob? value = NextClaim; NextClaim = null; return value;
 		}
 		public Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken) => Task.FromResult(RenewResult);
+		public Task<bool> IsCancelRequestedAsync(Guid jobId, CancellationToken cancellationToken) => Task.FromResult(false);
 		public Task<bool> AdvanceStateAsync(Guid jobId, string workerId, string expectedFromState, string toState, string? note, bool clearLease, CancellationToken cancellationToken)
 		{ Moves.Add((expectedFromState, toState)); return Task.FromResult(AdvanceResult); }
 		public async Task<IReadOnlyList<RecoveredJob>> RecoverExpiredLeasesAsync(int batchSize, CancellationToken cancellationToken)
