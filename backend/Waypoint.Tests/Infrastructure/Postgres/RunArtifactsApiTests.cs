@@ -150,6 +150,7 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		JsonElement row = document.RootElement.EnumerateArray().Single();
 		Assert.Equal(jobId.ToString(), row.GetProperty("job_id").GetString());
+		Assert.True(row.GetProperty("counts_available").GetBoolean());
 		Assert.Equal(2, row.GetProperty("cat_i_open").GetInt32());
 		Assert.Equal(1, row.GetProperty("cat_ii_open").GetInt32());
 		Assert.Equal(0, row.GetProperty("cat_iii_open").GetInt32());
@@ -161,7 +162,7 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 	}
 
 	[Fact]
-	public async Task GetArtifacts_JobWithNoArtifactsYet_ReportsZeroCountsAndNoKinds()
+	public async Task GetArtifacts_JobWithNoArtifactsYet_ReportsUncountableAndNoKinds()
 	{
 		(_, Guid targetId) = await CreateSiteAndTargetAsync("no-artifacts-target");
 		Guid runId = await CreateRunAsync();
@@ -171,9 +172,40 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		JsonElement row = document.RootElement.EnumerateArray().Single();
-		Assert.Equal(0, row.GetProperty("cat_i_open").GetInt32());
+		// No HDF on disk yet -> uncountable, NOT a fabricated zero. Null counts are omitted
+		// entirely (WaypointJsonOptions: WhenWritingNull); counts_available is the signal.
+		Assert.False(row.GetProperty("counts_available").GetBoolean());
+		Assert.False(row.TryGetProperty("cat_i_open", out _));
+		Assert.False(row.TryGetProperty("cat_ii_open", out _));
+		Assert.False(row.TryGetProperty("cat_iii_open", out _));
 		Assert.Empty(row.GetProperty("artifact_kinds").EnumerateArray());
 		Assert.Equal("pending", row.GetProperty("upload_status").GetString());
+	}
+
+	[Fact]
+	public async Task GetArtifacts_PresentButCorruptHdf_ReportsUncountableNotZero()
+	{
+		(_, Guid targetId) = await CreateSiteAndTargetAsync("corrupt-hdf-target");
+		Guid runId = await CreateRunAsync();
+		Guid jobId = await FanOutScanJobAsync(runId, targetId, state: "uploaded");
+
+		// A present HDF whose bytes are not valid HDF JSON: the count must come back
+		// "uncountable" (counts_available:false, null counts), never a clean-looking zero
+		// (issue #299 round-1 blocker -- corrupt must not read as compliant).
+		WriteCorruptHdf(jobId);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/artifacts", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement row = document.RootElement.EnumerateArray().Single();
+		Assert.False(row.GetProperty("counts_available").GetBoolean());
+		Assert.False(row.TryGetProperty("cat_i_open", out _));
+		Assert.False(row.TryGetProperty("cat_ii_open", out _));
+		Assert.False(row.TryGetProperty("cat_iii_open", out _));
+		// The HDF file IS present on disk, so the download route still lists it.
+		string[] kinds = row.GetProperty("artifact_kinds").EnumerateArray().Select(k => k.GetString()!).ToArray();
+		Assert.Contains("hdf", kinds);
 	}
 
 	[Fact]
@@ -375,6 +407,13 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 
 		string path = Path.Combine(_artifactStorePath, $"{jobId:N}.json");
 		File.WriteAllText(path, JsonSerializer.Serialize(hdf));
+	}
+
+	private void WriteCorruptHdf(Guid jobId)
+	{
+		// Present at the HDF path, but not parseable as HDF JSON (truncated/garbage bytes).
+		string path = Path.Combine(_artifactStorePath, $"{jobId:N}.json");
+		File.WriteAllText(path, "{ this is not valid json at all <<<");
 	}
 
 	private void WriteCkl(Guid jobId)

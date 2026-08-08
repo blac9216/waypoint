@@ -242,14 +242,23 @@ public sealed record RunArtifactResponse(
 	[property: JsonPropertyName("benchmark")]
 	string? Benchmark,
 
+	/// <summary>
+	/// <c>false</c> when the HDF is absent or present-but-unparseable -- the CAT counts
+	/// below are then <c>null</c> and mean "could not count", NOT zero (issue #299
+	/// round-1 blocker: a corrupt HDF must never render as a clean, compliant row). A
+	/// consumer must gate on this before trusting the counts.
+	/// </summary>
+	[property: JsonPropertyName("counts_available")]
+	bool CountsAvailable,
+
 	[property: JsonPropertyName("cat_i_open")]
-	int CatIOpen,
+	int? CatIOpen,
 
 	[property: JsonPropertyName("cat_ii_open")]
-	int CatIIOpen,
+	int? CatIIOpen,
 
 	[property: JsonPropertyName("cat_iii_open")]
-	int CatIIIOpen,
+	int? CatIIIOpen,
 
 	/// <summary>Which of <c>hdf</c>/<c>ckl</c> currently have a file on disk for this job -- what <c>GET /jobs/{id}/artifacts/{kind}</c> can actually serve.</summary>
 	[property: JsonPropertyName("artifact_kinds")]

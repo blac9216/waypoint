@@ -416,8 +416,9 @@ public sealed class RunsController : ControllerBase
 	/// artifacts (issue #275's attest/convert stages) -- other job types in the run are
 	/// simply absent from the list, not represented as an empty/zeroed row. CAT I/II/III
 	/// counts are parsed from the job's HDF report (<see cref="HdfSeverityCounter"/>) when
-	/// one exists on disk, zero otherwise (a job that has not yet reached the InSpec
-	/// stage's completion, or whose artifact was never persisted). <c>artifact_kinds</c>
+	/// one exists AND parses; when the HDF is absent or present-but-corrupt the row reports
+	/// <c>counts_available: false</c> with null counts ("could not count"), never a
+	/// fabricated zero (issue #299 round-1 blocker). <c>artifact_kinds</c>
 	/// reflects exactly which files this run has TODAY under <see cref="ScanOptions.ArtifactStorePath"/>
 	/// -- what <c>GET /jobs/{id}/artifacts/{kind}</c> can actually serve, not what the
 	/// pipeline will eventually produce.
@@ -708,7 +709,10 @@ public sealed class RunsController : ControllerBase
 			kinds.Add(ScanArtifactCklKind);
 		}
 
-		HdfSeverityCounts counts = HdfSeverityCounter.CountOpenFindings(hdfPath);
+		// null == uncountable (HDF absent, or present-but-unparseable): the wire must NOT
+		// present that as CAT I/II/III = 0 (issue #299 round-1 blocker). counts_available
+		// gates the counts; a corrupt HDF reads as "could not count", never as compliant.
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(hdfPath);
 
 		string? benchmark = null;
 		if (job.TargetId is { } targetIdText && Guid.TryParse(targetIdText, out Guid targetId))
@@ -724,9 +728,10 @@ public sealed class RunsController : ControllerBase
 			JobId: job.Id.ToString(),
 			Target: job.TargetName ?? job.TargetId ?? UnknownTargetLabel,
 			Benchmark: benchmark,
-			CatIOpen: counts.CatIOpen,
-			CatIIOpen: counts.CatIIOpen,
-			CatIIIOpen: counts.CatIIIOpen,
+			CountsAvailable: counts is not null,
+			CatIOpen: counts?.CatIOpen,
+			CatIIOpen: counts?.CatIIOpen,
+			CatIIIOpen: counts?.CatIIIOpen,
 			ArtifactKinds: kinds,
 			UploadStatus: StigManagerUploadStatus(job.State));
 	}
