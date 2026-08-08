@@ -45,8 +45,8 @@ public sealed class SchemaMigrationTests
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #193 (0007 promotes depot_artifacts product/version to generated columns) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 7;
+	/// <summary>Embedded migration count as of issue #10 (0008 adds downloads.run_id) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 8;
 
 	private readonly PostgresFixture _fixture;
 

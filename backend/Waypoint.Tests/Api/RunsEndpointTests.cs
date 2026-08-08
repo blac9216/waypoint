@@ -775,6 +775,12 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 		return Task.FromResult(new AbortRunResult([], []));
 	}
 
+	public Task<JobCancelOutcome> CancelJobAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		_ = (jobId, cancellationToken);
+		return Task.FromResult(JobCancelOutcome.Cancelled);
+	}
+
 	public Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
 	{
 		_ = (workerId, leaseDuration, cancellationToken);

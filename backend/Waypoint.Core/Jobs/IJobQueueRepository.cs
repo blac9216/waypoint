@@ -112,6 +112,22 @@ public interface IJobQueueRepository
 	Task<AbortRunResult> AbortRunAsync(Guid runId, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Cancels a single job within a run without touching its siblings -- the per-job
+	/// counterpart to <see cref="AbortRunAsync"/>, added for <c>DELETE /downloads/{id}</c>
+	/// (issue #10) so cancelling one artifact's download in a multi-job download run
+	/// never aborts the whole run. A <c>queued</c> or <c>blocked</c> job is moved to
+	/// <c>cancelled</c> in a single statement (DB-authoritative, safe across workers).
+	/// A job already <c>running</c> or terminal is left untouched and the method returns
+	/// <see cref="JobCancelOutcome.NotCancellable"/>: the M1 dispatcher's in-flight
+	/// cooperative-cancel signal is run-scoped (the heartbeat watches
+	/// <c>runs.state='aborted'</c>, not a per-job flag), so honestly there is no per-job
+	/// running-cancel path yet -- the caller records the user's intent at the download
+	/// level and the in-flight job's result is discarded on completion. Returns
+	/// <see cref="JobCancelOutcome.NotFound"/> when no such job exists.
+	/// </summary>
+	Task<JobCancelOutcome> CancelJobAsync(Guid jobId, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Blocks queued work after the credential's most recent resolved outcomes are
 	/// consecutive authentication failures, and durably halts the credential
 	/// (<c>credentials.queue_halted</c>) so later fan-outs, requeues and releases for
@@ -148,6 +164,19 @@ public sealed record RunQueueState(string State, bool Paused, bool Blocked, stri
 
 /// <summary>The database effects of aborting a run.</summary>
 public sealed record AbortRunResult(IReadOnlyList<Guid> CancelledJobIds, IReadOnlyList<Guid> InFlightJobIds);
+
+/// <summary>
+/// The outcome of a single-job cancel (see <see cref="IJobQueueRepository.CancelJobAsync"/>).
+/// <see cref="Cancelled"/>: a queued/blocked job was moved to <c>cancelled</c>.
+/// <see cref="NotCancellable"/>: the job exists but was already running or terminal, so it
+/// was not touched. <see cref="NotFound"/>: no such job row.
+/// </summary>
+public enum JobCancelOutcome
+{
+	NotFound,
+	Cancelled,
+	NotCancellable,
+}
 
 /// <summary>A page of run summaries plus the full collection's total row count (for <c>X-Total-Count</c>).</summary>
 public sealed record RunListResult(IReadOnlyList<RunSummary> Items, int TotalCount);

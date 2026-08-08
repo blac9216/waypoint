@@ -19,12 +19,14 @@ using Microsoft.Extensions.Options;
 using Waypoint.Core.Auth;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Configuration;
+using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.PowerShell;
 using Waypoint.Infrastructure.Auth;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
 
 namespace Waypoint.Infrastructure.DependencyInjection;
@@ -65,6 +67,9 @@ public static class ServiceCollectionExtensions
 
 		services.AddOptions<CatalogOptions>()
 			.Bind(configuration.GetSection(CatalogOptions.SectionName));
+
+		services.AddOptions<DownloadOptions>()
+			.Bind(configuration.GetSection(DownloadOptions.SectionName));
 
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
@@ -119,6 +124,7 @@ public static class ServiceCollectionExtensions
 
 			services.AddSingleton(new Secrets.CredentialRepository(connectionString));
 			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
+			services.AddSingleton<IDownloadRepository>(new DownloadRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
@@ -137,6 +143,7 @@ public static class ServiceCollectionExtensions
 			// pattern PowerShellJobHandler's doc comment describes for the real job
 			// types (jobs.job_type is a closed CHECK set with no generic member).
 			services.AddSingleton<IJobHandler, Catalog.CatalogIndexJobHandler>();
+			services.AddSingleton<IJobHandler, Downloads.DownloadJobHandler>();
 
 			services.AddSingleton<JobDispatcherHostedService>();
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());
