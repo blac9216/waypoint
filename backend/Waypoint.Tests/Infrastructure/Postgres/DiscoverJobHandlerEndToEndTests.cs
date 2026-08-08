@@ -207,6 +207,41 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		Assert.Equal(TargetDiscoveryStatuses.NeverDiscovered, (await _targets.GetAsync(targetId.Value, CancellationToken.None))!.DiscoveryStatus);
 	}
 
+	/// <summary>
+	/// Issue #262: a vCenter credential with no dedicated username set fails the job
+	/// cleanly rather than silently falling back to the credential's display name as
+	/// the SSO login.
+	/// </summary>
+	[Fact]
+	public async Task TargetWithCredentialMissingUsername_FailsCleanly_WithoutFallingBackToName()
+	{
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-no-username-canary", username: null);
+
+		Guid runId = await _repository.CreateRunAsync("discover", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("discover", 4, TargetId: targetId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+		string note = await GetJobNoteAsync(jobIds[0]);
+		Assert.Contains("no username set", note, StringComparison.Ordinal);
+		// Same as TargetWithNoCredential_FailsCleanly_WithoutThrowing above: this check
+		// runs before discovery_status is stamped 'discovering', so a target that never
+		// got that far stays at its initial value rather than moving to 'failed'.
+		Assert.Equal(TargetDiscoveryStatuses.NeverDiscovered, (await _targets.GetAsync(targetId, CancellationToken.None))!.DiscoveryStatus);
+	}
+
 	private async Task<Guid> RunDiscoverOnceAsync(Guid targetId)
 	{
 		Guid runId = await _repository.CreateRunAsync("discover", "{}", credentialId: null, "tester", CancellationToken.None);
@@ -229,11 +264,11 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		return runId;
 	}
 
-	private async Task<(Guid TargetId, Guid CredentialId)> SeedVsphereTargetAsync(string secretValue)
+	private async Task<(Guid TargetId, Guid CredentialId)> SeedVsphereTargetAsync(string secretValue, string? username = "administrator@example.internal")
 	{
 		Guid siteId = (await _sites.CreateAsync($"site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
 		Guid credentialId = (await _credentials.CreateAsync(
-			"svc-discovery@example.internal", CredentialTypes.VCenter, CredentialOwners.Shared, sudoEnabled: false, CancellationToken.None))!.Value;
+			$"svc-discovery-{Guid.NewGuid():N}@example.internal", CredentialTypes.VCenter, CredentialOwners.Shared, sudoEnabled: false, CancellationToken.None, username))!.Value;
 		await _secretStore.StoreAsync(credentialId, System.Text.Encoding.UTF8.GetBytes(secretValue), "test", CancellationToken.None);
 
 		string connectionJson = JsonSerializer.Serialize(new { host = "vcsa-01.example.internal" });
