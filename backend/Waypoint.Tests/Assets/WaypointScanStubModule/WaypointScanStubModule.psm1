@@ -117,4 +117,68 @@ function Invoke-WaypointScan {
 	}
 }
 
-Export-ModuleMember -Function Invoke-WaypointScan
+# $env:WAYPOINT_ATTEST_STUB_MODE: 'success' (default, applies when a template path is
+# given) -- writes an invented "attested" HDF and returns AttestApplied = $true when
+# AttestTemplatePath is set, or the pass-through shape when it is not (mirrors the real
+# module's no-attestation-docs path). 'failure' -- Success = $false.
+function Invoke-WaypointAttest {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)] [string]$ReportPath,
+		[Parameter()] [AllowNull()] [AllowEmptyString()] [string]$AttestTemplatePath,
+		[Parameter()] [string]$AttestedReportPath,
+		[Parameter()] [int]$TimeoutSeconds,
+		[Parameter()] [string]$VmwareStigDockerCommonPath
+	)
+
+	if ((Get-Content -Path $ReportPath -Raw) -match '\bWaypoint-Canary\b') {
+		Write-Information 'Attest stub observed the HDF report.'
+	}
+
+	$Mode = $env:WAYPOINT_ATTEST_STUB_MODE
+	if (-not $Mode) { $Mode = 'success' }
+
+	if ($Mode -eq 'failure') {
+		return [pscustomobject]@{ Success = $false; AttestApplied = $false; ReportPath = $null; FailureReason = 'invented SAF attestation failure (stub).' }
+	}
+
+	if ([string]::IsNullOrWhiteSpace($AttestTemplatePath)) {
+		return [pscustomobject]@{ Success = $true; AttestApplied = $false; ReportPath = $ReportPath; FailureReason = $null }
+	}
+
+	'{"attested":true}' | Set-Content -Path $AttestedReportPath -Encoding utf8
+	return [pscustomobject]@{ Success = $true; AttestApplied = $true; ReportPath = $AttestedReportPath; FailureReason = $null }
+}
+
+# $env:WAYPOINT_CONVERT_STUB_MODE: 'success' (default) -- writes an invented CKL file
+# and returns Success = $true. 'failure' -- Success = $false, no CKL written.
+function Invoke-WaypointConvert {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)] [string]$ConvertInputPath,
+		[Parameter(Mandatory)] [string]$CklOutputPath,
+		[Parameter()] [AllowNull()] [string]$BenchmarkId,
+		[Parameter()] [AllowNull()] [string]$Title,
+		[Parameter()] [AllowNull()] [string]$ReleaseInfo,
+		[Parameter()] [AllowNull()] [string]$Version,
+		[Parameter()] [int]$TimeoutSeconds,
+		[Parameter()] [string]$VmwareStigDockerCommonPath
+	)
+
+	$Mode = $env:WAYPOINT_CONVERT_STUB_MODE
+	if (-not $Mode) { $Mode = 'success' }
+
+	if ($Mode -eq 'failure') {
+		return [pscustomobject]@{ Success = $false; CklPath = $null; MetadataApplied = $false; FailureReason = 'invented SAF conversion failure (stub).' }
+	}
+
+	$CklDirectory = Split-Path -Path $CklOutputPath -Parent
+	if ($CklDirectory -and -not (Test-Path -Path $CklDirectory -PathType Container)) {
+		New-Item -ItemType Directory -Path $CklDirectory -Force | Out-Null
+	}
+
+	"<CHECKLIST><!-- invented stub CKL, benchmark=$BenchmarkId --></CHECKLIST>" | Set-Content -Path $CklOutputPath -Encoding utf8
+	return [pscustomobject]@{ Success = $true; CklPath = $CklOutputPath; MetadataApplied = [bool]$BenchmarkId; FailureReason = $null }
+}
+
+Export-ModuleMember -Function Invoke-WaypointScan, Invoke-WaypointAttest, Invoke-WaypointConvert

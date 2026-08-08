@@ -14,28 +14,32 @@
 
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.PowerShell;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
+using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.PowerShell;
 using Waypoint.Infrastructure.Sites;
 
 namespace Waypoint.Infrastructure.Scans;
 
 /// <summary>
-/// The <c>scan</c> job type's handler (issue #274, second slice of the #23 split;
-/// replaces the #273 not-implemented stub). <c>scan</c> is <see cref="JobShape.Standard"/>
-/// (<c>queued -&gt; running -&gt; attesting -&gt; converting -&gt; uploaded</c>,
-/// ADR-0012): this handler owns only the first stage -- resolve target + credential,
-/// run the sibling <c>vmware-stig-docker</c> InSpec step through the runspace host, and
-/// persist the resulting HDF -- then reports <see cref="JobOutcomeKind.StageComplete"/>
-/// to rest the job, lease-cleared, at the <c>attesting</c> marker. Attest/convert
-/// bodies are #275; a job claimed with that marker fails cleanly with a
-/// <c>not_implemented</c> note (mirroring #273's original stub) so a run today ends
-/// predictably instead of hanging.
+/// The <c>scan</c> job type's handler (issues #274/#275, second and third slices of
+/// the #23 split; replaces the #273 not-implemented stub). <c>scan</c> is
+/// <see cref="JobShape.Standard"/> (<c>queued -&gt; running -&gt; attesting -&gt;
+/// converting -&gt; uploaded</c>, ADR-0012): this handler resolves target + credential
+/// and runs InSpec (<c>Stage == null</c>), applies resolved attestations to the HDF
+/// (<c>Stage == "attesting"</c>), then converts to CKL and stamps benchmark metadata
+/// (<c>Stage == "converting"</c>) -- reporting <see cref="JobOutcomeKind.StageComplete"/>
+/// after each non-terminal stage and <see cref="JobOutcomeKind.Succeeded"/> (which the
+/// dispatcher forces to <c>uploaded</c>, this shape's terminal state) after convert.
+/// <c>uploaded</c> here means "artifacts ready" -- the actual STIG Manager upload is
+/// #25, not yet built; this matches how ADR-0012 and docs/api-contract.md already use
+/// the state name (the job-engine terminal, not a completed HTTP upload).
 ///
 /// Credential resolution mirrors <see cref="Waypoint.Infrastructure.Discovery.DiscoverJobHandler"/>:
 /// a stored credential (<c>jobs.credential_id</c>) is decrypted under job/run
@@ -51,7 +55,10 @@ namespace Waypoint.Infrastructure.Scans;
 public sealed class ScanJobHandler : IJobHandler
 {
 	internal const string AttestingStage = "attesting";
+	internal const string ConvertingStage = "converting";
 	private const string InvocationCommand = "Invoke-WaypointScan";
+	private const string AttestCommand = "Invoke-WaypointAttest";
+	private const string ConvertCommand = "Invoke-WaypointConvert";
 	private const int LogTailLines = 20;
 
 	private readonly IPowerShellExecutor _executor;
@@ -63,6 +70,7 @@ public sealed class ScanJobHandler : IJobHandler
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
 	private readonly IOptions<ScanOptions> _scanOptions;
+	private readonly ConfigDocRepository _configDocs;
 
 	public ScanJobHandler(
 		IPowerShellExecutor executor,
@@ -73,7 +81,8 @@ public sealed class ScanJobHandler : IJobHandler
 		IJobQueueRepository jobs,
 		ISecretRedactor redactor,
 		IOptions<PowerShellOptions> powerShellOptions,
-		IOptions<ScanOptions> scanOptions)
+		IOptions<ScanOptions> scanOptions,
+		ConfigDocRepository configDocs)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(secrets);
@@ -84,6 +93,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(redactor);
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
 		ArgumentNullException.ThrowIfNull(scanOptions);
+		ArgumentNullException.ThrowIfNull(configDocs);
 
 		_executor = executor;
 		_secrets = secrets;
@@ -94,28 +104,33 @@ public sealed class ScanJobHandler : IJobHandler
 		_redactor = redactor;
 		_powerShellOptions = powerShellOptions;
 		_scanOptions = scanOptions;
+		_configDocs = configDocs;
 	}
 
 	public string JobType => "scan";
 
-	public async Task<JobExecutionOutcome> ExecuteAsync(JobExecutionContext context, CancellationToken cancellationToken)
+	public Task<JobExecutionOutcome> ExecuteAsync(JobExecutionContext context, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(context);
 
-		// ADR-0012 stage routing: a fresh claim (Stage == null) runs the InSpec stage
-		// below. Any other marker means a prior execution already reached (or rested
-		// at) a later stage -- attest/convert bodies are #275, so this handler cannot
-		// resume them yet. Failing cleanly here (rather than throwing, which the
-		// dispatcher would report as an opaque "Unhandled exception") keeps a run's
-		// outcome predictable today: the job lands in `failed` with a note that says
-		// exactly why, and #275 replaces this branch instead of ever needing to touch
-		// the InSpec stage below.
-		if (context.Job.Stage is not null)
+		// ADR-0012 stage routing: a fresh claim (Stage == null) runs the InSpec stage;
+		// a job resumed at a durable marker resumes at that stage's body instead of
+		// re-running earlier ones. Any other marker is unreachable today (Standard's
+		// only stages are attesting/converting) -- failing cleanly rather than
+		// throwing keeps a future new marker's outcome predictable instead of an
+		// opaque "Unhandled exception".
+		return context.Job.Stage switch
 		{
-			return JobExecutionOutcome.Failed(
-				$"not_implemented: scan stage '{context.Job.Stage}' has no handler yet -- attest/convert land in #275.");
-		}
+			null => ExecuteInspecStageAsync(context, cancellationToken),
+			AttestingStage => ExecuteAttestStageAsync(context, cancellationToken),
+			ConvertingStage => ExecuteConvertStageAsync(context, cancellationToken),
+			_ => Task.FromResult(JobExecutionOutcome.Failed(
+				$"not_implemented: scan stage '{context.Job.Stage}' has no handler.")),
+		};
+	}
 
+	private async Task<JobExecutionOutcome> ExecuteInspecStageAsync(JobExecutionContext context, CancellationToken cancellationToken)
+	{
 		ScanPayload payload;
 		try
 		{
@@ -229,6 +244,211 @@ public sealed class ScanJobHandler : IJobHandler
 	}
 
 	/// <summary>
+	/// The attest stage (issue #275): resolves the target's attestation config-doc via
+	/// <see cref="ConfigDocResolver.Resolve"/> (Global -&gt; Site -&gt; Target,
+	/// most-specific-wins, same resolution <c>GET /config-docs/resolve</c> uses) and
+	/// applies it to the HDF with the SAF CLI. An expired waiver is never applied --
+	/// <see cref="ConfigDocResolution.AttestationExpired"/> already encodes that per
+	/// <see cref="ConfigDocResolver"/>'s fall-through -- so it is reported as a WARN
+	/// <c>job.log</c> event and folded into this stage's <see cref="JobExecutionOutcome.Note"/>
+	/// (docs/domain-model.md: "the control reports Open, the run logs a WARN, and
+	/// Results lists expired attestations explicitly"). No resolved doc at all (a
+	/// target with no attestation config-doc anywhere in the three layers) is an
+	/// equally valid path: the HDF passes through unattested.
+	/// </summary>
+	private async Task<JobExecutionOutcome> ExecuteAttestStageAsync(JobExecutionContext context, CancellationToken cancellationToken)
+	{
+		ScanPayload payload;
+		try
+		{
+			payload = ParsePayload(context.Job.Payload);
+		}
+		catch (JsonException exception)
+		{
+			return JobExecutionOutcome.Failed($"scan payload is invalid: {exception.Message}");
+		}
+		catch (ArgumentException exception)
+		{
+			return JobExecutionOutcome.Failed($"scan payload is invalid: {exception.Message}");
+		}
+
+		Target? target = await _targets.GetAsync(payload.TargetId, cancellationToken).ConfigureAwait(false);
+		if (target is null)
+		{
+			return JobExecutionOutcome.Failed($"target '{payload.TargetId}' does not exist.");
+		}
+
+		string reportPath = Path.Combine(_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.json");
+		if (!File.Exists(reportPath))
+		{
+			return JobExecutionOutcome.Failed($"attest stage found no HDF report at '{reportPath}' (InSpec stage did not persist one).");
+		}
+
+		string profile = _scanOptions.Value.AttestationProfile;
+		ConfigDocWithLatestVersion? global = await _configDocs
+			.FindWithLatestVersionAsync(ConfigDocKinds.Attestation, profile, ConfigDocLayers.Global, null, cancellationToken).ConfigureAwait(false);
+		ConfigDocWithLatestVersion? site = await _configDocs
+			.FindWithLatestVersionAsync(ConfigDocKinds.Attestation, profile, ConfigDocLayers.Site, target.SiteId, cancellationToken).ConfigureAwait(false);
+		ConfigDocWithLatestVersion? targetDoc = await _configDocs
+			.FindWithLatestVersionAsync(ConfigDocKinds.Attestation, profile, ConfigDocLayers.Target, target.Id, cancellationToken).ConfigureAwait(false);
+
+		ConfigDocResolution resolution = ConfigDocResolver.Resolve(
+			ConfigDocKinds.Attestation, profile, global, site, targetDoc, DateTimeOffset.UtcNow);
+
+		if (resolution.AttestationExpired)
+		{
+			string warnLine = $"config-doc attestation for profile '{profile}' target '{payload.TargetId}' expired "
+				+ $"{resolution.AttestationExpiresAt:O}; not applied (control remains Open).";
+			await EmitWarnAsync(context, warnLine, cancellationToken).ConfigureAwait(false);
+		}
+
+		string? templatePath = null;
+		string? tempFile = null;
+		try
+		{
+			if (resolution.Body is not null)
+			{
+				tempFile = Path.Combine(Path.GetTempPath(), $"waypoint-attest-{context.Job.Id:N}.yml");
+				await File.WriteAllTextAsync(tempFile, resolution.Body, cancellationToken).ConfigureAwait(false);
+				templatePath = tempFile;
+			}
+
+			string attestedPath = Path.Combine(_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.attested.json");
+			Dictionary<string, object?> parameters = new(StringComparer.Ordinal)
+			{
+				["ReportPath"] = reportPath,
+				["AttestTemplatePath"] = templatePath,
+				["AttestedReportPath"] = attestedPath,
+				["TimeoutSeconds"] = _scanOptions.Value.SafTimeoutSeconds,
+			};
+
+			PowerShellRequest request = new(AttestCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
+			PowerShellExecutionResult result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+
+			if (!result.Succeeded)
+			{
+				return await FailScanAsync(context, result.FailureReason ?? "attest invocation failed with no failure reason.", cancellationToken).ConfigureAwait(false);
+			}
+
+			AttestInvocationOutput? output = TryParseAttestOutput(result.Output);
+			if (output is null || !output.Success)
+			{
+				string rawNote = output?.FailureReason ?? "attest invocation returned no result.";
+				return await FailScanAsync(context, rawNote, cancellationToken).ConfigureAwait(false);
+			}
+
+			string note = resolution.AttestationExpired
+				? $"attest: {(output.AttestApplied ? "applied" : "none applied")}; 1 expired-skipped (profile '{profile}')."
+				: $"attest: {(output.AttestApplied ? "applied" : "none applied")}.";
+
+			// A fresh claim always resumes at `running` (JobQueueRepository.ClaimSql
+			// unconditionally sets state = 'running' regardless of the durable `stage`
+			// marker -- only `stage` records pipeline position, per ADR-0012). This
+			// stage's own resumption therefore first replays the `running -> attesting`
+			// transition PR #298's InSpec stage made durable on the previous cycle,
+			// before advancing `attesting -> converting` -- both legal per
+			// JobStateMachine, and consistent with how the row's `state` column always
+			// reads 'running' the instant any stage is (re)claimed.
+			await context.AdvanceAsync(JobStates.Attesting, "attest stage claimed.", cancellationToken).ConfigureAwait(false);
+			await context.AdvanceAsync(JobStates.Converting, note, cancellationToken).ConfigureAwait(false);
+			return JobExecutionOutcome.StageComplete(ConvertingStage, note);
+		}
+		finally
+		{
+			if (tempFile is not null && File.Exists(tempFile))
+			{
+				File.Delete(tempFile);
+			}
+		}
+	}
+
+	/// <summary>
+	/// The convert stage (issue #275): converts the (optionally attested) HDF to a CKL
+	/// with the SAF CLI, stamps <see cref="ScanOptions.BenchmarkMetadata"/>, and
+	/// persists the CKL next to the HDF under the same artifact-store keying (job id).
+	/// This is the pipeline's last stage for <see cref="JobShape.Standard"/> -- success
+	/// here reports <see cref="JobOutcomeKind.Succeeded"/>, which the dispatcher forces
+	/// to the shape's terminal state (<c>uploaded</c>, meaning "artifacts ready"; the
+	/// STIG Manager upload itself is #25).
+	/// </summary>
+	private async Task<JobExecutionOutcome> ExecuteConvertStageAsync(JobExecutionContext context, CancellationToken cancellationToken)
+	{
+		ScanPayload payload;
+		try
+		{
+			payload = ParsePayload(context.Job.Payload);
+		}
+		catch (JsonException exception)
+		{
+			return JobExecutionOutcome.Failed($"scan payload is invalid: {exception.Message}");
+		}
+		catch (ArgumentException exception)
+		{
+			return JobExecutionOutcome.Failed($"scan payload is invalid: {exception.Message}");
+		}
+
+		Target? target = await _targets.GetAsync(payload.TargetId, cancellationToken).ConfigureAwait(false);
+		if (target is null)
+		{
+			return JobExecutionOutcome.Failed($"target '{payload.TargetId}' does not exist.");
+		}
+
+		string attestedPath = Path.Combine(_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.attested.json");
+		string rawPath = Path.Combine(_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.json");
+		string convertInput = File.Exists(attestedPath) ? attestedPath : rawPath;
+		if (!File.Exists(convertInput))
+		{
+			return JobExecutionOutcome.Failed($"convert stage found no HDF report for job '{context.Job.Id}'.");
+		}
+
+		string cklPath = Path.Combine(_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.ckl");
+		ScanBenchmarkMetadata? metadata = _scanOptions.Value.BenchmarkMetadata.GetValueOrDefault(target.Kind);
+
+		// Same replay as ExecuteAttestStageAsync: a fresh claim always resumes at
+		// `running` (ClaimSql), so this stage first replays `running -> attesting`
+		// (the InSpec stage's own durable transition) then `attesting -> converting`
+		// before doing any convert work -- both legal per JobStateMachine, and correct
+		// regardless of how the convert step itself turns out: a subsequent failure
+		// legally transitions converting -> failed, and success legally transitions
+		// converting -> uploaded (forced by the dispatcher on JobOutcomeKind.Succeeded).
+		await context.AdvanceAsync(JobStates.Attesting, "convert stage claimed.", cancellationToken).ConfigureAwait(false);
+		await context.AdvanceAsync(JobStates.Converting, "convert stage claimed.", cancellationToken).ConfigureAwait(false);
+
+		Dictionary<string, object?> parameters = new(StringComparer.Ordinal)
+		{
+			["ConvertInputPath"] = convertInput,
+			["CklOutputPath"] = cklPath,
+			["BenchmarkId"] = metadata?.BenchmarkId,
+			["Title"] = metadata?.Title,
+			["ReleaseInfo"] = metadata?.ReleaseInfo,
+			["Version"] = metadata?.Version,
+			["TimeoutSeconds"] = _scanOptions.Value.SafTimeoutSeconds,
+		};
+
+		PowerShellRequest request = new(ConvertCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
+		PowerShellExecutionResult result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+
+		if (!result.Succeeded)
+		{
+			return await FailScanAsync(context, result.FailureReason ?? "convert invocation failed with no failure reason.", cancellationToken).ConfigureAwait(false);
+		}
+
+		ConvertInvocationOutput? output = TryParseConvertOutput(result.Output);
+		if (output is null || !output.Success)
+		{
+			string rawNote = output?.FailureReason ?? "convert invocation returned no result.";
+			return await FailScanAsync(context, rawNote, cancellationToken).ConfigureAwait(false);
+		}
+
+		if (string.IsNullOrWhiteSpace(output.CklPath) || !File.Exists(output.CklPath))
+		{
+			return await FailScanAsync(context, "convert invocation reported success but produced no CKL file.", cancellationToken).ConfigureAwait(false);
+		}
+
+		return JobExecutionOutcome.Succeeded($"CKL persisted at '{output.CklPath}' (benchmark metadata applied: {output.MetadataApplied}).");
+	}
+
+	/// <summary>
 	/// Classifies a raw failure reason (auth-shaped -&gt; the credential halt path,
 	/// otherwise ordinary), redacts it for the two sinks it reaches (jobs.note,
 	/// job.log), and emits the log-tail event (#274 AC "real failures mapped to failed
@@ -329,6 +549,18 @@ public sealed class ScanJobHandler : IJobHandler
 		await context.Events.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, payload, cancellationToken).ConfigureAwait(false);
 	}
 
+	/// <summary>
+	/// The expired-attestation WARN (#275 AC, docs/domain-model.md: "the run logs a
+	/// WARN, and Results lists expired attestations explicitly") -- same job.log
+	/// event/severity shape as <see cref="EmitLogTailAsync"/>'s Error line, at Warning
+	/// severity instead, so #27's Results sidebar can distinguish the two.
+	/// </summary>
+	private static async Task EmitWarnAsync(JobExecutionContext context, string line, CancellationToken cancellationToken)
+	{
+		string payload = JsonSerializer.Serialize(new { severity = "Warning", line });
+		await context.Events.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, payload, cancellationToken).ConfigureAwait(false);
+	}
+
 	private static string? TryGetConnectionHost(string connectionJson)
 	{
 		using JsonDocument document = JsonDocument.Parse(connectionJson);
@@ -352,6 +584,37 @@ public sealed class ScanJobHandler : IJobHandler
 		return new ScanInvocationOutput(success, reportPath, failureReason);
 	}
 
+	/// <summary>Parses Invoke-WaypointAttest's returned [pscustomobject], same rationale as <see cref="TryParseOutput"/>.</summary>
+	private static AttestInvocationOutput? TryParseAttestOutput(IReadOnlyList<object?> output)
+	{
+		object? first = output.Count > 0 ? output[0] : null;
+		if (first is not System.Management.Automation.PSObject psObject)
+		{
+			return null;
+		}
+
+		bool success = psObject.Properties["Success"]?.Value is true;
+		bool attestApplied = psObject.Properties["AttestApplied"]?.Value is true;
+		string? failureReason = psObject.Properties["FailureReason"]?.Value as string;
+		return new AttestInvocationOutput(success, attestApplied, failureReason);
+	}
+
+	/// <summary>Parses Invoke-WaypointConvert's returned [pscustomobject], same rationale as <see cref="TryParseOutput"/>.</summary>
+	private static ConvertInvocationOutput? TryParseConvertOutput(IReadOnlyList<object?> output)
+	{
+		object? first = output.Count > 0 ? output[0] : null;
+		if (first is not System.Management.Automation.PSObject psObject)
+		{
+			return null;
+		}
+
+		bool success = psObject.Properties["Success"]?.Value is true;
+		string? cklPath = psObject.Properties["CklPath"]?.Value as string;
+		bool metadataApplied = psObject.Properties["MetadataApplied"]?.Value is true;
+		string? failureReason = psObject.Properties["FailureReason"]?.Value as string;
+		return new ConvertInvocationOutput(success, cklPath, metadataApplied, failureReason);
+	}
+
 	private static ScanPayload ParsePayload(string payloadJson)
 	{
 		using JsonDocument document = JsonDocument.Parse(payloadJson);
@@ -369,6 +632,10 @@ public sealed class ScanJobHandler : IJobHandler
 	private sealed record ResolvedCredential(string Username, string Secret, Action Release);
 
 	private sealed record ScanInvocationOutput(bool Success, string? ReportPath, string? FailureReason);
+
+	private sealed record AttestInvocationOutput(bool Success, bool AttestApplied, string? FailureReason);
+
+	private sealed record ConvertInvocationOutput(bool Success, string? CklPath, bool MetadataApplied, string? FailureReason);
 
 	/// <summary>Internal-only signal from <see cref="ResolveCredentialAsync"/> to its caller; never crosses a handler boundary as a thrown exception.</summary>
 	private sealed class ScanCredentialException(string message) : Exception(message);

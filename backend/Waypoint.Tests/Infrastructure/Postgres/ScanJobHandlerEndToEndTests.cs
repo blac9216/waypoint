@@ -18,12 +18,14 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.PowerShell;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
+using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.PowerShell;
@@ -64,6 +66,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	private SiteRepository _sites = null!;
 	private TargetRepository _targets = null!;
 	private EphemeralCredentialCache _ephemeralCredentials = null!;
+	private ConfigDocRepository _configDocs = null!;
 	private ScanJobHandler _handler = null!;
 
 	public ScanJobHandlerEndToEndTests(PostgresFixture fixture)
@@ -101,16 +104,19 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		_sites = new SiteRepository(_fixture.ConnectionString);
 		_targets = new TargetRepository(_fixture.ConnectionString);
 		_ephemeralCredentials = new EphemeralCredentialCache(_redactor, _fixture.ConnectionString, NullLogger<EphemeralCredentialCache>.Instance);
+		_configDocs = new ConfigDocRepository(_fixture.ConnectionString);
 
 		IOptions<ScanOptions> scanOptions = Options.Create(new ScanOptions
 		{
 			ArtifactStorePath = _artifactDirectory,
 			ProfilePath = "/invented/profile/path",
 			TimeoutSeconds = 60,
+			AttestationProfile = "invented-vsphere-stig",
+			SafTimeoutSeconds = 30,
 		});
 
 		_handler = new ScanJobHandler(
-			executor, _secretStore, _credentials, _targets, _ephemeralCredentials, _repository, _redactor, wrappedPsOptions, scanOptions);
+			executor, _secretStore, _credentials, _targets, _ephemeralCredentials, _repository, _redactor, wrappedPsOptions, scanOptions, _configDocs);
 	}
 
 	public async Task DisposeAsync()
@@ -140,13 +146,19 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	/// The full loop with a stored credential: fan out a <c>scan</c> job for a seeded
 	/// vsphere target -&gt; dispatcher claims it -&gt; the real handler decrypts the
 	/// credential, invokes the stub module -&gt; HDF report lands on disk under the
-	/// artifact store, keyed by job id -&gt; job rests at `queued`/stage `attesting`
-	/// (ADR-0012 StageComplete requeue), never a terminal state.
+	/// artifact store, keyed by job id. #275 replaced the attest/convert stub-fail
+	/// with real bodies, so the job no longer rests at `attesting` -- it proceeds
+	/// through attest/convert to the shape's terminal (`uploaded`) across the same
+	/// live dispatcher, which is what <see cref="FullPipeline_WalksQueuedToUploaded_AcrossThreeClaimCycles"/>
+	/// covers end to end; this test keeps its original focus (InSpec-stage credential
+	/// handling + HDF persistence + canary non-leakage).
 	/// </summary>
 	[Fact]
 	public async Task StoredCredential_ScanSucceeds_PersistsHdf_AndRestsAtAttestingStage()
 	{
 		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
 		const string canary = "invented-scan-e2e-canary-b7c3";
 		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync(canary);
 
@@ -159,14 +171,14 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		await dispatcher.StartAsync(CancellationToken.None);
 		try
 		{
-			await PollUntilStageMarkerAsync(jobIds[0]);
+			await PollUntilTerminalAsync(jobIds[0]);
 		}
 		finally
 		{
 			await dispatcher.StopAsync(CancellationToken.None);
 		}
 
-		Assert.Equal("attesting", await GetJobFieldAsync(jobIds[0], "stage"));
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
 		string hdfPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.json");
 		Assert.True(File.Exists(hdfPath), $"expected HDF report at '{hdfPath}'.");
 
@@ -178,6 +190,8 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	public async Task ExitCode100_IsMappedToSuccess_NotFailure()
 	{
 		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "exit100");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
 		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-exit100-canary");
 
 		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
@@ -189,14 +203,14 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		await dispatcher.StartAsync(CancellationToken.None);
 		try
 		{
-			await PollUntilStageMarkerAsync(jobIds[0]);
+			await PollUntilTerminalAsync(jobIds[0]);
 		}
 		finally
 		{
 			await dispatcher.StopAsync(CancellationToken.None);
 		}
 
-		Assert.Equal("attesting", await GetJobFieldAsync(jobIds[0], "stage"));
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
 	}
 
 	/// <summary>A non-auth InSpec/transport failure maps to `failed` with a log-tail job event, never a thrown exception.</summary>
@@ -263,6 +277,8 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	public async Task EphemeralCredential_UsedWhenJobCredentialIdIsNull_NeverFallsBackToStoredCredential()
 	{
 		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
 		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-unused-stored-secret", username: "stored-user@example.internal");
 
 		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
@@ -277,14 +293,18 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		await dispatcher.StartAsync(CancellationToken.None);
 		try
 		{
-			await PollUntilStageMarkerAsync(jobIds[0]);
+			await PollUntilTerminalAsync(jobIds[0]);
 		}
 		finally
 		{
 			await dispatcher.StopAsync(CancellationToken.None);
 		}
 
-		Assert.Equal("attesting", await GetJobFieldAsync(jobIds[0], "stage"));
+		// #275: attest/convert now run for real (no longer a stub dead-end), so the
+		// pipeline reaches the shape's terminal -- this test's own focus is the
+		// ephemeral-credential consumption during the InSpec stage, which already
+		// happened by the time the job reaches its terminal state.
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
 
 		// The ephemeral entry was consumed (single-shot TryTake) -- a second attempt
 		// to take it must fail, proving the handler actually took it rather than
@@ -358,23 +378,109 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	/// claiming it fresh.
 	/// </summary>
 	[Fact]
-	public async Task JobClaimedAtAttestingMarker_FailsCleanly_NotImplemented()
+	public async Task FullPipeline_WalksQueuedToUploaded_AcrossThreeClaimCycles()
 	{
-		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-attest-marker-canary");
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-full-pipeline-canary");
 
 		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
 		string payload = JsonSerializer.Serialize(new { target_id = targetId });
 		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
 			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
 
-		ClaimedJob? claimed = await _repository.ClaimJobAsync("seed-worker", TimeSpan.FromMinutes(5), CancellationToken.None);
-		Assert.NotNull(claimed);
-		JobExecutionContext seedContext = new(
-			claimed!, "seed-worker",
-			new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, _redactor, NullLogger<JobEventPublisher>.Instance),
-			_repository, JobShape.Standard);
-		await seedContext.AdvanceAsync(JobStates.Attesting, "seed: attest reached", CancellationToken.None);
-		Assert.True(await _repository.RequeueAtStageAsync(jobIds[0], "seed-worker", JobStates.Attesting, "attesting", "seed", CancellationToken.None));
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		// Standard shape's terminal (ADR-0012/#298): the dispatcher forces Succeeded to
+		// `uploaded` here ("artifacts ready" -- the STIG Manager upload itself is #25).
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		string hdfPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.json");
+		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
+		Assert.True(File.Exists(hdfPath), $"expected HDF at '{hdfPath}'.");
+		Assert.True(File.Exists(cklPath), $"expected CKL at '{cklPath}'.");
+	}
+
+	/// <summary>
+	/// #275 AC: an expired attestation is never applied (control stays Open), is
+	/// logged as a WARN job.log event, and is recorded in the results output (here:
+	/// jobs.note at the attest->converting requeue) so #27's sidebar can show
+	/// expired-skips.
+	/// </summary>
+	[Fact]
+	public async Task ExpiredAttestation_IsNotApplied_LogsWarn_AndRecordsInNote()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-expired-attest-canary");
+
+		string profile = "invented-vsphere-stig";
+		Guid docId = Guid.NewGuid();
+		await _configDocs.SaveAsync(
+			docId, ConfigDocKinds.Attestation, profile, ConfigDocLayers.Target, targetId, "tester",
+			"status: Not_A_Finding\njustification: lapsed waiver\nexpires: 2020-01-01\n", CancellationToken.None);
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand warnQuery = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' AND payload::text LIKE '%Warning%' AND payload::text LIKE '%expired%'",
+			connection);
+		warnQuery.Parameters.AddWithValue(jobIds[0]);
+		Assert.True((long)(await warnQuery.ExecuteScalarAsync())! >= 1);
+
+		// jobs.note is overwritten by each subsequent AdvanceAsync/RequeueAtStageAsync
+		// call -- the earliest place the expired-skip fact is still legible after the
+		// convert stage ran is the job.log WARN asserted above; also confirm the
+		// attest->converting requeue note (captured mid-pipeline via job_events'
+		// job.state payload, which carries the note at the time of that transition)
+		// recorded the expired-skip, not just the WARN line.
+		await using NpgsqlCommand stateEventQuery = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.state' AND payload::text LIKE '%expired-skipped%'", connection);
+		stateEventQuery.Parameters.AddWithValue(jobIds[0]);
+		Assert.True((long)(await stateEventQuery.ExecuteScalarAsync())! >= 1);
+	}
+
+	/// <summary>A non-auth SAF attest failure maps to `failed` with a log-tail job event, never a thrown exception.</summary>
+	[Fact]
+	public async Task AttestFailure_MapsToFailed_WithLogTailEvent()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "failure");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-attest-failure-canary");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
 
 		JobDispatcherHostedService dispatcher = CreateDispatcher();
 		await dispatcher.StartAsync(CancellationToken.None);
@@ -388,8 +494,77 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		}
 
 		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
-		string note = await GetJobNoteAsync(jobIds[0]);
-		Assert.Contains("not_implemented", note, StringComparison.Ordinal);
+		Assert.Equal("attesting", await GetJobFieldAsync(jobIds[0], "stage"));
+		Assert.True(await EventTypeExistsAsync(JobEventTypes.JobLog, jobIds[0]));
+	}
+
+	/// <summary>
+	/// #275 AC / the #296 counters pattern: a job that fails at `converting` keeps
+	/// `stage = 'converting'` on its `failed` row (ADR-0012 point 5) -- resuming it
+	/// (seeded here the same way #298's precedent seeds a mid-pipeline marker) re-runs
+	/// only the convert stage, never re-running InSpec/attest.
+	/// </summary>
+	[Fact]
+	public async Task ResumeFromConvertingAfterFailure_ReRunsOnlyConvert()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "failure");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-resume-convert-canary");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService firstAttempt = CreateDispatcher();
+		await firstAttempt.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await firstAttempt.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.Equal("converting", await GetJobFieldAsync(jobIds[0], "stage"));
+		string hdfPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.json");
+		string attestedPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.attested.json");
+		DateTime hdfWrittenAt = File.GetLastWriteTimeUtc(File.Exists(attestedPath) ? attestedPath : hdfPath);
+
+		// Operator-facing retry (ADR-0012 point 5: "no such endpoint exists yet") --
+		// simulate it directly the same way #298's precedent seeded a mid-pipeline
+		// marker: move the row back to `queued`, keeping `stage = 'converting'` intact.
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand requeue = new(
+				"UPDATE jobs SET state = 'queued', claimed_by = NULL, lease_expires_at = NULL, heartbeat_at = NULL WHERE id = $1", connection);
+			requeue.Parameters.AddWithValue(jobIds[0]);
+			await requeue.ExecuteNonQueryAsync();
+		}
+
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		JobDispatcherHostedService secondAttempt = CreateDispatcher();
+		await secondAttempt.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await secondAttempt.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
+		Assert.True(File.Exists(cklPath));
+
+		// The HDF (or attested report) from the first attempt was never rewritten --
+		// proof the resumed execution re-ran only convert, not InSpec/attest.
+		Assert.Equal(hdfWrittenAt, File.GetLastWriteTimeUtc(File.Exists(attestedPath) ? attestedPath : hdfPath));
 	}
 
 	private async Task<(Guid TargetId, Guid CredentialId)> SeedVsphereTargetAsync(string secretValue, string? username = "administrator@example.internal")
@@ -476,32 +651,6 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		return (string)(await query.ExecuteScalarAsync())!;
 	}
 
-	/// <summary>
-	/// Polls the DURABLE stage marker, not the transient `state` column (JobStageDispatcherTests'
-	/// documented race): once this handler reports StageComplete, the live dispatcher's
-	/// poll loop immediately re-claims the resting `queued` row for the (not-yet-implemented)
-	/// `attesting` stage and fails it -- a real, correct next execution this test does not
-	/// care about -- so asserting `state == "queued"` at the moment this method returns
-	/// would race that reclaim. `stage` survives every subsequent claim/fail cycle, so
-	/// polling it alone is race-free proof the StageComplete requeue happened at all.
-	/// </summary>
-	private async Task PollUntilStageMarkerAsync(Guid jobId)
-	{
-		Stopwatch stopwatch = Stopwatch.StartNew();
-		while (stopwatch.Elapsed < TimeSpan.FromSeconds(30))
-		{
-			string stage = await GetJobFieldAsync(jobId, "stage");
-			if (!string.IsNullOrEmpty(stage))
-			{
-				return;
-			}
-
-			await Task.Delay(TimeSpan.FromMilliseconds(100));
-		}
-
-		Assert.Fail("Condition not met within 30s.");
-	}
-
 	private async Task PollUntilTerminalAsync(Guid jobId)
 	{
 		Stopwatch stopwatch = Stopwatch.StartNew();
@@ -524,7 +673,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand command = new(
-			"TRUNCATE TABLE targets, sites RESTART IDENTITY CASCADE", connection);
+			"TRUNCATE TABLE config_versions, config_docs, targets, sites RESTART IDENTITY CASCADE", connection);
 		await command.ExecuteNonQueryAsync();
 	}
 }
