@@ -27,11 +27,11 @@ public sealed class ErrorEnvelopeTests : IClassFixture<WaypointApiFactory>
 	}
 
 	[Fact]
-	public async Task ProtectedStub_WithoutAuthentication_Returns401WithErrorEnvelope()
+	public async Task ProtectedEndpoint_WithoutAuthentication_Returns401WithErrorEnvelope()
 	{
 		HttpClient client = _factory.CreateClient();
 
-		HttpResponseMessage response = await client.GetAsync("/api/v1/_stub/items");
+		HttpResponseMessage response = await client.GetAsync("/api/v1/catalog/artifacts");
 
 		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
 		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "unauthenticated");

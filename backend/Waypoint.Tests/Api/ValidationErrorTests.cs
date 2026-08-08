@@ -76,7 +76,7 @@ public sealed class ValidationErrorTests : IClassFixture<WaypointApiFactory>, IC
 		client.DefaultRequestHeaders.Add(TestAuthHandler.RoleHeaderName, "Admin");
 
 		// "limit" binds to an int on PageRequest; "abc" cannot convert.
-		HttpResponseMessage response = await client.GetAsync("/api/v1/_stub/items?limit=abc");
+		HttpResponseMessage response = await client.GetAsync("/api/v1/catalog/artifacts?limit=abc");
 
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 		string body = await response.Content.ReadAsStringAsync();

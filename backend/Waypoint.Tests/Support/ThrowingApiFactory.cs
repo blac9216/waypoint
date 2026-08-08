@@ -32,7 +32,7 @@ namespace Waypoint.Tests.Support;
 /// </summary>
 public sealed class ThrowingApiFactory : WaypointApiFactory
 {
-	/// <summary>Route that always throws. Deliberately outside <c>api/v1/_stub</c> — this is not a scaffold convention, it's a fault injector.</summary>
+	/// <summary>Route that always throws. Deliberately outside <c>api/v1</c> resource routes — this is not a scaffold convention, it's a fault injector.</summary>
 	public const string ThrowPath = "/api/v1/_test/throw";
 
 	/// <summary>Route that flushes a partial body first, then throws — the started-response fault (#76) an SSE stream would hit mid-flight.</summary>
