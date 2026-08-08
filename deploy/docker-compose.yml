@@ -81,6 +81,23 @@ services:
       # deploy/README.md "Bring-up" for how to compute it. Never commit a
       # real hash (or the plaintext password it hashes) to this repo.
       LocalAuth__AdminPasswordHash: "${WAYPOINT_ADMIN_PASSWORD_HASH:-}"
+      # Postgres connection (#103): backend/appsettings.json bakes in a default
+      # ConnectionStrings:Waypoint that happens to match the postgres service's
+      # own defaults below, so an unconfigured stack still connects out of the
+      # box (issue #4). But the two are not actually linked - Compose has no
+      # way to interpolate one service's environment from another's inline, so
+      # an operator who overrides POSTGRES_USER/PASSWORD/DB (the whole point of
+      # the `${...:-default}` on the postgres service) needs the backend to
+      # follow. This composes the standard ASP.NET Core double-underscore
+      # environment override (Microsoft.Extensions.Configuration.EnvironmentVariables;
+      # same mechanism as LocalAuth__AdminPasswordHash above) from the exact
+      # same POSTGRES_* variables, so one set of overrides in .env covers both
+      # containers. Host/port/sslmode are dev-stack constants, not operator
+      # knobs: `postgres` is the internal-network service name (never resolvable
+      # outside this compose stack) and 5432 is the container's fixed listen
+      # port from the postgres:16-alpine image, so neither varies with the
+      # operator's credential choice.
+      ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=${POSTGRES_USER:-waypoint};Password=${POSTGRES_PASSWORD:-waypoint_dev_only}"
     volumes:
       - artifacts:/var/lib/waypoint/artifacts
       # Dev-only, gitignored, operator-borrowed depot token/config + the

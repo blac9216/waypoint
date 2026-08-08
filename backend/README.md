@@ -97,6 +97,11 @@ that shape.
   `appsettings.json`'s default connection string matches
   `deploy/docker-compose.yml`'s `postgres` service defaults (dev-only credentials
   already committed there), so the image works against the dev stack unmodified.
+  `deploy/docker-compose.yml` also sets `ConnectionStrings__Waypoint` on the
+  `backend` service, composed from the same `POSTGRES_USER`/`POSTGRES_PASSWORD`/
+  `POSTGRES_DB` variables the `postgres` service reads (#103) — an operator who
+  overrides those in `deploy/.env` does not need to separately override the
+  backend's connection string too; both containers move together.
 - **Deviations from the contract sketch** (both because M2 — sites/targets/inventory
   — isn't built yet):
   - `jobs.run_id` is **nullable**. Only the scan/remediate job types are ever fanned

@@ -159,6 +159,11 @@ the frontend bundle).
    comes up healthy and serves `/api/v1/health`, it just refuses every login
    (fails closed by design; see `backend/README.md` "Run locally").
 
+   Changing `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` here is enough on
+   its own — the `backend` service composes its `ConnectionStrings__Waypoint`
+   from the same three variables (#103), so there is no separate connection
+   string to keep in sync.
+
 4. Bring up the stack from `deploy/`:
 
    ```bash
