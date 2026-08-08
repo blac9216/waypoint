@@ -199,7 +199,7 @@ export function fetchAttestationResolution(profile: string, targetId: string): P
  * "state model drives presentation" convention `LiveRunScreen`'s
  * `stateColor` uses. An upload happens after a job reaches `uploaded`; prior
  * states read as "pending" (nothing has been attempted yet), and `failed`/
- * `auth-failed` read as "not uploaded" rather than a false "conflict" — a
+ * `auth-failed` read as `not-uploaded` rather than a false "conflict" — a
  * true 409 conflict is a distinct outcome this function cannot see from job
  * state alone and is left to the (not yet implemented) artifacts endpoint's
  * own `uploadStatus` field.
@@ -211,7 +211,7 @@ export function stigManagerStatusLabel(state: string): string {
 			return "uploaded";
 		case "failed":
 		case "auth-failed":
-			return "not uploaded";
+			return "not-uploaded";
 		default:
 			return "pending";
 	}

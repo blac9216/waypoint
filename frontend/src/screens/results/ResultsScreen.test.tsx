@@ -217,6 +217,18 @@ describe("ResultsScreen", () => {
 		expect(button).toBeDisabled();
 	});
 
+	it("counts the failed job in the Not uploaded stat (regression: label/token mismatch)", async () => {
+		installFetchMock();
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getByText("Not uploaded")).toBeInTheDocument());
+		// RUN_JOBS holds one uploaded and one failed job; the failed one must
+		// be counted, not silently dropped by a "not uploaded" vs "not-uploaded"
+		// string-convention mismatch (round-1 review blocker on PR #300).
+		const statValue = screen.getByText("Not uploaded").nextElementSibling;
+		expect(statValue?.textContent).toBe("1");
+	});
+
 	it("renders the STIG Manager retry stub as disabled, referencing issue #25", async () => {
 		installFetchMock();
 		renderWithAuth();
