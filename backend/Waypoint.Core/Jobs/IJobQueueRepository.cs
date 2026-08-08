@@ -164,6 +164,26 @@ public interface IJobQueueRepository
 	/// inverse of <see cref="CheckConsecutiveAuthFailuresAsync"/>.
 	/// </summary>
 	Task<CredentialUnblockResult> UnblockCredentialAsync(Guid credentialId, string? reason, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// <c>POST /runs/{id}/resume-blocked</c> (docs/api-contract.md, ADR-0008): unlike
+	/// <see cref="UnblockCredentialAsync"/>'s same-credential retry, this reassigns the
+	/// run's halted job set onto a <b>different, caller-supplied replacement
+	/// credential</b> -- a true swap, not a retry. Scoped to exactly one run: only that
+	/// run's <c>blocked</c> jobs move, never every job system-wide that happens to
+	/// reference the same halted credential (a sibling run blocked by the same
+	/// credential is untouched and still needs its own resume-blocked call). Under the
+	/// same <c>FOR UPDATE</c> halt-lock discipline as <see cref="UnblockCredentialAsync"/>,
+	/// this: (1) locks and reads the run's distinct halted credential(s) from its
+	/// <c>blocked</c> jobs; (2) locks and validates the replacement credential; (3)
+	/// updates <c>jobs.credential_id</c> old-&gt;new for that job set; (4) writes an
+	/// <c>audit_log</c> row carrying both credential identities; (5) clears the block
+	/// and moves those jobs back to <c>queued</c>, unblocking the run. See
+	/// <see cref="CredentialSwapOutcome"/> for the failure modes the caller maps to
+	/// HTTP status codes.
+	/// </summary>
+	Task<CredentialSwapResult> SwapAndResumeBlockedCredentialAsync(
+		Guid runId, Guid replacementCredentialId, string actor, string? reason, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -209,3 +229,53 @@ public sealed record AuthFailureHaltResult(bool HaltTripped, IReadOnlyList<Guid>
 /// is false when the credential was not halted (idempotent no-op).
 /// </summary>
 public sealed record CredentialUnblockResult(bool WasHalted, IReadOnlyList<Guid> UnblockedRunIds, IReadOnlyList<Guid> UnblockedJobIds);
+
+/// <summary>
+/// The failure modes <see cref="IJobQueueRepository.SwapAndResumeBlockedCredentialAsync"/>
+/// can report -- the API layer maps each to a specific status code (see
+/// <c>RunsController.ResumeBlockedRun</c>). <see cref="Swapped"/> is the only success
+/// case.
+/// </summary>
+public enum CredentialSwapOutcome
+{
+	/// <summary>No such run.</summary>
+	RunNotFound,
+
+	/// <summary>The run exists but has no credential-halted <c>blocked</c> jobs to resume.</summary>
+	RunNotHalted,
+
+	/// <summary>
+	/// The run's blocked jobs reference more than one distinct halted credential -- the
+	/// single-replacement-credential contract has no unambiguous target. Not observed
+	/// under the current fan-out shape (one credential per run), but the primitive does
+	/// not assume it.
+	/// </summary>
+	AmbiguousHaltedCredential,
+
+	/// <summary>No credential row with the supplied replacement id.</summary>
+	ReplacementCredentialNotFound,
+
+	/// <summary>The replacement credential is itself queue-halted -- swapping onto it would immediately re-block the run.</summary>
+	ReplacementCredentialHalted,
+
+	/// <summary>
+	/// The replacement credential's <c>credential_type</c> does not match the halted
+	/// credential's type -- e.g. swapping an <c>ssh</c> credential onto jobs that were
+	/// authenticating with a <c>vcenter</c> credential.
+	/// </summary>
+	ReplacementCredentialTypeMismatch,
+
+	/// <summary>The swap succeeded: <c>jobs.credential_id</c> moved old-&gt;new for the run's halted job set, the block cleared, and the jobs are queued again.</summary>
+	Swapped,
+}
+
+/// <summary>
+/// The outcome plus (on <see cref="CredentialSwapOutcome.Swapped"/>) the database
+/// effects of a credential swap-and-resume. <see cref="OldCredentialId"/> and
+/// <see cref="NewCredentialId"/> are populated on success only.
+/// </summary>
+public sealed record CredentialSwapResult(
+	CredentialSwapOutcome Outcome,
+	Guid? OldCredentialId,
+	Guid? NewCredentialId,
+	IReadOnlyList<Guid> ResumedJobIds);

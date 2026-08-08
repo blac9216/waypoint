@@ -938,6 +938,219 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		return new CredentialUnblockResult(WasHalted: true, unblockedRunIds, unblockedJobIds);
 	}
 
+	/// <summary>
+	/// True swap semantics for <c>POST /runs/{id}/resume-blocked</c> (docs/api-contract.md,
+	/// ADR-0008) -- see <see cref="IJobQueueRepository.SwapAndResumeBlockedCredentialAsync"/>
+	/// for the contract. Built alongside <see cref="UnblockCredentialAsync"/>, not as a
+	/// replacement for it: that method stays the "retry with the same credential"
+	/// primitive; this one is "an Admin swapped in a different credential and wants the
+	/// run's blocked work re-queued under it."
+	///
+	/// Locking follows the same idiom as the halt/unblock pair: the affected credential
+	/// row(s) are locked <c>FOR UPDATE</c> before any write, so a concurrent halt trip or
+	/// unblock against the same credential serializes against this swap rather than
+	/// interleaving with it.
+	/// </summary>
+	public async Task<CredentialSwapResult> SwapAndResumeBlockedCredentialAsync(
+		Guid runId, Guid replacementCredentialId, string actor, string? reason, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(actor);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		// Step 1: does the run exist, and which credential(s) are its blocked jobs
+		// halted on? Lock the run row itself (FOR UPDATE) so a concurrent abort/pause
+		// cannot race the swap.
+		await using (NpgsqlCommand lockRun = new("SELECT id FROM runs WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockRun.Parameters.AddWithValue(runId);
+			object? found = await lockRun.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+			if (found is null)
+			{
+				await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+				return new CredentialSwapResult(CredentialSwapOutcome.RunNotFound, null, null, []);
+			}
+		}
+
+		List<Guid> distinctHaltedCredentialIds = [];
+		await using (NpgsqlCommand findHalted = new(
+			"SELECT DISTINCT credential_id FROM jobs WHERE run_id = $1 AND state = 'blocked' AND credential_id IS NOT NULL",
+			connection, transaction))
+		{
+			findHalted.Parameters.AddWithValue(runId);
+			await using NpgsqlDataReader reader = await findHalted.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				distinctHaltedCredentialIds.Add(reader.GetGuid(0));
+			}
+		}
+
+		if (distinctHaltedCredentialIds.Count == 0)
+		{
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return new CredentialSwapResult(CredentialSwapOutcome.RunNotHalted, null, null, []);
+		}
+
+		if (distinctHaltedCredentialIds.Count > 1)
+		{
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return new CredentialSwapResult(CredentialSwapOutcome.AmbiguousHaltedCredential, null, null, []);
+		}
+
+		Guid oldCredentialId = distinctHaltedCredentialIds[0];
+
+		// Lock the halted credential row -- same FOR UPDATE the halt/unblock pair uses --
+		// so a concurrent halt trip or unblock against it serializes against this swap.
+		await using (NpgsqlCommand lockOld = new("SELECT id FROM credentials WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockOld.Parameters.AddWithValue(oldCredentialId);
+			await lockOld.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// Step 2: validate the replacement credential -- exists, not itself halted, and
+		// (where enforceable) the same credential_type as the one it is replacing. There
+		// is no target/job type-linkage in the schema today (jobs.target_id has no FK to
+		// targets, and no join exists anywhere from a job to a target's `kind`), so the
+		// only type check this primitive can make is against the halted credential's own
+		// type -- see IJobQueueRepository's doc comment.
+		string? replacementType = null;
+		bool replacementHalted = false;
+		bool replacementFound = false;
+		await using (NpgsqlCommand lockNew = new(
+			"SELECT credential_type, queue_halted FROM credentials WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockNew.Parameters.AddWithValue(replacementCredentialId);
+			await using NpgsqlDataReader reader = await lockNew.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				replacementFound = true;
+				replacementType = reader.GetString(0);
+				replacementHalted = reader.GetBoolean(1);
+			}
+		}
+
+		// The reader/command above are fully disposed by this point (the `await using`
+		// blocks closed before falling through here) -- rolling back while a reader is
+		// still open throws NpgsqlOperationInProgressException, so every early exit
+		// below happens strictly after that scope, never from inside it.
+		if (!replacementFound)
+		{
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return new CredentialSwapResult(CredentialSwapOutcome.ReplacementCredentialNotFound, null, null, []);
+		}
+
+		if (replacementHalted)
+		{
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return new CredentialSwapResult(CredentialSwapOutcome.ReplacementCredentialHalted, null, null, []);
+		}
+
+		string? oldType;
+		await using (NpgsqlCommand readOldType = new("SELECT credential_type FROM credentials WHERE id = $1", connection, transaction))
+		{
+			readOldType.Parameters.AddWithValue(oldCredentialId);
+			oldType = (string?)await readOldType.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		if (oldType is not null && !string.Equals(oldType, replacementType, StringComparison.Ordinal))
+		{
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return new CredentialSwapResult(CredentialSwapOutcome.ReplacementCredentialTypeMismatch, null, null, []);
+		}
+
+		// Step 3: swap jobs.credential_id old -> new for exactly this run's halted job
+		// set (scoped by run_id AND the old credential_id together, never every job
+		// system-wide that references the old credential -- a sibling run blocked by the
+		// same credential is untouched here).
+		List<Guid> resumedJobIds = [];
+		await using (NpgsqlCommand swap = new(
+			"""
+			UPDATE jobs SET credential_id = $3, state = 'queued', note = $4
+			WHERE run_id = $1 AND state = 'blocked' AND credential_id = $2
+			RETURNING id
+			""", connection, transaction))
+		{
+			swap.Parameters.AddWithValue(runId);
+			swap.Parameters.AddWithValue(oldCredentialId);
+			swap.Parameters.AddWithValue(replacementCredentialId);
+			swap.Parameters.AddWithValue(reason ?? "Credential swapped and resumed");
+			await using NpgsqlDataReader reader = await swap.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				resumedJobIds.Add(reader.GetGuid(0));
+			}
+		}
+
+		// Step 4: unblock the run itself now that its halted jobs have moved off the
+		// halted credential.
+		await using (NpgsqlCommand clearRunBlock = new(
+			"UPDATE runs SET blocked = false, blocked_reason = NULL WHERE id = $1", connection, transaction))
+		{
+			clearRunBlock.Parameters.AddWithValue(runId);
+			await clearRunBlock.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// Step 5: audit entry carrying BOTH credential identities -- "no audit, no
+		// secret" discipline, same table CredentialRepository.DeleteAsync writes to.
+		// Identity only, never secret material.
+		await using (NpgsqlCommand audit = new(
+			"""
+			INSERT INTO audit_log (event_type, actor, credential_id, run_id, detail)
+			VALUES ('credential.swapped', $1, $2, $3, $4::jsonb)
+			""", connection, transaction))
+		{
+			audit.Parameters.AddWithValue(actor);
+			audit.Parameters.AddWithValue(replacementCredentialId);
+			audit.Parameters.AddWithValue(runId);
+			audit.Parameters.AddWithValue(System.Text.Json.JsonSerializer.Serialize(new
+			{
+				run_id = runId,
+				old_credential_id = oldCredentialId,
+				new_credential_id = replacementCredentialId,
+				resumed_job_count = resumedJobIds.Count,
+				reason,
+			}));
+			await audit.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		LogCredentialSwappedAndResumed(runId, oldCredentialId, replacementCredentialId, resumedJobIds.Count);
+		await EmitCredentialSwappedAsync(runId, oldCredentialId, replacementCredentialId, resumedJobIds.Count, cancellationToken).ConfigureAwait(false);
+		return new CredentialSwapResult(CredentialSwapOutcome.Swapped, oldCredentialId, replacementCredentialId, resumedJobIds);
+	}
+
+	/// <summary>
+	/// Mirrors the halt trip's own <c>queue.state</c> emission (<see cref="EmitBornBlockedAsync"/>
+	/// / <c>JobDispatcherHostedService.HandleAuthFailureAsync</c>) -- same event type and
+	/// run/system-notice fan-out, since the frontend's <c>applyEvent</c> reducer already
+	/// treats any <c>queue.state</c> for this run as "the halt banner state changed."
+	/// <c>blocked: false</c> plus both credential ids distinguishes a swap-resume from a
+	/// same-credential unblock in the payload, for any consumer that cares which
+	/// happened. Emitted after commit ("nothing follows an emit in its transaction"),
+	/// best-effort like every event.
+	/// </summary>
+	private async Task EmitCredentialSwappedAsync(
+		Guid runId, Guid oldCredentialId, Guid newCredentialId, int resumedJobCount, CancellationToken cancellationToken)
+	{
+		if (_events is null)
+		{
+			return;
+		}
+
+		string payload = System.Text.Json.JsonSerializer.Serialize(new
+		{
+			blocked = false,
+			swapped = true,
+			old_credential_id = oldCredentialId,
+			new_credential_id = newCredentialId,
+			resumed_job_count = resumedJobCount,
+		});
+		await _events.EmitAsync(JobEventTypes.QueueState, null, runId, payload, cancellationToken).ConfigureAwait(false);
+		await _events.EmitAsync(JobEventTypes.SystemNotice, null, null, payload, cancellationToken).ConfigureAwait(false);
+	}
+
 	/// <summary>#147: a run fanned out into an already-halted credential is otherwise
 	/// invisible on SSE -- no auth failure occurs, so the dispatcher's halt path never
 	/// runs. Emitted after the transaction committed ("nothing follows an emit in its
@@ -995,6 +1208,9 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Credential {CredentialId} queue unblocked: {UnblockedRunCount} run(s) and {UnblockedJobCount} blocked job(s) released to queued")]
 	private partial void LogCredentialUnblocked(Guid credentialId, int unblockedRunCount, int unblockedJobCount);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Run {RunId} resumed by credential swap: {OldCredentialId} -> {NewCredentialId}, {ResumedJobCount} job(s) requeued")]
+	private partial void LogCredentialSwappedAndResumed(Guid runId, Guid oldCredentialId, Guid newCredentialId, int resumedJobCount);
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Recovered job {JobId} to {NewState} after expired lease (attempt {AttemptCount}/{MaxAttempts})")]
 	private partial void LogRecoveredJob(Guid jobId, string newState, int attemptCount, int maxAttempts);

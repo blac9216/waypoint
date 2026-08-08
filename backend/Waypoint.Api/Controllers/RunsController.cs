@@ -474,6 +474,62 @@ public sealed class RunsController : ControllerBase
 		return Ok(new RunActionResponse(id.ToString(), newState?.State ?? "aborted"));
 	}
 
+	/// <summary>
+	/// Swap a replacement credential onto a run's halted (credential queue-halted)
+	/// jobs and resume them -- docs/api-contract.md "resume-blocked", ADR-0008.
+	/// Admin-only (unlike pause/resume/abort's Operator+-own-runs gate): a credential
+	/// swap changes which service account authenticates future work against a target,
+	/// which is a stronger action than pausing/resuming dispatch. <c>credential_id</c>
+	/// in the body is the REPLACEMENT credential -- <see cref="IJobQueueRepository.SwapAndResumeBlockedCredentialAsync"/>
+	/// determines the halted credential being replaced from the run's own blocked job
+	/// set, so the caller never names it directly.
+	/// </summary>
+	[HttpPost("{id:guid}/resume-blocked")]
+	[RequireAdminRole]
+	[ProducesResponseType(typeof(ResumeBlockedResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<ResumeBlockedResponse>> ResumeBlocked(
+		Guid id, [FromBody] ResumeBlockedRequest request, CancellationToken cancellationToken)
+	{
+		if (!Guid.TryParse(request?.CredentialId, out Guid replacementCredentialId))
+		{
+			throw ApiException.Validation("A replacement 'credential_id' is required.", "credential_id must be a valid GUID.");
+		}
+
+		string actor = User.GetRequiredUsername();
+		CredentialSwapResult result = await _repository
+			.SwapAndResumeBlockedCredentialAsync(id, replacementCredentialId, actor, reason: null, cancellationToken)
+			.ConfigureAwait(false);
+
+		switch (result.Outcome)
+		{
+			case CredentialSwapOutcome.RunNotFound:
+				throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+			case CredentialSwapOutcome.RunNotHalted:
+				throw new ApiException(
+					System.Net.HttpStatusCode.Conflict, "run_not_halted",
+					"Run has no credential halt to resume from.", $"Run '{id}' is not blocked on a credential queue halt.");
+			case CredentialSwapOutcome.AmbiguousHaltedCredential:
+				throw new ApiException(
+					System.Net.HttpStatusCode.Conflict, "ambiguous_halted_credential",
+					"Run's blocked jobs reference more than one halted credential.",
+					$"Run '{id}' cannot be resumed with a single replacement credential.");
+			case CredentialSwapOutcome.ReplacementCredentialNotFound:
+				throw ApiException.NotFound("Replacement credential not found.", $"Credential '{replacementCredentialId}' does not exist.");
+			case CredentialSwapOutcome.ReplacementCredentialHalted:
+				throw new ApiException(
+					System.Net.HttpStatusCode.Conflict, "replacement_credential_halted",
+					"Replacement credential is itself queue-halted.", $"Credential '{replacementCredentialId}' has an active queue halt.");
+			case CredentialSwapOutcome.ReplacementCredentialTypeMismatch:
+				throw ApiException.Validation(
+					"Replacement credential type does not match the halted credential.",
+					$"Credential '{replacementCredentialId}' is not the same credential_type as the halted credential it would replace.");
+			case CredentialSwapOutcome.Swapped:
+			default:
+				return Ok(new ResumeBlockedResponse(
+					id.ToString(), result.OldCredentialId!.Value.ToString(), result.NewCredentialId!.Value.ToString(), result.ResumedJobIds.Count));
+		}
+	}
+
 	// -- mapping helpers ---------------------------------------------------
 
 	private static RunResponse MapRun(RunSummary run)

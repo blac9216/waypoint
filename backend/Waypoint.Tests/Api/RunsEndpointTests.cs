@@ -835,4 +835,11 @@ public sealed class FakeJobQueueRepository : IJobQueueRepository
 		_ = (credentialId, reason, cancellationToken);
 		return Task.FromResult(new CredentialUnblockResult(WasHalted: false, [], []));
 	}
+
+	public Task<CredentialSwapResult> SwapAndResumeBlockedCredentialAsync(
+		Guid runId, Guid replacementCredentialId, string actor, string? reason, CancellationToken cancellationToken)
+	{
+		_ = (runId, replacementCredentialId, actor, reason, cancellationToken);
+		return Task.FromResult(new CredentialSwapResult(CredentialSwapOutcome.RunNotHalted, null, null, []));
+	}
 }
