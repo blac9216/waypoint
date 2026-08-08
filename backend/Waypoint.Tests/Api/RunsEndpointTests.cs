@@ -58,11 +58,16 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	[Fact]
 	public async Task CreateRun_WithCyberRole_Returns202()
 	{
+		// Non-scan run_type: this only proves the [RequireCyberRole] floor lets a
+		// Cyber caller through to CreateRunAsync. Scan's own fan-out (site/target
+		// validation, per-target JobSpecs) is covered against real Postgres in
+		// ScanRunFanOutTests -- FakeJobQueueRepository here has no SiteRepository/
+		// TargetRepository-backed data to validate against.
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/runs");
 		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Cyber");
 		request.Content = new StringContent(
-			System.Text.Json.JsonSerializer.Serialize(new { run_type = "scan", scope = "{}" }),
+			System.Text.Json.JsonSerializer.Serialize(new { run_type = "download", scope = "{}" }),
 			System.Text.Encoding.UTF8, "application/json");
 
 		HttpResponseMessage response = await client.SendAsync(request);
@@ -126,13 +131,14 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	[Fact]
 	public async Task CreateRun_InitiatedByComesFromIdentity_NotFromBody()
 	{
+		// Non-scan run_type -- see CreateRun_WithCyberRole_Returns202's comment.
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/runs");
 		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Cyber");
 		// initiated_by is no longer part of the contract; a caller supplying it
 		// anyway must not influence the recorded initiator.
 		request.Content = new StringContent(
-			JsonSerializer.Serialize(new { run_type = "scan", scope = "{}", initiated_by = "mallory" }),
+			JsonSerializer.Serialize(new { run_type = "download", scope = "{}", initiated_by = "mallory" }),
 			System.Text.Encoding.UTF8, "application/json");
 
 		HttpResponseMessage response = await client.SendAsync(request);
@@ -591,11 +597,12 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	[Fact]
 	public async Task CreateRun_ReturnsRunId()
 	{
+		// Non-scan run_type -- see CreateRun_WithCyberRole_Returns202's comment.
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/runs");
 		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Cyber");
 		request.Content = new StringContent(
-			System.Text.Json.JsonSerializer.Serialize(new { run_type = "scan", scope = "{}" }),
+			System.Text.Json.JsonSerializer.Serialize(new { run_type = "download", scope = "{}" }),
 			System.Text.Encoding.UTF8, "application/json");
 
 		HttpResponseMessage response = await client.SendAsync(request);

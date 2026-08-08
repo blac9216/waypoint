@@ -15,12 +15,15 @@
 using System.Globalization;
 using System.Net;
 using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Pagination;
+using Waypoint.Core.Sites;
+using Waypoint.Infrastructure.Sites;
 
 namespace Waypoint.Api.Controllers;
 
@@ -34,13 +37,21 @@ public sealed class RunsController : ControllerBase
 {
 	private const string RemediateRunType = "remediate";
 	private const string RemediateConfirmation = "REMEDIATE";
+	private const string ScanRunType = "scan";
+	private const string ScanJobType = "scan";
 
 	private readonly IJobQueueRepository _repository;
+	private readonly SiteRepository _sites;
+	private readonly TargetRepository _targets;
 
-	public RunsController(IJobQueueRepository repository)
+	public RunsController(IJobQueueRepository repository, SiteRepository sites, TargetRepository targets)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
+		ArgumentNullException.ThrowIfNull(sites);
+		ArgumentNullException.ThrowIfNull(targets);
 		_repository = repository;
+		_sites = sites;
+		_targets = targets;
 	}
 
 	/// <summary>
@@ -85,6 +96,11 @@ public sealed class RunsController : ControllerBase
 	/// explicit <c>confirmation: "REMEDIATE"</c> body field — remediation is never
 	/// implicit (docs/api-contract.md `/runs`, CLAUDE.md key constraints). The
 	/// initiator is recorded from the authenticated identity, never from the body.
+	/// A <c>scan</c> run additionally validates its scope and fans out one <c>scan</c>
+	/// job per target (issue #273) before the run is created; every other run type
+	/// keeps the pre-#273 behavior of passing <c>scope</c> through uninterpreted (no
+	/// job rows created here -- their initiators, e.g. <c>DownloadsController</c>, own
+	/// their own fan-out).
 	/// </summary>
 	[HttpPost]
 	[RequireCyberRole]
@@ -111,11 +127,123 @@ public sealed class RunsController : ControllerBase
 		}
 
 		string initiatedBy = User.GetRequiredUsername();
+
+		if (string.Equals(request.RunType, ScanRunType, StringComparison.Ordinal))
+		{
+			return Accepted(await CreateScanRunAsync(request, initiatedBy, cancellationToken).ConfigureAwait(false));
+		}
+
 		Guid runId = await _repository.CreateRunAsync(
 			request.RunType, request.Scope, request.CredentialId, initiatedBy, cancellationToken)
 			.ConfigureAwait(false);
 
 		return Accepted(new RunCreatedResponse(runId.ToString()));
+	}
+
+	/// <summary>
+	/// Validates a scan run's <c>scope</c> (site + optional target selection, all must
+	/// resolve to existing rows -- docs/api-contract.md `/runs`: "POST body: site_id,
+	/// scope... credential"), then creates the run and fans out one <c>scan</c>
+	/// <see cref="JobSpec"/> per target, ordered by <see cref="ScanTargetPriority"/>.
+	/// Every target's job is created up front in one <see cref="IJobQueueRepository.FanOutJobsAsync"/>
+	/// call -- an individual target's later execution failure cannot affect its
+	/// siblings (ADR-0008 Continue policy; each is an independent job row) -- but
+	/// validation happens entirely before that call so a bad site/target/credential
+	/// reference never leaves a partially created run.
+	/// </summary>
+	private async Task<RunCreatedResponse> CreateScanRunAsync(
+		RunCreateRequest request, string initiatedBy, CancellationToken cancellationToken)
+	{
+		ScanScope scope;
+		try
+		{
+			scope = ScanScopeParser.Parse(request.Scope);
+		}
+		catch (FormatException exception)
+		{
+			throw ApiException.Validation("scope is not valid.", exception.Message);
+		}
+
+		if (scope.SiteId is not { } siteId)
+		{
+			throw ApiException.Validation(
+				"scope.site_id is required for a scan run.",
+				"Set \"scope\": { \"site_id\": \"<uuid>\" } (optionally with \"target_ids\") in the request body.");
+		}
+
+		Site? site = await _sites.GetAsync(siteId, cancellationToken).ConfigureAwait(false);
+		if (site is null)
+		{
+			throw ApiException.NotFound("Site not found.", $"Site '{siteId}' does not exist.");
+		}
+
+		IReadOnlyList<Target> targets = await ResolveScanTargetsAsync(siteId, scope.TargetIds, cancellationToken).ConfigureAwait(false);
+		if (targets.Count == 0)
+		{
+			throw ApiException.Validation(
+				"Site has no targets to scan.",
+				$"Site '{siteId}' has no targets; add at least one before starting a scan.");
+		}
+
+		List<JobSpec> specs = [];
+		foreach (Target target in targets)
+		{
+			Guid? credentialId = request.CredentialId ?? target.CredentialId;
+			string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId });
+			specs.Add(new JobSpec(
+				ScanJobType,
+				ScanTargetPriority.ForTargetKind(target.Kind),
+				TargetId: target.Id,
+				TargetName: target.Name,
+				CredentialId: credentialId,
+				Payload: payload));
+		}
+
+		Guid runId = await _repository.CreateRunAsync(
+			request.RunType, request.Scope, request.CredentialId, initiatedBy, cancellationToken)
+			.ConfigureAwait(false);
+		await _repository.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);
+
+		return new RunCreatedResponse(runId.ToString());
+	}
+
+	/// <summary>
+	/// Resolves the scan's target set: every target under the site when
+	/// <paramref name="requestedIds"/> is null/empty (a full-site scan), or exactly the
+	/// requested ids -- each of which must belong to <paramref name="siteId"/>, so a
+	/// target id from a different site is a clean 404 rather than silently scanning
+	/// the wrong site's target.
+	/// </summary>
+	private async Task<IReadOnlyList<Target>> ResolveScanTargetsAsync(
+		Guid siteId, IReadOnlyList<Guid>? requestedIds, CancellationToken cancellationToken)
+	{
+		if (requestedIds is null || requestedIds.Count == 0)
+		{
+			// PageRequest.Limit clamps to its own MaxLimit (200) -- a site with more
+			// targets than that is not a case this M1 slice needs to handle (no site
+			// in the fixtures or the real lab approaches that count); revisit with a
+			// paged fetch loop if that ever changes.
+			(IReadOnlyList<Target> items, _) = await _targets
+				.ListAsync(siteId, new PageRequest { Limit = 200 }, cancellationToken)
+				.ConfigureAwait(false);
+			return items;
+		}
+
+		List<Target> resolved = [];
+		foreach (Guid targetId in requestedIds)
+		{
+			Target? target = await _targets.GetAsync(targetId, cancellationToken).ConfigureAwait(false);
+			if (target is null || target.SiteId != siteId)
+			{
+				throw ApiException.NotFound(
+					"Target not found.",
+					$"Target '{targetId}' does not exist under site '{siteId}'.");
+			}
+
+			resolved.Add(target);
+		}
+
+		return resolved;
 	}
 
 	/// <summary>
