@@ -451,8 +451,9 @@ if (-not (Get-Command -Name 'Write-Log' -ErrorAction SilentlyContinue)) {
 # The session token and cookie are secret material for as long as they are valid (they
 # grant NSX Manager API access) -- they are held only in local variables for the
 # lifetime of this function call, are never written to $ReportPath or any other file,
-# and are passed to `inspec exec` via a generated inputs file that lives under the
-# artifact store's own directory (not a watched/logged
+# and are passed to `inspec exec` via a generated inputs file (created 0600, owner-only,
+# so the token is never world-readable during its on-disk window -- issue #304's pattern
+# for this file) that lives under the artifact store's own directory (not a watched/logged
 # path) exactly as the base vSphere path passes the vCenter password via environment
 # variables rather than argv: neither ever appears in the captured process command line.
 # On any throw the caught exception message is reduced by Get-NsxAuthFailureReason before
@@ -572,6 +573,19 @@ function Invoke-WaypointNsxScan {
 	$InputsContent = "nsxManager: '$Manager'`nsessionToken: '$($Session.Token)'`nsessionCookieId: '$($Session.Cookie)'`n"
 
 	try {
+		# Create the file 0600 (owner read/write only) BEFORE the secret is written, so the
+		# session token + cookie are never world-readable during their on-disk window on the
+		# shared artifact-store volume (issue #304's 0600 pattern, applied to this file --
+		# the vSphere path avoids disk entirely via env vars; NSX's `local` transport needs an
+		# --input-file). New-Item creates it empty; File.SetUnixFileMode narrows the mode on
+		# Linux before Set-Content fills it. The `finally` deletion below still removes it once
+		# the invocation completes.
+		New-Item -ItemType File -Path $InputsPath -Force -ErrorAction Stop | Out-Null
+		if (-not $IsWindows) {
+			[System.IO.File]::SetUnixFileMode(
+				$InputsPath,
+				[System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserWrite)
+		}
 		Set-Content -Path $InputsPath -Value $InputsContent -ErrorAction Stop
 
 		$InspecArguments = "`"$ProfilePath`" -t local --input-file `"$InputsPath`" --reporter=json:`"$ReportPath`" --show-progress --enhanced-outcomes"
