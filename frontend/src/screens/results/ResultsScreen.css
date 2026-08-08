@@ -410,6 +410,14 @@
 	color: var(--txt2);
 }
 
+/* Uncountable (counts_available:false) — an explicit "n/a" state, never a
+   bare 0, so a corrupt/absent HDF cannot render as a clean compliant row
+   (issue #307). Reuses the same --na token the KPI tiles' own "ATTESTED
+   N/A" state uses. */
+.results__severity--na {
+	color: var(--na);
+}
+
 /* --- Upload status pill (the one place ellipsis IS correct per the design
    brief: "Upload status is a pill... with ellipsis so it truncates inside
    its cell" — this is a free-text status string, not a severity label, so
@@ -473,6 +481,14 @@
 	border: 1px solid var(--warnd);
 	padding: 0 4px;
 	border-radius: 2px;
+}
+
+/* Non-expired applied-attestation rows (from GET /runs/{id}/attestations-applied)
+   read as neutral/informational rather than the warning treatment expired
+   rows get. */
+.results__attest-scope-pill--active {
+	color: var(--txt3);
+	border-color: var(--soft);
 }
 
 .results__attest-meta {

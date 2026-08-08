@@ -13,32 +13,29 @@
  *      incidental coupling between two independently-evolving screens.
  *
  *   2. Per-target artifacts, STIG Manager upload status, and
- *      attestations-applied: `docs/api-contract.md` documents
- *      `/runs/{id}/artifacts`, `/jobs/{id}/artifacts/{kind}`, and
- *      `/runs/{id}/attestations-applied`, but none of the three exist on the
- *      backend yet (`RunsController`/`JobsController` only implement
- *      list/detail/jobs/pause/resume/abort/resume-blocked/cancel as of this
- *      PR — see their doc comments). This module still defines the fetch
- *      functions against the documented shapes so the screen is ready the
- *      moment the backend lands them (same "build against the contract"
- *      convention `startscan.ts` and `catalog.ts` already use), and the
- *      screen degrades to an explicit "not available yet" empty state
- *      instead of crashing when the calls 404. Tracked as issue #299
- *      (backend REST surface for these three routes; blocked on #275
- *      landing artifact persistence first).
+ *      attestations-applied: `GET /runs/{id}/artifacts`,
+ *      `GET /jobs/{id}/artifacts/{kind}`, and
+ *      `GET /runs/{id}/attestations-applied` are implemented
+ *      (`RunsController`/`JobsController`, issue #299/PR #305). The wire
+ *      shapes below (`RunArtifactRow`, `AppliedAttestation`) are matched
+ *      field-for-field against `RunArtifactResponse`/`AppliedAttestationResponse`
+ *      (RunContracts.cs), not guessed — see each interface's own doc comment
+ *      for the two subtleties that don't show up in a casual read of the
+ *      issue: `counts_available` gating on artifacts, and `attestations-applied`
+ *      being live resolution rather than recorded history (issue #307).
  *
- *   Attestations-applied specifically: the full `/runs/{id}/attestations-applied`
- *   endpoint (control, scope, justification, author/version, expired-skips)
- *   does not exist yet either (also #299). What DOES exist and is merged is
- *   `GET /config-docs/resolve?profile&target&kind=attestation`
- *   (`ConfigDocsController.Resolve`, issue #266), which returns
- *   `attestation_expired`/`attestation_expires_at` per (profile, target).
- *   `fetchAttestationResolution` uses that endpoint as a partial substitute
- *   in `ResultsScreen.tsx` — it can show which target/profile pairs
- *   currently resolve to an expired waiver, but not the full per-control
- *   waiver ledger #299/#275 will eventually populate `attestations-applied`
- *   from. This is a deliberate, narrower stand-in, not a guess at their
- *   shape.
+ *   Attestations-applied: `fetchAttestationsApplied` calls the real
+ *   endpoint. It has **no persisted per-control waiver ledger** behind it
+ *   (RunContracts.cs's `AppliedAttestationResponse` doc comment) — every row
+ *   is derived live, at request time, by re-resolving each scanned target's
+ *   attestation config-doc exactly the way `fetchAttestationResolution`
+ *   below (against `GET /config-docs/resolve`) already does. `derivation`
+ *   is always `"live-resolution"` and `resolved_at` is this request's
+ *   clock, not a scan-time timestamp; there is deliberately no `applied_at`.
+ *   The persisted at-scan-time ledger is tracked as issue #306.
+ *   `fetchAttestationResolution`/`ConfigDocResolution` stay as-is below:
+ *   `ResultsScreen.tsx`'s sidebar still uses them for the "which are
+ *   currently expired" slice, now alongside the real endpoint.
  */
 import { apiGet } from "../../lib/api";
 
@@ -113,58 +110,115 @@ export type Severity = "CAT I" | "CAT II" | "CAT III";
 
 export const SEVERITIES: Severity[] = ["CAT I", "CAT II", "CAT III"];
 
-/** One target row of `GET /runs/{id}/artifacts` (documented, not yet
- * implemented — see module doc). Severity counts are OPEN findings only,
- * matching the prototype's per-target table and the KPI tiles above it. */
+/** One target row of `GET /runs/{id}/artifacts` (`RunArtifactResponse`,
+ * RunContracts.cs — issue #299/#305). Field names and nullability match the
+ * wire exactly (snake_case, per `lib/api.ts`'s "kept snake_case in the TS
+ * types too, deliberately" convention) rather than being translated to
+ * camelCase at this boundary.
+ *
+ * Severity counts are OPEN findings only, matching the prototype's
+ * per-target table and the KPI tiles above it. `counts_available` gates the
+ * three CAT counts: `false` means the HDF was absent or unparseable and the
+ * counts are omitted from the response entirely (`undefined` here, not
+ * `0`) — a consumer MUST check `counts_available` before trusting them, and
+ * MUST NOT render an absent count as `0`, which would read as a
+ * clean/compliant row instead of "could not count" (api-contract.md
+ * "countability is explicit", #299 round-1 review blocker). */
 export interface RunArtifactRow {
+	job_id: string;
 	target: string;
-	benchmark: string;
-	catIOpen: number;
-	catIIOpen: number;
-	catIIIOpen: number;
-	/** Available artifact kinds for this target, e.g. `["ckl", "hdf"]`. */
-	artifactKinds: string[];
-	/** STIG Manager upload status, derived from job state at render time by
-	 * `stigManagerStatus` below when the endpoint's own status field is
-	 * absent — kept as an explicit union so a stub/placeholder value can't
-	 * silently pass through as a real status. */
-	uploadStatus: "uploaded" | "not-uploaded" | "conflict" | "pending";
+	benchmark: string | null;
+	counts_available: boolean;
+	cat_i_open?: number;
+	cat_ii_open?: number;
+	cat_iii_open?: number;
+	/** Available artifact kinds for this target, e.g. `["ckl", "hdf"]` —
+	 * reflects file *presence* on disk, independent of `counts_available`
+	 * (a present-but-corrupt HDF still lists `"hdf"` here). */
+	artifact_kinds: string[];
+	/** STIG Manager upload status. The endpoint never returns `"conflict"`
+	 * today (RunArtifactResponse's doc comment: only a real upload attempt
+	 * can report that) but the type stays a superset of what's possible so a
+	 * future real conflict isn't a breaking type change. */
+	upload_status: "uploaded" | "not-uploaded" | "conflict" | "pending";
 }
 
 export function fetchRunArtifacts(runId: string): Promise<RunArtifactRow[]> {
 	return apiGet<RunArtifactRow[]>(`/runs/${runId}/artifacts`);
 }
 
-/** `GET /jobs/{id}/artifacts/{kind}` — CKL/HDF download route (documented,
- * not yet implemented). Returns the URL to hand to an `<a>`/`fetch`, not the
- * bytes — callers decide whether to navigate or fetch-and-zip. */
+/** `GET /jobs/{id}/artifacts/{kind}` — CKL/HDF download route. Returns the
+ * URL to hand to an `<a>`/`fetch`, not the bytes — callers decide whether to
+ * navigate or fetch-and-zip. */
 export function artifactDownloadUrl(jobId: string, kind: "ckl" | "hdf"): string {
 	return `/api/v1/jobs/${jobId}/artifacts/${kind}`;
 }
 
 /** `GET /runs/{id}/artifacts?bundle=zip` — the server-side bundle route the
- * contract documents. Not used by `exportCklBundle` below (that builds the
- * zip client-side per the issue's AC, since the backend route doesn't exist
- * yet either); kept here as the eventual replacement once it lands, so the
- * follow-up is a one-line swap rather than a new fetch shape. */
+ * contract documents (PR #305 did not implement it; the frontend's
+ * client-side `zip.ts` covers the export button today). Not used by
+ * `downloadCklBundle` in `ResultsScreen.tsx`; kept here as the eventual
+ * replacement so a future swap is one line, not a new fetch shape. */
 export function runArtifactsBundleUrl(runId: string): string {
 	return `/api/v1/runs/${runId}/artifacts?bundle=zip`;
 }
 
-/** `GET /runs/{id}/attestations-applied` (documented, not yet implemented — issue #299). */
+/** One row of `GET /runs/{id}/attestations-applied`
+ * (`AppliedAttestationResponse`, RunContracts.cs — issue #299/#305).
+ *
+ * Two things a naive read of the issue misses:
+ *  - `scope` is the same `layer`/`layer:{ref}` form `/config-docs/resolve`
+ *    already emits (`"global"`, or `"site:{guid}"`/`"target:{guid}"`), not a
+ *    bare `"global" | "site" | "target"` union — see `parseAttestationScope`
+ *    below for the display split.
+ *  - This is **live resolution, not recorded history**: there is no
+ *    persisted per-control waiver ledger anywhere in this codebase yet
+ *    (issue #306 tracks building one). Every row is re-derived from the
+ *    CURRENT config-doc at request time, so `derivation` is always the
+ *    constant `"live-resolution"` and `resolved_at` is when THIS request
+ *    resolved it — not a scan-time application time. There is deliberately
+ *    no `applied_at` field; `attestation_updated_at` (the config-doc's own
+ *    last-edit time, optional — absent when the doc has no recorded edit)
+ *    is the closest thing on the wire, and must not be presented as
+ *    "applied at scan time" either.
+ */
 export interface AppliedAttestation {
 	control: string;
-	scope: "global" | "site" | "target";
+	/** `"global"` or `"{layer}:{ref-guid}"` — see `parseAttestationScope`. */
+	scope: string;
 	coverage: string;
 	justification: string;
 	author: string;
 	version: number;
-	applied_at: string;
+	/** Always `"live-resolution"` today (issue #306 is the persisted-ledger
+	 * follow-up that would introduce a second value). */
+	derivation: "live-resolution";
+	/** ISO-8601 timestamp of when THIS request resolved the attestation —
+	 * NOT a scan-time application time. See the interface doc comment. */
+	resolved_at: string;
+	/** The config-doc's own last-modified time, if it has one — NOT when it
+	 * was applied to any scan. */
+	attestation_updated_at?: string;
 	expired: boolean;
 }
 
 export function fetchAttestationsApplied(runId: string): Promise<AppliedAttestation[]> {
 	return apiGet<AppliedAttestation[]>(`/runs/${runId}/attestations-applied`);
+}
+
+/** Splits an `AppliedAttestation.scope` (`"global"` or `"{layer}:{ref}"`,
+ * the same form `ConfigDocContracts.cs`'s `FormatLayer` produces for
+ * `/config-docs` `layer`) into a display-friendly `{ layer, ref }` pair.
+ * `ref` is `null` for the global layer, which carries no ref. Defensive
+ * like `scopeSiteId` below: an unrecognized shape falls back to treating the
+ * whole string as the layer with no ref, rather than throwing and blanking
+ * the sidebar over one malformed row. */
+export function parseAttestationScope(scope: string): { layer: string; ref: string | null } {
+	const separatorIndex = scope.indexOf(":");
+	if (separatorIndex === -1) {
+		return { layer: scope, ref: null };
+	}
+	return { layer: scope.slice(0, separatorIndex), ref: scope.slice(separatorIndex + 1) };
 }
 
 /** `ConfigDocResolutionResponse` (ConfigDocContracts.cs) — the merged,
