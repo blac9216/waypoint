@@ -141,10 +141,20 @@ design, not by configuration.
    run site/product-level scans as configured?
 2. **Retention**: how long do run logs/results live in Postgres before pruning/archival
    (CKL/HDF artifacts may also live on disk under `/reports` as today)?
-3. **Inventory staleness policy**: hard max age before a scan forces re-discovery?
 
 Resolved:
 
+- ~~Inventory staleness policy~~ → **60-minute default, operator-configurable**
+  (`Discovery:StaleAfterMinutes`, issue #21, 2026-08-08). Long enough that revisiting
+  the Start-a-Scan screen minutes apart does not force a redundant `discover` job (a
+  vSphere AllLinked connect + full enumeration is not free); short enough that a scan
+  does not silently run against a tree that is hours stale. `GET
+  /targets/{id}/inventory` reports a `stale` flag computed against this threshold; the
+  caller decides whether to call `POST /targets/{id}/discover` first. This slice
+  implements the threshold plus manual/on-demand refresh only — automatically
+  triggering a refresh at scan-initiation time (this open question's other half) is
+  deferred to land with the scan slice (#23), since the scan-initiation code path
+  doesn't exist yet.
 - ~~Operator remediation~~ → **Admin-only in v1** (2026-08-02).
 - ~~Download-tool licensing~~ → **confirmed: the `vcf-download-tool` is never bundled**
   in the appliance image (2026-08-02). The prototype's install flow applies: install
