@@ -1,0 +1,21 @@
+# Normalize line endings for all text files: store as LF in the repo,
+# check out using the platform's native convention. This is the baseline
+# fix for issue #159 (mixed CRLF/LF files with no normalization policy
+# caused an editor touch to flip an entire file and bury the real diff).
+* text=auto eol=lf
+
+# Shell scripts must run on Linux containers/CI regardless of the
+# committer's platform — force LF unconditionally.
+*.sh text eol=lf
+
+# Visual Studio solution files are conventionally CRLF and Visual Studio
+# itself rewrites them that way on save; forcing LF here would just cause
+# perpetual churn against that tooling. Keep the existing CRLF convention.
+*.sln text eol=crlf
+
+# Binary assets: never subject to text normalization or diffing as text.
+*.png binary
+*.dll binary
+*.pdb binary
+*.so binary
+*.dylib binary
