@@ -17,11 +17,13 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Auth;
+using Waypoint.Core.Catalog;
 using Waypoint.Core.Configuration;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.PowerShell;
 using Waypoint.Infrastructure.Auth;
+using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 
@@ -113,6 +115,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<IPowerShellExecutor, PowerShell.PowerShellExecutor>();
 
 			services.AddSingleton(new Secrets.CredentialRepository(connectionString));
+			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
