@@ -104,3 +104,53 @@ public sealed record ConfigDocSaveBody(
 
 	[property: JsonPropertyName("body")]
 	string? Body);
+
+/// <summary>
+/// One kind's entry in the <c>GET /config-docs/resolve</c> response -- the EFFECTIVE card
+/// (docs/api-contract.md: "resolved value + supplying layer"). <c>layer</c>/<c>body</c>/
+/// <c>doc_id</c>/<c>version</c>/<c>author</c>/<c>updated_at</c> are all null when no layer
+/// has a doc for this (kind, profile) at all (prototype: input layer "not defined ...
+/// inherits site value" collapses further to nothing defined anywhere). <c>attestation_expired</c>
+/// is only ever true for <c>kind == "attestation"</c> -- docs/domain-model.md: "the control
+/// reports Open, the run logs a WARN, and Results lists expired attestations explicitly."
+/// </summary>
+public sealed record ConfigDocResolutionResponse(
+	[property: JsonPropertyName("kind")]
+	string Kind,
+
+	[property: JsonPropertyName("profile")]
+	string Profile,
+
+	[property: JsonPropertyName("layer")]
+	string? Layer,
+
+	[property: JsonPropertyName("body")]
+	string? Body,
+
+	[property: JsonPropertyName("doc_id")]
+	Guid? DocId,
+
+	[property: JsonPropertyName("version")]
+	int? Version,
+
+	[property: JsonPropertyName("author")]
+	string? Author,
+
+	[property: JsonPropertyName("updated_at")]
+	DateTimeOffset? UpdatedAt,
+
+	[property: JsonPropertyName("attestation_expired")]
+	bool AttestationExpired,
+
+	[property: JsonPropertyName("attestation_expires_at")]
+	DateTimeOffset? AttestationExpiresAt)
+{
+	public static ConfigDocResolutionResponse FromDomain(Waypoint.Core.ConfigDocs.ConfigDocResolution resolution)
+	{
+		ArgumentNullException.ThrowIfNull(resolution);
+		return new ConfigDocResolutionResponse(
+			resolution.Kind, resolution.Profile, resolution.Layer, resolution.Body,
+			resolution.DocId, resolution.Version, resolution.Author, resolution.UpdatedAt,
+			resolution.AttestationExpired, resolution.AttestationExpiresAt);
+	}
+}

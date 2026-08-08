@@ -16,6 +16,7 @@ using System.Globalization;
 using System.Net;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.ConfigDocs;
@@ -41,20 +42,23 @@ namespace Waypoint.Api.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/v1/config-docs")]
-public sealed class ConfigDocsController : ControllerBase
+public sealed partial class ConfigDocsController : ControllerBase
 {
 	private readonly ConfigDocRepository _configDocs;
 	private readonly SiteRepository _sites;
 	private readonly TargetRepository _targets;
+	private readonly ILogger<ConfigDocsController> _logger;
 
-	public ConfigDocsController(ConfigDocRepository configDocs, SiteRepository sites, TargetRepository targets)
+	public ConfigDocsController(ConfigDocRepository configDocs, SiteRepository sites, TargetRepository targets, ILogger<ConfigDocsController> logger)
 	{
 		ArgumentNullException.ThrowIfNull(configDocs);
 		ArgumentNullException.ThrowIfNull(sites);
 		ArgumentNullException.ThrowIfNull(targets);
+		ArgumentNullException.ThrowIfNull(logger);
 		_configDocs = configDocs;
 		_sites = sites;
 		_targets = targets;
+		_logger = logger;
 	}
 
 	[HttpGet]
@@ -85,6 +89,67 @@ public sealed class ConfigDocsController : ControllerBase
 		}
 
 		return Ok(responses);
+	}
+
+	/// <summary>
+	/// The EFFECTIVE card (issue #266, second slice of the #22 split): resolves Global ->
+	/// Site -> Target for <paramref name="target"/> across all three doc kinds (or just
+	/// <paramref name="kind"/> when given), most specific wins per
+	/// <see cref="ConfigDocResolver.Resolve"/>. <paramref name="control"/> matches the
+	/// documented query shape (docs/api-contract.md: `resolve?profile&amp;control&amp;target`)
+	/// but does not change resolution -- config-docs resolve as whole YAML bodies per
+	/// (kind, profile, layer), never parsed per-control (docs/domain-model.md: "the schemas
+	/// belong to Broadcom/MITRE"); it is accepted for parity with the documented signature
+	/// and echoed nowhere else. An expired attestation resolves as "not applied" (falls
+	/// through to a less-specific layer or to nothing) and logs a WARN -- docs/domain-model.md:
+	/// "the control reports Open, the run logs a WARN, and Results lists expired
+	/// attestations explicitly."
+	/// </summary>
+	[HttpGet("resolve")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(ConfigDocResolutionResponse[]), StatusCodes.Status200OK)]
+	public async Task<ActionResult<IReadOnlyList<ConfigDocResolutionResponse>>> Resolve(
+		[FromQuery] string profile, [FromQuery] Guid target, [FromQuery] string? kind, [FromQuery] string? control, CancellationToken cancellationToken)
+	{
+		if (string.IsNullOrWhiteSpace(profile))
+		{
+			throw new ApiException(HttpStatusCode.BadRequest, "validation_error", "'profile' is required.");
+		}
+
+		if (kind is not null && !ConfigDocKinds.All.Contains(kind))
+		{
+			throw new ApiException(HttpStatusCode.BadRequest, "invalid_kind", $"'{kind}' is not a valid kind. Expected one of: {string.Join(", ", ConfigDocKinds.All)}.");
+		}
+
+		Target? targetEntity = await _targets.GetAsync(target, cancellationToken).ConfigureAwait(false);
+		if (targetEntity is null)
+		{
+			throw new ApiException(HttpStatusCode.BadRequest, "invalid_target", $"No target exists with id '{target}'.");
+		}
+
+		IReadOnlyCollection<string> kinds = kind is null ? ConfigDocKinds.All : [kind];
+		DateTimeOffset now = DateTimeOffset.UtcNow;
+
+		List<ConfigDocResolutionResponse> results = [];
+		foreach (string k in kinds)
+		{
+			ConfigDocWithLatestVersion? global = await _configDocs
+				.FindWithLatestVersionAsync(k, profile, ConfigDocLayers.Global, null, cancellationToken).ConfigureAwait(false);
+			ConfigDocWithLatestVersion? site = await _configDocs
+				.FindWithLatestVersionAsync(k, profile, ConfigDocLayers.Site, targetEntity.SiteId, cancellationToken).ConfigureAwait(false);
+			ConfigDocWithLatestVersion? targetDoc = await _configDocs
+				.FindWithLatestVersionAsync(k, profile, ConfigDocLayers.Target, target, cancellationToken).ConfigureAwait(false);
+
+			ConfigDocResolution resolution = ConfigDocResolver.Resolve(k, profile, global, site, targetDoc, now);
+			if (resolution.AttestationExpired)
+			{
+				LogExpiredAttestation(profile, target, resolution.AttestationExpiresAt);
+			}
+
+			results.Add(ConfigDocResolutionResponse.FromDomain(resolution));
+		}
+
+		return Ok(results);
 	}
 
 	[HttpGet("{id:guid}")]
@@ -268,4 +333,7 @@ public sealed class ConfigDocsController : ControllerBase
 
 	private static ApiException NotFoundError(Guid id) =>
 		new(HttpStatusCode.NotFound, "not_found", $"No config-doc exists with id '{id}'.");
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "config-doc resolve: expired attestation for profile '{Profile}' target '{Target}' (expired {ExpiresAt:O}) resolved as not-applied")]
+	private partial void LogExpiredAttestation(string profile, Guid target, DateTimeOffset? expiresAt);
 }

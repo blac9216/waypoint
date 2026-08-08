@@ -20,6 +20,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
+using Waypoint.Core.Sites;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Sites;
@@ -226,6 +227,137 @@ public sealed class ConfigDocsApiTests : IAsyncLifetime
 	{
 		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/config-docs/{Guid.NewGuid()}", "Viewer", body: null);
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task Resolve_TargetOverridesSiteOverridesGlobal_MostSpecificWins()
+	{
+		string profile = $"resolve-profile-{Guid.NewGuid():N}";
+		(Guid siteId, Guid targetId) = await CreateSiteAndTargetAsync();
+
+		await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{Guid.NewGuid()}", "Admin",
+			new { kind = "input", profile, layer = "global", body = "syslog_host: syslog.example.internal\n" });
+		await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{Guid.NewGuid()}", "Admin",
+			new { kind = "input", profile, layer = $"site:{siteId}", body = "syslog_host: site-log.example.internal\n" });
+		await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{Guid.NewGuid()}", "Admin",
+			new { kind = "input", profile, layer = $"target:{targetId}", body = "syslog_host: target-log.example.internal\n" });
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Get, $"/api/v1/config-docs/resolve?profile={profile}&target={targetId}&kind=input", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement[] rows = document.RootElement.EnumerateArray().ToArray();
+		Assert.Single(rows);
+		Assert.Equal($"target:{targetId}", rows[0].GetProperty("layer").GetString());
+		Assert.Equal("syslog_host: target-log.example.internal\n", rows[0].GetProperty("body").GetString());
+	}
+
+	[Fact]
+	public async Task Resolve_NoTargetLayer_FallsThroughToSite()
+	{
+		string profile = $"resolve-fallthrough-{Guid.NewGuid():N}";
+		(Guid siteId, Guid targetId) = await CreateSiteAndTargetAsync();
+
+		await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{Guid.NewGuid()}", "Admin",
+			new { kind = "input", profile, layer = "global", body = "a: global\n" });
+		await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{Guid.NewGuid()}", "Admin",
+			new { kind = "input", profile, layer = $"site:{siteId}", body = "a: site\n" });
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Get, $"/api/v1/config-docs/resolve?profile={profile}&target={targetId}&kind=input", "Viewer", body: null);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement row = document.RootElement.EnumerateArray().Single();
+		Assert.Equal($"site:{siteId}", row.GetProperty("layer").GetString());
+		Assert.Equal("a: site\n", row.GetProperty("body").GetString());
+	}
+
+	[Fact]
+	public async Task Resolve_NoDocAtAnyLayer_ResolvesToNullLayerAndBody()
+	{
+		string profile = $"resolve-empty-{Guid.NewGuid():N}";
+		(_, Guid targetId) = await CreateSiteAndTargetAsync();
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Get, $"/api/v1/config-docs/resolve?profile={profile}&target={targetId}&kind=input", "Viewer", body: null);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement row = document.RootElement.EnumerateArray().Single();
+
+		// Null fields are omitted entirely (WaypointJsonOptions: WhenWritingNull), the same
+		// convention every other response in this API follows.
+		Assert.False(row.TryGetProperty("layer", out _));
+		Assert.False(row.TryGetProperty("body", out _));
+	}
+
+	[Fact]
+	public async Task Resolve_ExpiredTargetAttestation_FallsThroughAndReportsExpired()
+	{
+		string profile = $"resolve-expired-{Guid.NewGuid():N}";
+		(Guid siteId, Guid targetId) = await CreateSiteAndTargetAsync();
+
+		await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{Guid.NewGuid()}", "Admin",
+			new { kind = "attestation", profile, layer = $"site:{siteId}", body = "status: Not_A_Finding\njustification: site waiver\nexpires: 2099-01-01\n" });
+		await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{Guid.NewGuid()}", "Admin",
+			new { kind = "attestation", profile, layer = $"target:{targetId}", body = "status: Not_A_Finding\njustification: lapsed waiver\nexpires: 2020-01-01\n" });
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Get, $"/api/v1/config-docs/resolve?profile={profile}&target={targetId}&kind=attestation", "Viewer", body: null);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement row = document.RootElement.EnumerateArray().Single();
+		Assert.Equal($"site:{siteId}", row.GetProperty("layer").GetString());
+		Assert.True(row.GetProperty("attestation_expired").GetBoolean());
+	}
+
+	[Fact]
+	public async Task Resolve_NoKindFilter_ReturnsAllThreeKinds()
+	{
+		string profile = $"resolve-allkinds-{Guid.NewGuid():N}";
+		(_, Guid targetId) = await CreateSiteAndTargetAsync();
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Get, $"/api/v1/config-docs/resolve?profile={profile}&target={targetId}", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement[] rows = document.RootElement.EnumerateArray().ToArray();
+		Assert.Equal(3, rows.Length);
+		Assert.Contains(rows, row => row.GetProperty("kind").GetString() == "input");
+		Assert.Contains(rows, row => row.GetProperty("kind").GetString() == "attestation");
+		Assert.Contains(rows, row => row.GetProperty("kind").GetString() == "remediation-input");
+	}
+
+	[Fact]
+	public async Task Resolve_UnknownTarget_Is400()
+	{
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Get, $"/api/v1/config-docs/resolve?profile=any&target={Guid.NewGuid()}", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task Resolve_MissingProfile_Is400()
+	{
+		(_, Guid targetId) = await CreateSiteAndTargetAsync();
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Get, $"/api/v1/config-docs/resolve?target={targetId}", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+	}
+
+	private async Task<(Guid SiteId, Guid TargetId)> CreateSiteAndTargetAsync()
+	{
+		SiteRepository sites = new(_fixture.ConnectionString);
+		TargetRepository targets = new(_fixture.ConnectionString);
+
+		Guid siteId = (await sites.CreateAsync($"resolve-site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
+		(TargetWriteOutcome outcome, Guid? targetId) = await targets.CreateAsync(
+			siteId, "vsphere", $"resolve-target-{Guid.NewGuid():N}", """{"host":"esxi-01.example.internal"}""", null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+		return (siteId, targetId!.Value);
 	}
 
 	private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, string role, object? body)

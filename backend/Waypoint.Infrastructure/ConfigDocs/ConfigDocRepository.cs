@@ -99,6 +99,32 @@ public sealed class ConfigDocRepository
 		return (items, total);
 	}
 
+	/// <summary>
+	/// The doc-with-latest-version at a single (kind, profile, layer) slot, or null when no
+	/// doc exists there -- the building block <c>GET /config-docs/resolve</c> (issue #266)
+	/// uses up to three times per kind (global, the target's site, the target) to gather the
+	/// candidates <see cref="Waypoint.Core.ConfigDocs.ConfigDocResolver"/> picks from.
+	/// Degrades to null rather than throwing when a matching doc row has no versions yet
+	/// (the #270 orphan-row edge case) -- resolution simply treats that slot as absent
+	/// instead of surfacing the orphan as a 500.
+	/// </summary>
+	public async Task<ConfigDocWithLatestVersion?> FindWithLatestVersionAsync(
+		string kind, string profile, string layerType, Guid? layerRef, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		Guid? docId = await FindDocIdAsync(connection, kind, profile, layerType, layerRef, cancellationToken).ConfigureAwait(false);
+		if (!docId.HasValue)
+		{
+			return null;
+		}
+
+		ConfigDoc? doc = await GetAsync(docId.Value, cancellationToken).ConfigureAwait(false);
+		ConfigDocVersion? latest = await GetLatestVersionAsync(docId.Value, cancellationToken).ConfigureAwait(false);
+		return doc is null || latest is null ? null : new ConfigDocWithLatestVersion(doc, latest);
+	}
+
 	public async Task<ConfigDoc?> GetAsync(Guid id, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
