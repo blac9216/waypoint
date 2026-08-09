@@ -505,14 +505,13 @@ hardening guidance for it; this is where that guidance lives.
   screen needs an inline style/script or a cross-origin connection, this
   directive has to change with it** — don't relax CSP anywhere else instead.
 
-**Considered and deliberately deferred** (not applied here — see the
-in-file comment in `default.conf`): a request-method allowlist (rejecting
-TRACE/CONNECT/etc. at the edge). nginx's `if` inside a `server` block has
-well-known sharp edges with directive inheritance into `location` blocks,
-and there is no live stack in this change to prove an allowlist doesn't
-reject something legitimate. Revisit once the full REST surface
-(`docs/api-contract.md`) is stable and can be verified against a running
-stack.
+- A request-method allowlist (issue #388): `GET, HEAD, POST, PUT, DELETE,
+  OPTIONS` — every other method (TRACE, CONNECT, and any other
+  WebDAV/exotic verb) gets a `405` before any location is matched. Derived
+  from the full resource table in `docs/api-contract.md` — no route there
+  uses any method outside that set. See the in-file comment in
+  `default.conf` for why a server-level, return-only `if` was chosen over
+  `limit_except`.
 
 **Operator-tunable:** cert/key content and paths (`ssl_certificate`,
 `ssl_certificate_key` — operator-provided, ADR-0003), and anything in
