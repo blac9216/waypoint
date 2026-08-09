@@ -21,6 +21,8 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using Waypoint.Core.Jobs;
+using Waypoint.Core.Logging;
 using Waypoint.Core.Serialization;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Tests.Support;
@@ -75,8 +77,14 @@ public sealed class EventStreamEndpointTests : IAsyncLifetime
 				});
 				services.AddSingleton<Waypoint.Core.Jobs.IJobQueueRepository>(provider => new Waypoint.Infrastructure.Jobs.JobQueueRepository(
 					_connectionString, NullLogger<Waypoint.Infrastructure.Jobs.JobQueueRepository>.Instance));
+				// #374: this must resolve the SAME redactor instance registered for
+				// ISecretRedactor/ISecretTracker in the base container -- a disconnected
+				// `new InPlaySecretRedactor()` here would make EmitAsync scrub against an
+				// empty tracked-secret set no matter what a test tracks, silently
+				// defeating any canary written through this publisher (caught by the
+				// SSE redaction canary below, which failed against the old wiring).
 				services.AddSingleton<Waypoint.Core.Jobs.IJobEventPublisher>(provider => new Waypoint.Infrastructure.Jobs.JobEventPublisher(
-					_connectionString, commandTimeoutSeconds: 5, new Waypoint.Core.Logging.InPlaySecretRedactor(),
+					_connectionString, commandTimeoutSeconds: 5, provider.GetRequiredService<Waypoint.Core.Logging.ISecretRedactor>(),
 					NullLogger<Waypoint.Infrastructure.Jobs.JobEventPublisher>.Instance));
 				services.AddSingleton(provider => new Waypoint.Infrastructure.Jobs.JobEventStreamService(
 					_connectionString,
@@ -185,6 +193,45 @@ public sealed class EventStreamEndpointTests : IAsyncLifetime
 		using HttpResponseMessage missing = await _client.SendAsync(missingRequest);
 		Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
 		Assert.Contains("not_found", await missing.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// #374: the response-shape sweep (#370, <c>AllControllersResponseShapeTests</c>)
+	/// structurally cannot cover this controller -- it returns raw
+	/// <c>text/event-stream</c> bytes, no <c>[ProducesResponseType]</c> DTO to walk.
+	/// The SSE surface's no-secret guarantee instead rests entirely on write-time
+	/// redaction: <see cref="Waypoint.Api.Controllers.EventStreamController.WriteEventAsync"/>
+	/// embeds <c>row.PayloadJson</c> verbatim on the claim that it is "already
+	/// redacted at write time." This test pins that claim end to end through the real
+	/// pipeline (no mocked redactor): track a canary with the process's real
+	/// <see cref="ISecretTracker"/>, publish a job_events row containing it through the
+	/// real <see cref="IJobEventPublisher"/> (the same redaction path
+	/// <see cref="BufferedJobEventWriterTests"/> pins against the table directly), then
+	/// read the raw SSE bytes over HTTP and assert the canary never appears in the
+	/// wire format -- proving the redaction that protects the table also protects this
+	/// specific serialization surface, not just Postgres.
+	/// </summary>
+	[Fact]
+	public async Task ATrackedSecret_NeverReachesTheSseWireFormat()
+	{
+		const string canary = "invented-sse-redaction-canary-5townsend2";
+		ISecretTracker tracker = _factory.Services.GetRequiredService<ISecretTracker>();
+		IJobEventPublisher publisher = _factory.Services.GetRequiredService<IJobEventPublisher>();
+
+		using (tracker.Track(canary))
+		{
+			await publisher.EmitAsync(
+				"run.progress", null, _runId,
+				JsonSerializer.Serialize(new { marker = "sse-canary-probe", secret = $"auth token {canary} rejected" }, WaypointJsonOptions.Default),
+				CancellationToken.None);
+		}
+
+		using HttpResponseMessage response = await OpenStreamAsync($"/api/v1/runs/{_runId}/events?lastEventId=0");
+		(_, _, JsonElement envelope) = await ReadFirstEventAsync(response);
+
+		string rawData = envelope.GetRawText();
+		Assert.DoesNotContain(canary, rawData, StringComparison.Ordinal);
+		Assert.Contains("[REDACTED]", envelope.GetProperty("data").GetProperty("secret").GetString(), StringComparison.Ordinal);
 	}
 
 	[Fact]
