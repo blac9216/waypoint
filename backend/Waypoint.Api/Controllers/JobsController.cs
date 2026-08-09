@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Waypoint.Api.Contracts;
@@ -73,18 +74,32 @@ public sealed class JobsController : ControllerBase
 	/// Cancels a single job, independent of its run's other jobs -- the same primitive
 	/// <c>DownloadsController.CancelDownload</c> uses (#10/#277). Operator+ per
 	/// docs/api-contract.md's pause/resume/abort gate: job-level cancel is the same
-	/// tier as the run-level controls it sits alongside on the Live Run screen. Unlike
-	/// pause/resume/abort there is no ownership check here -- a job row does not carry
-	/// its run's <c>initiated_by</c> without an extra lookup, and #277's only existing
-	/// caller (downloads) is already Admin-gated one level up; this endpoint is the
-	/// first to expose the primitive directly; ownership scoping is deferred (issue
-	/// TBD, see PR notes) rather than assumed here.
+	/// tier as the run-level controls it sits alongside on the Live Run screen, and
+	/// (issue #294) the same "own runs, Admin any" ownership scope --
+	/// <see cref="RunsController.EnforceRunOwnership(System.Security.Claims.ClaimsPrincipal, RunQueueState)"/>
+	/// applied to the run owning this job, resolved via <see cref="IJobQueueRepository.GetJobAsync"/>
+	/// -&gt; <see cref="JobSummary.RunId"/> -&gt; <see cref="IJobQueueRepository.GetRunQueueStateAsync"/>.
+	/// The ownership check runs before the cancel attempt, so a non-owning Operator's
+	/// call never reaches <see cref="IJobQueueRepository.CancelJobAsync"/>. A job with no
+	/// run (should not occur in practice; every job is fanned out from a run) is treated
+	/// as ownerless -- Admin-only, same as a run with no recorded initiator.
 	/// </summary>
 	[HttpDelete("{id:guid}")]
 	[RequireOperatorRole]
 	[ProducesResponseType(typeof(JobCancelResponse), StatusCodes.Status200OK)]
 	public async Task<ActionResult<JobCancelResponse>> CancelJob(Guid id, CancellationToken cancellationToken)
 	{
+		JobSummary? job = await _repository.GetJobAsync(id, cancellationToken).ConfigureAwait(false);
+		if (job is null)
+		{
+			throw ApiException.NotFound("Job not found.", $"Job '{id}' does not exist.");
+		}
+
+		RunQueueState? runState = job.RunId is { } runId
+			? await _repository.GetRunQueueStateAsync(runId, cancellationToken).ConfigureAwait(false)
+			: null;
+		RunsController.EnforceRunOwnership(User, runState ?? new RunQueueState("unknown", false, false, null, InitiatedBy: null));
+
 		JobCancelOutcome outcome = await _repository.CancelJobAsync(id, cancellationToken).ConfigureAwait(false);
 
 		switch (outcome)
