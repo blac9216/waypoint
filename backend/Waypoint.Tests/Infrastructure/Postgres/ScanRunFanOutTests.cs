@@ -134,10 +134,16 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		HttpResponseMessage jobsResponse = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/jobs", "Viewer", body: null);
 		Assert.Equal(HttpStatusCode.OK, jobsResponse.StatusCode);
 		using JsonDocument jobs = JsonDocument.Parse(await jobsResponse.Content.ReadAsStringAsync());
-		JsonElement[] rows = jobs.RootElement.EnumerateArray().ToArray();
+		JsonElement[] allRows = jobs.RootElement.EnumerateArray().ToArray();
 
+		// Issue #259: the never-discovered vsphere target also gets an auto-queued
+		// discover job in the same run, so the full row set is 4 -- scan fan-out is
+		// this test's actual subject, so it filters to job_type = "scan" rather than
+		// asserting the whole run has exactly 3 rows. The discover job itself is
+		// covered by AutoDiscoverOnScanInitiationTests.
+		Assert.Equal(4, allRows.Length);
+		JsonElement[] rows = allRows.Where(row => row.GetProperty("job_type").GetString() == "scan").ToArray();
 		Assert.Equal(3, rows.Length);
-		Assert.All(rows, row => Assert.Equal("scan", row.GetProperty("job_type").GetString()));
 
 		// Priority-ordered: NSX(1) before vCenter/vsphere(3) before SRG/ssh(6) --
 		// GetJobsForRunAsync orders "by priority then created_at".
@@ -204,8 +210,14 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		using JsonDocument jobs = JsonDocument.Parse(await jobsResponse.Content.ReadAsStringAsync());
 		JsonElement[] rows = jobs.RootElement.EnumerateArray().ToArray();
 
-		Assert.Single(rows);
-		Assert.Equal(included.ToString(), rows[0].GetProperty("target_id").GetString());
+		// Issue #259: the included (never-discovered) vsphere target also gets its own
+		// auto-queued discover job in the same run -- still proves the scoping this
+		// test is actually about, since every row must reference "included", never the
+		// excluded nsx-api target.
+		Assert.Equal(2, rows.Length);
+		Assert.All(rows, row => Assert.Equal(included.ToString(), row.GetProperty("target_id").GetString()));
+		Assert.Contains(rows, row => row.GetProperty("job_type").GetString() == "scan");
+		Assert.Contains(rows, row => row.GetProperty("job_type").GetString() == "discover");
 	}
 
 	[Fact]
@@ -293,7 +305,11 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
-		await using NpgsqlCommand count = new("SELECT count(DISTINCT id) FROM jobs WHERE run_id = $1", connection);
+		// Issue #259: scoped to job_type = 'scan' -- both never-discovered vsphere
+		// targets also get their own auto-queued discover job in the same run (see
+		// AutoDiscoverOnScanInitiationTests), which is a separate, unrelated isolation
+		// property from the one this test asserts (each target's SCAN job is its own row).
+		await using NpgsqlCommand count = new("SELECT count(DISTINCT id) FROM jobs WHERE run_id = $1 AND job_type = 'scan'", connection);
 		count.Parameters.AddWithValue(runId);
 		long distinctJobRows = (long)(await count.ExecuteScalarAsync())!;
 

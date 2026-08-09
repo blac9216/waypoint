@@ -147,7 +147,11 @@ public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
 		const string canaryUsername = "adhoc-operator@example.internal";
 
 		Guid siteId = await CreateSiteAsync("adhoc-canary-site");
-		Guid target = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+		// Issue #259: an "ssh" (SRG) target, not "vsphere" -- this test asserts exactly
+		// one job on the run, which only holds for a target kind that never triggers an
+		// auto-queued discover job (discover only supports vsphere). The ad hoc
+		// credential flow under test here has no dependency on target kind.
+		Guid target = await CreateTargetAsync(siteId, "ssh", "photon-01", """{"host":"photon-01.example.internal"}""");
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Operator", new
 		{
