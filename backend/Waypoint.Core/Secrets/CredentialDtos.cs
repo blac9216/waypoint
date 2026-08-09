@@ -15,10 +15,12 @@
 namespace Waypoint.Core.Secrets;
 
 /// <summary>
-/// The closed set of credential types (docs/domain-model.md "Credential";
-/// migration 0010's <c>credentials_credential_type_check</c> enforces the same set at
-/// the database layer -- this is the API-layer mirror, the same split
-/// <c>Waypoint.Core.Sites.TargetKinds</c> uses for target <c>kind</c>).
+/// The closed set of credential types (docs/domain-model.md "Credential"). Validated
+/// against this set at the API layer only (<c>CredentialsController</c>) -- migration
+/// 0010 deliberately leaves <c>credential_type</c> as free TEXT at the database layer
+/// (see that migration's comment for why), so unlike <see cref="CredentialHealthStates"/>
+/// there is no DB CHECK mirroring this set. Same API-layer-only split
+/// <c>Waypoint.Core.Sites.TargetKinds</c> uses for target <c>kind</c>.
 /// </summary>
 public static class CredentialTypes
 {
