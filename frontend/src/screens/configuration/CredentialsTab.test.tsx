@@ -31,6 +31,18 @@ const CREDENTIALS: Credential[] = [
 		created_at: "2026-01-01T00:00:00Z",
 		updated_at: "2026-01-01T00:00:00Z",
 	},
+	{
+		id: "cred-3",
+		name: "Broadcom depot token",
+		credential_type: "depot-token",
+		owner: "shared",
+		health: "unknown",
+		sudo_enabled: false,
+		has_secret: true,
+		used_by_job_count: 1,
+		created_at: "2026-01-01T00:00:00Z",
+		updated_at: "2026-01-01T00:00:00Z",
+	},
 ];
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -217,13 +229,31 @@ describe("CredentialsTab (issue #247)", () => {
 		await mount();
 
 		expect(screen.getByText("svc-stig-vm")).toBeInTheDocument();
-		expect(screen.getAllByText("shared")).toHaveLength(2);
+		expect(screen.getAllByText("shared")).toHaveLength(3);
 		expect(screen.getByText("valid")).toBeInTheDocument();
 		expect(screen.getByText("auth failing")).toBeInTheDocument();
 		expect(screen.getByText("3")).toBeInTheDocument();
 		expect(screen.getByText("2026-07-01 12:00Z")).toBeInTheDocument();
 		// cred-2 has never been rotated.
 		expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+	});
+
+	it("a depot-token credential (#252/#383) renders its type in the table instead of falling through as unrecognized", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		expect(screen.getByText("Broadcom depot token")).toBeInTheDocument();
+		expect(screen.getByText("depot-token")).toBeInTheDocument();
+	});
+
+	it("depot-token is not offered in the creatable-type dropdown (no depot-credential creation flow in this tab)", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		fireEvent.click(screen.getByText("Add credential"));
+		const select = screen.getByDisplayValue("vCenter") as HTMLSelectElement;
+		const values = Array.from(select.options).map((o) => o.value);
+		expect(values).not.toContain("depot-token");
 	});
 
 	it("no personal-credential UI anywhere: owner is always 'shared', never rendered as an editable field", async () => {

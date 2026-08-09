@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	CREDENTIAL_TYPES,
 	createCredential,
 	deleteCredential,
 	fetchCredentials,
@@ -114,6 +115,14 @@ describe("credentials.ts data layer", () => {
 		const result = await testCredential("cred-1");
 		expect(calls[0]).toEqual({ url: "/api/v1/credentials/cred-1/test", method: "POST", body: undefined });
 		expect(result).toEqual({ run_id: "run-1", job_id: "job-1" });
+	});
+});
+
+describe("CREDENTIAL_TYPES (#252/#383 reconciliation)", () => {
+	it("deliberately excludes depot-token — it has no creation flow in this connection-credential dropdown", () => {
+		const values = CREDENTIAL_TYPES.map((t) => t.value);
+		expect(values).toEqual(["vcenter", "nsx", "ssh", "token"]);
+		expect(values).not.toContain("depot-token");
 	});
 });
 
