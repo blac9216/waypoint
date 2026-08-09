@@ -248,6 +248,25 @@ def _unescape_separators(line: str) -> str:
 # four-part address. Written as single-character lookarounds rather than one
 # character class so each guard states which neighbour it is rejecting and why.
 #
+# That round-2 fix bounded the over-correction to NUMERIC continuations only
+# (`(?!\.\d)`), which left a DOTTED-EXTENSION continuation open: a `.` followed
+# by letters still ended the token, so a four-part version immediately followed
+# by a file extension newly matched as a bare quad, invisible only when the
+# filename happened to carry a `-`/`_`-joined product prefix (issue #113). A
+# subsequent revision (PR #360 round 1) tried to close that with a fourth
+# lookahead rejecting a `.`+short-alpha run, but that opened a FALSE NEGATIVE:
+# a version quad and an IPv4 literal are byte-for-byte identical, so the same
+# lookahead suppressed a REAL, non-doc address glued to an extension in the
+# same position, walking it through the hard gate. Per CLAUDE.md that is the
+# one unacceptable direction, so #113 falls back to its own documented Option
+# B: NO syntactic extension guard here. A keyless four-part version glued to an
+# extension is now a disclosed false POSITIVE (a spurious CI fail, renamed
+# away), pinned in VersionExtensionTests and docs/testing.md; the only
+# structural exemption that survives is a PRECEDING version key, applied
+# downstream by is_version_string(), not here. Do NOT reintroduce a lookahead
+# that encodes an extension list — that shape has failed open before. The
+# five-part-version case stays handled by `(?!\.\d)` exactly as before.
+#
 # Two more narrowings, both issue #111:
 #
 # - The LEADING word-character guard now names `[A-Za-z0-9]` explicitly
@@ -299,6 +318,16 @@ def _unescape_separators(line: str) -> str:
 # strips the padding and rejects anything above 255 or carrying more than
 # three significant digits. Widening the regex alone would change nothing, and
 # narrowing it again would silently re-cap the parser.
+# NOTE (#113, revised after PR #360 round-1 review): there is deliberately NO
+# extension-suppressing lookahead here. An earlier revision added a fourth
+# lookahead of the shape `(?!\.[A-Za-z]{1,8}...)` so a bare version quad glued
+# to a file extension would not match as an address; it was removed because it
+# opened a FALSE NEGATIVE on the hard secret gate. See the block above IPV4_RE
+# and docs/testing.md for the full rationale; the short version is that a
+# version quad and an IPv4 literal are byte-for-byte identical, so any such
+# lookahead also suppresses a real, non-doc address glued to an extension. The
+# only surviving version exemption is a PRECEDING version key, applied by
+# is_version_string() below — never a trailing-extension shape.
 IPV4_RE = re.compile(
 	r"(?<![A-Za-z0-9])(?<!\.)"       # not continuing an alnum/dotted run
 	r"(?:\d+\.){3}\d+"
@@ -683,13 +712,31 @@ def is_placeholder_token(value: str) -> bool:
 # round 2, finding 1). test_every_grammar_shape_a_detector_admits_is_exercised
 # walks this pattern and fails if a new optional construct is added
 # anonymously, or if no fixture exercises one both ways.
+#
+# `mapped_quad`'s per-part digit count is unbounded (`\d+`, not `\d{1,3}`),
+# the same #119 lesson IPV4_RE's own per-part count already learned, applied
+# here for issue #123. A bounded part cap put the padding question in two
+# places at once for the plain-IPv4 detector (the regex AND
+# _parse_ipv4_octets), and it did the same here for the mapped form's
+# embedded quad: a 4-digit-padded octet never even produced a `mapped_quad`
+# match (the optional group backtracked out entirely), so the candidate fell
+# back to the bare hex/colon prefix and the finding named a truncated
+# fragment rather than the address — or, with only three digits of padding,
+# parsed as an ordinary-looking dotted quad but still failed strict IPv6
+# parsing (leading zeros) and read as "not an address, so allowed", losing
+# the IPv6 finding while the IPv4 detector still caught the embedded quad on
+# its own. `_normalize_ipv4_mapped_tail()` is the single place that then
+# decides which digit strings denote a real octet, via the same
+# `_parse_ipv4_octets()` the plain IPv4 detector uses — exactly the "answered
+# in exactly one place" structure #119's own comment on IPV4_RE describes,
+# extended across both address families instead of re-derived for this one.
 IPV6_RE = re.compile(
 	r"(?<![A-Za-z0-9])"
 	r"(?:"
 	r"\[(?P<bracketed>[0-9A-Fa-f:]+(?P<bracket_zone>%[\w.-]+)?)\]"
 	r"(?P<bracket_port>:\d+)?"
 	r"|"
-	r"(?P<bare>[0-9A-Fa-f:]+(?P<mapped_quad>(?:\.\d{1,3}){1,3})?"
+	r"(?P<bare>[0-9A-Fa-f:]+(?P<mapped_quad>(?:\.\d+){1,3})?"
 	r"(?P<zone>%[\w.-]+)?)"
 	r")"
 	r"(?!\w)"
@@ -811,6 +858,50 @@ def _parse_ipv6(text: str) -> ipaddress.IPv6Address | None:
 		return None
 
 
+# A trailing dotted-quad, unbounded per part like IPV6_RE's own `mapped_quad`
+# group above — deliberately the same shape, matched independently here
+# because this runs on the CANDIDATE STRING (already split off any zone id),
+# not on the original line, and needs its own anchor at the end of that
+# string (`\Z`) rather than IPV6_RE's line-position lookarounds.
+_MAPPED_QUAD_TAIL_RE = re.compile(r"(?:\d+\.){3}\d+\Z")
+
+
+def _normalize_ipv4_mapped_tail(text: str) -> str:
+	"""Strip zero-padding from a trailing IPv4-mapped dotted quad, if present.
+
+	Same root cause as issue #119 for the plain IPv4 detector, in the other
+	address family (issue #123): `ipaddress.IPv6Address` rejects leading
+	zeros in the embedded quad of the IPv4-mapped form (a zero-padded octet
+	after the `::ffff:` prefix, e.g. `010` instead of `10`) as ambiguous
+	octal notation. This scanner reads its own source like any other tracked
+	file, so this comment names the shape rather than spelling out a padded
+	mapped literal — the same no-address-shaped-literal discipline every
+	other detector comment in this file already follows. A
+	padded-but-otherwise-ordinary literal then reads as "does not parse, so
+	not an address" — the IPv6 finding is lost while the IPv4 detector still
+	catches the embedded quad on its own,
+	so the line is under-reported rather than silent (PR #115 did not carry
+	the #119 treatment across when it added this address family).
+
+	Delegates the actual digit-validity question to `_parse_ipv4_octets` —
+	the SAME function the plain IPv4 detector uses — so "which digit strings
+	denote a real octet" is answered in exactly one place for both address
+	families, at any padding width (`_parse_ipv4_octets` already dropped its
+	own 3-digit cap for #119). If the tail is not a valid dotted-quad at all
+	(an octet over 255, or something that merely looks dotted), this returns
+	`text` unchanged and lets the normal strict-parse/retry path in
+	`_ipv6_address_of` decide — it never invents a quad that was not there.
+	"""
+	match = _MAPPED_QUAD_TAIL_RE.search(text)
+	if match is None:
+		return text
+	octets = _parse_ipv4_octets(match.group(0))
+	if octets is None:
+		return text
+	normalized_tail = ".".join(str(octet) for octet in octets)
+	return text[: match.start()] + normalized_tail
+
+
 def _ipv6_address_of(candidate: str) -> ipaddress.IPv6Address | None:
 	"""The address this candidate denotes, or None if it denotes none.
 
@@ -873,8 +964,19 @@ def _ipv6_address_of(candidate: str) -> ipaddress.IPv6Address | None:
 	    all_digit_groups_are_a_disclosed_residual.
 
 	Both are in docs/testing.md as well.
+
+	One more normalization happens before any of the above: a trailing
+	IPv4-mapped dotted quad has its zero-padding stripped first
+	(`_normalize_ipv4_mapped_tail`, issue #123), so a padded mapped literal
+	parses on the FIRST attempt rather than being misread by the port retry
+	below as a run of trailing numeric groups to strip. Padding never LOOKS
+	like a port — it is dots, not colons — but stripping it first is still
+	the right order: `_parse_ipv4_octets` is the single place both address
+	families already agree padding width is not the question, so asking it
+	before the retry loop even starts is more direct than allowing the loop
+	to eventually strip its way past a group boundary that was never a port.
 	"""
-	base = candidate.split("%", 1)[0]
+	base = _normalize_ipv4_mapped_tail(candidate.split("%", 1)[0])
 	addr = _parse_ipv6(base)
 	if addr is not None:
 		return addr
@@ -924,9 +1026,13 @@ def _strict_ipv6_literal(candidate: str) -> ipaddress.IPv6Address | None:
 	A zone id is still stripped here, same as `_ipv6_address_of()` — that
 	strip is unconditionally safe (it only ever removes a suffix `ipaddress`
 	was never going to accept anyway) and has nothing to do with the port
-	retry this function exists to keep out of re-anchoring.
+	retry this function exists to keep out of re-anchoring. The same is true
+	of the mapped-quad padding normalization (issue #123): it only changes how
+	an already-present trailing dotted quad is spelled, never which characters
+	are part of the candidate, so it carries no port-retry-style risk of
+	widening a span onto characters that were not already in it.
 	"""
-	return _parse_ipv6(candidate.split("%", 1)[0])
+	return _parse_ipv6(_normalize_ipv4_mapped_tail(candidate.split("%", 1)[0]))
 
 
 def _widest_address_start(line: str, run_start: int, match_start: int, end: int) -> int:
@@ -982,6 +1088,40 @@ def _hex_run_start(line: str, match_start: int) -> int:
 	return start
 
 
+def _is_hex_lettered_identifier_shape(candidate: str) -> bool:
+	"""True if this candidate has no digit anywhere (issue #118).
+
+	A two-part identifier joined by `::`, where both parts are spelled
+	entirely with hex letters (`a`-`f`), is syntactically indistinguishable
+	from a real compressed IPv6 literal — `ipaddress.IPv6Address` cannot tell
+	a `cafe`/`babe`-style placeholder identifier from an address, because
+	there isn't a syntactic difference to tell. Every SANCTIONED spelling this
+	scanner allows carries at least one digit (the RFC 3849 doc prefix starts
+	`2001:`, loopback and unspecified are literally digits/nothing), so this
+	cannot suppress an allowlisted address into a false negative — it only
+	ever removes candidates from the reportable set, which by construction
+	were already going to be either a false positive (this issue) or a real
+	lab literal, and every real lab literal this repo's threat model produces
+	(inventory exports, netstat, logs, CKL/HDF, URLs) is hex-and-DIGITS, not
+	hex-letters-only prose. Deliberately checked on the WHOLE candidate, not
+	per-group: a real address with one digit-free group and a digit elsewhere
+	in a LATER group must still be caught, and is — this only fires when NO
+	digit appears anywhere in the span. (Like the mapped-form comment above,
+	this docstring names that shape in prose rather than spelling out a
+	concrete digit-plus-hex-letters literal: this file is scanned like any
+	other tracked file, and a hex-lettered group next to a digit-bearing one
+	is itself address-shaped enough to trip this very check.)
+
+	This is the same one-directional trade `_dash_glues_to_non_address` and
+	the trailing-guard fixes above make explicit: it can only turn a
+	would-be finding into a non-finding, never the reverse, so it cannot
+	create a new false negative on top of what the regex already matched.
+	IPv6DetectorTests pins that a real, digit-bearing literal — including one
+	whose OTHER group is hex-letter-heavy — is unaffected.
+	"""
+	return not any(char.isdigit() for char in candidate)
+
+
 def _is_ipv6_finding(candidate: str) -> bool:
 	"""True if this candidate is a reportable IPv6 literal.
 
@@ -990,8 +1130,18 @@ def _is_ipv6_finding(candidate: str) -> bool:
 	at most one colon, so requiring two discards them before `ipaddress` is
 	asked anything. A real literal always has at least two (the shortest
 	spellings are `::` and `::1`).
+
+	The digit floor (issue #118) is the same idea one level up: a candidate
+	spelled entirely in hex LETTERS, with no digit anywhere, is more likely a
+	word-shaped identifier that happens to validate than a lab address — see
+	_is_hex_lettered_identifier_shape for why that can only shrink the
+	reportable set, never hide a real leak.
 	"""
-	return candidate.count(":") >= 2 and not is_allowed_ipv6(candidate)
+	if candidate.count(":") < 2:
+		return False
+	if _is_hex_lettered_identifier_shape(candidate):
+		return False
+	return not is_allowed_ipv6(candidate)
 
 
 def list_tracked_files() -> list[Path]:

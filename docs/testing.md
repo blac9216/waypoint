@@ -600,32 +600,79 @@ have repeatedly caught real defects no CI run could have seen:
     `.editorconfig` reasoning above), and a literal followed by `.` plus an
     alphanumeric (a dotted continuation such as a hostname, where the
     address-shaped prefix is not standing alone).
-  - **Left open on the false-POSITIVE side** — two shapes this gate reports
-    that are not leaks, pinned by
-    `test_the_known_residual_false_positives_are_still_only_these`. A run of
-    colon-separated hex groups that happens to be valid IPv6 syntax
-    ([#118](https://github.com/blac9216/waypoint/issues/118)); the port retry
-    widens that class by the number of groups it is allowed to strip, so a run
-    of **nine, ten or eleven** groups whose trailing groups are all digits now
-    resolves to the eight in front of them, and a twelve-group run is where
-    the class stops. That the range is finite at all is the whole reason the
-    retry loop carries a bound: uncapped, the class would be unbounded in
-    record length — any colon-separated numeric record long enough to have
-    eight parseable groups in front of an all-digit tail — which is a class no
-    test can enumerate and no sentence here can state truthfully. The
-    eleven-group rows specifically are what raising the bound from two to
-    three cost (see the #131 bullet above); they are an EUI-64 string, a
-    certificate fingerprint and a numeric counter record, each with three
-    trailing numeric fields.
+  - **Narrowed, not eliminated, on the false-POSITIVE side** — a two-part
+    identifier joined by `::`, both halves spelled entirely in hex LETTERS
+    with no digit anywhere in the candidate (a `cafe`/`babe`-style
+    placeholder, or a single hex-lettered word after `::`), no longer fires
+    ([#118](https://github.com/blac9216/waypoint/issues/118)): every
+    sanctioned spelling this gate allows carries at least one digit, so
+    requiring one costs no real address, and every real lab literal this
+    gate's threat model produces (inventory exports, netstat, logs, CKL/HDF,
+    URLs) is hex-and-digits, not hex-letters-only prose. This is a narrow,
+    digit-based exception on top of `ipaddress.IPv6Address` as the arbiter,
+    not a loosening of it — a real, digit-bearing literal (including one
+    whose other group is hex-letter-heavy) is unaffected, pinned by
+    `HexLetteredIdentifierTests.test_real_ipv6_address_is_still_flagged`.
+    **What is deliberately still open**, pinned by
+    `test_the_known_residual_false_positives_are_still_only_these`: a run of
+    colon-separated hex groups that happens to be valid IPv6 syntax AND
+    carries a digit somewhere in it (an EUI-64-style run is the running
+    example) is a different shape from the one just closed — the digit guard
+    cannot touch it, by design, since the whole point of that guard is to
+    leave any digit-bearing candidate exactly as reportable as before. The
+    port retry widens that class by the number of groups it is allowed to
+    strip, so a run of **nine, ten or eleven** groups whose trailing groups
+    are all digits now resolves to the eight in front of them, and a
+    twelve-group run is where the class stops. That the range is finite at
+    all is the whole reason the retry loop carries a bound: uncapped, the
+    class would be unbounded in record length — any colon-separated numeric
+    record long enough to have eight parseable groups in front of an
+    all-digit tail — which is a class no test can enumerate and no sentence
+    here can state truthfully. The eleven-group rows specifically are what
+    raising the bound from two to three cost (see the #131 bullet above);
+    they are an EUI-64 string, a certificate fingerprint and a numeric
+    counter record, each with three trailing numeric fields.
     `test_the_known_residual_false_positives_are_still_only_these` pins both
     ends, the nine- to eleven-group runs that fire and the twelve-group runs
     that do not. And an unbracketed
     `<sanctioned address>:<port>` pair, which as written is also a valid,
     different, non-sanctioned address — the gate reports rather than guesses,
     and the bracketed URL form is unambiguous and stays silent.
-  - **Under-reported rather than silent**: a zero-padded IPv4-mapped literal
-    loses its IPv6 finding while still tripping the IPv4 detector
-    ([#123](https://github.com/blac9216/waypoint/issues/123)).
+  - **Closed, not disclosed**: a zero-padded IPv4-mapped literal used to lose
+    its IPv6 finding while the IPv4 detector still caught the embedded quad
+    on its own — under-reported, not silent
+    ([#123](https://github.com/blac9216/waypoint/issues/123)). The mapped
+    form's embedded dotted quad is now normalized through the same
+    `_parse_ipv4_octets` padding-width-independence #119 established for the
+    plain IPv4 detector, at any padding width, so the IPv6 finding names the
+    full literal rather than a truncated fragment or being dropped outright.
+  - **Disclosed residual, not closed** — a four-part product version
+    immediately followed by a file extension with NO preceding version key
+    (a bare `<four-part-version>.ovf` / `.tar.gz` / `.zip`, no `version:` key
+    in front) is flagged as an IPv4 literal
+    ([#113](https://github.com/blac9216/waypoint/issues/113)). This is a
+    deliberate false POSITIVE, accepted as the price of closing a false
+    NEGATIVE. An earlier revision (PR #360 round 1) added a syntactic lookahead
+    to `IPV4_RE` that rejected a `.`+short-alpha run so these version quads
+    would not match. It was reverted: a version quad and an IPv4 literal are
+    byte-for-byte identical, so the same lookahead ALSO suppressed a real,
+    non-doc address in the same position — a routable four-octet quad glued to
+    `.bak` / `.log` / `.csv` stopped matching, and a line like `exfil
+    <routable-quad>.bak` passed the gate. That is a false negative on the
+    load-bearing public-repo secret gate, the one outcome `CLAUDE.md` forbids;
+    a spurious CI fail on a bundle filename is not. There is no structural
+    signal that separates the two — the only reliable "this is a version" cue
+    is a PRECEDING version key, which `is_version_string()` already honours (so
+    a `version:`-keyed quad stays quiet even with an extension after it), and a
+    bare `<version>.ovf` carries no such cue. This is #113's own documented
+    **Option B**: accept the extensioned-version FP, do NOT encode an extension
+    list (the shape that has failed open before). When a real bundle filename
+    trips this, the fix is to add a version key or rename the file, never to
+    reintroduce a syntactic extension guard. Both directions are pinned in
+    `VersionExtensionTests` — the real IP + extension MUST flag, the keyless
+    version quad + extension DOES flag, and the version-keyed quad stays quiet.
+    (No dotted-quad literal is written into this bullet on purpose; the
+    concrete cases are assembled via `quad()` in the tests — the #327 lesson.)
   - **Closed, not disclosed**: a backslash inserted immediately before each
     separator (`.` for IPv4/FQDN, `:` for IPv6) used to defeat all three
     detectors identically — not a suppression, an absence of any match at
