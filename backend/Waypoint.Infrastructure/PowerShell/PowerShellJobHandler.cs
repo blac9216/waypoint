@@ -98,10 +98,17 @@ public sealed class PowerShellJobHandler : IJobHandler
 		}
 
 		PowerShellRequestKind kind = PowerShellRequestKind.Command;
-		if (root.TryGetProperty("kind", out JsonElement kindElement) &&
-			string.Equals(kindElement.GetString(), "script", StringComparison.OrdinalIgnoreCase))
+		if (root.TryGetProperty("kind", out JsonElement kindElement))
 		{
-			kind = PowerShellRequestKind.Script;
+			string? kindValue = kindElement.ValueKind == JsonValueKind.String ? kindElement.GetString() : null;
+			if (string.Equals(kindValue, "script", StringComparison.OrdinalIgnoreCase))
+			{
+				kind = PowerShellRequestKind.Script;
+			}
+			else if (!string.Equals(kindValue, "command", StringComparison.OrdinalIgnoreCase))
+			{
+				throw new ArgumentException($"'kind' must be 'command' or 'script', got '{kindValue ?? kindElement.GetRawText()}'");
+			}
 		}
 
 		Dictionary<string, object?>? parameters = null;
@@ -115,8 +122,13 @@ public sealed class PowerShellJobHandler : IJobHandler
 		}
 
 		TimeSpan? timeout = null;
-		if (root.TryGetProperty("timeoutSeconds", out JsonElement timeoutElement) && timeoutElement.TryGetInt32(out int timeoutSeconds) && timeoutSeconds > 0)
+		if (root.TryGetProperty("timeoutSeconds", out JsonElement timeoutElement))
 		{
+			if (timeoutElement.ValueKind != JsonValueKind.Number || !timeoutElement.TryGetInt32(out int timeoutSeconds) || timeoutSeconds <= 0)
+			{
+				throw new ArgumentException("'timeoutSeconds' must be a positive integer");
+			}
+
 			timeout = TimeSpan.FromSeconds(timeoutSeconds);
 		}
 

@@ -171,6 +171,60 @@ public sealed class PowerShellJobHandlerTests : IDisposable
 		Assert.Contains("not a valid PowerShell invocation", outcome.Note, StringComparison.Ordinal);
 	}
 
+	/// <summary>#163: a present-but-malformed 'timeoutSeconds' must fail fast rather
+	/// than silently falling back to the 30-minute default -- a payload author who
+	/// mistypes the field deserves a diagnosable error, not a job with the wrong bound.</summary>
+	[Theory]
+	[InlineData("""{"command":"Get-StubEcho","timeoutSeconds":"30"}""")]
+	[InlineData("""{"command":"Get-StubEcho","timeoutSeconds":0}""")]
+	[InlineData("""{"command":"Get-StubEcho","timeoutSeconds":-5}""")]
+	[InlineData("""{"command":"Get-StubEcho","timeoutSeconds":1.5}""")]
+	[InlineData("""{"command":"Get-StubEcho","timeoutSeconds":99999999999}""")]
+	public async Task AMalformedTimeoutSeconds_FailsWithAClearNoteNamingTheField(string payload)
+	{
+		JobExecutionOutcome outcome = await CreateHandler().ExecuteAsync(ContextFor(payload), CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("not a valid PowerShell invocation", outcome.Note, StringComparison.Ordinal);
+		Assert.Contains("timeoutSeconds", outcome.Note, StringComparison.Ordinal);
+	}
+
+	/// <summary>#163: an absent 'timeoutSeconds' is legal (the executor's default
+	/// applies) -- only a present-but-invalid value should fail. This pins the happy
+	/// path so the strict check above doesn't regress into rejecting omission.</summary>
+	[Fact]
+	public async Task AnAbsentTimeoutSeconds_StillAppliesTheDefault()
+	{
+		JobExecutionOutcome outcome = await CreateHandler().ExecuteAsync(
+			ContextFor("""{"command":"Get-StubEcho","parameters":{"Value":"hello"}}"""), CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+	}
+
+	/// <summary>#163: an unrecognized 'kind' (typo or future value) must fail fast
+	/// rather than silently falling back to Command and invoking the text as a
+	/// command name.</summary>
+	[Theory]
+	[InlineData("""{"command":"Get-StubEcho","kind":"scirpt"}""")]
+	[InlineData("""{"command":"Get-StubEcho","kind":"unknown-future-kind"}""")]
+	[InlineData("""{"command":"Get-StubEcho","kind":123}""")]
+	public async Task AnUnknownKind_FailsWithAClearNoteNamingTheField(string payload)
+	{
+		JobExecutionOutcome outcome = await CreateHandler().ExecuteAsync(ContextFor(payload), CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("not a valid PowerShell invocation", outcome.Note, StringComparison.Ordinal);
+		Assert.Contains("kind", outcome.Note, StringComparison.Ordinal);
+	}
+
+	/// <summary>#163: the legal 'kind' values (both explicit "command" and "script")
+	/// plus a valid positive 'timeoutSeconds' must still take the happy path.</summary>
+	[Theory]
+	[InlineData("""{"command":"Get-StubEcho","kind":"command","parameters":{"Value":"hello"},"timeoutSeconds":30}""")]
+	[InlineData("""{"command":"Get-StubEcho -Value 'hello'","kind":"script","timeoutSeconds":30}""")]
+	public async Task AValidKindAndTimeout_TakesTheHappyPath(string payload)
+	{
+		JobExecutionOutcome outcome = await CreateHandler().ExecuteAsync(ContextFor(payload), CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+	}
+
 	[Fact]
 	public async Task ATimedOutInvocation_MapsToFailed_NotAuthFailed()
 	{
