@@ -14,10 +14,22 @@ export interface SystemInfo {
 	update_available: string | null;
 }
 
+/**
+ * The chrome-relevant subset of `GET /api/v1/stigman`'s
+ * `StigManagerConnectionResponse` (`backend/Waypoint.Api/Contracts/StigManagerContracts.cs`,
+ * PR #314) — a *stored configuration*, not a reachability signal. There is no
+ * `connected` field on the wire (issue #316): the endpoint being configured
+ * says nothing about whether STIG Manager is actually up right now. Live
+ * reachability is a separate, side-effecting probe (`POST /stigman/test`,
+ * Admin-only) that the always-on top-bar chrome must not fire on every page
+ * load — both because a Viewer would 403 on it and because it is a real
+ * network call, not something to run unprompted on startup. The Config →
+ * STIG Manager tab (#312/#317) owns that live check via its own "Test"
+ * button; this type only ever answers "is a connection configured".
+ */
 interface StigmanStatus {
-	connected: boolean;
-	endpoint: string | null;
-	collection: string | null;
+	endpoint: string;
+	collection: string;
 }
 
 interface SystemContextValue {

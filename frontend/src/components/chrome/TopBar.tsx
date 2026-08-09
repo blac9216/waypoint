@@ -34,15 +34,21 @@ export function TopBar({ screenTitle }: { screenTitle: string }) {
 
 			<div className="top-bar__spacer" />
 
+			{/* `GET /stigman` reports configuration, not reachability (issue #316) —
+			    `stigman !== null` means a connection is configured, not that it is
+			    reachable right now. Live reachability is `POST /stigman/test`
+			    (Admin-only, side-effecting), surfaced by the Config → STIG Manager
+			    tab's "Test" button, not fired unprompted from this always-on
+			    chrome. */}
 			<div
 				className="top-bar__stigman"
 				title={
-					stigman?.connected
-						? `STIG Manager: ${stigman.endpoint ?? "unknown endpoint"} — connected, collection ${stigman.collection ?? "?"}`
-						: "STIG Manager: not reachable"
+					stigman
+						? `STIG Manager: ${stigman.endpoint}, collection ${stigman.collection} — configured`
+						: "STIG Manager: not configured"
 				}
 			>
-				<span className={`top-bar__stigman-dot ${stigman?.connected ? "is-ok" : "is-off"}`} />
+				<span className={`top-bar__stigman-dot ${stigman ? "is-ok" : "is-off"}`} />
 				<span>STIG Manager</span>
 			</div>
 
