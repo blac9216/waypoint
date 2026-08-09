@@ -121,6 +121,14 @@ function Invoke-WaypointScan {
 # given) -- writes an invented "attested" HDF and returns AttestApplied = $true when
 # AttestTemplatePath is set, or the pass-through shape when it is not (mirrors the real
 # module's no-attestation-docs path). 'failure' -- Success = $false.
+#
+# Issue #304 canary: before doing anything else, if $AttestTemplatePath is set this stub
+# stats the file ScanJobHandler wrote (created 0600 before the resolved attestation body
+# was written, per #304's fix) and writes its Unix permission bits to
+# $env:WAYPOINT_ATTEST_TEMPFILE_MODE_PATH, a scratch file the test reads AFTER this call
+# returns but BEFORE the handler's `finally` block deletes the temp file -- proving the
+# file is owner-only (0600) on disk at the moment the "saf attest apply" step would read
+# it, not just eventually.
 function Invoke-WaypointAttest {
 	[CmdletBinding()]
 	param(
@@ -130,6 +138,11 @@ function Invoke-WaypointAttest {
 		[Parameter()] [int]$TimeoutSeconds,
 		[Parameter()] [string]$VmwareStigDockerCommonPath
 	)
+
+	if ($AttestTemplatePath -and $env:WAYPOINT_ATTEST_TEMPFILE_MODE_PATH -and -not $IsWindows) {
+		$ModeValue = (Get-Item -Path $AttestTemplatePath).UnixFileMode
+		Set-Content -Path $env:WAYPOINT_ATTEST_TEMPFILE_MODE_PATH -Value $ModeValue.ToString() -NoNewline
+	}
 
 	if ((Get-Content -Path $ReportPath -Raw) -match '\bWaypoint-Canary\b') {
 		Write-Information 'Attest stub observed the HDF report.'

@@ -806,6 +806,67 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		Assert.True((long)(await stateEventQuery.ExecuteScalarAsync())! >= 1);
 	}
 
+	/// <summary>
+	/// Issue #304: the attest stage's resolved-attestation temp file
+	/// (<c>waypoint-attest-{jobid}.yml</c>, <c>ScanJobHandler.ExecuteAttestStageAsync</c>)
+	/// must be owner-only (0600) on disk for its whole on-disk window, not just
+	/// eventually -- the shared system temp dir's umask default is typically 0644
+	/// (world-readable). The stub module's <c>Invoke-WaypointAttest</c> stats the file
+	/// the instant it receives <c>AttestTemplatePath</c> (mirroring where the real
+	/// module's <c>saf attest apply</c> would read it) and reports the Unix mode via
+	/// <c>$env:WAYPOINT_ATTEST_TEMPFILE_MODE_PATH</c>, read here BEFORE the handler's
+	/// `finally` block deletes the temp file.
+	/// </summary>
+	[Fact]
+	public async Task AttestTempFile_IsCreatedOwnerOnly_0600()
+	{
+		if (!OperatingSystem.IsLinux())
+		{
+			return; // Unix file modes are only meaningful on Linux/macOS; CI runs Linux.
+		}
+
+		string modeReportPath = Path.Combine(_artifactDirectory, "attest-tempfile-mode.txt");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_TEMPFILE_MODE_PATH", modeReportPath);
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		try
+		{
+			(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-attest-tempfile-mode-canary");
+
+			string profile = "invented-vsphere-stig";
+			await _configDocs.SaveAsync(
+				Guid.NewGuid(), ConfigDocKinds.Attestation, profile, ConfigDocLayers.Target, targetId, "tester",
+				"status: Not_A_Finding\njustification: invented non-expired waiver\nexpires: 2099-01-01\n", CancellationToken.None);
+
+			Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+			string payload = JsonSerializer.Serialize(new { target_id = targetId });
+			IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+				runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+			JobDispatcherHostedService dispatcher = CreateDispatcher();
+			await dispatcher.StartAsync(CancellationToken.None);
+			try
+			{
+				await PollUntilTerminalAsync(jobIds[0]);
+			}
+			finally
+			{
+				await dispatcher.StopAsync(CancellationToken.None);
+			}
+
+			Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+			Assert.True(File.Exists(modeReportPath), $"stub did not observe an AttestTemplatePath -- expected '{modeReportPath}' to be written.");
+
+			string reportedMode = await File.ReadAllTextAsync(modeReportPath);
+			Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, Enum.Parse<UnixFileMode>(reportedMode));
+		}
+		finally
+		{
+			Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_TEMPFILE_MODE_PATH", null);
+		}
+	}
+
 	/// <summary>A non-auth SAF attest failure maps to `failed` with a log-tail job event, never a thrown exception.</summary>
 	[Fact]
 	public async Task AttestFailure_MapsToFailed_WithLogTailEvent()
