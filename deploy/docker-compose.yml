@@ -163,6 +163,32 @@ services:
       # uses under powershell/ (vcf-download-manager.common.ps1 lives at the
       # top of that directory in the sibling repo today).
       WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH: "/vcf-scripts/vcf-download-manager.common.ps1"
+      # #395: extends the #223 pattern above to the *other* sibling repo,
+      # vmware-stig-docker - the vendor source for the discover/scan/
+      # credential-test job handlers' shim modules (WaypointDiscovery,
+      # WaypointScan, WaypointCredentialTest under
+      # backend/Waypoint.Infrastructure/PowerShell/Modules/). WaypointDownload
+      # is deliberately NOT listed here: it dot-sources
+      # vcf-download-manager.common.ps1 from the *vcf-docker-download* sibling
+      # (the #223 mount/env above), not vmware-stig-docker, so it needs no
+      # additional wiring. Preload three more shim modules, appending to
+      # index 0 above rather than disturbing it - WaypointRunspacePool imports
+      # every configured index into each runspace, in order, so index 0
+      # (WaypointCatalogIndex) is unaffected by these additions.
+      PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDiscovery"
+      PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointScan"
+      PowerShell__ModulePreloadPaths__3: "/app/PowerShell/Modules/WaypointCredentialTest"
+      # The three vendor script paths the shims above read (see each
+      # module's $env: reads - e.g. WaypointDiscovery.psm1's
+      # $Script:VmwareStigDockerModulePath). Point inside the read-only
+      # vmware-stig-docker-scripts mount below; the relative subpaths match
+      # the sibling repo's powershell/ directory layout, where every
+      # module.*.ps1 file (transport, nsxapi, common, and the rest) lives
+      # flat at the top level - described generically here per CLAUDE.md
+      # (no host paths committed).
+      WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_PATH: "/vmware-stig-docker-scripts/module.transport.vmware.ps1"
+      WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH: "/vmware-stig-docker-scripts/module.transport.nsxapi.ps1"
+      WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH: "/vmware-stig-docker-scripts/module.common.ps1"
     volumes:
       - artifacts:/var/lib/waypoint/artifacts
       # Dev-only, gitignored, operator-borrowed depot token/config + the
@@ -187,6 +213,22 @@ services:
       # shim's own "not found" error only surfaces if a catalog-index job
       # actually runs.
       - ${WAYPOINT_VCF_SCRIPTS_DIR:-../dev/local/vcf-scripts}:/vcf-scripts:ro
+      # Sibling vmware-stig-docker repo's PowerShell scripts (issue #395),
+      # read-only. Same repo-root dev/local/ convention as the mount above,
+      # its own subpath so it doesn't collide with vcf-scripts' contents.
+      # Defaults to ../dev/local/vmware-stig-docker-scripts (gitignored -
+      # .gitignore's dev/local/ entry) so an operator points
+      # WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR at their sibling repo's
+      # powershell/ directory in deploy/.env; left unset, this mounts
+      # whatever (possibly nonexistent) ../dev/local/vmware-stig-docker-scripts
+      # resolves to. Same default bind-mount behavior as vcf-scripts above
+      # (NOT create_host_path: false) on purpose - this material is optional
+      # and lazily consumed (see the ModulePreloadPaths comment above), so a
+      # missing source should not block the whole stack from coming up -
+      # Docker creates an empty directory in that case and each shim's own
+      # "not found" error only surfaces if a discover/scan/credential-test
+      # job actually runs.
+      - ${WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR:-../dev/local/vmware-stig-docker-scripts}:/vmware-stig-docker-scripts:ro
       # Admin password hash file (issue #333) - operator-provided, gitignored
       # (../config/ is covered by .gitignore's anchored /config/ entry).
       # Commented out by default so an unconfigured stack does not fail to

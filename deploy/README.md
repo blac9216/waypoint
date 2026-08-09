@@ -591,11 +591,81 @@ comes up healthy exactly as before. Only a `catalog-index` job that actually
 dispatches fails, with the shim's own `no vcf-download-manager.common.ps1
 path configured` or `not found at '...'` error surfacing in that job's log.
 
-Only `catalog-index` is wired this way today. The other four PowerShell job
-handlers (`download`, `discover`, `scan`, `credential-test`) dot-source
-scripts from a *different* sibling repo (`vmware-stig-docker`) and are not
-yet mounted or preloaded — tracked separately (see the repo issue tracker
-for the follow-up filed alongside #223).
+`download` is also wired, but through the mount above — `WaypointDownload`'s
+shim dot-sources `vcf-download-manager.common.ps1` too (see
+`WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH` in `WaypointDownload.psm1`), so it
+needs no separate mount or preload entry.
+
+### PowerShell scripts mount (`WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR`, issue #395)
+
+The `discover`, `scan`, and `credential-test` job handlers (epic #13) run
+Waypoint-owned shim modules
+(`backend/Waypoint.Infrastructure/PowerShell/Modules/{WaypointDiscovery,WaypointScan,WaypointCredentialTest}/`)
+that dot-source three files from the *other* sibling repo,
+`vmware-stig-docker` — `module.transport.vmware.ps1`
+(`Connect-StigVIServer`/`Disconnect-VIServer`), `module.transport.nsxapi.ps1`
+(`Get-NsxSessionToken`), and `module.common.ps1`
+(`Invoke-ExternalCommand`/`Test-TargetReachable`/`New-InspecSecretConfigFile`).
+Same CLAUDE.md License & Borrowing Policy as the #223 mount above: these
+vendor scripts run **unmodified** — never copied into this repo or baked
+into the backend image, only mounted read-only at runtime, following the
+same `dev/local/`-style convention.
+
+`docker-compose.yml`'s `backend` service mounts a second operator-supplied
+directory read-only into the container, alongside `vcf-scripts`:
+
+```yaml
+- ${WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR:-../dev/local/vmware-stig-docker-scripts}:/vmware-stig-docker-scripts:ro
+```
+
+Point `WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR` (in `deploy/.env`, gitignored)
+at your own checkout of `vmware-stig-docker`'s `powershell/` directory:
+
+```bash
+# deploy/.env
+WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR=/path/to/your/vmware-stig-docker/powershell
+```
+
+Left unset, it defaults to a repo-root `dev/local/vmware-stig-docker-scripts`
+subdirectory (`../dev/local/vmware-stig-docker-scripts` relative to
+`deploy/`) — the same repo-root `dev/local/` convention as the other mounts,
+its own subpath so it doesn't collide with `vcf-scripts` or the depot
+token/binary mount. Either way the directory is git-ignored and never
+populated by this repo.
+
+The `backend` service also sets three more `ModulePreloadPaths` entries and
+three env vars so the three shims find their module and their vendor
+scripts inside the container:
+
+```yaml
+PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDiscovery"
+PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointScan"
+PowerShell__ModulePreloadPaths__3: "/app/PowerShell/Modules/WaypointCredentialTest"
+WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_PATH: "/vmware-stig-docker-scripts/module.transport.vmware.ps1"
+WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH: "/vmware-stig-docker-scripts/module.transport.nsxapi.ps1"
+WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH: "/vmware-stig-docker-scripts/module.common.ps1"
+```
+
+Indexes `1`–`3` are appended after the existing `catalog-index` mount's
+index `0` without disturbing it — `WaypointRunspacePool` imports every
+configured `ModulePreloadPaths` entry into each runspace
+(`WaypointRunspacePool.CreateRunspace`), so all four shim modules preload
+together. All six values above are fixed in-container literals, not
+operator knobs — only `WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR` (the mount
+source) and the layout of your `vmware-stig-docker` checkout under it are
+operator-controlled.
+
+**An unconfigured stack still starts and reports healthy**, for the same
+reason as the `catalog-index` mount: module import happens lazily, once per
+PowerShell runspace, on first job dispatch — never at container startup or
+DI construction. If `WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR` is left unset
+and `../dev/local/vmware-stig-docker-scripts` doesn't exist, Docker mounts
+an empty directory (this mount, like `vcf-scripts`, intentionally does
+**not** use the frontend/dist mount's `create_host_path: false` guard) and
+the stack comes up healthy exactly as before. Only a `discover`, `scan`, or
+`credential-test` job that actually dispatches fails, with the relevant
+shim's own `no module.*.ps1 path configured` or `not found at '...'` error
+surfacing in that job's log.
 
 ### Edge hardening baseline (DISA/CIS nginx guidance, issue #52)
 
