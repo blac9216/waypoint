@@ -6,7 +6,7 @@
  * requires full CRUD for sites, not just targets.
  */
 import { useState } from "react";
-import { useAuth } from "../../lib/auth";
+import { useAuth } from "../../lib/auth-context";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";
 import type { Site } from "./sites";
 import "./ConfigurationScreen.css";

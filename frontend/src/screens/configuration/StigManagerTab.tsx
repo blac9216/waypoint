@@ -21,7 +21,7 @@
  * showed a secret input for this panel, so there was nothing to reconcile.
  */
 import { useCallback, useEffect, useState } from "react";
-import { useAuth } from "../../lib/auth";
+import { useAuth } from "../../lib/auth-context";
 import { ApiError } from "../../lib/api";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";
 import { fetchCredentialOptions, fetchSites, type CredentialOption, type Site } from "./sites";

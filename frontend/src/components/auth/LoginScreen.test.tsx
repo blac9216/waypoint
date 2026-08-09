@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthProvider, useAuth } from "../../lib/auth";
+import { AuthProvider } from "../../lib/auth";
+import { useAuth } from "../../lib/auth-context";
 import { LoginScreen } from "./LoginScreen";
 
 function Probe() {

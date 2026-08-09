@@ -1,6 +1,6 @@
-import { useAuth } from "../../lib/auth";
-import { useSystem } from "../../lib/system";
-import { useTheme } from "../../lib/theme";
+import { useAuth } from "../../lib/auth-context";
+import { useSystem } from "../../lib/system-context";
+import { useTheme } from "../../lib/theme-context";
 import { BrandMark, ThemeIcon } from "./icons";
 import "./TopBar.css";
 

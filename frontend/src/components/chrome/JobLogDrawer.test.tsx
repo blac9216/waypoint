@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
 import type { WaypointEvent } from "../../lib/events";
-import { clampDrawerHeight, JobLogDrawer } from "./JobLogDrawer";
+import { clampDrawerHeight } from "./job-log";
+import { JobLogDrawer } from "./JobLogDrawer";
 
 /** README "Global job log drawer" / "Drawer resize": "Drag-resize clamps to
  * [96px, 40% of window height]." — this is the load-bearing piece of the

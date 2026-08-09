@@ -13,7 +13,7 @@
  * split.
  */
 import { useCallback, useEffect, useState } from "react";
-import { useAuth } from "../../lib/auth";
+import { useAuth } from "../../lib/auth-context";
 import { ApiError } from "../../lib/api";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";
 import {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateRouteAccess, ROUTES, routeForKey } from "./router";
+import { evaluateRouteAccess, ROUTES, routeForKey } from "./routes";
 
 describe("evaluateRouteAccess", () => {
 	it("allows a Viewer onto read-only screens", () => {
