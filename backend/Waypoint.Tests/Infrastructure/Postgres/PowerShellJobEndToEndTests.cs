@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -148,6 +149,64 @@ public sealed class PowerShellJobEndToEndTests : IAsyncLifetime
 		Assert.True(await reader.ReadAsync());
 		Assert.Equal("done", reader.GetString(0)); // Write-StubSecretLeak errors are non-terminating
 		Assert.DoesNotContain(canary, reader.GetString(1), StringComparison.Ordinal);
+	}
+
+	/// <summary>#156: a secret that transits two JSON serialization layers before the
+	/// sink -- here, the stub simulates an upstream HTTP error body (ConvertTo-Json,
+	/// layer 1) quoted into an information line, which Emit() then serializes into the
+	/// job_events payload (layer 2) -- must still be fully redacted, not just the
+	/// unescaped prefix a level-1-only needle set would catch.</summary>
+	[Fact]
+	public async Task TheDoublyEscapedCanarySecret_NeverReachesJobEvents()
+	{
+		const string canary = "pa\"ss\\wo<rd-invented-e2e";
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await _repository.CreateRunAsync("discover", "{}", credentialId, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds;
+		using (_redactor.Track(canary))
+		{
+			string payload = JsonSerializer.Serialize(new
+			{
+				command = "Write-StubDoublyEscapedSecretLeak",
+				parameters = new { Secret = canary },
+			});
+			jobIds = await _repository.FanOutJobsAsync(
+				runId,
+				[new JobSpec("discover", 1, CredentialId: credentialId, Payload: payload)],
+				"tester", CancellationToken.None);
+
+			JobDispatcherHostedService dispatcher = CreateDispatcher();
+			await dispatcher.StartAsync(CancellationToken.None);
+			try
+			{
+				await PollUntilTerminalAsync(jobIds[0]);
+			}
+			finally
+			{
+				await dispatcher.StopAsync(CancellationToken.None);
+			}
+		}
+
+		await Task.Delay(TimeSpan.FromMilliseconds(300));
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// Neither the raw canary nor its once-escaped spelling (what a level-1-only
+		// needle set would leave behind after only partially redacting the doubly
+		// -escaped occurrence) may survive.
+		await using (NpgsqlCommand leaked = new(
+			"SELECT count(*) FROM job_events WHERE payload::text LIKE '%' || $1 || '%'", connection))
+		{
+			leaked.Parameters.AddWithValue("rd-invented-e2e");
+			Assert.Equal(0L, (long)(await leaked.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand redactedPresent = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND payload::text LIKE '%[REDACTED]%'", connection))
+		{
+			redactedPresent.Parameters.AddWithValue(jobIds[0]);
+			Assert.True((long)(await redactedPresent.ExecuteScalarAsync())! >= 1);
+		}
 	}
 
 	/// <summary>The full #6-meets-#5 wire: three consecutive PowerShell auth failures
