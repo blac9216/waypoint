@@ -32,7 +32,9 @@ public sealed class LocalAuthOptions
 	public string AdminUsername { get; set; } = "admin";
 
 	/// <summary>
-	/// SHA-256 hex digest of the admin password. Set via the
+	/// Salted, iterated PBKDF2 hash of the admin password (see
+	/// <see cref="Auth.Pbkdf2PasswordHasher"/> for the stored format), generated with
+	/// <c>dotnet Waypoint.Api.dll --hash-password</c>. Set via the
 	/// <c>LocalAuth__AdminPasswordHash</c> environment variable (or an operator secret
 	/// mount) — never a literal password in configuration, and never committed.
 	/// </summary>

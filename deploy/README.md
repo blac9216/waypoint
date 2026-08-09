@@ -142,8 +142,12 @@ the frontend bundle).
    (`deploy/.env`):
 
    ```bash
-   # Never commit the plaintext password or its hash.
-   printf 'a-dev-password-of-your-choosing' | sha256sum | awk '{print $1}'
+   # Prompts for the password (input hidden) and prints a salted PBKDF2 hash to
+   # stdout (Pbkdf2PasswordHasher, issue #62). Never pass the password as an
+   # argument, and never commit the plaintext password or its hash.
+   cd ../backend && dotnet build Waypoint.Api
+   dotnet run --project Waypoint.Api --no-launch-profile --no-build -- --hash-password
+   cd -
    ```
 
    ```bash

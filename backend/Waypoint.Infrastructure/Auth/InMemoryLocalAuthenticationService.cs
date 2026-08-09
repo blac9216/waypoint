@@ -14,7 +14,6 @@
 
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
-using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Auth;
@@ -59,10 +58,7 @@ public sealed partial class InMemoryLocalAuthenticationService : ILocalAuthentic
 			return null;
 		}
 
-		string candidateHash = HashPassword(password);
-		if (!CryptographicOperations.FixedTimeEquals(
-				Encoding.UTF8.GetBytes(candidateHash),
-				Encoding.UTF8.GetBytes(options.AdminPasswordHash)))
+		if (!Pbkdf2PasswordHasher.Verify(password, options.AdminPasswordHash))
 		{
 			return null;
 		}
@@ -92,12 +88,6 @@ public sealed partial class InMemoryLocalAuthenticationService : ILocalAuthentic
 		}
 
 		return session;
-	}
-
-	private static string HashPassword(string password)
-	{
-		byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(password));
-		return Convert.ToHexString(hash).ToLowerInvariant();
 	}
 
 	private static string GenerateToken()

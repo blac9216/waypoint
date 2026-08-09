@@ -39,6 +39,15 @@ if (HealthCheckProbe.IsHealthCheckInvocation(args))
 	return HealthCheckProbe.Run();
 }
 
+// The LocalAuth__AdminPasswordHash generator (see PasswordHashCli, issue #62): the
+// same binary that verifies the hash also produces it, so the stored format's
+// parameters (KDF, iterations) can never drift between the two. Handled before any
+// host or logging setup for the same reason as --health-check above.
+if (PasswordHashCli.IsHashPasswordInvocation(args))
+{
+	return PasswordHashCli.Run();
+}
+
 // Bootstrap logger: captures anything that happens before the host (and DI, and the
 // redaction hook it resolves) is up. Kept as the static Log.Logger for the lifetime of
 // the process (see preserveStaticLogger below); it is only ever used by the startup

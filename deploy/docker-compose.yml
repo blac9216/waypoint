@@ -77,9 +77,10 @@ services:
       # every login closed instead of shipping a guessable credential (see
       # Waypoint.Core.Configuration.LocalAuthOptions and
       # InMemoryLocalAuthenticationService). Set WAYPOINT_ADMIN_PASSWORD_HASH
-      # to the SHA-256 hex digest of a password of your choosing - see
-      # deploy/README.md "Bring-up" for how to compute it. Never commit a
-      # real hash (or the plaintext password it hashes) to this repo.
+      # to a salted PBKDF2 hash (Pbkdf2PasswordHasher, issue #62) of a password
+      # of your choosing - see deploy/README.md "Bring-up" for how to generate
+      # it. Never commit a real hash (or the plaintext password it hashes) to
+      # this repo.
       LocalAuth__AdminPasswordHash: "${WAYPOINT_ADMIN_PASSWORD_HASH:-}"
       # Postgres connection (#103): backend/appsettings.json bakes in a default
       # ConnectionStrings:Waypoint that happens to match the postgres service's

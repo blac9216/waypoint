@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Security.Cryptography;
-using System.Text;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Waypoint.Core.Auth;
 
 namespace Waypoint.Tests.Support;
 
@@ -38,14 +37,8 @@ public class WaypointApiFactory : WebApplicationFactory<Program>
 		{
 			configBuilder.AddInMemoryCollection(new Dictionary<string, string?>
 			{
-				["LocalAuth:AdminPasswordHash"] = HashPassword(TestAdminPassword)
+				["LocalAuth:AdminPasswordHash"] = Pbkdf2PasswordHasher.Hash(TestAdminPassword)
 			});
 		});
-	}
-
-	private static string HashPassword(string password)
-	{
-		byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(password));
-		return Convert.ToHexString(hash).ToLowerInvariant();
 	}
 }
