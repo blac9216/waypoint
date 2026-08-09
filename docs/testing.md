@@ -58,6 +58,91 @@ identifiers.
 
 ---
 
+## Devcontainer bind mounts: source paths resolve on the host, not in the container
+
+If you are running `docker compose` (or plain `docker run -v`) from inside the
+devcontainer, this is the other trap that shares the same root cause as the two
+sections above: **the Docker daemon you are talking to is the host's daemon**, reached
+through the mounted `/var/run/docker.sock`. The daemon has never entered the
+container's filesystem namespace, so every bind-mount **source** path in a `-v` flag
+or a compose `volumes:` entry is resolved by the daemon **against the host
+filesystem**, regardless of what container issued the command.
+
+That matters because the devcontainer's workspace path is not the host's workspace
+path. The devcontainer mounts the repo checkout at a container-side path (typically
+under `/workspaces/...`), but the host-side directory backing that mount lives
+somewhere else entirely — under the invoking user's home directory. The two paths
+share no prefix, and nothing on the container filesystem tells you what the host-side
+path is.
+
+**Find the mapping yourself — do not guess or hardcode it.** `docker inspect` the
+running devcontainer and read its own mounts, the same way the network-discovery
+snippet above inspects `"$(hostname)"`:
+
+```bash
+docker inspect "$(hostname)" --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
+```
+
+The output is a table of `HOST_SIDE_PATH -> CONTAINER_SIDE_PATH` pairs. Find the entry
+whose destination is your workspace mount (e.g. `/workspaces/YOUR_FOLDER`) — its source
+is the host path you need for any new bind mount you construct from inside the
+container. This mapping is specific to the machine and the user who started the
+devcontainer; never copy a path you see in someone else's output into a script or
+doc, and never commit a resolved path — always re-derive it with the command above.
+
+### The failure mode: a silent, empty, root-owned directory
+
+If a bind-mount source you construct does not exist on the **host**, the daemon does
+not error. It silently creates an empty directory at that host path (owned by
+`root`, since the daemon runs as root) and mounts *that* — empty — into the
+container. Nothing in the compose or `docker run` output flags this; the container
+starts, "succeeds", and simply has no data where you expected it. This was
+misdiagnosed twice as unrelated problems (stale daemon state; a missing config
+file) before the actual cause — a workspace-relative source path that only exists
+inside the container — was identified.
+
+### `/mnt` is shared 1:1; container `/tmp` is not shared at all
+
+Two paths behave predictably, and knowing them turns this from a guessing game into
+a checklist:
+
+- **`/mnt` is bind-mounted host-to-container 1:1** (`/mnt:/mnt`) in this project's
+  devcontainer. A path under `/mnt` means the same thing on both sides — safe to use
+  as a bind-mount source from inside the container with no translation.
+- **Container `/tmp` is not shared with the host at all.** It is the container's own
+  filesystem layer. A source path you construct under `/tmp` inside the container
+  does not exist on the host under that name, so it always hits the empty-directory
+  trap above — this is why ad hoc scratch files under `/tmp` silently fail to appear
+  in bind-mounted containers, and why this repo's own scratch-directory guidance for
+  agents steers new temp files to a workspace or `/mnt` location instead.
+
+### Two workarounds
+
+1. **Stage the deploy tree under a both-sides-identical path.** Copy or check out
+   the files you need to bind-mount into a directory under `/mnt` (a scratch
+   subdirectory works well) instead of the devcontainer's workspace path. Any
+   compose file or `-v` flag that references that `/mnt` path needs no translation.
+2. **Translate sources to host-absolute paths.** Take the host-side path for your
+   workspace mount from the `docker inspect` output above, and substitute it for the
+   container-side workspace prefix in any bind-mount source you construct — by hand,
+   or with a small `sed`/shell substitution keyed off the mapping you just looked up.
+
+**The shipped defaults are correct on a real appliance host.** `deploy/docker-compose.yml`'s
+relative bind-mount sources work as-is when Compose runs directly on the appliance
+host (no devcontainer, no mounted-socket indirection — the daemon and the compose
+invocation share one filesystem). This trap is specific to running the deploy compose
+file *from inside* the devcontainer; do not "fix" the shipped compose file to work
+around it.
+
+### Symptom → cause
+
+| Symptom | Likely cause |
+| --- | --- |
+| A bind-mounted config/data directory is empty inside the container, but you know the host-side content exists | Not daemon staleness — the bind-mount **source** path does not exist on the host; see above |
+| nginx starts but serves no config (no server block) | Same: `conf.d` (or similar) was bind-mounted from a source path that only existed inside the devcontainer, so the daemon mounted an empty directory |
+| A newly-created scratch file under `/tmp` is invisible to a container you just bind-mounted it into | Container `/tmp` is not shared with the host; use `/mnt` or a workspace path instead |
+| The empty directory that got mounted is owned by `root` and you cannot delete it as yourself | Expected — the daemon (running as root) created it; remove it with `docker run --rm -v PARENT_DIR:/x alpine rm -rf /x/DIR_NAME` (substitute your own paths) or ask an operator with host access |
+
 ## The rule
 
 **Never run `deploy/docker-compose.yml` without isolating it.** Not "usually", not
@@ -91,6 +176,12 @@ embedded DNS (`resolver 127.0.0.11`, see `deploy/README.md` "Networking"), which
 always been per-project, never per-`container_name`.
 
 ## The recipe
+
+If you are bringing this stack up **from inside the devcontainer**, first read
+[Devcontainer bind mounts: source paths resolve on the host, not in the
+container](#devcontainer-bind-mounts-source-paths-resolve-on-the-host-not-in-the-container)
+above — a workspace-relative bind-mount source silently mounts empty, which looks
+like the stack came up fine right up until nginx or the backend has no config.
 
 Pick a slug unique to your work — the issue you are on plus your role, e.g.
 `issue3-fix`, `review-67`. Pick a host port nobody else is using (the default is
