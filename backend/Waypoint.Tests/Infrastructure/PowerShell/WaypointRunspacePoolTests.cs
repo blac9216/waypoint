@@ -144,7 +144,7 @@ public sealed class WaypointRunspacePoolTests
 	/// wait queue, so the race is genuinely won or lost inside that fast path.
 	/// (A caller already parked waiting on an exhausted pool is a different, more
 	/// severe pre-existing condition -- SemaphoreSlim.Dispose does not release parked
-	/// waiters at all, confirmed by manual repro and tracked separately, see #349 --
+	/// waiters at all, confirmed by manual repro and tracked separately, see #343 --
 	/// out of scope here since #158 only concerns ObjectDisposedException reaching the
 	/// caller.) Run many iterations with no artificial delay so the race window is hit
 	/// on at least one: whichever side wins, the outcome must be a single clean ODE
