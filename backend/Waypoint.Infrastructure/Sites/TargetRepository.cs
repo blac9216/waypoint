@@ -83,6 +83,33 @@ public sealed class TargetRepository
 		return (items, total);
 	}
 
+	/// <summary>
+	/// All targets under one site, unpaginated (issue #279): the scan fan-out needs
+	/// every target to build one job per row -- <see cref="ListAsync"/>'s <see cref="PageRequest"/>
+	/// clamps to <c>MaxLimit</c> (200), which silently truncated a full-site scan on
+	/// any site past that count. A site's target count is bounded by what an operator
+	/// can realistically stand up (M1 fixtures/lab: low hundreds), so one unpaginated
+	/// query is the right shape here rather than a paged fetch loop -- this method
+	/// exists precisely because the fan-out is one of the few callers that genuinely
+	/// needs "all rows", unlike the paginated `/sites/{id}/targets` listing endpoint.
+	/// </summary>
+	public async Task<IReadOnlyList<Target>> ListAllForSiteAsync(Guid siteId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		List<Target> items = [];
+		await using NpgsqlCommand command = new($"{ProjectionSql} WHERE site_id = $1 ORDER BY name", connection);
+		command.Parameters.AddWithValue(siteId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			items.Add(Map(reader));
+		}
+
+		return items;
+	}
+
 	public async Task<Target?> GetAsync(Guid id, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
