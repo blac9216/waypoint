@@ -28,7 +28,8 @@ browser --TLS--> nginx --/api--> backend --> postgres (internal network only)
   for a durable way to check this holds.
 - **backend** is the real ASP.NET Core API (issue #3), built from `../backend`.
   Local auth (ADR-0004 rollout note) is a dev-grade single admin user with no
-  compiled-in default password — see "Bring-up" step 3 to enable login.
+  compiled-in default password — see "Bring-up" step 3 to enable login, and
+  step 4 to enable the credential store's secret encryption.
 - **postgres** (16) sits on an `internal: true` compose network with no
   published port — reachable only from `backend`, never from the host or
   from `nginx`.
@@ -193,7 +194,71 @@ the frontend bundle).
    from the same three variables (#103), so there is no separate connection
    string to keep in sync.
 
-4. Bring up the stack from `deploy/`:
+4. Generate a secrets master key (issue #405) so the credential store works.
+   ADR-0005's envelope encryption (the AWX pattern) fails closed without
+   one: `FileMasterKeyProvider` throws a clear
+   `MasterKeyUnavailableException` — "No master key is configured..." — the
+   first time anything encrypts, so `POST /api/v1/credentials` (or any other
+   secret-bearing write) 500s until this step is done. Everything else in
+   the stack works without it; only the credential store depends on this
+   key.
+
+   ```bash
+   mkdir -p ../config/secrets
+   openssl rand -hex 32 > ../config/secrets/master.key
+   ```
+
+   **Never commit this file or its contents.** `../config/` is git-ignored
+   (see `.gitignore`'s anchored `/config/` entry and `CLAUDE.md`), and
+   losing this key after real credentials have been encrypted with it makes
+   those credentials permanently unrecoverable — back it up somewhere
+   outside the repo if the stack's credential data matters to you.
+
+   Then uncomment the `waypoint-master-key` bind mount on the `backend`
+   service in `docker-compose.yml`. On startup the backend reads the key
+   from `WAYPOINT_MASTER_KEY_FILE`
+   (`/run/secrets/waypoint-master-key` in-container) — unlike the admin
+   password hash above, there is no environment-variable fallback; a
+   mounted file is the only delivery path.
+
+   **The key file must be readable by the container's app user.** The
+   backend image (`backend/Dockerfile`) runs as the non-root `app` user
+   baked into the `mcr.microsoft.com/dotnet/aspnet:8.0` base image — uid
+   `1654` — not root and not your host user. A key file created with a
+   tight `0600` and left owned by your own (or root's) uid is exactly the
+   permission trap the admin-hash mount already warns about implicitly:
+   `app` can't read it, and `FileMasterKeyProvider` reports
+   `Access denied` on first use. For this dev stack, the practical fix is
+   either:
+
+   ```bash
+   chmod 644 ../config/secrets/master.key      # simplest: readable by all
+   # or, if you know the in-container uid and prefer tighter perms:
+   chown 1654 ../config/secrets/master.key && chmod 600 ../config/secrets/master.key
+   ```
+
+   `644` on a gitignored, host-local path is the pragmatic default here —
+   the file is not reachable outside this host either way, and matching
+   ownership across a bind mount from an arbitrary host account is more
+   friction than it buys on a dev box. A production/appliance deployment
+   with a real operator-managed key should prefer the `chown`/`600` form.
+
+   **A bad key file is cached until restart (issue #407).** Because
+   `FileMasterKeyProvider` loads the key lazily and caches the result
+   (including a failure) for the process lifetime, fixing permissions
+   *after* the backend has already attempted and failed a read does not
+   help until the backend container restarts:
+
+   ```bash
+   docker compose restart backend
+   ```
+
+   Leaving the mount commented out (or the file absent) is fine — the
+   stack still comes up healthy and serves `/api/v1/health` and login; it
+   just fails closed on any secret-bearing write with
+   `FileMasterKeyProvider`'s own error until this step is done.
+
+5. Bring up the stack from `deploy/`:
 
    ```bash
    cd deploy
@@ -230,7 +295,7 @@ the frontend bundle).
    See [`docs/testing.md`](../docs/testing.md) "`up -d` returning does not mean
    healthy" for the full explanation and paste-safe patterns.
 
-5. Verify:
+6. Verify:
 
    ```bash
    # Real frontend app shell, over TLS (dev cert is self-signed -> -k)
@@ -272,7 +337,7 @@ the frontend bundle).
    being served and the login round-trip returning `200` are what this layer is
    responsible for.
 
-6. Tear down:
+7. Tear down:
 
    ```bash
    docker compose down       # add -v to also drop the named volumes
