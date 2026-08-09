@@ -151,6 +151,19 @@ interface RunProgressData {
 	percent?: number;
 	completed_count?: number;
 	elapsed_seconds?: number;
+	/** Issue #406: present when this event is the run reaching a contract terminal
+	 * state (`completed`/`completed_with_failures`) — the job-engine's run-completion
+	 * write rides the existing `run.progress` channel rather than a new event type
+	 * (docs/api-contract.md's SSE types are a closed six-value set). Absent on every
+	 * other `run.progress` emission (plain counter progress, abort), so it must never
+	 * overwrite `header.state` with `undefined`. */
+	state?: RunHeader["state"];
+}
+
+const KNOWN_RUN_STATES: ReadonlySet<string> = new Set(["pending", "running", "completed", "completed_with_failures", "aborted"]);
+
+function asRunState(value: string | undefined): RunHeader["state"] | undefined {
+	return value !== undefined && KNOWN_RUN_STATES.has(value) ? (value as RunHeader["state"]) : undefined;
 }
 
 /** `queue.state` event payload. */
@@ -250,6 +263,7 @@ export function applyEvent(snapshot: RunSnapshot, event: WaypointEvent): RunSnap
 				percent: data.percent ?? snapshot.header.percent,
 				completed_count: data.completed_count ?? snapshot.header.completed_count,
 				elapsed_seconds: data.elapsed_seconds ?? snapshot.header.elapsed_seconds,
+				state: asRunState(data.state) ?? snapshot.header.state,
 			},
 		};
 	}
