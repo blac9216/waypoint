@@ -178,6 +178,13 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<ISecretTracker>(),
 				serviceProvider.GetRequiredService<ILogger<Secrets.CredentialSecretStore>>()));
 
+			// Issue #188: POST /credentials with a secret commits the metadata row and
+			// the secret atomically -- see CredentialCreationCoordinator's doc comment.
+			services.AddSingleton<Waypoint.Core.Secrets.ICredentialCreationCoordinator>(serviceProvider => new Secrets.CredentialCreationCoordinator(
+				connectionString,
+				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
+				serviceProvider.GetRequiredService<ILogger<Secrets.CredentialCreationCoordinator>>()));
+
 			// Issue #311: the convert-stage upload/enrichment coordinator and the
 			// retry route (JobsController) share this one instance.
 			services.AddSingleton<Scans.ScanUploadCoordinator>();

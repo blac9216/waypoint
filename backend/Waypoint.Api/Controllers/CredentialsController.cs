@@ -44,15 +44,19 @@ public sealed class CredentialsController : ControllerBase
 
 	private readonly CredentialRepository _credentials;
 	private readonly ICredentialSecretStore _secrets;
+	private readonly ICredentialCreationCoordinator _creation;
 	private readonly IJobQueueRepository _jobs;
 
-	public CredentialsController(CredentialRepository credentials, ICredentialSecretStore secrets, IJobQueueRepository jobs)
+	public CredentialsController(
+		CredentialRepository credentials, ICredentialSecretStore secrets, ICredentialCreationCoordinator creation, IJobQueueRepository jobs)
 	{
 		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(secrets);
+		ArgumentNullException.ThrowIfNull(creation);
 		ArgumentNullException.ThrowIfNull(jobs);
 		_credentials = credentials;
 		_secrets = secrets;
+		_creation = creation;
 		_jobs = jobs;
 	}
 
@@ -110,15 +114,29 @@ public sealed class CredentialsController : ControllerBase
 				"'sudo_enabled' is only meaningful for credential_type 'ssh'.");
 		}
 
-		Guid? id = await _credentials.CreateAsync(request.Name, request.CredentialType, owner, sudoEnabled, cancellationToken, request.Username);
+		// Issue #188: metadata insert + secret store (+ rotated_at stamp) commit as one
+		// transaction via the coordinator, so a secret-store failure (bad master key, DB
+		// blip) never leaves an orphan metadata row with has_secret=false for a retry to
+		// collide with as a spurious 409 name_taken.
+		byte[]? secretBytes = string.IsNullOrEmpty(request.Secret) ? null : Encoding.UTF8.GetBytes(request.Secret);
+		Guid? id;
+		try
+		{
+			id = await _creation.CreateAsync(
+				request.Name, request.CredentialType, owner, sudoEnabled, request.Username,
+				secretBytes, User.GetRequiredUsername(), cancellationToken);
+		}
+		finally
+		{
+			if (secretBytes is not null)
+			{
+				System.Security.Cryptography.CryptographicOperations.ZeroMemory(secretBytes);
+			}
+		}
+
 		if (id is not Guid createdId)
 		{
 			throw new ApiException(HttpStatusCode.Conflict, "name_taken", $"A credential named '{request.Name}' already exists.");
-		}
-
-		if (!string.IsNullOrEmpty(request.Secret))
-		{
-			await StoreSecretAsync(createdId, request.Secret, cancellationToken);
 		}
 
 		CredentialResponse created = (await _credentials.GetAsync(createdId, cancellationToken))!;

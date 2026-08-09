@@ -75,6 +75,10 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 					provider.GetRequiredService<IEnvelopeCipher>(),
 					provider.GetRequiredService<ISecretTracker>(),
 					NullLogger<CredentialSecretStore>.Instance));
+				services.AddSingleton<ICredentialCreationCoordinator>(provider => new CredentialCreationCoordinator(
+					_connectionString,
+					provider.GetRequiredService<IEnvelopeCipher>(),
+					NullLogger<CredentialCreationCoordinator>.Instance));
 
 				// Issue #245: /credentials/{id}/test now fans out a job, so the
 				// controller needs IJobQueueRepository -- JobEngine:Enabled is false

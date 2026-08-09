@@ -47,18 +47,38 @@ public sealed partial class CredentialSecretStore : ICredentialSecretStore
 
 	public async Task StoreAsync(Guid credentialId, byte[] secretValue, string actor, CancellationToken cancellationToken)
 	{
-		ArgumentNullException.ThrowIfNull(secretValue);
 		ArgumentException.ThrowIfNullOrWhiteSpace(actor);
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+		string masterKeyId = await StoreAsync(connection, transaction, credentialId, secretValue, actor, _cipher, cancellationToken).ConfigureAwait(false);
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		LogSecretStored(credentialId, actor, masterKeyId);
+	}
+
+	/// <summary>
+	/// Connection-scoped core of <see cref="StoreAsync(Guid,byte[],string,CancellationToken)"/>
+	/// -- does not open a connection/transaction or commit; the caller owns both so
+	/// this can be composed with the credential metadata insert (issue #188, via
+	/// <see cref="Waypoint.Core.Secrets.ICredentialCreationCoordinator"/>). The "no
+	/// audit, no secret" fail-closed guarantee (security.md goal 3) is unaffected by
+	/// this composition: the audit INSERT and the ciphertext upsert still commit or
+	/// roll back together, whichever transaction they end up sharing -- a store
+	/// failure during create rolls back the (never-committed) audit row along with
+	/// the (never-committed) metadata row, which is correct: nothing worth auditing
+	/// happened.
+	/// </summary>
+	internal static async Task<string> StoreAsync(
+		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid credentialId, byte[] secretValue, string actor,
+		IEnvelopeCipher cipher, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(secretValue);
 		if (secretValue.Length == 0)
 		{
 			throw new ArgumentException("An empty secret cannot be stored.", nameof(secretValue));
 		}
 
-		SecretEnvelope envelope = _cipher.Encrypt(secretValue, ContextFor(credentialId));
-
-		await using NpgsqlConnection connection = new(_connectionString);
-		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+		SecretEnvelope envelope = cipher.Encrypt(secretValue, ContextFor(credentialId));
 
 		// Rotation replaces the row in place (ADR-0005: one blob per credential,
 		// write-only -- no version history to leak from).
@@ -83,8 +103,8 @@ public sealed partial class CredentialSecretStore : ICredentialSecretStore
 
 		await WriteAuditAsync(connection, transaction, "secret.stored", actor, credentialId, null, null,
 			System.Text.Json.JsonSerializer.Serialize(new { master_key_id = envelope.MasterKeyId }), cancellationToken).ConfigureAwait(false);
-		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-		LogSecretStored(credentialId, actor, envelope.MasterKeyId);
+
+		return envelope.MasterKeyId;
 	}
 
 	public async Task<DecryptedSecret> DecryptAsync(Guid credentialId, string actor, Guid? jobId, Guid? runId, CancellationToken cancellationToken)

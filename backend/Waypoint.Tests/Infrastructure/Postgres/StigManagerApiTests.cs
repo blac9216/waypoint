@@ -108,6 +108,10 @@ public sealed class StigManagerApiTests : IAsyncLifetime, IDisposable
 					provider.GetRequiredService<IEnvelopeCipher>(),
 					provider.GetRequiredService<ISecretTracker>(),
 					NullLogger<CredentialSecretStore>.Instance));
+				services.AddSingleton<ICredentialCreationCoordinator>(provider => new CredentialCreationCoordinator(
+					_connectionString,
+					provider.GetRequiredService<IEnvelopeCipher>(),
+					NullLogger<CredentialCreationCoordinator>.Instance));
 				services.AddSingleton<IStigManagerProbe>(Probe);
 			});
 		}
