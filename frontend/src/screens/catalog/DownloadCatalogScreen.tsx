@@ -20,6 +20,7 @@ import {
 	fetchCatalogArtifacts,
 	formatEta,
 	formatRate,
+	formatTransferEstimate,
 	queueDownloads,
 	syncCatalog,
 	type ArtifactStatus,
@@ -71,7 +72,7 @@ export function DownloadCatalogScreen() {
 	const [queueError, setQueueError] = useState<string | null>(null);
 	const [queueing, setQueueing] = useState(false);
 
-	const { byArtifact } = useDownloadQueue(token, Boolean(user));
+	const { items: queueItems, byArtifact } = useDownloadQueue(token, Boolean(user));
 
 	const load = useCallback((query: CatalogArtifactsQuery) => {
 		setLoading(true);
@@ -208,6 +209,15 @@ export function DownloadCatalogScreen() {
 
 	const selectedArtifacts = artifacts.filter((a) => selected.has(a.id));
 	const selectedTotalBytes = selectedArtifacts.reduce((sum, a) => sum + a.size_bytes, 0);
+	// Live aggregate rate: sum of currently-downloading jobs' measured
+	// rate, so the estimate reflects real throughput when the queue is
+	// active (falls back to an assumed bandwidth constant when it's 0 —
+	// see formatTransferEstimate).
+	const liveAggregateRate = queueItems.reduce(
+		(sum, item) => (item.state === "downloading" ? sum + (item.rate_bytes_per_sec ?? 0) : sum),
+		0,
+	);
+	const transferEstimate = formatTransferEstimate(selectedTotalBytes, liveAggregateRate);
 
 	return (
 		<div className="catalog-screen">
@@ -273,6 +283,7 @@ export function DownloadCatalogScreen() {
 						<div className="catalog-footer__summary">
 							<span className="mono">{selected.size} selected</span>
 							<span className="mono">{formatBytesInline(selectedTotalBytes)}</span>
+							{transferEstimate && <span className="mono">{transferEstimate}</span>}
 						</div>
 						{queueError && <div className="catalog-footer__error">{queueError}</div>}
 						<div className="catalog-footer__spacer" />

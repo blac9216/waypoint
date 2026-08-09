@@ -136,3 +136,44 @@ export function formatEta(seconds: number | null): string {
 	const rest = Math.round(seconds % 60);
 	return `${minutes}m ${rest}s`;
 }
+
+/**
+ * Conservative assumed download bandwidth (bytes/sec), used to estimate the
+ * selection footer's transfer time when the queue has no live aggregate
+ * rate to measure from (nothing currently downloading). ~10 Mbps — a
+ * deliberately modest guess for a DoD network path to an internet depot;
+ * it is meant to avoid an overconfident estimate, not to model any
+ * particular circuit. Documented here rather than inferred silently so a
+ * future tuning pass has one place to change it.
+ */
+export const ASSUMED_BANDWIDTH_BYTES_PER_SEC = 1_250_000; // 10 Mbps
+
+/**
+ * Selection-footer transfer estimate (docs/ui/prototype/README.md screen 6:
+ * "selection count, total size, transfer estimate, Clear, and Queue N
+ * downloads"; the prototype HTML renders "est. 24m at 13 MB/s"). Prefers
+ * the queue's live aggregate rate (sum of `rate_bytes_per_sec` across
+ * actively-downloading jobs) when one exists, since that reflects real
+ * throughput; falls back to `ASSUMED_BANDWIDTH_BYTES_PER_SEC` otherwise.
+ */
+export function formatTransferEstimate(selectedBytes: number, liveRateBytesPerSec: number): string | null {
+	if (!Number.isFinite(selectedBytes) || selectedBytes <= 0) {
+		return null;
+	}
+	const rate = liveRateBytesPerSec > 0 ? liveRateBytesPerSec : ASSUMED_BANDWIDTH_BYTES_PER_SEC;
+	const seconds = selectedBytes / rate;
+	return `est. ${formatDuration(seconds)} at ${formatRate(rate)}`;
+}
+
+function formatDuration(seconds: number): string {
+	if (seconds < 60) {
+		return "<1m";
+	}
+	const totalMinutes = Math.round(seconds / 60);
+	if (totalMinutes < 60) {
+		return `${totalMinutes}m`;
+	}
+	const hours = Math.floor(totalMinutes / 60);
+	const minutes = totalMinutes % 60;
+	return minutes === 0 ? `${hours}hr` : `${hours}hr ${minutes}m`;
+}
