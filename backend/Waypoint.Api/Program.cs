@@ -121,11 +121,21 @@ try
 	// request pipeline is wired up at all, not lazily on first request. The "Testing"
 	// environment configuration turns RunMigrationsOnStartup off: the in-process test
 	// host has no Postgres to migrate against (see appsettings.Testing.json).
+	//
+	// ApplyAsync is passed the host's shutdown token (issue #231, deferred from #108/
+	// #229): #229 made the advisory-lock acquire wait unbounded (CommandTimeout = 0),
+	// so a second instance can now block indefinitely behind another instance's
+	// in-progress migration. Without a real token, nothing could interrupt that wait
+	// or an in-flight migration on host shutdown -- ApplicationStopping is the token
+	// IHostApplicationLifetime signals when the host begins a graceful shutdown, and
+	// it is already available here because it comes from the built host's DI
+	// container, before app.Run() starts taking traffic.
 	WaypointDatabaseOptions databaseOptions = app.Services.GetRequiredService<IOptions<WaypointDatabaseOptions>>().Value;
 	if (databaseOptions.RunMigrationsOnStartup)
 	{
 		ISchemaMigrator migrator = app.Services.GetRequiredService<ISchemaMigrator>();
-		await migrator.ApplyAsync();
+		IHostApplicationLifetime lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+		await migrator.ApplyAsync(lifetime.ApplicationStopping);
 	}
 
 	// First in the pipeline (#61): the appliance always sits behind nginx (ADR-0003),

@@ -114,7 +114,17 @@ public sealed partial class NpgsqlSchemaMigrator : ISchemaMigrator
 		{
 			await using NpgsqlCommand unlockCommand = new("SELECT pg_advisory_unlock($1)", connection);
 			unlockCommand.Parameters.AddWithValue(AdvisoryLockKey);
-			await unlockCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			// Deliberately CancellationToken.None, not the caller's token: this is
+			// cleanup for a lock this process *holds*, running in a finally that also
+			// fires on the cancellation path. Passing the (possibly already-cancelled)
+			// caller token here would make ExecuteNonQueryAsync throw immediately
+			// without sending the unlock at all, leaking the advisory lock and
+			// deadlocking every future instance's migration attempt behind a lock
+			// nothing would ever release. The connection is still open and healthy at
+			// this point -- Npgsql's command cancellation is a Postgres-level cancel
+			// request, not a torn-down socket -- so this best-effort unlock on the same
+			// connection is safe and bounded (a single fast, always-local statement).
+			await unlockCommand.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
 		}
 	}
 
