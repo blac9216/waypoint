@@ -511,4 +511,108 @@ describe("LiveRunScreen (issue #283)", () => {
 			expect(row).toHaveTextContent(FAILURE_NOTE);
 		});
 	});
+
+	describe("log-first layout (#287)", () => {
+		it("the layout switcher offers a third Log-first option alongside Priority queues and State board", async () => {
+			installFetchMock(() => ({ frames: [] }));
+			renderWithAuth("run-0808-0100Z");
+			await waitFor(() => expect(screen.getByText("run-0808-0100Z")).toBeInTheDocument());
+
+			expect(screen.getByRole("button", { name: "Priority queues" })).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "State board" })).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: "Log-first" })).toBeInTheDocument();
+		});
+
+		it("selecting Log-first renders the narrow target list and a full-height log pane, and switching between all three modes works", async () => {
+			installFetchMock(() => ({ frames: [] }));
+			renderWithAuth("run-0808-0100Z");
+			await waitFor(() => expect(screen.getByText("esxi-01.example.internal")).toBeInTheDocument());
+
+			// Default is Priority queues: grouped table rows, no dedicated log pane.
+			expect(document.querySelector(".live-run__queues")).toBeInTheDocument();
+			expect(document.querySelector(".live-run__log-first")).not.toBeInTheDocument();
+
+			screen.getByRole("button", { name: "State board" }).click();
+			await waitFor(() => expect(document.querySelector(".live-run__board")).toBeInTheDocument());
+			expect(document.querySelector(".live-run__log-first")).not.toBeInTheDocument();
+
+			screen.getByRole("button", { name: "Log-first" }).click();
+			await waitFor(() => expect(document.querySelector(".live-run__log-first")).toBeInTheDocument());
+			expect(document.querySelector(".live-run__log-first-targets")).toBeInTheDocument();
+			expect(document.querySelector(".live-run__log-first-log")).toBeInTheDocument();
+			// Same per-target data the other two layouts render.
+			expect(screen.getByText("esxi-01.example.internal")).toBeInTheDocument();
+			expect(screen.getByText("esxi-02.example.internal")).toBeInTheDocument();
+			// No log lines have arrived yet.
+			expect(screen.getByText("No log lines yet.")).toBeInTheDocument();
+
+			screen.getByRole("button", { name: "Priority queues" }).click();
+			await waitFor(() => expect(document.querySelector(".live-run__queues")).toBeInTheDocument());
+			expect(document.querySelector(".live-run__log-first")).not.toBeInTheDocument();
+		});
+
+		it("the log pane renders live job.log lines while in log-first mode", async () => {
+			const LOG_LINE = "InSpec control scan starting — 412 controls";
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				const accept = new Headers(init?.headers).get("Accept");
+				if (url === "/api/v1/runs/run-0808-0100Z" && accept !== "text/event-stream") {
+					return new Response(JSON.stringify(HEADER), { status: 200 });
+				}
+				if (url === "/api/v1/runs/run-0808-0100Z/jobs") {
+					return new Response(JSON.stringify(JOBS), { status: 200 });
+				}
+				if (url === "/api/v1/auth/me") {
+					return new Response(JSON.stringify({ username: "j.moreno", role: "Admin" }), { status: 200 });
+				}
+				if (url === "/api/v1/runs/run-0808-0100Z/events") {
+					const encoder = new TextEncoder();
+					const logEnvelope = {
+						seq: 1,
+						ts: "2026-08-08T01:00:00Z",
+						type: "job.log",
+						run_id: "run-0808-0100Z",
+						job_id: "j-1",
+						data: { target: "esxi-01.example.internal", line: LOG_LINE },
+					};
+					const chunk = encoder.encode(`id: 1\ndata: ${JSON.stringify(logEnvelope)}\n\n`);
+					let sent = false;
+					const signal = init?.signal;
+					return {
+						ok: true,
+						status: 200,
+						body: {
+							getReader: () => ({
+								read(): Promise<{ value: Uint8Array | undefined; done: boolean }> {
+									if (!sent) {
+										sent = true;
+										return Promise.resolve({ value: chunk, done: false });
+									}
+									return new Promise((_resolve, reject) => {
+										if (signal?.aborted) {
+											reject(new DOMException("aborted", "AbortError"));
+											return;
+										}
+										signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+									});
+								},
+								releaseLock() {},
+							}),
+						},
+					} as unknown as Response;
+				}
+				throw new Error(`Unhandled fetch: ${url}`);
+			}) as unknown as typeof fetch;
+
+			renderWithAuth("run-0808-0100Z", "Admin");
+			await waitFor(() => expect(screen.getByText("esxi-01.example.internal")).toBeInTheDocument());
+
+			screen.getByRole("button", { name: "Log-first" }).click();
+			await waitFor(() => expect(document.querySelector(".live-run__log-first-log")).toBeInTheDocument());
+			await waitFor(() => expect(screen.getByText(LOG_LINE)).toBeInTheDocument());
+			// The target list still renders alongside the log pane in the same mode
+			// (the target name now appears twice: the list row and the log line's tag).
+			expect(screen.getAllByText("esxi-01.example.internal").length).toBeGreaterThanOrEqual(2);
+		});
+	});
 });

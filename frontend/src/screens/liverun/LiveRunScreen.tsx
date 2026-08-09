@@ -1,12 +1,11 @@
 /**
  * Live Run — docs/ui/prototype/README.md screen 1, the hero screen (issue
  * #283 read side + #285 write side). Renders a run's per-target board driven
- * entirely by SSE (useLiveRun.ts) — header counters, the layout switcher, two
- * of the prototype's three layout modes (priority queues default, state
- * board), and — as of #285 — the run controls: Pause queue / Abort run
- * (run-scoped), per-job cancel, and the blocked banner's Admin
- * credential-swap-resume. The third layout (log-first) is proposed as a
- * follow-up in the PR body to keep slices review-sized; see #283.
+ * entirely by SSE (useLiveRun.ts) — header counters, the layout switcher, all
+ * three of the prototype's layout modes (priority queues default, state
+ * board, log-first — #287), and — as of #285 — the run controls: Pause queue
+ * / Abort run (run-scoped), per-job cancel, and the blocked banner's Admin
+ * credential-swap-resume.
  *
  * Controls follow the README "Roles & Permissions" visible-but-disabled
  * convention: an insufficient role still sees the button, disabled, with a
@@ -17,11 +16,22 @@
  * Every control's server-side effect is reflected back through SSE
  * (job.state / run.progress / queue.state), never a local optimistic patch —
  * consistent with the "no polling" rule this screen was built to satisfy.
+ *
+ * Log-first (#287) is the third of the prototype's three layout modes
+ * (README screen 1: "Narrow target list (380px, own scroll) beside a
+ * full-height log pane") — deferred out of #283 to keep that PR
+ * review-sized. It reuses the same `RunSnapshot.jobs` the other two layouts
+ * render (the reducer/hook are untouched) plus its own small `job.log`
+ * accumulator (`useRunLog` below), which mirrors the global Job Log
+ * Drawer's (#11) subscription pattern but is scoped to this run and capped
+ * at 260 lines per the prototype's "Live run simulation" spec — distinct
+ * from the drawer's own 1000-line memory bound.
  */
-import { useEffect, useMemo, useState } from "react";
-import { ApiError } from "../../lib/api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ApiError, API_BASE } from "../../lib/api";
 import { roleGateProps, type Role } from "../../lib/roles";
 import { useAuth } from "../../lib/auth";
+import { connectEventStream, type WaypointEvent } from "../../lib/events";
 import { fetchCredentials, type Credential } from "../configuration/credentials";
 import {
 	abortRun,
@@ -38,7 +48,66 @@ import { useLiveRun } from "./useLiveRun";
 import { useRunIdFromQuery } from "./useRunIdFromQuery";
 import "./LiveRunScreen.css";
 
-type LayoutMode = "queues" | "board";
+type LayoutMode = "queues" | "board" | "log";
+
+/** Prototype "Live run simulation": "Log lines are appended on every state
+ * transition and capped at 260 lines." */
+const LOG_FIRST_MAX_LINES = 260;
+
+interface LogFirstLine {
+	seq: number;
+	ts: string;
+	target?: string;
+	message: string;
+}
+
+interface JobLogEventData {
+	target?: string;
+	line?: string;
+	message?: string;
+}
+
+/**
+ * Local `job.log` accumulator for the log-first layout's full-height pane.
+ * Deliberately separate from `useLiveRun`/`applyEvent` — that reducer folds
+ * `job.log` into a single `note` field per job (the queues/board layouts'
+ * "latest note" column), not a scrollable history, and is intentionally
+ * left untouched by this issue. This hook opens its own subscription to the
+ * same per-run SSE stream (`connectEventStream`, same primitive `useLiveRun`
+ * and the global JobLogDrawer both use) purely to keep a capped line
+ * history; it never mutates the `RunSnapshot`.
+ */
+function useRunLog(runId: string | undefined, active: boolean): LogFirstLine[] {
+	const { token, status } = useAuth();
+	const [lines, setLines] = useState<LogFirstLine[]>([]);
+
+	useEffect(() => {
+		setLines([]);
+		if (!active || !runId || status !== "signed-in" || !token) {
+			return;
+		}
+		const close = connectEventStream(`${API_BASE}/runs/${runId}/events`, {
+			getToken: () => token,
+			onEvent: (event: WaypointEvent) => {
+				if (event.type !== "job.log") {
+					return;
+				}
+				const data = event.data as JobLogEventData;
+				const message = data.line ?? data.message;
+				if (!message) {
+					return;
+				}
+				setLines((prev) => {
+					const next = [...prev, { seq: event.seq, ts: event.ts, target: data.target, message }];
+					return next.length > LOG_FIRST_MAX_LINES ? next.slice(next.length - LOG_FIRST_MAX_LINES) : next;
+				});
+			},
+		});
+		return close;
+	}, [runId, active, status, token]);
+
+	return lines;
+}
 
 const STATE_COLOR: Record<string, string> = {
 	queued: "var(--txt3)",
@@ -238,6 +307,58 @@ function BoardLayout({ jobs }: { jobs: RunJob[] }) {
 	);
 }
 
+/**
+ * Log-first layout (README screen 1: "Narrow target list (380px, own
+ * scroll) beside a full-height log pane"). The target list reuses the same
+ * per-target rows the other two layouts render (just a flat list, sorted by
+ * queue priority then target — the queue grouping itself belongs to the
+ * Priority Queues layout); the log pane is fed by `useRunLog` above and
+ * follows the tail the same way the global Job Log Drawer does (`scrollTop
+ * = scrollHeight`, never `scrollIntoView`).
+ */
+function LogFirstLayout({ jobs, lines }: { jobs: RunJob[]; lines: LogFirstLine[] }) {
+	const sorted = useMemo(() => [...jobs].sort((a, b) => a.priority - b.priority || a.target.localeCompare(b.target)), [jobs]);
+	const logRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		const el = logRef.current;
+		if (el) {
+			el.scrollTop = el.scrollHeight;
+		}
+	}, [lines]);
+
+	return (
+		<div className="live-run__log-first">
+			<div className="live-run__log-first-targets">
+				{sorted.map((job) => {
+					const color = stateColor(job.state);
+					const inFlight = IN_FLIGHT_STATES.has(job.state);
+					return (
+						<div key={job.job_id} className="live-run__log-first-target">
+							<span className={`live-run__dot ${inFlight ? "live-run__dot--pulse" : ""}`} style={{ background: color }} />
+							<span className="mono live-run__log-first-target-name">{job.target}</span>
+							<span className="live-run__spacer" />
+							<span className="live-run__state-pill mono" style={{ color, borderColor: color }}>
+								{job.state}
+							</span>
+						</div>
+					);
+				})}
+			</div>
+			<div className="live-run__log-first-log" ref={logRef} role="log" aria-live="polite">
+				{lines.length === 0 && <div className="live-run__log-first-empty">No log lines yet.</div>}
+				{lines.map((line) => (
+					<div className="live-run__log-first-line" key={line.seq}>
+						<span className="mono live-run__log-first-ts">{line.ts}</span>
+						{line.target && <span className="mono live-run__log-first-target-tag">{line.target}</span>}
+						<span className="live-run__log-first-msg">{line.message}</span>
+					</div>
+				))}
+			</div>
+		</div>
+	);
+}
+
 /** Route-connected entry point — reads `?run=` from the URL. The bare
  * `LiveRunScreen` below takes `runId` as an explicit prop so tests can drive
  * it directly without touching `window.location`. */
@@ -250,6 +371,7 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 	const { user } = useAuth();
 	const { snapshot, loading, loadError, connectionState } = useLiveRun(runId);
 	const [layout, setLayout] = useState<LayoutMode>("queues");
+	const logLines = useRunLog(runId, layout === "log");
 	const [actionError, setActionError] = useState<string | null>(null);
 	const [pausing, setPausing] = useState(false);
 	const [aborting, setAborting] = useState(false);
@@ -405,6 +527,9 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 						<button type="button" className={layout === "board" ? "is-active" : ""} onClick={() => setLayout("board")}>
 							State board
 						</button>
+						<button type="button" className={layout === "log" ? "is-active" : ""} onClick={() => setLayout("log")}>
+							Log-first
+						</button>
 					</div>
 					<span className="live-run__spacer" />
 					{connectionState !== "open" && (
@@ -425,11 +550,9 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 			</div>
 
 			<div className="live-run__body">
-				{layout === "queues" ? (
-					<QueueLayout header={header} jobs={jobs} jobControls={jobControls} />
-				) : (
-					<BoardLayout jobs={jobs} />
-				)}
+				{layout === "queues" && <QueueLayout header={header} jobs={jobs} jobControls={jobControls} />}
+				{layout === "board" && <BoardLayout jobs={jobs} />}
+				{layout === "log" && <LogFirstLayout jobs={jobs} lines={logLines} />}
 			</div>
 		</div>
 	);
