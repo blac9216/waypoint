@@ -278,7 +278,10 @@ Two standing rules for anything you claim in a PR body or review:
    final rendered body, before you post it. Several PRs have shipped snippets that
    fail or silently no-op for a reviewer who pastes them — `git revert ` with no SHA,
    a `grep -A3` that stops short of the line it claims to show, an `echo` whose
-   payload was eaten. A broken step makes a healthy PR look broken.
+   payload was eaten, or a pwsh `Import-Module backend/…/X.psm1` with a repo-relative
+   path (pwsh rejects it — `Import-Module` needs an absolute/rooted path or a name on
+   `$env:PSModulePath`, so root it, e.g. `Import-Module "$PWD/backend/…/X.psm1"`).
+   A broken step makes a healthy PR look broken.
 
 3. **Read the stored body back after posting, and re-check every command.** This is
    not the same as rule 2, and writing the body correctly is *not sufficient*.
