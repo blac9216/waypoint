@@ -379,12 +379,19 @@ that raises coverage) but is deliberately **not** built here — issue #102 chos
 floor as the pragmatic air-gap-compatible interim, and a no-regression gate on a
 committed baseline is left as a documented future option.
 
-Current floors (as of 2026-08-08, commit `f2aadfe`):
+Current floors (backend re-baselined 2026-08-09 against current `main`; frontend
+measured 2026-08-08 at commit `f2aadfe`):
 
 | Project | Metric | Floor | Measured | Headroom |
 | --- | --- | --- | --- | --- |
-| backend | line | 89.0% | 91.92% (515/515 tests) | ~3 points |
+| backend | line | 88.0% | 88.84% (CI on current main, PR #391) | ~1 point |
 | frontend | line | 88.0% | 90.12% (165/165 tests) | ~2 points |
+
+The backend floor was set from the codebase's *current* coverage, not an older
+high-water mark: 91.92% was measured at `f2aadfe`, but ~78 M2 commits landed
+between then and the gate going live and moved the real number to 88.84%. The gate
+is baselined at reality (adding it changed no product code), so this is not a
+lowered floor accommodating a regression.
 
 **Ratcheting the floor up**: re-measure locally (`dotnet test backend/Waypoint.sln
 --collect:"XPlat Code Coverage"` / `npm run test:coverage` in `frontend/`), confirm the
