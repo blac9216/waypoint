@@ -140,3 +140,128 @@ describe("TopBar STIG Manager pill (issue #316)", () => {
 		expect(title).not.toMatch(/\bconnected\b/i);
 	});
 });
+
+/**
+ * Issue #94: `TopBar` used to derive its mode badge from `system?.mode ??
+ * null` — the same conflation issue #82 removed from the router. `null`
+ * meant both "still loading" and "the fetch failed", so a `GET /system`
+ * that was merely slow rendered the false claim "could not reach the
+ * Waypoint API." These tests pin the fix: a neutral loading treatment while
+ * `!ready`, the real outage wording only once a fetch has actually settled
+ * to failure, and the correct label for each resolved mode.
+ */
+describe("TopBar mode badge tri-state (issue #94)", () => {
+	let originalFetch: typeof fetch;
+
+	function installFetchMock(systemImpl: () => Promise<Response> | Response) {
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "/api/v1/system") {
+				return systemImpl();
+			}
+			if (url === "/api/v1/stigman") {
+				return jsonResponse({ error: { code: "not_found", message: "No global STIG Manager connection is configured." } }, 404);
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as unknown as typeof fetch;
+
+		window.sessionStorage.setItem(
+			"waypoint.session",
+			JSON.stringify({
+				token: "tok-1",
+				username: "j.moreno",
+				role: "Admin",
+				expiresAt: new Date(Date.now() + 60_000).toISOString(),
+			}),
+		);
+	}
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		window.sessionStorage.clear();
+	});
+
+	function mount() {
+		render(
+			<AuthProvider>
+				<SystemProvider>
+					<ThemeProvider>
+						<TopBar screenTitle="Dashboard" />
+					</ThemeProvider>
+				</SystemProvider>
+			</AuthProvider>,
+		);
+	}
+
+	it("shows a neutral loading badge (not the outage message) while /system is in flight", async () => {
+		let resolveFetch: (() => void) | undefined;
+		installFetchMock(
+			() =>
+				new Promise<Response>((resolve) => {
+					resolveFetch = () => resolve(jsonResponse({ version: "2.4.1", build: "24817", mode: "connected", update_available: null }));
+				}),
+		);
+		mount();
+
+		const badge = document.querySelector(".top-bar__mode");
+		expect(badge).toHaveClass("top-bar__mode--unknown");
+		expect(badge?.textContent).toContain("CHECKING");
+		expect(badge).toHaveAttribute("title", "Checking deployment mode…");
+		expect(badge?.getAttribute("title")).not.toMatch(/could not reach/i);
+
+		resolveFetch?.();
+		await waitFor(() => {
+			expect(document.querySelector(".top-bar__mode")).toHaveClass("top-bar__mode--connected");
+		});
+	});
+
+	it("shows the real outage message only after the fetch settles to failure", async () => {
+		installFetchMock(() => {
+			throw new Error("network down");
+		});
+		mount();
+
+		await waitFor(() => {
+			const badge = document.querySelector(".top-bar__mode");
+			expect(badge).toHaveClass("top-bar__mode--disconnected");
+		});
+
+		const badge = document.querySelector(".top-bar__mode");
+		expect(badge).toHaveAttribute("title", "Deployment mode unavailable — could not reach the Waypoint API.");
+		expect(badge?.textContent).toContain("MODE · AIR-GAPPED");
+	});
+
+	it("shows the connected label once mode resolves to connected", async () => {
+		installFetchMock(() => jsonResponse({ version: "2.4.1", build: "24817", mode: "connected", update_available: null }));
+		mount();
+
+		await waitFor(() => {
+			const badge = document.querySelector(".top-bar__mode");
+			expect(badge).toHaveClass("top-bar__mode--connected");
+			expect(badge?.textContent).toContain("MODE · INTERNET-ENABLED");
+			expect(badge).toHaveAttribute(
+				"title",
+				"Internet-enabled: reaches the Broadcom depot and GitHub; all features; builds signed export bundles.",
+			);
+		});
+	});
+
+	it("shows the disconnected label (not the outage message) when /system resolves with mode disconnected", async () => {
+		installFetchMock(() => jsonResponse({ version: "2.4.1", build: "24817", mode: "disconnected", update_available: null }));
+		mount();
+
+		await waitFor(() => {
+			const badge = document.querySelector(".top-bar__mode");
+			expect(badge).toHaveClass("top-bar__mode--disconnected");
+			expect(badge?.textContent).toContain("MODE · AIR-GAPPED");
+			expect(badge).toHaveAttribute(
+				"title",
+				"Air-gapped: no external network; consumes imported bundles; download/catalog features are hidden.",
+			);
+		});
+	});
+});
