@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Reflection;
-using Microsoft.AspNetCore.Mvc;
 using Waypoint.Api.Controllers;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Secrets;
@@ -33,84 +31,40 @@ namespace Waypoint.Tests.Api;
 /// observes -- every 4xx/5xx from this controller (indeed, every controller) goes
 /// out through <c>ErrorHandlingMiddleware</c> as an <see cref="ErrorResponse"/>
 /// envelope. That envelope is walked here too, so the no-secret guarantee covers
-/// error paths, not just success ones. Widening this to every controller's error
-/// paths is a separate, broader sweep -- see issue #189's deferred follow-up.
+/// error paths, not just success ones.
+///
+/// Issue #370 generalized the walk mechanism itself (now <see cref="ResponseShapeWalk"/>)
+/// to sweep every controller in the API assembly -- see
+/// <see cref="AllControllersResponseShapeTests"/>. This test is kept as the
+/// credentials-specific pin: it is the highest-value single controller (it is the
+/// only one that ever touches decrypted secret material), and keeping a dedicated,
+/// narrowly-scoped assertion here means a regression on this controller specifically
+/// still reads as "credentials leaked a secret," not just "some controller did."
 /// </summary>
 public sealed class CredentialResponseShapeTests
 {
-	private static readonly string[] ForbiddenNameFragments =
-		["secret", "password", "token", "ciphertext", "plaintext", "privatekey", "keymaterial"];
-
 	[Fact]
 	public void NoCredentialResponseType_CarriesASecretBearingProperty()
 	{
 		HashSet<Type> reachable = [];
-		foreach (Type responseType in DeclaredResponseTypes())
+		foreach (Type responseType in ResponseShapeWalk.DeclaredResponseTypes(typeof(CredentialsController)))
 		{
-			Collect(responseType, reachable);
+			ResponseShapeWalk.Collect(responseType, reachable);
 		}
 
 		// The error envelope every 4xx/5xx returns -- not declared via
 		// [ProducesResponseType] on the controller, so it must be added explicitly.
-		Collect(typeof(ErrorResponse), reachable);
+		ResponseShapeWalk.Collect(typeof(ErrorResponse), reachable);
 
 		Assert.Contains(typeof(CredentialResponse), reachable);
 		Assert.Contains(typeof(ErrorResponse), reachable);
 		Assert.Contains(typeof(ErrorDetail), reachable);
 
-		foreach (Type type in reachable)
-		{
-			foreach (PropertyInfo property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
-			{
-				// Data-bearing types only: a bool like HasSecret states a fact about
-				// the blob without carrying a byte of it.
-				bool dataBearing = property.PropertyType == typeof(string)
-					|| property.PropertyType == typeof(byte[])
-					|| property.PropertyType == typeof(object);
-				if (!dataBearing)
-				{
-					continue;
-				}
-
-				string name = property.Name.ToLowerInvariant();
-				Assert.False(
-					ForbiddenNameFragments.Any(fragment => name.Contains(fragment, StringComparison.Ordinal)),
-					$"{type.Name}.{property.Name} is a data-bearing property with a secret-suggesting name -- " +
-					"credential responses must not carry secret material (security.md control 3).");
-			}
-		}
-	}
-
-	private static IEnumerable<Type> DeclaredResponseTypes()
-	{
-		foreach (MethodInfo action in typeof(CredentialsController).GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
-		{
-			foreach (ProducesResponseTypeAttribute produces in action.GetCustomAttributes<ProducesResponseTypeAttribute>())
-			{
-				if (produces.Type != typeof(void))
-				{
-					yield return produces.Type;
-				}
-			}
-		}
-	}
-
-	private static void Collect(Type type, HashSet<Type> reachable)
-	{
-		if (type.IsArray)
-		{
-			Collect(type.GetElementType()!, reachable);
-			return;
-		}
-
-		if (type.Namespace?.StartsWith("Waypoint", StringComparison.Ordinal) != true || !reachable.Add(type))
-		{
-			return;
-		}
-
-		foreach (PropertyInfo property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
-		{
-			Collect(property.PropertyType, reachable);
-		}
+		List<string> violations = ResponseShapeWalk.FindSecretSuggestingProperties(reachable);
+		Assert.True(
+			violations.Count == 0,
+			"Data-bearing propert" + (violations.Count == 1 ? "y" : "ies") + " with a secret-suggesting name found -- " +
+			"credential responses must not carry secret material (security.md control 3): " +
+			string.Join(", ", violations));
 	}
 }
