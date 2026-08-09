@@ -575,7 +575,7 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 
 	// -- seed / read helpers --------------------------------------------------
 
-	private async Task<Guid> SeedCredentialAsync(string namePrefix = "cred", string credentialType = "service")
+	private async Task<Guid> SeedCredentialAsync(string namePrefix = "cred", string credentialType = "token")
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();

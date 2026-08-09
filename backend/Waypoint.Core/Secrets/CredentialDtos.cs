@@ -15,12 +15,17 @@
 namespace Waypoint.Core.Secrets;
 
 /// <summary>
-/// The closed set of credential types (docs/domain-model.md "Credential"). Validated
-/// against this set at the API layer only (<c>CredentialsController</c>) -- migration
-/// 0010 deliberately leaves <c>credential_type</c> as free TEXT at the database layer
-/// (see that migration's comment for why), so unlike <see cref="CredentialHealthStates"/>
-/// there is no DB CHECK mirroring this set. Same API-layer-only split
-/// <c>Waypoint.Core.Sites.TargetKinds</c> uses for target <c>kind</c>.
+/// The closed set of credential types (docs/domain-model.md "Credential", plus
+/// <see cref="DepotToken"/>). Migration 0022 (issue #252) adds a DB CHECK mirroring
+/// this set -- same split <c>Waypoint.Core.Sites.TargetKinds</c>/<c>targets.kind</c>
+/// uses: API-layer validation here in <c>CredentialsController</c>, backed by a DB
+/// CHECK for defense-in-depth. <see cref="DepotToken"/> is not one of
+/// domain-model.md's four user-facing connection types -- it is the single
+/// well-known row <c>CatalogIndexJobHandler</c> resolves via
+/// <c>FindByTypeAsync(CatalogOptions.DepotTokenCredentialType)</c> to authenticate
+/// catalog-index runs to the Broadcom depot (docs/roadmap.md), so it belongs in the
+/// closed set even though it isn't created through the same connection-credential UI
+/// flow as the other four.
 /// </summary>
 public static class CredentialTypes
 {
@@ -28,8 +33,9 @@ public static class CredentialTypes
 	public const string Nsx = "nsx";
 	public const string Ssh = "ssh";
 	public const string Token = "token";
+	public const string DepotToken = "depot-token";
 
-	public static readonly IReadOnlyCollection<string> All = [VCenter, Nsx, Ssh, Token];
+	public static readonly IReadOnlyCollection<string> All = [VCenter, Nsx, Ssh, Token, DepotToken];
 
 	public static bool IsValid(string? credentialType) => credentialType is not null && All.Contains(credentialType);
 }

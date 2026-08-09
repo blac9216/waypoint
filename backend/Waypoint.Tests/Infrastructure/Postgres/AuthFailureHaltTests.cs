@@ -626,7 +626,7 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		await connection.OpenAsync();
 
 		await using NpgsqlCommand insert = new(
-			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'service') RETURNING id", connection);
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'token') RETURNING id", connection);
 		insert.Parameters.AddWithValue($"cred-{Guid.NewGuid():N}");
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}

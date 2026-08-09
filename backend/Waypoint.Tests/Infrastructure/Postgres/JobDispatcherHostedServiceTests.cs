@@ -449,7 +449,7 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
-		await using NpgsqlCommand command = new("INSERT INTO credentials (name, credential_type) VALUES ($1, 'service') RETURNING id", connection);
+		await using NpgsqlCommand command = new("INSERT INTO credentials (name, credential_type) VALUES ($1, 'token') RETURNING id", connection);
 		command.Parameters.AddWithValue($"cred-{Guid.NewGuid():N}");
 		return (Guid)(await command.ExecuteScalarAsync())!;
 	}

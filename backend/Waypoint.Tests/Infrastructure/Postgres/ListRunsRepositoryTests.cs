@@ -339,7 +339,7 @@ public sealed class ListRunsRepositoryTests : IAsyncLifetime
 		await using NpgsqlCommand insert = new(
 			"""
 			INSERT INTO credentials (name, credential_type, owner)
-			VALUES ('list-runs-test-credential', 'service', 'shared')
+			VALUES ('list-runs-test-credential', 'token', 'shared')
 			RETURNING id
 			""", connection);
 		return (Guid)(await insert.ExecuteScalarAsync())!;

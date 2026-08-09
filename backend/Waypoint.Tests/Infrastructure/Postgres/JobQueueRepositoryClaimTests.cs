@@ -194,7 +194,7 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 			await connection.OpenAsync();
 
 			await using (NpgsqlCommand credential = new(
-				"INSERT INTO credentials (name, credential_type) VALUES ($1, 'service') RETURNING id", connection))
+				"INSERT INTO credentials (name, credential_type) VALUES ($1, 'token') RETURNING id", connection))
 			{
 				credential.Parameters.AddWithValue($"cred-{Guid.NewGuid():N}");
 				credentialId = (Guid)(await credential.ExecuteScalarAsync())!;
