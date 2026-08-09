@@ -382,6 +382,23 @@ public sealed class ScanJobHandler : IJobHandler
 			if (resolution.Body is not null)
 			{
 				tempFile = Path.Combine(Path.GetTempPath(), $"waypoint-attest-{context.Job.Id:N}.yml");
+
+				// Issue #304's 0600 pattern (mirrors #308/PR #315's NSX inputs-file fix):
+				// create the file empty, narrow its mode to owner-only on Unix, THEN write
+				// the resolved attestation body -- so it is never world-readable (the shared
+				// system temp dir's umask default is typically 0644) even briefly. The body
+				// is waiver content (status/justification/expires), not a raw secret, but a
+				// justification can carry sensitive rationale worth this defense in depth.
+				using (FileStream createStream = File.Create(tempFile))
+				{
+					if (!OperatingSystem.IsWindows())
+					{
+						File.SetUnixFileMode(
+							tempFile,
+							UnixFileMode.UserRead | UnixFileMode.UserWrite);
+					}
+				}
+
 				await File.WriteAllTextAsync(tempFile, resolution.Body, cancellationToken).ConfigureAwait(false);
 				templatePath = tempFile;
 			}
