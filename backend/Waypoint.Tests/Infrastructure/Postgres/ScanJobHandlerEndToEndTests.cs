@@ -169,7 +169,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	/// handling + HDF persistence + canary non-leakage).
 	/// </summary>
 	[Fact]
-	public async Task StoredCredential_ScanSucceeds_PersistsHdf_AndRestsAtAttestingStage()
+	public async Task StoredCredential_ScanSucceeds_PersistsHdf_ReachesUploaded()
 	{
 		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
 		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
@@ -700,11 +700,11 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
-	/// ADR-0012: a job claimed with a stage marker this handler does not implement yet
-	/// (attest/convert are #275) fails cleanly with a `not_implemented` note rather than
-	/// hanging or throwing -- proven by seeding a job directly at the `attesting` marker
-	/// (as if a prior execution's StageComplete requeue had already happened) and
-	/// claiming it fresh.
+	/// #275/#298: a fanned-out scan job walks its full multi-stage pipeline -- InSpec
+	/// scan -&gt; attest -&gt; convert, each its own dispatcher claim cycle -- from `queued`
+	/// all the way to the shape's terminal `uploaded` state, persisting both the HDF and
+	/// CKL artifacts along the way; issue #311's non-fatal upload-failure contract
+	/// (no STIG Manager connection configured in this suite) is asserted too.
 	/// </summary>
 	[Fact]
 	public async Task FullPipeline_WalksQueuedToUploaded_AcrossThreeClaimCycles()
