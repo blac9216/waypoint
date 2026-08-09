@@ -76,6 +76,33 @@ function isRole(value: unknown): value is Role {
 }
 
 /**
+ * Strict ISO-8601 instant shape, matching what a .NET `DateTimeOffset`
+ * actually serializes to (`System.Text.Json`'s default `DateTimeOffset`
+ * converter, which every wire producer in this repo uses — see
+ * `Waypoint.Api/Contracts/AuthContracts.cs`'s `LoginResponse.ExpiresAt`):
+ * `YYYY-MM-DDTHH:mm:ss[.fff...](Z|±HH:mm)`. This is deliberately narrower
+ * than anything `Date.parse` accepts — `Date.parse` is implementation-defined
+ * outside the ISO subset and happily parses `"December 31, 2099"`, a shape
+ * the backend can never emit. A stored session's `expiresAt` restoring
+ * "successfully" off a value like that is exactly the half-accepted state
+ * `readStoredSession()` exists to refuse (issue #98).
+ */
+const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+function isIsoInstant(value: unknown): value is string {
+	return typeof value === "string" && ISO_INSTANT_RE.test(value) && Number.isFinite(Date.parse(value));
+}
+
+/** Non-empty after trimming — the bar `toWireText()` already holds the wire
+ * path to (see its doc comment). `readStoredSession()` used to only check
+ * `typeof === "string"`, which let `""` and whitespace-only values restore
+ * as a "signed in" session that carries no usable token/identity (issue
+ * #98). */
+function isNonBlankString(value: unknown): value is string {
+	return typeof value === "string" && value.trim() !== "";
+}
+
+/**
  * Narrow a `role` that arrived over the network to the closed `Role` set, or
  * refuse the sign-in. The same `isRole()` predicate that guards the
  * `sessionStorage` restore path — applied to the path that actually faces
@@ -183,14 +210,14 @@ function readStoredSession(): StoredSession | null {
 		const parsed = JSON.parse(raw) as Partial<StoredSession> | null;
 		if (
 			!parsed ||
-			typeof parsed.token !== "string" ||
-			typeof parsed.username !== "string" ||
-			typeof parsed.expiresAt !== "string" ||
+			!isNonBlankString(parsed.token) ||
+			!isNonBlankString(parsed.username) ||
+			!isIsoInstant(parsed.expiresAt) ||
 			!isRole(parsed.role)
 		) {
 			return null;
 		}
-		if (Number.isNaN(Date.parse(parsed.expiresAt)) || Date.parse(parsed.expiresAt) <= Date.now()) {
+		if (Date.parse(parsed.expiresAt) <= Date.now()) {
 			return null;
 		}
 		return { token: parsed.token, username: parsed.username, role: parsed.role, expiresAt: parsed.expiresAt };
@@ -224,14 +251,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	const sessionRef = useRef<StoredSession | null>(null);
 	sessionRef.current = session;
 
+	// The one teardown path for "this session is over, for any reason" — an
+	// explicit logout(), a 401 from the server (setUnauthorizedHandler below),
+	// or the client-side expiry enforcement (issue #97). All three funnel
+	// through here so there is exactly one way a session ends, not a parallel
+	// one invented per caller.
+	const dropSession = useCallback(() => {
+		setSession(null);
+		setStatus("signed-out");
+		clearStoredSession();
+	}, []);
+
 	useEffect(() => {
 		setTokenGetter(() => sessionRef.current?.token ?? null);
-		setUnauthorizedHandler(() => {
-			setSession(null);
-			setStatus("signed-out");
-			clearStoredSession();
-		});
-	}, []);
+		setUnauthorizedHandler(dropSession);
+	}, [dropSession]);
 
 	useEffect(() => {
 		const restored = readStoredSession();
@@ -244,6 +278,60 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		setSession(restored);
 		setStatus(restored ? "signed-in" : "signed-out");
 	}, []);
+
+	/**
+	 * Client-side expiry enforcement (issue #97). Without this, an expired
+	 * `expiresAt` was only noticed on the *next* mount (readStoredSession) or
+	 * whenever some authenticated request happened to 401 — until then the
+	 * app kept rendering full chrome on a token the server had already
+	 * invalidated. There is no refresh endpoint in M1
+	 * (docs/api-contract.md's Auth section): expiry means sign out, not renew.
+	 *
+	 * Two mechanisms, because neither alone is sufficient:
+	 *
+	 * - A `setTimeout` scheduled to the exact `expiresAt` catches the common
+	 *   case (tab stays open and foregrounded) promptly, without polling.
+	 *   Re-scheduled whenever `session` changes (login, restore, logout) and
+	 *   always cleared on cleanup — an uncleared timer here would fire
+	 *   `dropSession()` against a since-unmounted/replaced provider, the exact
+	 *   leaked-timer shape issue #324 was about.
+	 * - A `visibilitychange`/`focus` re-check catches the case the timer
+	 *   can't: a backgrounded tab's timers are throttled/clamped by the
+	 *   browser, so a tab that was backgrounded before expiry and returns to
+	 *   the foreground after it must re-evaluate immediately rather than wait
+	 *   for a delayed timer to eventually fire.
+	 *
+	 * Both paths call the same `dropSession()` used by `logout()` and the 401
+	 * handler — no parallel sign-out logic.
+	 */
+	useEffect(() => {
+		if (!session) {
+			return;
+		}
+		const msRemaining = Date.parse(session.expiresAt) - Date.now();
+		if (msRemaining <= 0) {
+			dropSession();
+			return;
+		}
+		const timer = window.setTimeout(dropSession, msRemaining);
+
+		const recheck = () => {
+			if (document.visibilityState !== "visible") {
+				return;
+			}
+			if (Date.parse(sessionRef.current?.expiresAt ?? "") <= Date.now()) {
+				dropSession();
+			}
+		};
+		document.addEventListener("visibilitychange", recheck);
+		window.addEventListener("focus", recheck);
+
+		return () => {
+			window.clearTimeout(timer);
+			document.removeEventListener("visibilitychange", recheck);
+			window.removeEventListener("focus", recheck);
+		};
+	}, [session, dropSession]);
 
 	const login = useCallback(async (username: string, password: string) => {
 		setStatus("signing-in");
@@ -326,10 +414,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	const logout = useCallback(() => {
-		setSession(null);
-		setStatus("signed-out");
-		clearStoredSession();
-	}, []);
+		dropSession();
+	}, [dropSession]);
 
 	const value = useMemo<AuthContextValue>(
 		() => ({
