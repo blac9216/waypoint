@@ -1,7 +1,12 @@
 # Waypoint — System Architecture
 
-Status: **draft, planning phase**. Decisions referenced here are recorded as ADRs in
-[`adr/`](adr/); this document describes how they fit together.
+Status: **living document, implementation in progress** (M3 of the plan in
+[`roadmap.md`](roadmap.md)). This describes the target-state system; decisions are
+recorded as ADRs in [`adr/`](adr/). Sections below are marked ✅ **Built** (shipped in
+M1/M2, epics [#1](https://github.com/blac9216/waypoint/issues/1)/[#13](https://github.com/blac9216/waypoint/issues/13)),
+🚧 **In progress** (M3, epic [#14](https://github.com/blac9216/waypoint/issues/14)), or
+📋 **Planned** (M4+) so a reader can tell what exists from what is still design intent.
+Do not read a 📋 marker as license to change the described design without an ADR.
 
 ## What Waypoint is
 
@@ -14,6 +19,10 @@ Waypoint adds the **control plane**: UI, API, job orchestration, credential stor
 and cross-enclave transfer.
 
 ## Deployment topology: one appliance, two modes
+
+📋 **Planned (M6, epic [#17](https://github.com/blac9216/waypoint/issues/17)).** Today
+there is one mode: a single connected-style dev/compose deployment with local auth.
+Mode enforcement, the disconnected variant, and transfer bundles are not yet built.
 
 The same appliance image deploys on both sides of the air gap ([ADR-0010](adr/0010-deployment-topology.md)):
 
@@ -29,6 +38,11 @@ The mode is instance configuration, surfaced as a persistent badge in the UI. Fe
 availability derives from the mode — there is one codebase and one image, never a fork.
 
 ## Component view
+
+✅ **Built**: nginx, frontend, backend, Postgres, the execution-layer integration
+(PowerShell runspace hosting), and the STIG Manager connection (M1/M2). 🚧 **In
+progress**: Keycloak (M3 — the backend currently does local/dev auth behind the same
+abstraction Keycloak will sit behind). 📋 **Planned**: the updater sidecar (M7).
 
 ```mermaid
 flowchart TB
@@ -55,6 +69,12 @@ flowchart TB
 
 ## The job engine (the heart of the product)
 
+✅ **Built** (M1/M2): queue, dispatcher, priority, in-process PowerShell runspace
+hosting, SSE streaming, and the per-target state machine below are all live, serving
+`catalog-index`/`download` (M1) and discovery/scan/NSX/SRG job types (M2).
+Cooperative per-job cancellation (issue #234) and lease-recovery sweeps also shipped.
+Scheduling (cron-style, read-only job types only) is 📋 **planned for M3**.
+
 Everything long-running is a **job**: a scan of a site, a remediation of a component, an
 artifact download, an inventory discovery, a bundle export/import, a catalog index. One
 engine serves both products and all future features ([ADR-0008](adr/0008-job-engine.md)).
@@ -79,6 +99,9 @@ engine serves both products and all future features ([ADR-0008](adr/0008-job-eng
 
 ## Discovery is a job type
 
+✅ **Built** (M2, issue #21): the `discover` job type and inventory cache below are
+live.
+
 Host/VM inventory is discovered from each vCenter (AllLinked connect, as today) and
 **snapshotted into Postgres**, so the UI can render checkbox target-selection without a
 live vCenter connection. The UI shows last-refreshed time; scans trigger an automatic
@@ -86,12 +109,20 @@ refresh before running; operators can refresh on demand.
 
 ## Identity & authorization
 
+🚧 **In progress (M3, epic #14).** Today the backend uses local/dev-only auth behind
+the auth abstraction Keycloak will replace; role guards exist for the four roles
+below but there is no OIDC/CAC/PIV/LDAP integration yet.
+
 Keycloak is the IdP ([ADR-0004](adr/0004-identity-keycloak.md)); the backend is a plain
 OIDC client so the IdP stays swappable. Roles — **Viewer, Cyber, Operator, Admin** —
 are defined in [domain-model.md](domain-model.md) along with the credential ownership
 model (personal vs shared/service credentials).
 
 ## Secrets
+
+✅ **Built** (M1, epic #1; extended M2, epic #13). Envelope encryption, write-only
+API, and the shared/service credential store are live; personal (ad hoc) credentials
+per ADR-0011 shipped in M2 (issue #276).
 
 Envelope encryption in Postgres, AWX-style ([ADR-0005](adr/0005-secrets.md)): per-secret
 data keys wrapped by a master key mounted as a file/Docker secret (same operator model
@@ -103,6 +134,9 @@ pluggable option — not v1.
 
 ## Self-update
 
+📋 **Planned (M7, epic [#18](https://github.com/blac9216/waypoint/issues/18)).** Not
+yet built.
+
 Signed update bundles uploaded through the UI ([ADR-0009](adr/0009-self-update.md)):
 validate signature/versions → `docker load` → dedicated updater sidecar (sole holder of
 the Docker socket, behind a socket proxy) recreates changed services → health-check gate
@@ -111,6 +145,9 @@ runner container. In the eventual OVA, the same bundle is applied by a host-side
 unit instead.
 
 ## Cross-enclave transfer
+
+📋 **Planned (M6, epic [#17](https://github.com/blac9216/waypoint/issues/17)).** Not
+yet built.
 
 The `Transfer/` directory convention from vcf-docker-download becomes a first-class
 feature: the connected instance composes a **signed export bundle** (selected artifacts,
