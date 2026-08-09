@@ -661,6 +661,32 @@ class PrivateSpaceCidrTests(unittest.TestCase):
 				self.assertTrue(scanner.scan_text("x", f"net {bad}"))
 
 
+class PinnedEdgeSubnetCidrTests(unittest.TestCase):
+	"""Issue #191: the compose `edge` network's pinned subnet literal
+	(192.168.240.0/24) is allowed ONLY as this exact base + exact /24 prefix;
+	every nearby shape -- the base quad alone, a different host in the range,
+	or any other prefix -- stays a finding, same discipline as
+	PrivateSpaceCidrTests above."""
+
+	_BASE = ".".join(map(str, (192, 168, 240, 0)))
+
+	def test_pinned_subnet_cidr_is_allowed(self) -> None:
+		self.assertEqual(
+			[], scanner.scan_text("x", f'subnet: {self._BASE}/24'))
+
+	def test_base_quad_without_its_prefix_is_still_flagged(self) -> None:
+		self.assertTrue(scanner.scan_text("x", f"host {self._BASE} here"))
+
+	def test_wrong_or_narrower_prefix_is_still_flagged(self) -> None:
+		for bad in (f"{self._BASE}/28", f"{self._BASE}/16", f"{self._BASE}/240"):
+			with self.subTest(bad=bad):
+				self.assertTrue(scanner.scan_text("x", f"net {bad}"))
+
+	def test_a_different_host_in_the_pinned_range_is_still_flagged(self) -> None:
+		other_host = ".".join(map(str, (192, 168, 240, 5)))
+		self.assertTrue(scanner.scan_text("x", f"host {other_host}/24 here"))
+
+
 class DetectorPositiveTests(unittest.TestCase):
 	"""Each detector fires on the pattern class it exists to catch."""
 

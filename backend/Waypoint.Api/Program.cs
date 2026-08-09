@@ -143,11 +143,15 @@ try
 	// this, every request looks like plain HTTP from the proxy container -- useless
 	// for the audit trail's initiating-identity record (security.md control 4) and
 	// wrong for any scheme-dependent logic. Trust is restricted to the configured
-	// known networks (ForwardedHeaders:KnownNetworks, CIDR list; defaults to the
-	// RFC 1918 docker address pools the compose stack uses) so a client outside the
-	// proxy cannot spoof its source. The Testing host sets
-	// ForwardedHeaders:TrustAnyProxy=true because TestServer connections carry no
-	// remote address to match against.
+	// known networks (ForwardedHeaders:KnownNetworks, CIDR list). deploy/docker-compose.yml
+	// pins the `edge` network nginx and the backend share to a fixed subnet
+	// (192.168.240.0/24) and sets ForwardedHeaders__KnownNetworks__0 to exactly that
+	// subnet (#191), so the real compose deployment trusts only nginx's network, not
+	// every private address anywhere. The fallback below (all three RFC 1918 spaces)
+	// applies only when that env var is absent -- e.g. a non-compose/dev run -- and
+	// stays broad on purpose since such a run has no pinned subnet to name precisely.
+	// The Testing host sets ForwardedHeaders:TrustAnyProxy=true because TestServer
+	// connections carry no remote address to match against.
 	ForwardedHeadersOptions forwardedHeaders = new()
 	{
 		ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor

@@ -99,6 +99,12 @@ services:
       # port from the postgres:16-alpine image, so neither varies with the
       # operator's credential choice.
       ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=${POSTGRES_USER:-waypoint};Password=${POSTGRES_PASSWORD:-waypoint_dev_only}"
+      # #191: narrows ForwardedHeaders:KnownNetworks (Program.cs) from the
+      # whole-RFC-1918-space fallback to exactly the edge network's pinned
+      # subnet (see the `edge` network's ipam config below) - the only network
+      # nginx and the backend share, and the only source X-Forwarded-For/
+      # X-Forwarded-Proto should ever be trusted from in this deployment.
+      ForwardedHeaders__KnownNetworks__0: "192.168.240.0/24"
     volumes:
       - artifacts:/var/lib/waypoint/artifacts
       # Dev-only, gitignored, operator-borrowed depot token/config + the
@@ -145,8 +151,21 @@ services:
 
 networks:
   # nginx <-> backend. Published to the host via nginx's port mapping only.
+  # Subnet pinned (#191) so ForwardedHeaders:KnownNetworks (backend env below,
+  # Program.cs) can trust exactly this network instead of all of RFC 1918.
+  # The chosen /24 sits outside Docker's default address pool (the top of the
+  # 172.16.0.0/12 space, consumed top-down as bridge networks are created --
+  # this shared host's concurrent stacks already occupy several /16s there,
+  # see docs/testing.md) and outside the handful of /24s a typical home/office
+  # LAN or a nested Docker host is likely to already be using in the low
+  # 192.168.0.0/16 range, so a fixed subnet is unlikely to collide with either
+  # source on a shared or nested host. Only `edge` is pinned; `internal` has
+  # no route out (see below) so a fixed subnet buys it nothing.
   edge:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.240.0/24
   # backend <-> postgres. internal: true means Docker gives this network no
   # route out (no host access, no default-gateway/internet); only containers
   # attached to it can reach each other. nginx is deliberately not attached.

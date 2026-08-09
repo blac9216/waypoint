@@ -495,6 +495,28 @@ def _is_private_space_cidr(line: str, candidate: str, end: int) -> bool:
 	return after >= len(line) or not line[after].isdigit()
 
 
+# Issue #191: the deploy/docker-compose.yml `edge` network's pinned subnet,
+# and ONLY as this exact base address + exact /24 prefix. This is NOT a range
+# widening of _PRIVATE_SPACE_CIDRS above -- it names one specific /24 this
+# repo's own compose file assigns to a bridge network, the same way a fixture
+# IP would be sanctioned, not "every private network" the whole-space
+# exception above covers. The base quad alone, any other host in the range,
+# or any other prefix on this base still stays a finding.
+_PINNED_EDGE_SUBNET_BASE = ".".join(map(str, (192, 168, 240, 0)))
+_PINNED_EDGE_SUBNET_SUFFIX = "/24"
+
+
+def _is_pinned_edge_subnet_cidr(line: str, candidate: str, end: int) -> bool:
+	if candidate != _PINNED_EDGE_SUBNET_BASE:
+		return False
+	if line[end:end + len(_PINNED_EDGE_SUBNET_SUFFIX)] != _PINNED_EDGE_SUBNET_SUFFIX:
+		return False
+	# Same "/24 followed by another digit is /240+" guard as
+	# _is_private_space_cidr above (PR #190 round 1, finding 4).
+	after = end + len(_PINNED_EDGE_SUBNET_SUFFIX)
+	return after >= len(line) or not line[after].isdigit()
+
+
 def is_allowed_ip(candidate: str) -> bool:
 	"""True if this dotted-quad is a sanctioned address, or not an IP at all.
 
@@ -1189,6 +1211,8 @@ def scan_text(rel: str, text: str) -> list[str]:
 				if is_version_string(line, match.start()):
 					continue
 				if _is_private_space_cidr(line, candidate, match.end()):
+					continue
+				if _is_pinned_edge_subnet_cidr(line, candidate, match.end()):
 					continue
 				findings.append(
 					f"{rel}:{lineno}: non-RFC-5737 IP address literal: {candidate}"
