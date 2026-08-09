@@ -183,7 +183,7 @@ public interface IJobQueueRepository
 	/// action is not subject to the automatic-retry budget. Resets lease/claim columns
 	/// the same way <see cref="RequeueAtStageAsync"/> does, and records an
 	/// <c>audit_log</c> row (<c>event_type = 'job.retried'</c>) carrying the actor,
-	/// job id, run id and preserved stage -- "no audit, no retry" mirroring every other
+	/// job id and run id -- "no audit, no retry" mirroring every other
 	/// run-control action in this repository.
 	/// </summary>
 	Task<JobRetryOutcome> RetryJobAsync(Guid jobId, string actor, CancellationToken cancellationToken);
