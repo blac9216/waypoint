@@ -399,27 +399,31 @@ ALLOWED_IP_EXACT = {"0.0.0.0"}
 # wholesale-exempted.
 #
 # Suppress ONLY when the word "version"/"versions" sits immediately before the
-# quad, with nothing between them but optional whitespace, an OPTIONAL
+# quad, with nothing between them but optional whitespace, a REQUIRED
 # colon/equals, and an optional opening quote.
 #
-# The separator being optional is deliberate but wider than a "version: 'A.B.C.D'"
-# key/value shape, and the difference is worth stating rather than leaving a
-# reader to derive it: "version A.B.C.D", "--version A.B.C.D", "x-version
-# A.B.C.D" and "app.version=A.B.C.D" are all suppressed too, because release
-# notes, CLI help text and changelogs write versions that way and a hard gate
-# that false-positives on them gets muted. `\b` bounds the word, so
-# "mgmt_version" (underscore is a word character) does NOT suppress, and
-# neither does a backtick before the quad. (Placeholders, not literals: this
-# comment keeps the no-dotted-quad discipline stated above, and the concrete
-# spellings are pinned in test_separator_is_optional_as_documented.)
+# The separator is mandatory (issue #361): a version FIELD is written
+# "version: A.B.C.D" or "version=A.B.C.D" — a `:`/`=` is what marks the word
+# "version" as a key rather than prose. Without that requirement, a bare
+# "version A.B.C.D" with only whitespace between them waived a real routable
+# IPv4 literal that merely followed the word "version" in a sentence (e.g.
+# "the appliance version <real address> host"), which is a false negative on
+# the load-bearing secret gate — the unacceptable direction per CLAUDE.md.
+# `\b` bounds the word, so "mgmt_version" (underscore is a word character)
+# does NOT suppress, and neither does a backtick before the quad. (Placeholders,
+# not literals: this comment keeps the no-dotted-quad discipline stated above,
+# and the concrete spellings are pinned in
+# test_separator_is_required_as_documented / test_bare_version_word_no_longer_
+# waives_a_real_ip.)
 #
 # What stays excluded is the thing that matters: a mention of "version" ELSEWHERE
 # on the line does not suppress, because \Z anchors the match to the text
 # immediately preceding the quad. Otherwise a sentence that merely said "the
 # vCenter version at the site is" ahead of a real lab address would waive a real
-# leak. Immediate context or nothing — that bound, not the separator, is what
-# keeps this from becoming a line-wide bypass, and it is what the tests pin.
-VERSION_KEY_BEFORE_RE = re.compile(r"(?i)\bversions?\b\s*[:=]?\s*['\"]?\Z")
+# leak. Immediate context or nothing — that bound, together with the now-mandatory
+# separator, is what keeps this from becoming a line-wide bypass, and it is what
+# the tests pin.
+VERSION_KEY_BEFORE_RE = re.compile(r"(?i)\bversions?\b\s*[:=]\s*['\"]?\Z")
 
 
 def is_version_string(line: str, start: int) -> bool:
