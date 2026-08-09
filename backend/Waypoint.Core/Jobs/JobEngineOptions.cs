@@ -121,6 +121,17 @@ public sealed class JobEngineOptions
 	/// </summary>
 	public int EventStreamCatchUpChunkSize { get; set; } = 1_000;
 
+	/// <summary>
+	/// How long an SSE subscriber (<c>EventStreamController</c>) can go without a
+	/// delivered event before a <c>: heartbeat</c> comment is written, so proxies and
+	/// clients can tell a quiet stream from a dead one (#7 slice 2). Distinct from
+	/// <see cref="HeartbeatInterval"/>, which is the dispatcher's lease-renewal
+	/// cadence for an entirely different subsystem -- same word, unrelated timers.
+	/// 15 s by default: comfortably inside typical proxy idle-read timeouts (nginx's
+	/// default is 60 s) while producing a small, steady trickle of keepalive traffic.
+	/// </summary>
+	public TimeSpan SseHeartbeatInterval { get; set; } = TimeSpan.FromSeconds(15);
+
 	public TimeSpan HeartbeatIntervalOrDefault =>
 		HeartbeatInterval ?? TimeSpan.FromTicks(LeaseDuration.Ticks / 3);
 }
