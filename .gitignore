@@ -37,6 +37,17 @@ dev/local/
 *.p12
 
 # Build output
+# Audited #362 (follow-up to #254, which anchored config/ -> /config/ after
+# it swallowed frontend/src/screens/config/ as app source): every pattern
+# below is intentionally LEFT unanchored. Each is a build-tool-owned
+# directory name (.NET bin/obj, npm node_modules/dist, pytest/dotnet-test
+# TestResults, CPython __pycache__) that legitimately recurs at every
+# nesting depth (e.g. backend/*/bin/, frontend/vite-plugins/dist/) and,
+# unlike "config", is never a plausible name for a hand-written source
+# directory - confirmed by `find` across backend/ and frontend/src/ turning
+# up no such collisions. Anchoring any of these to root would MISS the
+# nested build output they exist to ignore. Do not anchor without re-
+# confirming a real collision first.
 bin/
 obj/
 TestResults/

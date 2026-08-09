@@ -1,3 +1,5 @@
+# Build output (audited #362, see root .gitignore for rationale): npm/vite
+# tooling-convention names, safe unanchored - not plausible app-source dirs.
 node_modules/
 dist/
 dev-dist/
