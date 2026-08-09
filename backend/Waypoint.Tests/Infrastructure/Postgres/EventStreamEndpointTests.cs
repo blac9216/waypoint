@@ -41,10 +41,12 @@ public sealed class EventStreamEndpointTests : IAsyncLifetime
 	private sealed class PostgresApiFactory : WaypointApiFactory
 	{
 		private readonly string _connectionString;
+		private readonly TimeSpan? _sseHeartbeatInterval;
 
-		public PostgresApiFactory(string connectionString)
+		public PostgresApiFactory(string connectionString, TimeSpan? sseHeartbeatInterval = null)
 		{
 			_connectionString = connectionString;
+			_sseHeartbeatInterval = sseHeartbeatInterval;
 		}
 
 		protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -63,6 +65,13 @@ public sealed class EventStreamEndpointTests : IAsyncLifetime
 					options.Enabled = true;
 					options.EventStreamPollInterval = TimeSpan.FromMilliseconds(50);
 					options.EventFlushInterval = TimeSpan.FromMilliseconds(50);
+					if (_sseHeartbeatInterval is { } interval)
+					{
+						// #172: the controller reads this once per stream, so a short
+						// interval here is what makes the heartbeat path testable
+						// without 15 s of real wall time.
+						options.SseHeartbeatInterval = interval;
+					}
 				});
 				services.AddSingleton<Waypoint.Core.Jobs.IJobQueueRepository>(provider => new Waypoint.Infrastructure.Jobs.JobQueueRepository(
 					_connectionString, NullLogger<Waypoint.Infrastructure.Jobs.JobQueueRepository>.Instance));
@@ -184,6 +193,94 @@ public sealed class EventStreamEndpointTests : IAsyncLifetime
 		using HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/events");
 		using HttpResponseMessage response = await _client.SendAsync(request);
 		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	/// <summary>
+	/// #172: <c>JobEngineOptions.SseHeartbeatInterval</c> is the injection point that
+	/// makes the heartbeat path testable without 15 s of real wall time -- a quiet
+	/// stream (no rows inserted) still proves liveness on a short interval.
+	/// </summary>
+	[Fact]
+	public async Task QuietStream_EmitsAHeartbeatCommentAfterTheConfiguredInterval()
+	{
+		await using PostgresApiFactory heartbeatFactory = new(_fixture.ConnectionString, sseHeartbeatInterval: TimeSpan.FromMilliseconds(200));
+		using HttpClient heartbeatClient = heartbeatFactory.CreateClient();
+
+		HttpResponseMessage loginResponse = await heartbeatClient.PostAsJsonAsync(
+			"/api/v1/auth/login", new { username = "admin", password = WaypointApiFactory.TestAdminPassword }, WaypointJsonOptions.Default);
+		loginResponse.EnsureSuccessStatusCode();
+		using JsonDocument loginDocument = JsonDocument.Parse(await loginResponse.Content.ReadAsStringAsync());
+		string token = loginDocument.RootElement.GetProperty("token").GetString()!;
+
+		using HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/events");
+		request.Headers.Add("Authorization", $"Bearer {token}");
+		using HttpResponseMessage response = await heartbeatClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+
+		using StreamReader reader = new(await response.Content.ReadAsStreamAsync());
+		Stopwatch stopwatch = Stopwatch.StartNew();
+		string? heartbeatLine = null;
+		while (stopwatch.Elapsed < TimeSpan.FromSeconds(15))
+		{
+			string? line = await reader.ReadLineAsync();
+			if (line is null)
+			{
+				break;
+			}
+
+			if (line.StartsWith(": heartbeat", StringComparison.Ordinal))
+			{
+				heartbeatLine = line;
+				break;
+			}
+		}
+
+		Assert.NotNull(heartbeatLine);
+	}
+
+	/// <summary>
+	/// #172: a delivered event still resets the idle clock -- the preserved
+	/// pre-#172 semantics ("heartbeat after an interval of silence", not a fixed
+	/// cadence) -- so a stream that keeps receiving events inside the interval
+	/// delivers them with no heartbeat comment interleaved.
+	/// </summary>
+	[Fact]
+	public async Task ActiveStream_DeliversEventsWithNoHeartbeatBetweenThem()
+	{
+		await using PostgresApiFactory heartbeatFactory = new(_fixture.ConnectionString, sseHeartbeatInterval: TimeSpan.FromSeconds(5));
+		using HttpClient heartbeatClient = heartbeatFactory.CreateClient();
+
+		HttpResponseMessage loginResponse = await heartbeatClient.PostAsJsonAsync(
+			"/api/v1/auth/login", new { username = "admin", password = WaypointApiFactory.TestAdminPassword }, WaypointJsonOptions.Default);
+		loginResponse.EnsureSuccessStatusCode();
+		using JsonDocument loginDocument = JsonDocument.Parse(await loginResponse.Content.ReadAsStringAsync());
+		string token = loginDocument.RootElement.GetProperty("token").GetString()!;
+
+		Guid runId = await SeedRunAsync();
+		await InsertEventAsync(runId, "active-probe-0");
+
+		using HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/events?lastEventId=0");
+		request.Headers.Add("Authorization", $"Bearer {token}");
+		using HttpResponseMessage response = await heartbeatClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+
+		using StreamReader reader = new(await response.Content.ReadAsStreamAsync());
+		Stopwatch stopwatch = Stopwatch.StartNew();
+		int dataLines = 0;
+		while (stopwatch.Elapsed < TimeSpan.FromSeconds(2) && dataLines < 1)
+		{
+			string? line = await reader.ReadLineAsync();
+			if (line is null)
+			{
+				break;
+			}
+
+			Assert.False(line.StartsWith(": heartbeat", StringComparison.Ordinal));
+			if (line.StartsWith("data: ", StringComparison.Ordinal))
+			{
+				dataLines++;
+			}
+		}
+
+		Assert.Equal(1, dataLines);
 	}
 
 	private async Task<HttpResponseMessage> OpenStreamAsync(string path)

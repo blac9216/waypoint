@@ -15,6 +15,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Serialization;
@@ -27,8 +28,8 @@ namespace Waypoint.Api.Controllers;
 /// <see cref="IJobEventFeed"/>. SSE framing: <c>id:</c> carries <c>seq</c> (that is
 /// what the browser echoes back as <c>Last-Event-ID</c>), <c>event:</c> carries the
 /// event type, <c>data:</c> carries the contract envelope. A heartbeat comment goes
-/// out every <see cref="HeartbeatInterval"/> of silence so proxies and clients can
-/// distinguish a quiet stream from a dead one.
+/// out every <see cref="JobEngineOptions.SseHeartbeatInterval"/> of silence so
+/// proxies and clients can distinguish a quiet stream from a dead one.
 ///
 /// Backpressure: when the feed drops this subscriber
 /// (<see cref="JobEventStreamOverflowException"/>), the stream ends after an
@@ -40,14 +41,15 @@ namespace Waypoint.Api.Controllers;
 [ApiController]
 public sealed class EventStreamController : ControllerBase
 {
-	private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(15);
-
 	private readonly IJobEventFeed _feed;
+	private readonly TimeSpan _heartbeatInterval;
 
-	public EventStreamController(IJobEventFeed feed)
+	public EventStreamController(IJobEventFeed feed, IOptions<JobEngineOptions> options)
 	{
 		ArgumentNullException.ThrowIfNull(feed);
+		ArgumentNullException.ThrowIfNull(options);
 		_feed = feed;
+		_heartbeatInterval = options.Value.SseHeartbeatInterval;
 	}
 
 	[HttpGet("api/v1/events")]
@@ -88,6 +90,11 @@ public sealed class EventStreamController : ControllerBase
 
 		long lastDelivered = afterSeq ?? -1;
 		IAsyncEnumerator<StreamedJobEvent> events = _feed.ReadAsync(scope, afterSeq, cancellationToken).GetAsyncEnumerator(cancellationToken);
+
+		// The heartbeat delay's CancellationTokenSource: see NextHeartbeatDelay for
+		// why this is disposed and replaced -- never left pending -- every time it
+		// stops being the one we're waiting on (#172).
+		CancellationTokenSource? heartbeatCts = null;
 		try
 		{
 			while (true)
@@ -95,9 +102,14 @@ public sealed class EventStreamController : ControllerBase
 				// Heartbeat while idle: race the next event against the interval so a
 				// quiet stream still proves liveness through every proxy hop.
 				Task<bool> moveNext = events.MoveNextAsync().AsTask();
-				while (await Task.WhenAny(moveNext, Task.Delay(HeartbeatInterval, cancellationToken)).ConfigureAwait(false) != moveNext)
+				Task heartbeatDelay = NextHeartbeatDelay(ref heartbeatCts, cancellationToken);
+				while (await Task.WhenAny(moveNext, heartbeatDelay).ConfigureAwait(false) != moveNext)
 				{
+					// The delay elapsed (not the outer token) -- the interval passed
+					// with no event.
+					cancellationToken.ThrowIfCancellationRequested();
 					await WriteRawAsync(": heartbeat\n\n", cancellationToken).ConfigureAwait(false);
+					heartbeatDelay = NextHeartbeatDelay(ref heartbeatCts, cancellationToken);
 				}
 
 				if (!await moveNext.ConfigureAwait(false))
@@ -124,8 +136,32 @@ public sealed class EventStreamController : ControllerBase
 		}
 		finally
 		{
+			heartbeatCts?.Dispose();
 			await events.DisposeAsync().ConfigureAwait(false);
 		}
+	}
+
+	/// <summary>
+	/// Replaces the heartbeat delay's <see cref="CancellationTokenSource"/> with a
+	/// fresh one armed for <see cref="_heartbeatInterval"/>, disposing whatever was
+	/// there before -- which tears down its pending timer-wheel registration
+	/// immediately, rather than the pre-#172 behavior of abandoning a bare
+	/// <c>Task.Delay(interval, cancellationToken)</c> to keep counting down on its
+	/// own until it fired or the stream's own token cancelled it, whichever came
+	/// first (up to a full <see cref="_heartbeatInterval"/> of a completely
+	/// unreferenced timer per delivered event). Called exactly once per "thing that
+	/// happened" -- once per delivered event, once per fired heartbeat -- so
+	/// whatever the current event rate, at most one heartbeat timer is ever live at
+	/// a time (O(1), not O(events delivered)). A <see cref="CancellationTokenSource"/>
+	/// cannot be un-cancelled, which is why this replaces the instance rather than
+	/// calling <c>CancelAfter</c> again on the same one.
+	/// </summary>
+	private Task NextHeartbeatDelay(ref CancellationTokenSource? heartbeatCts, CancellationToken cancellationToken)
+	{
+		heartbeatCts?.Dispose();
+		heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+		heartbeatCts.CancelAfter(_heartbeatInterval);
+		return Task.Delay(Timeout.InfiniteTimeSpan, heartbeatCts.Token);
 	}
 
 	private long? ParseLastEventId()
