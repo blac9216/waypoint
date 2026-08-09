@@ -200,6 +200,68 @@ describe("DownloadCatalogScreen", () => {
 		await waitFor(() => expect(queuePostBody).toEqual({ artifact_ids: ["art-1", "art-2"] }));
 	});
 
+	it("shows a transfer-time estimate in the footer for a non-empty selection (assumed-bandwidth basis)", async () => {
+		installFetchMock("Operator");
+		await mount();
+
+		// art-2 alone is 734,003,200 bytes; with no live download rate the
+		// footer falls back to ASSUMED_BANDWIDTH_BYTES_PER_SEC (1,250,000 B/s
+		// = 1.2 MB/s), giving ~587s -> rounds to 10m.
+		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
+
+		expect(screen.getByText("est. 10m at 1.2 MB/s")).toBeInTheDocument();
+	});
+
+	it("scales the transfer estimate with the size of the selection", async () => {
+		installFetchMock("Operator");
+		await mount();
+
+		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
+		expect(screen.getByText("est. 10m at 1.2 MB/s")).toBeInTheDocument();
+
+		// Adding the 4 GiB ISO brings the selection to 5,028,970,496 bytes,
+		// which crosses into the hours formatting (~67 minutes -> 1hr 7m).
+		fireEvent.click(screen.getByLabelText("Select VCF-Installer-5.2.1.iso"));
+		expect(screen.getByText("est. 1hr 7m at 1.2 MB/s")).toBeInTheDocument();
+		expect(screen.queryByText("est. 10m at 1.2 MB/s")).not.toBeInTheDocument();
+	});
+
+	it("prefers the queue's live aggregate rate over the assumed-bandwidth constant", async () => {
+		installFetchMock("Operator");
+		await mount();
+
+		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
+		expect(screen.getByText("est. 10m at 1.2 MB/s")).toBeInTheDocument();
+
+		// A live downloading job reports a much faster rate (10 MB/s) than the
+		// assumed constant — the footer should switch to using it.
+		await deliver(
+			frame({
+				seq: 1,
+				ts: "2026-08-08T12:01:00Z",
+				type: "download.progress",
+				job_id: "job-9",
+				run_id: "run-9",
+				data: { artifact_id: "art-9", state: "downloading", progress_percent: 10, rate_bytes_per_sec: 10_000_000, eta_seconds: 900, retries: 0 },
+			}),
+		);
+
+		await waitFor(() => expect(screen.getByText(/at 9\.5 MB\/s/)).toBeInTheDocument());
+	});
+
+	it("hides the transfer estimate when the selection is empty", async () => {
+		installFetchMock("Operator");
+		await mount();
+
+		expect(screen.queryByText(/^est\./)).not.toBeInTheDocument();
+
+		fireEvent.click(screen.getByLabelText("Select ESXi-8.0U3-patch.zip"));
+		expect(screen.getByText(/^est\./)).toBeInTheDocument();
+
+		fireEvent.click(screen.getByText("Clear"));
+		expect(screen.queryByText(/^est\./)).not.toBeInTheDocument();
+	});
+
 	it("disables the queue action with a reason below Operator", async () => {
 		installFetchMock("Cyber");
 		await mount();
