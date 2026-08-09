@@ -338,14 +338,10 @@ public sealed class RunsController : ControllerBase
 	{
 		if (requestedIds is null || requestedIds.Count == 0)
 		{
-			// PageRequest.Limit clamps to its own MaxLimit (200) -- a site with more
-			// targets than that is not a case this M1 slice needs to handle (no site
-			// in the fixtures or the real lab approaches that count); revisit with a
-			// paged fetch loop if that ever changes.
-			(IReadOnlyList<Target> items, _) = await _targets
-				.ListAsync(siteId, new PageRequest { Limit = 200 }, cancellationToken)
-				.ConfigureAwait(false);
-			return items;
+			// Issue #279: a full-site scan must fan out over every target under the
+			// site, not a PageRequest-clamped page of at most 200 -- ListAllForSiteAsync
+			// is the dedicated unpaginated repository method for exactly this caller.
+			return await _targets.ListAllForSiteAsync(siteId, cancellationToken).ConfigureAwait(false);
 		}
 
 		List<Target> resolved = [];

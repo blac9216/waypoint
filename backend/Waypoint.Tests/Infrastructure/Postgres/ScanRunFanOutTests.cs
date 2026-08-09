@@ -22,6 +22,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Sites;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Sites;
@@ -147,6 +148,43 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		Assert.Contains(nsx.ToString(), targetIds);
 		Assert.Contains(vcsa.ToString(), targetIds);
 		Assert.Contains(ssh.ToString(), targetIds);
+	}
+
+	[Fact]
+	public async Task CreateScanRun_SiteWithMoreThanTwoHundredTargets_FansOutAll()
+	{
+		// Issue #279 regression: ResolveScanTargetsAsync used to fetch a full-site
+		// scan's targets via PageRequest { Limit = 200 }, which PageRequest.Limit's
+		// own MaxLimit silently clamped to -- a site with more than 200 targets fanned
+		// out over only the first page, no error/warning. 250 invented targets (one
+		// over two full pages of the old limit) proves the fix fetches every row.
+		const int TargetCount = 250;
+		Guid siteId = await CreateSiteAsync("large-site");
+
+		TargetRepository targets = new(_fixture.ConnectionString);
+		for (int i = 0; i < TargetCount; i++)
+		{
+			string name = $"esxi-{i:D4}";
+			string connectionJson = $$"""{"host":"esxi-{{i:D4}}.example.internal"}""";
+			(TargetWriteOutcome outcome, Guid? id) = await targets.CreateAsync(
+				siteId, TargetKinds.Ssh, name, connectionJson, credentialId: null, CancellationToken.None);
+			Assert.Equal(TargetWriteOutcome.Ok, outcome);
+			Assert.NotNull(id);
+		}
+
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId });
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		string runId = created.RootElement.GetProperty("run_id").GetString()!;
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand count = new("SELECT count(DISTINCT id) FROM jobs WHERE run_id = $1", connection);
+		count.Parameters.AddWithValue(Guid.Parse(runId));
+		long distinctJobRows = (long)(await count.ExecuteScalarAsync())!;
+
+		Assert.Equal(TargetCount, distinctJobRows);
 	}
 
 	[Fact]
