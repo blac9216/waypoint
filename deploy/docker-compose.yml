@@ -67,7 +67,12 @@ services:
   # interface nginx and postgres depend on - unchanged across the swap.
   backend:
     build:
-      context: ../backend
+      # Context is the repo root, not ../backend (issue #92): .editorconfig and
+      # Directory.Build.props live at the repo root, and a backend/-scoped context put
+      # the containerized compile's analyzer posture at the SDK defaults instead of this
+      # repo's (see backend/Dockerfile's header comment for the full mechanism).
+      context: ..
+      dockerfile: backend/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy

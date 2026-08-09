@@ -213,12 +213,17 @@ the row is written -- `docs/security.md` control 1 at the Postgres sink.
 
 ## Docker
 
+The build context is the **repo root**, not `backend/` (issue #92) — `.editorconfig`
+and `Directory.Build.props` live at the repo root (issue #55) so a containerized
+compile sees the same analyzer/format posture `dotnet build` does at the root. Run
+these from the repo root, not from inside `backend/`:
+
 ```bash
-docker build -t waypoint-api backend
+docker build -f backend/Dockerfile -t waypoint-api .
 # Optional build args stamp GET /api/v1/health's version/build fields:
-docker build -t waypoint-api \
+docker build -f backend/Dockerfile -t waypoint-api \
   --build-arg BUILD_VERSION=0.1.0 --build-arg BUILD_SHA=$(git rev-parse HEAD) --build-arg BUILD_DATE=$(date -u +%FT%TZ) \
-  backend
+  .
 
 docker run --rm -p 8080:8080 -e LocalAuth__AdminPasswordHash=<hash> waypoint-api
 ```
