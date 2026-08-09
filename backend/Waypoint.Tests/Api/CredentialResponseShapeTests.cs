@@ -15,6 +15,7 @@
 using System.Reflection;
 using Microsoft.AspNetCore.Mvc;
 using Waypoint.Api.Controllers;
+using Waypoint.Core.Errors;
 using Waypoint.Core.Secrets;
 using Xunit;
 
@@ -27,6 +28,13 @@ namespace Waypoint.Tests.Api;
 /// type reachable from them) and fails if a data-bearing property with a
 /// secret-suggesting name ever appears. Adding one is a build-red event, not a
 /// review catch.
+///
+/// Issue #189: the happy-path DTOs are not the only response shape a client
+/// observes -- every 4xx/5xx from this controller (indeed, every controller) goes
+/// out through <c>ErrorHandlingMiddleware</c> as an <see cref="ErrorResponse"/>
+/// envelope. That envelope is walked here too, so the no-secret guarantee covers
+/// error paths, not just success ones. Widening this to every controller's error
+/// paths is a separate, broader sweep -- see issue #189's deferred follow-up.
 /// </summary>
 public sealed class CredentialResponseShapeTests
 {
@@ -42,7 +50,13 @@ public sealed class CredentialResponseShapeTests
 			Collect(responseType, reachable);
 		}
 
+		// The error envelope every 4xx/5xx returns -- not declared via
+		// [ProducesResponseType] on the controller, so it must be added explicitly.
+		Collect(typeof(ErrorResponse), reachable);
+
 		Assert.Contains(typeof(CredentialResponse), reachable);
+		Assert.Contains(typeof(ErrorResponse), reachable);
+		Assert.Contains(typeof(ErrorDetail), reachable);
 
 		foreach (Type type in reachable)
 		{

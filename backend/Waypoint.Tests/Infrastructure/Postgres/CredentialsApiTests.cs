@@ -242,6 +242,94 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		Assert.Equal(HttpStatusCode.NotFound, gone.StatusCode);
 	}
 
+	/// <summary>
+	/// Issue #189: migration 0006 exists so the audit trail outlives its subject --
+	/// <c>Delete_CascadesTheSecretBlob</c> exercises this implicitly (the deleted
+	/// credential has a prior <c>secret.decrypted</c> audit row, so without
+	/// <c>ON DELETE SET NULL</c> the delete itself would 500 on the FK), but nothing
+	/// asserts the behavior directly. This does: a decrypt before delete produces a
+	/// prior audit row pinned by id; after delete that row still exists with
+	/// <c>credential_id</c> nulled -- not deleted, not an orphaned-FK error -- and the
+	/// <c>credential.deleted</c> row itself (also nulled) carries the credential's
+	/// id/name attribution in <c>detail</c> even though its own FK is nulled by the
+	/// same constraint.
+	/// </summary>
+	[Fact]
+	public async Task Delete_AuditRowsSurviveWithCredentialIdNulled_AndDeletedRowCarriesAttribution()
+	{
+		Guid id = await CreateCredentialAsync("audit-survives", "invented-audit-survival-blob");
+		string fullName;
+		await using (NpgsqlConnection lookup = new(_fixture.ConnectionString))
+		{
+			await lookup.OpenAsync();
+			await using NpgsqlCommand read = new("SELECT name FROM credentials WHERE id = $1", lookup);
+			read.Parameters.AddWithValue(id);
+			fullName = (string)(await read.ExecuteScalarAsync())!;
+		}
+
+		// Produce a prior audit row attributed to this credential before it's
+		// deleted, pinned by its own id so the assertions below aren't guessing
+		// which row is "the" survivor.
+		ICredentialSecretStore store = _factory.Services.GetRequiredService<ICredentialSecretStore>();
+		using (await store.DecryptAsync(id, "test", null, null, CancellationToken.None))
+		{
+			// value not needed -- only the resulting audit row matters here.
+		}
+
+		Guid decryptAuditRowId;
+		await using (NpgsqlConnection preDelete = new(_fixture.ConnectionString))
+		{
+			await preDelete.OpenAsync();
+			await using NpgsqlCommand read = new(
+				"SELECT id FROM audit_log WHERE event_type = 'secret.decrypted' AND credential_id = $1", preDelete);
+			read.Parameters.AddWithValue(id);
+			decryptAuditRowId = (Guid)(await read.ExecuteScalarAsync())!;
+		}
+
+		HttpResponseMessage deleted = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// The prior secret.decrypted row survives the delete with credential_id
+		// nulled -- migration 0006's ON DELETE SET NULL, not a cascade delete and
+		// not a foreign-key violation.
+		await using (NpgsqlCommand survivor = new(
+			"SELECT count(*) FROM audit_log WHERE id = $1 AND credential_id IS NULL", connection))
+		{
+			survivor.Parameters.AddWithValue(decryptAuditRowId);
+			Assert.Equal(1L, (long)(await survivor.ExecuteScalarAsync())!);
+		}
+
+		// No audit row anywhere still points at the deleted credential's id -- the
+		// delete nulled every reference, none were orphaned or removed.
+		await using (NpgsqlCommand orphaned = new(
+			"SELECT count(*) FROM audit_log WHERE credential_id = $1", connection))
+		{
+			orphaned.Parameters.AddWithValue(id);
+			Assert.Equal(0L, (long)(await orphaned.ExecuteScalarAsync())!);
+		}
+
+		// The credential.deleted row itself: credential_id nulled, but detail JSON
+		// still carries the credential's id/name attribution -- the audit trail
+		// records WHAT was deleted even though the FK no longer points at it.
+		await using (NpgsqlCommand deletedRow = new(
+			"""
+			SELECT detail->>'credential_id', detail->>'name'
+			FROM audit_log
+			WHERE event_type = 'credential.deleted' AND credential_id IS NULL AND detail->>'credential_id' = $1
+			""", connection))
+		{
+			deletedRow.Parameters.AddWithValue(id.ToString());
+			await using NpgsqlDataReader reader = await deletedRow.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync(), "expected exactly one credential.deleted audit row attributing this credential's id/name");
+			Assert.Equal(id.ToString(), reader.GetString(0));
+			Assert.Equal(fullName, reader.GetString(1));
+			Assert.False(await reader.ReadAsync(), "expected exactly one credential.deleted audit row for this credential");
+		}
+	}
+
 	/// <summary>PR #187 round 1, finding 1: a credential still referenced by jobs/runs
 	/// is 409, not 500 -- job history keeps its attribution (the auth-halt window
 	/// depends on it), and the pre-written deletion audit rolls back with it.</summary>
