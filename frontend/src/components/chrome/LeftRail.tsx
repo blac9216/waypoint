@@ -54,8 +54,7 @@ export interface LeftRailProps {
 export function LeftRail({ open, onToggle, badges }: LeftRailProps) {
 	const { user } = useAuth();
 	const { route: activeRoute } = useRouter();
-	const { system } = useSystem();
-	const mode = system?.mode ?? null;
+	const { system, mode } = useSystem();
 
 	if (!user) {
 		return null;

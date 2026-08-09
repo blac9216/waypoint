@@ -16,10 +16,24 @@ const MODE_TOOLTIP: Record<"connected" | "disconnected", string> = {
 
 export function TopBar({ screenTitle }: { screenTitle: string }) {
 	const { user } = useAuth();
-	const { system, stigman } = useSystem();
+	const { system, stigman, mode, ready } = useSystem();
 	const { theme, toggleTheme } = useTheme();
 
-	const mode = system?.mode ?? null;
+	// Three cases, not two (issue #94): `mode === "unknown"` covers both
+	// "still loading" (`!ready`) and, in principle, any other not-yet-settled
+	// state — only `!ready` actually occurs today, since `mode` folds to
+	// `"disconnected"` the instant a fetch settles (SystemProvider). Wording
+	// them the same was the bug: a request that is still in flight is not an
+	// outage, and telling an operator "could not reach the Waypoint API"
+	// while it is merely loading is a false alarm.
+	const modeLabel = !ready ? "MODE · CHECKING…" : MODE_LABEL[mode === "connected" ? "connected" : "disconnected"];
+	const modeTooltip = !ready
+		? "Checking deployment mode…"
+		: mode === "connected"
+			? MODE_TOOLTIP.connected
+			: system === null
+				? "Deployment mode unavailable — could not reach the Waypoint API."
+				: MODE_TOOLTIP.disconnected;
 
 	return (
 		<header className="top-bar">
@@ -55,13 +69,9 @@ export function TopBar({ screenTitle }: { screenTitle: string }) {
 			{/* Read-only by design: deployment mode is fixed at deploy time (README
 			    "Global Chrome" / "Interactions"), not a runtime toggle — this is
 			    deliberately NOT the prototype's clickable demo badge. */}
-			<div
-				className={`top-bar__mode top-bar__mode--${mode ?? "unknown"}`}
-				role="status"
-				title={mode ? MODE_TOOLTIP[mode] : "Deployment mode unavailable — could not reach the Waypoint API."}
-			>
+			<div className={`top-bar__mode top-bar__mode--${mode}`} role="status" title={modeTooltip}>
 				<span className="top-bar__mode-dot" />
-				{mode ? MODE_LABEL[mode] : "MODE · UNKNOWN"}
+				{modeLabel}
 			</div>
 
 			<div className="top-bar__user" title={`Signed in as ${user?.username ?? "—"}`}>
