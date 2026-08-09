@@ -137,9 +137,7 @@ the frontend bundle).
    ```
 
 3. Compute a dev admin password hash so you can log in, and (optionally)
-   override the dev Postgres credentials / published HTTPS port. These all
-   go in a git-ignored `.env` file next to `docker-compose.yml`
-   (`deploy/.env`):
+   override the dev Postgres credentials / published HTTPS port.
 
    ```bash
    # Prompts for the password (input hidden) and prints a salted PBKDF2 hash to
@@ -150,6 +148,29 @@ the frontend bundle).
    cd -
    ```
 
+   Deliver the hash one of two ways (issue #333 — the mounted file is
+   preferred; the env var is kept working for existing deployments):
+
+   **Preferred: mounted file.** Write the hash to the repo-root `config/`
+   directory (git-ignored — see `.gitignore`'s anchored `/config/` entry
+   and CLAUDE.md; `deploy/config/` is *not* covered, so this path matters):
+
+   ```bash
+   mkdir -p ../config/local-auth
+   # Paste the hash from the --hash-password output above. Trailing newline
+   # is fine - LocalAuthOptionsPostConfigure trims it.
+   printf '%s' 'paste-the-hash-from-above-here' > ../config/local-auth/admin-password-hash
+   ```
+
+   Then uncomment the `local-auth-admin-password-hash` bind mount on the
+   `backend` service in `docker-compose.yml`. On startup the backend reads
+   the hash from `LocalAuth__AdminPasswordHashFile`
+   (`/run/secrets/local-auth-admin-password-hash` in-container) and it takes
+   precedence over the env var below.
+
+   **Legacy fallback: env var.** Go in a git-ignored `.env` file next to
+   `docker-compose.yml` (`deploy/.env`):
+
    ```bash
    # deploy/.env
    WAYPOINT_ADMIN_PASSWORD_HASH=paste-the-hash-from-above-here
@@ -159,9 +180,13 @@ the frontend bundle).
    WAYPOINT_HTTPS_PORT=8443
    ```
 
-   Leaving `WAYPOINT_ADMIN_PASSWORD_HASH` unset is fine — the stack still
-   comes up healthy and serves `/api/v1/health`, it just refuses every login
-   (fails closed by design; see `backend/README.md` "Run locally").
+   Only used when the mounted file above isn't present — the backend logs a
+   one-time startup WARN when it falls back to this env var, since env vars
+   leak via `/proc/<pid>/environ`, `docker inspect`, and crash dumps.
+
+   Leaving both unset is fine — the stack still comes up healthy and serves
+   `/api/v1/health`, it just refuses every login (fails closed by design;
+   see `backend/README.md` "Run locally").
 
    Changing `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` here is enough on
    its own — the `backend` service composes its `ConnectionStrings__Waypoint`

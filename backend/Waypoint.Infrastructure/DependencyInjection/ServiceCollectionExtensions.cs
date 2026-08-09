@@ -58,6 +58,11 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<LocalAuthOptions>()
 			.Bind(configuration.GetSection(LocalAuthOptions.SectionName));
 
+		// Issue #333: resolves AdminPasswordHash from a mounted file over the legacy
+		// env var. Registered as IPostConfigureOptions so it runs after the Bind above
+		// regardless of options-pipeline ordering.
+		services.AddSingleton<IPostConfigureOptions<LocalAuthOptions>, Waypoint.Core.Auth.LocalAuthOptionsPostConfigure>();
+
 		services.AddOptions<WaypointBuildOptions>()
 			.Bind(configuration.GetSection(WaypointBuildOptions.SectionName));
 

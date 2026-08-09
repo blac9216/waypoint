@@ -92,6 +92,18 @@ real-world importance:
    the updater, and the execution containers never see the key. The master key is a
    mounted file readable solely by the backend user — never an environment variable
    (env leaks via `/proc/<pid>/environ`, `docker inspect`, and crash dumps).
+
+   This control governs the envelope-encryption master key (ADR-0005), which does not
+   exist yet in this scaffold. The dev-grade local-auth admin password hash
+   (`LocalAuthOptions.AdminPasswordHash`, issue #62) is a *different* piece of secret
+   material this control doesn't literally cover — but the same leakage argument
+   applies, so it gets the analogous treatment (issue #333): a mounted file
+   (`LocalAuth:AdminPasswordHashFile` / `LocalAuth__AdminPasswordHashFile`), preferred
+   over the `LocalAuth__AdminPasswordHash` environment variable, which is kept as a
+   deprecated fallback (one-time startup WARN) so existing deployments' admin login
+   doesn't break. See `deploy/README.md` "Bring-up" for the operator flow. This entire
+   mechanism — and the control-6 analogy it stands on — is moot once Keycloak (#29)
+   replaces local auth.
 7. **Plaintext lifetime.** Decrypted values live as briefly as practical and are not
    cached. Stated honestly: .NET cannot guarantee zeroed memory, so the achievable bar
    is *short-lived, uncached, audited* — not *never in RAM*.

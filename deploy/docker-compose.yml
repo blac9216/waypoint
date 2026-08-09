@@ -76,11 +76,24 @@ services:
       # locally"). Empty by default so an unconfigured stack still fails
       # every login closed instead of shipping a guessable credential (see
       # Waypoint.Core.Configuration.LocalAuthOptions and
-      # InMemoryLocalAuthenticationService). Set WAYPOINT_ADMIN_PASSWORD_HASH
-      # to a salted PBKDF2 hash (Pbkdf2PasswordHasher, issue #62) of a password
-      # of your choosing - see deploy/README.md "Bring-up" for how to generate
-      # it. Never commit a real hash (or the plaintext password it hashes) to
-      # this repo.
+      # InMemoryLocalAuthenticationService).
+      #
+      # Preferred delivery (issue #333): a mounted file, bind-mounted below
+      # from ../config/local-auth/admin-password-hash (gitignored - see
+      # .gitignore's /config/ entry and CLAUDE.md). This env var names the
+      # in-container path; LocalAuthOptionsPostConfigure reads the hash from
+      # it at startup and, when the file exists and is non-empty, it wins
+      # over LocalAuth__AdminPasswordHash below. See deploy/README.md
+      # "Bring-up" for how to generate the file's contents.
+      LocalAuth__AdminPasswordHashFile: "/run/secrets/local-auth-admin-password-hash"
+      # Legacy fallback (issue #62): only used when the mounted file above is
+      # absent or empty (see LocalAuthOptionsPostConfigure). Env vars leak
+      # via /proc/<pid>/environ, `docker inspect`, and crash dumps, so new
+      # deployments should prefer the file above - this is kept working so
+      # existing WAYPOINT_ADMIN_PASSWORD_HASH deployments' admin login does
+      # not break. Set it to a salted PBKDF2 hash (Pbkdf2PasswordHasher,
+      # issue #62) of a password of your choosing. Never commit a real hash
+      # (or the plaintext password it hashes) to this repo.
       LocalAuth__AdminPasswordHash: "${WAYPOINT_ADMIN_PASSWORD_HASH:-}"
       # Postgres connection (#103): backend/appsettings.json bakes in a default
       # ConnectionStrings:Waypoint that happens to match the postgres service's
@@ -112,6 +125,22 @@ services:
       # deploy/README.md "dev/local/ convention"). Uncomment once the
       # download jobs (M1 later slices) need it:
       # - ../dev/local:/dev/local:ro
+      # Admin password hash file (issue #333) - operator-provided, gitignored
+      # (../config/ is covered by .gitignore's anchored /config/ entry).
+      # Commented out by default so an unconfigured stack does not fail to
+      # start on a missing bind source (unlike the frontend/dist mount above,
+      # this one is optional: LocalAuthOptionsPostConfigure falls back to
+      # LocalAuth__AdminPasswordHash, or to fail-closed local auth, when it's
+      # absent). Uncomment and create
+      # ../config/local-auth/admin-password-hash (see deploy/README.md
+      # "Bring-up" step 3) to use the mounted-file delivery path instead of
+      # the env var:
+      # - type: bind
+      #   source: ../config/local-auth/admin-password-hash
+      #   target: /run/secrets/local-auth-admin-password-hash
+      #   read_only: true
+      #   bind:
+      #     create_host_path: false
     networks:
       - edge
       - internal
