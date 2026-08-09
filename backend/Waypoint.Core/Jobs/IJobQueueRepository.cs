@@ -259,6 +259,15 @@ public sealed record RunQueueState(string State, bool Paused, bool Blocked, stri
 public sealed record AbortRunResult(IReadOnlyList<Guid> CancelledJobIds, IReadOnlyList<Guid> InFlightJobIds);
 
 /// <summary>
+/// Issue #406: the outcome of the run-completion check a terminal job write triggers.
+/// <see cref="RunId"/> and <see cref="State"/> (<c>"completed"</c> or
+/// <c>"completed_with_failures"</c>) identify what changed; <see cref="FailedJobCount"/>
+/// is the run's failure-terminal (<c>failed</c>/<c>auth-failed</c>/<c>cancelled</c>) job
+/// count at the moment it completed, carried into the emitted <c>run.progress</c> event.
+/// </summary>
+public sealed record RunCompletionResult(Guid RunId, string State, int FailedJobCount);
+
+/// <summary>
 /// The outcome of a single-job cancel (see <see cref="IJobQueueRepository.CancelJobAsync"/>).
 /// <see cref="Cancelled"/>: a queued/blocked job was moved to <c>cancelled</c> immediately.
 /// <see cref="CancelRequested"/>: a running/attesting/converting job had

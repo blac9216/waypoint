@@ -33,3 +33,34 @@ public static class JobStates
 	public const string Blocked = "blocked";
 	public const string Cancelled = "cancelled";
 }
+
+/// <summary>
+/// Issue #406: the <see cref="JobStates"/> values with no further outgoing transition
+/// in ANY shape's <see cref="JobStateMachine"/> table (<see cref="JobStates.Queued"/>,
+/// <see cref="JobStates.Running"/>, <see cref="JobStates.Attesting"/>,
+/// <see cref="JobStates.Converting"/> and <see cref="JobStates.Blocked"/> all still have
+/// at least one outgoing edge in at least one shape, so none of them belong here).
+/// This is the set a run's last job must land in before the run itself can transition
+/// out of <c>running</c> -- see <c>JobQueueRepository.TryCompleteRunAsync</c>.
+/// <see cref="JobStates.Uploaded"/> and <see cref="JobStates.Done"/> are the two
+/// "success" terminals (map to <c>completed</c> when every job in a run lands on one of
+/// them); <see cref="JobStates.Failed"/>, <see cref="JobStates.AuthFailed"/> and
+/// <see cref="JobStates.Cancelled"/> are the "failure" terminals (any one of them among
+/// a run's jobs maps the run to <c>completed_with_failures</c> per
+/// docs/api-contract.md's state machine).
+/// </summary>
+public static class JobTerminalStates
+{
+	private static readonly HashSet<string> Success = new(StringComparer.Ordinal) { JobStates.Uploaded, JobStates.Done };
+	private static readonly HashSet<string> Failure = new(StringComparer.Ordinal) { JobStates.Failed, JobStates.AuthFailed, JobStates.Cancelled };
+	private static readonly HashSet<string> All = new(StringComparer.Ordinal) { JobStates.Uploaded, JobStates.Done, JobStates.Failed, JobStates.AuthFailed, JobStates.Cancelled };
+
+	/// <summary>True for any of the five states a job never leaves.</summary>
+	public static bool Contains(string state) => All.Contains(state);
+
+	/// <summary>True for the two "the job succeeded" terminals.</summary>
+	public static bool IsSuccess(string state) => Success.Contains(state);
+
+	/// <summary>True for the three "the job did not succeed" terminals.</summary>
+	public static bool IsFailure(string state) => Failure.Contains(state);
+}
