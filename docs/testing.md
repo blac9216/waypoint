@@ -373,9 +373,12 @@ have repeatedly caught real defects no CI run could have seen:
 - **What `sanitize` cannot catch**: it is tuned against today's tree and today's
   known-legitimate patterns (RFC 5737 ranges, `*.example.<tld>`, loopback, Docker's
   `127.0.0.11`, four-part product versions immediately preceded by the word
-  `version` — with or without a `:`/`=` separator, so `version 1.2.3.4`,
-  `--version 1.2.3.4` and `app.version=1.2.3.4` are suppressed as well as
-  `version: '1.2.3.4'`; a `version` mentioned anywhere else on the line is not). It is a
+  `version` AND a mandatory `:`/`=` separator (quote optional), so
+  `version: A.B.C.D`, `--version=A.B.C.D` and `app.version=A.B.C.D` are suppressed as
+  well as `version: 'A.B.C.D'`; a bare `version A.B.C.D` with only whitespace and no
+  separator is NOT suppressed (issue #361 — that shape is a weak version cue and was
+  waiving real IPv4 literals), and a `version` mentioned anywhere else on the line is
+  not either). It is a
   mechanical backstop for the sanitization policy in `CLAUDE.md`, not a replacement
   for the diff-by-hand review that policy still requires — a sufficiently
   well-disguised secret or a lab identifier that doesn't match any of its patterns

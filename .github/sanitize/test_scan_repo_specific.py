@@ -1798,33 +1798,69 @@ class VersionStringTests(unittest.TestCase):
 		"""An octet above 255 cannot be the lab address this check catches."""
 		self.assertEqual(scanner.scan_text("f.md", f"rel {quad(2024, 1, 300, 5)}"), [])
 
-	def test_separator_is_optional_as_documented(self) -> None:
-		"""The suppression is wider than a `version: 'A.B.C.D'` key/value shape.
+	def test_separator_is_required_as_documented(self) -> None:
+		"""The suppression is bound to a `version: 'A.B.C.D'` key/value shape.
 
-		`[:=]?` is optional, so the separator-less and prefixed spellings that
-		release notes and CLI help text actually use are suppressed too. This
-		is documented behaviour, not an accident — pinned here so the code
-		comment and the implementation cannot drift apart.
+		Issue #361: `[:=]` is mandatory, so a colon/equals separator (quote
+		still optional) is what marks "version" as a key rather than prose.
+		This is documented behaviour, not an accident — pinned here so the
+		code comment and the implementation cannot drift apart.
 		"""
 		version = quad(8, 18, 0, 4)
 		for line in (
-			f"version {version}",
-			f"--version {version}",
-			f"x-version {version}",
+			f"version: {version}",
+			f"version:{version}",
+			f"version = {version}",
+			f"version={version}",
+			f"--version={version}",
+			f"x-version: {version}",
 			f"app.version={version}",
 		):
 			with self.subTest(line=line):
 				self.assertEqual(scanner.scan_text("f.md", line), [], line)
 
+	def test_bare_version_word_no_longer_waives_a_real_ip(self) -> None:
+		"""Issue #361: the false negative this issue closes.
+
+		A routable IPv4 literal that immediately follows the bare word
+		"version" plus whitespace — with no `:`/`=` separator — must now be
+		flagged. Previously the optional separator waived this too, which is
+		a false negative on the load-bearing secret gate.
+		"""
+		for line in (
+			f"version {LAB_IP}",
+			f"--version {LAB_IP}",
+			f"x-version {LAB_IP}",
+			f'version "{LAB_IP}"',
+			f"Version {LAB_IP}",
+			f"versions {LAB_IP}",
+		):
+			with self.subTest(line=line):
+				findings = scanner.scan_text("f.md", line)
+				self.assertEqual(len(findings), 1, (line, findings))
+				self.assertIn(LAB_IP, findings[0])
+
+	def test_issue_361_repro_bare_version_ip_now_flags(self) -> None:
+		"""Verbatim shape from issue #361's own table (RFC 5737 doc quad, not a
+		real leak, but the exact `version <ip>` shape the issue measured as
+		QUIET before the fix). Asserted directly against is_version_string()
+		so the fix is pinned at the unit the issue names, independent of
+		whatever address is or is not in ALLOWED_IP_NETWORKS.
+		"""
+		text = f"version {quad(192, 0, 2, 5)}"
+		match = scanner.IPV4_RE.search(text)
+		self.assertIsNotNone(match)
+		self.assertFalse(scanner.is_version_string(text, match.start()))
+
 	def test_version_word_must_be_whole_and_immediately_before(self) -> None:
 		"""The documented bounds of the suppression, stated as failures.
 
 		These are the spellings that deliberately do NOT waive, and they are
-		what keeps the optional separator above from being a bypass.
+		what keeps the mandatory separator above from being a bypass.
 		"""
 		for line in (
 			f"mgmt_version: {LAB_IP}",       # underscore defeats the \\b
-			f"version `{LAB_IP}`",           # backtick is not in ['\"]?
+			f"version `{LAB_IP}`",           # no `:`/`=` separator at all
 			f"revision {LAB_IP}",            # not the word "version"
 			f"version of the host; see {LAB_IP}",  # not immediately before
 		):
@@ -2929,7 +2965,7 @@ class FalsePositiveCorpusTests(unittest.TestCase):
 		# #89's build/version shapes
 		"vcf-download-tool-9.0.0.0-24089201.tar.gz",
 		"version: '8.18.0.4'",
-		"--version 9.0.0.0",
+		"--version=9.0.0.0",
 		"app.version=9.0.0.0",
 		# repo conventions
 		"host esxi-01.example.internal",
@@ -3737,7 +3773,7 @@ class ThreeIssueInteractionTests(unittest.TestCase):
 		flags — see VersionExtensionTests — so the still-quiet #113 path is the
 		version-key one, which is what is exercised here.)
 		"""
-		text = f"version {quad(5, 2, 1, 0)} built near cafe::babe"
+		text = f"version: {quad(5, 2, 1, 0)} built near cafe::babe"
 		self.assertEqual(scanner.scan_text("f.md", text), [])
 
 	def test_padded_mapped_literal_alongside_a_version_key_quad(self) -> None:
@@ -3746,7 +3782,7 @@ class ThreeIssueInteractionTests(unittest.TestCase):
 		literal is still fully reported on both axes.
 		"""
 		mapped = ipv6("", "", "ffff", zero_pad_quad(LAB_IP, 4))
-		text = f"version {quad(5, 2, 1, 0)} reachable at {mapped}"
+		text = f"version: {quad(5, 2, 1, 0)} reachable at {mapped}"
 		findings = scanner.scan_text("f.md", text)
 		self.assertEqual(len(findings), 2, findings)
 		self.assertTrue(any("IPv6 address literal" in f for f in findings), findings)
