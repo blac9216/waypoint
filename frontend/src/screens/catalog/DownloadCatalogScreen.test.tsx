@@ -101,7 +101,7 @@ describe("DownloadCatalogScreen", () => {
 				return jsonResponse({ version: "2.4.1", build: "24817", mode: "connected", update_available: null });
 			}
 			if (url === "/api/v1/stigman") {
-				return jsonResponse({ connected: false, endpoint: null, collection: null });
+				return jsonResponse({ error: { code: "not_found", message: "No global STIG Manager connection is configured." } }, 404);
 			}
 			throw new Error(`unexpected fetch: ${url}`);
 		}) as unknown as typeof fetch;
