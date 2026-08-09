@@ -162,7 +162,55 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 
-		await using NpgsqlCommand command = new(
+		// Issue #406: a job landing on one of the shape-terminal states (see
+		// JobTerminalStates) is the only moment a run can possibly finish -- so the
+		// completion check runs in the SAME transaction as this write, not as a
+		// separate statement afterward. That is what makes "two jobs finish at the
+		// same instant" race-safe: RunCompletionSql's own SELECT ... FOR UPDATE on
+		// the run row serializes the second committer behind the first, and the
+		// second committer's remaining-non-terminal-jobs count already reflects the
+		// first commit, so exactly one of them observes zero remaining and flips the
+		// run -- never both, never neither. clearLease is the same signal
+		// JobExecutionContext.AdvanceAsync already relies on to distinguish a
+		// same-tier pipeline move (clearLease: false, e.g. running -> attesting) from
+		// a shape-terminal write; only the latter can possibly be a run's last job.
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		// LOCK ORDER (issue #406 round-1 review): run row BEFORE job row. AbortRunAsync
+		// and SwapAndResumeBlockedCredentialAsync both lock the run row first, then jobs;
+		// this method must follow the same global order or a worker finishing a run's
+		// last job (job-then-run) can deadlock against a concurrent abort (run-then-job).
+		// So when this write can possibly finish the run -- clearLease + a terminal
+		// toState -- we pre-read the job's run_id and take the run's FOR UPDATE lock
+		// BEFORE touching the job row. Non-terminal pipeline moves (running -> attesting
+		// etc.) never lock the run at all, exactly as before, so the hot per-stage path
+		// keeps its old cost and never serializes on the run row.
+		bool mayComplete = clearLease && JobTerminalStates.Contains(toState);
+		if (mayComplete)
+		{
+			await using NpgsqlCommand lockRunFirst = new(
+				"""
+				SELECT r.id FROM jobs j JOIN runs r ON r.id = j.run_id
+				WHERE j.id = $1 AND j.claimed_by = $2 AND j.state = $3
+				FOR UPDATE OF r
+				""", connection, transaction);
+			lockRunFirst.Parameters.AddWithValue(jobId);
+			lockRunFirst.Parameters.AddWithValue(workerId);
+			lockRunFirst.Parameters.AddWithValue(expectedFromState);
+			// If the job is unmatched (wrong owner/state) or has no run, we take no run
+			// lock and fall through to the UPDATE, which returns matched=false and rolls
+			// back -- identical outcome to before, just without a run lock we don't need.
+			await lockRunFirst.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		Guid? runId;
+		// The reader/command below are fully disposed by the time the `await using`
+		// block closes -- rolling back while a reader is still open throws
+		// NpgsqlOperationInProgressException (the same trap SwapAndResumeBlockedCredentialAsync's
+		// comment documents), so the no-match rollback happens strictly after this
+		// scope, never from inside it.
+		bool matched;
+		await using (NpgsqlCommand command = new(
 			"""
 			UPDATE jobs SET
 				state = $3,
@@ -171,17 +219,145 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 				lease_expires_at = CASE WHEN $5 THEN NULL ELSE lease_expires_at END,
 				heartbeat_at = CASE WHEN $5 THEN NULL ELSE heartbeat_at END
 			WHERE id = $1 AND claimed_by = $2 AND state = $6
-			RETURNING id
-			""", connection);
-		command.Parameters.AddWithValue(jobId);
-		command.Parameters.AddWithValue(workerId);
-		command.Parameters.AddWithValue(toState);
-		command.Parameters.AddWithValue((object?)note ?? DBNull.Value);
-		command.Parameters.AddWithValue(clearLease);
-		command.Parameters.AddWithValue(expectedFromState);
+			RETURNING id, run_id
+			""", connection, transaction))
+		{
+			command.Parameters.AddWithValue(jobId);
+			command.Parameters.AddWithValue(workerId);
+			command.Parameters.AddWithValue(toState);
+			command.Parameters.AddWithValue((object?)note ?? DBNull.Value);
+			command.Parameters.AddWithValue(clearLease);
+			command.Parameters.AddWithValue(expectedFromState);
 
-		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-		return result is not null;
+			await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			matched = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+			runId = matched && !reader.IsDBNull(1) ? reader.GetGuid(1) : null;
+		}
+
+		if (!matched)
+		{
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return false;
+		}
+
+		RunCompletionResult? completion = null;
+		if (clearLease && runId is Guid completedRunId && JobTerminalStates.Contains(toState))
+		{
+			completion = await TryCompleteRunAsync(completedRunId, connection, transaction, cancellationToken).ConfigureAwait(false);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+		if (completion is not null)
+		{
+			LogRunCompleted(completion.RunId, completion.State);
+			await EmitRunCompletedAsync(completion, cancellationToken).ConfigureAwait(false);
+		}
+
+		return true;
+	}
+
+	/// <summary>
+	/// Issue #406: transitions <paramref name="runId"/> out of <c>running</c> once every
+	/// one of its jobs has reached a <see cref="JobTerminalStates"/> state --
+	/// <c>completed</c> if all of them are the two success terminals
+	/// (<see cref="JobStates.Uploaded"/>/<see cref="JobStates.Done"/>),
+	/// <c>completed_with_failures</c> if any is a failure terminal
+	/// (<see cref="JobStates.Failed"/>/<see cref="JobStates.AuthFailed"/>/<see cref="JobStates.Cancelled"/>).
+	/// A <see cref="JobStates.Blocked"/> job is deliberately NOT terminal (per the
+	/// contract and the caller's <see cref="JobTerminalStates.Contains"/> gate before
+	/// this is even invoked) -- a run with any blocked job never reaches here with zero
+	/// "remaining" because the blocked row still counts as outstanding work below.
+	///
+	/// MUST be called inside the same transaction as the job write that might have made
+	/// this run's last job terminal -- see the caller's comment for why that, plus the
+	/// <c>SELECT ... FOR UPDATE</c> here, is what makes two jobs finishing at the same
+	/// instant race-safe rather than a double-write or a lost update.
+	///
+	/// Never touches a run already <c>aborted</c> (the <c>WHERE r.state = 'running'</c>
+	/// guard) or already <c>completed</c>/<c>completed_with_failures</c> (idempotent:
+	/// a second job's terminal write landing after the run already finished -- e.g. two
+	/// jobs racing where this call itself is what serializes them -- finds nothing left
+	/// to flip on its own turn).
+	/// </summary>
+	private static async Task<RunCompletionResult?> TryCompleteRunAsync(
+		Guid runId, NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
+	{
+		await using NpgsqlCommand lockRun = new("SELECT state FROM runs WHERE id = $1 FOR UPDATE", connection, transaction);
+		lockRun.Parameters.AddWithValue(runId);
+		object? currentState = await lockRun.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		if (currentState is not string state || !string.Equals(state, "running", StringComparison.Ordinal))
+		{
+			// Not found, already aborted, or already completed by a racing commit that
+			// got here first -- nothing for this call to do.
+			return null;
+		}
+
+		// "Remaining" is every job NOT in one of the five terminal states -- this
+		// deliberately includes 'blocked' (the contract's "not terminal" state) as well
+		// as 'queued'/'running'/'attesting'/'converting', so a run with any outstanding
+		// or blocked work is left alone. failureCount only ever counts terminal rows, so
+		// it is independent of remainingCount's definition.
+		int remainingCount;
+		int failureCount;
+		await using (NpgsqlCommand counts = new(
+			"""
+			SELECT
+				COUNT(*) FILTER (WHERE state NOT IN ('uploaded', 'done', 'failed', 'auth-failed', 'cancelled')),
+				COUNT(*) FILTER (WHERE state IN ('failed', 'auth-failed', 'cancelled'))
+			FROM jobs WHERE run_id = $1
+			""", connection, transaction))
+		{
+			counts.Parameters.AddWithValue(runId);
+			await using NpgsqlDataReader reader = await counts.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+			remainingCount = Convert.ToInt32(reader.GetInt64(0), CultureInfo.InvariantCulture);
+			failureCount = Convert.ToInt32(reader.GetInt64(1), CultureInfo.InvariantCulture);
+		}
+
+		if (remainingCount > 0)
+		{
+			return null;
+		}
+
+		string newState = failureCount > 0 ? "completed_with_failures" : "completed";
+		await using (NpgsqlCommand complete = new(
+			"UPDATE runs SET state = $2, completed_at = now() WHERE id = $1", connection, transaction))
+		{
+			complete.Parameters.AddWithValue(runId);
+			complete.Parameters.AddWithValue(newState);
+			await complete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		return new RunCompletionResult(runId, newState, failureCount);
+	}
+
+	/// <summary>
+	/// Mirrors <see cref="EmitCredentialSwappedAsync"/>'s "emit after commit" discipline
+	/// (see <see cref="IJobQueueRepository"/>'s "emit last" doc comment). There is no
+	/// <c>run.state</c> event type in the closed six-value <c>job_events_event_type_check</c>
+	/// set (docs/api-contract.md "Event streams (SSE)") -- <c>run.progress</c> is already
+	/// the run-scoped "aggregate run counts/percent" carrier the Live Run/Results screens
+	/// bind their progress UI to (<see cref="JobDispatcherHostedService.AbortRunAsync"/>
+	/// emits the same type for the abort case), so a run reaching a contract terminal
+	/// state rides that existing channel with <c>state</c>/<c>completed</c> fields a
+	/// consumer can key off of, rather than inventing a seventh type this migration would
+	/// also have to add.
+	/// </summary>
+	private async Task EmitRunCompletedAsync(RunCompletionResult completion, CancellationToken cancellationToken)
+	{
+		if (_events is null)
+		{
+			return;
+		}
+
+		string payload = System.Text.Json.JsonSerializer.Serialize(new
+		{
+			completed = true,
+			state = completion.State,
+			failed_job_count = completion.FailedJobCount,
+		});
+		await _events.EmitAsync(JobEventTypes.RunProgress, null, completion.RunId, payload, cancellationToken).ConfigureAwait(false);
 	}
 
 	/// <summary>
@@ -240,10 +416,40 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 	// StageComplete requeue left in place survives the recovery and the next claim's
 	// RETURNING stage hands it straight back to the handler -- recovery requeues at
 	// the marker, not from the beginning, closing #282's stranding.
+	// LOCK ORDER (issue #406 round-1 review): this sweep can land a run's last job on
+	// 'failed' and then TryCompleteRunAsync flips the run, so it locks both run and job
+	// rows in one transaction and, like AdvanceStateAsync / RetryJobAsync / AbortRunAsync,
+	// must take the run lock FIRST. That is why RecoverExpiredLeasesAsync runs
+	// LockRecoverableRunsSql (below) BEFORE this RecoverSql: it locks -- FOR UPDATE
+	// SKIP LOCKED, ORDER BY id for a deterministic order among concurrent sweeps -- the
+	// distinct run rows of every lease-expired job. SKIP LOCKED means a run a concurrent
+	// AbortRunAsync already holds is simply passed over this sweep (its jobs recover on
+	// the next tick) rather than blocking on it, so the sweep never waits in the
+	// run->job direction against an abort that waits job->... -- closing the inversion.
+	// RecoverSql then does its original job-level FOR UPDATE SKIP LOCKED work, with the
+	// relevant run rows already held.
+	internal const string LockRecoverableRunsSql = """
+		SELECT id FROM runs WHERE id IN (
+			SELECT DISTINCT run_id FROM jobs
+			WHERE run_id IS NOT NULL
+			  AND state IN ('running', 'attesting', 'converting')
+			  AND lease_expires_at < now()
+		)
+		ORDER BY id
+		FOR UPDATE SKIP LOCKED
+		""";
+
+	// $2 is the set of run ids LockRecoverableRunsSql actually locked this sweep. A
+	// lease-expired job is only recovered here if its run is in that set (or it has no
+	// run at all) -- so a job whose run a concurrent AbortRunAsync holds (hence skipped
+	// by LockRecoverableRunsSql) is NOT touched here, which is what stops recovery from
+	// ever holding a run's job while blocking on that run's row: the run-first + scope
+	// pairing removes the deadlock cycle against abort entirely.
 	internal const string RecoverSql = """
 		WITH recoverable AS (
 			SELECT id FROM jobs
 			WHERE state IN ('running', 'attesting', 'converting') AND lease_expires_at < now()
+			  AND (run_id IS NULL OR run_id = ANY($2))
 			ORDER BY lease_expires_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT $1
@@ -280,15 +486,71 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new(RecoverSql, connection);
-		command.Parameters.AddWithValue(batchSize);
-		List<RecoveredJob> recovered = [];
-		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+
+		// Issue #406: a lease-expiry sweep can itself land a run's last job on a
+		// terminal state -- 'failed' once attempt_count exhausts max_attempts (the
+		// 'cancelled' arm only fires under an already-aborted run, which
+		// TryCompleteRunAsync's own `state = 'running'` guard already leaves alone) --
+		// so this needs the same in-transaction completion check AdvanceStateAsync
+		// uses, applied once per distinct run this batch actually recovered into a
+		// JobTerminalStates state. A batch can recover jobs from several runs at once,
+		// unlike AdvanceStateAsync's single-job call, hence the per-run loop below
+		// rather than a single completion attempt.
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		// LOCK ORDER (issue #406 round-1 review): take the run-row locks FIRST -- see the
+		// LockRecoverableRunsSql / RecoverSql comments. A run a concurrent abort holds is
+		// SKIP-LOCKED past here and excluded from RecoverSql's $2 scope, so this sweep
+		// never blocks on a run while holding one of that run's job rows.
+		List<Guid> lockedRunIds = [];
+		await using (NpgsqlCommand lockRuns = new(LockRecoverableRunsSql, connection, transaction))
 		{
-			RecoveredJob job = new(reader.GetGuid(0), reader.IsDBNull(1) ? null : reader.GetGuid(1), reader.GetString(2), reader.GetInt32(3), reader.GetInt32(4));
-			recovered.Add(job); LogRecoveredJob(job.Id, job.NewState, job.AttemptCount, job.MaxAttempts);
+			await using NpgsqlDataReader reader = await lockRuns.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				lockedRunIds.Add(reader.GetGuid(0));
+			}
 		}
+
+		List<RecoveredJob> recovered = [];
+		await using (NpgsqlCommand command = new(RecoverSql, connection, transaction))
+		{
+			command.Parameters.AddWithValue(batchSize);
+			command.Parameters.AddWithValue(lockedRunIds.ToArray());
+			await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				RecoveredJob job = new(reader.GetGuid(0), reader.IsDBNull(1) ? null : reader.GetGuid(1), reader.GetString(2), reader.GetInt32(3), reader.GetInt32(4));
+				recovered.Add(job);
+			}
+		}
+
+		List<RunCompletionResult> completions = [];
+		foreach (Guid runId in recovered
+			.Where(job => job.RunId is not null && JobTerminalStates.Contains(job.NewState))
+			.Select(job => job.RunId!.Value)
+			.Distinct())
+		{
+			RunCompletionResult? completion = await TryCompleteRunAsync(runId, connection, transaction, cancellationToken).ConfigureAwait(false);
+			if (completion is not null)
+			{
+				completions.Add(completion);
+			}
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+		foreach (RecoveredJob job in recovered)
+		{
+			LogRecoveredJob(job.Id, job.NewState, job.AttemptCount, job.MaxAttempts);
+		}
+
+		foreach (RunCompletionResult completion in completions)
+		{
+			LogRunCompleted(completion.RunId, completion.State);
+			await EmitRunCompletedAsync(completion, cancellationToken).ConfigureAwait(false);
+		}
+
 		return recovered;
 	}
 
@@ -850,24 +1112,56 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-		// Lock the row so the retry and the state check are one atomic decision, same
-		// discipline as CancelJobAsync -- a concurrent lease-recovery sweep or another
-		// retry cannot race this read/write pair.
+		// LOCK ORDER (issue #406 round-1 review): run row BEFORE job row. The reopen
+		// UPDATE below writes runs, so this method locks both -- and must take them in
+		// the same global order as AbortRunAsync (run-then-job) or the two deadlock when
+		// an operator retries a job while an operator aborts its run. So read the job's
+		// run_id, lock that run row FOR UPDATE, THEN lock the job row and do the
+		// state-gated read below. A concurrent abort thus fully serializes with this
+		// retry on the run row (the reopen's IN ('completed','completed_with_failures')
+		// predicate already excludes 'aborted', so once abort wins the run is left
+		// aborted). The two reads are one atomic decision inside the same transaction.
 		string? currentState;
 		Guid? runId;
-		await using (NpgsqlCommand lockJob = new(
-			"SELECT state, run_id FROM jobs WHERE id = $1 FOR UPDATE", connection, transaction))
+		await using (NpgsqlCommand readRun = new(
+			"SELECT run_id FROM jobs WHERE id = $1", connection, transaction))
 		{
-			lockJob.Parameters.AddWithValue(jobId);
-			await using NpgsqlDataReader reader = await lockJob.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			readRun.Parameters.AddWithValue(jobId);
+			await using NpgsqlDataReader reader = await readRun.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 			if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
 			{
 				await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
 				return JobRetryOutcome.NotFound;
 			}
 
+			runId = reader.IsDBNull(0) ? null : reader.GetGuid(0);
+		}
+
+		if (runId is Guid runToLock)
+		{
+			await using NpgsqlCommand lockRun = new(
+				"SELECT id FROM runs WHERE id = $1 FOR UPDATE", connection, transaction);
+			lockRun.Parameters.AddWithValue(runToLock);
+			await lockRun.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// Lock the job row so the retry and the state check are one atomic decision, same
+		// discipline as CancelJobAsync -- a concurrent lease-recovery sweep or another
+		// retry cannot race this read/write pair. Run row (if any) is already locked above.
+		await using (NpgsqlCommand lockJob = new(
+			"SELECT state FROM jobs WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockJob.Parameters.AddWithValue(jobId);
+			await using NpgsqlDataReader reader = await lockJob.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				// Job vanished between the two reads (extraordinarily unlikely inside one
+				// txn, but keep the same NotFound contract rather than NRE).
+				await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+				return JobRetryOutcome.NotFound;
+			}
+
 			currentState = reader.GetString(0);
-			runId = reader.IsDBNull(1) ? null : reader.GetGuid(1);
 		}
 
 		if (!string.Equals(currentState, JobStates.Failed, StringComparison.Ordinal))
@@ -899,6 +1193,29 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		{
 			retry.Parameters.AddWithValue(jobId);
 			await retry.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// Issue #406: retrying this job's only effect on jobs.state is 'failed' ->
+		// 'queued', so if the run had already reached one of the two completed states
+		// (its last-terminal-job moment predates this retry by definition, since a
+		// 'failed' row is itself one of the five terminal states TryCompleteRunAsync
+		// counted), the run must reopen to 'running' -- otherwise a completed run
+		// keeps dispatching a freshly-queued job underneath a state the contract calls
+		// terminal, and GET /runs/{id} lies about there being nothing left to do.
+		// completed_at is cleared to match ('the run finished at this instant' is no
+		// longer true) -- TryCompleteRunAsync re-stamps it if/when this retried job
+		// (or whatever else is still outstanding) reaches a terminal state again.
+		// Scoped to exactly the two completed states, same FOR UPDATE-locked read as
+		// every other run-control primitive in this class, so a concurrent abort
+		// racing this retry is serialized rather than silently overwritten back to
+		// 'running' -- 'aborted' is excluded from the IN list below on purpose.
+		if (runId is Guid retryRunId)
+		{
+			await using NpgsqlCommand reopenRun = new(
+				"UPDATE runs SET state = 'running', completed_at = NULL WHERE id = $1 AND state IN ('completed', 'completed_with_failures')",
+				connection, transaction);
+			reopenRun.Parameters.AddWithValue(retryRunId);
+			await reopenRun.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
 		// "No audit, no retry" -- same discipline as SwapAndResumeBlockedCredentialAsync's
@@ -1398,6 +1715,9 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Run {RunId} aborted: {CancelledCount} queued job(s) cancelled, {InFlightCount} in-flight job(s) signaled")]
 	private partial void LogRunAborted(Guid runId, int cancelledCount, int inFlightCount);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Run {RunId} completed: {State}")]
+	private partial void LogRunCompleted(Guid runId, string state);
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Job {JobId} cancelled by request")]
 	private partial void LogJobCancelled(Guid jobId);
