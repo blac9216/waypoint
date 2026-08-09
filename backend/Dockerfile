@@ -1,17 +1,31 @@
 # Waypoint.Api — multi-stage build. Build args populate the version/build metadata
 # GET /api/v1/health reports; the compose stack (deploy/) supplies real values, unset
 # args fall back to the WaypointBuildOptions "dev" defaults.
+#
+# Build context is the REPO ROOT, not backend/ (issue #92): .editorconfig and
+# Directory.Build.props live at the repo root so a future non-backend .NET project can
+# inherit the same analyzer/format posture (issue #55), and MSBuild discovers both by
+# walking upward from the project directory. A backend/-scoped context put that walk's
+# root at /src with no parent to climb to, so the containerized compile silently ran
+# with SDK-default analyzer settings instead of this repo's posture — see issue #92 for
+# the full history. Build from the repo root:
+#   docker build -f backend/Dockerfile .
+# `deploy/docker-compose.yml`'s backend service context is set the same way.
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
-COPY Waypoint.sln ./
-COPY Waypoint.Core/Waypoint.Core.csproj Waypoint.Core/
-COPY Waypoint.Infrastructure/Waypoint.Infrastructure.csproj Waypoint.Infrastructure/
-COPY Waypoint.Api/Waypoint.Api.csproj Waypoint.Api/
-COPY Waypoint.Tests/Waypoint.Tests.csproj Waypoint.Tests/
+COPY Directory.Build.props .editorconfig ./
+COPY backend/Waypoint.sln backend/
+COPY backend/Waypoint.Core/Waypoint.Core.csproj backend/Waypoint.Core/
+COPY backend/Waypoint.Infrastructure/Waypoint.Infrastructure.csproj backend/Waypoint.Infrastructure/
+COPY backend/Waypoint.Api/Waypoint.Api.csproj backend/Waypoint.Api/
+COPY backend/Waypoint.Tests/Waypoint.Tests.csproj backend/Waypoint.Tests/
+WORKDIR /src/backend
 RUN dotnet restore Waypoint.sln
 
-COPY . .
+WORKDIR /src
+COPY backend/ backend/
+WORKDIR /src/backend
 RUN dotnet publish Waypoint.Api/Waypoint.Api.csproj -c Release -o /app --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime

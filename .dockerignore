@@ -1,0 +1,58 @@
+# Repo-root .dockerignore — used when a Waypoint image build's context is the repo
+# root (issue #92: backend/Dockerfile now builds from here so it can see .editorconfig
+# and Directory.Build.props). Keep this lean and keep local/secret material out of every
+# build context, same intent as .gitignore's "NEVER commit" list in CLAUDE.md — a
+# .dockerignore miss ships the file INTO the image layer, which is worse than a git miss
+# because it can leave a running host, not just a repo.
+#
+# Only the paths a Dockerfile actually needs should reach the daemon. backend/Dockerfile
+# COPYs Directory.Build.props, .editorconfig, and backend/ explicitly, so everything
+# else at the repo root is excluded by default here and re-included per-Dockerfile only
+# if a future image needs it.
+
+# Version control / editor / CI metadata — never needed inside a build.
+.git/
+.github/
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local secrets & operator config (mirrors .gitignore — CLAUDE.md "NEVER commit"):
+# gitignored dev material must not leak into an image even though .dockerignore and
+# .gitignore are evaluated independently and a gitignore entry alone does NOT stop
+# Docker from sending a file to the daemon.
+.env
+.env.*
+*.token
+*.vault
+vault-pass*
+secrets*.json
+secrets*.yml
+/config/
+dev/local/
+*.local.json
+*.local.yml
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Build/dependency output — large, regenerated inside the build, never a build input.
+**/bin/
+**/obj/
+**/TestResults/
+**/node_modules/
+**/dist/
+frontend/build/
+**/__pycache__/
+**/*.pyc
+
+# Docs and other components not needed by the backend image build. Re-include per
+# Dockerfile if a future image genuinely needs one of these (e.g. a frontend image
+# would need an exception for frontend/ — add it there, not by loosening this file).
+docs/
+frontend/
+scripts/
+README.md
