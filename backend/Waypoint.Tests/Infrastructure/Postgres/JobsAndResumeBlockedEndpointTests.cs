@@ -257,6 +257,169 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 		Assert.Equal("cancelled", await ReadJobStateAsync(jobId));
 	}
 
+	// -- POST /runs/{runId}/jobs/{jobId}/retry (issue #297) ------------------
+	// ADR-0012 §5's engine-level resume primitive gets its operator-facing HTTP
+	// surface here: a failed job returns to queued with jobs.stage untouched, so the
+	// next claim resumes the pipeline where it left off rather than restarting it.
+
+	[Fact]
+	public async Task RetryJob_Failed_ReturnsToQueued_AndSubsequentClaimResumesAtStage()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
+		Guid jobId = await SeedFailedJobAsync(runId, credentialId, stage: "converting");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/{jobId}/retry", "Operator", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal(jobId.ToString(), body.RootElement.GetProperty("job_id").GetString());
+		Assert.Equal("queued", body.RootElement.GetProperty("state").GetString());
+		Assert.Equal("converting", body.RootElement.GetProperty("stage").GetString());
+
+		(string state, string? stage) = await ReadJobStateAndStageAsync(jobId);
+		Assert.Equal("queued", state);
+		Assert.Equal("converting", stage);
+
+		// The crux (real Postgres): a subsequent claim hands the preserved stage marker
+		// straight back via ClaimedJob.Stage, so the handler resumes at "converting"
+		// instead of restarting the pipeline from the first stage.
+		JobQueueRepository repository = new(_fixture.ConnectionString, Microsoft.Extensions.Logging.Abstractions.NullLogger<JobQueueRepository>.Instance);
+		ClaimedJob? claimed = await repository.ClaimJobAsync("worker-resume-test", TimeSpan.FromMinutes(5), CancellationToken.None);
+
+		Assert.NotNull(claimed);
+		Assert.Equal(jobId, claimed!.Id);
+		Assert.Equal("converting", claimed.Stage);
+	}
+
+	[Fact]
+	public async Task RetryJob_Failed_DoesNotIncrementAttemptCount_AndAudits()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
+		Guid jobId = await SeedFailedJobAsync(runId, credentialId, stage: null, attemptCount: 3);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/{jobId}/retry", "Operator", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+		// Retry-accounting: a manual operator retry is an override -- attempt_count is
+		// left exactly as the auto-retry path last set it (never incremented by the
+		// retry endpoint itself, never blocked by max_attempts).
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT attempt_count, claimed_by, lease_expires_at FROM jobs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(jobId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		Assert.Equal(3, reader.GetInt32(0));
+		Assert.True(reader.IsDBNull(1));
+		Assert.True(reader.IsDBNull(2));
+		await reader.DisposeAsync();
+
+		// Audit note records who retried which job/run.
+		await using NpgsqlCommand auditQuery = new(
+			"SELECT actor, run_id, detail FROM audit_log WHERE event_type = 'job.retried' AND run_id = $1", connection);
+		auditQuery.Parameters.AddWithValue(runId);
+		await using NpgsqlDataReader auditReader = await auditQuery.ExecuteReaderAsync();
+		Assert.True(await auditReader.ReadAsync());
+		Assert.Equal("test-user", auditReader.GetString(0));
+		Assert.Equal(runId, auditReader.GetGuid(1));
+		using JsonDocument detail = JsonDocument.Parse(auditReader.GetString(2));
+		Assert.Equal(jobId.ToString(), detail.RootElement.GetProperty("job_id").GetString());
+	}
+
+	[Theory]
+	[InlineData("queued")]
+	[InlineData("running")]
+	[InlineData("done")]
+	[InlineData("auth-failed")]
+	[InlineData("cancelled")]
+	public async Task RetryJob_NonFailedState_Returns409(string state)
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
+		Guid jobId = state switch
+		{
+			"queued" => await SeedQueuedJobAsync(runId, credentialId),
+			"running" => await SeedRunningJobAsync(runId, credentialId),
+			_ => await SeedTerminalJobAsync(runId, credentialId, state),
+		};
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/{jobId}/retry", "Operator", body: null);
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_retryable");
+		Assert.Equal(state, await ReadJobStateAsync(jobId));
+	}
+
+	[Fact]
+	public async Task RetryJob_JobNotInRun_Returns404()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
+		Guid otherRunId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
+		Guid jobId = await SeedFailedJobAsync(otherRunId, credentialId, stage: null);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/{jobId}/retry", "Operator", body: null);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
+	}
+
+	[Fact]
+	public async Task RetryJob_MissingRun_Returns404()
+	{
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{Guid.NewGuid()}/jobs/{Guid.NewGuid()}/retry", "Operator", body: null);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
+	}
+
+	[Theory]
+	[InlineData("Viewer")]
+	[InlineData("Cyber")]
+	public async Task RetryJob_BelowOperator_Returns403(string role)
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
+		Guid jobId = await SeedFailedJobAsync(runId, credentialId, stage: null);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/{jobId}/retry", role, body: null);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+		Assert.Equal("failed", await ReadJobStateAsync(jobId));
+	}
+
+	[Fact]
+	public async Task RetryJob_NonOwnerOperator_Returns403AndJobNotRetried()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "another-user");
+		Guid jobId = await SeedFailedJobAsync(runId, credentialId, stage: null);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/{jobId}/retry", "Operator", body: null);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "forbidden");
+		Assert.Equal("failed", await ReadJobStateAsync(jobId));
+	}
+
+	[Fact]
+	public async Task RetryJob_Admin_SucceedsOnNonOwnedJob()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "another-user");
+		Guid jobId = await SeedFailedJobAsync(runId, credentialId, stage: "attesting");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/{jobId}/retry", "Admin", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		(string state, string? stage) = await ReadJobStateAndStageAsync(jobId);
+		Assert.Equal("queued", state);
+		Assert.Equal("attesting", stage);
+	}
+
 	// -- POST /runs/{id}/resume-blocked --------------------------------------
 
 	[Fact]
@@ -490,6 +653,29 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
 
+	/// <summary>
+	/// A <c>failed</c> job carrying a stage marker (issue #297: mirrors ADR-0012 §5's
+	/// "a job that fails at, say, converting keeps stage = 'converting' on its failed
+	/// row"), optionally with a caller-controlled <paramref name="attemptCount"/> so
+	/// retry-accounting tests can prove the manual retry endpoint leaves it untouched.
+	/// </summary>
+	private async Task<Guid> SeedFailedJobAsync(Guid runId, Guid credentialId, string? stage, int attemptCount = 1)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO jobs (run_id, job_type, priority, state, credential_id, stage, attempt_count, max_attempts, finished_at, note)
+			VALUES ($1, 'scan', 1, 'failed', $2, $3, $4, 5, now(), 'Simulated failure for test')
+			RETURNING id
+			""", connection);
+		insert.Parameters.AddWithValue(runId);
+		insert.Parameters.AddWithValue(credentialId);
+		insert.Parameters.AddWithValue((object?)stage ?? DBNull.Value);
+		insert.Parameters.AddWithValue(attemptCount);
+		return (Guid)(await insert.ExecuteScalarAsync())!;
+	}
+
 	private async Task<Guid> SeedBlockedJobAsync(Guid runId, Guid credentialId)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
@@ -529,6 +715,17 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 		await using NpgsqlCommand command = new("SELECT state FROM jobs WHERE id = $1", connection);
 		command.Parameters.AddWithValue(jobId);
 		return (string)(await command.ExecuteScalarAsync())!;
+	}
+
+	private async Task<(string State, string? Stage)> ReadJobStateAndStageAsync(Guid jobId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT state, stage FROM jobs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(jobId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1));
 	}
 
 	private async Task<(string State, Guid? CredentialId)> ReadJobStateAndCredentialAsync(Guid jobId)

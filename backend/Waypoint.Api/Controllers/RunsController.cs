@@ -421,6 +421,62 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
+	/// Retries a single <c>failed</c> job within a run, resuming from its last-reached
+	/// stage (issue #297; the HTTP surface ADR-0012 §5 deferred). Run-scoped so
+	/// ownership resolves the same way <c>DELETE /jobs/{id}</c>'s does (issue #294):
+	/// Operator+ (own runs), Admin any -- <see cref="EnforceRunOwnership(ClaimsPrincipal, RunQueueState)"/>
+	/// against the run named in the route, not a run resolved indirectly off the job.
+	/// The job must belong to <paramref name="runId"/> (404 otherwise -- a job id from a
+	/// different run is not silently retried under the wrong run's authority). Scoped to
+	/// <c>failed</c> only: NOT <c>auth-failed</c> (issue #146/#295's credential-swap-resume
+	/// path is the correct route there -- retrying without swapping the bad credential
+	/// would just re-fail) and NOT <c>cancelled</c> (a deliberate operator action; the
+	/// operator starts a new run rather than silently re-queueing it). A retry on any
+	/// other state, including those two, is 409. This is a manual override of the
+	/// engine's own retry accounting: it does not increment <c>attempt_count</c> and is
+	/// never blocked by the automatic-retry <c>max_attempts</c> cap -- see
+	/// <see cref="IJobQueueRepository.RetryJobAsync"/>. <c>jobs.stage</c> is preserved
+	/// untouched, so the next claim resumes the pipeline at the marker rather than
+	/// restarting it (ADR-0012 §5), and the action is recorded to <c>audit_log</c>
+	/// (<c>event_type = 'job.retried'</c>).
+	/// </summary>
+	[HttpPost("{runId:guid}/jobs/{jobId:guid}/retry")]
+	[RequireOperatorRole]
+	[ProducesResponseType(typeof(JobRetryResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<JobRetryResponse>> RetryJob(Guid runId, Guid jobId, CancellationToken cancellationToken)
+	{
+		RunQueueState? state = await _repository.GetRunQueueStateAsync(runId, cancellationToken).ConfigureAwait(false);
+		if (state is null)
+		{
+			throw ApiException.NotFound("Run not found.", $"Run '{runId}' does not exist.");
+		}
+
+		EnforceRunOwnership(state);
+
+		JobSummary? job = await _repository.GetJobAsync(jobId, cancellationToken).ConfigureAwait(false);
+		if (job is null || job.RunId != runId)
+		{
+			throw ApiException.NotFound("Job not found.", $"Job '{jobId}' does not exist under run '{runId}'.");
+		}
+
+		string actor = User.GetRequiredUsername();
+		JobRetryOutcome outcome = await _repository.RetryJobAsync(jobId, actor, cancellationToken).ConfigureAwait(false);
+
+		switch (outcome)
+		{
+			case JobRetryOutcome.NotFound:
+				throw ApiException.NotFound("Job not found.", $"Job '{jobId}' does not exist under run '{runId}'.");
+			case JobRetryOutcome.NotFailed:
+				throw new ApiException(
+					System.Net.HttpStatusCode.Conflict, "not_retryable",
+					"Job cannot be retried.", $"Job '{jobId}' is in state '{job.State}'; only a 'failed' job may be retried.");
+			case JobRetryOutcome.Retried:
+			default:
+				return Ok(new JobRetryResponse(jobId.ToString(), JobStates.Queued, job.Stage));
+		}
+	}
+
+	/// <summary>
 	/// Per-target artifact rows for a run (docs/api-contract.md `/runs/{id}/artifacts`,
 	/// issue #299). Viewer+, matching every other run read. Only <c>scan</c> jobs produce
 	/// artifacts (issue #275's attest/convert stages) -- other job types in the run are
