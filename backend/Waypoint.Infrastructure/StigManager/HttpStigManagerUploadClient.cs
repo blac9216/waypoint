@@ -15,6 +15,7 @@
 using System.Net;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Waypoint.Core.StigManager;
 
 namespace Waypoint.Infrastructure.StigManager;
@@ -31,18 +32,47 @@ namespace Waypoint.Infrastructure.StigManager;
 /// <see cref="HttpStigManagerProbe"/>, this class has no lab STIG Manager instance to
 /// exercise in CI -- integration tests substitute <see cref="IStigManagerUploadClient"/>;
 /// verifying the real HTTP path is a manual owner step.
+///
+/// Issue #320: each network call (token acquisition, checklist POST, <c>/stigs</c> GET)
+/// is bounded by its own <see cref="StigManagerClientOptions.UploadTimeout"/> budget via
+/// a <see cref="CancellationTokenSource"/> linked to the caller's token and
+/// <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/>, rather than relying on
+/// the shared named <see cref="HttpClient"/>'s inherited 100 s default -- a per-call
+/// token keeps the budget scoped to this boundary without touching the client other
+/// callers of the same factory might share. A trip of that budget surfaces as
+/// <see cref="TaskCanceledException"/>, caught by the exact same per-stage handlers
+/// that already cover the wall-clock 100 s case, so it degrades to
+/// <see cref="StigManagerUploadOutcome.Failed"/> like any other timeout -- it never
+/// becomes an unhandled throw that would violate <c>ScanUploadCoordinator</c>'s
+/// "never fails the scan run" contract.
 /// </summary>
 public sealed partial class HttpStigManagerUploadClient : IStigManagerUploadClient
 {
 	private readonly IHttpClientFactory _httpClientFactory;
+	private readonly IOptions<StigManagerClientOptions> _options;
 	private readonly ILogger<HttpStigManagerUploadClient> _logger;
 
-	public HttpStigManagerUploadClient(IHttpClientFactory httpClientFactory, ILogger<HttpStigManagerUploadClient> logger)
+	public HttpStigManagerUploadClient(
+		IHttpClientFactory httpClientFactory, IOptions<StigManagerClientOptions> options, ILogger<HttpStigManagerUploadClient> logger)
 	{
 		ArgumentNullException.ThrowIfNull(httpClientFactory);
+		ArgumentNullException.ThrowIfNull(options);
 		ArgumentNullException.ThrowIfNull(logger);
 		_httpClientFactory = httpClientFactory;
+		_options = options;
 		_logger = logger;
+	}
+
+	/// <summary>
+	/// A fresh linked token bounded by <see cref="StigManagerClientOptions.UploadTimeout"/>
+	/// for one network call. Callers dispose it after the call (the #351/#364 teardown
+	/// lesson: a linked <see cref="CancellationTokenSource"/> must not outlive its call).
+	/// </summary>
+	private CancellationTokenSource CreateCallTimeoutSource(CancellationToken cancellationToken)
+	{
+		CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+		linked.CancelAfter(_options.Value.UploadTimeout);
+		return linked;
 	}
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "STIG Manager CKL upload failed: {Stage}")]
@@ -59,10 +89,20 @@ public sealed partial class HttpStigManagerUploadClient : IStigManagerUploadClie
 
 		HttpClient client = _httpClientFactory.CreateClient(nameof(HttpStigManagerUploadClient));
 
+		// Issue #320: one call-scoped budget spans both network legs of an upload
+		// attempt (token acquisition + the checklist POST) -- they are one logical
+		// "upload" from the caller's perspective, so a single CancelAfter bounds the
+		// pair rather than resetting the clock between them. TaskCanceledException
+		// raised by either leg is checked against the *original* cancellationToken
+		// (not callTimeout.Token) so a genuine caller cancellation is still
+		// distinguishable from this timeout tripping -- both degrade to Failed here,
+		// but only the timeout case should log/report "timed out".
+		using CancellationTokenSource callTimeout = CreateCallTimeoutSource(cancellationToken);
+
 		string? accessToken;
 		try
 		{
-			accessToken = await StigManagerAuth.AcquireTokenAsync(client, connection, clientSecret, cancellationToken).ConfigureAwait(false);
+			accessToken = await StigManagerAuth.AcquireTokenAsync(client, connection, clientSecret, callTimeout.Token).ConfigureAwait(false);
 		}
 		catch (HttpRequestException exception)
 		{
@@ -93,7 +133,7 @@ public sealed partial class HttpStigManagerUploadClient : IStigManagerUploadClie
 			using HttpRequestMessage request = new(HttpMethod.Post, uploadUri) { Content = form };
 			request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
 
-			using HttpResponseMessage response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+			using HttpResponseMessage response = await client.SendAsync(request, callTimeout.Token).ConfigureAwait(false);
 
 			if (response.StatusCode == HttpStatusCode.Conflict)
 			{
@@ -135,10 +175,14 @@ public sealed partial class HttpStigManagerUploadClient : IStigManagerUploadClie
 			return fallback;
 		}
 
+		// Issue #320: same call-scoped budget rationale as UploadCklAsync above, spanning
+		// token acquisition + the /stigs GET as one logical enrichment attempt.
+		using CancellationTokenSource callTimeout = CreateCallTimeoutSource(cancellationToken);
+
 		try
 		{
 			HttpClient client = _httpClientFactory.CreateClient(nameof(HttpStigManagerUploadClient));
-			string? accessToken = await StigManagerAuth.AcquireTokenAsync(client, connection, clientSecret, cancellationToken).ConfigureAwait(false);
+			string? accessToken = await StigManagerAuth.AcquireTokenAsync(client, connection, clientSecret, callTimeout.Token).ConfigureAwait(false);
 			if (accessToken is null)
 			{
 				LogEnrichmentSkipped("no access token issued");
@@ -147,14 +191,14 @@ public sealed partial class HttpStigManagerUploadClient : IStigManagerUploadClie
 
 			using HttpRequestMessage request = new(HttpMethod.Get, StigManagerAuth.CombineUri(connection.Endpoint, "stigs"));
 			request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
-			using HttpResponseMessage response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+			using HttpResponseMessage response = await client.SendAsync(request, callTimeout.Token).ConfigureAwait(false);
 			if (!response.IsSuccessStatusCode)
 			{
 				LogEnrichmentSkipped($"STIG Manager returned {(int)response.StatusCode} for /stigs");
 				return fallback;
 			}
 
-			using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+			using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(callTimeout.Token).ConfigureAwait(false));
 			foreach (JsonElement stig in document.RootElement.EnumerateArray())
 			{
 				if (!stig.TryGetProperty("benchmarkId", out JsonElement idElement) || !string.Equals(idElement.GetString(), benchmarkId, StringComparison.Ordinal))

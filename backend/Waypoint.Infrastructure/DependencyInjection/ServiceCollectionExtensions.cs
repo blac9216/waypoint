@@ -82,6 +82,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<Waypoint.Core.Scans.ScanOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.Scans.ScanOptions.SectionName));
 
+		services.AddOptions<Waypoint.Core.StigManager.StigManagerClientOptions>()
+			.Bind(configuration.GetSection(Waypoint.Core.StigManager.StigManagerClientOptions.SectionName));
+
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
 		// One scrubber instance serves both sides of security.md control 1: sinks read
