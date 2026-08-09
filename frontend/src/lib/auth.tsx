@@ -76,6 +76,33 @@ function isRole(value: unknown): value is Role {
 }
 
 /**
+ * Strict ISO-8601 instant shape, matching what a .NET `DateTimeOffset`
+ * actually serializes to (`System.Text.Json`'s default `DateTimeOffset`
+ * converter, which every wire producer in this repo uses — see
+ * `Waypoint.Api/Contracts/AuthContracts.cs`'s `LoginResponse.ExpiresAt`):
+ * `YYYY-MM-DDTHH:mm:ss[.fff...](Z|±HH:mm)`. This is deliberately narrower
+ * than anything `Date.parse` accepts — `Date.parse` is implementation-defined
+ * outside the ISO subset and happily parses `"December 31, 2099"`, a shape
+ * the backend can never emit. A stored session's `expiresAt` restoring
+ * "successfully" off a value like that is exactly the half-accepted state
+ * `readStoredSession()` exists to refuse (issue #98).
+ */
+const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+function isIsoInstant(value: unknown): value is string {
+	return typeof value === "string" && ISO_INSTANT_RE.test(value) && Number.isFinite(Date.parse(value));
+}
+
+/** Non-empty after trimming — the bar `toWireText()` already holds the wire
+ * path to (see its doc comment). `readStoredSession()` used to only check
+ * `typeof === "string"`, which let `""` and whitespace-only values restore
+ * as a "signed in" session that carries no usable token/identity (issue
+ * #98). */
+function isNonBlankString(value: unknown): value is string {
+	return typeof value === "string" && value.trim() !== "";
+}
+
+/**
  * Narrow a `role` that arrived over the network to the closed `Role` set, or
  * refuse the sign-in. The same `isRole()` predicate that guards the
  * `sessionStorage` restore path — applied to the path that actually faces
@@ -183,14 +210,14 @@ function readStoredSession(): StoredSession | null {
 		const parsed = JSON.parse(raw) as Partial<StoredSession> | null;
 		if (
 			!parsed ||
-			typeof parsed.token !== "string" ||
-			typeof parsed.username !== "string" ||
-			typeof parsed.expiresAt !== "string" ||
+			!isNonBlankString(parsed.token) ||
+			!isNonBlankString(parsed.username) ||
+			!isIsoInstant(parsed.expiresAt) ||
 			!isRole(parsed.role)
 		) {
 			return null;
 		}
-		if (Number.isNaN(Date.parse(parsed.expiresAt)) || Date.parse(parsed.expiresAt) <= Date.now()) {
+		if (Date.parse(parsed.expiresAt) <= Date.now()) {
 			return null;
 		}
 		return { token: parsed.token, username: parsed.username, role: parsed.role, expiresAt: parsed.expiresAt };
