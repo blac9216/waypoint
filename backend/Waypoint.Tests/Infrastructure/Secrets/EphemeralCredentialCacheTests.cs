@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Microsoft.Extensions.Logging;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Secrets;
@@ -103,5 +104,49 @@ public sealed class EphemeralCredentialCacheTests
 		EphemeralCredentialCache cache = CreateCache(out _);
 		Assert.Throws<ArgumentException>(() =>
 			cache.Put(Guid.NewGuid(), null, new EphemeralCredential("user@example.internal", "invented-unit-secret"), actor: " "));
+	}
+
+	[Fact]
+	public void EntryLifetime_ProductionDefaultIsThirtyMinutes()
+	{
+		// Issue #286 AC3: the injectable clock added for the eviction test below must not
+		// move this default. Nothing in DI or production code touches the internal
+		// clock-accepting constructor -- the public one always pins real time.
+		Assert.Equal(TimeSpan.FromMinutes(30), EphemeralCredentialCache.EntryLifetime);
+	}
+
+	[Fact]
+	public void SweepExpired_EntryPastLifetime_IsEvictedRedactionClearedAndLogged()
+	{
+		// Issue #286: exercise the cache's second fail-closed guarantee -- an unclaimed
+		// entry does not linger for the life of the process. SweepExpired() runs on every
+		// Put/TryTake, so advancing a fake clock past EntryLifetime and then calling
+		// TryTake is what actually drives the sweep (there is no timer to fire).
+		DateTimeOffset now = DateTimeOffset.UtcNow;
+		InPlaySecretRedactor redactor = new();
+		CapturingLogger<EphemeralCredentialCache> logger = new();
+		EphemeralCredentialCache cache = new(redactor, connectionString: null, logger, () => now);
+
+		Guid jobId = Guid.NewGuid();
+		const string secret = "invented-unit-secret-ttl-9012";
+		cache.Put(jobId, Guid.NewGuid(), new EphemeralCredential("user@example.internal", secret), "tester");
+
+		// Confirm the redaction window is open before eviction.
+		Assert.Equal("line with [REDACTED] inside", redactor.Redact($"line with {secret} inside"));
+
+		// Advance past EntryLifetime (30 min) and drive the sweep via TryTake.
+		now += EphemeralCredentialCache.EntryLifetime + TimeSpan.FromSeconds(1);
+
+		// (a) Fail-closed: the swept secret is gone, not returned.
+		Assert.Null(cache.TryTake(jobId));
+
+		// (b) Redaction handle disposed: the tracked secret no longer redacts.
+		Assert.Equal($"line with {secret} inside", redactor.Redact($"line with {secret} inside"));
+
+		// (c) LogExpired carries the job id but never the secret.
+		CapturedLogEntry expired = logger.OnlyEntryAt(LogLevel.Warning);
+		Assert.Contains(jobId.ToString(), expired.Message, StringComparison.Ordinal);
+		Assert.DoesNotContain(secret, expired.Message, StringComparison.Ordinal);
+		Assert.All(logger.Entries, entry => Assert.DoesNotContain(secret, entry.Message, StringComparison.Ordinal));
 	}
 }
