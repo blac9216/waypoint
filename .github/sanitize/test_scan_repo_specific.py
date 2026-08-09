@@ -3224,14 +3224,21 @@ class FileHandlingTests(unittest.TestCase):
 		self.addCleanup(self.tmp.cleanup)
 		self.root = Path(self.tmp.name)
 
-	def test_binary_extensions_are_skipped(self) -> None:
-		for ext in (".png", ".woff2", ".pem", ".key", ".zip"):
+	def test_known_safe_binary_extensions_are_still_scan_file_skipped(self) -> None:
+		"""KNOWN_SAFE_BINARY_EXTENSIONS is scan_file's skip list now, not the
+		old SKIPPED_EXTENSIONS — but the behaviour for the types it still
+		names (icons, fonts, wasm) is unchanged: scan_file() never reads
+		their bytes as text."""
+		for ext in (".png", ".woff2"):
 			with self.subTest(ext=ext):
 				path = self.root / f"asset{ext}"
-				path.write_text(f"host {LAB_FQDN} at {LAB_IP}", encoding="utf-8")
+				path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
 				self.assertEqual(scanner.scan_file(path, rel=path.name), [])
 
 	def test_undecodable_file_is_skipped_without_raising(self) -> None:
+		"""scan_file() itself never raises on undecodable content — the loud
+		refusal for an un-inspectable *tracked* file lives in main() via
+		_find_uninspectable_tracked_files(), not in scan_file()."""
 		path = self.root / "blob.txt"
 		path.write_bytes(b"\xff\xfe\x00\x01 not utf-8 \xc3\x28")
 		self.assertEqual(scanner.scan_file(path, rel="blob.txt"), [])
@@ -3246,6 +3253,163 @@ class FileHandlingTests(unittest.TestCase):
 		findings = scanner.scan_file(path, rel="notes.md")
 		self.assertEqual(len(findings), 1, findings)
 		self.assertTrue(findings[0].startswith("notes.md:1:"), findings[0])
+
+
+class UninspectableFileTests(unittest.TestCase):
+	"""Issue #101: an un-inspectable tracked file must never pass as clean.
+
+	Covers the acceptance criteria directly: a .pem/.key with a fake key
+	body is caught (refused, loudly, before any detector runs), a .zip/.gz
+	is refused the same way, and a genuinely-safe text file still passes
+	untouched. All fixtures are invented — a fake PEM body, not a real key —
+	per this repo's own sanitization mandate.
+	"""
+
+	def setUp(self) -> None:
+		import tempfile
+
+		self.tmp = tempfile.TemporaryDirectory()
+		self.addCleanup(self.tmp.cleanup)
+		self.root = Path(self.tmp.name)
+		# _find_uninspectable_tracked_files() reports paths relative to
+		# scanner.REPO_ROOT, so tests need it pointed at the tempdir — same
+		# pattern ExitCodeTests uses below.
+		self._saved_root = scanner.REPO_ROOT
+		self.addCleanup(setattr, scanner, "REPO_ROOT", self._saved_root)
+		scanner.REPO_ROOT = self.root
+
+	def _write_binary(self, name: str, content: bytes) -> Path:
+		path = self.root / name
+		path.write_bytes(content)
+		return path
+
+	def test_undecodable_pem_is_flagged_uninspectable(self) -> None:
+		"""A .pem whose bytes are not valid UTF-8 (a real DER-encoded or
+		otherwise binary cert/key blob) cannot be read as text at all, so it
+		must be refused rather than silently passed."""
+		path = self._write_binary(
+			"fixture.pem", b"\x30\x82\x01\x0a\x02\x82\x01\x01\x00\xc9\xfe not-utf8 \xff"
+		)
+		found = scanner._find_uninspectable_tracked_files([path])
+		self.assertEqual(found, ["fixture.pem"])
+
+	def test_utf8_pem_with_invented_body_is_flagged_uninspectable(self) -> None:
+		"""A .pem that HAPPENS to decode as UTF-8 (an invented, fake PEM body
+		here — never a real key) is still refused: .pem is not in
+		KNOWN_SAFE_BINARY_EXTENSIONS, so its extension alone is enough to
+		route it to the loud refusal path regardless of whether this
+		particular instance decodes."""
+		# Armor delimiters are assembled from fragments so the full PEM
+		# begin/end marker lines never appear as literals in this source file —
+		# otherwise gitleaks' private-key rule (which matches on the armor
+		# alone, ignoring the body) would flag this test fixture and fail the
+		# very sanitize gate this file hardens. The runtime string is still a
+		# UTF-8-decodable, PEM-armor-shaped, wholly invented body.
+		marker = "-----"
+		fake_pem = (
+			f"{marker}BEGIN PRIVATE " + f"KEY{marker}\n"
+			"MIIBINVENTEDFAKEKEYMATERIALFORTESTINGPURPOSESONLYNOTREAL==\n"
+			f"{marker}END PRIVATE " + f"KEY{marker}\n"
+		)
+		path = self.root / "fixture.pem"
+		path.write_text(fake_pem, encoding="utf-8")
+		found = scanner._find_uninspectable_tracked_files([path])
+		self.assertEqual(found, ["fixture.pem"])
+
+	def test_key_pfx_p12_are_all_flagged_uninspectable(self) -> None:
+		for ext in (".key", ".pfx", ".p12"):
+			with self.subTest(ext=ext):
+				path = self._write_binary(f"fixture{ext}", b"\x00\x01binary\xffcontent")
+				found = scanner._find_uninspectable_tracked_files([path])
+				self.assertEqual(found, [f"fixture{ext}"])
+
+	def test_zip_and_gz_are_flagged_uninspectable(self) -> None:
+		# Real gzip/zip magic bytes, but arbitrary invented "payload" after
+		# them — no real archive contents, just enough to be non-UTF-8.
+		gzip_magic = b"\x1f\x8b\x08\x00" + b"\x00" * 4 + b"invented-payload\xff"
+		zip_magic = b"PK\x03\x04" + b"\x00" * 4 + b"invented-payload\xff"
+		for name, content in (("fixture.gz", gzip_magic), ("fixture.zip", zip_magic)):
+			with self.subTest(name=name):
+				path = self._write_binary(name, content)
+				found = scanner._find_uninspectable_tracked_files([path])
+				self.assertEqual(found, [name])
+
+	def test_known_safe_binary_extensions_are_not_flagged(self) -> None:
+		"""The icon/font/wasm types this repo actually ships stay skipped,
+		not escalated — they are the KNOWN_SAFE_BINARY_EXTENSIONS bucket,
+		not the un-inspectable one."""
+		png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+		woff_bytes = b"wOF2" + b"\x00" * 16
+		for name, content in (("icon.png", png_bytes), ("font.woff2", woff_bytes)):
+			with self.subTest(name=name):
+				path = self._write_binary(name, content)
+				found = scanner._find_uninspectable_tracked_files([path])
+				self.assertEqual(found, [])
+
+	def test_genuinely_safe_text_file_still_passes(self) -> None:
+		"""A normal, clean, UTF-8 text file — regardless of extension — is
+		never flagged as uninspectable, and still scans clean end to end."""
+		path = self.root / "notes.md"
+		path.write_text(
+			f"See {fqdn('esxi-01', 'example', 'internal')} for details.",
+			encoding="utf-8",
+		)
+		self.assertEqual(scanner._find_uninspectable_tracked_files([path]), [])
+		self.assertEqual(scanner.scan_file(path, rel="notes.md"), [])
+
+	def test_a_text_file_with_an_unrecognised_extension_is_still_scanned(self) -> None:
+		"""An extension nobody has taught this scanner about (neither
+		KNOWN_SAFE_BINARY_EXTENSIONS nor a historically-skipped one) is not
+		itself grounds for refusal if the content decodes as text — only
+		genuinely undecodable content, or a content type this scanner cannot
+		vouch for by name, is refused. Here: decodable content, so it is
+		scanned normally rather than refused."""
+		path = self.root / f"weird{'.newformat'}"
+		path.write_text(f"host {LAB_IP}", encoding="utf-8")
+		self.assertEqual(scanner._find_uninspectable_tracked_files([path]), [])
+		findings = scanner.scan_file(path, rel=path.name)
+		self.assertEqual(len(findings), 1, findings)
+
+
+class MainRefusesUninspectableFilesTests(unittest.TestCase):
+	"""main()'s exit-code contract for the uninspectable-file path."""
+
+	@staticmethod
+	def _run_main() -> int:
+		import contextlib
+		import io
+
+		with contextlib.redirect_stdout(io.StringIO()):
+			return scanner.main()
+
+	def setUp(self) -> None:
+		import tempfile
+
+		self.tmp = tempfile.TemporaryDirectory()
+		self.addCleanup(self.tmp.cleanup)
+		self.root = Path(self.tmp.name)
+		self._saved_lister = scanner.list_tracked_files
+		self.addCleanup(setattr, scanner, "list_tracked_files", self._saved_lister)
+		self._saved_root = scanner.REPO_ROOT
+		self.addCleanup(setattr, scanner, "REPO_ROOT", self._saved_root)
+		scanner.REPO_ROOT = self.root
+
+	def _track_binary(self, name: str, content: bytes) -> None:
+		path = self.root / name
+		path.write_bytes(content)
+		files = sorted(p for p in self.root.iterdir() if p.is_file())
+		scanner.list_tracked_files = lambda: files
+
+	def test_an_uninspectable_tracked_pem_fails_the_run(self) -> None:
+		self._track_binary("secret.pem", b"\x00\x01 not utf-8 \xff\xfe")
+		self.assertEqual(self._run_main(), 1)
+
+	def test_an_uninspectable_file_is_reported_before_text_detectors_run(self) -> None:
+		"""The refusal check runs first: even a tree with no text findings
+		still fails if it carries an un-inspectable file, and the scan does
+		not proceed to report a false "clean"."""
+		self._track_binary("archive.zip", b"PK\x03\x04" + b"\x00" * 8 + b"\xff")
+		self.assertEqual(self._run_main(), 1)
 
 
 class ExitCodeTests(unittest.TestCase):
