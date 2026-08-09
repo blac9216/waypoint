@@ -186,6 +186,22 @@ public sealed class CredentialTestJobHandlerEndToEndTests : IAsyncLifetime, IDis
 		Assert.Contains("no dialable endpoint", await GetJobNoteAsync(jobId), StringComparison.Ordinal);
 	}
 
+	[Fact]
+	public async Task DepotTokenCredential_IsDecryptOnly_NeverInvokesPowerShell()
+	{
+		Guid credentialId = (await _credentials.CreateAsync(
+			$"svc-depot-token-{Guid.NewGuid():N}", CredentialTypes.DepotToken, CredentialOwners.Shared, sudoEnabled: false,
+			CancellationToken.None, username: null))!.Value;
+		await _secretStore.StoreAsync(credentialId, System.Text.Encoding.UTF8.GetBytes("invented-depot-token-value"), "test", CancellationToken.None);
+
+		// No target references this credential at all -- a depot-token test must still
+		// succeed, proving it never tries to resolve a host (the depot has no
+		// connection-target representation to begin with).
+		Guid jobId = await RunTestOnceAsync(credentialId);
+		Assert.Equal(CredentialHealthStates.Valid, (await _credentials.GetAsync(credentialId, CancellationToken.None))!.Health);
+		Assert.Contains("no dialable endpoint", await GetJobNoteAsync(jobId), StringComparison.Ordinal);
+	}
+
 	private async Task<Guid> RunTestOnceAsync(Guid credentialId, string expectedState = "done")
 	{
 		Guid runId = await _repository.CreateRunAsync("credential-test", "{}", credentialId, "tester", CancellationToken.None);

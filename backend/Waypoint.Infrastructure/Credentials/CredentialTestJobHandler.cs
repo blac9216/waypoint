@@ -49,6 +49,15 @@ namespace Waypoint.Infrastructure.Credentials;
 /// stays decrypt-only: this handler still runs it through the same job/audit path
 /// (rather than leaving the old synchronous 200) so the health-flip source is uniform,
 /// it just never invokes PowerShell or looks up a target.
+///
+/// <see cref="CredentialTypes.DepotToken"/> (issue #252/#383) gets the same
+/// decrypt-only treatment as <see cref="CredentialTypes.Token"/>, for the same reason:
+/// the credential row carries no depot URL/host of its own (<c>CatalogOptions.DepotPath</c>
+/// is deploy-wide config, not credential-scoped, and this handler's only host source --
+/// <see cref="TargetRepository.FindFirstByCredentialAsync"/> -- is for connection targets,
+/// which a depot-token is never attached to), so there is nothing to dial. A real depot
+/// reachability probe would need a depot base URL this credential doesn't carry; an
+/// intentional skip is the correct call here, not a build-out.
 /// </summary>
 public sealed class CredentialTestJobHandler : IJobHandler
 {
@@ -109,7 +118,7 @@ public sealed class CredentialTestJobHandler : IJobHandler
 
 		string actor = await ResolveActorAsync(context.Job.RunId, cancellationToken).ConfigureAwait(false);
 
-		if (credential.CredentialType == CredentialTypes.Token)
+		if (credential.CredentialType is CredentialTypes.Token or CredentialTypes.DepotToken)
 		{
 			return await RunDecryptOnlyAsync(credentialId, actor, context, cancellationToken).ConfigureAwait(false);
 		}
@@ -183,11 +192,11 @@ public sealed class CredentialTestJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// <see cref="CredentialTypes.Token"/> has no endpoint to dial in this slice -- the
-	/// same decrypt-liveness check issue #20's synchronous handler ran, now driven
-	/// through the job/audit path so the health flip has one uniform source
-	/// (<see cref="CredentialRepository.MarkTestOutcomeAsync"/> from a job outcome,
-	/// never from the controller directly).
+	/// <see cref="CredentialTypes.Token"/> and <see cref="CredentialTypes.DepotToken"/>
+	/// have no endpoint to dial in this slice -- the same decrypt-liveness check issue
+	/// #20's synchronous handler ran, now driven through the job/audit path so the
+	/// health flip has one uniform source (<see cref="CredentialRepository.MarkTestOutcomeAsync"/>
+	/// from a job outcome, never from the controller directly).
 	/// </summary>
 	private async Task<JobExecutionOutcome> RunDecryptOnlyAsync(
 		Guid credentialId, string actor, JobExecutionContext context, CancellationToken cancellationToken)
@@ -199,7 +208,7 @@ public sealed class CredentialTestJobHandler : IJobHandler
 				.ConfigureAwait(false);
 			await _credentials.MarkTestOutcomeAsync(credentialId, succeeded: true, cancellationToken).ConfigureAwait(false);
 			return JobExecutionOutcome.Succeeded(
-				"Stored secret decrypted successfully. Token credentials have no dialable endpoint in this slice; this does not verify connectivity to a target.");
+				"Stored secret decrypted successfully. This credential type has no dialable endpoint in this slice; this does not verify connectivity to a target.");
 		}
 		catch (CredentialSecretNotFoundException)
 		{
