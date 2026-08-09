@@ -52,8 +52,8 @@ public sealed class SchemaMigrationTests
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #106 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check, 0020 adds BEFORE UPDATE/DELETE triggers enforcing job_events/audit_log append-only, with a carve-out on audit_log for 0006's FK-driven credential_id SET NULL, 0021 adds attestation_snapshots -- the persisted at-scan-time attestations-applied ledger, issue #306) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 21;
+	/// <summary>Embedded migration count as of issue #106 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check, 0020 adds BEFORE UPDATE/DELETE triggers enforcing job_events/audit_log append-only, with a carve-out on audit_log for 0006's FK-driven credential_id SET NULL, 0021 adds attestation_snapshots -- the persisted at-scan-time attestations-applied ledger, issue #306, 0022 adds credentials_credential_type_check mirroring CredentialTypes.All, issue #252) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 22;
 
 	private readonly PostgresFixture _fixture;
 
@@ -307,7 +307,7 @@ public sealed class SchemaMigrationTests
 		await connection.OpenAsync();
 
 		await using NpgsqlCommand seedCredential = new(
-			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'service') RETURNING id", connection);
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'token') RETURNING id", connection);
 		seedCredential.Parameters.AddWithValue($"test-cred-{Guid.NewGuid():N}");
 		Guid credentialId = (Guid)(await seedCredential.ExecuteScalarAsync())!;
 
@@ -336,7 +336,7 @@ public sealed class SchemaMigrationTests
 		// UPDATE that *also* touches another column must still be rejected -- only the
 		// exact FK-driven shape (credential_id alone, non-null -> NULL) is permitted.
 		await using NpgsqlCommand seedCredential2 = new(
-			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'service') RETURNING id", connection);
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'token') RETURNING id", connection);
 		seedCredential2.Parameters.AddWithValue($"test-cred-{Guid.NewGuid():N}");
 		Guid credentialId2 = (Guid)(await seedCredential2.ExecuteScalarAsync())!;
 
@@ -500,6 +500,60 @@ public sealed class SchemaMigrationTests
 			await using NpgsqlCommand release = new("SELECT pg_advisory_unlock(875190001)", holder);
 			await release.ExecuteNonQueryAsync();
 		}
+	}
+
+	/// <summary>
+	/// Issue #252: 0022 adds <c>credentials_credential_type_check</c>, the DB-level
+	/// mirror of <c>Waypoint.Core.Secrets.CredentialTypes.All</c> that migration 0010
+	/// deliberately deferred (see that migration's comment). A bogus type must now be
+	/// rejected at the database, not just by <c>CredentialsController</c>'s API-layer
+	/// validation.
+	/// </summary>
+	[Fact]
+	public async Task Migrations_Credentials_RejectsInvalidCredentialType()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'bogus-type') RETURNING id", connection);
+		insert.Parameters.AddWithValue($"test-cred-{Guid.NewGuid():N}");
+
+		PostgresException ex = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteScalarAsync());
+		Assert.Equal("23514", ex.SqlState); // check_violation
+		Assert.Contains("credentials_credential_type_check", ex.MessageText, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #252: every value in the closed <c>CredentialTypes.All</c> set -- including
+	/// <c>depot-token</c>, resolved into the set from a real production consumer
+	/// (<c>CatalogIndexJobHandler</c>), not a placeholder -- must still insert cleanly
+	/// under the new CHECK.
+	/// </summary>
+	[Theory]
+	[InlineData("vcenter")]
+	[InlineData("nsx")]
+	[InlineData("ssh")]
+	[InlineData("token")]
+	[InlineData("depot-token")]
+	public async Task Migrations_Credentials_AcceptsEveryClosedSetCredentialType(string credentialType)
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, $2) RETURNING id", connection);
+		insert.Parameters.AddWithValue($"test-cred-{Guid.NewGuid():N}");
+		insert.Parameters.AddWithValue(credentialType);
+
+		object? id = await insert.ExecuteScalarAsync();
+		Assert.NotNull(id);
 	}
 
 	/// <summary>

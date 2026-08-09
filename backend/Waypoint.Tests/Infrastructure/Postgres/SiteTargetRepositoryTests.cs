@@ -158,7 +158,7 @@ public sealed class SiteTargetRepositoryTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand insert = new(
-			"INSERT INTO credentials (name, credential_type, owner) VALUES ($1, 'service', 'shared') RETURNING id", connection);
+			"INSERT INTO credentials (name, credential_type, owner) VALUES ($1, 'token', 'shared') RETURNING id", connection);
 		insert.Parameters.AddWithValue($"repo-test-cred-{Guid.NewGuid():N}");
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
