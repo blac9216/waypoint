@@ -31,8 +31,26 @@
 
 import { apiDelete, apiGet, apiPost, apiPut } from "../../lib/api";
 
-export type CredentialType = "vcenter" | "nsx" | "ssh" | "token";
+/**
+ * The full backend closed set (`Waypoint.Core.Secrets.CredentialTypes.All`,
+ * migration 0022's DB CHECK) — includes `depot-token` so a fetched depot-token
+ * credential (see `CREDENTIAL_TYPES` below) renders correctly in the list/type
+ * column instead of falling through as an unrecognized type.
+ */
+export type CredentialType = "vcenter" | "nsx" | "ssh" | "token" | "depot-token";
 
+/**
+ * The CREATABLE subset, rendered in this tab's "Type" dropdown. Deliberately
+ * excludes `depot-token`: per `CredentialTypes`' backend doc comment (#252/#383),
+ * depot-token is the single well-known row `CatalogIndexJobHandler` resolves by
+ * type to authenticate catalog-index runs to the Broadcom depot — it is not one
+ * of domain-model.md's four user-facing connection types, and this repo has no
+ * separate depot-credential creation flow yet either (the catalog/download
+ * screens don't manage credentials). It stays out of this dropdown so an
+ * operator can't half-configure it here (no dialable host, no username in the
+ * normal sense); when a depot-credential creation flow is built, add it there,
+ * not to this connection-credential list.
+ */
 export const CREDENTIAL_TYPES: { value: CredentialType; label: string }[] = [
 	{ value: "vcenter", label: "vCenter" },
 	{ value: "nsx", label: "NSX" },
