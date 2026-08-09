@@ -196,6 +196,9 @@ public sealed class ConfigDocRepository
 	/// the "identify by slot, create the doc row if new" entry point PUT /config-docs/{id}
 	/// and POST /config-docs both need. Never mutates an existing version row: this always
 	/// INSERTs <c>current_version + 1</c> and advances the pointer in the same transaction.
+	/// Opens its own connection/transaction; <see cref="SaveAsync"/> uses the
+	/// connection-scoped overload instead so slot-creation and @v1 commit atomically
+	/// (issue #270).
 	/// </summary>
 	public async Task<ConfigDocVersion?> SaveVersionAsync(Guid docId, string author, string bodyYaml, CancellationToken cancellationToken)
 	{
@@ -206,6 +209,20 @@ public sealed class ConfigDocRepository
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
+		ConfigDocVersion? version = await SaveVersionAsync(connection, transaction, docId, author, bodyYaml, cancellationToken).ConfigureAwait(false);
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		return version;
+	}
+
+	/// <summary>
+	/// Connection-scoped core of <see cref="SaveVersionAsync(Guid,string,string,CancellationToken)"/>
+	/// -- does not open a connection/transaction or commit; the caller owns both so this
+	/// can be composed with other writes (namely <see cref="FindOrCreateDocAsync"/>) in a
+	/// single atomic unit.
+	/// </summary>
+	private static async Task<ConfigDocVersion?> SaveVersionAsync(
+		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid docId, string author, string bodyYaml, CancellationToken cancellationToken)
+	{
 		// Locks the doc row for the duration of the transaction so two concurrent saves
 		// against the same slot cannot both read the same current_version and race to
 		// insert the same next version number (config_versions_doc_id_version_key would
@@ -249,8 +266,6 @@ public sealed class ConfigDocRepository
 			await updatePointer.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
-		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-
 		return new ConfigDocVersion(versionId, docId, nextVersion.Value, author, bodyYaml, createdAt);
 	}
 
@@ -282,10 +297,28 @@ public sealed class ConfigDocRepository
 			return (ConfigDocSaveOutcome.InvalidLayer, null, null);
 		}
 
-		Guid docId = await FindOrCreateDocAsync(id, kind, profile, layerType, layerRef, cancellationToken).ConfigureAwait(false);
+		// Slot-creation and @v1 share one connection/transaction so a crash between them
+		// cannot leave a config_docs row with no versions (issue #270) -- a process death
+		// before CommitAsync rolls back everything Npgsql has sent, including the INSERT
+		// into config_docs from FindOrCreateDocAsync below.
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-		ConfigDocVersion version = (await SaveVersionAsync(docId, author, bodyYaml, cancellationToken).ConfigureAwait(false))!;
-		ConfigDoc doc = (await GetAsync(docId, cancellationToken).ConfigureAwait(false))!;
+		Guid docId = await FindOrCreateDocAsync(connection, transaction, id, kind, profile, layerType, layerRef, cancellationToken).ConfigureAwait(false);
+		ConfigDocVersion version = (await SaveVersionAsync(connection, transaction, docId, author, bodyYaml, cancellationToken).ConfigureAwait(false))!;
+
+		await using NpgsqlCommand select = new($"{DocProjectionSql} WHERE id = $1", connection, transaction);
+		select.Parameters.AddWithValue(docId);
+		ConfigDoc doc;
+		await using (NpgsqlDataReader reader = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+		{
+			await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+			doc = MapDoc(reader);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
 		return (ConfigDocSaveOutcome.Ok, doc, version);
 	}
 
@@ -299,20 +332,28 @@ public sealed class ConfigDocRepository
 	/// resolved by re-reading -- the loser ends up pointed at whichever row won the race
 	/// (its own id if it inserted first, otherwise the concurrent caller's), which the
 	/// controller's "slot already exists at a different id" check surfaces as a 409.
+	///
+	/// Runs on <paramref name="connection"/>/<paramref name="transaction"/> so the caller
+	/// (<see cref="SaveAsync"/>) can commit slot-creation and @v1 together (issue #270). A
+	/// unique-violation aborts the whole enclosing transaction in Postgres, not just the
+	/// failed statement, so the INSERT is wrapped in its own SAVEPOINT -- on conflict we
+	/// roll back to the savepoint (undoing only the failed INSERT, not anything the caller
+	/// already did earlier in the transaction) and re-read.
 	/// </summary>
-	private async Task<Guid> FindOrCreateDocAsync(Guid id, string kind, string profile, string layerType, Guid? layerRef, CancellationToken cancellationToken)
+	private static async Task<Guid> FindOrCreateDocAsync(
+		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid id, string kind, string profile, string layerType, Guid? layerRef, CancellationToken cancellationToken)
 	{
-		await using NpgsqlConnection connection = new(_connectionString);
-		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-
-		Guid? existing = await FindDocIdAsync(connection, kind, profile, layerType, layerRef, cancellationToken).ConfigureAwait(false);
+		Guid? existing = await FindDocIdAsync(connection, transaction, kind, profile, layerType, layerRef, cancellationToken).ConfigureAwait(false);
 		if (existing.HasValue)
 		{
 			return existing.Value;
 		}
 
+		const string SavepointName = "find_or_create_doc";
+		await transaction.SaveAsync(SavepointName, cancellationToken).ConfigureAwait(false);
+
 		await using NpgsqlCommand insert = new(
-			"INSERT INTO config_docs (id, kind, profile, layer_type, layer_ref) VALUES ($1, $2, $3, $4, $5) RETURNING id", connection);
+			"INSERT INTO config_docs (id, kind, profile, layer_type, layer_ref) VALUES ($1, $2, $3, $4, $5) RETURNING id", connection, transaction);
 		insert.Parameters.AddWithValue(id);
 		insert.Parameters.AddWithValue(kind);
 		insert.Parameters.AddWithValue(profile);
@@ -325,18 +366,27 @@ public sealed class ConfigDocRepository
 		}
 		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
 		{
-			return (await FindDocIdAsync(connection, kind, profile, layerType, layerRef, cancellationToken).ConfigureAwait(false))!.Value;
+			// The failed INSERT aborted the transaction as far as Postgres is concerned;
+			// rolling back to the savepoint restores it to "transaction open, nothing from
+			// this method applied" so the re-read below (and the caller's later
+			// SaveVersionAsync) can still run in the same transaction.
+			await transaction.RollbackAsync(SavepointName, cancellationToken).ConfigureAwait(false);
+			return (await FindDocIdAsync(connection, transaction, kind, profile, layerType, layerRef, cancellationToken).ConfigureAwait(false))!.Value;
 		}
 	}
 
+	private static Task<Guid?> FindDocIdAsync(
+		NpgsqlConnection connection, string kind, string profile, string layerType, Guid? layerRef, CancellationToken cancellationToken) =>
+		FindDocIdAsync(connection, null, kind, profile, layerType, layerRef, cancellationToken);
+
 	private static async Task<Guid?> FindDocIdAsync(
-		NpgsqlConnection connection, string kind, string profile, string layerType, Guid? layerRef, CancellationToken cancellationToken)
+		NpgsqlConnection connection, NpgsqlTransaction? transaction, string kind, string profile, string layerType, Guid? layerRef, CancellationToken cancellationToken)
 	{
 		await using NpgsqlCommand find = new(
 			layerType == ConfigDocLayers.Global
 				? "SELECT id FROM config_docs WHERE kind = $1 AND profile = $2 AND layer_type = 'global'"
 				: "SELECT id FROM config_docs WHERE kind = $1 AND profile = $2 AND layer_type = $3 AND layer_ref = $4",
-			connection);
+			connection, transaction);
 		find.Parameters.AddWithValue(kind);
 		find.Parameters.AddWithValue(profile);
 		if (layerType != ConfigDocLayers.Global)

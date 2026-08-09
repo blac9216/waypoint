@@ -152,6 +152,14 @@ public sealed partial class ConfigDocsController : ControllerBase
 		return Ok(results);
 	}
 
+	/// <summary>
+	/// A doc row with no versions is an orphan slot from a pre-#270 mid-save crash (the
+	/// atomic-write fix makes new orphans unreachable, but does not retroactively clean up
+	/// any that already exist) -- treated the same as "no such config-doc" since, from the
+	/// caller's perspective, a slot with nothing ever successfully saved to it is
+	/// indistinguishable from one that was never created (docs/api-contract.md does not
+	/// document a partial-creation state).
+	/// </summary>
 	[HttpGet("{id:guid}")]
 	[RequireViewerRole]
 	[ProducesResponseType(typeof(ConfigDocResponse), StatusCodes.Status200OK)]
@@ -163,10 +171,16 @@ public sealed partial class ConfigDocsController : ControllerBase
 			throw NotFoundError(id);
 		}
 
-		ConfigDocVersion latest = (await _configDocs.GetLatestVersionAsync(id, cancellationToken).ConfigureAwait(false))!;
+		ConfigDocVersion? latest = await _configDocs.GetLatestVersionAsync(id, cancellationToken).ConfigureAwait(false);
+		if (latest is null)
+		{
+			throw NotFoundError(id);
+		}
+
 		return Ok(ConfigDocResponse.FromDomain(doc, latest));
 	}
 
+	/// <summary>See <see cref="Get"/> for why a versionless doc 404s rather than returning an empty array.</summary>
 	[HttpGet("{id:guid}/versions")]
 	[RequireViewerRole]
 	[ProducesResponseType(typeof(ConfigDocVersionResponse[]), StatusCodes.Status200OK)]
@@ -179,9 +193,15 @@ public sealed partial class ConfigDocsController : ControllerBase
 		}
 
 		IReadOnlyList<ConfigDocVersion> versions = await _configDocs.ListVersionsAsync(id, cancellationToken).ConfigureAwait(false);
+		if (versions.Count == 0)
+		{
+			throw NotFoundError(id);
+		}
+
 		return Ok(versions.Select(ConfigDocVersionResponse.FromDomain).ToArray());
 	}
 
+	/// <summary>See <see cref="Get"/> for why a versionless doc 404s here too (same code/message as the unknown-doc case).</summary>
 	[HttpGet("{id:guid}/versions/{version:int}")]
 	[RequireViewerRole]
 	[ProducesResponseType(typeof(ConfigDocVersionResponse), StatusCodes.Status200OK)]
