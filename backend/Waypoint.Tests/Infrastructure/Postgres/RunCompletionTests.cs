@@ -231,6 +231,80 @@ public sealed class RunCompletionTests : IAsyncLifetime
 		Assert.Equal("running", await GetRunStateAsync(runId));
 	}
 
+	private static readonly string[] ValidRaceOutcomes = ["aborted", "running", "completed"];
+
+	[Fact]
+	public async Task AbortRacingTerminalJobWrite_NeverDeadlocks_AndSettlesConsistently()
+	{
+		// Issue #406 round-1 review (Finding 1): AbortRunAsync locks the run row then the
+		// job rows (run->job); this PR's terminal AdvanceStateAsync path locks the run
+		// row before the job UPDATE too (run->job). Before the fix, AdvanceStateAsync
+		// locked the JOB row first and then the run (job->run), so an operator abort and
+		// a worker landing that run's last job concurrently could deadlock -- Postgres
+		// kills one side (SQLSTATE 40P01), which either drops the abort (a 500 to the
+		// operator) or throws an unobserved exception out of the terminal write. This
+		// races the two on the SAME run repeatedly and asserts (a) neither side ever
+		// throws a deadlock and (b) the run always settles on a valid terminal state.
+		//
+		// MUTATION EVIDENCE: revert the terminal path to job-first (delete the
+		// `mayComplete` run-first lock block in AdvanceStateAsync so the job UPDATE takes
+		// the first lock again) and this test fails with Npgsql PostgresException 40P01
+		// "deadlock detected" within a few iterations; with the run-first lock it passes.
+		const int iterations = 40;
+		for (int i = 0; i < iterations; i++)
+		{
+			Guid runId = await SeedRunAsync("running");
+			Guid jobA = await InsertJobAsync(runId, JobStates.Running, "worker-a");
+			// A second in-flight job so AbortRunAsync has a non-trivial jobs snapshot to
+			// lock (it locks every job of the run FOR UPDATE), widening the contention
+			// window against the terminal write's run-then-job acquisition.
+			Guid jobB = await InsertJobAsync(runId, JobStates.Running, "worker-b");
+
+			// Fire both as simultaneously as possible so their lock acquisitions overlap.
+			using Barrier gate = new(2);
+			Task<AbortRunResult> abortTask = Task.Run(async () =>
+			{
+				gate.SignalAndWait();
+				return await _repository.AbortRunAsync(runId, CancellationToken.None);
+			});
+			Task<bool> advanceTask = Task.Run(async () =>
+			{
+				gate.SignalAndWait();
+				return await _repository.AdvanceStateAsync(
+					jobA, "worker-a", JobStates.Running, JobStates.Done, null, clearLease: true, CancellationToken.None);
+			});
+
+			// Neither side may throw -- a deadlock surfaces as a PostgresException here.
+			await Task.WhenAll(abortTask, advanceTask);
+
+			// Consistent outcome: whichever transaction commits first wins the run row.
+			// If abort won, the run is 'aborted'; if the terminal write won and it was
+			// the run's last outstanding job, the run is 'completed'. jobB is still
+			// running, so a lone terminal jobA write can only complete the run once jobB
+			// is also terminal -- meaning when abort loses the race the run stays
+			// 'running' until abort's own cancellation of jobB lands. Any of these three
+			// is internally consistent; a torn state (e.g. 'completed' with jobB still
+			// running under an abort) must never occur.
+			string finalState = await GetRunStateAsync(runId);
+			Assert.Contains(finalState, ValidRaceOutcomes);
+			if (string.Equals(finalState, "completed", StringComparison.Ordinal))
+			{
+				// A 'completed' run must have no non-terminal jobs left behind it.
+				Assert.Equal(0, await CountNonTerminalJobsAsync(runId));
+			}
+			_ = jobB;
+		}
+	}
+
+	private async Task<int> CountNonTerminalJobsAsync(Guid runId)
+	{
+		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
+		await using NpgsqlCommand q = new(
+			"SELECT COUNT(*) FROM jobs WHERE run_id = $1 AND state NOT IN ('uploaded','done','failed','auth-failed','cancelled')", c);
+		q.Parameters.AddWithValue(runId);
+		return Convert.ToInt32((long)(await q.ExecuteScalarAsync())!);
+	}
+
 	private async Task<Guid> SeedRunAsync(string state)
 	{
 		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
