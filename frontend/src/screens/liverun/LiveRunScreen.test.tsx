@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
 import { LiveRunScreen } from "./LiveRunScreen";
-import type { RunHeader, RunJob } from "./liverun";
+import type { QueueStatus, RunHeader, RunJob } from "./liverun";
 
 const HEADER: RunHeader = {
 	id: "run-0808-0100Z",
@@ -509,6 +509,273 @@ describe("LiveRunScreen (issue #283)", () => {
 		await waitFor(() => {
 			const row = screen.getByText("esxi-01.example.internal").closest("tr");
 			expect(row).toHaveTextContent(FAILURE_NOTE);
+		});
+	});
+
+	describe("40-target scale render (#289 — AC-1 was only proven at 2 targets)", () => {
+		/** README screen 1's five priority queues: "P1 NSX MANAGERS", "P2 VCSA
+		 * COMPONENTS", "P3 VCENTER APPLIANCES", "P4 ESXI HOSTS", "P5 GUEST / SSH
+		 * TARGETS" — 8 invented targets per queue, 40 total, mirroring the
+		 * prototype's "~40 targets in priority queues" spec instead of the
+		 * 2-target fixture the rest of this suite uses for readability. */
+		const SCALE_QUEUES: QueueStatus[] = [
+			{ key: "nsx", priority: 1, name: "NSX MANAGERS", benchmark: "VMware_NSX_4.x_STIG_V1R1", blocked: false, blocked_reason: null },
+			{ key: "vcsa", priority: 2, name: "VCSA COMPONENTS", benchmark: "VMware_vCSA_8.0_STIG_V1R1", blocked: false, blocked_reason: null },
+			{
+				key: "vcenter",
+				priority: 3,
+				name: "VCENTER APPLIANCES",
+				benchmark: "VMware_vCenter_8.0_STIG_V1R1",
+				blocked: false,
+				blocked_reason: null,
+			},
+			{ key: "esxi", priority: 4, name: "ESXI HOSTS", benchmark: "VMware_vSphere_8.0_ESXi_STIG_V2R1", blocked: false, blocked_reason: null },
+			{
+				key: "guest",
+				priority: 5,
+				name: "GUEST / SSH TARGETS",
+				benchmark: "VMware_vSphere_8.0_VM_STIG_V1R1",
+				blocked: false,
+				blocked_reason: null,
+			},
+		];
+
+		const TARGETS_PER_QUEUE = 8;
+		const SCALE_JOB_COUNT = SCALE_QUEUES.length * TARGETS_PER_QUEUE; // 40
+
+		function buildScaleJobs(): RunJob[] {
+			const jobs: RunJob[] = [];
+			for (const queue of SCALE_QUEUES) {
+				for (let i = 0; i < TARGETS_PER_QUEUE; i++) {
+					const n = String(i).padStart(2, "0");
+					jobs.push({
+						job_id: `${queue.key}-job-${n}`,
+						target: `${queue.key}-${n}.example.internal`,
+						queue: queue.key,
+						priority: queue.priority,
+						benchmark: queue.benchmark,
+						state: "queued",
+						progress_percent: 0,
+						pass: null,
+						fail: null,
+						na: null,
+						note: "",
+					});
+				}
+			}
+			return jobs;
+		}
+
+		const SCALE_JOBS = buildScaleJobs();
+		const SCALE_HEADER: RunHeader = {
+			id: "run-0808-0200Z",
+			site: "Alpha Enclave",
+			target_count: SCALE_JOB_COUNT,
+			initiated_by: "j.moreno",
+			credential_name: "svc-stig-scan",
+			state: "running",
+			paused: false,
+			pass: 0,
+			fail: 0,
+			na: 0,
+			percent: 0,
+			completed_count: 0,
+			elapsed_seconds: 5,
+			blocked: false,
+			queues: SCALE_QUEUES,
+		};
+
+		/** A representative subset of transitions, not all 40 jobs walking the
+		 * full state machine — per #289's scope note, driving a batch of SSE
+		 * frames through the same reducer is sufficient to pin the live-render
+		 * claim without making the test slow. Two full walks to a terminal
+		 * state (one uploaded, one failed), several mid-flight advances spread
+		 * across queues, and the rest left at their seeded "queued" state. */
+		function buildScaleFrames() {
+			const frames: { seq: number; job_id: string; to: string }[] = [];
+			let seq = 1;
+
+			// nsx-00 walks all the way to uploaded.
+			for (const to of ["running", "attesting", "converting", "uploaded"]) {
+				frames.push({ seq: seq++, job_id: "nsx-job-00", to });
+			}
+			// vcsa-03 fails at convert (mirrors the README's convert-failure story).
+			for (const to of ["running", "attesting", "converting", "failed"]) {
+				frames.push({ seq: seq++, job_id: "vcsa-job-03", to });
+			}
+			// One in-flight advance per remaining queue so all five queues show
+			// live movement, not just the two fully-walked jobs.
+			frames.push({ seq: seq++, job_id: "vcenter-job-01", to: "running" });
+			frames.push({ seq: seq++, job_id: "esxi-job-02", to: "running" });
+			frames.push({ seq: seq++, job_id: "esxi-job-05", to: "attesting" });
+			frames.push({ seq: seq++, job_id: "guest-job-07", to: "running" });
+
+			return frames;
+		}
+
+		function scaleFrameText(f: { seq: number; job_id: string; to: string }): string {
+			const envelope = {
+				seq: f.seq,
+				ts: "2026-08-08T02:00:00Z",
+				type: "job.state",
+				run_id: SCALE_HEADER.id,
+				job_id: f.job_id,
+				data: { to: f.to },
+			};
+			return `id: ${f.seq}\ndata: ${JSON.stringify(envelope)}\n\n`;
+		}
+
+		function progressFrameText(seq: number) {
+			const envelope = {
+				seq,
+				ts: "2026-08-08T02:00:01Z",
+				type: "run.progress",
+				run_id: SCALE_HEADER.id,
+				data: { pass: 412, fail: 3, na: 8, percent: 12, completed_count: 1, elapsed_seconds: 96 },
+			};
+			return `id: ${seq}\ndata: ${JSON.stringify(envelope)}\n\n`;
+		}
+
+		function installScaleFetchMock(frames: { seq: number; job_id: string; to: string }[], extraFrameText?: string) {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				const accept = new Headers(init?.headers).get("Accept");
+				if (url === `/api/v1/runs/${SCALE_HEADER.id}` && accept !== "text/event-stream") {
+					return new Response(JSON.stringify(SCALE_HEADER), { status: 200, headers: { "Content-Type": "application/json" } });
+				}
+				if (url === `/api/v1/runs/${SCALE_HEADER.id}/jobs`) {
+					return new Response(JSON.stringify(SCALE_JOBS), { status: 200, headers: { "Content-Type": "application/json" } });
+				}
+				if (url === `/api/v1/runs/${SCALE_HEADER.id}/events`) {
+					const encoder = new TextEncoder();
+					const body = frames.map(scaleFrameText).join("") + (extraFrameText ?? "");
+					const chunk = encoder.encode(body);
+					let sent = false;
+					const signal = init?.signal;
+					return {
+						ok: true,
+						status: 200,
+						body: {
+							getReader: () => ({
+								read(): Promise<{ value: Uint8Array | undefined; done: boolean }> {
+									if (!sent) {
+										sent = true;
+										return Promise.resolve({ value: chunk, done: false });
+									}
+									return new Promise((_resolve, reject) => {
+										if (signal?.aborted) {
+											reject(new DOMException("aborted", "AbortError"));
+											return;
+										}
+										signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+									});
+								},
+								releaseLock() {},
+							}),
+						},
+					} as unknown as Response;
+				}
+				if (url === "/api/v1/auth/me") {
+					return new Response(JSON.stringify({ username: "j.moreno", role: "Admin" }), { status: 200 });
+				}
+				throw new Error(`Unhandled fetch in test: ${url}`);
+			}) as unknown as typeof fetch;
+		}
+
+		it("renders all 40 target rows live from the SSE-driven reducer, with counters reflecting the 40 jobs (AC-1)", async () => {
+			const frames = buildScaleFrames();
+			const lastSeq = frames[frames.length - 1].seq + 1;
+			installScaleFetchMock(frames, progressFrameText(lastSeq));
+			renderWithAuth(SCALE_HEADER.id);
+
+			await waitFor(() => expect(screen.getByText(SCALE_HEADER.id)).toBeInTheDocument());
+
+			// All 40 target rows are present — the crux of AC-1's "40-target run
+			// renders live" claim, not extrapolated from 2.
+			await waitFor(() => {
+				for (const job of SCALE_JOBS) {
+					expect(screen.getByText(job.target)).toBeInTheDocument();
+				}
+			});
+			expect(screen.getAllByRole("row").length).toBeGreaterThanOrEqual(SCALE_JOB_COUNT);
+
+			// The run-level header reflects the full target count (not just the
+			// jobs that got an SSE frame in this test).
+			expect(screen.getByText(new RegExp(`${SCALE_JOB_COUNT} targets`))).toBeInTheDocument();
+
+			// Per-target transitions from the SSE batch landed on the right rows...
+			await waitFor(() => {
+				const row = screen.getByText("nsx-00.example.internal").closest("tr");
+				expect(row).toHaveTextContent("uploaded");
+			});
+			expect(screen.getByText("vcsa-03.example.internal").closest("tr")).toHaveTextContent("failed");
+			expect(screen.getByText("vcenter-01.example.internal").closest("tr")).toHaveTextContent("running");
+			expect(screen.getByText("esxi-02.example.internal").closest("tr")).toHaveTextContent("running");
+			expect(screen.getByText("esxi-05.example.internal").closest("tr")).toHaveTextContent("attesting");
+			expect(screen.getByText("guest-07.example.internal").closest("tr")).toHaveTextContent("running");
+
+			// ...and every job this batch never touched is still at its seeded
+			// "queued" state — the reducer didn't smear a transition across rows.
+			expect(screen.getByText("nsx-01.example.internal").closest("tr")).toHaveTextContent("queued");
+			expect(screen.getByText("esxi-00.example.internal").closest("tr")).toHaveTextContent("queued");
+			expect(screen.getByText("guest-00.example.internal").closest("tr")).toHaveTextContent("queued");
+
+			// run.progress counters folded from SSE, not extrapolated/derived locally.
+			await waitFor(() => {
+				expect(screen.getByText("412")).toBeInTheDocument(); // PASS
+				expect(screen.getByText("3")).toBeInTheDocument(); // FAIL
+				expect(screen.getByText("8")).toBeInTheDocument(); // N/A
+			});
+
+			// State board layout also carries the full 40-job set (buildBoardColumns
+			// operates over the same jobs array the queue layout renders).
+			screen.getByRole("button", { name: "State board" }).click();
+			await waitFor(() => expect(document.querySelector(".live-run__board")).toBeInTheDocument());
+			for (const job of SCALE_JOBS) {
+				expect(screen.getByText(job.target)).toBeInTheDocument();
+			}
+		});
+
+		it("a queue halting at 40-target scale still renders the HALTED status and blocked banner (AC-1 queue halts)", async () => {
+			// P5 guest/SSH queue halts after repeated credential failures, mirroring
+			// the README's "P5 guest queue halts after three consecutive
+			// svc-stig-vm SSH auth failures" thread, but at the full 40-target
+			// scale rather than the 2-target fixture.
+			const blockedHeader: RunHeader = {
+				...SCALE_HEADER,
+				blocked: true,
+				queues: SCALE_QUEUES.map((q) => (q.key === "guest" ? { ...q, blocked: true, blocked_reason: "credential failure" } : q)),
+			};
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				const accept = new Headers(init?.headers).get("Accept");
+				if (url === `/api/v1/runs/${SCALE_HEADER.id}` && accept !== "text/event-stream") {
+					return new Response(JSON.stringify(blockedHeader), { status: 200 });
+				}
+				if (url === `/api/v1/runs/${SCALE_HEADER.id}/jobs`) {
+					return new Response(JSON.stringify(SCALE_JOBS), { status: 200 });
+				}
+				if (url === `/api/v1/runs/${SCALE_HEADER.id}/events`) {
+					return {
+						ok: true,
+						status: 200,
+						body: { getReader: () => ({ read: () => new Promise(() => {}), releaseLock() {} }) },
+					} as unknown as Response;
+				}
+				if (url === "/api/v1/auth/me") {
+					return new Response(JSON.stringify({ username: "j.moreno", role: "Viewer" }), { status: 200 });
+				}
+				throw new Error(`Unhandled fetch: ${url}`);
+			}) as unknown as typeof fetch;
+
+			renderWithAuth(SCALE_HEADER.id, "Viewer");
+			await waitFor(() => expect(screen.getByText(/Queue halted/)).toBeInTheDocument());
+			// The halted queue's status text renders even with the other 32 rows
+			// (4 queues x 8) still present alongside it.
+			expect(screen.getByText(/HALTED — credential failure/)).toBeInTheDocument();
+			for (const job of SCALE_JOBS) {
+				expect(screen.getByText(job.target)).toBeInTheDocument();
+			}
 		});
 	});
 
