@@ -83,12 +83,19 @@ const EMPTY_FORM: CredentialFormState = {
 };
 
 function toFormState(credential: Credential): CredentialFormState {
-	const type = CREDENTIAL_TYPES.some((t) => t.value === credential.credential_type)
-		? (credential.credential_type as CredentialType)
-		: "vcenter";
+	// Issue #385: preserve the credential's REAL type rather than falling back
+	// to "vcenter" when it's outside the creatable CREDENTIAL_TYPES subset
+	// (currently only depot-token, per #383/#384). credential_type is typed as
+	// `CredentialType | string` only to tolerate an unrecognized wire value;
+	// every value this app itself writes is a real CredentialType, so casting
+	// here is safe and — critically — never silently swaps the type to a
+	// different, wrong one. CredentialForm renders the type read-only whenever
+	// it's not in CREDENTIAL_TYPES, and updateCredential never sends
+	// credential_type on PUT, so this value is display-only and can't corrupt
+	// the stored type either way.
 	return {
 		name: credential.name,
-		credential_type: type,
+		credential_type: credential.credential_type as CredentialType,
 		username: credential.username ?? "",
 		sudo_enabled: credential.sudo_enabled,
 		// Deliberately never seeded from `credential` — there is no secret on
@@ -523,6 +530,15 @@ function CredentialForm({
 }) {
 	const canSubmit = form.name.trim().length > 0;
 	const isSsh = form.credential_type === "ssh";
+	// Issue #385: a credential whose type isn't in the creatable dropdown
+	// (currently only depot-token, #383/#384) has no option that can
+	// represent it. Rather than force a dropdown selection onto some other
+	// type (which submitEdit would never actually send, but which would
+	// misdisplay the credential and invite confusion), show the real type as
+	// a disabled, read-only control so the operator can still edit
+	// name/username/secret without any implication the type is changeable
+	// here.
+	const isCreatableType = CREDENTIAL_TYPES.some((t) => t.value === form.credential_type);
 
 	return (
 		<form
@@ -545,19 +561,23 @@ function CredentialForm({
 				</label>
 				<label className="config-form__field">
 					<span>Type</span>
-					<select
-						value={form.credential_type}
-						onChange={(e) => {
-							const credential_type = e.target.value as CredentialType;
-							setForm({ ...form, credential_type, sudo_enabled: credential_type === "ssh" ? form.sudo_enabled : false });
-						}}
-					>
-						{CREDENTIAL_TYPES.map((t) => (
-							<option key={t.value} value={t.value}>
-								{t.label}
-							</option>
-						))}
-					</select>
+					{isCreatableType ? (
+						<select
+							value={form.credential_type}
+							onChange={(e) => {
+								const credential_type = e.target.value as CredentialType;
+								setForm({ ...form, credential_type, sudo_enabled: credential_type === "ssh" ? form.sudo_enabled : false });
+							}}
+						>
+							{CREDENTIAL_TYPES.map((t) => (
+								<option key={t.value} value={t.value}>
+									{t.label}
+								</option>
+							))}
+						</select>
+					) : (
+						<input value={form.credential_type} disabled readOnly title="Type is not editable for this credential" />
+					)}
 				</label>
 				<label className="config-form__field">
 					<span>Username</span>

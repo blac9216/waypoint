@@ -256,6 +256,39 @@ describe("CredentialsTab (issue #247)", () => {
 		expect(values).not.toContain("depot-token");
 	});
 
+	it("editing a depot-token credential (issue #385) shows its real type read-only, not coerced to vcenter", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		const row = screen.getByText("Broadcom depot token").closest("tr")!;
+		fireEvent.click(within(row).getByText("Edit"));
+
+		// The type control shows the real type, not a dropdown defaulted to
+		// "vCenter" — before the fix, toFormState coerced the displayed type
+		// to "vcenter" because depot-token isn't in the creatable subset.
+		const typeControl = screen.getByTitle("Type is not editable for this credential") as HTMLInputElement;
+		expect(typeControl.value).toBe("depot-token");
+		expect(typeControl.disabled).toBe(true);
+		expect(screen.queryByDisplayValue("vCenter")).not.toBeInTheDocument();
+	});
+
+	it("saving an edited depot-token credential (issue #385) never sends credential_type, so the stored type can't be coerced to vcenter", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		const row = screen.getByText("Broadcom depot token").closest("tr")!;
+		fireEvent.click(within(row).getByText("Edit"));
+		fireEvent.click(screen.getByText("Save"));
+
+		await waitFor(() => expect(fetchCalls.some((c) => c.url === "/api/v1/credentials/cred-3" && c.init?.method === "PUT")).toBe(true));
+		const call = fetchCalls.find((c) => c.url === "/api/v1/credentials/cred-3" && c.init?.method === "PUT")!;
+		const body = JSON.parse(call.init!.body as string);
+		expect(body.credential_type).toBeUndefined();
+
+		// The row still shows depot-token afterward — nothing coerced it.
+		expect(screen.getByText("depot-token")).toBeInTheDocument();
+	});
+
 	it("no personal-credential UI anywhere: owner is always 'shared', never rendered as an editable field", async () => {
 		installFetchMock("Admin");
 		await mount();
