@@ -15,17 +15,17 @@
  *     "n/a" pill rather than a false "0 open" (issue #307 — a corrupt scan
  *     must never look clean). Still renders a graceful "not available yet"
  *     empty state if the call itself fails.
- *   - Attestations-applied: `GET /runs/{id}/attestations-applied` (#299/#305)
- *     is the primary source for the sidebar's waiver list. It has **no
- *     persisted per-control ledger behind it** — every row is derived LIVE,
- *     at request time, by re-resolving each target's current attestation
- *     config-doc (see `results.ts`'s `AppliedAttestation` doc comment); the
- *     panel says so explicitly rather than implying scan-time history
- *     (issue #307; the real persisted ledger is #306). The sidebar also
- *     still calls the MERGED `GET /config-docs/resolve?profile&target&kind=attestation`
+ *   - Attestations-applied: `GET /runs/{id}/attestations-applied`
+ *     (#299/#305, wire shape updated by #306/PR #336) is the primary source
+ *     for the sidebar's waiver list. Each row is a PERSISTED, AT-SCAN-TIME
+ *     snapshot (see `results.ts`'s `AppliedAttestation` doc comment) —
+ *     immutable per run, not re-derived on load — and the panel shows the
+ *     real `applied_at` scan-time timestamp rather than the old
+ *     live-resolution caveat (issue #307's caveat no longer applies; #306
+ *     closed the gap it described). The sidebar also still calls the
+ *     MERGED `GET /config-docs/resolve?profile&target&kind=attestation`
  *     (issue #266) to flag which of those rows are currently EXPIRED,
- *     mirroring exactly what the live-resolution endpoint itself does
- *     server-side.
+ *     mirroring what the persisted ledger records server-side.
  *
  * Severity labels (AC1, design-brief "Layout Rules Learned the Hard Way" #4):
  * always rendered as the full "CAT I"/"CAT II"/"CAT III" text, in a pill wide
@@ -588,15 +588,14 @@ function AttestationsPanel({ expired, applied }: { expired: ExpiredAttestation[]
 		<div className="results__panel results__panel--sidebar">
 			<div className="results__panel-title">ATTESTATIONS APPLIED</div>
 			<div className="results__panel-note">
-				{/* Honest framing per issue #307/#299: there is no persisted per-control
-				    waiver ledger yet (issue #306), so every row below is the CURRENT
-				    resolution of each target's attestation config-doc, re-derived at
-				    load time — not a record of what was in effect at scan time. An
-				    attestation edited after this run completed will change what this
-				    panel shows on the next reload. */}
-				Live resolution, not scan-time history: rows reflect each target's attestation config-doc as it resolves right
-				now, re-derived on every load — a waiver edited after this run completed will change what's shown here. The
-				persisted at-scan-time ledger is tracked as issue #306.
+				{/* Honest framing per issue #306/PR #336: each row below is a persisted
+				    snapshot recorded the instant the attest stage resolved that target's
+				    attestation at scan time — immutable for this run regardless of any
+				    later edit to the underlying config-doc. Superseded the #307/#299
+				    "live resolution" caveat, which no longer applies now that this is
+				    genuinely recorded history. */}
+				Recorded at scan time: rows are the attestation each target actually ran with, permanently — editing the
+				underlying config-doc afterward does not change what's shown here for this run.
 			</div>
 			{applied && applied.length > 0 && (
 				<>
@@ -612,7 +611,7 @@ function AttestationsPanel({ expired, applied }: { expired: ExpiredAttestation[]
 									</span>
 									<span className="results__spacer" />
 									<span className="mono results__attest-meta">
-										resolved {formatTimestamp(item.resolved_at)}
+										applied {formatTimestamp(item.applied_at)}
 										{item.attestation_updated_at ? ` · doc edited ${formatTimestamp(item.attestation_updated_at)}` : ""}
 									</span>
 								</div>

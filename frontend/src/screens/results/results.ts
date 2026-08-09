@@ -16,26 +16,26 @@
  *      attestations-applied: `GET /runs/{id}/artifacts`,
  *      `GET /jobs/{id}/artifacts/{kind}`, and
  *      `GET /runs/{id}/attestations-applied` are implemented
- *      (`RunsController`/`JobsController`, issue #299/PR #305). The wire
- *      shapes below (`RunArtifactRow`, `AppliedAttestation`) are matched
+ *      (`RunsController`/`JobsController`, issue #299/PR #305, PR #336). The
+ *      wire shapes below (`RunArtifactRow`, `AppliedAttestation`) are matched
  *      field-for-field against `RunArtifactResponse`/`AppliedAttestationResponse`
  *      (RunContracts.cs), not guessed — see each interface's own doc comment
- *      for the two subtleties that don't show up in a casual read of the
- *      issue: `counts_available` gating on artifacts, and `attestations-applied`
- *      being live resolution rather than recorded history (issue #307).
+ *      for the subtleties that don't show up in a casual read of the issue:
+ *      `counts_available` gating on artifacts, and `attestations-applied`
+ *      being a persisted, at-scan-time ledger (issue #306/PR #336).
  *
  *   Attestations-applied: `fetchAttestationsApplied` calls the real
- *   endpoint. It has **no persisted per-control waiver ledger** behind it
- *   (RunContracts.cs's `AppliedAttestationResponse` doc comment) — every row
- *   is derived live, at request time, by re-resolving each scanned target's
- *   attestation config-doc exactly the way `fetchAttestationResolution`
- *   below (against `GET /config-docs/resolve`) already does. `derivation`
- *   is always `"live-resolution"` and `resolved_at` is this request's
- *   clock, not a scan-time timestamp; there is deliberately no `applied_at`.
- *   The persisted at-scan-time ledger is tracked as issue #306.
+ *   endpoint, which reads a **persisted, per-target snapshot** written the
+ *   instant the attest stage resolved each scanned target's attestation
+ *   (`attestation_snapshots`, backend migration 0021) — never a live
+ *   re-resolution. A historical run's answer is therefore immutable:
+ *   editing the underlying config-doc afterward does not change what this
+ *   endpoint reports for that run. `applied_at` is the genuine scan-time
+ *   timestamp the snapshot was recorded at; `derivation`/`resolved_at` (the
+ *   old live-resolution markers, issue #299/#307) are gone from the wire.
  *   `fetchAttestationResolution`/`ConfigDocResolution` stay as-is below:
  *   `ResultsScreen.tsx`'s sidebar still uses them for the "which are
- *   currently expired" slice, now alongside the real endpoint.
+ *   currently expired" slice, alongside the real endpoint.
  */
 import { apiGet } from "../../lib/api";
 
@@ -164,23 +164,28 @@ export function runArtifactsBundleUrl(runId: string): string {
 }
 
 /** One row of `GET /runs/{id}/attestations-applied`
- * (`AppliedAttestationResponse`, RunContracts.cs — issue #299/#305).
+ * (`AppliedAttestationResponse`, RunContracts.cs — issue #299/#305, wire
+ * shape updated by issue #306/PR #336).
  *
  * Two things a naive read of the issue misses:
  *  - `scope` is the same `layer`/`layer:{ref}` form `/config-docs/resolve`
  *    already emits (`"global"`, or `"site:{guid}"`/`"target:{guid}"`), not a
  *    bare `"global" | "site" | "target"` union — see `parseAttestationScope`
  *    below for the display split.
- *  - This is **live resolution, not recorded history**: there is no
- *    persisted per-control waiver ledger anywhere in this codebase yet
- *    (issue #306 tracks building one). Every row is re-derived from the
- *    CURRENT config-doc at request time, so `derivation` is always the
- *    constant `"live-resolution"` and `resolved_at` is when THIS request
- *    resolved it — not a scan-time application time. There is deliberately
- *    no `applied_at` field; `attestation_updated_at` (the config-doc's own
- *    last-edit time, optional — absent when the doc has no recorded edit)
- *    is the closest thing on the wire, and must not be presented as
- *    "applied at scan time" either.
+ *  - This is **persisted, at-scan-time history, not live resolution**: a
+ *    per-target snapshot (`attestation_snapshots`, backend migration 0021)
+ *    is written the instant the attest stage resolves each scanned target's
+ *    attestation, and this endpoint reads that recorded snapshot back —
+ *    never re-resolving live. `applied_at` is therefore the genuine
+ *    scan-time timestamp the snapshot was recorded at, and is immutable for
+ *    a given run regardless of any later edit to the underlying config-doc.
+ *    The old `derivation`/`resolved_at` live-resolution markers (issue
+ *    #299/#307) are gone from the wire. `attestation_updated_at` keeps its
+ *    prior meaning — the config-doc version's own last-modified time,
+ *    optional — but is now read from the snapshot rather than a live
+ *    lookup; it still answers a different question than `applied_at` (doc
+ *    edit time vs. scan-time application time) even though both are now
+ *    real recorded facts.
  */
 export interface AppliedAttestation {
 	control: string;
@@ -190,14 +195,12 @@ export interface AppliedAttestation {
 	justification: string;
 	author: string;
 	version: number;
-	/** Always `"live-resolution"` today (issue #306 is the persisted-ledger
-	 * follow-up that would introduce a second value). */
-	derivation: "live-resolution";
-	/** ISO-8601 timestamp of when THIS request resolved the attestation —
-	 * NOT a scan-time application time. See the interface doc comment. */
-	resolved_at: string;
-	/** The config-doc's own last-modified time, if it has one — NOT when it
-	 * was applied to any scan. */
+	/** The genuine scan-time timestamp this snapshot was recorded at
+	 * (ISO-8601) — always present, immutable for a given run. See the
+	 * interface doc comment. */
+	applied_at: string;
+	/** The attestation config-doc version's own last-modified time, if it
+	 * has one — NOT when it was applied to any scan. */
 	attestation_updated_at?: string;
 	expired: boolean;
 }

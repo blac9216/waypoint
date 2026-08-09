@@ -4,8 +4,9 @@
  * failure fallback when GET /runs/{id}/artifacts errors, the Remediate
  * Admin gate, and the AC1 severity non-truncation guarantee (design-brief
  * "Layout Rules Learned the Hard Way" #4). Issue #307 regressions (snake_case
- * wire shapes, counts_available, attestations-applied live-resolution
- * framing) are grouped near the bottom of the describe block.
+ * wire shapes, counts_available) and issue #335 (persisted at-scan-time
+ * attestations-applied ledger, PR #336 — replacing the old live-resolution
+ * shape) are grouped near the bottom of the describe block.
  */
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -88,8 +89,9 @@ const RUN_ARTIFACTS_UNCOUNTABLE = [
 	},
 ];
 
-/** `AppliedAttestationResponse` shape (RunContracts.cs) — live resolution,
- * no `applied_at`, layer:ref `scope` form. */
+/** `AppliedAttestationResponse` shape (RunContracts.cs, wire updated by
+ * issue #306/PR #336) — persisted at-scan-time snapshot: genuine `applied_at`,
+ * no `derivation`/`resolved_at`, layer:ref `scope` form unchanged. */
 const ATTESTATIONS_APPLIED = [
 	{
 		control: "attestation-profile-a",
@@ -98,10 +100,26 @@ const ATTESTATIONS_APPLIED = [
 		justification: "Compensating control documented in POA&M #42.",
 		author: "j.moreno",
 		version: 3,
-		derivation: "live-resolution",
-		resolved_at: "2026-08-08T21:00:00Z",
+		applied_at: "2026-08-02T04:15:00Z",
 		attestation_updated_at: "2026-08-01T10:00:00Z",
 		expired: false,
+	},
+];
+
+/** An expired snapshot — the attestation had already lapsed at scan time
+ * (`applied: false, expired: true` server-side, RunContracts.cs), still
+ * recorded and reported as a row here rather than omitted. */
+const ATTESTATIONS_APPLIED_EXPIRED = [
+	{
+		control: "attestation-profile-b",
+		scope: "global",
+		coverage: "full",
+		justification: "Waiver lapsed before this scan ran.",
+		author: "j.moreno",
+		version: 2,
+		applied_at: "2026-08-02T04:16:00Z",
+		attestation_updated_at: "2026-07-01T09:00:00Z",
+		expired: true,
 	},
 ];
 
@@ -357,18 +375,19 @@ describe("ResultsScreen", () => {
 		expect(within(catITile as HTMLElement).getByText("n/a")).toBeInTheDocument();
 	});
 
-	it("shows the live-resolution caveat and applied waivers in the attestations sidebar", async () => {
+	it("shows the recorded-at-scan-time framing and applied waivers in the attestations sidebar", async () => {
 		installFetchMock();
 		renderWithAuth();
 
 		await waitFor(() => expect(screen.getByText("ATTESTATIONS APPLIED")).toBeInTheDocument());
 
-		// The sidebar must say plainly that this is current resolution, not a
-		// recorded scan-time ledger (issue #307/#299; the real persisted
-		// ledger is #306) — GET /runs/{id}/attestations-applied has no
-		// applied_at, only derivation:"live-resolution" and resolved_at.
-		expect(screen.getByText(/Live resolution, not scan-time history/)).toBeInTheDocument();
-		expect(screen.getByText(/issue #306/)).toBeInTheDocument();
+		// The sidebar must say plainly that this is recorded, scan-time history —
+		// GET /runs/{id}/attestations-applied is now a persisted ledger
+		// (issue #306/PR #336), not a live re-resolution. The old #307/#299
+		// "live resolution, not scan-time history" caveat must be gone.
+		expect(screen.getByText(/Recorded at scan time/)).toBeInTheDocument();
+		expect(screen.queryByText(/Live resolution, not scan-time history/)).not.toBeInTheDocument();
+		expect(screen.queryByText(/issue #306/)).not.toBeInTheDocument();
 
 		// The applied waiver row itself renders (control/coverage/author/version),
 		// parsed from the target:{guid} scope form rather than a bare "target" union.
@@ -377,6 +396,28 @@ describe("ResultsScreen", () => {
 		// scope "target:{guid}" parses into a "TARGET · {guid}" pill, not a bare
 		// "target" string from a stale union type.
 		expect(screen.getByText(/TARGET · 11111111-1111-1111-1111-111111111111/)).toBeInTheDocument();
+		// The genuine scan-time applied_at is shown, not a request-time "resolved" label.
+		expect(screen.getByText(/applied/)).toBeInTheDocument();
+	});
+
+	it("renders an expired attestation snapshot row", async () => {
+		installFetchMock({ attestationsApplied: ATTESTATIONS_APPLIED_EXPIRED });
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getByText("ATTESTATIONS APPLIED")).toBeInTheDocument());
+		await waitFor(() => expect(screen.getByText("attestation-profile-b")).toBeInTheDocument());
+		expect(screen.getByText("EXPIRED")).toBeInTheDocument();
+		expect(screen.getByText(/full · v2 · j\.moreno/)).toBeInTheDocument();
+	});
+
+	it("handles a run with no persisted attestation snapshots (empty ledger)", async () => {
+		installFetchMock({ attestationsApplied: [] });
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getByText("ATTESTATIONS APPLIED")).toBeInTheDocument());
+		// An empty array (e.g. a pre-#306 run with nothing recorded) must render
+		// gracefully — falls back to the expired-only view, not a crash.
+		expect(screen.getByText("No expired attestations resolved for this run.")).toBeInTheDocument();
 	});
 
 	it("falls back gracefully when GET /runs/{id}/attestations-applied is unavailable", async () => {
