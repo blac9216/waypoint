@@ -96,10 +96,14 @@ public sealed class RunsController : ControllerBase
 	/// match the run's recorded initiator; a run with no recorded initiator
 	/// (<see cref="RunQueueState.InitiatedBy"/> null — system/scheduled run) is
 	/// Admin-only, since there is no owner to compare against.
+	///
+	/// Shared with <see cref="JobsController"/>'s per-job cancel (issue #294), which
+	/// applies the same "own runs, Admin any" scope to the run owning the job being
+	/// cancelled -- hence <c>internal</c> rather than <c>private</c>.
 	/// </summary>
-	private void EnforceRunOwnership(RunQueueState state)
+	internal static void EnforceRunOwnership(ClaimsPrincipal user, RunQueueState state)
 	{
-		if (CallerHasAtLeast(WaypointRole.Admin))
+		if (Enum.TryParse(user.FindFirstValue(WaypointClaimTypes.Role), out WaypointRole role) && role >= WaypointRole.Admin)
 		{
 			return;
 		}
@@ -111,7 +115,7 @@ public sealed class RunsController : ControllerBase
 				"Runs with no recorded initiator (system/scheduled runs) may only be paused, resumed, or aborted by an Admin.");
 		}
 
-		string caller = User.GetRequiredUsername();
+		string caller = user.GetRequiredUsername();
 		if (!string.Equals(caller, state.InitiatedBy, StringComparison.Ordinal))
 		{
 			throw ApiException.Forbidden(
@@ -119,6 +123,8 @@ public sealed class RunsController : ControllerBase
 				"Only the run's initiator or an Admin may pause, resume, or abort it.");
 		}
 	}
+
+	private void EnforceRunOwnership(RunQueueState state) => EnforceRunOwnership(User, state);
 
 	/// <summary>
 	/// Create a new run. Cyber+ for scan runs; remediation requires Admin plus the

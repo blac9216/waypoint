@@ -114,7 +114,9 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 	public async Task CancelJob_Queued_Returns200Cancelled()
 	{
 		Guid credentialId = await SeedCredentialAsync();
-		Guid runId = await SeedRunAsync(credentialId);
+		// Owned by "test-user" -- the fixed identity TestAuthHandler authenticates as
+		// (issue #294: DELETE /jobs/{id} now enforces run ownership).
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
 		Guid jobId = await SeedQueuedJobAsync(runId, credentialId);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", "Operator", body: null);
@@ -131,7 +133,7 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 	public async Task CancelJob_Running_Returns200CancelRequested()
 	{
 		Guid credentialId = await SeedCredentialAsync();
-		Guid runId = await SeedRunAsync(credentialId);
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
 		Guid jobId = await SeedRunningJobAsync(runId, credentialId);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", "Operator", body: null);
@@ -148,7 +150,7 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 	public async Task CancelJob_AlreadyTerminal_Returns409()
 	{
 		Guid credentialId = await SeedCredentialAsync();
-		Guid runId = await SeedRunAsync(credentialId);
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
 		Guid jobId = await SeedTerminalJobAsync(runId, credentialId, "done");
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", "Operator", body: null);
@@ -172,12 +174,87 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 	public async Task CancelJob_BelowOperator_Returns403(string role)
 	{
 		Guid credentialId = await SeedCredentialAsync();
-		Guid runId = await SeedRunAsync(credentialId);
+		// Owned by "test-user" so this exercises the role gate specifically, not
+		// ownership (both would 403, but this keeps the test's intent unambiguous).
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
 		Guid jobId = await SeedQueuedJobAsync(runId, credentialId);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", role, body: null);
 
 		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	// -- issue #294: job-cancel ownership -------------------------------------
+	// Mirrors RunsController.EnforceRunOwnership's "Operator+ (own runs), Admin
+	// any" scope (docs/api-contract.md). TestAuthHandler always authenticates as
+	// "test-user"; SeedRunAsyncWithInitiator lets these tests control the run's
+	// recorded initiator to exercise the owner/non-owner/ownerless branches.
+
+	[Fact]
+	public async Task CancelJob_OwnerOperator_Returns200()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
+		Guid jobId = await SeedQueuedJobAsync(runId, credentialId);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", "Operator", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal("cancelled", await ReadJobStateAsync(jobId));
+	}
+
+	[Fact]
+	public async Task CancelJob_NonOwnerOperator_Returns403AndJobNotCancelled()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "another-user");
+		Guid jobId = await SeedQueuedJobAsync(runId, credentialId);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", "Operator", body: null);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "forbidden");
+		Assert.Equal("queued", await ReadJobStateAsync(jobId));
+	}
+
+	[Fact]
+	public async Task CancelJob_Admin_SucceedsOnNonOwnedJob()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "another-user");
+		Guid jobId = await SeedQueuedJobAsync(runId, credentialId);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", "Admin", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal("cancelled", await ReadJobStateAsync(jobId));
+	}
+
+	[Fact]
+	public async Task CancelJob_OperatorOnOwnerlessJob_Returns403()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, initiatedBy: null);
+		Guid jobId = await SeedQueuedJobAsync(runId, credentialId);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", "Operator", body: null);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "forbidden");
+		Assert.Equal("queued", await ReadJobStateAsync(jobId));
+	}
+
+	[Fact]
+	public async Task CancelJob_AdminOnOwnerlessJob_Returns200()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, initiatedBy: null);
+		Guid jobId = await SeedQueuedJobAsync(runId, credentialId);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", "Admin", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal("cancelled", await ReadJobStateAsync(jobId));
 	}
 
 	// -- POST /runs/{id}/resume-blocked --------------------------------------
@@ -354,6 +431,23 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 			"INSERT INTO runs (run_type, scope, credential_id, initiated_by, state) VALUES ('scan', '{}'::jsonb, $1, 'tester', 'running') RETURNING id",
 			connection);
 		insert.Parameters.AddWithValue(credentialId);
+		return (Guid)(await insert.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>
+	/// Like <see cref="SeedRunAsync"/> but with a caller-controlled <c>initiated_by</c>
+	/// (issue #294 ownership tests need to place the recorded initiator relative to
+	/// TestAuthHandler's fixed "test-user" identity, including the null/system-run case).
+	/// </summary>
+	private async Task<Guid> SeedRunAsyncWithInitiator(Guid credentialId, string? initiatedBy)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO runs (run_type, scope, credential_id, initiated_by, state) VALUES ('scan', '{}'::jsonb, $1, $2, 'running') RETURNING id",
+			connection);
+		insert.Parameters.AddWithValue(credentialId);
+		insert.Parameters.AddWithValue((object?)initiatedBy ?? DBNull.Value);
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
 
