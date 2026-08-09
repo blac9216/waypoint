@@ -126,16 +126,45 @@ public sealed class InPlaySecretRedactor : ISecretRedactor, ISecretTracker
 	}
 
 	/// <summary>The raw value plus each distinct JSON-escaped spelling a serializer could
-	/// have written into a payload. Both encoders are derived because both exist in this
-	/// codebase's dependency surface: the default encoder writes \u0022-style escapes,
-	/// the relaxed encoder writes \"-style.</summary>
+	/// have written into a payload, one level (#152) and two levels (#156) deep. Both
+	/// encoders are derived at level 1 because both exist in this codebase's dependency
+	/// surface: the default encoder writes \u0022-style escapes, the relaxed encoder
+	/// writes \"-style.
+	///
+	/// Level 2 covers a secret that transits two JSON serialization layers before the
+	/// sink -- tool output that is already JSON (an HTTP error body, a serialized
+	/// object) quoted inside a log line that this codebase's own Emit() (the executor's
+	/// stream handler) then serializes a second time into the job_events payload. Layer
+	/// 1 is NOT guaranteed to use the same encoder as layer 2: Emit() always uses the
+	/// default encoder, but layer 1 can be produced upstream by anything that escapes
+	/// JSON relaxed-style -- notably PowerShell's own ConvertTo-Json, which a vendor
+	/// module may call on tool output before it reaches this process (\"-style,
+	/// matching JavaScriptEncoder.UnsafeRelaxedJsonEscaping's spelling, not the default
+	/// encoder's \u0022-style). So level 2 is the cross product of {default, relaxed}
+	/// applied to each level-1 form, not "the same encoder twice" -- four combinations,
+	/// deduped to three because default(default-escaped) and relaxed(default-escaped)
+	/// coincide (the default-escaped form has no raw &lt;&gt;&amp;' characters left for
+	/// the relaxed encoder to treat differently). Still bounded, and deliberately NOT a
+	/// deeper cross-product (three, four, ... levels): each additional level doubles the
+	/// reachable set for a threat this codebase's call sites only compose twice (tool
+	/// output already being JSON, quoted once into a log line, serialized once more into
+	/// the payload). At most 6 needles per tracked secret (raw + 2 level-1 + 3 level-2)
+	/// regardless of how many escapable characters the secret contains, deduplicated
+	/// further for secrets where escaping is a no-op.</summary>
 	private static string[] DeriveNeedles(string secretValue)
 	{
+		string defaultEscaped = JsonEncodedText.Encode(secretValue).ToString();
+		string relaxedEscaped = JsonEncodedText.Encode(secretValue, JavaScriptEncoder.UnsafeRelaxedJsonEscaping).ToString();
+
 		return new[]
 		{
 			secretValue,
-			JsonEncodedText.Encode(secretValue).ToString(),
-			JsonEncodedText.Encode(secretValue, JavaScriptEncoder.UnsafeRelaxedJsonEscaping).ToString(),
+			defaultEscaped,
+			relaxedEscaped,
+			JsonEncodedText.Encode(defaultEscaped).ToString(),
+			JsonEncodedText.Encode(defaultEscaped, JavaScriptEncoder.UnsafeRelaxedJsonEscaping).ToString(),
+			JsonEncodedText.Encode(relaxedEscaped).ToString(),
+			JsonEncodedText.Encode(relaxedEscaped, JavaScriptEncoder.UnsafeRelaxedJsonEscaping).ToString(),
 		}.Distinct(StringComparer.Ordinal).ToArray();
 	}
 

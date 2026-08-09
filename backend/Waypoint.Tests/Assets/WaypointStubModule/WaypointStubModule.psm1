@@ -79,6 +79,21 @@ function Write-StubSecretLeak {
     "output leaks $Secret"
 }
 
+function Write-StubDoublyEscapedSecretLeak {
+    [CmdletBinding()]
+    param([string] $Secret)
+    # #156: simulates tool output that is ALREADY JSON (an HTTP error body, a
+    # serialized object) quoted into a log line. ConvertTo-Json here is the FIRST
+    # serialization layer -- it JSON-escapes $Secret once, e.g. `pa"ss` becomes the
+    # text `pa\"ss` inside the returned string. The executor's Emit() then JSON
+    # -serializes THIS string as the `line` field of the job_events payload, which is
+    # the SECOND layer: the already-escaped backslash-quote is itself escaped,
+    # producing `pa\\\"ss` (default encoder). Only the #156 needle set catches that.
+    $InformationPreference = 'Continue'
+    $inner = [pscustomobject]@{ error = $Secret } | ConvertTo-Json -Compress
+    Write-Information "upstream response: $inner"
+}
+
 function Invoke-StubHangThenWrite {
     [CmdletBinding()]
     param([int] $Milliseconds = 3000)
@@ -88,4 +103,4 @@ function Invoke-StubHangThenWrite {
     Write-Warning 'late line after the job already finished'
 }
 
-Export-ModuleMember -Function Get-StubInventory, Write-StubStreams, Get-StubEcho, Invoke-StubFailure, Invoke-StubHang, Invoke-StubHangThenWrite, Write-StubSecretLeak
+Export-ModuleMember -Function Get-StubInventory, Write-StubStreams, Get-StubEcho, Invoke-StubFailure, Invoke-StubHang, Invoke-StubHangThenWrite, Write-StubSecretLeak, Write-StubDoublyEscapedSecretLeak
