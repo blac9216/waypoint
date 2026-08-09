@@ -250,28 +250,22 @@ def _unescape_separators(line: str) -> str:
 #
 # That round-2 fix bounded the over-correction to NUMERIC continuations only
 # (`(?!\.\d)`), which left a DOTTED-EXTENSION continuation open: a `.` followed
-# by letters still ended the token, so a four-part version immediately
-# followed by a file extension (`5.2.1.0.ovf`, `9.0.0.0.tar.gz`,
-# `8.18.0.4.zip`) newly matched as a bare quad — invisible only when the
-# filename happened to carry a `-`/`_`-joined product prefix, which is not the
-# general case for a filename in a table cell or a list (issue #113). The
-# extra lookahead below closes that without touching the round-2 fix's own
-# case: it rejects a `.` that begins a SHORT alphabetic run (an extension, or
-# a dotted chain of them, `.tar.gz`) immediately followed by a token boundary,
-# never a `.` that merely ends the sentence (nothing alphabetic follows) or
-# continues a longer alphanumeric run (still rejected by `(?!\w)` on that
-# run's own first character, so this lookahead never has to reason about it).
-# The length cap (`{1,8}`) keeps this an EXTENSION guard rather than a general
-# "any dotted word suppresses" rule — the same reason the leading/trailing
-# word-character guards above name specific classes instead of a catch-all:
-# an unbounded alphabetic run would start suppressing real dotted hostnames
-# glued straight onto a version quad, which is not this issue's shape and
-# already has its own guard (`(?!\w)` on the FIRST character of that run).
-# Pinned in VersionStringTests' extension cases and in
-# test_trailing_period_does_not_resurrect_version_false_positives, which
-# stays green because a `.` followed by a DIGIT (not letters) is still routed
-# through `(?!\.\d)` exactly as before — the two lookaheads are independent
-# and neither widens the other.
+# by letters still ended the token, so a four-part version immediately followed
+# by a file extension newly matched as a bare quad, invisible only when the
+# filename happened to carry a `-`/`_`-joined product prefix (issue #113). A
+# subsequent revision (PR #360 round 1) tried to close that with a fourth
+# lookahead rejecting a `.`+short-alpha run, but that opened a FALSE NEGATIVE:
+# a version quad and an IPv4 literal are byte-for-byte identical, so the same
+# lookahead suppressed a REAL, non-doc address glued to an extension in the
+# same position, walking it through the hard gate. Per CLAUDE.md that is the
+# one unacceptable direction, so #113 falls back to its own documented Option
+# B: NO syntactic extension guard here. A keyless four-part version glued to an
+# extension is now a disclosed false POSITIVE (a spurious CI fail, renamed
+# away), pinned in VersionExtensionTests and docs/testing.md; the only
+# structural exemption that survives is a PRECEDING version key, applied
+# downstream by is_version_string(), not here. Do NOT reintroduce a lookahead
+# that encodes an extension list — that shape has failed open before. The
+# five-part-version case stays handled by `(?!\.\d)` exactly as before.
 #
 # Two more narrowings, both issue #111:
 #
@@ -324,12 +318,21 @@ def _unescape_separators(line: str) -> str:
 # strips the padding and rejects anything above 255 or carrying more than
 # three significant digits. Widening the regex alone would change nothing, and
 # narrowing it again would silently re-cap the parser.
+# NOTE (#113, revised after PR #360 round-1 review): there is deliberately NO
+# extension-suppressing lookahead here. An earlier revision added a fourth
+# lookahead of the shape `(?!\.[A-Za-z]{1,8}...)` so a bare version quad glued
+# to a file extension would not match as an address; it was removed because it
+# opened a FALSE NEGATIVE on the hard secret gate. See the block above IPV4_RE
+# and docs/testing.md for the full rationale; the short version is that a
+# version quad and an IPv4 literal are byte-for-byte identical, so any such
+# lookahead also suppresses a real, non-doc address glued to an extension. The
+# only surviving version exemption is a PRECEDING version key, applied by
+# is_version_string() below — never a trailing-extension shape.
 IPV4_RE = re.compile(
 	r"(?<![A-Za-z0-9])(?<!\.)"       # not continuing an alnum/dotted run
 	r"(?:\d+\.){3}\d+"
 	r"(?!\w)"                        # not followed by more token characters
 	r"(?!\.\d)"                      # ...but a trailing sentence period is fine
-	r"(?!\.[A-Za-z]{1,8}(?:\.[A-Za-z]{1,8})*(?!\w))"  # ...and so is a file extension (#113)
 )
 
 # A bare dotted-quad with none of IPV4_RE's boundary guards, used only to

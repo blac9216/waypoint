@@ -646,21 +646,33 @@ have repeatedly caught real defects no CI run could have seen:
     `_parse_ipv4_octets` padding-width-independence #119 established for the
     plain IPv4 detector, at any padding width, so the IPv6 finding names the
     full literal rather than a truncated fragment or being dropped outright.
-  - **Closed, not disclosed**: a four-part product version immediately
-    followed by a file extension (`5.2.1.0.ovf`, `9.0.0.0.tar.gz`) used to be
-    newly flagged as an IPv4 literal after the round-2 trailing-guard fix
-    above widened what a trailing `.` could terminate
-    ([#113](https://github.com/blac9216/waypoint/issues/113)): that fix
-    bounded the over-correction to numeric continuations only (`(?!\.\d)`),
-    leaving a dotted-extension continuation open. A second, narrow lookahead
-    now also rejects a `.` that begins a short alphabetic run (an extension,
-    or a chain of them, `.tar.gz`) immediately followed by a token boundary
-    — capped at eight characters per segment so it stays an EXTENSION guard
-    and does not start suppressing a real address glued to a genuine dotted
-    hostname continuation. The round-2 fix's own case — a real address ending
-    a sentence, where nothing alphabetic follows the period — is untouched,
-    because that guard only ever engages when an alphabetic run actually
-    follows; pinned in `VersionExtensionTests`.
+  - **Disclosed residual, not closed** — a four-part product version
+    immediately followed by a file extension with NO preceding version key
+    (a bare `<four-part-version>.ovf` / `.tar.gz` / `.zip`, no `version:` key
+    in front) is flagged as an IPv4 literal
+    ([#113](https://github.com/blac9216/waypoint/issues/113)). This is a
+    deliberate false POSITIVE, accepted as the price of closing a false
+    NEGATIVE. An earlier revision (PR #360 round 1) added a syntactic lookahead
+    to `IPV4_RE` that rejected a `.`+short-alpha run so these version quads
+    would not match. It was reverted: a version quad and an IPv4 literal are
+    byte-for-byte identical, so the same lookahead ALSO suppressed a real,
+    non-doc address in the same position — a routable four-octet quad glued to
+    `.bak` / `.log` / `.csv` stopped matching, and a line like `exfil
+    <routable-quad>.bak` passed the gate. That is a false negative on the
+    load-bearing public-repo secret gate, the one outcome `CLAUDE.md` forbids;
+    a spurious CI fail on a bundle filename is not. There is no structural
+    signal that separates the two — the only reliable "this is a version" cue
+    is a PRECEDING version key, which `is_version_string()` already honours (so
+    a `version:`-keyed quad stays quiet even with an extension after it), and a
+    bare `<version>.ovf` carries no such cue. This is #113's own documented
+    **Option B**: accept the extensioned-version FP, do NOT encode an extension
+    list (the shape that has failed open before). When a real bundle filename
+    trips this, the fix is to add a version key or rename the file, never to
+    reintroduce a syntactic extension guard. Both directions are pinned in
+    `VersionExtensionTests` — the real IP + extension MUST flag, the keyless
+    version quad + extension DOES flag, and the version-keyed quad stays quiet.
+    (No dotted-quad literal is written into this bullet on purpose; the
+    concrete cases are assembled via `quad()` in the tests — the #327 lesson.)
   - **Closed, not disclosed**: a backslash inserted immediately before each
     separator (`.` for IPv4/FQDN, `:` for IPv6) used to defeat all three
     detectors identically — not a suppression, an absence of any match at

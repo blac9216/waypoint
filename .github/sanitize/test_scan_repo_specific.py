@@ -3464,17 +3464,62 @@ class ExitCodeTests(unittest.TestCase):
 
 
 class VersionExtensionTests(unittest.TestCase):
-	"""Issue #113: a version quad followed by a file extension is not an IP.
+	"""Issue #113 (revised after PR #360 round-1 review): a bare version quad
+	glued to a file extension is a KNOWN, ACCEPTED false positive.
 
-	The round-2 trailing-guard fix (`(?!\\.\\d)`) bounded the over-correction
-	to NUMERIC continuations only, so a `.` followed by letters still ended
-	the token — a bare four-part version immediately followed by a file
-	extension newly matched as a dotted-quad. This class pins the false
-	positive closed and, just as importantly, pins that the round-2 fix's own
-	case (a real address ending a sentence) is untouched by closing it.
+	An earlier revision added a syntactic extension lookahead to IPV4_RE so a
+	version quad glued to an extension (`quad.ovf`) would not match as an
+	address. That guard was removed: a version quad and an IPv4 literal are
+	byte-for-byte identical, so the same lookahead suppressed a REAL, non-doc
+	address in the same position (a routable quad glued to `.bak`) — a false
+	NEGATIVE on the hard secret gate, the one outcome CLAUDE.md forbids. (The
+	concrete adversarial quads are assembled via quad() in the test bodies, not
+	spelled here, so this file does not trip its own gate — the #327 lesson.)
+	Per #113's own documented Option B the
+	extension guard is gone, the residual version-quad false POSITIVE is
+	accepted (a spurious CI fail, renamed away), and BOTH directions are pinned
+	here: the real IP + extension still flags, and the bundle-filename version
+	quad now flags too. The only structural exemption that survives is a
+	preceding version KEY, handled by is_version_string() (see
+	test_version_key_suppression_still_applies_ahead_of_an_extension).
 	"""
 
-	def test_version_followed_by_a_single_extension_is_not_flagged(self) -> None:
+	# Real-shaped (non-doc, non-RFC-5737) addresses. Assembled via quad() so no
+	# routable-looking literal is committed to this file (issue #327 lesson).
+	# These are the reviewer's exact round-1 adversarial cases.
+	REAL_IP_EXT_CASES = (
+		(quad(45, 33, 32, 156), "bak"),
+		(quad(8, 8, 8, 8), "log"),
+		(quad(10, 20, 30, 40), "txt"),
+		(quad(172, 16, 254, 1), "csv"),
+	)
+
+	def test_real_ip_glued_to_an_extension_still_flags(self) -> None:
+		"""BLOCKER regression (PR #360 round 1): a real IP followed by a
+		`.`+short-alpha suffix must NOT be suppressed as if it were a version
+		quad. This is the false negative the extension lookahead opened.
+		"""
+		for ip, ext in self.REAL_IP_EXT_CASES:
+			text = f"exfil {ip}.{ext}"
+			with self.subTest(text=text):
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, text)
+				self.assertIn(ip, findings[0])
+
+	def test_real_ip_glued_to_a_chained_extension_still_flags(self) -> None:
+		ip = quad(45, 33, 32, 156)
+		findings = scanner.scan_text("f.md", f"scp {ip}.tar.gz remote:")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(ip, findings[0])
+
+	def test_version_followed_by_a_single_extension_is_a_pinned_false_positive(
+		self,
+	) -> None:
+		"""Option B: an extensioned version quad with NO version key now flags.
+		Accepted residual — a spurious CI fail, not a leak. If this fires in
+		real content the fix is to add a version key or rename the file, NOT to
+		reintroduce a syntactic extension guard (which fails open — see #113).
+		"""
 		for version, ext in (
 			(quad(5, 2, 1, 0), "ovf"),
 			(quad(9, 0, 0, 0), "zip"),
@@ -3482,17 +3527,26 @@ class VersionExtensionTests(unittest.TestCase):
 		):
 			text = f"Image {version}.{ext}"
 			with self.subTest(text=text):
-				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+				findings = scanner.scan_text("f.md", text)
+				self.assertEqual(len(findings), 1, text)
+				self.assertIn(version, findings[0])
 
-	def test_version_followed_by_a_chained_extension_is_not_flagged(self) -> None:
-		"""The `.tar.gz`-style chained extension from the issue body."""
-		text = f"file {quad(9, 0, 0, 0)}.tar.gz"
-		self.assertEqual(scanner.scan_text("f.md", text), [])
+	def test_version_followed_by_a_chained_extension_is_a_pinned_false_positive(
+		self,
+	) -> None:
+		"""The `.tar.gz`-style chained extension from the issue body — now flags."""
+		version = quad(9, 0, 0, 0)
+		findings = scanner.scan_text("f.md", f"file {version}.tar.gz")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(version, findings[0])
 
-	def test_bundle_filename_in_a_table_cell_is_not_flagged(self) -> None:
-		"""The issue's own repro: a bare filename with no dash-joined prefix."""
-		text = f"| bundle | {quad(8, 18, 0, 4)}.zip |"
-		self.assertEqual(scanner.scan_text("f.md", text), [])
+	def test_bundle_filename_in_a_table_cell_is_a_pinned_false_positive(self) -> None:
+		"""The issue's own repro: a bare filename with no dash-joined prefix —
+		now flags (accepted FP)."""
+		version = quad(8, 18, 0, 4)
+		findings = scanner.scan_text("f.md", f"| bundle | {version}.zip |")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(version, findings[0])
 
 	def test_sentence_final_address_is_still_flagged(self) -> None:
 		"""The round-2 fix's own case must survive closing this one.
@@ -3515,20 +3569,24 @@ class VersionExtensionTests(unittest.TestCase):
 		"""The round-2 fix's numeric case must also survive closing this one."""
 		self.assertEqual(scanner.scan_text("f.md", f"x {quad(9, 0, 0, 0)}.5"), [])
 
-	def test_extension_guard_does_not_widen_past_a_short_alphabetic_run(self) -> None:
-		"""A long alphabetic run after the dot is a hostname label, not an
-		extension — the guard is capped so it does not start suppressing a
-		real address glued to a dotted hostname continuation.
+	def test_address_glued_to_a_long_alphabetic_run_still_flags(self) -> None:
+		"""With the syntactic extension guard removed (Option B), ANY dotted
+		alphabetic continuation ends the token and the leading quad flags —
+		including a hostname-label-length run. (Formerly this pinned the
+		{1,8}-cap edge of the guard; the guard is gone, but a real address
+		glued to a dotted continuation must still flag, and does.)
 		"""
-		long_label = "a" * 9  # past the {1,8} cap
+		long_label = "a" * 9
 		findings = scanner.scan_text("f.md", f"host {LAB_IP}.{long_label}")
 		self.assertEqual(len(findings), 1, findings)
 		self.assertIn(LAB_IP, findings[0])
 
 	def test_version_key_suppression_still_applies_ahead_of_an_extension(self) -> None:
-		"""The two suppressions (version-key, extension) are independent and
-		compose rather than fight — a version-keyed quad with an extension
-		after it stays suppressed for either reason.
+		"""The ONLY structural exemption that survives Option B: a preceding
+		version key. is_version_string() suppresses the quad regardless of any
+		trailing extension, so this stays quiet while a keyless `X.ovf` (above)
+		now flags. This is the intended, airtight-context path — a real address
+		is not preceded by a `version:` key.
 		"""
 		text = f"version: '{quad(8, 18, 0, 4)}.ovf'"
 		self.assertEqual(scanner.scan_text("f.md", text), [])
@@ -3672,20 +3730,23 @@ class ThreeIssueInteractionTests(unittest.TestCase):
 	where that is meaningful.
 	"""
 
-	def test_version_extension_and_hex_identifier_do_not_interact(self) -> None:
-		"""A version+extension (#113) and a hex-lettered identifier (#118) on
-		the same line: both stay quiet, independently.
+	def test_version_key_quad_and_hex_identifier_do_not_interact(self) -> None:
+		"""A version-KEYED quad (#113's surviving exemption after Option B) and
+		a hex-lettered identifier (#118) on the same line: both stay quiet,
+		independently. (A keyless version+extension is now a disclosed FP and
+		flags — see VersionExtensionTests — so the still-quiet #113 path is the
+		version-key one, which is what is exercised here.)
 		"""
-		text = f"Image {quad(5, 2, 1, 0)}.ovf built near cafe::babe"
+		text = f"version {quad(5, 2, 1, 0)} built near cafe::babe"
 		self.assertEqual(scanner.scan_text("f.md", text), [])
 
-	def test_padded_mapped_literal_alongside_a_version_extension(self) -> None:
-		"""#123's restored finding and #113's suppression on the same line:
-		the version+extension stays quiet, the padded mapped literal is still
-		fully reported on both axes.
+	def test_padded_mapped_literal_alongside_a_version_key_quad(self) -> None:
+		"""#123's restored finding and #113's surviving version-key suppression
+		on the same line: the version-keyed quad stays quiet, the padded mapped
+		literal is still fully reported on both axes.
 		"""
 		mapped = ipv6("", "", "ffff", zero_pad_quad(LAB_IP, 4))
-		text = f"Image {quad(5, 2, 1, 0)}.ovf reachable at {mapped}"
+		text = f"version {quad(5, 2, 1, 0)} reachable at {mapped}"
 		findings = scanner.scan_text("f.md", text)
 		self.assertEqual(len(findings), 2, findings)
 		self.assertTrue(any("IPv6 address literal" in f for f in findings), findings)
