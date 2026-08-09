@@ -88,10 +88,6 @@ export function queueDownloads(artifactIds: string[]): Promise<QueueDownloadsRes
 	return apiPost<QueueDownloadsResponse>("/downloads", { artifact_ids: artifactIds });
 }
 
-export function cancelDownload(id: string): Promise<void> {
-	return apiPost<void>(`/downloads/${id}`, undefined, { method: "DELETE" } as never);
-}
-
 /** `GET /system`'s disk-usage-by-store fields (api-contract.md "System, users,
  * audit": "disk usage by store"). Issue #226 is landing these on the backend
  * concurrently — every field is optional so a build against this contract
