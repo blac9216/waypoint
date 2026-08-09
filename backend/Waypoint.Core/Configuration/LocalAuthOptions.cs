@@ -34,11 +34,32 @@ public sealed class LocalAuthOptions
 	/// <summary>
 	/// Salted, iterated PBKDF2 hash of the admin password (see
 	/// <see cref="Auth.Pbkdf2PasswordHasher"/> for the stored format), generated with
-	/// <c>dotnet Waypoint.Api.dll --hash-password</c>. Set via the
-	/// <c>LocalAuth__AdminPasswordHash</c> environment variable (or an operator secret
-	/// mount) — never a literal password in configuration, and never committed.
+	/// <c>dotnet Waypoint.Api.dll --hash-password</c>. Never a literal password in
+	/// configuration, and never committed.
+	///
+	/// Preferred delivery (issue #333) is a mounted file named by
+	/// <see cref="AdminPasswordHashFile"/> — see that property. The
+	/// <c>LocalAuth__AdminPasswordHash</c> environment variable is still accepted as a
+	/// fallback for existing deployments, but leaks via <c>/proc/&lt;pid&gt;/environ</c>,
+	/// <c>docker inspect</c>, and crash dumps, so new deployments should use the file.
+	/// A <see cref="Auth.LocalAuthOptionsPostConfigure"/> step resolves the file over the
+	/// env var and leaves this property holding whichever source won — code downstream of
+	/// options binding (e.g. <see cref="Auth.ILocalAuthenticationService"/>) reads only
+	/// this property and never needs to know which source it came from.
 	/// </summary>
 	public string? AdminPasswordHash { get; set; }
+
+	/// <summary>
+	/// Path to a mounted file whose contents are the PBKDF2 admin password hash (a
+	/// trailing newline is tolerated and trimmed). Set via the
+	/// <c>LocalAuth__AdminPasswordHashFile</c> environment variable (or
+	/// <c>LocalAuth:AdminPasswordHashFile</c> in configuration) to the operator-mounted
+	/// path — see <c>deploy/docker-compose.yml</c> and <c>deploy/README.md</c> "Bring-up".
+	/// This is the preferred delivery mechanism (issue #333); when set and the file
+	/// exists, it takes precedence over <see cref="AdminPasswordHash"/> as read directly
+	/// from configuration/env.
+	/// </summary>
+	public string? AdminPasswordHashFile { get; set; }
 
 	/// <summary>How long an issued session token remains valid.</summary>
 	public TimeSpan SessionLifetime { get; set; } = TimeSpan.FromHours(8);

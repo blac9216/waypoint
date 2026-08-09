@@ -61,6 +61,14 @@ dotnet run --project Waypoint.Api --no-launch-profile
 # POST http://localhost:5000/api/v1/auth/login      { "username": "admin", "password": "<your-dev-password>" }
 ```
 
+`LocalAuth__AdminPasswordHash` is fine for this bare `dotnet run` loop, but it leaks via
+`/proc/<pid>/environ`, `docker inspect`, and crash dumps — the containerized compose
+stack (`deploy/docker-compose.yml`, `deploy/README.md` "Bring-up" step 3) prefers a
+mounted file instead: set `LocalAuth__AdminPasswordHashFile` to a path containing the
+hash and it takes precedence (issue #333, `LocalAuthOptionsPostConfigure`). The env var
+above remains a supported fallback either way — a mounted file just isn't the natural
+shape for a local `dotnet run` session, so this quick-start keeps using it.
+
 `--no-launch-profile` is not optional here. Without it, `dotnet run` applies the `http`
 profile in `Waypoint.Api/Properties/launchSettings.json`, whose
 `applicationUrl: http://localhost:5205` **silently overrides both the default port above
