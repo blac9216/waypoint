@@ -337,6 +337,65 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 	}
 
 	/// <summary>
+	/// Issue #401: the <c>OLD-but-non-null</c> half of <c>BuildStaleDiscoverSpecs</c>'s
+	/// staleness check (<c>target.LastRefreshed is null || target.LastRefreshed.Value
+	/// &lt; staleBefore</c>) has its own test, distinct from
+	/// <see cref="StaleTarget_QueuesBothDiscoverAndScan_BothReachTerminalState"/> (which
+	/// exercises the <c>is null</c> half) and <see cref="FreshTarget_QueuesOnlyScan_NoDiscoverJob"/>
+	/// (fresh, non-stale). This target has a real, non-null <c>last_refreshed</c>
+	/// timestamp stamped directly via SQL -- 2 hours old, well past the default
+	/// 60-minute <c>Discovery:StaleAfterMinutes</c> window -- so only the
+	/// <c>&lt; staleBefore</c> comparison, not the null check, can be responsible for
+	/// the discover job being queued. Per docs/testing.md's fixture-monoculture rule,
+	/// this closes the gap left by the existing fixtures, which were only ever
+	/// null-or-fresh and never exercised the timestamp comparison itself.
+	/// </summary>
+	[Fact]
+	public async Task OldButNonNullLastRefreshed_QueuesDiscover_TimestampComparisonBranch()
+	{
+		Guid siteId = await CreateSiteAsync("old-refresh-site");
+		string connectionJson = """{"host":"vcsa-old.example.internal"}""";
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.VSphere, $"vcsa-old-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
+		await StampLastRefreshedAsync(targetId.Value, DateTimeOffset.UtcNow.AddHours(-2));
+
+		Target? seeded = await _targets.GetAsync(targetId.Value, CancellationToken.None);
+		Assert.NotNull(seeded!.LastRefreshed);
+		Assert.True(seeded.LastRefreshed!.Value < DateTimeOffset.UtcNow.AddMinutes(-60));
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) });
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		IReadOnlyList<JobSummary> jobs = await _repository.GetJobsForRunAsync(runId, CancellationToken.None);
+		Assert.Equal(2, jobs.Count);
+		JobSummary discoverJob = Assert.Single(jobs, j => j.JobType == "discover");
+		JobSummary scanJob = Assert.Single(jobs, j => j.JobType == "scan");
+		Assert.Equal(targetId, Guid.Parse(discoverJob.TargetId!));
+		Assert.Equal(targetId, Guid.Parse(scanJob.TargetId!));
+	}
+
+	/// <summary>
+	/// Directly stamps <c>targets.last_refreshed</c> to an arbitrary past instant --
+	/// <see cref="TargetRepository.SetDiscoveryStatusAsync"/> only ever stamps
+	/// <c>now()</c>, so there is no repository API that can seed an old-but-non-null
+	/// timestamp. Test-only escape hatch for <see cref="OldButNonNullLastRefreshed_QueuesDiscover_TimestampComparisonBranch"/>.
+	/// </summary>
+	private async Task StampLastRefreshedAsync(Guid targetId, DateTimeOffset lastRefreshed)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new("UPDATE targets SET last_refreshed = $2 WHERE id = $1", connection);
+		update.Parameters.AddWithValue(targetId);
+		update.Parameters.AddWithValue(lastRefreshed);
+		await update.ExecuteNonQueryAsync();
+	}
+
+	/// <summary>
 	/// An <c>ssh</c> (SRG) target has no inventory cache to refresh -- discover only
 	/// supports <c>vsphere</c> (<see cref="DiscoverJobHandler"/> rejects any other
 	/// kind outright). A stale/absent <c>LastRefreshed</c> on a non-vsphere target
