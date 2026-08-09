@@ -171,24 +171,30 @@ export function JobLogDrawer() {
 
 			{/*
 			  A real <button> can't contain the nested Follow-tail/Download
-			  buttons (invalid HTML, breaks their accessibility tree), so the
-			  click-target-is-the-whole-bar behavior is a div with a button role
-			  instead, and the two real buttons stop propagation.
+			  buttons (invalid HTML, breaks their accessibility tree), so this
+			  outer div is a plain click-anywhere-on-the-bar pointer affordance,
+			  not an accessibility-tree control (no role="button" — that would
+			  fold the nested buttons' names into this container's computed
+			  name and announce them twice; see issue #71). Keyboard/SR users
+			  get one dedicated toggle instead: the real <button> below, which
+			  carries aria-expanded so the open/collapsed state is exposed.
 			*/}
-			<div
-				className="job-log-drawer__bar"
-				role="button"
-				tabIndex={0}
-				onClick={() => setOpen((o) => !o)}
-				onKeyDown={(event) => {
-					if (event.key === "Enter" || event.key === " ") {
-						event.preventDefault();
+			<div className="job-log-drawer__bar" onClick={() => setOpen((o) => !o)}>
+				<button
+					type="button"
+					className="job-log-drawer__toggle"
+					aria-expanded={open}
+					aria-controls="job-log-drawer-body"
+					onClick={(event) => {
+						// The wrapping div's onClick already toggles; stop
+						// propagation so this doesn't double-toggle.
+						event.stopPropagation();
 						setOpen((o) => !o);
-					}
-				}}
-			>
-				<DrawerChevronIcon style={{ transform: `rotate(${open ? 0 : 180}deg)` }} />
-				<span className="job-log-drawer__title">JOB LOG</span>
+					}}
+				>
+					<DrawerChevronIcon style={{ transform: `rotate(${open ? 0 : 180}deg)` }} />
+					<span className="job-log-drawer__title">JOB LOG</span>
+				</button>
 				<span className="job-log-drawer__active">
 					<span className="job-log-drawer__dot" />
 					<span className="mono">{activeJobs.size}</span>
@@ -222,7 +228,14 @@ export function JobLogDrawer() {
 			</div>
 
 			{open && (
-				<div className="job-log-drawer__body" style={{ height: logH }} ref={logRef}>
+				<div
+					id="job-log-drawer-body"
+					className="job-log-drawer__body"
+					style={{ height: logH }}
+					ref={logRef}
+					role="log"
+					aria-live="polite"
+				>
 					{logs.length === 0 && <div className="job-log-drawer__empty">No log lines yet.</div>}
 					{logs.map((line) => (
 						<div className="job-log-drawer__line" key={line.seq}>

@@ -38,6 +38,19 @@
 	text-align: left;
 }
 
+.job-log-drawer__toggle {
+	display: flex;
+	align-items: center;
+	gap: 11px;
+	flex: 0 0 auto;
+	background: transparent;
+	border: 0;
+	padding: 0;
+	color: inherit;
+	font: inherit;
+	cursor: pointer;
+}
+
 .job-log-drawer__title {
 	font-size: 10.5px;
 	letter-spacing: 0.1em;
