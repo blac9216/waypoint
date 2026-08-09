@@ -26,6 +26,19 @@
     <EmbeddedResource Include="Data\Migrations\*.sql" />
   </ItemGroup>
 
+  <!-- Issue #223: the WaypointCatalogIndex shim module (#194) is Waypoint-owned code,
+       not vendor content (CLAUDE.md License & Borrowing Policy only restricts copying
+       the SIBLING repo's .ps1 scripts, which this is not - see the module's own
+       header comment). It has to reach the published output so
+       docker-compose.yml's PowerShell__ModulePreloadPaths__0 can point at a real
+       in-container path; nothing previously copied it there. CopyToPublishDirectory
+       preserves the Modules/WaypointCatalogIndex/ subfolder structure PowerShell's
+       module-by-directory-name convention expects (ImportPSModule loads
+       <Dir>/<DirName>.psm1). -->
+  <ItemGroup>
+    <None Include="PowerShell\Modules\**\*.psm1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!-- Lets JobQueueClaimSqlParityTests read JobQueueRepository.ClaimSql directly. The
        alternative is a test that restates the SQL it is supposed to be checking, which
        is the "test that cannot fail" pattern this repo has already shipped three times:

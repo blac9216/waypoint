@@ -468,6 +468,70 @@ in epic #1 lands, uncomment the `backend` service's
 **Never** copy anything out of `dev/local/` into a committed file, fixture,
 log, or doc — see the sanitization policy in the repo root `CLAUDE.md`.
 
+### PowerShell scripts mount (`WAYPOINT_VCF_SCRIPTS_DIR`, issue #223)
+
+The `catalog-index` job handler (issue #194) runs a Waypoint-owned shim
+module (`backend/Waypoint.Infrastructure/PowerShell/Modules/WaypointCatalogIndex/`)
+that dot-sources `vcf-download-manager.common.ps1` from the sibling
+`vcf-docker-download` repo to call its `Get-FileManifest` function. Per
+CLAUDE.md's License & Borrowing Policy, that sibling script runs as
+**unmodified vendor code** — it is never copied into this repo or baked
+into the backend image, only mounted read-only at runtime, following the
+same `dev/local/`-style convention as the depot token/binary above.
+
+`docker-compose.yml`'s `backend` service mounts an operator-supplied
+directory read-only into the container:
+
+```yaml
+- ${WAYPOINT_VCF_SCRIPTS_DIR:-../dev/local/vcf-scripts}:/vcf-scripts:ro
+```
+
+Point `WAYPOINT_VCF_SCRIPTS_DIR` (in `deploy/.env`, gitignored) at your own
+checkout of `vcf-docker-download`'s `powershell/` directory:
+
+```bash
+# deploy/.env
+WAYPOINT_VCF_SCRIPTS_DIR=/path/to/your/vcf-docker-download/powershell
+```
+
+Left unset, it defaults to a repo-root `dev/local/vcf-scripts` subdirectory
+(`../dev/local/vcf-scripts` relative to `deploy/`) — the same repo-root
+`dev/local/` directory the token/binary mount above uses, but its own
+subpath so it doesn't collide with that mount's contents. Either way the
+directory is git-ignored and never populated by this repo.
+
+The `backend` service also sets two environment variables so the shim finds
+its module and the vendor script inside the container:
+
+```yaml
+PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointCatalogIndex"
+WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH: "/vcf-scripts/vcf-download-manager.common.ps1"
+```
+
+`PowerShell__ModulePreloadPaths__0` is a fixed in-container literal, not an
+operator knob — `Waypoint.Infrastructure.csproj` now copies
+`PowerShell/Modules/**/*.psm1` into the publish output, so the shim always
+lands at that exact path inside the image. Only `WAYPOINT_VCF_SCRIPTS_DIR`
+(the mount source) and the layout of your `vcf-docker-download` checkout
+under it are operator-controlled.
+
+**An unconfigured stack still starts and reports healthy.** Module import
+happens lazily, once per PowerShell runspace, on first job dispatch
+(`WaypointRunspacePool.CreateRunspace`) — never at container startup or DI
+construction. If `WAYPOINT_VCF_SCRIPTS_DIR` is left unset and
+`../dev/local/vcf-scripts` doesn't exist, Docker mounts an empty directory (this
+mount intentionally does **not** use the frontend/dist mount's
+`create_host_path: false` guard — see the in-file comment) and the stack
+comes up healthy exactly as before. Only a `catalog-index` job that actually
+dispatches fails, with the shim's own `no vcf-download-manager.common.ps1
+path configured` or `not found at '...'` error surfacing in that job's log.
+
+Only `catalog-index` is wired this way today. The other four PowerShell job
+handlers (`download`, `discover`, `scan`, `credential-test`) dot-source
+scripts from a *different* sibling repo (`vmware-stig-docker`) and are not
+yet mounted or preloaded — tracked separately (see the repo issue tracker
+for the follow-up filed alongside #223).
+
 ### Edge hardening baseline (DISA/CIS nginx guidance, issue #52)
 
 `deploy/nginx/conf.d/default.conf` carries a hardening baseline applied on
