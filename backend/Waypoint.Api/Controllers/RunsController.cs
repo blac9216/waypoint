@@ -55,6 +55,7 @@ public sealed class RunsController : ControllerBase
 	private readonly TargetRepository _targets;
 	private readonly IEphemeralCredentialCache _ephemeralCredentials;
 	private readonly ConfigDocRepository _configDocs;
+	private readonly AttestationSnapshotRepository _attestationSnapshots;
 	private readonly IOptions<ScanOptions> _scanOptions;
 
 	public RunsController(
@@ -63,6 +64,7 @@ public sealed class RunsController : ControllerBase
 		TargetRepository targets,
 		IEphemeralCredentialCache ephemeralCredentials,
 		ConfigDocRepository configDocs,
+		AttestationSnapshotRepository attestationSnapshots,
 		IOptions<ScanOptions> scanOptions)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
@@ -70,12 +72,14 @@ public sealed class RunsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(targets);
 		ArgumentNullException.ThrowIfNull(ephemeralCredentials);
 		ArgumentNullException.ThrowIfNull(configDocs);
+		ArgumentNullException.ThrowIfNull(attestationSnapshots);
 		ArgumentNullException.ThrowIfNull(scanOptions);
 		_repository = repository;
 		_sites = sites;
 		_targets = targets;
 		_ephemeralCredentials = ephemeralCredentials;
 		_configDocs = configDocs;
+		_attestationSnapshots = attestationSnapshots;
 		_scanOptions = scanOptions;
 	}
 
@@ -458,31 +462,26 @@ public sealed class RunsController : ControllerBase
 	/// `/runs/{id}/attestations-applied`: "Waivers that fired: control, scope,
 	/// justification, author/version, expired-skips"). Viewer+.
 	///
-	/// There is no persisted per-control waiver ledger anywhere in this codebase to read
-	/// back -- config-docs resolve as whole YAML bodies per (kind, profile, layer), never
-	/// parsed per-control (docs/domain-model.md, <c>ConfigDocsController.Resolve</c>'s own
-	/// doc comment), and the attest stage (#275) records only a free-text <c>jobs.note</c>
-	/// summary plus one aggregate <c>job.log</c> WARN line, neither of which carries
-	/// scope/justification/author/version structurally. This action instead derives the
-	/// ledger LIVE, per scanned target in the run, by re-running the exact same
-	/// <see cref="ConfigDocResolver.Resolve"/> call <c>ScanJobHandler.ExecuteAttestStageAsync</c>
-	/// made when the job actually ran -- the same live-resolution approach
-	/// <c>frontend/src/screens/results/results.ts</c>'s <c>fetchAttestationResolution</c>
-	/// stand-in already takes against <c>/config-docs/resolve</c> directly (see that
-	/// module's doc comment). One row is emitted per scan job whose target has an
-	/// attestation config-doc resolved (applied or expired-and-skipped) at ANY of the
-	/// three layers -- a target with no attestation doc anywhere contributes no row.
+	/// Issue #306: this reads the persisted, at-scan-time <c>attestation_snapshots</c>
+	/// ledger (migration 0021) that <c>ScanJobHandler.ExecuteAttestStageAsync</c> writes
+	/// the instant it resolves each target's attestation -- NOT a live re-resolution. A
+	/// historical run's answer is therefore immutable: editing a config-doc after the run
+	/// no longer changes what this endpoint reports for it, closing the integrity gap PR
+	/// #305 could only disclose (the old <c>derivation: "live-resolution"</c> wire marker
+	/// this replaced). One row is recorded per scanned target whose attest stage actually
+	/// ran, whether or not a doc applied (see <see cref="AttestationSnapshotRepository.RecordAsync"/>);
+	/// a target whose scan job never reached the attest stage contributes no row.
 	/// <c>control</c> carries the fixed <see cref="ScanOptions.AttestationProfile"/> name,
-	/// not a per-control STIG id: there is no control-enumeration catalog in this codebase
-	/// to join the resolved waiver against (flagged in this issue's PR body as a
-	/// documented gap, not silently invented).
+	/// not a per-control STIG id -- there is no control-enumeration catalog in this
+	/// codebase to join the resolved waiver against; per-control granularity is future
+	/// work once one exists (issue #306's AC).
 	///
-	/// Because this is live resolution and not recorded history, the WIRE says so (not just
-	/// this code comment): each row carries <c>derivation: "live-resolution"</c> and a
-	/// <c>resolved_at</c> = request time, and the config-doc's last-edit time is surfaced
-	/// only as <c>attestation_updated_at</c>, never mislabeled <c>applied_at</c> -- so a
-	/// consumer can tell that a later edit to an attestation rewrites what this "historical"
-	/// endpoint reports. The persisted at-scan-time ledger (the real fix) is issue #306.
+	/// <c>applied_at</c> is now a genuine scan-time timestamp (issue #299/#305 removed it
+	/// because the old live-resolution shape had no true application time to report; this
+	/// endpoint now reads it back from the recorded snapshot). <c>attestation_updated_at</c>
+	/// is still the config-doc version's own timestamp, kept distinct from
+	/// <c>applied_at</c> for the same reason as before -- a doc-edit time is not a
+	/// scan-time application time, even though both are now real recorded facts.
 	/// </summary>
 	[HttpGet("{id:guid}/attestations-applied")]
 	[RequireViewerRole]
@@ -495,40 +494,13 @@ public sealed class RunsController : ControllerBase
 			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
 		}
 
-		IReadOnlyList<JobSummary> jobs = await _repository.GetJobsForRunAsync(id, cancellationToken).ConfigureAwait(false);
-		string profile = _scanOptions.Value.AttestationProfile;
-		DateTimeOffset now = DateTimeOffset.UtcNow;
+		IReadOnlyList<AttestationSnapshot> snapshots = await _attestationSnapshots.ListForRunAsync(id, cancellationToken).ConfigureAwait(false);
 
 		List<AppliedAttestationResponse> rows = [];
-		foreach (JobSummary job in jobs)
+		foreach (AttestationSnapshot snapshot in snapshots)
 		{
-			if (!string.Equals(job.JobType, ScanJobType, StringComparison.Ordinal) || job.TargetId is not { } targetIdText
-				|| !Guid.TryParse(targetIdText, out Guid targetId))
-			{
-				continue;
-			}
-
-			Target? target = await _targets.GetAsync(targetId, cancellationToken).ConfigureAwait(false);
-			if (target is null)
-			{
-				continue;
-			}
-
-			ConfigDocWithLatestVersion? global = await _configDocs
-				.FindWithLatestVersionAsync(ConfigDocKinds.Attestation, profile, ConfigDocLayers.Global, null, cancellationToken).ConfigureAwait(false);
-			ConfigDocWithLatestVersion? site = await _configDocs
-				.FindWithLatestVersionAsync(ConfigDocKinds.Attestation, profile, ConfigDocLayers.Site, target.SiteId, cancellationToken).ConfigureAwait(false);
-			ConfigDocWithLatestVersion? targetDoc = await _configDocs
-				.FindWithLatestVersionAsync(ConfigDocKinds.Attestation, profile, ConfigDocLayers.Target, target.Id, cancellationToken).ConfigureAwait(false);
-
-			if (global is null && site is null && targetDoc is null)
-			{
-				continue;
-			}
-
-			ConfigDocResolution resolution = ConfigDocResolver.Resolve(
-				ConfigDocKinds.Attestation, profile, global, site, targetDoc, now);
-			rows.Add(MapAttestation(target, resolution, now));
+			Target? target = await _targets.GetAsync(snapshot.TargetId, cancellationToken).ConfigureAwait(false);
+			rows.Add(await MapAttestationAsync(target, snapshot, cancellationToken).ConfigureAwait(false));
 		}
 
 		return Ok(rows);
@@ -777,29 +749,35 @@ public sealed class RunsController : ControllerBase
 		};
 	}
 
-	private const string LiveResolutionDerivation = "live-resolution";
-
 	/// <summary>
-	/// Maps a live config-doc resolution to a wire row. The wire is explicit that this is
-	/// current resolution, not recorded history (issue #299 round-1 blocker, #306): it emits
-	/// <c>derivation: "live-resolution"</c> and a <c>resolved_at</c> stamped from
-	/// <paramref name="resolvedAt"/> (this request's clock), and it surfaces the config-doc's
-	/// last-edit time only as <c>attestation_updated_at</c> -- never as an <c>applied_at</c>
-	/// that would misrepresent a doc-edit time as a scan-time application time.
+	/// Maps a persisted at-scan-time snapshot (issue #306) to a wire row.
+	/// <see cref="AppliedAttestationResponse.Justification"/> is re-read from
+	/// <c>config_versions</c> at the EXACT recorded (doc id, version) -- safe because
+	/// versions are append-only and never mutated in place (<see cref="ConfigDocRepository.SaveVersionAsync"/>'s
+	/// doc comment), so this is still reading the byte-for-byte body that was in effect
+	/// at scan time, not a live re-resolution. <paramref name="target"/> is only for
+	/// display (<c>coverage</c>) -- a null target (deleted since the run) falls back to
+	/// the snapshot's raw id so the row is never dropped from a historical ledger.
 	/// </summary>
-	private static AppliedAttestationResponse MapAttestation(Target target, ConfigDocResolution resolution, DateTimeOffset resolvedAt)
+	private async Task<AppliedAttestationResponse> MapAttestationAsync(Target? target, AttestationSnapshot snapshot, CancellationToken cancellationToken)
 	{
+		string justification = string.Empty;
+		if (snapshot.DocId is { } docId && snapshot.DocVersion is { } version)
+		{
+			ConfigDocVersion? body = await _configDocs.GetVersionAsync(docId, version, cancellationToken).ConfigureAwait(false);
+			justification = body?.BodyYaml ?? string.Empty;
+		}
+
 		return new AppliedAttestationResponse(
-			Control: resolution.Profile,
-			Scope: resolution.Layer ?? ConfigDocLayers.Global,
-			Coverage: target.Name,
-			Justification: resolution.Body ?? string.Empty,
-			Author: resolution.Author ?? string.Empty,
-			Version: resolution.Version ?? 0,
-			Derivation: LiveResolutionDerivation,
-			ResolvedAt: resolvedAt.ToString("O", CultureInfo.InvariantCulture),
-			AttestationUpdatedAt: resolution.UpdatedAt?.ToString("O", CultureInfo.InvariantCulture),
-			Expired: resolution.AttestationExpired);
+			Control: snapshot.Profile,
+			Scope: snapshot.Scope,
+			Coverage: target?.Name ?? snapshot.TargetId.ToString(),
+			Justification: justification,
+			Author: snapshot.DocAuthor ?? string.Empty,
+			Version: snapshot.DocVersion ?? 0,
+			AppliedAt: snapshot.AppliedAt.ToString("O", CultureInfo.InvariantCulture),
+			AttestationUpdatedAt: snapshot.DocVersionCreatedAt?.ToString("O", CultureInfo.InvariantCulture),
+			Expired: snapshot.Expired);
 	}
 
 	private static JobResponse MapJob(JobSummary job)

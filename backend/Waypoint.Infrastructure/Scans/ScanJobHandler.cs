@@ -82,6 +82,7 @@ public sealed class ScanJobHandler : IJobHandler
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
 	private readonly IOptions<ScanOptions> _scanOptions;
 	private readonly ConfigDocRepository _configDocs;
+	private readonly AttestationSnapshotRepository _attestationSnapshots;
 	private readonly ScanUploadCoordinator _upload;
 
 	public ScanJobHandler(
@@ -95,6 +96,7 @@ public sealed class ScanJobHandler : IJobHandler
 		IOptions<PowerShellOptions> powerShellOptions,
 		IOptions<ScanOptions> scanOptions,
 		ConfigDocRepository configDocs,
+		AttestationSnapshotRepository attestationSnapshots,
 		ScanUploadCoordinator upload)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
@@ -107,6 +109,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
 		ArgumentNullException.ThrowIfNull(scanOptions);
 		ArgumentNullException.ThrowIfNull(configDocs);
+		ArgumentNullException.ThrowIfNull(attestationSnapshots);
 		ArgumentNullException.ThrowIfNull(upload);
 
 		_executor = executor;
@@ -119,6 +122,7 @@ public sealed class ScanJobHandler : IJobHandler
 		_powerShellOptions = powerShellOptions;
 		_scanOptions = scanOptions;
 		_configDocs = configDocs;
+		_attestationSnapshots = attestationSnapshots;
 		_upload = upload;
 	}
 
@@ -373,6 +377,30 @@ public sealed class ScanJobHandler : IJobHandler
 			string warnLine = $"config-doc attestation for profile '{profile}' target '{payload.TargetId}' expired "
 				+ $"{resolution.AttestationExpiresAt:O}; not applied (control remains Open).";
 			await EmitWarnAsync(context, warnLine, cancellationToken).ConfigureAwait(false);
+		}
+
+		// Issue #306: persist THIS resolution, right now, as the immutable at-scan-time
+		// record -- before anything downstream (or any later edit to the config-doc) can
+		// affect what GET /runs/{id}/attestations-applied will ever report for this run.
+		// context.Job.RunId is null only for a scan job created outside the normal
+		// run-fan-out path, which does not happen in practice (RunsController always
+		// fans scan jobs out from a run) -- skipped defensively rather than failing the
+		// scan, since there would be no run to attribute the row to.
+		if (context.Job.RunId is { } runId)
+		{
+			await _attestationSnapshots.RecordAsync(
+				runId,
+				context.Job.Id,
+				target.Id,
+				profile,
+				resolution.Layer ?? ConfigDocLayers.Global,
+				resolution.DocId,
+				resolution.Version,
+				resolution.Author,
+				resolution.UpdatedAt,
+				applied: resolution.Body is not null,
+				expired: resolution.AttestationExpired,
+				cancellationToken).ConfigureAwait(false);
 		}
 
 		string? templatePath = null;
