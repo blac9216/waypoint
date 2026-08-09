@@ -218,4 +218,100 @@ public sealed class WaypointRunspacePoolTests
 
 		pool.Dispose();
 	}
+
+	/// <summary>
+	/// #343, the crux: a caller genuinely PARKED in WaitAsync (pool fully exhausted,
+	/// nothing idle, nothing to free) must be released -- cleanly -- when Dispose
+	/// runs, not left hanging forever. Pre-fix, SemaphoreSlim.Dispose() does not
+	/// release or fault a parked waiter at all, so the awaited RentAsync task never
+	/// completes; against the pre-fix code this test would hang until the harness's
+	/// own timeout killed it. WaitAsync(TimeSpan) below bounds that: it asserts the
+	/// parked rent finishes within a short window, not that the bounded wait merely
+	/// elapsed.
+	/// </summary>
+	[Fact]
+	public async Task ParkedRentAsync_OnAnExhaustedPool_IsReleasedCleanly_WhenPoolDisposes_InsteadOfHanging()
+	{
+		WaypointRunspacePool pool = CreatePool(maxRunspaces: 1);
+
+		// Exhaust the single slot so the second rent below has nowhere to go and must
+		// genuinely park inside SemaphoreSlim.WaitAsync's internal wait queue (not the
+		// fast/synchronous path #158's tests exercise).
+		WaypointRunspacePool.RunspaceLease holder = await pool.RentAsync(CancellationToken.None);
+
+		Task<WaypointRunspacePool.RunspaceLease> parkedRent = pool.RentAsync(CancellationToken.None);
+
+		// Give the second rent a moment to actually reach and park in WaitAsync before
+		// disposing -- avoids racing Dispose against the entry ThrowIf check instead of
+		// the parked-waiter path this test targets.
+		await Task.Delay(TimeSpan.FromMilliseconds(50));
+		Assert.False(parkedRent.IsCompleted);
+
+		pool.Dispose();
+
+		// Bounded wait: this is what turns "would hang forever pre-fix" into a failing
+		// (not hanging) assertion. Task.WhenAny never throws on its own, so the
+		// completed-task check below is what actually distinguishes "released" from
+		// "timed out still parked".
+		Task completed = await Task.WhenAny(parkedRent, Task.Delay(TimeSpan.FromSeconds(5)));
+		Assert.True(ReferenceEquals(completed, parkedRent), "Parked RentAsync did not complete within the timeout -- pool dispose left it hanging.");
+
+		// The clean shutdown outcome, matching #158's chosen ODE for rent-during/after
+		// dispose so the caller sees one consistent exception whether parked or fresh.
+		await Assert.ThrowsAsync<ObjectDisposedException>(() => parkedRent);
+
+		Assert.Null(Record.Exception(holder.Dispose));
+	}
+
+	/// <summary>The linked token must still honor the caller's OWN cancellation, not
+	/// just pool disposal -- a parked rent cancelled by its caller (pool never
+	/// disposed) must surface the caller's own OperationCanceledException, not an
+	/// ObjectDisposedException.</summary>
+	[Fact]
+	public async Task ParkedRentAsync_CancelledByCaller_ThrowsOperationCanceledException_NotObjectDisposedException()
+	{
+		WaypointRunspacePool pool = CreatePool(maxRunspaces: 1);
+		WaypointRunspacePool.RunspaceLease holder = await pool.RentAsync(CancellationToken.None);
+
+		using CancellationTokenSource callerCts = new();
+		Task<WaypointRunspacePool.RunspaceLease> parkedRent = pool.RentAsync(callerCts.Token);
+
+		await Task.Delay(TimeSpan.FromMilliseconds(50));
+		Assert.False(parkedRent.IsCompleted);
+
+		callerCts.Cancel();
+
+		// The exception type itself is the assertion that matters here: the caller's
+		// own cancellation must surface as a plain cancellation, never the
+		// ObjectDisposedException RentAsync throws for pool-disposal-triggered
+		// releases (the pool is never disposed in this test) -- proving the `when`
+		// guard on the linked WaitAsync catch correctly lets caller-originated
+		// cancellation through unmodified instead of misreporting it as shutdown.
+		await Assert.ThrowsAsync<OperationCanceledException>(() => parkedRent)
+			.WaitAsync(TimeSpan.FromSeconds(5));
+
+		Assert.Null(Record.Exception(holder.Dispose));
+		pool.Dispose();
+	}
+
+	/// <summary>No linked-CTS leak (#351/#324 lesson): a rent that completes normally
+	/// must not leave its per-call linked CancellationTokenSource undisposed. Not
+	/// directly observable from outside, so this drives many successful rents through
+	/// the same pool and asserts nothing degrades (no exception, no resource
+	/// exhaustion) -- a leaked CTS per call would eventually manifest as handle
+	/// pressure under load, not a single deterministic assertion.</summary>
+	[Fact]
+	public async Task ManySuccessfulRents_DoNotLeakPerCallLinkedCancellationTokenSources()
+	{
+		WaypointRunspacePool pool = CreatePool(maxRunspaces: 1);
+
+		for (int i = 0; i < 500; i++)
+		{
+			using WaypointRunspacePool.RunspaceLease lease = await pool.RentAsync(CancellationToken.None)
+				.WaitAsync(TimeSpan.FromSeconds(5));
+			Assert.NotNull(lease.Runspace);
+		}
+
+		pool.Dispose();
+	}
 }
