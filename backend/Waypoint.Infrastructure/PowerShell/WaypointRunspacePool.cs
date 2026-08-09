@@ -72,9 +72,20 @@ public sealed partial class WaypointRunspacePool : IDisposable
 	public async Task<RunspaceLease> RentAsync(CancellationToken cancellationToken)
 	{
 		ObjectDisposedException.ThrowIf(_disposed, this);
-		await _slots.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+		// The check above and WaitAsync below are not atomic: Dispose can land in the
+		// gap and dispose _slots before WaitAsync observes it, or while WaitAsync is
+		// blocked. SemaphoreSlim throws ObjectDisposedException from WaitAsync in that
+		// case -- that is the correct, single exception to surface (shutdown mid-rent
+		// is genuinely "the pool is gone"), so it is let through rather than wrapped.
+		// What must NOT happen is a second ODE: if WaitAsync itself threw ODE, the slot
+		// was never acquired, so the catch below must not attempt to release it.
+		bool acquired = false;
 		try
 		{
+			await _slots.WaitAsync(cancellationToken).ConfigureAwait(false);
+			acquired = true;
+
 			if (!_idle.TryTake(out Runspace? runspace))
 			{
 				runspace = CreateRunspace();
@@ -84,7 +95,11 @@ public sealed partial class WaypointRunspacePool : IDisposable
 		}
 		catch
 		{
-			_slots.Release();
+			if (acquired)
+			{
+				ReleaseSlot();
+			}
+
 			throw;
 		}
 	}
@@ -124,7 +139,35 @@ public sealed partial class WaypointRunspacePool : IDisposable
 		}
 		finally
 		{
+			ReleaseSlot();
+		}
+	}
+
+	/// <summary>
+	/// Releases one semaphore slot, tolerating a release that lands after
+	/// <see cref="Dispose"/>. A lease can be returned (via its using-block) after the
+	/// host has already disposed the pool at shutdown -- the semaphore is gone, but a
+	/// release with nothing left to release is meaningless, not an error. Swallowing
+	/// here is what keeps that race from throwing ObjectDisposedException out of
+	/// <see cref="RunspaceLease.Dispose"/> and masking the invocation's real
+	/// result/exception in the caller's using-block (see #158). The check-then-release
+	/// is still racy against a concurrent Dispose, so the catch is the backstop.
+	/// </summary>
+	private void ReleaseSlot()
+	{
+		if (_disposed)
+		{
+			return;
+		}
+
+		try
+		{
 			_slots.Release();
+		}
+		catch (ObjectDisposedException)
+		{
+			// Dispose won the race between the check above and this call. The pool is
+			// gone; there is nothing to release into.
 		}
 	}
 
