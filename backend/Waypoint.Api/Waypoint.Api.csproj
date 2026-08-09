@@ -24,4 +24,18 @@
     <InternalsVisibleTo Include="Waypoint.Tests" />
   </ItemGroup>
 
+  <!-- #192: appsettings.Testing.json carries ForwardedHeaders:TrustAnyProxy=true, which
+       Program.cs only honours when ASPNETCORE_ENVIRONMENT=Testing. Publishing the file
+       into the runtime image would let an operator arm that trust-everyone bypass in
+       production with nothing but an env var. CopyToPublishDirectory=Never keeps it out
+       of `dotnet publish` output (and therefore the Docker image) while leaving
+       CopyToOutputDirectory untouched, so `dotnet build`/`dotnet test` still copy it to
+       bin/ and WaypointApiFactory (UseEnvironment("Testing")) still loads it from the
+       content root. -->
+  <ItemGroup>
+    <Content Update="appsettings.Testing.json">
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
