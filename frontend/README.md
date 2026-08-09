@@ -7,6 +7,33 @@ runtime. See [ADR-0007](../docs/adr/0007-frontend.md), the
 chrome spec, layout rules) — this app implements that spec against React
 primitives, it does not port the prototype's markup.
 
+## Prerequisites
+
+Node.js **>=22.19.0** (pinned in `.nvmrc`; matches CI's `frontend.yml`, which
+installs Node 22). This is a hard floor, not a suggestion: `jsdom`, `undici`,
+and `whatwg-url` — transitive deps of the vitest/jsdom test stack — declare
+their own `engines.node` requirements in that range, and `.npmrc` in this
+directory sets `engine-strict=true`, so `npm install`/`npm ci` **fails**
+immediately on an older Node instead of installing and letting the failure
+surface later as a confusing `vitest` worker crash
+(`webidl.util.markAsUncloneable is not a function`, from `undici`).
+
+If your shell's default `node` is older than 22 (a common sandbox/devcontainer
+default is 20.x), and you manage Node versions with
+[nvm](https://github.com/nvm-sh/nvm):
+
+```bash
+nvm install    # reads .nvmrc, installs/uses Node 22 if not already present
+nvm use
+```
+
+Or, if a Node 22 install already exists under nvm but isn't your shell
+default:
+
+```bash
+export PATH="$HOME/.nvm/versions/node/v22.<x>.<y>/bin:$PATH"
+```
+
 ## Commands
 
 ```bash
