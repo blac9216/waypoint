@@ -27,7 +27,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: 0 # gitleaks scans full reachable history, not just HEAD
+          fetch-depth: 0 # full history: the PR-range scan (origin/<base>..HEAD)
+          # and the push-to-main full scan both need every commit present (#329)
 
       # The gate's own logic, verified before the gate is trusted. Running
       # the scanner against a clean tree proves only that it found nothing —
@@ -46,11 +47,38 @@ jobs:
       # and no repository secret is used anywhere in this job — the run
       # simply fails if gitleaks finds something; nothing is posted back
       # to the PR by an authenticated call.
-      - name: gitleaks secret scan (full history)
+      #
+      # gitleaks scans commit history (not just the working tree), so a
+      # secret a PR adds and then removes in a later commit is still caught.
+      # But scanning the ENTIRE fetched object store means that on a busy
+      # repo the runner can hold commits from other in-flight/merged branches,
+      # and a secret-shaped fixture in one of THOSE foreign commits fails an
+      # unrelated PR (issue #329). So the scan scope follows the event:
+      #   - pull_request: only commits unique to this PR (origin/<base>..HEAD)
+      #   - push to main: full reachable history (main's object store holds no
+      #     foreign branches; a full sweep of the canonical branch is the
+      #     belt-and-suspenders the public-repo policy wants).
+      # A PR that legitimately commits a synthetic secret *fixture* (e.g. in
+      # the sanitize self-tests) should mark that line with an inline
+      # `gitleaks:allow` comment, which gitleaks honours.
+      - name: gitleaks secret scan
+        env:
+          BASE_REF: ${{ github.base_ref }} # non-empty only on pull_request
         run: |
+          if [ -n "$BASE_REF" ]; then
+            # Guarantee the base tracking ref exists, then scope to this PR's
+            # own commit range. `--log-opts=<a>..<b>` stays a single token
+            # (no space), so the unquoted expansion below is one argv element.
+            git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            LOG_OPTS="--log-opts=origin/$BASE_REF..HEAD"
+            echo "gitleaks scope: PR range origin/$BASE_REF..HEAD"
+          else
+            LOG_OPTS=""
+            echo "gitleaks scope: full reachable history"
+          fi
           docker run --rm -v "${{ github.workspace }}:/repo" \
             zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f `# v8.30.1` \
-            detect --source /repo --redact -v
+            detect --source /repo --redact -v $LOG_OPTS
 
       # Repo-specific patterns gitleaks doesn't know about: lab FQDNs,
       # non-RFC-5737 IP addresses, and Broadcom/VMware depot-token shapes.
