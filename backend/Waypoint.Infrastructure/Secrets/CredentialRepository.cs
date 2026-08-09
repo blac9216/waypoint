@@ -109,13 +109,29 @@ public sealed class CredentialRepository
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+		Guid? id = await CreateAsync(connection, transaction, name, credentialType, owner, sudoEnabled, username, cancellationToken).ConfigureAwait(false);
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		return id;
+	}
+
+	/// <summary>
+	/// Connection-scoped core of <see cref="CreateAsync(string,string,string,bool,CancellationToken,string?)"/>
+	/// -- does not open a connection/transaction or commit; the caller owns both so
+	/// this can be composed with a secret store (issue #188, via
+	/// <see cref="ICredentialCreationCoordinator"/>).
+	/// </summary>
+	internal static async Task<Guid?> CreateAsync(
+		NpgsqlConnection connection, NpgsqlTransaction transaction, string name, string credentialType, string owner, bool sudoEnabled,
+		string? username, CancellationToken cancellationToken)
+	{
 		await using NpgsqlCommand command = new(
 			"""
 			INSERT INTO credentials (name, credential_type, owner, sudo_enabled, username)
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (name) DO NOTHING
 			RETURNING id
-			""", connection);
+			""", connection, transaction);
 		command.Parameters.AddWithValue(name);
 		command.Parameters.AddWithValue(credentialType);
 		command.Parameters.AddWithValue(owner);
@@ -178,6 +194,18 @@ public sealed class CredentialRepository
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new("UPDATE credentials SET rotated_at = now() WHERE id = $1", connection);
+		command.Parameters.AddWithValue(id);
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Connection-scoped core of <see cref="StampRotatedAsync"/>, for composition into
+	/// the atomic create-with-secret transaction (issue #188, via
+	/// <see cref="ICredentialCreationCoordinator"/>).
+	/// </summary>
+	internal static async Task StampRotatedAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid id, CancellationToken cancellationToken)
+	{
+		await using NpgsqlCommand command = new("UPDATE credentials SET rotated_at = now() WHERE id = $1", connection, transaction);
 		command.Parameters.AddWithValue(id);
 		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
