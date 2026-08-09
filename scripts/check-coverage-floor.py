@@ -69,7 +69,11 @@ def find_report(pattern: str) -> str:
 
 
 def measure_cobertura(report_path: str, metric: str) -> float:
-    tree = ET.parse(report_path)
+    try:
+        tree = ET.parse(report_path)
+    except ET.ParseError as exc:
+        print(f"error: {report_path} is not valid cobertura xml: {exc}", file=sys.stderr)
+        sys.exit(2)
     root = tree.getroot()
     attr = "line-rate" if metric == "line" else "branch-rate"
     rate_str = root.get(attr)
@@ -81,7 +85,11 @@ def measure_cobertura(report_path: str, metric: str) -> float:
 
 def measure_vitest_json_summary(report_path: str, metric: str) -> float:
     with open(report_path, encoding="utf-8") as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as exc:
+            print(f"error: {report_path} is not valid json: {exc}", file=sys.stderr)
+            sys.exit(2)
     key = "lines" if metric == "line" else "branches"
     try:
         return float(data["total"][key]["pct"])
