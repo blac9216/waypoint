@@ -229,6 +229,38 @@ public sealed class ConfigDocsApiTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 	}
 
+	/// <summary>
+	/// Issue #270 AC: "GET-by-id on a doc with no versions returns a clean response, not
+	/// 500". A doc row with current_version = 0 and zero config_versions rows is exactly
+	/// the shape a pre-#270 mid-save crash could have left behind (the atomic-write fix in
+	/// ConfigDocRepository.SaveAsync makes new ones unreachable, but does not retroactively
+	/// clean up any that already exist) -- inserted directly here since the fixed write
+	/// path can no longer produce it. Get, ListVersions, and GetVersion must all 404
+	/// cleanly rather than the pre-fix null-forgiving deref 500.
+	/// </summary>
+	[Fact]
+	public async Task Get_OrphanDocWithNoVersions_Is404NotServerError()
+	{
+		Guid orphanId = Guid.NewGuid();
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync().ConfigureAwait(false);
+			await using NpgsqlCommand insertOrphan = new(
+				"INSERT INTO config_docs (id, kind, profile, layer_type, layer_ref, current_version) VALUES ($1, 'input', 'orphan-api-profile', 'global', NULL, 0)", connection);
+			insertOrphan.Parameters.AddWithValue(orphanId);
+			await insertOrphan.ExecuteNonQueryAsync().ConfigureAwait(false);
+		}
+
+		HttpResponseMessage getResponse = await SendAsync(HttpMethod.Get, $"/api/v1/config-docs/{orphanId}", "Viewer", body: null);
+		Assert.Equal(HttpStatusCode.NotFound, getResponse.StatusCode);
+
+		HttpResponseMessage versionsResponse = await SendAsync(HttpMethod.Get, $"/api/v1/config-docs/{orphanId}/versions", "Viewer", body: null);
+		Assert.Equal(HttpStatusCode.NotFound, versionsResponse.StatusCode);
+
+		HttpResponseMessage versionResponse = await SendAsync(HttpMethod.Get, $"/api/v1/config-docs/{orphanId}/versions/1", "Viewer", body: null);
+		Assert.Equal(HttpStatusCode.NotFound, versionResponse.StatusCode);
+	}
+
 	[Fact]
 	public async Task Resolve_TargetOverridesSiteOverridesGlobal_MostSpecificWins()
 	{

@@ -153,6 +153,121 @@ public sealed class ConfigDocRepositoryTests : IAsyncLifetime
 		Assert.Null(result);
 	}
 
+	/// <summary>
+	/// Issue #270: slot-creation and @v1 must commit as one transaction, so a failure in
+	/// the @v1 insert must roll back the config_docs row too -- never leaving an orphan
+	/// (a doc row with current_version = 0 and no config_versions rows). A real process
+	/// crash between the two steps is not reproducible from a test, so this forces the
+	/// failure a different way: pre-seed a v1 row under a *different* doc id at the same
+	/// slot is not possible (version numbers are per-doc, not global), so instead this
+	/// pre-seeds an inconsistent row directly -- a config_docs row already sitting at the
+	/// target slot with current_version left at 0 but a stray v1 already present. SaveAsync
+	/// targets a *different*, brand-new id at that same (kind, profile, layer): the slot
+	/// lookup finds the pre-seeded row (no INSERT into config_docs happens for the new id),
+	/// so this exercises SaveVersionAsync's own transaction boundary rather than
+	/// FindOrCreateDocAsync's -- see the companion API-level orphan/GET test and the
+	/// concurrent-create test below for the rest of the #270 AC.
+	/// </summary>
+	[Fact]
+	public async Task SaveVersionAsync_UniqueViolationOnInsert_RollsBackWithoutLeavingAStrayVersion()
+	{
+		Guid docId = Guid.NewGuid();
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync().ConfigureAwait(false);
+			await using NpgsqlCommand insertDoc = new(
+				"INSERT INTO config_docs (id, kind, profile, layer_type, layer_ref, current_version) VALUES ($1, $2, $3, 'global', NULL, 0)", connection);
+			insertDoc.Parameters.AddWithValue(docId);
+			insertDoc.Parameters.AddWithValue(ConfigDocKinds.Input);
+			insertDoc.Parameters.AddWithValue("orphan-force-profile");
+			await insertDoc.ExecuteNonQueryAsync().ConfigureAwait(false);
+
+			await using NpgsqlCommand insertStrayVersion = new(
+				"INSERT INTO config_versions (doc_id, version, author, body_yaml) VALUES ($1, 1, 'seed', 'seed: true')", connection);
+			insertStrayVersion.Parameters.AddWithValue(docId);
+			await insertStrayVersion.ExecuteNonQueryAsync().ConfigureAwait(false);
+		}
+
+		// current_version is still 0 (never advanced), so SaveVersionAsync computes
+		// nextVersion = 1 and its INSERT collides with the stray v1 seeded above --
+		// forcing a real Postgres unique-violation inside SaveVersionAsync's transaction.
+		await Assert.ThrowsAsync<PostgresException>(
+			() => _configDocs.SaveVersionAsync(docId, "alice", "x: 1", CancellationToken.None));
+
+		// The doc row's current_version must be unchanged (still 0) -- the UPDATE that
+		// would have repointed it never committed because the INSERT before it failed and
+		// the whole transaction rolled back.
+		ConfigDoc? doc = await _configDocs.GetAsync(docId, CancellationToken.None);
+		Assert.Equal(0, doc!.CurrentVersion);
+
+		// No second version row was left behind -- only the one seeded directly.
+		IReadOnlyList<ConfigDocVersion> versions = await _configDocs.ListVersionsAsync(docId, CancellationToken.None);
+		Assert.Single(versions);
+		Assert.Equal("seed", versions[0].Author);
+	}
+
+	/// <summary>
+	/// Issue #270 AC: "GET-by-id on a doc with no versions returns a clean response, not
+	/// 500" is verified at the HTTP layer in ConfigDocsApiTests; this is the repository-level
+	/// companion proving the specific orphan shape (current_version = 0, zero
+	/// config_versions rows) degrades cleanly rather than throwing when read directly.
+	/// </summary>
+	[Fact]
+	public async Task GetLatestVersionAsync_OrphanDocWithNoVersions_ReturnsNullNotThrow()
+	{
+		Guid docId = Guid.NewGuid();
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync().ConfigureAwait(false);
+			await using NpgsqlCommand insertOrphan = new(
+				"INSERT INTO config_docs (id, kind, profile, layer_type, layer_ref, current_version) VALUES ($1, $2, $3, 'global', NULL, 0)", connection);
+			insertOrphan.Parameters.AddWithValue(docId);
+			insertOrphan.Parameters.AddWithValue(ConfigDocKinds.Attestation);
+			insertOrphan.Parameters.AddWithValue("orphan-read-profile");
+			await insertOrphan.ExecuteNonQueryAsync().ConfigureAwait(false);
+		}
+
+		ConfigDoc? doc = await _configDocs.GetAsync(docId, CancellationToken.None);
+		Assert.NotNull(doc);
+
+		ConfigDocVersion? latest = await _configDocs.GetLatestVersionAsync(docId, CancellationToken.None);
+		Assert.Null(latest);
+	}
+
+	/// <summary>
+	/// Issue #270 AC: concurrent first-saves at the same brand-new (kind, profile, layer)
+	/// slot must still dedupe to exactly one config_docs row -- the FindOrCreateDocAsync
+	/// unique-violation-and-reread race handling (now running inside SaveAsync's shared
+	/// transaction via a SAVEPOINT, see ConfigDocRepository) must still work.
+	/// </summary>
+	[Fact]
+	public async Task SaveAsync_ConcurrentFirstSavesAtSameNewSlot_DedupeToOneDocRow()
+	{
+		string profile = $"concurrent-slot-{Guid.NewGuid():N}";
+
+		Task<(ConfigDocSaveOutcome, ConfigDoc?, ConfigDocVersion?)> first = _configDocs.SaveAsync(
+			Guid.NewGuid(), ConfigDocKinds.Input, profile, ConfigDocLayers.Global, null, "alice", "a: 1", CancellationToken.None);
+		Task<(ConfigDocSaveOutcome, ConfigDoc?, ConfigDocVersion?)> second = _configDocs.SaveAsync(
+			Guid.NewGuid(), ConfigDocKinds.Input, profile, ConfigDocLayers.Global, null, "bob", "b: 1", CancellationToken.None);
+
+		(ConfigDocSaveOutcome, ConfigDoc?, ConfigDocVersion?)[] results = await Task.WhenAll(first, second);
+
+		Assert.All(results, r => Assert.Equal(ConfigDocSaveOutcome.Ok, r.Item1));
+		Assert.Equal(results[0].Item2!.Id, results[1].Item2!.Id);
+
+		(IReadOnlyList<ConfigDoc> items, long total) = await _configDocs.ListAsync(
+			ConfigDocKinds.Input, profile, ConfigDocLayers.Global, null, new PageRequest(), CancellationToken.None);
+		Assert.Equal(1, total);
+		Assert.Single(items);
+
+		// Exactly one of the two saves landed as v1 and the other as v2 -- both against the
+		// single deduped doc row, never two v1 rows under two doc rows.
+		IReadOnlyList<ConfigDocVersion> versions = await _configDocs.ListVersionsAsync(items[0].Id, CancellationToken.None);
+		Assert.Equal(2, versions.Count);
+		Assert.Contains(versions, v => v.Version == 1);
+		Assert.Contains(versions, v => v.Version == 2);
+	}
+
 	[Fact]
 	public async Task GetVersionAsync_ByteStableRoundTrip_ForValidYaml()
 	{
