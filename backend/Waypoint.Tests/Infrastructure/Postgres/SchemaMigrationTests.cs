@@ -430,6 +430,79 @@ public sealed class SchemaMigrationTests
 	}
 
 	/// <summary>
+	/// Issue #231: a token cancelled before <see cref="NpgsqlSchemaMigrator.ApplyAsync"/>
+	/// is even called must abort promptly with <see cref="OperationCanceledException"/>
+	/// rather than run to completion regardless -- proving the token actually reaches the
+	/// commands the runner issues (the connection open, the advisory-lock acquire, the
+	/// migrations-table bootstrap) instead of being accepted and ignored. No migration may
+	/// be recorded as applied, since nothing should have progressed past the very first
+	/// cancellation check.
+	/// </summary>
+	[Fact]
+	public async Task ApplyAsync_WithAlreadyCancelledToken_ThrowsAndAppliesNothing()
+	{
+		string connectionString = await CreateFreshDatabaseAsync();
+		NpgsqlSchemaMigrator migrator = new(connectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+
+		using CancellationTokenSource cts = new();
+		await cts.CancelAsync();
+
+		await Assert.ThrowsAnyAsync<OperationCanceledException>(() => migrator.ApplyAsync(cts.Token));
+
+		// schema_migrations may or may not exist depending on exactly where cancellation
+		// was observed, but it must never report a migration as applied.
+		await using NpgsqlConnection verify = new(connectionString);
+		await verify.OpenAsync();
+		if (await TableExistsAsync(verify, "schema_migrations"))
+		{
+			Assert.Equal(0, await CountAsync(verify, "SELECT count(*) FROM schema_migrations"));
+		}
+	}
+
+	/// <summary>
+	/// Issue #231 (deferred third bullet of #108, more urgent after #229 made the
+	/// advisory-lock acquire wait unbounded): a caller blocked waiting on a lock another
+	/// session holds must be released by cancelling the token, not left to block
+	/// indefinitely with nothing able to interrupt it. Mirrors
+	/// <see cref="ApplyAsync_WaitsPastTheOldThirtySecondDefault_InsteadOfTimingOut"/>'s
+	/// held-lock setup, but cancels shortly after starting instead of waiting out a timed
+	/// hold, and asserts the wait is aborted promptly (well under the hold duration)
+	/// rather than completed once released.
+	/// </summary>
+	[Fact]
+	public async Task ApplyAsync_CancelledWhileBlockedOnAdvisoryLock_AbortsPromptly()
+	{
+		string connectionString = await CreateFreshDatabaseAsync();
+
+		await using NpgsqlConnection holder = new(connectionString);
+		await holder.OpenAsync();
+		await using (NpgsqlCommand acquire = new("SELECT pg_advisory_lock(875190001)", holder))
+		{
+			await acquire.ExecuteNonQueryAsync();
+		}
+
+		try
+		{
+			NpgsqlSchemaMigrator migrator = new(connectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+
+			using CancellationTokenSource cts = new(TimeSpan.FromSeconds(3));
+
+			DateTimeOffset started = DateTimeOffset.UtcNow;
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(() => migrator.ApplyAsync(cts.Token));
+			TimeSpan elapsed = DateTimeOffset.UtcNow - started;
+
+			Assert.True(
+				elapsed < TimeSpan.FromSeconds(15),
+				$"ApplyAsync took {elapsed.TotalSeconds:F1}s to observe cancellation while blocked on the advisory lock -- it should have aborted shortly after the ~3s cancellation, not run indefinitely.");
+		}
+		finally
+		{
+			await using NpgsqlCommand release = new("SELECT pg_advisory_unlock(875190001)", holder);
+			await release.ExecuteNonQueryAsync();
+		}
+	}
+
+	/// <summary>
 	/// Creates an empty database on the fixture's server and returns a connection string
 	/// for it, so a test can exercise the fresh-apply path independently of the shared
 	/// database every other test in the collection migrates.
