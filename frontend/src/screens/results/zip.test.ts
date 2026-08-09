@@ -96,4 +96,82 @@ describe("buildZip", () => {
 		expect(readUint32LE(bytes, 0)).toBe(0x06054b50);
 		expect(readUint16LE(bytes, 10)).toBe(0);
 	});
+
+	describe("4GB overflow guard (no Zip64 support)", () => {
+		it("throws a clear error when a single entry's declared size exceeds the 32-bit field", () => {
+			// Constructing a real >4GB Uint8Array would blow up test memory/time;
+			// instead fake a `data.length` past the limit without allocating the
+			// backing bytes, since buildZip only reads `.length` and iterates
+			// `data` during the byte-copy step, which we never reach — the range
+			// check on `data.length` throws first.
+			const oversized: Uint8Array = { length: 0x100000000 } as unknown as Uint8Array;
+			expect(() => buildZip([{ name: "huge.ckl", data: oversized }])).toThrow(
+				/ZIP entry 'huge\.ckl' size exceeds the 4GB STORED-zip limit/,
+			);
+		});
+
+		it("throws a clear error when more than 65535 entries are supplied", () => {
+			const manyEntries = Array.from({ length: 0x10000 }, (_, i) => ({
+				name: `f${i}.ckl`,
+				data: new Uint8Array(0),
+			}));
+			expect(() => buildZip(manyEntries)).toThrow(/ZIP entry count exceeds the 65535 entries/);
+		});
+
+		it("does not throw for entries comfortably under the 4GB limit", () => {
+			expect(() =>
+				buildZip([{ name: "small.ckl", data: new TextEncoder().encode("<CHECKLIST/>") }]),
+			).not.toThrow();
+		});
+	});
+
+	describe("UTF-8 filename flag (general-purpose bit 11)", () => {
+		it("does not set the UTF-8 flag for an ASCII-only filename", async () => {
+			const bytes = await toBytes(
+				buildZip([{ name: "esxi-01.example.internal.ckl", data: new TextEncoder().encode("x") }]),
+			);
+			const localFlags = readUint16LE(bytes, 6);
+			expect(localFlags & 0x0800).toBe(0);
+		});
+
+		it("sets the UTF-8 flag (bit 11) in the local file header for a non-ASCII filename", async () => {
+			const bytes = await toBytes(
+				buildZip([{ name: "ésxi-01.ckl", data: new TextEncoder().encode("x") }]), // "ésxi-01.ckl"
+			);
+			const localFlags = readUint16LE(bytes, 6);
+			expect(localFlags & 0x0800).toBe(0x0800);
+		});
+
+		it("sets the UTF-8 flag (bit 11) in the central directory entry for a non-ASCII filename", async () => {
+			const name = "ésxi-01.ckl";
+			const data = new TextEncoder().encode("x");
+			const bytes = await toBytes(buildZip([{ name, data }]));
+
+			const nameLength = new TextEncoder().encode(name).length;
+			const centralStart = 30 + nameLength + data.length;
+			const centralFlags = readUint16LE(bytes, centralStart + 8);
+			expect(centralFlags & 0x0800).toBe(0x0800);
+		});
+
+		it("round-trips a non-ASCII filename as UTF-8 bytes in both headers", async () => {
+			const name = "ésxi-01.ckl"; // "ésxi-01.ckl"
+			const data = new TextEncoder().encode("<CHECKLIST/>");
+			const bytes = await toBytes(buildZip([{ name, data }]));
+			const encodedName = new TextEncoder().encode(name);
+
+			// Local header: name length is a UTF-8 byte count, not a JS string length.
+			const localNameLength = readUint16LE(bytes, 26);
+			expect(localNameLength).toBe(encodedName.length);
+			const localNameBytes = bytes.slice(30, 30 + localNameLength);
+			expect(new TextDecoder("utf-8").decode(localNameBytes)).toBe(name);
+
+			// Central directory: same name, same length, immediately after the
+			// local header + data (only entry in the archive).
+			const centralStart = 30 + localNameLength + data.length;
+			const centralNameLength = readUint16LE(bytes, centralStart + 28);
+			expect(centralNameLength).toBe(encodedName.length);
+			const centralNameBytes = bytes.slice(centralStart + 46, centralStart + 46 + centralNameLength);
+			expect(new TextDecoder("utf-8").decode(centralNameBytes)).toBe(name);
+		});
+	});
 });
