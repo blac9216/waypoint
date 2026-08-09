@@ -65,8 +65,40 @@ jobs:
       - name: Air-gap asset guard (ADR-0007)
         run: npm run check:external-assets
 
-      - name: Test
-        run: npm test
+      # Coverage collection (issue #102 — frontend previously ran `vitest
+      # run` with no coverage at all). "json-summary" is emitted by
+      # vitest.config.ts's coverage reporter list alongside "text"/"html";
+      # no new dependency — @vitest/coverage-v8 is already vendored.
+      - name: Test (with coverage)
+        run: npm run test:coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        continue-on-error: true
+        with:
+          name: frontend-coverage
+          path: frontend/coverage
+          retention-days: 14
+
+      # Coverage FLOOR gate (issue #102), same rationale and script as
+      # backend.yml — see scripts/check-coverage-floor.py's header for why
+      # this is a floor and not issue #79's true no-regression check
+      # (air-gapped: no external baseline service).
+      #
+      # Floor = 88.0% line coverage, measured at 90.12% on 2026-08-08
+      # (165/165 tests passing, commit f2aadfe) and rounded down ~2 points
+      # for headroom. To ratchet up: re-measure locally with `npm run
+      # test:coverage`, confirm the new number holds, then raise --floor
+      # here (never lower it to accommodate a regression).
+      - name: Coverage gate (floor)
+        working-directory: ${{ github.workspace }}
+        run: >
+          python3 scripts/check-coverage-floor.py
+          --report "frontend/coverage/coverage-summary.json"
+          --format vitest-json-summary
+          --floor 88.0
+          --metric line
 
       - name: Lint
         run: npm run lint

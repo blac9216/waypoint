@@ -1011,7 +1011,12 @@ describe("check-no-external-assets", () => {
 				// boundary the #122 repro exploited, and all three dispositions.
 				expect(cases.some((c) => c.bytes.length > MB)).toBe(true);
 				expect(new Set(actual.values()).size).toBeGreaterThan(1);
-			});
+			// This fuzz case writes CASE_COUNT files to a real temp dir and
+			// re-scans them; under v8 coverage instrumentation (the CI
+			// `test:coverage` run added in #102) that comfortably exceeds
+			// vitest's 5000ms default. Give it explicit headroom rather than
+			// raising the global timeout (which would mask genuine hangs).
+			}, 30000);
 
 			it("catches the exact #122 regression shape: a size-cap early-exit inside scanDist", () => {
 				// This does not test scanDist as shipped — it demonstrates that

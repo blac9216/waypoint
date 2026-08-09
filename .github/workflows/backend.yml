@@ -62,10 +62,6 @@ jobs:
           --collect:"XPlat Code Coverage"
           --results-directory ./TestResults
 
-      # No coverage floor is enforced yet (issue #79 prefers a no-regression
-      # check over a fixed threshold, to avoid the first legitimately-hard-
-      # to-test path forcing a waiver). The report is uploaded so a reviewer
-      # can read it; wiring a regression gate is follow-up work.
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -74,3 +70,32 @@ jobs:
           name: backend-coverage
           path: backend/TestResults
           retention-days: 14
+
+      # Coverage FLOOR gate (issue #102). Issue #79 asked for a true
+      # no-regression check (compare against the base branch) in preference
+      # to a fixed floor, but this appliance is fully air-gapped (CLAUDE.md,
+      # ADR-0007) — no Codecov/Coveralls/external service to store a
+      # baseline in, and a self-hosted no-regression check would need a
+      # baseline persisted across runs or committed to the repo. Left as a
+      # documented future option (see scripts/check-coverage-floor.py's
+      # header). What's here instead: a committed floor enforced by a
+      # self-contained, network-free script reading the Cobertura report
+      # this job already produces.
+      #
+      # Floor = 88.0% line coverage. The floor is being established at the
+      # codebase's CURRENT true coverage, not an old high-water mark: it
+      # measured 88.84% on 2026-08-09 (CI on PR #391, current main + this
+      # PR, which adds no product code — only the gate). The earlier 91.92%
+      # figure predated ~78 M2 commits that shifted the real number down;
+      # baselining the gate at reality with a small headroom is correct, and
+      # is NOT lowering the floor to wave through a regression (this PR
+      # introduces none). To ratchet up: re-measure with a fresh
+      # `dotnet test --collect:"XPlat Code Coverage"`, confirm the new number
+      # holds, then raise --floor here (never lower it to chase a regression).
+      - name: Coverage gate (floor)
+        run: >
+          python3 scripts/check-coverage-floor.py
+          --report "backend/TestResults/**/coverage.cobertura.xml"
+          --format cobertura
+          --floor 88.0
+          --metric line

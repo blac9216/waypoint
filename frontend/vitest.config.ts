@@ -9,7 +9,12 @@ export default defineConfig({
 		css: true,
 		coverage: {
 			provider: "v8",
-			reporter: ["text", "html"],
+			// "json-summary" is built into @vitest/coverage-v8 (already vendored,
+			// no new dependency) and is what the CI coverage-floor gate parses
+			// (scripts/check-coverage-floor.py --format vitest-json-summary).
+			// "text"/"html" remain for humans reading a local run or the
+			// uploaded CI artifact.
+			reporter: ["text", "html", "json-summary"],
 			include: ["src/**/*.{ts,tsx}"],
 			exclude: ["src/main.tsx", "src/vite-env.d.ts", "src/**/*.test.{ts,tsx}", "src/screens/**"],
 		},

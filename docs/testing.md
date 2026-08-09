@@ -345,8 +345,8 @@ GitHub Actions runs four workflows — [`sanitize.yml`](../.github/workflows/san
 | Workflow | Triggers on | What it runs |
 | --- | --- | --- |
 | `sanitize` | every PR + push, no path filter (hard gate) | the scanner's own test suite (`.github/sanitize/test_scan_repo_specific.py`), then a `gitleaks` full-history secret scan, then a repo-specific scanner (`.github/sanitize/scan_repo_specific.py`) for lab-style FQDNs, non-RFC-5737 IPv4 addresses, non-documentation/non-loopback/non-unspecified IPv6 addresses (issue #112), and Broadcom/VMware depot-token shapes |
-| `backend` | `backend/**` | `dotnet build -warnaserror`, `dotnet test` with coverage |
-| `frontend` | `frontend/**` | `npm ci`, `npm run build`, the ADR-0007 air-gap asset guard **as its own explicit step**, `npm test`, `oxlint` |
+| `backend` | `backend/**` | `dotnet build -warnaserror`, `dotnet test` with coverage, a coverage **floor** gate |
+| `frontend` | `frontend/**` | `npm ci`, `npm run build`, the ADR-0007 air-gap asset guard **as its own explicit step**, `npm run test:coverage`, a coverage **floor** gate, `oxlint` |
 | `deploy` | `deploy/**`, `scripts/**` | `docker compose config`, `nginx -t` against the shipped `conf.d` with a throwaway generated dev cert, `shellcheck` |
 
 Every job is path-filtered except `sanitize`, which is a hard gate on everything —
@@ -355,6 +355,49 @@ real in a markdown file as in code. Every job sets its own `concurrency` group w
 `cancel-in-progress`, so a superseded push doesn't keep burning runner time. No
 workflow references a repository secret; PR triggers are plain `pull_request`, never
 `pull_request_target`; every third-party action is pinned by full commit SHA.
+
+### Coverage gate: a committed floor, not a stored baseline (issue #102)
+
+`backend.yml` and `frontend.yml` both run a coverage **floor** gate as their last
+test-adjacent step, via [`scripts/check-coverage-floor.py`](../scripts/check-coverage-floor.py)
+(stdlib-only Python, no network calls, no marketplace action). It parses the coverage
+report each job already produces — backend's Cobertura XML from
+`--collect:"XPlat Code Coverage"`, frontend's `coverage-summary.json` from vitest's
+`json-summary` reporter (built into the already-vendored `@vitest/coverage-v8`, no new
+dependency) — and fails the job if line coverage is below a hardcoded threshold.
+
+Issue [#79](https://github.com/blac9216/waypoint/issues/79) asked for a true
+**no-regression** check (fail only if a PR's coverage is lower than the base branch's)
+in preference to a fixed floor, to avoid the first legitimately-hard-to-test path
+forcing a waiver. That is the better gate, but it needs somewhere to keep the base
+branch's number — either a persisted baseline artifact across CI runs or a file
+committed to the repo and updated on every merge to `main`. This repository is fully
+air-gapped (`CLAUDE.md`, ADR-0007): no Codecov, no Coveralls, no external coverage
+service of any kind. Storing and comparing a baseline entirely inside self-hosted CI
+is possible (a `coverage-baseline.json` committed to the repo, updated in the same PR
+that raises coverage) but is deliberately **not** built here — issue #102 chose the
+floor as the pragmatic air-gap-compatible interim, and a no-regression gate on a
+committed baseline is left as a documented future option.
+
+Current floors (backend re-baselined 2026-08-09 against current `main`; frontend
+measured 2026-08-08 at commit `f2aadfe`):
+
+| Project | Metric | Floor | Measured | Headroom |
+| --- | --- | --- | --- | --- |
+| backend | line | 88.0% | 88.84% (CI on current main, PR #391) | ~1 point |
+| frontend | line | 88.0% | 90.12% (165/165 tests) | ~2 points |
+
+The backend floor was set from the codebase's *current* coverage, not an older
+high-water mark: 91.92% was measured at `f2aadfe`, but ~78 M2 commits landed
+between then and the gate going live and moved the real number to 88.84%. The gate
+is baselined at reality (adding it changed no product code), so this is not a
+lowered floor accommodating a regression.
+
+**Ratcheting the floor up**: re-measure locally (`dotnet test backend/Waypoint.sln
+--collect:"XPlat Code Coverage"` / `npm run test:coverage` in `frontend/`), confirm the
+new number holds, then raise the `--floor` value in the workflow file. Never lower a
+floor to accommodate a regression — fix the regression instead. The floor is a ratchet
+in one direction only.
 
 **A green check is not proof of correctness.** CI is additive to the contextless
 review this repo already relies on — it is never a substitute for it, and reviewers
