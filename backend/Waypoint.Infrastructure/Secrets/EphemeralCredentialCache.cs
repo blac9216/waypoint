@@ -43,14 +43,28 @@ public sealed partial class EphemeralCredentialCache : IEphemeralCredentialCache
 	private readonly ISecretTracker _tracker;
 	private readonly string? _connectionString;
 	private readonly ILogger<EphemeralCredentialCache> _logger;
+	private readonly Func<DateTimeOffset> _now;
 
 	public EphemeralCredentialCache(ISecretTracker tracker, string? connectionString, ILogger<EphemeralCredentialCache> logger)
+		: this(tracker, connectionString, logger, () => DateTimeOffset.UtcNow)
+	{
+	}
+
+	/// <summary>
+	/// Test-only seam: lets a unit test advance past <see cref="EntryLifetime"/> without a
+	/// real 30-minute wait. Production always goes through the public constructor above,
+	/// which pins <paramref name="now"/> to real time -- nothing in DI or production code
+	/// calls this overload.
+	/// </summary>
+	internal EphemeralCredentialCache(ISecretTracker tracker, string? connectionString, ILogger<EphemeralCredentialCache> logger, Func<DateTimeOffset> now)
 	{
 		ArgumentNullException.ThrowIfNull(tracker);
 		ArgumentNullException.ThrowIfNull(logger);
+		ArgumentNullException.ThrowIfNull(now);
 		_tracker = tracker;
 		_connectionString = connectionString;
 		_logger = logger;
+		_now = now;
 	}
 
 	public void Put(Guid jobId, Guid? runId, EphemeralCredential credential, string actor)
@@ -64,7 +78,7 @@ public sealed partial class EphemeralCredentialCache : IEphemeralCredentialCache
 		// Track BEFORE the entry is visible to any reader -- same "track before it can go
 		// anywhere" discipline as CredentialSecretStore.DecryptAsync (control 1).
 		IDisposable redaction = _tracker.Track(credential.Secret);
-		Entry entry = new(credential, redaction, DateTimeOffset.UtcNow + EntryLifetime);
+		Entry entry = new(credential, redaction, _now() + EntryLifetime);
 		if (!_entries.TryAdd(jobId, entry))
 		{
 			// A second Put for the same job id would leak the first entry's redaction
@@ -93,7 +107,7 @@ public sealed partial class EphemeralCredentialCache : IEphemeralCredentialCache
 
 	private void SweepExpired()
 	{
-		DateTimeOffset now = DateTimeOffset.UtcNow;
+		DateTimeOffset now = _now();
 		foreach (KeyValuePair<Guid, Entry> pair in _entries)
 		{
 			if (pair.Value.ExpiresAt <= now && _entries.TryRemove(pair.Key, out Entry? removed))
