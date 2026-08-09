@@ -251,14 +251,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	const sessionRef = useRef<StoredSession | null>(null);
 	sessionRef.current = session;
 
+	// The one teardown path for "this session is over, for any reason" — an
+	// explicit logout(), a 401 from the server (setUnauthorizedHandler below),
+	// or the client-side expiry enforcement (issue #97). All three funnel
+	// through here so there is exactly one way a session ends, not a parallel
+	// one invented per caller.
+	const dropSession = useCallback(() => {
+		setSession(null);
+		setStatus("signed-out");
+		clearStoredSession();
+	}, []);
+
 	useEffect(() => {
 		setTokenGetter(() => sessionRef.current?.token ?? null);
-		setUnauthorizedHandler(() => {
-			setSession(null);
-			setStatus("signed-out");
-			clearStoredSession();
-		});
-	}, []);
+		setUnauthorizedHandler(dropSession);
+	}, [dropSession]);
 
 	useEffect(() => {
 		const restored = readStoredSession();
@@ -271,6 +278,60 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		setSession(restored);
 		setStatus(restored ? "signed-in" : "signed-out");
 	}, []);
+
+	/**
+	 * Client-side expiry enforcement (issue #97). Without this, an expired
+	 * `expiresAt` was only noticed on the *next* mount (readStoredSession) or
+	 * whenever some authenticated request happened to 401 — until then the
+	 * app kept rendering full chrome on a token the server had already
+	 * invalidated. There is no refresh endpoint in M1
+	 * (docs/api-contract.md's Auth section): expiry means sign out, not renew.
+	 *
+	 * Two mechanisms, because neither alone is sufficient:
+	 *
+	 * - A `setTimeout` scheduled to the exact `expiresAt` catches the common
+	 *   case (tab stays open and foregrounded) promptly, without polling.
+	 *   Re-scheduled whenever `session` changes (login, restore, logout) and
+	 *   always cleared on cleanup — an uncleared timer here would fire
+	 *   `dropSession()` against a since-unmounted/replaced provider, the exact
+	 *   leaked-timer shape issue #324 was about.
+	 * - A `visibilitychange`/`focus` re-check catches the case the timer
+	 *   can't: a backgrounded tab's timers are throttled/clamped by the
+	 *   browser, so a tab that was backgrounded before expiry and returns to
+	 *   the foreground after it must re-evaluate immediately rather than wait
+	 *   for a delayed timer to eventually fire.
+	 *
+	 * Both paths call the same `dropSession()` used by `logout()` and the 401
+	 * handler — no parallel sign-out logic.
+	 */
+	useEffect(() => {
+		if (!session) {
+			return;
+		}
+		const msRemaining = Date.parse(session.expiresAt) - Date.now();
+		if (msRemaining <= 0) {
+			dropSession();
+			return;
+		}
+		const timer = window.setTimeout(dropSession, msRemaining);
+
+		const recheck = () => {
+			if (document.visibilityState !== "visible") {
+				return;
+			}
+			if (Date.parse(sessionRef.current?.expiresAt ?? "") <= Date.now()) {
+				dropSession();
+			}
+		};
+		document.addEventListener("visibilitychange", recheck);
+		window.addEventListener("focus", recheck);
+
+		return () => {
+			window.clearTimeout(timer);
+			document.removeEventListener("visibilitychange", recheck);
+			window.removeEventListener("focus", recheck);
+		};
+	}, [session, dropSession]);
 
 	const login = useCallback(async (username: string, password: string) => {
 		setStatus("signing-in");
@@ -353,10 +414,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	const logout = useCallback(() => {
-		setSession(null);
-		setStatus("signed-out");
-		clearStoredSession();
-	}, []);
+		dropSession();
+	}, [dropSession]);
 
 	const value = useMemo<AuthContextValue>(
 		() => ({

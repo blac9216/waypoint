@@ -480,3 +480,205 @@ describe("AuthProvider wire-path field validation (issue #64 — token, expires_
 		expect(calls).toEqual(["/api/v1/auth/login"]);
 	});
 });
+
+/**
+ * Restore-path validation hardening (issue #98, found in PR #93 review).
+ *
+ * `readStoredSession()` already rejected an unrecognized `role` strictly via
+ * `isRole()`; `token`, `username`, and `expiresAt` were only loosely checked
+ * (`typeof === "string"`, and whatever `Date.parse` tolerates). These cases
+ * pin the fix: blank token/username and a non-ISO-8601 `expiresAt` are
+ * refused, matching the strictness already applied to `role` and to the
+ * wire path's `toWireText`/`toWireInstant`.
+ */
+describe("AuthProvider restored-session field validation (issue #98)", () => {
+	beforeEach(() => {
+		window.sessionStorage.clear();
+	});
+
+	const futureExpiry = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+	function seedStoredSession(overrides: Record<string, unknown>): void {
+		window.sessionStorage.setItem(
+			STORAGE_KEY,
+			JSON.stringify({
+				token: "tok-restored",
+				username: "admin",
+				role: "Admin",
+				expiresAt: futureExpiry(),
+				...overrides,
+			}),
+		);
+	}
+
+	it.each([
+		["empty string", ""],
+		["whitespace only", "   "],
+	])("rejects a restored session whose token is %s", async (_label, token) => {
+		seedStoredSession({ token });
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+		// A rejected restore does not leave the bad session behind for the next mount.
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	});
+
+	it.each([
+		["empty string", ""],
+		["whitespace only", "   "],
+	])("rejects a restored session whose username is %s", async (_label, username) => {
+		seedStoredSession({ username });
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+	});
+
+	it("rejects a restored session with a non-ISO but Date.parse-able expiresAt", async () => {
+		// "December 31, 2099" is exactly the repro from issue #98: Date.parse
+		// accepts it, but it is not a shape the backend's DateTimeOffset
+		// serializer can ever emit.
+		seedStoredSession({ expiresAt: "December 31, 2099" });
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+	});
+
+	it("accepts a restored session with a well-formed ISO-8601 expiresAt", async () => {
+		seedStoredSession({});
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+		await waitFor(() =>
+			expect(screen.getByText("signed in as admin (Admin) token=tok-restored")).toBeInTheDocument(),
+		);
+	});
+});
+
+/**
+ * Client-side expiry enforcement while the tab stays open (issue #97, found
+ * in PR #93 review). Before this fix, `expiresAt` was only checked inside
+ * `readStoredSession()` on mount — once signed in, nothing revisited it, so
+ * an expired session kept rendering full chrome until some request happened
+ * to 401.
+ */
+describe("AuthProvider expiry enforcement while mounted (issue #97)", () => {
+	beforeEach(() => {
+		window.sessionStorage.clear();
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	function seedStoredSession(expiresInMs: number): void {
+		window.sessionStorage.setItem(
+			STORAGE_KEY,
+			JSON.stringify({
+				token: "tok-live",
+				username: "admin",
+				role: "Admin",
+				expiresAt: new Date(Date.now() + expiresInMs).toISOString(),
+			}),
+		);
+	}
+
+	it("drops to the login screen when the session expires while mounted, via its scheduled timer", async () => {
+		seedStoredSession(5_000);
+
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await vi.waitFor(() =>
+			expect(screen.getByText("signed in as admin (Admin) token=tok-live")).toBeInTheDocument(),
+		);
+
+		// Advance past expiry — no user interaction, no failed request.
+		await vi.advanceTimersByTimeAsync(5_001);
+
+		expect(screen.getByText("signed out")).toBeInTheDocument();
+		// The stale session is not left behind in storage either.
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	});
+
+	it("re-checks expiry on visibilitychange/focus and drops to login if already past expiry", async () => {
+		// A backgrounded tab's timers are throttled by the browser, so this
+		// pins the second enforcement path independently of the setTimeout:
+		// advance the clock without letting the fake timer queue run the
+		// scheduled callback, then simulate the tab regaining focus.
+		seedStoredSession(5_000);
+
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await vi.waitFor(() =>
+			expect(screen.getByText("signed in as admin (Admin) token=tok-live")).toBeInTheDocument(),
+		);
+
+		// Move the clock past expiry without advancing fake timers (simulates a
+		// throttled/backgrounded tab where the setTimeout hasn't fired yet).
+		vi.setSystemTime(Date.now() + 10_000);
+		Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+		document.dispatchEvent(new Event("visibilitychange"));
+
+		await vi.waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+	});
+
+	it("does not leak the expiry timer or visibility/focus listeners on unmount", async () => {
+		seedStoredSession(5_000);
+
+		const addSpy = vi.spyOn(document, "addEventListener");
+		const removeSpy = vi.spyOn(document, "removeEventListener");
+		const winAddSpy = vi.spyOn(window, "addEventListener");
+		const winRemoveSpy = vi.spyOn(window, "removeEventListener");
+
+		const { unmount } = render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await vi.waitFor(() =>
+			expect(screen.getByText("signed in as admin (Admin) token=tok-live")).toBeInTheDocument(),
+		);
+
+		const visibilityAdds = addSpy.mock.calls.filter((call) => call[0] === "visibilitychange").length;
+		const focusAdds = winAddSpy.mock.calls.filter((call) => call[0] === "focus").length;
+		expect(visibilityAdds).toBeGreaterThan(0);
+		expect(focusAdds).toBeGreaterThan(0);
+
+		unmount();
+
+		const visibilityRemoves = removeSpy.mock.calls.filter((call) => call[0] === "visibilitychange").length;
+		const focusRemoves = winRemoveSpy.mock.calls.filter((call) => call[0] === "focus").length;
+		expect(visibilityRemoves).toBe(visibilityAdds);
+		expect(focusRemoves).toBe(focusAdds);
+
+		// And the now-orphaned timer, if it were still live, would throw or act
+		// on unmounted state; advancing well past expiry after unmount must be
+		// silent.
+		await vi.advanceTimersByTimeAsync(10_000);
+
+		addSpy.mockRestore();
+		removeSpy.mockRestore();
+		winAddSpy.mockRestore();
+		winRemoveSpy.mockRestore();
+	});
+});
