@@ -46,7 +46,16 @@ function installChromeFetchMock(role: "Viewer" | "Admin" = "Admin") {
 			return jsonResponse({ version: "0.1.0-dev", build: "local", mode: "connected", update_available: null });
 		}
 		if (url === "/api/v1/stigman") {
-			return jsonResponse({ connected: true, endpoint: "stigman.example.internal", collection: "17" });
+			return jsonResponse({
+				endpoint: "https://stigman.example.internal",
+				authority: "https://keycloak.example.internal/realms/waypoint",
+				collection: "17",
+				client_id: "waypoint-appliance",
+				scope: "openid stig-manager:stig:read",
+				credential_id: "cred-token-1",
+				created_at: "2026-01-01T00:00:00Z",
+				updated_at: "2026-07-01T00:00:00Z",
+			});
 		}
 		if (url.startsWith("/api/v1/events")) {
 			// Stay open indefinitely (a real SSE connection); the test never awaits it.
@@ -81,7 +90,7 @@ function installDeferredSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = 
 			return jsonResponse({ version: "0.1.0-dev", build: "local", mode, update_available: null });
 		}
 		if (url === "/api/v1/stigman") {
-			return jsonResponse({ connected: false, endpoint: null, collection: null });
+			return jsonResponse({ error: { code: "not_found", message: "No global STIG Manager connection is configured." } }, 404);
 		}
 		if (url.startsWith("/api/v1/events")) {
 			return new Promise(() => {});
@@ -311,7 +320,7 @@ describe("App", () => {
 				return jsonResponse({ version: "0.1.0-dev", build: "local", mode: "disconnected", update_available: null });
 			}
 			if (url === "/api/v1/stigman") {
-				return jsonResponse({ connected: false, endpoint: null, collection: null });
+				return jsonResponse({ error: { code: "not_found", message: "No global STIG Manager connection is configured." } }, 404);
 			}
 			if (url.startsWith("/api/v1/events")) {
 				return new Promise(() => {});

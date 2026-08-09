@@ -266,7 +266,7 @@ describe("DownloadCatalogScreen", () => {
 			if (url.startsWith("/api/v1/catalog/artifacts")) return jsonResponse({ artifacts: ARTIFACTS, index_synced_at: null });
 			if (url === "/api/v1/downloads" && init?.method === undefined) return jsonResponse([]);
 			if (url === "/api/v1/system") return jsonResponse({ version: "2.4.1", build: "24817", mode: "disconnected", update_available: null });
-			if (url === "/api/v1/stigman") return jsonResponse({ connected: false, endpoint: null, collection: null });
+			if (url === "/api/v1/stigman") return jsonResponse({ error: { code: "not_found", message: "No global STIG Manager connection is configured." } }, 404);
 			throw new Error(`unexpected fetch: ${url}`);
 		}) as unknown as typeof fetch;
 		window.sessionStorage.setItem(
