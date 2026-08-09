@@ -118,6 +118,30 @@ services:
       # nginx and the backend share, and the only source X-Forwarded-For/
       # X-Forwarded-Proto should ever be trusted from in this deployment.
       ForwardedHeaders__KnownNetworks__0: "192.168.240.0/24"
+      # #223: points the PowerShell runspace pool (WaypointRunspacePool,
+      # ADR-0006) at the Waypoint-owned shim module that dot-sources the
+      # sibling vcf-docker-download repo's UNMODIFIED vcf-download-manager
+      # scripts (issue #194; CLAUDE.md License & Borrowing Policy - vendor
+      # scripts run as unmodified vendor code, never copied into this repo
+      # or baked into the image). The in-container path is fixed - it's
+      # where the Waypoint.Infrastructure build output already places the
+      # shim module, not something the operator configures - so this is a
+      # plain literal, not a ${...} env override. Module import happens
+      # lazily on first runspace rent (WaypointRunspacePool.CreateRunspace),
+      # never at DI construction or app startup, so an unconfigured stack
+      # (no scripts mounted below) still starts and reports healthy; only a
+      # job that actually dispatches into PowerShell fails, with the shim's
+      # own "no vcf-download-manager.common.ps1 path configured" error
+      # surfacing in that job's log rather than blocking the whole stack.
+      PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointCatalogIndex"
+      # Companion to the module path above: the shim reads the vendor
+      # script's location from this env var rather than a hardcoded path
+      # (see WaypointCatalogIndex.psm1's $Script:VcfDownloadManagerCommonPath).
+      # Points inside the read-only vcf-scripts mount below; matches
+      # whatever relative layout the operator's vcf-docker-download checkout
+      # uses under powershell/ (vcf-download-manager.common.ps1 lives at the
+      # top of that directory in the sibling repo today).
+      WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH: "/vcf-scripts/vcf-download-manager.common.ps1"
     volumes:
       - artifacts:/var/lib/waypoint/artifacts
       # Dev-only, gitignored, operator-borrowed depot token/config + the
@@ -125,6 +149,23 @@ services:
       # deploy/README.md "dev/local/ convention"). Uncomment once the
       # download jobs (M1 later slices) need it:
       # - ../dev/local:/dev/local:ro
+      # Sibling vcf-docker-download repo's PowerShell scripts (issue #223),
+      # read-only. Same repo-root dev/local/ convention as the mount above
+      # (../dev/local, relative to this file in deploy/): never committed,
+      # borrowed from the operator's own checkout of the sibling repo.
+      # Defaults to ../dev/local/vcf-scripts (gitignored - .gitignore's
+      # dev/local/ entry) so an operator following the existing convention
+      # just points WAYPOINT_VCF_SCRIPTS_DIR at their sibling repo's
+      # powershell/ directory in deploy/.env; left unset, this mounts
+      # whatever (possibly nonexistent) ../dev/local/vcf-scripts resolves to.
+      # Uses the default bind-mount behavior (NOT create_host_path: false,
+      # unlike the frontend/dist mount above) on purpose: this material is
+      # optional and lazily consumed (see the ModulePreloadPaths comment
+      # above), so a missing source should not block the whole stack from
+      # coming up - Docker creates an empty directory in that case and the
+      # shim's own "not found" error only surfaces if a catalog-index job
+      # actually runs.
+      - ${WAYPOINT_VCF_SCRIPTS_DIR:-../dev/local/vcf-scripts}:/vcf-scripts:ro
       # Admin password hash file (issue #333) - operator-provided, gitignored
       # (../config/ is covered by .gitignore's anchored /config/ entry).
       # Commented out by default so an unconfigured stack does not fail to
