@@ -381,6 +381,19 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		try
 		{
 			await PollUntilAsync(() => GetRunBlockedAsync(runId), blocked => blocked);
+
+			// The queue-blocked flag, the second job's own state transition, the
+			// operator log entry, and the two emitted events all land on the same
+			// background dispatch tick but are independently observable writes --
+			// runs.blocked flipping true does not guarantee the rest have landed
+			// yet. Poll each rather than asserting immediately, or this races the
+			// loop under CI load (#341).
+			await PollUntilAsync(() => GetJobStateAsync(jobIds[1]), state => state == JobStates.Blocked);
+			await PollUntilAsync(
+				() => Task.FromResult(_dispatcherLogger.Entries.Any(entry => entry.Message.Contains("queue halted", StringComparison.Ordinal))),
+				found => found);
+			await PollUntilAsync(() => EventTypeExistsAsync(JobEventTypes.QueueState, runId), exists => exists);
+			await PollUntilAsync(() => EventTypeExistsAsync(JobEventTypes.SystemNotice, null), exists => exists);
 		}
 		finally
 		{
