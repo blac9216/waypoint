@@ -87,6 +87,7 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
 				services.AddSingleton(new ConfigDocRepository(_connectionString));
+				services.AddSingleton(new AttestationSnapshotRepository(_connectionString));
 
 				ServiceDescriptor? jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IJobQueueRepository));
 				if (jobsDescriptor != null)
@@ -316,11 +317,15 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 	{
 		(Guid siteId, Guid targetId) = await CreateSiteAndTargetAsync("attest-target");
 		string profile = "invented-vsphere-stig";
-		await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{Guid.NewGuid()}", "Admin",
-			new { kind = "attestation", profile, layer = $"target:{targetId}", body = "status: Not_A_Finding\njustification: invented waiver\nexpires: 2099-01-01\n" });
+		JsonElement docResponse = await PutConfigDocAsync(
+			targetId, profile, "status: Not_A_Finding\njustification: invented waiver\nexpires: 2099-01-01\n");
+		Guid docId = docResponse.GetProperty("id").GetGuid();
 
 		Guid runId = await CreateRunAsync();
-		await FanOutScanJobAsync(runId, targetId, state: "uploaded");
+		Guid jobId = await FanOutScanJobAsync(runId, targetId, state: "uploaded");
+		await SeedAttestationSnapshotAsync(
+			runId, jobId, targetId, profile, $"target:{targetId}", docId, version: 1, author: "Admin",
+			applied: true, expired: false);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/attestations-applied", "Viewer", body: null);
 
@@ -331,26 +336,78 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 		Assert.Equal($"target:{targetId}", row.GetProperty("scope").GetString());
 		Assert.False(row.GetProperty("expired").GetBoolean());
 
-		// Wire must self-describe as live resolution, not recorded history (issue #299
-		// round-1 blocker): derivation + resolved_at present, applied_at absent, and the
-		// doc-edit time surfaced only as attestation_updated_at.
-		Assert.Equal("live-resolution", row.GetProperty("derivation").GetString());
-		Assert.True(DateTimeOffset.TryParse(row.GetProperty("resolved_at").GetString(), out _));
-		Assert.False(row.TryGetProperty("applied_at", out _), "applied_at must not appear -- it mislabels a doc-edit time as a scan-time application time.");
+		// Issue #306: the wire now carries a genuine scan-time applied_at (recorded
+		// history), not a live-resolution marker -- the old derivation/resolved_at pair
+		// (issue #299 round-1 blocker) is gone.
+		Assert.False(row.TryGetProperty("derivation", out _), "derivation must not appear -- this is recorded history, not live resolution.");
+		Assert.False(row.TryGetProperty("resolved_at", out _), "resolved_at must not appear -- see applied_at.");
+		Assert.True(DateTimeOffset.TryParse(row.GetProperty("applied_at").GetString(), out _));
 		Assert.True(row.TryGetProperty("attestation_updated_at", out _));
 		_ = siteId;
 	}
 
+	/// <summary>
+	/// The crux integrity test for issue #306: a config-doc edited AFTER the run must
+	/// NOT change what this endpoint reports for that historical run. This is exactly
+	/// the gap PR #305 could only disclose (`derivation: "live-resolution"`) -- proving
+	/// it closed means proving the endpoint's answer survives a later edit unchanged.
+	/// </summary>
 	[Fact]
-	public async Task GetAttestationsApplied_ExpiredWaiver_ReportsExpiredTrue()
+	public async Task GetAttestationsApplied_ConfigDocEditedAfterRun_DoesNotChangeHistoricalResult()
+	{
+		(_, Guid targetId) = await CreateSiteAndTargetAsync("post-run-edit-target");
+		string profile = "invented-vsphere-stig";
+		JsonElement docResponse = await PutConfigDocAsync(
+			targetId, profile, "status: Not_A_Finding\njustification: original waiver\nexpires: 2099-01-01\n");
+		Guid docId = docResponse.GetProperty("id").GetGuid();
+
+		Guid runId = await CreateRunAsync();
+		Guid jobId = await FanOutScanJobAsync(runId, targetId, state: "uploaded");
+		await SeedAttestationSnapshotAsync(
+			runId, jobId, targetId, profile, $"target:{targetId}", docId, version: 1, author: "Admin",
+			applied: true, expired: false);
+
+		HttpResponseMessage before = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/attestations-applied", "Viewer", body: null);
+		using JsonDocument beforeDocument = JsonDocument.Parse(await before.Content.ReadAsStringAsync());
+		JsonElement beforeRow = beforeDocument.RootElement.EnumerateArray().Single();
+		string beforeJustification = beforeRow.GetProperty("justification").GetString()!;
+		string beforeAppliedAt = beforeRow.GetProperty("applied_at").GetString()!;
+		string? beforeUpdatedAt = beforeRow.GetProperty("attestation_updated_at").GetString();
+
+		// Edit the SAME config-doc slot after the run -- a new version, a lapsed expiry,
+		// different justification text. If the endpoint were still live-resolving (the
+		// #306 bug), this would flip the historical run's row to expired:true and a
+		// different justification/attestation_updated_at.
+		await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{docId}", "Admin",
+			new { kind = "attestation", profile, layer = $"target:{targetId}", body = "status: Not_A_Finding\njustification: EDITED AFTER THE RUN\nexpires: 2020-01-01\n" });
+
+		HttpResponseMessage after = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/attestations-applied", "Viewer", body: null);
+		using JsonDocument afterDocument = JsonDocument.Parse(await after.Content.ReadAsStringAsync());
+		JsonElement afterRow = afterDocument.RootElement.EnumerateArray().Single();
+
+		Assert.False(afterRow.GetProperty("expired").GetBoolean(), "the post-run edit's lapsed expiry must not retroactively mark the historical run's row expired.");
+		Assert.Equal(beforeJustification, afterRow.GetProperty("justification").GetString());
+		Assert.Equal(beforeAppliedAt, afterRow.GetProperty("applied_at").GetString());
+		Assert.Equal(beforeUpdatedAt, afterRow.GetProperty("attestation_updated_at").GetString());
+	}
+
+	[Fact]
+	public async Task GetAttestationsApplied_ExpiredAtScanTime_ReportsExpiredTrue()
 	{
 		(_, Guid targetId) = await CreateSiteAndTargetAsync("expired-attest-target");
 		string profile = "invented-vsphere-stig";
-		await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{Guid.NewGuid()}", "Admin",
-			new { kind = "attestation", profile, layer = $"target:{targetId}", body = "status: Not_A_Finding\njustification: lapsed\nexpires: 2020-01-01\n" });
+		JsonElement docResponse = await PutConfigDocAsync(
+			targetId, profile, "status: Not_A_Finding\njustification: lapsed\nexpires: 2020-01-01\n");
+		Guid docId = docResponse.GetProperty("id").GetGuid();
 
 		Guid runId = await CreateRunAsync();
-		await FanOutScanJobAsync(runId, targetId, state: "uploaded");
+		Guid jobId = await FanOutScanJobAsync(runId, targetId, state: "uploaded");
+		// Recorded as it was resolved at attest-stage time: the waiver had already
+		// lapsed, so applied is false and expired is true -- exactly what
+		// ScanJobHandler.ExecuteAttestStageAsync would have written.
+		await SeedAttestationSnapshotAsync(
+			runId, jobId, targetId, profile, $"target:{targetId}", docId, version: 1, author: "Admin",
+			applied: false, expired: true);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/attestations-applied", "Viewer", body: null);
 
@@ -360,7 +417,7 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 	}
 
 	[Fact]
-	public async Task GetAttestationsApplied_TargetWithNoAttestationDoc_ContributesNoRow()
+	public async Task GetAttestationsApplied_TargetWithNoRecordedSnapshot_ContributesNoRow()
 	{
 		(_, Guid targetId) = await CreateSiteAndTargetAsync("no-attest-target");
 		Guid runId = await CreateRunAsync();
@@ -478,6 +535,49 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
 
+	/// <summary>PUTs a fresh @v1 attestation config-doc at the target layer and returns the parsed <see cref="ConfigDocResponse"/> JSON.</summary>
+	private async Task<JsonElement> PutConfigDocAsync(Guid targetId, string profile, string body)
+	{
+		HttpResponseMessage response = await SendAsync(HttpMethod.Put, $"/api/v1/config-docs/{Guid.NewGuid()}", "Admin",
+			new { kind = "attestation", profile, layer = $"target:{targetId}", body });
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		return document.RootElement.Clone();
+	}
+
+	/// <summary>
+	/// Seeds an <c>attestation_snapshots</c> row directly, standing in for what
+	/// <c>ScanJobHandler.ExecuteAttestStageAsync</c> (via <see cref="AttestationSnapshotRepository.RecordAsync"/>)
+	/// would have written at real attest-stage execution time -- this test class seeds
+	/// jobs directly (see <see cref="FanOutScanJobAsync"/>'s doc comment) rather than
+	/// running the full pipeline, which <c>ScanJobHandlerEndToEndTests</c> already
+	/// covers for the write path itself.
+	/// </summary>
+	private async Task SeedAttestationSnapshotAsync(
+		Guid runId, Guid jobId, Guid targetId, string profile, string scope, Guid? docId, int? version, string? author, bool applied, bool expired)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO attestation_snapshots
+			    (run_id, job_id, target_id, profile, scope, doc_id, doc_version, doc_author, doc_version_created_at, applied, expired)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			""", connection);
+		insert.Parameters.AddWithValue(runId);
+		insert.Parameters.AddWithValue(jobId);
+		insert.Parameters.AddWithValue(targetId);
+		insert.Parameters.AddWithValue(profile);
+		insert.Parameters.AddWithValue(scope);
+		insert.Parameters.AddWithValue((object?)docId ?? DBNull.Value);
+		insert.Parameters.AddWithValue((object?)version ?? DBNull.Value);
+		insert.Parameters.AddWithValue((object?)author ?? DBNull.Value);
+		insert.Parameters.AddWithValue(docId is null ? DBNull.Value : DateTimeOffset.UtcNow);
+		insert.Parameters.AddWithValue(applied);
+		insert.Parameters.AddWithValue(expired);
+		await insert.ExecuteNonQueryAsync();
+	}
+
 	private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, string role, object? body)
 	{
 		HttpRequestMessage request = new(method, path);
@@ -495,7 +595,7 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand truncate = new(
-			"TRUNCATE TABLE config_versions, config_docs, jobs, runs, targets, sites RESTART IDENTITY CASCADE", connection);
+			"TRUNCATE TABLE attestation_snapshots, config_versions, config_docs, jobs, runs, targets, sites RESTART IDENTITY CASCADE", connection);
 		await truncate.ExecuteNonQueryAsync();
 	}
 }

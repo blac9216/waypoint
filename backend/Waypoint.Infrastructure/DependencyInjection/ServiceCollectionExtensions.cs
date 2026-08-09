@@ -170,6 +170,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton(new InventoryRepository(connectionString));
 			services.AddSingleton(new ConfigDocRepository(connectionString));
+			services.AddSingleton(new AttestationSnapshotRepository(connectionString));
 			services.AddSingleton(new StigManager.StigManagerRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
 				connectionString,

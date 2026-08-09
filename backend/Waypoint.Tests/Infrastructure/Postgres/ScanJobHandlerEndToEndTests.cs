@@ -69,6 +69,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	private TargetRepository _targets = null!;
 	private EphemeralCredentialCache _ephemeralCredentials = null!;
 	private ConfigDocRepository _configDocs = null!;
+	private AttestationSnapshotRepository _attestationSnapshots = null!;
 	private ScanJobHandler _handler = null!;
 
 	public ScanJobHandlerEndToEndTests(PostgresFixture fixture)
@@ -107,6 +108,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		_targets = new TargetRepository(_fixture.ConnectionString);
 		_ephemeralCredentials = new EphemeralCredentialCache(_redactor, _fixture.ConnectionString, NullLogger<EphemeralCredentialCache>.Instance);
 		_configDocs = new ConfigDocRepository(_fixture.ConnectionString);
+		_attestationSnapshots = new AttestationSnapshotRepository(_fixture.ConnectionString);
 
 		IOptions<ScanOptions> scanOptions = Options.Create(new ScanOptions
 		{
@@ -129,7 +131,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 
 		_handler = new ScanJobHandler(
 			executor, _secretStore, _credentials, _targets, _ephemeralCredentials, _repository, _redactor, wrappedPsOptions, scanOptions, _configDocs,
-			uploadCoordinator);
+			_attestationSnapshots, uploadCoordinator);
 	}
 
 	public async Task DisposeAsync()
@@ -804,6 +806,127 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.state' AND payload::text LIKE '%expired-skipped%'", connection);
 		stateEventQuery.Parameters.AddWithValue(jobIds[0]);
 		Assert.True((long)(await stateEventQuery.ExecuteScalarAsync())! >= 1);
+
+		// Issue #306: the same expiry the WARN/job.state events above describe must also
+		// land in the persisted at-scan-time ledger -- applied=false, expired=true. No
+		// less-specific layer has a doc either, so ConfigDocResolver.Resolve falls
+		// through to "no doc at all" (DocId null is its documented contract for that
+		// case -- ConfigDocResolution's doc comment) even though a doc DID exist at the
+		// target layer; it just lapsed.
+		AttestationSnapshot snapshot = Assert.Single(await _attestationSnapshots.ListForRunAsync(runId, CancellationToken.None));
+		Assert.Equal(jobIds[0], snapshot.JobId);
+		Assert.Equal(targetId, snapshot.TargetId);
+		Assert.Null(snapshot.DocId);
+		Assert.False(snapshot.Applied);
+		Assert.True(snapshot.Expired);
+		_ = docId;
+	}
+
+	/// <summary>
+	/// Issue #306's write-path AC: the attest stage persists a real at-scan-time
+	/// snapshot for an APPLIED (non-expired) waiver -- doc id/version/author/timestamp
+	/// all recorded, <c>applied_at</c> a genuine scan-time stamp (asserted as "close to
+	/// now" rather than any fixed value, since the real dispatcher clock produced it).
+	/// </summary>
+	[Fact]
+	public async Task AppliedAttestation_PersistsAtScanTimeSnapshot()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-applied-attest-canary");
+
+		string profile = "invented-vsphere-stig";
+		Guid docId = Guid.NewGuid();
+		(ConfigDocSaveOutcome outcome, ConfigDoc? doc, ConfigDocVersion? version) = await _configDocs.SaveAsync(
+			docId, ConfigDocKinds.Attestation, profile, ConfigDocLayers.Target, targetId, "tester",
+			"status: Not_A_Finding\njustification: invented waiver, still valid\nexpires: 2099-01-01\n", CancellationToken.None);
+		Assert.Equal(ConfigDocSaveOutcome.Ok, outcome);
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		DateTimeOffset beforeAttest = DateTimeOffset.UtcNow;
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		AttestationSnapshot snapshot = Assert.Single(await _attestationSnapshots.ListForRunAsync(runId, CancellationToken.None));
+		Assert.Equal(runId, snapshot.RunId);
+		Assert.Equal(jobIds[0], snapshot.JobId);
+		Assert.Equal(targetId, snapshot.TargetId);
+		Assert.Equal(profile, snapshot.Profile);
+		Assert.Equal($"target:{targetId}", snapshot.Scope);
+		Assert.Equal(doc!.Id, snapshot.DocId);
+		Assert.Equal(version!.Version, snapshot.DocVersion);
+		Assert.Equal("tester", snapshot.DocAuthor);
+		Assert.True(snapshot.Applied);
+		Assert.False(snapshot.Expired);
+		Assert.InRange(snapshot.AppliedAt, beforeAttest.AddSeconds(-1), DateTimeOffset.UtcNow.AddSeconds(1));
+	}
+
+	/// <summary>
+	/// The integrity property issue #306 exists to guarantee: reading the run's ledger
+	/// back through <c>GET /runs/{id}/attestations-applied</c>-equivalent storage access
+	/// after the config-doc has been edited must still show the ORIGINAL at-scan-time
+	/// facts, not the edited ones. <see cref="RunArtifactsApiTests"/> proves this at the
+	/// HTTP layer; this proves the same property one layer down, against the real
+	/// dispatcher-driven write this whole suite exercises.
+	/// </summary>
+	[Fact]
+	public async Task RecordedSnapshot_SurvivesConfigDocEditedAfterTheRun()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-post-edit-canary");
+
+		string profile = "invented-vsphere-stig";
+		Guid docId = Guid.NewGuid();
+		await _configDocs.SaveAsync(
+			docId, ConfigDocKinds.Attestation, profile, ConfigDocLayers.Target, targetId, "tester",
+			"status: Not_A_Finding\njustification: original waiver\nexpires: 2099-01-01\n", CancellationToken.None);
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		AttestationSnapshot before = Assert.Single(await _attestationSnapshots.ListForRunAsync(runId, CancellationToken.None));
+
+		// Edit the same slot AFTER the run: a new version, lapsed expiry, different text.
+		await _configDocs.SaveAsync(
+			docId, ConfigDocKinds.Attestation, profile, ConfigDocLayers.Target, targetId, "tester",
+			"status: Not_A_Finding\njustification: EDITED AFTER THE RUN\nexpires: 2020-01-01\n", CancellationToken.None);
+
+		AttestationSnapshot after = Assert.Single(await _attestationSnapshots.ListForRunAsync(runId, CancellationToken.None));
+		Assert.Equal(before.DocVersion, after.DocVersion);
+		Assert.Equal(before.DocVersionCreatedAt, after.DocVersionCreatedAt);
+		Assert.Equal(before.Applied, after.Applied);
+		Assert.Equal(before.Expired, after.Expired);
+		Assert.Equal(before.AppliedAt, after.AppliedAt);
 	}
 
 	/// <summary>

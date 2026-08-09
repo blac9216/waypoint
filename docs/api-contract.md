@@ -109,7 +109,7 @@ authenticated the caller, and role claims keep mapping to the same four
 | `/runs/{id}/resume-blocked` | POST | Admin only. Body: `{ credential_id }` — the REPLACEMENT credential to swap onto the run's halted jobs (not the halted credential's own id; the server determines that from the run's blocked job set). Swaps `jobs.credential_id` old→new for that job set, audits both credential identities, and re-queues (ADR-0008 halt behavior). 409 when the run has no credential halt to resume from, or when the replacement credential is itself queue-halted; 404 when the replacement credential does not exist; 400 when its `credential_type` does not match the halted credential's. |
 | `/jobs/{id}` | DELETE | Operator+. Cancels one job independent of its run's other jobs (issue #10/#277). 200 body distinguishes an immediate cancel (`state: "cancelled"`, queued/blocked job) from a cooperative in-flight request (`state: "cancel_requested"`, running/attesting/converting job — stops at the dispatcher's next heartbeat tick); 409 if already terminal; 404 if the job does not exist. |
 | `/runs/{id}/artifacts` · `/jobs/{id}/artifacts/{kind}` | GET | Per-target rows + CKL/HDF download; `?bundle=zip` for the export button. Row CAT counts are **nullable** and gated by `counts_available` — see below. |
-| `/runs/{id}/attestations-applied` | GET | Waivers that fired: control, scope, justification, author/version, expired-skips. **Live resolution, not recorded history** — see below. |
+| `/runs/{id}/attestations-applied` | GET | Waivers that fired: control, scope, justification, author/version, expired-skips. **Persisted at-scan-time ledger, immutable per run** — see below. |
 
 #### `/runs/{id}/artifacts` — countability is explicit (issue #299)
 
@@ -121,16 +121,22 @@ the counts: a corrupt HDF is reported as *uncountable* (counts absent), never as
 compliant-looking `0/0/0`. `artifact_kinds` reflects file *presence* on disk (so a
 present-but-corrupt HDF still lists `hdf`), which is independent of *countability*.
 
-#### `/runs/{id}/attestations-applied` — live resolution, not at-scan-time history (issue #299)
+#### `/runs/{id}/attestations-applied` — persisted at-scan-time ledger (issue #306)
 
-There is no persisted per-control waiver ledger yet, so this endpoint derives its rows
-**live** at request time by re-resolving each scanned target's attestation config-doc. The
-wire says so, so a consumer is never misled that an attestation edited after the run is
-recorded history: every row carries `derivation: "live-resolution"` and `resolved_at` (when
-*this request* resolved it). The config-doc's own last-modified time is surfaced only as
-`attestation_updated_at` — there is deliberately **no** `applied_at` field, because a
-doc-edit time is not a scan-time application time. The persisted at-scan-time ledger that
-would carry a true `applied_at` is tracked as **issue #306**.
+This endpoint reads a **persisted, per-target snapshot** written the instant the attest
+stage resolved each scanned target's attestation (`attestation_snapshots`, migration
+0021) — never a live re-resolution. A historical run's answer is therefore **immutable**:
+editing the underlying config-doc afterward does not change what this endpoint reports
+for that run. Each row carries `applied_at`, the genuine scan-time timestamp the
+snapshot was recorded at, distinct from `attestation_updated_at` (the config-doc
+version's own last-modified time) — a doc-edit time still answers a different question
+than a scan-time application time, even though both are now real recorded facts rather
+than one being faked. This closes the integrity gap issue #299/#305 could only disclose
+via the `derivation: "live-resolution"` wire marker (removed).
+
+Granularity is per-target, not per-control: there is no control-enumeration catalog in
+this codebase to join the resolved waiver against. Per-control granularity is future
+work once one exists.
 
 ### Config documents (three-layer)
 | Endpoint | Methods | Notes |

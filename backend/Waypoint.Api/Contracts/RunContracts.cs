@@ -298,24 +298,24 @@ public sealed record JobUploadRetryResponse(
 /// bodies per (kind, profile, layer), never parsed per-control (issue #266's
 /// <c>ConfigDocsController.Resolve</c> doc comment), and the attest stage (#275) records
 /// only a free-text <c>jobs.note</c> summary plus a <c>job.log</c> WARN line, not a
-/// structured ledger. This response is therefore derived live, per scanned target in the
-/// run, by re-running the same <c>ConfigDocResolver.Resolve</c> the attest stage itself
-/// used -- one row per (target, resolved-or-expired-attestation) pair, mirroring exactly
-/// what <c>frontend/src/screens/results/results.ts</c>'s <c>fetchAttestationResolution</c>
-/// stand-in already does client-side against <c>/config-docs/resolve</c> (see that
-/// module's doc comment). <c>control</c> is always the fixed <see cref="Waypoint.Core.Scans.ScanOptions.AttestationProfile"/>
+/// structured ledger -- issue #306 closed that gap: the attest stage
+/// (<c>ScanJobHandler.ExecuteAttestStageAsync</c>) now persists one <c>attestation_snapshots</c>
+/// row per scanned target the instant it resolves that target's attestation, and this
+/// response is read back from that recorded ledger, never re-resolved. <c>control</c> is
+/// always the fixed <see cref="Waypoint.Core.Scans.ScanOptions.AttestationProfile"/>
 /// profile name, not a per-control id -- there is no control-enumeration catalog in this
-/// codebase to join against (see this PR's body for the acknowledged gap).
+/// codebase to join against; per-control granularity is future work once one exists.
 ///
 /// <para>
-/// This response is CURRENT RESOLUTION, not recorded at-scan-time history: <see cref="Derivation"/>
-/// is the constant <c>"live-resolution"</c> and <see cref="ResolvedAt"/> is when THIS request
-/// resolved it, so an API consumer can tell that an attestation edited after the run silently
-/// rewrites what this endpoint reports (issue #299 round-1 blocker). There is deliberately no
-/// <c>applied_at</c> field -- the config-doc's last-edit time (<see cref="AttestationUpdatedAt"/>)
-/// is exactly that, a doc-edit time, and must not be presented as a scan-time application time.
-/// The persisted at-scan-time ledger that WOULD carry a true <c>applied_at</c> is tracked as
-/// issue #306.
+/// This response is RECORDED HISTORY, not current resolution: <see cref="AppliedAt"/> is
+/// the genuine scan-time timestamp the snapshot was written at, so it is immutable for a
+/// given run regardless of any config-doc edit made afterward (the integrity gap issue
+/// #299/#305/#306 tracked). <see cref="AttestationUpdatedAt"/> remains the config-doc
+/// version's own timestamp -- kept distinct from <see cref="AppliedAt"/> because a
+/// doc-edit time and a scan-time application time answer different questions, even
+/// though both are now real recorded facts rather than one being faked. There is no
+/// <c>derivation</c> field anymore -- the prior <c>"live-resolution"</c> wire marker
+/// (issue #299 round-1 blocker) is obsolete now that this is genuinely recorded history.
 /// </para>
 /// </summary>
 public sealed record AppliedAttestationResponse(
@@ -337,15 +337,11 @@ public sealed record AppliedAttestationResponse(
 	[property: JsonPropertyName("version")]
 	int Version,
 
-	/// <summary>Always <c>"live-resolution"</c>: derived by re-resolving the config-doc at request time, not read from a recorded scan-time ledger (#306).</summary>
-	[property: JsonPropertyName("derivation")]
-	string Derivation,
+	/// <summary>The genuine scan-time timestamp this snapshot was recorded at (ISO-8601) -- see the type doc comment.</summary>
+	[property: JsonPropertyName("applied_at")]
+	string AppliedAt,
 
-	/// <summary>When THIS request resolved the attestation (ISO-8601). NOT a scan-time application time -- see <see cref="Derivation"/>.</summary>
-	[property: JsonPropertyName("resolved_at")]
-	string ResolvedAt,
-
-	/// <summary>The attestation config-doc's own last-modified time (its version timestamp), NOT when it was applied to any scan.</summary>
+	/// <summary>The attestation config-doc version's own timestamp, NOT when it was applied to any scan.</summary>
 	[property: JsonPropertyName("attestation_updated_at")]
 	string? AttestationUpdatedAt,
 
