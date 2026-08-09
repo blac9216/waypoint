@@ -8,7 +8,7 @@
 # negation can't reopen them) and vault-pass* (deliberate exception: it
 # DOES still shadow vault-pass.example, because a vault-pass file's whole
 # content is the password — there is no non-secret default to template).
-# It cannot reach inside a fully-ignored directory (config/, dev/local/)
+# It cannot reach inside a fully-ignored directory (/config/, dev/local/)
 # — that is a known git limitation, not a gap in this pattern.
 # ORDERING IS LOAD-BEARING: any secret pattern added ABOVE !*.example is
 # punched through by it. New secret patterns go BELOW this line.
@@ -18,7 +18,14 @@
 vault-pass*
 secrets*.json
 secrets*.yml
-config/
+# Anchored to the repo root (leading slash) — this ignores only a top-level
+# operator-config mount (e.g. a root config/ directory), matching the intent
+# in CLAUDE.md's "dev/local/, .env, config/" list. Without the leading
+# slash, git matches "config/" at ANY depth, including inside application
+# source (e.g. frontend/src/screens/config/) — silently dropping real
+# source files from `git status`/`git add`. See issue #254. Do not remove
+# the leading slash.
+/config/
 dev/local/
 *.local.json
 *.local.yml
