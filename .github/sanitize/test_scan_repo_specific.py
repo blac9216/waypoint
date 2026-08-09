@@ -3463,5 +3463,253 @@ class ExitCodeTests(unittest.TestCase):
 			self._run_main()
 
 
+class VersionExtensionTests(unittest.TestCase):
+	"""Issue #113: a version quad followed by a file extension is not an IP.
+
+	The round-2 trailing-guard fix (`(?!\\.\\d)`) bounded the over-correction
+	to NUMERIC continuations only, so a `.` followed by letters still ended
+	the token — a bare four-part version immediately followed by a file
+	extension newly matched as a dotted-quad. This class pins the false
+	positive closed and, just as importantly, pins that the round-2 fix's own
+	case (a real address ending a sentence) is untouched by closing it.
+	"""
+
+	def test_version_followed_by_a_single_extension_is_not_flagged(self) -> None:
+		for version, ext in (
+			(quad(5, 2, 1, 0), "ovf"),
+			(quad(9, 0, 0, 0), "zip"),
+			(quad(8, 18, 0, 4), "iso"),
+		):
+			text = f"Image {version}.{ext}"
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+	def test_version_followed_by_a_chained_extension_is_not_flagged(self) -> None:
+		"""The `.tar.gz`-style chained extension from the issue body."""
+		text = f"file {quad(9, 0, 0, 0)}.tar.gz"
+		self.assertEqual(scanner.scan_text("f.md", text), [])
+
+	def test_bundle_filename_in_a_table_cell_is_not_flagged(self) -> None:
+		"""The issue's own repro: a bare filename with no dash-joined prefix."""
+		text = f"| bundle | {quad(8, 18, 0, 4)}.zip |"
+		self.assertEqual(scanner.scan_text("f.md", text), [])
+
+	def test_sentence_final_address_is_still_flagged(self) -> None:
+		"""The round-2 fix's own case must survive closing this one.
+
+		A real address ending a sentence has nothing alphabetic after its
+		trailing period, so the new extension guard never engages.
+		"""
+		findings = scanner.scan_text("f.md", f"Upgrade to {LAB_IP}.")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IP, findings[0])
+
+	def test_sentence_final_address_followed_by_more_prose_is_still_flagged(
+		self,
+	) -> None:
+		findings = scanner.scan_text("f.md", f"Upgrade to {LAB_IP} now.")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IP, findings[0])
+
+	def test_five_part_version_stays_suppressed(self) -> None:
+		"""The round-2 fix's numeric case must also survive closing this one."""
+		self.assertEqual(scanner.scan_text("f.md", f"x {quad(9, 0, 0, 0)}.5"), [])
+
+	def test_extension_guard_does_not_widen_past_a_short_alphabetic_run(self) -> None:
+		"""A long alphabetic run after the dot is a hostname label, not an
+		extension — the guard is capped so it does not start suppressing a
+		real address glued to a dotted hostname continuation.
+		"""
+		long_label = "a" * 9  # past the {1,8} cap
+		findings = scanner.scan_text("f.md", f"host {LAB_IP}.{long_label}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IP, findings[0])
+
+	def test_version_key_suppression_still_applies_ahead_of_an_extension(self) -> None:
+		"""The two suppressions (version-key, extension) are independent and
+		compose rather than fight — a version-keyed quad with an extension
+		after it stays suppressed for either reason.
+		"""
+		text = f"version: '{quad(8, 18, 0, 4)}.ovf'"
+		self.assertEqual(scanner.scan_text("f.md", text), [])
+
+
+class HexLetteredIdentifierTests(unittest.TestCase):
+	"""Issue #118: a hex-letters-only `word::word` identifier is not an IPv6.
+
+	`ipaddress.IPv6Address` remains the strict arbiter of validity; the fix
+	here is a narrow, digit-based exception on top of it, not a loosening of
+	that arbiter. `test_real_ipv6_addresses_are_still_flagged` is the load-
+	bearing negative: it proves the exception is scoped to the disclosed
+	false-positive shape and does not weaken real-address detection.
+	"""
+
+	def test_hex_lettered_two_part_identifier_is_not_flagged(self) -> None:
+		"""The issue's own example shape: both halves hex-letters-only."""
+		for left, right in (("cafe", "babe"), ("face", "feed"), ("bad", "beef")):
+			text = f"link {left}::{right} seen"
+			with self.subTest(text=text):
+				self.assertEqual(scanner.scan_text("f.md", text), [], text)
+
+	def test_single_hex_lettered_word_after_double_colon_is_not_flagged(self) -> None:
+		"""The `::word`-only shape the issue's follow-up comment names too."""
+		self.assertEqual(scanner.scan_text("f.md", "scope ::deadbeef end"), [])
+
+	def test_real_ipv6_address_is_still_flagged(self) -> None:
+		"""The load-bearing negative: a real, digit-bearing literal is
+		unaffected by the digit-based exception.
+		"""
+		findings = scanner.scan_text("f.md", f"host {LAB_IPV6}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6, findings[0])
+
+	def test_fully_expanded_real_address_is_still_flagged(self) -> None:
+		findings = scanner.scan_text("f.md", f"host {LAB_IPV6_FULL}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn(LAB_IPV6_FULL, findings[0])
+
+	def test_hex_lettered_group_with_a_digit_elsewhere_is_still_flagged(self) -> None:
+		"""Per-candidate, not per-group: one digit anywhere in the span is
+		enough to keep the whole candidate reportable.
+		"""
+		text = f"host {ipv6('fd00', '', 'cafe')}"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 1, findings)
+
+	def test_sanctioned_addresses_are_unaffected(self) -> None:
+		"""Every sanctioned spelling already carries a digit, so the new guard
+		never has to be the reason one of these stays silent — but it must
+		not accidentally flip one to a finding either.
+		"""
+		for address in (OK_IPV6_DOC, OK_IPV6_LOOPBACK, OK_IPV6_UNSPECIFIED):
+			with self.subTest(address=address):
+				self.assertEqual(scanner.scan_text("f.md", f"addr {address}"), [])
+
+	def test_eui64_shaped_residual_is_unaffected(self) -> None:
+		"""The disclosed, deliberately-deferred #118 residual (an 8-group hex
+		run with digits present) is a DIFFERENT shape from this fix's target
+		and must keep firing exactly as documented in docs/testing.md and
+		FalsePositiveCorpusTests — this fix narrows the false-positive class,
+		it does not eliminate the whole issue.
+		"""
+		findings = scanner.scan_text("f.md", f"cols {EUI64_SHAPED}")
+		self.assertEqual(len(findings), 1, findings)
+
+
+class ZeroPaddedMappedIpv6Tests(unittest.TestCase):
+	"""Issue #123: a zero-padded IPv4-mapped IPv6 literal keeps its finding.
+
+	Same root cause as #119 for the plain IPv4 detector, in the mapped form:
+	`ipaddress.IPv6Address` rejects leading zeros in the embedded quad, and
+	the failure used to read as "not an address" — losing the IPv6 finding
+	while the IPv4 detector still caught the embedded quad on its own
+	(under-reported, not silent, per the issue).
+	"""
+
+	def test_unpadded_mapped_literal_is_still_flagged_both_ways(self) -> None:
+		"""Baseline: the shape that already worked must keep working."""
+		mapped = ipv6("", "", "ffff", LAB_IP)
+		findings = scanner.scan_text("f.md", f"host {mapped}")
+		self.assertEqual(len(findings), 2, findings)
+		self.assertTrue(any("IPv6 address literal" in f for f in findings), findings)
+		self.assertTrue(any("IP address literal" in f for f in findings), findings)
+
+	def test_three_digit_padded_mapped_literal_keeps_its_ipv6_finding(self) -> None:
+		mapped = ipv6("", "", "ffff", zero_pad_quad(LAB_IP))
+		findings = scanner.scan_text("f.md", f"host {mapped}")
+		self.assertEqual(len(findings), 2, findings)
+		ipv6_findings = [f for f in findings if "IPv6 address literal" in f]
+		self.assertEqual(len(ipv6_findings), 1, findings)
+		self.assertIn(mapped, ipv6_findings[0])
+
+	def test_four_digit_padded_mapped_literal_keeps_its_ipv6_finding(self) -> None:
+		"""The issue's own widest example: padding wide enough that the old
+		per-part regex cap (`\\d{1,3}`) couldn't even produce a `mapped_quad`
+		candidate, so the reported span used to be truncated to the prefix.
+		"""
+		mapped = ipv6("", "", "ffff", zero_pad_quad(LAB_IP, 4))
+		findings = scanner.scan_text("f.md", f"host {mapped}")
+		self.assertEqual(len(findings), 2, findings)
+		ipv6_findings = [f for f in findings if "IPv6 address literal" in f]
+		self.assertEqual(len(ipv6_findings), 1, findings)
+		self.assertIn(mapped, ipv6_findings[0], "IPv6 finding must name the full literal, not a truncated fragment")
+
+	def test_padded_mapped_literal_with_a_port_keeps_its_ipv6_finding(self) -> None:
+		"""Padding and the unbracketed-port swallow (#115 round 2) are
+		independent fixes and must compose rather than fight.
+		"""
+		mapped = ipv6("", "", "ffff", zero_pad_quad(LAB_IP))
+		findings = scanner.scan_text("f.md", f"legacy {mapped}:8080")
+		self.assertEqual(len(findings), 2, findings)
+		self.assertTrue(any("IPv6 address literal" in f for f in findings), findings)
+
+	def test_padded_rfc5737_mapped_quad_stays_ip_allowed(self) -> None:
+		"""The embedded quad's own allowlist check is untouched by padding
+		normalization — only which octets it denotes changed, not whether
+		those octets are sanctioned.
+		"""
+		mapped = ipv6("", "", "ffff", zero_pad_quad(quad(192, 0, 2, 10)))
+		findings = scanner.scan_text("f.md", f"host {mapped}")
+		self.assertFalse(any("IP address literal" in f for f in findings), findings)
+
+	def test_padding_width_is_not_a_bound(self) -> None:
+		"""Mirrors ZeroPaddedQuadTests' IPv4 case: the fix must not stop one
+		digit short the way #111's original IPv4 fix did (#119).
+		"""
+		for width in (3, 4, 5, 8):
+			with self.subTest(width=width):
+				mapped = ipv6("", "", "ffff", zero_pad_quad(LAB_IP, width))
+				findings = scanner.scan_text("f.md", f"host {mapped}")
+				ipv6_findings = [f for f in findings if "IPv6 address literal" in f]
+				self.assertEqual(len(ipv6_findings), 1, (width, findings))
+				self.assertIn(mapped, ipv6_findings[0])
+
+
+class ThreeIssueInteractionTests(unittest.TestCase):
+	"""#113 and #118 narrow what is flagged; #123 widens it. This class pins
+	that the three do not fight: each issue's example still behaves per its
+	own AC when all three fixes are applied together, on one shared line
+	where that is meaningful.
+	"""
+
+	def test_version_extension_and_hex_identifier_do_not_interact(self) -> None:
+		"""A version+extension (#113) and a hex-lettered identifier (#118) on
+		the same line: both stay quiet, independently.
+		"""
+		text = f"Image {quad(5, 2, 1, 0)}.ovf built near cafe::babe"
+		self.assertEqual(scanner.scan_text("f.md", text), [])
+
+	def test_padded_mapped_literal_alongside_a_version_extension(self) -> None:
+		"""#123's restored finding and #113's suppression on the same line:
+		the version+extension stays quiet, the padded mapped literal is still
+		fully reported on both axes.
+		"""
+		mapped = ipv6("", "", "ffff", zero_pad_quad(LAB_IP, 4))
+		text = f"Image {quad(5, 2, 1, 0)}.ovf reachable at {mapped}"
+		findings = scanner.scan_text("f.md", text)
+		self.assertEqual(len(findings), 2, findings)
+		self.assertTrue(any("IPv6 address literal" in f for f in findings), findings)
+		self.assertTrue(any("IP address literal" in f for f in findings), findings)
+		ipv6_findings = [f for f in findings if "IPv6 address literal" in f]
+		self.assertIn(mapped, ipv6_findings[0])
+
+	def test_no_new_false_negative_on_the_full_corpus(self) -> None:
+		"""Guard test: every real-address fixture this suite relies on
+		elsewhere is still flagged after all three fixes land together.
+		"""
+		real_addresses = (
+			LAB_IP,
+			LAB_IP_2,
+			LAB_IP_PADDED,
+			LAB_IPV6,
+			LAB_IPV6_FULL,
+			LAB_IPV6_LINK_LOCAL,
+		)
+		for address in real_addresses:
+			with self.subTest(address=address):
+				findings = scanner.scan_text("f.md", f"host {address} live")
+				self.assertEqual(len(findings), 1, (address, findings))
+
+
 if __name__ == "__main__":
 	unittest.main(verbosity=2)

@@ -600,32 +600,67 @@ have repeatedly caught real defects no CI run could have seen:
     `.editorconfig` reasoning above), and a literal followed by `.` plus an
     alphanumeric (a dotted continuation such as a hostname, where the
     address-shaped prefix is not standing alone).
-  - **Left open on the false-POSITIVE side** — two shapes this gate reports
-    that are not leaks, pinned by
-    `test_the_known_residual_false_positives_are_still_only_these`. A run of
-    colon-separated hex groups that happens to be valid IPv6 syntax
-    ([#118](https://github.com/blac9216/waypoint/issues/118)); the port retry
-    widens that class by the number of groups it is allowed to strip, so a run
-    of **nine, ten or eleven** groups whose trailing groups are all digits now
-    resolves to the eight in front of them, and a twelve-group run is where
-    the class stops. That the range is finite at all is the whole reason the
-    retry loop carries a bound: uncapped, the class would be unbounded in
-    record length — any colon-separated numeric record long enough to have
-    eight parseable groups in front of an all-digit tail — which is a class no
-    test can enumerate and no sentence here can state truthfully. The
-    eleven-group rows specifically are what raising the bound from two to
-    three cost (see the #131 bullet above); they are an EUI-64 string, a
-    certificate fingerprint and a numeric counter record, each with three
-    trailing numeric fields.
+  - **Narrowed, not eliminated, on the false-POSITIVE side** — a two-part
+    identifier joined by `::`, both halves spelled entirely in hex LETTERS
+    with no digit anywhere in the candidate (a `cafe`/`babe`-style
+    placeholder, or a single hex-lettered word after `::`), no longer fires
+    ([#118](https://github.com/blac9216/waypoint/issues/118)): every
+    sanctioned spelling this gate allows carries at least one digit, so
+    requiring one costs no real address, and every real lab literal this
+    gate's threat model produces (inventory exports, netstat, logs, CKL/HDF,
+    URLs) is hex-and-digits, not hex-letters-only prose. This is a narrow,
+    digit-based exception on top of `ipaddress.IPv6Address` as the arbiter,
+    not a loosening of it — a real, digit-bearing literal (including one
+    whose other group is hex-letter-heavy) is unaffected, pinned by
+    `HexLetteredIdentifierTests.test_real_ipv6_address_is_still_flagged`.
+    **What is deliberately still open**, pinned by
+    `test_the_known_residual_false_positives_are_still_only_these`: a run of
+    colon-separated hex groups that happens to be valid IPv6 syntax AND
+    carries a digit somewhere in it (an EUI-64-style run is the running
+    example) is a different shape from the one just closed — the digit guard
+    cannot touch it, by design, since the whole point of that guard is to
+    leave any digit-bearing candidate exactly as reportable as before. The
+    port retry widens that class by the number of groups it is allowed to
+    strip, so a run of **nine, ten or eleven** groups whose trailing groups
+    are all digits now resolves to the eight in front of them, and a
+    twelve-group run is where the class stops. That the range is finite at
+    all is the whole reason the retry loop carries a bound: uncapped, the
+    class would be unbounded in record length — any colon-separated numeric
+    record long enough to have eight parseable groups in front of an
+    all-digit tail — which is a class no test can enumerate and no sentence
+    here can state truthfully. The eleven-group rows specifically are what
+    raising the bound from two to three cost (see the #131 bullet above);
+    they are an EUI-64 string, a certificate fingerprint and a numeric
+    counter record, each with three trailing numeric fields.
     `test_the_known_residual_false_positives_are_still_only_these` pins both
     ends, the nine- to eleven-group runs that fire and the twelve-group runs
     that do not. And an unbracketed
     `<sanctioned address>:<port>` pair, which as written is also a valid,
     different, non-sanctioned address — the gate reports rather than guesses,
     and the bracketed URL form is unambiguous and stays silent.
-  - **Under-reported rather than silent**: a zero-padded IPv4-mapped literal
-    loses its IPv6 finding while still tripping the IPv4 detector
-    ([#123](https://github.com/blac9216/waypoint/issues/123)).
+  - **Closed, not disclosed**: a zero-padded IPv4-mapped literal used to lose
+    its IPv6 finding while the IPv4 detector still caught the embedded quad
+    on its own — under-reported, not silent
+    ([#123](https://github.com/blac9216/waypoint/issues/123)). The mapped
+    form's embedded dotted quad is now normalized through the same
+    `_parse_ipv4_octets` padding-width-independence #119 established for the
+    plain IPv4 detector, at any padding width, so the IPv6 finding names the
+    full literal rather than a truncated fragment or being dropped outright.
+  - **Closed, not disclosed**: a four-part product version immediately
+    followed by a file extension (`5.2.1.0.ovf`, `9.0.0.0.tar.gz`) used to be
+    newly flagged as an IPv4 literal after the round-2 trailing-guard fix
+    above widened what a trailing `.` could terminate
+    ([#113](https://github.com/blac9216/waypoint/issues/113)): that fix
+    bounded the over-correction to numeric continuations only (`(?!\.\d)`),
+    leaving a dotted-extension continuation open. A second, narrow lookahead
+    now also rejects a `.` that begins a short alphabetic run (an extension,
+    or a chain of them, `.tar.gz`) immediately followed by a token boundary
+    — capped at eight characters per segment so it stays an EXTENSION guard
+    and does not start suppressing a real address glued to a genuine dotted
+    hostname continuation. The round-2 fix's own case — a real address ending
+    a sentence, where nothing alphabetic follows the period — is untouched,
+    because that guard only ever engages when an alphabetic run actually
+    follows; pinned in `VersionExtensionTests`.
   - **Closed, not disclosed**: a backslash inserted immediately before each
     separator (`.` for IPv4/FQDN, `:` for IPv6) used to defeat all three
     detectors identically — not a suppression, an absence of any match at
