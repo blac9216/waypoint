@@ -356,6 +356,70 @@ describe("JobLogDrawer", () => {
 		expect(messages[999].textContent).toBe("line 1005");
 	});
 
+	// --- Accessibility (issue #71) ------------------------------------------
+
+	it("does not fold the Follow-tail/Download buttons into the bar's accessible name", async () => {
+		await mountOpenDrawer();
+
+		// The regression this issue is about: before the fix, the bar itself
+		// carried role="button" and wrapped the real buttons, so this query
+		// matched both the bar and the real button.
+		expect(screen.getAllByRole("button", { name: /follow tail/i })).toHaveLength(1);
+		expect(screen.getAllByRole("button", { name: /download/i })).toHaveLength(1);
+	});
+
+	it("exposes drawer open/collapsed state via aria-expanded on a dedicated toggle", async () => {
+		const { container } = render(
+			<AuthProvider>
+				<JobLogDrawer />
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("JOB LOG")).toBeInTheDocument());
+
+		const toggle = screen.getByRole("button", { name: /job log/i });
+		expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+		fireEvent.click(toggle);
+		await waitFor(() => expect(container.querySelector(".job-log-drawer__body")).not.toBeNull());
+		expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+		fireEvent.click(toggle);
+		await waitFor(() => expect(container.querySelector(".job-log-drawer__body")).toBeNull());
+		expect(toggle).toHaveAttribute("aria-expanded", "false");
+	});
+
+	it("still opens/collapses when clicking anywhere on the bar (pointer affordance preserved)", async () => {
+		const { container } = await mountOpenDrawer();
+		const bar = container.querySelector(".job-log-drawer__bar") as HTMLElement;
+
+		// Click on a non-interactive part of the bar (the summary/count area),
+		// not the dedicated toggle button.
+		fireEvent.click(bar);
+		await waitFor(() => expect(container.querySelector(".job-log-drawer__body")).toBeNull());
+
+		fireEvent.click(bar);
+		await waitFor(() => expect(container.querySelector(".job-log-drawer__body")).not.toBeNull());
+	});
+
+	it("the toggle button is keyboard-operable independent of the bar div", async () => {
+		render(
+			<AuthProvider>
+				<JobLogDrawer />
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("JOB LOG")).toBeInTheDocument());
+
+		const toggle = screen.getByRole("button", { name: /job log/i });
+		toggle.focus();
+		expect(toggle).toHaveFocus();
+
+		// A real <button> activates on Enter/Space natively (jsdom fires the
+		// click for us via fireEvent.click, which is how RTL simulates native
+		// keyboard activation of a focused button).
+		fireEvent.click(toggle);
+		expect(toggle).toHaveAttribute("aria-expanded", "true");
+	});
+
 	it("renders nothing at all while signed out", async () => {
 		window.sessionStorage.clear();
 		const { container } = render(
