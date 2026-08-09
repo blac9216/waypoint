@@ -21,6 +21,7 @@ using Microsoft.Extensions.Options;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.ConfigDocs;
+using Waypoint.Core.Discovery;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Pagination;
@@ -44,11 +45,29 @@ public sealed class RunsController : ControllerBase
 	private const string RemediateConfirmation = "REMEDIATE";
 	private const string ScanRunType = "scan";
 	private const string ScanJobType = "scan";
+	private const string DiscoverJobType = "discover";
 	private const string PersonalCredentialKind = "personal";
 
 	private const string ScanArtifactHdfKind = "hdf";
 	private const string ScanArtifactCklKind = "ckl";
 	private const string UnknownTargetLabel = "unknown";
+
+	/// <summary>
+	/// Fan-out priority for an auto-triggered <c>discover</c> job (issue #259). Tied
+	/// with <see cref="ScanTargetPriority.Nsx"/> (1) -- the highest scan tier -- rather
+	/// than set below it, because <c>jobs_priority_check</c> (migration 0001) bounds
+	/// <c>priority</c> to 1-6; there is no headroom above the existing top tier. Tying
+	/// the top tier is sufficient: a stale target's discover job dispatches at least as
+	/// early as any scan job in the same run once the queue is contended (<c>ORDER BY
+	/// priority, created_at</c>, <see cref="Waypoint.Infrastructure.Jobs.JobQueueRepository"/>),
+	/// and discover specs are appended after every scan spec in
+	/// <see cref="BuildStaleDiscoverSpecs"/>'s caller, so a same-priority tie always
+	/// resolves in the scan jobs' favor on <c>created_at</c> rather than the reverse --
+	/// which is fine, since this is ordering only, not a hard dependency (see
+	/// <see cref="BuildStaleDiscoverSpecs"/>'s design-decision note for why the scan
+	/// itself does not block on it).
+	/// </summary>
+	private const short AutoDiscoverPriority = ScanTargetPriority.Nsx;
 
 	private readonly IJobQueueRepository _repository;
 	private readonly SiteRepository _sites;
@@ -57,6 +76,7 @@ public sealed class RunsController : ControllerBase
 	private readonly ConfigDocRepository _configDocs;
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
 	private readonly IOptions<ScanOptions> _scanOptions;
+	private readonly IOptions<DiscoveryOptions> _discoveryOptions;
 
 	public RunsController(
 		IJobQueueRepository repository,
@@ -65,7 +85,8 @@ public sealed class RunsController : ControllerBase
 		IEphemeralCredentialCache ephemeralCredentials,
 		ConfigDocRepository configDocs,
 		AttestationSnapshotRepository attestationSnapshots,
-		IOptions<ScanOptions> scanOptions)
+		IOptions<ScanOptions> scanOptions,
+		IOptions<DiscoveryOptions> discoveryOptions)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(sites);
@@ -74,6 +95,7 @@ public sealed class RunsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(configDocs);
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
 		ArgumentNullException.ThrowIfNull(scanOptions);
+		ArgumentNullException.ThrowIfNull(discoveryOptions);
 		_repository = repository;
 		_sites = sites;
 		_targets = targets;
@@ -81,6 +103,7 @@ public sealed class RunsController : ControllerBase
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
 		_scanOptions = scanOptions;
+		_discoveryOptions = discoveryOptions;
 	}
 
 	/// <summary>
@@ -312,6 +335,15 @@ public sealed class RunsController : ControllerBase
 			}
 		}
 
+		// Discover specs are appended after every scan spec, never interleaved: the
+		// ephemeral-credential zip below assumes specs[i] <-> jobIds[i] for the first
+		// targets.Count entries (FanOutJobsAsync returns ids in list order), and
+		// inserting a discover spec anywhere before that range would shift the zip and
+		// hand an ad hoc secret to the wrong job. Ordering between discover and scan
+		// dispatch is carried entirely by AutoDiscoverPriority, not by list position.
+		int scanSpecCount = specs.Count;
+		specs.AddRange(BuildStaleDiscoverSpecs(targets));
+
 		Guid runId = await _repository.CreateRunAsync(
 			request.RunType, request.Scope, request.CredentialId, initiatedBy, cancellationToken)
 			.ConfigureAwait(false);
@@ -321,15 +353,79 @@ public sealed class RunsController : ControllerBase
 		{
 			// jobIds is returned in the same order as specs (JobQueueRepository.FanOutJobsAsync):
 			// zip rather than re-resolve so each target's ad hoc secret lands on exactly
-			// its own job's cache entry, never a sibling's.
+			// its own job's cache entry, never a sibling's. Bounded to scanSpecCount so an
+			// appended discover job's id is never mistaken for a scan job's.
 			EphemeralCredential credential = new(request.Credential!.Username, request.Credential.Secret);
-			for (int i = 0; i < jobIds.Count; i++)
+			for (int i = 0; i < scanSpecCount; i++)
 			{
 				_ephemeralCredentials.Put(jobIds[i], runId, credential, initiatedBy);
 			}
 		}
 
 		return new RunCreatedResponse(runId.ToString());
+	}
+
+	/// <summary>
+	/// Issue #259 (deferred half of #21's AC): builds one <c>discover</c>
+	/// <see cref="JobSpec"/> per <c>vsphere</c> target in <paramref name="targets"/>
+	/// whose cached inventory is stale or has never been populated -- the same
+	/// staleness test <see cref="Waypoint.Api.Controllers.DiscoveryController.GetInventory"/>
+	/// exposes on the wire (<c>LastRefreshed is null</c>, or older than
+	/// <see cref="DiscoveryOptions.StaleAfterMinutes"/>), reused here so "stale" means
+	/// one thing everywhere it's evaluated. Only <c>vsphere</c> targets are eligible --
+	/// <see cref="Waypoint.Infrastructure.Discovery.DiscoverJobHandler"/> rejects any
+	/// other kind outright, and <c>nsx-api</c>/<c>ssh</c> targets have no inventory
+	/// cache to refresh in the first place.
+	///
+	/// <b>Design decision (fire-and-forget, not scan-blocking):</b> queued into the
+	/// same run as the scan fan-out, ordered ahead of every scan job via
+	/// <see cref="AutoDiscoverPriority"/>, but the scan jobs are NOT made to depend on
+	/// or wait for these -- the job queue has no dependency/blocking primitive between
+	/// sibling jobs in a run (<see cref="Waypoint.Infrastructure.Jobs.JobQueueRepository.FanOutJobsAsync"/>
+	/// only orders dispatch by priority/created_at; ADR-0008's Continue-on-failure
+	/// policy treats every job in a run as independent). More fundamentally,
+	/// <see cref="Waypoint.Infrastructure.Scans.ScanJobHandler"/> never reads the
+	/// inventory cache (<see cref="Waypoint.Infrastructure.Discovery.InventoryRepository"/>)
+	/// at all -- it drives InSpec/PowerCLI directly against the target's own
+	/// <c>connection.host</c>, the same way it always has. The cache exists solely to
+	/// back the Start-a-Scan checkbox tree (<c>GET /targets/{id}/inventory</c>) that
+	/// runs BEFORE this endpoint is called. So blocking this scan on a fresh discover
+	/// would add latency and a new failure-coupling path (a discover auth failure
+	/// could halt a scan that never touches inventory) for zero benefit to the run
+	/// being started; the real benefit is a fresher cache for the NEXT time an
+	/// operator opens the checkbox tree or starts another scan. If a future slice
+	/// makes scan execution inventory-aware (e.g. per-inventory-item fan-out), this
+	/// call site is exactly where a hard dependency would need to be introduced.
+	/// </summary>
+	private List<JobSpec> BuildStaleDiscoverSpecs(IReadOnlyList<Target> targets)
+	{
+		DateTimeOffset staleBefore = DateTimeOffset.UtcNow.AddMinutes(-_discoveryOptions.Value.StaleAfterMinutes);
+
+		List<JobSpec> specs = [];
+		foreach (Target target in targets)
+		{
+			if (!string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal))
+			{
+				continue;
+			}
+
+			bool stale = target.LastRefreshed is null || target.LastRefreshed.Value < staleBefore;
+			if (!stale)
+			{
+				continue;
+			}
+
+			string payload = JsonSerializer.Serialize(new { target_id = target.Id });
+			specs.Add(new JobSpec(
+				DiscoverJobType,
+				AutoDiscoverPriority,
+				TargetId: target.Id,
+				TargetName: target.Name,
+				CredentialId: target.CredentialId,
+				Payload: payload));
+		}
+
+		return specs;
 	}
 
 	/// <summary>
