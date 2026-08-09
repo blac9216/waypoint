@@ -50,13 +50,17 @@ API, job engine, credential store, RBAC, and cross-enclave transfer. One applian
 image deploys on both sides of an air gap — a **connected** instance (all features,
 builds signed export bundles) and **disconnected** instances (consume bundles).
 
-**Current status: implementation, milestone M1** (foundation + download vertical
-slice — see `docs/roadmap.md`). Planning (M0) is complete: architecture, decisions,
-security model, UI prototype, and the API contract live in `docs/` — read
-`docs/architecture.md`, `docs/api-contract.md`, and the ADRs in `docs/adr/` before
-building anything, and keep them updated as decisions evolve. Do not contradict an
-accepted ADR without recording a superseding one. All work is issue-driven via the
-`github-workflow` skill.
+**Current status: implementation, milestone M3.** M1 (foundation + download vertical
+slice, epic [#1](https://github.com/blac9216/waypoint/issues/1)) and M2 (sites,
+credentials & STIG scan slice, epic [#13](https://github.com/blac9216/waypoint/issues/13))
+are both closed and live-stack validated; M3 (identity/RBAC/scheduling, epic
+[#14](https://github.com/blac9216/waypoint/issues/14)) is active — see
+`docs/roadmap.md` for what's built vs. still planned. Planning (M0) is complete:
+architecture, decisions, security model, UI prototype, and the API contract live in
+`docs/` — read `docs/architecture.md`, `docs/api-contract.md`, and the ADRs in
+`docs/adr/` before building anything, and keep them updated as decisions evolve. Do
+not contradict an accepted ADR without recording a superseding one. All work is
+issue-driven via the `github-workflow` skill.
 
 ## Tech Stack (agreed — see ADRs for rationale)
 
@@ -76,18 +80,14 @@ accepted ADR without recording a superseding one. All work is issue-driven via t
 
 **[`docs/testing.md`](docs/testing.md) is required reading before you run the stack.**
 
-Multiple agents run this stack on the same Docker host concurrently. The compose file
-pins explicit `container_name:` values, which Compose does **not** namespace by
-project — so `docker compose -p <name> up` does *not* isolate you, and a second stack
-silently recreates the first one's containers (issue #68). The failure mode is a
-plausible wrong result, not an error: someone else's healthy container answers your
-probe, or someone else's recreate fails your run.
-
-`docs/testing.md` carries the isolation recipe (unique project + override file for
-container names + unique host port), how to verify isolation *before* trusting a
+Multiple agents run this stack on the same Docker host concurrently, so every
+bring-up needs its own Compose project name and host port — `docs/testing.md` is the
+single source of truth for the current isolation recipe (issue #68 removed the
+compose file's fixed `container_name:` values, so `-p <name>` alone now isolates
+containers/networks/volumes together), how to verify isolation *before* trusting a
 result, cleanup discipline, and the two standing verification-honesty rules: never
 claim a check you did not execute, and run every Suggested Test Step exactly as
-written before posting it.
+written before posting it. Do not duplicate the recipe here — it drifts; go read it.
 
 ## Repository Layout
 
@@ -104,9 +104,9 @@ written before posting it.
 │   │   ├── design-brief.md  # Screen inventory, reconciliation notes, data ledger
 │   │   └── prototype/       # High-fidelity interactive HTML prototype + design handoff
 │   └── adr/             # Architecture Decision Records (numbered, immutable once accepted)
-├── backend/             # (skeleton) ASP.NET Core API + job engine + PS hosting
-├── frontend/            # (skeleton) React + TypeScript PWA
-├── deploy/              # (skeleton) compose file, nginx config, updater, bundle tooling
+├── backend/             # ASP.NET Core API + job engine + PS hosting (M1/M2 delivered; M3 Keycloak/RBAC in progress)
+├── frontend/            # React + TypeScript PWA (M1/M2 screens delivered; M3 auth/RBAC UI in progress)
+├── deploy/              # compose file, nginx config; updater + bundle tooling still planned (M6/M7)
 └── .claude/skills/      # github-workflow + github-pr-review (issue-driven development)
 ```
 

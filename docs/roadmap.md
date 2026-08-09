@@ -14,37 +14,38 @@ and forces exactly one new subsystem into existence.
 
 Next: decompose M1 into epics/issues per the `github-workflow` skill.
 
-## M1 — Foundation + download vertical slice (current — epic [#1](https://github.com/blac9216/waypoint/issues/1))
+## M1 — Foundation + download vertical slice ✅ (closed 2026-08-08 — epic [#1](https://github.com/blac9216/waypoint/issues/1))
 
-Reordered 2026-08-02: the download workflow goes first — it is the easiest end-to-end
-slice (no vCenter discovery, no InSpec/SAF pipeline, one credential) while still
-forcing every foundation into existence.
+Reordered 2026-08-02: the download workflow went first — it was the easiest
+end-to-end slice (no vCenter discovery, no InSpec/SAF pipeline, one credential)
+while still forcing every foundation into existence.
 
-- Compose stack: nginx + backend + Postgres + frontend shell. **Local auth only.**
-- Job engine (ADR-0008): queue, dispatcher, runspace hosting (ADR-0006), SSE
-  streaming (global + per-run) — proves the riskiest integration (C# ↔ PowerShell)
-  on the simplest workflow.
-- Minimal secrets store (ADR-0005 subset): envelope encryption + write-only API,
-  initially holding just the Broadcom depot token.
-- Wired through end to end: **depot catalog indexing (`catalog-index`) + catalog
-  browser + download jobs (`download`) with live progress, checksum verification,
-  and disk usage**, using the vcf-docker-download modules as the execution layer.
-- Dev-only shortcut: the download tool binary is provisioned into the dev environment
-  by hand (the in-UI install flow stays in M5). **Test depot tokens/config come from
-  the private sibling repo at runtime — gitignored mounts, never committed here.**
+Delivered: Compose stack (nginx + backend + Postgres + frontend shell, local auth
+only); job engine (ADR-0008: queue, dispatcher, runspace hosting per ADR-0006, SSE
+streaming global + per-run); minimal secrets store (ADR-0005 subset: envelope
+encryption + write-only API, holding the Broadcom depot token); **depot catalog
+indexing (`catalog-index`) + catalog browser + download jobs (`download`) with live
+progress, checksum verification, and disk usage**, wired end to end against the
+vcf-docker-download modules as the execution layer. The download-tool binary is
+still hand-provisioned in dev — the in-UI install flow (local repo / depot fetch /
+manual upload) remains scoped to M5, not duplicated here. Test depot tokens/config
+still come from the private sibling repo at runtime — gitignored mounts, never
+committed.
 
-## M2 — Sites, credentials & the STIG scan slice (epic [#13](https://github.com/blac9216/waypoint/issues/13))
+## M2 — Sites, credentials & the STIG scan slice ✅ (closed 2026-08-09 — epic [#13](https://github.com/blac9216/waypoint/issues/13))
 
-- Full credential store (ownership model) + sites/targets CRUD, all configured fresh
-  in the UI. **No importer from the sibling repos' `secrets.vault`/`site.json`** —
-  Waypoint replicates their functionality and borrows code where sensible, but is not
-  tied to their data formats (decision 2026-08-08).
-- Discovery job type + cached inventory (needed by the start-a-scan flow).
-- **STIG scan of a vSphere site with live logs in the browser** (the hero screen),
-  then the remaining transports (NSX, SRG) + attestation/input document store with
-  versioning.
+Delivered: full credential store (ownership model) + sites/targets CRUD, all
+configured fresh in the UI. **No importer from the sibling repos'
+`secrets.vault`/`site.json`** — Waypoint replicates their functionality and borrows
+code where sensible, but is not tied to their data formats (decision 2026-08-08).
+Discovery job type + cached inventory; **STIG scan of a vSphere site with live logs
+in the browser** (the hero screen); NSX + SRG transports; attestation/input
+document store with versioning; STIG Manager integration. Live-stack + Playwright
+validation passed end-to-end; residual items are owner-gated (e.g. #100, live-vCenter
+HDF/CKL parity, live STIG Manager upload) or deferred to later milestones — see the
+epic's closing comment for the full list.
 
-## M3 — Identity & RBAC (epic [#14](https://github.com/blac9216/waypoint/issues/14))
+## M3 — Identity & RBAC (current — epic [#14](https://github.com/blac9216/waypoint/issues/14))
 
 - Keycloak (ADR-0004), OIDC integration, role mapping (Viewer/Cyber/Operator/Admin).
 - Scheduling for read-only jobs under service credentials.
@@ -57,11 +58,14 @@ forcing every foundation into existence.
 
 ## M5 — Download manager & managed content (epic [#16](https://github.com/blac9216/waypoint/issues/16))
 
-- Depot catalog indexing into Postgres; catalog browser UI; download jobs with
-  progress/verification; content-library + Photon repo management; disk usage.
+Depot catalog indexing, catalog browser UI, and download jobs with
+progress/verification/disk usage shipped early in **M1** (see above) rather than
+here — what remains scoped to M5 is everything M1 explicitly deferred:
+
+- Content-library + Photon repo management.
 - Download-tool install flow (local repo / depot fetch / manual upload with signature
   verification) — the tool is never bundled in the image (licensing, decided
-  2026-08-02); catalog stays browsable index-only without the tool.
+  2026-08-02); catalog stays browsable index-only without the tool until this lands.
 - Compliance-content management: the profiles repo as appliance state (pinned tag or
   tracked branch, `content-pull` when connected; air-gapped `content-import` lands
   with the M6 bundle format).

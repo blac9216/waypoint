@@ -16,15 +16,23 @@ compliance operations locally.
 
 ## Status
 
-**Planning / design phase.** No application code yet. Start here:
+**In active implementation.** Planning (M0) closed 2026-08-02; the foundation and
+download vertical slice (M1, epic [#1](https://github.com/blac9216/waypoint/issues/1))
+and the sites/credentials/STIG-scan slice (M2, epic
+[#13](https://github.com/blac9216/waypoint/issues/13)) are both closed and live-stack
+validated. M3 — identity via Keycloak, RBAC enforcement, and scheduling (epic
+[#14](https://github.com/blac9216/waypoint/issues/14)) — is next; see
+[roadmap.md](docs/roadmap.md) for what that leaves built vs. planned. Start here:
 
 - [Architecture](docs/architecture.md) — components, job engine, modes, update flow
+  (status-annotated: built vs. planned)
 - [Domain model](docs/domain-model.md) — sites, targets, credentials, roles
 - [Security](docs/security.md) — secrets threat model and leakage controls
 - [ADRs](docs/adr/) — the decisions and why
 - [Roadmap](docs/roadmap.md) — build sequencing
 - [UI design brief](docs/ui/design-brief.md) — screen inventory and prototype reconciliation
 - [API contract](docs/api-contract.md) — REST/SSE contract, state machines, data ledger (M0 output)
+- [Testing](docs/testing.md) — required reading before running the Compose stack
 
 ## License
 
