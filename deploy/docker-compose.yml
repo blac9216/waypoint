@@ -123,6 +123,22 @@ services:
       # nginx and the backend share, and the only source X-Forwarded-For/
       # X-Forwarded-Proto should ever be trusted from in this deployment.
       ForwardedHeaders__KnownNetworks__0: "192.168.240.0/24"
+      # Secrets master key (issue #405; ADR-0005, AWX-pattern envelope
+      # encryption). Preferred and only delivery path is a mounted file,
+      # bind-mounted below from ../config/secrets/master.key (gitignored -
+      # see .gitignore's /config/ entry and CLAUDE.md; same convention as
+      # the admin-password-hash mount above). This env var names the
+      # in-container path; FileMasterKeyProvider reads the key from it
+      # lazily, on the first secret-store operation, not at startup - so an
+      # unconfigured stack still comes up healthy and only a credential
+      # write fails, with FileMasterKeyProvider's own
+      # "No master key is configured..." error. There is no env-var
+      # fallback here (unlike LocalAuth__AdminPasswordHash above):
+      # FileMasterKeyProvider only ever reads a file, by design, since env
+      # vars leak via /proc/<pid>/environ, `docker inspect`, and crash
+      # dumps. See deploy/README.md "Bring-up" for how to generate the
+      # key file's contents.
+      WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
       # #223: points the PowerShell runspace pool (WaypointRunspacePool,
       # ADR-0006) at the Waypoint-owned shim module that dot-sources the
       # sibling vcf-docker-download repo's UNMODIFIED vcf-download-manager
@@ -184,6 +200,23 @@ services:
       # - type: bind
       #   source: ../config/local-auth/admin-password-hash
       #   target: /run/secrets/local-auth-admin-password-hash
+      #   read_only: true
+      #   bind:
+      #     create_host_path: false
+      # Secrets master key file (issue #405) - operator-provided, gitignored
+      # (../config/ is covered by .gitignore's anchored /config/ entry).
+      # Commented out by default so an unconfigured stack does not fail to
+      # start on a missing bind source: FileMasterKeyProvider only loads the
+      # key lazily on first use (see the WAYPOINT_MASTER_KEY_FILE comment
+      # above), so a stack without this mount still starts and reports
+      # healthy - only a credential write (or anything else that touches
+      # the secret store) fails, with FileMasterKeyProvider's own clean
+      # fail-closed error. Uncomment and create
+      # ../config/secrets/master.key (see deploy/README.md "Bring-up") to
+      # enable the credential store:
+      # - type: bind
+      #   source: ../config/secrets/master.key
+      #   target: /run/secrets/waypoint-master-key
       #   read_only: true
       #   bind:
       #     create_host_path: false
