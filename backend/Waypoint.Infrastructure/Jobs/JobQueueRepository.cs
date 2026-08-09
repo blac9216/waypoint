@@ -836,6 +836,94 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		return result is bool cancelRequested && cancelRequested;
 	}
 
+	/// <summary>Issue #297 -- see <see cref="IJobQueueRepository.RetryJobAsync"/>.</summary>
+	public async Task<JobRetryOutcome> RetryJobAsync(Guid jobId, string actor, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(actor);
+
+		if (!JobStateMachine.CanEngineTransition(JobShape.Simple, JobStates.Failed, JobStates.Queued))
+		{
+			throw new InvalidOperationException("The engine transition gate rejects a manual job retry.");
+		}
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		// Lock the row so the retry and the state check are one atomic decision, same
+		// discipline as CancelJobAsync -- a concurrent lease-recovery sweep or another
+		// retry cannot race this read/write pair.
+		string? currentState;
+		Guid? runId;
+		await using (NpgsqlCommand lockJob = new(
+			"SELECT state, run_id FROM jobs WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockJob.Parameters.AddWithValue(jobId);
+			await using NpgsqlDataReader reader = await lockJob.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+				return JobRetryOutcome.NotFound;
+			}
+
+			currentState = reader.GetString(0);
+			runId = reader.IsDBNull(1) ? null : reader.GetGuid(1);
+		}
+
+		if (!string.Equals(currentState, JobStates.Failed, StringComparison.Ordinal))
+		{
+			// Deliberately excludes auth-failed (credential-swap-resume, #146/#295, is
+			// the correct path there) and cancelled (a deliberate operator action --
+			// silently re-queueing it would be wrong; start a new run instead).
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return JobRetryOutcome.NotFailed;
+		}
+
+		// stage and attempt_count are deliberately absent from this SET list: stage
+		// survives untouched so the next claim's RETURNING stage resumes the pipeline
+		// where it failed (ADR-0012 §5), and a manual operator override is not subject
+		// to the automatic-retry attempt_count/max_attempts budget -- see the interface
+		// doc comment.
+		await using (NpgsqlCommand retry = new(
+			"""
+			UPDATE jobs SET
+				state = 'queued',
+				claimed_by = NULL,
+				claimed_at = NULL,
+				lease_expires_at = NULL,
+				heartbeat_at = NULL,
+				cancel_requested = false,
+				note = 'Retried by operator'
+			WHERE id = $1
+			""", connection, transaction))
+		{
+			retry.Parameters.AddWithValue(jobId);
+			await retry.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// "No audit, no retry" -- same discipline as SwapAndResumeBlockedCredentialAsync's
+		// Step 5. Identity + job/run/stage context only.
+		await using (NpgsqlCommand audit = new(
+			"""
+			INSERT INTO audit_log (event_type, actor, run_id, detail)
+			VALUES ('job.retried', $1, $2, $3::jsonb)
+			""", connection, transaction))
+		{
+			audit.Parameters.AddWithValue(actor);
+			audit.Parameters.AddWithValue((object?)runId ?? DBNull.Value);
+			audit.Parameters.AddWithValue(System.Text.Json.JsonSerializer.Serialize(new
+			{
+				job_id = jobId,
+				run_id = runId,
+			}));
+			await audit.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		LogJobRetried(jobId, actor);
+		return JobRetryOutcome.Retried;
+	}
+
 	public async Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken)
 	{
 		if (threshold <= 0)
@@ -1316,6 +1404,9 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Job {JobId} cancel requested while running; awaiting next heartbeat tick")]
 	private partial void LogJobCancelRequested(Guid jobId);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Job {JobId} retried by {Actor}")]
+	private partial void LogJobRetried(Guid jobId, string actor);
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "Credential {CredentialId} hit {Threshold} consecutive auth failures: {BlockedRunCount} run(s) and {BlockedJobCount} queued job(s) blocked")]
 	private partial void LogAuthFailureHalt(Guid credentialId, int threshold, int blockedRunCount, int blockedJobCount);

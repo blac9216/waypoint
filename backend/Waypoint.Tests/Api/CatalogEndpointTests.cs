@@ -311,6 +311,12 @@ public sealed class CatalogFakeJobQueueRepository : IJobQueueRepository
 		return Task.FromResult(new AbortRunResult([], []));
 	}
 
+	public Task<JobRetryOutcome> RetryJobAsync(Guid jobId, string actor, CancellationToken cancellationToken)
+	{
+		_ = (jobId, actor, cancellationToken);
+		return Task.FromResult(JobRetryOutcome.Retried);
+	}
+
 	public Task<JobCancelOutcome> CancelJobAsync(Guid jobId, CancellationToken cancellationToken)
 	{
 		_ = (jobId, cancellationToken);

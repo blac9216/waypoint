@@ -133,6 +133,23 @@ public sealed class JobStateMachineTests
 		Assert.False(JobStateMachine.CanTransition(JobShape.Standard, fromState, JobStates.Queued));
 	}
 
+	/// <summary>
+	/// Issue #297: the operator-facing retry endpoint moves a <c>failed</c> job back to
+	/// <c>queued</c> (ADR-0012 §5's resume primitive). This is engine-only, same as
+	/// every other requeue-to-queued privilege above -- no handler may resurrect its
+	/// own failed job and bypass retry accounting (<see cref="JobStateMachine.CanTransition"/>
+	/// stays false).
+	/// </summary>
+	[Theory]
+	[InlineData(JobShape.Standard)]
+	[InlineData(JobShape.Simple)]
+	[InlineData(JobShape.Srg)]
+	public void EngineMayRequeueFailedJobs_ButHandlersMayNot(JobShape shape)
+	{
+		Assert.True(JobStateMachine.CanEngineTransition(shape, JobStates.Failed, JobStates.Queued));
+		Assert.False(JobStateMachine.CanTransition(shape, JobStates.Failed, JobStates.Queued));
+	}
+
 	[Fact]
 	public void JobShapes_OnlyScanIsStandard()
 	{

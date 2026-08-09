@@ -83,13 +83,21 @@ public static class JobStateMachine
 	/// what lets a job requeued mid-pipeline re-enter the claim query at all, and what
 	/// makes #282's crashed-attest/convert recovery legal rather than a silent CHECK
 	/// violation waiting to happen.
+	///
+	/// Issue #297: <c>failed -&gt; queued</c> is engine-only for exactly the same
+	/// reason -- the operator-facing retry endpoint moves a terminal <c>failed</c> row
+	/// back to <c>queued</c> preserving <c>jobs.stage</c> (ADR-0012 §5), which is not a
+	/// transition any handler ever performs on itself (<see cref="CanTransition"/> is
+	/// unchanged: a handler still cannot resurrect its own failed job and bypass retry
+	/// accounting).
 	/// </summary>
 	public static bool CanEngineTransition(JobShape shape, string fromState, string toState) =>
 		CanTransition(shape, fromState, toState)
 		|| (string.Equals(toState, JobStates.Queued, StringComparison.Ordinal)
 			&& (string.Equals(fromState, JobStates.Running, StringComparison.Ordinal)
 				|| string.Equals(fromState, JobStates.Attesting, StringComparison.Ordinal)
-				|| string.Equals(fromState, JobStates.Converting, StringComparison.Ordinal)));
+				|| string.Equals(fromState, JobStates.Converting, StringComparison.Ordinal)
+				|| string.Equals(fromState, JobStates.Failed, StringComparison.Ordinal)));
 
 	/// <summary>The states a job of the given shape may still reach from <paramref name="fromState"/>.</summary>
 	public static IReadOnlyList<string> AllowedNextStates(JobShape shape, string fromState)

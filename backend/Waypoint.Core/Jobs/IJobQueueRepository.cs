@@ -166,6 +166,29 @@ public interface IJobQueueRepository
 	Task<JobCancelOutcome> CancelJobAsync(Guid jobId, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Issue #297: the operator-facing counterpart to ADR-0012 §5's engine-level
+	/// resume primitive. Moves a <c>failed</c> job back to <c>queued</c> WITHOUT
+	/// touching <c>jobs.stage</c> -- the next claim's <c>RETURNING stage</c> hands the
+	/// marker straight back (<see cref="ClaimedJob.Stage"/>), so the handler resumes at
+	/// the last-reached stage rather than restarting the pipeline, exactly like
+	/// <see cref="RequeueAtStageAsync"/>'s engine-driven requeue and the lease-recovery
+	/// sweep's mid-pipeline recovery. Scoped to <c>failed</c> only (see
+	/// <see cref="JobRetryOutcome"/>): NOT <c>auth-failed</c> (issue #146/#295's
+	/// credential-swap-resume path exists precisely because retrying without swapping
+	/// the bad credential would just re-fail) and NOT <c>cancelled</c> (a deliberate
+	/// operator action -- silently re-queueing it is wrong; the operator starts a new
+	/// run instead). This is a manual override, not the auto-retry/lease-recovery path:
+	/// it does not increment <c>attempt_count</c> and is never blocked by the
+	/// <c>max_attempts</c> cap that governs automatic retries -- an explicit human
+	/// action is not subject to the automatic-retry budget. Resets lease/claim columns
+	/// the same way <see cref="RequeueAtStageAsync"/> does, and records an
+	/// <c>audit_log</c> row (<c>event_type = 'job.retried'</c>) carrying the actor,
+	/// job id, run id and preserved stage -- "no audit, no retry" mirroring every other
+	/// run-control action in this repository.
+	/// </summary>
+	Task<JobRetryOutcome> RetryJobAsync(Guid jobId, string actor, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Blocks queued work after the credential's most recent resolved outcomes are
 	/// consecutive authentication failures, and durably halts the credential
 	/// (<c>credentials.queue_halted</c>) so later fan-outs, requeues and releases for
@@ -249,6 +272,22 @@ public enum JobCancelOutcome
 	Cancelled,
 	NotCancellable,
 	CancelRequested,
+}
+
+/// <summary>
+/// The outcome of a single-job manual retry (see
+/// <see cref="IJobQueueRepository.RetryJobAsync"/>). <see cref="Retried"/>: a
+/// <c>failed</c> job was moved back to <c>queued</c> with <c>stage</c> preserved.
+/// <see cref="NotFailed"/>: the job exists but is not <c>failed</c> (includes
+/// <c>auth-failed</c> and <c>cancelled</c>, both deliberately excluded -- see the
+/// interface doc comment) -- the caller maps this to 409. <see cref="NotFound"/>: no
+/// such job row.
+/// </summary>
+public enum JobRetryOutcome
+{
+	NotFound,
+	Retried,
+	NotFailed,
 }
 
 /// <summary>A page of run summaries plus the full collection's total row count (for <c>X-Total-Count</c>).</summary>

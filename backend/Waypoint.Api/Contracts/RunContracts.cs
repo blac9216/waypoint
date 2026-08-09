@@ -198,6 +198,22 @@ public sealed record JobCancelResponse(
 	string State);
 
 /// <summary>
+/// Response body for <c>POST /api/v1/runs/{runId}/jobs/{jobId}/retry</c> (issue #297,
+/// ADR-0012 §5). <see cref="Stage"/> echoes back the preserved <c>jobs.stage</c> marker
+/// (null when the job had not yet completed any stage) so the caller can confirm the
+/// resume point without a follow-up GET.
+/// </summary>
+public sealed record JobRetryResponse(
+	[property: JsonPropertyName("job_id")]
+	string JobId,
+
+	[property: JsonPropertyName("state")]
+	string State,
+
+	[property: JsonPropertyName("stage")]
+	string? Stage);
+
+/// <summary>
 /// Request body for <c>POST /api/v1/runs/{id}/resume-blocked</c> (ADR-0008, issue #291).
 /// <see cref="CredentialId"/> is the REPLACEMENT credential to swap onto the run's
 /// halted jobs -- not the id of the halted credential itself, which the server
