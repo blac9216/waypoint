@@ -30,7 +30,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, API_BASE } from "../../lib/api";
 import { roleGateProps, type Role } from "../../lib/roles";
-import { useAuth } from "../../lib/auth";
+import { useAuth } from "../../lib/auth-context";
 import { connectEventStream, type WaypointEvent } from "../../lib/events";
 import { fetchCredentials, type Credential } from "../configuration/credentials";
 import {

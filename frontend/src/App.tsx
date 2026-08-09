@@ -1,9 +1,13 @@
 import { useEffect, type ComponentType } from "react";
 import { Chrome } from "./components/chrome/Chrome";
 import { LoginScreen } from "./components/auth/LoginScreen";
-import { AuthProvider, useAuth } from "./lib/auth";
-import { DEFAULT_ROUTE, evaluateRouteAccess, RouterProvider, useRouter } from "./lib/router";
-import { SystemProvider, useSystem } from "./lib/system";
+import { AuthProvider } from "./lib/auth";
+import { useAuth } from "./lib/auth-context";
+import { RouterProvider } from "./lib/router";
+import { useRouter } from "./lib/router-context";
+import { DEFAULT_ROUTE, evaluateRouteAccess } from "./lib/routes";
+import { SystemProvider } from "./lib/system";
+import { useSystem } from "./lib/system-context";
 import { ThemeProvider } from "./lib/theme";
 import {
 	BenchmarksScreen,

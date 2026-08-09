@@ -36,7 +36,7 @@
  * prior stream first so overlapping clicks never leak two.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAuth } from "../../lib/auth";
+import { useAuth } from "../../lib/auth-context";
 import { API_BASE, ApiError } from "../../lib/api";
 import { connectEventStream } from "../../lib/events";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";

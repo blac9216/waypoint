@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { useAuth } from "../../lib/auth";
-import type { RouteDef } from "../../lib/router";
+import { useAuth } from "../../lib/auth-context";
+import type { RouteDef } from "../../lib/routes";
 import { JobLogDrawer } from "./JobLogDrawer";
 import { LeftRail } from "./LeftRail";
 import { TopBar } from "./TopBar";

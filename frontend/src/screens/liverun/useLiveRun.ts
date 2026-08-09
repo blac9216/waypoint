@@ -14,7 +14,7 @@
  * proves with a mocked EventSource.
  */
 import { useEffect, useRef, useState } from "react";
-import { useAuth } from "../../lib/auth";
+import { useAuth } from "../../lib/auth-context";
 import { API_BASE } from "../../lib/api";
 import { connectEventStream, type ConnectionState, type WaypointEvent } from "../../lib/events";
 import { applyEvent, fetchRun, fetchRunJobs, type RunSnapshot } from "./liverun";

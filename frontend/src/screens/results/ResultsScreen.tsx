@@ -46,7 +46,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError } from "../../lib/api";
-import { useAuth } from "../../lib/auth";
+import { useAuth } from "../../lib/auth-context";
 import { roleGateProps } from "../../lib/roles";
 import {
 	artifactDownloadUrl,

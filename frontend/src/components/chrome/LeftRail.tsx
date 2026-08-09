@@ -1,8 +1,10 @@
 import type { ComponentType } from "react";
-import { useAuth } from "../../lib/auth";
-import { Link, ROUTES, useRouter, type ScreenKey } from "../../lib/router";
+import { useAuth } from "../../lib/auth-context";
+import { Link } from "../../lib/router";
+import { useRouter } from "../../lib/router-context";
+import { ROUTES, type ScreenKey } from "../../lib/routes";
 import { roleAtLeast } from "../../lib/roles";
-import { useSystem } from "../../lib/system";
+import { useSystem } from "../../lib/system-context";
 import {
 	BenchmarksIcon,
 	CatalogIcon,

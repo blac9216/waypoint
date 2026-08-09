@@ -17,10 +17,10 @@
  * role downgrade).
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useAuth } from "../../lib/auth";
+import { useAuth } from "../../lib/auth-context";
 import { ApiError } from "../../lib/api";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";
-import { useRouter } from "../../lib/router";
+import { useRouter } from "../../lib/router-context";
 import { fetchSites, fetchTargets, type Site, type Target } from "../configuration/sites";
 import { fetchCredentialOptions, type CredentialOption } from "../configuration/sites";
 import { createScanRun, fetchTargetInventory, flattenInventory, type InventoryItem } from "./startscan";

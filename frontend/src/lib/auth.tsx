@@ -1,6 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiError, apiFetch, setTokenGetter, setUnauthorizedHandler } from "./api";
 import { ROLE_ORDER, type Role } from "./roles";
+import { AuthContext, type AuthContextValue } from "./auth-context";
 
 /**
  * Local-auth login/session client — the confirmed contract (issue #64,
@@ -42,20 +43,6 @@ interface LoginResponseWire {
 interface CurrentUserResponseWire {
 	username: unknown;
 	role: unknown;
-}
-
-export interface AuthUser {
-	username: string;
-	role: Role;
-}
-
-interface AuthContextValue {
-	user: AuthUser | null;
-	token: string | null;
-	status: "restoring" | "signed-out" | "signing-in" | "signed-in";
-	error: string | null;
-	login: (username: string, password: string) => Promise<void>;
-	logout: () => void;
 }
 
 const STORAGE_KEY = "waypoint.session";
@@ -241,8 +228,6 @@ function clearStoredSession(): void {
 		// best-effort
 	}
 }
-
-const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
 	const [session, setSession] = useState<StoredSession | null>(null);
@@ -430,12 +415,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	);
 
 	return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-}
-
-export function useAuth(): AuthContextValue {
-	const ctx = useContext(AuthContext);
-	if (!ctx) {
-		throw new Error("useAuth must be used within an AuthProvider");
-	}
-	return ctx;
 }
