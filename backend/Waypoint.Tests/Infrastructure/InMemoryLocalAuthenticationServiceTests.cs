@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Security.Cryptography;
-using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 using Waypoint.Core.Auth;
 using Waypoint.Core.Authorization;
@@ -120,14 +118,8 @@ public sealed class InMemoryLocalAuthenticationServiceTests
 		return new LocalAuthOptions
 		{
 			AdminUsername = "admin",
-			AdminPasswordHash = HashPassword(Password),
+			AdminPasswordHash = Pbkdf2PasswordHasher.Hash(Password),
 			SessionLifetime = sessionLifetime ?? TimeSpan.FromHours(1)
 		};
-	}
-
-	private static string HashPassword(string password)
-	{
-		byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(password));
-		return Convert.ToHexString(hash).ToLowerInvariant();
 	}
 }

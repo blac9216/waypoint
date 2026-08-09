@@ -43,15 +43,18 @@ license header. Both a clean `dotnet build` and a clean
 ## Run locally
 
 Local auth (ADR-0004 rollout note) is a **dev-grade single admin user** — there is no
-compiled-in default password. Set `LocalAuth__AdminPasswordHash` (SHA-256 hex digest of
-the password you choose) before the API will accept any login; with it unset, login
-always fails closed:
+compiled-in default password. Set `LocalAuth__AdminPasswordHash` (a salted, iterated
+PBKDF2 hash — see `Pbkdf2PasswordHasher`, issue #62) before the API will accept any
+login; with it unset, login always fails closed:
 
 ```bash
-# Compute the hash for a password of your choosing — never commit the plaintext or the hash.
-printf '<your-dev-password>' | sha256sum | awk '{print $1}'
-
 cd backend
+dotnet build Waypoint.Api
+# Prompts for the password (input hidden) and prints the hash to stdout. Never pass
+# the password as an argument — that would land it in argv, readable via
+# /proc/<pid>/cmdline (docs/security.md control 2). Never commit the plaintext or the hash.
+dotnet run --project Waypoint.Api --no-launch-profile --no-build -- --hash-password
+
 export LocalAuth__AdminPasswordHash=<hash from above>
 dotnet run --project Waypoint.Api --no-launch-profile
 # GET  http://localhost:5000/api/v1/health         (no auth)
