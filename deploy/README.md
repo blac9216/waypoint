@@ -443,6 +443,59 @@ in epic #1 lands, uncomment the `backend` service's
 **Never** copy anything out of `dev/local/` into a committed file, fixture,
 log, or doc — see the sanitization policy in the repo root `CLAUDE.md`.
 
+### Edge hardening baseline (DISA/CIS nginx guidance, issue #52)
+
+`deploy/nginx/conf.d/default.conf` carries a hardening baseline applied on
+every bring-up — dev and production alike — rather than bolted on at
+packaging time. ADR-0003 picked nginx partly because DISA publishes
+hardening guidance for it; this is where that guidance lives.
+
+**Baseline (not operator-tunable without a code change):**
+
+- Plain HTTP (`listen 80`) 301-redirects to HTTPS instead of refusing the
+  connection — a static same-host redirect, no ACME/external dependency.
+- `server_tokens off;` on both server blocks — the nginx version is not
+  advertised in the `Server` header or on error pages.
+- An explicit `ssl_ciphers` list (ECDHE + AES-GCM/CHACHA20 only, no
+  CBC/RC4/3DES) with `ssl_prefer_server_ciphers on`, plus `ssl_session_cache`
+  / `ssl_session_timeout` / `ssl_session_tickets off` — no reliance on
+  nginx's compiled-in cipher defaults. `ssl_protocols TLSv1.2 TLSv1.3` was
+  already set (PR #49).
+- Security response headers on the HTTPS server: `Strict-Transport-Security`
+  (`max-age=2592000`, i.e. 30 days — shorter than the public-site convention
+  of 1-2 years because this is an operator-administered appliance reached by
+  IP/local hostname, not a public domain with a long-lived rotation cadence;
+  a shorter pin bounds the blast radius of a botched cert rotation),
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
+  `Referrer-Policy: same-origin`.
+- `Content-Security-Policy: default-src 'self'; connect-src 'self';
+  frame-ancestors 'none'; base-uri 'self'; form-action 'self'`. The PWA
+  (ADR-0007) ships zero external assets and no inline `<style>`/`<script>` —
+  verified against `frontend/index.html` and `vite.config.ts` at authoring
+  time (no CSS-in-JS, no inline `style=` attributes) — so a strict
+  `'self'`-only policy fits without any `'unsafe-inline'`/`'unsafe-eval'`
+  relaxation. `connect-src 'self'` covers both ordinary `/api/` REST calls
+  and the `/api/v1/events` SSE endpoints (EventSource is governed by
+  `connect-src`, same-origin through this proxy either way). **If a future
+  screen needs an inline style/script or a cross-origin connection, this
+  directive has to change with it** — don't relax CSP anywhere else instead.
+
+**Considered and deliberately deferred** (not applied here — see the
+in-file comment in `default.conf`): a request-method allowlist (rejecting
+TRACE/CONNECT/etc. at the edge). nginx's `if` inside a `server` block has
+well-known sharp edges with directive inheritance into `location` blocks,
+and there is no live stack in this change to prove an allowlist doesn't
+reject something legitimate. Revisit once the full REST surface
+(`docs/api-contract.md`) is stable and can be verified against a running
+stack.
+
+**Operator-tunable:** cert/key content and paths (`ssl_certificate`,
+`ssl_certificate_key` — operator-provided, ADR-0003), and anything in
+`deploy/.env` (`WAYPOINT_HTTPS_PORT`, etc.). The cipher list, header set,
+and CSP above are the appliance's security baseline and are not meant to be
+loosened per-deployment; tightening further (e.g. a shorter HSTS `max-age`,
+or extending CSP once new asset types are added) is fine.
+
 ### Notes
 
 - The dev TLS cert is self-signed (`CN=localhost`) and meant only for this
