@@ -15,7 +15,13 @@ column.
   guards server-side (the UI's disabled-with-reason treatment is presentation only).
 - **Mode**: every response is mode-aware; endpoints unavailable in the instance mode
   return `409 mode_unavailable` (they exist but cannot function), never `404`.
-- **Errors**: `{ "error": { "code", "message", "detail?" } }`.
+- **Errors**: `{ "error": { "code", "message", "detail?" } }`. Selected stable codes
+  that apply across endpoints (per-endpoint codes are noted inline in the resource
+  tables below):
+
+  | Code | Status | Meaning |
+  |---|---|---|
+  | `master_key_unavailable` | 503 | The secrets master key (ADR-0005) is not mounted, unreadable, or malformed — any secret-bearing write or decrypt (e.g. `POST`/`PUT /credentials` with a `secret`) fails closed. An **operator** misconfiguration, not a client error or a transient fault: 503 (not 500) signals "appliance not fully configured, retry after remediation" rather than "something crashed." The response body is deliberately generic — it never echoes the configured key file path (server filesystem layout, `security.md` control 1); the detailed `MasterKeyUnavailableException` message (env var, path, expected format) is logged server-side only. See `deploy/README.md`, "Generate a secrets master key". |
 - **Pagination**: `?limit/offset` + `X-Total-Count` on list endpoints.
 - **Write-only secrets**: stored credential material (and any secret held in the
   credential store) appears in requests, never in responses (enforced at the

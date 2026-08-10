@@ -199,9 +199,10 @@ the frontend bundle).
    one: `FileMasterKeyProvider` throws a clear
    `MasterKeyUnavailableException` — "No master key is configured..." — the
    first time anything encrypts, so `POST /api/v1/credentials` (or any other
-   secret-bearing write) 500s until this step is done. Everything else in
-   the stack works without it; only the credential store depends on this
-   key.
+   secret-bearing write) answers `503 master_key_unavailable` (issue #409;
+   `docs/api-contract.md`'s error-code table) until this step is done.
+   Everything else in the stack works without it; only the credential store
+   depends on this key.
 
    ```bash
    mkdir -p ../config/secrets
