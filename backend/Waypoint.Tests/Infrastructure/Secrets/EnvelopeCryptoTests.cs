@@ -176,16 +176,84 @@ public sealed class EnvelopeCryptoTests : IDisposable
 		Assert.Contains("32 raw bytes or 64 hex characters", error.Message, StringComparison.Ordinal);
 	}
 
+	/// <summary>
+	/// #407: a transient read failure (file momentarily missing/unreadable, e.g. a
+	/// mount race) must not poison the provider for process lifetime -- once the file
+	/// becomes readable, the very next call succeeds without a restart.
+	/// </summary>
 	[Fact]
-	public void TheFailure_IsCachedUntilRestart()
+	public void ATransientFailure_DoesNotBlockASubsequentSuccess()
 	{
 		string path = Path.Combine(_keyDirectory, "late.key");
 		FileMasterKeyProvider provider = new(path);
 		Assert.Throws<MasterKeyUnavailableException>(() => provider.GetKey());
 
-		// The file appearing later must NOT silently fix the provider: deterministic
-		// failure until restart is the documented operator contract.
-		File.WriteAllBytes(path, RandomNumberGenerator.GetBytes(32));
-		Assert.Throws<MasterKeyUnavailableException>(() => provider.GetKey());
+		// The file appearing later must fix the provider on the next access -- no
+		// restart required.
+		byte[] key = RandomNumberGenerator.GetBytes(32);
+		File.WriteAllBytes(path, key);
+		MasterKey loaded = provider.GetKey();
+		Assert.Equal(key, loaded.Key);
+	}
+
+	/// <summary>
+	/// #407: once a load succeeds, the result is cached forever -- the file is never
+	/// re-read on subsequent calls. Proven by deleting the file after the first
+	/// successful call: if GetKey() re-read the file, it would now throw.
+	/// </summary>
+	[Fact]
+	public void ASuccessfulLoad_IsCachedForever_TheFileIsReadAtMostOnce()
+	{
+		string path = Path.Combine(_keyDirectory, "cached.key");
+		byte[] key = RandomNumberGenerator.GetBytes(32);
+		File.WriteAllBytes(path, key);
+		FileMasterKeyProvider provider = new(path);
+
+		MasterKey first = provider.GetKey();
+		File.Delete(path);
+
+		// If GetKey() touched the filesystem again here, it would throw
+		// MasterKeyUnavailableException for the now-missing file. It must not.
+		MasterKey second = provider.GetKey();
+		Assert.Same(first, second);
+		Assert.Equal(key, second.Key);
+	}
+
+	/// <summary>
+	/// #407: two threads racing the first access while the load is failing must both
+	/// observe the failure with no torn/partial state, and once the file becomes
+	/// readable, later concurrent access must converge on one cached key.
+	/// </summary>
+	[Fact]
+	public void ConcurrentFirstAccess_DuringAFailure_ThenAfterRecovery_ConvergesCleanly()
+	{
+		string path = Path.Combine(_keyDirectory, "concurrent.key");
+		FileMasterKeyProvider provider = new(path);
+
+		const int ThreadCount = 8;
+		using Barrier barrier = new(ThreadCount);
+		MasterKeyUnavailableException?[] failures = new MasterKeyUnavailableException?[ThreadCount];
+
+		Parallel.For(0, ThreadCount, index =>
+		{
+			barrier.SignalAndWait();
+			failures[index] = Assert.Throws<MasterKeyUnavailableException>(() => provider.GetKey());
+		});
+
+		Assert.All(failures, failure => Assert.NotNull(failure));
+
+		byte[] key = RandomNumberGenerator.GetBytes(32);
+		File.WriteAllBytes(path, key);
+
+		MasterKey[] results = new MasterKey[ThreadCount];
+		using Barrier recoveryBarrier = new(ThreadCount);
+		Parallel.For(0, ThreadCount, index =>
+		{
+			recoveryBarrier.SignalAndWait();
+			results[index] = provider.GetKey();
+		});
+
+		Assert.All(results, result => Assert.Same(results[0], result));
+		Assert.Equal(key, results[0].Key);
 	}
 }

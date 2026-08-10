@@ -26,24 +26,56 @@ namespace Waypoint.Infrastructure.Secrets;
 /// Lazy and fail-closed on purpose: construction never throws (a Testing host or a
 /// disconnected instance without secrets must still boot), the first
 /// <see cref="GetKey"/> does the load, and every failure names the env var and the
-/// fix. The result -- including a failure -- is cached: a key that was wrong at
-/// first use does not silently become right without a restart, which keeps the
-/// failure mode deterministic for the operator.
+/// fix. A *successful* load is cached forever -- the file is read at most once per
+/// process, and subsequent calls return the cached key without touching the
+/// filesystem again. A *failed* load is deliberately NOT cached (#407): a transient
+/// condition (key file momentarily unreadable/wrong-owner during a mount race) must
+/// not poison every later secret operation until restart, so the next call retries
+/// the read. Fail-closed behavior on each individual failing attempt is unchanged --
+/// only the permanence of caching that failure is what changed.
 /// </summary>
 public sealed class FileMasterKeyProvider : IMasterKeyProvider
 {
 	public const string KeyFileEnvironmentVariable = "WAYPOINT_MASTER_KEY_FILE";
 
-	private readonly Lazy<MasterKey> _key;
+	private readonly string? _keyFilePath;
+	private readonly object _loadLock = new();
+	private MasterKey? _cachedKey;
 
 	public FileMasterKeyProvider(string? keyFilePath = null)
 	{
-		_key = new Lazy<MasterKey>(
-			() => Load(keyFilePath ?? Environment.GetEnvironmentVariable(KeyFileEnvironmentVariable)),
-			LazyThreadSafetyMode.ExecutionAndPublication);
+		_keyFilePath = keyFilePath;
 	}
 
-	public MasterKey GetKey() => _key.Value;
+	public MasterKey GetKey()
+	{
+		// Fast path: a successful load was already cached, no lock needed to read a
+		// reference that -- once published below -- never changes again.
+		MasterKey? cached = Volatile.Read(ref _cachedKey);
+		if (cached is not null)
+		{
+			return cached;
+		}
+
+		lock (_loadLock)
+		{
+			// Re-check under the lock: another thread may have completed the load
+			// (success or failure) while this thread waited.
+			cached = Volatile.Read(ref _cachedKey);
+			if (cached is not null)
+			{
+				return cached;
+			}
+
+			MasterKey loaded = Load(_keyFilePath ?? Environment.GetEnvironmentVariable(KeyFileEnvironmentVariable));
+
+			// Only a success is published. A failing Load() throws above and the lock
+			// is released without caching anything, so the next call -- from this
+			// thread or another -- retries the read from scratch.
+			Volatile.Write(ref _cachedKey, loaded);
+			return loaded;
+		}
+	}
 
 	private static MasterKey Load(string? path)
 	{
