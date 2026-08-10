@@ -17,6 +17,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Waypoint.Core.Secrets;
 
 namespace Waypoint.Tests.Support;
 
@@ -37,6 +38,18 @@ public sealed class ThrowingApiFactory : WaypointApiFactory
 
 	/// <summary>Route that flushes a partial body first, then throws — the started-response fault (#76) an SSE stream would hit mid-flight.</summary>
 	public const string StreamThrowPath = "/api/v1/_test/stream-throw";
+
+	/// <summary>Route that always throws <see cref="MasterKeyUnavailableException"/> — drives issue #409's dedicated middleware mapping end to end without standing up real Postgres/secret infrastructure.</summary>
+	public const string MasterKeyThrowPath = "/api/v1/_test/master-key-throw";
+
+	/// <summary>
+	/// The exact detailed message the test-only route throws. Exposed so the test can
+	/// assert this literal text does <em>not</em> appear in the response body -- the
+	/// mapped 503 must stay generic-actionable, never echoing the (here, fake) key
+	/// file path a real <see cref="MasterKeyUnavailableException"/> would carry.
+	/// </summary>
+	public const string MasterKeyExceptionMessage =
+		"test-only: The master key file named by WAYPOINT_MASTER_KEY_FILE ('/fake/server/path/master.key') could not be read.";
 
 	/// <summary>The bytes flushed before the fault; the client must see these and only these.</summary>
 	public const string StreamedPrefix = "data: first-event\n\n";
@@ -87,6 +100,11 @@ public sealed class ThrowingApiFactory : WaypointApiFactory
 						await context.Response.WriteAsync(StreamedPrefix);
 						await context.Response.Body.FlushAsync();
 						throw new InvalidOperationException(ExceptionMessage);
+					}
+
+					if (string.Equals(context.Request.Path, MasterKeyThrowPath, StringComparison.Ordinal))
+					{
+						throw new MasterKeyUnavailableException(MasterKeyExceptionMessage);
 					}
 
 					await nextMiddleware(context);

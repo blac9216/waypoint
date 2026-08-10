@@ -398,6 +398,41 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		Assert.True(document.RootElement.GetProperty("sudo_enabled").GetBoolean());
 	}
 
+	/// <summary>
+	/// Issue #409: a secret-bearing write with no master key configured is a distinct,
+	/// operator-actionable <c>503 master_key_unavailable</c> -- not the generic <c>500
+	/// internal_error</c> pre-#409 behavior mapped it to. Uses a real
+	/// <see cref="FileMasterKeyProvider"/> with no path (exactly how production
+	/// resolves an unset <c>WAYPOINT_MASTER_KEY_FILE</c>), so the exception thrown here
+	/// is the real <c>MasterKeyUnavailableException</c> from production code, not a
+	/// fault-injected stand-in -- <see cref="Api.MasterKeyUnavailableTests"/> covers the
+	/// middleware mapping itself via injection; this proves the real credential-write
+	/// path actually reaches it.
+	/// </summary>
+	[Fact]
+	public async Task CreateWithSecret_NoMasterKeyConfigured_Is503MasterKeyUnavailable()
+	{
+		using SecretsApiFactory noKeyFactory = new(_fixture.ConnectionString, keyPath: null!, _redactor);
+		using HttpClient noKeyClient = noKeyFactory.CreateClient();
+		string token = await LoginAsAdminAsync(noKeyClient);
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/credentials");
+		request.Headers.Add("Authorization", $"Bearer {token}");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { name = $"no-key-{Guid.NewGuid():N}", credential_type = "token", secret = "invented-no-key-secret" }),
+			Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await noKeyClient.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		Assert.Contains("master_key_unavailable", body, StringComparison.Ordinal);
+
+		// The detailed exception message (env var name, key path) never reaches the
+		// wire -- only the generic, operator-actionable text does.
+		Assert.DoesNotContain("WAYPOINT_MASTER_KEY_FILE", body, StringComparison.Ordinal);
+	}
+
 	/// <summary>Issue #262: username is a dedicated, non-secret field -- set at create, round-trips
 	/// in every response, changeable via PUT, and clearable back to null with an empty string.</summary>
 	[Fact]
@@ -515,9 +550,11 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
 
-	private async Task<string> LoginAsAdminAsync()
+	private Task<string> LoginAsAdminAsync() => LoginAsAdminAsync(_client);
+
+	private static async Task<string> LoginAsAdminAsync(HttpClient client)
 	{
-		HttpResponseMessage response = await _client.PostAsJsonAsync(
+		HttpResponseMessage response = await client.PostAsJsonAsync(
 			"/api/v1/auth/login", new { username = "admin", password = WaypointApiFactory.TestAdminPassword });
 		response.EnsureSuccessStatusCode();
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
