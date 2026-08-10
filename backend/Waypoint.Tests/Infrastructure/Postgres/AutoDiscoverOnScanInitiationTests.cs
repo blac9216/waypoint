@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -20,6 +21,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -82,14 +84,38 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 	{
 		private readonly string _connectionString;
 
-		public AutoDiscoverApiFactory(string connectionString)
+		/// <summary>
+		/// Null keeps whatever <c>Discovery:StaleAfterMinutes</c> the base test host
+		/// configuration supplies (the production default of 60, per
+		/// <see cref="DiscoveryOptions.StaleAfterMinutes"/>). Non-null overrides it via
+		/// <see cref="IWebHostBuilder.ConfigureAppConfiguration"/> so
+		/// <see cref="StaleAfterMinutesConfigBoundaryTests"/> can drive a genuinely
+		/// non-default window instead of every fixture in this file sharing the same
+		/// 60-minute value -- see that class's doc comment for why sharing it would be a
+		/// fixture-monoculture gap (issue #404).
+		/// </summary>
+		private readonly int? _staleAfterMinutesOverride;
+
+		public AutoDiscoverApiFactory(string connectionString, int? staleAfterMinutesOverride = null)
 		{
 			_connectionString = connectionString;
+			_staleAfterMinutesOverride = staleAfterMinutesOverride;
 		}
 
 		protected override void ConfigureWebHost(IWebHostBuilder builder)
 		{
 			base.ConfigureWebHost(builder);
+
+			if (_staleAfterMinutesOverride is int minutes)
+			{
+				builder.ConfigureAppConfiguration((_, configBuilder) =>
+				{
+					configBuilder.AddInMemoryCollection(new Dictionary<string, string?>
+					{
+						[$"{DiscoveryOptions.SectionName}:{nameof(DiscoveryOptions.StaleAfterMinutes)}"] = minutes.ToString(CultureInfo.InvariantCulture)
+					});
+				});
+			}
 
 			builder.ConfigureTestServices(services =>
 			{
@@ -421,16 +447,174 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Assert.Equal("scan", onlyJob.JobType);
 	}
 
-	private async Task<Guid> CreateSiteAsync(string namePrefix)
+	/// <summary>
+	/// Issue #404: every fixture above the AutoDiscover fixture set (
+	/// <see cref="FreshTarget_QueuesOnlyScan_NoDiscoverJob"/>,
+	/// <see cref="OldButNonNullLastRefreshed_QueuesDiscover_TimestampComparisonBranch"/>)
+	/// exercises the <c>&lt;</c> comparison in <c>BuildStaleDiscoverSpecs</c> against the
+	/// production default of 60 minutes -- so a regression that hard-coded 60, ignored
+	/// the <c>Discovery:StaleAfterMinutes</c> option entirely, or bound the wrong config
+	/// key would sail through every test in this file green (mutation evidence for
+	/// exactly that is in the PR body). This test drives a genuinely non-default window
+	/// (5 minutes, an order of magnitude below the default) via
+	/// <see cref="AutoDiscoverApiFactory"/>'s config override and shows the SAME
+	/// 10-minutes-old target flips from "not stale" to "stale" purely because the
+	/// configured window shrank -- the only way that can happen is if
+	/// <c>BuildStaleDiscoverSpecs</c> actually reads <see cref="DiscoveryOptions.StaleAfterMinutes"/>
+	/// at request time rather than a baked-in constant.
+	/// </summary>
+	[Fact]
+	public async Task NonDefaultWindow_TenMinutesOld_FiveMinuteWindow_QueuesDiscover()
+	{
+		await using AutoDiscoverApiFactory factory = new(_fixture.ConnectionString, staleAfterMinutesOverride: 5);
+		using HttpClient client = factory.CreateClient();
+
+		Guid siteId = await CreateSiteAsync("non-default-window-stale-site", client);
+		string connectionJson = """{"host":"vcsa-nondefault-stale.example.internal"}""";
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.VSphere, $"vcsa-nondefault-stale-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
+		await StampLastRefreshedAsync(targetId.Value, DateTimeOffset.UtcNow.AddMinutes(-10));
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) }, client);
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		IReadOnlyList<JobSummary> jobs = await _repository.GetJobsForRunAsync(runId, CancellationToken.None);
+		Assert.Equal(2, jobs.Count);
+		Assert.Single(jobs, j => j.JobType == "discover");
+	}
+
+	/// <summary>
+	/// Issue #404: the mirror of <see cref="NonDefaultWindow_TenMinutesOld_FiveMinuteWindow_QueuesDiscover"/>.
+	/// The SAME 10-minutes-old age that is stale under a 5-minute window is comfortably
+	/// fresh under a widened 120-minute window -- no discover job. Together the pair
+	/// proves the config value actually changes queueing behavior in both directions,
+	/// not just that a non-default value is accepted without error.
+	/// </summary>
+	[Fact]
+	public async Task NonDefaultWindow_TenMinutesOld_OneHundredTwentyMinuteWindow_NoDiscoverJob()
+	{
+		await using AutoDiscoverApiFactory factory = new(_fixture.ConnectionString, staleAfterMinutesOverride: 120);
+		using HttpClient client = factory.CreateClient();
+
+		Guid siteId = await CreateSiteAsync("non-default-window-fresh-site", client);
+		string connectionJson = """{"host":"vcsa-nondefault-fresh.example.internal"}""";
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.VSphere, $"vcsa-nondefault-fresh-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
+		await StampLastRefreshedAsync(targetId.Value, DateTimeOffset.UtcNow.AddMinutes(-10));
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) }, client);
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		IReadOnlyList<JobSummary> jobs = await _repository.GetJobsForRunAsync(runId, CancellationToken.None);
+		JobSummary onlyJob = Assert.Single(jobs);
+		Assert.Equal("scan", onlyJob.JobType);
+	}
+
+	/// <summary>
+	/// Issue #404: pins the edge of <c>BuildStaleDiscoverSpecs</c>'s
+	/// <c>target.LastRefreshed.Value &lt; staleBefore</c> comparison from the FRESH
+	/// side, and states the choice deliberately: <c>&lt;</c> is strict, so a target
+	/// whose age is less than the configured window -- even by a slim margin -- is NOT
+	/// stale. A target stamped 30 seconds inside a 10-minute window (age 9m30s) is
+	/// unambiguously under the threshold with generous headroom against wall-clock
+	/// drift between "this test stamps <c>LastRefreshed</c>" and "the controller reads
+	/// <c>UtcNow</c> to compute <c>staleBefore</c>" (both happen within the same HTTP
+	/// round trip, sub-second) -- true equality was tried first and rejected: this
+	/// suite measured the controller's <c>UtcNow</c> call landing microseconds to
+	/// low-milliseconds after the test's own snapshot, which is enough to push a
+	/// timestamp stamped at exactly <c>-10 minutes</c> from the TEST's clock to just
+	/// past <c>staleBefore</c> computed from the (very slightly later) CONTROLLER
+	/// clock -- an inherent race in comparing two independently-read
+	/// <c>DateTimeOffset.UtcNow</c> calls that a fixed margin removes entirely. The
+	/// just-inside-vs-just-outside pair below is a safe finite offset from that
+	/// unreachable exact instant, not the instant itself. Companion:
+	/// <see cref="Boundary_JustOutsideWindow_QueuesDiscover"/>.
+	/// </summary>
+	[Fact]
+	public async Task Boundary_JustInsideWindow_NoDiscoverJob()
+	{
+		await using AutoDiscoverApiFactory factory = new(_fixture.ConnectionString, staleAfterMinutesOverride: 10);
+		using HttpClient client = factory.CreateClient();
+
+		Guid siteId = await CreateSiteAsync("boundary-inside-site", client);
+		string connectionJson = """{"host":"vcsa-boundary-inside.example.internal"}""";
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.VSphere, $"vcsa-boundary-inside-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
+
+		// Age 9m30s against a 10-minute window: 30s inside the fresh side.
+		DateTimeOffset justInsideEdge = DateTimeOffset.UtcNow.AddMinutes(-9).AddSeconds(-30);
+		await StampLastRefreshedAsync(targetId.Value, justInsideEdge);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) }, client);
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		IReadOnlyList<JobSummary> jobs = await _repository.GetJobsForRunAsync(runId, CancellationToken.None);
+		JobSummary onlyJob = Assert.Single(jobs);
+		Assert.Equal("scan", onlyJob.JobType);
+	}
+
+	/// <summary>
+	/// Issue #404: the just-outside-the-edge companion to
+	/// <see cref="Boundary_JustInsideWindow_NoDiscoverJob"/>. Age 10m30s against the
+	/// same 10-minute window -- 30s past the threshold, unambiguously on the stale side
+	/// of <c>&lt;</c> with the same safety margin against clock-read drift -- so a
+	/// discover job is queued. Together the pair brackets the boundary from both sides
+	/// under a shared non-default window, closing the gap #401/#403 left (their
+	/// fixtures were 2 hours past a 60-minute window, nowhere near the edge).
+	/// </summary>
+	[Fact]
+	public async Task Boundary_JustOutsideWindow_QueuesDiscover()
+	{
+		await using AutoDiscoverApiFactory factory = new(_fixture.ConnectionString, staleAfterMinutesOverride: 10);
+		using HttpClient client = factory.CreateClient();
+
+		Guid siteId = await CreateSiteAsync("boundary-outside-site", client);
+		string connectionJson = """{"host":"vcsa-boundary-outside.example.internal"}""";
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.VSphere, $"vcsa-boundary-outside-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
+
+		// Age 10m30s against a 10-minute window: 30s past the fresh side.
+		DateTimeOffset justOutsideEdge = DateTimeOffset.UtcNow.AddMinutes(-10).AddSeconds(-30);
+		await StampLastRefreshedAsync(targetId.Value, justOutsideEdge);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) }, client);
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		IReadOnlyList<JobSummary> jobs = await _repository.GetJobsForRunAsync(runId, CancellationToken.None);
+		Assert.Equal(2, jobs.Count);
+		Assert.Single(jobs, j => j.JobType == "discover");
+	}
+
+	private async Task<Guid> CreateSiteAsync(string namePrefix, HttpClient? client = null)
 	{
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/sites", "Admin",
-			new { name = $"{namePrefix}-{Guid.NewGuid():N}" });
+			new { name = $"{namePrefix}-{Guid.NewGuid():N}" }, client);
 		response.EnsureSuccessStatusCode();
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		return document.RootElement.GetProperty("id").GetGuid();
 	}
 
-	private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, string role, object? body)
+	private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, string role, object? body, HttpClient? client = null)
 	{
 		HttpRequestMessage request = new(method, path);
 		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
@@ -439,7 +623,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 			request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
 		}
 
-		return await _client.SendAsync(request);
+		return await (client ?? _client).SendAsync(request);
 	}
 
 	private async Task<string> GetJobFieldAsync(Guid jobId, string field)
