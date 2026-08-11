@@ -37,7 +37,8 @@ public sealed class JobEngineWiringTests
 	{
 		using ServiceProvider provider = BuildProvider("Host=127.0.0.1;Port=5432;Database=waypoint_test;Username=u;Password=p");
 
-		Assert.NotNull(provider.GetService<IJobQueueRepository>());
+		Assert.NotNull(provider.GetService<IJobControlRepository>());
+		Assert.NotNull(provider.GetService<IJobRunnerRepository>());
 		Assert.NotNull(provider.GetService<IJobEventPublisher>());
 	}
 
@@ -46,7 +47,8 @@ public sealed class JobEngineWiringTests
 	{
 		using ServiceProvider provider = BuildProvider(connectionString: null);
 
-		Assert.Null(provider.GetService<IJobQueueRepository>());
+		Assert.Null(provider.GetService<IJobControlRepository>());
+		Assert.Null(provider.GetService<IJobRunnerRepository>());
 		Assert.Null(provider.GetService<IJobEventPublisher>());
 	}
 
@@ -61,7 +63,8 @@ public sealed class JobEngineWiringTests
 	{
 		using ServiceProvider provider = BuildProvider(connectionString);
 
-		Assert.Null(provider.GetService<IJobQueueRepository>());
+		Assert.Null(provider.GetService<IJobControlRepository>());
+		Assert.Null(provider.GetService<IJobRunnerRepository>());
 		Assert.Null(provider.GetService<IJobEventPublisher>());
 	}
 

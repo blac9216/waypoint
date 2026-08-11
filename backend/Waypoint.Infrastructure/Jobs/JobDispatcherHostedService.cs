@@ -35,7 +35,17 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	private static readonly TimeSpan PausedReleaseRetryDelay = TimeSpan.FromMilliseconds(200);
 	private static readonly TimeSpan ShutdownGracePeriod = TimeSpan.FromSeconds(30);
 
-	private readonly IJobQueueRepository _repository;
+	// Issue #415: the dispatcher is today's stand-in for the future dedicated runner
+	// process (ADR-0013/0014), so it is the one caller in this codebase that
+	// legitimately needs both focused interfaces -- _repository for every
+	// claim/lease/state/recovery operation ADR-0014 assigns to the runner, and
+	// _controlRepository strictly for this type's own AbortRunAsync/PauseRunAsync/
+	// ResumeRunAsync pass-throughs (retained for API parity until those move behind an
+	// actual runner-control channel). Both parameters are satisfied by the same
+	// concrete instance in every current caller (DI wires one JobQueueRepository
+	// singleton under both interfaces; tests pass one fake/repository object twice).
+	private readonly IJobRunnerRepository _repository;
+	private readonly IJobControlRepository _controlRepository;
 	private readonly IJobEventPublisher _events;
 	private readonly JobHandlerRegistry _handlers;
 	private readonly IOptions<JobEngineOptions> _options;
@@ -43,19 +53,22 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _inFlight = new();
 
 	public JobDispatcherHostedService(
-		IJobQueueRepository repository,
+		IJobRunnerRepository repository,
+		IJobControlRepository controlRepository,
 		IJobEventPublisher events,
 		JobHandlerRegistry handlers,
 		IOptions<JobEngineOptions> options,
 		ILogger<JobDispatcherHostedService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
+		ArgumentNullException.ThrowIfNull(controlRepository);
 		ArgumentNullException.ThrowIfNull(events);
 		ArgumentNullException.ThrowIfNull(handlers);
 		ArgumentNullException.ThrowIfNull(options);
 		ArgumentNullException.ThrowIfNull(logger);
 
 		_repository = repository;
+		_controlRepository = controlRepository;
 		_events = events;
 		_handlers = handlers;
 		_options = options;
@@ -76,7 +89,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	/// <summary>Aborts a run and immediately cancels work owned by this dispatcher; other workers observe the database state through heartbeat.</summary>
 	public async Task AbortRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
-		AbortRunResult result = await _repository.AbortRunAsync(runId, cancellationToken).ConfigureAwait(false);
+		AbortRunResult result = await _controlRepository.AbortRunAsync(runId, cancellationToken).ConfigureAwait(false);
 		foreach (Guid jobId in result.InFlightJobIds)
 		{
 			if (_inFlight.TryGetValue(jobId, out CancellationTokenSource? cts))
@@ -98,10 +111,10 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	}
 
 	/// <summary>Stops new dispatch for a run while allowing in-flight jobs to finish.</summary>
-	public Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken) => _repository.PauseRunAsync(runId, cancellationToken);
+	public Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken) => _controlRepository.PauseRunAsync(runId, cancellationToken);
 
 	/// <summary>Restores dispatch for a paused non-terminal run.</summary>
-	public Task<bool> ResumeRunAsync(Guid runId, CancellationToken cancellationToken) => _repository.ResumeRunAsync(runId, cancellationToken);
+	public Task<bool> ResumeRunAsync(Guid runId, CancellationToken cancellationToken) => _controlRepository.ResumeRunAsync(runId, cancellationToken);
 
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
 	{

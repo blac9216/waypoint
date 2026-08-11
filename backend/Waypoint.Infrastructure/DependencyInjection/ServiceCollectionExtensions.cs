@@ -142,10 +142,19 @@ public static class ServiceCollectionExtensions
 				connectionString,
 				serviceProvider.GetRequiredService<ILogger<NpgsqlSchemaMigrator>>()));
 
-			services.AddSingleton<IJobQueueRepository>(serviceProvider => new JobQueueRepository(
+			// Issue #415: one JobQueueRepository singleton satisfies both focused
+			// interfaces the ADR-0013/0014 process boundary calls for --
+			// IJobControlRepository (API enqueue/control/query) and IJobRunnerRepository
+			// (runner claim/lease/state/recovery). Registering the concrete instance once
+			// and exposing it under both interface types keeps every consumer's
+			// constructor scoped to only the operations it owns without duplicating the
+			// underlying SQL/transaction implementation.
+			services.AddSingleton(serviceProvider => new JobQueueRepository(
 				connectionString,
 				serviceProvider.GetRequiredService<ILogger<JobQueueRepository>>(),
 				serviceProvider.GetRequiredService<IJobEventPublisher>()));
+			services.AddSingleton<IJobControlRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
+			services.AddSingleton<IJobRunnerRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
 
 			services.AddSingleton<IJobEventPublisher>(serviceProvider =>
 			{

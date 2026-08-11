@@ -54,7 +54,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
 	private readonly TargetRepository _targets;
 	private readonly InventoryRepository _inventory;
-	private readonly IJobQueueRepository _jobs;
+	private readonly IJobRunnerRepository _jobs;
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
 
@@ -64,7 +64,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
 		TargetRepository targets,
 		InventoryRepository inventory,
-		IJobQueueRepository jobs,
+		IJobRunnerRepository jobs,
 		ISecretRedactor redactor,
 		IOptions<PowerShellOptions> powerShellOptions)
 	{

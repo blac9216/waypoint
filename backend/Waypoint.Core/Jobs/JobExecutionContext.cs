@@ -36,10 +36,10 @@ namespace Waypoint.Core.Jobs;
 /// </summary>
 public sealed class JobExecutionContext
 {
-	private readonly IJobQueueRepository _repository;
+	private readonly IJobRunnerRepository _repository;
 	private readonly JobShape _shape;
 
-	public JobExecutionContext(ClaimedJob job, string workerId, IJobEventPublisher events, IJobQueueRepository repository, JobShape shape)
+	public JobExecutionContext(ClaimedJob job, string workerId, IJobEventPublisher events, IJobRunnerRepository repository, JobShape shape)
 	{
 		ArgumentNullException.ThrowIfNull(job);
 		ArgumentException.ThrowIfNullOrWhiteSpace(workerId);

@@ -74,8 +74,11 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 
 				services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(_connectionString));
 				services.AddSingleton<IDownloadRepository>(new DownloadRepository(_connectionString));
-				services.AddSingleton<IJobQueueRepository>(new JobQueueRepository(
-					_connectionString, NullLogger<JobQueueRepository>.Instance));
+				// Issue #415: one JobQueueRepository instance satisfies both focused
+				// interfaces DownloadsController (control) and the runner path resolve.
+				JobQueueRepository jobs = new(_connectionString, NullLogger<JobQueueRepository>.Instance);
+				services.AddSingleton<IJobControlRepository>(jobs);
+				services.AddSingleton<IJobRunnerRepository>(jobs);
 			});
 		}
 	}

@@ -23,7 +23,7 @@ namespace Waypoint.Infrastructure.Jobs;
 /// <summary>
 /// Periodically sweeps <c>jobs</c> for expired leases (a worker that claimed a job and
 /// then crashed, was killed, or lost network to Postgres before it could heartbeat) and
-/// either requeues or fails each one per <see cref="IJobQueueRepository.RecoverExpiredLeasesAsync"/>.
+/// either requeues or fails each one per <see cref="IJobRunnerRepository.RecoverExpiredLeasesAsync"/>.
 /// Runs independently of <see cref="JobDispatcherHostedService"/> -- and independently
 /// per process, so more than one Waypoint instance can run this sweep safely (that
 /// safety, not just the sweep's existence, is what
@@ -31,13 +31,13 @@ namespace Waypoint.Infrastructure.Jobs;
 /// </summary>
 public sealed partial class LeaseRecoveryHostedService : BackgroundService
 {
-	private readonly IJobQueueRepository _repository;
+	private readonly IJobRunnerRepository _repository;
 	private readonly IJobEventPublisher _events;
 	private readonly IOptions<JobEngineOptions> _options;
 	private readonly ILogger<LeaseRecoveryHostedService> _logger;
 
 	public LeaseRecoveryHostedService(
-		IJobQueueRepository repository, IJobEventPublisher events, IOptions<JobEngineOptions> options, ILogger<LeaseRecoveryHostedService> logger)
+		IJobRunnerRepository repository, IJobEventPublisher events, IOptions<JobEngineOptions> options, ILogger<LeaseRecoveryHostedService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(events);

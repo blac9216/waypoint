@@ -113,6 +113,7 @@ public sealed class DownloadJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		JobEngineOptions options = new() { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(50), MaxConcurrency = 2 };
 		return new JobDispatcherHostedService(
 			_repository,
+			_repository,
 			new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, _redactor, NullLogger<JobEventPublisher>.Instance),
 			new JobHandlerRegistry([_handler]),
 			Options.Create(options),

@@ -30,7 +30,7 @@ namespace Waypoint.Tests.Api;
 /// exercises the ownership rule only through <see cref="TestAuthHandler"/>, whose
 /// claim set is more generous than production's. These tests instead drive the real
 /// login endpoint and the real <c>LocalSessionAuthenticationHandler</c> (via
-/// <see cref="WaypointApiFactory"/>, with only <see cref="IJobQueueRepository"/>
+/// <see cref="WaypointApiFactory"/>, with only <see cref="IJobControlRepository"/>
 /// swapped for a fake so no Postgres is required), so a future regression that drops
 /// the handler's <c>ClaimTypes.Name</c> claim -- or reintroduces a
 /// <c>?? "admin"</c>-style fallback -- fails a test instead of passing one.
@@ -104,8 +104,8 @@ public sealed class RunInitiatorProductionClaimsTests : IClassFixture<RunInitiat
 	/// <summary>
 	/// Real <see cref="WaypointApiFactory"/> (production auth handler, production
 	/// claim shape) with the bootstrap username overridden to a non-"admin" value
-	/// and <see cref="IJobQueueRepository"/> swapped for a fake so the run endpoints
-	/// work without Postgres.
+	/// and the job repositories swapped for a fake so the run endpoints work without
+	/// Postgres.
 	/// </summary>
 	public sealed class ProductionAuthRunsApiFactory : WaypointApiFactory
 	{
@@ -128,12 +128,19 @@ public sealed class RunInitiatorProductionClaimsTests : IClassFixture<RunInitiat
 
 			builder.ConfigureTestServices(services =>
 			{
-				var descriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IJobQueueRepository));
-				if (descriptor != null)
+				// Issue #415 split IJobQueueRepository into IJobControlRepository and
+				// IJobRunnerRepository; swap both so any controller resolved through
+				// this host sees the fake.
+				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{
-					services.Remove(descriptor);
+					var descriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
+					if (descriptor != null)
+					{
+						services.Remove(descriptor);
+					}
 				}
-				services.AddSingleton<IJobQueueRepository>(Repository);
+				services.AddSingleton<IJobControlRepository>(Repository);
+				services.AddSingleton<IJobRunnerRepository>(Repository);
 			});
 		}
 	}

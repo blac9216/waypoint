@@ -89,14 +89,22 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 				services.AddSingleton(new ConfigDocRepository(_connectionString));
 				services.AddSingleton(new AttestationSnapshotRepository(_connectionString));
 
-				ServiceDescriptor? jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IJobQueueRepository));
-				if (jobsDescriptor != null)
+				// Issue #415: swap both focused-interface registrations so every
+				// consumer resolved through this host (control-plane and runner alike)
+				// sees the same real JobQueueRepository against the test database.
+				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{
-					services.Remove(jobsDescriptor);
+					ServiceDescriptor? jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
+					if (jobsDescriptor != null)
+					{
+						services.Remove(jobsDescriptor);
+					}
 				}
 
-				services.AddSingleton<IJobQueueRepository>(serviceProvider => new JobQueueRepository(
+				services.AddSingleton(serviceProvider => new JobQueueRepository(
 					_connectionString, serviceProvider.GetRequiredService<ILogger<JobQueueRepository>>()));
+				services.AddSingleton<IJobControlRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
+				services.AddSingleton<IJobRunnerRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
 			});
 		}
 	}

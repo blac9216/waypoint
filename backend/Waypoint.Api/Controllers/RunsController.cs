@@ -69,7 +69,7 @@ public sealed class RunsController : ControllerBase
 	/// </summary>
 	private const short AutoDiscoverPriority = ScanTargetPriority.Nsx;
 
-	private readonly IJobQueueRepository _repository;
+	private readonly IJobControlRepository _repository;
 	private readonly SiteRepository _sites;
 	private readonly TargetRepository _targets;
 	private readonly IEphemeralCredentialCache _ephemeralCredentials;
@@ -79,7 +79,7 @@ public sealed class RunsController : ControllerBase
 	private readonly IOptions<DiscoveryOptions> _discoveryOptions;
 
 	public RunsController(
-		IJobQueueRepository repository,
+		IJobControlRepository repository,
 		SiteRepository sites,
 		TargetRepository targets,
 		IEphemeralCredentialCache ephemeralCredentials,
@@ -258,7 +258,7 @@ public sealed class RunsController : ControllerBase
 	/// resolve to existing rows -- docs/api-contract.md `/runs`: "POST body: site_id,
 	/// scope... credential"), then creates the run and fans out one <c>scan</c>
 	/// <see cref="JobSpec"/> per target, ordered by <see cref="ScanTargetPriority"/>.
-	/// Every target's job is created up front in one <see cref="IJobQueueRepository.FanOutJobsAsync"/>
+	/// Every target's job is created up front in one <see cref="IJobControlRepository.FanOutJobsAsync"/>
 	/// call -- an individual target's later execution failure cannot affect its
 	/// siblings (ADR-0008 Continue policy; each is an independent job row) -- but
 	/// validation happens entirely before that call so a bad site/target/credential
@@ -531,7 +531,7 @@ public sealed class RunsController : ControllerBase
 	/// other state, including those two, is 409. This is a manual override of the
 	/// engine's own retry accounting: it does not increment <c>attempt_count</c> and is
 	/// never blocked by the automatic-retry <c>max_attempts</c> cap -- see
-	/// <see cref="IJobQueueRepository.RetryJobAsync"/>. <c>jobs.stage</c> is preserved
+	/// <see cref="IJobControlRepository.RetryJobAsync"/>. <c>jobs.stage</c> is preserved
 	/// untouched, so the next claim resumes the pipeline at the marker rather than
 	/// restarting it (ADR-0012 §5), and the action is recorded to <c>audit_log</c>
 	/// (<c>event_type = 'job.retried'</c>).
@@ -748,7 +748,7 @@ public sealed class RunsController : ControllerBase
 	/// Admin-only (unlike pause/resume/abort's Operator+-own-runs gate): a credential
 	/// swap changes which service account authenticates future work against a target,
 	/// which is a stronger action than pausing/resuming dispatch. <c>credential_id</c>
-	/// in the body is the REPLACEMENT credential -- <see cref="IJobQueueRepository.SwapAndResumeBlockedCredentialAsync"/>
+	/// in the body is the REPLACEMENT credential -- <see cref="IJobControlRepository.SwapAndResumeBlockedCredentialAsync"/>
 	/// determines the halted credential being replaced from the run's own blocked job
 	/// set, so the caller never names it directly.
 	/// </summary>

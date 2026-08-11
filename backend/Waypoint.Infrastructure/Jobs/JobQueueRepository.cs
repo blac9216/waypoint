@@ -19,8 +19,16 @@ using Waypoint.Core.Jobs;
 
 namespace Waypoint.Infrastructure.Jobs;
 
-/// <summary>Plain-Npgsql implementation of <see cref="IJobQueueRepository"/> -- see that interface for the contract each method keeps.</summary>
-public sealed partial class JobQueueRepository : IJobQueueRepository
+/// <summary>
+/// Plain-Npgsql implementation of both <see cref="IJobControlRepository"/> (API
+/// enqueue/control/query) and <see cref="IJobRunnerRepository"/> (runner
+/// claim/lease/state/recovery) -- see those interfaces for the contract each method
+/// keeps. Issue #415 split the former combined <c>IJobQueueRepository</c> into the two
+/// focused interfaces along the ADR-0013/0014 process boundary; this class still
+/// implements both because nothing about the SQL, transaction, or locking behavior
+/// changed -- only which interface type each caller depends on.
+/// </summary>
+public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunnerRepository
 {
 	private readonly string _connectionString;
 	private readonly ILogger<JobQueueRepository> _logger;
@@ -334,7 +342,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 	/// <summary>
 	/// Mirrors <see cref="EmitCredentialSwappedAsync"/>'s "emit after commit" discipline
-	/// (see <see cref="IJobQueueRepository"/>'s "emit last" doc comment). There is no
+	/// (see <see cref="IJobRunnerRepository"/>'s "emit last" doc comment). There is no
 	/// <c>run.state</c> event type in the closed six-value <c>job_events_event_type_check</c>
 	/// set (docs/api-contract.md "Event streams (SSE)") -- <c>run.progress</c> is already
 	/// the run-scoped "aggregate run counts/percent" carrier the Live Run/Results screens
@@ -361,7 +369,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 	}
 
 	/// <summary>
-	/// Issue #293's stage-per-execution requeue -- see <see cref="IJobQueueRepository.RequeueAtStageAsync"/>.
+	/// Issue #293's stage-per-execution requeue -- see <see cref="IJobRunnerRepository.RequeueAtStageAsync"/>.
 	/// Same shape as <see cref="AdvanceStateAsync"/>'s <c>clearLease: true</c> path
 	/// (finished_at is deliberately left untouched: the job is not finished, only
 	/// resting) except the target state is always <c>queued</c> and <paramref name="stage"/>
@@ -1098,7 +1106,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		return result is bool cancelRequested && cancelRequested;
 	}
 
-	/// <summary>Issue #297 -- see <see cref="IJobQueueRepository.RetryJobAsync"/>.</summary>
+	/// <summary>Issue #297 -- see <see cref="IJobControlRepository.RetryJobAsync"/>.</summary>
 	public async Task<JobRetryOutcome> RetryJobAsync(Guid jobId, string actor, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(actor);
@@ -1459,7 +1467,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 
 	/// <summary>
 	/// True swap semantics for <c>POST /runs/{id}/resume-blocked</c> (docs/api-contract.md,
-	/// ADR-0008) -- see <see cref="IJobQueueRepository.SwapAndResumeBlockedCredentialAsync"/>
+	/// ADR-0008) -- see <see cref="IJobControlRepository.SwapAndResumeBlockedCredentialAsync"/>
 	/// for the contract. Built alongside <see cref="UnblockCredentialAsync"/>, not as a
 	/// replacement for it: that method stays the "retry with the same credential"
 	/// primitive; this one is "an Admin swapped in a different credential and wants the
@@ -1533,7 +1541,7 @@ public sealed partial class JobQueueRepository : IJobQueueRepository
 		// is no target/job type-linkage in the schema today (jobs.target_id has no FK to
 		// targets, and no join exists anywhere from a job to a target's `kind`), so the
 		// only type check this primitive can make is against the halted credential's own
-		// type -- see IJobQueueRepository's doc comment.
+		// type -- see IJobControlRepository's doc comment.
 		string? replacementType = null;
 		bool replacementHalted = false;
 		bool replacementFound = false;
