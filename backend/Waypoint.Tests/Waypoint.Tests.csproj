@@ -28,6 +28,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Waypoint.Core\Waypoint.Core.csproj" />
     <ProjectReference Include="..\Waypoint.Infrastructure\Waypoint.Infrastructure.csproj" />
+    <ProjectReference Include="..\Waypoint.Runner\Waypoint.Runner.csproj" />
     <ProjectReference Include="..\Waypoint.Api\Waypoint.Api.csproj" />
   </ItemGroup>
 

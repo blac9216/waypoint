@@ -2,6 +2,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Waypoint.Core\Waypoint.Core.csproj" />
+    <!-- ADR-0013/0014 (issue #436): the shared runner lifecycle host. Referenced here
+         only because Waypoint.Api still hosts execution in-process today; #443 moves
+         this reference (and the dispatcher/recovery DI wiring below) into a dedicated
+         runner executable project instead. -->
+    <ProjectReference Include="..\Waypoint.Runner\Waypoint.Runner.csproj" />
   </ItemGroup>
 
   <ItemGroup>

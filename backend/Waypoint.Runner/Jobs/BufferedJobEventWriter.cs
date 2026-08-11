@@ -21,7 +21,7 @@ using NpgsqlTypes;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 
-namespace Waypoint.Infrastructure.Jobs;
+namespace Waypoint.Runner.Jobs;
 
 /// <summary>
 /// The batching flusher behind <see cref="IJobLogBuffer"/>, implementing the #117

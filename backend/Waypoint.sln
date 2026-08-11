@@ -11,6 +11,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Waypoint.Api", "Waypoint.Ap
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Waypoint.Tests", "Waypoint.Tests\Waypoint.Tests.csproj", "{7ACC6F77-C50D-469C-B4FA-39D37B10E315}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Waypoint.Runner", "Waypoint.Runner\Waypoint.Runner.csproj", "{7CBB34C9-64E3-4F34-AF2D-F7FC86C3F16B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -36,5 +38,9 @@ Global
 		{7ACC6F77-C50D-469C-B4FA-39D37B10E315}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7ACC6F77-C50D-469C-B4FA-39D37B10E315}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{7ACC6F77-C50D-469C-B4FA-39D37B10E315}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7CBB34C9-64E3-4F34-AF2D-F7FC86C3F16B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7CBB34C9-64E3-4F34-AF2D-F7FC86C3F16B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7CBB34C9-64E3-4F34-AF2D-F7FC86C3F16B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7CBB34C9-64E3-4F34-AF2D-F7FC86C3F16B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

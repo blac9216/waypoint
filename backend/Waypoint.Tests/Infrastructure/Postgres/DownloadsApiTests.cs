@@ -28,6 +28,7 @@ using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Runner.Jobs;
 using Waypoint.Tests.Support;
 using Xunit;
 

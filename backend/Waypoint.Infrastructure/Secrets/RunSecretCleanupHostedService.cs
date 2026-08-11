@@ -23,7 +23,7 @@ namespace Waypoint.Infrastructure.Secrets;
 /// Issue #434 AC "expiry + cleanup sweep for abandoned runs": periodically deletes
 /// <c>run_secrets</c> rows whose <c>expires_at</c> has passed via
 /// <see cref="IRunSecretStore.DeleteExpiredAsync"/>. Structurally mirrors
-/// <see cref="Waypoint.Infrastructure.Jobs.LeaseRecoveryHostedService"/> -- an
+/// <see cref="Waypoint.Runner.Jobs.LeaseRecoveryHostedService"/> -- an
 /// independent periodic sweep, safe to run from more than one Waypoint instance at
 /// once (each pass's <c>FOR UPDATE SKIP LOCKED</c> makes concurrent sweeps disjoint,
 /// not merely non-corrupting -- see <see cref="RunSecretStore.DeleteExpiredAsync"/>).
@@ -64,7 +64,7 @@ public sealed partial class RunSecretCleanupHostedService : BackgroundService
 		while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
 	}
 
-	/// <summary>One sweep pass, exposed for tests -- mirrors <see cref="Waypoint.Infrastructure.Jobs.LeaseRecoveryHostedService.SweepAsync"/>'s test seam.</summary>
+	/// <summary>One sweep pass, exposed for tests -- mirrors <see cref="Waypoint.Runner.Jobs.LeaseRecoveryHostedService.SweepAsync"/>'s test seam.</summary>
 	internal async Task SweepOnceAsync(CancellationToken cancellationToken)
 	{
 		try

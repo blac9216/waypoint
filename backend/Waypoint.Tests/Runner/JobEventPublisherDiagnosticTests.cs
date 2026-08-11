@@ -17,11 +17,11 @@ using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
-using Waypoint.Infrastructure.Jobs;
+using Waypoint.Runner.Jobs;
 using Waypoint.Tests.Support;
 using Xunit;
 
-namespace Waypoint.Tests.Infrastructure;
+namespace Waypoint.Tests.Runner;
 
 /// <summary>
 /// The fixtures the publisher suites did not have. Round 1 asked what every fixture in

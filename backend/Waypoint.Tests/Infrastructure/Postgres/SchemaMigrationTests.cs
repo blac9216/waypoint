@@ -214,7 +214,7 @@ public sealed class SchemaMigrationTests
 	/// Issue #106: <c>job_events</c> is documented append-only (0001's header comment,
 	/// docs/api-contract.md's schema sketch) but nothing enforced it. 0020's trigger must
 	/// reject both mutation forms outright -- no writer legitimately UPDATEs or DELETEs a
-	/// committed row (<see cref="Waypoint.Infrastructure.Jobs.JobEventPublisher"/> only
+	/// committed row (<see cref="Waypoint.Runner.Jobs.JobEventPublisher"/> only
 	/// INSERTs).
 	/// </summary>
 	[Fact]

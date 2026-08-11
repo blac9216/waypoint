@@ -22,7 +22,7 @@ namespace Waypoint.Core.Jobs;
 /// inside the same transaction, so the global ordering lock is never held across a row
 /// lock; (2) the write carries its own short, explicitly chosen command timeout rather
 /// than inheriting Npgsql's 30s default (see
-/// <c>Waypoint.Infrastructure.Jobs.JobEventPublisher</c> for the chosen budget and why).
+/// <c>Waypoint.Runner.Jobs.JobEventPublisher</c> for the chosen budget and why).
 /// </summary>
 public interface IJobEventPublisher
 {

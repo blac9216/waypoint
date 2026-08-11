@@ -21,7 +21,7 @@ namespace Waypoint.Core.Jobs;
 /// <c>catalog-index</c>/<c>download</c> job types (#8/#9) are non-goals here. Register
 /// an <see cref="IJobHandler"/> per <see cref="JobType"/> in DI
 /// (<c>services.AddSingleton&lt;IJobHandler, MyHandler&gt;()</c>) and
-/// <c>Waypoint.Infrastructure.Jobs.JobHandlerRegistry</c> resolves it by the claimed
+/// <c>Waypoint.Runner.Jobs.JobHandlerRegistry</c> resolves it by the claimed
 /// job's <c>job_type</c>. A claimed job whose type has no registered handler fails
 /// immediately with a clear note rather than hanging -- see
 /// <c>JobDispatcherHostedService</c>.

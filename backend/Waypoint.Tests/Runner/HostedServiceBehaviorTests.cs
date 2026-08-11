@@ -15,11 +15,11 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
-using Waypoint.Infrastructure.Jobs;
+using Waypoint.Runner.Jobs;
 using Waypoint.Tests.Support;
 using Xunit;
 
-namespace Waypoint.Tests.Infrastructure;
+namespace Waypoint.Tests.Runner;
 
 public sealed class HostedServiceBehaviorTests
 {

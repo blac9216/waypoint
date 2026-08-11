@@ -18,7 +18,7 @@ namespace Waypoint.Core.Jobs;
 /// The exact string values of <c>job_events.event_type</c>, matching
 /// <c>job_events_event_type_check</c> and <c>job_events_scope_check</c> in
 /// <c>0001_initial_schema.sql</c>. Scope (which of job_id/run_id each type requires) is
-/// documented per member; <see cref="Waypoint.Infrastructure.Jobs.JobEventPublisher"/>
+/// documented per member; <see cref="Waypoint.Runner.Jobs.JobEventPublisher"/>
 /// does not re-validate it client-side -- the database CHECK is the enforcement point,
 /// consistent with "an unclassified event type fails closed".
 /// </summary>

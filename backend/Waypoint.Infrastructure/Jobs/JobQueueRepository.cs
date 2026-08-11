@@ -408,7 +408,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	/// <c>run.state</c> event type in the closed six-value <c>job_events_event_type_check</c>
 	/// set (docs/api-contract.md "Event streams (SSE)") -- <c>run.progress</c> is already
 	/// the run-scoped "aggregate run counts/percent" carrier the Live Run/Results screens
-	/// bind their progress UI to (<see cref="JobDispatcherHostedService.AbortRunAsync"/>
+	/// bind their progress UI to (<c>Waypoint.Runner.Jobs.JobDispatcherHostedService.AbortRunAsync</c>
 	/// emits the same type for the abort case), so a run reaching a contract terminal
 	/// state rides that existing channel with <c>state</c>/<c>completed</c> fields a
 	/// consumer can key off of, rather than inventing a seventh type this migration would

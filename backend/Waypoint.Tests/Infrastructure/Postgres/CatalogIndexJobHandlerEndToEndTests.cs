@@ -29,6 +29,7 @@ using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.PowerShell;
 using Waypoint.Infrastructure.Secrets;
+using Waypoint.Runner.Jobs;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Postgres;
