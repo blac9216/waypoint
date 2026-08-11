@@ -97,3 +97,6 @@ This is a **public repository** developed against private infrastructure. No rea
 hostnames, IPs, credentials, or Broadcom/VMware account data may appear here — see
 [CLAUDE.md](CLAUDE.md) for the full sanitization policy. All examples use fictional
 placeholders.
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a
+pull request, and participate according to the [Code of Conduct](CODE_OF_CONDUCT.md).
