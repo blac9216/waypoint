@@ -44,14 +44,14 @@ public sealed class ScanUploadCoordinator
 	private readonly StigManagerRepository _stigman;
 	private readonly IStigManagerUploadClient _uploadClient;
 	private readonly ICredentialSecretStore _secrets;
-	private readonly IJobQueueRepository _jobs;
+	private readonly IJobRunnerRepository _jobs;
 	private readonly ISecretRedactor _redactor;
 
 	public ScanUploadCoordinator(
 		StigManagerRepository stigman,
 		IStigManagerUploadClient uploadClient,
 		ICredentialSecretStore secrets,
-		IJobQueueRepository jobs,
+		IJobRunnerRepository jobs,
 		ISecretRedactor redactor)
 	{
 		ArgumentNullException.ThrowIfNull(stigman);

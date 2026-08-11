@@ -49,10 +49,10 @@ public sealed class DiscoveryController : ControllerBase
 
 	private readonly TargetRepository _targets;
 	private readonly InventoryRepository _inventory;
-	private readonly IJobQueueRepository _jobs;
+	private readonly IJobControlRepository _jobs;
 	private readonly IOptions<DiscoveryOptions> _options;
 
-	public DiscoveryController(TargetRepository targets, InventoryRepository inventory, IJobQueueRepository jobs, IOptions<DiscoveryOptions> options)
+	public DiscoveryController(TargetRepository targets, InventoryRepository inventory, IJobControlRepository jobs, IOptions<DiscoveryOptions> options)
 	{
 		ArgumentNullException.ThrowIfNull(targets);
 		ArgumentNullException.ThrowIfNull(inventory);

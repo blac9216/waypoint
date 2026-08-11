@@ -77,7 +77,7 @@ public sealed class ScanJobHandler : IJobHandler
 	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
 	private readonly TargetRepository _targets;
 	private readonly IEphemeralCredentialCache _ephemeralCredentials;
-	private readonly IJobQueueRepository _jobs;
+	private readonly IJobRunnerRepository _jobs;
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
 	private readonly IOptions<ScanOptions> _scanOptions;
@@ -91,7 +91,7 @@ public sealed class ScanJobHandler : IJobHandler
 		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
 		TargetRepository targets,
 		IEphemeralCredentialCache ephemeralCredentials,
-		IJobQueueRepository jobs,
+		IJobRunnerRepository jobs,
 		ISecretRedactor redactor,
 		IOptions<PowerShellOptions> powerShellOptions,
 		IOptions<ScanOptions> scanOptions,

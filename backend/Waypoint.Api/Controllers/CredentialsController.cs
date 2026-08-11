@@ -45,10 +45,10 @@ public sealed class CredentialsController : ControllerBase
 	private readonly CredentialRepository _credentials;
 	private readonly ICredentialSecretStore _secrets;
 	private readonly ICredentialCreationCoordinator _creation;
-	private readonly IJobQueueRepository _jobs;
+	private readonly IJobControlRepository _jobs;
 
 	public CredentialsController(
-		CredentialRepository credentials, ICredentialSecretStore secrets, ICredentialCreationCoordinator creation, IJobQueueRepository jobs)
+		CredentialRepository credentials, ICredentialSecretStore secrets, ICredentialCreationCoordinator creation, IJobControlRepository jobs)
 	{
 		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(secrets);

@@ -44,9 +44,9 @@ public sealed class CatalogController : ControllerBase
 	private const short CatalogIndexPriority = 1;
 
 	private readonly IDepotArtifactRepository _artifacts;
-	private readonly IJobQueueRepository _jobs;
+	private readonly IJobControlRepository _jobs;
 
-	public CatalogController(IDepotArtifactRepository artifacts, IJobQueueRepository jobs)
+	public CatalogController(IDepotArtifactRepository artifacts, IJobControlRepository jobs)
 	{
 		ArgumentNullException.ThrowIfNull(artifacts);
 		ArgumentNullException.ThrowIfNull(jobs);

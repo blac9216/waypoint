@@ -38,7 +38,7 @@ namespace Waypoint.Api.Controllers;
 /// already core job-engine capabilities: the Continue policy (one job
 /// failing/quarantining never halts its siblings) is inherent to the engine -- nothing
 /// aborts a run on a single job's failure -- and per-download cancel maps to a single-job
-/// cancel (<see cref="IJobQueueRepository.CancelJobAsync"/>) that never touches sibling
+/// cancel (<see cref="IJobControlRepository.CancelJobAsync"/>) that never touches sibling
 /// jobs in the same run. A running download's job now stops promptly too (issue #234):
 /// CancelJobAsync sets <c>cancel_requested</c> on it and the dispatcher's heartbeat loop
 /// observes that flag on its next tick, same as the run-scoped abort check.
@@ -52,9 +52,9 @@ public sealed class DownloadsController : ControllerBase
 
 	private readonly IDownloadRepository _downloads;
 	private readonly IDepotArtifactRepository _artifacts;
-	private readonly IJobQueueRepository _jobs;
+	private readonly IJobControlRepository _jobs;
 
-	public DownloadsController(IDownloadRepository downloads, IDepotArtifactRepository artifacts, IJobQueueRepository jobs)
+	public DownloadsController(IDownloadRepository downloads, IDepotArtifactRepository artifacts, IJobControlRepository jobs)
 	{
 		ArgumentNullException.ThrowIfNull(downloads);
 		ArgumentNullException.ThrowIfNull(artifacts);
@@ -148,7 +148,7 @@ public sealed class DownloadsController : ControllerBase
 	/// <summary>
 	/// Cancel a single download within its run. Admin-gated for M1 (see POST -- widens to
 	/// Operator+ with RBAC in M3). Cancels only this download's own <c>download</c> job
-	/// via <see cref="IJobQueueRepository.CancelJobAsync"/>, never aborting the run or
+	/// via <see cref="IJobControlRepository.CancelJobAsync"/>, never aborting the run or
 	/// touching a sibling artifact's job queued in the same batch. A queued job is
 	/// cancelled cleanly and immediately; a job already running stops cooperatively at the
 	/// dispatcher's next heartbeat tick (issue #234) rather than running to completion. The

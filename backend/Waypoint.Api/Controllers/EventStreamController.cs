@@ -193,7 +193,7 @@ public sealed class EventStreamController : ControllerBase
 
 	private async Task<bool> RunExistsAsync(Guid runId, CancellationToken cancellationToken)
 	{
-		IJobQueueRepository repository = HttpContext.RequestServices.GetRequiredService<IJobQueueRepository>();
+		IJobControlRepository repository = HttpContext.RequestServices.GetRequiredService<IJobControlRepository>();
 		return await repository.GetRunQueueStateAsync(runId, cancellationToken).ConfigureAwait(false) is not null;
 	}
 }

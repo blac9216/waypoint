@@ -54,7 +54,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 	private readonly ICredentialSecretStore _secrets;
 	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
 	private readonly IDepotArtifactRepository _artifacts;
-	private readonly IJobQueueRepository _jobs;
+	private readonly IJobRunnerRepository _jobs;
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
@@ -64,7 +64,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 		ICredentialSecretStore secrets,
 		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
 		IDepotArtifactRepository artifacts,
-		IJobQueueRepository jobs,
+		IJobRunnerRepository jobs,
 		ISecretRedactor redactor,
 		IOptions<CatalogOptions> catalogOptions,
 		IOptions<PowerShellOptions> powerShellOptions)

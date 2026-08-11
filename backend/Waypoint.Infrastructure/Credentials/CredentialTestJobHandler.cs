@@ -69,7 +69,7 @@ public sealed class CredentialTestJobHandler : IJobHandler
 	private readonly ICredentialSecretStore _secrets;
 	private readonly CredentialRepository _credentials;
 	private readonly TargetRepository _targets;
-	private readonly IJobQueueRepository _jobs;
+	private readonly IJobRunnerRepository _jobs;
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
 
@@ -78,7 +78,7 @@ public sealed class CredentialTestJobHandler : IJobHandler
 		ICredentialSecretStore secrets,
 		CredentialRepository credentials,
 		TargetRepository targets,
-		IJobQueueRepository jobs,
+		IJobRunnerRepository jobs,
 		ISecretRedactor redactor,
 		IOptions<PowerShellOptions> powerShellOptions)
 	{

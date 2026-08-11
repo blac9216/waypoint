@@ -29,7 +29,7 @@ namespace Waypoint.Api.Controllers;
 
 /// <summary>
 /// Job-level (as opposed to run-level) endpoints: the per-job cancel (issue #291), a thin
-/// wrapper over <see cref="IJobQueueRepository.CancelJobAsync"/> (#277), the per-kind
+/// wrapper over <see cref="IJobControlRepository.CancelJobAsync"/> (#277), the per-kind
 /// artifact download (issue #299), and the STIG Manager upload retry (issue #311, the
 /// shape issue #297 documents but leaves unbuilt -- reused narrowly here for exactly
 /// this one action rather than a general job-retry route).
@@ -53,12 +53,12 @@ public sealed class JobsController : ControllerBase
 		["ckl"] = "application/xml",
 	};
 
-	private readonly IJobQueueRepository _repository;
+	private readonly IJobControlRepository _repository;
 	private readonly IOptions<ScanOptions> _scanOptions;
 	private readonly TargetRepository _targets;
 	private readonly ScanUploadCoordinator _upload;
 
-	public JobsController(IJobQueueRepository repository, IOptions<ScanOptions> scanOptions, TargetRepository targets, ScanUploadCoordinator upload)
+	public JobsController(IJobControlRepository repository, IOptions<ScanOptions> scanOptions, TargetRepository targets, ScanUploadCoordinator upload)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(scanOptions);
@@ -77,10 +77,10 @@ public sealed class JobsController : ControllerBase
 	/// tier as the run-level controls it sits alongside on the Live Run screen, and
 	/// (issue #294) the same "own runs, Admin any" ownership scope --
 	/// <see cref="RunsController.EnforceRunOwnership(System.Security.Claims.ClaimsPrincipal, RunQueueState)"/>
-	/// applied to the run owning this job, resolved via <see cref="IJobQueueRepository.GetJobAsync"/>
-	/// -&gt; <see cref="JobSummary.RunId"/> -&gt; <see cref="IJobQueueRepository.GetRunQueueStateAsync"/>.
+	/// applied to the run owning this job, resolved via <see cref="IJobControlRepository.GetJobAsync"/>
+	/// -&gt; <see cref="JobSummary.RunId"/> -&gt; <see cref="IJobControlRepository.GetRunQueueStateAsync"/>.
 	/// The ownership check runs before the cancel attempt, so a non-owning Operator's
-	/// call never reaches <see cref="IJobQueueRepository.CancelJobAsync"/>. A job with no
+	/// call never reaches <see cref="IJobControlRepository.CancelJobAsync"/>. A job with no
 	/// run (should not occur in practice; every job is fanned out from a run) is treated
 	/// as ownerless -- Admin-only, same as a run with no recorded initiator.
 	/// </summary>
