@@ -3104,9 +3104,21 @@ class AllowlistTests(unittest.TestCase):
 		scanner.ALLOWLIST_FINDINGS.clear()
 		scanner.ALLOWLIST_FINDINGS.update(self._saved)
 
-	def test_repo_ships_with_no_exemptions(self) -> None:
-		"""Steady state. If this fails, the new entry needs a reason in review."""
-		self.assertEqual(scanner.ALLOWLIST_FINDINGS, {})
+	def test_repo_ships_with_exactly_the_known_exemptions(self) -> None:
+		"""Pins the allowlist to its known, reviewed entries. Any new or
+		removed entry — or a widened check set on an existing one — fails
+		here, forcing the change through review and disclosure in
+		docs/testing.md. The one live entry waives only the FQDN detector on
+		the imported compliance-runner VMware transport module (VMware's
+		factory-default SSO domain, a product constant; see #438)."""
+		self.assertEqual(
+			{path: set(waived) for path, waived in scanner.ALLOWLIST_FINDINGS.items()},
+			{
+				"runners/compliance-runner/powershell/module.transport.vmware.ps1": {
+					scanner.CHECK_FQDN,
+				},
+			},
+		)
 
 	def test_waiving_one_check_leaves_the_others_live(self) -> None:
 		"""The exact defect this mechanism replaces: waiving the FQDN nit

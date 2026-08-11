@@ -141,7 +141,23 @@ CHECK_NAMES = frozenset({CHECK_IP, CHECK_FQDN, CHECK_DEPOT_TOKEN, CHECK_IPV6})
 # exempted one is still fully scanned. Empty is the correct steady state, and
 # a non-empty ALLOWLIST_FINDINGS must also be disclosed in docs/testing.md
 # under "What CI covers — and does not".
-ALLOWLIST_FINDINGS: dict[str, dict[str, str]] = {}
+ALLOWLIST_FINDINGS: dict[str, dict[str, str]] = {
+	# module.transport.vmware.ps1:111 uses VMware's factory-default SSO domain
+	# (the `administrator@` account on the `vsphere` `.local` domain — spelled
+	# split here so this comment does not itself trip the FQDN detector; this
+	# scanner reads its own source like any other tracked file). That domain is
+	# baked into every vCenter deployment and appears verbatim in the unmodified
+	# project-owned source imported from vmware-stig-docker (issue #438). It is a
+	# product constant, not lab data: it identifies nothing about the author's
+	# environment. Only the .local FQDN detector is waived on that one file;
+	# IP/IPv6/depot-token detectors stay live.
+	"runners/compliance-runner/powershell/module.transport.vmware.ps1": {
+		CHECK_FQDN: (
+			"VMware default SSO domain (product constant) on the imported "
+			"module; present in the unmodified upstream source, not lab data."
+		),
+	},
+}
 
 
 def _validate_allowlist() -> None:
