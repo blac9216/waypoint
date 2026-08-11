@@ -49,11 +49,12 @@ public sealed class SchemaMigrationTests
 		"config_versions",
 		"stigman_connections",
 		"attestation_snapshots",
+		"run_secrets",
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #106 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check, 0020 adds BEFORE UPDATE/DELETE triggers enforcing job_events/audit_log append-only, with a carve-out on audit_log for 0006's FK-driven credential_id SET NULL, 0021 adds attestation_snapshots -- the persisted at-scan-time attestations-applied ledger, issue #306, 0022 adds credentials_credential_type_check mirroring CredentialTypes.All, issue #252) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 22;
+	/// <summary>Embedded migration count as of issue #106 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check, 0020 adds BEFORE UPDATE/DELETE triggers enforcing job_events/audit_log append-only, with a carve-out on audit_log for 0006's FK-driven credential_id SET NULL, 0021 adds attestation_snapshots -- the persisted at-scan-time attestations-applied ledger, issue #306, 0022 adds credentials_credential_type_check mirroring CredentialTypes.All, issue #252, 0023 adds run_secrets + jobs.has_run_secret -- the encrypted run-scoped personal-credential handoff, issue #434) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 23;
 
 	private readonly PostgresFixture _fixture;
 

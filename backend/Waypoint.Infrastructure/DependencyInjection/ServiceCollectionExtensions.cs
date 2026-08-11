@@ -90,6 +90,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<Waypoint.Core.StigManager.StigManagerClientOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.StigManager.StigManagerClientOptions.SectionName));
 
+		services.AddOptions<Waypoint.Core.Secrets.RunSecretOptions>()
+			.Bind(configuration.GetSection(Waypoint.Core.Secrets.RunSecretOptions.SectionName));
+
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
 		// One scrubber instance serves both sides of security.md control 1: sinks read
@@ -97,19 +100,6 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<InPlaySecretRedactor>();
 		services.AddSingleton<ISecretRedactor>(serviceProvider => serviceProvider.GetRequiredService<InPlaySecretRedactor>());
 		services.AddSingleton<ISecretTracker>(serviceProvider => serviceProvider.GetRequiredService<InPlaySecretRedactor>());
-
-		// ADR-0011 ad hoc "my credentials" flow (issue #276): process-memory only, no
-		// connection-string gate -- registered unconditionally like the redactor above
-		// so a host without Postgres configured still boots (the audit write inside it
-		// no-ops without a connection string, same pattern as other best-effort writes).
-		services.AddSingleton<Waypoint.Core.Secrets.IEphemeralCredentialCache>(serviceProvider =>
-		{
-			string? ephemeralConnectionString = configuration.GetConnectionString(ConnectionStringName);
-			return new Secrets.EphemeralCredentialCache(
-				serviceProvider.GetRequiredService<ISecretTracker>(),
-				ephemeralConnectionString,
-				serviceProvider.GetRequiredService<ILogger<Secrets.EphemeralCredentialCache>>());
-		});
 
 		services.AddSingleton<JobHandlerRegistry>();
 
@@ -201,6 +191,20 @@ public static class ServiceCollectionExtensions
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
 				serviceProvider.GetRequiredService<ILogger<Secrets.CredentialCreationCoordinator>>()));
+
+			// ADR-0011 ad hoc "my credentials" flow, issue #434: replaces the
+			// process-memory-only IEphemeralCredentialCache with encrypted, run-scoped
+			// Postgres state (run_secrets, migration 0023) -- registered here rather than
+			// unconditionally because, unlike the predecessor cache, it needs the
+			// connection string from the moment it is constructed (no best-effort no-op
+			// mode; a host with no Postgres configured has no run/scan endpoints wired
+			// either, so this dependency is never actually missing in practice).
+			services.AddSingleton<Waypoint.Core.Secrets.IRunSecretStore>(serviceProvider => new Secrets.RunSecretStore(
+				connectionString,
+				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
+				serviceProvider.GetRequiredService<ISecretTracker>(),
+				serviceProvider.GetRequiredService<ILogger<Secrets.RunSecretStore>>()));
+			services.AddHostedService<Secrets.RunSecretCleanupHostedService>();
 
 			// Issue #311: the convert-stage upload/enrichment coordinator and the
 			// retry route (JobsController) share this one instance.

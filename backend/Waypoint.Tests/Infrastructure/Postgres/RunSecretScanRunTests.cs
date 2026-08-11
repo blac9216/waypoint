@@ -33,27 +33,32 @@ using Xunit;
 namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
-/// Issue #276 (fourth slice of the #23 split): the ADR-0011 ad hoc "my credentials"
-/// scan flow. <see cref="CreateScanRun_WithEphemeralCredential_NeverPersisted_CanaryProof"/>
+/// Issue #434 (replaces the #276 in-memory <c>IEphemeralCredentialCache</c> handoff):
+/// the ADR-0011 ad hoc "my credentials" scan flow, now backed by encrypted, run-scoped
+/// Postgres state. <see cref="CreateScanRun_WithRunSecret_NeverPersistedInsecurely_CanaryProof"/>
 /// is the heart of the slice -- a redactor-canary-style test that runs an ad hoc scan
 /// run end to end through the real API and Postgres, then greps every persistence
 /// surface (<c>credentials</c>, <c>credential_secrets</c>, <c>jobs.payload</c>,
-/// <c>jobs.credential_id</c>, <c>job_events</c>, <c>audit_log.detail</c>, and the
-/// process's own captured log lines) for the canary secret and asserts zero hits.
+/// <c>jobs.credential_id</c>, <c>job_events</c>, <c>audit_log.detail</c>, the process's
+/// own captured log lines, and the <c>run_secrets</c> ciphertext column itself) for the
+/// canary secret in the CLEAR and asserts zero hits -- while confirming the run_secrets
+/// row DOES exist (encrypted) and decrypts back to the canary.
 /// </summary>
 [Collection("Postgres")]
 #pragma warning disable CA1001 // xUnit owns the lifecycle: DisposeAsync tears down client/factory.
-public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
+public sealed class RunSecretScanRunTests : IAsyncLifetime
 {
-	private sealed class EphemeralCredentialApiFactory : WaypointApiFactory
+	private sealed class RunSecretApiFactory : WaypointApiFactory
 	{
 		private readonly string _connectionString;
+		private readonly string _keyPath;
 
-		public CapturingLogger<EphemeralCredentialCache> CacheLogger { get; } = new();
+		public CapturingLogger<RunSecretStore> StoreLogger { get; } = new();
 
-		public EphemeralCredentialApiFactory(string connectionString)
+		public RunSecretApiFactory(string connectionString, string keyPath)
 		{
 			_connectionString = connectionString;
+			_keyPath = keyPath;
 		}
 
 		protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -91,27 +96,36 @@ public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
 				services.AddSingleton<IJobControlRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
 				services.AddSingleton<IJobRunnerRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
 
-				// Swap in a capturing logger for the cache so the canary test can assert
-				// the cache's own log lines (job-id/actor only, per its doc comment)
-				// never carry the secret either -- and swap the cache itself for one
+				// Base WaypointApiFactory wires no master key (most suites never touch
+				// encryption) -- same pattern CredentialsApiTests uses.
+				services.AddSingleton<IMasterKeyProvider>(new FileMasterKeyProvider(_keyPath));
+				services.AddSingleton<IEnvelopeCipher, AesGcmEnvelopeCipher>();
+
+				// Swap in a capturing logger for the store so the canary test can assert
+				// the store's own log lines (run-id/actor only, per its doc comment)
+				// never carry the secret either -- and swap the store itself for one
 				// built against that logger so both sides see the same instance.
-				var cacheDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IEphemeralCredentialCache));
-				if (cacheDescriptor != null)
+				var storeDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IRunSecretStore));
+				if (storeDescriptor != null)
 				{
-					services.Remove(cacheDescriptor);
+					services.Remove(storeDescriptor);
 				}
 
-				services.AddSingleton<IEphemeralCredentialCache>(serviceProvider => new EphemeralCredentialCache(
-					serviceProvider.GetRequiredService<Waypoint.Core.Logging.ISecretTracker>(), _connectionString, CacheLogger));
+				services.AddSingleton<IRunSecretStore>(serviceProvider => new RunSecretStore(
+					_connectionString,
+					serviceProvider.GetRequiredService<IEnvelopeCipher>(),
+					serviceProvider.GetRequiredService<Waypoint.Core.Logging.ISecretTracker>(),
+					StoreLogger));
 			});
 		}
 	}
 
 	private readonly PostgresFixture _fixture;
-	private EphemeralCredentialApiFactory _factory = null!;
+	private readonly string _keyDirectory = Directory.CreateTempSubdirectory("wp-run-secret-key").FullName;
+	private RunSecretApiFactory _factory = null!;
 	private HttpClient _client = null!;
 
-	public EphemeralCredentialScanRunTests(PostgresFixture fixture)
+	public RunSecretScanRunTests(PostgresFixture fixture)
 	{
 		_fixture = fixture;
 	}
@@ -122,7 +136,10 @@ public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
 		await migrator.ApplyAsync();
 		await ResetDataAsync();
 
-		_factory = new EphemeralCredentialApiFactory(_fixture.ConnectionString);
+		string keyPath = Path.Combine(_keyDirectory, "master.key");
+		File.WriteAllBytes(keyPath, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+
+		_factory = new RunSecretApiFactory(_fixture.ConnectionString, keyPath);
 		_client = _factory.CreateClient();
 	}
 
@@ -130,23 +147,25 @@ public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
 	{
 		_client.Dispose();
 		_factory.Dispose();
+		Directory.Delete(_keyDirectory, recursive: true);
 		return Task.CompletedTask;
 	}
 
 #pragma warning restore CA1001
 
 	/// <summary>
-	/// The proof test (AC): the ephemeral secret supplied at run initiation touches
-	/// none of the persistence surfaces a stored/decrypted secret would -- not
+	/// The proof test (AC): the ephemeral secret supplied at run initiation touches none
+	/// of the persistence surfaces a stored/decrypted secret would in the CLEAR -- not
 	/// <c>credentials</c>, not <c>credential_secrets</c>, not <c>jobs.payload</c>, not
-	/// <c>jobs.credential_id</c> (which stays NULL -- there is no row to reference),
-	/// not <c>job_events</c>, not <c>audit_log.detail</c>, and not the cache's own log
-	/// lines. It DOES reach the in-memory <see cref="IEphemeralCredentialCache"/>,
-	/// exactly once per fanned-out job, and a best-effort
-	/// <c>secret.ephemeral_registered</c> audit row with <c>credential_id NULL</c>.
+	/// <c>jobs.credential_id</c> (which stays NULL -- there is no stored-credential row
+	/// to reference), not <c>job_events</c>, not <c>audit_log.detail</c>, not the
+	/// store's own log lines, and not even <c>run_secrets.ciphertext</c> itself (it is
+	/// envelope-encrypted, not the plaintext value). It DOES reach <c>run_secrets</c>,
+	/// exactly once per run (not once per job), and a <c>secret.run_registered</c> audit
+	/// row.
 	/// </summary>
 	[Fact]
-	public async Task CreateScanRun_WithEphemeralCredential_NeverPersisted_CanaryProof()
+	public async Task CreateScanRun_WithRunSecret_NeverPersistedInsecurely_CanaryProof()
 	{
 		const string canarySecret = "invented-adhoc-canary-a1b2c3"; // gitleaks:allow — invented test canary, asserted absent from every persistence surface
 		const string canaryUsername = "adhoc-operator@example.internal";
@@ -186,15 +205,17 @@ public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
 		await connection.OpenAsync();
 
 		// jobs: neither payload nor credential_id carries the secret; credential_id is
-		// NULL outright for an ad hoc job (no stored row exists to reference).
+		// NULL outright for an ad hoc job (no stored row exists to reference), and
+		// has_run_secret is true (migration 0023).
 		await using (NpgsqlCommand jobRow = new(
-			"SELECT payload::text, credential_id FROM jobs WHERE id = $1", connection))
+			"SELECT payload::text, credential_id, has_run_secret FROM jobs WHERE id = $1", connection))
 		{
 			jobRow.Parameters.AddWithValue(jobId);
 			await using NpgsqlDataReader reader = await jobRow.ExecuteReaderAsync();
 			Assert.True(await reader.ReadAsync());
 			Assert.DoesNotContain(canarySecret, reader.GetString(0), StringComparison.Ordinal);
 			Assert.True(reader.IsDBNull(1), "an ad hoc job's credential_id must be NULL -- never a stored row reference.");
+			Assert.True(reader.GetBoolean(2), "an ad hoc job must be marked has_run_secret.");
 		}
 
 		await AssertNoCanaryAsync(connection, "SELECT count(*) FROM jobs WHERE payload::text LIKE '%' || $1 || '%' OR note LIKE '%' || $1 || '%'", canarySecret);
@@ -214,41 +235,66 @@ public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
 			Assert.Equal(0L, (long)(await secretCount.ExecuteScalarAsync())!);
 		}
 
-		// audit_log: the best-effort intake row landed, attributed, with no stored
-		// credential to reference.
-		await using (NpgsqlCommand auditRow = new(
-			"SELECT credential_id, job_id, run_id, actor FROM audit_log WHERE event_type = 'secret.ephemeral_registered' AND job_id = $1", connection))
+		// run_secrets: exactly one row for the run (not one per job), the ciphertext
+		// column itself never carries the plaintext canary (it is AES-256-GCM sealed
+		// bytes, but assert the string-search property anyway as a belt-and-braces
+		// canary check), and the username half of the pair IS stored in the clear
+		// (design: the username is not secret material, same as credentials.username).
+		await using (NpgsqlCommand runSecretRow = new(
+			"SELECT username, encode(ciphertext, 'hex'), expires_at FROM run_secrets WHERE run_id = $1", connection))
 		{
-			auditRow.Parameters.AddWithValue(jobId);
+			runSecretRow.Parameters.AddWithValue(runId);
+			await using NpgsqlDataReader reader = await runSecretRow.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync(), "expected exactly one run_secrets row for the run.");
+			Assert.Equal(canaryUsername, reader.GetString(0));
+			Assert.DoesNotContain(canarySecret, reader.GetString(1), StringComparison.OrdinalIgnoreCase);
+			Assert.True(reader.GetFieldValue<DateTimeOffset>(2) > DateTimeOffset.UtcNow, "expires_at must be in the future at creation.");
+		}
+
+		await using (NpgsqlCommand runSecretCount = new("SELECT count(*) FROM run_secrets", connection))
+		{
+			Assert.Equal(1L, (long)(await runSecretCount.ExecuteScalarAsync())!);
+		}
+
+		// audit_log: the registration row landed, attributed, with no stored credential
+		// to reference and run_id set (not job_id -- registration is a run-level event).
+		await using (NpgsqlCommand auditRow = new(
+			"SELECT credential_id, job_id, run_id, actor FROM audit_log WHERE event_type = 'secret.run_registered' AND run_id = $1", connection))
+		{
+			auditRow.Parameters.AddWithValue(runId);
 			await using NpgsqlDataReader reader = await auditRow.ExecuteReaderAsync();
-			Assert.True(await reader.ReadAsync(), "expected a secret.ephemeral_registered audit row for the ad hoc job.");
-			Assert.True(reader.IsDBNull(0), "audit_log.credential_id must be NULL for an ephemeral registration.");
-			Assert.Equal(runId, reader.GetGuid(2));
+			Assert.True(await reader.ReadAsync(), "expected a secret.run_registered audit row for the run.");
+			Assert.True(reader.IsDBNull(0), "audit_log.credential_id must be NULL for a run secret registration.");
+			Assert.True(reader.IsDBNull(1), "audit_log.job_id must be NULL for a run-level registration event.");
 			Assert.Equal("test-user", reader.GetString(3));
 		}
 
-		// Captured log lines from the cache itself: job id and actor are fine to log,
+		// Captured log lines from the store itself: run id and actor are fine to log,
 		// the secret value is not.
-		foreach (CapturedLogEntry entry in _factory.CacheLogger.Entries)
+		foreach (CapturedLogEntry entry in _factory.StoreLogger.Entries)
 		{
 			Assert.DoesNotContain(canarySecret, entry.Message, StringComparison.Ordinal);
 		}
 
-		// The cache DID receive it -- this is the one place it is allowed to live, and
-		// only until first consumption.
-		IEphemeralCredentialCache cache = _factory.Services.GetRequiredService<IEphemeralCredentialCache>();
-		EphemeralCredential? taken = cache.TryTake(jobId);
-		Assert.NotNull(taken);
-		Assert.Equal(canaryUsername, taken!.Username);
-		Assert.Equal(canarySecret, taken.Secret);
+		// The store DID receive it, encrypted -- decrypting it back (as the runner
+		// would, at the point of use) recovers the exact canary and audits the
+		// decrypt.
+		IRunSecretStore store = _factory.Services.GetRequiredService<IRunSecretStore>();
+		using DecryptedRunSecret? decrypted = await store.DecryptAsync(runId, jobId, "runner-under-test", CancellationToken.None);
+		Assert.NotNull(decrypted);
+		Assert.Equal(canaryUsername, decrypted!.Username);
+		Assert.Equal(canarySecret, decrypted.Secret);
 
-		// Single-shot: a second take (e.g. a naive resume path) finds nothing, which is
-		// the documented fail-closed behavior for a resumed job with no cached secret.
-		Assert.Null(cache.TryTake(jobId));
+		// Unlike the predecessor single-shot in-memory cache, decrypt is NOT
+		// single-shot -- a retried or lease-recovered job must be able to decrypt
+		// again while the run is non-terminal. A second decrypt still succeeds.
+		using DecryptedRunSecret? decryptedAgain = await store.DecryptAsync(runId, jobId, "runner-under-test", CancellationToken.None);
+		Assert.NotNull(decryptedAgain);
+		Assert.Equal(canarySecret, decryptedAgain!.Secret);
 	}
 
 	[Fact]
-	public async Task CreateScanRun_WithEphemeralCredential_BelowOperatorRole_Returns403()
+	public async Task CreateScanRun_WithRunSecret_BelowOperatorRole_Returns403()
 	{
 		Guid siteId = await CreateSiteAsync("adhoc-role-site");
 		await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
@@ -269,7 +315,7 @@ public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
 	}
 
 	[Fact]
-	public async Task CreateScanRun_WithEphemeralCredentialAndCredentialId_Returns400()
+	public async Task CreateScanRun_WithRunSecretAndCredentialId_Returns400()
 	{
 		Guid siteId = await CreateSiteAsync("adhoc-mutex-site");
 		await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
@@ -287,7 +333,7 @@ public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
 	}
 
 	[Fact]
-	public async Task CreateScanRun_WithEphemeralCredential_UnsupportedKind_Returns400()
+	public async Task CreateScanRun_WithRunSecret_UnsupportedKind_Returns400()
 	{
 		Guid siteId = await CreateSiteAsync("adhoc-kind-site");
 		await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
@@ -304,7 +350,7 @@ public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
 	}
 
 	[Fact]
-	public async Task CreateScanRun_WithEphemeralCredential_NotAScanRun_Returns400()
+	public async Task CreateScanRun_WithRunSecret_NotAScanRun_Returns400()
 	{
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Operator", new
 		{
@@ -369,7 +415,7 @@ public sealed class EphemeralCredentialScanRunTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand truncate = new(
-			"TRUNCATE TABLE job_events, audit_log, jobs, runs, targets, sites, credential_secrets, credentials RESTART IDENTITY CASCADE", connection);
+			"TRUNCATE TABLE job_events, audit_log, jobs, run_secrets, runs, targets, sites, credential_secrets, credentials RESTART IDENTITY CASCADE", connection);
 		await truncate.ExecuteNonQueryAsync();
 	}
 }

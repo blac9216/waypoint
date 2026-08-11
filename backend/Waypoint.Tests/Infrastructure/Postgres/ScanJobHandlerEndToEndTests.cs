@@ -67,7 +67,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	private CredentialSecretStore _secretStore = null!;
 	private SiteRepository _sites = null!;
 	private TargetRepository _targets = null!;
-	private EphemeralCredentialCache _ephemeralCredentials = null!;
+	private RunSecretStore _runSecrets = null!;
 	private ConfigDocRepository _configDocs = null!;
 	private AttestationSnapshotRepository _attestationSnapshots = null!;
 	private ScanJobHandler _handler = null!;
@@ -106,7 +106,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		_secretStore = new CredentialSecretStore(_fixture.ConnectionString, cipher, _redactor, NullLogger<CredentialSecretStore>.Instance);
 		_sites = new SiteRepository(_fixture.ConnectionString);
 		_targets = new TargetRepository(_fixture.ConnectionString);
-		_ephemeralCredentials = new EphemeralCredentialCache(_redactor, _fixture.ConnectionString, NullLogger<EphemeralCredentialCache>.Instance);
+		_runSecrets = new RunSecretStore(_fixture.ConnectionString, cipher, _redactor, NullLogger<RunSecretStore>.Instance);
 		_configDocs = new ConfigDocRepository(_fixture.ConnectionString);
 		_attestationSnapshots = new AttestationSnapshotRepository(_fixture.ConnectionString);
 
@@ -130,7 +130,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			stigman, new StubStigManagerUploadClient(), _secretStore, _repository, _redactor);
 
 		_handler = new ScanJobHandler(
-			executor, _secretStore, _credentials, _targets, _ephemeralCredentials, _repository, _redactor, wrappedPsOptions, scanOptions, _configDocs,
+			executor, _secretStore, _credentials, _targets, _runSecrets, _repository, _redactor, wrappedPsOptions, scanOptions, _configDocs,
 			_attestationSnapshots, uploadCoordinator);
 	}
 
@@ -599,14 +599,14 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
-	/// ADR-0011/#276: a NULL credential_id job takes its secret from the ephemeral
-	/// cache, never falling back to the target's stored credential -- proven here by
-	/// seeding a target WITH a stored credential but fanning the job out with
-	/// HasEphemeralCredential, then asserting the stub saw the ephemeral username, not
-	/// the stored one.
+	/// ADR-0011/#276/#434: a NULL credential_id job takes its secret from the run's
+	/// encrypted run_secrets row, never falling back to the target's stored credential
+	/// -- proven here by seeding a target WITH a stored credential but fanning the job
+	/// out with HasRunSecret, then asserting the stub saw the ad hoc username, not the
+	/// stored one.
 	/// </summary>
 	[Fact]
-	public async Task EphemeralCredential_UsedWhenJobCredentialIdIsNull_NeverFallsBackToStoredCredential()
+	public async Task RunSecret_UsedWhenJobCredentialIdIsNull_NeverFallsBackToStoredCredential()
 	{
 		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
 		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
@@ -614,12 +614,12 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-unused-stored-secret", username: "stored-user@example.internal");
 
 		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		const string runSecretValue = "invented-runsecret-canary-d9e1"; // gitleaks:allow — invented test canary, asserted never to reach the stub or any persistence surface
+		await _runSecrets.StoreAsync(runId, new RunSecretCredential("adhoc-user@example.internal", runSecretValue), "tester", TimeSpan.FromHours(1), CancellationToken.None);
+
 		string payload = JsonSerializer.Serialize(new { target_id = targetId });
 		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
-			runId, [new JobSpec("scan", 3, TargetId: targetId, Payload: payload, HasEphemeralCredential: true)], "tester", CancellationToken.None);
-
-		const string ephemeralSecret = "invented-ephemeral-canary-d9e1"; // gitleaks:allow — invented test canary, asserted never to reach the stub or any persistence surface
-		_ephemeralCredentials.Put(jobIds[0], runId, new EphemeralCredential("ephemeral-user@example.internal", ephemeralSecret), "tester");
+			runId, [new JobSpec("scan", 3, TargetId: targetId, Payload: payload, HasRunSecret: true)], "tester", CancellationToken.None);
 
 		JobDispatcherHostedService dispatcher = CreateDispatcher();
 		await dispatcher.StartAsync(CancellationToken.None);
@@ -634,31 +634,36 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 
 		// #275: attest/convert now run for real (no longer a stub dead-end), so the
 		// pipeline reaches the shape's terminal -- this test's own focus is the
-		// ephemeral-credential consumption during the InSpec stage, which already
+		// ad hoc run secret consumption during the InSpec stage, which already
 		// happened by the time the job reaches its terminal state.
 		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
 
-		// The ephemeral entry was consumed (single-shot TryTake) -- a second attempt
-		// to take it must fail, proving the handler actually took it rather than
-		// silently falling back to a stored credential it never touched.
-		Assert.Null(_ephemeralCredentials.TryTake(jobIds[0]));
+		// Unlike the predecessor single-shot in-memory cache, a run secret is NOT
+		// consumed on read -- it remains decryptable across retries/lease-recovery
+		// while the run is non-terminal (issue #434 AC). This run's only job just
+		// reached a terminal state, which completes the run too (JobQueueRepository.TryCompleteRunAsync)
+		// -- and terminal run completion is exactly what deletes the row (issue #434 AC
+		// "terminal completion deletes the secret"), so it is gone now, not "still there".
+		using DecryptedRunSecret? afterTerminal = await _runSecrets.DecryptAsync(runId, jobIds[0], "test-verify", CancellationToken.None);
+		Assert.Null(afterTerminal);
 
-		await AssertCanaryNeverLeakedAsync(ephemeralSecret, credentialId: null);
+		await AssertCanaryNeverLeakedAsync(runSecretValue, credentialId: null);
 	}
 
-	/// <summary>No credential_id AND no ephemeral entry (never registered) fails auth-style, never a stored-credential fallback.</summary>
+	/// <summary>No credential_id AND no run_secrets row (never registered) fails auth-style, never a stored-credential fallback.</summary>
 	[Fact]
-	public async Task NoCredentialIdAndNoEphemeralEntry_FailsCleanly()
+	public async Task NoCredentialIdAndNoRunSecret_FailsCleanly()
 	{
 		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-unreachable-canary");
 
 		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
 		string payload = JsonSerializer.Serialize(new { target_id = targetId });
 		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
-			runId, [new JobSpec("scan", 3, TargetId: targetId, Payload: payload, HasEphemeralCredential: true)], "tester", CancellationToken.None);
+			runId, [new JobSpec("scan", 3, TargetId: targetId, Payload: payload, HasRunSecret: true)], "tester", CancellationToken.None);
 
-		// Deliberately never call _ephemeralCredentials.Put -- simulates a TTL expiry
-		// or a process restart between fan-out and claim.
+		// Deliberately never call _runSecrets.StoreAsync -- simulates an expiry sweep
+		// or a run whose secret was already deleted (e.g. a prior terminal completion
+		// that this job's retry reopened).
 		JobDispatcherHostedService dispatcher = CreateDispatcher();
 		await dispatcher.StartAsync(CancellationToken.None);
 		try
@@ -672,7 +677,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 
 		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
 		string note = await GetJobNoteAsync(jobIds[0]);
-		Assert.Contains("no ephemeral credential is available", note, StringComparison.Ordinal);
+		Assert.Contains("no run secret is available", note, StringComparison.Ordinal);
 	}
 
 	/// <summary>Issue #262: a stored vCenter credential with no username fails cleanly, never falling back to the display name.</summary>

@@ -20,12 +20,15 @@ namespace Waypoint.Core.Jobs;
 /// of these per target/component; <see cref="IJobControlRepository.FanOutJobsAsync"/>
 /// inserts them all as one run.
 /// </summary>
-/// <param name="HasEphemeralCredential">
+/// <param name="HasRunSecret">
 /// True when this job's caller-supplied "my credentials" secret (ADR-0011 ad hoc flow,
-/// issue #276) is held in <see cref="Waypoint.Core.Secrets.IEphemeralCredentialCache"/>
-/// keyed by the job id <see cref="IJobControlRepository.FanOutJobsAsync"/> assigns --
-/// never carried on this record or any persisted column. Mutually exclusive with
-/// <paramref name="CredentialId"/>; the caller (<c>RunsController</c>) enforces that.
+/// issue #276/#434) is stored, envelope-encrypted, in <c>run_secrets</c> under the
+/// job's own run id (<see cref="Waypoint.Core.Secrets.IRunSecretStore"/>) -- never
+/// carried on this record, never a stored <c>credentials</c> row. Persisted onto
+/// <c>jobs.has_run_secret</c> by <see cref="IJobControlRepository.FanOutJobsAsync"/>
+/// (migration 0023). Mutually exclusive with <paramref name="CredentialId"/>; the
+/// caller (<c>RunsController</c>) enforces that at the API layer and
+/// <c>jobs_credential_exclusivity_check</c> backstops it at the schema layer.
 /// </param>
 public sealed record JobSpec(
 	string JobType,
@@ -34,4 +37,4 @@ public sealed record JobSpec(
 	string? TargetName = null,
 	Guid? CredentialId = null,
 	string Payload = "{}",
-	bool HasEphemeralCredential = false);
+	bool HasRunSecret = false);

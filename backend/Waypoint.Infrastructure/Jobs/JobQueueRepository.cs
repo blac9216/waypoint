@@ -337,7 +337,51 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			await complete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
+		await DeleteRunSecretIfPresentAsync(runId, connection, transaction, cancellationToken).ConfigureAwait(false);
+
 		return new RunCompletionResult(runId, newState, failureCount);
+	}
+
+	/// <summary>
+	/// Issue #434 AC "terminal completion deletes the secret": the run-scoped
+	/// encrypted secret (<c>run_secrets</c>, <see cref="Waypoint.Core.Secrets.IRunSecretStore"/>)
+	/// is deleted in the SAME transaction that flips the run to a terminal state --
+	/// <see cref="TryCompleteRunAsync"/> above (completed/completed_with_failures) and
+	/// <see cref="AbortRunAsync"/> below (aborted) -- rather than as a follow-up call
+	/// after commit. That is what makes this race-safe against a concurrent job claim:
+	/// both paths already hold the run row <c>FOR UPDATE</c> before this runs, so no
+	/// job can be mid-claim against a run whose secret this statement is about to
+	/// remove without that claim's own transaction serializing behind this one.
+	///
+	/// Deliberately raw SQL here rather than a dependency on
+	/// <see cref="Waypoint.Core.Secrets.IRunSecretStore"/>: that interface owns its own
+	/// connection/transaction per call (mirroring <c>ICredentialSecretStore</c>), which
+	/// cannot be composed into a transaction this method does not own. A no-op (zero
+	/// rows deleted) is the common case -- most jobs use a stored credential and have no
+	/// run secret at all -- so no audit row is written unless one was actually deleted.
+	/// </summary>
+	private static async Task DeleteRunSecretIfPresentAsync(
+		Guid runId, NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
+	{
+		int deleted;
+		await using (NpgsqlCommand delete = new("DELETE FROM run_secrets WHERE run_id = $1", connection, transaction))
+		{
+			delete.Parameters.AddWithValue(runId);
+			deleted = await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		if (deleted == 0)
+		{
+			return;
+		}
+
+		await using NpgsqlCommand audit = new(
+			"""
+			INSERT INTO audit_log (event_type, actor, credential_id, job_id, run_id, detail)
+			VALUES ('secret.run_deleted', 'system:run-completion', NULL, NULL, $1, '{}'::jsonb)
+			""", connection, transaction);
+		audit.Parameters.AddWithValue(runId);
+		await audit.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	/// <summary>
@@ -622,8 +666,8 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		{
 			await using NpgsqlCommand insertJob = new(
 				"""
-				INSERT INTO jobs (run_id, job_type, target_id, target_name, credential_id, priority, payload, created_by, state)
-				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued')
+				INSERT INTO jobs (run_id, job_type, target_id, target_name, credential_id, priority, payload, created_by, state, has_run_secret)
+				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued', $9)
 				RETURNING id, state, note
 				""", connection, transaction);
 			insertJob.Parameters.AddWithValue(runId);
@@ -634,6 +678,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			insertJob.Parameters.AddWithValue(spec.Priority);
 			insertJob.Parameters.AddWithValue(string.IsNullOrWhiteSpace(spec.Payload) ? "{}" : spec.Payload);
 			insertJob.Parameters.AddWithValue((object?)createdBy ?? DBNull.Value);
+			insertJob.Parameters.AddWithValue(spec.HasRunSecret);
 
 			await using NpgsqlDataReader reader = await insertJob.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 			await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -1000,6 +1045,12 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			markAborted.Parameters.AddWithValue(runId);
 			await markAborted.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
+
+		// Issue #434: abort is also a terminal transition -- see DeleteRunSecretIfPresentAsync's
+		// doc comment for why this runs inside the same transaction as markAborted above
+		// (the run row's FOR UPDATE lock, taken earlier in this method, is what makes it
+		// race-safe against a concurrent claim).
+		await DeleteRunSecretIfPresentAsync(runId, connection, transaction, cancellationToken).ConfigureAwait(false);
 
 		// Migration 0003's run-side trigger has already cancelled queued rows in this
 		// transaction. Blocked rows are not queued, so finish those explicitly.

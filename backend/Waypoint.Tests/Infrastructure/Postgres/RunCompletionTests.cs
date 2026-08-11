@@ -231,6 +231,92 @@ public sealed class RunCompletionTests : IAsyncLifetime
 		Assert.Equal("running", await GetRunStateAsync(runId));
 	}
 
+	/// <summary>
+	/// Issue #434 AC "terminal completion deletes the secret": a run's last job
+	/// reaching a terminal state completes the run (already proven above by
+	/// <see cref="AllJobsSucceed_RunTransitionsToCompleted_WithCompletedAtStamped"/>) AND,
+	/// in the same transaction, deletes that run's <c>run_secrets</c> row --
+	/// <see cref="JobQueueRepository.DeleteRunSecretIfPresentAsync"/>.
+	/// </summary>
+	[Fact]
+	public async Task AllJobsSucceed_RunCompletes_AndRunSecretIsDeleted()
+	{
+		Guid runId = await SeedRunAsync("running");
+		Guid jobA = await InsertJobAsync(runId, JobStates.Running, "worker-a");
+		await InsertRunSecretAsync(runId);
+
+		bool advanced = await _repository.AdvanceStateAsync(jobA, "worker-a", JobStates.Running, JobStates.Done, null, clearLease: true, CancellationToken.None);
+
+		Assert.True(advanced);
+		Assert.Equal("completed", await GetRunStateAsync(runId));
+		Assert.False(await RunSecretExistsAsync(runId));
+		Assert.Equal(1, await CountAuditRowsAsync(runId, "secret.run_deleted"));
+	}
+
+	/// <summary>
+	/// A run with no run_secrets row at all (the ordinary stored-credential case) is
+	/// unaffected -- the delete is a no-op and writes no audit row (RunSecretStore's
+	/// "no audit unless something was actually deleted" discipline).
+	/// </summary>
+	[Fact]
+	public async Task AllJobsSucceed_RunCompletes_NoRunSecretRow_NoOpNoAudit()
+	{
+		Guid runId = await SeedRunAsync("running");
+		Guid jobA = await InsertJobAsync(runId, JobStates.Running, "worker-a");
+
+		bool advanced = await _repository.AdvanceStateAsync(jobA, "worker-a", JobStates.Running, JobStates.Done, null, clearLease: true, CancellationToken.None);
+
+		Assert.True(advanced);
+		Assert.Equal("completed", await GetRunStateAsync(runId));
+		Assert.Equal(0, await CountAuditRowsAsync(runId, "secret.run_deleted"));
+	}
+
+	/// <summary>Issue #434 AC: abort is also a terminal transition -- AbortRunAsync deletes the run secret too.</summary>
+	[Fact]
+	public async Task AbortRun_DeletesRunSecret()
+	{
+		Guid runId = await SeedRunAsync("running");
+		await InsertJobAsync(runId, JobStates.Queued, worker: null);
+		await InsertRunSecretAsync(runId);
+
+		AbortRunResult result = await _repository.AbortRunAsync(runId, CancellationToken.None);
+
+		Assert.Equal("aborted", await GetRunStateAsync(runId));
+		Assert.False(await RunSecretExistsAsync(runId));
+		Assert.Equal(1, await CountAuditRowsAsync(runId, "secret.run_deleted"));
+		_ = result;
+	}
+
+	/// <summary>
+	/// Issue #434 AC "retry ... keep the secret until terminal": retrying a failed job
+	/// reopens the run to <c>running</c> (proven by <see cref="RetryOfFailedJobOnCompletedRun_ReopensRunToRunning"/>)
+	/// -- but by the time that retry runs, the run had ALREADY gone terminal once and
+	/// its secret was ALREADY deleted (this is the documented fail-closed edge: a
+	/// retried ad hoc-credential job has no secret to resume with, exactly like the
+	/// predecessor single-shot in-memory cache's TTL-expiry case). What this test
+	/// actually proves is the case that must NOT delete early: a run with jobs still
+	/// outstanding (not yet terminal) keeps its secret untouched.
+	/// </summary>
+	[Fact]
+	public async Task RunWithOutstandingJobs_NeverCompletes_RunSecretUntouched()
+	{
+		Guid runId = await SeedRunAsync("running");
+		Guid jobA = await InsertJobAsync(runId, JobStates.Running, "worker-a");
+		Guid jobB = await InsertJobAsync(runId, JobStates.Running, "worker-b");
+		await InsertRunSecretAsync(runId);
+
+		// jobA reaches a terminal state, but jobB is still outstanding -- the run must
+		// NOT complete, and the secret must survive untouched (TryCompleteRunAsync's
+		// remainingCount > 0 guard returns null before DeleteRunSecretIfPresentAsync is
+		// ever reached).
+		bool advanced = await _repository.AdvanceStateAsync(jobA, "worker-a", JobStates.Running, JobStates.Done, null, clearLease: true, CancellationToken.None);
+
+		Assert.True(advanced);
+		Assert.Equal("running", await GetRunStateAsync(runId));
+		Assert.True(await RunSecretExistsAsync(runId));
+		_ = jobB;
+	}
+
 	private static readonly string[] ValidRaceOutcomes = ["aborted", "running", "completed"];
 
 	[Fact]
@@ -370,6 +456,41 @@ public sealed class RunCompletionTests : IAsyncLifetime
 		q.Parameters.AddWithValue(runId);
 		object? result = await q.ExecuteScalarAsync();
 		return result is DBNull or null ? null : (DateTime)result;
+	}
+
+	/// <summary>
+	/// Seeds a minimal, deliberately non-decryptable <c>run_secrets</c> row directly
+	/// (bypassing <c>IRunSecretStore</c>) -- these tests only care whether the ROW
+	/// exists after a completion/abort write, never about decrypting it, so a
+	/// placeholder ciphertext keeps this file free of an envelope-cipher dependency.
+	/// </summary>
+	private async Task InsertRunSecretAsync(Guid runId)
+	{
+		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
+		await using NpgsqlCommand q = new(
+			"""
+			INSERT INTO run_secrets (run_id, username, ciphertext, data_key_wrapped, master_key_id, algorithm, expires_at)
+			VALUES ($1, 'placeholder@example.internal', E'\\x00', E'\\x00', 'test-key', 'AES-256-GCM', now() + interval '1 hour')
+			""", c);
+		q.Parameters.AddWithValue(runId);
+		await q.ExecuteNonQueryAsync();
+	}
+
+	private async Task<bool> RunSecretExistsAsync(Guid runId)
+	{
+		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
+		await using NpgsqlCommand q = new("SELECT count(*) FROM run_secrets WHERE run_id = $1", c);
+		q.Parameters.AddWithValue(runId);
+		return (long)(await q.ExecuteScalarAsync())! > 0;
+	}
+
+	private async Task<int> CountAuditRowsAsync(Guid runId, string eventType)
+	{
+		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
+		await using NpgsqlCommand q = new("SELECT count(*) FROM audit_log WHERE run_id = $1 AND event_type = $2", c);
+		q.Parameters.AddWithValue(runId);
+		q.Parameters.AddWithValue(eventType);
+		return Convert.ToInt32((long)(await q.ExecuteScalarAsync())!);
 	}
 
 	private sealed record RecordedEvent(string EventType, Guid? JobId, Guid? RunId, string PayloadJson);

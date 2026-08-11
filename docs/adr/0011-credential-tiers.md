@@ -1,6 +1,8 @@
 # ADR-0011: Credential tiers — ephemeral personal credentials in v1
 
-Status: Accepted
+Status: Accepted; storage model superseded by [ADR-0016](0016-run-scoped-personal-credential-persistence.md)
+(the tier split and "no personal rows in the reusable credential store" rule below are
+unchanged and reaffirmed there — only "held in memory... never persisted" changed).
 
 ## Context
 

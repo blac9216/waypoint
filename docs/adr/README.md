@@ -35,8 +35,9 @@ An append to Consequences must:
 | [0008](0008-job-engine.md) | Central job engine on a Postgres-backed queue | Accepted; worker ownership superseded by 0013/0014 |
 | [0009](0009-self-update.md) | Signed update bundles + updater sidecar | Accepted; clarified by 0015 |
 | [0010](0010-deployment-topology.md) | One appliance, connected/disconnected modes | Accepted; clarified by 0015 |
-| [0011](0011-credential-tiers.md) | Credential tiers; ephemeral personal credentials in v1 | Accepted |
+| [0011](0011-credential-tiers.md) | Credential tiers; ephemeral personal credentials in v1 | Accepted; storage model superseded by 0016 |
 | [0012](0012-stage-per-execution-dispatcher.md) | Stage-per-execution dispatcher; resume-from-stage | Accepted |
 | [0013](0013-control-plane-and-runners.md) | ASP.NET control plane + dedicated .NET execution runners | Accepted |
 | [0014](0014-runner-job-ownership.md) | Runner-owned leases, events, secrets, and resource admission | Accepted |
 | [0015](0015-source-build-and-operator-export.md) | Source distribution + operator-built/exported appliances | Accepted |
+| [0016](0016-run-scoped-personal-credential-persistence.md) | Personal credentials persist encrypted, run-scoped, terminal/expiry bounded | Accepted |

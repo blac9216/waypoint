@@ -46,9 +46,16 @@ Two tiers ([ADR-0011](adr/0011-credential-tiers.md)):
   decryptable autonomously for scheduled/system runs. Targets reference these via
   `credentialRef`. "One global service account" is just the degenerate case where
   every target references the same credential — the model does not assume it.
-- **Personal** — **not stored in v1**. An ad hoc run using "my credentials" prompts
-  the user at run initiation; the value lives in memory for that run only (so vCenter
-  audit logs attribute actions to the human, and there is nothing at rest to steal).
+- **Personal** — **never a row in the reusable credential store**. An ad hoc run using
+  "my credentials" prompts the user at run initiation; the value is envelope-encrypted
+  into a separate, run-scoped `run_secrets` row (one per run, referenced by that run's
+  jobs) so vCenter audit logs attribute actions to the human, a dedicated runner can
+  decrypt it at the point of use, and an API restart between run creation and job claim
+  does not force credential re-entry (issue #434). The row is terminal/expiry
+  bounded: the backend deletes it the moment the run reaches a terminal state
+  (completed, completed_with_failures, aborted), and a cleanup sweep removes any that
+  outlive a bounded expiry window (an abandoned/crashed run). See
+  [security.md](security.md) for the threat model this replaces.
 
 Stored credentials are write-only through the API: overwrite or delete, never read
 back. Threat model and leakage controls: [security.md](security.md).
