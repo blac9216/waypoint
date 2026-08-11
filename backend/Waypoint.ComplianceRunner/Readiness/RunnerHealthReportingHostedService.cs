@@ -27,9 +27,11 @@ namespace Waypoint.ComplianceRunner.Readiness;
 /// <see cref="RunnerHealthCheckProbe"/> to read back. See <see cref="RunnerHealthOptions"/>
 /// for why a file sentinel rather than an HTTP endpoint.
 ///
-/// Runs once immediately at startup (before the first <see cref="RunnerHealthOptions.RefreshInterval"/>
-/// tick) so a Compose healthcheck polling shortly after container start does not see a
-/// missing file and report unhealthy for the first refresh interval.
+/// Writes the first report in <see cref="StartAsync"/> (awaited before the host reports
+/// started, ahead of the first <see cref="RunnerHealthOptions.RefreshInterval"/> tick) so a
+/// Compose healthcheck polling shortly after container start does not see a missing file and
+/// report unhealthy for the first refresh interval -- and so a StopAsync immediately after
+/// start cannot race the file's existence.
 /// </summary>
 public sealed partial class RunnerHealthReportingHostedService : BackgroundService
 {
@@ -55,14 +57,29 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 		_logger = logger;
 	}
 
+	public override async Task StartAsync(CancellationToken cancellationToken)
+	{
+		// Write the first report synchronously as part of startup (awaited before the
+		// host reports started) rather than deferring it into the fire-and-forget
+		// ExecuteAsync loop. This makes a fresh container's very first health probe
+		// meaningful -- the report file exists the moment StartAsync returns -- and
+		// makes the reporting deterministic for callers (and tests) that stop the
+		// service immediately after starting it, closing the race a first write inside
+		// ExecuteAsync leaves open (an immediate StopAsync could otherwise beat the
+		// file into existence). Mirrors the download-runner's ReadinessReportingHostedService.
+		WriteReport(_options.Value.ReportFilePath);
+		await base.StartAsync(cancellationToken).ConfigureAwait(false);
+	}
+
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
 	{
 		RunnerHealthOptions options = _options.Value;
 
+		// The first report was already written in StartAsync; subsequent refreshes are
+		// spaced by RefreshInterval, so wait before writing again rather than
+		// re-writing immediately here.
 		while (!stoppingToken.IsCancellationRequested)
 		{
-			WriteReport(options.ReportFilePath);
-
 			try
 			{
 				await Task.Delay(options.RefreshInterval, stoppingToken).ConfigureAwait(false);
@@ -70,7 +87,10 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 			catch (OperationCanceledException)
 			{
 				// Host stopping; loop condition ends the loop next.
+				break;
 			}
+
+			WriteReport(options.ReportFilePath);
 		}
 	}
 

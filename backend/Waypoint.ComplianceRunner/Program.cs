@@ -44,20 +44,24 @@ HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
 // claims jobs, and executes discover/credential-test/scan directly. It is not the
 // control plane (that stays Waypoint.Api's job until #443 removes execution from it).
 // AddWaypointInfrastructure wires the same repositories, secret stores, PowerShell
-// runspace pool, and IJobHandler registrations Waypoint.Api registers today -- see the
-// JobHandlerRegistry override below for how this host narrows to only the handlers
-// its allowlist claims, without touching the shared composition-root method (kept
-// additive/conflict-free with the concurrent download-runner host per #441).
-builder.Services.AddWaypointInfrastructure(builder.Configuration);
+// runspace pool, and IJobHandler registrations Waypoint.Api registers today. The
+// ExecutionOnly host kind (shared with the download-runner per #441) skips the two
+// ADR-0013 §1 control-plane hosted services a dedicated runner has no surface for --
+// the SSE fan-out and the ad hoc run-secret sweep. It also registers the tool-gated
+// download handler, which this host simply never resolves: the JobHandlerRegistry
+// override below narrows the allowlist to JobCapabilities.Compliance, so a download
+// handler is excluded from what this process can claim (see that override).
+builder.Services.AddWaypointInfrastructure(
+	builder.Configuration, WaypointInfrastructureHostKind.ExecutionOnly);
 
 builder.Services.AddOptions<RunnerHealthOptions>()
 	.Bind(builder.Configuration.GetSection(RunnerHealthOptions.SectionName));
 
 // Issue #440: this host's own mandatory capability registration (JobHandlerRegistry
 // fails closed on an empty allowlist or a duplicate handler -- see its doc comment).
-// AddWaypointInfrastructure already registered a JobHandlerRegistry keyed to
-// JobCapabilities.All (today's still-combined Waypoint.Api dispatcher); this
-// replaces that registration with the narrower JobCapabilities.Compliance allowlist
+// AddWaypointInfrastructure (regardless of host kind) registered a JobHandlerRegistry
+// keyed to JobCapabilities.All; this replaces that registration with the narrower
+// JobCapabilities.Compliance allowlist
 // and only the IJobHandler instances whose JobType belongs to it, so this process
 // claims (ADR-0014 §1) and can resolve a handler for exactly discover/
 // credential-test/scan/remediate -- never catalog-index or download.

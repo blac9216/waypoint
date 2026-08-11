@@ -25,7 +25,8 @@ namespace Waypoint.Tests.ComplianceRunner;
 /// Issue #440 AC1: "Discovery, credential-test, and scan jobs execute only in the
 /// compliance runner." This test exercises the exact composition <c>Program.cs</c>
 /// performs: call <see cref="ServiceCollectionExtensions.AddWaypointInfrastructure"/>
-/// (the same call <c>Waypoint.Api</c> makes) and then re-register
+/// with <see cref="WaypointInfrastructureHostKind.ExecutionOnly"/> (the runner seam #441
+/// added, shared with the download-runner) and then re-register
 /// <see cref="JobHandlerRegistry"/> narrowed to <see cref="JobCapabilities.Compliance"/>,
 /// filtering <see cref="IJobHandler"/> instances by <c>JobType</c> rather than by
 /// concrete type -- so a future compliance handler is included automatically and a
@@ -82,7 +83,7 @@ public sealed class ComplianceRunnerCompositionTests
 
 		ServiceCollection services = new();
 		services.AddLogging();
-		services.AddWaypointInfrastructure(configuration);
+		services.AddWaypointInfrastructure(configuration, WaypointInfrastructureHostKind.ExecutionOnly);
 
 		services.AddSingleton(serviceProvider =>
 		{
