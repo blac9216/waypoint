@@ -44,13 +44,19 @@ The design goals that follow are:
 | Tier | Storage | Blast radius if DB + master key are stolen |
 |---|---|---|
 | **Service/shared** | Envelope-encrypted in Postgres | Exposed — accepted, compensated by audit + containment |
-| **Personal** | **Not stored (v1)** — typed at run initiation, held in memory for that run only | Nothing to steal |
+| **Personal** | Envelope-encrypted in Postgres, **run-scoped, terminal/expiry bounded** ([ADR-0011](adr/0011-credential-tiers.md), issue #434) — never a row in the reusable `credentials`/`credential_secrets` store | Exposed only while an ad hoc run has not yet reached a terminal state (deleted on completion/abort; a bounded expiry sweep removes abandoned rows) — same compensating controls as service/shared for that window, nothing to steal outside it |
 
 Personal credentials are the user's own AD/vCenter password. Ad hoc runs are
 interactive by definition and scheduling always uses service credentials, so no
-workflow requires a *persisted* personal credential. A later convenience feature may
-add passphrase-wrapped personal credential storage (Argon2id-derived key, supplied at
-time of use, nothing recoverable server-side); that is explicitly out of v1.
+workflow ever schedules a persisted personal credential. What changed under issue #434:
+the M2-era in-memory-only handoff (`IEphemeralCredentialCache`, single process) could
+not survive an API restart before a runner claimed the job, and a dedicated compliance
+runner (ADR-0013/0014) shares no process memory with the API at all. The replacement
+(`run_secrets`, one encrypted row per run, migration 0023) keeps ADR-0011's headline
+guarantee — **no personal rows in the reusable credential store, ever** — while making
+the secret durable enough to survive the handoff between API and runner. It is not a
+passphrase-wrapped *long-lived* personal credential store; that convenience feature
+remains explicitly out of v1.
 
 ## Authorization gating vs cryptographic tying
 
@@ -67,7 +73,10 @@ API and runners enforce before choosing to decrypt. Required gates:
 - Scheduled/system decrypts are gated by the schedule's existence and recorded as such.
 
 Cryptographic tying exists only where the user supplies material the server never
-stores — which in v1 is the ephemeral personal-credential flow.
+*permanently* stores — which in v1 is the run-scoped ad hoc personal-credential flow:
+the encrypted row is bounded to one run's lifetime (terminal completion or expiry),
+never carried forward into the reusable credential store the way a service credential
+is.
 
 ## Leakage controls (implementation requirements)
 
@@ -133,8 +142,9 @@ real-world importance:
 - Full compromise of the API or an authorized runner can expose service credentials
   available to that service — mitigated by job allowlists, narrow database roles,
   detection (audit trail), containment, and the small autonomous tier; not eliminable.
-- A compromised API or the runner responsible for a job observes ephemeral personal
-  credentials of users who run jobs **during** the compromise window — temporal
-  exposure only; absent users are safe.
+- A compromised API or the runner responsible for a job can decrypt run-scoped personal
+  credentials of users whose ad hoc run has not yet reached a terminal state **during**
+  the compromise window — temporal and run-scoped exposure only; a completed/aborted
+  run's secret is already deleted, and absent users (no ad hoc run in flight) are safe.
 - Memory-scraping a live, privileged API or runner process yields in-flight plaintext —
   out of scope; host compromise defeats any self-hosted design.
