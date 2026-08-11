@@ -10,9 +10,18 @@
 # later issue imports the remediate job (ADR-0013 lists remediate as "later").
 #
 # This is a standalone Dockerfile, not yet wired into deploy/docker-compose.yml
-# (issue #438 explicitly does not rewire runtime consumption -- see #440/#442). It
-# does not yet host a .NET runner process; that lands when the shared runner host
-# (ADR-0013) and Waypoint.Runner.Compliance project exist.
+# (issue #438 explicitly does not rewire runtime consumption -- see #440/#442).
+#
+# Issue #440 added the .NET host executable this image will eventually run
+# (backend/Waypoint.ComplianceRunner, referencing the shared Waypoint.Runner library
+# and Waypoint.Infrastructure's discover/credential-test/scan handlers) but did not
+# extend this Dockerfile with a `dotnet publish` stage: this build context uses
+# ubuntu:20.04 as its base (the compliance toolchain's own OS/package requirements,
+# not a .NET SDK/runtime image), so adding the host means either a multi-stage build
+# with a second base image or restructuring this image's base entirely -- a decision
+# that belongs with #442's Compose/image-topology wiring, not this issue's handler
+# composition-root scope. Building this image today remains a toolchain provenance
+# proof; running `Waypoint.ComplianceRunner.dll` inside it lands with #442.
 FROM ubuntu:20.04
 
 RUN apt-get -y update --fix-missing && \

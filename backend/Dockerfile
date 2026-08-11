@@ -17,8 +17,10 @@ WORKDIR /src
 COPY Directory.Build.props .editorconfig ./
 COPY backend/Waypoint.sln backend/
 COPY backend/Waypoint.Core/Waypoint.Core.csproj backend/Waypoint.Core/
+COPY backend/Waypoint.Runner/Waypoint.Runner.csproj backend/Waypoint.Runner/
 COPY backend/Waypoint.Infrastructure/Waypoint.Infrastructure.csproj backend/Waypoint.Infrastructure/
 COPY backend/Waypoint.Api/Waypoint.Api.csproj backend/Waypoint.Api/
+COPY backend/Waypoint.ComplianceRunner/Waypoint.ComplianceRunner.csproj backend/Waypoint.ComplianceRunner/
 COPY backend/Waypoint.Tests/Waypoint.Tests.csproj backend/Waypoint.Tests/
 WORKDIR /src/backend
 RUN dotnet restore Waypoint.sln
