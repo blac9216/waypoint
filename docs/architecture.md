@@ -1,10 +1,11 @@
 # Waypoint — System Architecture
 
-Status: **living document, implementation in progress** (M3 of the plan in
+Status: **living document, approved architecture ahead of implementation** (runner
+realignment precedes M3 in
 [`roadmap.md`](roadmap.md)). This describes the target-state system; decisions are
 recorded as ADRs in [`adr/`](adr/). Sections below are marked ✅ **Built** (shipped in
 M1/M2, epics [#1](https://github.com/blac9216/waypoint/issues/1)/[#13](https://github.com/blac9216/waypoint/issues/13)),
-🚧 **In progress** (M3, epic [#14](https://github.com/blac9216/waypoint/issues/14)), or
+🚧 **In transition** (approved replacement is not yet implemented), or
 📋 **Planned** (M4+) so a reader can tell what exists from what is still design intent.
 Do not read a 📋 marker as license to change the described design without an ADR.
 
@@ -14,9 +15,10 @@ A self-hosted web appliance that unifies VMware STIG compliance
 ([vmware-stig-docker](https://github.com/blac9216/vmware-stig-docker)) and VCF artifact
 download/repository management
 ([vcf-docker-download](https://github.com/blac9216/vcf-docker-download)) for DoD-style
-environments. The existing PowerShell codebases are retained as the **execution layer**;
-Waypoint adds the **control plane**: UI, API, job orchestration, credential store, RBAC,
-and cross-enclave transfer.
+environments. Project-owned Dockerfiles, orchestration, and PowerShell from the two
+predecessor repositories migrate into dedicated execution runners. Waypoint's
+**control plane** is the UI/API, credential store, RBAC, job control, history/SSE, and
+cross-enclave transfer; it does not execute domain tools (ADR-0013).
 
 ## Deployment topology: one appliance, two modes
 
@@ -24,7 +26,8 @@ and cross-enclave transfer.
 there is one mode: a single connected-style dev/compose deployment with local auth.
 Mode enforcement, the disconnected variant, and transfer bundles are not yet built.
 
-The same appliance image deploys on both sides of the air gap ([ADR-0010](adr/0010-deployment-topology.md)):
+The same operator-built Compose topology deploys on both sides of the air gap
+([ADR-0010](adr/0010-deployment-topology.md), [ADR-0015](adr/0015-source-build-and-operator-export.md)):
 
 | | Connected instance | Disconnected instances |
 |---|---|---|
@@ -39,41 +42,56 @@ availability derives from the mode — there is one codebase and one image, neve
 
 ## Component view
 
-✅ **Built**: nginx, frontend, backend, Postgres, the execution-layer integration
-(PowerShell runspace hosting), and the STIG Manager connection (M1/M2). 🚧 **In
-progress**: Keycloak (M3 — the backend currently does local/dev auth behind the same
-abstraction Keycloak will sit behind). 📋 **Planned**: the updater sidecar (M7).
+✅ **Built**: nginx, frontend, combined backend/worker, Postgres, and the STIG Manager
+connection (M1/M2). 🚧 **In transition**: split the combined backend into a
+control-plane API plus `compliance-runner` and `download-runner` services (ADRs
+0013/0014), then continue Keycloak/RBAC work. 📋 **Planned**: updater/exporter and
+transfer automation (M6/M7).
 
 ```mermaid
 flowchart TB
     subgraph Compose["Docker Compose stack (later: inside a Packer-built OVA)"]
         nginx["nginx\nTLS termination, static frontend, /api proxy"]
         fe["frontend\nReact + TS PWA (static bundle)"]
-        be["backend (ASP.NET Core)\nREST API · job dispatcher ·\nPowerShell runspace hosting ·\nSSE log streaming"]
+        be["backend (ASP.NET Core)\nREST/RBAC · enqueue/control ·\nqueries · SSE"]
+        cr["compliance-runner (.NET worker)\nfiltered claims · leases · events ·\nPowerShell · PowerCLI · InSpec · SAF"]
+        dr["download-runner (.NET worker)\nfiltered claims · leases · events ·\nPowerShell · depot/content tooling"]
         kc["Keycloak\nOIDC · CAC/PIV x.509 · LDAP"]
         pg[("PostgreSQL\napp schema · job queue ·\nencrypted secrets · Keycloak DB")]
         upd["updater (sidecar)\nonly holder of docker socket\n(via socket proxy)"]
-        exec["execution layer\nvmware-stig-docker + vcf-docker-download\nPowerShell modules"]
+        cstate[("compliance state\nprofiles · installed content ·\nscan artifacts")]
+        dstate[("download state\ninstalled entitled tools · depot ·\nmanaged artifacts")]
     end
     browser["Browser (PWA)"] --> nginx
     nginx --> fe
     nginx --> be
     nginx --> kc
     be --> pg
+    cr --> pg
+    dr --> pg
     kc --> pg
     be -->|internal API| upd
-    be -->|in-process runspaces /\nchild pwsh| exec
-    exec -->|PowerCLI · InSpec · SSH · REST| infra["vCenters · ESXi · VMs · NSX ·\nSRG appliances · Broadcom depot"]
+    cr --> cstate
+    dr --> dstate
+    cr -->|PowerCLI · InSpec · SSH · REST| infra["vCenters · ESXi · VMs · NSX ·\nSRG appliances · STIG Manager"]
+    dr -->|authorized downloads| depot["Broadcom depot · operator repositories"]
     be --> stigman["STIG Manager"]
 ```
 
 ## The job engine (the heart of the product)
 
-✅ **Built** (M1/M2): queue, dispatcher, priority, in-process PowerShell runspace
-hosting, SSE streaming, and the per-target state machine below are all live, serving
+✅ **Built** (M1/M2, current combined backend): queue, dispatcher, priority, in-process
+PowerShell runspace hosting, SSE streaming, and the per-target state machine below are live, serving
 `catalog-index`/`download` (M1) and discovery/scan/NSX/SRG job types (M2).
 Cooperative per-job cancellation (issue #234) and lease-recovery sweeps also shipped.
 Scheduling (cron-style, read-only job types only) is 📋 **planned for M3**.
+
+🚧 **Approved transition** (ADRs 0013/0014): the durable queue/state/event contracts
+remain, but execution ownership moves to the two long-lived runners. Each runner
+atomically claims only its allowlisted job types, owns the lease and cancellation for
+work it executes, and writes structured events directly to Postgres. The backend
+continues to enqueue/control work and serves the same SSE streams from persisted
+events.
 
 Everything long-running is a **job**: a scan of a site, a remediation of a component, an
 artifact download, an inventory discovery, a bundle export/import, a catalog index. One
@@ -84,18 +102,22 @@ engine serves both products and all future features ([ADR-0008](adr/0008-job-eng
 - **Priority**: carried over from the STIG catalog's declared `reportGroup`/`priority`
   model (NSX=1, VCSA=2, vCenter=3, ESXi=4, VM=5, SRG=6) as a priority column; other job
   types declare their own.
-- **Execution**: the backend hosts PowerShell runspace pools **in-process** via
-  `System.Management.Automation` ([ADR-0006](adr/0006-backend-language.md)). The existing
-  modules (transports, catalog, scan scriptblocks, download workflows) are invoked from
-  runspaces; real objects flow between C# and PowerShell — no stdout parsing.
-  Remediation keeps its child-`pwsh` isolation (vendor scripts call `Exit`).
+- **Execution**: each .NET runner hosts its own PowerShell runspace pools in-process
+  through `System.Management.Automation`; real objects flow between C# handlers and
+  PowerShell without a network/stdout protocol. Remediation may keep child-`pwsh`
+  isolation for code that calls `Exit`.
+- **Concurrency**: a shared runner library reads container CPU/memory limits, combines
+  them with measured handler resource profiles and operator caps, and admits work only
+  within that budget. Exact weights/defaults await measurement. Queue/worker identity
+  is replica-safe, but Compose starts one of each runner.
 - **Streaming**: per-job log and state events go to the UI over SSE (WebSocket if SSE
   proves insufficient). Logs and results also persist to Postgres for history.
 - **State machine** (per target within a run): `queued → running → attesting →
   converting → uploaded | done | failed`. Failures never halt the run (Continue
   strategy, inherited from the STIG runner).
-- The runspace-pool engine in `module.parallelism.ps1` stops being the orchestrator;
-  the job service takes that role and the modules become workers.
+- The shared C# runner library is the generic orchestrator; domain handlers and
+  PowerShell modules are adaptable workers. A future execution domain adds a runner
+  host/image and handler registrations rather than changing the API/queue protocol.
 
 ## Discovery is a job type
 
@@ -125,8 +147,9 @@ API, and the shared/service credential store are live; personal (ad hoc) credent
 per ADR-0011 shipped in M2 (issue #276).
 
 Envelope encryption in Postgres, AWX-style ([ADR-0005](adr/0005-secrets.md)): per-secret
-data keys wrapped by a master key mounted as a file/Docker secret (same operator model
-as the current `STIG_VAULT_PASSWORD_FILE`). Secrets are write-only through the API.
+data keys wrapped by a master key mounted as a file/Docker secret. Secrets are
+write-only through the API; the API encrypts writes and a trusted runner decrypts only
+for a job it has claimed, with audit/redaction at the point of use (ADR-0014).
 Personal credentials are never stored in v1 — prompted at run initiation
 ([ADR-0011](adr/0011-credential-tiers.md)). Threat model and mandatory leakage
 controls: [security.md](security.md). External Vault/OpenBao support is a later,
@@ -137,23 +160,25 @@ pluggable option — not v1.
 📋 **Planned (M7, epic [#18](https://github.com/blac9216/waypoint/issues/18)).** Not
 yet built.
 
-Signed update bundles uploaded through the UI ([ADR-0009](adr/0009-self-update.md)):
-validate signature/versions → `docker load` → dedicated updater sidecar (sole holder of
-the Docker socket, behind a socket proxy) recreates changed services → health-check gate
-→ keep previous tags for rollback. The updater updates itself via a transient one-shot
-runner container. In the eventual OVA, the same bundle is applied by a host-side systemd
-unit instead.
+Operators build Waypoint images from the public source repository (ADR-0015). A future
+connected updater/exporter includes those local images and immutable digests in the
+signed transfer/update format. Import validates and stages newer compatible images,
+then Settings shows **Appliance update available**. Only a separate explicit Admin
+apply invokes `docker load` and the dedicated updater sidecar, health gate, and rollback
+flow from ADR-0009.
 
 ## Cross-enclave transfer
 
 📋 **Planned (M6, epic [#17](https://github.com/blac9216/waypoint/issues/17)).** Not
 yet built.
 
-The `Transfer/` directory convention from vcf-docker-download becomes a first-class
-feature: the connected instance composes a **signed export bundle** (selected artifacts,
-repos, content-library deltas, catalog index); disconnected instances import, verify the
-signature and checksums, and show a contents diff against local state before applying.
-The update bundle and the transfer bundle share one signing/manifest format.
+The predecessor transfer convention becomes a first-class feature: the connected
+instance composes an operator-created **signed export bundle** containing locally built
+appliance images when selected/required, installed tooling required by the selected
+functions, compliance content, selected artifacts, repository/content-library deltas,
+and catalog indexes. Disconnected instances verify signatures/checksums and show a
+contents diff. The update and transfer payloads share one versioned manifest envelope;
+content import and appliance-update apply remain distinct actions.
 
 ## What Waypoint deliberately is not
 
@@ -161,6 +186,9 @@ The update bundle and the transfer bundle share one signing/manifest format.
   right operational weight ([ADR-0001](adr/0001-packaging.md)).
 - **Not a rewrite.** PowerShell domain logic survives; only the orchestration and UI
   layers are new.
+- **Not a publisher of completed appliance images or entitled tools.** The public
+  repository supplies source/build definitions; operators build, provision, and
+  export their own appliance state (ADR-0015).
 - **Not zero-downtime.** A few seconds of per-service restart during updates is
   accepted appliance behavior.
 

@@ -1,7 +1,9 @@
 # Waypoint — Secrets Threat Model & Leakage Controls
 
-Status: draft, planning phase. This document states plainly what the secrets design
-([ADR-0005](adr/0005-secrets.md), [ADR-0011](adr/0011-credential-tiers.md)) does and
+Status: living security requirements. This document states plainly what the secrets
+design
+([ADR-0005](adr/0005-secrets.md), [ADR-0011](adr/0011-credential-tiers.md),
+[ADR-0014](adr/0014-runner-job-ownership.md)) does and
 does not protect, and lists the implementation requirements that keep secrets from
 leaking. These are requirements, not suggestions — several have CI enforcement.
 
@@ -10,8 +12,8 @@ leaking. These are requirements, not suggestions — several have CI enforcement
 ### What envelope encryption defends against
 
 Secrets are stored in Postgres encrypted (AES-256-GCM, per-secret data keys wrapped by
-a master key held only by the backend). An attacker who obtains **ciphertext without
-the key** gets nothing:
+a master key held only by the trusted control-plane and runner services). An attacker
+who obtains **ciphertext without the key** gets nothing:
 
 - Stolen database backups or dumps (the most common credential-store leak in practice)
 - Compromise of the Postgres container alone
@@ -21,9 +23,11 @@ the key** gets nothing:
 
 ### What it does not defend against — and why nothing can
 
-An attacker with code execution **inside the backend** has what the backend has: the
-master key and the ciphertext. This is not a flaw of the chosen pattern; it is a
-property of any system that performs autonomous automation. A scheduled 3am scan must
+An attacker with code execution **inside the API or either runner** may have access to
+the master key and ciphertext. The API requires the key to encrypt credential writes;
+a runner requires it to decrypt credentials for jobs that runner has claimed. This is
+not a flaw of the chosen pattern; it is a property of any system that performs
+autonomous automation. A scheduled 3am scan must
 decrypt a vCenter service credential with no human present — therefore the system can
 decrypt service credentials by itself, and so can an attacker who fully controls it.
 Vault does not change this: once unsealed, the application's token retrieves secrets
@@ -53,9 +57,11 @@ time of use, nothing recoverable server-side); that is explicitly out of v1.
 Keycloak provides **assertions, not key material** — OIDC tokens cannot make
 decryption cryptographically impossible without a login (and CAC flows carry no
 password to derive keys from). What login checks provide is **gating**: policy the
-backend enforces before choosing to decrypt. Required gates:
+API and runners enforce before choosing to decrypt. Required gates:
 
-- Every decrypt on behalf of an interactive action requires a valid, fresh token.
+- The API validates a fresh token and authorization before enqueueing every
+  interactive action; a runner revalidates the persisted authorization context before
+  decrypting for the claimed job.
 - Sensitive operations (remediation, credential overwrite, update apply) require
   **step-up re-authentication**.
 - Scheduled/system decrypts are gated by the schedule's existence and recorded as such.
@@ -69,8 +75,8 @@ Databases are where people look for leaks; **logs are where leaks live**. In ord
 real-world importance:
 
 1. **Log scrubbing at the sink.** The logging pipeline maintains the set of secret
-   values currently in play (it decrypted them) and redacts every occurrence before
-   any line reaches a sink — console, file, or Postgres. This covers worker output:
+   values currently in play (it encrypted or decrypted them) and redacts every
+   occurrence before any line reaches a sink — console, file, or Postgres. This covers worker output:
    InSpec, PowerCLI, and Ansible will echo connection strings in stack traces.
    Ansible tasks that handle credentials set `no_log: true`.
 2. **Never in process arguments.** Anything in argv is world-readable via
@@ -87,14 +93,19 @@ real-world importance:
    scan pipeline against a mock target, then greps every sink — logs, artifacts, API
    responses, job output — for the canary. The build fails on any hit. The scrubbing
    claim is re-proven on every build, not asserted once.
-6. **Containment.** Only the backend container receives the master key and database
-   credentials. Postgres listens only on an internal compose network. nginx, Keycloak,
-   the updater, and the execution containers never see the key. The master key is a
-   mounted file readable solely by the backend user — never an environment variable
+6. **Containment.** Only the API, `compliance-runner`, and `download-runner` receive
+   the master key. Each gets narrowly scoped database credentials: the API owns
+   control-plane writes, while runners may claim only their allowlisted job types and
+   write associated state and events. Postgres listens only on an internal compose
+   network. nginx and Keycloak never see the key. Plaintext credentials never cross a
+   network RPC from the API to a runner. The master key is a mounted file readable
+   solely by each service's non-root user — never an environment variable
    (env leaks via `/proc/<pid>/environ`, `docker inspect`, and crash dumps).
 
-   This control governs the envelope-encryption master key (ADR-0005), which does not
-   exist yet in this scaffold. The dev-grade local-auth admin password hash
+   This control governs the envelope-encryption master key (ADR-0005). The current
+   transitional Compose stack mounts it only into the combined backend; the runner
+   migration expands that mount to the three services named above. The dev-grade
+   local-auth admin password hash
    (`LocalAuthOptions.AdminPasswordHash`, issue #62) is a *different* piece of secret
    material this control doesn't literally cover — but the same leakage argument
    applies, so it gets the analogous treatment (issue #333): a mounted file
@@ -119,9 +130,11 @@ real-world importance:
 
 ## Residual risks (accepted, documented)
 
-- Full backend compromise exposes service credentials in use — mitigated by detection
-  (audit trail), containment, and the small autonomous tier; not eliminable.
-- A compromised backend observes ephemeral personal credentials of users who run jobs
-  **during** the compromise window — temporal exposure only; absent users are safe.
-- Memory-scraping a live, privileged backend process yields in-flight plaintext —
+- Full compromise of the API or an authorized runner can expose service credentials
+  available to that service — mitigated by job allowlists, narrow database roles,
+  detection (audit trail), containment, and the small autonomous tier; not eliminable.
+- A compromised API or the runner responsible for a job observes ephemeral personal
+  credentials of users who run jobs **during** the compromise window — temporal
+  exposure only; absent users are safe.
+- Memory-scraping a live, privileged API or runner process yields in-flight plaintext —
   out of scope; host compromise defeats any self-hosted design.

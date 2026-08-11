@@ -1,6 +1,6 @@
 # ADR-0010: One appliance, connected/disconnected modes, bundle-based transfer
 
-Status: Accepted
+Status: Accepted; operator-built transfer contents clarified by [ADR-0015](0015-source-build-and-operator-export.md)
 
 ## Context
 

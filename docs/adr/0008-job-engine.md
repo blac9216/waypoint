@@ -1,6 +1,6 @@
 # ADR-0008: Central job engine on a Postgres-backed queue
 
-Status: Accepted
+Status: Accepted; backend-worker ownership superseded by [ADR-0013](0013-control-plane-and-runners.md) and [ADR-0014](0014-runner-job-ownership.md)
 
 ## Context
 

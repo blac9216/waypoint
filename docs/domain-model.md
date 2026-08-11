@@ -1,6 +1,6 @@
 # Waypoint — Domain Model
 
-Status: **draft, planning phase**. All example names are fictional placeholders
+Status: **living domain model**. All example names are fictional placeholders
 (`*.example.internal`, RFC 5737 addresses) — this is a public repository.
 
 ## Core entities
@@ -60,6 +60,13 @@ state, logs, and results. Job types: `scan`, `remediate`, `discover`, `download`
 `catalog-index`, `bundle-export`, `bundle-import`, `content-library-sync`,
 `content-pull`, `content-import`, `update`.
 
+The API creates jobs but does not execute them. The long-lived `compliance-runner`
+claims compliance job types and the `download-runner` claims download/content job
+types directly from Postgres. The claiming runner owns the lease, heartbeat,
+cancellation checks, stage transitions, events, and terminal state. See
+[ADR-0013](adr/0013-control-plane-and-runners.md) and
+[ADR-0014](adr/0014-runner-job-ownership.md).
+
 Per-target scan states: `queued → running → attesting → converting → uploaded | done |
 failed | auth-failed | blocked`.
 
@@ -101,6 +108,20 @@ The VMware DoD compliance-and-automation repo is managed appliance state, not a 
 mount: pinned tag or tracked branch, recorded commit, last-pull author/time, profile
 inventory. Connected instances pull (`content-pull`); air-gapped instances import
 content bundles (`content-import`) carried by the transfer format.
+
+### Appliance build and transfer state
+
+Waypoint is distributed as source, Dockerfiles, and Compose definitions. Operators
+build the appliance images locally. Account-gated vendor tools are acquired through
+the UI from an authorized upstream, local repository, or manual upload and stored in
+persistent managed appliance state; they are not published by the Waypoint project.
+
+An operator-created air-gap bundle includes all tools, content, and other payloads
+required for the selected appliance functions. Until the updater/exporter is built,
+the operator separately exports the locally built images and transfers them. The
+future exporter may include those images in the signed transfer package; importing a
+newer image set stages an available appliance update, and applying it remains an
+explicit Admin action. See [ADR-0015](adr/0015-source-build-and-operator-export.md).
 
 ### STIG Manager connection
 Global default connection, optional per-site override (different enclaves may report to
@@ -156,10 +177,12 @@ Resolved:
   deferred to land with the scan slice (#23), since the scan-initiation code path
   doesn't exist yet.
 - ~~Operator remediation~~ → **Admin-only in v1** (2026-08-02).
-- ~~Download-tool licensing~~ → **confirmed: the `vcf-download-tool` is never bundled**
-  in the appliance image (2026-08-02). The prototype's install flow applies: install
-  from local repo / fetch from depot (connected) / manual upload with signature
-  verification. The appliance image carries no Broadcom binaries.
+- ~~Download-tool distribution~~ → **confirmed: the Waypoint project does not publish
+  `vcf-download-tool` binaries** (clarified 2026-08-11). An authenticated operator can
+  install the tool through the connected appliance UI from its authorized upstream;
+  local-repository and verified manual-upload paths also remain valid. The installed
+  tool is managed appliance state and travels in operator-created air-gap bundles so
+  the disconnected appliance retains the selected functionality. See ADR-0015.
 - ~~Depot index without the tool~~ → **confirmed: building the index does NOT require
   the download tool** (2026-08-08, issue #194). `catalog-index` calls
   `vcf-docker-download`'s `Get-FileManifest` (`vcf-download-manager.common.ps1`), which

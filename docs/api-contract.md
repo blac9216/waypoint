@@ -187,7 +187,7 @@ work once one exists.
 ### Transfer bundles
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/bundles/export` | POST | Connected, Admin: selection tree → 202 `bundle-export` job (build + sign). |
+| `/bundles/export` | POST | Connected, Admin: selection tree → 202 `bundle-export` job (build + sign). It contains every tool/content payload required for the selected functions; a future exporter may also include the operator's locally built appliance images. |
 | `/bundles` · `/bundles/{id}` | GET | History: name, items, sizes, signing key, where/when applied. |
 | `/bundles/import` | POST | Air-gapped, Admin: upload → verify (signature/checksums/schema) → contents diff (`new`\|`replaces`\|`identical`). |
 | `/bundles/import/{id}/apply` | POST | Admin, after verification; 202 → `bundle-import` job. |
@@ -208,7 +208,7 @@ work once one exists.
 | Endpoint | Methods | Notes |
 |---|---|---|
 | `/system` | GET | Version/build, mode, uptime, disk usage by store, depot sync, update availability. |
-| `/system/update` | POST (upload), `/apply` POST | Admin + re-auth; pre-flight checks; 202 → `update` job (ADR-0009). |
+| `/system/update` | POST (upload), `/apply` POST | Admin + re-auth; importing newer locally built images stages `update_available`; apply is a separate intentional action with pre-flight checks and returns 202 → `update` job (ADR-0009, ADR-0015). |
 | `/users` | GET, POST, PUT | Admin; role, site scope, auth method, last seen. |
 | `/audit` | GET | Cyber+; decrypt events, config versions, run initiations, imports/updates. |
 | `/dashboard` | GET | Aggregate: KPI tiles, site posture, recent runs, attention items. |
@@ -319,7 +319,13 @@ author, ts, body) · `profiles` · `benchmarks` · `profile_mappings` ·
 signature, applied_at/where) · `compliance_content` (singleton: ref, commit, pulled_by)
 · `schedules` · `users` (oidc_sub, role, site_scope) · `audit_log` (append-only) ·
 `appliance_state` (singleton: version, mode, update status). Job queue = `jobs` rows
-claimed `FOR UPDATE SKIP LOCKED` (ADR-0008); Keycloak lives in its own database.
+claimed `FOR UPDATE SKIP LOCKED`; Keycloak lives in its own database.
+
+The API inserts jobs. Dedicated runners claim them directly from Postgres with an
+atomic job-type allowlist: `compliance-runner` handles discovery, credential tests,
+scans, and later remediation; `download-runner` handles catalog, download, and content
+work. The claimant owns leases, cancellation, state transitions, and structured
+`job_events`; the API replays those events over SSE (ADR-0013, ADR-0014).
 
 ## Data ledger (screen → source)
 
