@@ -840,11 +840,23 @@ have repeatedly caught real defects no CI run could have seen:
   digit-extended prefix all remain findings; `PrivateSpaceCidrTests` pins each
   direction. This is a value-level exception inside the detector, not a file
   exemption — every file is still scanned by every check.
-- **Files the scanner does not read**: **none, currently — and that is a property
-  worth keeping.** `ALLOWLIST_FINDINGS` in `scan_repo_specific.py` is empty, so every
-  git-tracked file that isn't a known-safe binary extension (`KNOWN_SAFE_BINARY_
-  EXTENSIONS` — app icons, fonts, wasm; six `.png` icons today) is scanned by all
-  four detectors. This matters because the alternative degrades silently: an exempt
+- **Checks waived on a specific file** (`ALLOWLIST_FINDINGS` in `scan_repo_specific.py`):
+  one entry, exactly one detector on it:
+  - `runners/compliance-runner/powershell/module.transport.vmware.ps1` — `fqdn` check
+    only. Waives the single `.local` FQDN hit on VMware's factory-default SSO domain
+    (the `administrator@` account on the `vsphere` `.local` domain — spelled split
+    here because `docs/testing.md` is a scanned file and the literal would itself trip
+    the FQDN detector). That domain is baked into every vCenter and present verbatim in
+    the unmodified project-owned source imported from `vmware-stig-docker`
+    ([#438](https://github.com/blac9216/waypoint/issues/438)); it is a product
+    constant, not lab data, and identifies nothing about the author's environment. The
+    `ip`, `ipv6`, and `depot-token` detectors stay live on this file — only the one
+    named FQDN check is waived, not the path.
+
+  Every other git-tracked file that isn't a known-safe binary extension
+  (`KNOWN_SAFE_BINARY_EXTENSIONS` — app icons, fonts, wasm; six `.png` icons today) is
+  scanned by all four detectors. Keeping the allowlist this narrow matters because the
+  alternative degrades silently: an exempt
   path reports clean while never having been looked at, and nothing in a green check
   distinguishes the two. That silent-degradation failure mode used to include a
   whole *category* of file, not just individually-listed paths: before issue #101,

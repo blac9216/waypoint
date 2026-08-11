@@ -11,7 +11,15 @@ License is distributed with this work in the file LICENSE, and is also available
 Third-party code incorporated into this repository
 --------------------------------------------------------------------------------
 
-None at this time.
+runners/compliance-runner/powershell/module.common.ps1
+runners/compliance-runner/powershell/module.transport.vmware.ps1
+runners/compliance-runner/powershell/module.transport.nsxapi.ps1
+Derived from vmware-stig-docker (https://github.com/blac9216/vmware-stig-docker)
+Copyright 2026 Justin Black
+Licensed under Apache-2.0 (relicensed at import time; the source repository carries
+no LICENSE file, but shares the same copyright holder as this repository -- see
+runners/compliance-runner/powershell/README.md for the full provenance note,
+including one doc-comment sanitization applied at import).
 
 When source code from another project is copied into this repository — in whole or
 in part — its attribution is recorded here, in addition to retaining the original
@@ -39,3 +47,10 @@ some of which carry their own NOTICE files that must be propagated.
 Those obligations attach to the distributed artifact, not to this source repository,
 and are therefore not enumerated here. A bill of materials and a complete
 attributions bundle are generated as part of the appliance build.
+
+The compliance-runner build context (runners/compliance-runner/) additionally
+installs, at build time from their own public sources: PowerCLI and
+VMware.vSphere.SsoAdmin (PowerShell Gallery), cinc-auditor, the MITRE SAF CLI
+(@mitre/saf), and the train-vmware InSpec transport plugin (VMware, Apache-2.0,
+rubygems.org) -- none of these are vendored into this repository; the Dockerfile
+fetches them at image-build time.

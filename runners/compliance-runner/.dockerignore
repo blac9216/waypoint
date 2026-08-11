@@ -1,0 +1,30 @@
+# compliance-runner build context .dockerignore (issue #438). Same intent as the
+# repo-root .dockerignore: only what the Dockerfile actually COPYs should reach the
+# daemon, and no local/secret material should ever be sent as build context.
+
+.git/
+.github/
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local secrets & operator config -- mirrors .gitignore / repo-root .dockerignore
+# (CLAUDE.md "NEVER commit"). Nothing here today, but this context must stay
+# sanitized even if operator-local scratch files are later added alongside it.
+.env
+.env.*
+*.token
+*.vault
+vault-pass*
+secrets*.json
+secrets*.yml
+*.local.json
+*.local.yml
+*.pem
+*.key
+*.pfx
+*.p12
+
+README.md
