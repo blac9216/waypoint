@@ -24,7 +24,9 @@ namespace Waypoint.Api.Contracts;
 /// stored row. <c>kind</c> is carried explicitly (rather than inferred from "credential
 /// present") so the wire shape has room for a future tier without a breaking change;
 /// <c>"personal"</c> is the only value v1 accepts. Never logged, never echoed in any
-/// response, never written past <see cref="Waypoint.Core.Secrets.IEphemeralCredentialCache"/>.
+/// response, never written anywhere except envelope-encrypted, run-scoped storage
+/// (<see cref="Waypoint.Core.Secrets.IRunSecretStore"/>, issue #434) -- never a row in
+/// the reusable <c>credentials</c>/<c>credential_secrets</c> tables.
 /// </summary>
 public sealed record EphemeralCredentialRequest(
 	[property: JsonPropertyName("kind")]
@@ -34,7 +36,7 @@ public sealed record EphemeralCredentialRequest(
 	[property: JsonPropertyName("username")]
 	string Username,
 
-	/// <summary>The caller's own password/secret. Held in memory for the run's lifetime only -- see docs/security.md "in-play redaction".</summary>
+	/// <summary>The caller's own password/secret. Encrypted at rest for the run's lifetime only -- see docs/security.md "in-play redaction".</summary>
 	[property: JsonPropertyName("secret")]
 	string Secret);
 

@@ -55,11 +55,14 @@ namespace Waypoint.Infrastructure.Scans;
 /// attribution (security.md control 4), and a stored vCenter credential with no
 /// dedicated <see cref="CredentialResponse.Username"/> fails cleanly rather than
 /// falling back to the display name (#262). <c>jobs.credential_id</c> NULL means the ad
-/// hoc "my credentials" flow (ADR-0011, #276): the secret comes from
-/// <see cref="IEphemeralCredentialCache.TryTake"/>, single-shot, never falling back to
-/// a stored credential -- a job resumed after its ephemeral entry is gone (TTL,
-/// process restart, or a prior claim already took it) fails auth-style, exactly like a
-/// rejected credential.
+/// hoc "my credentials" flow (ADR-0011, #276/#434): the secret comes from
+/// <see cref="IRunSecretStore.DecryptAsync"/>, keyed by the job's own run id and
+/// audited on every decrypt (never single-shot the way the predecessor in-memory cache
+/// was -- a retried or lease-recovered job simply decrypts again, which is exactly what
+/// makes this durable across an API restart between run creation and job claim) --
+/// never falling back to a stored credential. A job whose run has no row (never
+/// registered, or already deleted by a prior terminal run completion / expiry sweep)
+/// fails auth-style, exactly like a rejected credential.
 /// </summary>
 public sealed class ScanJobHandler : IJobHandler
 {
@@ -76,7 +79,7 @@ public sealed class ScanJobHandler : IJobHandler
 	private readonly ICredentialSecretStore _secrets;
 	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
 	private readonly TargetRepository _targets;
-	private readonly IEphemeralCredentialCache _ephemeralCredentials;
+	private readonly IRunSecretStore _runSecrets;
 	private readonly IJobRunnerRepository _jobs;
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
@@ -90,7 +93,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ICredentialSecretStore secrets,
 		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
 		TargetRepository targets,
-		IEphemeralCredentialCache ephemeralCredentials,
+		IRunSecretStore runSecrets,
 		IJobRunnerRepository jobs,
 		ISecretRedactor redactor,
 		IOptions<PowerShellOptions> powerShellOptions,
@@ -103,7 +106,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(secrets);
 		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(targets);
-		ArgumentNullException.ThrowIfNull(ephemeralCredentials);
+		ArgumentNullException.ThrowIfNull(runSecrets);
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(redactor);
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
@@ -116,7 +119,7 @@ public sealed class ScanJobHandler : IJobHandler
 		_secrets = secrets;
 		_credentials = credentials;
 		_targets = targets;
-		_ephemeralCredentials = ephemeralCredentials;
+		_runSecrets = runSecrets;
 		_jobs = jobs;
 		_redactor = redactor;
 		_powerShellOptions = powerShellOptions;
@@ -271,10 +274,8 @@ public sealed class ScanJobHandler : IJobHandler
 		{
 			// Ends the in-play redaction window as soon as the invocation is done, same
 			// discipline as DiscoverJobHandler regardless of which credential tier this
-			// came from -- a stored credential's DecryptedSecret disposes its own
-			// redaction handle; TryTake's ephemeral entry already ended its window at
-			// the moment it was taken (IEphemeralCredentialCache.TryTake's contract), so
-			// Release is a no-op there.
+			// came from -- a stored credential's DecryptedSecret and an ad hoc run
+			// secret's DecryptedRunSecret both dispose their own redaction handle.
 			resolved.Release();
 		}
 
@@ -626,32 +627,49 @@ public sealed class ScanJobHandler : IJobHandler
 
 	/// <summary>
 	/// Stored credential (decrypt-under-identity) when <c>jobs.credential_id</c> is set,
-	/// otherwise the ad hoc ephemeral credential registered for this job id (#276). The
-	/// two tiers never mix: a NULL <c>credential_id</c> with no ephemeral entry available
-	/// (never registered, TTL-expired, or already taken by a prior claim) is an
-	/// auth-style failure, never a silent fall-through to a stored credential -- see
-	/// <see cref="IEphemeralCredentialCache"/>'s "no personal rows, ever" contract.
+	/// otherwise the ad hoc run secret registered for this job's run (#276/#434). The
+	/// two tiers never mix: a NULL <c>credential_id</c> with no run secret row available
+	/// (never registered, already deleted on a prior terminal completion, or swept as
+	/// expired) is an auth-style failure, never a silent fall-through to a stored
+	/// credential -- see <see cref="IRunSecretStore"/>'s "no personal rows, ever"
+	/// contract.
 	/// </summary>
 	private async Task<ResolvedCredential> ResolveCredentialAsync(JobExecutionContext context, CancellationToken cancellationToken)
 	{
 		if (context.Job.CredentialId is not { } credentialId)
 		{
-			// TryTake is single-shot and already ends the in-play redaction window on a
-			// successful take (IEphemeralCredentialCache's contract) -- there is nothing
-			// further for this handler to release for the ephemeral tier.
-			EphemeralCredential? ephemeral = _ephemeralCredentials.TryTake(context.Job.Id);
-			if (ephemeral is null)
+			if (context.Job.RunId is not { } runId)
 			{
-				throw new ScanCredentialException(
-					$"job '{context.Job.Id}' has no stored credential and no ephemeral credential is available (never registered, expired, or already claimed).");
+				// A run-scoped secret needs a run to be scoped to -- a NULL credential_id
+				// with no run at all is not a shape ad hoc scans ever produce (RunsController
+				// only sets HasRunSecret on scan-run fan-out), so this is a defensive guard,
+				// not an expected path.
+				throw new ScanCredentialException($"job '{context.Job.Id}' has no stored credential and no run to resolve an ad hoc credential against.");
 			}
 
-			// The ephemeral "my credentials" tier (ADR-0011, #276) carries no sudo flag --
+			string runSecretActor = await ResolveActorAsync(context.Job.RunId, cancellationToken).ConfigureAwait(false);
+			DecryptedRunSecret? runSecret;
+			try
+			{
+				runSecret = await _runSecrets.DecryptAsync(runId, context.Job.Id, runSecretActor, cancellationToken).ConfigureAwait(false);
+			}
+			catch (MasterKeyUnavailableException exception)
+			{
+				throw new ScanCredentialException($"ad hoc run credential could not be decrypted: {exception.Message}");
+			}
+
+			if (runSecret is null)
+			{
+				throw new ScanCredentialException(
+					$"job '{context.Job.Id}' has no stored credential and no run secret is available for run '{runId}' (never registered, already deleted on a prior terminal completion, or swept as expired).");
+			}
+
+			// The ad hoc "my credentials" tier (ADR-0011, #276/#434) carries no sudo flag --
 			// it is a personal, ad hoc secret with no stored typed-credential row to read
-			// SudoEnabled from -- so an SRG scan using an ephemeral credential always runs
+			// SudoEnabled from -- so an SRG scan using an ad hoc credential always runs
 			// without sudo. Sudo (#249's typed credentials field) is only meaningful for a
 			// stored credential.
-			return new ResolvedCredential(ephemeral.Username, ephemeral.Secret, SudoEnabled: false, static () => { });
+			return new ResolvedCredential(runSecret.Username, runSecret.Secret, SudoEnabled: false, runSecret.Dispose);
 		}
 
 		CredentialResponse? credential = await _credentials.GetAsync(credentialId, cancellationToken).ConfigureAwait(false);

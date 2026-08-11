@@ -72,38 +72,42 @@ public sealed class RunsController : ControllerBase
 	private readonly IJobControlRepository _repository;
 	private readonly SiteRepository _sites;
 	private readonly TargetRepository _targets;
-	private readonly IEphemeralCredentialCache _ephemeralCredentials;
+	private readonly IRunSecretStore _runSecrets;
 	private readonly ConfigDocRepository _configDocs;
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
 	private readonly IOptions<ScanOptions> _scanOptions;
 	private readonly IOptions<DiscoveryOptions> _discoveryOptions;
+	private readonly IOptions<RunSecretOptions> _runSecretOptions;
 
 	public RunsController(
 		IJobControlRepository repository,
 		SiteRepository sites,
 		TargetRepository targets,
-		IEphemeralCredentialCache ephemeralCredentials,
+		IRunSecretStore runSecrets,
 		ConfigDocRepository configDocs,
 		AttestationSnapshotRepository attestationSnapshots,
 		IOptions<ScanOptions> scanOptions,
-		IOptions<DiscoveryOptions> discoveryOptions)
+		IOptions<DiscoveryOptions> discoveryOptions,
+		IOptions<RunSecretOptions> runSecretOptions)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(sites);
 		ArgumentNullException.ThrowIfNull(targets);
-		ArgumentNullException.ThrowIfNull(ephemeralCredentials);
+		ArgumentNullException.ThrowIfNull(runSecrets);
 		ArgumentNullException.ThrowIfNull(configDocs);
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
 		ArgumentNullException.ThrowIfNull(scanOptions);
 		ArgumentNullException.ThrowIfNull(discoveryOptions);
+		ArgumentNullException.ThrowIfNull(runSecretOptions);
 		_repository = repository;
 		_sites = sites;
 		_targets = targets;
-		_ephemeralCredentials = ephemeralCredentials;
+		_runSecrets = runSecrets;
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
 		_scanOptions = scanOptions;
 		_discoveryOptions = discoveryOptions;
+		_runSecretOptions = runSecretOptions;
 	}
 
 	/// <summary>
@@ -298,7 +302,7 @@ public sealed class RunsController : ControllerBase
 				$"Site '{siteId}' has no targets; add at least one before starting a scan.");
 		}
 
-		bool useEphemeralCredential = request.Credential is not null;
+		bool useRunSecret = request.Credential is not null;
 
 		List<JobSpec> specs = [];
 		foreach (Target target in targets)
@@ -308,19 +312,20 @@ public sealed class RunsController : ControllerBase
 			// is the only place the dispatcher can learn "this is an ssh (SRG) target"
 			// before a handler ever resolves the target row.
 			string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId, target_kind = target.Kind });
-			if (useEphemeralCredential)
+			if (useRunSecret)
 			{
 				// No credential_id at all for an ad hoc job -- the secret lives only in
-				// IEphemeralCredentialCache, keyed below by the job id FanOutJobsAsync
-				// assigns. Falling back to target.CredentialId here would silently mix
-				// tiers (a "my credentials" run quietly using a stored service secret).
+				// run_secrets, keyed by the run id (one row per run, issue #434) rather
+				// than one row per job. Falling back to target.CredentialId here would
+				// silently mix tiers (a "my credentials" run quietly using a stored
+				// service secret).
 				specs.Add(new JobSpec(
 					ScanJobType,
 					ScanTargetPriority.ForTargetKind(target.Kind),
 					TargetId: target.Id,
 					TargetName: target.Name,
 					Payload: payload,
-					HasEphemeralCredential: true));
+					HasRunSecret: true));
 			}
 			else
 			{
@@ -335,32 +340,29 @@ public sealed class RunsController : ControllerBase
 			}
 		}
 
-		// Discover specs are appended after every scan spec, never interleaved: the
-		// ephemeral-credential zip below assumes specs[i] <-> jobIds[i] for the first
-		// targets.Count entries (FanOutJobsAsync returns ids in list order), and
-		// inserting a discover spec anywhere before that range would shift the zip and
-		// hand an ad hoc secret to the wrong job. Ordering between discover and scan
-		// dispatch is carried entirely by AutoDiscoverPriority, not by list position.
-		int scanSpecCount = specs.Count;
 		specs.AddRange(BuildStaleDiscoverSpecs(targets));
 
 		Guid runId = await _repository.CreateRunAsync(
 			request.RunType, request.Scope, request.CredentialId, initiatedBy, cancellationToken)
 			.ConfigureAwait(false);
-		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);
 
-		if (useEphemeralCredential)
+		if (useRunSecret)
 		{
-			// jobIds is returned in the same order as specs (JobQueueRepository.FanOutJobsAsync):
-			// zip rather than re-resolve so each target's ad hoc secret lands on exactly
-			// its own job's cache entry, never a sibling's. Bounded to scanSpecCount so an
-			// appended discover job's id is never mistaken for a scan job's.
-			EphemeralCredential credential = new(request.Credential!.Username, request.Credential.Secret);
-			for (int i = 0; i < scanSpecCount; i++)
-			{
-				_ephemeralCredentials.Put(jobIds[i], runId, credential, initiatedBy);
-			}
+			// Stored BEFORE fan-out: a job claimed the instant it is queued must already
+			// be able to find its run's secret row. One row per run (not per job/target)
+			// -- every target in this scan shares the same ad hoc credential, matching
+			// the pre-#434 in-memory cache's per-run semantics (RunsController supplied
+			// the same EphemeralCredential value to every fanned-out job). Fail closed:
+			// if the encrypted write or its paired audit row does not commit
+			// (IRunSecretStore.StoreAsync's fail-closed contract), this throws and no
+			// jobs are ever created for the run -- CreateRunAsync above already committed
+			// the (otherwise empty) run row, but a run with zero jobs is inert, not a
+			// half-armed credential leak.
+			RunSecretCredential credential = new(request.Credential!.Username, request.Credential.Secret);
+			await _runSecrets.StoreAsync(runId, credential, initiatedBy, _runSecretOptions.Value.Expiry, cancellationToken).ConfigureAwait(false);
 		}
+
+		await _repository.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);
 
 		return new RunCreatedResponse(runId.ToString());
 	}
