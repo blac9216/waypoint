@@ -5,6 +5,14 @@ individually; the project risk is trying to build auth + job engine + secrets + 
 product integrations simultaneously.** Each milestone produces something demonstrable
 and forces exactly one new subsystem into existence.
 
+> **Architecture realignment approved 2026-08-11.** M1/M2 closed against the original
+> combined-backend design, but a fresh appliance exposed that their execution
+> dependencies were not packaged into a functional deployment. ADRs
+> [0013](adr/0013-control-plane-and-runners.md)–[0015](adr/0015-source-build-and-operator-export.md)
+> replace backend-hosted execution with dedicated runners and clarify operator-built
+> packaging. The implementation epic/issues that realign the shipped code are the next
+> planning action; this document does not pretend that migration has landed.
+
 ## M0 — Design & contracts ✅ (closed 2026-08-02)
 
 - ✅ UI design pass — high-fidelity prototype in [`ui/prototype/`](ui/prototype/);
@@ -45,7 +53,22 @@ validation passed end-to-end; residual items are owner-gated (e.g. #100, live-vC
 HDF/CKL parity, live STIG Manager upload) or deferred to later milestones — see the
 epic's closing comment for the full list.
 
-## M3 — Identity & RBAC (current — epic [#14](https://github.com/blac9216/waypoint/issues/14))
+## Architecture realignment — next planning action
+
+- Extract a reusable C# runner host from the current backend dispatcher.
+- Add long-lived compliance and download runner projects/images/services.
+- Move project-owned Dockerfiles, orchestration, and PowerShell from the sibling
+  repositories into the corresponding runner build contexts.
+- Make runners own filtered claims, leases, cancellation, events, secret decryption,
+  resource-aware concurrency, and readiness.
+- Make the ASP.NET backend control-plane-only and report runner capabilities.
+- Establish source-build, managed-tool/content volumes, and operator export/import
+  semantics from ADR-0015.
+
+The detailed epic and review-sized implementation issues are intentionally drafted
+after the architecture documentation is accepted.
+
+## M3 — Identity & RBAC (follows architecture realignment — epic [#14](https://github.com/blac9216/waypoint/issues/14))
 
 - Keycloak (ADR-0004), OIDC integration, role mapping (Viewer/Cyber/Operator/Admin).
 - Scheduling for read-only jobs under service credentials.
@@ -54,7 +77,7 @@ epic's closing comment for the full list.
 ## M4 — Remediation (epic [#15](https://github.com/blac9216/waypoint/issues/15))
 
 - Admin-gated, typed-confirmation, never-schedulable remediation via child `pwsh`
-  (vendor scripts unmodified). Remediation input documents from the config store.
+  where process isolation is required. Remediation input documents from the config store.
 
 ## M5 — Download manager & managed content (epic [#16](https://github.com/blac9216/waypoint/issues/16))
 
@@ -63,22 +86,26 @@ progress/verification/disk usage shipped early in **M1** (see above) rather than
 here — what remains scoped to M5 is everything M1 explicitly deferred:
 
 - Content-library + Photon repo management.
-- Download-tool install flow (local repo / depot fetch / manual upload with signature
-  verification) — the tool is never bundled in the image (licensing, decided
-  2026-08-02); catalog stays browsable index-only without the tool until this lands.
+- Download-tool install flow (authorized upstream repository / local source / manual
+  upload with signature verification). The public project does not distribute the
+  tool; operator-installed tooling is managed appliance state and transfers with the
+  functions that require it (ADR-0015).
 - Compliance-content management: the profiles repo as appliance state (pinned tag or
   tracked branch, `content-pull` when connected; air-gapped `content-import` lands
   with the M6 bundle format).
 
 ## M6 — Transfer & modes (epic [#17](https://github.com/blac9216/waypoint/issues/17))
 
-- Connected/disconnected instance modes (ADR-0010); signed bundle format
-  (shared with updates); export composer + import/validate/diff.
+- Connected/disconnected instance modes (ADR-0010); signed bundle format shared with
+  updates; export composer + import/validate/diff for locally built images, required
+  installed tooling, managed content, and selected artifacts (ADR-0015).
 
 ## M7 — Updater & appliance polish (epic [#18](https://github.com/blac9216/waypoint/issues/18))
 
 - `upgrade.sh` consuming the update bundle → in-UI self-update via the updater
-  sidecar (ADR-0009) → (optional) Packer-built OVA wrapper (ADR-0001).
+  sidecar (ADR-0009). Imported newer images are staged and shown as **Appliance update
+  available**; applying them is a separate explicit Admin action. Optional Packer-built
+  OVA wrapper remains an operator packaging path.
 
 ## Deliberately deferred
 

@@ -1,8 +1,11 @@
 # backend
 
-ASP.NET Core (C#) application — REST API, job engine, PowerShell runspace hosting, SSE
-streaming. See [ADR-0006](../docs/adr/0006-backend-language.md) and
-[ADR-0008](../docs/adr/0008-job-engine.md).
+ASP.NET Core (C#) control-plane application — REST API, authorization, job creation,
+and SSE replay. The current implementation still contains job-engine and PowerShell
+hosting code; that is a transitional state. The approved architecture moves execution
+into dedicated .NET Generic Host runner services while retaining Postgres as the job
+and event boundary. See [ADR-0013](../docs/adr/0013-control-plane-and-runners.md) and
+[ADR-0014](../docs/adr/0014-runner-job-ownership.md).
 
 ## Solution layout
 
@@ -10,8 +13,14 @@ streaming. See [ADR-0006](../docs/adr/0006-backend-language.md) and
 |---|---|
 | `Waypoint.Api` | ASP.NET Core host: controllers, middleware, authentication, DI composition root (`Program.cs`). |
 | `Waypoint.Core` | Domain layer: roles/authorization, the error envelope, pagination, configuration option types, the local-auth and log-redaction abstractions. No ASP.NET Core hosting dependency beyond the lightweight `Microsoft.AspNetCore.Authorization` package. |
-| `Waypoint.Infrastructure` | DI wiring for the abstractions `Waypoint.Core` declares (the in-memory local-auth implementation) plus Postgres access: the schema migrations pipeline (`Data/`, issue #4). PowerShell runspace hosting lands with the job engine. |
+| `Waypoint.Infrastructure` | DI wiring for the abstractions `Waypoint.Core` declares (the in-memory local-auth implementation) plus Postgres access: the schema migrations pipeline (`Data/`, issue #4). It currently also contains transitional PowerShell/job execution code that will move behind runner handlers. |
 | `Waypoint.Tests` | xUnit — unit tests for `Core`/`Infrastructure` plus `WebApplicationFactory`-based integration tests against the real HTTP pipeline. |
+
+The target solution additionally has a shared runner library for claiming, leases,
+heartbeats, cancellation, event publication, secret handling, and resource-aware
+scheduling, plus `compliance-runner` and `download-runner` hosts. Both runner images
+embed PowerShell through `Microsoft.PowerShell.SDK`; they do not call back through the
+API for execution.
 
 ## Build and test
 

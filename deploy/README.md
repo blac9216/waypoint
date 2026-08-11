@@ -4,7 +4,17 @@ Deployment artifacts: Docker Compose stack, nginx configuration, updater sidecar
 install/upgrade scripts, and (later) bundle tooling + Packer OVA build. See
 [ADR-0001](../docs/adr/0001-packaging.md),
 [ADR-0009](../docs/adr/0009-self-update.md), and
-[ADR-0010](../docs/adr/0010-deployment-topology.md).
+[ADR-0010](../docs/adr/0010-deployment-topology.md). The approved runner and
+source-build direction is recorded in [ADR-0013](../docs/adr/0013-control-plane-and-runners.md),
+[ADR-0014](../docs/adr/0014-runner-job-ownership.md), and
+[ADR-0015](../docs/adr/0015-source-build-and-operator-export.md).
+
+> **Current implementation is transitional.** The compose file below still executes
+> jobs inside `backend` and mounts scripts from sibling checkouts. The approved target
+> adds long-lived `compliance-runner` and `download-runner` services, moves the
+> project-owned scripts and Dockerfiles into their build contexts in this repository,
+> and leaves `backend` as the control plane. These instructions describe what works
+> today; they are not the target topology.
 
 ## Dev compose stack (M1, epic [#1](https://github.com/blac9216/waypoint/issues/1))
 
@@ -35,6 +45,12 @@ browser --TLS--> nginx --/api--> backend --> postgres (internal network only)
   from `nginx`.
 
 All three services declare a Docker `healthcheck`.
+
+The target compose topology adds both runners on the internal network. Each claims
+only its allowlisted job types from Postgres, mounts only its required managed stores,
+and reports structured events to Postgres for the backend SSE stream. One replica of
+each is the default; additional replicas are an optional isolation/scaling control,
+not a prerequisite for concurrent jobs.
 
 ### Networking: nginx depends on Docker's embedded DNS
 
@@ -507,8 +523,8 @@ work is issue #7); revisit then.
 
 ### `dev/local/` convention (gitignored)
 
-Per `CLAUDE.md`'s local-testing rule, this repo's own test depot
-token/config and the hand-provisioned `vcf-download-tool` binary are
+For the transitional development stack, this repo's own test depot
+token/config and a locally acquired `vcf-download-tool` binary are
 **never** committed here. They're borrowed at runtime from the private
 sibling repo (`vcf-docker-download`) by mounting them from a repo-root
 `dev/local/` directory, which is git-ignored (see the root `.gitignore`
@@ -522,8 +538,7 @@ container uses to reach that borrowed material, e.g.
 dev/local/
 ├── depot-token          # borrowed Broadcom depot token, dev/test use only
 ├── depot-config.json    # borrowed depot/site config
-└── vcf-download-tool     # hand-provisioned binary (never bundled - see
-                          # CLAUDE.md License & Borrowing Policy)
+└── vcf-download-tool     # locally acquired binary; never project-published
 ```
 
 The `backend` service doesn't consume any of this yet, so
@@ -540,10 +555,10 @@ The `catalog-index` job handler (issue #194) runs a Waypoint-owned shim
 module (`backend/Waypoint.Infrastructure/PowerShell/Modules/WaypointCatalogIndex/`)
 that dot-sources `vcf-download-manager.common.ps1` from the sibling
 `vcf-docker-download` repo to call its `Get-FileManifest` function. Per
-CLAUDE.md's License & Borrowing Policy, that sibling script runs as
-**unmodified vendor code** — it is never copied into this repo or baked
-into the backend image, only mounted read-only at runtime, following the
-same `dev/local/`-style convention as the depot token/binary above.
+the current implementation, that project-owned sibling script is mounted
+read-only at runtime. ADR-0013 replaces this transitional arrangement: the
+script will move into this repository and be baked into the
+`download-runner` image built locally by the operator.
 
 `docker-compose.yml`'s `backend` service mounts an operator-supplied
 directory read-only into the container:
@@ -607,10 +622,10 @@ that dot-source three files from the *other* sibling repo,
 (`Connect-StigVIServer`/`Disconnect-VIServer`), `module.transport.nsxapi.ps1`
 (`Get-NsxSessionToken`), and `module.common.ps1`
 (`Invoke-ExternalCommand`/`Test-TargetReachable`/`New-InspecSecretConfigFile`).
-Same CLAUDE.md License & Borrowing Policy as the #223 mount above: these
-vendor scripts run **unmodified** — never copied into this repo or baked
-into the backend image, only mounted read-only at runtime, following the
-same `dev/local/`-style convention.
+As with the #223 mount, these are project-owned scripts in a transitional
+sibling checkout. ADR-0013 moves them into this repository and the locally
+built `compliance-runner` image; the current backend bind mount remains
+documented here only because that is what this compose revision executes.
 
 `docker-compose.yml`'s `backend` service mounts a second operator-supplied
 directory read-only into the container, alongside `vcf-scripts`:

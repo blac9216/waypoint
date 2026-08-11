@@ -45,16 +45,19 @@ existing PowerShell/Docker tools behind one UI:
 - [`vcf-docker-download`](https://github.com/blac9216/vcf-docker-download) — VCF
   artifact download and offline-repository management for air-gapped deployments
 
-Those repos remain the **execution layer**; Waypoint adds the control plane: web UI,
-API, job engine, credential store, RBAC, and cross-enclave transfer. One appliance
-image deploys on both sides of an air gap — a **connected** instance (all features,
-builds signed export bundles) and **disconnected** instances (consume bundles).
+Their project-owned Dockerfiles, orchestration, and PowerShell are migrating into this
+repository as the execution layer. Waypoint separates the ASP.NET control plane from
+long-lived `compliance-runner` and `download-runner` services; runners claim their own
+Postgres jobs and host PowerShell in-process (ADRs 0013/0014). The same Compose
+topology deploys on both sides of an air gap — a **connected** instance builds signed
+export bundles and **disconnected** instances consume them.
 
-**Current status: implementation, milestone M3.** M1 (foundation + download vertical
+**Current status: architecture realignment before milestone M3 continues.** M1 (foundation + download vertical
 slice, epic [#1](https://github.com/blac9216/waypoint/issues/1)) and M2 (sites,
 credentials & STIG scan slice, epic [#13](https://github.com/blac9216/waypoint/issues/13))
-are both closed and live-stack validated; M3 (identity/RBAC/scheduling, epic
-[#14](https://github.com/blac9216/waypoint/issues/14)) is active — see
+are both closed, but their backend-hosted execution packaging is being replaced by the
+runner topology approved in ADRs 0013–0015. M3 (identity/RBAC/scheduling, epic
+[#14](https://github.com/blac9216/waypoint/issues/14)) follows that realignment — see
 `docs/roadmap.md` for what's built vs. still planned. Planning (M0) is complete:
 architecture, decisions, security model, UI prototype, and the API contract live in
 `docs/` — read `docs/architecture.md`, `docs/api-contract.md`, and the ADRs in
@@ -66,15 +69,16 @@ issue-driven via the `github-workflow` skill.
 
 | Concern | Choice |
 |---|---|
-| Packaging | Docker Compose (v1) → optional Packer-built OVA wrapper (v2) |
+| Packaging | Public source + Dockerfiles; operators build with Compose, provision entitled tools, and export their own images/bundles |
 | Database | PostgreSQL (app data, JSONB catalogs, job queue, Keycloak DB) |
 | Reverse proxy | nginx, operator-provided TLS certs |
 | Identity | Keycloak (OIDC; CAC/PIV x.509 + LDAP federation); app is a plain OIDC client |
-| Secrets | AES-256-GCM envelope encryption in Postgres (AWX pattern); master key mounted at deploy |
-| Backend | ASP.NET Core (C#) hosting PowerShell runspaces in-process via the PowerShell SDK |
-| Job engine | Postgres-backed queue (`FOR UPDATE SKIP LOCKED`), priority-aware, SSE log streaming |
+| Secrets | AES-256-GCM envelope encryption in Postgres; API encrypts writes, trusted runners decrypt claimed-job credentials |
+| Backend | ASP.NET Core (C#) control plane: REST/RBAC, enqueue/control, queries, SSE; no job execution |
+| Runners | Long-lived .NET Generic Host services; shared C# worker library + in-process PowerShell SDK + domain handlers |
+| Job engine | Runner-claimed Postgres queue (`FOR UPDATE SKIP LOCKED`), leases/cancellation/events owned by executing runner |
 | Frontend | React + TypeScript PWA, static build, **zero external assets** (air-gap) |
-| Execution | Existing PowerShell modules from the two sibling repos, unmodified where possible |
+| Execution | Project-owned Dockerfiles/PowerShell migrate from sibling repos into compliance/download runner build contexts |
 
 ## Running & Testing — read before `docker compose`
 
@@ -104,9 +108,9 @@ written before posting it. Do not duplicate the recipe here — it drifts; go re
 │   │   ├── design-brief.md  # Screen inventory, reconciliation notes, data ledger
 │   │   └── prototype/       # High-fidelity interactive HTML prototype + design handoff
 │   └── adr/             # Architecture Decision Records (numbered, immutable once accepted)
-├── backend/             # ASP.NET Core API + job engine + PS hosting (M1/M2 delivered; M3 Keycloak/RBAC in progress)
+├── backend/             # today: combined API/worker; target: API + shared runner + two runner hosts (ADRs 0013/0014)
 ├── frontend/            # React + TypeScript PWA (M1/M2 screens delivered; M3 auth/RBAC UI in progress)
-├── deploy/              # compose file, nginx config; updater + bundle tooling still planned (M6/M7)
+├── deploy/              # today: three-service dev stack; target adds runners, updater, and bundle tooling
 └── .claude/skills/      # github-workflow + github-pr-review (issue-driven development)
 ```
 
@@ -151,10 +155,11 @@ code ("cribbing" from prior art):
   a commit message, a PR body, or this file does not travel with the code.
 - **Not allowed**: GPL/AGPL/LGPL, SSPL, BSL, or unlicensed code — copyleft would
   encumber the whole appliance; no-license means no permission.
-- **Never redistribute vendor binaries.** Broadcom's `vcf-download-tool` is **not
-  bundled** in the appliance image (decided 2026-08-02) — it is installed at runtime
-  via the install flow (local repo / depot fetch / manual upload). The same applies to
-  any other vendor-licensed artifact.
+- **Never project-publish vendor binaries.** Broadcom's `vcf-download-tool` is not
+  included in source or immutable runner images. An authenticated operator installs it
+  through the appliance from an authorized upstream, local repository, or manual
+  upload. Once installed, it is managed appliance state and is included when that
+  operator creates an air-gap bundle requiring download functionality (ADR-0015).
 
 ## Key Constraints
 
@@ -163,6 +168,7 @@ code ("cribbing" from prior art):
   gracefully to hidden/disabled when disconnected.
 - Scans are read-only and schedulable; **remediation is never schedulable** and always
   requires explicit human confirmation.
-- The sibling repos' Broadcom/vendor scripts run as unmodified vendor code — Waypoint
-  orchestrates them, it does not fork them.
+- The execution scripts in the sibling repositories are project-owned code and will
+  move into this repository with their Dockerfiles and attribution/history preserved.
+  Account-gated third-party tools remain operator-installed managed state.
 - Operations must be idempotent; individual target failures must not halt a run.
