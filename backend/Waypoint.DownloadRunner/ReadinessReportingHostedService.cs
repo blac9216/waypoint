@@ -67,14 +67,22 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 		_logger = logger;
 	}
 
+	public override async Task StartAsync(CancellationToken cancellationToken)
+	{
+		// Write the first snapshot synchronously as part of startup (awaited before
+		// the host reports started) rather than deferring it into the fire-and-forget
+		// ExecuteAsync loop. This makes a fresh container's very first health probe
+		// meaningful -- the readiness file exists the moment StartAsync returns -- and
+		// makes the reporting deterministic for callers (and tests) that stop the
+		// service immediately after starting it.
+		await WriteSnapshotAsync(cancellationToken).ConfigureAwait(false);
+		await base.StartAsync(cancellationToken).ConfigureAwait(false);
+	}
+
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
 	{
 		DownloadRunnerOptions options = _runnerOptions.Value;
 		using PeriodicTimer timer = new(options.ReadinessInterval);
-
-		// Write an initial snapshot immediately rather than waiting a full interval,
-		// so a fresh container's first health probe is not gratuitously unhealthy.
-		await WriteSnapshotAsync(stoppingToken).ConfigureAwait(false);
 
 		try
 		{

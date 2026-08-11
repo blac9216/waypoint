@@ -285,12 +285,25 @@ public static class ServiceCollectionExtensions
 			// types (jobs.job_type is a closed CHECK set with no generic member).
 			services.AddSingleton<IJobHandler, Catalog.CatalogIndexJobHandler>();
 
-			// Issue #441: DownloadJobHandler is registered concretely (not as
-			// IJobHandler) so ToolGatedDownloadJobHandler -- the ADR-0015 tool-presence
-			// gate -- can wrap it; only the gated wrapper is registered as the
-			// "download" IJobHandler the dispatcher resolves.
-			services.AddSingleton<Downloads.DownloadJobHandler>();
-			services.AddSingleton<IJobHandler, Downloads.ToolGatedDownloadJobHandler>();
+			// Issue #441: which "download" IJobHandler the dispatcher resolves depends on
+			// the host kind. On a dedicated ExecutionOnly runner the download executes
+			// behind the ADR-0015 tool-presence gate (ToolGatedDownloadJobHandler wraps
+			// the concrete DownloadJobHandler; the tool is provisioned at the runner's
+			// ManagedTool:ToolStatePath). The Combined (Waypoint.Api) host still hosts
+			// download execution until #443 and provisions vcf-download-tool via the
+			// dev/local mount -- not the gate's managed-tool path -- so it must keep
+			// today's ungated M1 behavior. Gating the API path here would fail every
+			// API-submitted download with "tool not installed"; #443 removes API
+			// execution and this branch with it.
+			if (hostKind == WaypointInfrastructureHostKind.ExecutionOnly)
+			{
+				services.AddSingleton<Downloads.DownloadJobHandler>();
+				services.AddSingleton<IJobHandler, Downloads.ToolGatedDownloadJobHandler>();
+			}
+			else
+			{
+				services.AddSingleton<IJobHandler, Downloads.DownloadJobHandler>();
+			}
 			services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 			services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
 			services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();
