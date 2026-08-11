@@ -1,0 +1,50 @@
+# download-runner build context .dockerignore (issue #439). Same intent as the
+# repo-root .dockerignore's comment: a miss here ships the file INTO the image
+# layer, which is worse than a git miss. This context must never bake in the
+# account-gated vcf-download-tool/UMDS installers, depot tokens, activation
+# codes, or any operator credential (ADR-0015 — those are operator-installed
+# managed state on a persistent volume, not build inputs).
+
+.git/
+.github/
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Vendor installer packages, depot tokens/activation codes, operator config —
+# must never reach this build context even if accidentally placed alongside
+# it during development. Mirrors the sibling repo's own artifacts by name so
+# a careless `cp -r` of the sibling checkout into this directory can't leak
+# them into the image.
+*.tar
+*.tar.gz
+*.gz
+downloadToken.txt
+softwareDepotActivationCode.txt
+downloadConfig.xml
+*.token
+*.vault
+vault-pass*
+secrets*.json
+secrets*.yml
+*.local.json
+*.local.yml
+*.pem
+*.key
+*.pfx
+*.p12
+.env
+.env.*
+
+# Build/test output not needed inside the image.
+**/bin/
+**/obj/
+**/TestResults/
+**/__pycache__/
+**/*.pyc
+coverage.xml
+htmlcov/
+.pytest_cache/
+.coverage
