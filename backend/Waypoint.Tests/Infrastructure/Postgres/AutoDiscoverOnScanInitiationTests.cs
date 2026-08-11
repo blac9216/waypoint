@@ -214,14 +214,14 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		};
 		Waypoint.Infrastructure.ConfigDocs.ConfigDocRepository configDocs = new(_fixture.ConnectionString);
 		Waypoint.Infrastructure.ConfigDocs.AttestationSnapshotRepository attestationSnapshots = new(_fixture.ConnectionString);
-		Waypoint.Infrastructure.Secrets.EphemeralCredentialCache ephemeralCredentials = new(
-			_redactor, _fixture.ConnectionString, NullLogger<Waypoint.Infrastructure.Secrets.EphemeralCredentialCache>.Instance);
+		Waypoint.Infrastructure.Secrets.RunSecretStore runSecrets = new(
+			_fixture.ConnectionString, cipher, _redactor, NullLogger<Waypoint.Infrastructure.Secrets.RunSecretStore>.Instance);
 		StigManagerRepository stigman = new(_fixture.ConnectionString);
 		ScanUploadCoordinator uploadCoordinator = new(
 			stigman, new NeverCalledStigManagerUploadClient(), secretStore, _repository, _redactor);
 
 		_scanHandler = new Waypoint.Infrastructure.Scans.ScanJobHandler(
-			executor, secretStore, credentials, _targets, ephemeralCredentials, _repository, _redactor, wrappedPsOptions,
+			executor, secretStore, credentials, _targets, runSecrets, _repository, _redactor, wrappedPsOptions,
 			Options.Create(scanOptions), configDocs, attestationSnapshots, uploadCoordinator);
 
 		_credentials = credentials;
