@@ -35,10 +35,13 @@ CREATE TABLE IF NOT EXISTS run_secrets (
     expires_at TIMESTAMPTZ NOT NULL
 );
 
--- The cleanup sweep's query shape: "expired rows whose run is not still
--- actively running" -- see RunSecretCleanupHostedService's doc comment for
--- why the sweep also re-checks runs.state rather than trusting expires_at
--- alone.
+-- The cleanup sweep's query shape: "rows whose expires_at has passed"
+-- (DeleteExpiredAsync filters WHERE expires_at <= now() ... FOR UPDATE SKIP
+-- LOCKED). expires_at is the sole trigger -- there is deliberately no
+-- runs.state heuristic; the expiry horizon is the safety bound for an
+-- abandoned run that never reached a terminal state (a terminal run deletes
+-- its own row outright, in-transaction, well before expiry). See
+-- RunSecretStore.DeleteExpiredAsync's doc comment.
 CREATE INDEX IF NOT EXISTS idx_run_secrets_expires_at ON run_secrets (expires_at);
 
 -- jobs.has_run_secret ------------------------------------------------------
