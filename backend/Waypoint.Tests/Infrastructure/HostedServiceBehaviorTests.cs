@@ -251,8 +251,9 @@ public sealed class HostedServiceBehaviorTests
 		public bool RenewResult { get; set; } = true;
 		public bool AdvanceResult { get; set; } = true;
 		public List<(string From, string To)> Moves { get; } = [];
-		public async Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
+		public async Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, IReadOnlySet<string> allowedJobTypes, CancellationToken cancellationToken)
 		{
+			_ = allowedJobTypes;
 			Claims++;
 			if (BlockClaims)
 			{

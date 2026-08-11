@@ -74,7 +74,7 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 		{
 			while (true)
 			{
-				ClaimedJob? job = await dispatcher.ClaimJobAsync(workerId, TimeSpan.FromMinutes(5), CancellationToken.None);
+				ClaimedJob? job = await dispatcher.ClaimJobAsync(workerId, TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 				if (job is null)
 				{
 					return;
@@ -114,7 +114,7 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 			await SeedQueuedJobsAsync(jobCount);
 
 			Task<ClaimedJob?>[] claims = [.. Enumerable.Range(0, jobCount)
-				.Select(i => _repository.ClaimJobAsync($"worker-{round}-{i}", TimeSpan.FromMinutes(5), CancellationToken.None))];
+				.Select(i => _repository.ClaimJobAsync($"worker-{round}-{i}", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None))];
 
 			ClaimedJob?[] results = await Task.WhenAll(claims);
 			Guid[] claimedIds = [.. results.Where(job => job is not null).Select(job => job!.Id)];
@@ -133,7 +133,7 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 	{
 		await SeedQueuedJobsAsync(1);
 
-		ClaimedJob? job = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? job = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(job);
 
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
@@ -155,7 +155,7 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 	[Fact]
 	public async Task ClaimJobAsync_EmptyQueue_ReturnsNull()
 	{
-		Assert.Null(await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), CancellationToken.None));
+		Assert.Null(await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None));
 	}
 
 	[Fact]
@@ -169,10 +169,10 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 		await Task.Delay(TimeSpan.FromMilliseconds(5));
 		Guid highPriorityNewer = await InsertQueuedJobAsync(connection, priority: 1);
 
-		ClaimedJob? first = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? first = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 		Assert.Equal(highPriorityNewer, first!.Id);
 
-		ClaimedJob? second = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? second = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 		Assert.Equal(lowPriorityOlder, second!.Id);
 	}
 
@@ -217,7 +217,7 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 			await insert.ExecuteNonQueryAsync();
 		}
 
-		ClaimedJob? claimed = await _repository.ClaimJobAsync("worker-fields", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? claimed = await _repository.ClaimJobAsync("worker-fields", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(claimed);
 
 		ClaimedJob expected = new(
@@ -248,8 +248,8 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 	{
 		await SeedQueuedJobsAsync(2);
 
-		ClaimedJob? first = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), CancellationToken.None);
-		ClaimedJob? second = await _repository.ClaimJobAsync("worker-b", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? first = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
+		ClaimedJob? second = await _repository.ClaimJobAsync("worker-b", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 
 		Assert.NotNull(first);
 		Assert.NotNull(second);
@@ -291,7 +291,7 @@ public sealed class JobQueueRepositoryClaimTests : IAsyncLifetime
 			retryJobId = (Guid)(await insert.ExecuteScalarAsync())!;
 		}
 
-		ClaimedJob? claimed = await _repository.ClaimJobAsync("worker-retry", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? claimed = await _repository.ClaimJobAsync("worker-retry", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 
 		Assert.NotNull(claimed);
 		Assert.Equal(retryJobId, claimed.Id);

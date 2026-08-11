@@ -138,7 +138,12 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 			ClaimedJob? job;
 			try
 			{
-				job = await _repository.ClaimJobAsync(WorkerId, options.LeaseDuration, stoppingToken).ConfigureAwait(false);
+				// Issue #435 (ADR-0014): this dispatcher is still today's stand-in for
+				// both future dedicated runner processes (ADR-0013/#415's doc comment),
+				// so it claims the full union -- JobCapabilities.All -- rather than
+				// either domain's narrower allowlist. A split compliance-runner/
+				// download-runner will each pass their own JobCapabilities set instead.
+				job = await _repository.ClaimJobAsync(WorkerId, options.LeaseDuration, JobCapabilities.All, stoppingToken).ConfigureAwait(false);
 			}
 			catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
 			{

@@ -71,7 +71,7 @@ public sealed class JobEngineLoggingTests : IAsyncLifetime
 		JobQueueRepository repository = new(_fixture.ConnectionString, logger);
 		await SeedQueuedJobAsync();
 
-		ClaimedJob? claimed = await repository.ClaimJobAsync("worker-logs", TimeSpan.FromMinutes(7), CancellationToken.None);
+		ClaimedJob? claimed = await repository.ClaimJobAsync("worker-logs", TimeSpan.FromMinutes(7), JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(claimed);
 
 		CapturedLogEntry entry = logger.OnlyEntryAt(LogLevel.Debug);
@@ -87,7 +87,7 @@ public sealed class JobEngineLoggingTests : IAsyncLifetime
 		CapturingLogger<JobQueueRepository> logger = new();
 		JobQueueRepository repository = new(_fixture.ConnectionString, logger);
 
-		Assert.Null(await repository.ClaimJobAsync("worker-logs", TimeSpan.FromMinutes(5), CancellationToken.None));
+		Assert.Null(await repository.ClaimJobAsync("worker-logs", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None));
 		Assert.Empty(logger.Entries);
 	}
 
@@ -138,12 +138,12 @@ public sealed class JobEngineLoggingTests : IAsyncLifetime
 		CapturingLogger<JobQueueRepository> capturing = new();
 		await SeedQueuedJobAsync();
 		await new JobQueueRepository(_fixture.ConnectionString, capturing)
-			.ClaimJobAsync("worker-capturing", TimeSpan.FromMinutes(5), CancellationToken.None);
+			.ClaimJobAsync("worker-capturing", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 
 		DisabledLogger<JobQueueRepository> disabled = new();
 		await SeedQueuedJobAsync();
 		await new JobQueueRepository(_fixture.ConnectionString, disabled)
-			.ClaimJobAsync("worker-disabled", TimeSpan.FromMinutes(5), CancellationToken.None);
+			.ClaimJobAsync("worker-disabled", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 
 		Assert.NotEmpty(capturing.Entries);
 		Assert.Equal(0, disabled.LogCallCount);

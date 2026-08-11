@@ -108,7 +108,7 @@ public sealed class RunFanOutPauseAbortTests : IAsyncLifetime
 
 		Assert.True(await _repository.PauseRunAsync(runId, CancellationToken.None));
 
-		ClaimedJob? claimed = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? claimed = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(claimed);
 		Assert.Equal(runId, claimed!.RunId);
 
@@ -146,7 +146,7 @@ public sealed class RunFanOutPauseAbortTests : IAsyncLifetime
 		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(runId, specs, "tester", CancellationToken.None);
 
 		// One of the three gets claimed (simulating "in flight"); the other two stay queued.
-		ClaimedJob? inFlight = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? inFlight = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(inFlight);
 
 		AbortRunResult result = await _repository.AbortRunAsync(runId, CancellationToken.None);
@@ -183,7 +183,7 @@ public sealed class RunFanOutPauseAbortTests : IAsyncLifetime
 	{
 		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
 		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
-		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("dead-worker", TimeSpan.FromMilliseconds(100), CancellationToken.None));
+		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("dead-worker", TimeSpan.FromMilliseconds(100), JobCapabilities.All, CancellationToken.None));
 		Assert.Equal(jobId, claimed.Id);
 
 		AbortRunResult abort = await _repository.AbortRunAsync(runId, CancellationToken.None);
@@ -320,7 +320,7 @@ public sealed class RunFanOutPauseAbortTests : IAsyncLifetime
 	{
 		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
 		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
-		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("worker-1", TimeSpan.FromMinutes(5), CancellationToken.None));
+		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("worker-1", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None));
 		Assert.Equal(jobId, claimed.Id);
 
 		Assert.False(await _repository.IsCancelRequestedAsync(jobId, CancellationToken.None));
@@ -338,7 +338,7 @@ public sealed class RunFanOutPauseAbortTests : IAsyncLifetime
 	{
 		Guid runId = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
 		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], "tester", CancellationToken.None));
-		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("worker-1", TimeSpan.FromMinutes(5), CancellationToken.None));
+		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("worker-1", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None));
 		Assert.True(await _repository.AdvanceStateAsync(claimed.Id, "worker-1", JobStates.Running, JobStates.Done, "ok", clearLease: true, CancellationToken.None));
 
 		JobCancelOutcome outcome = await _repository.CancelJobAsync(jobId, CancellationToken.None);

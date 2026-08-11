@@ -53,8 +53,8 @@ public sealed class SchemaMigrationTests
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #106 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check, 0020 adds BEFORE UPDATE/DELETE triggers enforcing job_events/audit_log append-only, with a carve-out on audit_log for 0006's FK-driven credential_id SET NULL, 0021 adds attestation_snapshots -- the persisted at-scan-time attestations-applied ledger, issue #306, 0022 adds credentials_credential_type_check mirroring CredentialTypes.All, issue #252, 0023 adds run_secrets + jobs.has_run_secret -- the encrypted run-scoped personal-credential handoff, issue #434) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 23;
+	/// <summary>Embedded migration count as of issue #106 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check, 0020 adds BEFORE UPDATE/DELETE triggers enforcing job_events/audit_log append-only, with a carve-out on audit_log for 0006's FK-driven credential_id SET NULL, 0021 adds attestation_snapshots -- the persisted at-scan-time attestations-applied ledger, issue #306, 0022 adds credentials_credential_type_check mirroring CredentialTypes.All, issue #252, 0023 adds run_secrets + jobs.has_run_secret -- the encrypted run-scoped personal-credential handoff, issue #434, 0024 adds idx_jobs_queue_claim -- the partial index backing the allowlist-filtered atomic claim so runners stop scanning every claimable row, issue #435) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 24;
 
 	private readonly PostgresFixture _fixture;
 
@@ -143,15 +143,18 @@ public sealed class SchemaMigrationTests
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 
-		// The claim query is `WHERE state = 'queued' ORDER BY priority, created_at`;
-		// the index must both exist and carry that partial predicate, or the queue
-		// scans the whole table under load.
+		// The claim query is `WHERE state = 'queued' AND job_type = ANY($3) ORDER BY
+		// priority, created_at` (issue #435/ADR-0014); the index must both exist and
+		// lead with job_type so the allowlist predicate stays index-supported instead
+		// of scanning every claimable row (0024_jobs_queue_claim_job_type_index.sql).
 		await using NpgsqlCommand command = new(
 			"SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_jobs_queue_claim'", connection);
 		object? indexDefinition = await command.ExecuteScalarAsync();
 
 		Assert.NotNull(indexDefinition);
-		Assert.Contains("WHERE (state = 'queued'::text)", (string)indexDefinition!, StringComparison.Ordinal);
+		string definition = (string)indexDefinition!;
+		Assert.Contains("WHERE (state = 'queued'::text)", definition, StringComparison.Ordinal);
+		Assert.Contains("(job_type, priority, created_at)", definition, StringComparison.Ordinal);
 	}
 
 	/// <summary>

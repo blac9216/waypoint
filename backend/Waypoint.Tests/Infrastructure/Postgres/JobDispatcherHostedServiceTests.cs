@@ -438,7 +438,7 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 
 		Guid runId = await _repository.CreateRunAsync("download", "{}", null, null, CancellationToken.None);
 		Guid jobId = Assert.Single(await _repository.FanOutJobsAsync(runId, [new JobSpec("download", 1)], null, CancellationToken.None));
-		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("other-worker", TimeSpan.FromMinutes(1), CancellationToken.None));
+		ClaimedJob claimed = Assert.IsType<ClaimedJob>(await _repository.ClaimJobAsync("other-worker", TimeSpan.FromMinutes(1), JobCapabilities.All, CancellationToken.None));
 		Assert.Equal(jobId, claimed.Id);
 		await dispatcher.AbortRunAsync(runId, CancellationToken.None);
 		Assert.Equal(JobStates.Running, await GetJobStateAsync(jobId));

@@ -73,11 +73,13 @@ public sealed class JobQueueClaimSqlParityTests
 	/// <summary>
 	/// The two claim queries agree on the locking CTE body — everything from
 	/// <c>SELECT id FROM jobs</c> to the closing <c>)</c> — except for the test's
-	/// run-scoping predicate. Asserting the *whole* CTE rather than only the clause is
-	/// what catches a drift the two `Contains` tests above would miss, provided the
-	/// drift lives inside the CTE: for example a second predicate added there
-	/// (`AND attempt_count = 0`) that silently narrows what a dispatcher will ever
-	/// claim while leaving the proven clause intact.
+	/// run-scoping predicate and production's job-type allowlist predicate (issue
+	/// #435/ADR-0014: <c>AND job_type = ANY($3)</c>, deliberately absent from the
+	/// hand-rolled concurrency proof, which does not exercise the allowlist). Asserting
+	/// the *whole* CTE rather than only the clause is what catches a drift the two
+	/// `Contains` tests above would miss, provided the drift lives inside the CTE: for
+	/// example a second predicate added there (`AND attempt_count = 0`) that silently
+	/// narrows what a dispatcher will ever claim while leaving the proven clause intact.
 	///
 	/// <c>ExtractLockingCte</c> reads only up to the first <c>)</c>, so a predicate
 	/// added to the UPDATE's own <c>WHERE</c> clause (one line below the CTE) is
@@ -87,12 +89,26 @@ public sealed class JobQueueClaimSqlParityTests
 	/// claimable.
 	/// </summary>
 	[Fact]
-	public void TheLockingCtesAgreeOnceTheTestsRunScopingIsRemoved()
+	public void TheLockingCtesAgreeOnceTheTestsRunScopingAndAllowlistAreRemoved()
 	{
-		string production = ExtractLockingCte(JobQueueRepository.ClaimSql);
+		string production = ExtractLockingCte(JobQueueRepository.ClaimSql).Replace(" AND job_type = ANY($3)", string.Empty, StringComparison.Ordinal);
 		string proven = ExtractLockingCte(JobsQueueClaimTests.ClaimSql).Replace("run_id = $1 AND ", string.Empty, StringComparison.Ordinal);
 
 		Assert.Equal(production, proven);
+	}
+
+	/// <summary>
+	/// Issue #435: the allowlist predicate must actually be present in production's CTE
+	/// -- the test above only proves the *other* predicates agree once it is stripped
+	/// out, so a regression that silently dropped the predicate (reintroducing the
+	/// global claim ADR-0014 forbids) would pass that test undetected without this one.
+	/// </summary>
+	[Fact]
+	public void ProductionClaim_FiltersOnTheJobTypeAllowlistInsideTheLockingCte()
+	{
+		string production = ExtractLockingCte(JobQueueRepository.ClaimSql);
+
+		Assert.Contains("AND job_type = ANY($3)", production, StringComparison.Ordinal);
 	}
 
 	/// <summary>
@@ -124,14 +140,39 @@ public sealed class JobQueueClaimSqlParityTests
 	private static string Normalize(string sql) =>
 		Regex.Replace(sql, @"\s+", " ", RegexOptions.None, TimeSpan.FromSeconds(5)).Trim();
 
-	/// <summary>The `claimable` CTE body -- everything between `SELECT id FROM jobs` and the closing paren -- normalized.</summary>
+	/// <summary>
+	/// The `claimable` CTE body -- everything between `SELECT id FROM jobs` and the
+	/// CTE's own closing paren -- normalized. Paren-depth-aware rather than "the first
+	/// `)`" (issue #435: production's predicate gained a nested `ANY($3)`, whose own
+	/// closing paren would otherwise be mistaken for the CTE's), so a predicate that
+	/// itself contains parens does not truncate the extracted body early.
+	/// </summary>
 	private static string ExtractLockingCte(string sql)
 	{
 		string normalized = Normalize(sql);
 		int start = normalized.IndexOf("SELECT id FROM jobs", StringComparison.Ordinal);
 		Assert.True(start >= 0, "Claim query no longer opens its locking CTE with 'SELECT id FROM jobs'.");
 
-		int end = normalized.IndexOf(')', start);
+		int depth = 0;
+		int end = -1;
+		for (int i = start; i < normalized.Length; i++)
+		{
+			if (normalized[i] == '(')
+			{
+				depth++;
+			}
+			else if (normalized[i] == ')')
+			{
+				if (depth == 0)
+				{
+					end = i;
+					break;
+				}
+
+				depth--;
+			}
+		}
+
 		Assert.True(end > start, "Claim query's locking CTE is not closed.");
 
 		return normalized[start..end].Trim();

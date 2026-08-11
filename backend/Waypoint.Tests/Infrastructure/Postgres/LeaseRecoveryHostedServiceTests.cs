@@ -56,7 +56,7 @@ public sealed class LeaseRecoveryHostedServiceTests : IAsyncLifetime
 	{
 		Guid jobId = await SeedQueuedJobAsync();
 		TimeSpan lease = TimeSpan.FromMilliseconds(200);
-		await _repository.ClaimJobAsync("crashed-worker", lease, CancellationToken.None);
+		await _repository.ClaimJobAsync("crashed-worker", lease, JobCapabilities.All, CancellationToken.None);
 		await Task.Delay(lease + TimeSpan.FromMilliseconds(300));
 
 		LeaseRecoveryHostedService service = new(
@@ -83,7 +83,7 @@ public sealed class LeaseRecoveryHostedServiceTests : IAsyncLifetime
 	public async Task SweepAsync_NothingExpired_IsANoOpAndEmitsNoEvents()
 	{
 		Guid jobId = await SeedQueuedJobAsync();
-		await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), CancellationToken.None);
+		await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 
 		LeaseRecoveryHostedService service = new(
 			_repository, _events, Options.Create(new JobEngineOptions { Enabled = true }), NullLogger<LeaseRecoveryHostedService>.Instance);
@@ -107,7 +107,7 @@ public sealed class LeaseRecoveryHostedServiceTests : IAsyncLifetime
 		for (int i = 0; i < jobCount; i++)
 		{
 			Guid jobId = await SeedQueuedJobAsync();
-			await _repository.ClaimJobAsync($"worker-{i}", lease, CancellationToken.None);
+			await _repository.ClaimJobAsync($"worker-{i}", lease, JobCapabilities.All, CancellationToken.None);
 		}
 
 		await Task.Delay(lease + TimeSpan.FromMilliseconds(300));
