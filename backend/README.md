@@ -146,9 +146,13 @@ that shape.
     `docs/domain-model.md` nor `docs/api-contract.md` enumerates it, only the field
     name.
 - **Queue-claim index**: `idx_jobs_queue_claim` is a partial index on
-  `(priority, created_at) WHERE state = 'queued'`, matching the ADR-0008 claim query
-  exactly — the claim is an index scan over only the claimable rows, not a table
-  scan. `idx_jobs_lease_recovery` (`lease_expires_at) WHERE state = 'running'`)
+  `(job_type, priority, created_at) WHERE state = 'queued'`, matching the ADR-0008
+  claim query — the claim is an index scan over only the claimable rows, not a table
+  scan. `job_type` leads as of issue #435/ADR-0014 (migration 0023): the claim now
+  also filters on the claiming runner's job-type allowlist (`AND job_type =
+  ANY($3)`, see `Waypoint.Core.Jobs.JobCapabilities`), and that predicate needs
+  `job_type` as the index's leading column to stay index-supported.
+  `idx_jobs_lease_recovery` (`lease_expires_at) WHERE state = 'running'`)
   serves dead-job recovery from the lease/heartbeat columns present from day one.
 - **`job_events` scoping**: the contract's six event types are not all job-scoped, so
   neither `job_id` nor `run_id` can be `NOT NULL` for the table as a whole. Three

@@ -59,21 +59,31 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	//
 	// That clause -- together with the state = 'queued' predicate -- is what
 	// JobsQueueClaimTests (issue #4) proved never double-claims under real concurrency,
-	// and it is what idx_jobs_queue_claim is a partial index on.
+	// and it is what idx_jobs_queue_claim is a partial index on (job_type leads the
+	// index as of #435/0023 so the job_type = ANY($3) predicate below stays index-
+	// supported rather than falling back to scanning every claimable row).
 	//
 	// It is NOT true that this query is byte-identical to that test's. PR #126 claimed
 	// that and it was wrong; the claim landed in a comment in #134 before the type it
 	// referenced existed, so nobody could check it. The two differ deliberately:
 	// JobsQueueClaimTests scopes its claim to one run (WHERE run_id = $1 AND ...) so its
 	// fixtures cannot be disturbed by rows another test class left in the shared
-	// container, and its $1/$2 are run id and claimant. This query is global by design --
-	// a dispatcher claims the highest-priority job anywhere in the queue -- and its
-	// $1/$2 are the worker id and the lease interval.
+	// container, and its $1/$2 are run id and claimant. This query is global-within-
+	// allowlist by design -- a runner claims the highest-priority job anywhere in the
+	// queue among the job types it registered -- and its $1/$2/$3 are the worker id,
+	// the lease interval, and the job-type allowlist.
 	//
 	// The part that IS shared is asserted, not asserted-about: see
 	// JobQueueClaimSqlParityTests, which normalizes both strings and fails if either
 	// side's predicate, ordering or lock clause drifts from the other. Do not edit the
 	// clause above without re-reading that test.
+	//
+	// job_type = ANY($3) is issue #435's ADR-0014 addition: "the atomic claim includes
+	// the runner's explicit job-type allowlist... filtering after a claim is
+	// prohibited." It sits inside the same locking CTE as state = 'queued', not as a
+	// filter on the CTE's result, so an unlike runner can never observe -- let alone
+	// lock -- a row outside its allowlist. ClaimJobAsync below rejects a null/empty
+	// allowlist before this statement ever runs (fail closed).
 	//
 	// Everything set in the UPDATE beyond `state` is new relative to that test. Stamping
 	// the lease atomically with the claim is what makes the #107 stranded-job state
@@ -83,7 +93,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	internal const string ClaimSql = """
 		WITH claimable AS (
 			SELECT id FROM jobs
-			WHERE state = 'queued'
+			WHERE state = 'queued' AND job_type = ANY($3)
 			ORDER BY priority, created_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
@@ -100,9 +110,16 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		RETURNING id, run_id, job_type, target_id, target_name, credential_id, priority, payload::text, attempt_count, max_attempts, stage
 		""";
 
-	public async Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
+	public async Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, IReadOnlySet<string> allowedJobTypes, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
+		if (allowedJobTypes is null || allowedJobTypes.Count == 0)
+		{
+			// ADR-0014/#435: fail closed. A null or empty allowlist must never fall
+			// back to claiming every job type -- that is exactly the cross-domain
+			// claim this predicate exists to prevent.
+			throw new ArgumentException("A non-empty job-type allowlist is required to claim a job.", nameof(allowedJobTypes));
+		}
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -110,6 +127,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		await using NpgsqlCommand command = new(ClaimSql, connection);
 		command.Parameters.AddWithValue(workerId);
 		command.Parameters.AddWithValue(leaseDuration);
+		command.Parameters.AddWithValue(allowedJobTypes.ToArray());
 
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))

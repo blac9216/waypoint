@@ -39,20 +39,31 @@ namespace Waypoint.Core.Jobs;
 public interface IJobRunnerRepository
 {
 	/// <summary>
-	/// Atomically claims the highest-priority, oldest queued job and stamps its lease in
-	/// the same statement -- the single-statement claim ADR-0008/#107 requires so
+	/// Atomically claims the highest-priority, oldest queued job whose <c>job_type</c>
+	/// is in <paramref name="allowedJobTypes"/>, and stamps its lease in the same
+	/// statement -- the single-statement claim ADR-0008/#107 requires so
 	/// <c>state='running'</c> and a non-NULL <c>lease_expires_at</c> can never diverge.
-	/// The predicate and the ordering/locking clause (<c>WHERE state = 'queued' ...
-	/// ORDER BY priority, created_at FOR UPDATE SKIP LOCKED LIMIT 1</c>) are the same
-	/// ones <c>JobsQueueClaimTests</c> (issue #4) proved never double-claim under real
-	/// concurrency; that test's query additionally scopes itself to one run so it cannot
-	/// race another test class's rows, so the two are not identical and this doc does not
-	/// claim they are (<c>JobQueueClaimSqlParityTests</c> pins exactly the part that is
-	/// shared). Do not change the clause without re-running the proof --
+	/// The predicate and the ordering/locking clause (<c>WHERE state = 'queued' AND
+	/// job_type = ANY($3) ORDER BY priority, created_at FOR UPDATE SKIP LOCKED LIMIT
+	/// 1</c>) are the same ones <c>JobsQueueClaimTests</c> (issue #4) proved never
+	/// double-claim under real concurrency; that test's query additionally scopes
+	/// itself to one run so it cannot race another test class's rows, so the two are
+	/// not identical and this doc does not claim they are
+	/// (<c>JobQueueClaimSqlParityTests</c> pins exactly the part that is shared). Do
+	/// not change the clause without re-running the proof --
 	/// <c>JobQueueRepositoryClaimTests</c> carries it forward against this method.
-	/// Returns <c>null</c> if the queue is empty.
+	///
+	/// ADR-0014 (issue #435): "Filtering after a claim is prohibited: a runner must
+	/// never claim and release work belonging to another execution domain." The
+	/// allowlist is therefore applied inside this atomic statement, not as a filter on
+	/// the result. <paramref name="allowedJobTypes"/> must be non-null and non-empty --
+	/// see <see cref="JobCapabilities"/> for the stable <c>compliance-runner</c>/
+	/// <c>download-runner</c> sets ADR-0013 §2 assigns, and <see cref="JobCapabilities.All"/>
+	/// for the combined set today's still-unsplit dispatcher passes. An empty or null
+	/// allowlist throws rather than claiming globally -- fail closed, never claim
+	/// everything. Returns <c>null</c> if no queued job matches.
 	/// </summary>
-	Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken);
+	Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, IReadOnlySet<string> allowedJobTypes, CancellationToken cancellationToken);
 
 	/// <summary>Extends a claimed job's lease. Only succeeds while the job is still owned by <paramref name="workerId"/> and in an active state.</summary>
 	Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken);
