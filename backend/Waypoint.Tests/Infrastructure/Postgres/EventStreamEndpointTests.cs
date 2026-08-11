@@ -75,8 +75,13 @@ public sealed class EventStreamEndpointTests : IAsyncLifetime
 						options.SseHeartbeatInterval = interval;
 					}
 				});
-				services.AddSingleton<Waypoint.Core.Jobs.IJobQueueRepository>(provider => new Waypoint.Infrastructure.Jobs.JobQueueRepository(
+				// Issue #415: one JobQueueRepository instance satisfies both focused
+				// interfaces the EventStreamController (control) and the dispatcher
+				// (runner) resolve.
+				services.AddSingleton(provider => new Waypoint.Infrastructure.Jobs.JobQueueRepository(
 					_connectionString, NullLogger<Waypoint.Infrastructure.Jobs.JobQueueRepository>.Instance));
+				services.AddSingleton<Waypoint.Core.Jobs.IJobControlRepository>(provider => provider.GetRequiredService<Waypoint.Infrastructure.Jobs.JobQueueRepository>());
+				services.AddSingleton<Waypoint.Core.Jobs.IJobRunnerRepository>(provider => provider.GetRequiredService<Waypoint.Infrastructure.Jobs.JobQueueRepository>());
 				// #374: this must resolve the SAME redactor instance registered for
 				// ISecretRedactor/ISecretTracker in the base container -- a disconnected
 				// `new InPlaySecretRedactor()` here would make EmitAsync scrub against an

@@ -644,23 +644,33 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 				options.DefaultForbidScheme = TestAuthHandler.SchemeName;
 			});
 
-			// Replace the default (no-op or Postgres) IJobQueueRepository with our fake.
-			var descriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IJobQueueRepository));
-			if (descriptor != null)
+			// Replace the default (no-op or Postgres) job repositories with our fake --
+			// issue #415 split IJobQueueRepository into IJobControlRepository and
+			// IJobRunnerRepository, so both registrations must be swapped for any
+			// controller resolved through this host to see the fake.
+			foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 			{
-				services.Remove(descriptor);
+				var descriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
+				if (descriptor != null)
+				{
+					services.Remove(descriptor);
+				}
 			}
-			services.AddSingleton<IJobQueueRepository>(Repository);
+			services.AddSingleton<IJobControlRepository>(Repository);
+			services.AddSingleton<IJobRunnerRepository>(Repository);
 		});
 	}
 }
 
 /// <summary>
-/// Minimal fake IJobQueueRepository for RunsController tests. Tracks state per run
+/// Minimal fake job repository for RunsController tests. Tracks state per run
 /// GUID so that nonexistent run IDs return null (404). Only the methods exercised by
-/// the controller are implemented; the rest return no-op defaults.
+/// the controller are implemented; the rest return no-op defaults. Implements both
+/// <see cref="IJobControlRepository"/> and <see cref="IJobRunnerRepository"/> (issue
+/// #415's split of the former combined <c>IJobQueueRepository</c>) since this test host
+/// swaps both registrations so every controller resolved through it sees one fake.
 /// </summary>
-public sealed class FakeJobQueueRepository : IJobQueueRepository
+public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRepository
 {
 	private readonly Dictionary<Guid, RunQueueState> _runs = new();
 	private bool _pauseResult = true;

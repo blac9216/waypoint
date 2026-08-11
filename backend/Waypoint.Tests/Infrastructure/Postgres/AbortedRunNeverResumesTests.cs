@@ -69,6 +69,7 @@ public sealed class AbortedRunNeverResumesTests : IAsyncLifetime
 		int calls = 0;
 		FakeJobHandler handler = new("download", (_, _) => { Interlocked.Increment(ref calls); return Task.FromResult(JobExecutionOutcome.Succeeded()); });
 		JobDispatcherHostedService dispatcher = new(_repository,
+			_repository,
 			new JobEventPublisher(_fixture.ConnectionString, 5, new InPlaySecretRedactor(), NullLogger<JobEventPublisher>.Instance),
 			new JobHandlerRegistry([handler]), Options.Create(new JobEngineOptions { PollInterval = TimeSpan.FromMilliseconds(25) }),
 			NullLogger<JobDispatcherHostedService>.Instance);

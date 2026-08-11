@@ -277,7 +277,7 @@ public sealed class JobStageDispatcherTests : IAsyncLifetime
 	{
 		JobEngineOptions options = new() { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(25) };
 		return new JobDispatcherHostedService(
-			_repository, _events, new JobHandlerRegistry([handler]), Options.Create(options), NullLogger<JobDispatcherHostedService>.Instance);
+			_repository, _repository, _events, new JobHandlerRegistry([handler]), Options.Create(options), NullLogger<JobDispatcherHostedService>.Instance);
 	}
 
 	private async Task<Guid> SeedQueuedScanJobAsync()

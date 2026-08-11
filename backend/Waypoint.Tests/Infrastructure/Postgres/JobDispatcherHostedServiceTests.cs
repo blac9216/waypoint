@@ -112,7 +112,7 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 	{
 		JobEngineOptions effective = options ?? new JobEngineOptions { Enabled = true };
 		return new JobDispatcherHostedService(
-			_repository, _events, new JobHandlerRegistry(handlers), Options.Create(effective), _dispatcherLogger);
+			_repository, _repository, _events, new JobHandlerRegistry(handlers), Options.Create(effective), _dispatcherLogger);
 	}
 
 	[Fact]
@@ -280,7 +280,7 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 
 	/// <summary>
 	/// Issue #234: a running job's per-job cancel_requested flag (set by
-	/// <see cref="IJobQueueRepository.CancelJobAsync"/>, the DELETE /downloads/{id} path)
+	/// <see cref="IJobControlRepository.CancelJobAsync"/>, the DELETE /downloads/{id} path)
 	/// is observed by the heartbeat loop -- same tick as the pre-existing run-abort
 	/// check -- and stops the handler promptly, releases the lease, and lands the job in
 	/// 'cancelled' with a note that names cancel-by-request rather than run-abort. The

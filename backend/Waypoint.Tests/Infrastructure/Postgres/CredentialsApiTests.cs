@@ -81,13 +81,15 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 					NullLogger<CredentialCreationCoordinator>.Instance));
 
 				// Issue #245: /credentials/{id}/test now fans out a job, so the
-				// controller needs IJobQueueRepository -- JobEngine:Enabled is false
+				// controller needs IJobControlRepository -- JobEngine:Enabled is false
 				// in the Testing environment (appsettings.Testing.json), so the real
 				// registration in AddWaypointInfrastructure never runs; register it
 				// directly here, the same pattern CatalogApiTests already uses for
-				// DownloadsController's job fan-out.
-				services.AddSingleton<IJobQueueRepository>(new JobQueueRepository(
-					_connectionString, NullLogger<JobQueueRepository>.Instance));
+				// DownloadsController's job fan-out. One instance backs both focused
+				// interfaces (issue #415).
+				JobQueueRepository jobs = new(_connectionString, NullLogger<JobQueueRepository>.Instance);
+				services.AddSingleton<IJobControlRepository>(jobs);
+				services.AddSingleton<IJobRunnerRepository>(jobs);
 			});
 		}
 	}

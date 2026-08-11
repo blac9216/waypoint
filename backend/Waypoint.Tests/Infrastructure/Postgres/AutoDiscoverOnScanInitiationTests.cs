@@ -134,14 +134,19 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
 
-				var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IJobQueueRepository));
-				if (jobsDescriptor != null)
+				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{
-					services.Remove(jobsDescriptor);
+					var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
+					if (jobsDescriptor != null)
+					{
+						services.Remove(jobsDescriptor);
+					}
 				}
 
-				services.AddSingleton<IJobQueueRepository>(serviceProvider => new JobQueueRepository(
+				services.AddSingleton(serviceProvider => new JobQueueRepository(
 					_connectionString, serviceProvider.GetRequiredService<ILogger<JobQueueRepository>>()));
+				services.AddSingleton<IJobControlRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
+				services.AddSingleton<IJobRunnerRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
 			});
 		}
 	}
@@ -248,6 +253,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 	{
 		JobEngineOptions options = new() { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(50), MaxConcurrency = maxConcurrency };
 		return new JobDispatcherHostedService(
+			_repository,
 			_repository,
 			new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, _redactor, NullLogger<JobEventPublisher>.Instance),
 			new JobHandlerRegistry([_discoverHandler, _scanHandler]),

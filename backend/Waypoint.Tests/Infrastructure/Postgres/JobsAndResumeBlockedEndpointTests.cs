@@ -31,9 +31,9 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
 /// Issue #291, end to end against real Postgres: <c>DELETE /jobs/{id}</c> (thin wrapper
-/// over #277's <see cref="IJobQueueRepository.CancelJobAsync"/>) and
+/// over #277's <see cref="IJobControlRepository.CancelJobAsync"/>) and
 /// <c>POST /runs/{id}/resume-blocked</c> (the new true-swap primitive,
-/// <see cref="IJobQueueRepository.SwapAndResumeBlockedCredentialAsync"/>). Proves the
+/// <see cref="IJobControlRepository.SwapAndResumeBlockedCredentialAsync"/>). Proves the
 /// database effects the fake-repository role-gate tests cannot: jobs actually carrying
 /// the new credential_id after a swap, and the audit_log row carrying both identities.
 /// </summary>
@@ -68,14 +68,19 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 					options.DefaultForbidScheme = TestAuthHandler.SchemeName;
 				});
 
-				var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IJobQueueRepository));
-				if (jobsDescriptor != null)
+				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{
-					services.Remove(jobsDescriptor);
+					var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
+					if (jobsDescriptor != null)
+					{
+						services.Remove(jobsDescriptor);
+					}
 				}
 
-				services.AddSingleton<IJobQueueRepository>(serviceProvider => new JobQueueRepository(
+				services.AddSingleton(serviceProvider => new JobQueueRepository(
 					_connectionString, serviceProvider.GetRequiredService<ILogger<JobQueueRepository>>()));
+				services.AddSingleton<IJobControlRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
+				services.AddSingleton<IJobRunnerRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
 			});
 		}
 	}

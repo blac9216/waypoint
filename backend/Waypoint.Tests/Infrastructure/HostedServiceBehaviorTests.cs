@@ -30,7 +30,7 @@ public sealed class HostedServiceBehaviorTests
 		CapturingLogger<JobDispatcherHostedService> dispatcherLog = new();
 		CapturingLogger<LeaseRecoveryHostedService> recoveryLog = new();
 		IOptions<JobEngineOptions> options = Options.Create(new JobEngineOptions { Enabled = false });
-		await new JobDispatcherHostedService(repository, events, new JobHandlerRegistry([]), options, dispatcherLog).StartAsync(CancellationToken.None);
+		await new JobDispatcherHostedService(repository, repository, events, new JobHandlerRegistry([]), options, dispatcherLog).StartAsync(CancellationToken.None);
 		await new LeaseRecoveryHostedService(repository, events, options, recoveryLog).StartAsync(CancellationToken.None);
 		Assert.Contains("disabled", dispatcherLog.OnlyEntryAt(LogLevel.Information).Message, StringComparison.OrdinalIgnoreCase);
 		Assert.Contains("disabled", recoveryLog.OnlyEntryAt(LogLevel.Information).Message, StringComparison.OrdinalIgnoreCase);
@@ -212,7 +212,7 @@ public sealed class HostedServiceBehaviorTests
 	}
 
 	private static JobDispatcherHostedService Dispatcher(FakeRepository repository, CapturingLogger<JobDispatcherHostedService> logger, params IJobHandler[] handlers) =>
-		new(repository, new FakeEvents(), new JobHandlerRegistry(handlers), Options.Create(new JobEngineOptions
+		new(repository, repository, new FakeEvents(), new JobHandlerRegistry(handlers), Options.Create(new JobEngineOptions
 		{
 			PollInterval = TimeSpan.FromMilliseconds(10),
 			LeaseDuration = TimeSpan.FromSeconds(1),
@@ -236,7 +236,7 @@ public sealed class HostedServiceBehaviorTests
 		{ Count++; return Task.CompletedTask; }
 	}
 
-	private sealed class FakeRepository : IJobQueueRepository
+	private sealed class FakeRepository : IJobControlRepository, IJobRunnerRepository
 	{
 		public ClaimedJob? NextClaim { get; set; }
 		public RunQueueState? RunState { get; set; }

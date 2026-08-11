@@ -166,7 +166,12 @@ public sealed class CatalogTestApiFactory : WaypointApiFactory
 			});
 
 			ReplaceSingleton<IDepotArtifactRepository>(services, Artifacts);
-			ReplaceSingleton<IJobQueueRepository>(services, Jobs);
+			// Issue #415 split IJobQueueRepository into IJobControlRepository and
+			// IJobRunnerRepository -- CatalogController only depends on the former, but
+			// both registrations are swapped so any other controller resolved through
+			// this host also sees the fake.
+			ReplaceSingleton<IJobControlRepository>(services, Jobs);
+			ReplaceSingleton<IJobRunnerRepository>(services, Jobs);
 		});
 	}
 
@@ -210,11 +215,14 @@ public sealed class FakeDepotArtifactRepository : IDepotArtifactRepository
 }
 
 /// <summary>
-/// Minimal <see cref="IJobQueueRepository"/> fake for /catalog/sync tests -- only
+/// Minimal job repository fake for /catalog/sync tests -- only
 /// <see cref="CreateRunAsync"/> and <see cref="FanOutJobsAsync"/> are exercised by
-/// <c>CatalogController.Sync</c>; every other member is unused scaffolding.
+/// <c>CatalogController.Sync</c>; every other member is unused scaffolding. Implements
+/// both <see cref="IJobControlRepository"/> and <see cref="IJobRunnerRepository"/>
+/// (issue #415's split of the former combined <c>IJobQueueRepository</c>) since this
+/// test host swaps both registrations.
 /// </summary>
-public sealed class CatalogFakeJobQueueRepository : IJobQueueRepository
+public sealed class CatalogFakeJobQueueRepository : IJobControlRepository, IJobRunnerRepository
 {
 	public (string RunType, string ScopeJson, Guid? CredentialId, string? InitiatedBy)? LastCreateRun { get; private set; }
 	public IReadOnlyList<JobSpec>? LastFanOut { get; private set; }

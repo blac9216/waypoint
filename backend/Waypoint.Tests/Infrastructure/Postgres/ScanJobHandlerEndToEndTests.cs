@@ -151,6 +151,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		JobEngineOptions options = new() { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(50), MaxConcurrency = 2 };
 		return new JobDispatcherHostedService(
 			_repository,
+			_repository,
 			new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, _redactor, NullLogger<JobEventPublisher>.Instance),
 			new JobHandlerRegistry([_handler]),
 			Options.Create(options),
@@ -395,6 +396,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		JobEngineOptions options = new() { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(50), MaxConcurrency = 1 };
 		JobDispatcherHostedService dispatcher = new(
 			_repository,
+			_repository,
 			new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, _redactor, NullLogger<JobEventPublisher>.Instance),
 			new JobHandlerRegistry([_handler]),
 			Options.Create(options),
@@ -568,6 +570,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 
 		JobEngineOptions options = new() { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(50), MaxConcurrency = 1 };
 		JobDispatcherHostedService dispatcher = new(
+			_repository,
 			_repository,
 			new JobEventPublisher(_fixture.ConnectionString, commandTimeoutSeconds: 5, _redactor, NullLogger<JobEventPublisher>.Instance),
 			new JobHandlerRegistry([_handler]),

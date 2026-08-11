@@ -197,6 +197,7 @@ public sealed class RunFanOutPauseAbortTests : IAsyncLifetime
 		JobEventPublisher events = new(_fixture.ConnectionString, 5, new InPlaySecretRedactor(), NullLogger<JobEventPublisher>.Instance);
 		JobDispatcherHostedService dispatcher = new(
 			_repository,
+			_repository,
 			events,
 			new JobHandlerRegistry([handler]),
 			Options.Create(new JobEngineOptions { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(25) }),
