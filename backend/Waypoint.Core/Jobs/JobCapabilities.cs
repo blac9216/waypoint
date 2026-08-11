@@ -26,7 +26,7 @@ namespace Waypoint.Core.Jobs;
 /// it to the CHECK constraint, or it becomes unclaimable by any runner.
 ///
 /// Both runners still live behind the single combined
-/// <see cref="JobDispatcherHostedService"/>/<see cref="JobHandlerRegistry"/> today --
+/// <c>Waypoint.Runner.Jobs.JobDispatcherHostedService</c>/<c>Waypoint.Runner.Jobs.JobHandlerRegistry</c> today --
 /// ADR-0013's split into two separate runner executables is a later migration -- so
 /// these sets are the seam that split will key its two claim loops on, and are already
 /// what <see cref="IJobRunnerRepository.ClaimJobAsync"/> requires a caller to narrow to
@@ -72,7 +72,7 @@ public static class JobCapabilities
 
 	/// <summary>
 	/// The union of every capability set -- exactly <c>jobs_job_type_check</c>'s
-	/// values. Used by the still-combined dispatcher (<see cref="JobDispatcherHostedService"/>)
+	/// values. Used by the still-combined dispatcher (<c>Waypoint.Runner.Jobs.JobDispatcherHostedService</c>)
 	/// until ADR-0013's runner split lands, so today's single process keeps claiming
 	/// every job type it always has, through the same non-empty-allowlist path a split
 	/// runner will use with a narrower set.

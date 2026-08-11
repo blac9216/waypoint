@@ -41,6 +41,7 @@ using Waypoint.Infrastructure.Scans;
 using Waypoint.Infrastructure.Secrets;
 using Waypoint.Infrastructure.Sites;
 using Waypoint.Infrastructure.StigManager;
+using Waypoint.Runner.Jobs;
 using Waypoint.Tests.Support;
 using Xunit;
 

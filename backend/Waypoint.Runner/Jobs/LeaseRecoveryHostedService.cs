@@ -18,7 +18,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
 
-namespace Waypoint.Infrastructure.Jobs;
+namespace Waypoint.Runner.Jobs;
 
 /// <summary>
 /// Periodically sweeps <c>jobs</c> for expired leases (a worker that claimed a job and

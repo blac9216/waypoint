@@ -88,22 +88,22 @@ public sealed class EventStreamEndpointTests : IAsyncLifetime
 				// empty tracked-secret set no matter what a test tracks, silently
 				// defeating any canary written through this publisher (caught by the
 				// SSE redaction canary below, which failed against the old wiring).
-				services.AddSingleton<Waypoint.Core.Jobs.IJobEventPublisher>(provider => new Waypoint.Infrastructure.Jobs.JobEventPublisher(
+				services.AddSingleton<Waypoint.Core.Jobs.IJobEventPublisher>(provider => new Waypoint.Runner.Jobs.JobEventPublisher(
 					_connectionString, commandTimeoutSeconds: 5, provider.GetRequiredService<Waypoint.Core.Logging.ISecretRedactor>(),
-					NullLogger<Waypoint.Infrastructure.Jobs.JobEventPublisher>.Instance));
+					NullLogger<Waypoint.Runner.Jobs.JobEventPublisher>.Instance));
 				services.AddSingleton(provider => new Waypoint.Infrastructure.Jobs.JobEventStreamService(
 					_connectionString,
 					provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<Waypoint.Core.Jobs.JobEngineOptions>>(),
 					NullLogger<Waypoint.Infrastructure.Jobs.JobEventStreamService>.Instance));
 				services.AddSingleton<Waypoint.Core.Jobs.IJobEventFeed>(provider =>
 					provider.GetRequiredService<Waypoint.Infrastructure.Jobs.JobEventStreamService>());
-				services.AddSingleton(provider => new Waypoint.Infrastructure.Jobs.BufferedJobEventWriter(
+				services.AddSingleton(provider => new Waypoint.Runner.Jobs.BufferedJobEventWriter(
 					_connectionString,
 					provider.GetRequiredService<Waypoint.Core.Logging.ISecretRedactor>(),
 					provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<Waypoint.Core.Jobs.JobEngineOptions>>(),
-					NullLogger<Waypoint.Infrastructure.Jobs.BufferedJobEventWriter>.Instance));
+					NullLogger<Waypoint.Runner.Jobs.BufferedJobEventWriter>.Instance));
 				services.AddSingleton<Waypoint.Core.Jobs.IJobLogBuffer>(provider =>
-					provider.GetRequiredService<Waypoint.Infrastructure.Jobs.BufferedJobEventWriter>());
+					provider.GetRequiredService<Waypoint.Runner.Jobs.BufferedJobEventWriter>());
 			});
 		}
 	}

@@ -19,7 +19,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
 
-namespace Waypoint.Infrastructure.Jobs;
+namespace Waypoint.Runner.Jobs;
 
 /// <summary>
 /// The ADR-0008 dispatcher: claims one job at a time up to
@@ -138,12 +138,13 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 			ClaimedJob? job;
 			try
 			{
-				// Issue #435 (ADR-0014): this dispatcher is still today's stand-in for
-				// both future dedicated runner processes (ADR-0013/#415's doc comment),
-				// so it claims the full union -- JobCapabilities.All -- rather than
-				// either domain's narrower allowlist. A split compliance-runner/
-				// download-runner will each pass their own JobCapabilities set instead.
-				job = await _repository.ClaimJobAsync(WorkerId, options.LeaseDuration, JobCapabilities.All, stoppingToken).ConfigureAwait(false);
+				// Issue #436: the allowlist comes from the mandatory capability
+				// registration on JobHandlerRegistry (fail-closed at construction --
+				// see its doc comment), never a value this loop chooses itself. Today's
+				// still-unsplit host passes JobCapabilities.All; a split
+				// compliance-runner/download-runner passes its own narrower set the
+				// same way, through the same registry.
+				job = await _repository.ClaimJobAsync(WorkerId, options.LeaseDuration, _handlers.AllowedJobTypes, stoppingToken).ConfigureAwait(false);
 			}
 			catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
 			{

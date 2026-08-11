@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ADR-0013/0014: the shared runner lifecycle host. This project owns dispatcher
+    mechanics (claim loop, handler registry, lease heartbeat, cancellation, graceful
+    shutdown, stage-complete requeue per ADR-0012, expired-lease recovery, and the
+    database-backed buffered event writer) independently of ASP.NET. It references
+    only Waypoint.Core (job-engine contracts) plus the Generic Host/logging/options
+    abstractions and Npgsql for the event-write path. It must never reference
+    Waypoint.Api or host REST/SSE: those stay the control plane's job (ADR-0013 P1).
+    A future dedicated compliance-runner/download-runner executable, and today's
+    Waypoint.Api process until #443 removes execution from it, both reference this
+    project rather than duplicating the mechanics.
+  -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\Waypoint.Core\Waypoint.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.2" />
+    <!-- The buffered/single-row event writers talk to job_events directly (ADR-0014
+         §3: runners write structured events directly to PostgreSQL); no ORM, matching
+         Waypoint.Infrastructure's own choice for the same reason. -->
+    <PackageReference Include="Npgsql" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Waypoint.Tests" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

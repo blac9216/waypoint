@@ -17,7 +17,7 @@ using Npgsql;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 
-namespace Waypoint.Infrastructure.Jobs;
+namespace Waypoint.Runner.Jobs;
 
 /// <summary>
 /// Writes one row to <c>job_events</c> per call, each on its own connection with an

@@ -20,7 +20,7 @@ using Npgsql;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Infrastructure.Data;
-using Waypoint.Infrastructure.Jobs;
+using Waypoint.Runner.Jobs;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Postgres;

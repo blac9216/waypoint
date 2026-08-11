@@ -11,16 +11,17 @@ and event boundary. See [ADR-0013](../docs/adr/0013-control-plane-and-runners.md
 
 | Project | Purpose |
 |---|---|
-| `Waypoint.Api` | ASP.NET Core host: controllers, middleware, authentication, DI composition root (`Program.cs`). |
-| `Waypoint.Core` | Domain layer: roles/authorization, the error envelope, pagination, configuration option types, the local-auth and log-redaction abstractions. No ASP.NET Core hosting dependency beyond the lightweight `Microsoft.AspNetCore.Authorization` package. |
-| `Waypoint.Infrastructure` | DI wiring for the abstractions `Waypoint.Core` declares (the in-memory local-auth implementation) plus Postgres access: the schema migrations pipeline (`Data/`, issue #4). It currently also contains transitional PowerShell/job execution code that will move behind runner handlers. |
-| `Waypoint.Tests` | xUnit — unit tests for `Core`/`Infrastructure` plus `WebApplicationFactory`-based integration tests against the real HTTP pipeline. |
+| `Waypoint.Api` | ASP.NET Core host: controllers, middleware, authentication, DI composition root (`Program.cs`). It still registers `Waypoint.Runner`'s hosted services today (see below) — #443 removes execution from this process entirely. |
+| `Waypoint.Core` | Domain layer: roles/authorization, the error envelope, pagination, configuration option types, the local-auth and log-redaction abstractions, and the job-engine contracts (`Jobs/`) every other project builds on. No ASP.NET Core hosting dependency beyond the lightweight `Microsoft.AspNetCore.Authorization` package. |
+| `Waypoint.Infrastructure` | DI wiring for the abstractions `Waypoint.Core` declares (the in-memory local-auth implementation) plus Postgres access: the schema migrations pipeline (`Data/`, issue #4), the job queue repository, and the SSE tail-poll event-stream service. It currently also contains transitional PowerShell/job execution code that will move behind runner handlers. |
+| `Waypoint.Runner` | The shared .NET Generic Host runner lifecycle library (ADR-0013/0014, issue #436): worker identity, mandatory capability/handler registration (`JobHandlerRegistry`, fails closed on an empty allowlist or a duplicate handler), the dispatcher claim loop, lease heartbeat, cancellation, graceful shutdown, stage-complete requeue (ADR-0012), expired-lease recovery, and the database-backed buffered/single-row event writers. It references only `Waypoint.Core` and never ASP.NET — no REST, no SSE query surface. `Waypoint.Api` consumes it today; a future dedicated `compliance-runner`/`download-runner` executable consumes it the same way. |
+| `Waypoint.Tests` | xUnit — unit tests for `Core`/`Infrastructure`/`Runner` plus `WebApplicationFactory`-based integration tests against the real HTTP pipeline. `Waypoint.Tests/Runner/` exercises the dispatcher/recovery/registry mechanics directly against fakes, with no ASP.NET test server and no Postgres. |
 
-The target solution additionally has a shared runner library for claiming, leases,
-heartbeats, cancellation, event publication, secret handling, and resource-aware
-scheduling, plus `compliance-runner` and `download-runner` hosts. Both runner images
-embed PowerShell through `Microsoft.PowerShell.SDK`; they do not call back through the
-API for execution.
+The target solution additionally has `compliance-runner` and `download-runner`
+executable hosts that each reference `Waypoint.Runner` and register their own
+narrower `JobCapabilities` set and domain handlers. Both runner images embed
+PowerShell through `Microsoft.PowerShell.SDK`; they do not call back through the API
+for execution.
 
 ## Build and test
 

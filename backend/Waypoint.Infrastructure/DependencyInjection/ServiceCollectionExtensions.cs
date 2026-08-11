@@ -33,6 +33,7 @@ using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Sites;
 using Waypoint.Infrastructure.SystemState;
+using Waypoint.Runner.Jobs;
 
 namespace Waypoint.Infrastructure.DependencyInjection;
 
@@ -101,7 +102,14 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<ISecretRedactor>(serviceProvider => serviceProvider.GetRequiredService<InPlaySecretRedactor>());
 		services.AddSingleton<ISecretTracker>(serviceProvider => serviceProvider.GetRequiredService<InPlaySecretRedactor>());
 
-		services.AddSingleton<JobHandlerRegistry>();
+		// Issue #436: JobHandlerRegistry is the mandatory capability-registration
+		// point (fails closed on an empty allowlist or a duplicate handler -- see its
+		// doc comment). Waypoint.Api still hosts both execution domains combined
+		// today, so it registers JobCapabilities.All; a split compliance-runner/
+		// download-runner registers its own narrower set through the same
+		// constructor instead.
+		services.AddSingleton(serviceProvider => new JobHandlerRegistry(
+			serviceProvider.GetServices<IJobHandler>(), JobCapabilities.All));
 
 		// Disk usage is a filesystem stat, not a database read -- registered
 		// unconditionally so GET /system still reports store usage on a host with no
