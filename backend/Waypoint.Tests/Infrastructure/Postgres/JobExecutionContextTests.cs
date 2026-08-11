@@ -127,7 +127,7 @@ public sealed class JobExecutionContextTests : IAsyncLifetime
 			"INSERT INTO jobs (job_type, priority, state) VALUES ('scan', 1, 'queued') RETURNING id", connection);
 		await insert.ExecuteScalarAsync();
 
-		ClaimedJob? claimed = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? claimed = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(claimed);
 		return claimed!;
 	}

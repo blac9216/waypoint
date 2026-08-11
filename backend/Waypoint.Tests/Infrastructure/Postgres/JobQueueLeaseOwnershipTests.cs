@@ -240,7 +240,7 @@ public sealed class JobQueueLeaseOwnershipTests : IAsyncLifetime
 		Guid jobId = await SeedAndClaimAsync(TimeSpan.FromMinutes(5));
 		Assert.True(await _repository.ReleaseClaimAsync(jobId, Owner, CancellationToken.None));
 
-		ClaimedJob? reclaimed = await _repository.ClaimJobAsync("worker-next", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? reclaimed = await _repository.ClaimJobAsync("worker-next", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 
 		Assert.NotNull(reclaimed);
 		Assert.Equal(jobId, reclaimed.Id);
@@ -547,7 +547,7 @@ public sealed class JobQueueLeaseOwnershipTests : IAsyncLifetime
 			await insert.ExecuteNonQueryAsync();
 		}
 
-		ClaimedJob? claimed = await _repository.ClaimJobAsync(Owner, leaseDuration, CancellationToken.None);
+		ClaimedJob? claimed = await _repository.ClaimJobAsync(Owner, leaseDuration, JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(claimed);
 		return claimed.Id;
 	}

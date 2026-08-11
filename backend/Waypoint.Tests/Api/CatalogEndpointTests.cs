@@ -241,9 +241,9 @@ public sealed class CatalogFakeJobQueueRepository : IJobControlRepository, IJobR
 		return Task.FromResult<IReadOnlyList<Guid>>(specs.Select(_ => Guid.NewGuid()).ToArray());
 	}
 
-	public Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
+	public Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, IReadOnlySet<string> allowedJobTypes, CancellationToken cancellationToken)
 	{
-		_ = (workerId, leaseDuration, cancellationToken);
+		_ = (workerId, leaseDuration, allowedJobTypes, cancellationToken);
 		return Task.FromResult<ClaimedJob?>(null);
 	}
 

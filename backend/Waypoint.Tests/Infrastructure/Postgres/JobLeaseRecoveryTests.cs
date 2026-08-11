@@ -63,7 +63,7 @@ public sealed class JobLeaseRecoveryTests : IAsyncLifetime
 		Guid jobId = await SeedQueuedJobAsync(maxAttempts: 3);
 		TimeSpan shortLease = TimeSpan.FromMilliseconds(300);
 
-		ClaimedJob? claimed = await _repository.ClaimJobAsync("crashed-worker", shortLease, CancellationToken.None);
+		ClaimedJob? claimed = await _repository.ClaimJobAsync("crashed-worker", shortLease, JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(claimed);
 		Assert.Equal(1, claimed!.AttemptCount);
 
@@ -94,7 +94,7 @@ public sealed class JobLeaseRecoveryTests : IAsyncLifetime
 	{
 		await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => _repository.RecoverExpiredLeasesAsync(0, CancellationToken.None));
 		Guid jobId = await SeedQueuedJobAsync(maxAttempts: 3);
-		await _repository.ClaimJobAsync("crashed-worker", TimeSpan.FromMilliseconds(100), CancellationToken.None);
+		await _repository.ClaimJobAsync("crashed-worker", TimeSpan.FromMilliseconds(100), JobCapabilities.All, CancellationToken.None);
 		await Task.Delay(TimeSpan.FromMilliseconds(250));
 		Waypoint.Tests.Support.CapturingLogger<JobQueueRepository> logger = new();
 		JobQueueRepository capturing = new(_fixture.ConnectionString, logger);
@@ -110,7 +110,7 @@ public sealed class JobLeaseRecoveryTests : IAsyncLifetime
 		Guid jobId = await SeedQueuedJobAsync(maxAttempts: 1);
 		TimeSpan shortLease = TimeSpan.FromMilliseconds(300);
 
-		await _repository.ClaimJobAsync("crashed-worker", shortLease, CancellationToken.None);
+		await _repository.ClaimJobAsync("crashed-worker", shortLease, JobCapabilities.All, CancellationToken.None);
 		await Task.Delay(shortLease + TimeSpan.FromMilliseconds(400));
 
 		IReadOnlyList<RecoveredJob> recovered = await _repository.RecoverExpiredLeasesAsync(batchSize: 10, CancellationToken.None);
@@ -138,7 +138,7 @@ public sealed class JobLeaseRecoveryTests : IAsyncLifetime
 		TimeSpan lease = TimeSpan.FromSeconds(2);
 		TimeSpan heartbeatCadence = TimeSpan.FromMilliseconds(250);
 
-		ClaimedJob? claimed = await _repository.ClaimJobAsync("slow-worker", lease, CancellationToken.None);
+		ClaimedJob? claimed = await _repository.ClaimJobAsync("slow-worker", lease, JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(claimed);
 
 		using CancellationTokenSource stop = new();
@@ -203,7 +203,7 @@ public sealed class JobLeaseRecoveryTests : IAsyncLifetime
 		JobQueueRepository claimer = new(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
 		for (int i = 0; i < jobCount; i++)
 		{
-			await claimer.ClaimJobAsync($"worker-{independentRun}-{i}", lease, CancellationToken.None);
+			await claimer.ClaimJobAsync($"worker-{independentRun}-{i}", lease, JobCapabilities.All, CancellationToken.None);
 		}
 
 		await Task.Delay(lease + TimeSpan.FromMilliseconds(400));

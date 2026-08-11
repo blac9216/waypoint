@@ -330,7 +330,7 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 		}
 
 		// The claim predicate only sees 'queued': nothing from this fan-out is claimable.
-		Assert.Null(await _repository.ClaimJobAsync("worker-post-halt", TimeSpan.FromMinutes(5), CancellationToken.None));
+		Assert.Null(await _repository.ClaimJobAsync("worker-post-halt", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None));
 	}
 
 	/// <summary>The credential row records the halt durably, with the why and when the CHECK demands.</summary>
@@ -429,7 +429,7 @@ public sealed class AuthFailureHaltTests : IAsyncLifetime
 
 		RecoveredJob job = Assert.Single(recovered, r => r.Id == jobId);
 		Assert.Equal("blocked", job.NewState);
-		Assert.Null(await _repository.ClaimJobAsync("worker-after-recovery", TimeSpan.FromMinutes(5), CancellationToken.None));
+		Assert.Null(await _repository.ClaimJobAsync("worker-after-recovery", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None));
 	}
 
 	/// <summary>#147: a fan-out that is born blocked (credential already halted) emits a

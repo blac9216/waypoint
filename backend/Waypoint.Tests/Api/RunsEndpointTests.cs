@@ -810,9 +810,9 @@ public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRe
 		return Task.FromResult(JobRetryOutcome.Retried);
 	}
 
-	public Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
+	public Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, IReadOnlySet<string> allowedJobTypes, CancellationToken cancellationToken)
 	{
-		_ = (workerId, leaseDuration, cancellationToken);
+		_ = (workerId, leaseDuration, allowedJobTypes, cancellationToken);
 		return Task.FromResult<ClaimedJob?>(null);
 	}
 

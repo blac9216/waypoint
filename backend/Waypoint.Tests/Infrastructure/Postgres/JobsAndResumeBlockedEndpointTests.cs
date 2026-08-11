@@ -290,7 +290,7 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 		// straight back via ClaimedJob.Stage, so the handler resumes at "converting"
 		// instead of restarting the pipeline from the first stage.
 		JobQueueRepository repository = new(_fixture.ConnectionString, Microsoft.Extensions.Logging.Abstractions.NullLogger<JobQueueRepository>.Instance);
-		ClaimedJob? claimed = await repository.ClaimJobAsync("worker-resume-test", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? claimed = await repository.ClaimJobAsync("worker-resume-test", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 
 		Assert.NotNull(claimed);
 		Assert.Equal(jobId, claimed!.Id);

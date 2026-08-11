@@ -145,7 +145,7 @@ public sealed class JobStageDispatcherTests : IAsyncLifetime
 		Guid jobId = await SeedQueuedScanJobAsync();
 		TimeSpan shortLease = TimeSpan.FromMilliseconds(300);
 
-		ClaimedJob? claimed = await _repository.ClaimJobAsync("crashed-worker", shortLease, CancellationToken.None);
+		ClaimedJob? claimed = await _repository.ClaimJobAsync("crashed-worker", shortLease, JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(claimed);
 		Assert.Null(claimed!.Stage);
 
@@ -163,7 +163,7 @@ public sealed class JobStageDispatcherTests : IAsyncLifetime
 			jobId, "crashed-worker", JobStates.Attesting, "attesting", "attest complete", CancellationToken.None);
 		Assert.True(requeuedThenReclaimed);
 
-		ClaimedJob? resumedClaim = await _repository.ClaimJobAsync("crashed-worker-2", shortLease, CancellationToken.None);
+		ClaimedJob? resumedClaim = await _repository.ClaimJobAsync("crashed-worker-2", shortLease, JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(resumedClaim);
 		Assert.Equal("attesting", resumedClaim!.Stage);
 
@@ -190,7 +190,7 @@ public sealed class JobStageDispatcherTests : IAsyncLifetime
 
 		// The next claim hands the surviving marker straight back -- recovery requeued
 		// at the stage, not from the beginning.
-		ClaimedJob? postRecoveryClaim = await _repository.ClaimJobAsync("worker-after-recovery", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? postRecoveryClaim = await _repository.ClaimJobAsync("worker-after-recovery", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(postRecoveryClaim);
 		Assert.Equal("attesting", postRecoveryClaim!.Stage);
 	}
@@ -211,7 +211,7 @@ public sealed class JobStageDispatcherTests : IAsyncLifetime
 
 		// Reach converting the same way cycle 1+2 of the stage-walk test do, so the job
 		// carries a genuine "attest already happened" marker.
-		ClaimedJob? firstClaim = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? firstClaim = await _repository.ClaimJobAsync("worker-a", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(firstClaim);
 		JobExecutionContext firstContext = new(firstClaim!, "worker-a", _events, _repository, JobShape.Standard);
 		await firstContext.AdvanceAsync(JobStates.Attesting, null, CancellationToken.None);
@@ -219,7 +219,7 @@ public sealed class JobStageDispatcherTests : IAsyncLifetime
 
 		// Claim again: the handler resumes at "converting" and this attempt fails.
 		StageWalkingJobHandler handler = new();
-		ClaimedJob? secondClaim = await _repository.ClaimJobAsync("worker-b", TimeSpan.FromMinutes(5), CancellationToken.None);
+		ClaimedJob? secondClaim = await _repository.ClaimJobAsync("worker-b", TimeSpan.FromMinutes(5), JobCapabilities.All, CancellationToken.None);
 		Assert.NotNull(secondClaim);
 		Assert.Equal("converting", secondClaim!.Stage);
 
