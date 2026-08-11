@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <!--
+    ADR-0013/0014/0015, issue #441: the download-runner Generic Host. Registers only
+    the M1 `catalog-index` and `download` handlers (Waypoint.Core.Jobs.JobCapabilities.
+    Download's implemented subset) on top of Waypoint.Infrastructure's shared
+    composition root, see Waypoint.Infrastructure.DependencyInjection.
+    ServiceCollectionExtensions.AddWaypointInfrastructure's ExecutionOnly overload.
+    No ASP.NET reference: this process claims jobs, runs PowerShell in-process, and
+    writes job_events directly to Postgres (ADR-0014 §§2-3); it serves no REST/SSE
+    surface (that stays Waypoint.Api's job until #443 removes execution there).
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Waypoint.DownloadRunner</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Waypoint.Core\Waypoint.Core.csproj" />
+    <ProjectReference Include="..\Waypoint.Infrastructure\Waypoint.Infrastructure.csproj" />
+    <ProjectReference Include="..\Waypoint.Runner\Waypoint.Runner.csproj" />
+  </ItemGroup>
+
+  <!--
+    Deliberately no InternalsVisibleTo to Waypoint.Tests: top-level statements give
+    this project's Program an implicit internal type of the same simple name as
+    Waypoint.Api's Program, and granting internals visibility here makes an
+    unqualified `Program` reference in the test project ambiguous between the two
+    assemblies (CS0433). Every type this project's tests need
+    (HealthCheckProbe, ReadinessReportingHostedService, DownloadRunnerJobTypes, etc.)
+    is already public.
+  -->
+
+</Project>

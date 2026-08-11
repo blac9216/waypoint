@@ -30,6 +30,7 @@
     <ProjectReference Include="..\Waypoint.Infrastructure\Waypoint.Infrastructure.csproj" />
     <ProjectReference Include="..\Waypoint.Runner\Waypoint.Runner.csproj" />
     <ProjectReference Include="..\Waypoint.Api\Waypoint.Api.csproj" />
+    <ProjectReference Include="..\Waypoint.DownloadRunner\Waypoint.DownloadRunner.csproj" />
   </ItemGroup>
 
   <!--

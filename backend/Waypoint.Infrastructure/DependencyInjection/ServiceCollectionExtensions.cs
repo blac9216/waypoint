@@ -38,6 +38,23 @@ using Waypoint.Runner.Jobs;
 namespace Waypoint.Infrastructure.DependencyInjection;
 
 /// <summary>
+/// Issue #441: which control-plane-only hosted services
+/// <see cref="ServiceCollectionExtensions.AddWaypointInfrastructure(IServiceCollection, IConfiguration, WaypointInfrastructureHostKind)"/>
+/// starts alongside the shared repositories/PowerShell host/job dispatcher every host
+/// kind needs. <see cref="Combined"/> is today's <c>Waypoint.Api</c> behavior
+/// (unchanged); <see cref="ExecutionOnly"/> is for a dedicated runner host (e.g.
+/// download-runner) that has no SSE surface or run/scan endpoints of its own.
+/// </summary>
+public enum WaypointInfrastructureHostKind
+{
+	/// <summary>Today's single combined process: control plane + execution, every hosted service starts.</summary>
+	Combined,
+
+	/// <summary>A dedicated execution-only runner host: skips API-only hosted services (SSE fan-out, run-secret cleanup).</summary>
+	ExecutionOnly
+}
+
+/// <summary>
 /// Composition-root entry point for everything this project provides. Postgres access
 /// lands with the schema (issue #4) as a small raw-SQL migrations pipeline
 /// (<see cref="ISchemaMigrator"/>), not an ORM — see that type's doc comment for why.
@@ -54,7 +71,26 @@ public static class ServiceCollectionExtensions
 	/// </summary>
 	public const string ConnectionStringName = "Waypoint";
 
-	public static IServiceCollection AddWaypointInfrastructure(this IServiceCollection services, IConfiguration configuration)
+	public static IServiceCollection AddWaypointInfrastructure(this IServiceCollection services, IConfiguration configuration) =>
+		services.AddWaypointInfrastructure(configuration, WaypointInfrastructureHostKind.Combined);
+
+	/// <summary>
+	/// Issue #441: the additive seam a dedicated runner host (download-runner today;
+	/// a future compliance-runner split takes the same seam) uses to reuse this
+	/// project's whole composition root without also starting the two hosted services
+	/// that are ADR-0013 §1 control-plane concerns, not execution concerns --
+	/// <c>JobEventStreamService</c> (SSE fan-out; the API is the only SSE surface) and
+	/// <c>RunSecretCleanupHostedService</c> (the ad hoc "my credentials" run-secret
+	/// sweep, meaningful only alongside the API's run/scan endpoints). Everything else
+	/// -- repositories, the PowerShell host, the job dispatcher, lease recovery, the
+	/// event writer -- is identical for every <see cref="WaypointInfrastructureHostKind"/>;
+	/// only <see cref="JobHandlerRegistry"/>'s allowlist and <see cref="IJobHandler"/>
+	/// set differ by which handlers a given runner registers on top of this call.
+	/// The default overload above keeps today's combined behavior unchanged for
+	/// <c>Waypoint.Api</c> and every existing test.
+	/// </summary>
+	public static IServiceCollection AddWaypointInfrastructure(
+		this IServiceCollection services, IConfiguration configuration, WaypointInfrastructureHostKind hostKind)
 	{
 		services.AddOptions<LocalAuthOptions>()
 			.Bind(configuration.GetSection(LocalAuthOptions.SectionName));
@@ -81,6 +117,9 @@ public static class ServiceCollectionExtensions
 
 		services.AddOptions<DownloadOptions>()
 			.Bind(configuration.GetSection(DownloadOptions.SectionName));
+
+		services.AddOptions<Waypoint.Core.Downloads.ManagedToolOptions>()
+			.Bind(configuration.GetSection(Waypoint.Core.Downloads.ManagedToolOptions.SectionName));
 
 		services.AddOptions<DiscoveryOptions>()
 			.Bind(configuration.GetSection(DiscoveryOptions.SectionName));
@@ -115,6 +154,12 @@ public static class ServiceCollectionExtensions
 		// unconditionally so GET /system still reports store usage on a host with no
 		// connection string configured (issue #226).
 		services.AddSingleton<Waypoint.Core.SystemState.IArtifactStoreDiskUsageProvider, ArtifactStoreDiskUsageProvider>();
+
+		// Issue #441: a filesystem stat like the disk-usage provider above -- no
+		// connection string dependency, registered unconditionally so a host with no
+		// database configured can still answer capability/readiness questions about
+		// the managed-tool mount.
+		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolPresenceChecker, Downloads.ManagedToolPresenceChecker>();
 
 		// ADR-0005 crypto core (epic #8 slice 1). Registered unconditionally: the
 		// provider is lazy and fail-closed, so a host without a mounted key boots
@@ -212,25 +257,53 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
 				serviceProvider.GetRequiredService<ISecretTracker>(),
 				serviceProvider.GetRequiredService<ILogger<Secrets.RunSecretStore>>()));
-			services.AddHostedService<Secrets.RunSecretCleanupHostedService>();
 
 			// Issue #311: the convert-stage upload/enrichment coordinator and the
 			// retry route (JobsController) share this one instance.
 			services.AddSingleton<Scans.ScanUploadCoordinator>();
 
-			services.AddSingleton<JobEventStreamService>(serviceProvider => new JobEventStreamService(
-				connectionString,
-				serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
-				serviceProvider.GetRequiredService<ILogger<JobEventStreamService>>()));
-			services.AddSingleton<IJobEventFeed>(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
-			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
+			// Issue #441: RunSecretCleanupHostedService and JobEventStreamService are
+			// ADR-0013 §1 control-plane concerns (the ad hoc run-secret sweep and the
+			// SSE fan-out the API alone exposes) -- a dedicated execution-only runner
+			// host has no run/scan endpoints or SSE surface to serve, so it opts out
+			// via hostKind rather than starting background work with nothing to do.
+			if (hostKind == WaypointInfrastructureHostKind.Combined)
+			{
+				services.AddHostedService<Secrets.RunSecretCleanupHostedService>();
+
+				services.AddSingleton<JobEventStreamService>(serviceProvider => new JobEventStreamService(
+					connectionString,
+					serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
+					serviceProvider.GetRequiredService<ILogger<JobEventStreamService>>()));
+				services.AddSingleton<IJobEventFeed>(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
+				services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
+			}
 
 			// The first production job handler registration (issue #194, epic #9 slice
 			// 2) -- constructed and registered here, not self-registering, the same
 			// pattern PowerShellJobHandler's doc comment describes for the real job
 			// types (jobs.job_type is a closed CHECK set with no generic member).
 			services.AddSingleton<IJobHandler, Catalog.CatalogIndexJobHandler>();
-			services.AddSingleton<IJobHandler, Downloads.DownloadJobHandler>();
+
+			// Issue #441: which "download" IJobHandler the dispatcher resolves depends on
+			// the host kind. On a dedicated ExecutionOnly runner the download executes
+			// behind the ADR-0015 tool-presence gate (ToolGatedDownloadJobHandler wraps
+			// the concrete DownloadJobHandler; the tool is provisioned at the runner's
+			// ManagedTool:ToolStatePath). The Combined (Waypoint.Api) host still hosts
+			// download execution until #443 and provisions vcf-download-tool via the
+			// dev/local mount -- not the gate's managed-tool path -- so it must keep
+			// today's ungated M1 behavior. Gating the API path here would fail every
+			// API-submitted download with "tool not installed"; #443 removes API
+			// execution and this branch with it.
+			if (hostKind == WaypointInfrastructureHostKind.ExecutionOnly)
+			{
+				services.AddSingleton<Downloads.DownloadJobHandler>();
+				services.AddSingleton<IJobHandler, Downloads.ToolGatedDownloadJobHandler>();
+			}
+			else
+			{
+				services.AddSingleton<IJobHandler, Downloads.DownloadJobHandler>();
+			}
 			services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 			services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
 			services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();

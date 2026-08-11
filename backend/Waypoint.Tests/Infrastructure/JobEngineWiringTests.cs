@@ -17,6 +17,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
 using Waypoint.Infrastructure.DependencyInjection;
+using Waypoint.Infrastructure.Downloads;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure;
@@ -90,7 +91,48 @@ public sealed class JobEngineWiringTests
 		Assert.Equal(9, options.EventCommandTimeoutSeconds);
 	}
 
+	/// <summary>
+	/// Issue #441: which concrete <c>download</c> <see cref="IJobHandler"/> each host kind
+	/// resolves is load-bearing and was previously untested. The <see cref="WaypointInfrastructureHostKind.ExecutionOnly"/>
+	/// runner puts download execution behind the ADR-0015 tool-presence gate
+	/// (<see cref="ToolGatedDownloadJobHandler"/>); the <see cref="WaypointInfrastructureHostKind.Combined"/>
+	/// (Waypoint.Api) host still runs downloads ungated (<see cref="DownloadJobHandler"/>)
+	/// until #443 removes API execution, because the API provisions the tool via the
+	/// dev/local mount rather than the gate's managed-tool path. Gating the Combined path
+	/// would fail every API-submitted download, so the split is pinned here.
+	/// </summary>
+	[Fact]
+	public void ExecutionOnly_ResolvesTheToolGatedDownloadHandler()
+	{
+		using ServiceProvider provider = BuildProvider(
+			"Host=127.0.0.1;Port=5432;Database=waypoint_test;Username=u;Password=p",
+			WaypointInfrastructureHostKind.ExecutionOnly);
+
+		IJobHandler download = SingleDownloadHandler(provider);
+		Assert.IsType<ToolGatedDownloadJobHandler>(download);
+	}
+
+	[Fact]
+	public void Combined_ResolvesTheUngatedDownloadHandler()
+	{
+		using ServiceProvider provider = BuildProvider(
+			"Host=127.0.0.1;Port=5432;Database=waypoint_test;Username=u;Password=p",
+			WaypointInfrastructureHostKind.Combined);
+
+		IJobHandler download = SingleDownloadHandler(provider);
+		Assert.IsType<DownloadJobHandler>(download);
+	}
+
+	private static IJobHandler SingleDownloadHandler(ServiceProvider provider)
+	{
+		List<IJobHandler> download = [.. provider.GetServices<IJobHandler>().Where(handler => handler.JobType == "download")];
+		return Assert.Single(download);
+	}
+
 	private static ServiceProvider BuildProvider(string? connectionString, params (string Key, string Value)[] settings)
+		=> BuildProvider(connectionString, WaypointInfrastructureHostKind.Combined, settings);
+
+	private static ServiceProvider BuildProvider(string? connectionString, WaypointInfrastructureHostKind hostKind, params (string Key, string Value)[] settings)
 	{
 		List<KeyValuePair<string, string?>> values = [.. settings.Select(setting => new KeyValuePair<string, string?>(setting.Key, setting.Value))];
 		if (connectionString is not null)
@@ -102,7 +144,7 @@ public sealed class JobEngineWiringTests
 
 		ServiceCollection services = new();
 		services.AddLogging();
-		services.AddWaypointInfrastructure(configuration);
+		services.AddWaypointInfrastructure(configuration, hostKind);
 		return services.BuildServiceProvider();
 	}
 }

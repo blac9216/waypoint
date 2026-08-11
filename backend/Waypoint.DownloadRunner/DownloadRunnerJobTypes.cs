@@ -1,0 +1,34 @@
+// Copyright 2026 Justin Black
+//
+// Licensed under the Apache License, Version 2.0 (the "License").
+// You may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+namespace Waypoint.DownloadRunner;
+
+/// <summary>
+/// The download-runner's actual claim allowlist for this M1 catch-up (issue #441).
+/// Deliberately narrower than <c>Waypoint.Core.Jobs.JobCapabilities.Download</c>,
+/// which also reserves six "later" content-library/bundle/update job types that have
+/// no registered <see cref="Waypoint.Core.Jobs.IJobHandler"/> anywhere yet -- claiming
+/// one of those here would fail it immediately with "no handler registered"
+/// (<c>Waypoint.Runner.Jobs.JobDispatcherHostedService</c>) instead of leaving it
+/// queued for the runner that eventually implements it. A future issue that adds a
+/// handler for one of those types adds it to this set in the same change.
+/// </summary>
+public static class DownloadRunnerJobTypes
+{
+	public static readonly IReadOnlySet<string> Allowed = new HashSet<string>(StringComparer.Ordinal)
+	{
+		"catalog-index",
+		"download"
+	};
+}
