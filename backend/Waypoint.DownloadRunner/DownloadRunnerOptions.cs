@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Waypoint.Runner.Readiness;
+
 namespace Waypoint.DownloadRunner;
 
 /// <summary>
@@ -19,8 +21,13 @@ namespace Waypoint.DownloadRunner;
 /// distinct from the domain options (<c>Catalog</c>, <c>Downloads</c>, <c>ManagedTool</c>,
 /// <c>PowerShell</c>) it shares with <c>Waypoint.Api</c> through
 /// <c>AddWaypointInfrastructure</c>.
+///
+/// Implements <see cref="IRunnerReadinessOptions"/> (issue #461) so the shared
+/// <see cref="Waypoint.Runner.Readiness.RunnerReadinessReportingHostedService{TReport}"/>
+/// can read this host's report path/interval/staleness/worker-id without either host
+/// having to rename its own appsettings.json keys to match the other's.
 /// </summary>
-public sealed class DownloadRunnerOptions
+public sealed class DownloadRunnerOptions : IRunnerReadinessOptions
 {
 	public const string SectionName = "DownloadRunner";
 
@@ -54,4 +61,10 @@ public sealed class DownloadRunnerOptions
 	/// container recreation (e.g. a fixed Compose <c>container_name</c>).
 	/// </summary>
 	public string WorkerId { get; set; } = Environment.MachineName;
+
+	string IRunnerReadinessOptions.ReportFilePath => ReadinessFilePath;
+
+	TimeSpan IRunnerReadinessOptions.RefreshInterval => ReadinessInterval;
+
+	TimeSpan IRunnerReadinessOptions.MaxReportAge => ReadinessMaxAge;
 }

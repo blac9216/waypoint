@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -23,6 +22,7 @@ using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.SystemState;
 using Waypoint.Infrastructure.DependencyInjection;
+using Waypoint.Runner.Readiness;
 using Waypoint.Runner.Resources;
 
 namespace Waypoint.DownloadRunner;
@@ -30,24 +30,29 @@ namespace Waypoint.DownloadRunner;
 /// <summary>
 /// Periodically probes this host's required dependencies (database, artifact store,
 /// depot path) and the optional managed tool, then writes a <see cref="ReadinessSnapshot"/>
-/// to <see cref="DownloadRunnerOptions.ReadinessFilePath"/> for <c>--health-check</c>
-/// to read back (see <see cref="HealthCheckProbe"/>'s doc comment for why this is a
-/// file and not an HTTP endpoint). ADR-0014 §7: "runner readiness must include
-/// registered capabilities and allocated-resource discovery; it must fail closed when
-/// required dependencies or mounts are unavailable" -- a database or artifact-store
-/// failure makes <see cref="ReadinessSnapshot.Ready"/> false; a missing managed tool
-/// does not (see <see cref="ReadinessSnapshot"/>'s doc comment).
+/// via the shared <see cref="RunnerReadinessReportingHostedService{TReport}"/> (issue
+/// #461) to <see cref="DownloadRunnerOptions.ReadinessFilePath"/> for
+/// <c>--health-check</c> to read back (see <see cref="HealthCheckProbe"/>'s doc comment
+/// for why this is a file and not an HTTP endpoint). ADR-0014 §7: "runner readiness
+/// must include registered capabilities and allocated-resource discovery; it must fail
+/// closed when required dependencies or mounts are unavailable" -- a database or
+/// artifact-store failure makes <see cref="ReadinessSnapshot.Ready"/> false; a missing
+/// managed tool does not (see <see cref="ReadinessSnapshot"/>'s doc comment).
+///
+/// This type is a thin domain-specific wrapper: it owns exactly the download-runner's
+/// dependency checks and payload shape, and delegates the write-then-move sentinel
+/// mechanics, StartAsync/ExecuteAsync scheduling, and worker_registry heartbeat to the
+/// shared <see cref="RunnerReadinessReportingHostedService{TReport}"/> it composes.
 /// </summary>
-public sealed partial class ReadinessReportingHostedService : BackgroundService
+public sealed partial class ReadinessReportingHostedService : IHostedService, IDisposable
 {
 	private readonly string? _connectionString;
 	private readonly IManagedToolPresenceChecker _toolPresence;
 	private readonly IOptions<DownloadOptions> _downloadOptions;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
-	private readonly IOptions<DownloadRunnerOptions> _runnerOptions;
-	private readonly ResourceAdmissionController? _resourceAdmission;
-	private readonly IWorkerRegistryWriter? _workerRegistry;
+	private readonly ResourceAdmissionController _resourceAdmission;
 	private readonly ILogger<ReadinessReportingHostedService> _logger;
+	private readonly RunnerReadinessReportingHostedService<ReadinessSnapshot> _inner;
 
 	/// <summary>
 	/// <paramref name="workerRegistry"/> is nullable and optional (constructor-injected
@@ -80,43 +85,25 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 		_toolPresence = toolPresence;
 		_downloadOptions = downloadOptions;
 		_catalogOptions = catalogOptions;
-		_runnerOptions = runnerOptions;
 		_resourceAdmission = resourceAdmission;
-		_workerRegistry = workerRegistry;
 		_logger = logger;
+
+		_inner = new RunnerReadinessReportingHostedService<ReadinessSnapshot>(
+			BuildSnapshotAsync,
+			snapshot => snapshot.Ready,
+			snapshot => snapshot.JobTypes,
+			Options.Create<IRunnerReadinessOptions>(runnerOptions.Value),
+			workerRegistry,
+			logger);
 	}
 
-	public override async Task StartAsync(CancellationToken cancellationToken)
-	{
-		// Write the first snapshot synchronously as part of startup (awaited before
-		// the host reports started) rather than deferring it into the fire-and-forget
-		// ExecuteAsync loop. This makes a fresh container's very first health probe
-		// meaningful -- the readiness file exists the moment StartAsync returns -- and
-		// makes the reporting deterministic for callers (and tests) that stop the
-		// service immediately after starting it.
-		await WriteSnapshotAsync(cancellationToken).ConfigureAwait(false);
-		await base.StartAsync(cancellationToken).ConfigureAwait(false);
-	}
+	public Task StartAsync(CancellationToken cancellationToken) => _inner.StartAsync(cancellationToken);
 
-	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-	{
-		DownloadRunnerOptions options = _runnerOptions.Value;
-		using PeriodicTimer timer = new(options.ReadinessInterval);
+	public Task StopAsync(CancellationToken cancellationToken) => _inner.StopAsync(cancellationToken);
 
-		try
-		{
-			while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
-			{
-				await WriteSnapshotAsync(stoppingToken).ConfigureAwait(false);
-			}
-		}
-		catch (OperationCanceledException)
-		{
-			// Expected on host shutdown.
-		}
-	}
+	public void Dispose() => _inner.Dispose();
 
-	private async Task WriteSnapshotAsync(CancellationToken cancellationToken)
+	private async Task<ReadinessSnapshot> BuildSnapshotAsync(CancellationToken cancellationToken)
 	{
 		bool databaseReachable = await CheckDatabaseAsync(cancellationToken).ConfigureAwait(false);
 		bool artifactStoreWritable = CheckDirectoryWritable(_downloadOptions.Value.ArtifactStorePath);
@@ -126,68 +113,15 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 		// Deliberately excludes toolPresent -- see ReadinessSnapshot's doc comment.
 		bool ready = databaseReachable && artifactStoreWritable && depotPathReadable;
 
-		ReadinessSnapshot snapshot = new(
+		return new ReadinessSnapshot(
 			Ready: ready,
 			JobTypes: [.. DownloadRunnerJobTypes.Allowed],
 			ToolPresent: toolPresent,
 			ArtifactStoreWritable: artifactStoreWritable,
 			DepotPathReadable: depotPathReadable,
-			Capacity: BuildCapacityReport(),
+			Capacity: RunnerCapacityReportFactory.FromController(_resourceAdmission),
 			GeneratedAt: DateTimeOffset.UtcNow);
-
-		try
-		{
-			string json = JsonSerializer.Serialize(snapshot);
-			string path = _runnerOptions.Value.ReadinessFilePath;
-			string? directory = Path.GetDirectoryName(path);
-			if (!string.IsNullOrEmpty(directory))
-			{
-				Directory.CreateDirectory(directory);
-			}
-
-			// Write-then-move: --health-check must never observe a half-written file.
-			string tempPath = path + ".tmp";
-			await File.WriteAllTextAsync(tempPath, json, cancellationToken).ConfigureAwait(false);
-			File.Move(tempPath, path, overwrite: true);
-		}
-		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-		{
-			LogReadinessWriteFailed(exception);
-		}
-
-		// Issue #443: the database-persisted twin of the file-based snapshot above.
-		// GET /system reads this table, not the file -- the file exists for this
-		// container's own health probe (no HTTP listener to ask instead), the table
-		// exists so the control plane can report per-domain runner availability
-		// without ever reaching into another container's filesystem. Best-effort, same
-		// as the file write: a failed heartbeat write just means this cycle's presence
-		// is not recorded, and worker_registry's own staleness read handles that the
-		// same way a missed job lease heartbeat does.
-		if (databaseReachable && _workerRegistry is not null)
-		{
-			try
-			{
-				await _workerRegistry.HeartbeatAsync(
-					_runnerOptions.Value.WorkerId, DownloadRunnerJobTypes.Allowed.ToArray(), ready, cancellationToken).ConfigureAwait(false);
-			}
-			catch (Exception exception) when (exception is not OperationCanceledException)
-			{
-				LogWorkerHeartbeatFailed(exception);
-			}
-		}
 	}
-
-	/// <summary>Issue #437: snapshots <see cref="ResourceAdmissionController"/>'s current discovered/effective/admitted state for the readiness report.</summary>
-	private RunnerCapacityReport BuildCapacityReport() => new(
-		Source: _resourceAdmission!.Discovered.Source.ToString(),
-		IsFallback: _resourceAdmission.Discovered.IsFallback,
-		DiscoveredCpuCores: _resourceAdmission.Discovered.CpuCores,
-		DiscoveredMemoryBytes: _resourceAdmission.Discovered.MemoryBytes,
-		EffectiveCpuCores: _resourceAdmission.EffectiveBudget.CpuCores,
-		EffectiveMemoryBytes: _resourceAdmission.EffectiveBudget.MemoryBytes,
-		AdmittedCpuCores: _resourceAdmission.AdmittedCpuCores,
-		AdmittedMemoryBytes: _resourceAdmission.AdmittedMemoryBytes,
-		AdmittedJobCount: _resourceAdmission.AdmittedJobCount);
 
 	private async Task<bool> CheckDatabaseAsync(CancellationToken cancellationToken)
 	{
@@ -227,10 +161,4 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Readiness probe could not reach the database")]
 	private partial void LogDatabaseUnreachable(Exception exception);
-
-	[LoggerMessage(Level = LogLevel.Error, Message = "Failed to write the readiness marker file")]
-	private partial void LogReadinessWriteFailed(Exception exception);
-
-	[LoggerMessage(Level = LogLevel.Warning, Message = "Failed to write this worker's heartbeat to worker_registry")]
-	private partial void LogWorkerHeartbeatFailed(Exception exception);
 }

@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.SystemState;
 using Waypoint.Runner.Jobs;
+using Waypoint.Runner.Readiness;
 using Waypoint.Runner.Resources;
 
 namespace Waypoint.ComplianceRunner.Readiness;
@@ -25,24 +25,22 @@ namespace Waypoint.ComplianceRunner.Readiness;
 /// <summary>
 /// Periodically evaluates <see cref="ComplianceReadinessCheck"/>, pairs the verdict with
 /// this host's registered capabilities (<see cref="JobHandlerRegistry.AllowedJobTypes"/>),
-/// and writes the result to <see cref="RunnerHealthOptions.ReportFilePath"/> for
+/// and writes the result via the shared <see cref="RunnerReadinessReportingHostedService{TReport}"/>
+/// (issue #461) to <see cref="RunnerHealthOptions.ReportFilePath"/> for
 /// <see cref="RunnerHealthCheckProbe"/> to read back. See <see cref="RunnerHealthOptions"/>
 /// for why a file sentinel rather than an HTTP endpoint.
 ///
-/// Writes the first report in <see cref="StartAsync"/> (awaited before the host reports
-/// started, ahead of the first <see cref="RunnerHealthOptions.RefreshInterval"/> tick) so a
-/// Compose healthcheck polling shortly after container start does not see a missing file and
-/// report unhealthy for the first refresh interval -- and so a StopAsync immediately after
-/// start cannot race the file's existence.
+/// This type is a thin domain-specific wrapper: it owns exactly the compliance-runner's
+/// readiness evaluation and payload shape, and delegates the write-then-move sentinel
+/// mechanics, StartAsync/ExecuteAsync scheduling, and worker_registry heartbeat to the
+/// shared <see cref="RunnerReadinessReportingHostedService{TReport}"/> it composes.
 /// </summary>
-public sealed partial class RunnerHealthReportingHostedService : BackgroundService
+public sealed class RunnerHealthReportingHostedService : IHostedService, IDisposable
 {
 	private readonly ComplianceReadinessCheck _readiness;
 	private readonly JobHandlerRegistry _handlers;
-	private readonly IOptions<RunnerHealthOptions> _options;
 	private readonly ResourceAdmissionController _resourceAdmission;
-	private readonly IWorkerRegistryWriter? _workerRegistry;
-	private readonly ILogger<RunnerHealthReportingHostedService> _logger;
+	private readonly RunnerReadinessReportingHostedService<RunnerHealthReport> _inner;
 
 	/// <summary>
 	/// <paramref name="workerRegistry"/> is nullable and optional: Program.cs only
@@ -67,129 +65,32 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 
 		_readiness = readiness;
 		_handlers = handlers;
-		_options = options;
 		_resourceAdmission = resourceAdmission;
-		_workerRegistry = workerRegistry;
-		_logger = logger;
+
+		_inner = new RunnerReadinessReportingHostedService<RunnerHealthReport>(
+			BuildReportAsync,
+			report => report.Ready,
+			report => report.Capabilities,
+			Options.Create<IRunnerReadinessOptions>(options.Value),
+			workerRegistry,
+			logger);
 	}
 
-	public override async Task StartAsync(CancellationToken cancellationToken)
-	{
-		// Write the first report synchronously as part of startup (awaited before the
-		// host reports started) rather than deferring it into the fire-and-forget
-		// ExecuteAsync loop. This makes a fresh container's very first health probe
-		// meaningful -- the report file exists the moment StartAsync returns -- and
-		// makes the reporting deterministic for callers (and tests) that stop the
-		// service immediately after starting it, closing the race a first write inside
-		// ExecuteAsync leaves open (an immediate StopAsync could otherwise beat the
-		// file into existence). Mirrors the download-runner's ReadinessReportingHostedService.
-		ReadinessReport initialReadiness = WriteReport(_options.Value.ReportFilePath);
-		await HeartbeatWorkerRegistryAsync(initialReadiness, cancellationToken).ConfigureAwait(false);
-		await base.StartAsync(cancellationToken).ConfigureAwait(false);
-	}
+	public Task StartAsync(CancellationToken cancellationToken) => _inner.StartAsync(cancellationToken);
 
-	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-	{
-		RunnerHealthOptions options = _options.Value;
+	public Task StopAsync(CancellationToken cancellationToken) => _inner.StopAsync(cancellationToken);
 
-		// The first report was already written in StartAsync; subsequent refreshes are
-		// spaced by RefreshInterval, so wait before writing again rather than
-		// re-writing immediately here.
-		while (!stoppingToken.IsCancellationRequested)
-		{
-			try
-			{
-				await Task.Delay(options.RefreshInterval, stoppingToken).ConfigureAwait(false);
-			}
-			catch (OperationCanceledException)
-			{
-				// Host stopping; loop condition ends the loop next.
-				break;
-			}
+	public void Dispose() => _inner.Dispose();
 
-			ReadinessReport readiness = WriteReport(options.ReportFilePath);
-			await HeartbeatWorkerRegistryAsync(readiness, stoppingToken).ConfigureAwait(false);
-		}
-	}
-
-	private ReadinessReport WriteReport(string reportFilePath)
+	private Task<RunnerHealthReport> BuildReportAsync(CancellationToken cancellationToken)
 	{
 		ReadinessReport readiness = _readiness.Evaluate();
 		RunnerHealthReport report = new(
 			Ready: readiness.Ready,
 			Capabilities: [.. _handlers.AllowedJobTypes.Order(StringComparer.Ordinal)],
 			Problems: readiness.Problems,
-			Capacity: BuildCapacityReport(),
+			Capacity: RunnerCapacityReportFactory.FromController(_resourceAdmission),
 			Timestamp: DateTimeOffset.UtcNow);
-
-		try
-		{
-			string json = JsonSerializer.Serialize(report);
-			string? directory = Path.GetDirectoryName(reportFilePath);
-			if (!string.IsNullOrEmpty(directory))
-			{
-				Directory.CreateDirectory(directory);
-			}
-
-			// Write-then-move: --health-check must never observe a half-written file.
-			string tempPath = $"{reportFilePath}.tmp-{Guid.NewGuid():N}";
-			File.WriteAllText(tempPath, json);
-			File.Move(tempPath, reportFilePath, overwrite: true);
-		}
-		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-		{
-			// The report file itself is unwritable -- log it, but do not crash the
-			// dispatcher over a health-reporting side channel. A --health-check probe
-			// that finds no file (or a stale one) already fails closed (see
-			// RunnerHealthCheckProbe), which is the correct outcome here too.
-			LogReportWriteFailed(reportFilePath, exception);
-		}
-
-		return readiness;
+		return Task.FromResult(report);
 	}
-
-	/// <summary>
-	/// Issue #443: the database-persisted twin of the file-based report above. See
-	/// <c>Waypoint.DownloadRunner.ReadinessReportingHostedService.WriteSnapshotAsync</c>'s
-	/// matching comment -- same best-effort behavior, same reason GET /system reads
-	/// this table rather than reaching into a container's filesystem.
-	/// </summary>
-	private async Task HeartbeatWorkerRegistryAsync(ReadinessReport readiness, CancellationToken cancellationToken)
-	{
-		if (_workerRegistry is null)
-		{
-			return;
-		}
-
-		try
-		{
-			await _workerRegistry.HeartbeatAsync(
-				_options.Value.WorkerId,
-				[.. _handlers.AllowedJobTypes.Order(StringComparer.Ordinal)],
-				readiness.Ready,
-				cancellationToken).ConfigureAwait(false);
-		}
-		catch (Exception exception) when (exception is not OperationCanceledException)
-		{
-			LogWorkerHeartbeatFailed(exception);
-		}
-	}
-
-	/// <summary>Issue #437: snapshots <see cref="ResourceAdmissionController"/>'s current discovered/effective/admitted state for the health report.</summary>
-	private RunnerCapacityReport BuildCapacityReport() => new(
-		Source: _resourceAdmission.Discovered.Source.ToString(),
-		IsFallback: _resourceAdmission.Discovered.IsFallback,
-		DiscoveredCpuCores: _resourceAdmission.Discovered.CpuCores,
-		DiscoveredMemoryBytes: _resourceAdmission.Discovered.MemoryBytes,
-		EffectiveCpuCores: _resourceAdmission.EffectiveBudget.CpuCores,
-		EffectiveMemoryBytes: _resourceAdmission.EffectiveBudget.MemoryBytes,
-		AdmittedCpuCores: _resourceAdmission.AdmittedCpuCores,
-		AdmittedMemoryBytes: _resourceAdmission.AdmittedMemoryBytes,
-		AdmittedJobCount: _resourceAdmission.AdmittedJobCount);
-
-	[LoggerMessage(Level = LogLevel.Warning, Message = "Failed to write runner health report to '{ReportFilePath}'")]
-	private partial void LogReportWriteFailed(string reportFilePath, Exception exception);
-
-	[LoggerMessage(Level = LogLevel.Warning, Message = "Failed to write this worker's heartbeat to worker_registry")]
-	private partial void LogWorkerHeartbeatFailed(Exception exception);
 }
