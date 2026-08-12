@@ -239,9 +239,15 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		await dispatcher.StartAsync(CancellationToken.None);
 		try
 		{
-			await Task.Delay(TimeSpan.FromMilliseconds(250));
+			// Deterministic in place of a fixed wall-clock delay (issue #428): the dispatcher
+			// claims, checks pause, and releases a paused run's job on every poll -- so raw
+			// DB state transiently reads "running" between claim and release on essentially
+			// every cycle, and sampling it (even repeatedly) races that window under load.
+			// What must hold is that the handler is never actually invoked; wait out several
+			// of the dispatcher's own release-retry cycles and assert that directly.
+			await AssertNeverExecutesWhilePausedAsync(() => Volatile.Read(ref calls), settleCycles: 5, JobDispatcherHostedService.PausedReleaseRetryDelay);
 			Assert.Equal(0, Volatile.Read(ref calls));
-			Assert.Equal(JobStates.Queued, await GetJobStateAsync(jobId));
+			await PollUntilAsync(() => GetJobStateAsync(jobId), state => state == JobStates.Queued);
 			Assert.True(await dispatcher.ResumeRunAsync(runId, CancellationToken.None));
 			await PollUntilAsync(() => GetJobStateAsync(jobId), state => state == JobStates.Done);
 		}
@@ -535,6 +541,30 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		command.Parameters.AddWithValue(jobId);
 		object? result = await command.ExecuteScalarAsync();
 		return result as DateTime?;
+	}
+
+	/// <summary>
+	/// Issue #428: a paused run's job is genuinely claimed, checked, and released back to
+	/// <see cref="JobStates.Queued"/> on every dispatcher poll while paused (see
+	/// <c>JobDispatcherHostedService</c>'s claim-then-release-if-paused path) -- so the DB
+	/// row transiently reads <see cref="JobStates.Running"/> for the moment between claim
+	/// and release, on essentially every cycle. Sampling raw state on a fixed cadence (the
+	/// original 250ms single sample, or naive repeated sampling) races that transient
+	/// window and is exactly what made this test flaky under load. What must actually never
+	/// happen while paused is the handler executing -- <paramref name="callCount"/> stays
+	/// zero for the whole window regardless of how many claim/release cycles occur -- so
+	/// this waits out a deterministic number of the dispatcher's own release-retry cycles
+	/// (<paramref name="settleCycles"/> x its known <c>PausedReleaseRetryDelay</c>) and
+	/// asserts the handler was never invoked across that whole window, which is the
+	/// property the test exists to prove.
+	/// </summary>
+	private static async Task AssertNeverExecutesWhilePausedAsync(Func<int> readCallCount, int settleCycles, TimeSpan releaseRetryDelay)
+	{
+		for (int i = 0; i < settleCycles; i++)
+		{
+			await Task.Delay(releaseRetryDelay);
+			Assert.Equal(0, readCallCount());
+		}
 	}
 
 	private static async Task PollUntilAsync<T>(Func<Task<T>> probe, Func<T, bool> isDone)
