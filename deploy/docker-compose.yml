@@ -1,9 +1,21 @@
-# Waypoint M1 dev compose stack (issue #2, epic #1).
+# Waypoint dev compose stack (issue #2, epic #1; runner topology issue #442,
+# ADR-0013/0014/0015).
 #
 # Topology (docs/architecture.md component view; ADR-0001 packaging):
 #   nginx (edge, TLS + static frontend + /api proxy)
-#     -> backend (ASP.NET Core REST API, built from ../backend)
+#     -> backend (ASP.NET Core control plane -- REST/RBAC/SSE, no execution)
 #        -> postgres (internal network only, no published port)
+#   compliance-runner (discover/credential-test/scan) -> postgres, internal only
+#   download-runner   (catalog-index/download)        -> postgres, internal only
+#
+# The two runners are long-lived Generic Host services, not additional web APIs
+# (ADR-0013 decision 3) -- they claim jobs directly from Postgres (ADR-0014
+# decision 1) and are not reachable from nginx or the host. One replica of each is
+# the default; ADR-0013 decision 6 explicitly does not multiply services without
+# measured need. Each connects to Postgres as its own least-privilege role
+# (waypoint_compliance_runner / waypoint_download_runner -- see the postgres
+# service below and backend/Waypoint.Infrastructure/Data/Migrations/
+# 0025_runner_db_roles.sql), separate from the backend's own waypoint/owner role.
 #
 # Bring-up: see deploy/README.md. Requires deploy/nginx/certs/dev-cert.pem
 # and dev-key.pem (deploy/nginx/certs/generate-dev-certs.sh), and a built
@@ -139,96 +151,15 @@ services:
       # dumps. See deploy/README.md "Bring-up" for how to generate the
       # key file's contents.
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
-      # #223: points the PowerShell runspace pool (WaypointRunspacePool,
-      # ADR-0006) at the Waypoint-owned shim module that dot-sources the
-      # sibling vcf-docker-download repo's UNMODIFIED vcf-download-manager
-      # scripts (issue #194; CLAUDE.md License & Borrowing Policy - vendor
-      # scripts run as unmodified vendor code, never copied into this repo
-      # or baked into the image). The in-container path is fixed - it's
-      # where the Waypoint.Infrastructure build output already places the
-      # shim module, not something the operator configures - so this is a
-      # plain literal, not a ${...} env override. Module import happens
-      # lazily on first runspace rent (WaypointRunspacePool.CreateRunspace),
-      # never at DI construction or app startup, so an unconfigured stack
-      # (no scripts mounted below) still starts and reports healthy; only a
-      # job that actually dispatches into PowerShell fails, with the shim's
-      # own "no vcf-download-manager.common.ps1 path configured" error
-      # surfacing in that job's log rather than blocking the whole stack.
-      PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointCatalogIndex"
-      # Companion to the module path above: the shim reads the vendor
-      # script's location from this env var rather than a hardcoded path
-      # (see WaypointCatalogIndex.psm1's $Script:VcfDownloadManagerCommonPath).
-      # Points inside the read-only vcf-scripts mount below; matches
-      # whatever relative layout the operator's vcf-docker-download checkout
-      # uses under powershell/ (vcf-download-manager.common.ps1 lives at the
-      # top of that directory in the sibling repo today).
-      WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH: "/vcf-scripts/vcf-download-manager.common.ps1"
-      # #395: extends the #223 pattern above to the *other* sibling repo,
-      # vmware-stig-docker - the vendor source for the discover/scan/
-      # credential-test job handlers' shim modules (WaypointDiscovery,
-      # WaypointScan, WaypointCredentialTest under
-      # backend/Waypoint.Infrastructure/PowerShell/Modules/). WaypointDownload
-      # is deliberately NOT listed here: it dot-sources
-      # vcf-download-manager.common.ps1 from the *vcf-docker-download* sibling
-      # (the #223 mount/env above), not vmware-stig-docker, so it needs no
-      # additional wiring. Preload three more shim modules, appending to
-      # index 0 above rather than disturbing it - WaypointRunspacePool imports
-      # every configured index into each runspace, in order, so index 0
-      # (WaypointCatalogIndex) is unaffected by these additions.
-      PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDiscovery"
-      PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointScan"
-      PowerShell__ModulePreloadPaths__3: "/app/PowerShell/Modules/WaypointCredentialTest"
-      # The three vendor script paths the shims above read (see each
-      # module's $env: reads - e.g. WaypointDiscovery.psm1's
-      # $Script:VmwareStigDockerModulePath). Point inside the read-only
-      # vmware-stig-docker-scripts mount below; the relative subpaths match
-      # the sibling repo's powershell/ directory layout, where every
-      # module.*.ps1 file (transport, nsxapi, common, and the rest) lives
-      # flat at the top level - described generically here per CLAUDE.md
-      # (no host paths committed).
-      WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_PATH: "/vmware-stig-docker-scripts/module.transport.vmware.ps1"
-      WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH: "/vmware-stig-docker-scripts/module.transport.nsxapi.ps1"
-      WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH: "/vmware-stig-docker-scripts/module.common.ps1"
     volumes:
-      - artifacts:/var/lib/waypoint/artifacts
-      # Dev-only, gitignored, operator-borrowed depot token/config + the
-      # hand-provisioned vcf-download-tool binary (see CLAUDE.md and
-      # deploy/README.md "dev/local/ convention"). Uncomment once the
-      # download jobs (M1 later slices) need it:
-      # - ../dev/local:/dev/local:ro
-      # Sibling vcf-docker-download repo's PowerShell scripts (issue #223),
-      # read-only. Same repo-root dev/local/ convention as the mount above
-      # (../dev/local, relative to this file in deploy/): never committed,
-      # borrowed from the operator's own checkout of the sibling repo.
-      # Defaults to ../dev/local/vcf-scripts (gitignored - .gitignore's
-      # dev/local/ entry) so an operator following the existing convention
-      # just points WAYPOINT_VCF_SCRIPTS_DIR at their sibling repo's
-      # powershell/ directory in deploy/.env; left unset, this mounts
-      # whatever (possibly nonexistent) ../dev/local/vcf-scripts resolves to.
-      # Uses the default bind-mount behavior (NOT create_host_path: false,
-      # unlike the frontend/dist mount above) on purpose: this material is
-      # optional and lazily consumed (see the ModulePreloadPaths comment
-      # above), so a missing source should not block the whole stack from
-      # coming up - Docker creates an empty directory in that case and the
-      # shim's own "not found" error only surfaces if a catalog-index job
-      # actually runs.
-      - ${WAYPOINT_VCF_SCRIPTS_DIR:-../dev/local/vcf-scripts}:/vcf-scripts:ro
-      # Sibling vmware-stig-docker repo's PowerShell scripts (issue #395),
-      # read-only. Same repo-root dev/local/ convention as the mount above,
-      # its own subpath so it doesn't collide with vcf-scripts' contents.
-      # Defaults to ../dev/local/vmware-stig-docker-scripts (gitignored -
-      # .gitignore's dev/local/ entry) so an operator points
-      # WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR at their sibling repo's
-      # powershell/ directory in deploy/.env; left unset, this mounts
-      # whatever (possibly nonexistent) ../dev/local/vmware-stig-docker-scripts
-      # resolves to. Same default bind-mount behavior as vcf-scripts above
-      # (NOT create_host_path: false) on purpose - this material is optional
-      # and lazily consumed (see the ModulePreloadPaths comment above), so a
-      # missing source should not block the whole stack from coming up -
-      # Docker creates an empty directory in that case and each shim's own
-      # "not found" error only surfaces if a discover/scan/credential-test
-      # job actually runs.
-      - ${WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR:-../dev/local/vmware-stig-docker-scripts}:/vmware-stig-docker-scripts:ro
+      # Read-only (issue #442 AC5: "backend no longer mounts execution scripts
+      # or domain tool stores read-write"). ADR-0014 §7: "backend: read-only
+      # artifact access where required to serve results/downloads" -- the
+      # backend never writes an artifact itself (it has no execution
+      # dispatcher, ADR-0013 §1), it only serves already-written scan/download
+      # output back to the API caller. compliance-runner and download-runner
+      # (below) hold the read-write mount for the same named volume.
+      - artifacts:/var/lib/waypoint/artifacts:ro
       # Admin password hash file (issue #333) - operator-provided, gitignored
       # (../config/ is covered by .gitignore's anchored /config/ entry).
       # Commented out by default so an unconfigured stack does not fail to
@@ -284,8 +215,21 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-waypoint}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-waypoint_dev_only}
       POSTGRES_DB: ${POSTGRES_DB:-waypoint}
+      # Issue #442 (ADR-0014 §7): passwords for the two dedicated runner DB
+      # roles postgres/initdb/01-runner-roles.sh creates on first init. Never
+      # committed - override in deploy/.env (gitignored) alongside
+      # POSTGRES_PASSWORD for anything beyond this dev-only default. Table
+      # grants for these roles live in a versioned backend migration
+      # (0025_runner_db_roles.sql), not here - see that file's header comment
+      # for why role creation and grants are deliberately split.
+      POSTGRES_COMPLIANCE_RUNNER_PASSWORD: ${POSTGRES_COMPLIANCE_RUNNER_PASSWORD:-waypoint_compliance_runner_dev_only}
+      POSTGRES_DOWNLOAD_RUNNER_PASSWORD: ${POSTGRES_DOWNLOAD_RUNNER_PASSWORD:-waypoint_download_runner_dev_only}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Runs once against a FRESH pgdata volume (docker-entrypoint-initdb.d
+      # convention - see the script's own header comment). Read-only: this
+      # image's entrypoint only ever reads these scripts, never writes back.
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
     # No `ports:` - reachable only from other containers on the internal
     # network (ADR-0002; issue #2 acceptance criteria). Not published to
     # the host, not reachable from the edge network nginx sits on.
@@ -297,6 +241,163 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+    restart: unless-stopped
+
+  # compliance-runner (issue #442, ADR-0013/0014): claims discover/credential-test/
+  # scan (later remediate) jobs directly from Postgres and hosts PowerShell/PowerCLI/
+  # cinc-auditor/SAF in-process. Not reachable from nginx or the host - internal
+  # network only, no `ports:`. One replica by default (ADR-0013 decision 6); see
+  # "Replica-safe scaling" in deploy/README.md before setting `deploy.replicas` > 1.
+  compliance-runner:
+    build:
+      # Repo-root context, same convention as backend (issue #92) - this image's
+      # own dotnet-build stage needs backend/ too. See
+      # runners/compliance-runner/Dockerfile's header comment.
+      context: ..
+      dockerfile: runners/compliance-runner/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Least-privilege role (0025_runner_db_roles.sql), distinct from the
+      # backend's own ${POSTGRES_USER} owner role - see postgres service above
+      # and that migration's header comment.
+      ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_compliance_runner;Password=${POSTGRES_COMPLIANCE_RUNNER_PASSWORD:-waypoint_compliance_runner_dev_only}"
+      # Same file-delivery convention and in-container path as the backend's own
+      # mount below (issue #405/ADR-0005) - every trusted service reads the same
+      # key material, never an env var carrying the key itself.
+      WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
+      # Shim modules baked into the image at /app/PowerShell/Modules (Waypoint.
+      # Infrastructure.csproj's CopyToPublishDirectory - see the Dockerfile).
+      # Preload order matches the mapping deploy/README.md previously documented
+      # on the backend service - now this service's own.
+      PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointDiscovery"
+      PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointScan"
+      PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointCredentialTest"
+      # Vendor .ps1 files the shims above dot-source, baked into the image under
+      # /powershell/ (runners/compliance-runner/powershell/, imported from the
+      # vmware-stig-docker sibling repo per CLAUDE.md's borrowing policy) -
+      # replaces the backend's former host bind mount (issue #395/#427) now that
+      # the vendor source lives in this repository (ADR-0015 decision 2).
+      WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_PATH: "/powershell/module.transport.vmware.ps1"
+      WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH: "/powershell/module.transport.nsxapi.ps1"
+      WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH: "/powershell/module.common.ps1"
+    volumes:
+      # Compliance content (InSpec profiles) - read-only (ADR-0014 §7: "compliance
+      # runner: compliance-content read access"). Operator-provided; a
+      # provisioning UI is future work, so this is a plain named volume an
+      # operator populates directly for now (matches ScanOptions' ProfilePath/
+      # NsxProfilePath/SrgProfilePath defaults, all under this one root).
+      - compliance-profiles:/opt/waypoint/profiles:ro
+      # Scan artifacts (HDF/CKL) - read-write (ADR-0014 §7: "scan-artifact write
+      # access"). Same named volume the backend mounts read-only above, so the
+      # API can serve already-written results without itself being able to
+      # write into the store.
+      - artifacts:/var/lib/waypoint/artifacts
+      # Secrets master key file (issue #405/#442) - operator-provided, gitignored
+      # (../config/ is covered by .gitignore's anchored /config/ entry). Same
+      # file, same in-container path, and the same optional/fail-closed
+      # behavior as the backend's own mount above: discover/credential-test/
+      # scan all decrypt a credential before doing anything else (ADR-0014 §6),
+      # so a runner that cannot reach this key still starts and reports
+      # healthy, but every job it claims fails until the key is mounted. See
+      # deploy/README.md "Bring-up" step 4 - the same uid/permission note
+      # applies (this image's app user is also uid 1654; see the Dockerfile).
+      # Uncomment and create ../config/secrets/master.key to enable:
+      # - type: bind
+      #   source: ../config/secrets/master.key
+      #   target: /run/secrets/waypoint-master-key
+      #   read_only: true
+      #   bind:
+      #     create_host_path: false
+    networks:
+      - internal
+    # File-sentinel healthcheck (ADR-0013 §1: this process has no HTTP listener
+    # to probe) - RunnerHealthReportingHostedService re-evaluates readiness every
+    # RunnerHealth:RefreshInterval and writes a JSON report; --health-check reads
+    # it back and exits 0/1. See ComplianceReadinessCheck's doc comment for
+    # exactly what "ready" means here (module/content/artifact mounts + master
+    # key, deliberately not InSpec/PowerCLI binary presence).
+    healthcheck:
+      test: ["CMD", "dotnet", "Waypoint.ComplianceRunner.dll", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # download-runner (issue #442, ADR-0013/0014): claims catalog-index/download
+  # (later content-library/repository/managed-content) jobs directly from Postgres
+  # and hosts PowerShell in-process. Not reachable from nginx or the host -
+  # internal network only, no `ports:`. One replica by default (ADR-0013
+  # decision 6); see "Replica-safe scaling" in deploy/README.md before setting
+  # `deploy.replicas` > 1.
+  download-runner:
+    build:
+      context: ..
+      dockerfile: runners/download-runner/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Least-privilege role (0025_runner_db_roles.sql), distinct from the
+      # backend's own ${POSTGRES_USER} owner role - see postgres service above
+      # and that migration's header comment.
+      ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_download_runner;Password=${POSTGRES_DOWNLOAD_RUNNER_PASSWORD:-waypoint_download_runner_dev_only}"
+      WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
+      # Shim modules baked into the image at /app/PowerShell/Modules (Waypoint.
+      # Infrastructure.csproj's CopyToPublishDirectory - see the Dockerfile).
+      # WaypointDownload was missing from this list on `main` even before this
+      # issue (pre-existing gap, not introduced here) - DownloadJobHandler
+      # invokes Invoke-WaypointDownload, which only exists once this module is
+      # preloaded into the runspace (WaypointRunspacePool.CreateRunspace only
+      # imports what ModulePreloadPaths names). Included here alongside
+      # WaypointCatalogIndex now that this is this service's own config.
+      PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointCatalogIndex"
+      PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDownload"
+      # Vendor script baked into the image under /app/PowerShell/vendor
+      # (runners/download-runner/powershell/vendor/, imported from the
+      # vcf-docker-download sibling repo per CLAUDE.md's borrowing policy) -
+      # replaces the backend's former host bind mount (issue #223) now that the
+      # vendor source lives in this repository (ADR-0015 decision 2).
+      WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH: "/app/PowerShell/vendor/vcf-download-manager.common.ps1"
+    volumes:
+      # Offline depot share to index - read-write (ADR-0014 §7: "download
+      # runner: managed tool/depot/content write access"). Matches CatalogOptions'
+      # DepotPath default.
+      - depot:/vcf
+      # Download artifact store - read-write. Same named volume the backend
+      # mounts read-only above.
+      - artifacts:/var/lib/waypoint/artifacts
+      # Operator-installed managed tool state (ADR-0015 decision 3): the
+      # account-gated vcf-download-tool executable lands here through a future
+      # appliance install flow, never baked into this image. Matches
+      # ManagedToolOptions' ToolStatePath default. Read-write so that future
+      # install flow can place the binary; download jobs only ever read it.
+      - managed-tool:/var/lib/waypoint/managed-tool
+      # Secrets master key file (issue #405/#442) - same convention as
+      # compliance-runner's own mount above; catalog-index resolves the depot
+      # token credential and download resolves the target credential, both
+      # through this key (ADR-0014 §6). Uncomment and create
+      # ../config/secrets/master.key to enable:
+      # - type: bind
+      #   source: ../config/secrets/master.key
+      #   target: /run/secrets/waypoint-master-key
+      #   read_only: true
+      #   bind:
+      #     create_host_path: false
+    networks:
+      - internal
+    # File-sentinel healthcheck, same convention as compliance-runner above -
+    # see ReadinessReportingHostedService/HealthCheckProbe's doc comments. Unlike
+    # the compliance-runner's check, this one also confirms Postgres
+    # reachability (CheckDatabaseAsync) as part of "ready".
+    healthcheck:
+      test: ["CMD", "dotnet", "Waypoint.DownloadRunner.dll", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
 networks:
@@ -316,9 +417,11 @@ networks:
     ipam:
       config:
         - subnet: 192.168.240.0/24
-  # backend <-> postgres. internal: true means Docker gives this network no
-  # route out (no host access, no default-gateway/internet); only containers
-  # attached to it can reach each other. nginx is deliberately not attached.
+  # backend, compliance-runner, download-runner <-> postgres. internal: true
+  # means Docker gives this network no route out (no host access, no
+  # default-gateway/internet); only containers attached to it can reach each
+  # other. nginx is deliberately not attached - neither runner is reachable
+  # from nginx or the host (issue #442).
   internal:
     driver: bridge
     internal: true
@@ -326,8 +429,16 @@ networks:
 volumes:
   # Postgres data directory.
   pgdata:
-  # Downloaded/extracted VCF artifacts and offline-repo storage (see
-  # vcf-docker-download's UMDS/VCSA/VKS/ContentLibrary layout). Unused by
-  # the backend today; mounted now so the path convention is fixed before
-  # the download jobs (M1 later slices) land.
+  # Scan (compliance-runner) and download (download-runner) artifact output.
+  # download-runner and compliance-runner both mount this read-write; backend
+  # mounts it read-only to serve already-written results (issue #442 AC5).
   artifacts:
+  # Offline depot share (see vcf-docker-download's UMDS/VCSA/VKS/ContentLibrary
+  # layout) - download-runner only.
+  depot:
+  # Operator-installed managed tool state (ADR-0015 decision 3, e.g. the
+  # account-gated vcf-download-tool) - download-runner only.
+  managed-tool:
+  # Compliance content (InSpec profiles) - compliance-runner only, read-only at
+  # the mount (see that service's volumes:).
+  compliance-profiles:
