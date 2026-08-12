@@ -245,6 +245,36 @@ describe("StigManagerTab (issue #312)", () => {
 		await waitFor(() => expect(within(charlieRow).getByText("authentication failed")).toBeInTheDocument());
 	});
 
+	it("Test button surfaces the master_key_unavailable outcome with a human-readable label, classed as a failure like auth_failed", async () => {
+		installFetchMock("Admin");
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			const method = init?.method ?? "GET";
+			fetchCalls.push({ url, init });
+			if (url === "/api/v1/credentials") return jsonResponse(CREDENTIAL_OPTIONS);
+			if (url === "/api/v1/sites") return jsonResponse(SITES);
+			if (url === "/api/v1/stigman" && method === "GET") return jsonResponse(GLOBAL_CONNECTION);
+			if (url === "/api/v1/stigman/test" && method === "POST") {
+				return jsonResponse({
+					reachable: false,
+					auth_ok: false,
+					outcome: "master_key_unavailable",
+					message: "The appliance master key is unavailable; the credential could not be decrypted.",
+					api_version: null,
+				});
+			}
+			throw new Error(`unexpected fetch: ${method} ${url}`);
+		}) as unknown as typeof fetch;
+
+		await mount();
+		const globalPanel = screen.getByText("GLOBAL DEFAULT").closest(".config-panel")! as HTMLElement;
+		fireEvent.click(within(globalPanel).getByText("Test"));
+		await waitFor(() => expect(within(globalPanel).getByText("master key unavailable")).toBeInTheDocument());
+		expect(within(globalPanel).getByText("master key unavailable").closest(".stigman-tab__outcome")).toHaveClass(
+			"stigman-tab__outcome--bad",
+		);
+	});
+
 	it("renders not_configured and unreachable outcomes distinctly from ok/auth_failed", async () => {
 		installFetchMock("Admin");
 		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
