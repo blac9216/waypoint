@@ -94,6 +94,18 @@ public sealed class ScanUploadCoordinator
 				result = await _uploadClient.UploadCklAsync(connection, clientSecret, cklPath, cancellationToken).ConfigureAwait(false);
 			}
 		}
+		catch (MasterKeyUnavailableException)
+		{
+			// Issue #430: fail closed at the point of the master-key failure, naming
+			// the master key as the cause -- never proceed secret-less to
+			// IStigManagerUploadClient, which would only ever produce a misleading
+			// remote-auth failure with the real cause invisible. No key path or env
+			// var detail crosses this boundary (matches #409's wire/log hygiene rule
+			// for this exception); only this generic, operator-actionable text does.
+			result = new StigManagerUploadResult(
+				StigManagerUploadOutcome.MasterKeyUnavailable,
+				"The appliance master key is unavailable; the STIG Manager credential could not be decrypted.");
+		}
 		catch (Exception exception) when (exception is not OperationCanceledException)
 		{
 			// Belt-and-suspenders: IStigManagerUploadClient's own contract is
@@ -103,6 +115,10 @@ public sealed class ScanUploadCoordinator
 			result = new StigManagerUploadResult(StigManagerUploadOutcome.Failed, "STIG Manager upload failed unexpectedly.");
 		}
 
+		// JobUploadStatuses (the persisted jobs.upload_status column) has no distinct
+		// master-key value -- MasterKeyUnavailable still lands on Failed, but with the
+		// master-key-naming detail set below (issue #430 AC: "records the master-key
+		// cause instead of failing as remote auth"), not a generic upload failure text.
 		string status = result.Outcome switch
 		{
 			StigManagerUploadOutcome.Uploaded => JobUploadStatuses.Uploaded,
@@ -157,6 +173,13 @@ public sealed class ScanUploadCoordinator
 			return null;
 		}
 
+		// MasterKeyUnavailableException is deliberately NOT caught here (issue #430):
+		// returning null on that failure let both callers proceed secret-less to a
+		// guaranteed, misleading remote-auth failure with the real cause invisible.
+		// UploadAsync catches it explicitly to fail closed with a master-key-naming
+		// result; ResolveBenchmarkMetadataAsync's existing catch-all still degrades to
+		// its fallback (never uploads, so proceeding without the secret there is not a
+		// fail-open risk -- it just skips the enrichment, same as any other failure).
 		try
 		{
 			using DecryptedSecret decrypted = await _secrets
@@ -165,10 +188,6 @@ public sealed class ScanUploadCoordinator
 			return decrypted.Value;
 		}
 		catch (CredentialSecretNotFoundException)
-		{
-			return null;
-		}
-		catch (MasterKeyUnavailableException)
 		{
 			return null;
 		}

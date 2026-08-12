@@ -315,6 +315,41 @@ public sealed class StigManagerApiTests : IAsyncLifetime, IDisposable
 		Assert.Null(_factory.Probe.LastConnection);
 	}
 
+	/// <summary>
+	/// Issue #430: a master-key decrypt failure is distinct from a wrong STIG Manager
+	/// credential -- an operator seeing <c>auth_failed</c> would chase credential
+	/// rotation for a problem that is actually appliance key remediation. Creates the
+	/// credential through the normal (working-key) factory, then points a second
+	/// factory sharing the same Postgres at a key file that does not exist -- the real
+	/// <see cref="MasterKeyUnavailableException"/> from production
+	/// <see cref="FileMasterKeyProvider"/>, not a fault-injected stand-in (mirrors
+	/// <c>CredentialsApiTests.CreateWithSecret_NoMasterKeyConfigured_Is503MasterKeyUnavailable</c>).
+	/// </summary>
+	[Fact]
+	public async Task Test_MasterKeyUnavailable_ReturnsMasterKeyUnavailableOutcome_NotAuthFailed_AndNeverCallsTheProbe()
+	{
+		Guid credentialId = await CreateTokenCredentialAsync("invented-stigman-client-secret-mk1");
+		await PutGlobalAsync(credentialId);
+
+		string missingKeyPath = Path.Combine(_keyDirectory, "does-not-exist.key");
+		using StigManagerApiFactory noKeyFactory = new(_fixture.ConnectionString, missingKeyPath);
+		using HttpClient noKeyClient = noKeyFactory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/stigman/test");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+
+		HttpResponseMessage response = await noKeyClient.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("master_key_unavailable", body.RootElement.GetProperty("outcome").GetString());
+		Assert.False(body.RootElement.GetProperty("auth_ok").GetBoolean());
+		Assert.Null(noKeyFactory.Probe.LastConnection);
+
+		// The detailed exception message (env var name, key path) never reaches the wire.
+		string responseBody = await response.Content.ReadAsStringAsync();
+		Assert.DoesNotContain(missingKeyPath, responseBody, StringComparison.Ordinal);
+	}
+
 	[Theory]
 	[InlineData("Viewer")]
 	[InlineData("Cyber")]

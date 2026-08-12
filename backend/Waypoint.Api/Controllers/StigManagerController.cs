@@ -171,8 +171,13 @@ public sealed class StigManagerController : ControllerBase
 			}
 			catch (MasterKeyUnavailableException)
 			{
+				// Issue #430: distinct from AuthFailed -- the STIG Manager credential
+				// itself may be fine, but the appliance's own master key is not
+				// available to decrypt it. Never send the exception's detailed message
+				// (env var, key path) to the wire; only this generic, operator-actionable
+				// text does (matches #409's wire hygiene rule for the same exception).
 				return Ok(new StigManagerTestResponse(
-					Reachable: false, AuthOk: false, StigManagerTestOutcomes.AuthFailed,
+					Reachable: false, AuthOk: false, StigManagerTestOutcomes.MasterKeyUnavailable,
 					"The appliance master key is unavailable; the credential could not be decrypted.", ApiVersion: null));
 			}
 		}

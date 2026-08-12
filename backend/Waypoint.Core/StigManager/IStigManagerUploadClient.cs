@@ -54,6 +54,14 @@ public enum StigManagerUploadOutcome
 	Conflict,
 
 	Failed,
+
+	/// <summary>
+	/// Issue #430: the appliance's own secrets master key (ADR-0005) could not decrypt
+	/// the site's STIG Manager credential. <see cref="ScanUploadCoordinator"/> fails
+	/// closed on this before ever calling <see cref="IStigManagerUploadClient"/> --
+	/// it never proceeds secret-less to a guaranteed, misleading remote-auth failure.
+	/// </summary>
+	MasterKeyUnavailable,
 }
 
 /// <summary><see cref="Detail"/> is a short, redacted reason suitable for <c>jobs.upload_detail</c> -- never a raw exception message or response body.</summary>
