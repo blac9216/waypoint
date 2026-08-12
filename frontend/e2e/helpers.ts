@@ -20,36 +20,34 @@ export function adminPassword(): string {
 }
 
 /**
- * The exact `error.message` `lib/auth.tsx`'s `login()` surfaces on a genuine
- * `401 invalid_credentials` from `POST /api/v1/auth/login` (see
- * `AuthController.Login`, `Waypoint.Api/Controllers/AuthController.cs`) —
- * the only alert text that means "the password was actually wrong". Every
- * other alert `login()` can produce (a transient network error, a timeout,
- * an unrecognized role, etc. — see `auth.tsx`'s `toRole`/`toWireText`/
- * `catch` block) carries a different message, because it is constructed
- * from a different `ApiError.status`/`code` or a hardcoded fallback string.
- * That asymmetry is what lets `login()` below retry safely: it is retrying
- * on "the message wasn't this one", never on "the message looked wrong".
- */
-const INVALID_CREDENTIALS_MESSAGE = "Invalid username or password.";
-
-/**
  * Issue #503: the very first browser login against a freshly-brought-up
- * stack occasionally raced a transient failure (observed pre-#502 at
- * roughly 1-in-3) even though the seed phase's own `POST /auth/login` a
- * moment earlier, with the same credentials, had already succeeded — i.e.
- * not a credential problem. Retries here are scoped tightly to that shape:
- * only when the alert's text is something *other than* the exact
- * `AuthController`-authored "wrong password" message, meaning `login()`
- * threw on a network hiccup, a timeout, or some other transient `ApiError`
- * rather than a real 401. A genuine bad-password rejection (this repo's
- * own "rejects a bad password" test, or any real auth break) still fails
- * immediately on the first attempt — this never masks that.
+ * stack occasionally races a cold-start backend-readiness failure (observed
+ * pre-#502 at roughly 1-in-3) even though the seed phase's own
+ * `POST /auth/login` a moment earlier, with the same credentials, had
+ * already succeeded — i.e. not a credential problem.
+ *
+ * Crucially, that race surfaces as the **exact same** alert text a genuine
+ * wrong password does: if the admin hash isn't resolved/readable yet,
+ * `InMemoryLocalAuthenticationService.Authenticate` fails closed and returns
+ * `null` (`InMemoryLocalAuthenticationService.cs`), which `AuthController.Login`
+ * maps to `401 invalid_credentials` → "Invalid username or password."
+ * (`AuthController.cs`), surfaced verbatim by `lib/auth.tsx`. There is no
+ * distinct 5xx path for an unresolved hash, so alert text alone cannot
+ * separate the cold-start race from a real rejection.
+ *
+ * Because these are indistinguishable by text, `login()` treats the first
+ * few login failures as a warm-up probe: it retries *any* failure with
+ * bounded backoff before giving up. This covers the cold-start race while
+ * still failing a genuine credential break in seconds (the retries exhaust
+ * quickly). The dedicated "rejects a bad password" test inlines its own
+ * flow and does not use this helper, so real-rejection coverage is
+ * unaffected by the retry.
  */
 const LOGIN_RETRY_ATTEMPTS = 4;
 const LOGIN_RETRY_DELAY_MS = 1500;
 
 export async function login(page: Page, username = ADMIN_USERNAME, password = adminPassword()): Promise<void> {
+	let lastFailure = "";
 	for (let attempt = 1; attempt <= LOGIN_RETRY_ATTEMPTS; attempt++) {
 		await page.goto("/");
 		await page.getByLabel("Username").fill(username);
@@ -72,21 +70,20 @@ export async function login(page: Page, username = ADMIN_USERNAME, password = ad
 		}
 
 		const alertText = outcome === "alert" ? ((await alert.textContent()) ?? "").trim() : "";
-		if (alertText === INVALID_CREDENTIALS_MESSAGE) {
-			// A real credential rejection — never retry this; surface it exactly
-			// like a single-attempt login would.
-			throw new Error(`login() rejected: server returned "${alertText}"`);
-		}
+		lastFailure = alertText
+			? `alert: "${alertText}"`
+			: "no alert shown, wordmark never appeared";
 
-		if (attempt === LOGIN_RETRY_ATTEMPTS) {
-			throw new Error(
-				`login() did not reach an authenticated screen after ${LOGIN_RETRY_ATTEMPTS} attempts` +
-					(alertText ? ` (last alert: "${alertText}")` : " (no alert shown, wordmark never appeared)"),
-			);
+		if (attempt < LOGIN_RETRY_ATTEMPTS) {
+			// Any first-login failure is retried as a cold-start warm-up probe —
+			// the invalid-credentials alert cannot be told apart from the #503
+			// backend-readiness race by text, so we retry it too. A genuine
+			// credential break simply exhausts these retries in a few seconds.
+			await page.waitForTimeout(LOGIN_RETRY_DELAY_MS);
 		}
-
-		await page.waitForTimeout(LOGIN_RETRY_DELAY_MS);
 	}
+
+	throw new Error(`login() did not reach an authenticated screen after ${LOGIN_RETRY_ATTEMPTS} attempts (last: ${lastFailure})`);
 }
 
 /** Invented, obviously-fictional hostnames — never a real lab host (CLAUDE.md). */
