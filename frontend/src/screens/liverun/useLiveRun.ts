@@ -17,7 +17,7 @@ import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../../lib/auth-context";
 import { API_BASE } from "../../lib/api";
 import { connectEventStream, type ConnectionState, type WaypointEvent } from "../../lib/events";
-import { applyEvent, fetchRun, fetchRunJobs, type RunSnapshot } from "./liverun";
+import { applyEvent, fetchRunSnapshot, type RunSnapshot } from "./liverun";
 
 export interface UseLiveRunResult {
 	snapshot: RunSnapshot | null;
@@ -51,8 +51,8 @@ export function useLiveRun(runId: string | undefined): UseLiveRunResult {
 		setLoading(true);
 
 		let cancelled = false;
-		Promise.all([fetchRun(runId), fetchRunJobs(runId)])
-			.then(([header, jobs]) => {
+		fetchRunSnapshot(runId)
+			.then(({ header, jobs }) => {
 				if (cancelled) {
 					return;
 				}

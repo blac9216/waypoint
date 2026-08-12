@@ -2,61 +2,101 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
 import { LiveRunScreen } from "./LiveRunScreen";
-import type { QueueStatus, RunHeader, RunJob } from "./liverun";
 
-const HEADER: RunHeader = {
+/**
+ * Issue #494: fixtures below are the REAL wire shapes — `RunResponse`/
+ * `JobResponse` (backend/Waypoint.Api/Contracts/RunContracts.cs), exactly as
+ * `RunsController` serializes them, not the fictional `RunHeader`/`RunJob`
+ * view model `liverun.ts` maps them into. Mocking the view model directly (as
+ * this suite did before #494) is exactly the drift that let
+ * `LiveRunScreen`'s "e.queues is not iterable" crash ship unnoticed: every
+ * unit test passed against a contract no real backend ever sends.
+ */
+interface RunWireFixture {
+	id: string;
+	run_type: string;
+	state: string;
+	paused: boolean;
+	blocked: boolean;
+	blocked_reason: string | null;
+	scope: string;
+	credential_id: string | null;
+	initiated_by: string | null;
+	created_at: string;
+	started_at: string | null;
+	completed_at: string | null;
+	job_count: number;
+	job_count_queued: number;
+	job_count_running: number;
+	job_count_completed: number;
+	job_count_failed: number;
+	job_count_blocked: number;
+}
+
+interface JobWireFixture {
+	id: string;
+	run_id: string | null;
+	job_type: string;
+	target_id: string | null;
+	target_name: string | null;
+	state: string;
+	stage: string | null;
+	priority: number;
+	attempt_count: number;
+	created_at: string;
+	started_at: string | null;
+	finished_at: string | null;
+}
+
+const RUN_WIRE: RunWireFixture = {
 	id: "run-0808-0100Z",
-	site: "Alpha Enclave",
-	target_count: 2,
-	initiated_by: "j.moreno",
-	credential_name: "svc-stig-scan",
+	run_type: "scan",
 	state: "running",
 	paused: false,
-	pass: 0,
-	fail: 0,
-	na: 0,
-	percent: 0,
-	completed_count: 0,
-	elapsed_seconds: 30,
 	blocked: false,
-	queues: [
-		{
-			key: "esxi",
-			priority: 4,
-			name: "ESXI HOSTS",
-			benchmark: "VMware_vSphere_8.0_ESXi_STIG_V2R1",
-			blocked: false,
-			blocked_reason: null,
-		},
-	],
+	blocked_reason: null,
+	scope: '{"site_id":"11111111-1111-1111-1111-111111111111"}',
+	credential_id: "22222222-2222-2222-2222-222222222222",
+	initiated_by: "j.moreno",
+	created_at: "2026-08-08T01:00:00Z",
+	started_at: "2026-08-08T01:00:00Z",
+	completed_at: null,
+	job_count: 2,
+	job_count_queued: 2,
+	job_count_running: 0,
+	job_count_completed: 0,
+	job_count_failed: 0,
+	job_count_blocked: 0,
 };
 
-const JOBS: RunJob[] = [
+const JOB_WIRE: JobWireFixture[] = [
 	{
-		job_id: "j-1",
-		target: "esxi-01.example.internal",
-		queue: "esxi",
-		priority: 4,
-		benchmark: "VMware_vSphere_8.0_ESXi_STIG_V2R1",
+		id: "j-1",
+		run_id: "run-0808-0100Z",
+		job_type: "scan",
+		target_id: "target-1",
+		target_name: "esxi-01.example.internal",
 		state: "queued",
-		progress_percent: 0,
-		pass: null,
-		fail: null,
-		na: null,
-		note: "",
+		stage: null,
+		priority: 4,
+		attempt_count: 0,
+		created_at: "2026-08-08T01:00:00Z",
+		started_at: null,
+		finished_at: null,
 	},
 	{
-		job_id: "j-2",
-		target: "esxi-02.example.internal",
-		queue: "esxi",
-		priority: 4,
-		benchmark: "VMware_vSphere_8.0_ESXi_STIG_V2R1",
+		id: "j-2",
+		run_id: "run-0808-0100Z",
+		job_type: "scan",
+		target_id: "target-2",
+		target_name: "esxi-02.example.internal",
 		state: "queued",
-		progress_percent: 0,
-		pass: null,
-		fail: null,
-		na: null,
-		note: "",
+		stage: null,
+		priority: 4,
+		attempt_count: 0,
+		created_at: "2026-08-08T01:00:00Z",
+		started_at: null,
+		finished_at: null,
 	},
 ];
 
@@ -106,10 +146,10 @@ function installFetchMock(sseAttempt: (lastEventId: string | null) => SseAttempt
 		const accept = new Headers(init?.headers).get("Accept");
 
 		if (url === "/api/v1/runs/run-0808-0100Z" && accept !== "text/event-stream") {
-			return new Response(JSON.stringify(HEADER), { status: 200, headers: { "Content-Type": "application/json" } });
+			return new Response(JSON.stringify(RUN_WIRE), { status: 200, headers: { "Content-Type": "application/json" } });
 		}
 		if (url === "/api/v1/runs/run-0808-0100Z/jobs") {
-			return new Response(JSON.stringify(JOBS), { status: 200, headers: { "Content-Type": "application/json" } });
+			return new Response(JSON.stringify(JOB_WIRE), { status: 200, headers: { "Content-Type": "application/json" } });
 		}
 		if (url === "/api/v1/runs/run-0808-0100Z/events") {
 			const lastEventId = new Headers(init?.headers).get("Last-Event-ID");
@@ -319,15 +359,11 @@ describe("LiveRunScreen (issue #283)", () => {
 				return extraResponse;
 			}
 			if (url === "/api/v1/runs/run-0808-0100Z" && new Headers(init?.headers).get("Accept") !== "text/event-stream") {
-				const blockedHeader: RunHeader = {
-					...HEADER,
-					blocked: true,
-					queues: [{ ...HEADER.queues[0], blocked: true, blocked_reason: "credential failure" }],
-				};
-				return new Response(JSON.stringify(blockedHeader), { status: 200 });
+				const blockedWire: RunWireFixture = { ...RUN_WIRE, blocked: true, blocked_reason: "credential failure" };
+				return new Response(JSON.stringify(blockedWire), { status: 200 });
 			}
 			if (url === "/api/v1/runs/run-0808-0100Z/jobs") {
-				return new Response(JSON.stringify(JOBS), { status: 200 });
+				return new Response(JSON.stringify(JOB_WIRE), { status: 200 });
 			}
 			if (url === "/api/v1/runs/run-0808-0100Z/events") {
 				return {
@@ -448,10 +484,10 @@ describe("LiveRunScreen (issue #283)", () => {
 			const url = typeof input === "string" ? input : input.toString();
 			const accept = new Headers(init?.headers).get("Accept");
 			if (url === "/api/v1/runs/run-0808-0100Z" && accept !== "text/event-stream") {
-				return new Response(JSON.stringify(HEADER), { status: 200 });
+				return new Response(JSON.stringify(RUN_WIRE), { status: 200 });
 			}
 			if (url === "/api/v1/runs/run-0808-0100Z/jobs") {
-				return new Response(JSON.stringify(JOBS), { status: 200 });
+				return new Response(JSON.stringify(JOB_WIRE), { status: 200 });
 			}
 			if (url === "/api/v1/auth/me") {
 				return new Response(JSON.stringify({ username: "j.moreno", role: "Admin" }), { status: 200 });
@@ -517,49 +553,43 @@ describe("LiveRunScreen (issue #283)", () => {
 		 * COMPONENTS", "P3 VCENTER APPLIANCES", "P4 ESXI HOSTS", "P5 GUEST / SSH
 		 * TARGETS" — 8 invented targets per queue, 40 total, mirroring the
 		 * prototype's "~40 targets in priority queues" spec instead of the
-		 * 2-target fixture the rest of this suite uses for readability. */
-		const SCALE_QUEUES: QueueStatus[] = [
-			{ key: "nsx", priority: 1, name: "NSX MANAGERS", benchmark: "VMware_NSX_4.x_STIG_V1R1", blocked: false, blocked_reason: null },
-			{ key: "vcsa", priority: 2, name: "VCSA COMPONENTS", benchmark: "VMware_vCSA_8.0_STIG_V1R1", blocked: false, blocked_reason: null },
-			{
-				key: "vcenter",
-				priority: 3,
-				name: "VCENTER APPLIANCES",
-				benchmark: "VMware_vCenter_8.0_STIG_V1R1",
-				blocked: false,
-				blocked_reason: null,
-			},
-			{ key: "esxi", priority: 4, name: "ESXI HOSTS", benchmark: "VMware_vSphere_8.0_ESXi_STIG_V2R1", blocked: false, blocked_reason: null },
-			{
-				key: "guest",
-				priority: 5,
-				name: "GUEST / SSH TARGETS",
-				benchmark: "VMware_vSphere_8.0_VM_STIG_V1R1",
-				blocked: false,
-				blocked_reason: null,
-			},
+		 * 2-target fixture the rest of this suite uses for readability.
+		 *
+		 * Issue #494: the real `JobResponse` carries only `priority` (a bare
+		 * short), not a named queue/benchmark — `liverun.ts`'s `mapRunJob`
+		 * synthesizes the `p{priority}` queue grouping the board renders, so
+		 * this fixture only needs a `key`/`priority` pair per group; `name`/
+		 * `benchmark` are no longer wire fields.
+		 */
+		const SCALE_QUEUES: { key: string; priority: number }[] = [
+			{ key: "nsx", priority: 1 },
+			{ key: "vcsa", priority: 2 },
+			{ key: "vcenter", priority: 3 },
+			{ key: "esxi", priority: 4 },
+			{ key: "guest", priority: 5 },
 		];
 
 		const TARGETS_PER_QUEUE = 8;
 		const SCALE_JOB_COUNT = SCALE_QUEUES.length * TARGETS_PER_QUEUE; // 40
 
-		function buildScaleJobs(): RunJob[] {
-			const jobs: RunJob[] = [];
+		function buildScaleJobs(): JobWireFixture[] {
+			const jobs: JobWireFixture[] = [];
 			for (const queue of SCALE_QUEUES) {
 				for (let i = 0; i < TARGETS_PER_QUEUE; i++) {
 					const n = String(i).padStart(2, "0");
 					jobs.push({
-						job_id: `${queue.key}-job-${n}`,
-						target: `${queue.key}-${n}.example.internal`,
-						queue: queue.key,
-						priority: queue.priority,
-						benchmark: queue.benchmark,
+						id: `${queue.key}-job-${n}`,
+						run_id: "run-0808-0200Z",
+						job_type: "scan",
+						target_id: `${queue.key}-target-${n}`,
+						target_name: `${queue.key}-${n}.example.internal`,
 						state: "queued",
-						progress_percent: 0,
-						pass: null,
-						fail: null,
-						na: null,
-						note: "",
+						stage: null,
+						priority: queue.priority,
+						attempt_count: 0,
+						created_at: "2026-08-08T02:00:00Z",
+						started_at: null,
+						finished_at: null,
 					});
 				}
 			}
@@ -567,22 +597,25 @@ describe("LiveRunScreen (issue #283)", () => {
 		}
 
 		const SCALE_JOBS = buildScaleJobs();
-		const SCALE_HEADER: RunHeader = {
+		const SCALE_HEADER: RunWireFixture = {
 			id: "run-0808-0200Z",
-			site: "Alpha Enclave",
-			target_count: SCALE_JOB_COUNT,
-			initiated_by: "j.moreno",
-			credential_name: "svc-stig-scan",
+			run_type: "scan",
 			state: "running",
 			paused: false,
-			pass: 0,
-			fail: 0,
-			na: 0,
-			percent: 0,
-			completed_count: 0,
-			elapsed_seconds: 5,
 			blocked: false,
-			queues: SCALE_QUEUES,
+			blocked_reason: null,
+			scope: '{"site_id":"11111111-1111-1111-1111-111111111111"}',
+			credential_id: "22222222-2222-2222-2222-222222222222",
+			initiated_by: "j.moreno",
+			created_at: "2026-08-08T02:00:00Z",
+			started_at: "2026-08-08T02:00:00Z",
+			completed_at: null,
+			job_count: SCALE_JOB_COUNT,
+			job_count_queued: SCALE_JOB_COUNT,
+			job_count_running: 0,
+			job_count_completed: 0,
+			job_count_failed: 0,
+			job_count_blocked: 0,
 		};
 
 		/** A representative subset of transitions, not all 40 jobs walking the
@@ -694,7 +727,7 @@ describe("LiveRunScreen (issue #283)", () => {
 			// renders live" claim, not extrapolated from 2.
 			await waitFor(() => {
 				for (const job of SCALE_JOBS) {
-					expect(screen.getByText(job.target)).toBeInTheDocument();
+					expect(screen.getByText(job.target_name!)).toBeInTheDocument();
 				}
 			});
 			expect(screen.getAllByRole("row").length).toBeGreaterThanOrEqual(SCALE_JOB_COUNT);
@@ -732,25 +765,25 @@ describe("LiveRunScreen (issue #283)", () => {
 			screen.getByRole("button", { name: "State board" }).click();
 			await waitFor(() => expect(document.querySelector(".live-run__board")).toBeInTheDocument());
 			for (const job of SCALE_JOBS) {
-				expect(screen.getByText(job.target)).toBeInTheDocument();
+				expect(screen.getByText(job.target_name!)).toBeInTheDocument();
 			}
 		});
 
 		it("a queue halting at 40-target scale still renders the HALTED status and blocked banner (AC-1 queue halts)", async () => {
-			// P5 guest/SSH queue halts after repeated credential failures, mirroring
-			// the README's "P5 guest queue halts after three consecutive
-			// svc-stig-vm SSH auth failures" thread, but at the full 40-target
-			// scale rather than the 2-target fixture.
-			const blockedHeader: RunHeader = {
-				...SCALE_HEADER,
-				blocked: true,
-				queues: SCALE_QUEUES.map((q) => (q.key === "guest" ? { ...q, blocked: true, blocked_reason: "credential failure" } : q)),
-			};
+			// Issue #494: the real `queue.state`/`RunResponse.blocked` signal is
+			// run-level (a credential halt on the shared job queue), not scoped
+			// to one named priority queue the way the original fictional
+			// contract modeled it — a halted run therefore reads as every
+			// synthesized queue halting together, mirroring the README's
+			// "P5 guest queue halts after three consecutive svc-stig-vm SSH auth
+			// failures" story at the full 40-target scale, but honestly reflecting
+			// that the halt is whole-run.
+			const blockedWire: RunWireFixture = { ...SCALE_HEADER, blocked: true, blocked_reason: "credential failure" };
 			globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 				const url = typeof input === "string" ? input : input.toString();
 				const accept = new Headers(init?.headers).get("Accept");
 				if (url === `/api/v1/runs/${SCALE_HEADER.id}` && accept !== "text/event-stream") {
-					return new Response(JSON.stringify(blockedHeader), { status: 200 });
+					return new Response(JSON.stringify(blockedWire), { status: 200 });
 				}
 				if (url === `/api/v1/runs/${SCALE_HEADER.id}/jobs`) {
 					return new Response(JSON.stringify(SCALE_JOBS), { status: 200 });
@@ -770,11 +803,12 @@ describe("LiveRunScreen (issue #283)", () => {
 
 			renderWithAuth(SCALE_HEADER.id, "Viewer");
 			await waitFor(() => expect(screen.getByText(/Queue halted/)).toBeInTheDocument());
-			// The halted queue's status text renders even with the other 32 rows
-			// (4 queues x 8) still present alongside it.
-			expect(screen.getByText(/HALTED — credential failure/)).toBeInTheDocument();
+			// Every synthesized queue reflects the run-level halt (all 5 queues,
+			// not just one — see the run-level `queue.state` note above), while
+			// all 40 target rows still render alongside it.
+			expect(screen.getAllByText(/HALTED — credential failure/).length).toBe(SCALE_QUEUES.length);
 			for (const job of SCALE_JOBS) {
-				expect(screen.getByText(job.target)).toBeInTheDocument();
+				expect(screen.getByText(job.target_name!)).toBeInTheDocument();
 			}
 		});
 	});
@@ -824,10 +858,10 @@ describe("LiveRunScreen (issue #283)", () => {
 				const url = typeof input === "string" ? input : input.toString();
 				const accept = new Headers(init?.headers).get("Accept");
 				if (url === "/api/v1/runs/run-0808-0100Z" && accept !== "text/event-stream") {
-					return new Response(JSON.stringify(HEADER), { status: 200 });
+					return new Response(JSON.stringify(RUN_WIRE), { status: 200 });
 				}
 				if (url === "/api/v1/runs/run-0808-0100Z/jobs") {
-					return new Response(JSON.stringify(JOBS), { status: 200 });
+					return new Response(JSON.stringify(JOB_WIRE), { status: 200 });
 				}
 				if (url === "/api/v1/auth/me") {
 					return new Response(JSON.stringify({ username: "j.moreno", role: "Admin" }), { status: 200 });
