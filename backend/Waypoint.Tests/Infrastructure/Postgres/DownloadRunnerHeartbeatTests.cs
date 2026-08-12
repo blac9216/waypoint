@@ -31,11 +31,15 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <summary>
 /// Issue #443 against real Postgres: the download-runner's readiness reporter writes its
 /// database-persisted heartbeat twin only when the database is actually reachable
-/// (<c>databaseReachable &amp;&amp; _workerRegistry is not null</c>). The pure-unit
-/// <c>ReadinessReportingHostedServiceTests</c> can't reach that branch (no configured
-/// database), so this exercises it end to end: a real connection string makes the probe
-/// succeed, and the upserted <c>worker_registry</c> row is read back with the runner's
-/// allowlist and readiness.
+/// (<see cref="ReadinessSnapshot.DatabaseReachable"/> gates the shared engine's
+/// <c>canHeartbeat</c> predicate -- see issue #484, which restored this gate after the
+/// #461/#473 readiness consolidation briefly dropped it). The pure-unit
+/// <c>ReadinessReportingHostedServiceTests</c> can't reach the reachable branch (no
+/// configured database), so this exercises it end to end: a real connection string makes
+/// the probe succeed, and the upserted <c>worker_registry</c> row is read back with the
+/// runner's allowlist and readiness. <see cref="StartThenImmediateStop_WithUnreachableDatabase_SkipsHeartbeatWithoutError"/>
+/// covers the opposite branch -- an invalid connection string, so the probe fails and the
+/// heartbeat is skipped rather than attempted-and-caught.
 /// </summary>
 [Collection("Postgres")]
 public sealed class DownloadRunnerHeartbeatTests : IAsyncLifetime
@@ -111,6 +115,59 @@ public sealed class DownloadRunnerHeartbeatTests : IAsyncLifetime
 		Assert.Equal(
 			new HashSet<string>(StringComparer.Ordinal) { "catalog-index", "download" },
 			new HashSet<string>(row.JobTypes, StringComparer.Ordinal));
+	}
+
+	[Fact]
+	public async Task StartThenImmediateStop_WithUnreachableDatabase_SkipsHeartbeatWithoutError()
+	{
+		// Issue #484: a connection string is configured (so IWorkerRegistryWriter is
+		// non-null) but points at nothing reachable -- BuildSnapshotAsync's own database
+		// probe fails, so DatabaseReachable is false. The shared engine's canHeartbeat
+		// predicate must skip HeartbeatAsync entirely in that case (not attempt it and
+		// catch the failure): the registry is never called, and worker_registry stays
+		// empty for this worker rather than gaining a Ready:false row for a worker whose
+		// self-reported job types and capacity the control plane never actually saw.
+		string artifactStore = Path.Combine(_tempDirectory, "artifacts");
+		string depotPath = Path.Combine(_tempDirectory, "depot");
+		Directory.CreateDirectory(depotPath);
+		string readinessFile = Path.Combine(_tempDirectory, "readiness.json");
+
+		// A syntactically valid Npgsql connection string pointed at a port nothing
+		// listens on -- OpenAsync fails fast rather than hanging for the test timeout.
+		const string unreachableConnectionString = "Host=127.0.0.1;Port=1;Database=waypoint;Username=waypoint;Password=waypoint;Timeout=1";
+
+		IConfiguration configuration = new ConfigurationBuilder()
+			.AddInMemoryCollection(new Dictionary<string, string?>
+			{
+				["ConnectionStrings:Waypoint"] = unreachableConnectionString,
+			})
+			.Build();
+
+		CountingWorkerRegistry registry = new();
+
+		ReadinessReportingHostedService service = new(
+			configuration,
+			new FakeManagedToolPresenceChecker(present: true),
+			Options.Create(new DownloadOptions { ArtifactStorePath = artifactStore }),
+			Options.Create(new CatalogOptions { DepotPath = depotPath }),
+			Options.Create(new DownloadRunnerOptions
+			{
+				ReadinessFilePath = readinessFile,
+				ReadinessInterval = TimeSpan.FromMinutes(5),
+				WorkerId = "download-runner-db-unreachable",
+			}),
+			CreateResourceAdmission(),
+			registry,
+			NullLogger<ReadinessReportingHostedService>.Instance);
+
+		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(10));
+		await service.StartAsync(cts.Token);
+		await service.StopAsync(CancellationToken.None);
+
+		Assert.Equal(0, registry.Count);
+		Assert.Empty(await new WorkerRegistryRepository(_fixture.ConnectionString).ListAsync(CancellationToken.None));
+		// The file snapshot still lands even though the heartbeat was skipped.
+		Assert.True(File.Exists(readinessFile));
 	}
 
 	[Fact]
@@ -205,7 +262,7 @@ public sealed class DownloadRunnerHeartbeatTests : IAsyncLifetime
 
 		public int Count => Volatile.Read(ref _count);
 
-		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, CancellationToken cancellationToken)
+		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken)
 		{
 			Interlocked.Increment(ref _count);
 			return Task.CompletedTask;
@@ -216,7 +273,7 @@ public sealed class DownloadRunnerHeartbeatTests : IAsyncLifetime
 	{
 		public bool WasCalled { get; private set; }
 
-		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, CancellationToken cancellationToken)
+		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken)
 		{
 			WasCalled = true;
 			throw new InvalidOperationException("simulated heartbeat write failure");

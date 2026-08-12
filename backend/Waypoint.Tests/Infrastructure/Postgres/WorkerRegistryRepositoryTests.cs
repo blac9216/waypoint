@@ -58,25 +58,26 @@ public sealed class WorkerRegistryRepositoryTests : IAsyncLifetime
 	{
 		string[] jobTypes = ["download", "catalog-index"];
 
-		await _registry.HeartbeatAsync("download-runner-1", jobTypes, ready: true, CancellationToken.None);
+		await _registry.HeartbeatAsync("download-runner-1", jobTypes, ready: true, [], CancellationToken.None);
 
 		WorkerHeartbeat row = Assert.Single(await _registry.ListAsync(CancellationToken.None));
 		Assert.Equal("download-runner-1", row.WorkerId);
 		Assert.True(row.Ready);
 		// JSONB allowlist survives the round trip in order.
 		Assert.Equal(jobTypes, row.JobTypes);
+		Assert.Empty(row.StarvedJobTypes);
 	}
 
 	[Fact]
 	public async Task HeartbeatAsync_SecondCall_UpdatesInPlace_NoDuplicateRow()
 	{
-		await _registry.HeartbeatAsync("compliance-runner-1", ["scan"], ready: false, CancellationToken.None);
+		await _registry.HeartbeatAsync("compliance-runner-1", ["scan"], ready: false, [], CancellationToken.None);
 		DateTimeOffset firstSeen = (await _registry.ListAsync(CancellationToken.None))[0].LastSeenAt;
 
 		// A change in both the allowlist and the readiness flag must overwrite the same
 		// row (worker_id is the primary key; ON CONFLICT DO UPDATE), never append.
 		string[] updatedJobTypes = ["scan", "remediate"];
-		await _registry.HeartbeatAsync("compliance-runner-1", updatedJobTypes, ready: true, CancellationToken.None);
+		await _registry.HeartbeatAsync("compliance-runner-1", updatedJobTypes, ready: true, [], CancellationToken.None);
 
 		WorkerHeartbeat row = Assert.Single(await _registry.ListAsync(CancellationToken.None));
 		Assert.Equal("compliance-runner-1", row.WorkerId);
@@ -92,9 +93,9 @@ public sealed class WorkerRegistryRepositoryTests : IAsyncLifetime
 		// Two distinct workers; the second one heartbeats last, so it must sort first
 		// (ListAsync orders last_seen_at DESC -- the ordering GET /system's staleness
 		// grouping relies on).
-		await _registry.HeartbeatAsync("download-runner-1", ["download"], ready: true, CancellationToken.None);
+		await _registry.HeartbeatAsync("download-runner-1", ["download"], ready: true, [], CancellationToken.None);
 		await ForceOlderLastSeenAsync("download-runner-1", TimeSpan.FromMinutes(5));
-		await _registry.HeartbeatAsync("compliance-runner-1", ["scan"], ready: true, CancellationToken.None);
+		await _registry.HeartbeatAsync("compliance-runner-1", ["scan"], ready: true, [], CancellationToken.None);
 
 		IReadOnlyList<WorkerHeartbeat> rows = await _registry.ListAsync(CancellationToken.None);
 
@@ -102,6 +103,32 @@ public sealed class WorkerRegistryRepositoryTests : IAsyncLifetime
 		Assert.Equal("compliance-runner-1", rows[0].WorkerId);
 		Assert.Equal("download-runner-1", rows[1].WorkerId);
 		Assert.True(rows[0].LastSeenAt > rows[1].LastSeenAt);
+	}
+
+	[Fact]
+	public async Task HeartbeatAsync_WithStarvedJobTypes_RoundTripsPermanentAndTransientFlags()
+	{
+		// Issue #467: starved_job_types (migration 0029) round-trips both the job type
+		// and its permanent/transient tag through the JSONB column, and an empty list on
+		// a later heartbeat clears a previously-reported starvation (mirrors job_types'
+		// own overwrite-on-conflict semantics -- this is a live snapshot, not a log).
+		StarvedWorkerJobType[] starved =
+		[
+			new StarvedWorkerJobType("scan", Permanent: true),
+			new StarvedWorkerJobType("download", Permanent: false),
+		];
+
+		await _registry.HeartbeatAsync("compliance-runner-1", ["scan"], ready: true, starved, CancellationToken.None);
+
+		WorkerHeartbeat row = Assert.Single(await _registry.ListAsync(CancellationToken.None));
+		Assert.Equal(2, row.StarvedJobTypes.Count);
+		Assert.Contains(row.StarvedJobTypes, s => s.JobType == "scan" && s.Permanent);
+		Assert.Contains(row.StarvedJobTypes, s => s.JobType == "download" && !s.Permanent);
+
+		// A later heartbeat with nothing starved clears it.
+		await _registry.HeartbeatAsync("compliance-runner-1", ["scan"], ready: true, [], CancellationToken.None);
+		WorkerHeartbeat cleared = Assert.Single(await _registry.ListAsync(CancellationToken.None));
+		Assert.Empty(cleared.StarvedJobTypes);
 	}
 
 	private async Task ForceOlderLastSeenAsync(string workerId, TimeSpan age)

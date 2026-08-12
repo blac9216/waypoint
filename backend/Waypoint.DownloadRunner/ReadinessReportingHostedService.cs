@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -94,7 +95,9 @@ public sealed partial class ReadinessReportingHostedService : IHostedService, ID
 			snapshot => snapshot.JobTypes,
 			Options.Create<IRunnerReadinessOptions>(runnerOptions.Value),
 			workerRegistry,
-			logger);
+			logger,
+			canHeartbeat: snapshot => snapshot.DatabaseReachable,
+			starvedJobTypes: snapshot => snapshot.Capacity?.StarvedJobTypes.Select(starved => new StarvedJobType(starved.JobType, starved.Permanent)).ToArray() ?? []);
 	}
 
 	public Task StartAsync(CancellationToken cancellationToken) => _inner.StartAsync(cancellationToken);
@@ -119,6 +122,7 @@ public sealed partial class ReadinessReportingHostedService : IHostedService, ID
 			ToolPresent: toolPresent,
 			ArtifactStoreWritable: artifactStoreWritable,
 			DepotPathReadable: depotPathReadable,
+			DatabaseReachable: databaseReachable,
 			Capacity: RunnerCapacityReportFactory.FromController(_resourceAdmission),
 			GeneratedAt: DateTimeOffset.UtcNow);
 	}

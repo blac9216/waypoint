@@ -22,8 +22,20 @@ namespace Waypoint.Core.SystemState;
 /// <param name="JobTypes">The <c>JobCapabilities</c> allowlist this worker claims from.</param>
 /// <param name="Ready">The worker's own self-reported readiness at the time of the last heartbeat.</param>
 /// <param name="LastSeenAt">When the worker last upserted this row.</param>
+/// <param name="StarvedJobTypes">
+/// Issue #467 (migration 0029): job types this worker was denying resource admission to
+/// as of its last heartbeat, each tagged permanent (profile exceeds the total effective
+/// budget) or transient (would fit once running jobs release budget). Empty when nothing
+/// was starved.
+/// </param>
 public sealed record WorkerHeartbeat(
 	string WorkerId,
 	IReadOnlyList<string> JobTypes,
 	bool Ready,
-	DateTimeOffset LastSeenAt);
+	DateTimeOffset LastSeenAt,
+	IReadOnlyList<StarvedWorkerJobType> StarvedJobTypes);
+
+/// <summary>JSON/DB-persisted twin of <c>Waypoint.Runner.Resources.StarvedJobType</c> -- <c>Waypoint.Core</c> cannot reference the runner project, so this is the control-plane-side shape.</summary>
+/// <param name="JobType">The <c>jobs.job_type</c> value being denied admission.</param>
+/// <param name="Permanent">True when the type's profile alone exceeds this worker's total effective budget (never fits); false when it is only transient contention.</param>
+public sealed record StarvedWorkerJobType(string JobType, bool Permanent);

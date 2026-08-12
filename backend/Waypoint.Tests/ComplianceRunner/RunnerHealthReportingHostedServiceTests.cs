@@ -119,6 +119,8 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 		Assert.Equal(0.0, report.Capacity.AdmittedCpuCores, precision: 6);
 		Assert.Equal(0L, report.Capacity.AdmittedMemoryBytes);
 		Assert.Equal(0, report.Capacity.AdmittedJobCount);
+		// Issue #467: nothing admitted means nothing starved either.
+		Assert.Empty(report.Capacity.StarvedJobTypes);
 	}
 
 	[Fact]
@@ -280,7 +282,7 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 
 		public List<Heartbeat> Heartbeats { get; } = [];
 
-		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, CancellationToken cancellationToken)
+		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken)
 		{
 			Heartbeats.Add(new Heartbeat(workerId, jobTypes, ready));
 			return Task.CompletedTask;
@@ -291,7 +293,7 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 	{
 		public bool WasCalled { get; private set; }
 
-		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, CancellationToken cancellationToken)
+		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken)
 		{
 			WasCalled = true;
 			throw new InvalidOperationException("simulated heartbeat write failure");

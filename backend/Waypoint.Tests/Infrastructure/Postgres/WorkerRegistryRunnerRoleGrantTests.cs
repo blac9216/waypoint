@@ -82,8 +82,8 @@ public sealed class WorkerRegistryRunnerRoleGrantTests : IAsyncLifetime
 	{
 		WorkerRegistryRepository registry = new(_complianceRunnerConnectionString);
 
-		await registry.HeartbeatAsync("compliance-runner-role-probe", ["scan", "discover"], ready: true, CancellationToken.None);
-		await registry.HeartbeatAsync("compliance-runner-role-probe", ["scan", "discover"], ready: false, CancellationToken.None);
+		await registry.HeartbeatAsync("compliance-runner-role-probe", ["scan", "discover"], ready: true, [], CancellationToken.None);
+		await registry.HeartbeatAsync("compliance-runner-role-probe", ["scan", "discover"], ready: false, [], CancellationToken.None);
 
 		await using NpgsqlConnection verify = new(_fixture.ConnectionString);
 		await verify.OpenAsync();
@@ -101,8 +101,8 @@ public sealed class WorkerRegistryRunnerRoleGrantTests : IAsyncLifetime
 	{
 		WorkerRegistryRepository registry = new(_downloadRunnerConnectionString);
 
-		await registry.HeartbeatAsync("download-runner-role-probe", ["download", "catalog-index"], ready: true, CancellationToken.None);
-		await registry.HeartbeatAsync("download-runner-role-probe", ["download", "catalog-index"], ready: false, CancellationToken.None);
+		await registry.HeartbeatAsync("download-runner-role-probe", ["download", "catalog-index"], ready: true, [], CancellationToken.None);
+		await registry.HeartbeatAsync("download-runner-role-probe", ["download", "catalog-index"], ready: false, [], CancellationToken.None);
 
 		await using NpgsqlConnection verify = new(_fixture.ConnectionString);
 		await verify.OpenAsync();

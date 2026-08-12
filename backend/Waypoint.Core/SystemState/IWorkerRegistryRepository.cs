@@ -35,7 +35,11 @@ public interface IWorkerRegistryWriter
 	/// "no update in N seconds means the process is gone" reasoning), but independent
 	/// of any claimed job -- an idle worker between jobs still heartbeats.
 	/// </summary>
-	Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, CancellationToken cancellationToken);
+	/// <param name="starvedJobTypes">
+	/// Issue #467 (migration 0029): job types this worker is currently denying resource
+	/// admission to. Empty (not null) when nothing is starved.
+	/// </param>
+	Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken);
 }
 
 /// <summary>See <see cref="IWorkerRegistryWriter"/> for why this is a separate interface.</summary>

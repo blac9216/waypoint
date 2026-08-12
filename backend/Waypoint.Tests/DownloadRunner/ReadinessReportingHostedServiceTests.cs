@@ -19,6 +19,7 @@ using Microsoft.Extensions.Options;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
 using Waypoint.DownloadRunner;
+using Waypoint.Runner.Readiness;
 using Waypoint.Runner.Resources;
 using Waypoint.Tests.Support;
 using Xunit;
@@ -162,6 +163,43 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 		Assert.Equal(2.0, snapshot.Capacity.EffectiveCpuCores, precision: 6);
 		Assert.Equal(4L * 1024 * 1024 * 1024, snapshot.Capacity.EffectiveMemoryBytes);
 		Assert.Equal(0, snapshot.Capacity.AdmittedJobCount);
+		Assert.Empty(snapshot.Capacity.StarvedJobTypes);
+	}
+
+	[Fact]
+	public async Task Snapshot_WithStarvedJobType_ReportsItInCapacity()
+	{
+		// Issue #467: a job type this runner can never admit (profile exceeds a
+		// 1-core budget) must show up in the snapshot's Capacity.StarvedJobTypes, not
+		// just in the log -- this is what worker_registry's heartbeat and GET /system
+		// read to surface admission starvation.
+		string artifactStore = Path.Combine(_tempDirectory, "artifacts");
+		string depotPath = Path.Combine(_tempDirectory, "depot");
+		Directory.CreateDirectory(depotPath);
+		string readinessFile = Path.Combine(_tempDirectory, "readiness.json");
+
+		ResourceAdmissionController resourceAdmission = CreateResourceAdmission(fallbackCpuCores: 1.0, fallbackMemoryBytes: 4L * 1024 * 1024 * 1024);
+		resourceAdmission.TryAdmit(Guid.NewGuid(), "scan"); // 2.0 cores > 1.0-core budget -- permanently starved.
+
+		ReadinessReportingHostedService service = new(
+			EmptyConfiguration(),
+			new FakeManagedToolPresenceChecker(present: true),
+			Options.Create(new DownloadOptions { ArtifactStorePath = artifactStore }),
+			Options.Create(new CatalogOptions { DepotPath = depotPath }),
+			Options.Create(new DownloadRunnerOptions { ReadinessFilePath = readinessFile, ReadinessInterval = TimeSpan.FromMinutes(5) }),
+			resourceAdmission,
+			null,
+			NullLogger<ReadinessReportingHostedService>.Instance);
+
+		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
+		await service.StartAsync(cts.Token);
+		await service.StopAsync(CancellationToken.None);
+
+		ReadinessSnapshot snapshot = JsonSerializer.Deserialize<ReadinessSnapshot>(await File.ReadAllTextAsync(readinessFile))!;
+
+		StarvedJobTypeReport starved = Assert.Single(snapshot.Capacity!.StarvedJobTypes);
+		Assert.Equal("scan", starved.JobType);
+		Assert.True(starved.Permanent);
 	}
 
 	[Fact]
