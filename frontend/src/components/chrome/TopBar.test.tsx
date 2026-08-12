@@ -265,3 +265,133 @@ describe("TopBar mode badge tri-state (issue #94)", () => {
 		});
 	});
 });
+
+/**
+ * Issue #489: `GET /system`'s `runners[].starved_job_types` (issue #467's
+ * per-runner resource-admission-starvation report) reaches the Runners
+ * indicator. These pin the three states an operator can see: nothing
+ * starved (existing behavior, unaffected), transient starvation (warn,
+ * self-resolving), and permanent starvation (escalated bad-severity,
+ * misconfiguration that never self-resolves on its own).
+ */
+describe("TopBar Runners indicator admission starvation (issue #489)", () => {
+	let originalFetch: typeof fetch;
+
+	function installFetchMock(runners: unknown[]) {
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "/api/v1/system") {
+				return jsonResponse({ version: "2.4.1", build: "24817", mode: "connected", update_available: null, runners });
+			}
+			if (url === "/api/v1/stigman") {
+				return jsonResponse({ error: { code: "not_found", message: "No global STIG Manager connection is configured." } }, 404);
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as unknown as typeof fetch;
+
+		window.sessionStorage.setItem(
+			"waypoint.session",
+			JSON.stringify({
+				token: "tok-1",
+				username: "j.moreno",
+				role: "Admin",
+				expiresAt: new Date(Date.now() + 60_000).toISOString(),
+			}),
+		);
+	}
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		window.sessionStorage.clear();
+	});
+
+	function mount() {
+		render(
+			<AuthProvider>
+				<SystemProvider>
+					<ThemeProvider>
+						<TopBar screenTitle="Dashboard" />
+					</ThemeProvider>
+				</SystemProvider>
+			</AuthProvider>,
+		);
+	}
+
+	function runnersPill(): Element {
+		const pills = document.querySelectorAll(".top-bar__stigman");
+		// The second `.top-bar__stigman`-shaped pill is the Runners indicator
+		// (the first is the STIG Manager pill).
+		const pill = pills[1];
+		if (!pill) {
+			throw new Error("Runners indicator pill not found");
+		}
+		return pill;
+	}
+
+	it("shows no starvation badge and an is-ok dot when no runner reports starved job types", async () => {
+		installFetchMock([
+			{
+				worker_id: "compliance-runner-1",
+				job_types: ["discover", "scan"],
+				available: true,
+				last_seen_at: "2026-08-11T00:00:00Z",
+				starved_job_types: [],
+			},
+		]);
+		mount();
+
+		await waitFor(() => {
+			expect(runnersPill().querySelector(".top-bar__stigman-dot")).toHaveClass("is-ok");
+		});
+		expect(runnersPill().querySelector(".top-bar__runners-starved")).toBeNull();
+	});
+
+	it("shows a transient-starvation warning (warn severity) without escalating to bad", async () => {
+		installFetchMock([
+			{
+				worker_id: "download-runner-1",
+				job_types: ["download", "catalog-index"],
+				available: true,
+				last_seen_at: "2026-08-11T00:00:00Z",
+				starved_job_types: [{ job_type: "download", permanent: false }],
+			},
+		]);
+		mount();
+
+		await waitFor(() => {
+			const badge = runnersPill().querySelector(".top-bar__runners-starved");
+			expect(badge).not.toBeNull();
+			expect(badge).toHaveClass("is-degraded");
+			expect(badge?.textContent).toMatch(/starved/i);
+			expect(badge?.textContent).not.toMatch(/permanent/i);
+		});
+		expect(runnersPill().querySelector(".top-bar__stigman-dot")).toHaveClass("is-degraded");
+		expect(runnersPill().getAttribute("title")).toMatch(/download \(transient\)/);
+	});
+
+	it("shows a permanent-starvation warning (bad severity, misconfiguration) distinguished from transient", async () => {
+		installFetchMock([
+			{
+				worker_id: "compliance-runner-1",
+				job_types: ["discover", "scan"],
+				available: true,
+				last_seen_at: "2026-08-11T00:00:00Z",
+				starved_job_types: [{ job_type: "scan", permanent: true }],
+			},
+		]);
+		mount();
+
+		await waitFor(() => {
+			const badge = runnersPill().querySelector(".top-bar__runners-starved");
+			expect(badge).not.toBeNull();
+			expect(badge).toHaveClass("is-bad");
+			expect(badge?.textContent).toMatch(/permanent/i);
+		});
+		expect(runnersPill().querySelector(".top-bar__stigman-dot")).toHaveClass("is-bad");
+		expect(runnersPill().getAttribute("title")).toMatch(/scan \(permanent — misconfiguration, will not self-resolve\)/);
+	});
+});
