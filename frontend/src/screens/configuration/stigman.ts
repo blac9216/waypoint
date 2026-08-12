@@ -80,7 +80,13 @@ export function putSiteStigManager(siteId: string, input: StigManagerWriteInput)
 	return apiPut<ResolvedStigManagerConnection>(`/sites/${siteId}/stigman`, toBody(input));
 }
 
-export const STIG_MANAGER_TEST_OUTCOMES = ["ok", "unreachable", "auth_failed", "not_configured"] as const;
+export const STIG_MANAGER_TEST_OUTCOMES = [
+	"ok",
+	"unreachable",
+	"auth_failed",
+	"not_configured",
+	"master_key_unavailable",
+] as const;
 export type StigManagerTestOutcome = (typeof STIG_MANAGER_TEST_OUTCOMES)[number];
 
 export interface StigManagerTestResult {
@@ -108,6 +114,8 @@ export function formatStigManagerOutcome(outcome: string): string {
 			return "authentication failed";
 		case "not_configured":
 			return "not configured";
+		case "master_key_unavailable":
+			return "master key unavailable";
 		default:
 			return outcome;
 	}
