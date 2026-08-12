@@ -115,6 +115,7 @@ public sealed class RunSecretScanRunTests : IAsyncLifetime
 					_connectionString,
 					serviceProvider.GetRequiredService<IEnvelopeCipher>(),
 					serviceProvider.GetRequiredService<Waypoint.Core.Logging.ISecretTracker>(),
+					serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<RunSecretOptions>>(),
 					StoreLogger));
 			});
 		}

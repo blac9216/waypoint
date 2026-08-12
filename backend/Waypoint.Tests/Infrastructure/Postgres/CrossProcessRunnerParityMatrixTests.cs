@@ -119,6 +119,7 @@ public sealed class CrossProcessRunnerParityMatrixTests : IAsyncLifetime
 					_connectionString,
 					serviceProvider.GetRequiredService<IEnvelopeCipher>(),
 					serviceProvider.GetRequiredService<Waypoint.Core.Logging.ISecretTracker>(),
+					serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<RunSecretOptions>>(),
 					serviceProvider.GetRequiredService<ILogger<RunSecretStore>>()));
 			});
 		}

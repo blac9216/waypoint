@@ -107,7 +107,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		_secretStore = new CredentialSecretStore(_fixture.ConnectionString, cipher, _redactor, NullLogger<CredentialSecretStore>.Instance);
 		_sites = new SiteRepository(_fixture.ConnectionString);
 		_targets = new TargetRepository(_fixture.ConnectionString);
-		_runSecrets = new RunSecretStore(_fixture.ConnectionString, cipher, _redactor, NullLogger<RunSecretStore>.Instance);
+		_runSecrets = new RunSecretStore(_fixture.ConnectionString, cipher, _redactor, Options.Create(new RunSecretOptions()), NullLogger<RunSecretStore>.Instance);
 		_configDocs = new ConfigDocRepository(_fixture.ConnectionString);
 		_attestationSnapshots = new AttestationSnapshotRepository(_fixture.ConnectionString);
 

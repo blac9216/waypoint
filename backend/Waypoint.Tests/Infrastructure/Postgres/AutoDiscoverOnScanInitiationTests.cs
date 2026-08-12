@@ -216,7 +216,8 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Waypoint.Infrastructure.ConfigDocs.ConfigDocRepository configDocs = new(_fixture.ConnectionString);
 		Waypoint.Infrastructure.ConfigDocs.AttestationSnapshotRepository attestationSnapshots = new(_fixture.ConnectionString);
 		Waypoint.Infrastructure.Secrets.RunSecretStore runSecrets = new(
-			_fixture.ConnectionString, cipher, _redactor, NullLogger<Waypoint.Infrastructure.Secrets.RunSecretStore>.Instance);
+			_fixture.ConnectionString, cipher, _redactor, Options.Create(new Waypoint.Core.Secrets.RunSecretOptions()),
+			NullLogger<Waypoint.Infrastructure.Secrets.RunSecretStore>.Instance);
 		StigManagerRepository stigman = new(_fixture.ConnectionString);
 		ScanUploadCoordinator uploadCoordinator = new(
 			stigman, new NeverCalledStigManagerUploadClient(), secretStore, _repository, _redactor);
