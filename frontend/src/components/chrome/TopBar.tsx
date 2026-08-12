@@ -124,14 +124,12 @@ function RunnersIndicator({ runners }: { runners: SystemRunnerStatus[] }) {
 	const starvedRunners = runners.filter((runner) => runner.starved_job_types.length > 0);
 	const hasPermanentStarvation = starvedRunners.some((runner) => runner.starved_job_types.some((starved) => starved.permanent));
 
-	const state: "none" | "degraded" | "starved-permanent" | "all-ok" =
+	const state: "none" | "degraded" | "all-ok" =
 		runners.length === 0
 			? "none"
-			: availableCount < runners.length || hasPermanentStarvation
+			: availableCount < runners.length || starvedRunners.length > 0
 				? "degraded"
-				: starvedRunners.length > 0
-					? "degraded"
-					: "all-ok";
+				: "all-ok";
 
 	const label = runners.length === 0 ? "Runners" : `Runners ${availableCount}/${runners.length}`;
 	const tooltipLines =
