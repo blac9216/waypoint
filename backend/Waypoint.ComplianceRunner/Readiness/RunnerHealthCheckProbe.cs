@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Text.Json;
+using Waypoint.Runner.Readiness;
 
 namespace Waypoint.ComplianceRunner.Readiness;
 
@@ -24,17 +24,20 @@ namespace Waypoint.ComplianceRunner.Readiness;
 /// an HTTP endpoint this process does not have (see <see cref="RunnerHealthOptions"/>
 /// for why). <c>dotnet Waypoint.ComplianceRunner.dll --health-check</c> exits 0
 /// (healthy) or 1 (unhealthy) and needs nothing not already in the image.
+///
+/// A thin domain-specific wrapper around the shared
+/// <see cref="RunnerHealthCheckProbe{TReport}"/> (issue #461): it supplies only the
+/// <see cref="RunnerHealthReport"/> type argument and how "ready"/"timestamp"/"not
+/// ready reason" are extracted from it.
 /// </summary>
 public static class RunnerHealthCheckProbe
 {
 	/// <summary>The command-line argument that switches the entry point into probe mode.</summary>
-	public const string Argument = "--health-check";
+	public const string Argument = Waypoint.Runner.Readiness.RunnerHealthCheckProbe.Argument;
 
 	/// <summary>True when the process was started to probe health rather than to run the dispatcher.</summary>
-	public static bool IsHealthCheckInvocation(string[] args)
-	{
-		return args.Any(argument => string.Equals(argument, Argument, StringComparison.OrdinalIgnoreCase));
-	}
+	public static bool IsHealthCheckInvocation(string[] args) =>
+		Waypoint.Runner.Readiness.RunnerHealthCheckProbe.IsHealthCheckInvocation(args);
 
 	/// <summary>
 	/// Reads the health report at <paramref name="reportFilePath"/> and reports the
@@ -44,51 +47,12 @@ public static class RunnerHealthCheckProbe
 	public static int Run(string reportFilePath, TimeSpan maxReportAge) => Run(reportFilePath, maxReportAge, DateTimeOffset.UtcNow);
 
 	/// <summary>Testable overload taking an explicit "now" instead of reading the clock.</summary>
-	public static int Run(string reportFilePath, TimeSpan maxReportAge, DateTimeOffset now)
-	{
-		string json;
-		try
-		{
-			json = File.ReadAllText(reportFilePath);
-		}
-		catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-		{
-			Console.Error.WriteLine($"health-check: report file '{reportFilePath}' unreadable — {exception.Message}");
-			return 1;
-		}
-
-		RunnerHealthReport? report;
-		try
-		{
-			report = JsonSerializer.Deserialize<RunnerHealthReport>(json);
-		}
-		catch (JsonException exception)
-		{
-			Console.Error.WriteLine($"health-check: report file '{reportFilePath}' is not valid JSON — {exception.Message}");
-			return 1;
-		}
-
-		if (report is null)
-		{
-			Console.Error.WriteLine($"health-check: report file '{reportFilePath}' deserialized to null");
-			return 1;
-		}
-
-		TimeSpan age = now - report.Timestamp;
-		if (age > maxReportAge)
-		{
-			Console.Error.WriteLine(
-				$"health-check: report file '{reportFilePath}' is stale ({age.TotalSeconds:F0}s old, max {maxReportAge.TotalSeconds:F0}s)");
-			return 1;
-		}
-
-		if (!report.Ready)
-		{
-			Console.Error.WriteLine(
-				$"health-check: runner not ready — {string.Join("; ", report.Problems)}");
-			return 1;
-		}
-
-		return 0;
-	}
+	public static int Run(string reportFilePath, TimeSpan maxReportAge, DateTimeOffset now) =>
+		RunnerHealthCheckProbe<RunnerHealthReport>.Run(
+			reportFilePath,
+			maxReportAge,
+			isReady: report => report.Ready,
+			timestamp: report => report.Timestamp,
+			describeNotReady: report => string.Join("; ", report.Problems),
+			now);
 }

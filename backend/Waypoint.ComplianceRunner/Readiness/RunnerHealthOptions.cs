@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Waypoint.Runner.Readiness;
+
 namespace Waypoint.ComplianceRunner.Readiness;
 
 /// <summary>
@@ -27,10 +29,13 @@ namespace Waypoint.ComplianceRunner.Readiness;
 /// (<see cref="RunnerHealthCheckProbe"/>) reads that file and exits 0/1 the same way
 /// the API's probe does. A Compose <c>HEALTHCHECK</c> runs
 /// <c>dotnet Waypoint.ComplianceRunner.dll --health-check</c> exactly like the API
-/// image runs its own probe -- the actual Dockerfile/Compose wiring is #442's job, not
-/// this issue's, per its Affected Files table.
+/// image runs its own probe.
+///
+/// Implements <see cref="IRunnerReadinessOptions"/> (issue #461) so the shared
+/// <see cref="Waypoint.Runner.Readiness.RunnerReadinessReportingHostedService{TReport}"/>
+/// can read this host's report path/interval/staleness/worker-id.
 /// </summary>
-public sealed class RunnerHealthOptions
+public sealed class RunnerHealthOptions : IRunnerReadinessOptions
 {
 	public const string SectionName = "RunnerHealth";
 

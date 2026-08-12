@@ -12,19 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Waypoint.Runner.Readiness;
+
 namespace Waypoint.ComplianceRunner.Readiness;
 
 /// <summary>
 /// The JSON shape written to <see cref="RunnerHealthOptions.ReportFilePath"/> and read
 /// back by <c>--health-check</c> (see <see cref="RunnerHealthCheckProbe"/>). Kept
-/// deliberately small and dependency-free (no Waypoint.Core reference) so it can be
-/// serialized/deserialized with the BCL's source-generated <c>System.Text.Json</c>
+/// deliberately small (no Waypoint.Core reference beyond what
+/// <see cref="Waypoint.Runner.Readiness.RunnerCapacityReport"/> already needs) so it can
+/// be serialized/deserialized with the BCL's source-generated <c>System.Text.Json</c>
 /// support without pulling ASP.NET's JSON options into a non-ASP.NET host.
 /// </summary>
 /// <param name="Capacity">
-/// Issue #437 (ADR-0014 §5, tracked here alongside #461's near-duplicate download-runner
-/// report): this runner's calculated resource-admission capacity and current admission
-/// state.
+/// Issue #437 (ADR-0014 §5): this runner's calculated resource-admission capacity and
+/// current admission state. <see cref="Waypoint.Runner.Readiness.RunnerCapacityReport"/>
+/// (issue #461) is the shared shape both runner hosts' reports use for this field.
 /// </param>
 public sealed record RunnerHealthReport(
 	bool Ready,
@@ -32,23 +35,3 @@ public sealed record RunnerHealthReport(
 	IReadOnlyList<string> Problems,
 	RunnerCapacityReport? Capacity,
 	DateTimeOffset Timestamp);
-
-/// <summary>
-/// The JSON-serializable shape of a runner's resource-admission state (issue #437).
-/// Field-for-field the same shape as <c>Waypoint.DownloadRunner.RunnerCapacityReport</c>
-/// (#461: intentionally near-duplicate reports, not unified) so operators reading either
-/// host's report see the same vocabulary; kept as a second, separately-defined type here
-/// rather than a shared reference so this project's "no Waypoint.Core reference" boundary
-/// (see this file's other doc comment) is not compromised by a cross-project dependency
-/// for a handful of fields.
-/// </summary>
-public sealed record RunnerCapacityReport(
-	string Source,
-	bool IsFallback,
-	double DiscoveredCpuCores,
-	long DiscoveredMemoryBytes,
-	double EffectiveCpuCores,
-	long EffectiveMemoryBytes,
-	double AdmittedCpuCores,
-	long AdmittedMemoryBytes,
-	int AdmittedJobCount);

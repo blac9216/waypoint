@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Text.Json;
+using Waypoint.Runner.Readiness;
 
 namespace Waypoint.DownloadRunner;
 
@@ -24,20 +24,20 @@ namespace Waypoint.DownloadRunner;
 /// REST/SSE surface, so <c>dotnet Waypoint.DownloadRunner.dll --health-check</c> reads
 /// the readiness marker file <see cref="ReadinessReportingHostedService"/> writes,
 /// rather than probing loopback, and exits <c>0</c> (ready) or <c>1</c> (not ready).
+///
+/// A thin domain-specific wrapper around the shared
+/// <see cref="RunnerHealthCheckProbe{TReport}"/> (issue #461): it supplies only the
+/// <see cref="ReadinessSnapshot"/> type argument and how "ready"/"generated at"/"not
+/// ready reason" are extracted from it.
 /// </summary>
 public static class HealthCheckProbe
 {
 	/// <summary>The command-line argument that switches the entry point into probe mode.</summary>
-	public const string Argument = "--health-check";
-
-	private static readonly System.Text.Json.JsonSerializerOptions SerializerOptions = new()
-	{
-		PropertyNameCaseInsensitive = true
-	};
+	public const string Argument = Waypoint.Runner.Readiness.RunnerHealthCheckProbe.Argument;
 
 	/// <summary>True when the process was started to probe health rather than to run the dispatcher.</summary>
 	public static bool IsHealthCheckInvocation(string[] args) =>
-		args.Any(argument => string.Equals(argument, Argument, StringComparison.OrdinalIgnoreCase));
+		Waypoint.Runner.Readiness.RunnerHealthCheckProbe.IsHealthCheckInvocation(args);
 
 	/// <summary>
 	/// Reads the readiness marker at <paramref name="readinessFilePath"/> and reports the
@@ -53,47 +53,13 @@ public static class HealthCheckProbe
 	/// would make an unqualified <c>Program</c> reference in <c>Waypoint.Tests</c>
 	/// ambiguous with <c>Waypoint.Api.Program</c> (see this project's .csproj comment).
 	/// </summary>
-	public static async Task<int> RunAsync(string readinessFilePath, TimeSpan maxAge, DateTimeOffset now)
-	{
-		try
-		{
-			if (!File.Exists(readinessFilePath))
-			{
-				await Console.Error.WriteLineAsync(
-					$"health-check: readiness file '{readinessFilePath}' does not exist yet").ConfigureAwait(false);
-				return 1;
-			}
-
-			string json = await File.ReadAllTextAsync(readinessFilePath).ConfigureAwait(false);
-			ReadinessSnapshot? snapshot = JsonSerializer.Deserialize<ReadinessSnapshot>(json, SerializerOptions);
-			if (snapshot is null)
-			{
-				await Console.Error.WriteLineAsync(
-					$"health-check: readiness file '{readinessFilePath}' did not parse").ConfigureAwait(false);
-				return 1;
-			}
-
-			TimeSpan age = now - snapshot.GeneratedAt;
-			if (age > maxAge)
-			{
-				await Console.Error.WriteLineAsync(
-					$"health-check: readiness snapshot is {age.TotalSeconds:F0}s old, exceeding the {maxAge.TotalSeconds:F0}s budget").ConfigureAwait(false);
-				return 1;
-			}
-
-			if (!snapshot.Ready)
-			{
-				await Console.Error.WriteLineAsync(
-					$"health-check: not ready (artifactStoreWritable={snapshot.ArtifactStoreWritable}, depotPathReadable={snapshot.DepotPathReadable})").ConfigureAwait(false);
-				return 1;
-			}
-
-			return 0;
-		}
-		catch (Exception exception)
-		{
-			await Console.Error.WriteLineAsync($"health-check: {exception.Message}").ConfigureAwait(false);
-			return 1;
-		}
-	}
+	public static Task<int> RunAsync(string readinessFilePath, TimeSpan maxAge, DateTimeOffset now) => Task.FromResult(
+		RunnerHealthCheckProbe<ReadinessSnapshot>.Run(
+			readinessFilePath,
+			maxAge,
+			isReady: snapshot => snapshot.Ready,
+			timestamp: snapshot => snapshot.GeneratedAt,
+			describeNotReady: snapshot =>
+				$"artifactStoreWritable={snapshot.ArtifactStoreWritable}, depotPathReadable={snapshot.DepotPathReadable}",
+			now));
 }
