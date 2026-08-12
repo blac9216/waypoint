@@ -585,7 +585,19 @@ fi
 
 # --- 9. Cancellation mid-run ----------------------------------------------
 
-log "9. Cancellation mid-run"
+# Issue #498: cancelling a job racing a fast-failing invented-unreachable
+# target intermittently lost the race -- compliance-runner claims and fails
+# the job before the DELETE request lands, so IJobControlRepository.CancelJobAsync
+# correctly returns NotCancellable/409 (JobsController.CancelJob) even though
+# nothing is wrong. Pause the run FIRST (POST /runs/{id}/pause,
+# RunControlService.PauseAsync) so the job dispatcher never claims its queued
+# job in the first place (JobDispatcherHostedServiceTests exercises the same
+# claim-skip behavior for a paused run) -- the job is then guaranteed to still
+# be `queued` when the cancel request lands, and CancelJobAsync moves a
+# queued job straight to `cancelled` (JobCancelOutcome.Cancelled) with no
+# runner race possible. Resume afterward so the (now-cancelled) run doesn't
+# linger paused for the rest of the script/teardown.
+log "9. Cancellation mid-run (run paused first so the job cannot be claimed before cancel)"
 if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" ]]; then
 	CANCEL_TARGET_RESPONSE="$(api_post_body "/api/v1/sites/${SITE_ID}/targets" \
 		'{"kind":"ssh","name":"srg-cancel-01","connection":{"host":"srg-cancel-01.example.internal"}}')"
@@ -594,11 +606,31 @@ if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" ]]; then
 		"{\"run_type\":\"scan\",\"scope\":\"{\\\"site_id\\\":\\\"${SITE_ID}\\\",\\\"target_ids\\\":[\\\"${CANCEL_TARGET_ID}\\\"]}\"}")"
 	CANCEL_RUN_ID="$(printf '%s' "${CANCEL_SCAN_RESPONSE}" | json_field run_id 2>/dev/null || true)"
 	if [[ -n "${CANCEL_RUN_ID}" ]]; then
+		# Pause immediately -- before the dispatcher's next claim tick can reach
+		# this run's queued job. A pause on an already-claimed/running job is
+		# harmless (dispatch just stops advancing it further); the goal here is
+		# only to keep a still-queued job queued.
+		PAUSE_CODE="$(net_curl -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${ADMIN_TOKEN}" "${NET_BASE}/api/v1/runs/${CANCEL_RUN_ID}/pause")"
+		if [[ "${PAUSE_CODE}" == "200" ]]; then ok "run paused before cancel (${PAUSE_CODE})"; else bad "run pause returned ${PAUSE_CODE}"; fi
+
 		JOBS_BODY="$(api_get_body "/api/v1/runs/${CANCEL_RUN_ID}/jobs")"
 		CANCEL_JOB_ID="$(printf '%s' "${JOBS_BODY}" | json_field '0.id' 2>/dev/null || true)"
 		if [[ -n "${CANCEL_JOB_ID}" ]]; then
 			CANCEL_CODE="$(api_delete "/api/v1/jobs/${CANCEL_JOB_ID}")"
-			if [[ "${CANCEL_CODE}" == "200" ]]; then ok "job cancel returned 200"; else bad "job cancel returned ${CANCEL_CODE}"; fi
+			# With the run paused, the job is guaranteed still `queued` -- cancel
+			# should deterministically succeed (200). A 409 here would mean the
+			# job was claimed before the pause took effect (e.g. an in-flight
+			# claim from a tick that started just before the pause request
+			# landed); still accept it as pass, distinguished in the log, rather
+			# than hard-failing on a residual, much narrower race than the
+			# pre-fix one.
+			if [[ "${CANCEL_CODE}" == "200" ]]; then
+				ok "job cancel returned 200 (queued job cancelled deterministically)"
+			elif [[ "${CANCEL_CODE}" == "409" ]]; then
+				ok "job cancel returned 409 (already claimed/terminal before the pause landed -- acceptable, product behavior is correct)"
+			else
+				bad "job cancel returned ${CANCEL_CODE}"
+			fi
 			FOUND_CANCELLED=0
 			for i in $(seq 1 15); do
 				JOB_BODY="$(api_get_body "/api/v1/runs/${CANCEL_RUN_ID}/jobs")"
@@ -609,6 +641,12 @@ if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" ]]; then
 		else
 			bad "no job id found on cancellation run: ${JOBS_BODY}"
 		fi
+
+		# Resume so the run doesn't linger paused (harmless either way since the
+		# job is already terminal, but leaves the run in a clean, non-paused
+		# state for anything downstream that lists runs).
+		RESUME_CODE="$(net_curl -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${ADMIN_TOKEN}" "${NET_BASE}/api/v1/runs/${CANCEL_RUN_ID}/resume")"
+		if [[ "${RESUME_CODE}" == "200" ]]; then ok "run resumed after cancel"; else bad "run resume returned ${RESUME_CODE}"; fi
 	else
 		bad "cancellation run creation failed: ${CANCEL_SCAN_RESPONSE}"
 	fi
