@@ -37,6 +37,17 @@ public sealed class JobEventStreamServiceTests : IAsyncLifetime
 {
 	private static readonly string[] ExpectedRacedMarkers = ["raced-0", "raced-1", "raced-2"];
 
+	/// <summary>
+	/// Issue #458: the stalled-subscriber test's safety-net cancellation deadline. Its own
+	/// pacing (a few hundred ms of intentional <see cref="Task.Delay"/> calls) needs only a
+	/// couple of seconds end-to-end; the previous fixed 25s budget was already generous for
+	/// that but was still observed to be crossed once under CI's coverage-instrumented run,
+	/// which slows every await materially. This is a pure safety net against a genuine hang
+	/// (it does not gate what the test asserts), so widen it well past instrumented-CI
+	/// slowdown rather than trying to predict a tight bound.
+	/// </summary>
+	private static readonly TimeSpan StalledSubscriberTestTimeout = TimeSpan.FromSeconds(90);
+
 	private readonly PostgresFixture _fixture;
 	private JobEventStreamService _service = null!;
 	private CapturingLogger<JobEventStreamService> _logger = null!;
@@ -185,7 +196,7 @@ public sealed class JobEventStreamServiceTests : IAsyncLifetime
 		_service = CreateService(queueCapacity: 4);
 		await _service.StartAsync(CancellationToken.None);
 
-		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(25));
+		using CancellationTokenSource cts = new(StalledSubscriberTestTimeout);
 
 		// The stalled subscriber: attaches (registration happens at the first
 		// MoveNext), takes one row, then stops advancing -- its queue fills behind it.
