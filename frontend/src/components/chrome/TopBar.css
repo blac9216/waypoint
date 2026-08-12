@@ -90,6 +90,28 @@
 	background: var(--warn);
 }
 
+/* Issue #489: permanent admission starvation (misconfiguration, never
+   self-resolves) — reuses --bad (already used elsewhere for hard failures)
+   to distinguish it from the transient/degraded --warn treatment above. */
+.top-bar__stigman-dot.is-bad {
+	background: var(--bad);
+}
+
+.top-bar__runners-starved {
+	font-size: 10px;
+	font-weight: 650;
+	letter-spacing: 0.02em;
+	white-space: nowrap;
+}
+
+.top-bar__runners-starved.is-degraded {
+	color: var(--warn);
+}
+
+.top-bar__runners-starved.is-bad {
+	color: var(--bad);
+}
+
 .top-bar__mode {
 	display: flex;
 	align-items: center;

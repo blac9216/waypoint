@@ -109,24 +109,57 @@ export function TopBar({ screenTitle }: { screenTitle: string }) {
  * dot color and tooltip cover three states, matching the STIG Manager and
  * mode indicators' own two/three-state pattern rather than collapsing to a
  * plain boolean.
+ *
+ * Issue #489: `starved_job_types` is layered on top of, not folded into,
+ * `available` — a runner reports itself available while still denying
+ * admission to specific job types. A permanent starvation (profile alone
+ * exceeds the runner's total effective budget — misconfiguration, never
+ * self-resolves) escalates the dot past "degraded" the same way "some
+ * runner unavailable" does, since it needs the same "go look at this" signal
+ * as an outage; transient starvation (contention that clears on its own)
+ * stays at the existing degraded/warn treatment so it doesn't cry wolf.
  */
 function RunnersIndicator({ runners }: { runners: SystemRunnerStatus[] }) {
 	const availableCount = runners.filter((runner) => runner.available).length;
-	const state: "none" | "degraded" | "all-ok" =
-		runners.length === 0 ? "none" : availableCount < runners.length ? "degraded" : "all-ok";
+	const starvedRunners = runners.filter((runner) => runner.starved_job_types.length > 0);
+	const hasPermanentStarvation = starvedRunners.some((runner) => runner.starved_job_types.some((starved) => starved.permanent));
+
+	const state: "none" | "degraded" | "starved-permanent" | "all-ok" =
+		runners.length === 0
+			? "none"
+			: availableCount < runners.length || hasPermanentStarvation
+				? "degraded"
+				: starvedRunners.length > 0
+					? "degraded"
+					: "all-ok";
 
 	const label = runners.length === 0 ? "Runners" : `Runners ${availableCount}/${runners.length}`;
-	const tooltip =
+	const tooltipLines =
 		runners.length === 0
-			? "Runners: none reporting — no compliance-runner or download-runner has heartbeated yet."
-			: runners
-					.map((runner) => `${runner.worker_id} (${runner.job_types.join(", ")}): ${runner.available ? "available" : "unavailable"}`)
-					.join("\n");
+			? ["Runners: none reporting — no compliance-runner or download-runner has heartbeated yet."]
+			: runners.map((runner) => {
+					const base = `${runner.worker_id} (${runner.job_types.join(", ")}): ${runner.available ? "available" : "unavailable"}`;
+					if (runner.starved_job_types.length === 0) {
+						return base;
+					}
+					const starved = runner.starved_job_types
+						.map((s) => `${s.job_type}${s.permanent ? " (permanent — misconfiguration, will not self-resolve)" : " (transient)"}`)
+						.join(", ");
+					return `${base}\n  starved: ${starved}`;
+				});
+
+	const dotClass =
+		state === "all-ok" ? "is-ok" : state === "none" ? "is-off" : hasPermanentStarvation ? "is-bad" : "is-degraded";
 
 	return (
-		<div className="top-bar__stigman" title={tooltip}>
-			<span className={`top-bar__stigman-dot ${state === "all-ok" ? "is-ok" : state === "degraded" ? "is-degraded" : "is-off"}`} />
+		<div className="top-bar__stigman" title={tooltipLines.join("\n")}>
+			<span className={`top-bar__stigman-dot ${dotClass}`} />
 			<span>{label}</span>
+			{starvedRunners.length > 0 && (
+				<span className={`top-bar__runners-starved ${hasPermanentStarvation ? "is-bad" : "is-degraded"}`}>
+					{hasPermanentStarvation ? "⚠ starved (permanent)" : "⚠ starved"}
+				</span>
+			)}
 		</div>
 	);
 }

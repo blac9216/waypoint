@@ -2,18 +2,33 @@ import { createContext, useContext } from "react";
 import type { ModeState } from "./routes";
 
 /**
+ * One job type a runner is currently denying resource admission to (issue
+ * #467/#489, `SystemStarvedJobTypeResponse`). `permanent` distinguishes a
+ * budget the job type can never fit (misconfiguration — action required,
+ * never self-resolves) from transient contention that clears once other work
+ * finishes.
+ */
+export interface SystemStarvedJobType {
+	job_type: string;
+	permanent: boolean;
+}
+
+/**
  * One runner process's last-known liveness (issue #443,
  * `backend/Waypoint.Api/Contracts/SystemContracts.cs` `SystemRunnerStatusResponse`).
  * `available` is the derived verdict to key an indicator on — already folds in
  * both "did this worker report itself ready" and "has its heartbeat gone
  * stale"; nothing on the frontend needs to re-derive staleness from
- * `last_seen_at`.
+ * `last_seen_at`. `starved_job_types` (issue #489) is separate from
+ * `available`: a runner can be available overall while still denying
+ * admission to specific job types under resource contention.
  */
 export interface SystemRunnerStatus {
 	worker_id: string;
 	job_types: string[];
 	available: boolean;
 	last_seen_at: string;
+	starved_job_types: SystemStarvedJobType[];
 }
 
 /** `GET /api/v1/system` (docs/api-contract.md "System, users, audit"):
