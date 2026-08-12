@@ -24,28 +24,17 @@ test("rejects a bad password with a visible error, no crash", async ({ page }) =
 });
 
 test("top bar Runners indicator reports both compliance and download runners available", async ({ page }) => {
-	// DISCLOSED GAP (found live by this suite, not fixed here): `lib/system.tsx`'s
-	// `SystemProvider` fetches `GET /system` exactly ONCE, in a `useEffect`
-	// keyed only on auth `status` becoming "signed-in" — there is no polling
-	// interval anywhere in that file. So if compliance-runner's first
-	// worker_registry heartbeat has not landed yet at the exact moment that
-	// one fetch fires, the Runners indicator freezes at whatever it saw
-	// then ("Runners 1/1") for the rest of the session, even though the
-	// backend's own state keeps changing underneath it — confirmed directly
-	// against a live stack while authoring this suite: `worker_registry`
-	// itself gained both rows within seconds of both containers starting,
-	// while polling the SAME running page's DOM for 150s straight never
-	// moved off "Runners 1/1". A DOM `.poll()` on this indicator was
-	// therefore not testing "does the operator eventually see both
-	// runners" — it was testing "did the one-shot fetch happen to race
-	// ahead of compliance-runner's heartbeat", a coin flip unrelated to any
-	// assertion in this file. Fixing `SystemProvider` to poll live is a
-	// real product change (shared chrome state, broad blast radius) beyond
-	// this issue's test-coverage scope — this test instead reloads the page
-	// (forcing a fresh one-shot fetch, the only refresh mechanism that
-	// exists today) after giving both runners' backend heartbeats a fixed
-	// grace period, which is what an operator would actually have to do
-	// today to see current runner status.
+	// Since #496, `SystemProvider` (lib/system.tsx) fetches `GET /system`
+	// immediately on sign-in AND re-polls live (SYSTEM_POLL_INTERVAL_MS,
+	// plus a focus/visibility re-check) — no reload needed to observe
+	// current runner status. `worker_registry` typically gains both
+	// compliance-runner and download-runner rows within seconds of the
+	// stack coming up (compliance-runner's healthcheck can report "healthy"
+	// before its dispatcher/heartbeat loop finishes settling — see
+	// e2e-playwright.sh's bring-up wait loop), so this polls the indicator's
+	// title attribute directly rather than asserting on the very first
+	// fetch, giving both runners' heartbeats room to land without relying on
+	// a manual reload.
 	await login(page);
 
 	const indicator = page.locator(".top-bar__stigman", { hasText: /Runners/ });
@@ -56,22 +45,13 @@ test("top bar Runners indicator reports both compliance and download runners ava
 	const bothPresent = (title: string) =>
 		complianceSignature.test(title) && downloadSignature.test(title) && !/none reporting/i.test(title);
 
-	// Grace period for both runners' heartbeats to land in worker_registry
-	// server-side (compliance-runner's healthcheck can report "healthy"
-	// before backend finishes migrating — see e2e-playwright.sh's bring-up
-	// wait loop — and its dispatcher/heartbeat loops self-heal on their own
-	// retry backoff after that).
-	await page.waitForTimeout(45_000);
-	await page.reload();
-	await page.getByText("WAYPOINT", { exact: true }).first().waitFor({ state: "visible" });
-
 	await expect
 		.poll(
 			async () => {
 				const title = (await indicator.getAttribute("title")) ?? "";
 				return bothPresent(title);
 			},
-			{ timeout: 30_000, intervals: [2000] },
+			{ timeout: 60_000, intervals: [2000] },
 		)
 		.toBe(true);
 });

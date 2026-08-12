@@ -24,7 +24,12 @@ export default defineConfig({
 	forbidOnly: !!process.env.CI,
 	retries: 0,
 	workers: 1,
-	reporter: [["list"]],
+	// `json` alongside `list`: deploy/scripts/e2e-playwright.sh (issue #500)
+	// parses PLAYWRIGHT_JSON_OUTPUT_FILE's `stats.expected`/`unexpected` counts
+	// after the run to assert the suite actually executed N>0 tests, rather
+	// than trusting a bare exit code that a skipped/never-run suite can also
+	// produce as 0.
+	reporter: [["list"], ["json", { outputFile: process.env.PLAYWRIGHT_JSON_OUTPUT_FILE ?? "playwright-report/results.json" }]],
 	use: {
 		baseURL: process.env.E2E_BASE_URL ?? "https://127.0.0.1:19543",
 		ignoreHTTPSErrors: true,
