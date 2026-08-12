@@ -21,8 +21,34 @@ namespace Waypoint.ComplianceRunner.Readiness;
 /// serialized/deserialized with the BCL's source-generated <c>System.Text.Json</c>
 /// support without pulling ASP.NET's JSON options into a non-ASP.NET host.
 /// </summary>
+/// <param name="Capacity">
+/// Issue #437 (ADR-0014 §5, tracked here alongside #461's near-duplicate download-runner
+/// report): this runner's calculated resource-admission capacity and current admission
+/// state.
+/// </param>
 public sealed record RunnerHealthReport(
 	bool Ready,
 	IReadOnlyList<string> Capabilities,
 	IReadOnlyList<string> Problems,
+	RunnerCapacityReport? Capacity,
 	DateTimeOffset Timestamp);
+
+/// <summary>
+/// The JSON-serializable shape of a runner's resource-admission state (issue #437).
+/// Field-for-field the same shape as <c>Waypoint.DownloadRunner.RunnerCapacityReport</c>
+/// (#461: intentionally near-duplicate reports, not unified) so operators reading either
+/// host's report see the same vocabulary; kept as a second, separately-defined type here
+/// rather than a shared reference so this project's "no Waypoint.Core reference" boundary
+/// (see this file's other doc comment) is not compromised by a cross-project dependency
+/// for a handful of fields.
+/// </summary>
+public sealed record RunnerCapacityReport(
+	string Source,
+	bool IsFallback,
+	double DiscoveredCpuCores,
+	long DiscoveredMemoryBytes,
+	double EffectiveCpuCores,
+	long EffectiveMemoryBytes,
+	double AdmittedCpuCores,
+	long AdmittedMemoryBytes,
+	int AdmittedJobCount);

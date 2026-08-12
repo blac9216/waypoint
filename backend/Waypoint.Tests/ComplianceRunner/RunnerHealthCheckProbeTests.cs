@@ -66,7 +66,7 @@ public sealed class RunnerHealthCheckProbeTests : IDisposable
 	public void FreshReadyReport_IsHealthy()
 	{
 		DateTimeOffset now = DateTimeOffset.UtcNow;
-		WriteReport(new RunnerHealthReport(Ready: true, Capabilities: ["discover", "scan"], Problems: [], Timestamp: now));
+		WriteReport(new RunnerHealthReport(Ready: true, Capabilities: ["discover", "scan"], Problems: [], Capacity: null, Timestamp: now));
 
 		int exitCode = RunnerHealthCheckProbe.Run(_reportPath, MaxAge, now.AddSeconds(5));
 		Assert.Equal(0, exitCode);
@@ -76,7 +76,7 @@ public sealed class RunnerHealthCheckProbeTests : IDisposable
 	public void FreshNotReadyReport_IsUnhealthy()
 	{
 		DateTimeOffset now = DateTimeOffset.UtcNow;
-		WriteReport(new RunnerHealthReport(Ready: false, Capabilities: ["discover"], Problems: ["mount missing"], Timestamp: now));
+		WriteReport(new RunnerHealthReport(Ready: false, Capabilities: ["discover"], Problems: ["mount missing"], Capacity: null, Timestamp: now));
 
 		int exitCode = RunnerHealthCheckProbe.Run(_reportPath, MaxAge, now.AddSeconds(5));
 		Assert.Equal(1, exitCode);
@@ -86,7 +86,7 @@ public sealed class RunnerHealthCheckProbeTests : IDisposable
 	public void StaleReadyReport_IsUnhealthy()
 	{
 		DateTimeOffset writtenAt = DateTimeOffset.UtcNow;
-		WriteReport(new RunnerHealthReport(Ready: true, Capabilities: ["discover"], Problems: [], Timestamp: writtenAt));
+		WriteReport(new RunnerHealthReport(Ready: true, Capabilities: ["discover"], Problems: [], Capacity: null, Timestamp: writtenAt));
 
 		DateTimeOffset now = writtenAt.Add(MaxAge).AddMinutes(1);
 		int exitCode = RunnerHealthCheckProbe.Run(_reportPath, MaxAge, now);

@@ -21,6 +21,7 @@ using Waypoint.Core.PowerShell;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
 using Waypoint.Runner.Jobs;
+using Waypoint.Runner.Resources;
 using Xunit;
 
 namespace Waypoint.Tests.ComplianceRunner;
@@ -85,7 +86,65 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 		Assert.NotEmpty(report.Problems);
 	}
 
-	private RunnerHealthReportingHostedService BuildService(string reportFile, bool ready)
+	[Fact]
+	public async Task Report_IncludesResourceAdmissionCapacity()
+	{
+		// Issue #437: the health report must carry BuildCapacityReport()'s snapshot of the
+		// runner's discovered/effective/admitted resource state, not just readiness +
+		// capabilities. A ResourceAdmissionController pointed at a nonexistent cgroup root
+		// falls back to its configured conservative defaults, which the capacity block must
+		// then surface verbatim.
+		string reportFile = Path.Combine(_tempRoot, "health.json");
+		RunnerHealthReportingHostedService service = BuildService(
+			reportFile,
+			ready: true,
+			fallbackCpuCores: 3.0,
+			fallbackMemoryBytes: 6L * 1024 * 1024 * 1024);
+
+		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
+		await service.StartAsync(cts.Token);
+		await service.StopAsync(CancellationToken.None);
+
+		RunnerHealthReport report = JsonSerializer.Deserialize<RunnerHealthReport>(await File.ReadAllTextAsync(reportFile))!;
+
+		Assert.NotNull(report.Capacity);
+		Assert.Equal(HostResourceLimitSource.Fallback.ToString(), report.Capacity!.Source);
+		Assert.True(report.Capacity.IsFallback);
+		Assert.Equal(3.0, report.Capacity.DiscoveredCpuCores, precision: 6);
+		Assert.Equal(6L * 1024 * 1024 * 1024, report.Capacity.DiscoveredMemoryBytes);
+		Assert.Equal(3.0, report.Capacity.EffectiveCpuCores, precision: 6);
+		Assert.Equal(6L * 1024 * 1024 * 1024, report.Capacity.EffectiveMemoryBytes);
+		// Nothing has been admitted, so the running-job commitments are all zero.
+		Assert.Equal(0.0, report.Capacity.AdmittedCpuCores, precision: 6);
+		Assert.Equal(0L, report.Capacity.AdmittedMemoryBytes);
+		Assert.Equal(0, report.Capacity.AdmittedJobCount);
+	}
+
+	[Fact]
+	public async Task UnwritableReportPath_DoesNotThrowAndWritesNoFile()
+	{
+		// The report file's parent path is a *file*, not a directory, so both
+		// Directory.CreateDirectory and the write-then-move fail with an IOException. The
+		// service must swallow that (log-and-continue) rather than crash the runner over a
+		// health side channel -- and no report file is produced.
+		string blockingFile = Path.Combine(_tempRoot, "not-a-directory");
+		await File.WriteAllTextAsync(blockingFile, "occupied");
+		string reportFile = Path.Combine(blockingFile, "health.json");
+
+		RunnerHealthReportingHostedService service = BuildService(reportFile, ready: true);
+
+		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
+		await service.StartAsync(cts.Token);
+		await service.StopAsync(CancellationToken.None);
+
+		Assert.False(File.Exists(reportFile));
+	}
+
+	private RunnerHealthReportingHostedService BuildService(
+		string reportFile,
+		bool ready,
+		double fallbackCpuCores = 1.0,
+		long fallbackMemoryBytes = 1024L * 1024 * 1024)
 	{
 		string modulesDir = Path.Combine(_tempRoot, "modules");
 		string profileDir = Path.Combine(_tempRoot, "profiles", "vsphere");
@@ -121,6 +180,17 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 
 		JobHandlerRegistry registry = new([], JobCapabilities.Compliance);
 
+		RunnerResourceOptions resourceOptions = new()
+		{
+			CgroupRoot = "/does/not/exist",
+			FallbackCpuCores = fallbackCpuCores,
+			FallbackMemoryBytes = fallbackMemoryBytes,
+		};
+		ResourceAdmissionController resourceAdmission = new(
+			Options.Create(resourceOptions),
+			new CgroupResourceDiscovery(Options.Create(resourceOptions), NullLogger<CgroupResourceDiscovery>.Instance),
+			NullLogger<ResourceAdmissionController>.Instance);
+
 		return new RunnerHealthReportingHostedService(
 			readiness,
 			registry,
@@ -129,6 +199,7 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 				ReportFilePath = reportFile,
 				RefreshInterval = TimeSpan.FromMinutes(5),
 			}),
+			resourceAdmission,
 			NullLogger<RunnerHealthReportingHostedService>.Instance);
 	}
 

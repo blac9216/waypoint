@@ -17,6 +17,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Runner.Jobs;
+using Waypoint.Runner.Resources;
 
 namespace Waypoint.ComplianceRunner.Readiness;
 
@@ -38,22 +39,26 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 	private readonly ComplianceReadinessCheck _readiness;
 	private readonly JobHandlerRegistry _handlers;
 	private readonly IOptions<RunnerHealthOptions> _options;
+	private readonly ResourceAdmissionController _resourceAdmission;
 	private readonly ILogger<RunnerHealthReportingHostedService> _logger;
 
 	public RunnerHealthReportingHostedService(
 		ComplianceReadinessCheck readiness,
 		JobHandlerRegistry handlers,
 		IOptions<RunnerHealthOptions> options,
+		ResourceAdmissionController resourceAdmission,
 		ILogger<RunnerHealthReportingHostedService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(readiness);
 		ArgumentNullException.ThrowIfNull(handlers);
 		ArgumentNullException.ThrowIfNull(options);
+		ArgumentNullException.ThrowIfNull(resourceAdmission);
 		ArgumentNullException.ThrowIfNull(logger);
 
 		_readiness = readiness;
 		_handlers = handlers;
 		_options = options;
+		_resourceAdmission = resourceAdmission;
 		_logger = logger;
 	}
 
@@ -101,6 +106,7 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 			Ready: readiness.Ready,
 			Capabilities: [.. _handlers.AllowedJobTypes.Order(StringComparer.Ordinal)],
 			Problems: readiness.Problems,
+			Capacity: BuildCapacityReport(),
 			Timestamp: DateTimeOffset.UtcNow);
 
 		try
@@ -126,6 +132,18 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 			LogReportWriteFailed(reportFilePath, exception);
 		}
 	}
+
+	/// <summary>Issue #437: snapshots <see cref="ResourceAdmissionController"/>'s current discovered/effective/admitted state for the health report.</summary>
+	private RunnerCapacityReport BuildCapacityReport() => new(
+		Source: _resourceAdmission.Discovered.Source.ToString(),
+		IsFallback: _resourceAdmission.Discovered.IsFallback,
+		DiscoveredCpuCores: _resourceAdmission.Discovered.CpuCores,
+		DiscoveredMemoryBytes: _resourceAdmission.Discovered.MemoryBytes,
+		EffectiveCpuCores: _resourceAdmission.EffectiveBudget.CpuCores,
+		EffectiveMemoryBytes: _resourceAdmission.EffectiveBudget.MemoryBytes,
+		AdmittedCpuCores: _resourceAdmission.AdmittedCpuCores,
+		AdmittedMemoryBytes: _resourceAdmission.AdmittedMemoryBytes,
+		AdmittedJobCount: _resourceAdmission.AdmittedJobCount);
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Failed to write runner health report to '{ReportFilePath}'")]
 	private partial void LogReportWriteFailed(string reportFilePath, Exception exception);
