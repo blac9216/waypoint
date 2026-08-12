@@ -15,6 +15,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Secrets;
@@ -29,6 +30,10 @@ namespace Waypoint.Infrastructure.Secrets;
 /// the ciphertext" discipline, same in-play redaction handoff -- but keyed by
 /// <c>run_id</c> instead of <c>credential_id</c>, with no rotation (one write, at run
 /// creation) and an <c>expires_at</c> bound <see cref="DeleteExpiredAsync"/> sweeps.
+/// <c>expires_at</c> is a sliding window (issue #469): every successful
+/// <see cref="DecryptAsync"/> pushes it back out to now() + <see cref="RunSecretOptions.Expiry"/>,
+/// so a run stays covered for as long as something keeps decrypting its secret, and only
+/// stops sliding -- and eventually gets swept -- once decrypt activity actually stops.
 /// </summary>
 public sealed partial class RunSecretStore : IRunSecretStore
 {
@@ -38,18 +43,21 @@ public sealed partial class RunSecretStore : IRunSecretStore
 	private readonly string _connectionString;
 	private readonly IEnvelopeCipher _cipher;
 	private readonly ISecretTracker _tracker;
+	private readonly IOptions<RunSecretOptions> _options;
 	private readonly ILogger<RunSecretStore> _logger;
 
-	public RunSecretStore(string connectionString, IEnvelopeCipher cipher, ISecretTracker tracker, ILogger<RunSecretStore> logger)
+	public RunSecretStore(string connectionString, IEnvelopeCipher cipher, ISecretTracker tracker, IOptions<RunSecretOptions> options, ILogger<RunSecretStore> logger)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 		ArgumentNullException.ThrowIfNull(cipher);
 		ArgumentNullException.ThrowIfNull(tracker);
+		ArgumentNullException.ThrowIfNull(options);
 		ArgumentNullException.ThrowIfNull(logger);
 
 		_connectionString = connectionString;
 		_cipher = cipher;
 		_tracker = tracker;
+		_options = options;
 		_logger = logger;
 	}
 
@@ -153,6 +161,21 @@ public sealed partial class RunSecretStore : IRunSecretStore
 			return null;
 		}
 
+		// Sliding window (issue #469): a successful decrypt is activity, so push
+		// expires_at back out to now() + Expiry in the SAME transaction as the audit
+		// write below -- one commit, one definition of "this row is still in use".
+		// This is what lets a long multi-stage run survive past the 8h default without
+		// losing its secret mid-flight: every retry, stage requeue, or lease-recovery
+		// decrypt slides the window again, so only a run that stops decrypting entirely
+		// (i.e. genuinely abandoned) ever lets the window run out.
+		await using (NpgsqlCommand slide = new(
+			"UPDATE run_secrets SET expires_at = now() + $2 WHERE run_id = $1", connection, transaction))
+		{
+			slide.Parameters.AddWithValue(runId);
+			slide.Parameters.AddWithValue(_options.Value.Expiry);
+			await slide.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
 		await WriteAuditAsync(connection, transaction, "secret.run_decrypted", actor, runId, jobId,
 			System.Text.Json.JsonSerializer.Serialize(new { master_key_id = envelope.MasterKeyId }), cancellationToken).ConfigureAwait(false);
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -206,19 +229,22 @@ public sealed partial class RunSecretStore : IRunSecretStore
 
 	/// <summary>
 	/// The abandoned-run cleanup sweep (issue #434 AC "expiry + cleanup sweep for
-	/// abandoned runs"). Deletes rows whose <c>expires_at</c> has passed -- but ONLY
-	/// when the owning run is not in a state that could still be actively using the
-	/// secret. A run that reaches a contract-terminal state (completed,
-	/// completed_with_failures, aborted) already had its row deleted synchronously by
+	/// abandoned runs"). Deletes rows whose <c>expires_at</c> has passed -- that gate
+	/// is the ONLY cleanup trigger; there is no separate run-state check (issue #452:
+	/// this summary previously implied one, which the query has never implemented). A
+	/// run that reaches a contract-terminal state (completed, completed_with_failures,
+	/// aborted) already had its row deleted synchronously by
 	/// <see cref="Waypoint.Infrastructure.Jobs.JobQueueRepository"/>'s run-completion
-	/// paths, so by the time <c>expires_at</c> passes for a row that is STILL present,
-	/// its run is either genuinely abandoned (pending/running with no worker ever
-	/// making progress -- a crashed API before dispatch, or a runner that claimed the
-	/// job and then died before ANY terminal write, which lease recovery will
-	/// eventually resolve) or, in the ordinary case, the expiry window
-	/// (<see cref="Waypoint.Core.Jobs.RunSecretOptions.ExpiryFor"/> default) is simply
-	/// generous next to normal run duration and the row was already deleted on
-	/// completion long before this sweep ever sees it.
+	/// paths, so any row still present once <c>expires_at</c> passes belongs to a run
+	/// that is abandoned in one of two senses: genuinely stuck (pending/running with no
+	/// worker ever making progress -- a crashed API before dispatch, or a runner that
+	/// claimed the job and then died before ANY terminal write, which lease recovery
+	/// will eventually resolve) or simply no longer decrypting its secret. The window is
+	/// sliding (issue #469: <see cref="DecryptAsync"/> pushes <c>expires_at</c> back out
+	/// to now() + <see cref="RunSecretOptions.Expiry"/> on every successful decrypt), so
+	/// a still-active run's row keeps outrunning this sweep on its own; only a row whose
+	/// run has stopped decrypting for a full <see cref="RunSecretOptions.Expiry"/> window
+	/// ever reaches this query.
 	///
 	/// The race this guards against: a sweep pass and a job's terminal write both
 	/// touching the same row concurrently is harmless either way (DELETE is

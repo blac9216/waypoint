@@ -233,6 +233,7 @@ public static class ServiceCollectionExtensions
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
 				serviceProvider.GetRequiredService<ISecretTracker>(),
+				serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<Waypoint.Core.Secrets.RunSecretOptions>>(),
 				serviceProvider.GetRequiredService<ILogger<Secrets.RunSecretStore>>()));
 
 			// Issue #311: the convert-stage upload/enrichment coordinator and the
