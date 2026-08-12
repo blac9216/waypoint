@@ -18,6 +18,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
+using Waypoint.Runner.Resources;
 
 namespace Waypoint.Runner.Jobs;
 
@@ -29,6 +30,24 @@ namespace Waypoint.Runner.Jobs;
 /// enforced after claim rather than by changing the proven global claim predicate:
 /// paused/blocked claims are released; aborted claims are cancelled. In-flight work
 /// observes abort through the same database read in its heartbeat loop.
+///
+/// <para>
+/// Issue #437 (ADR-0014 §5): <see cref="JobEngineOptions.MaxConcurrency"/> remains a
+/// coarse worker-slot ceiling (the <c>SemaphoreSlim</c> below), but every claim is now
+/// also subject to <see cref="ResourceAdmissionController.TryAdmit"/> -- the finer
+/// CPU/memory budget derived from cgroup discovery and operator caps. The resource
+/// check runs immediately after a successful claim, before the job is handed to a
+/// handler: <c>ClaimJobAsync</c>'s <c>job_type</c> is not knowable until the row is
+/// actually claimed (the atomic <c>SKIP LOCKED</c> statement has no cheap peek-ahead),
+/// so "decide admission before claiming" is honored as "decide admission before
+/// executing" -- a claim the resource budget cannot admit is immediately released back
+/// to <c>queued</c> via the same <see cref="IJobRunnerRepository.ReleaseClaimAsync"/>
+/// path already used for a paused/blocked run's claim, rather than being executed
+/// over-budget or lost. <see cref="_resourceAdmission"/> is optional: a host that does
+/// not register one (see <c>ResourceAdmissionOptions.Enabled</c> at the composition
+/// root) keeps exactly today's <see cref="JobEngineOptions.MaxConcurrency"/>-only
+/// behavior.
+/// </para>
 /// </summary>
 public sealed partial class JobDispatcherHostedService : BackgroundService
 {
@@ -49,6 +68,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	private readonly IJobEventPublisher _events;
 	private readonly JobHandlerRegistry _handlers;
 	private readonly IOptions<JobEngineOptions> _options;
+	private readonly ResourceAdmissionController? _resourceAdmission;
 	private readonly ILogger<JobDispatcherHostedService> _logger;
 	private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _inFlight = new();
 
@@ -58,6 +78,19 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		IJobEventPublisher events,
 		JobHandlerRegistry handlers,
 		IOptions<JobEngineOptions> options,
+		ILogger<JobDispatcherHostedService> logger)
+		: this(repository, controlRepository, events, handlers, options, resourceAdmission: null, logger)
+	{
+	}
+
+	/// <summary>Issue #437: the resource-admission-aware overload. <paramref name="resourceAdmission"/> is null for a host that opts out of resource-aware admission (see this type's remarks).</summary>
+	public JobDispatcherHostedService(
+		IJobRunnerRepository repository,
+		IJobControlRepository controlRepository,
+		IJobEventPublisher events,
+		JobHandlerRegistry handlers,
+		IOptions<JobEngineOptions> options,
+		ResourceAdmissionController? resourceAdmission,
 		ILogger<JobDispatcherHostedService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
@@ -72,6 +105,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		_events = events;
 		_handlers = handlers;
 		_options = options;
+		_resourceAdmission = resourceAdmission;
 		_logger = logger;
 
 		// jobs.claimed_by is unconstrained TEXT (see 0001_initial_schema.sql), so there
@@ -166,6 +200,22 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 				continue;
 			}
 
+			// Issue #437: resource-aware admission runs immediately after claim, before
+			// this job is handed to a handler or even checked against run pause/abort
+			// state -- see this type's doc comment for why "before claiming" becomes
+			// "before executing" given ClaimJobAsync's atomic SKIP LOCKED statement has
+			// no job-type peek-ahead. A denied claim is released back to queued exactly
+			// like the paused/blocked-run release path below, so the job is neither
+			// executed over-budget nor lost; another worker (or this one, once running
+			// jobs free up budget) picks it up on a later poll.
+			if (_resourceAdmission is not null && !_resourceAdmission.TryAdmit(job.Id, job.JobType))
+			{
+				await _repository.ReleaseClaimAsync(job.Id, WorkerId, stoppingToken).ConfigureAwait(false);
+				gate.Release();
+				await DelayAsync(PausedReleaseRetryDelay, stoppingToken).ConfigureAwait(false);
+				continue;
+			}
+
 			if (job.RunId is Guid runId)
 			{
 				RunQueueState? run = await _repository.GetRunQueueStateAsync(runId, stoppingToken).ConfigureAwait(false);
@@ -189,6 +239,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 					{
 						await _repository.ReleaseClaimAsync(job.Id, WorkerId, stoppingToken).ConfigureAwait(false);
 					}
+					_resourceAdmission?.Release(job.Id);
 					gate.Release();
 					await DelayAsync(PausedReleaseRetryDelay, stoppingToken).ConfigureAwait(false);
 					continue;
@@ -338,6 +389,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		finally
 		{
 			_inFlight.TryRemove(job.Id, out _);
+			_resourceAdmission?.Release(job.Id);
 			gate.Release();
 		}
 	}

@@ -34,6 +34,7 @@ using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Sites;
 using Waypoint.Infrastructure.SystemState;
 using Waypoint.Runner.Jobs;
+using Waypoint.Runner.Resources;
 
 namespace Waypoint.Infrastructure.DependencyInjection;
 
@@ -108,6 +109,9 @@ public static class ServiceCollectionExtensions
 
 		services.AddOptions<JobEngineOptions>()
 			.Bind(configuration.GetSection(JobEngineOptions.SectionName));
+
+		services.AddOptions<RunnerResourceOptions>()
+			.Bind(configuration.GetSection(RunnerResourceOptions.SectionName));
 
 		services.AddOptions<PowerShellOptions>()
 			.Bind(configuration.GetSection(PowerShellOptions.SectionName));
@@ -308,7 +312,33 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
 			services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();
 
-			services.AddSingleton<JobDispatcherHostedService>();
+			// Issue #437 (ADR-0014 §5): resource-aware admission is wired for a
+			// dedicated ExecutionOnly runner (compliance-runner, download-runner), each
+			// of which is a single process bounded by its own container's cgroup
+			// allocation. Combined (Waypoint.Api) keeps today's proven
+			// JobEngineOptions.MaxConcurrency-only behavior unchanged -- see
+			// JobDispatcherHostedService's doc comment for how a null
+			// ResourceAdmissionController falls back to that existing semaphore-only
+			// gate, and the PR description for why: the API process's own resource
+			// footprint (HTTP handling, SSE fan-out) is not accounted for by a runner
+			// resource profile, and #443 removes its execution role entirely, so
+			// extending discovery to it is not worth the transitional complexity.
+			if (hostKind == WaypointInfrastructureHostKind.ExecutionOnly)
+			{
+				services.AddSingleton<CgroupResourceDiscovery>();
+				services.AddSingleton<ResourceAdmissionController>();
+			}
+
+			services.AddSingleton<JobDispatcherHostedService>(serviceProvider => new JobDispatcherHostedService(
+				serviceProvider.GetRequiredService<IJobRunnerRepository>(),
+				serviceProvider.GetRequiredService<IJobControlRepository>(),
+				serviceProvider.GetRequiredService<IJobEventPublisher>(),
+				serviceProvider.GetRequiredService<JobHandlerRegistry>(),
+				serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
+				hostKind == WaypointInfrastructureHostKind.ExecutionOnly
+					? serviceProvider.GetRequiredService<ResourceAdmissionController>()
+					: null,
+				serviceProvider.GetRequiredService<ILogger<JobDispatcherHostedService>>()));
 			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());
 			services.AddHostedService<LeaseRecoveryHostedService>();
 		}
