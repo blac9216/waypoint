@@ -1084,15 +1084,15 @@ future change) can tell what still covers what without re-deriving it.
 | One-domain-unavailable isolation | `CrossProcessRunnerParityMatrixTests.OneExecutionDomainUnavailable_TheOtherDomainsQueueIsUnaffected` — plus live: smoke-test step 11 (`docker compose stop compliance-runner`, confirm `download-runner` still available in `/system`) |
 | All services healthy on a fresh `--build` | smoke-test step 1 |
 | Login | smoke-test step 2 |
-| `GET /system` reports both runner domains ready with capabilities | smoke-test step 3; `SystemApiTests.cs`/`WorkerRegistryRepositoryTests.cs` at the unit/integration level; `WorkerRegistryRunnerRoleGrantTests.cs` proves the actual least-privilege runner roles (not the test fixture's owner role) can execute the real upsert — see "A real bug this matrix caught" below |
-| Catalog-index works without the gated tool | smoke-test step 4; `CatalogIndexJobHandlerEndToEndTests.cs` (never wrapped by `ToolGatedDownloadJobHandler` — indexing is a pure filesystem walk) |
-| Download fails with the clear tool-absent message | smoke-test step 5; `ToolGatedDownloadJobHandler`'s own unit coverage in `backend/Waypoint.Tests/` |
+| `GET /system` reports both runner domains ready with capabilities | smoke-test step 3; `SystemApiTests.cs`/`WorkerRegistryRepositoryTests.cs` at the unit/integration level; `WorkerRegistryRunnerRoleGrantTests.cs` proves the actual least-privilege runner roles (not the test fixture's owner role) can execute the real upsert — see "A real bug this matrix caught" below. **Operator-visible (Runners indicator, issue #465):** `frontend/e2e/01-login-and-system.spec.ts` (issue #468) |
+| Catalog-index works without the gated tool | smoke-test step 4; `CatalogIndexJobHandlerEndToEndTests.cs` (never wrapped by `ToolGatedDownloadJobHandler` — indexing is a pure filesystem walk). **Operator-visible:** `frontend/e2e/04-catalog-download.spec.ts` loads the Download Catalog screen live (issue #468) |
+| Download fails with the clear tool-absent message | smoke-test step 5; `ToolGatedDownloadJobHandler`'s own unit coverage in `backend/Waypoint.Tests/`. **Operator-visible:** `frontend/e2e/04-catalog-download.spec.ts` queues a download and asserts the tool-absent message renders in the UI when an artifact is indexed (issue #468) |
 | Locally-installed test tool success path | **Gap, disclosed, not closed** — see below |
-| Site/target/credential setup via API | smoke-test step 6; `SitesTargetsApiTests.cs`, `CredentialsApiTests.cs` |
-| Service-credential scan: enqueue → compliance-runner claim → honest failure against an invented unreachable target | smoke-test step 7; `ScanJobHandlerEndToEndTests.cs` |
+| Site/target/credential setup via API | smoke-test step 6; `SitesTargetsApiTests.cs`, `CredentialsApiTests.cs`. **Operator-visible (Configuration screen CRUD):** `frontend/e2e/02-configuration-crud.spec.ts` (issue #468) |
+| Service-credential scan: enqueue → compliance-runner claim → honest failure against an invented unreachable target | smoke-test step 7; `ScanJobHandlerEndToEndTests.cs`. **Operator-visible (Start-a-Scan wizard, service-credential path):** `frontend/e2e/03-scan-liverun-results.spec.ts` (issue #468) |
 | Personal-credential scan: same, ad hoc credential | smoke-test step 8; `RunSecretScanRunTests.cs` |
-| Cancellation mid-run | smoke-test step 9; `AuthFailureHaltTests.cs`/job-cancel unit coverage |
-| SSE stream reconnect/replay | smoke-test step 10 (route-level: answers `text/event-stream` live); `proxy_buffering off` streaming proof is `deploy/README.md` "Verifying SSE streaming"; `JobEventStreamServiceTests.cs`/`EventStreamEndpointTests.cs` at the integration level. Reconnect/replay **from a browser `EventSource`** is a Playwright-shaped check — see the frontend gap below |
+| Cancellation mid-run | smoke-test step 9; `AuthFailureHaltTests.cs`/job-cancel unit coverage. **Operator-visible (Abort run control):** `frontend/e2e/03-scan-liverun-results.spec.ts` proves the Operator+-gated control submits (issue #468) — the terminal-state assertion is deferred to the Live Run gap below |
+| SSE stream reconnect/replay | smoke-test step 10 (route-level: answers `text/event-stream` live); `proxy_buffering off` streaming proof is `deploy/README.md` "Verifying SSE streaming"; `JobEventStreamServiceTests.cs`/`EventStreamEndpointTests.cs` at the integration level. Reconnect/replay **from a browser `EventSource`** is still not exercised — `LiveRunScreen`'s SSE consumption is unreachable through the UI today, see the "Live Run screen" gap below |
 | Secret canary scan (no plaintext in DB/artifacts/logs) | smoke-test step 13; `RunSecretScanRunTests.CreateScanRun_WithRunSecret_NeverPersistedInsecurely_CanaryProof` |
 | Discovery inventory caching | `AutoDiscoverOnScanInitiationTests.cs`, `DiscoverJobHandlerEndToEndTests.cs` |
 | Stage resume / retry | `JobStageDispatcherTests.cs`, `ScanJobHandlerEndToEndTests.cs` (`StageComplete` outcome) |
@@ -1161,20 +1161,124 @@ and *why* without reading a runner container's logs.
   success. A follow-up issue can add a throwaway stub (clearly marked invented,
   never resembling `vcf-download-tool`'s real invocation contract) to
   `deploy/scripts/fresh-stack-smoke-test.sh` if this gap needs closing.
-- **Frontend/Playwright live-stack checks.** `frontend/package.json` pins
-  `"node": ">=22.19.0"`; the sandbox that authored #444 has Node 20.20.2, so
-  `npm ci` refuses outright (`EBADENGINE`) and no Playwright run against a live
-  nginx-served frontend could be executed. The operator-visible parity items the
-  issue's Playwright list would have covered (site/target/credential CRUD forms,
-  scan/download initiation, cancellation, the live SSE run view, the Runners
-  indicator reflecting a stopped runner) are covered instead by the API-level
-  smoke-test steps above, which exercise the same backend behavior the UI calls
-  into without a browser. Reconnect/replay semantics of the browser's own
-  `EventSource` object specifically are not exercised by any check in this
-  matrix. A reviewer or follow-up session with Node 22 available should run
-  `frontend`'s Playwright suite (once one exists for these flows) against a stack
-  brought up with this same smoke script before treating the operator-visible
-  surface as fully proven.
+- **Frontend/Playwright live-stack checks — closed by issue #468.** A Node 22
+  toolchain (`nvm install 22`, matching `frontend/package.json`'s
+  `"node": ">=22.19.0"` floor) plus `frontend/e2e/` (Playwright, a
+  devDependency — browser binaries are never committed, installed locally via
+  `npx playwright install chromium`) now exercise the operator-visible surface
+  this gap used to describe: login, the Runners indicator, Sites/Targets/
+  Credentials CRUD, the Start-a-Scan wizard's service-credential path through
+  submission, the Abort run control, the Results screen rendering a completed
+  run, and the Download Catalog screen's empty/tool-absent states.
+  `deploy/scripts/e2e-playwright.sh` brings up an isolated fresh stack (same
+  recipe as `fresh-stack-smoke-test.sh`: unique `-p`/port, self-provisioned
+  admin password + master key, devcontainer bind-mount translation,
+  compliance-profiles pre-seeding, cgroup-fallback override), seeds a site/
+  target/credential via the API, runs the suite, and tears down fully — see
+  "Running the Playwright suite" below.
+
+  **Two real, previously-undetected bugs were found live and fixed as part of
+  closing this gap** (both invisible to `npm test`'s mocked-fetch unit tests,
+  which only ever exercised the shape each file's author assumed, never the
+  shape the real backend actually sends):
+
+  - `frontend/src/lib/router.tsx`'s hand-rolled router stored the FULL
+    navigated path — including any query string — as its route-matching
+    state, but `routes.ts`'s `ROUTES` table (and `routeForPath`) key on the
+    bare pathname only. Any `navigate("/path?query=...")` call therefore
+    matched no route, and `App.tsx`'s `route ?? DEFAULT_ROUTE` silently fell
+    back to Dashboard. This broke `useScanWizard.ts`'s own
+    `navigate('/live-run?run=' + id)` post-submit call — the entire
+    Start-a-Scan → Live Run handoff redirected to Dashboard instead of
+    landing on the run. Fixed: the router now strips the query string before
+    storing route-matching state (still pushes the full URL to history).
+  - `frontend/src/screens/catalog/catalog.ts`'s `fetchCatalogArtifacts`
+    assumed `GET /catalog/artifacts` returns `{artifacts: [...],
+    index_synced_at}`; the real `CatalogController.ListArtifacts` returns a
+    bare `CatalogArtifactResponse[]` (`return Ok(items...)`, no envelope, no
+    `index_synced_at`, no `search` query binding). `res.artifacts` was
+    therefore always `undefined` against the real backend, crashing
+    `DownloadCatalogScreen`'s `useMemo(() => artifacts.map(...))` on mount.
+    Fixed: `fetchCatalogArtifacts` now adapts the real bare-array shape,
+    filters `search` client-side (the backend has no such query parameter),
+    and `index_synced_at` is typed but always `null` until the backend grows
+    that concept.
+
+  **One gap found live is disclosed, not fixed, and intentionally NOT closed
+  by this issue** — see `frontend/e2e/03-scan-liverun-results.spec.ts`'s file
+  header for the full detail: `LiveRunScreen`'s REST-seed data layer
+  (`liverun.ts`'s `fetchRun`/`fetchRunJobs`, feeding `RunHeader`/`RunJob[]`)
+  assumes a contract (`queues`, `pass`/`fail`/`na`, `site`, `credential_name`,
+  per-job `queue`/`benchmark`/`note`/`job_id`) that the real
+  `RunsController`'s `GET /runs/{id}` and `GET /runs/{id}/jobs` responses
+  never carry — confirmed directly against a live stack; the real payloads
+  are `{id, run_type, state, paused, blocked, scope, credential_id,
+  initiated_by, ..., job_count*}` and `[{id, run_id, job_type, target_id,
+  target_name, state, priority, attempt_count, ...}]`. The result is an
+  unhandled `"e.queues is not iterable"` render crash on every real run —
+  the Live Run screen cannot currently be exercised end to end through the
+  UI at all. This is a `RunsController`/`liverun.ts` contract-alignment
+  problem, not a missing test, and `backend/`/`Waypoint.Runner` were
+  explicitly off-limits to the session that closed #468 (concurrent
+  coordination with agents working `RunsController`/admission). The
+  Playwright suite asserts the crash explicitly (fails fast with the real
+  error, not a 60s timeout guessing at UI text) so this has a clear,
+  reproducible, CI-visible signal — see issue tracker for the follow-up.
+  SSE reconnect/replay from a browser `EventSource` specifically stays
+  unproven until this is fixed, since it's the same screen.
+
+  A second, smaller disclosed gap: `lib/system.tsx`'s `SystemProvider`
+  fetches `GET /system` exactly once, in a `useEffect` keyed only on auth
+  status — there is no polling interval. The Runners indicator (and mode/
+  STIG Manager status) can therefore freeze at a stale reading (e.g.
+  "Runners 1/1" when both runners are in fact up) for the rest of the
+  session if that one fetch races ahead of a runner's first heartbeat;
+  reloading the page is the only way to refresh it today. Confirmed directly:
+  `worker_registry` gained both runner rows within seconds server-side while
+  the already-rendered page's indicator stayed frozen for 150s straight.
+  `frontend/e2e/01-login-and-system.spec.ts`'s Runners-indicator test works
+  around this with an explicit grace period + page reload (what an operator
+  would have to do today) rather than polling the live DOM, and documents the
+  gap inline. Making `SystemProvider` poll live is a real product change
+  (shared chrome state, broad blast radius) — a follow-up issue, not part of
+  #468.
+
+  CI wiring (running this suite in `.github/workflows/`) is a deliberate
+  follow-up, not part of #468 — `.github/workflows/` is owner-gated.
+
+### Running the Playwright suite
+
+```bash
+cd deploy
+./scripts/e2e-playwright.sh <your-slug> <your-port>
+```
+
+Same isolation recipe as the smoke script (unique `-p`/port, full `down -v`
+teardown on exit including on failure), plus: seeds one site/target/
+(shared) credential via the API so the Start-a-Scan wizard has something to
+select, joins its own process to the stack's `edge` network when the
+published host port is unreachable from this namespace (identical
+devcontainer/remote-daemon trap the smoke script's helper-container pattern
+works around — see that script's header comment; this one has no
+Playwright-side equivalent to "run every request in a container", so it
+joins the network directly instead and disconnects in its own cleanup trap),
+and finally runs `npm run test:e2e` from `frontend/` with `E2E_BASE_URL`/
+`E2E_ADMIN_PASSWORD`/`E2E_SITE_NAME`/`E2E_CREDENTIAL_NAME` set. Requires
+`frontend/node_modules/.bin/playwright` and a locally installed Chromium
+(`cd frontend && npm ci && npx playwright install chromium` — browser
+binaries are a devDependency-managed local install, never committed and
+never fetched at appliance runtime; `npm run build`'s external-asset guard
+never scans `frontend/e2e/`).
+
+If the shipped `edge` network's pinned subnet collides with a concurrent
+stack on a shared host, `WAYPOINT_E2E_SUBNET` (e.g.
+`WAYPOINT_E2E_SUBNET="203.0.113.0/24"`) overrides both the `edge` subnet
+and the backend's `ForwardedHeaders__KnownNetworks__0` together, same
+requirement as the smoke script's `WAYPOINT_SMOKE_OVERRIDE_FILE`.
+`WAYPOINT_E2E_OVERRIDE_FILE` carries the same devcontainer bind-mount
+translation override the smoke script generates automatically, and can hold
+more than one path (space-separated) if both a devcontainer override and a
+subnet override are needed at once.
 
 ### Running the smoke script
 

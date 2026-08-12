@@ -33,7 +33,10 @@ export interface CatalogArtifact {
 
 export interface CatalogArtifactsResponse {
 	artifacts: CatalogArtifact[];
-	/** Last successful `catalog-index` job completion, ISO-8601. */
+	/** Last successful `catalog-index` job completion, ISO-8601. Always `null`
+	 * today — see the note on `fetchCatalogArtifacts` below; kept as a typed
+	 * field (rather than dropped) so a future backend addition is a
+	 * no-frontend-change wire-up, not a new field to invent client shape for. */
 	index_synced_at: string | null;
 }
 
@@ -44,14 +47,35 @@ export interface CatalogArtifactsQuery {
 	status?: ArtifactStatus;
 }
 
+/**
+ * Adapts the real `CatalogController.ListArtifacts` response, which is a
+ * bare `CatalogArtifactResponse[]` (`return Ok(items...)` — no envelope, no
+ * `index_synced_at`, and no `search` query binding), to this module's
+ * `{artifacts, index_synced_at}` shape. Found live by the issue #468
+ * Playwright suite: this function previously assumed the api-contract.md
+ * envelope shape directly (`apiGet<CatalogArtifactsResponse>(...)`), which
+ * silently returned `res.artifacts === undefined` against the real backend
+ * and crashed `DownloadCatalogScreen`'s `useMemo` on `.map` over `undefined`
+ * — invisible to `npm test`'s mocked-fetch unit tests, which only ever
+ * exercised the shape this code assumed, never the shape the backend
+ * actually sends. `search` is filtered client-side below since the backend
+ * has no `search` query parameter to send it to; `product`/`version`/
+ * `status` DO bind server-side (`ListArtifacts`'s query parameters) and are
+ * still sent as query params.
+ */
 export function fetchCatalogArtifacts(query: CatalogArtifactsQuery = {}): Promise<CatalogArtifactsResponse> {
 	const params = new URLSearchParams();
-	if (query.search) params.set("search", query.search);
 	if (query.product) params.set("product", query.product);
 	if (query.version) params.set("version", query.version);
 	if (query.status) params.set("status", query.status);
 	const qs = params.toString();
-	return apiGet<CatalogArtifactsResponse>(`/catalog/artifacts${qs ? `?${qs}` : ""}`);
+	return apiGet<CatalogArtifact[]>(`/catalog/artifacts${qs ? `?${qs}` : ""}`).then((artifacts) => {
+		const search = query.search?.trim().toLowerCase();
+		const filtered = search
+			? artifacts.filter((a) => a.name.toLowerCase().includes(search) || a.sha256.toLowerCase().includes(search))
+			: artifacts;
+		return { artifacts: filtered, index_synced_at: null };
+	});
 }
 
 export interface CatalogSyncResponse {

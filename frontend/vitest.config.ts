@@ -7,6 +7,10 @@ export default defineConfig({
 		environment: "jsdom",
 		setupFiles: ["./src/test/setup.ts"],
 		css: true,
+		// e2e/ holds Playwright specs (npm run test:e2e), which run against a
+		// real browser + live stack, not jsdom — vitest must never try to
+		// collect them (they use @playwright/test's own test()/expect()).
+		exclude: ["e2e/**", "node_modules/**"],
 		coverage: {
 			provider: "v8",
 			// "json-summary" is built into @vitest/coverage-v8 (already vendored,
