@@ -80,6 +80,36 @@ echo "docker ps (containers NOT belonging to this run -- do not touch them):"
 docker ps --format '{{.Names}}' | grep -v "^${PROJECT}-" || echo "  (none currently running)"
 
 # --- Prerequisites -----------------------------------------------------
+#
+# Issue #500: these used to be soft (e.g. a `command -v dotnet` guard around
+# the admin-hash step) -- missing a prerequisite silently skipped work
+# further down and the script still exited 0, reporting a false "verified".
+# Fail fast, before any stack comes up, so a missing tool is loud and cheap
+# to diagnose instead of surfacing as a confusing downstream failure (or no
+# failure at all).
+
+missing=()
+command -v docker >/dev/null 2>&1 || missing+=("docker")
+command -v openssl >/dev/null 2>&1 || missing+=("openssl")
+command -v python3 >/dev/null 2>&1 || missing+=("python3")
+command -v dotnet >/dev/null 2>&1 || missing+=("dotnet (expected on PATH, e.g. \$HOME/.dotnet)")
+if [[ ! -s "${NVM_DIR}/nvm.sh" ]]; then
+	missing+=("nvm (expected at \${NVM_DIR}/nvm.sh, NVM_DIR=${NVM_DIR})")
+else
+	# shellcheck disable=SC1091
+	. "${NVM_DIR}/nvm.sh"
+	if ! nvm which 22 >/dev/null 2>&1; then
+		missing+=("Node 22 (expected installed via nvm -- run: nvm install 22)")
+	fi
+fi
+
+if [[ ${#missing[@]} -gt 0 ]]; then
+	echo "error: missing prerequisite(s), refusing to bring up a stack for a run that cannot succeed:" >&2
+	for m in "${missing[@]}"; do
+		echo "  - ${m}" >&2
+	done
+	exit 1
+fi
 
 cd "${DEPLOY_DIR}"
 
@@ -188,11 +218,9 @@ ADMIN_PASSWORD="invented-e2e-password-$(openssl rand -hex 4)"
 log "Computing admin password hash via backend --hash-password"
 (
 	cd "${REPO_ROOT}/backend"
-	if command -v dotnet >/dev/null 2>&1; then
-		dotnet build Waypoint.Api >/dev/null
-		printf '%s\n' "${ADMIN_PASSWORD}" | dotnet run --project Waypoint.Api --no-launch-profile --no-build -- --hash-password \
-			| tail -1 > "${SCRATCH_KEY_DIR}/admin-hash"
-	fi
+	dotnet build Waypoint.Api >/dev/null
+	printf '%s\n' "${ADMIN_PASSWORD}" | dotnet run --project Waypoint.Api --no-launch-profile --no-build -- --hash-password \
+		| tail -1 > "${SCRATCH_KEY_DIR}/admin-hash"
 )
 if [[ ! -s "${SCRATCH_KEY_DIR}/admin-hash" ]]; then
 	echo "error: could not compute admin password hash locally -- Playwright login step would fail closed" >&2
@@ -375,6 +403,8 @@ fi
 
 # --- Run Playwright against this stack -----------------------------------
 
+PLAYWRIGHT_JSON_OUTPUT_FILE="${SCRATCH_KEY_DIR}/playwright-results.json"
+export PLAYWRIGHT_JSON_OUTPUT_FILE
 log "Running Playwright against ${PLAYWRIGHT_BASE_URL}"
 (
 	use_node22
@@ -387,5 +417,27 @@ log "Running Playwright against ${PLAYWRIGHT_BASE_URL}"
 )
 PLAYWRIGHT_EXIT=$?
 
-log "Playwright exit code: ${PLAYWRIGHT_EXIT}"
+# Issue #500: a bare exit code cannot distinguish "the suite ran and passed"
+# from "the suite never ran" (e.g. `tsc` failing before `playwright test`
+# even starts still exits nonzero, but a differently-broken invocation could
+# exit 0 with zero tests executed). Parse the JSON reporter's stats and
+# require at least one test to have actually run before trusting a 0 exit.
+EXECUTED=0
+if [[ -s "${PLAYWRIGHT_JSON_OUTPUT_FILE}" ]]; then
+	EXECUTED="$(python3 -c "
+import json
+with open('${PLAYWRIGHT_JSON_OUTPUT_FILE}') as f:
+    data = json.load(f)
+stats = data.get('stats', {})
+print(int(stats.get('expected', 0)) + int(stats.get('unexpected', 0)) + int(stats.get('flaky', 0)))
+" 2>/dev/null || echo 0)"
+fi
+
+log "Playwright exit code: ${PLAYWRIGHT_EXIT}, tests executed: ${EXECUTED}"
+
+if [[ "${PLAYWRIGHT_EXIT}" -eq 0 && "${EXECUTED}" -eq 0 ]]; then
+	echo "error: Playwright reported success but executed zero tests -- treating as a failed run (issue #500)" >&2
+	exit 1
+fi
+
 exit "${PLAYWRIGHT_EXIT}"
