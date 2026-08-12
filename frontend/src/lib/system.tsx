@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { apiGet } from "./api";
 import { useAuth } from "./auth-context";
 import type { ModeState } from "./routes";
@@ -46,17 +46,39 @@ import { SystemContext, type SystemInfo, type StigmanStatus } from "./system-con
  */
 export const SYSTEM_FETCH_TIMEOUT_MS = 8000;
 
+/**
+ * Re-poll interval for `/system` (issue #495). Before this, `SystemProvider`
+ * fetched once at sign-in and never again, so the top-bar Runners indicator
+ * (and the starvation state from #489/#490) went stale — a runner dying or
+ * starving after page load was invisible until a full reload (worked around
+ * in the #468 e2e test rather than fixed).
+ *
+ * 45s: inside the 30-60s range the issue asks for, matching the "modest
+ * interval" framing — this is chrome, not a live run detail page, so it
+ * trades a little staleness for not hammering the API from every signed-in
+ * tab. Paired with a focus/visibility re-check (same pattern as
+ * `auth.tsx`'s expiry enforcement) so a backgrounded tab that regains focus
+ * doesn't wait out the rest of the interval to notice a runner went down.
+ */
+export const SYSTEM_POLL_INTERVAL_MS = 45_000;
+
 export function SystemProvider({ children }: { children: ReactNode }) {
 	const { status } = useAuth();
 	const [system, setSystem] = useState<SystemInfo | null>(null);
 	const [stigman, setStigman] = useState<StigmanStatus | null>(null);
 	const [ready, setReady] = useState(false);
+	// Read inside `load()` instead of closing over the `ready` state value, so
+	// the polling effect below does not need `ready` in its dependency array
+	// — it must register its interval/listeners exactly once per sign-in, not
+	// re-run (and thus re-schedule) the instant the first fetch settles.
+	const readyRef = useRef(false);
 
 	useEffect(() => {
 		if (status !== "signed-in") {
 			return;
 		}
 		let cancelled = false;
+		readyRef.current = false;
 
 		async function load() {
 			// `/system` and `/stigman` are independent per the contract; a
@@ -81,14 +103,49 @@ export function SystemProvider({ children }: { children: ReactNode }) {
 			// unreachable we deliberately do NOT guess "connected" — an unknown
 			// mode hides mode-gated nav (Download Catalog) rather than risk
 			// showing a feature the appliance cannot actually serve.
-			setSystem(systemResult.status === "fulfilled" ? systemResult.value : null);
-			setStigman(stigmanResult.status === "fulfilled" ? stigmanResult.value : null);
+			//
+			// A *re*-poll failure (issue #495) is treated differently from the
+			// first load: only the initial `system`/`stigman` state is null, so
+			// only the initial failure can fold `mode` to "disconnected" here.
+			// Once a value has been fetched successfully, a later failed refetch
+			// intentionally keeps the last-known state rather than clearing it —
+			// a single dropped poll (a transient blip, or the 8s timeout firing
+			// on a slow-but-alive backend) must not flap the mode indicator or
+			// blank the Runners list; it waits for the next successful poll.
+			if (systemResult.status === "fulfilled") {
+				setSystem(systemResult.value);
+			} else if (!readyRef.current) {
+				setSystem(null);
+			}
+			if (stigmanResult.status === "fulfilled") {
+				setStigman(stigmanResult.value);
+			} else if (!readyRef.current) {
+				setStigman(null);
+			}
+			readyRef.current = true;
 			setReady(true);
 		}
 
 		void load();
+
+		const timer = window.setInterval(() => {
+			void load();
+		}, SYSTEM_POLL_INTERVAL_MS);
+
+		const onFocus = () => {
+			if (document.visibilityState !== "visible") {
+				return;
+			}
+			void load();
+		};
+		document.addEventListener("visibilitychange", onFocus);
+		window.addEventListener("focus", onFocus);
+
 		return () => {
 			cancelled = true;
+			window.clearInterval(timer);
+			document.removeEventListener("visibilitychange", onFocus);
+			window.removeEventListener("focus", onFocus);
 		};
 	}, [status]);
 
