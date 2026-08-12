@@ -21,6 +21,7 @@ using Npgsql;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
 using Waypoint.Infrastructure.DependencyInjection;
+using Waypoint.Runner.Resources;
 
 namespace Waypoint.DownloadRunner;
 
@@ -42,6 +43,7 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 	private readonly IOptions<DownloadOptions> _downloadOptions;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
 	private readonly IOptions<DownloadRunnerOptions> _runnerOptions;
+	private readonly ResourceAdmissionController? _resourceAdmission;
 	private readonly ILogger<ReadinessReportingHostedService> _logger;
 
 	public ReadinessReportingHostedService(
@@ -50,6 +52,7 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 		IOptions<DownloadOptions> downloadOptions,
 		IOptions<CatalogOptions> catalogOptions,
 		IOptions<DownloadRunnerOptions> runnerOptions,
+		ResourceAdmissionController resourceAdmission,
 		ILogger<ReadinessReportingHostedService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(configuration);
@@ -57,6 +60,7 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 		ArgumentNullException.ThrowIfNull(downloadOptions);
 		ArgumentNullException.ThrowIfNull(catalogOptions);
 		ArgumentNullException.ThrowIfNull(runnerOptions);
+		ArgumentNullException.ThrowIfNull(resourceAdmission);
 		ArgumentNullException.ThrowIfNull(logger);
 
 		_connectionString = configuration.GetConnectionString(ServiceCollectionExtensions.ConnectionStringName);
@@ -64,6 +68,7 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 		_downloadOptions = downloadOptions;
 		_catalogOptions = catalogOptions;
 		_runnerOptions = runnerOptions;
+		_resourceAdmission = resourceAdmission;
 		_logger = logger;
 	}
 
@@ -113,6 +118,7 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 			ToolPresent: toolPresent,
 			ArtifactStoreWritable: artifactStoreWritable,
 			DepotPathReadable: depotPathReadable,
+			Capacity: BuildCapacityReport(),
 			GeneratedAt: DateTimeOffset.UtcNow);
 
 		try
@@ -135,6 +141,18 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 			LogReadinessWriteFailed(exception);
 		}
 	}
+
+	/// <summary>Issue #437: snapshots <see cref="ResourceAdmissionController"/>'s current discovered/effective/admitted state for the readiness report.</summary>
+	private RunnerCapacityReport BuildCapacityReport() => new(
+		Source: _resourceAdmission!.Discovered.Source.ToString(),
+		IsFallback: _resourceAdmission.Discovered.IsFallback,
+		DiscoveredCpuCores: _resourceAdmission.Discovered.CpuCores,
+		DiscoveredMemoryBytes: _resourceAdmission.Discovered.MemoryBytes,
+		EffectiveCpuCores: _resourceAdmission.EffectiveBudget.CpuCores,
+		EffectiveMemoryBytes: _resourceAdmission.EffectiveBudget.MemoryBytes,
+		AdmittedCpuCores: _resourceAdmission.AdmittedCpuCores,
+		AdmittedMemoryBytes: _resourceAdmission.AdmittedMemoryBytes,
+		AdmittedJobCount: _resourceAdmission.AdmittedJobCount);
 
 	private async Task<bool> CheckDatabaseAsync(CancellationToken cancellationToken)
 	{

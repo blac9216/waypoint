@@ -19,6 +19,7 @@ using Microsoft.Extensions.Options;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
 using Waypoint.DownloadRunner;
+using Waypoint.Runner.Resources;
 using Waypoint.Tests.Support;
 using Xunit;
 
@@ -45,6 +46,16 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 
 	private static IConfiguration EmptyConfiguration() => new ConfigurationBuilder().Build();
 
+	/// <summary>
+	/// A real controller pointed at a nonexistent cgroup root -- exercises the
+	/// documented fallback path (issue #437) rather than a mock, since this type has no
+	/// interface seam and its constructor-time discovery is cheap/deterministic.
+	/// </summary>
+	private static ResourceAdmissionController CreateResourceAdmission() => new(
+		Options.Create(new RunnerResourceOptions { CgroupRoot = "/does/not/exist" }),
+		new CgroupResourceDiscovery(Options.Create(new RunnerResourceOptions { CgroupRoot = "/does/not/exist" }), NullLogger<CgroupResourceDiscovery>.Instance),
+		NullLogger<ResourceAdmissionController>.Instance);
+
 	[Fact]
 	public async Task NoConnectionString_ReportsNotReady()
 	{
@@ -59,6 +70,7 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 			Options.Create(new DownloadOptions { ArtifactStorePath = artifactStore }),
 			Options.Create(new CatalogOptions { DepotPath = depotPath }),
 			Options.Create(new DownloadRunnerOptions { ReadinessFilePath = readinessFile, ReadinessInterval = TimeSpan.FromMinutes(5) }),
+			CreateResourceAdmission(),
 			NullLogger<ReadinessReportingHostedService>.Instance);
 
 		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
@@ -88,6 +100,7 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 			Options.Create(new DownloadOptions { ArtifactStorePath = artifactStore }),
 			Options.Create(new CatalogOptions { DepotPath = depotPath }),
 			Options.Create(new DownloadRunnerOptions { ReadinessFilePath = readinessFile, ReadinessInterval = TimeSpan.FromMinutes(5) }),
+			CreateResourceAdmission(),
 			NullLogger<ReadinessReportingHostedService>.Instance);
 
 		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));

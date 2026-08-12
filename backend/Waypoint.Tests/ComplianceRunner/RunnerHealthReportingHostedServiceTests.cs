@@ -21,6 +21,7 @@ using Waypoint.Core.PowerShell;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
 using Waypoint.Runner.Jobs;
+using Waypoint.Runner.Resources;
 using Xunit;
 
 namespace Waypoint.Tests.ComplianceRunner;
@@ -121,6 +122,11 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 
 		JobHandlerRegistry registry = new([], JobCapabilities.Compliance);
 
+		ResourceAdmissionController resourceAdmission = new(
+			Options.Create(new RunnerResourceOptions { CgroupRoot = "/does/not/exist" }),
+			new CgroupResourceDiscovery(Options.Create(new RunnerResourceOptions { CgroupRoot = "/does/not/exist" }), NullLogger<CgroupResourceDiscovery>.Instance),
+			NullLogger<ResourceAdmissionController>.Instance);
+
 		return new RunnerHealthReportingHostedService(
 			readiness,
 			registry,
@@ -129,6 +135,7 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 				ReportFilePath = reportFile,
 				RefreshInterval = TimeSpan.FromMinutes(5),
 			}),
+			resourceAdmission,
 			NullLogger<RunnerHealthReportingHostedService>.Instance);
 	}
 
