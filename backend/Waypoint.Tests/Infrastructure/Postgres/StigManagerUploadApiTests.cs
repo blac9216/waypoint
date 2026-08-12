@@ -21,11 +21,15 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Logging;
+using Waypoint.Core.Secrets;
 using Waypoint.Core.StigManager;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.Secrets;
 using Waypoint.Infrastructure.Sites;
 using Waypoint.Tests.Support;
 using Xunit;
@@ -133,6 +137,23 @@ public sealed class StigManagerUploadApiTests : IAsyncLifetime, IDisposable
 				// the stub, exercising the full resolve path without any real network.
 				services.AddSingleton(new Waypoint.Infrastructure.StigManager.StigManagerRepository(_connectionString));
 				services.AddSingleton<IStigManagerUploadClient>(UploadClient);
+
+				// The base host's ICredentialSecretStore/IMasterKeyProvider come from
+				// appsettings.json's ConnectionStrings:Waypoint (Host=postgres), which
+				// this sandbox cannot resolve -- issue #430's regression test needs
+				// ScanUploadCoordinator's decrypt call to reach the *test* Postgres
+				// (Retry_MasterKeyUnavailable_* deliberately configures no key file, so
+				// FileMasterKeyProvider.GetKey() throws the real
+				// MasterKeyUnavailableException; every other test here never sets a
+				// credential_id, so this override is a silent no-op for them).
+				services.AddSingleton<IMasterKeyProvider>(new FileMasterKeyProvider(keyFilePath: null));
+				services.AddSingleton<IEnvelopeCipher, AesGcmEnvelopeCipher>();
+				services.AddSingleton<ISecretTracker>(new InPlaySecretRedactor());
+				services.AddSingleton<ICredentialSecretStore>(provider => new CredentialSecretStore(
+					_connectionString,
+					provider.GetRequiredService<IEnvelopeCipher>(),
+					provider.GetRequiredService<ISecretTracker>(),
+					NullLogger<CredentialSecretStore>.Instance));
 			});
 		}
 	}
@@ -223,6 +244,43 @@ public sealed class StigManagerUploadApiTests : IAsyncLifetime, IDisposable
 		Assert.Equal("failed", await GetJobFieldAsync(jobId, "upload_status"));
 	}
 
+	/// <summary>
+	/// Issue #430: a master-key decrypt failure on the site's STIG Manager credential
+	/// must fail closed with the master-key cause recorded -- not proceed secret-less
+	/// to <see cref="IStigManagerUploadClient"/>, which would only ever produce a
+	/// misleading remote-auth failure with the real cause invisible. No
+	/// <c>WAYPOINT_MASTER_KEY_FILE</c> is configured in this factory (the Testing
+	/// environment leaves it unset), so <c>ScanUploadCoordinator</c>'s decrypt call
+	/// throws the real <c>MasterKeyUnavailableException</c> from production
+	/// <c>FileMasterKeyProvider</c>, not a fault-injected stand-in -- exercised via a
+	/// credential-bearing connection (a bare row insert stands in for the ciphertext:
+	/// the master key never loads far enough to read it).
+	/// </summary>
+	[Fact]
+	public async Task Retry_MasterKeyUnavailable_RecordsMasterKeyCause_NotRemoteAuthFailure()
+	{
+		(_, Guid targetId) = await CreateSiteWithStigManagerAndCredentialAsync("retry-mk-target");
+		Guid runId = await CreateRunAsync();
+		Guid jobId = await FanOutScanJobAsync(runId, targetId, "failed");
+		WriteCkl(jobId);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/jobs/{jobId}/stigman-upload-retry", "Operator", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("failed", document.RootElement.GetProperty("upload_status").GetString());
+		string? detail = document.RootElement.GetProperty("upload_detail").GetString();
+		Assert.Contains("master key", detail, StringComparison.OrdinalIgnoreCase);
+		Assert.Equal("failed", await GetJobFieldAsync(jobId, "upload_status"));
+
+		// The upload client is never called secret-less -- the coordinator fails
+		// closed before reaching it.
+		Assert.Equal(0, _factory.UploadClient.CallCount);
+
+		// No key path or env-var detail crosses the wire (matches #409's hygiene rule).
+		Assert.DoesNotContain("WAYPOINT_MASTER_KEY_FILE", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
 	[Fact]
 	public async Task Retry_NoCklArtifact_Is409()
 	{
@@ -273,6 +331,57 @@ public sealed class StigManagerUploadApiTests : IAsyncLifetime, IDisposable
 	{
 		string path = Path.Combine(_artifactStorePath, $"{jobId:N}.ckl");
 		File.WriteAllText(path, "<CHECKLIST><STIGS/></CHECKLIST>");
+	}
+
+	/// <summary>
+	/// Same shape as <see cref="CreateSiteWithStigManagerAsync"/> but with a
+	/// <c>credential_id</c> on the override, so <c>ScanUploadCoordinator</c> attempts a
+	/// decrypt instead of taking the no-credential/public-client path. The
+	/// <c>credential_secrets</c> row is a bare placeholder -- with no master key
+	/// configured in this factory, <c>FileMasterKeyProvider.GetKey()</c> throws before
+	/// the ciphertext bytes are ever read, so their content is irrelevant.
+	/// </summary>
+	private async Task<(Guid SiteId, Guid TargetId)> CreateSiteWithStigManagerAndCredentialAsync(string namePrefix)
+	{
+		SiteRepository sites = new(_fixture.ConnectionString);
+		TargetRepository targets = new(_fixture.ConnectionString);
+
+		Guid credentialId;
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand insertCredential = new(
+				"INSERT INTO credentials (name, credential_type) VALUES ($1, 'token') RETURNING id", connection);
+			insertCredential.Parameters.AddWithValue($"{namePrefix}-credential-{Guid.NewGuid():N}");
+			credentialId = (Guid)(await insertCredential.ExecuteScalarAsync())!;
+
+			await using NpgsqlCommand insertSecret = new(
+				"""
+				INSERT INTO credential_secrets (credential_id, ciphertext, data_key_wrapped, master_key_id, algorithm)
+				VALUES ($1, $2, $3, 'wpk-invented-placeholder', 'AES-256-GCM')
+				""", connection);
+			insertSecret.Parameters.AddWithValue(credentialId);
+			insertSecret.Parameters.AddWithValue(new byte[] { 0x00 });
+			insertSecret.Parameters.AddWithValue(new byte[] { 0x00 });
+			await insertSecret.ExecuteNonQueryAsync();
+		}
+
+		Guid siteId = (await sites.CreateAsync($"{namePrefix}-site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
+
+		string overrideJson = JsonSerializer.Serialize(new
+		{
+			endpoint = "https://stigman.example.internal/api",
+			authority = "https://keycloak.example.internal/realms/stigman",
+			collection = "vcf-collection",
+			client_id = "waypoint-appliance",
+			credential_id = credentialId,
+		});
+		await sites.UpdateAsync(siteId, name: null, description: null, stigmanOverrideJson: overrideJson, clearDescription: false, clearStigmanOverride: false, CancellationToken.None);
+
+		(Waypoint.Core.Sites.TargetWriteOutcome outcome, Guid? targetId) = await targets.CreateAsync(
+			siteId, "vsphere", $"{namePrefix}-{Guid.NewGuid():N}", """{"host":"vcsa-01.example.internal"}""", null, CancellationToken.None);
+		Assert.Equal(Waypoint.Core.Sites.TargetWriteOutcome.Ok, outcome);
+		return (siteId, targetId!.Value);
 	}
 
 	private async Task<(Guid SiteId, Guid TargetId)> CreateSiteWithStigManagerAsync(string namePrefix)

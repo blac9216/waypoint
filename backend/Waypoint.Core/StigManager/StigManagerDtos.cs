@@ -86,4 +86,14 @@ public static class StigManagerTestOutcomes
 	public const string Unreachable = "unreachable";
 	public const string AuthFailed = "auth_failed";
 	public const string NotConfigured = "not_configured";
+
+	/// <summary>
+	/// Issue #430: the appliance's own secrets master key (ADR-0005) could not decrypt
+	/// the configured credential -- distinct from <see cref="AuthFailed"/>, which means
+	/// the *STIG Manager credentials themselves* are wrong. An operator seeing
+	/// <c>auth_failed</c> here would chase credential rotation for a problem that is
+	/// actually appliance key remediation (same 503 boundary #409 gave the request-thread
+	/// secret paths, applied honestly to this probe's 200-body outcome contract).
+	/// </summary>
+	public const string MasterKeyUnavailable = "master_key_unavailable";
 }

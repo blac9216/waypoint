@@ -166,7 +166,7 @@ work once one exists.
 | Endpoint | Methods | Notes |
 |---|---|---|
 | `/stigman` · `/sites/{id}/stigman` | GET, PUT | Global default + per-site override; endpoint, oidc client, collection, reachability/token TTL (secret write-only). |
-| `/stigman/test` | POST | Reachability + API version. |
+| `/stigman/test` | POST | Reachability + API version. Outcome is a closed set: `ok`\|`unreachable`\|`auth_failed`\|`not_configured`\|`master_key_unavailable` — the last is distinct from `auth_failed`: it means the appliance's own secrets master key (ADR-0005) could not decrypt the configured credential, not that the STIG Manager credential itself is wrong (issue #430). |
 
 ### Depot catalog & downloads (connected mode)
 | Endpoint | Methods | Notes |
