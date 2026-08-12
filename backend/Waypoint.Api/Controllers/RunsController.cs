@@ -13,22 +13,18 @@
 // limitations under the License.
 
 using System.Globalization;
-using System.Net;
 using System.Security.Claims;
-using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.ConfigDocs;
-using Waypoint.Core.Discovery;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Pagination;
 using Waypoint.Core.Scans;
-using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
 using Waypoint.Infrastructure.ConfigDocs;
+using Waypoint.Infrastructure.Runs;
 using Waypoint.Infrastructure.Sites;
 
 namespace Waypoint.Api.Controllers;
@@ -44,70 +40,39 @@ public sealed class RunsController : ControllerBase
 	private const string RemediateRunType = "remediate";
 	private const string RemediateConfirmation = "REMEDIATE";
 	private const string ScanRunType = "scan";
-	private const string ScanJobType = "scan";
-	private const string DiscoverJobType = "discover";
 	private const string PersonalCredentialKind = "personal";
 
-	private const string ScanArtifactHdfKind = "hdf";
-	private const string ScanArtifactCklKind = "ckl";
-	private const string UnknownTargetLabel = "unknown";
-
-	/// <summary>
-	/// Fan-out priority for an auto-triggered <c>discover</c> job (issue #259). Tied
-	/// with <see cref="ScanTargetPriority.Nsx"/> (1) -- the highest scan tier -- rather
-	/// than set below it, because <c>jobs_priority_check</c> (migration 0001) bounds
-	/// <c>priority</c> to 1-6; there is no headroom above the existing top tier. Tying
-	/// the top tier is sufficient: a stale target's discover job dispatches at least as
-	/// early as any scan job in the same run once the queue is contended (<c>ORDER BY
-	/// priority, created_at</c>, <see cref="Waypoint.Infrastructure.Jobs.JobQueueRepository"/>),
-	/// and discover specs are appended after every scan spec in
-	/// <see cref="BuildStaleDiscoverSpecs"/>'s caller, so a same-priority tie always
-	/// resolves in the scan jobs' favor on <c>created_at</c> rather than the reverse --
-	/// which is fine, since this is ordering only, not a hard dependency (see
-	/// <see cref="BuildStaleDiscoverSpecs"/>'s design-decision note for why the scan
-	/// itself does not block on it).
-	/// </summary>
-	private const short AutoDiscoverPriority = ScanTargetPriority.Nsx;
-
 	private readonly IJobControlRepository _repository;
-	private readonly SiteRepository _sites;
-	private readonly TargetRepository _targets;
-	private readonly IRunSecretStore _runSecrets;
 	private readonly ConfigDocRepository _configDocs;
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
-	private readonly IOptions<ScanOptions> _scanOptions;
-	private readonly IOptions<DiscoveryOptions> _discoveryOptions;
-	private readonly IOptions<RunSecretOptions> _runSecretOptions;
+	private readonly TargetRepository _targets;
+	private readonly RunCreationService _runCreation;
+	private readonly RunArtifactProjectionService _artifactProjection;
+	private readonly RunControlService _runControl;
 
 	public RunsController(
 		IJobControlRepository repository,
-		SiteRepository sites,
-		TargetRepository targets,
-		IRunSecretStore runSecrets,
 		ConfigDocRepository configDocs,
 		AttestationSnapshotRepository attestationSnapshots,
-		IOptions<ScanOptions> scanOptions,
-		IOptions<DiscoveryOptions> discoveryOptions,
-		IOptions<RunSecretOptions> runSecretOptions)
+		TargetRepository targets,
+		RunCreationService runCreation,
+		RunArtifactProjectionService artifactProjection,
+		RunControlService runControl)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
-		ArgumentNullException.ThrowIfNull(sites);
-		ArgumentNullException.ThrowIfNull(targets);
-		ArgumentNullException.ThrowIfNull(runSecrets);
 		ArgumentNullException.ThrowIfNull(configDocs);
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
-		ArgumentNullException.ThrowIfNull(scanOptions);
-		ArgumentNullException.ThrowIfNull(discoveryOptions);
-		ArgumentNullException.ThrowIfNull(runSecretOptions);
+		ArgumentNullException.ThrowIfNull(targets);
+		ArgumentNullException.ThrowIfNull(runCreation);
+		ArgumentNullException.ThrowIfNull(artifactProjection);
+		ArgumentNullException.ThrowIfNull(runControl);
 		_repository = repository;
-		_sites = sites;
-		_targets = targets;
-		_runSecrets = runSecrets;
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
-		_scanOptions = scanOptions;
-		_discoveryOptions = discoveryOptions;
-		_runSecretOptions = runSecretOptions;
+		_targets = targets;
+		_runCreation = runCreation;
+		_artifactProjection = artifactProjection;
+		_runControl = runControl;
 	}
 
 	/// <summary>
@@ -196,10 +161,17 @@ public sealed class RunsController : ControllerBase
 
 		if (string.Equals(request.RunType, ScanRunType, StringComparison.Ordinal))
 		{
-			return Accepted(await CreateScanRunAsync(request, initiatedBy, cancellationToken).ConfigureAwait(false));
+			RunSecretCredentialRequest? credential = request.Credential is null
+				? null
+				: new RunSecretCredentialRequest(request.Credential.Username, request.Credential.Secret);
+
+			Guid scanRunId = await _runCreation.CreateScanRunAsync(
+				request.Scope, request.CredentialId, credential, initiatedBy, cancellationToken).ConfigureAwait(false);
+
+			return Accepted(new RunCreatedResponse(scanRunId.ToString()));
 		}
 
-		Guid runId = await _repository.CreateRunAsync(
+		Guid runId = await _runCreation.CreateRunAsync(
 			request.RunType, request.Scope, request.CredentialId, initiatedBy, cancellationToken)
 			.ConfigureAwait(false);
 
@@ -255,214 +227,6 @@ public sealed class RunsController : ControllerBase
 				"credential requires both username and secret.",
 				"Set non-empty \"credential.username\" and \"credential.secret\" in the request body.");
 		}
-	}
-
-	/// <summary>
-	/// Validates a scan run's <c>scope</c> (site + optional target selection, all must
-	/// resolve to existing rows -- docs/api-contract.md `/runs`: "POST body: site_id,
-	/// scope... credential"), then creates the run and fans out one <c>scan</c>
-	/// <see cref="JobSpec"/> per target, ordered by <see cref="ScanTargetPriority"/>.
-	/// Every target's job is created up front in one <see cref="IJobControlRepository.FanOutJobsAsync"/>
-	/// call -- an individual target's later execution failure cannot affect its
-	/// siblings (ADR-0008 Continue policy; each is an independent job row) -- but
-	/// validation happens entirely before that call so a bad site/target/credential
-	/// reference never leaves a partially created run.
-	/// </summary>
-	private async Task<RunCreatedResponse> CreateScanRunAsync(
-		RunCreateRequest request, string initiatedBy, CancellationToken cancellationToken)
-	{
-		ScanScope scope;
-		try
-		{
-			scope = ScanScopeParser.Parse(request.Scope);
-		}
-		catch (FormatException exception)
-		{
-			throw ApiException.Validation("scope is not valid.", exception.Message);
-		}
-
-		if (scope.SiteId is not { } siteId)
-		{
-			throw ApiException.Validation(
-				"scope.site_id is required for a scan run.",
-				"Set \"scope\": { \"site_id\": \"<uuid>\" } (optionally with \"target_ids\") in the request body.");
-		}
-
-		Site? site = await _sites.GetAsync(siteId, cancellationToken).ConfigureAwait(false);
-		if (site is null)
-		{
-			throw ApiException.NotFound("Site not found.", $"Site '{siteId}' does not exist.");
-		}
-
-		IReadOnlyList<Target> targets = await ResolveScanTargetsAsync(siteId, scope.TargetIds, cancellationToken).ConfigureAwait(false);
-		if (targets.Count == 0)
-		{
-			throw ApiException.Validation(
-				"Site has no targets to scan.",
-				$"Site '{siteId}' has no targets; add at least one before starting a scan.");
-		}
-
-		bool useRunSecret = request.Credential is not null;
-
-		List<JobSpec> specs = [];
-		foreach (Target target in targets)
-		{
-			// target_kind is the shape-routing signal JobShapes.ForJob reads (issue #309):
-			// every scan fans out as job_type = 'scan' regardless of kind, so the payload
-			// is the only place the dispatcher can learn "this is an ssh (SRG) target"
-			// before a handler ever resolves the target row.
-			string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId, target_kind = target.Kind });
-			if (useRunSecret)
-			{
-				// No credential_id at all for an ad hoc job -- the secret lives only in
-				// run_secrets, keyed by the run id (one row per run, issue #434) rather
-				// than one row per job. Falling back to target.CredentialId here would
-				// silently mix tiers (a "my credentials" run quietly using a stored
-				// service secret).
-				specs.Add(new JobSpec(
-					ScanJobType,
-					ScanTargetPriority.ForTargetKind(target.Kind),
-					TargetId: target.Id,
-					TargetName: target.Name,
-					Payload: payload,
-					HasRunSecret: true));
-			}
-			else
-			{
-				Guid? credentialId = request.CredentialId ?? target.CredentialId;
-				specs.Add(new JobSpec(
-					ScanJobType,
-					ScanTargetPriority.ForTargetKind(target.Kind),
-					TargetId: target.Id,
-					TargetName: target.Name,
-					CredentialId: credentialId,
-					Payload: payload));
-			}
-		}
-
-		specs.AddRange(BuildStaleDiscoverSpecs(targets));
-
-		Guid runId = await _repository.CreateRunAsync(
-			request.RunType, request.Scope, request.CredentialId, initiatedBy, cancellationToken)
-			.ConfigureAwait(false);
-
-		if (useRunSecret)
-		{
-			// Stored BEFORE fan-out: a job claimed the instant it is queued must already
-			// be able to find its run's secret row. One row per run (not per job/target)
-			// -- every target in this scan shares the same ad hoc credential, matching
-			// the pre-#434 in-memory cache's per-run semantics (RunsController supplied
-			// the same EphemeralCredential value to every fanned-out job). Fail closed:
-			// if the encrypted write or its paired audit row does not commit
-			// (IRunSecretStore.StoreAsync's fail-closed contract), this throws and no
-			// jobs are ever created for the run -- CreateRunAsync above already committed
-			// the (otherwise empty) run row, but a run with zero jobs is inert, not a
-			// half-armed credential leak.
-			RunSecretCredential credential = new(request.Credential!.Username, request.Credential.Secret);
-			await _runSecrets.StoreAsync(runId, credential, initiatedBy, _runSecretOptions.Value.Expiry, cancellationToken).ConfigureAwait(false);
-		}
-
-		await _repository.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);
-
-		return new RunCreatedResponse(runId.ToString());
-	}
-
-	/// <summary>
-	/// Issue #259 (deferred half of #21's AC): builds one <c>discover</c>
-	/// <see cref="JobSpec"/> per <c>vsphere</c> target in <paramref name="targets"/>
-	/// whose cached inventory is stale or has never been populated -- the same
-	/// staleness test <see cref="Waypoint.Api.Controllers.DiscoveryController.GetInventory"/>
-	/// exposes on the wire (<c>LastRefreshed is null</c>, or older than
-	/// <see cref="DiscoveryOptions.StaleAfterMinutes"/>), reused here so "stale" means
-	/// one thing everywhere it's evaluated. Only <c>vsphere</c> targets are eligible --
-	/// <see cref="Waypoint.Infrastructure.Discovery.DiscoverJobHandler"/> rejects any
-	/// other kind outright, and <c>nsx-api</c>/<c>ssh</c> targets have no inventory
-	/// cache to refresh in the first place.
-	///
-	/// <b>Design decision (fire-and-forget, not scan-blocking):</b> queued into the
-	/// same run as the scan fan-out, ordered ahead of every scan job via
-	/// <see cref="AutoDiscoverPriority"/>, but the scan jobs are NOT made to depend on
-	/// or wait for these -- the job queue has no dependency/blocking primitive between
-	/// sibling jobs in a run (<see cref="Waypoint.Infrastructure.Jobs.JobQueueRepository.FanOutJobsAsync"/>
-	/// only orders dispatch by priority/created_at; ADR-0008's Continue-on-failure
-	/// policy treats every job in a run as independent). More fundamentally,
-	/// <see cref="Waypoint.Infrastructure.Scans.ScanJobHandler"/> never reads the
-	/// inventory cache (<see cref="Waypoint.Infrastructure.Discovery.InventoryRepository"/>)
-	/// at all -- it drives InSpec/PowerCLI directly against the target's own
-	/// <c>connection.host</c>, the same way it always has. The cache exists solely to
-	/// back the Start-a-Scan checkbox tree (<c>GET /targets/{id}/inventory</c>) that
-	/// runs BEFORE this endpoint is called. So blocking this scan on a fresh discover
-	/// would add latency and a new failure-coupling path (a discover auth failure
-	/// could halt a scan that never touches inventory) for zero benefit to the run
-	/// being started; the real benefit is a fresher cache for the NEXT time an
-	/// operator opens the checkbox tree or starts another scan. If a future slice
-	/// makes scan execution inventory-aware (e.g. per-inventory-item fan-out), this
-	/// call site is exactly where a hard dependency would need to be introduced.
-	/// </summary>
-	private List<JobSpec> BuildStaleDiscoverSpecs(IReadOnlyList<Target> targets)
-	{
-		DateTimeOffset staleBefore = DateTimeOffset.UtcNow.AddMinutes(-_discoveryOptions.Value.StaleAfterMinutes);
-
-		List<JobSpec> specs = [];
-		foreach (Target target in targets)
-		{
-			if (!string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal))
-			{
-				continue;
-			}
-
-			bool stale = target.LastRefreshed is null || target.LastRefreshed.Value < staleBefore;
-			if (!stale)
-			{
-				continue;
-			}
-
-			string payload = JsonSerializer.Serialize(new { target_id = target.Id });
-			specs.Add(new JobSpec(
-				DiscoverJobType,
-				AutoDiscoverPriority,
-				TargetId: target.Id,
-				TargetName: target.Name,
-				CredentialId: target.CredentialId,
-				Payload: payload));
-		}
-
-		return specs;
-	}
-
-	/// <summary>
-	/// Resolves the scan's target set: every target under the site when
-	/// <paramref name="requestedIds"/> is null/empty (a full-site scan), or exactly the
-	/// requested ids -- each of which must belong to <paramref name="siteId"/>, so a
-	/// target id from a different site is a clean 404 rather than silently scanning
-	/// the wrong site's target.
-	/// </summary>
-	private async Task<IReadOnlyList<Target>> ResolveScanTargetsAsync(
-		Guid siteId, IReadOnlyList<Guid>? requestedIds, CancellationToken cancellationToken)
-	{
-		if (requestedIds is null || requestedIds.Count == 0)
-		{
-			// Issue #279: a full-site scan must fan out over every target under the
-			// site, not a PageRequest-clamped page of at most 200 -- ListAllForSiteAsync
-			// is the dedicated unpaginated repository method for exactly this caller.
-			return await _targets.ListAllForSiteAsync(siteId, cancellationToken).ConfigureAwait(false);
-		}
-
-		List<Target> resolved = [];
-		foreach (Guid targetId in requestedIds)
-		{
-			Target? target = await _targets.GetAsync(targetId, cancellationToken).ConfigureAwait(false);
-			if (target is null || target.SiteId != siteId)
-			{
-				throw ApiException.NotFound(
-					"Target not found.",
-					$"Target '{targetId}' does not exist under site '{siteId}'.");
-			}
-
-			resolved.Add(target);
-		}
-
-		return resolved;
 	}
 
 	/// <summary>
@@ -598,19 +362,8 @@ public sealed class RunsController : ControllerBase
 			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
 		}
 
-		IReadOnlyList<JobSummary> jobs = await _repository.GetJobsForRunAsync(id, cancellationToken).ConfigureAwait(false);
-		List<RunArtifactResponse> rows = [];
-		foreach (JobSummary job in jobs)
-		{
-			if (!string.Equals(job.JobType, ScanJobType, StringComparison.Ordinal))
-			{
-				continue;
-			}
-
-			rows.Add(await BuildArtifactRowAsync(job, cancellationToken).ConfigureAwait(false));
-		}
-
-		return Ok(rows);
+		IReadOnlyList<RunArtifactRow> rows = await _artifactProjection.GetArtifactsAsync(id, cancellationToken).ConfigureAwait(false);
+		return Ok(rows.Select(MapArtifactRow).ToArray());
 	}
 
 	/// <summary>
@@ -678,15 +431,8 @@ public sealed class RunsController : ControllerBase
 
 		EnforceRunOwnership(state);
 
-		bool paused = await _repository.PauseRunAsync(id, cancellationToken).ConfigureAwait(false);
-		if (!paused)
-		{
-			throw ApiException.Validation("Run cannot be paused.", $"Run '{id}' is in state '{state.State}'.");
-		}
-
-		// Re-fetch state after the action to return the post-action state.
-		RunQueueState? newState = await _repository.GetRunQueueStateAsync(id, cancellationToken).ConfigureAwait(false);
-		return Ok(new RunActionResponse(id.ToString(), newState?.State ?? "paused"));
+		string resultState = await _runControl.PauseAsync(id, state, cancellationToken).ConfigureAwait(false);
+		return Ok(new RunActionResponse(id.ToString(), resultState));
 	}
 
 	/// <summary>
@@ -706,15 +452,8 @@ public sealed class RunsController : ControllerBase
 
 		EnforceRunOwnership(state);
 
-		bool resumed = await _repository.ResumeRunAsync(id, cancellationToken).ConfigureAwait(false);
-		if (!resumed)
-		{
-			throw ApiException.Validation("Run cannot be resumed.", $"Run '{id}' is in state '{state.State}'.");
-		}
-
-		// Re-fetch state after the action to return the post-action state.
-		RunQueueState? newState = await _repository.GetRunQueueStateAsync(id, cancellationToken).ConfigureAwait(false);
-		return Ok(new RunActionResponse(id.ToString(), newState?.State ?? "running"));
+		string resultState = await _runControl.ResumeAsync(id, state, cancellationToken).ConfigureAwait(false);
+		return Ok(new RunActionResponse(id.ToString(), resultState));
 	}
 
 	/// <summary>
@@ -734,14 +473,11 @@ public sealed class RunsController : ControllerBase
 
 		EnforceRunOwnership(state);
 
-		AbortRunResult result = await _repository.AbortRunAsync(id, cancellationToken).ConfigureAwait(false);
-		_ = result; // AbortRunResult carries cancelled/in-flight job IDs for future enrichment
-
-		// Re-fetch state after the action to return the post-action state (same pattern
-		// as pause/resume) rather than assuming the abort always succeeded: AbortRunAsync
-		// is a no-op against a run that is already terminal, and the response must say so.
-		RunQueueState? newState = await _repository.GetRunQueueStateAsync(id, cancellationToken).ConfigureAwait(false);
-		return Ok(new RunActionResponse(id.ToString(), newState?.State ?? "aborted"));
+		// AbortRunAsync is a no-op against a run that is already terminal;
+		// RunControlService.AbortAsync re-fetches state after the action so the
+		// response reflects that rather than assuming the abort always succeeded.
+		string resultState = await _runControl.AbortAsync(id, state, cancellationToken).ConfigureAwait(false);
+		return Ok(new RunActionResponse(id.ToString(), resultState));
 	}
 
 	/// <summary>
@@ -826,83 +562,22 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Builds one <see cref="RunArtifactResponse"/> row for a <c>scan</c> job: resolves
-	/// the target's kind to look up <see cref="ScanOptions.BenchmarkMetadata"/> for a
-	/// benchmark label, checks the artifact store for whichever of the HDF/CKL files
-	/// currently exist, and parses CAT I/II/III counts from the HDF when present.
+	/// Maps a <see cref="RunArtifactRow"/> (control-plane shape,
+	/// <see cref="RunArtifactProjectionService"/>) to the wire response.
 	/// </summary>
-	private async Task<RunArtifactResponse> BuildArtifactRowAsync(JobSummary job, CancellationToken cancellationToken)
+	private static RunArtifactResponse MapArtifactRow(RunArtifactRow row)
 	{
-		string artifactStorePath = _scanOptions.Value.ArtifactStorePath;
-		string? hdfPath = ScanArtifactPaths.ResolveHdf(artifactStorePath, job.Id);
-		string cklPath = ScanArtifactPaths.Ckl(artifactStorePath, job.Id);
-
-		List<string> kinds = [];
-		if (hdfPath is not null)
-		{
-			kinds.Add(ScanArtifactHdfKind);
-		}
-
-		if (System.IO.File.Exists(cklPath))
-		{
-			kinds.Add(ScanArtifactCklKind);
-		}
-
-		// null == uncountable (HDF absent, or present-but-unparseable): the wire must NOT
-		// present that as CAT I/II/III = 0 (issue #299 round-1 blocker). counts_available
-		// gates the counts; a corrupt HDF reads as "could not count", never as compliant.
-		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(hdfPath);
-
-		string? benchmark = null;
-		if (job.TargetId is { } targetIdText && Guid.TryParse(targetIdText, out Guid targetId))
-		{
-			Target? target = await _targets.GetAsync(targetId, cancellationToken).ConfigureAwait(false);
-			if (target is not null && _scanOptions.Value.BenchmarkMetadata.TryGetValue(target.Kind, out ScanBenchmarkMetadata? metadata))
-			{
-				benchmark = metadata.Title ?? metadata.BenchmarkId;
-			}
-		}
-
 		return new RunArtifactResponse(
-			JobId: job.Id.ToString(),
-			Target: job.TargetName ?? job.TargetId ?? UnknownTargetLabel,
-			Benchmark: benchmark,
-			CountsAvailable: counts is not null,
-			CatIOpen: counts?.CatIOpen,
-			CatIIOpen: counts?.CatIIOpen,
-			CatIIIOpen: counts?.CatIIIOpen,
-			ArtifactKinds: kinds,
-			UploadStatus: StigManagerUploadStatus(job),
-			UploadDetail: job.UploadStatus is null ? null : job.UploadDetail);
-	}
-
-	/// <summary>
-	/// STIG Manager upload status (issue #311): <c>job.UploadStatus</c> (<c>jobs.upload_status</c>)
-	/// is the real HTTP outcome once the convert stage has attempted an upload -- used
-	/// as-is when present. A null column (SRG-only run, or a job that never reached
-	/// convert) falls back to the original issue #299 job-state derivation so an
-	/// unattempted upload still reads as "pending"/"not-uploaded" rather than a missing
-	/// field.
-	/// </summary>
-	private static string StigManagerUploadStatus(JobSummary job)
-	{
-		if (job.UploadStatus is { } uploadStatus)
-		{
-			return uploadStatus switch
-			{
-				JobUploadStatuses.Uploaded => "uploaded",
-				JobUploadStatuses.Conflict => "conflict",
-				JobUploadStatuses.Pending => "pending",
-				_ => "not-uploaded",
-			};
-		}
-
-		return job.State switch
-		{
-			JobStates.Uploaded or JobStates.Done => "uploaded",
-			JobStates.Failed or JobStates.AuthFailed => "not-uploaded",
-			_ => "pending",
-		};
+			JobId: row.JobId.ToString(),
+			Target: row.Target,
+			Benchmark: row.Benchmark,
+			CountsAvailable: row.CountsAvailable,
+			CatIOpen: row.CatIOpen,
+			CatIIOpen: row.CatIIOpen,
+			CatIIIOpen: row.CatIIIOpen,
+			ArtifactKinds: row.ArtifactKinds,
+			UploadStatus: row.UploadStatus,
+			UploadDetail: row.UploadDetail);
 	}
 
 	/// <summary>
