@@ -75,7 +75,7 @@ public sealed class HealthCheckProbeTests : IDisposable
 		DateTimeOffset now = DateTimeOffset.UtcNow;
 		ReadinessSnapshot snapshot = new(
 			Ready: true, JobTypes: ["catalog-index", "download"], ToolPresent: false,
-			ArtifactStoreWritable: true, DepotPathReadable: true, Capacity: null, GeneratedAt: now);
+			ArtifactStoreWritable: true, DepotPathReadable: true, DatabaseReachable: true, Capacity: null, GeneratedAt: now);
 		await File.WriteAllTextAsync(ReadinessFilePath, JsonSerializer.Serialize(snapshot));
 
 		int exitCode = await HealthCheckProbe.RunAsync(ReadinessFilePath, _maxAge, now.AddSeconds(1));
@@ -88,7 +88,7 @@ public sealed class HealthCheckProbeTests : IDisposable
 		DateTimeOffset now = DateTimeOffset.UtcNow;
 		ReadinessSnapshot snapshot = new(
 			Ready: false, JobTypes: ["catalog-index", "download"], ToolPresent: false,
-			ArtifactStoreWritable: false, DepotPathReadable: true, Capacity: null, GeneratedAt: now);
+			ArtifactStoreWritable: false, DepotPathReadable: true, DatabaseReachable: true, Capacity: null, GeneratedAt: now);
 		await File.WriteAllTextAsync(ReadinessFilePath, JsonSerializer.Serialize(snapshot));
 
 		int exitCode = await HealthCheckProbe.RunAsync(ReadinessFilePath, _maxAge, now);
@@ -101,7 +101,7 @@ public sealed class HealthCheckProbeTests : IDisposable
 		DateTimeOffset generatedAt = DateTimeOffset.UtcNow.AddMinutes(-10);
 		ReadinessSnapshot snapshot = new(
 			Ready: true, JobTypes: ["catalog-index", "download"], ToolPresent: true,
-			ArtifactStoreWritable: true, DepotPathReadable: true, Capacity: null, GeneratedAt: generatedAt);
+			ArtifactStoreWritable: true, DepotPathReadable: true, DatabaseReachable: true, Capacity: null, GeneratedAt: generatedAt);
 		await File.WriteAllTextAsync(ReadinessFilePath, JsonSerializer.Serialize(snapshot));
 
 		int exitCode = await HealthCheckProbe.RunAsync(ReadinessFilePath, _maxAge, generatedAt.Add(_maxAge).AddSeconds(1));
@@ -117,7 +117,7 @@ public sealed class HealthCheckProbeTests : IDisposable
 		DateTimeOffset now = DateTimeOffset.UtcNow;
 		ReadinessSnapshot snapshot = new(
 			Ready: true, JobTypes: ["catalog-index", "download"], ToolPresent: false,
-			ArtifactStoreWritable: true, DepotPathReadable: true, Capacity: null, GeneratedAt: now);
+			ArtifactStoreWritable: true, DepotPathReadable: true, DatabaseReachable: true, Capacity: null, GeneratedAt: now);
 		await File.WriteAllTextAsync(ReadinessFilePath, JsonSerializer.Serialize(snapshot));
 
 		int exitCode = await HealthCheckProbe.RunAsync(ReadinessFilePath, _maxAge, now);

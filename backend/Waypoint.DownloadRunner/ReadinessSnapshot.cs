@@ -39,6 +39,17 @@ namespace Waypoint.DownloadRunner;
 /// <param name="ToolPresent">Whether the managed <c>vcf-download-tool</c> is currently installed -- reported for operator visibility, not readiness.</param>
 /// <param name="ArtifactStoreWritable">Whether <c>Downloads:ArtifactStorePath</c> is reachable and writable.</param>
 /// <param name="DepotPathReadable">Whether <c>Catalog:DepotPath</c> is reachable and readable.</param>
+/// <param name="DatabaseReachable">
+/// Whether the probe in <see cref="ReadinessReportingHostedService.BuildSnapshotAsync"/>
+/// could open a Postgres connection this cycle (issue #484). Reported as its own field
+/// (distinct from <see cref="Ready"/>, which also folds in artifact-store/depot checks)
+/// so the shared <see cref="RunnerReadinessReportingHostedService{TReport}"/> can gate
+/// the <c>worker_registry</c> heartbeat on it specifically -- heartbeating requires a
+/// database, so attempting one while <see cref="DatabaseReachable"/> is <c>false</c>
+/// only ever fails, restoring the pre-#461 <c>databaseReachable &amp;&amp;
+/// _workerRegistry is not null</c> gate this host had before the shared engine
+/// unintentionally dropped it.
+/// </param>
 /// <param name="Capacity">
 /// Issue #437 (ADR-0014 §5): this runner's calculated resource-admission capacity and
 /// current admission state, so an operator (or a future capability surface) can see the
@@ -54,5 +65,6 @@ public sealed record ReadinessSnapshot(
 	bool ToolPresent,
 	bool ArtifactStoreWritable,
 	bool DepotPathReadable,
+	bool DatabaseReachable,
 	RunnerCapacityReport? Capacity,
 	DateTimeOffset GeneratedAt);

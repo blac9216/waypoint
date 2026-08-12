@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.SystemState;
+using Waypoint.Runner.Resources;
 
 namespace Waypoint.Runner.Readiness;
 
@@ -42,6 +44,8 @@ public sealed partial class RunnerReadinessReportingHostedService<TReport> : Bac
 	private readonly Func<CancellationToken, Task<TReport>> _buildReport;
 	private readonly Func<TReport, bool> _isReady;
 	private readonly Func<TReport, IReadOnlyList<string>> _jobTypes;
+	private readonly Func<TReport, bool> _canHeartbeat;
+	private readonly Func<TReport, IReadOnlyList<StarvedJobType>> _starvedJobTypes;
 	private readonly IOptions<IRunnerReadinessOptions> _options;
 	private readonly IWorkerRegistryWriter? _workerRegistry;
 	private readonly ILogger _logger;
@@ -57,6 +61,27 @@ public sealed partial class RunnerReadinessReportingHostedService<TReport> : Bac
 	/// <param name="buildReport">Evaluates this host's domain-specific readiness and builds the report to serialize. Never expected to throw.</param>
 	/// <param name="isReady">Extracts the report's overall ready/not-ready verdict, for the worker_registry heartbeat.</param>
 	/// <param name="jobTypes">Extracts the report's claimed job-type list, for the worker_registry heartbeat.</param>
+	/// <param name="starvedJobTypes">
+	/// Issue #467: extracts the report's currently-starved job types (from its embedded
+	/// <see cref="Readiness.RunnerCapacityReport.StarvedJobTypes"/>), for the
+	/// worker_registry heartbeat's <c>starved_job_types</c> column -- so <c>GET /system</c>
+	/// can show per-worker admission starvation without reaching into that container's
+	/// filesystem or logs. <c>null</c> reports none starved (used by any future
+	/// <typeparamref name="TReport"/> whose domain has no resource admission to report).
+	/// </param>
+	/// <param name="canHeartbeat">
+	/// Issue #484: whether this cycle's report should even attempt the
+	/// <c>worker_registry</c> heartbeat -- distinct from <paramref name="isReady"/>,
+	/// which still heartbeats a not-ready-but-reachable worker so operators see it as a
+	/// present-but-unavailable row. <c>null</c> (the default every caller but the
+	/// download-runner passes) means "always attempt it," matching every host's
+	/// behavior before this parameter existed. The download-runner passes
+	/// <c>snapshot => snapshot.DatabaseReachable</c> to restore the pre-#461 gate that
+	/// skipped (rather than attempted-and-caught) the heartbeat when the database probe
+	/// itself had already failed -- attempting a heartbeat write in that case can only
+	/// ever fail the same way, so skipping it avoids a guaranteed-failing connection
+	/// attempt and its accompanying warning log every refresh cycle during an outage.
+	/// </param>
 	/// <remarks>
 	/// <paramref name="logger"/> is a plain <see cref="ILogger"/>, not
 	/// <c>ILogger&lt;RunnerReadinessReportingHostedService&lt;TReport&gt;&gt;</c> --
@@ -71,7 +96,9 @@ public sealed partial class RunnerReadinessReportingHostedService<TReport> : Bac
 		Func<TReport, IReadOnlyList<string>> jobTypes,
 		IOptions<IRunnerReadinessOptions> options,
 		IWorkerRegistryWriter? workerRegistry,
-		ILogger logger)
+		ILogger logger,
+		Func<TReport, bool>? canHeartbeat = null,
+		Func<TReport, IReadOnlyList<StarvedJobType>>? starvedJobTypes = null)
 	{
 		ArgumentNullException.ThrowIfNull(buildReport);
 		ArgumentNullException.ThrowIfNull(isReady);
@@ -85,6 +112,8 @@ public sealed partial class RunnerReadinessReportingHostedService<TReport> : Bac
 		_options = options;
 		_workerRegistry = workerRegistry;
 		_logger = logger;
+		_canHeartbeat = canHeartbeat ?? (_ => true);
+		_starvedJobTypes = starvedJobTypes ?? (_ => []);
 	}
 
 	public override async Task StartAsync(CancellationToken cancellationToken)
@@ -169,7 +198,7 @@ public sealed partial class RunnerReadinessReportingHostedService<TReport> : Bac
 	/// </summary>
 	private async Task HeartbeatWorkerRegistryAsync(TReport report, CancellationToken cancellationToken)
 	{
-		if (_workerRegistry is null)
+		if (_workerRegistry is null || !_canHeartbeat(report))
 		{
 			return;
 		}
@@ -180,6 +209,7 @@ public sealed partial class RunnerReadinessReportingHostedService<TReport> : Bac
 				_options.Value.WorkerId,
 				_jobTypes(report),
 				_isReady(report),
+				[.. _starvedJobTypes(report).Select(starved => new StarvedWorkerJobType(starved.JobType, starved.Permanent))],
 				cancellationToken).ConfigureAwait(false);
 		}
 		catch (Exception exception) when (exception is not OperationCanceledException)
