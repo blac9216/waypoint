@@ -51,7 +51,10 @@ namespace Waypoint.Runner.Jobs;
 /// </summary>
 public sealed partial class JobDispatcherHostedService : BackgroundService
 {
-	private static readonly TimeSpan PausedReleaseRetryDelay = TimeSpan.FromMilliseconds(200);
+	// internal (not private): issue #428's test needs the real backoff value rather than
+	// a duplicated magic number, so it can wait out a deterministic number of claim/
+	// release cycles instead of racing the transient queued->running->queued window.
+	internal static readonly TimeSpan PausedReleaseRetryDelay = TimeSpan.FromMilliseconds(200);
 	private static readonly TimeSpan ShutdownGracePeriod = TimeSpan.FromSeconds(30);
 
 	// Issue #415: the dispatcher is today's stand-in for the future dedicated runner
