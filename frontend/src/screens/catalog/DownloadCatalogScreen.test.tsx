@@ -88,7 +88,11 @@ describe("DownloadCatalogScreen", () => {
 				return sse.response;
 			}
 			if (url.startsWith("/api/v1/catalog/artifacts")) {
-				return jsonResponse({ artifacts: ARTIFACTS, index_synced_at: "2026-08-08T12:00:00Z" });
+				// The real CatalogController.ListArtifacts returns a bare array
+				// (`return Ok(items...)`), not an envelope with index_synced_at —
+				// see catalog.ts's fetchCatalogArtifacts doc comment (issue #468
+				// found the mismatch live). Mocking the real shape here.
+				return jsonResponse(ARTIFACTS);
 			}
 			if (url === "/api/v1/downloads" && (!init || init.method === undefined)) {
 				return jsonResponse([]);
@@ -175,15 +179,17 @@ describe("DownloadCatalogScreen", () => {
 		await waitFor(() => expect(queuePostBody).toEqual({ artifact_ids: ["art-2"] }));
 	});
 
-	it("filters via the search box, driving GET /catalog/artifacts?search=...", async () => {
+	it("filters via the search box client-side (backend has no search query parameter — issue #468)", async () => {
 		installFetchMock("Operator");
 		await mount();
 
+		expect(screen.getByText("ESXi-8.0U3-patch.zip")).toBeInTheDocument();
+		expect(screen.getAllByText("VCF Installer").length).toBeGreaterThan(0);
+
 		fireEvent.change(screen.getByLabelText("Search artifacts"), { target: { value: "ESXi" } });
 
-		await waitFor(() =>
-			expect(fetchCalls.some((c) => c.url.includes("/catalog/artifacts?search=ESXi"))).toBe(true),
-		);
+		await waitFor(() => expect(screen.queryByText("VCF-Installer-5.2.1.iso")).not.toBeInTheDocument());
+		expect(screen.getByText("ESXi-8.0U3-patch.zip")).toBeInTheDocument();
 	});
 
 	it("selecting rows shows the sticky footer and queues N downloads via POST /downloads", async () => {
@@ -325,7 +331,7 @@ describe("DownloadCatalogScreen", () => {
 		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
 			if (url.startsWith("/api/v1/events")) return sse.response;
-			if (url.startsWith("/api/v1/catalog/artifacts")) return jsonResponse({ artifacts: ARTIFACTS, index_synced_at: null });
+			if (url.startsWith("/api/v1/catalog/artifacts")) return jsonResponse(ARTIFACTS);
 			if (url === "/api/v1/downloads" && init?.method === undefined) return jsonResponse([]);
 			if (url === "/api/v1/system") return jsonResponse({ version: "2.4.1", build: "24817", mode: "disconnected", update_available: null });
 			if (url === "/api/v1/stigman") return jsonResponse({ error: { code: "not_found", message: "No global STIG Manager connection is configured." } }, 404);

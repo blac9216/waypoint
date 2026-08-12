@@ -6,3 +6,11 @@ dev-dist/
 *.local
 .DS_Store
 coverage/
+
+# Playwright (issue #468): local run artifacts and the local browser-binary
+# cache. Browser binaries are never committed — `npx playwright install
+# chromium` per docs/testing.md's "Running the Playwright suite".
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
