@@ -141,11 +141,8 @@ describe("applyEvent", () => {
 		expect(next.header).toMatchObject({ pass: 3, fail: 1, na: 2, percent: 40, completed_count: 1, elapsed_seconds: 90 });
 	});
 
-	it("flips a queue to blocked on queue.state and rolls it up to header.blocked", () => {
-		const next = applyEvent(
-			baseSnapshot(),
-			evt({ seq: 9, type: "queue.state", data: { key: "esxi", blocked: true, reason: "credential failure" } }),
-		);
+	it("flips the run to blocked on queue.state (real payload has no per-queue key — issue #494) and rolls it up to header.blocked", () => {
+		const next = applyEvent(baseSnapshot(), evt({ seq: 9, type: "queue.state", data: { blocked: true, reason: "credential failure" } }));
 		expect(next.header.blocked).toBe(true);
 		expect(next.header.queues[0]).toMatchObject({ blocked: true, blocked_reason: "credential failure" });
 	});

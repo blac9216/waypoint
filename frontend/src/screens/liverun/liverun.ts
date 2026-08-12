@@ -4,11 +4,26 @@
  * (SSE)" (`job.state`, `job.log`, `run.progress`, `queue.state`).
  *
  * State is built two ways that must converge to the same board:
- *   1. REST seed (`fetchRun` + `fetchRunJobs`) — a snapshot for first paint.
+ *   1. REST seed (`fetchRunSnapshot`, backed by `fetchRunJobs`) — a snapshot for first paint.
  *   2. SSE events folded by `applyEvent`, a pure reducer, so the exact same
  *      function drives live updates AND Last-Event-ID replay after a reload
  *      (docs/api-contract.md: "commit order" seq guarantee makes replay
  *      exact) — see useLiveRun.ts and LiveRunScreen.test.tsx.
+ *
+ * Issue #494: `RunHeader`/`RunJob`/`QueueStatus` below are a client-only VIEW
+ * MODEL, not a wire shape — `RunsController` (backend/Waypoint.Api/Controllers/RunsController.cs)
+ * sends `RunResponse` from `GET /runs/{id}` and `JobResponse[]` from
+ * `GET /runs/{id}/jobs` (see `RunWire`/`JobWire` below), which this module
+ * maps into the richer board shape the UI was originally built against. The
+ * real backend has NO per-queue/per-benchmark concept at all (`queue.state`
+ * is a run-level credential-halt signal, not a named priority queue), and
+ * job rows carry no pass/fail/na counts or benchmark label (those live only
+ * on `/runs/{id}/artifacts`, results.ts's concern, not this screen's) — so
+ * `mapRunHeader`/`mapRunJob` synthesize the closest honest projection: jobs
+ * are grouped into one queue per `JobResponse.priority`, and `pass`/`fail`/
+ * `na`/`benchmark` are left null/empty rather than fabricated. Where
+ * docs/api-contract.md previously described the fictional contract, it has
+ * been corrected to match this real shape.
  *
  * Run controls (#285): `pauseRun`/`resumeRun`/`abortRun` map to
  * `/runs/{id}/pause|resume|abort` (Operator+, own runs; Admin any —
@@ -24,7 +39,12 @@
 import { apiDelete, apiGet, apiPost } from "../../lib/api";
 import type { WaypointEvent } from "../../lib/events";
 
-/** Target state machine (api-contract.md "State machines" — Scan job). */
+/** Target state machine (api-contract.md "State machines" — Scan job), plus
+ * `cancelled` (issue #494): the real terminal state `JobStates.Cancelled`
+ * (backend/Waypoint.Core/Jobs/JobStates.cs) that per-job cancel and
+ * run-abort both leave a job in — omitted from the original fictional
+ * contract this module was built against, which is how a cancelled job's
+ * `job.state` SSE event crashed `asJobState`'s allowlist. */
 export type JobState =
 	| "queued"
 	| "running"
@@ -34,9 +54,10 @@ export type JobState =
 	| "done"
 	| "failed"
 	| "auth-failed"
-	| "blocked";
+	| "blocked"
+	| "cancelled";
 
-export const TERMINAL_JOB_STATES: ReadonlySet<JobState> = new Set(["uploaded", "done", "failed", "auth-failed"]);
+export const TERMINAL_JOB_STATES: ReadonlySet<JobState> = new Set(["uploaded", "done", "failed", "auth-failed", "cancelled"]);
 
 /** `stage x 25%` per the prototype README ("Target state machine"). */
 const STAGE_ORDER: JobState[] = ["queued", "running", "attesting", "converting", "uploaded"];
@@ -49,6 +70,8 @@ export function progressPercentForState(state: JobState): number {
 	return idx >= 0 ? idx * 25 : 0;
 }
 
+/** View-model row the board layouts render — see the module doc comment for
+ * why this is richer than any single wire response. */
 export interface RunJob {
 	job_id: string;
 	target: string;
@@ -72,6 +95,7 @@ export interface QueueStatus {
 	blocked_reason: string | null;
 }
 
+/** View-model header the screen renders — see the module doc comment. */
 export interface RunHeader {
 	id: string;
 	site: string;
@@ -101,16 +125,188 @@ export interface RunSnapshot {
 	lastSeq: number;
 }
 
-export function fetchRun(runId: string): Promise<RunHeader> {
-	return apiGet<RunHeader>(`/runs/${runId}`);
-}
-
-export function fetchRunJobs(runId: string): Promise<RunJob[]> {
-	return apiGet<RunJob[]>(`/runs/${runId}/jobs`);
-}
-
-export interface RunActionResult {
+/**
+ * The REAL `GET /runs/{id}` wire shape — `RunResponse`
+ * (backend/Waypoint.Api/Contracts/RunContracts.cs). No `site`, no
+ * `credential_name`, no `queues`, no aggregate `pass`/`fail`/`na` (those live
+ * only on `/runs/{id}/artifacts`, a different screen's concern) — just job
+ * counts by state and the queue-level `blocked`/`paused` flags.
+ */
+interface RunWire {
 	id: string;
+	run_type: string;
+	state: string;
+	paused: boolean;
+	blocked: boolean;
+	blocked_reason: string | null;
+	scope: string;
+	credential_id: string | null;
+	initiated_by: string | null;
+	created_at: string;
+	started_at: string | null;
+	completed_at: string | null;
+	job_count: number;
+	job_count_queued: number;
+	job_count_running: number;
+	job_count_completed: number;
+	job_count_failed: number;
+	job_count_blocked: number;
+}
+
+const KNOWN_RUN_HEADER_STATES: ReadonlySet<string> = new Set(["pending", "running", "completed", "completed_with_failures", "aborted"]);
+
+function asRunHeaderState(value: string): RunHeader["state"] {
+	return KNOWN_RUN_HEADER_STATES.has(value) ? (value as RunHeader["state"]) : "pending";
+}
+
+function elapsedSecondsFrom(startedAt: string | null, completedAt: string | null): number {
+	if (!startedAt) {
+		return 0;
+	}
+	const start = Date.parse(startedAt);
+	if (Number.isNaN(start)) {
+		return 0;
+	}
+	const end = completedAt ? Date.parse(completedAt) : Date.now();
+	return Math.max(0, Math.round((end - start) / 1000));
+}
+
+/**
+ * Maps the real `RunResponse` (`RunWire`) to the board's `RunHeader` view
+ * model. There is no server-side "named priority queue" concept — a run's
+ * `blocked`/`blocked_reason` is a single queue-level flag, not per-queue
+ * (see `mapRunJob`'s doc comment for the per-job queue grouping this feeds).
+ * `site`/`credential_name` are not carried on `RunResponse` at all
+ * (`scope` is an opaque JSON blob keyed by `site_id`, and `credential_id` is
+ * an id with no name join here) — `site` is set to `run_type` and
+ * `credential_name` to the raw `credential_id` (or empty) so the header has
+ * something honest to show rather than a fabricated label.
+ */
+export function mapRunHeader(wire: RunWire, jobs: RunJob[]): RunHeader {
+	const queueMap = new Map<string, QueueStatus>();
+	for (const job of jobs) {
+		if (!queueMap.has(job.queue)) {
+			queueMap.set(job.queue, {
+				key: job.queue,
+				priority: job.priority,
+				name: `PRIORITY ${job.priority}`,
+				benchmark: "",
+				blocked: wire.blocked,
+				blocked_reason: wire.blocked ? wire.blocked_reason : null,
+			});
+		}
+	}
+	const queues = [...queueMap.values()].sort((a, b) => a.priority - b.priority);
+
+	const completedCount = wire.job_count_completed;
+	const percent = wire.job_count > 0 ? Math.round((completedCount / wire.job_count) * 100) : 0;
+
+	return {
+		id: wire.id,
+		site: wire.run_type,
+		target_count: wire.job_count,
+		initiated_by: wire.initiated_by ?? "",
+		credential_name: wire.credential_id ?? "",
+		state: asRunHeaderState(wire.state),
+		paused: wire.paused,
+		// Not carried by RunResponse (only /runs/{id}/artifacts has counts) —
+		// left at 0 rather than fabricated; run.progress SSE fills these in live.
+		pass: 0,
+		fail: 0,
+		na: 0,
+		percent,
+		completed_count: completedCount,
+		elapsed_seconds: elapsedSecondsFrom(wire.started_at, wire.completed_at),
+		blocked: wire.blocked,
+		queues,
+	};
+}
+
+/**
+ * The REAL `GET /runs/{id}/jobs` wire row — `JobResponse`
+ * (backend/Waypoint.Api/Contracts/RunContracts.cs). No `benchmark`, no
+ * `pass`/`fail`/`na`, no free-text `note` — those are results/artifact
+ * concerns, not job-queue concerns, on the shipped backend.
+ */
+interface JobWire {
+	id: string;
+	run_id: string | null;
+	job_type: string;
+	target_id: string | null;
+	target_name: string | null;
+	state: string;
+	stage: string | null;
+	priority: number;
+	attempt_count: number;
+	created_at: string;
+	started_at: string | null;
+	finished_at: string | null;
+}
+
+const KNOWN_JOB_WIRE_STATES: ReadonlySet<string> = new Set([
+	"queued",
+	"running",
+	"attesting",
+	"converting",
+	"uploaded",
+	"done",
+	"failed",
+	"auth-failed",
+	"blocked",
+	"cancelled",
+]);
+
+function asJobWireState(value: string): JobState {
+	return KNOWN_JOB_WIRE_STATES.has(value) ? (value as JobState) : "queued";
+}
+
+/**
+ * Maps one real `JobResponse` (`JobWire`) to the board's `RunJob` view
+ * model. `queue` groups jobs by `priority` (the one queue-like signal
+ * `JobResponse` actually carries) rather than a named priority-queue id the
+ * backend has no concept of; `benchmark` and `pass`/`fail`/`na` have no wire
+ * source on this endpoint and are left empty/null (never fabricated) —
+ * `/runs/{id}/artifacts` is where real CAT counts live, a different
+ * screen's (`results.ts`) concern. `note` starts empty and is filled in
+ * live by `job.log` SSE via `applyEvent`, same as before.
+ */
+export function mapRunJob(wire: JobWire): RunJob {
+	const state = asJobWireState(wire.state);
+	return {
+		job_id: wire.id,
+		target: wire.target_name ?? wire.target_id ?? "unknown",
+		queue: `p${wire.priority}`,
+		priority: wire.priority,
+		benchmark: "",
+		state,
+		progress_percent: progressPercentForState(state),
+		pass: null,
+		fail: null,
+		na: null,
+		note: "",
+	};
+}
+
+/**
+ * Fetches and maps both REST endpoints together — `mapRunHeader` needs the
+ * mapped jobs to derive its synthetic `queues` (see its doc comment), so the
+ * two requests are combined here rather than composed by the caller (which
+ * would otherwise double-fetch `/runs/{id}/jobs`, once for `fetchRunJobs` and
+ * once inside a naive `fetchRun`).
+ */
+export async function fetchRunSnapshot(runId: string): Promise<{ header: RunHeader; jobs: RunJob[] }> {
+	const [wire, jobs] = await Promise.all([apiGet<RunWire>(`/runs/${runId}`), fetchRunJobs(runId)]);
+	return { header: mapRunHeader(wire, jobs), jobs };
+}
+
+export async function fetchRunJobs(runId: string): Promise<RunJob[]> {
+	const wireJobs = await apiGet<JobWire[]>(`/runs/${runId}/jobs`);
+	return wireJobs.map(mapRunJob);
+}
+
+/** The real `RunActionResponse` wire shape (`run_id`, not `id`). */
+export interface RunActionResult {
+	run_id: string;
 	state: string;
 }
 
@@ -166,9 +362,18 @@ function asRunState(value: string | undefined): RunHeader["state"] | undefined {
 	return value !== undefined && KNOWN_RUN_STATES.has(value) ? (value as RunHeader["state"]) : undefined;
 }
 
-/** `queue.state` event payload. */
+/**
+ * `queue.state` event payload — the REAL shape `JobQueueRepository` emits
+ * (`EmitBornBlockedAsync`/`EmitCredentialSwappedAsync`,
+ * backend/Waypoint.Infrastructure/Jobs/JobQueueRepository.cs): a run-level
+ * credential-halt signal, `{ blocked, reason, credential_ids }` (born-blocked)
+ * or `{ blocked: false, swapped: true, old_credential_id, new_credential_id }`
+ * (swap-resume) — there is no per-queue `key` on the wire (issue #494: the
+ * original fictional contract invented one). Since the board's `queues` are
+ * a client-side grouping by job priority, not a server-known id, this event
+ * is applied to every synthesized queue rather than keyed to one.
+ */
 interface QueueStateData {
-	key?: string;
 	blocked?: boolean;
 	reason?: string | null;
 }
@@ -180,20 +385,8 @@ interface JobLogData {
 	message?: string;
 }
 
-const KNOWN_JOB_STATES: ReadonlySet<string> = new Set([
-	"queued",
-	"running",
-	"attesting",
-	"converting",
-	"uploaded",
-	"done",
-	"failed",
-	"auth-failed",
-	"blocked",
-]);
-
 function asJobState(value: string | undefined): JobState | undefined {
-	return value !== undefined && KNOWN_JOB_STATES.has(value) ? (value as JobState) : undefined;
+	return value !== undefined && KNOWN_JOB_WIRE_STATES.has(value) ? (value as JobState) : undefined;
 }
 
 /**
@@ -270,14 +463,12 @@ export function applyEvent(snapshot: RunSnapshot, event: WaypointEvent): RunSnap
 
 	if (event.type === "queue.state") {
 		const data = event.data as QueueStateData;
-		if (!data.key) {
+		if (data.blocked === undefined) {
 			return { ...snapshot, lastSeq };
 		}
-		const queues = snapshot.header.queues.map((q) =>
-			q.key === data.key ? { ...q, blocked: data.blocked ?? q.blocked, blocked_reason: data.reason ?? null } : q,
-		);
-		const blocked = queues.some((q) => q.blocked);
-		return { ...snapshot, lastSeq, header: { ...snapshot.header, queues, blocked } };
+		const blockedReason = data.blocked ? (data.reason ?? null) : null;
+		const queues = snapshot.header.queues.map((q) => ({ ...q, blocked: data.blocked as boolean, blocked_reason: blockedReason }));
+		return { ...snapshot, lastSeq, header: { ...snapshot.header, queues, blocked: data.blocked } };
 	}
 
 	return { ...snapshot, lastSeq };

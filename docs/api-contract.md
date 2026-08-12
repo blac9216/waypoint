@@ -108,9 +108,9 @@ authenticated the caller, and role claims keep mapping to the same four
 ### Runs & jobs
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/runs` | GET, POST | POST body: site_id, scope (products/components + inventory selection), credential (`service` \| inline personal — never persisted), schedule?. Cyber+ for scans; remediation POSTs require Admin + `confirmation: "REMEDIATE"`. |
-| `/runs/{id}` | GET | Header, progress, pass/fail/na, per-queue status incl. `blocked`. |
-| `/runs/{id}/jobs` | GET | Per-target rows: state, stage progress, counts, note. |
+| `/runs` | GET, POST | POST body: `run_type`, `scope` (JSON string — a scan run's `scope.site_id` is required, optional `target_ids`), `credential_id` \| inline `credential` (personal tier, ADR-0011 — never persisted), `confirmation` (remediate only). Cyber+ for scans; remediation POSTs require Admin + `confirmation: "REMEDIATE"`. 202 body: `run_id`. |
+| `/runs/{id}` | GET | `RunResponse` (issue #494, matches shipped `RunsController`/`RunContracts.cs` exactly): `id`, `run_type`, `state`, `paused`, `blocked`, `blocked_reason`, `scope`, `credential_id`, `initiated_by`, `created_at`/`started_at`/`completed_at`, and job counts by state (`job_count`, `job_count_queued`, `job_count_running`, `job_count_completed`, `job_count_failed`, `job_count_blocked`). No per-queue/per-benchmark breakdown and no aggregate `pass`/`fail`/`na` — those live only on `/runs/{id}/artifacts`. `blocked`/`blocked_reason` are the run's single credential-halt flag (ADR-0008), not a list of independently-blockable named queues; the frontend (`liverun.ts`) synthesizes a queue-like grouping client-side from each job's `priority` for display, it is not a server concept. |
+| `/runs/{id}/jobs` | GET | `JobResponse[]`: `id`, `run_id`, `job_type`, `target_id`, `target_name`, `state`, `stage`, `priority`, `attempt_count`, `created_at`/`started_at`/`finished_at`. No `benchmark` label and no per-job `pass`/`fail`/`na`/`note` on this endpoint — CAT counts are `/runs/{id}/artifacts`'s concern; a job's latest log line arrives only via `job.log` SSE, never a REST field. |
 | `/runs/{id}/pause` · `/resume` · `/abort` | POST | Operator+ (own runs), Admin any. Runs with no recorded initiator (system/scheduled runs) are Admin-only. |
 | `/runs/{id}/resume-blocked` | POST | Admin only. Body: `{ credential_id }` — the REPLACEMENT credential to swap onto the run's halted jobs (not the halted credential's own id; the server determines that from the run's blocked job set). Swaps `jobs.credential_id` old→new for that job set, audits both credential identities, and re-queues (ADR-0008 halt behavior). 409 when the run has no credential halt to resume from, or when the replacement credential is itself queue-halted; 404 when the replacement credential does not exist; 400 when its `credential_type` does not match the halted credential's. |
 | `/jobs/{id}` | DELETE | Operator+ (own runs), Admin any — same ownership scope as pause/resume/abort (issue #294); a job's owning run with no recorded initiator is Admin-only. Cancels one job independent of its run's other jobs (issue #10/#277). 200 body distinguishes an immediate cancel (`state: "cancelled"`, queued/blocked job) from a cooperative in-flight request (`state: "cancel_requested"`, running/attesting/converting job — stops at the dispatcher's next heartbeat tick); 409 if already terminal; 404 if the job does not exist. |
@@ -225,9 +225,23 @@ work once one exists.
 ```
 
 Types: `job.state`, `job.log` (level + line, post-scrub), `run.progress` (counts,
-percent), `queue.state` (incl. `blocked` + reason), `download.progress`,
-`system.notice`. Follow-tail, counters, and every progress bar in the prototype bind
-to these six types — anything the UI animates MUST arrive as an event, not a poll.
+percent), `queue.state` (run-level credential-halt signal — see below),
+`download.progress`, `system.notice`. Follow-tail, counters, and every progress bar
+in the prototype bind to these six types — anything the UI animates MUST arrive as
+an event, not a poll.
+
+`job.state`'s `to` value is one of the job state machine's values, including the
+terminal `cancelled` (set by per-job cancel and run-abort alike) — issue #494: an
+earlier build of the frontend's `JobState` allowlist omitted `cancelled`, which
+silently dropped (rather than rendered) a cancelled job's final transition.
+
+`queue.state`'s payload (issue #494, matches `JobQueueRepository`'s shipped
+emission) is **`{ blocked, reason, credential_ids }`** on a halt trip or
+**`{ blocked: false, swapped: true, old_credential_id, new_credential_id,
+resumed_job_count }`** on a credential-swap-resume — there is no per-queue `key` on
+the wire. It reflects the run's single credential-halt flag (`RunResponse.blocked`/
+`blocked_reason`), not a per-named-queue halt: ADR-0008's "priority queue" is a
+run-wide job-dispatch concept, not multiple independently-blockable named lanes.
 
 Each type has a fixed **scope tier**, enforced by the schema
 (`job_events_scope_check`; decided in #104, recorded here per #116):
