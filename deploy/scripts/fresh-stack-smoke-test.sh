@@ -611,7 +611,18 @@ if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" ]]; then
 		# harmless (dispatch just stops advancing it further); the goal here is
 		# only to keep a still-queued job queued.
 		PAUSE_CODE="$(net_curl -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${ADMIN_TOKEN}" "${NET_BASE}/api/v1/runs/${CANCEL_RUN_ID}/pause")"
-		if [[ "${PAUSE_CODE}" == "200" ]]; then ok "run paused before cancel (${PAUSE_CODE})"; else bad "run pause returned ${PAUSE_CODE}"; fi
+		# Same residual race the cancel fallback below tolerates (issue #498
+		# regression): a single fast-failing job can drive the whole run
+		# terminal before this pause request lands, and pausing a terminal run
+		# correctly returns 400. Accept it, distinguished in the log, instead
+		# of hard-failing on correct product behavior.
+		if [[ "${PAUSE_CODE}" == "200" ]]; then
+			ok "run paused before cancel (${PAUSE_CODE})"
+		elif [[ "${PAUSE_CODE}" == "400" ]]; then
+			ok "run pause returned 400 (run already terminal before the pause landed -- acceptable, product behavior is correct)"
+		else
+			bad "run pause returned ${PAUSE_CODE}"
+		fi
 
 		JOBS_BODY="$(api_get_body "/api/v1/runs/${CANCEL_RUN_ID}/jobs")"
 		CANCEL_JOB_ID="$(printf '%s' "${JOBS_BODY}" | json_field '0.id' 2>/dev/null || true)"
@@ -646,7 +657,16 @@ if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" ]]; then
 		# job is already terminal, but leaves the run in a clean, non-paused
 		# state for anything downstream that lists runs).
 		RESUME_CODE="$(net_curl -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${ADMIN_TOKEN}" "${NET_BASE}/api/v1/runs/${CANCEL_RUN_ID}/resume")"
-		if [[ "${RESUME_CODE}" == "200" ]]; then ok "run resumed after cancel"; else bad "run resume returned ${RESUME_CODE}"; fi
+		# Mirrors the pause tolerance above: resuming a run that went terminal
+		# (or was never successfully paused) returns 400 -- correct behavior,
+		# accepted and distinguished rather than hard-failed.
+		if [[ "${RESUME_CODE}" == "200" ]]; then
+			ok "run resumed after cancel"
+		elif [[ "${RESUME_CODE}" == "400" ]]; then
+			ok "run resume returned 400 (run already terminal/not paused -- acceptable, product behavior is correct)"
+		else
+			bad "run resume returned ${RESUME_CODE}"
+		fi
 	else
 		bad "cancellation run creation failed: ${CANCEL_SCAN_RESPONSE}"
 	fi
