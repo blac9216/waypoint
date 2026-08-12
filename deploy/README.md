@@ -179,6 +179,50 @@ DNS**, not on any particular way of shipping the stack.
 See [ADR-0003](../docs/adr/0003-reverse-proxy-nginx.md#consequences) for the
 same note recorded against the reverse-proxy decision.
 
+### Health endpoints: liveness vs. readiness (issue #66)
+
+nginx exposes two container-internal health endpoints on the un-published
+`8081` listener (`deploy/nginx/conf.d/healthz.conf`) — pick the one that
+matches what you're checking:
+
+- **`/healthz` — liveness.** "Is nginx itself up." A local `return 200`,
+  independent of the backend. This is what the Docker Compose
+  `healthcheck:` for the `nginx` service polls, and what
+  `depends_on: condition: service_healthy` gates on. It deliberately does
+  **not** reflect backend reachability: the ADR-0009 self-update flow (and
+  ordinary `docker compose restart backend`) recreates the `backend`
+  container as routine behavior, and coupling nginx's own liveness to that
+  would make nginx report unhealthy — and risk being bounced by an external
+  supervisor that treats Docker HEALTHCHECK as a restart signal — for a
+  problem that isn't nginx's.
+- **`/healthz/upstream` — readiness.** "Is nginx **and** the backend it
+  proxies to both reachable." Proxies to the backend's own
+  `GET /api/v1/health` with short timeouts (2s connect/send/read) and no
+  caching, so it fails fast instead of hanging. A stopped, crash-looping, or
+  network-partitioned backend shows up here as `502`/`504` — this is the
+  signal that closes the silent-outage window #66 was filed for. Use this
+  for operator/monitoring checks and anything that needs to know the
+  request path actually works end-to-end, not just that nginx is running.
+  Like the `/api/` and SSE locations in `default.conf`, it re-resolves
+  `backend` per request via the same `resolver` + `$backend_host` pattern
+  from #59, so it recovers on its own once `backend` comes back — no
+  `nginx -s reload` needed.
+
+Per-domain runner capability (compliance-runner vs. download-runner) is
+**not** part of either endpoint — that distinction surfaces through the
+backend's own `GET /system` (issue #443), not through an nginx probe. Use
+`/healthz/upstream` to answer "can nginx reach the backend at all," and
+`GET /system` (once #443 lands) to answer "which execution domains are
+actually available."
+
+Both endpoints are container-internal only (port `8081` is never published
+to the host) — reach them from inside the `nginx` container, e.g.:
+
+```bash
+docker compose -p <project> exec nginx wget -qO- http://127.0.0.1:8081/healthz
+docker compose -p <project> exec nginx wget -qO- http://127.0.0.1:8081/healthz/upstream
+```
+
 ### Bring-up
 
 Prerequisites: Docker Engine + Compose v2, `openssl`, Node.js/npm (to build
