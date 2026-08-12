@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using Waypoint.Core.SystemState;
 
 namespace Waypoint.Api.Contracts;
@@ -65,12 +66,32 @@ public sealed record SystemStoreUsageResponse(string Name, string Path, long Tot
 /// <see cref="WorkerHeartbeat.Ready"/> AND not stale (see
 /// <c>Waypoint.Core.SystemState.WorkerRegistryOptions.StaleAfter</c>).
 /// </summary>
+/// <param name="StarvedJobTypes">
+/// Issue #467 (migration 0029): job types this worker was denying resource admission to
+/// as of its last heartbeat -- "these job types cannot currently be admitted on this
+/// runner," with <see cref="SystemStarvedJobTypeResponse.Permanent"/> distinguishing a
+/// budget the type can never fit from transient contention that self-resolves. Empty
+/// when nothing is starved, including for a worker whose <see cref="LastSeenAt"/> row
+/// predates migration 0029 (defaults to no starvation reported rather than failing).
+/// </param>
 public sealed record SystemRunnerStatusResponse(
 	string WorkerId,
 	IReadOnlyList<string> JobTypes,
 	bool Available,
-	DateTimeOffset LastSeenAt)
+	DateTimeOffset LastSeenAt,
+	IReadOnlyList<SystemStarvedJobTypeResponse> StarvedJobTypes)
 {
 	public static SystemRunnerStatusResponse FromDomain(WorkerHeartbeat heartbeat, bool available) =>
-		new(heartbeat.WorkerId, heartbeat.JobTypes, available, heartbeat.LastSeenAt);
+		new(
+			heartbeat.WorkerId,
+			heartbeat.JobTypes,
+			available,
+			heartbeat.LastSeenAt,
+			[.. heartbeat.StarvedJobTypes.Select(SystemStarvedJobTypeResponse.FromDomain)]);
+}
+
+/// <summary>One job type a runner is currently denying resource admission to (issue #467).</summary>
+public sealed record SystemStarvedJobTypeResponse(string JobType, bool Permanent)
+{
+	public static SystemStarvedJobTypeResponse FromDomain(StarvedWorkerJobType starved) => new(starved.JobType, starved.Permanent);
 }

@@ -151,8 +151,8 @@ public sealed class SystemEndpointTests : IClassFixture<SystemTestApiFactory>
 		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
 		_factory.DiskUsage.Reset();
 		_factory.WorkerRegistry.Reset(
-			new WorkerHeartbeat("compliance-runner-1", ["discover", "credential-test", "scan"], Ready: true, LastSeenAt: now),
-			new WorkerHeartbeat("download-runner-1", ["catalog-index", "download"], Ready: false, LastSeenAt: now));
+			new WorkerHeartbeat("compliance-runner-1", ["discover", "credential-test", "scan"], Ready: true, LastSeenAt: now, StarvedJobTypes: []),
+			new WorkerHeartbeat("download-runner-1", ["catalog-index", "download"], Ready: false, LastSeenAt: now, StarvedJobTypes: []));
 
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
@@ -185,7 +185,7 @@ public sealed class SystemEndpointTests : IClassFixture<SystemTestApiFactory>
 		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
 		_factory.DiskUsage.Reset();
 		_factory.WorkerRegistry.Reset(
-			new WorkerHeartbeat("compliance-runner-1", ["discover", "credential-test", "scan"], Ready: true, LastSeenAt: longAgo));
+			new WorkerHeartbeat("compliance-runner-1", ["discover", "credential-test", "scan"], Ready: true, LastSeenAt: longAgo, StarvedJobTypes: []));
 
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");

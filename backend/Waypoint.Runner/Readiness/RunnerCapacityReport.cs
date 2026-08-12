@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using Waypoint.Runner.Resources;
 
 namespace Waypoint.Runner.Readiness;
@@ -32,6 +33,15 @@ namespace Waypoint.Runner.Readiness;
 /// <param name="AdmittedCpuCores">CPU cores currently committed to admitted, still-running jobs.</param>
 /// <param name="AdmittedMemoryBytes">Memory bytes currently committed to admitted, still-running jobs.</param>
 /// <param name="AdmittedJobCount">How many jobs are currently admitted/running.</param>
+/// <param name="StarvedJobTypes">
+/// Issue #467: job types this runner is currently denying admission to, each tagged
+/// permanent (the type's profile alone exceeds <see cref="EffectiveCpuCores"/>/
+/// <see cref="EffectiveMemoryBytes"/> -- no amount of waiting fixes this) or transient
+/// (would fit once currently-admitted jobs release budget). Empty when nothing is
+/// starved. Cleared for a job type the moment it is next admitted, so a transient entry
+/// disappears on its own once contention passes -- this is a live snapshot, not a
+/// historical log.
+/// </param>
 public sealed record RunnerCapacityReport(
 	string Source,
 	bool IsFallback,
@@ -41,7 +51,14 @@ public sealed record RunnerCapacityReport(
 	long EffectiveMemoryBytes,
 	double AdmittedCpuCores,
 	long AdmittedMemoryBytes,
-	int AdmittedJobCount);
+	int AdmittedJobCount,
+	IReadOnlyList<StarvedJobTypeReport> StarvedJobTypes);
+
+/// <summary>JSON-serializable twin of <see cref="Resources.StarvedJobType"/> for <see cref="RunnerCapacityReport"/>.</summary>
+public sealed record StarvedJobTypeReport(string JobType, bool Permanent)
+{
+	public static StarvedJobTypeReport FromDomain(StarvedJobType starved) => new(starved.JobType, starved.Permanent);
+}
 
 /// <summary>
 /// Builds a <see cref="RunnerCapacityReport"/> from a live <see cref="ResourceAdmissionController"/>.
@@ -63,6 +80,9 @@ public static class RunnerCapacityReportFactory
 			EffectiveMemoryBytes: resourceAdmission.EffectiveBudget.MemoryBytes,
 			AdmittedCpuCores: resourceAdmission.AdmittedCpuCores,
 			AdmittedMemoryBytes: resourceAdmission.AdmittedMemoryBytes,
-			AdmittedJobCount: resourceAdmission.AdmittedJobCount);
+			AdmittedJobCount: resourceAdmission.AdmittedJobCount,
+			StarvedJobTypes: [.. resourceAdmission.StarvedJobTypes
+				.Select(StarvedJobTypeReport.FromDomain)
+				.OrderBy(starved => starved.JobType, StringComparer.Ordinal)]);
 	}
 }

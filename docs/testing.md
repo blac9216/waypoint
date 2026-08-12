@@ -1125,21 +1125,27 @@ which runs the real upsert through a connection authenticated as each runner rol
 (not the fixture's owner role) — verified to fail red on `main` before 0028 and pass
 green after it.
 
-### A real operator-visibility gap this matrix found (disclosed, not fixed here)
+### A real operator-visibility gap this matrix found (fixed by issue #467)
 
 `ResourceAdmissionController` (issue #437) silently released every claimed `scan`
 job back to `queued` in this sandbox: `CgroupResourceDiscovery` found no usable
 cgroup limits (a nested-Docker/devcontainer property, not a product defect) and fell
 back to a conservative 1 CPU core, below `scan`'s own 2.0-core
-`JobResourceProfiles` weight — so `scan` could never be admitted, and the denial
-(`LogAdmissionDenied`) is logged at **Debug**, invisible at the default
-`Information` level. An operator on an under-resourced host would see scans queue
-forever with no visible diagnostic pointing at resource admission as the cause. The
-smoke script works around this with a `RunnerResources__FallbackCpuCores`/
-`FallbackMemoryBytes` environment override (documented inline in the script) rather
-than changing product code or log levels — that decision (raise the fallback floor,
-promote the denial log level, or add an operator-facing "job admission-starved"
-signal) belongs to a follow-up issue, not this one.
+`JobResourceProfiles` weight — so `scan` could never be admitted, and the denial was
+logged only at Debug, invisible at the default `Information` level. An operator on
+an under-resourced host would see scans queue forever with no visible diagnostic
+pointing at resource admission as the cause. The smoke script's
+`RunnerResources__FallbackCpuCores`/`FallbackMemoryBytes` environment-override
+workaround (documented inline in the script) is unchanged, but the underlying gap
+is now closed: `ResourceAdmissionController` logs a rate-limited Warning per job
+type on first denial (once per `DenialWarningInterval` thereafter, not per poll),
+distinguishing "will never fit" (the job type's profile alone exceeds the total
+effective budget — a permanent misconfiguration) from "doesn't fit right now"
+(transient contention with currently-admitted jobs). Starved job types also flow
+into `RunnerCapacityReport` (both runner hosts' file-based readiness report),
+`worker_registry.starved_job_types` (migration 0029), and `GET /system`'s
+`runners[].starved_job_types`, so an operator can see *which* job types are stuck
+and *why* without reading a runner container's logs.
 
 ### Disclosed gaps
 

@@ -30,25 +30,28 @@ public sealed class WorkerRegistryRepository : IWorkerRegistryWriter, IWorkerReg
 		_connectionString = connectionString;
 	}
 
-	public async Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, CancellationToken cancellationToken)
+	public async Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
 		ArgumentNullException.ThrowIfNull(jobTypes);
+		ArgumentNullException.ThrowIfNull(starvedJobTypes);
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			INSERT INTO worker_registry (worker_id, job_types, ready, last_seen_at)
-			VALUES (@worker_id, @job_types, @ready, now())
+			INSERT INTO worker_registry (worker_id, job_types, ready, starved_job_types, last_seen_at)
+			VALUES (@worker_id, @job_types, @ready, @starved_job_types, now())
 			ON CONFLICT (worker_id) DO UPDATE
 				SET job_types = EXCLUDED.job_types,
 					ready = EXCLUDED.ready,
+					starved_job_types = EXCLUDED.starved_job_types,
 					last_seen_at = EXCLUDED.last_seen_at
 			""", connection);
 		command.Parameters.AddWithValue("worker_id", workerId);
 		command.Parameters.Add(new NpgsqlParameter("job_types", NpgsqlDbType.Jsonb) { Value = JsonSerializer.Serialize(jobTypes) });
 		command.Parameters.AddWithValue("ready", ready);
+		command.Parameters.Add(new NpgsqlParameter("starved_job_types", NpgsqlDbType.Jsonb) { Value = JsonSerializer.Serialize(starvedJobTypes) });
 
 		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
@@ -59,7 +62,7 @@ public sealed class WorkerRegistryRepository : IWorkerRegistryWriter, IWorkerReg
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT worker_id, job_types, ready, last_seen_at
+			SELECT worker_id, job_types, ready, last_seen_at, starved_job_types
 			FROM worker_registry
 			ORDER BY last_seen_at DESC
 			""", connection);
@@ -69,11 +72,13 @@ public sealed class WorkerRegistryRepository : IWorkerRegistryWriter, IWorkerReg
 		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
 		{
 			string[] jobTypes = JsonSerializer.Deserialize<string[]>(reader.GetString(1)) ?? [];
+			StarvedWorkerJobType[] starvedJobTypes = JsonSerializer.Deserialize<StarvedWorkerJobType[]>(reader.GetString(4)) ?? [];
 			results.Add(new WorkerHeartbeat(
 				WorkerId: reader.GetString(0),
 				JobTypes: jobTypes,
 				Ready: reader.GetBoolean(2),
-				LastSeenAt: reader.GetFieldValue<DateTimeOffset>(3)));
+				LastSeenAt: reader.GetFieldValue<DateTimeOffset>(3),
+				StarvedJobTypes: starvedJobTypes));
 		}
 
 		return results;

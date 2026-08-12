@@ -47,9 +47,22 @@ namespace Waypoint.Runner.Resources;
 /// </summary>
 public sealed partial class ResourceAdmissionController
 {
+	/// <summary>
+	/// Issue #467: minimum time between Warning-level "admission denied" log lines for
+	/// the *same* job type. A starved job type is denied on every dispatcher poll (as
+	/// often as <c>PollInterval</c>) until budget frees up or an operator intervenes --
+	/// logging every single denial at Warning would flood the log with an identical line
+	/// forever. One line per type per this interval keeps the signal (something is
+	/// starving) without the flood.
+	/// </summary>
+	private static readonly TimeSpan DenialWarningInterval = TimeSpan.FromMinutes(5);
+
 	private readonly object _gate = new();
 	private readonly ConcurrentDictionary<Guid, JobResourceProfile> _running = new();
+	private readonly ConcurrentDictionary<string, DateTimeOffset> _lastDenialWarningAt = new(StringComparer.Ordinal);
+	private readonly ConcurrentDictionary<string, StarvedJobType> _starvedJobTypes = new(StringComparer.Ordinal);
 	private readonly ILogger<ResourceAdmissionController> _logger;
+	private readonly TimeProvider _timeProvider;
 	private double _admittedCpuCores;
 	private long _admittedMemoryBytes;
 
@@ -57,12 +70,29 @@ public sealed partial class ResourceAdmissionController
 		IOptions<RunnerResourceOptions> resourceOptions,
 		CgroupResourceDiscovery discovery,
 		ILogger<ResourceAdmissionController> logger)
+		: this(resourceOptions, discovery, logger, TimeProvider.System)
+	{
+	}
+
+	/// <summary>
+	/// Issue #467 test seam: lets <see cref="ResourceAdmissionControllerTests"/> control
+	/// the clock the denial-warning rate limiter reads, rather than sleeping real time to
+	/// exercise the "warn again after the interval elapses" branch. Production callers
+	/// always resolve the public constructor above (<see cref="TimeProvider.System"/>).
+	/// </summary>
+	internal ResourceAdmissionController(
+		IOptions<RunnerResourceOptions> resourceOptions,
+		CgroupResourceDiscovery discovery,
+		ILogger<ResourceAdmissionController> logger,
+		TimeProvider timeProvider)
 	{
 		ArgumentNullException.ThrowIfNull(resourceOptions);
 		ArgumentNullException.ThrowIfNull(discovery);
 		ArgumentNullException.ThrowIfNull(logger);
+		ArgumentNullException.ThrowIfNull(timeProvider);
 
 		_logger = logger;
+		_timeProvider = timeProvider;
 
 		HostResourceLimits discovered = discovery.Discover();
 		RunnerResourceOptions options = resourceOptions.Value;
@@ -127,14 +157,56 @@ public sealed partial class ResourceAdmissionController
 
 			if (projectedCpu > EffectiveBudget.CpuCores || projectedMemory > EffectiveBudget.MemoryBytes)
 			{
-				LogAdmissionDenied(jobId, jobType, profile.CpuCores, profile.MemoryBytes, _admittedCpuCores, _admittedMemoryBytes, EffectiveBudget.CpuCores, EffectiveBudget.MemoryBytes);
+				// Issue #467: "will never fit" (the profile alone exceeds the total
+				// effective budget on either axis) is a permanent misconfiguration --
+				// no amount of other jobs finishing ever frees enough room. "doesn't fit
+				// right now" (the profile would fit in isolation, but other admitted jobs
+				// are currently occupying the room) is transient and self-resolves once
+				// something releases. Both are worth operator visibility (issue #467's
+				// AC), but only the permanent case can never be fixed by waiting.
+				bool permanent = profile.CpuCores > EffectiveBudget.CpuCores || profile.MemoryBytes > EffectiveBudget.MemoryBytes;
+				_starvedJobTypes[jobType] = new StarvedJobType(jobType, permanent);
+				MaybeLogAdmissionDenied(jobId, jobType, permanent, profile, EffectiveBudget.CpuCores, EffectiveBudget.MemoryBytes);
 				return false;
 			}
 
+			_starvedJobTypes.TryRemove(jobType, out _);
 			_admittedCpuCores = projectedCpu;
 			_admittedMemoryBytes = projectedMemory;
 			_running[jobId] = profile;
 			return true;
+		}
+	}
+
+	/// <summary>
+	/// Job types currently denied admission, each tagged permanent (the profile alone
+	/// exceeds the total effective budget -- no release of other jobs will ever help) or
+	/// transient (would fit once currently-admitted jobs free up). Cleared for a job type
+	/// the moment that type is next admitted; issue #467's operator-visibility surface for
+	/// <c>RunnerCapacityReport</c>/<c>GET /system</c>.
+	/// </summary>
+	public IReadOnlyList<StarvedJobType> StarvedJobTypes => [.. _starvedJobTypes.Values];
+
+	private void MaybeLogAdmissionDenied(Guid jobId, string jobType, bool permanent, JobResourceProfile profile, double budgetCpu, long budgetMemory)
+	{
+		LogAdmissionDeniedDebug(jobId, jobType, profile.CpuCores, profile.MemoryBytes, _admittedCpuCores, _admittedMemoryBytes, budgetCpu, budgetMemory);
+
+		DateTimeOffset now = _timeProvider.GetUtcNow();
+		DateTimeOffset lastWarned = _lastDenialWarningAt.GetOrAdd(jobType, DateTimeOffset.MinValue);
+		if (now - lastWarned < DenialWarningInterval)
+		{
+			return;
+		}
+
+		_lastDenialWarningAt[jobType] = now;
+
+		if (permanent)
+		{
+			LogAdmissionPermanentlyStarved(jobType, profile.CpuCores, profile.MemoryBytes, budgetCpu, budgetMemory);
+		}
+		else
+		{
+			LogAdmissionTransientlyStarved(jobType, profile.CpuCores, profile.MemoryBytes, _admittedCpuCores, _admittedMemoryBytes, budgetCpu, budgetMemory);
 		}
 	}
 
@@ -161,5 +233,24 @@ public sealed partial class ResourceAdmissionController
 	private partial void LogEffectiveBudget(HostResourceLimitSource source, double discoveredCpu, long discoveredMemory, double effectiveCpu, long effectiveMemory);
 
 	[LoggerMessage(Level = LogLevel.Debug, Message = "Admission denied for job {JobId} ({JobType}): profile {ProfileCpu} cores / {ProfileMemory} bytes would push admitted {AdmittedCpu} cores / {AdmittedMemory} bytes past budget {BudgetCpu} cores / {BudgetMemory} bytes")]
-	private partial void LogAdmissionDenied(Guid jobId, string jobType, double profileCpu, long profileMemory, double admittedCpu, long admittedMemory, double budgetCpu, long budgetMemory);
+	private partial void LogAdmissionDeniedDebug(Guid jobId, string jobType, double profileCpu, long profileMemory, double admittedCpu, long admittedMemory, double budgetCpu, long budgetMemory);
+
+	// Issue #467: Warning-level, rate-limited (DenialWarningInterval) per job type -- see
+	// MaybeLogAdmissionDenied. Two distinct messages so "will never fit" and "doesn't fit
+	// right now" read unambiguously in a log search rather than requiring the reader to
+	// interpret a shared "denied" line's numbers.
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Job type '{JobType}' can never be admitted on this runner: its profile ({ProfileCpu} cores / {ProfileMemory} bytes) exceeds the total effective budget ({BudgetCpu} cores / {BudgetMemory} bytes). This is a permanent misconfiguration -- raise the operator resource cap/fallback or move this job type to a larger runner.")]
+	private partial void LogAdmissionPermanentlyStarved(string jobType, double profileCpu, long profileMemory, double budgetCpu, long budgetMemory);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Job type '{JobType}' is being denied admission: its profile ({ProfileCpu} cores / {ProfileMemory} bytes) does not fit alongside {AdmittedCpu} cores / {AdmittedMemory} bytes already admitted, within budget {BudgetCpu} cores / {BudgetMemory} bytes. This is transient -- admission will resume once running jobs release enough budget.")]
+	private partial void LogAdmissionTransientlyStarved(string jobType, double profileCpu, long profileMemory, double admittedCpu, long admittedMemory, double budgetCpu, long budgetMemory);
 }
+
+/// <summary>
+/// One job type currently unable to be admitted on this runner (issue #467), with
+/// <see cref="Permanent"/> distinguishing a budget the type can never fit (the profile
+/// alone exceeds the total effective budget -- an operator misconfiguration, not a
+/// contention issue) from a type that would fit once other admitted jobs release their
+/// budget.
+/// </summary>
+public readonly record struct StarvedJobType(string JobType, bool Permanent);

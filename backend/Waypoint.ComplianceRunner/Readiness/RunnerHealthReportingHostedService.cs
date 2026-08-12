@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -73,7 +74,8 @@ public sealed class RunnerHealthReportingHostedService : IHostedService, IDispos
 			report => report.Capabilities,
 			Options.Create<IRunnerReadinessOptions>(options.Value),
 			workerRegistry,
-			logger);
+			logger,
+			starvedJobTypes: report => report.Capacity?.StarvedJobTypes.Select(starved => new StarvedJobType(starved.JobType, starved.Permanent)).ToArray() ?? []);
 	}
 
 	public Task StartAsync(CancellationToken cancellationToken) => _inner.StartAsync(cancellationToken);

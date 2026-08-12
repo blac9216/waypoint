@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Waypoint.Runner.Resources;
@@ -42,6 +43,17 @@ public sealed class ResourceAdmissionControllerTests : IDisposable
 		effective.CgroupRoot = _emptyCgroupRoot; // Always empty -> always falls back to the configured defaults below, deterministically.
 		CgroupResourceDiscovery discovery = new(Options.Create(effective), NullLogger<CgroupResourceDiscovery>.Instance);
 		return new ResourceAdmissionController(Options.Create(effective), discovery, NullLogger<ResourceAdmissionController>.Instance);
+	}
+
+	private (ResourceAdmissionController Controller, RecordingLogger Logger, ManualTimeProvider TimeProvider) CreateControllerWithLogging(RunnerResourceOptions? options = null)
+	{
+		RunnerResourceOptions effective = options ?? new RunnerResourceOptions();
+		effective.CgroupRoot = _emptyCgroupRoot;
+		CgroupResourceDiscovery discovery = new(Options.Create(effective), NullLogger<CgroupResourceDiscovery>.Instance);
+		RecordingLogger logger = new();
+		ManualTimeProvider timeProvider = new();
+		ResourceAdmissionController controller = new(Options.Create(effective), discovery, logger, timeProvider);
+		return (controller, logger, timeProvider);
 	}
 
 	[Fact]
@@ -217,5 +229,129 @@ public sealed class ResourceAdmissionControllerTests : IDisposable
 		Assert.Equal(0, controller.AdmittedJobCount);
 		Assert.Equal(0.0, controller.AdmittedCpuCores);
 		Assert.Equal(0L, controller.AdmittedMemoryBytes);
+	}
+
+	// Issue #467: admission starvation must be operator-visible -- a Warning-level log
+	// (rate-limited per job type) plus a live StarvedJobTypes snapshot distinguishing
+	// "will never fit" (permanent) from "doesn't fit right now" (transient).
+
+	[Fact]
+	public void PermanentlyOversizedJobType_IsFlaggedPermanentAndLogsWarningOnFirstDenial()
+	{
+		// scan's 2.0-core profile exceeds this runner's entire 1.0-core budget -- no
+		// amount of waiting ever admits it.
+		(ResourceAdmissionController controller, RecordingLogger logger, _) = CreateControllerWithLogging(new RunnerResourceOptions
+		{
+			FallbackCpuCores = 1.0,
+			FallbackMemoryBytes = 4L * 1024 * 1024 * 1024,
+		});
+
+		Assert.False(controller.TryAdmit(Guid.NewGuid(), "scan"));
+
+		StarvedJobType starved = Assert.Single(controller.StarvedJobTypes);
+		Assert.Equal("scan", starved.JobType);
+		Assert.True(starved.Permanent);
+
+		Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("scan", StringComparison.Ordinal) && e.Message.Contains("never be admitted", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public void TransientlyOversubscribedJobType_IsFlaggedTransientNotPermanent()
+	{
+		// discover (0.25 cores) fits in isolation within a 2.0-core budget, but scan
+		// (2.0 cores) already occupies all of it -- this is contention, not a
+		// misconfiguration, so it must resolve once scan releases.
+		(ResourceAdmissionController controller, RecordingLogger logger, _) = CreateControllerWithLogging(new RunnerResourceOptions
+		{
+			FallbackCpuCores = 2.0,
+			FallbackMemoryBytes = 4L * 1024 * 1024 * 1024,
+		});
+
+		Guid scanId = Guid.NewGuid();
+		Assert.True(controller.TryAdmit(scanId, "scan"));
+		Assert.False(controller.TryAdmit(Guid.NewGuid(), "discover"));
+
+		StarvedJobType starved = Assert.Single(controller.StarvedJobTypes);
+		Assert.Equal("discover", starved.JobType);
+		Assert.False(starved.Permanent);
+
+		Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("discover", StringComparison.Ordinal) && e.Message.Contains("transient", StringComparison.Ordinal));
+
+		// Releasing scan frees the budget -- discover is no longer starved once admitted.
+		controller.Release(scanId);
+		Assert.True(controller.TryAdmit(Guid.NewGuid(), "discover"));
+		Assert.Empty(controller.StarvedJobTypes);
+	}
+
+	[Fact]
+	public void RepeatedDenialsOfTheSameJobType_WarnOnceThenRateLimit()
+	{
+		(ResourceAdmissionController controller, RecordingLogger logger, ManualTimeProvider timeProvider) = CreateControllerWithLogging(new RunnerResourceOptions
+		{
+			FallbackCpuCores = 1.0,
+			FallbackMemoryBytes = 4L * 1024 * 1024 * 1024,
+		});
+
+		// Every dispatcher poll re-denies the same starved type -- must not re-warn on
+		// every single call within the rate-limit interval.
+		for (int i = 0; i < 5; i++)
+		{
+			Assert.False(controller.TryAdmit(Guid.NewGuid(), "scan"));
+		}
+
+		int warningsAfterBurst = logger.Entries.Count(e => e.Level == LogLevel.Warning);
+		Assert.Equal(1, warningsAfterBurst);
+
+		// Debug-level denial logging is unaffected by the rate limiter -- every attempt
+		// still gets a Debug line for detailed diagnosis.
+		Assert.Equal(5, logger.Entries.Count(e => e.Level == LogLevel.Debug));
+
+		// Advance past the rate-limit interval -- the next denial warns again.
+		timeProvider.Advance(TimeSpan.FromMinutes(6));
+		Assert.False(controller.TryAdmit(Guid.NewGuid(), "scan"));
+
+		Assert.Equal(2, logger.Entries.Count(e => e.Level == LogLevel.Warning));
+	}
+
+	[Fact]
+	public void DifferentStarvedJobTypes_EachGetTheirOwnRateLimit()
+	{
+		// remediate (1.5 cores) also exceeds a 1.0-core budget alongside scan (2.0
+		// cores) -- both are permanently starved, and each must warn independently on
+		// first denial rather than sharing one global rate limit.
+		(ResourceAdmissionController controller, RecordingLogger logger, _) = CreateControllerWithLogging(new RunnerResourceOptions
+		{
+			FallbackCpuCores = 1.0,
+			FallbackMemoryBytes = 4L * 1024 * 1024 * 1024,
+		});
+
+		Assert.False(controller.TryAdmit(Guid.NewGuid(), "scan"));
+		Assert.False(controller.TryAdmit(Guid.NewGuid(), "remediate"));
+
+		Assert.Equal(2, controller.StarvedJobTypes.Count);
+		Assert.Equal(2, logger.Entries.Count(e => e.Level == LogLevel.Warning));
+	}
+
+	private sealed class ManualTimeProvider : TimeProvider
+	{
+		private DateTimeOffset _now = DateTimeOffset.UtcNow;
+
+		public override DateTimeOffset GetUtcNow() => _now;
+
+		public void Advance(TimeSpan by) => _now += by;
+	}
+
+	private sealed class RecordingLogger : ILogger<ResourceAdmissionController>
+	{
+		public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+		public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+		public bool IsEnabled(LogLevel logLevel) => true;
+
+		public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+		{
+			Entries.Add((logLevel, formatter(state, exception)));
+		}
 	}
 }
