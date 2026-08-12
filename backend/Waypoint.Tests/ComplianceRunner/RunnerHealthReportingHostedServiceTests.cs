@@ -200,6 +200,7 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 				RefreshInterval = TimeSpan.FromMinutes(5),
 			}),
 			resourceAdmission,
+			null,
 			NullLogger<RunnerHealthReportingHostedService>.Instance);
 	}
 

@@ -82,6 +82,14 @@ try
 
 	builder.Services.AddWaypointInfrastructure(builder.Configuration);
 
+	// Issue #443: the API-only half of the control-plane composition -- SSE fan-out
+	// and the run-secret cleanup sweep. Deliberately a second call, not folded into
+	// AddWaypointInfrastructure above: both dedicated runners also call that method
+	// for the control-plane repositories they share with the API, and neither has the
+	// job_events SELECT grant JobEventStreamService's poll loop needs (migration
+	// 0025) -- see AddWaypointApiSurface's doc comment for how that was found.
+	builder.Services.AddWaypointApiSurface(builder.Configuration);
+
 	builder.Services
 		.AddControllers()
 		.AddJsonOptions(options => WaypointJsonOptions.Apply(options.JsonSerializerOptions));

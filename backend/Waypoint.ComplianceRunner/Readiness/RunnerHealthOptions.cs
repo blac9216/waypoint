@@ -52,4 +52,13 @@ public sealed class RunnerHealthOptions
 	/// keep its container running, but no longer proving it is doing useful work).
 	/// </summary>
 	public TimeSpan MaxReportAge { get; set; } = TimeSpan.FromMinutes(2);
+
+	/// <summary>
+	/// Issue #443: the stable identity this process heartbeats to <c>worker_registry</c>
+	/// under (see <c>Waypoint.Core.SystemState.IWorkerRegistryWriter</c>). Defaults to
+	/// the container hostname (Docker gives each container a unique one by default);
+	/// see <c>Waypoint.DownloadRunner.DownloadRunnerOptions.WorkerId</c> for the same
+	/// default reasoning on the download-runner side.
+	/// </summary>
+	public string WorkerId { get; set; } = Environment.MachineName;
 }

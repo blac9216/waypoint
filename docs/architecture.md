@@ -42,11 +42,13 @@ availability derives from the mode — there is one codebase and one image, neve
 
 ## Component view
 
-✅ **Built**: nginx, frontend, combined backend/worker, Postgres, and the STIG Manager
-connection (M1/M2). 🚧 **In transition**: split the combined backend into a
-control-plane API plus `compliance-runner` and `download-runner` services (ADRs
-0013/0014), then continue Keycloak/RBAC work. 📋 **Planned**: updater/exporter and
-transfer automation (M6/M7).
+✅ **Built**: nginx, frontend, Postgres, the STIG Manager connection (M1/M2), and the
+split of the once-combined backend into a control-plane API plus dedicated
+`compliance-runner` and `download-runner` services (ADRs 0013/0014, issue #443) — the
+API process references neither the PowerShell SDK nor any job handler at build time
+(`backend/Waypoint.Infrastructure.Execution` is a separate project only the two
+runners reference). 🚧 **In transition**: continue Keycloak/RBAC work (M3). 📋
+**Planned**: updater/exporter and transfer automation (M6/M7).
 
 ```mermaid
 flowchart TB
@@ -80,18 +82,17 @@ flowchart TB
 
 ## The job engine (the heart of the product)
 
-✅ **Built** (M1/M2, current combined backend): queue, dispatcher, priority, in-process
-PowerShell runspace hosting, SSE streaming, and the per-target state machine below are live, serving
-`catalog-index`/`download` (M1) and discovery/scan/NSX/SRG job types (M2).
-Cooperative per-job cancellation (issue #234) and lease-recovery sweeps also shipped.
-Scheduling (cron-style, read-only job types only) is 📋 **planned for M3**.
-
-🚧 **Approved transition** (ADRs 0013/0014): the durable queue/state/event contracts
-remain, but execution ownership moves to the two long-lived runners. Each runner
-atomically claims only its allowlisted job types, owns the lease and cancellation for
-work it executes, and writes structured events directly to Postgres. The backend
-continues to enqueue/control work and serves the same SSE streams from persisted
-events.
+✅ **Built** (M1/M2, ADRs 0013/0014, issue #443): queue, dispatcher, priority,
+in-process PowerShell runspace hosting, SSE streaming, and the per-target state
+machine below are live, serving `catalog-index`/`download` (M1) and discovery/scan/
+NSX/SRG job types (M2). Cooperative per-job cancellation (issue #234) and
+lease-recovery sweeps also shipped. Execution ownership is now the two long-lived
+runners' alone: each runner atomically claims only its allowlisted job types, owns the
+lease and cancellation for work it executes, and writes structured events directly to
+Postgres. `Waypoint.Api` retains the durable queue/state/event contracts —
+enqueue/control/query, migrations, and the SSE feed the UI reads from persisted
+events — but hosts no dispatcher, no PowerShell, and no domain handler. Scheduling
+(cron-style, read-only job types only) is 📋 **planned for M3**.
 
 Everything long-running is a **job**: a scan of a site, a remediation of a component, an
 artifact download, an inventory discovery, a bundle export/import, a catalog index. One

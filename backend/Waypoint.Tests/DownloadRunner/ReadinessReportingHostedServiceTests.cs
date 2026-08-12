@@ -82,6 +82,7 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 			Options.Create(new CatalogOptions { DepotPath = depotPath }),
 			Options.Create(new DownloadRunnerOptions { ReadinessFilePath = readinessFile, ReadinessInterval = TimeSpan.FromMinutes(5) }),
 			CreateResourceAdmission(),
+			null,
 			NullLogger<ReadinessReportingHostedService>.Instance);
 
 		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
@@ -112,6 +113,7 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 			Options.Create(new CatalogOptions { DepotPath = depotPath }),
 			Options.Create(new DownloadRunnerOptions { ReadinessFilePath = readinessFile, ReadinessInterval = TimeSpan.FromMinutes(5) }),
 			CreateResourceAdmission(),
+			null,
 			NullLogger<ReadinessReportingHostedService>.Instance);
 
 		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
@@ -143,6 +145,7 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 			Options.Create(new CatalogOptions { DepotPath = depotPath }),
 			Options.Create(new DownloadRunnerOptions { ReadinessFilePath = readinessFile, ReadinessInterval = TimeSpan.FromMinutes(5) }),
 			CreateResourceAdmission(fallbackCpuCores: 2.0, fallbackMemoryBytes: 4L * 1024 * 1024 * 1024),
+			null,
 			NullLogger<ReadinessReportingHostedService>.Instance);
 
 		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
@@ -181,6 +184,7 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 			Options.Create(new CatalogOptions { DepotPath = depotPath }),
 			Options.Create(new DownloadRunnerOptions { ReadinessFilePath = readinessFile, ReadinessInterval = TimeSpan.FromMinutes(5) }),
 			CreateResourceAdmission(),
+			null,
 			NullLogger<ReadinessReportingHostedService>.Instance);
 
 		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));

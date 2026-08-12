@@ -83,6 +83,13 @@
 	background: var(--txt3);
 }
 
+/* Issue #443: the runners indicator's "some but not all available" state —
+   reuses --warn (already used by top-bar__mode--disconnected) rather than
+   introducing a new color token for a single dot. */
+.top-bar__stigman-dot.is-degraded {
+	background: var(--warn);
+}
+
 .top-bar__mode {
 	display: flex;
 	align-items: center;

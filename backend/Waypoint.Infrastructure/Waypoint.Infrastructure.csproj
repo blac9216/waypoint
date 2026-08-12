@@ -1,11 +1,23 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    Issue #443 (ADR-0013 §1): this project is now control-plane only: repositories,
+    migrations, secrets/crypto, SSE feed/replay, and the run-secret lifecycle. It
+    deliberately does NOT reference Microsoft.PowerShell.SDK or any dispatcher/
+    lease-recovery/PowerShell-host type: those, plus every PowerShell-backed
+    IJobHandler, moved to the sibling Waypoint.Infrastructure.Execution project that
+    only the two dedicated runner executables reference. Waypoint.Api references only
+    this project, never Waypoint.Infrastructure.Execution; that missing reference is
+    what makes "the API process cannot execute a job" a build-time fact instead of a
+    runtime configuration choice. The Waypoint.Runner reference below is narrower than
+    it looks: this project uses exactly one type from it, JobEventPublisher (the
+    job_events row writer both the control-plane enqueue/cancel path and the runner
+    dispatcher share); Waypoint.Runner itself carries no PowerShell dependency (see
+    its own csproj), so this reference does not reintroduce an execution capability.
+  -->
+
   <ItemGroup>
     <ProjectReference Include="..\Waypoint.Core\Waypoint.Core.csproj" />
-    <!-- ADR-0013/0014 (issue #436): the shared runner lifecycle host. Referenced here
-         only because Waypoint.Api still hosts execution in-process today; #443 moves
-         this reference (and the dispatcher/recovery DI wiring below) into a dedicated
-         runner executable project instead. -->
     <ProjectReference Include="..\Waypoint.Runner\Waypoint.Runner.csproj" />
   </ItemGroup>
 
@@ -23,25 +35,11 @@
          (ADR-0008) is raw SQL by nature, and the migrations pipeline (issue #4) is a
          small hand-rolled runner over embedded .sql files rather than EF Core's
          generated-migration model, so there is no EF Core dependency to add here. -->
-    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.4.6" />
     <PackageReference Include="Npgsql" Version="8.0.5" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="Data\Migrations\*.sql" />
-  </ItemGroup>
-
-  <!-- Issue #223: the WaypointCatalogIndex shim module (#194) is Waypoint-owned code,
-       not vendor content (CLAUDE.md License & Borrowing Policy only restricts copying
-       the SIBLING repo's .ps1 scripts, which this is not - see the module's own
-       header comment). It has to reach the published output so
-       docker-compose.yml's PowerShell__ModulePreloadPaths__0 can point at a real
-       in-container path; nothing previously copied it there. CopyToPublishDirectory
-       preserves the Modules/WaypointCatalogIndex/ subfolder structure PowerShell's
-       module-by-directory-name convention expects (ImportPSModule loads
-       <Dir>/<DirName>.psm1). -->
-  <ItemGroup>
-    <None Include="PowerShell\Modules\**\*.psm1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Lets JobQueueClaimSqlParityTests read JobQueueRepository.ClaimSql directly. The

@@ -114,13 +114,98 @@ public sealed class SystemEndpointTests : IClassFixture<SystemTestApiFactory>
 		using JsonDocument doc = JsonDocument.Parse(body);
 		Assert.Equal(0, doc.RootElement.GetProperty("stores").GetArrayLength());
 	}
+
+	/// <summary>
+	/// Issue #443: no worker has ever heartbeated -- an empty, not missing, "runners"
+	/// array, same "graceful empty state, not an error" shape as the no-stores case
+	/// above.
+	/// </summary>
+	[Fact]
+	public async Task Get_NoRunnersRegistered_ReturnsEmptyRunnersArray_NotAnError()
+	{
+		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
+		_factory.DiskUsage.Reset();
+		_factory.WorkerRegistry.Reset();
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.Equal(0, doc.RootElement.GetProperty("runners").GetArrayLength());
+	}
+
+	/// <summary>
+	/// Issue #443 AC: "GET /system distinguishes API health from compliance/download
+	/// runner availability". A fresh heartbeat reports available; ready=false reports
+	/// unavailable even though the row is fresh -- these are independent signals.
+	/// </summary>
+	[Fact]
+	public async Task Get_WithFreshHeartbeats_ReportsAvailabilityFromReadyFlag()
+	{
+		DateTimeOffset now = DateTimeOffset.UtcNow;
+		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
+		_factory.DiskUsage.Reset();
+		_factory.WorkerRegistry.Reset(
+			new WorkerHeartbeat("compliance-runner-1", ["discover", "credential-test", "scan"], Ready: true, LastSeenAt: now),
+			new WorkerHeartbeat("download-runner-1", ["catalog-index", "download"], Ready: false, LastSeenAt: now));
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		JsonElement[] runners = [.. doc.RootElement.GetProperty("runners").EnumerateArray()];
+
+		Assert.Equal(2, runners.Length);
+		JsonElement compliance = Assert.Single(runners, r => r.GetProperty("worker_id").GetString() == "compliance-runner-1");
+		Assert.True(compliance.GetProperty("available").GetBoolean());
+		JsonElement download = Assert.Single(runners, r => r.GetProperty("worker_id").GetString() == "download-runner-1");
+		Assert.False(download.GetProperty("available").GetBoolean());
+	}
+
+	/// <summary>
+	/// Issue #443 AC: "Stopping one runner affects only its domain and is visible via
+	/// GET /system" -- a stale heartbeat (older than WorkerRegistryOptions.StaleAfter)
+	/// reports unavailable even though the row's own Ready flag says true, because a
+	/// stopped process can no longer update that flag.
+	/// </summary>
+	[Fact]
+	public async Task Get_WithStaleHeartbeat_ReportsUnavailableRegardlessOfReadyFlag()
+	{
+		DateTimeOffset longAgo = DateTimeOffset.UtcNow - TimeSpan.FromHours(1);
+		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
+		_factory.DiskUsage.Reset();
+		_factory.WorkerRegistry.Reset(
+			new WorkerHeartbeat("compliance-runner-1", ["discover", "credential-test", "scan"], Ready: true, LastSeenAt: longAgo));
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		JsonElement runner = Assert.Single(doc.RootElement.GetProperty("runners").EnumerateArray());
+		Assert.False(runner.GetProperty("available").GetBoolean());
+	}
 }
 
-/// <summary>Test host wiring fakes for both /system dependencies behind role-header auth.</summary>
+/// <summary>Test host wiring fakes for all three /system dependencies behind role-header auth.</summary>
 public sealed class SystemTestApiFactory : WaypointApiFactory
 {
 	public FakeApplianceStateRepository ApplianceState { get; } = new();
 	public FakeArtifactStoreDiskUsageProvider DiskUsage { get; } = new();
+	public FakeWorkerRegistryReader WorkerRegistry { get; } = new();
 
 	protected override void ConfigureWebHost(IWebHostBuilder builder)
 	{
@@ -142,6 +227,7 @@ public sealed class SystemTestApiFactory : WaypointApiFactory
 
 			ReplaceSingleton<IApplianceStateRepository>(services, ApplianceState);
 			ReplaceSingleton<IArtifactStoreDiskUsageProvider>(services, DiskUsage);
+			ReplaceSingleton<IWorkerRegistryReader>(services, WorkerRegistry);
 		});
 	}
 
@@ -180,4 +266,18 @@ public sealed class FakeArtifactStoreDiskUsageProvider : IArtifactStoreDiskUsage
 	public void Reset(params ArtifactStoreUsage[] stores) => _stores = stores;
 
 	public IReadOnlyList<ArtifactStoreUsage> GetUsage() => _stores;
+}
+
+/// <summary>Minimal in-memory fake for controller-level tests (issue #443).</summary>
+public sealed class FakeWorkerRegistryReader : IWorkerRegistryReader
+{
+	private WorkerHeartbeat[] _heartbeats = [];
+
+	public void Reset(params WorkerHeartbeat[] heartbeats) => _heartbeats = heartbeats;
+
+	public Task<IReadOnlyList<WorkerHeartbeat>> ListAsync(CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult<IReadOnlyList<WorkerHeartbeat>>(_heartbeats);
+	}
 }

@@ -16,6 +16,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.SystemState;
 using Waypoint.Runner.Jobs;
 using Waypoint.Runner.Resources;
 
@@ -40,13 +41,22 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 	private readonly JobHandlerRegistry _handlers;
 	private readonly IOptions<RunnerHealthOptions> _options;
 	private readonly ResourceAdmissionController _resourceAdmission;
+	private readonly IWorkerRegistryWriter? _workerRegistry;
 	private readonly ILogger<RunnerHealthReportingHostedService> _logger;
 
+	/// <summary>
+	/// <paramref name="workerRegistry"/> is nullable and optional: Program.cs only
+	/// registers it when a connection string is configured (see
+	/// <c>Waypoint.DownloadRunner.ReadinessReportingHostedService</c>'s matching
+	/// constructor doc comment for the "no connection string, no wiring" reasoning this
+	/// mirrors).
+	/// </summary>
 	public RunnerHealthReportingHostedService(
 		ComplianceReadinessCheck readiness,
 		JobHandlerRegistry handlers,
 		IOptions<RunnerHealthOptions> options,
 		ResourceAdmissionController resourceAdmission,
+		IWorkerRegistryWriter? workerRegistry,
 		ILogger<RunnerHealthReportingHostedService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(readiness);
@@ -59,6 +69,7 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 		_handlers = handlers;
 		_options = options;
 		_resourceAdmission = resourceAdmission;
+		_workerRegistry = workerRegistry;
 		_logger = logger;
 	}
 
@@ -72,7 +83,8 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 		// service immediately after starting it, closing the race a first write inside
 		// ExecuteAsync leaves open (an immediate StopAsync could otherwise beat the
 		// file into existence). Mirrors the download-runner's ReadinessReportingHostedService.
-		WriteReport(_options.Value.ReportFilePath);
+		ReadinessReport initialReadiness = WriteReport(_options.Value.ReportFilePath);
+		await HeartbeatWorkerRegistryAsync(initialReadiness, cancellationToken).ConfigureAwait(false);
 		await base.StartAsync(cancellationToken).ConfigureAwait(false);
 	}
 
@@ -95,11 +107,12 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 				break;
 			}
 
-			WriteReport(options.ReportFilePath);
+			ReadinessReport readiness = WriteReport(options.ReportFilePath);
+			await HeartbeatWorkerRegistryAsync(readiness, stoppingToken).ConfigureAwait(false);
 		}
 	}
 
-	private void WriteReport(string reportFilePath)
+	private ReadinessReport WriteReport(string reportFilePath)
 	{
 		ReadinessReport readiness = _readiness.Evaluate();
 		RunnerHealthReport report = new(
@@ -131,6 +144,35 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 			// RunnerHealthCheckProbe), which is the correct outcome here too.
 			LogReportWriteFailed(reportFilePath, exception);
 		}
+
+		return readiness;
+	}
+
+	/// <summary>
+	/// Issue #443: the database-persisted twin of the file-based report above. See
+	/// <c>Waypoint.DownloadRunner.ReadinessReportingHostedService.WriteSnapshotAsync</c>'s
+	/// matching comment -- same best-effort behavior, same reason GET /system reads
+	/// this table rather than reaching into a container's filesystem.
+	/// </summary>
+	private async Task HeartbeatWorkerRegistryAsync(ReadinessReport readiness, CancellationToken cancellationToken)
+	{
+		if (_workerRegistry is null)
+		{
+			return;
+		}
+
+		try
+		{
+			await _workerRegistry.HeartbeatAsync(
+				_options.Value.WorkerId,
+				[.. _handlers.AllowedJobTypes.Order(StringComparer.Ordinal)],
+				readiness.Ready,
+				cancellationToken).ConfigureAwait(false);
+		}
+		catch (Exception exception) when (exception is not OperationCanceledException)
+		{
+			LogWorkerHeartbeatFailed(exception);
+		}
 	}
 
 	/// <summary>Issue #437: snapshots <see cref="ResourceAdmissionController"/>'s current discovered/effective/admitted state for the health report.</summary>
@@ -147,4 +189,7 @@ public sealed partial class RunnerHealthReportingHostedService : BackgroundServi
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Failed to write runner health report to '{ReportFilePath}'")]
 	private partial void LogReportWriteFailed(string reportFilePath, Exception exception);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Failed to write this worker's heartbeat to worker_registry")]
+	private partial void LogWorkerHeartbeatFailed(Exception exception);
 }
