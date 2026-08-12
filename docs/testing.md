@@ -1062,3 +1062,138 @@ in its own README as it lands:
   [ADR-0007](adr/0007-frontend.md)) and `npm test`. See `frontend/README.md`.
 - **`deploy/`** — bring-up and the SSE `proxy_buffering off` requirement from
   [ADR-0003](adr/0003-reverse-proxy-nginx.md). See `deploy/README.md`.
+
+## Fresh-stack M1/M2 parity matrix (issue #444, epic #433)
+
+Epic #433 replaced the M1/M2 backend's in-process dispatch with the runner topology
+(ADRs 0013/0014/0015): `Waypoint.Api` enqueues and answers queries only,
+`compliance-runner`/`download-runner` claim, execute, and own leases/events. Issue
+#444 is the closing proof that every M1/M2-delivered workflow still works end to end
+on that topology, and that a missing runner or a missing operator-gated tool fails
+**honestly** (a clear error, not a hang or a silent no-op) rather than passing
+undetected. This section maps each acceptance-matrix item to where it is proven —
+an automated test, a deploy smoke-test step, or a disclosed gap — so a reviewer (or a
+future change) can tell what still covers what without re-deriving it.
+
+| Matrix item | Covered by |
+| --- | --- |
+| Cross-process queue behavior (API enqueues, runner-scoped registry claims) | `backend/Waypoint.Tests/Infrastructure/Postgres/CrossProcessRunnerParityMatrixTests.cs` (`ApiEnqueues_IndependentRunnerRepositoryClaims_AdvancesToTerminal`) |
+| API restart before claim (run-secret survival) | `CrossProcessRunnerParityMatrixTests.ApiRestartsBeforeClaim_RunSecretStillDecryptsForTheRunnerSideClaim` (extends the store/decrypt round trip `RunSecretStoreTests.cs`/#450 already proved, across an actual ASP.NET host teardown/rebuild) |
+| Runner restart mid-run recovery | `CrossProcessRunnerParityMatrixTests.RunnerRestartsMidRun_ExpiredLeaseRecovered_AndClaimedByTheReplacementWorker` (composes `JobLeaseRecoveryTests`' expiry primitive across two distinct worker identities) |
+| Duplicate-replica claim safety | `CrossProcessRunnerParityMatrixTests.TwoReplicasOfTheSameRunner_RaceAFannedOutRun_NoDoubleClaimNoOrphan` (also `JobQueueRepositoryAllowlistClaimTests.IdenticalReplicas_...` at higher concurrency) — plus live: `deploy/scripts/fresh-stack-smoke-test.sh` step 12 (`--scale compliance-runner=2`) |
+| One-domain-unavailable isolation | `CrossProcessRunnerParityMatrixTests.OneExecutionDomainUnavailable_TheOtherDomainsQueueIsUnaffected` — plus live: smoke-test step 11 (`docker compose stop compliance-runner`, confirm `download-runner` still available in `/system`) |
+| All services healthy on a fresh `--build` | smoke-test step 1 |
+| Login | smoke-test step 2 |
+| `GET /system` reports both runner domains ready with capabilities | smoke-test step 3; `SystemApiTests.cs`/`WorkerRegistryRepositoryTests.cs` at the unit/integration level; `WorkerRegistryRunnerRoleGrantTests.cs` proves the actual least-privilege runner roles (not the test fixture's owner role) can execute the real upsert — see "A real bug this matrix caught" below |
+| Catalog-index works without the gated tool | smoke-test step 4; `CatalogIndexJobHandlerEndToEndTests.cs` (never wrapped by `ToolGatedDownloadJobHandler` — indexing is a pure filesystem walk) |
+| Download fails with the clear tool-absent message | smoke-test step 5; `ToolGatedDownloadJobHandler`'s own unit coverage in `backend/Waypoint.Tests/` |
+| Locally-installed test tool success path | **Gap, disclosed, not closed** — see below |
+| Site/target/credential setup via API | smoke-test step 6; `SitesTargetsApiTests.cs`, `CredentialsApiTests.cs` |
+| Service-credential scan: enqueue → compliance-runner claim → honest failure against an invented unreachable target | smoke-test step 7; `ScanJobHandlerEndToEndTests.cs` |
+| Personal-credential scan: same, ad hoc credential | smoke-test step 8; `RunSecretScanRunTests.cs` |
+| Cancellation mid-run | smoke-test step 9; `AuthFailureHaltTests.cs`/job-cancel unit coverage |
+| SSE stream reconnect/replay | smoke-test step 10 (route-level: answers `text/event-stream` live); `proxy_buffering off` streaming proof is `deploy/README.md` "Verifying SSE streaming"; `JobEventStreamServiceTests.cs`/`EventStreamEndpointTests.cs` at the integration level. Reconnect/replay **from a browser `EventSource`** is a Playwright-shaped check — see the frontend gap below |
+| Secret canary scan (no plaintext in DB/artifacts/logs) | smoke-test step 13; `RunSecretScanRunTests.CreateScanRun_WithRunSecret_NeverPersistedInsecurely_CanaryProof` |
+| Discovery inventory caching | `AutoDiscoverOnScanInitiationTests.cs`, `DiscoverJobHandlerEndToEndTests.cs` |
+| Stage resume / retry | `JobStageDispatcherTests.cs`, `ScanJobHandlerEndToEndTests.cs` (`StageComplete` outcome) |
+| Artifact/result serving | `RunArtifactsApiTests.cs` |
+
+### A real bug this matrix caught (issue #444, fixed by migration 0028)
+
+Running the smoke script against a genuinely fresh Compose stack (not a cached
+build, not a reused `pgdata` volume) found that `compliance-runner`/`download-runner`
+never actually appeared in `GET /system`'s `runners` list, and every `scan` job
+claimed by `compliance-runner` sat at `queued` forever with `attempt_count: 0`.
+Migration `0027_worker_registry_runner_grants.sql` (issue #443) granted the two
+runner roles `INSERT, UPDATE` on `worker_registry` and reasoned "SELECT is not
+needed... neither runner role ever SELECTs this table" — true of the application's
+own SQL text, false about what Postgres requires to execute it:
+`WorkerRegistryRepository.HeartbeatAsync`'s `INSERT ... ON CONFLICT (worker_id) DO
+UPDATE ...` needs SELECT on the target table to evaluate the conflict and the
+`EXCLUDED`-row reference, even with no explicit `SELECT` anywhere in the C# or
+embedded SQL. Both prior test suites (`WorkerRegistryRepositoryTests.cs`,
+`SchemaMigrationTests.cs`) ran against the full-privilege test-fixture role, never
+the actual least-privilege `waypoint_compliance_runner`/`waypoint_download_runner`
+roles the shipped migrations grant to — so this shipped, twice, undetected, until a
+live fresh-stack run hit `permission denied for table worker_registry` against a
+fully-migrated database.
+
+Fixed by `0028_worker_registry_upsert_needs_select.sql` (grants the missing
+`SELECT`) and closed for regression by
+`backend/Waypoint.Tests/Infrastructure/Postgres/WorkerRegistryRunnerRoleGrantTests.cs`,
+which runs the real upsert through a connection authenticated as each runner role
+(not the fixture's owner role) — verified to fail red on `main` before 0028 and pass
+green after it.
+
+### A real operator-visibility gap this matrix found (disclosed, not fixed here)
+
+`ResourceAdmissionController` (issue #437) silently released every claimed `scan`
+job back to `queued` in this sandbox: `CgroupResourceDiscovery` found no usable
+cgroup limits (a nested-Docker/devcontainer property, not a product defect) and fell
+back to a conservative 1 CPU core, below `scan`'s own 2.0-core
+`JobResourceProfiles` weight — so `scan` could never be admitted, and the denial
+(`LogAdmissionDenied`) is logged at **Debug**, invisible at the default
+`Information` level. An operator on an under-resourced host would see scans queue
+forever with no visible diagnostic pointing at resource admission as the cause. The
+smoke script works around this with a `RunnerResources__FallbackCpuCores`/
+`FallbackMemoryBytes` environment override (documented inline in the script) rather
+than changing product code or log levels — that decision (raise the fallback floor,
+promote the denial log level, or add an operator-facing "job admission-starved"
+signal) belongs to a follow-up issue, not this one.
+
+### Disclosed gaps
+
+- **Locally-installed test tool success path.** `deploy/README.md` "Compliance
+  content and managed-tool state" documents the `managed-tool` named volume
+  `download-runner` mounts read-write at `/var/lib/waypoint/managed-tool`
+  (`ManagedToolOptions.ToolStatePath`) as the interface an operator's install flow
+  populates. Exercising the *success* path with an invented stub executable placed
+  in that volume was judged not worth the risk of the stub being mistaken for
+  real tool-shape guidance in a public repo, and was not automated here — the
+  absence path (`ToolGatedDownloadJobHandler`'s clear failure) is proven live and
+  in unit tests, but no test asserts a populated volume flips a `download` job to
+  success. A follow-up issue can add a throwaway stub (clearly marked invented,
+  never resembling `vcf-download-tool`'s real invocation contract) to
+  `deploy/scripts/fresh-stack-smoke-test.sh` if this gap needs closing.
+- **Frontend/Playwright live-stack checks.** `frontend/package.json` pins
+  `"node": ">=22.19.0"`; the sandbox that authored #444 has Node 20.20.2, so
+  `npm ci` refuses outright (`EBADENGINE`) and no Playwright run against a live
+  nginx-served frontend could be executed. The operator-visible parity items the
+  issue's Playwright list would have covered (site/target/credential CRUD forms,
+  scan/download initiation, cancellation, the live SSE run view, the Runners
+  indicator reflecting a stopped runner) are covered instead by the API-level
+  smoke-test steps above, which exercise the same backend behavior the UI calls
+  into without a browser. Reconnect/replay semantics of the browser's own
+  `EventSource` object specifically are not exercised by any check in this
+  matrix. A reviewer or follow-up session with Node 22 available should run
+  `frontend`'s Playwright suite (once one exists for these flows) against a stack
+  brought up with this same smoke script before treating the operator-visible
+  surface as fully proven.
+
+### Running the smoke script
+
+```bash
+cd deploy
+./scripts/fresh-stack-smoke-test.sh <your-slug> <your-port>
+```
+
+Follows the isolation recipe above automatically (unique `-p` derived from the slug,
+unique `WAYPOINT_HTTPS_PORT`) and tears its own project down (`down -v`) on exit,
+including on failure. It also self-provisions what `deploy/README.md`'s manual
+"Bring-up" steps 3/4 otherwise require by hand (a dev admin password + hash, a
+generated secrets master key, mounted into all three trusted services) so a fresh
+run needs no pre-existing `../config/` state, and auto-detects the devcontainer
+bind-mount host-path trap described earlier in this document (translating
+`frontend/dist`, `nginx/conf.d`, `nginx/certs`, `postgres/initdb`, and the
+generated master-key/admin-hash sources to their host-absolute paths when it
+detects it is itself running inside a mounted container).
+
+If the shipped `edge` network's pinned `192.168.240.0/24`
+collides with a concurrent stack on a shared host, pass an uncommitted override file
+via `WAYPOINT_SMOKE_OVERRIDE_FILE` (a scratch compose file overriding both the `edge`
+subnet and the backend's `ForwardedHeaders__KnownNetworks__0` to match — the two must
+move together, since the backend only trusts forwarded headers from that exact
+subnet). Never commit an override file; the shipped subnet is correct on a real
+appliance host with no concurrent stacks. The same variable can carry the
+devcontainer path-translation override too (the script generates one automatically
+when unset and needed); passing your own file skips the auto-detection.
