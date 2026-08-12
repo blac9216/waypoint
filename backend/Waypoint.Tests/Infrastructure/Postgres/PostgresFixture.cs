@@ -87,6 +87,41 @@ public sealed class PostgresFixture : IAsyncLifetime
 		}
 
 		await WaitUntilReadyAsync().ConfigureAwait(false);
+		await CreateRunnerRolesAsync().ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Creates the two runner login roles migration 0025 grants to
+	/// (<c>backend/Waypoint.Infrastructure/Data/Migrations/0025_runner_db_roles.sql</c>),
+	/// mirroring what <c>deploy/postgres/initdb/01-runner-roles.sh</c> does for a real
+	/// stack's fresh <c>pgdata</c> volume. This fixture starts a bare
+	/// <c>postgres:16-alpine</c> container with no init scripts, so without this step
+	/// every test that runs migrations against it would fail the moment 0025 tries to
+	/// <c>GRANT</c> to a role that does not exist — the same "role must already exist"
+	/// failure 0025's own header comment describes as the correct behavior for a real
+	/// deployment missing the init script, just surfacing here instead against a test
+	/// container that intentionally never runs one.
+	/// </summary>
+	private async Task CreateRunnerRolesAsync()
+	{
+		await using NpgsqlConnection connection = new(ConnectionString);
+		await connection.OpenAsync().ConfigureAwait(false);
+
+		await using NpgsqlCommand command = new(
+			"""
+			DO $$
+			BEGIN
+				IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'waypoint_compliance_runner') THEN
+					CREATE ROLE waypoint_compliance_runner LOGIN PASSWORD 'waypoint_test' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+				END IF;
+				IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'waypoint_download_runner') THEN
+					CREATE ROLE waypoint_download_runner LOGIN PASSWORD 'waypoint_test' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+				END IF;
+			END
+			$$;
+			""",
+			connection);
+		await command.ExecuteNonQueryAsync().ConfigureAwait(false);
 	}
 
 	public async Task DisposeAsync()
