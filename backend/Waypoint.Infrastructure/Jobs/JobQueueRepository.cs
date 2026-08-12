@@ -60,7 +60,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	// That clause -- together with the state = 'queued' predicate -- is what
 	// JobsQueueClaimTests (issue #4) proved never double-claims under real concurrency,
 	// and it is what idx_jobs_queue_claim is a partial index on (job_type leads the
-	// index as of #435/0023 so the job_type = ANY($3) predicate below stays index-
+	// index as of #435/0024 so the job_type = ANY($3) predicate below stays index-
 	// supported rather than falling back to scanning every claimable row).
 	//
 	// It is NOT true that this query is byte-identical to that test's. PR #126 claimed
