@@ -26,6 +26,20 @@
 
 set -euo pipefail
 
+# Load nvm and select Node 22 for the current shell. Defined (and NVM_DIR
+# exported) once at the top level rather than inside each `(...)` subshell,
+# so the assignment is not flagged as lost to a subshell (SC2030/SC2031).
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+use_node22() {
+	if [[ -s "${NVM_DIR}/nvm.sh" ]]; then
+		# shellcheck disable=SC1091
+		. "${NVM_DIR}/nvm.sh"
+	fi
+	if command -v nvm >/dev/null 2>&1; then
+		nvm use 22 >/dev/null 2>&1 || true
+	fi
+}
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
 REPO_ROOT="$(cd -- "${DEPLOY_DIR}/.." &>/dev/null && pwd)"
@@ -77,10 +91,7 @@ fi
 if [[ ! -f "${FRONTEND_DIR}/dist/index.html" ]]; then
 	log "frontend/dist missing -- building it first (Node 22 required)"
 	(
-		export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-		# shellcheck disable=SC1091
-		[[ -s "${NVM_DIR}/nvm.sh" ]] && . "${NVM_DIR}/nvm.sh"
-		command -v nvm >/dev/null 2>&1 && nvm use 22 >/dev/null 2>&1 || true
+		use_node22
 		cd "${FRONTEND_DIR}"
 		npm ci
 		npm run build
@@ -366,10 +377,7 @@ fi
 
 log "Running Playwright against ${PLAYWRIGHT_BASE_URL}"
 (
-	export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-	# shellcheck disable=SC1091
-	[[ -s "${NVM_DIR}/nvm.sh" ]] && . "${NVM_DIR}/nvm.sh"
-	command -v nvm >/dev/null 2>&1 && nvm use 22 >/dev/null 2>&1 || true
+	use_node22
 	cd "${FRONTEND_DIR}"
 	export E2E_BASE_URL="${PLAYWRIGHT_BASE_URL}"
 	export E2E_ADMIN_PASSWORD="${ADMIN_PASSWORD}"

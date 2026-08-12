@@ -1266,7 +1266,7 @@ never scans `frontend/e2e/`).
 
 If the shipped `edge` network's pinned subnet collides with a concurrent
 stack on a shared host, `WAYPOINT_E2E_SUBNET` (e.g.
-`WAYPOINT_E2E_SUBNET="192.168.241.0/24"`) overrides both the `edge` subnet
+`WAYPOINT_E2E_SUBNET="203.0.113.0/24"`) overrides both the `edge` subnet
 and the backend's `ForwardedHeaders__KnownNetworks__0` together, same
 requirement as the smoke script's `WAYPOINT_SMOKE_OVERRIDE_FILE`.
 `WAYPOINT_E2E_OVERRIDE_FILE` carries the same devcontainer bind-mount
