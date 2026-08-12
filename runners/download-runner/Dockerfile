@@ -68,19 +68,25 @@ RUN apt-get -y update --fix-missing && \
 
 WORKDIR /app
 
-# Project-owned PowerShell only: the vendor script this runner's M1 call
-# graph requires (vendor/) and the Waypoint-authored shim modules that
-# dot-source it (modules/). No vendor installer packages, tokens, or
-# credentials belong under powershell/ — see .dockerignore and the header
-# comment above.
+# Project-owned PowerShell vendor script only: vcf-download-manager.common.ps1,
+# the sibling-repo import this runner's M1 call graph dot-sources (vendor/). No
+# vendor installer packages, tokens, or credentials belong under powershell/ —
+# see .dockerignore and the header comment above.
+#
+# The Waypoint-authored WaypointCatalogIndex/WaypointDownload shim modules are
+# NOT copied from here — they live once, under backend/Waypoint.Infrastructure.
+# Execution/PowerShell/Modules/, and reach /app/PowerShell/Modules/ only via
+# that project's CopyToPublishDirectory (issue #456) in the COPY below. Do not
+# reintroduce a second on-disk copy under runners/download-runner/powershell/.
 COPY runners/download-runner/powershell/ /app/PowerShell/
 
 # .NET host publish output (issue #442, closing the gap #441 left open -- see
 # header comment). Includes Waypoint.DownloadRunner.dll and the Waypoint-owned
-# WaypointCatalogIndex shim module Waypoint.Infrastructure.csproj copies into the
-# publish output; it dot-sources vcf-download-manager.common.ps1 under
-# /app/PowerShell/vendor at runtime (see WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH
-# in deploy/docker-compose.yml).
+# WaypointCatalogIndex/WaypointDownload shim modules Waypoint.Infrastructure.
+# Execution.csproj copies into the publish output at PowerShell/Modules/ (the
+# single canonical source, issue #456); at runtime they dot-source
+# vcf-download-manager.common.ps1 under /app/PowerShell/vendor (see
+# WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH in deploy/docker-compose.yml).
 COPY --from=dotnet-build /app /app
 
 # Non-root: mcr.microsoft.com/dotnet/sdk:8.0 already ships the same `app`
