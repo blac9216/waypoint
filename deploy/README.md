@@ -9,22 +9,28 @@ source-build direction is recorded in [ADR-0013](../docs/adr/0013-control-plane-
 [ADR-0014](../docs/adr/0014-runner-job-ownership.md), and
 [ADR-0015](../docs/adr/0015-source-build-and-operator-export.md).
 
-> **Current implementation is transitional.** The compose file below still executes
-> jobs inside `backend` and mounts scripts from sibling checkouts. The approved target
-> adds long-lived `compliance-runner` and `download-runner` services, moves the
-> project-owned scripts and Dockerfiles into their build contexts in this repository,
-> and leaves `backend` as the control plane. These instructions describe what works
-> today; they are not the target topology.
+> **Runner topology landed in issue [#442](https://github.com/blac9216/waypoint/issues/442).**
+> `backend` is now control-plane only (ADR-0013 §1) — it no longer mounts execution
+> scripts or domain tool stores read-write, and `compliance-runner`/`download-runner`
+> are the two services that actually claim and execute jobs. `backend`'s in-process
+> job dispatcher registration is still present in code (issue
+> [#443](https://github.com/blac9216/waypoint/issues/443) removes it) but has no
+> execution mounts left to work with in this compose file, so in practice the two
+> runners are what does the work.
 
-## Dev compose stack (M1, epic [#1](https://github.com/blac9216/waypoint/issues/1))
+## Dev compose stack (epic [#1](https://github.com/blac9216/waypoint/issues/1), runners issue [#442](https://github.com/blac9216/waypoint/issues/442))
 
-`docker-compose.yml` stands up the M1 development topology from
-[`docs/architecture.md`](../docs/architecture.md) (component view) and
-[ADR-0003](../docs/adr/0003-reverse-proxy-nginx.md):
+`docker-compose.yml` stands up the development topology from
+[`docs/architecture.md`](../docs/architecture.md) (component view),
+[ADR-0003](../docs/adr/0003-reverse-proxy-nginx.md), and
+[ADR-0013](../docs/adr/0013-control-plane-and-runners.md)/[ADR-0014](../docs/adr/0014-runner-job-ownership.md):
 
 ```
 browser --TLS--> nginx --/api--> backend --> postgres (internal network only)
                     \--> static frontend bundle (frontend/dist/, bind-mounted)
+
+compliance-runner --> postgres (internal network only; not reachable from nginx/host)
+download-runner   --> postgres (internal network only; not reachable from nginx/host)
 ```
 
 - **nginx** terminates dev TLS, serves the frontend static bundle bind-mounted
@@ -37,20 +43,97 @@ browser --TLS--> nginx --/api--> backend --> postgres (internal network only)
   buffer fills or the upstream closes. See "Verifying SSE streaming" below
   for a durable way to check this holds.
 - **backend** is the real ASP.NET Core API (issue #3), built from `../backend`.
-  Local auth (ADR-0004 rollout note) is a dev-grade single admin user with no
-  compiled-in default password — see "Bring-up" step 3 to enable login, and
-  step 4 to enable the credential store's secret encryption.
+  It owns REST/RBAC/SSE, enqueueing, and run controls — it does not execute jobs
+  (ADR-0013 §1). Local auth (ADR-0004 rollout note) is a dev-grade single admin
+  user with no compiled-in default password — see "Bring-up" step 3 to enable
+  login, and step 4 to enable the credential store's secret encryption.
+- **compliance-runner** and **download-runner** are long-lived Generic Host
+  services (ADR-0013 §3), each claiming only its allowlisted job types
+  (`discover`/`credential-test`/`scan`/later `remediate`, and
+  `catalog-index`/`download` respectively) directly from Postgres
+  (ADR-0014 §1) and hosting PowerShell in-process. Neither has an HTTP listener
+  or a compose `ports:` mapping — both sit on the `internal` network only, never
+  reachable from `nginx` or the host. Their Dockerfiles
+  (`../runners/compliance-runner/Dockerfile`, `../runners/download-runner/Dockerfile`)
+  build from the repo root, same convention as `backend/Dockerfile` (issue #92),
+  because each now has its own `dotnet-build` stage that compiles its .NET host
+  executable alongside its domain toolchain (PowerCLI/cinc-auditor/SAF for
+  compliance; pwsh + vendor scripts for download). One replica of each is the
+  default (ADR-0013 §6) — see "Replica-safe scaling" below before setting
+  `deploy.replicas` on either.
 - **postgres** (16) sits on an `internal: true` compose network with no
-  published port — reachable only from `backend`, never from the host or
-  from `nginx`.
+  published port — reachable only from `backend` and the two runners, never
+  from the host or from `nginx`. Each of the three connects as its own
+  least-privilege database role (`waypoint` for the backend,
+  `waypoint_compliance_runner`/`waypoint_download_runner` for the runners) —
+  see "Database roles" below.
 
-All three services declare a Docker `healthcheck`.
+All five services declare a Docker `healthcheck`. The two runners report health
+via a file sentinel rather than a loopback HTTP call, since neither has an HTTP
+listener to probe (ADR-0013 §1) — see "Runner health checks" below.
 
-The target compose topology adds both runners on the internal network. Each claims
-only its allowlisted job types from Postgres, mounts only its required managed stores,
-and reports structured events to Postgres for the backend SSE stream. One replica of
-each is the default; additional replicas are an optional isolation/scaling control,
-not a prerequisite for concurrent jobs.
+### Database roles (issue #442, ADR-0014 §7)
+
+`postgres/initdb/01-runner-roles.sh` runs once, the first time the `pgdata`
+volume is initialized (Postgres's own `docker-entrypoint-initdb.d` convention —
+it does **not** re-run against an existing volume), and creates two
+`NOSUPERUSER NOCREATEDB NOCREATEROLE` login roles: `waypoint_compliance_runner`
+and `waypoint_download_runner`. Their passwords come from
+`POSTGRES_COMPLIANCE_RUNNER_PASSWORD`/`POSTGRES_DOWNLOAD_RUNNER_PASSWORD`
+(`deploy/.env`, gitignored — same convention as `POSTGRES_PASSWORD`; dev-only
+defaults apply if unset).
+
+Table-level `GRANT`s for those two roles live in a versioned backend migration —
+`backend/Waypoint.Infrastructure/Data/Migrations/0025_runner_db_roles.sql` —
+applied by `backend` (the sole migrator, `Database:RunMigrationsOnStartup`)
+using its own owning `${POSTGRES_USER}` connection. Splitting role creation
+(needs the actual password, so it can't live in a committed `.sql` file) from
+grants (versioned alongside schema, so a later migration adding a table also
+grants it) means an operator with a pre-#442 `pgdata` volume only needs to
+create the two roles once by hand before `backend` next migrates — see that
+migration's header comment for the exact tables/columns each role gets and
+why. **If `backend` starts before `postgres`'s init scripts have created the
+roles** (only possible on a genuinely fresh volume with a misordered manual
+`docker exec`, not through normal `docker compose up`), migration 0025 fails
+loudly (`role "waypoint_compliance_runner" does not exist`) rather than
+silently granting nothing — `docker compose logs backend` names the missing
+role.
+
+### Runner health checks (issue #442, ADR-0013 §1)
+
+`compliance-runner` and `download-runner` have no REST/SSE surface, so neither
+can answer a `wget --spider`-style probe the way `backend`/`nginx` do. Instead
+each runs a background hosted service that re-evaluates domain-specific
+readiness on an interval (PowerShell module/content mounts, artifact-store
+writability, master-key availability, and for `download-runner` a real
+Postgres reachability check) and writes a small JSON report to a fixed path
+inside the container; the same binary's `--health-check` flag reads that
+report back and exits `0`/`1` — mirroring `backend`'s own
+`dotnet Waypoint.Api.dll --health-check` convention, just backed by a file
+instead of a loopback HTTP call. A **missing runner dependency** (e.g. no
+compliance-content volume populated, or the master key mount left
+uncommented-out) makes that runner's own healthcheck fail — Compose reports
+that one container `unhealthy` — without affecting `backend`'s or the other
+runner's health, since each container's healthcheck is independent and no
+other service `depends_on` a runner with `condition: service_healthy`.
+
+### Replica-safe scaling
+
+The queue claim (`FOR UPDATE SKIP LOCKED`, filtered by job-type allowlist) and
+worker identity (`{MachineName}:{ProcessId}:{Guid}`, generated per process at
+startup — see `JobDispatcherHostedService`) are both already safe under
+multiple identical replicas of the same runner: two containers claiming from
+the same queue can never claim the same row, and each gets a distinct
+`claimed_by` value derived from its own container hostname/pid/random suffix,
+with no compose-level identity configuration required. Scaling
+(`docker compose up -d --scale compliance-runner=2`, or a compose-file
+`deploy.replicas` override) is therefore safe to do, but it does not create
+more host CPU/memory — resource-aware admission (ADR-0014 §5,
+`RunnerResources` config section) bounds each replica's own concurrency from
+its container's cgroup allocation independently, so N replicas compete for the
+same underlying host resources rather than multiplying them. It remains an
+operator option, not the default (ADR-0013 §6) — one replica of each runner
+starts by default.
 
 ### Networking: nginx depends on Docker's embedded DNS
 
@@ -130,14 +213,14 @@ the frontend bundle).
    which turns what would otherwise be a silent failure into a loud one.
    Docker's *default* behaviour for a missing bind source is to create it —
    as a **root-owned** empty directory — and the resulting stack looks fine:
-   all three services report `healthy`, and `curl -k https://localhost:8443/`
+   every service still reports `healthy`, and `curl -k https://localhost:8443/`
    returns a bare nginx **403 Forbidden** (`try_files` falls through to an
    empty directory with autoindex off), not an empty listing or a 404. Build
    the bundle and bring the stack up again.
 
    **The guard covers a *missing* `frontend/dist`, not an *empty* one.** If the
-   directory exists but has no files in it, the mount succeeds, all three
-   services still report `healthy`, and `/` still returns that same bare nginx
+   directory exists but has no files in it, the mount succeeds, every service
+   still reports `healthy`, and `/` still returns that same bare nginx
    **403 Forbidden** — verified with the guard in place. This state is easy to
    reach by accident: `vite build` empties `outDir` before it writes anything,
    so a build that fails partway leaves exactly an empty `dist/`. If you get a
@@ -194,6 +277,11 @@ the frontend bundle).
    POSTGRES_USER=waypoint
    POSTGRES_PASSWORD=waypoint_dev_only
    POSTGRES_DB=waypoint
+   # Issue #442: passwords for the two dedicated runner DB roles. Same
+   # dev-only-default convention as POSTGRES_PASSWORD above — see "Database
+   # roles" and postgres/initdb/01-runner-roles.sh.
+   POSTGRES_COMPLIANCE_RUNNER_PASSWORD=waypoint_compliance_runner_dev_only
+   POSTGRES_DOWNLOAD_RUNNER_PASSWORD=waypoint_download_runner_dev_only
    WAYPOINT_HTTPS_PORT=8443
    ```
 
@@ -208,7 +296,12 @@ the frontend bundle).
    Changing `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` here is enough on
    its own — the `backend` service composes its `ConnectionStrings__Waypoint`
    from the same three variables (#103), so there is no separate connection
-   string to keep in sync.
+   string to keep in sync. `POSTGRES_COMPLIANCE_RUNNER_PASSWORD`/
+   `POSTGRES_DOWNLOAD_RUNNER_PASSWORD` only take effect on a **fresh**
+   `pgdata` volume (`docker-entrypoint-initdb.d` scripts never re-run against
+   an existing one — same rule `POSTGRES_PASSWORD` itself already follows);
+   changing them against a stack that already has data requires `ALTER ROLE
+   ... PASSWORD` by hand, or a fresh volume.
 
 4. Generate a secrets master key (issue #405) so the credential store works.
    ADR-0005's envelope encryption (the AWX pattern) fails closed without
@@ -231,21 +324,27 @@ the frontend bundle).
    those credentials permanently unrecoverable — back it up somewhere
    outside the repo if the stack's credential data matters to you.
 
-   Then uncomment the `waypoint-master-key` bind mount on the `backend`
-   service in `docker-compose.yml`. On startup the backend reads the key
-   from `WAYPOINT_MASTER_KEY_FILE`
+   Then uncomment the `waypoint-master-key` bind mount **on all three
+   trusted services** — `backend`, `compliance-runner`, and
+   `download-runner` — in `docker-compose.yml` (issue #442: every service
+   that decrypts a credential needs the same key). Each reads it from
+   `WAYPOINT_MASTER_KEY_FILE`
    (`/run/secrets/waypoint-master-key` in-container) — unlike the admin
    password hash above, there is no environment-variable fallback; a
    mounted file is the only delivery path.
 
-   **The key file must be readable by the container's app user.** The
+   **The key file must be readable by each container's app user.** The
    backend image (`backend/Dockerfile`) runs as the non-root `app` user
    baked into the `mcr.microsoft.com/dotnet/aspnet:8.0` base image — uid
-   `1654` — not root and not your host user. A key file created with a
-   tight `0600` and left owned by your own (or root's) uid is exactly the
-   permission trap the admin-hash mount already warns about implicitly:
-   `app` can't read it, and `FileMasterKeyProvider` reports
-   `Access denied` on first use. For this dev stack, the practical fix is
+   `1654`. The two runner images (`runners/compliance-runner/Dockerfile`,
+   `runners/download-runner/Dockerfile`) run as a `waypoint` user their own
+   Dockerfiles create at the same uid, `1654`, specifically so one file
+   permission works for all three — not root and not your host user. A key
+   file created with a tight `0600` and left owned by your own (or root's)
+   uid is exactly the permission trap the admin-hash mount already warns
+   about implicitly: none of the three can read it, and
+   `FileMasterKeyProvider` reports `Access denied` on first use for
+   whichever one tries first. For this dev stack, the practical fix is
    either:
 
    ```bash
@@ -263,17 +362,18 @@ the frontend bundle).
    **A bad key file is cached until restart (issue #407).** Because
    `FileMasterKeyProvider` loads the key lazily and caches the result
    (including a failure) for the process lifetime, fixing permissions
-   *after* the backend has already attempted and failed a read does not
-   help until the backend container restarts:
+   *after* a service has already attempted and failed a read does not
+   help until that container restarts:
 
    ```bash
-   docker compose restart backend
+   docker compose restart backend compliance-runner download-runner
    ```
 
-   Leaving the mount commented out (or the file absent) is fine — the
-   stack still comes up healthy and serves `/api/v1/health` and login; it
-   just fails closed on any secret-bearing write with
-   `FileMasterKeyProvider`'s own error until this step is done.
+   Leaving the mount commented out (or the file absent) is fine on all
+   three services — the stack still comes up healthy and serves
+   `/api/v1/health` and login; it just fails closed on any secret-bearing
+   write or decrypt with `FileMasterKeyProvider`'s own error until this
+   step is done.
 
 5. Bring up the stack from `deploy/`:
 
@@ -290,8 +390,9 @@ the frontend bundle).
 
    ```bash
    # Exact-match on the health state: a substring test would also match
-   # "unhealthy". All three containers must pass, not just the first one.
-   # docker compose ps -q derives the *actual* container IDs for this
+   # "unhealthy". All five containers must pass (nginx, backend, postgres,
+   # compliance-runner, download-runner - issue #442), not just the first
+   # one. docker compose ps -q derives the *actual* container IDs for this
    # project - correct whether you're on the plain default stack or an
    # isolated one (see docs/testing.md "The recipe"), since Compose no
    # longer pins fixed container_name values (issue #68).
@@ -302,7 +403,7 @@ the frontend bundle).
        sleep 1
      done
    done
-   docker compose ps          # all three should report "healthy"
+   docker compose ps          # all five should report "healthy"
    ```
 
    (If you are running under the `docs/testing.md` isolation recipe, prefix
@@ -521,167 +622,40 @@ be) — that is the regression this check exists to catch.
 This is docs-only until a real automated test harness lands (the backend SSE
 work is issue #7); revisit then.
 
-### `dev/local/` convention (gitignored)
+### Compliance content and managed-tool state (issue #442)
 
-For the transitional development stack, this repo's own test depot
-token/config and a locally acquired `vcf-download-tool` binary are
-**never** committed here. They're borrowed at runtime from the private
-sibling repo (`vcf-docker-download`) by mounting them from a repo-root
-`dev/local/` directory, which is git-ignored (see the root `.gitignore`
-entry `dev/local/`) and not created by this repo — you populate it
-yourself, locally, from your own copy of the sibling repo.
+The three PowerShell-script bind mounts this section used to document
+(`dev/local/`, `WAYPOINT_VCF_SCRIPTS_DIR`, `WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR`)
+are gone from `backend` — ADR-0013/ADR-0015 moved the project-owned vendor
+scripts into `../runners/compliance-runner/powershell/` and
+`../runners/download-runner/powershell/`, baked directly into each runner's
+image at build time (see each Dockerfile's header comment), so there is
+nothing left for `backend` — or an operator — to bind-mount for them.
 
-The convention: `dev/local/` is the mount point a Waypoint backend
-container uses to reach that borrowed material, e.g.
+What operators still provide at runtime, as named volumes rather than host
+bind mounts (populate them by `docker cp`-ing content in, or a future
+provisioning UI):
 
-```
-dev/local/
-├── depot-token          # borrowed Broadcom depot token, dev/test use only
-├── depot-config.json    # borrowed depot/site config
-└── vcf-download-tool     # locally acquired binary; never project-published
-```
+- **`compliance-profiles`** (mounted read-only into `compliance-runner` at
+  `/opt/waypoint/profiles`) — InSpec compliance content
+  (`ScanOptions.ProfilePath`/`NsxProfilePath`/`SrgProfilePath`, all under this
+  one root). A scan job fails closed with a clear "not mounted" readiness
+  problem (`ComplianceReadinessCheck`) until this is populated; the stack
+  still comes up healthy without it.
+- **`managed-tool`** (mounted read-write into `download-runner` at
+  `/var/lib/waypoint/managed-tool`) — the account-gated `vcf-download-tool`
+  executable (ADR-0015 decision 3: operator-installed through the appliance,
+  never baked into the image). A `download` job fails closed with a clear
+  "tool not installed" error until this is populated; the stack still comes
+  up healthy without it.
+- **`depot`** (mounted read-write into `download-runner` at `/vcf`) — the
+  offline depot share `catalog-index` indexes (`CatalogOptions.DepotPath`).
 
-The `backend` service doesn't consume any of this yet, so
-`docker-compose.yml` has the mount commented out. Once the download-job work
-in epic #1 lands, uncomment the `backend` service's
-`../dev/local:/dev/local:ro` volume line.
-
-**Never** copy anything out of `dev/local/` into a committed file, fixture,
-log, or doc — see the sanitization policy in the repo root `CLAUDE.md`.
-
-### PowerShell scripts mount (`WAYPOINT_VCF_SCRIPTS_DIR`, issue #223)
-
-The `catalog-index` job handler (issue #194) runs a Waypoint-owned shim
-module (`backend/Waypoint.Infrastructure/PowerShell/Modules/WaypointCatalogIndex/`)
-that dot-sources `vcf-download-manager.common.ps1` from the sibling
-`vcf-docker-download` repo to call its `Get-FileManifest` function. Per
-the current implementation, that project-owned sibling script is mounted
-read-only at runtime. ADR-0013 replaces this transitional arrangement: the
-script will move into this repository and be baked into the
-`download-runner` image built locally by the operator.
-
-`docker-compose.yml`'s `backend` service mounts an operator-supplied
-directory read-only into the container:
-
-```yaml
-- ${WAYPOINT_VCF_SCRIPTS_DIR:-../dev/local/vcf-scripts}:/vcf-scripts:ro
-```
-
-Point `WAYPOINT_VCF_SCRIPTS_DIR` (in `deploy/.env`, gitignored) at your own
-checkout of `vcf-docker-download`'s `powershell/` directory:
-
-```bash
-# deploy/.env
-WAYPOINT_VCF_SCRIPTS_DIR=/path/to/your/vcf-docker-download/powershell
-```
-
-Left unset, it defaults to a repo-root `dev/local/vcf-scripts` subdirectory
-(`../dev/local/vcf-scripts` relative to `deploy/`) — the same repo-root
-`dev/local/` directory the token/binary mount above uses, but its own
-subpath so it doesn't collide with that mount's contents. Either way the
-directory is git-ignored and never populated by this repo.
-
-The `backend` service also sets two environment variables so the shim finds
-its module and the vendor script inside the container:
-
-```yaml
-PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointCatalogIndex"
-WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH: "/vcf-scripts/vcf-download-manager.common.ps1"
-```
-
-`PowerShell__ModulePreloadPaths__0` is a fixed in-container literal, not an
-operator knob — `Waypoint.Infrastructure.csproj` now copies
-`PowerShell/Modules/**/*.psm1` into the publish output, so the shim always
-lands at that exact path inside the image. Only `WAYPOINT_VCF_SCRIPTS_DIR`
-(the mount source) and the layout of your `vcf-docker-download` checkout
-under it are operator-controlled.
-
-**An unconfigured stack still starts and reports healthy.** Module import
-happens lazily, once per PowerShell runspace, on first job dispatch
-(`WaypointRunspacePool.CreateRunspace`) — never at container startup or DI
-construction. If `WAYPOINT_VCF_SCRIPTS_DIR` is left unset and
-`../dev/local/vcf-scripts` doesn't exist, Docker mounts an empty directory (this
-mount intentionally does **not** use the frontend/dist mount's
-`create_host_path: false` guard — see the in-file comment) and the stack
-comes up healthy exactly as before. Only a `catalog-index` job that actually
-dispatches fails, with the shim's own `no vcf-download-manager.common.ps1
-path configured` or `not found at '...'` error surfacing in that job's log.
-
-`download` is also wired, but through the mount above — `WaypointDownload`'s
-shim dot-sources `vcf-download-manager.common.ps1` too (see
-`WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH` in `WaypointDownload.psm1`), so it
-needs no separate mount or preload entry.
-
-### PowerShell scripts mount (`WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR`, issue #395)
-
-The `discover`, `scan`, and `credential-test` job handlers (epic #13) run
-Waypoint-owned shim modules
-(`backend/Waypoint.Infrastructure/PowerShell/Modules/{WaypointDiscovery,WaypointScan,WaypointCredentialTest}/`)
-that dot-source three files from the *other* sibling repo,
-`vmware-stig-docker` — `module.transport.vmware.ps1`
-(`Connect-StigVIServer`/`Disconnect-VIServer`), `module.transport.nsxapi.ps1`
-(`Get-NsxSessionToken`), and `module.common.ps1`
-(`Invoke-ExternalCommand`/`Test-TargetReachable`/`New-InspecSecretConfigFile`).
-As with the #223 mount, these are project-owned scripts in a transitional
-sibling checkout. ADR-0013 moves them into this repository and the locally
-built `compliance-runner` image; the current backend bind mount remains
-documented here only because that is what this compose revision executes.
-
-`docker-compose.yml`'s `backend` service mounts a second operator-supplied
-directory read-only into the container, alongside `vcf-scripts`:
-
-```yaml
-- ${WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR:-../dev/local/vmware-stig-docker-scripts}:/vmware-stig-docker-scripts:ro
-```
-
-Point `WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR` (in `deploy/.env`, gitignored)
-at your own checkout of `vmware-stig-docker`'s `powershell/` directory:
-
-```bash
-# deploy/.env
-WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR=/path/to/your/vmware-stig-docker/powershell
-```
-
-Left unset, it defaults to a repo-root `dev/local/vmware-stig-docker-scripts`
-subdirectory (`../dev/local/vmware-stig-docker-scripts` relative to
-`deploy/`) — the same repo-root `dev/local/` convention as the other mounts,
-its own subpath so it doesn't collide with `vcf-scripts` or the depot
-token/binary mount. Either way the directory is git-ignored and never
-populated by this repo.
-
-The `backend` service also sets three more `ModulePreloadPaths` entries and
-three env vars so the three shims find their module and their vendor
-scripts inside the container:
-
-```yaml
-PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDiscovery"
-PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointScan"
-PowerShell__ModulePreloadPaths__3: "/app/PowerShell/Modules/WaypointCredentialTest"
-WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_PATH: "/vmware-stig-docker-scripts/module.transport.vmware.ps1"
-WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH: "/vmware-stig-docker-scripts/module.transport.nsxapi.ps1"
-WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH: "/vmware-stig-docker-scripts/module.common.ps1"
-```
-
-Indexes `1`–`3` are appended after the existing `catalog-index` mount's
-index `0` without disturbing it — `WaypointRunspacePool` imports every
-configured `ModulePreloadPaths` entry into each runspace
-(`WaypointRunspacePool.CreateRunspace`), so all four shim modules preload
-together. All six values above are fixed in-container literals, not
-operator knobs — only `WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR` (the mount
-source) and the layout of your `vmware-stig-docker` checkout under it are
-operator-controlled.
-
-**An unconfigured stack still starts and reports healthy**, for the same
-reason as the `catalog-index` mount: module import happens lazily, once per
-PowerShell runspace, on first job dispatch — never at container startup or
-DI construction. If `WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR` is left unset
-and `../dev/local/vmware-stig-docker-scripts` doesn't exist, Docker mounts
-an empty directory (this mount, like `vcf-scripts`, intentionally does
-**not** use the frontend/dist mount's `create_host_path: false` guard) and
-the stack comes up healthy exactly as before. Only a `discover`, `scan`, or
-`credential-test` job that actually dispatches fails, with the relevant
-shim's own `no module.*.ps1 path configured` or `not found at '...'` error
-surfacing in that job's log.
+`dev/local/`'s depot-token/config borrowing convention (gitignored,
+never committed — CLAUDE.md) still applies to *credentials*, which travel
+through the encrypted credential store (`POST /api/v1/credentials`), not
+through a filesystem mount at all — that part of the convention was never
+about `backend`'s mounts and is unaffected by this issue.
 
 ### Edge hardening baseline (DISA/CIS nginx guidance, issue #52)
 

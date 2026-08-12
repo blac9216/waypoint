@@ -1,14 +1,19 @@
 # Repo-root .dockerignore — used when a Waypoint image build's context is the repo
-# root (issue #92: backend/Dockerfile now builds from here so it can see .editorconfig
-# and Directory.Build.props). Keep this lean and keep local/secret material out of every
-# build context, same intent as .gitignore's "NEVER commit" list in CLAUDE.md — a
-# .dockerignore miss ships the file INTO the image layer, which is worse than a git miss
-# because it can leave a running host, not just a repo.
+# root (issue #92: backend/Dockerfile builds from here so it can see .editorconfig
+# and Directory.Build.props; issue #442 extends the same context convention to
+# runners/compliance-runner/Dockerfile and runners/download-runner/Dockerfile so
+# their own `dotnet-build` stages can COPY backend/ too). Keep this lean and keep
+# local/secret material out of every build context, same intent as .gitignore's
+# "NEVER commit" list in CLAUDE.md — a .dockerignore miss ships the file INTO the
+# image layer, which is worse than a git miss because it can leave a running host,
+# not just a repo.
 #
-# Only the paths a Dockerfile actually needs should reach the daemon. backend/Dockerfile
-# COPYs Directory.Build.props, .editorconfig, and backend/ explicitly, so everything
-# else at the repo root is excluded by default here and re-included per-Dockerfile only
-# if a future image needs it.
+# Only the paths a Dockerfile actually needs should reach the daemon. All three
+# Dockerfiles COPY Directory.Build.props, .editorconfig, and backend/ explicitly;
+# the two runner Dockerfiles also COPY their own runners/<name>/powershell/ (not
+# excluded below — only docs/, frontend/, scripts/, and the root README are).
+# Everything else at the repo root is excluded by default here and re-included
+# per-Dockerfile only if a future image needs it.
 
 # Version control / editor / CI metadata — never needed inside a build.
 .git/
