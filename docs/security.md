@@ -111,9 +111,10 @@ real-world importance:
    solely by each service's non-root user — never an environment variable
    (env leaks via `/proc/<pid>/environ`, `docker inspect`, and crash dumps).
 
-   This control governs the envelope-encryption master key (ADR-0005). The current
-   transitional Compose stack mounts it only into the combined backend; the runner
-   migration expands that mount to the three services named above. The dev-grade
+   This control governs the envelope-encryption master key (ADR-0005). Compose mounts
+   it into all three trusted services named above — the API, `compliance-runner`, and
+   `download-runner` (issue #442) — each reading it from its own uid-matched file
+   permission (`deploy/README.md` "Bring-up" step 4). The dev-grade
    local-auth admin password hash
    (`LocalAuthOptions.AdminPasswordHash`, issue #62) is a *different* piece of secret
    material this control doesn't literally cover — but the same leakage argument
