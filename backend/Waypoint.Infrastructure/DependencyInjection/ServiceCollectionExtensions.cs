@@ -239,6 +239,14 @@ public static class ServiceCollectionExtensions
 			// Issue #311: the convert-stage upload/enrichment coordinator and the
 			// retry route (JobsController) share this one instance.
 			services.AddSingleton<Scans.ScanUploadCoordinator>();
+
+			// Issue #414: RunsController's extracted control-plane application services
+			// (run creation/fan-out, artifact projection, pause/resume/abort
+			// orchestration) -- same "concrete singleton, no interface" shape as
+			// ScanUploadCoordinator above, since each has exactly one caller today.
+			services.AddSingleton<Runs.RunCreationService>();
+			services.AddSingleton<Runs.RunArtifactProjectionService>();
+			services.AddSingleton<Runs.RunControlService>();
 		}
 
 		return services;
