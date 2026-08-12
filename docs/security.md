@@ -78,6 +78,17 @@ the encrypted row is bounded to one run's lifetime (terminal completion or expir
 never carried forward into the reusable credential store the way a service credential
 is.
 
+The expiry window **slides on use** (issue #469): every successful decrypt extends
+`expires_at` by the configured `RunSecrets:Expiry` (default 8h), so an active run keeps
+its secret alive while a genuinely abandoned run's row stops sliding and is swept
+within one window of its last activity. One narrow, deliberately accepted residual
+(issue #476): only the InSpec stage decrypts — attest/convert work from the on-disk
+report — so a *single* InSpec pass that runs longer than one full window without
+re-decrypting, and then fails and retries, will find its row already swept and the
+retry fails secret-not-found. This is fail-closed (nothing leaks; the run errors
+honestly), realistic scan stages finish in minutes-to-hours, and operators running
+exceptionally long scans can raise `RunSecrets:Expiry`.
+
 ## Leakage controls (implementation requirements)
 
 Databases are where people look for leaks; **logs are where leaks live**. In order of
