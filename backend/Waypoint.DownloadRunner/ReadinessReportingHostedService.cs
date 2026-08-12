@@ -20,6 +20,8 @@ using Microsoft.Extensions.Options;
 using Npgsql;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
+using Waypoint.Core.Jobs;
+using Waypoint.Core.SystemState;
 using Waypoint.Infrastructure.DependencyInjection;
 using Waypoint.Runner.Resources;
 
@@ -44,8 +46,18 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 	private readonly IOptions<CatalogOptions> _catalogOptions;
 	private readonly IOptions<DownloadRunnerOptions> _runnerOptions;
 	private readonly ResourceAdmissionController? _resourceAdmission;
+	private readonly IWorkerRegistryWriter? _workerRegistry;
 	private readonly ILogger<ReadinessReportingHostedService> _logger;
 
+	/// <summary>
+	/// <paramref name="workerRegistry"/> is nullable and optional (constructor-injected
+	/// via <c>IWorkerRegistryWriter?</c>, resolved to null when nothing is registered)
+	/// -- Program.cs only registers it when a connection string is configured, mirroring
+	/// every other "no connection string, no wiring" registration in this codebase. A
+	/// runner with no database configured has nothing to heartbeat to and nothing to
+	/// dispatch from either; the file-based readiness snapshot this service already
+	/// writes still reports <c>Ready: false</c> in that case via <c>databaseReachable</c>.
+	/// </summary>
 	public ReadinessReportingHostedService(
 		IConfiguration configuration,
 		IManagedToolPresenceChecker toolPresence,
@@ -53,6 +65,7 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 		IOptions<CatalogOptions> catalogOptions,
 		IOptions<DownloadRunnerOptions> runnerOptions,
 		ResourceAdmissionController resourceAdmission,
+		IWorkerRegistryWriter? workerRegistry,
 		ILogger<ReadinessReportingHostedService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(configuration);
@@ -69,6 +82,7 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 		_catalogOptions = catalogOptions;
 		_runnerOptions = runnerOptions;
 		_resourceAdmission = resourceAdmission;
+		_workerRegistry = workerRegistry;
 		_logger = logger;
 	}
 
@@ -140,6 +154,27 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 		{
 			LogReadinessWriteFailed(exception);
 		}
+
+		// Issue #443: the database-persisted twin of the file-based snapshot above.
+		// GET /system reads this table, not the file -- the file exists for this
+		// container's own health probe (no HTTP listener to ask instead), the table
+		// exists so the control plane can report per-domain runner availability
+		// without ever reaching into another container's filesystem. Best-effort, same
+		// as the file write: a failed heartbeat write just means this cycle's presence
+		// is not recorded, and worker_registry's own staleness read handles that the
+		// same way a missed job lease heartbeat does.
+		if (databaseReachable && _workerRegistry is not null)
+		{
+			try
+			{
+				await _workerRegistry.HeartbeatAsync(
+					_runnerOptions.Value.WorkerId, DownloadRunnerJobTypes.Allowed.ToArray(), ready, cancellationToken).ConfigureAwait(false);
+			}
+			catch (Exception exception) when (exception is not OperationCanceledException)
+			{
+				LogWorkerHeartbeatFailed(exception);
+			}
+		}
 	}
 
 	/// <summary>Issue #437: snapshots <see cref="ResourceAdmissionController"/>'s current discovered/effective/admitted state for the readiness report.</summary>
@@ -195,4 +230,7 @@ public sealed partial class ReadinessReportingHostedService : BackgroundService
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "Failed to write the readiness marker file")]
 	private partial void LogReadinessWriteFailed(Exception exception);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Failed to write this worker's heartbeat to worker_registry")]
+	private partial void LogWorkerHeartbeatFailed(Exception exception);
 }

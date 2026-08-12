@@ -23,6 +23,9 @@ using ApplianceState = Waypoint.Core.SystemState.ApplianceState;
 using ArtifactStoreUsage = Waypoint.Core.SystemState.ArtifactStoreUsage;
 using IApplianceStateRepository = Waypoint.Core.SystemState.IApplianceStateRepository;
 using IArtifactStoreDiskUsageProvider = Waypoint.Core.SystemState.IArtifactStoreDiskUsageProvider;
+using IWorkerRegistryReader = Waypoint.Core.SystemState.IWorkerRegistryReader;
+using WorkerHeartbeat = Waypoint.Core.SystemState.WorkerHeartbeat;
+using WorkerRegistryOptions = Waypoint.Core.SystemState.WorkerRegistryOptions;
 
 namespace Waypoint.Api.Controllers;
 
@@ -37,6 +40,14 @@ namespace Waypoint.Api.Controllers;
 /// catalog sync exists, and uptime was judged not worth a fabricated process-start
 /// clock in the same PR as real disk figures -- both are honest follow-ups, not
 /// silently dropped scope.
+///
+/// Issue #443 adds <c>runners</c>: since the API process no longer executes anything
+/// (ADR-0013 §1), this endpoint is now the only place "is a scan/discover/download job
+/// actually able to run right now" is answered. A 200 from this endpoint proves
+/// control-plane health regardless of what <c>runners</c> says -- a stopped or
+/// unreachable compliance-runner never turns this into a 5xx, it is reported as an
+/// unavailable entry in the list (or a missing one, once its heartbeat ages past
+/// <see cref="WorkerRegistryOptions.StaleAfter"/> and it stops appearing at all).
 /// </summary>
 [ApiController]
 [Route("api/v1/system")]
@@ -44,19 +55,27 @@ public sealed class SystemController : ControllerBase
 {
 	private readonly IApplianceStateRepository _applianceState;
 	private readonly IArtifactStoreDiskUsageProvider _diskUsage;
+	private readonly IWorkerRegistryReader _workerRegistry;
 	private readonly IOptionsMonitor<WaypointBuildOptions> _buildOptions;
+	private readonly IOptionsMonitor<WorkerRegistryOptions> _workerRegistryOptions;
 
 	public SystemController(
 		IApplianceStateRepository applianceState,
 		IArtifactStoreDiskUsageProvider diskUsage,
-		IOptionsMonitor<WaypointBuildOptions> buildOptions)
+		IWorkerRegistryReader workerRegistry,
+		IOptionsMonitor<WaypointBuildOptions> buildOptions,
+		IOptionsMonitor<WorkerRegistryOptions> workerRegistryOptions)
 	{
 		ArgumentNullException.ThrowIfNull(applianceState);
 		ArgumentNullException.ThrowIfNull(diskUsage);
+		ArgumentNullException.ThrowIfNull(workerRegistry);
 		ArgumentNullException.ThrowIfNull(buildOptions);
+		ArgumentNullException.ThrowIfNull(workerRegistryOptions);
 		_applianceState = applianceState;
 		_diskUsage = diskUsage;
+		_workerRegistry = workerRegistry;
 		_buildOptions = buildOptions;
+		_workerRegistryOptions = workerRegistryOptions;
 	}
 
 	/// <summary>
@@ -80,6 +99,15 @@ public sealed class SystemController : ControllerBase
 
 		IReadOnlyList<ArtifactStoreUsage> stores = _diskUsage.GetUsage();
 
-		return Ok(SystemResponse.Create(state, _buildOptions.CurrentValue.Sha, stores));
+		IReadOnlyList<WorkerHeartbeat> heartbeats = await _workerRegistry.ListAsync(cancellationToken).ConfigureAwait(false);
+		DateTimeOffset now = DateTimeOffset.UtcNow;
+		TimeSpan staleAfter = _workerRegistryOptions.CurrentValue.StaleAfter;
+		SystemRunnerStatusResponse[] runners = [.. heartbeats.Select(heartbeat =>
+		{
+			bool stale = now - heartbeat.LastSeenAt > staleAfter;
+			return SystemRunnerStatusResponse.FromDomain(heartbeat, available: heartbeat.Ready && !stale);
+		})];
+
+		return Ok(SystemResponse.Create(state, _buildOptions.CurrentValue.Sha, stores, runners));
 	}
 }

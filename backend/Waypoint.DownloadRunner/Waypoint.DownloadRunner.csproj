@@ -1,14 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk.Worker">
 
   <!--
-    ADR-0013/0014/0015, issue #441: the download-runner Generic Host. Registers only
-    the M1 `catalog-index` and `download` handlers (Waypoint.Core.Jobs.JobCapabilities.
-    Download's implemented subset) on top of Waypoint.Infrastructure's shared
-    composition root, see Waypoint.Infrastructure.DependencyInjection.
-    ServiceCollectionExtensions.AddWaypointInfrastructure's ExecutionOnly overload.
+    ADR-0013/0014/0015, issue #441/#443: the download-runner Generic Host. Registers
+    only the M1 `catalog-index` and `download` handlers (Waypoint.Core.Jobs.
+    JobCapabilities.Download's implemented subset) on top of Waypoint.Infrastructure's
+    control-plane repositories plus Waypoint.Infrastructure.Execution's execution-only
+    composition root (AddWaypointExecution); issue #443 split the PowerShell host and
+    job handlers out of Waypoint.Infrastructure so Waypoint.Api cannot reference them.
     No ASP.NET reference: this process claims jobs, runs PowerShell in-process, and
     writes job_events directly to Postgres (ADR-0014 §§2-3); it serves no REST/SSE
-    surface (that stays Waypoint.Api's job until #443 removes execution there).
+    surface (that is Waypoint.Api's job, which #443 removed execution from).
   -->
 
   <PropertyGroup>
@@ -26,6 +27,7 @@
     <ProjectReference Include="..\Waypoint.Core\Waypoint.Core.csproj" />
     <ProjectReference Include="..\Waypoint.Infrastructure\Waypoint.Infrastructure.csproj" />
     <ProjectReference Include="..\Waypoint.Runner\Waypoint.Runner.csproj" />
+    <ProjectReference Include="..\Waypoint.Infrastructure.Execution\Waypoint.Infrastructure.Execution.csproj" />
   </ItemGroup>
 
   <!--

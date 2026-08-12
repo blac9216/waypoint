@@ -23,7 +23,6 @@ using Waypoint.Core.Discovery;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
-using Waypoint.Core.PowerShell;
 using Waypoint.Infrastructure.Auth;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.ConfigDocs;
@@ -34,35 +33,34 @@ using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Sites;
 using Waypoint.Infrastructure.SystemState;
 using Waypoint.Runner.Jobs;
-using Waypoint.Runner.Resources;
 
 namespace Waypoint.Infrastructure.DependencyInjection;
 
 /// <summary>
-/// Issue #441: which control-plane-only hosted services
-/// <see cref="ServiceCollectionExtensions.AddWaypointInfrastructure(IServiceCollection, IConfiguration, WaypointInfrastructureHostKind)"/>
-/// starts alongside the shared repositories/PowerShell host/job dispatcher every host
-/// kind needs. <see cref="Combined"/> is today's <c>Waypoint.Api</c> behavior
-/// (unchanged); <see cref="ExecutionOnly"/> is for a dedicated runner host (e.g.
-/// download-runner) that has no SSE surface or run/scan endpoints of its own.
-/// </summary>
-public enum WaypointInfrastructureHostKind
-{
-	/// <summary>Today's single combined process: control plane + execution, every hosted service starts.</summary>
-	Combined,
-
-	/// <summary>A dedicated execution-only runner host: skips API-only hosted services (SSE fan-out, run-secret cleanup).</summary>
-	ExecutionOnly
-}
-
-/// <summary>
-/// Composition-root entry point for everything this project provides. Postgres access
-/// lands with the schema (issue #4) as a small raw-SQL migrations pipeline
-/// (<see cref="ISchemaMigrator"/>), not an ORM — see that type's doc comment for why.
-/// The job engine's queue primitives (issue #128: the claim/lease repository and the
-/// job_events write path) are wired here too, behind the same "no connection string, no
-/// wiring" guard as the migrator. The dispatcher and lease-recovery hosted services land
-/// with #129; PowerShell runspace hosting lands with #6.
+/// Issue #443 (ADR-0013 §1): this project is now control-plane only, so there is a
+/// single composition shape -- no more <c>WaypointInfrastructureHostKind</c> branch
+/// here. What used to be the "ExecutionOnly" side of that enum (the PowerShell host,
+/// every domain <see cref="IJobHandler"/>, the dispatcher/lease-recovery hosted
+/// services, and the <c>RunnerResourceOptions</c>/resource-admission wiring) now lives
+/// entirely in the sibling <c>Waypoint.Infrastructure.Execution</c> project's own
+/// composition root (<c>AddWaypointExecution</c>), which the two dedicated runner
+/// executables call in addition to <see cref="AddWaypointInfrastructure"/>.
+/// <c>Waypoint.Api</c> has no reference to <c>Waypoint.Infrastructure.Execution</c> at
+/// all, which is what makes "the API process cannot execute a job" a build-time fact
+/// (missing assembly reference, not a registration a config change could reactivate)
+/// rather than a runtime configuration choice. See ADR-0013 §1 and the epic (#433).
+///
+/// Composition-root entry point for this project's two exposed methods:
+/// <see cref="AddWaypointInfrastructure"/> (repositories, migrations
+/// (<see cref="ISchemaMigrator"/> -- a small raw-SQL pipeline, not an ORM, issue #4),
+/// envelope-encryption of writes, and the job enqueue/control/query surface -- shared
+/// by the API and both runners) and <see cref="AddWaypointApiSurface"/> (SSE feed/
+/// replay and the run-secret lifecycle -- API-only; see that method's doc comment for
+/// why these two are not simply folded into the first). Neither method starts a job
+/// dispatcher, lease recovery, or any PowerShell host -- see
+/// <c>Waypoint.Infrastructure.Execution</c>'s own
+/// <c>ServiceCollectionExtensions.AddWaypointExecution</c> in the sibling project for
+/// that half of what used to be registered here before issue #443.
 /// </summary>
 public static class ServiceCollectionExtensions
 {
@@ -72,26 +70,18 @@ public static class ServiceCollectionExtensions
 	/// </summary>
 	public const string ConnectionStringName = "Waypoint";
 
-	public static IServiceCollection AddWaypointInfrastructure(this IServiceCollection services, IConfiguration configuration) =>
-		services.AddWaypointInfrastructure(configuration, WaypointInfrastructureHostKind.Combined);
-
 	/// <summary>
-	/// Issue #441: the additive seam a dedicated runner host (download-runner today;
-	/// a future compliance-runner split takes the same seam) uses to reuse this
-	/// project's whole composition root without also starting the two hosted services
-	/// that are ADR-0013 §1 control-plane concerns, not execution concerns --
-	/// <c>JobEventStreamService</c> (SSE fan-out; the API is the only SSE surface) and
-	/// <c>RunSecretCleanupHostedService</c> (the ad hoc "my credentials" run-secret
-	/// sweep, meaningful only alongside the API's run/scan endpoints). Everything else
-	/// -- repositories, the PowerShell host, the job dispatcher, lease recovery, the
-	/// event writer -- is identical for every <see cref="WaypointInfrastructureHostKind"/>;
-	/// only <see cref="JobHandlerRegistry"/>'s allowlist and <see cref="IJobHandler"/>
-	/// set differ by which handlers a given runner registers on top of this call.
-	/// The default overload above keeps today's combined behavior unchanged for
-	/// <c>Waypoint.Api</c> and every existing test.
+	/// Registers the control-plane services every host needs: options, repositories
+	/// (behind the "no connection string, no wiring" guard below), crypto, and the
+	/// enqueue/control/query surface. Called by both <c>Waypoint.Api.Program</c> (which
+	/// then also calls <see cref="AddWaypointApiSurface"/> for the two API-only hosted
+	/// services -- see that method's doc comment for why they are NOT registered here)
+	/// and by the two runner executables' Program.cs (which then also call
+	/// <c>Waypoint.Infrastructure.Execution</c>'s own <c>AddWaypointExecution</c> for
+	/// the PowerShell host and job handlers). A runner needs the same repositories this
+	/// method wires and nothing this method deliberately withholds.
 	/// </summary>
-	public static IServiceCollection AddWaypointInfrastructure(
-		this IServiceCollection services, IConfiguration configuration, WaypointInfrastructureHostKind hostKind)
+	public static IServiceCollection AddWaypointInfrastructure(this IServiceCollection services, IConfiguration configuration)
 	{
 		services.AddOptions<LocalAuthOptions>()
 			.Bind(configuration.GetSection(LocalAuthOptions.SectionName));
@@ -109,12 +99,6 @@ public static class ServiceCollectionExtensions
 
 		services.AddOptions<JobEngineOptions>()
 			.Bind(configuration.GetSection(JobEngineOptions.SectionName));
-
-		services.AddOptions<RunnerResourceOptions>()
-			.Bind(configuration.GetSection(RunnerResourceOptions.SectionName));
-
-		services.AddOptions<PowerShellOptions>()
-			.Bind(configuration.GetSection(PowerShellOptions.SectionName));
 
 		services.AddOptions<CatalogOptions>()
 			.Bind(configuration.GetSection(CatalogOptions.SectionName));
@@ -137,6 +121,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<Waypoint.Core.Secrets.RunSecretOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.Secrets.RunSecretOptions.SectionName));
 
+		services.AddOptions<Waypoint.Core.SystemState.WorkerRegistryOptions>()
+			.Bind(configuration.GetSection(Waypoint.Core.SystemState.WorkerRegistryOptions.SectionName));
+
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
 		// One scrubber instance serves both sides of security.md control 1: sinks read
@@ -144,15 +131,6 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<InPlaySecretRedactor>();
 		services.AddSingleton<ISecretRedactor>(serviceProvider => serviceProvider.GetRequiredService<InPlaySecretRedactor>());
 		services.AddSingleton<ISecretTracker>(serviceProvider => serviceProvider.GetRequiredService<InPlaySecretRedactor>());
-
-		// Issue #436: JobHandlerRegistry is the mandatory capability-registration
-		// point (fails closed on an empty allowlist or a duplicate handler -- see its
-		// doc comment). Waypoint.Api still hosts both execution domains combined
-		// today, so it registers JobCapabilities.All; a split compliance-runner/
-		// download-runner registers its own narrower set through the same
-		// constructor instead.
-		services.AddSingleton(serviceProvider => new JobHandlerRegistry(
-			serviceProvider.GetServices<IJobHandler>(), JobCapabilities.All));
 
 		// Disk usage is a filesystem stat, not a database read -- registered
 		// unconditionally so GET /system still reports store usage on a host with no
@@ -213,18 +191,13 @@ public static class ServiceCollectionExtensions
 					serviceProvider.GetRequiredService<ILogger<JobEventPublisher>>());
 			});
 
-			services.AddSingleton<BufferedJobEventWriter>(serviceProvider => new BufferedJobEventWriter(
-				connectionString,
-				serviceProvider.GetRequiredService<ISecretRedactor>(),
-				serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
-				serviceProvider.GetRequiredService<ILogger<BufferedJobEventWriter>>()));
-			services.AddSingleton<IJobLogBuffer>(serviceProvider => serviceProvider.GetRequiredService<BufferedJobEventWriter>());
-			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<BufferedJobEventWriter>());
-
-			// The PS host needs the job.log buffer for stream capture, so it lives in
-			// the same connection-string gate as the rest of the engine.
-			services.AddSingleton<PowerShell.WaypointRunspacePool>();
-			services.AddSingleton<IPowerShellExecutor, PowerShell.PowerShellExecutor>();
+			// Issue #443: worker_registry read side -- the control plane's only
+			// consumer of this table (see migration 0027's comment: neither runner
+			// role is granted SELECT). The write side
+			// (WorkerRegistryRepository.HeartbeatAsync) is wired the same way by each
+			// runner host's own composition alongside its existing readiness-report
+			// loop, not from this control-plane registration.
+			services.AddSingleton<Waypoint.Core.SystemState.IWorkerRegistryReader>(new SystemState.WorkerRegistryRepository(connectionString));
 
 			services.AddSingleton(new Secrets.CredentialRepository(connectionString));
 			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
@@ -265,83 +238,46 @@ public static class ServiceCollectionExtensions
 			// Issue #311: the convert-stage upload/enrichment coordinator and the
 			// retry route (JobsController) share this one instance.
 			services.AddSingleton<Scans.ScanUploadCoordinator>();
-
-			// Issue #441: RunSecretCleanupHostedService and JobEventStreamService are
-			// ADR-0013 §1 control-plane concerns (the ad hoc run-secret sweep and the
-			// SSE fan-out the API alone exposes) -- a dedicated execution-only runner
-			// host has no run/scan endpoints or SSE surface to serve, so it opts out
-			// via hostKind rather than starting background work with nothing to do.
-			if (hostKind == WaypointInfrastructureHostKind.Combined)
-			{
-				services.AddHostedService<Secrets.RunSecretCleanupHostedService>();
-
-				services.AddSingleton<JobEventStreamService>(serviceProvider => new JobEventStreamService(
-					connectionString,
-					serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
-					serviceProvider.GetRequiredService<ILogger<JobEventStreamService>>()));
-				services.AddSingleton<IJobEventFeed>(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
-				services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
-			}
-
-			// The first production job handler registration (issue #194, epic #9 slice
-			// 2) -- constructed and registered here, not self-registering, the same
-			// pattern PowerShellJobHandler's doc comment describes for the real job
-			// types (jobs.job_type is a closed CHECK set with no generic member).
-			services.AddSingleton<IJobHandler, Catalog.CatalogIndexJobHandler>();
-
-			// Issue #441: which "download" IJobHandler the dispatcher resolves depends on
-			// the host kind. On a dedicated ExecutionOnly runner the download executes
-			// behind the ADR-0015 tool-presence gate (ToolGatedDownloadJobHandler wraps
-			// the concrete DownloadJobHandler; the tool is provisioned at the runner's
-			// ManagedTool:ToolStatePath). The Combined (Waypoint.Api) host still hosts
-			// download execution until #443 and provisions vcf-download-tool via the
-			// dev/local mount -- not the gate's managed-tool path -- so it must keep
-			// today's ungated M1 behavior. Gating the API path here would fail every
-			// API-submitted download with "tool not installed"; #443 removes API
-			// execution and this branch with it.
-			if (hostKind == WaypointInfrastructureHostKind.ExecutionOnly)
-			{
-				services.AddSingleton<Downloads.DownloadJobHandler>();
-				services.AddSingleton<IJobHandler, Downloads.ToolGatedDownloadJobHandler>();
-			}
-			else
-			{
-				services.AddSingleton<IJobHandler, Downloads.DownloadJobHandler>();
-			}
-			services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
-			services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
-			services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();
-
-			// Issue #437 (ADR-0014 §5): resource-aware admission is wired for a
-			// dedicated ExecutionOnly runner (compliance-runner, download-runner), each
-			// of which is a single process bounded by its own container's cgroup
-			// allocation. Combined (Waypoint.Api) keeps today's proven
-			// JobEngineOptions.MaxConcurrency-only behavior unchanged -- see
-			// JobDispatcherHostedService's doc comment for how a null
-			// ResourceAdmissionController falls back to that existing semaphore-only
-			// gate, and the PR description for why: the API process's own resource
-			// footprint (HTTP handling, SSE fan-out) is not accounted for by a runner
-			// resource profile, and #443 removes its execution role entirely, so
-			// extending discovery to it is not worth the transitional complexity.
-			if (hostKind == WaypointInfrastructureHostKind.ExecutionOnly)
-			{
-				services.AddSingleton<CgroupResourceDiscovery>();
-				services.AddSingleton<ResourceAdmissionController>();
-			}
-
-			services.AddSingleton<JobDispatcherHostedService>(serviceProvider => new JobDispatcherHostedService(
-				serviceProvider.GetRequiredService<IJobRunnerRepository>(),
-				serviceProvider.GetRequiredService<IJobControlRepository>(),
-				serviceProvider.GetRequiredService<IJobEventPublisher>(),
-				serviceProvider.GetRequiredService<JobHandlerRegistry>(),
-				serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
-				hostKind == WaypointInfrastructureHostKind.ExecutionOnly
-					? serviceProvider.GetRequiredService<ResourceAdmissionController>()
-					: null,
-				serviceProvider.GetRequiredService<ILogger<JobDispatcherHostedService>>()));
-			services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());
-			services.AddHostedService<LeaseRecoveryHostedService>();
 		}
+
+		return services;
+	}
+
+	/// <summary>
+	/// Issue #443 (found by the live-stack runner-parity verification this issue's
+	/// acceptance criteria require, not by a unit test): <c>RunSecretCleanupHostedService</c>
+	/// (the ad hoc "my credentials" sweep) and <see cref="JobEventStreamService"/> (SSE
+	/// fan-out) are API-surface concerns, not something every caller of
+	/// <see cref="AddWaypointInfrastructure"/> should get. The two dedicated runners also
+	/// call <c>AddWaypointInfrastructure</c> (for the control-plane repositories they
+	/// share with the API), so registering these two hosted services unconditionally
+	/// INSIDE that method -- which an earlier revision of this file did -- started an SSE
+	/// tail-poll loop and a run-secret sweep inside compliance-runner/download-runner too.
+	/// Both promptly failed: <c>waypoint_compliance_runner</c>/<c>waypoint_download_runner</c>
+	/// are deliberately not granted <c>SELECT</c> on <c>job_events</c> (migration 0025's
+	/// least-privilege grants), so <c>JobEventStreamService</c>'s poll loop logged a
+	/// permission-denied error every tick forever -- caught only by actually bringing up
+	/// compliance-runner against real Postgres and reading its logs, not by any
+	/// composition-registration unit test, because "this hosted service starts" is not
+	/// wrong in itself; it is wrong that it starts on a host whose database ROLE cannot
+	/// use it. <c>Waypoint.Api.Program</c> is the only caller of this method.
+	/// </summary>
+	public static IServiceCollection AddWaypointApiSurface(this IServiceCollection services, IConfiguration configuration)
+	{
+		string? connectionString = configuration.GetConnectionString(ConnectionStringName);
+		if (string.IsNullOrWhiteSpace(connectionString))
+		{
+			return services;
+		}
+
+		services.AddHostedService<Secrets.RunSecretCleanupHostedService>();
+
+		services.AddSingleton<JobEventStreamService>(serviceProvider => new JobEventStreamService(
+			connectionString,
+			serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
+			serviceProvider.GetRequiredService<ILogger<JobEventStreamService>>()));
+		services.AddSingleton<IJobEventFeed>(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
+		services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
 
 		return services;
 	}

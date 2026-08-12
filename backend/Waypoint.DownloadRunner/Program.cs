@@ -18,9 +18,12 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.SystemState;
 using Waypoint.DownloadRunner;
 using Waypoint.Infrastructure.DependencyInjection;
+using Waypoint.Infrastructure.SystemState;
 using Waypoint.Runner.Jobs;
+using ExecutionServiceCollectionExtensions = Waypoint.Infrastructure.Execution.DependencyInjection.ServiceCollectionExtensions;
 
 // The container health probe (see HealthCheckProbe): reads the readiness marker
 // ReadinessReportingHostedService writes and exits 0/1. Handled before any host or
@@ -45,23 +48,35 @@ HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
 builder.Services.AddOptions<DownloadRunnerOptions>()
 	.Bind(builder.Configuration.GetSection(DownloadRunnerOptions.SectionName));
 
-// Issue #441: reuse Waypoint.Infrastructure's whole composition root
-// (repositories, PowerShell host, job dispatcher, lease recovery, event writer) via
-// the ExecutionOnly host kind, which skips the two hosted services that are
-// ADR-0013 §1 control-plane concerns this runner has no surface for (SSE fan-out,
-// run-secret cleanup) -- see ServiceCollectionExtensions' doc comment.
-builder.Services.AddWaypointInfrastructure(builder.Configuration, WaypointInfrastructureHostKind.ExecutionOnly);
+// Issue #443: this host's composition is now two calls instead of one host-kind
+// argument -- AddWaypointInfrastructure wires the control-plane repositories every
+// host needs (Waypoint.Infrastructure, no PowerShell dependency), then
+// AddWaypointExecution (Waypoint.Infrastructure.Execution, the project split #443
+// introduced) adds the PowerShell host, job dispatcher, lease recovery, and event
+// writer this runner actually executes with. Waypoint.Api calls only the first.
+builder.Services.AddWaypointInfrastructure(builder.Configuration);
+ExecutionServiceCollectionExtensions.AddWaypointExecution(builder.Services, builder.Configuration);
 
 // Issue #441's mandatory capability registration (see JobHandlerRegistry's doc
-// comment): overrides AddWaypointInfrastructure's default JobCapabilities.All
+// comment): overrides AddWaypointExecution's default JobCapabilities.All
 // registration with this host's actual M1 allowlist. Registered after the call
-// above so DI resolves this narrower registration last -- AddWaypointInfrastructure
-// still registers every IJobHandler (including the compliance-only ones), but the
+// above so DI resolves this narrower registration last -- AddWaypointExecution still
+// registers every IJobHandler (including the compliance-only ones), but the
 // dispatcher only ever claims a job whose type is in AllowedJobTypes, so an
 // unclaimed handler for a job type this host does not own is simply never resolved.
 builder.Services.AddSingleton(serviceProvider => new JobHandlerRegistry(
 	serviceProvider.GetServices<IJobHandler>().Where(handler => DownloadRunnerJobTypes.Allowed.Contains(handler.JobType)),
 	DownloadRunnerJobTypes.Allowed));
+
+// Issue #443: this runner's own worker_registry write side (see migration 0027 --
+// only the reader is wired unconditionally by AddWaypointInfrastructure; a runner
+// process is the only kind of host that ever writes this table).
+string? workerRegistryConnectionString = builder.Configuration.GetConnectionString(
+	Waypoint.Infrastructure.DependencyInjection.ServiceCollectionExtensions.ConnectionStringName);
+if (!string.IsNullOrWhiteSpace(workerRegistryConnectionString))
+{
+	builder.Services.AddSingleton<IWorkerRegistryWriter>(new WorkerRegistryRepository(workerRegistryConnectionString));
+}
 
 builder.Services.AddHostedService<ReadinessReportingHostedService>();
 

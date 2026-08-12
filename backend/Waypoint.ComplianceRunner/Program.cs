@@ -18,8 +18,11 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Waypoint.ComplianceRunner.Readiness;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.SystemState;
 using Waypoint.Infrastructure.DependencyInjection;
+using Waypoint.Infrastructure.SystemState;
 using Waypoint.Runner.Jobs;
+using ExecutionServiceCollectionExtensions = Waypoint.Infrastructure.Execution.DependencyInjection.ServiceCollectionExtensions;
 
 // The container health probe (mirrors Waypoint.Api's --health-check, see
 // RunnerHealthCheckProbe's doc comment): handled before any host/logging setup so it
@@ -40,22 +43,32 @@ if (RunnerHealthCheckProbe.IsHealthCheckInvocation(args))
 
 HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
 
-// ADR-0013 §1/§2: this process is the compliance-runner -- it hosts PowerShell,
-// claims jobs, and executes discover/credential-test/scan directly. It is not the
-// control plane (that stays Waypoint.Api's job until #443 removes execution from it).
-// AddWaypointInfrastructure wires the same repositories, secret stores, PowerShell
-// runspace pool, and IJobHandler registrations Waypoint.Api registers today. The
-// ExecutionOnly host kind (shared with the download-runner per #441) skips the two
-// ADR-0013 §1 control-plane hosted services a dedicated runner has no surface for --
-// the SSE fan-out and the ad hoc run-secret sweep. It also registers the tool-gated
-// download handler, which this host simply never resolves: the JobHandlerRegistry
-// override below narrows the allowlist to JobCapabilities.Compliance, so a download
-// handler is excluded from what this process can claim (see that override).
-builder.Services.AddWaypointInfrastructure(
-	builder.Configuration, WaypointInfrastructureHostKind.ExecutionOnly);
+// ADR-0013 §1/§2, issue #443: this process is the compliance-runner -- it hosts
+// PowerShell, claims jobs, and executes discover/credential-test/scan directly. It is
+// not the control plane (that is Waypoint.Api, which #443 removed execution from).
+// AddWaypointInfrastructure wires the control-plane repositories and secret stores
+// (Waypoint.Infrastructure, no PowerShell dependency); AddWaypointExecution
+// (Waypoint.Infrastructure.Execution, the project #443 split out) adds the PowerShell
+// runspace pool and IJobHandler registrations this process actually executes with. It
+// also registers the tool-gated download handler, which this host simply never
+// resolves: the JobHandlerRegistry override below narrows the allowlist to
+// JobCapabilities.Compliance, so a download handler is excluded from what this
+// process can claim (see that override).
+builder.Services.AddWaypointInfrastructure(builder.Configuration);
+ExecutionServiceCollectionExtensions.AddWaypointExecution(builder.Services, builder.Configuration);
 
 builder.Services.AddOptions<RunnerHealthOptions>()
 	.Bind(builder.Configuration.GetSection(RunnerHealthOptions.SectionName));
+
+// Issue #443: this runner's own worker_registry write side (see migration 0027 --
+// only the reader is wired unconditionally by AddWaypointInfrastructure; a runner
+// process is the only kind of host that ever writes this table).
+string? workerRegistryConnectionString = builder.Configuration.GetConnectionString(
+	Waypoint.Infrastructure.DependencyInjection.ServiceCollectionExtensions.ConnectionStringName);
+if (!string.IsNullOrWhiteSpace(workerRegistryConnectionString))
+{
+	builder.Services.AddSingleton<IWorkerRegistryWriter>(new WorkerRegistryRepository(workerRegistryConnectionString));
+}
 
 // Issue #440: this host's own mandatory capability registration (JobHandlerRegistry
 // fails closed on an empty allowlist or a duplicate handler -- see its doc comment).

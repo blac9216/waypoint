@@ -14,10 +14,13 @@
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.SystemState;
 using Waypoint.Infrastructure.DependencyInjection;
 using Waypoint.Infrastructure.Downloads;
+using Waypoint.Infrastructure.Execution.DependencyInjection;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure;
@@ -30,6 +33,11 @@ namespace Waypoint.Tests.Infrastructure;
 /// test exercised only the branch where the job engine is *not* registered. A regression
 /// that wired the engine unconditionally would therefore have gone unnoticed until a
 /// deployment without a database crashed on startup -- and no test would have moved.
+///
+/// Issue #443: <c>AddWaypointInfrastructure</c> is now control-plane only (repositories,
+/// enqueue/control/query) -- these tests exercise it alone, matching exactly what
+/// <c>Waypoint.Api.Program</c> calls. <see cref="ExecutionCompositionTests"/> covers the
+/// <c>AddWaypointExecution</c> half a runner host adds on top.
 /// </summary>
 public sealed class JobEngineWiringTests
 {
@@ -92,47 +100,48 @@ public sealed class JobEngineWiringTests
 	}
 
 	/// <summary>
-	/// Issue #441: which concrete <c>download</c> <see cref="IJobHandler"/> each host kind
-	/// resolves is load-bearing and was previously untested. The <see cref="WaypointInfrastructureHostKind.ExecutionOnly"/>
-	/// runner puts download execution behind the ADR-0015 tool-presence gate
-	/// (<see cref="ToolGatedDownloadJobHandler"/>); the <see cref="WaypointInfrastructureHostKind.Combined"/>
-	/// (Waypoint.Api) host still runs downloads ungated (<see cref="DownloadJobHandler"/>)
-	/// until #443 removes API execution, because the API provisions the tool via the
-	/// dev/local mount rather than the gate's managed-tool path. Gating the Combined path
-	/// would fail every API-submitted download, so the split is pinned here.
+	/// Issue #443: the control-plane composition alone registers no <see cref="IJobHandler"/>
+	/// at all -- there is nothing left in <c>Waypoint.Infrastructure</c> that implements
+	/// one; every handler moved to <c>Waypoint.Infrastructure.Execution</c>. This is the
+	/// unit-level half of the composition proof
+	/// <c>Waypoint.Tests.Api.ApiProcessHostsNoExecutionTests</c> makes at the whole-API-host
+	/// level.
 	/// </summary>
 	[Fact]
-	public void ExecutionOnly_ResolvesTheToolGatedDownloadHandler()
+	public void ControlPlaneAlone_RegistersNoJobHandlers()
 	{
-		using ServiceProvider provider = BuildProvider(
-			"Host=127.0.0.1;Port=5432;Database=waypoint_test;Username=u;Password=p",
-			WaypointInfrastructureHostKind.ExecutionOnly);
+		using ServiceProvider provider = BuildProvider("Host=127.0.0.1;Port=5432;Database=waypoint_test;Username=u;Password=p");
 
-		IJobHandler download = SingleDownloadHandler(provider);
-		Assert.IsType<ToolGatedDownloadJobHandler>(download);
+		Assert.Empty(provider.GetServices<IJobHandler>());
 	}
 
+	/// <summary>
+	/// Issue #443 regression: <c>AddWaypointInfrastructure</c> ALONE (without the
+	/// separate <c>AddWaypointApiSurface</c> call) must register neither
+	/// <see cref="IJobEventFeed"/> nor <c>RunSecretCleanupHostedService</c> -- both
+	/// runners call exactly this method (for the control-plane repositories they share
+	/// with the API) and neither database role has the <c>job_events</c> SELECT grant
+	/// <see cref="IJobEventFeed"/>'s poll loop needs (migration 0025). An earlier
+	/// revision of this file registered both unconditionally inside
+	/// <c>AddWaypointInfrastructure</c> itself; that passed every unit test in this
+	/// file (which only ever asserted on job-queue/handler types, never on these two)
+	/// and was only caught by bringing up compliance-runner against real Postgres and
+	/// reading a permission-denied error in its logs -- see
+	/// <c>AddWaypointApiSurface</c>'s doc comment for the full story. Pinned here so a
+	/// future change cannot silently reintroduce it.
+	/// </summary>
 	[Fact]
-	public void Combined_ResolvesTheUngatedDownloadHandler()
+	public void ControlPlaneAlone_RegistersNeitherJobEventFeedNorRunSecretCleanup()
 	{
-		using ServiceProvider provider = BuildProvider(
-			"Host=127.0.0.1;Port=5432;Database=waypoint_test;Username=u;Password=p",
-			WaypointInfrastructureHostKind.Combined);
+		using ServiceProvider provider = BuildProvider("Host=127.0.0.1;Port=5432;Database=waypoint_test;Username=u;Password=p");
 
-		IJobHandler download = SingleDownloadHandler(provider);
-		Assert.IsType<DownloadJobHandler>(download);
-	}
-
-	private static IJobHandler SingleDownloadHandler(ServiceProvider provider)
-	{
-		List<IJobHandler> download = [.. provider.GetServices<IJobHandler>().Where(handler => handler.JobType == "download")];
-		return Assert.Single(download);
+		Assert.Null(provider.GetService<IJobEventFeed>());
+		Assert.DoesNotContain(
+			provider.GetServices<IHostedService>(),
+			service => service.GetType().Name == "RunSecretCleanupHostedService" || service.GetType().Name == "JobEventStreamService");
 	}
 
 	private static ServiceProvider BuildProvider(string? connectionString, params (string Key, string Value)[] settings)
-		=> BuildProvider(connectionString, WaypointInfrastructureHostKind.Combined, settings);
-
-	private static ServiceProvider BuildProvider(string? connectionString, WaypointInfrastructureHostKind hostKind, params (string Key, string Value)[] settings)
 	{
 		List<KeyValuePair<string, string?>> values = [.. settings.Select(setting => new KeyValuePair<string, string?>(setting.Key, setting.Value))];
 		if (connectionString is not null)
@@ -144,7 +153,118 @@ public sealed class JobEngineWiringTests
 
 		ServiceCollection services = new();
 		services.AddLogging();
-		services.AddWaypointInfrastructure(configuration, hostKind);
+		services.AddWaypointInfrastructure(configuration);
+		return services.BuildServiceProvider();
+	}
+}
+
+/// <summary>
+/// Issue #443: <c>AddWaypointApiSurface</c>, the API-only half split out of
+/// <c>AddWaypointInfrastructure</c> after the live-stack verification described in that
+/// method's doc comment. Only <c>Waypoint.Api.Program</c> calls this.
+/// </summary>
+public sealed class ApiSurfaceCompositionTests
+{
+	[Fact]
+	public void RegistersJobEventFeedAndRunSecretCleanup()
+	{
+		List<KeyValuePair<string, string?>> values =
+		[
+			new("ConnectionStrings:Waypoint", "Host=127.0.0.1;Port=5432;Database=waypoint_test;Username=u;Password=p"),
+		];
+		IConfiguration configuration = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+
+		ServiceCollection services = new();
+		services.AddLogging();
+		services.AddWaypointInfrastructure(configuration);
+		services.AddWaypointApiSurface(configuration);
+		using ServiceProvider provider = services.BuildServiceProvider();
+
+		Assert.NotNull(provider.GetService<IJobEventFeed>());
+		Assert.Contains(
+			provider.GetServices<IHostedService>(),
+			service => service.GetType().Name == "RunSecretCleanupHostedService");
+		Assert.Contains(
+			provider.GetServices<IHostedService>(),
+			service => service.GetType().Name == "JobEventStreamService");
+	}
+
+	[Fact]
+	public void WithoutAConnectionString_RegistersNeither()
+	{
+		IConfiguration configuration = new ConfigurationBuilder().Build();
+
+		ServiceCollection services = new();
+		services.AddLogging();
+		services.AddWaypointInfrastructure(configuration);
+		services.AddWaypointApiSurface(configuration);
+		using ServiceProvider provider = services.BuildServiceProvider();
+
+		Assert.Null(provider.GetService<IJobEventFeed>());
+	}
+}
+
+/// <summary>
+/// Issue #443: the <c>AddWaypointExecution</c> half of the composition, mirroring what
+/// <c>Waypoint.ComplianceRunner.Program</c>/<c>Waypoint.DownloadRunner.Program</c> do --
+/// call <c>AddWaypointInfrastructure</c> first, then <c>AddWaypointExecution</c> on top.
+/// Which concrete <c>download</c> handler resolves is load-bearing: since #443 removed
+/// the API's ungated download path, every caller of <c>AddWaypointExecution</c> gets the
+/// ADR-0015 tool-gated handler unconditionally -- there is no more Combined/ungated
+/// branch to choose between.
+/// </summary>
+public sealed class ExecutionCompositionTests
+{
+	[Fact]
+	public void RegistersTheToolGatedDownloadHandler()
+	{
+		using ServiceProvider provider = BuildProvider();
+
+		List<IJobHandler> download = [.. provider.GetServices<IJobHandler>().Where(handler => handler.JobType == "download")];
+		IJobHandler handler = Assert.Single(download);
+		Assert.IsType<ToolGatedDownloadJobHandler>(handler);
+	}
+
+	[Fact]
+	public void RegistersEveryDomainHandler()
+	{
+		using ServiceProvider provider = BuildProvider();
+
+		HashSet<string> jobTypes = [.. provider.GetServices<IJobHandler>().Select(handler => handler.JobType)];
+		Assert.Equal(new HashSet<string> { "catalog-index", "download", "discover", "scan", "credential-test" }, jobTypes);
+	}
+
+	/// <summary>
+	/// Issue #443 regression -- see <c>ApiSurfaceCompositionTests</c> and
+	/// <c>AddWaypointApiSurface</c>'s doc comment for the full story: a runner
+	/// composition (<c>AddWaypointInfrastructure</c> + <c>AddWaypointExecution</c>, with
+	/// no <c>AddWaypointApiSurface</c> call, exactly what
+	/// <c>Waypoint.ComplianceRunner.Program</c>/<c>Waypoint.DownloadRunner.Program</c> do)
+	/// must never register <see cref="IJobEventFeed"/> or the run-secret cleanup sweep.
+	/// </summary>
+	[Fact]
+	public void DoesNotRegisterJobEventFeedOrRunSecretCleanup()
+	{
+		using ServiceProvider provider = BuildProvider();
+
+		Assert.Null(provider.GetService<IJobEventFeed>());
+		Assert.DoesNotContain(
+			provider.GetServices<IHostedService>(),
+			service => service.GetType().Name == "RunSecretCleanupHostedService" || service.GetType().Name == "JobEventStreamService");
+	}
+
+	private static ServiceProvider BuildProvider()
+	{
+		List<KeyValuePair<string, string?>> values =
+		[
+			new("ConnectionStrings:Waypoint", "Host=127.0.0.1;Port=5432;Database=waypoint_test;Username=u;Password=p"),
+		];
+		IConfiguration configuration = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+
+		ServiceCollection services = new();
+		services.AddLogging();
+		services.AddWaypointInfrastructure(configuration);
+		services.AddWaypointExecution(configuration);
 		return services.BuildServiceProvider();
 	}
 }

@@ -1,14 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk.Worker">
 
   <!--
-    ADR-0013/0014, issue #440: the compliance-runner Generic Host. This is a
+    ADR-0013/0014, issue #440/#443: the compliance-runner Generic Host. This is a
     composition root, not a new implementation: it references Waypoint.Infrastructure
-    (which already carries the discover/credential-test/scan handlers, the PowerShell
-    runspace pool, and the envelope-encryption secret stores from M2) and
-    Waypoint.Runner (the shared dispatcher/lease/event mechanics from #457) and narrows
-    the job-type allowlist to JobCapabilities.Compliance. It must never reference
-    Waypoint.Api or host ASP.NET/REST/SSE (ADR-0013 P1); ASP.NET Core's own
-    "Worker" SDK (no Sdk.Web) enforces that at the project-template level.
+    (control-plane repositories and envelope-encryption secret stores),
+    Waypoint.Infrastructure.Execution (the discover/credential-test/scan handlers and
+    the PowerShell runspace pool; issue #443 split these out of
+    Waypoint.Infrastructure so Waypoint.Api cannot reference them), and Waypoint.Runner
+    (the shared dispatcher/lease/event mechanics from #457), and narrows the job-type
+    allowlist to JobCapabilities.Compliance. It must never reference Waypoint.Api or
+    host ASP.NET/REST/SSE (ADR-0013 P1); ASP.NET Core's own "Worker" SDK (no Sdk.Web)
+    enforces that at the project-template level.
   -->
 
   <PropertyGroup>
@@ -28,6 +30,7 @@
     <ProjectReference Include="..\Waypoint.Core\Waypoint.Core.csproj" />
     <ProjectReference Include="..\Waypoint.Runner\Waypoint.Runner.csproj" />
     <ProjectReference Include="..\Waypoint.Infrastructure\Waypoint.Infrastructure.csproj" />
+    <ProjectReference Include="..\Waypoint.Infrastructure.Execution\Waypoint.Infrastructure.Execution.csproj" />
   </ItemGroup>
 
 

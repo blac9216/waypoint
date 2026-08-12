@@ -9,14 +9,17 @@ source-build direction is recorded in [ADR-0013](../docs/adr/0013-control-plane-
 [ADR-0014](../docs/adr/0014-runner-job-ownership.md), and
 [ADR-0015](../docs/adr/0015-source-build-and-operator-export.md).
 
-> **Runner topology landed in issue [#442](https://github.com/blac9216/waypoint/issues/442).**
-> `backend` is now control-plane only (ADR-0013 §1) — it no longer mounts execution
-> scripts or domain tool stores read-write, and `compliance-runner`/`download-runner`
-> are the two services that actually claim and execute jobs. `backend`'s in-process
-> job dispatcher registration is still present in code (issue
-> [#443](https://github.com/blac9216/waypoint/issues/443) removes it) but has no
-> execution mounts left to work with in this compose file, so in practice the two
-> runners are what does the work.
+> **Runner topology landed in issue [#442](https://github.com/blac9216/waypoint/issues/442);
+> the control-plane split completed in issue
+> [#443](https://github.com/blac9216/waypoint/issues/443).** `backend` is control-plane
+> only (ADR-0013 §1) both in mounts (no execution scripts or domain tool stores
+> read-write) and in its compiled process: it references neither the PowerShell SDK
+> nor any job handler at build time (`backend/Waypoint.Infrastructure.Execution` is a
+> separate project only `compliance-runner`/`download-runner` reference), so there is
+> no dormant dispatcher registration for a future config change to reactivate.
+> `GET /api/v1/system` reports each runner's live heartbeat/capability status
+> (migration `0026_worker_registry.sql`), distinguishing API health from
+> compliance/download runner availability.
 
 ## Dev compose stack (epic [#1](https://github.com/blac9216/waypoint/issues/1), runners issue [#442](https://github.com/blac9216/waypoint/issues/442))
 

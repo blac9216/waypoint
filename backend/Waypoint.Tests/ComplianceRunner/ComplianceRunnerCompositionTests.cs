@@ -16,6 +16,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Waypoint.Core.Jobs;
 using Waypoint.Infrastructure.DependencyInjection;
+using Waypoint.Infrastructure.Execution.DependencyInjection;
 using Waypoint.Runner.Jobs;
 using Xunit;
 
@@ -24,14 +25,14 @@ namespace Waypoint.Tests.ComplianceRunner;
 /// <summary>
 /// Issue #440 AC1: "Discovery, credential-test, and scan jobs execute only in the
 /// compliance runner." This test exercises the exact composition <c>Program.cs</c>
-/// performs: call <see cref="ServiceCollectionExtensions.AddWaypointInfrastructure"/>
-/// with <see cref="WaypointInfrastructureHostKind.ExecutionOnly"/> (the runner seam #441
-/// added, shared with the download-runner) and then re-register
-/// <see cref="JobHandlerRegistry"/> narrowed to <see cref="JobCapabilities.Compliance"/>,
-/// filtering <see cref="IJobHandler"/> instances by <c>JobType</c> rather than by
-/// concrete type -- so a future compliance handler is included automatically and a
-/// download handler is excluded automatically, with no per-handler-type list to
-/// maintain here or drift from <c>Program.cs</c>.
+/// performs: call <c>AddWaypointInfrastructure</c> (control-plane repositories) then
+/// <see cref="ServiceCollectionExtensions.AddWaypointExecution"/> (the execution-only
+/// composition issue #443 split into <c>Waypoint.Infrastructure.Execution</c>) and then
+/// re-register <see cref="JobHandlerRegistry"/> narrowed to
+/// <see cref="JobCapabilities.Compliance"/>, filtering <see cref="IJobHandler"/> instances
+/// by <c>JobType</c> rather than by concrete type -- so a future compliance handler is
+/// included automatically and a download handler is excluded automatically, with no
+/// per-handler-type list to maintain here or drift from <c>Program.cs</c>.
 ///
 /// No live Postgres is needed: like <c>JobEngineWiringTests</c>, this only proves DI
 /// registrations resolve to the right types/counts, never opening a connection.
@@ -83,7 +84,8 @@ public sealed class ComplianceRunnerCompositionTests
 
 		ServiceCollection services = new();
 		services.AddLogging();
-		services.AddWaypointInfrastructure(configuration, WaypointInfrastructureHostKind.ExecutionOnly);
+		services.AddWaypointInfrastructure(configuration);
+		services.AddWaypointExecution(configuration);
 
 		services.AddSingleton(serviceProvider =>
 		{

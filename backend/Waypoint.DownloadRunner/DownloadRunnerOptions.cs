@@ -44,4 +44,14 @@ public sealed class DownloadRunnerOptions
 	/// scheduling delay never flaps the container's health status.
 	/// </summary>
 	public TimeSpan ReadinessMaxAge { get; set; } = TimeSpan.FromSeconds(60);
+
+	/// <summary>
+	/// Issue #443: the stable identity this process heartbeats to <c>worker_registry</c>
+	/// under (see <c>Waypoint.Core.SystemState.IWorkerRegistryWriter</c>). Defaults to
+	/// the container hostname (Docker gives each container a unique one by default),
+	/// which is unique per running instance without any operator configuration; set
+	/// explicitly only if an operator's deployment needs a stable identity across
+	/// container recreation (e.g. a fixed Compose <c>container_name</c>).
+	/// </summary>
+	public string WorkerId { get; set; } = Environment.MachineName;
 }

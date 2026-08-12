@@ -75,6 +75,13 @@ public sealed class SystemApiTests : IAsyncLifetime
 				services.AddSingleton<IArtifactStoreDiskUsageProvider>(new ArtifactStoreDiskUsageProvider(
 					Options.Create(new DownloadOptions { ArtifactStorePath = _artifactStorePath }),
 					NullLogger<ArtifactStoreDiskUsageProvider>.Instance));
+
+				// Issue #443: SystemController now also depends on IWorkerRegistryReader.
+				// This factory wires repositories directly (no ConnectionStrings:Waypoint
+				// in test config), so AddWaypointInfrastructure's connection-string-gated
+				// registration never runs -- register it explicitly, same as the two
+				// repositories above.
+				services.AddSingleton<IWorkerRegistryReader>(new WorkerRegistryRepository(_connectionString));
 			});
 		}
 	}

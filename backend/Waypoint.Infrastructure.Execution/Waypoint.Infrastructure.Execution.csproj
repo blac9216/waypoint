@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Issue #443 (ADR-0013 §1): the execution-only half of what was previously all of
+    Waypoint.Infrastructure. This project owns everything that actually runs
+    PowerShell or claims/executes a job: the runspace pool, the PowerShell-backed
+    IJobHandler implementations, and the dispatcher/lease-recovery/handler-registry DI
+    wiring those handlers need. Only the two dedicated runner executables
+    (Waypoint.ComplianceRunner, Waypoint.DownloadRunner) reference this project.
+    Waypoint.Api must NOT reference it; that absence is what makes "the API process
+    hosts no PowerShell host or domain job handlers" a structural property of the
+    build rather than a configuration choice a future change could quietly reverse
+    (see AddWaypointExecution's doc comment). Control-plane repositories, migrations,
+    secrets, SSE and the run-secret lifecycle stay in Waypoint.Infrastructure, which
+    both this project and Waypoint.Api reference.
+  -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\Waypoint.Core\Waypoint.Core.csproj" />
+    <ProjectReference Include="..\Waypoint.Infrastructure\Waypoint.Infrastructure.csproj" />
+    <ProjectReference Include="..\Waypoint.Runner\Waypoint.Runner.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.2" />
+    <!-- The only project in the solution that references the PowerShell SDK, by
+         design; see the header comment above. -->
+    <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.4.6" />
+  </ItemGroup>
+
+  <!-- Issue #223: the WaypointCatalogIndex/WaypointDownload/WaypointDiscovery/
+       WaypointCredentialTest/WaypointScan shim modules are Waypoint-owned code (not
+       vendor content; CLAUDE.md's License & Borrowing Policy only restricts copying
+       the SIBLING repos' .ps1 scripts, which these are not). They publish alongside
+       this project's output so a runner's PowerShell__ModulePreloadPaths__* can point
+       at a real in-container path. -->
+  <ItemGroup>
+    <None Include="PowerShell\Modules\**\*.psm1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Waypoint.Tests" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

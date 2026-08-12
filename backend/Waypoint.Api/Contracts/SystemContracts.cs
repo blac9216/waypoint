@@ -22,21 +22,32 @@ namespace Waypoint.Api.Contracts;
 /// availability"). Issue #226 covers version/build/mode/update_available (already
 /// consumed by the frontend's <c>SystemInfo</c> shape) plus <see cref="Stores"/> --
 /// the depot-sync figure stays a follow-up (no depot-sync mechanism exists to report
-/// on yet; tracked separately from this disk-usage slice).
+/// on yet; tracked separately from this disk-usage slice). Issue #443 adds
+/// <see cref="Runners"/>: this response distinguishes API/control-plane health (a 200
+/// from this endpoint at all) from execution-domain availability (each entry here) --
+/// the API process itself no longer executes anything, so "is the API up" and "can a
+/// scan/discover/download job actually run right now" are two different questions,
+/// and this is where the second one is answered.
 /// </summary>
 public sealed record SystemResponse(
 	string Version,
 	string Build,
 	string Mode,
 	string? UpdateAvailable,
-	IReadOnlyList<SystemStoreUsageResponse> Stores)
+	IReadOnlyList<SystemStoreUsageResponse> Stores,
+	IReadOnlyList<SystemRunnerStatusResponse> Runners)
 {
-	public static SystemResponse Create(ApplianceState state, string buildSha, IReadOnlyList<ArtifactStoreUsage> stores) => new(
+	public static SystemResponse Create(
+		ApplianceState state,
+		string buildSha,
+		IReadOnlyList<ArtifactStoreUsage> stores,
+		IReadOnlyList<SystemRunnerStatusResponse> runners) => new(
 		Version: state.Version,
 		Build: buildSha,
 		Mode: state.Mode,
 		UpdateAvailable: state.UpdateAvailableVersion,
-		Stores: stores.Select(SystemStoreUsageResponse.FromDomain).ToArray());
+		Stores: stores.Select(SystemStoreUsageResponse.FromDomain).ToArray(),
+		Runners: runners);
 }
 
 /// <summary>One store's disk-usage figures, in bytes, per api-contract.md "disk usage by store".</summary>
@@ -44,4 +55,22 @@ public sealed record SystemStoreUsageResponse(string Name, string Path, long Tot
 {
 	public static SystemStoreUsageResponse FromDomain(ArtifactStoreUsage usage) =>
 		new(usage.Name, usage.Path, usage.TotalBytes, usage.UsedBytes, usage.FreeBytes);
+}
+
+/// <summary>
+/// One runner process's last-known liveness (issue #443, migration 0026
+/// <c>worker_registry</c>). <see cref="WorkerId"/> and <see cref="LastSeenAt"/> are
+/// operator-facing diagnostics ("which container, how long ago"); <see cref="Available"/>
+/// is the derived verdict the UI should key its readiness indicator on --
+/// <see cref="WorkerHeartbeat.Ready"/> AND not stale (see
+/// <c>Waypoint.Core.SystemState.WorkerRegistryOptions.StaleAfter</c>).
+/// </summary>
+public sealed record SystemRunnerStatusResponse(
+	string WorkerId,
+	IReadOnlyList<string> JobTypes,
+	bool Available,
+	DateTimeOffset LastSeenAt)
+{
+	public static SystemRunnerStatusResponse FromDomain(WorkerHeartbeat heartbeat, bool available) =>
+		new(heartbeat.WorkerId, heartbeat.JobTypes, available, heartbeat.LastSeenAt);
 }

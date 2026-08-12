@@ -33,6 +33,7 @@ COPY backend/Waypoint.sln backend/
 COPY backend/Waypoint.Core/Waypoint.Core.csproj backend/Waypoint.Core/
 COPY backend/Waypoint.Runner/Waypoint.Runner.csproj backend/Waypoint.Runner/
 COPY backend/Waypoint.Infrastructure/Waypoint.Infrastructure.csproj backend/Waypoint.Infrastructure/
+COPY backend/Waypoint.Infrastructure.Execution/Waypoint.Infrastructure.Execution.csproj backend/Waypoint.Infrastructure.Execution/
 COPY backend/Waypoint.Api/Waypoint.Api.csproj backend/Waypoint.Api/
 COPY backend/Waypoint.ComplianceRunner/Waypoint.ComplianceRunner.csproj backend/Waypoint.ComplianceRunner/
 COPY backend/Waypoint.DownloadRunner/Waypoint.DownloadRunner.csproj backend/Waypoint.DownloadRunner/

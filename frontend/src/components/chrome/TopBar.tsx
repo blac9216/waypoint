@@ -1,5 +1,5 @@
 import { useAuth } from "../../lib/auth-context";
-import { useSystem } from "../../lib/system-context";
+import { useSystem, type SystemRunnerStatus } from "../../lib/system-context";
 import { useTheme } from "../../lib/theme-context";
 import { BrandMark, ThemeIcon } from "./icons";
 import "./TopBar.css";
@@ -66,6 +66,16 @@ export function TopBar({ screenTitle }: { screenTitle: string }) {
 				<span>STIG Manager</span>
 			</div>
 
+			{/* Issue #443: the API process no longer executes anything itself
+			    (ADR-0013), so "is a job actually able to run" is a separate fact
+			    from "is the API up" — this reads GET /system's `runners` list
+			    (each entry a compliance-runner or download-runner heartbeat)
+			    rather than backend health. Reuses the STIG Manager indicator's
+			    exact dot+label shape; only shown once `ready`, since an empty
+			    list before the first fetch settles would misleadingly read as
+			    "no runners". */}
+			{ready && <RunnersIndicator runners={system?.runners ?? []} />}
+
 			{/* Read-only by design: deployment mode is fixed at deploy time (README
 			    "Global Chrome" / "Interactions"), not a runtime toggle — this is
 			    deliberately NOT the prototype's clickable demo badge. */}
@@ -88,5 +98,35 @@ export function TopBar({ screenTitle }: { screenTitle: string }) {
 				<ThemeIcon />
 			</button>
 		</header>
+	);
+}
+
+/**
+ * Issue #443: a `runners` list of length 0 is a real, distinct state from
+ * "unavailable" — no worker has ever heartbeated (e.g. a fresh deployment
+ * before either runner container has started), not "a worker is down". Both
+ * read as "not fully ready" but say different things to an operator, so the
+ * dot color and tooltip cover three states, matching the STIG Manager and
+ * mode indicators' own two/three-state pattern rather than collapsing to a
+ * plain boolean.
+ */
+function RunnersIndicator({ runners }: { runners: SystemRunnerStatus[] }) {
+	const availableCount = runners.filter((runner) => runner.available).length;
+	const state: "none" | "degraded" | "all-ok" =
+		runners.length === 0 ? "none" : availableCount < runners.length ? "degraded" : "all-ok";
+
+	const label = runners.length === 0 ? "Runners" : `Runners ${availableCount}/${runners.length}`;
+	const tooltip =
+		runners.length === 0
+			? "Runners: none reporting — no compliance-runner or download-runner has heartbeated yet."
+			: runners
+					.map((runner) => `${runner.worker_id} (${runner.job_types.join(", ")}): ${runner.available ? "available" : "unavailable"}`)
+					.join("\n");
+
+	return (
+		<div className="top-bar__stigman" title={tooltip}>
+			<span className={`top-bar__stigman-dot ${state === "all-ok" ? "is-ok" : state === "degraded" ? "is-degraded" : "is-off"}`} />
+			<span>{label}</span>
+		</div>
 	);
 }
