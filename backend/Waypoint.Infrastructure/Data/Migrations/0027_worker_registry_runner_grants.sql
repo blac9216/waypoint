@@ -16,4 +16,8 @@ BEGIN
 END
 $$;
 
-GRANT SELECT, INSERT, UPDATE ON worker_registry TO waypoint_compliance_runner, waypoint_download_runner;
+-- INSERT + UPDATE only: the ON CONFLICT upsert in WorkerRegistryRepository.HeartbeatAsync
+-- needs both, but neither runner role ever SELECTs this table (only the control-plane
+-- connection reads it back for GET /system, per the comment above), so SELECT is
+-- deliberately withheld to keep these least-privilege roles matching their stated intent.
+GRANT INSERT, UPDATE ON worker_registry TO waypoint_compliance_runner, waypoint_download_runner;

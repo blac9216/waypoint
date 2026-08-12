@@ -20,6 +20,7 @@ using Waypoint.Core.Jobs;
 using Waypoint.Core.PowerShell;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
+using Waypoint.Core.SystemState;
 using Waypoint.Runner.Jobs;
 using Waypoint.Runner.Resources;
 using Xunit;
@@ -140,11 +141,74 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 		Assert.False(File.Exists(reportFile));
 	}
 
+	[Fact]
+	public async Task StartThenImmediateStop_WhenWorkerRegistryRegistered_HeartbeatsCapabilitiesAndReadiness()
+	{
+		// Issue #443: when an IWorkerRegistryWriter is wired (Program.cs registers it only
+		// with a connection string), the reporter's database-persisted twin of the file
+		// report must upsert this worker's row -- same capabilities and readiness it wrote
+		// to the file -- so GET /system can report per-domain runner availability.
+		string reportFile = Path.Combine(_tempRoot, "health.json");
+		RecordingWorkerRegistry registry = new();
+		RunnerHealthReportingHostedService service = BuildService(reportFile, ready: true, workerRegistry: registry, workerId: "compliance-runner-under-test");
+
+		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
+		await service.StartAsync(cts.Token);
+		await service.StopAsync(CancellationToken.None);
+
+		RecordingWorkerRegistry.Heartbeat beat = Assert.Single(registry.Heartbeats);
+		Assert.Equal("compliance-runner-under-test", beat.WorkerId);
+		Assert.True(beat.Ready);
+		Assert.Equal(
+			new HashSet<string>(JobCapabilities.Compliance, StringComparer.Ordinal),
+			new HashSet<string>(beat.JobTypes, StringComparer.Ordinal));
+	}
+
+	[Fact]
+	public async Task RunningLongEnoughForARefreshTick_HeartbeatsAgain()
+	{
+		// Drives the ExecuteAsync refresh loop (not just the StartAsync first write): a short
+		// RefreshInterval lets the timer tick at least once before StopAsync, so the periodic
+		// WriteReport + HeartbeatWorkerRegistryAsync path runs and records a second heartbeat.
+		string reportFile = Path.Combine(_tempRoot, "health.json");
+		RecordingWorkerRegistry registry = new();
+		RunnerHealthReportingHostedService service = BuildService(
+			reportFile, ready: true, workerRegistry: registry, refreshInterval: TimeSpan.FromMilliseconds(30));
+
+		await service.StartAsync(CancellationToken.None);
+		// One heartbeat from StartAsync; wait for at least one refresh tick to add more.
+		await Task.Delay(TimeSpan.FromMilliseconds(200));
+		await service.StopAsync(CancellationToken.None);
+
+		Assert.True(registry.Heartbeats.Count >= 2, $"expected at least 2 heartbeats, got {registry.Heartbeats.Count}");
+	}
+
+	[Fact]
+	public async Task Heartbeat_WhenWriterThrows_DoesNotCrashReporter()
+	{
+		// The heartbeat is best-effort (like the file write): a failed upsert is logged and
+		// swallowed, never propagated to crash the runner over a health side channel.
+		string reportFile = Path.Combine(_tempRoot, "health.json");
+		ThrowingWorkerRegistry registry = new();
+		RunnerHealthReportingHostedService service = BuildService(reportFile, ready: true, workerRegistry: registry);
+
+		using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
+		await service.StartAsync(cts.Token);
+		await service.StopAsync(CancellationToken.None);
+
+		// The file report still lands even though the heartbeat threw.
+		Assert.True(File.Exists(reportFile));
+		Assert.True(registry.WasCalled);
+	}
+
 	private RunnerHealthReportingHostedService BuildService(
 		string reportFile,
 		bool ready,
 		double fallbackCpuCores = 1.0,
-		long fallbackMemoryBytes = 1024L * 1024 * 1024)
+		long fallbackMemoryBytes = 1024L * 1024 * 1024,
+		IWorkerRegistryWriter? workerRegistry = null,
+		string workerId = "compliance-runner-test",
+		TimeSpan? refreshInterval = null)
 	{
 		string modulesDir = Path.Combine(_tempRoot, "modules");
 		string profileDir = Path.Combine(_tempRoot, "profiles", "vsphere");
@@ -197,15 +261,40 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 			Options.Create(new RunnerHealthOptions
 			{
 				ReportFilePath = reportFile,
-				RefreshInterval = TimeSpan.FromMinutes(5),
+				RefreshInterval = refreshInterval ?? TimeSpan.FromMinutes(5),
+				WorkerId = workerId,
 			}),
 			resourceAdmission,
-			null,
+			workerRegistry,
 			NullLogger<RunnerHealthReportingHostedService>.Instance);
 	}
 
 	private sealed class FakeMasterKeyProvider : IMasterKeyProvider
 	{
 		public MasterKey GetKey() => new(new byte[32], "wpk-fake0000");
+	}
+
+	private sealed class RecordingWorkerRegistry : IWorkerRegistryWriter
+	{
+		public sealed record Heartbeat(string WorkerId, IReadOnlyList<string> JobTypes, bool Ready);
+
+		public List<Heartbeat> Heartbeats { get; } = [];
+
+		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, CancellationToken cancellationToken)
+		{
+			Heartbeats.Add(new Heartbeat(workerId, jobTypes, ready));
+			return Task.CompletedTask;
+		}
+	}
+
+	private sealed class ThrowingWorkerRegistry : IWorkerRegistryWriter
+	{
+		public bool WasCalled { get; private set; }
+
+		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, CancellationToken cancellationToken)
+		{
+			WasCalled = true;
+			throw new InvalidOperationException("simulated heartbeat write failure");
+		}
 	}
 }
