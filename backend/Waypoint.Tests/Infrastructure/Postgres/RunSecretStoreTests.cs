@@ -71,10 +71,12 @@ public sealed class RunSecretStoreTests : IAsyncLifetime, IDisposable
 		return path;
 	}
 
-	private RunSecretStore CreateStore(string keyPath)
+	private RunSecretStore CreateStore(string keyPath) => CreateStore(keyPath, new RunSecretOptions());
+
+	private RunSecretStore CreateStore(string keyPath, RunSecretOptions options)
 	{
 		AesGcmEnvelopeCipher cipher = new(new FileMasterKeyProvider(keyPath));
-		return new RunSecretStore(_fixture.ConnectionString, cipher, _redactor, NullLogger<RunSecretStore>.Instance);
+		return new RunSecretStore(_fixture.ConnectionString, cipher, _redactor, Microsoft.Extensions.Options.Options.Create(options), NullLogger<RunSecretStore>.Instance);
 	}
 
 	[Fact]
@@ -124,6 +126,102 @@ public sealed class RunSecretStoreTests : IAsyncLifetime, IDisposable
 		Assert.NotNull(second);
 		Assert.Equal(secretValue, second!.Secret);
 		Assert.Equal(2, await CountAuditAsync("secret.run_decrypted", _runId));
+	}
+
+	/// <summary>
+	/// Issue #469: a successful decrypt slides <c>expires_at</c> back out to
+	/// now() + <see cref="RunSecretOptions.Expiry"/>, in the same transaction as the
+	/// decrypt audit. Seeds the row already close to expiry (StoreAsync's own minimum
+	/// positive TimeSpan check rules out zero/negative, so seed directly) and asserts
+	/// the post-decrypt value moved forward relative to the pre-decrypt value.
+	/// </summary>
+	[Fact]
+	public async Task Decrypt_SlidesExpiresAt_ForwardByTheConfiguredExpiry()
+	{
+		RunSecretOptions options = new() { Expiry = TimeSpan.FromHours(2) };
+		RunSecretStore store = CreateStore(WriteKeyFile(), options);
+		await store.StoreAsync(_runId, new RunSecretCredential("user@example.internal", "invented-sliding-value"), "tester", TimeSpan.FromMinutes(1), CancellationToken.None);
+
+		DateTime beforeDecrypt = await GetExpiresAtAsync(_runId);
+
+		Guid jobId = await SeedJobAsync(_runId);
+		using DecryptedRunSecret? handle = await store.DecryptAsync(_runId, jobId, "engine", CancellationToken.None);
+		Assert.NotNull(handle);
+
+		DateTime afterDecrypt = await GetExpiresAtAsync(_runId);
+		Assert.True(afterDecrypt > beforeDecrypt,
+			$"Decrypt did not slide expires_at forward: before={beforeDecrypt:o}, after={afterDecrypt:o}.");
+
+		// The slid value should land close to now + 2h (the configured Expiry), not
+		// merely "later than the 1-minute StoreAsync window" -- proves the slide uses
+		// RunSecretOptions.Expiry rather than re-applying the original expiresIn.
+		TimeSpan untilExpiry = afterDecrypt - DateTime.UtcNow;
+		Assert.True(untilExpiry > TimeSpan.FromMinutes(90) && untilExpiry < TimeSpan.FromHours(3),
+			$"Slid expires_at was not ~2h out: {untilExpiry}.");
+	}
+
+	/// <summary>
+	/// Issue #469: an abandoned run -- one that stops decrypting entirely -- gets no
+	/// activity to slide its window, so it is still swept once its (last-set)
+	/// expires_at passes. Sliding only helps a row that keeps generating decrypts.
+	/// </summary>
+	[Fact]
+	public async Task AnAbandonedRun_WithNoFurtherActivity_IsStillSweptAfterItsWindowPasses()
+	{
+		Guid jobId = await SeedJobAsync(_runId);
+		await _store.StoreAsync(_runId, new RunSecretCredential("user@example.internal", "invented-abandoned"), "tester", TimeSpan.FromMinutes(1), CancellationToken.None);
+
+		// One decrypt (e.g. the initial claim), then nothing else ever touches this run.
+		using (DecryptedRunSecret? handle = await _store.DecryptAsync(_runId, jobId, "engine", CancellationToken.None))
+		{
+			Assert.NotNull(handle);
+		}
+
+		// Simulate the window having elapsed with no further activity by backdating
+		// expires_at directly, rather than sleeping in a test.
+		await SetExpiresAtAsync(_runId, DateTime.UtcNow.AddMinutes(-1));
+
+		int deleted = await _store.DeleteExpiredAsync(CancellationToken.None);
+
+		Assert.Equal(1, deleted);
+		Assert.Equal(0L, await CountRowsAsync(_runId));
+		Assert.Equal(1, await CountAuditAsync("secret.run_expired", _runId));
+	}
+
+	/// <summary>
+	/// Issue #469: a run with periodic decrypt activity (retries / stage requeues /
+	/// lease-recovery decrypts, standing in for real multi-stage progress) survives
+	/// past what would have been its ORIGINAL fixed-at-creation expiry, because each
+	/// decrypt slides the window back out.
+	/// </summary>
+	[Fact]
+	public async Task ARunWithPeriodicActivity_SurvivesPastItsOriginalCreationWindow()
+	{
+		RunSecretOptions options = new() { Expiry = TimeSpan.FromMinutes(10) };
+		RunSecretStore store = CreateStore(WriteKeyFile(), options);
+		await store.StoreAsync(_runId, new RunSecretCredential("user@example.internal", "invented-long-runner"), "tester", TimeSpan.FromMinutes(1), CancellationToken.None);
+		Guid jobId = await SeedJobAsync(_runId);
+
+		DateTime originalExpiry = await GetExpiresAtAsync(_runId);
+
+		// Activity happens, then the row is artificially pushed to just past what the
+		// ORIGINAL (1-minute) creation window would have been -- if expiry were still
+		// fixed-at-creation, the row would already be gone. Decrypting again here
+		// stands in for the next stage's activity sliding the window back out.
+		await SetExpiresAtAsync(_runId, originalExpiry.AddSeconds(-1));
+		using (DecryptedRunSecret? handle = await store.DecryptAsync(_runId, jobId, "engine", CancellationToken.None))
+		{
+			Assert.NotNull(handle);
+		}
+
+		DateTime slidExpiry = await GetExpiresAtAsync(_runId);
+		Assert.True(slidExpiry > originalExpiry,
+			"A decrypt after the original creation window should have slid expires_at further out, not left it to lapse.");
+
+		// A sweep run "now" (well within the slid 10-minute window) must not collect it.
+		int deleted = await store.DeleteExpiredAsync(CancellationToken.None);
+		Assert.Equal(0, deleted);
+		Assert.Equal(1L, await CountRowsAsync(_runId));
 	}
 
 	[Fact]
@@ -312,6 +410,34 @@ public sealed class RunSecretStoreTests : IAsyncLifetime, IDisposable
 			"INSERT INTO jobs (run_id, job_type, priority, state, has_run_secret) VALUES ($1, 'scan', 1, 'queued', true) RETURNING id", connection);
 		insert.Parameters.AddWithValue(runId);
 		return (Guid)(await insert.ExecuteScalarAsync())!;
+	}
+
+	private async Task<DateTime> GetExpiresAtAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand select = new("SELECT expires_at FROM run_secrets WHERE run_id = $1", connection);
+		select.Parameters.AddWithValue(runId);
+		return (DateTime)(await select.ExecuteScalarAsync())!;
+	}
+
+	private async Task SetExpiresAtAsync(Guid runId, DateTime expiresAt)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new("UPDATE run_secrets SET expires_at = $2 WHERE run_id = $1", connection);
+		update.Parameters.AddWithValue(runId);
+		update.Parameters.AddWithValue(DateTime.SpecifyKind(expiresAt, DateTimeKind.Utc));
+		await update.ExecuteNonQueryAsync();
+	}
+
+	private async Task<long> CountRowsAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand count = new("SELECT count(*) FROM run_secrets WHERE run_id = $1", connection);
+		count.Parameters.AddWithValue(runId);
+		return (long)(await count.ExecuteScalarAsync())!;
 	}
 
 	private async Task<long> CountAuditAsync(string eventType, Guid runId)
