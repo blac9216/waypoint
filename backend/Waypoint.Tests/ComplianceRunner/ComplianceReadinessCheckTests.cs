@@ -107,12 +107,79 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 		Assert.Contains(report.Problems, problem => problem.Contains("Master key", StringComparison.Ordinal));
 	}
 
+	[Fact]
+	public void NoModulePreloadPathsConfigured_FailsReadiness()
+	{
+		// An empty ModulePreloadPaths list is itself a misconfiguration: the compliance
+		// shim modules the Dockerfile provisions must be declared, or the runner cannot
+		// load them. This is distinct from a *declared but missing* path.
+		ComplianceReadinessCheck check = BuildCheck(out _, modulePreloadPaths: []);
+
+		ReadinessReport report = check.Evaluate();
+
+		Assert.False(report.Ready);
+		Assert.Contains(report.Problems, problem => problem.Contains("ModulePreloadPaths", StringComparison.Ordinal));
+	}
+
+	[Theory]
+	[InlineData("Scans:ProfilePath")]
+	[InlineData("Scans:NsxProfilePath")]
+	[InlineData("Scans:SrgProfilePath")]
+	[InlineData("Scans:ArtifactStorePath")]
+	public void UnconfiguredContentOrArtifactPath_FailsReadinessAndNamesTheSetting(string settingName)
+	{
+		// A blank (unconfigured) path is a different failure from a configured-but-missing
+		// one and must be reported as "not configured", naming the setting so an operator
+		// knows which mount to declare.
+		ComplianceReadinessCheck check = BuildCheck(out _, blankSetting: settingName);
+
+		ReadinessReport report = check.Evaluate();
+
+		Assert.False(report.Ready);
+		Assert.Contains(
+			report.Problems,
+			problem => problem.Contains(settingName, StringComparison.Ordinal)
+				&& problem.Contains("not configured", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public void ArtifactStoreExistsButIsNotWritable_FailsReadiness()
+	{
+		// A read-only-mounted artifact volume exists but rejects the write-probe; the check
+		// must catch that at startup rather than at scan-completion time far downstream.
+		ComplianceReadinessCheck check = BuildCheck(out Paths paths, readOnlyArtifactStore: true);
+
+		try
+		{
+			ReadinessReport report = check.Evaluate();
+
+			Assert.False(report.Ready);
+			Assert.Contains(
+				report.Problems,
+				problem => problem.Contains("ArtifactStorePath", StringComparison.Ordinal)
+					&& problem.Contains("not writable", StringComparison.Ordinal));
+		}
+		finally
+		{
+			// Restore write permission so Dispose can delete the temp tree.
+			// CA1416: the runners are Linux-only (cgroups, Docker) and this suite runs on
+			// Linux CI; the Unix file-mode probe is the whole point of the not-writable case.
+#pragma warning disable CA1416
+			File.SetUnixFileMode(
+				paths.ArtifactDir,
+				UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+#pragma warning restore CA1416
+		}
+	}
+
 	private ComplianceReadinessCheck BuildCheck(
 		out Paths paths,
 		IReadOnlyList<string>? modulePreloadPaths = null,
 		string? missingContentRoot = null,
 		bool missingArtifactStore = false,
-		bool masterKeyThrows = false)
+		bool masterKeyThrows = false,
+		string? blankSetting = null,
+		bool readOnlyArtifactStore = false)
 	{
 		string modulesDir = Path.Combine(_tempRoot, "modules");
 		string profileDir = Path.Combine(_tempRoot, "profiles", "vsphere");
@@ -141,6 +208,15 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 			Directory.CreateDirectory(artifactDir);
 		}
 
+		if (readOnlyArtifactStore)
+		{
+			// Strip write permission so the readiness write-probe throws. Linux-only by
+			// design (see the not-writable test); CA1416 suppressed for the same reason.
+#pragma warning disable CA1416
+			File.SetUnixFileMode(artifactDir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+#pragma warning restore CA1416
+		}
+
 		paths = new Paths(modulesDir, profileDir, nsxDir, srgDir, artifactDir);
 
 		PowerShellOptions powerShellOptions = new();
@@ -151,10 +227,10 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 
 		ScanOptions scanOptions = new()
 		{
-			ProfilePath = profileDir,
-			NsxProfilePath = nsxDir,
-			SrgProfilePath = srgDir,
-			ArtifactStorePath = artifactDir,
+			ProfilePath = blankSetting == "Scans:ProfilePath" ? string.Empty : profileDir,
+			NsxProfilePath = blankSetting == "Scans:NsxProfilePath" ? string.Empty : nsxDir,
+			SrgProfilePath = blankSetting == "Scans:SrgProfilePath" ? string.Empty : srgDir,
+			ArtifactStorePath = blankSetting == "Scans:ArtifactStorePath" ? string.Empty : artifactDir,
 		};
 
 		IMasterKeyProvider masterKeyProvider = masterKeyThrows
