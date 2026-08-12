@@ -7,24 +7,9 @@
  */
 import { useEffect, useMemo, useRef } from "react";
 import type { RunJob, RunSnapshot } from "./liverun";
+import { stateColor } from "./liverun-view";
 import type { JobControlProps } from "./useRunControls";
 import type { LogFirstLine } from "./useRunLog";
-
-const STATE_COLOR: Record<string, string> = {
-	queued: "var(--txt3)",
-	blocked: "var(--txt3)",
-	running: "var(--acc)",
-	attesting: "var(--acc)",
-	converting: "var(--acc)",
-	uploaded: "var(--ok)",
-	done: "var(--ok)",
-	failed: "var(--bad)",
-	"auth-failed": "var(--bad)",
-};
-
-export function stateColor(state: string): string {
-	return STATE_COLOR[state] ?? "var(--txt3)";
-}
 
 const IN_FLIGHT_STATES = new Set(["running", "attesting", "converting"]);
 /** #277's cooperative per-job cancel is honored for queued and in-flight jobs
