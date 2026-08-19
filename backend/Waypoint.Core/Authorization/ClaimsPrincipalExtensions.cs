@@ -52,4 +52,23 @@ public static class ClaimsPrincipalExtensions
 
 		return username;
 	}
+
+	/// <summary>
+	/// True when the caller carries a <see cref="WaypointClaimTypes.Role"/> claim at or
+	/// above <paramref name="minimum"/>. Uses the same parse-and-compare rule (and the
+	/// same fail-closed behaviour on a missing/unparseable claim) as
+	/// <see cref="MinimumRoleAuthorizationHandler"/>, so an imperative per-request check
+	/// (e.g. a role floor that varies by request body) stays consistent with the
+	/// attribute-based policy. A pipeline-level <c>[Require*Role]</c> attribute still
+	/// establishes the coarse floor; this refines it for the specific request.
+	/// </summary>
+	public static bool HasRoleAtLeast(this ClaimsPrincipal principal, WaypointRole minimum)
+	{
+		ArgumentNullException.ThrowIfNull(principal);
+
+		string? roleClaim = principal.FindFirst(WaypointClaimTypes.Role)?.Value;
+		return roleClaim is not null
+			&& Enum.TryParse(roleClaim, ignoreCase: true, out WaypointRole role)
+			&& role >= minimum;
+	}
 }

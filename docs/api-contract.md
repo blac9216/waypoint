@@ -202,7 +202,7 @@ work once one exists.
 ### Schedules
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/schedules` · `/schedules/{id}` | GET, POST, PUT, DELETE | Read-only job types only (server-rejects `remediate` etc. — domain rule). cron, site/scope, next_run, last_result; auto-paused states in air-gapped mode for depot kinds. |
+| `/schedules` · `/schedules/{id}` | GET, POST, PUT, DELETE | Read-only job types only (server-rejects `remediate` etc. — domain rule). cron, site/scope, next_run, last_result; auto-paused states in air-gapped mode for depot kinds. Every dispatched run is recorded with initiator `"scheduled"` alongside `created_by` (the schedule's creator) — domain-model.md Scheduling: "record 'scheduled' as the initiator alongside the schedule's creator." |
 
 ### System, users, audit
 | Endpoint | Methods | Notes |
