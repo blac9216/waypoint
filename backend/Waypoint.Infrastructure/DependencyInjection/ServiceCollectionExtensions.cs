@@ -253,6 +253,10 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Runs.RunCreationService>();
 			services.AddSingleton<Runs.RunArtifactProjectionService>();
 			services.AddSingleton<Runs.RunControlService>();
+
+			// Issue #513: dashboard aggregate service, reusing RunArtifactProjectionService's
+			// HDF-derived CAT counting rather than a second implementation.
+			services.AddSingleton<Runs.DashboardAggregateService>();
 		}
 
 		return services;
