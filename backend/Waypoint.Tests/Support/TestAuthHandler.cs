@@ -50,7 +50,11 @@ public sealed class TestAuthHandler : AuthenticationHandler<AuthenticationScheme
 		[
 			new Claim(ClaimTypes.NameIdentifier, "test-user"),
 			new Claim(ClaimTypes.Name, "test-user"),
-			new Claim(WaypointClaimTypes.Role, roleValues.ToString())
+			new Claim(WaypointClaimTypes.Role, roleValues.ToString()),
+			// Issue #512: UserUpsertMiddleware reads this to key users.oidc_sub -- kept
+			// stable and distinct from a real Keycloak `sub` shape the same way
+			// LocalSessionAuthenticationHandler's "local:{username}" synthesis is.
+			new Claim(WaypointClaimTypes.Subject, "test:test-user")
 		];
 
 		ClaimsIdentity identity = new(claims, SchemeName);

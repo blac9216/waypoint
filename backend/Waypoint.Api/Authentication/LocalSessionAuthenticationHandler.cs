@@ -71,11 +71,17 @@ public sealed class LocalSessionAuthenticationHandler : AuthenticationHandler<Au
 		// what controllers use to attribute a run/credential action to its actual
 		// caller (issue #209 postmortem -- its absence silently collapsed every
 		// caller and every recorded initiator to the fallback literal "admin").
+		//
+		// WaypointClaimTypes.Subject (issue #512): this dev-flag path (ADR-0004 rollout
+		// note) has no real OIDC subject to key users.oidc_sub on, so it synthesizes
+		// "local:{username}" -- stable per session and unable to collide with a real
+		// Keycloak `sub` (a UUID).
 		Claim[] claims =
 		[
 			new Claim(ClaimTypes.NameIdentifier, session.Username),
 			new Claim(ClaimTypes.Name, session.Username),
-			new Claim(WaypointClaimTypes.Role, session.Role.ToString())
+			new Claim(WaypointClaimTypes.Role, session.Role.ToString()),
+			new Claim(WaypointClaimTypes.Subject, $"local:{session.Username}")
 		];
 
 		ClaimsIdentity identity = new(claims, Scheme.Name);

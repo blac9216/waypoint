@@ -24,4 +24,15 @@ public static class WaypointClaimTypes
 {
 	/// <summary>The authenticated principal's <see cref="WaypointRole"/>, serialized as its enum name.</summary>
 	public const string Role = "waypoint:role";
+
+	/// <summary>
+	/// The authenticated principal's stable, provider-issued subject identifier --
+	/// issue #512's <c>users.oidc_sub</c> key. For OIDC this is the token's own `sub`
+	/// claim (OidcClaimsMappingOptionsSetup copies it here verbatim, distinct from the
+	/// human-readable <see cref="System.Security.Claims.ClaimTypes.Name"/> claim it
+	/// also sets); LocalSessionAuthenticationHandler synthesizes
+	/// <c>"local:{username}"</c> since the dev-flag local-auth path (ADR-0004 rollout
+	/// note) has no real OIDC subject to key on.
+	/// </summary>
+	public const string Subject = "waypoint:sub";
 }

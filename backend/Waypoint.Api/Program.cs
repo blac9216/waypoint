@@ -268,6 +268,13 @@ try
 	// never listens on HTTPS in any deployment. The old call was a boot-log warning
 	// today and a latent 307 loop if ASPNETCORE_HTTPS_PORTS ever appeared.
 	app.UseAuthentication();
+
+	// Issue #512: after UseAuthentication (needs a populated HttpContext.User) and
+	// before UseAuthorization/controllers, so the users row reflects the caller's
+	// claims even on a request that authorization later rejects (e.g. a Viewer hitting
+	// an Admin-only route still "showed up" and should count as seen).
+	app.UseMiddleware<Waypoint.Api.Middleware.UserUpsertMiddleware>();
+
 	app.UseAuthorization();
 
 	app.MapControllers();
