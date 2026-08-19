@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { ApiError } from "../../lib/api";
 import { useAuth } from "../../lib/auth-context";
-import { consumeStepUpRetry, stashStepUpRetry } from "../../lib/stepUpRetry";
+import { clearStepUpRetry, consumeStepUpRetry, stashStepUpRetry } from "../../lib/stepUpRetry";
 import {
 	createCredential,
 	deleteCredential,
@@ -27,9 +27,19 @@ function isStepUpRequired(err: unknown): boolean {
 /** `stepUpRetry.ts`'s `kind` discriminator for a credential-edit retry — scopes the stashed intent to this one call site so an unrelated pending retry is never misapplied here. */
 const STEP_UP_RETRY_KIND = "credential-edit";
 
+/**
+ * The step-up retry stash NEVER carries the plaintext `secret` (issue #537
+ * review Finding 1): it would survive the full-page OIDC redirect at rest in
+ * `sessionStorage` for exactly the walked-away-session window step-up defends
+ * against. We persist only the credential id and the non-secret fields; on
+ * resume the edit form re-opens pre-filled with these and the admin re-enters
+ * the secret (the form already supports "leave blank to keep current secret").
+ */
+type CredentialEditRetryFields = Omit<CredentialFormState, "secret">;
+
 interface CredentialEditRetryPayload {
 	id: string;
-	form: CredentialFormState;
+	form: CredentialEditRetryFields;
 }
 
 export interface CredentialFormState {
@@ -128,19 +138,20 @@ export function useCredentialForms(): UseCredentialFormsResult {
 	 * Runs once per mount: `consumeStepUpRetry` is read-once by design (see
 	 * `lib/stepUpRetry.ts`), so a stashed intent can only ever resume the
 	 * single edit that triggered it, never replay on an unrelated later
-	 * mount. Re-opens the edit form with the original field values rather
-	 * than silently re-submitting blind — the freshness window has already
-	 * been spent on the redirect round trip by the time this runs, and a
-	 * visible "here's what you were saving, still saving" beat is cheaper
-	 * than a second surprise 403 if anything else about the request has
-	 * gone stale meanwhile.
+	 * mount. Re-opens the edit form with the original NON-SECRET field values
+	 * and an empty secret field (the plaintext secret is never stashed — see
+	 * `CredentialEditRetryPayload`), so the admin re-enters the secret rather
+	 * than silently re-submitting blind — the freshness window has already been
+	 * spent on the redirect round trip by the time this runs, and re-prompting
+	 * for the secret is both lower-exposure and cheaper than a second surprise
+	 * 403 if anything else about the request has gone stale meanwhile.
 	 */
 	useEffect(() => {
 		const pending = consumeStepUpRetry<CredentialEditRetryPayload>(STEP_UP_RETRY_KIND);
 		if (!pending) {
 			return;
 		}
-		setEditForm(pending.form);
+		setEditForm({ ...pending.form, secret: "" });
 		setEditingId(pending.id);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
@@ -187,11 +198,23 @@ export function useCredentialForms(): UseCredentialFormsResult {
 					// (`prompt=login`) — `stepUpOidcLogin` navigates the whole page
 					// away, so nothing after this call runs; the mount effect above
 					// resumes the edit once the callback lands back here.
-					stashStepUpRetry<CredentialEditRetryPayload>({ kind: STEP_UP_RETRY_KIND, payload: { id, form: editForm } });
+					// The plaintext `secret` is deliberately excluded from the stash
+					// (issue #537 Finding 1): it would otherwise sit at rest in
+					// sessionStorage across the redirect. The admin re-enters it on
+					// resume.
+					const { secret: _secret, ...formWithoutSecret } = editForm;
+					stashStepUpRetry<CredentialEditRetryPayload>({
+						kind: STEP_UP_RETRY_KIND,
+						payload: { id, form: formWithoutSecret },
+					});
 					setSaving(false);
 					try {
 						await stepUpOidcLogin();
 					} catch (redirectErr) {
+						// The redirect never happened, so nothing will resume this
+						// stash — drop it rather than leave it to replay on a later
+						// mount the user never re-authenticated for.
+						clearStepUpRetry();
 						setFormError(redirectErr instanceof Error ? redirectErr.message : "Could not start re-authentication.");
 					}
 					return;

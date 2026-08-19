@@ -418,34 +418,59 @@ describe("CredentialsTab (issue #247)", () => {
 			expect(new URL(assignedUrl!, window.location.origin).searchParams.get("prompt")).toBe("login");
 			expect(screen.queryByText("This action requires you to re-authenticate first.")).not.toBeInTheDocument();
 
-			// The in-flight edit (id + field values) is stashed so the caller
-			// resuming after the redirect can replay it — see
+			// The in-flight edit's id + NON-SECRET fields are stashed so the
+			// caller resuming after the redirect can re-open the form — see
 			// stepUpRetry.ts/useCredentialForms.ts's mount-effect resume.
-			const stashed = JSON.parse(window.sessionStorage.getItem("waypoint.stepup.retry") as string);
-			expect(stashed).toEqual({ kind: "credential-edit", payload: { id: "cred-1", form: expect.objectContaining({ secret: "rotated-secret" }) } });
+			const rawStash = window.sessionStorage.getItem("waypoint.stepup.retry") as string;
+			// Issue #537 Finding 1: the plaintext secret must NEVER be written to
+			// browser storage across the OIDC redirect. Grep the serialized stash
+			// for the secret value directly — the strongest possible assertion.
+			expect(rawStash).not.toContain("rotated-secret");
+			const stashed = JSON.parse(rawStash);
+			expect(stashed).toEqual({
+				kind: "credential-edit",
+				payload: {
+					id: "cred-1",
+					form: {
+						name: "Alpha vCenter service account",
+						credential_type: "vcenter",
+						username: "svc-stig@example.internal",
+						sudo_enabled: false,
+					},
+				},
+			});
+			// The stash carries no `secret` key at all, not even an empty one.
+			expect(stashed.payload.form).not.toHaveProperty("secret");
 		} finally {
 			Object.defineProperty(window, "location", { configurable: true, value: { ...window.location, assign: originalAssign } });
 		}
 	});
 
-	it("resumes a stashed step-up-retry edit on mount, re-opening the edit form with the original field values", async () => {
+	it("resumes a stashed step-up-retry edit on mount, re-opening the edit form pre-filled with non-secret fields and an empty secret to re-prompt", async () => {
 		installFetchMock("Admin");
+		// Issue #537 Finding 1: the stash carries NO secret. Resume re-opens the
+		// edit form with the non-secret fields and re-prompts for the secret.
 		window.sessionStorage.setItem(
 			"waypoint.stepup.retry",
 			JSON.stringify({
 				kind: "credential-edit",
 				payload: {
 					id: "cred-1",
-					form: { name: "Alpha vCenter service account", credential_type: "vcenter", username: "svc-stig@example.internal", sudo_enabled: false, secret: "rotated-secret" },
+					form: { name: "Alpha vCenter service account", credential_type: "vcenter", username: "svc-stig@example.internal", sudo_enabled: false },
 				},
 			}),
 		);
 		await mount();
 
-		// The edit form for cred-1 is already open, pre-filled — no click on
-		// "Edit" needed, matching what a user resuming mid-edit expects.
+		// The edit form for cred-1 is already open, pre-filled with the
+		// non-secret fields — no click on "Edit" needed, matching what a user
+		// resuming mid-edit expects.
+		expect(await screen.findByDisplayValue("Alpha vCenter service account")).toBeInTheDocument();
+		expect(screen.getByDisplayValue("svc-stig@example.internal")).toBeInTheDocument();
+		// The secret field is empty — the admin must re-enter it (re-prompt), so
+		// no plaintext secret ever survived the redirect in storage.
 		const secretInput = await screen.findByPlaceholderText("leave blank to keep current secret");
-		expect((secretInput as HTMLInputElement).value).toBe("rotated-secret");
+		expect((secretInput as HTMLInputElement).value).toBe("");
 		// Read-once: the stash must not resurrect on a second mount.
 		expect(window.sessionStorage.getItem("waypoint.stepup.retry")).toBeNull();
 	});

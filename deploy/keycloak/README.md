@@ -46,6 +46,32 @@ would otherwise be a secret is templated.
   throwaway copy at import time; the templated file in this repo is never edited
   in place.
 
+## Operator override: `waypoint-frontend` redirect/origin URIs (real hostname)
+
+`waypoint-frontend`'s `redirectUris` and `webOrigins` in `waypoint-realm.json` are
+pinned to `https://localhost:8443` — a **dev-seed placeholder**, kept committed as-is.
+This is intentionally *not* a wildcard (a wildcard redirect/origin on a public PKCE
+client is the security-critical thing to avoid), so a real deployment on any other edge
+hostname must update these two lists to that hostname before SPA sign-in will work —
+Keycloak rejects an authorization request whose redirect URI or origin is not exactly
+listed. This is the same class of operator override as the backend's
+`Oidc__PublicAuthority` note in `deploy/README.md`: change it for your site, do not
+commit your real hostname here.
+
+To change them:
+
+1. In the Keycloak admin console → Clients → `waypoint-frontend` → **Settings**, set
+   *Valid redirect URIs* to `https://<your-edge-host>/oidc/callback` and *Web origins*
+   to `https://<your-edge-host>` (replace, do not add to, the `localhost:8443`
+   placeholders). Keep the `/oidc/callback` path — it is the SPA's fixed callback route.
+2. Or edit the two lists directly in a working copy of `waypoint-realm.json` and import
+   it via `deploy/scripts/keycloak-realm-import.sh` (do **not** commit the edited file
+   with a real hostname — the committed copy stays on the `localhost:8443` placeholder,
+   same discipline as the templated client secret above).
+
+Multiple hostnames (e.g. an FQDN plus a management IP) are supported by listing each in
+both arrays; still no wildcards.
+
 ## Role groups, not realm roles, are what a user is assigned
 
 Each of the four realm roles (`Viewer`/`Cyber`/`Operator`/`Admin`) is granted through

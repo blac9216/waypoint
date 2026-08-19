@@ -27,6 +27,15 @@ export function stashStepUpRetry<TPayload>(intent: StepUpRetryIntent<TPayload>):
 	}
 }
 
+/** Discards any stashed retry unconditionally. Used on abort paths (e.g. the redirect itself fails to start) so a stash is never left behind to resume a write the user never re-authenticated for. */
+export function clearStepUpRetry(): void {
+	try {
+		window.sessionStorage.removeItem(STEP_UP_RETRY_KEY);
+	} catch {
+		// best-effort — nothing depends on the removal succeeding.
+	}
+}
+
 /** Read-once (consumed): returns the stashed intent only when `kind` matches, so an unrelated stashed retry from a different flow is never misapplied. */
 export function consumeStepUpRetry<TPayload>(kind: string): TPayload | null {
 	try {
