@@ -237,3 +237,58 @@ export function apiPut<T>(path: string, body?: unknown, options?: ApiRequestOpti
 export function apiDelete<T = void>(path: string, options?: ApiRequestOptions): Promise<T> {
 	return apiFetch<T>(path, { ...options, method: "DELETE" });
 }
+
+/** One page of a list endpoint: the parsed array plus the total row count
+ * across all pages, read from `X-Total-Count`. */
+export interface PagedResult<T> {
+	items: T[];
+	totalCount: number;
+}
+
+/**
+ * `GET` a list endpoint and pair its body with `X-Total-Count` (issue #531
+ * — the first frontend list surface that needs a real "N results" pager
+ * rather than a single best-effort page; see `results.ts`'s
+ * `RunListResult.totalCount` doc comment, which named this exact gap and
+ * deferred it "until a paged list UI needs the real total").
+ *
+ * Deliberately its own function rather than a mode of `apiFetch`/`apiGet`:
+ * `apiFetch`'s own comment records that a half-written `X-Total-Count`
+ * branch was removed (PR #65 review) because nothing consumed it and it
+ * returned the same value on both arms — folding header-reading back into
+ * the shared path would resurrect exactly that dead code for the many
+ * callers that don't paginate. This calls `fetch` directly (not `apiFetch`)
+ * so it can read `response.headers` before the body is parsed away, but
+ * otherwise mirrors `apiFetch`'s auth header, `Accept`, and error handling
+ * so callers get identical `ApiError` behavior.
+ */
+export async function apiGetPaged<T>(path: string, options?: ApiRequestOptions): Promise<PagedResult<T>> {
+	const { unauthenticated, headers, signal } = options ?? {};
+	const finalHeaders = new Headers(headers);
+	finalHeaders.set("Accept", "application/json");
+	if (!unauthenticated) {
+		const token = getToken();
+		if (token) {
+			finalHeaders.set("Authorization", `Bearer ${token}`);
+		}
+	}
+
+	let response: Response;
+	try {
+		response = await fetch(`${API_BASE}${path}`, { method: "GET", headers: finalHeaders, signal });
+	} catch (err) {
+		throw new ApiError(0, "network_error", "Could not reach the Waypoint API.", err);
+	}
+
+	if (!response.ok) {
+		const error = await parseErrorBody(response);
+		if (response.status === 401 && !unauthenticated) {
+			onUnauthorized();
+		}
+		throw error;
+	}
+
+	const totalHeader = response.headers.get("X-Total-Count");
+	const items = (await response.json()) as T[];
+	return { items, totalCount: totalHeader !== null ? Number(totalHeader) : items.length };
+}

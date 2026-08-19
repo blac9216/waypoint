@@ -114,6 +114,19 @@ export function ConfigurationIcon(props: SVGProps<SVGSVGElement>) {
 	);
 }
 
+export function AuditIcon(props: SVGProps<SVGSVGElement>) {
+	return (
+		<Icon {...props}>
+			<rect x="3" y="1.5" width="10" height="13" />
+			<line x1="5.5" y1="4.5" x2="10.5" y2="4.5" />
+			<line x1="5.5" y1="7.5" x2="10.5" y2="7.5" />
+			<line x1="5.5" y1="10.5" x2="8.5" y2="10.5" />
+			<circle cx="11.5" cy="11.5" r="2.2" />
+			<line x1="13.2" y1="13.2" x2="15" y2="15" />
+		</Icon>
+	);
+}
+
 export function ChevronIcon(props: SVGProps<SVGSVGElement>) {
 	return (
 		<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true" {...props}>

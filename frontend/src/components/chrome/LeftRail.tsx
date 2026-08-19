@@ -6,6 +6,7 @@ import { ROUTES, type ScreenKey } from "../../lib/routes";
 import { roleAtLeast } from "../../lib/roles";
 import { useSystem } from "../../lib/system-context";
 import {
+	AuditIcon,
 	BenchmarksIcon,
 	CatalogIcon,
 	ChevronIcon,
@@ -29,6 +30,7 @@ const ICONS: Record<ScreenKey, ComponentType> = {
 	library: LibraryIcon,
 	transfer: TransferIcon,
 	configuration: ConfigurationIcon,
+	audit: AuditIcon,
 };
 
 interface NavGroup {
@@ -40,7 +42,7 @@ const NAV_GROUPS: NavGroup[] = [
 	{ label: null, items: ["dashboard"] },
 	{ label: "COMPLIANCE", items: ["live-run", "start-scan", "results", "benchmarks"] },
 	{ label: "CONTENT", items: ["catalog", "library", "transfer"] },
-	{ label: "CONFIGURE", items: ["configuration"] },
+	{ label: "CONFIGURE", items: ["configuration", "audit"] },
 ];
 
 export interface LeftRailProps {

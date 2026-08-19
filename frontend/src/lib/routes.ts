@@ -19,7 +19,8 @@ export type ScreenKey =
 	| "catalog"
 	| "library"
 	| "transfer"
-	| "configuration";
+	| "configuration"
+	| "audit";
 
 export interface RouteDef {
 	key: ScreenKey;
@@ -44,6 +45,10 @@ export const ROUTES: RouteDef[] = [
 	{ key: "library", path: "/library", title: "Library", requiredRole: "Viewer" },
 	{ key: "transfer", path: "/transfer", title: "Transfer", requiredRole: "Viewer" },
 	{ key: "configuration", path: "/config", title: "Configuration", requiredRole: "Admin" },
+	// Top-level, not nested under /config (requiredRole: "Admin" at the route
+	// level): nesting would block Cyber before any in-tab gating could run —
+	// see issue #531's Proposed Changes for the full rationale.
+	{ key: "audit", path: "/audit", title: "Audit", requiredRole: "Cyber" },
 ];
 
 export const DEFAULT_ROUTE = ROUTES[0];

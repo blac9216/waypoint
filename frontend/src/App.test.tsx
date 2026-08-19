@@ -242,6 +242,19 @@ describe("App", () => {
 		await waitFor(() => expect(window.location.pathname).toBe("/"));
 	});
 
+	it("redirects a Viewer away from /audit (Cyber+ screen-level guard, issue #531)", async () => {
+		installChromeFetchMock("Viewer");
+		render(<App />);
+		await signIn();
+
+		await waitFor(() => expect(screen.getByText("WAYPOINT")).toBeInTheDocument());
+
+		window.history.pushState(null, "", "/audit");
+		window.dispatchEvent(new PopStateEvent("popstate"));
+
+		await waitFor(() => expect(window.location.pathname).toBe("/"));
+	});
+
 	it("never mounts ConfigurationScreen for a Viewer navigating to /config (issue #78: not just the final URL)", async () => {
 		// This is the regression case for issue #78: with the old
 		// useEffect-based guard, `<ConfigurationScreen />` was created and
