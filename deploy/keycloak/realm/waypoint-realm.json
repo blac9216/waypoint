@@ -1,0 +1,103 @@
+{
+  "realm": "waypoint",
+  "enabled": true,
+  "displayName": "Waypoint",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 28800,
+  "ssoSessionMaxLifespan": 28800,
+  "roles": {
+    "realm": [
+      {
+        "name": "Viewer",
+        "description": "Read-only: dashboards, runs, results."
+      },
+      {
+        "name": "Cyber",
+        "description": "Viewer + initiate scans with service credentials, export results, full audit history."
+      },
+      {
+        "name": "Operator",
+        "description": "Cyber + ad hoc scans with personal credentials + download/catalog/content-library management."
+      },
+      {
+        "name": "Admin",
+        "description": "Everything: sites, targets, shared credentials, users/roles, STIG config, remediation, updates, transfer."
+      }
+    ]
+  },
+  "groups": [
+    {
+      "name": "Viewer",
+      "path": "/Viewer",
+      "realmRoles": ["Viewer"]
+    },
+    {
+      "name": "Cyber",
+      "path": "/Cyber",
+      "realmRoles": ["Cyber"]
+    },
+    {
+      "name": "Operator",
+      "path": "/Operator",
+      "realmRoles": ["Operator"]
+    },
+    {
+      "name": "Admin",
+      "path": "/Admin",
+      "realmRoles": ["Admin"]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "waypoint-backend",
+      "name": "Waypoint backend (control plane)",
+      "description": "Confidential OIDC client the ASP.NET Core backend uses as a plain relying party (ADR-0004). Client secret is templated -- never committed. See deploy/README.md 'Keycloak realm bootstrap'.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "__WAYPOINT_BACKEND_CLIENT_SECRET__",
+      "redirectUris": [
+        "https://localhost:8443/*"
+      ],
+      "webOrigins": [
+        "https://localhost:8443"
+      ],
+      "fullScopeAllowed": false,
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "protocolMappers": [
+        {
+          "name": "waypoint-role",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "claim.name": "role"
+          }
+        }
+      ]
+    }
+  ],
+  "identityProviders": [],
+  "components": {}
+}

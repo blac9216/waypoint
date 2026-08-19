@@ -224,6 +224,14 @@ services:
       # for why role creation and grants are deliberately split.
       POSTGRES_COMPLIANCE_RUNNER_PASSWORD: ${POSTGRES_COMPLIANCE_RUNNER_PASSWORD:-waypoint_compliance_runner_dev_only}
       POSTGRES_DOWNLOAD_RUNNER_PASSWORD: ${POSTGRES_DOWNLOAD_RUNNER_PASSWORD:-waypoint_download_runner_dev_only}
+      # Issue #28 (ADR-0004): password for Keycloak's own login role + database,
+      # created by postgres/initdb/02-keycloak-db.sh on first init. Unlike the
+      # two runner passwords above, this role OWNS its database outright
+      # (Keycloak manages its own schema via its own migrations) rather than
+      # receiving grants into the shared `waypoint` database - see that
+      # script's header comment for why it deliberately does not follow the
+      # 01-runner-roles.sh + 0025-migration grants pattern.
+      POSTGRES_KEYCLOAK_PASSWORD: ${POSTGRES_KEYCLOAK_PASSWORD:-waypoint_keycloak_dev_only}
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Runs once against a FRESH pgdata volume (docker-entrypoint-initdb.d
@@ -241,6 +249,85 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+    restart: unless-stopped
+
+  # Keycloak (issue #28, ADR-0004): the IdP. The backend and frontend remain
+  # plain OIDC relying parties (no Keycloak-specific application code), so
+  # this service exists purely to authenticate and issue tokens - the
+  # backend's own OIDC swap lands in #29. Straddles `edge` (nginx proxies to
+  # it, same as `backend`) and `internal` (its own Postgres database) - the
+  # same network shape as `backend`, deliberately: nginx -> keycloak is a
+  # first-class proxy path per docs/architecture.md's component-view mermaid,
+  # not an afterthought. Pinned image version (air-gap: no ":latest", no
+  # runtime image resolution) - see deploy/README.md "Keycloak" for how an
+  # operator air-gaps this pull per ADR-0015's source-build norms (Keycloak
+  # itself is third-party, not project-owned code, so ADR-0015's "operator
+  # builds from source" duty doesn't apply the way it does to backend/the two
+  # runners - the norm that DOES apply is the same one nginx and postgres
+  # already follow: pin a version, let the operator's own registry mirror or
+  # pre-pulled image cache satisfy it in a disconnected environment).
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    command: ["start-dev", "--import-realm", "--http-enabled=true", "--hostname-strict=false", "--health-enabled=true"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Keycloak's own database - its dedicated login role + database from
+      # postgres/initdb/02-keycloak-db.sh, NOT the shared `waypoint` database
+      # backend/the runners use (see that script's header comment and the
+      # postgres service's own comment above).
+      KC_DB: postgres
+      KC_DB_URL: "jdbc:postgresql://postgres:5432/keycloak"
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_KEYCLOAK_PASSWORD:-waypoint_keycloak_dev_only}
+      # Dev-stack bootstrap admin (Keycloak's own bootstrap-admin mechanism,
+      # analogous to backend's LocalAuth admin password - issue #333's
+      # reasoning applies equally here). Dev-only default so an unconfigured
+      # stack still comes up with a usable admin console login; override in
+      # deploy/.env for anything beyond local dev, same convention as every
+      # other POSTGRES_*/WAYPOINT_* dev default in this file.
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-waypoint_keycloak_admin_dev_only}
+      # start-dev's HTTP listener is fine here: TLS is terminated once, at
+      # nginx (operator-provided certs, ADR-0003) - same split as backend,
+      # which also listens on plain HTTP behind the edge network.
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: "xforwarded"
+    volumes:
+      # Realm bootstrap import (issue #28 AC1: "fresh compose up yields a
+      # working realm with the four role groups"). --import-realm (see
+      # command above) reads every realm file under this directory at
+      # startup and imports/updates the realm if it doesn't already exist -
+      # read-only, since Keycloak never needs to write back into the
+      # committed template. The committed file has NO real secret in it
+      # (deploy/keycloak/README.md) - the client secret placeholder is
+      # intentionally left untemplated on THIS path, so a fresh stack's
+      # `waypoint-backend` client boots with the literal placeholder string
+      # as its secret. That is fine for this dev stack (nothing yet
+      # authenticates against Keycloak - #29 wires that up) and is called
+      # out in deploy/README.md; deploy/scripts/keycloak-realm-import.sh is
+      # the path that substitutes a real secret, for anyone bootstrapping a
+      # deployment that needs the OIDC flow to actually work end-to-end
+      # before #29 lands.
+      - ./keycloak/realm:/opt/keycloak/data/import:ro
+    networks:
+      - edge
+      - internal
+    # No published ports - reachable only via nginx's proxy path (edge
+    # network) or from other edge/internal containers, never directly from
+    # the host, matching backend's own no-`ports:` convention.
+    # --health-enabled=true (above) serves /health/ready on the management
+    # port (9000 by default, separate from the 8080 app port) rather than
+    # the main HTTP listener - this image ships neither curl nor wget, so
+    # the probe is a raw /dev/tcp request (same technique as this file's
+    # other CMD-SHELL health checks that lack a dedicated HTTP client).
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
     restart: unless-stopped
 
   # compliance-runner (issue #442, ADR-0013/0014): claims discover/credential-test/
