@@ -1,0 +1,49 @@
+/* Audit screen — shares .config-panel / .config-table with
+ * ConfigurationScreen.css; this file only adds what's specific to this
+ * screen (filter bar, pager). */
+
+.audit-screen__filters {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	gap: 10px;
+	padding: 12px 14px;
+	border-bottom: 1px solid var(--line);
+	background: var(--panel2);
+}
+
+.audit-screen__field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 11px;
+	color: var(--txt3);
+}
+
+.audit-screen__field input {
+	background: var(--bg);
+	border: 1px solid var(--line);
+	color: var(--txt);
+	padding: 6px 8px;
+	border-radius: var(--radius-btn);
+	font-size: 11.5px;
+}
+
+.audit-screen__filter-actions {
+	display: flex;
+	gap: 8px;
+}
+
+.audit-screen__pager {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 10px 14px;
+	font-size: 11px;
+	color: var(--txt2);
+}
+
+.audit-screen__pager-actions {
+	display: flex;
+	gap: 8px;
+}

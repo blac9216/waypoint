@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, apiFetch } from "./api";
+import { ApiError, apiFetch, apiGetPaged } from "./api";
 
 /**
  * Unit coverage for `apiFetch`'s deadline, at the layer where the bug lived.
@@ -211,5 +211,55 @@ describe("apiFetch timeoutMs composed with a caller signal (round-2 finding 4)",
 		expect(seen.signal).toBe(caller.signal);
 		caller.abort();
 		await assertion;
+	});
+});
+
+/**
+ * `apiGetPaged` (issue #531) — the first list caller that needs the real
+ * `X-Total-Count` rather than `results.ts`'s `items.length` placeholder.
+ * Covers the header read and the fallback when a server omits the header.
+ */
+describe("apiGetPaged", () => {
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	it("reads X-Total-Count and pairs it with the parsed array", async () => {
+		globalThis.fetch = vi.fn(
+			async () =>
+				new Response(JSON.stringify([{ id: "a" }, { id: "b" }]), {
+					status: 200,
+					headers: { "Content-Type": "application/json", "X-Total-Count": "42" },
+				}),
+		) as unknown as typeof fetch;
+
+		const result = await apiGetPaged("/audit?limit=2&offset=0");
+		expect(result.items).toEqual([{ id: "a" }, { id: "b" }]);
+		expect(result.totalCount).toBe(42);
+	});
+
+	it("falls back to items.length when X-Total-Count is absent", async () => {
+		globalThis.fetch = vi.fn(
+			async () =>
+				new Response(JSON.stringify([{ id: "a" }]), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+		) as unknown as typeof fetch;
+
+		const result = await apiGetPaged("/audit");
+		expect(result.totalCount).toBe(1);
+	});
+
+	it("surfaces a non-2xx response as an ApiError, same as apiFetch", async () => {
+		globalThis.fetch = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ error: { code: "forbidden", message: "nope" } }), {
+					status: 403,
+					headers: { "Content-Type": "application/json" },
+				}),
+		) as unknown as typeof fetch;
+
+		await expect(apiGetPaged("/audit")).rejects.toBeInstanceOf(ApiError);
 	});
 });

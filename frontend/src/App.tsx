@@ -10,6 +10,7 @@ import { SystemProvider } from "./lib/system";
 import { useSystem } from "./lib/system-context";
 import { ThemeProvider } from "./lib/theme";
 import {
+	AuditScreen,
 	BenchmarksScreen,
 	CatalogScreen,
 	ConfigurationScreen,
@@ -31,6 +32,7 @@ const SCREENS: Record<string, ComponentType> = {
 	library: LibraryScreen,
 	transfer: TransferScreen,
 	configuration: ConfigurationScreen,
+	audit: AuditScreen,
 };
 
 /** Owns the screen-level role/mode guard (README "Roles & Permissions":

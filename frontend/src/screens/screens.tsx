@@ -1,4 +1,5 @@
 import { PlaceholderScreen } from "./PlaceholderScreen";
+import { AuditScreen as AuditLogScreen } from "./audit/AuditScreen";
 import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
 import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./configuration/ConfigurationScreen";
 import { DashboardScreen as DashboardAggregateScreen } from "./dashboard/DashboardScreen";
@@ -45,4 +46,8 @@ export function TransferScreen() {
 
 export function ConfigurationScreen() {
 	return <SitesTargetsConfigurationScreen />;
+}
+
+export function AuditScreen() {
+	return <AuditLogScreen />;
 }
