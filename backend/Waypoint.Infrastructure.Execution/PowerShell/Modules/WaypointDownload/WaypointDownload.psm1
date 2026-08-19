@@ -12,11 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Waypoint-owned shim (issue #10, M1 vertical slice). This module is NOT vendor code --
-# it is the thin, Waypoint-authored seam that dot-sources the UNMODIFIED
-# vcf-docker-download Save-WebFile function (CLAUDE.md: "the sibling repos' vendor
-# scripts run as unmodified vendor code -- Waypoint orchestrates them, it does not fork
-# them") and adapts its resume/retry download to the shape
+# Waypoint-owned shim (issue #10, M1 vertical slice). It is the thin,
+# Waypoint-authored seam that dot-sources the project-owned sibling repository's
+# unmodified vcf-docker-download Save-WebFile function and adapts its resume/retry to the shape
 # Invoke-WaypointDownload's caller (DownloadJobHandler) needs.
 
 $Script:VcfDownloadManagerCommonPath = $env:WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH
@@ -77,7 +75,7 @@ function Invoke-WaypointDownload {
 		throw "WaypointDownload: vcf-download-manager.common.ps1 not found at '$VcfDownloadManagerCommonPath'."
 	}
 
-	# Dot-source the unmodified vendor script to bring Save-WebFile into scope. It
+	# Dot-source the unmodified sibling-repository script to bring Save-WebFile into scope. It
 	# owns resume (merging a `.resume.tmp` partial), the retry/backoff loop, and
 	# returns the exact shape this function passes straight through.
 	. $VcfDownloadManagerCommonPath

@@ -220,7 +220,7 @@ public sealed class ScanJobHandler : IJobHandler
 			// credential (#249), or false for the ephemeral "my credentials" tier, which
 			// carries no sudo flag (ADR-0011 scope -- see ResolveCredentialAsync). The ssh
 			// password doubles as the sudo password when sudo is enabled, matching the
-			// vendor's own module.scan.ps1 SRG branch (Config.Sudo -> --sudo,
+			// sibling repo's own module.scan.ps1 SRG branch (Config.Sudo -> --sudo,
 			// SudoRequiresPassword -> the same credential's password via --config).
 			Dictionary<string, object?> parameters;
 			string invocationCommand;

@@ -34,7 +34,7 @@
 
   <!-- Issue #223: the WaypointCatalogIndex/WaypointDownload/WaypointDiscovery/
        WaypointCredentialTest/WaypointScan shim modules are Waypoint-owned code (not
-       vendor content; CLAUDE.md's License & Borrowing Policy only restricts copying
+       third-party content; CLAUDE.md's License & Borrowing Policy only restricts copying
        the SIBLING repos' .ps1 scripts, which these are not). They publish alongside
        this project's output so a runner's PowerShell__ModulePreloadPaths__* can point
        at a real in-container path. -->
