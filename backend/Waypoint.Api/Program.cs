@@ -14,6 +14,7 @@
 
 using System.Globalization;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
@@ -106,10 +107,43 @@ try
 	builder.Services.AddEndpointsApiExplorer();
 	builder.Services.AddSwaggerGen();
 
+	// Issue #29: OIDC (Keycloak) bearer validation is the production auth path.
+	// LocalAuth:Enabled (off by default -- LocalAuthOptions doc comment) is an explicit
+	// dev-flag escape hatch the e2e suite and fresh-stack-smoke-test.sh still use.
+	//
+	// Both schemes are ALWAYS registered (deliberately not gated on reading
+	// LocalAuth:Enabled here): WebApplicationFactory-based test hosts overlay their
+	// config (e.g. WaypointApiFactory setting LocalAuth:Enabled=true) after this
+	// top-level Program.cs code already ran, so an eager `builder.Configuration` read
+	// at this point does not see it -- only options resolved later, through DI, do.
+	// Registering LocalSession unconditionally and deciding per-request is what makes
+	// this correct in both the real app and the test host without special-casing
+	// either: OidcOrLocalPolicySchemeDefaults.SelectScheme reads
+	// IOptionsMonitor<LocalAuthOptions> live and routes every request to Oidc whenever
+	// the flag is off, so a disabled local scheme is still never reachable by a caller
+	// no matter what they present -- see that class's doc comment.
+	OidcAuthOptions oidcOptions = builder.Configuration.GetSection(OidcAuthOptions.SectionName).Get<OidcAuthOptions>()
+		?? new OidcAuthOptions();
+
 	builder.Services
-		.AddAuthentication(LocalSessionAuthenticationDefaults.Scheme)
+		.AddAuthentication(OidcOrLocalPolicySchemeDefaults.Scheme)
+		.AddJwtBearer(options =>
+		{
+			options.Authority = oidcOptions.Authority;
+			options.Audience = oidcOptions.Audience;
+			options.RequireHttpsMetadata = oidcOptions.RequireHttpsMetadata;
+		})
 		.AddScheme<AuthenticationSchemeOptions, LocalSessionAuthenticationHandler>(
-			LocalSessionAuthenticationDefaults.Scheme, _ => { });
+			LocalSessionAuthenticationDefaults.Scheme, _ => { })
+		.AddPolicyScheme(OidcOrLocalPolicySchemeDefaults.Scheme, OidcOrLocalPolicySchemeDefaults.Scheme, options =>
+		{
+			options.ForwardDefaultSelector = OidcOrLocalPolicySchemeDefaults.SelectScheme;
+		});
+	// Configured via IPostConfigureOptions (not inline in AddJwtBearer above) so the
+	// claims-mapping events get a real ILoggerFactory from the built container instead
+	// of standing up a throwaway one -- BuildServiceProvider() mid-registration would
+	// construct a second container the rest of the app never uses.
+	builder.Services.ConfigureOptions<OidcClaimsMappingOptionsSetup>();
 
 	builder.Services.AddAuthorization(options =>
 	{
@@ -123,6 +157,17 @@ try
 	builder.Services.AddSingleton<IAuthorizationHandler, MinimumRoleAuthorizationHandler>();
 
 	WebApplication app = builder.Build();
+
+	// Issue #29: logged once at startup from the built app's own options (not the
+	// eager builder.Configuration read Program.cs deliberately avoids -- see the auth
+	// registration block above), so this reflects the same value the request-time
+	// policy scheme selector actually uses.
+	if (app.Services.GetRequiredService<IOptions<LocalAuthOptions>>().Value.Enabled)
+	{
+		Log.Warning(
+			"LocalAuth:Enabled is true -- the dev-grade local-session auth scheme is reachable alongside OIDC. " +
+			"This is a development/test convenience (issue #29), never a supported production identity path.");
+	}
 
 	// ADR-0009 expects the schema to be current before the API takes traffic — this
 	// runs (and, on failure, throws into the fatal-startup catch below) before the

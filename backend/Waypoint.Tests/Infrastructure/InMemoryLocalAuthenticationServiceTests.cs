@@ -26,17 +26,18 @@ public sealed class InMemoryLocalAuthenticationServiceTests
 	private const string Password = "correct-horse-battery-staple";
 
 	[Fact]
-	public void Authenticate_WithNoPasswordHashConfigured_FailsClosed()
+	public void Authenticate_WithNoPasswordHashConfigured_ThrowsNotReady()
 	{
+		// Issue #505: an unresolved admin hash is "the backend isn't ready", not
+		// "credentials rejected" — the two must be distinguishable so the API can
+		// answer 503 auth_not_ready instead of a misleading 401 invalid_credentials.
 		InMemoryLocalAuthenticationService service = CreateService(new LocalAuthOptions
 		{
 			AdminUsername = "admin",
 			AdminPasswordHash = null
 		});
 
-		LocalSession? session = service.Authenticate("admin", Password);
-
-		Assert.Null(session);
+		Assert.Throws<LocalAuthNotReadyException>(() => service.Authenticate("admin", Password));
 	}
 
 	[Fact]

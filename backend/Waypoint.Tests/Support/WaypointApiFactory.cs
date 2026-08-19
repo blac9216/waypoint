@@ -37,6 +37,10 @@ public class WaypointApiFactory : WebApplicationFactory<Program>
 		{
 			configBuilder.AddInMemoryCollection(new Dictionary<string, string?>
 			{
+				// Issue #29: local auth is a dev-flag-only path now (off by default) --
+				// this test host opts in so the pre-existing login/me/warm-up coverage
+				// keeps exercising the real "LocalSession" scheme end to end.
+				["LocalAuth:Enabled"] = "true",
 				["LocalAuth:AdminPasswordHash"] = Pbkdf2PasswordHasher.Hash(TestAdminPassword)
 			});
 		});
