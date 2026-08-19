@@ -110,7 +110,7 @@ the caller, and role claims keep mapping to the same four
 ### Credentials (service/shared only — ADR-0011)
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/credentials` · `/credentials/{id}` | GET, POST, PUT, DELETE | Admin writes. Metadata out: name, type, username?, used_by_count, rotated_at, health (`valid`\|`auth_failing`). `username` is the protocol-level login (e.g. `administrator@vcenter-sso-domain`) a connection-type (vcenter/nsx/ssh) credential's job handler presents — distinct from `name`, which is only ever a human-facing label; not secret material, so it round-trips in responses (issue #262). Secret material in only. |
+| `/credentials` · `/credentials/{id}` | GET, POST, PUT, DELETE | Admin writes. Metadata out: name, type, username?, used_by_count, rotated_at, health (`valid`\|`auth_failing`). `username` is the protocol-level login (e.g. `administrator@vcenter-sso-domain`) a connection-type (vcenter/nsx/ssh) credential's job handler presents — distinct from `name`, which is only ever a human-facing label; not secret material, so it round-trips in responses (issue #262). Secret material in only. Issue #521: a `PUT` that sets `secret` (overwriting existing key material) additionally requires step-up re-authentication — a token whose `auth_time` is missing or older than the configured freshness window answers `403 { "error": { "code": "step_up_required", ... } }` instead of writing anything; renaming or flipping `sudo_enabled` alone is never gated. See `docs/security.md` "Step-up re-authentication" for the full mechanism (frontend re-auth redirect + retry tracked separately, issue #534). |
 | `/credentials/{id}/test` | POST | Connectivity check; 202 → job. |
 
 ### Runs & jobs

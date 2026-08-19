@@ -11,10 +11,17 @@ would otherwise be a secret is templated.
   (`Viewer`/`Cyber`/`Operator`/`Admin`, matching `docs/domain-model.md` "Roles" and
   the exact PascalCase wire values in `docs/api-contract.md`), one confidential OIDC
   client (`waypoint-backend`) the ASP.NET Core backend will use once #29 swaps local
-  auth for the real OIDC flow, and a group-membership protocol mapper that puts the
+  auth for the real OIDC flow, a group-membership protocol mapper that puts the
   member group's name on the token as a `role` claim — the same field name and value
   set the API contract already promises, so the eventual Keycloak-backed `/auth/me`
-  needs no reshaping.
+  needs no reshaping — and (issue #521) a `waypoint-auth-time` mapper
+  (`oidc-usersessionmodel-note-mapper` reading the `AUTH_TIME` session note) that puts
+  the session's real authentication instant on the token as the standard `auth_time`
+  claim. Step-up re-authentication (`docs/security.md` "Step-up re-authentication")
+  depends on this mapper existing on the access token specifically — without it every
+  OIDC-authenticated request fails closed as `step_up_required` on the
+  credential-overwrite path, since a missing `auth_time` claim is never treated as
+  fresh.
 - The client's `secret` field is the literal placeholder `__WAYPOINT_BACKEND_CLIENT_SECRET__` —
   never a real value. `deploy/scripts/keycloak-realm-import.sh` substitutes the real
   secret from `KEYCLOAK_BACKEND_CLIENT_SECRET` (`deploy/.env`, gitignored) into a

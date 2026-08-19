@@ -35,4 +35,31 @@ public static class WaypointClaimTypes
 	/// note) has no real OIDC subject to key on.
 	/// </summary>
 	public const string Subject = "waypoint:sub";
+
+	/// <summary>
+	/// The standard OIDC <c>auth_time</c> claim (OIDC Core §2): Unix-epoch seconds at
+	/// which the End-User actually authenticated at the IdP, distinct from <c>iat</c>
+	/// (when this particular token was issued). <c>FreshAuthAuthorizationHandler</c>
+	/// (issue #521) reads this verbatim off the validated token — Keycloak must be
+	/// configured with an "Authentication Time" protocol mapper to populate it on the
+	/// access token this backend sees; see <c>docs/security.md</c> "Step-up
+	/// re-authentication". Unlike <see cref="Role"/>/<see cref="Subject"/> this is not
+	/// remapped by <c>OidcClaimsMappingOptionsSetup</c> — it is read directly off the
+	/// validated principal under its own wire name, since no downstream code needs a
+	/// Waypoint-namespaced alias for it.
+	/// </summary>
+	public const string AuthTime = "auth_time";
+
+	/// <summary>
+	/// The <see cref="System.Security.Claims.ClaimsIdentity.AuthenticationType"/> value
+	/// the dev-grade local-session scheme's identities carry (<c>LocalSessionAuthenticationHandler</c>
+	/// constructs its <c>ClaimsIdentity</c> with <c>Scheme.Name</c>, and
+	/// <c>LocalSessionAuthenticationDefaults.Scheme</c> in <c>Waypoint.Api</c> is this
+	/// same literal — duplicated here rather than referenced, since <c>Waypoint.Core</c>
+	/// cannot depend on <c>Waypoint.Api</c>). <c>FreshAuthAuthorizationHandler</c> (issue
+	/// #521) checks this to apply the documented dev-only step-up carve-out (see
+	/// <c>docs/security.md</c> "Step-up re-authentication") without adding a project
+	/// reference just for one string.
+	/// </summary>
+	public const string LocalSessionAuthenticationType = "LocalSession";
 }

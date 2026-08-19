@@ -12,10 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Waypoint.Core.Authorization;
+
 namespace Waypoint.Api.Authentication;
 
 public static class LocalSessionAuthenticationDefaults
 {
-	/// <summary>The authentication scheme name for the dev-grade local session handler.</summary>
-	public const string Scheme = "LocalSession";
+	/// <summary>
+	/// The authentication scheme name for the dev-grade local session handler. Kept
+	/// equal to <see cref="WaypointClaimTypes.LocalSessionAuthenticationType"/> by
+	/// construction (that constant's doc comment explains why it is a duplicated
+	/// literal rather than a reference in the other direction — <c>Waypoint.Core</c>
+	/// cannot depend on this project).
+	/// </summary>
+	public const string Scheme = WaypointClaimTypes.LocalSessionAuthenticationType;
 }
