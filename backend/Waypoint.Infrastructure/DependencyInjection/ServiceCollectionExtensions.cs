@@ -23,6 +23,7 @@ using Waypoint.Core.Discovery;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
+using Waypoint.Core.Scheduling;
 using Waypoint.Infrastructure.Auth;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.ConfigDocs;
@@ -30,6 +31,7 @@ using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Discovery;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.Scheduling;
 using Waypoint.Infrastructure.Sites;
 using Waypoint.Infrastructure.SystemState;
 using Waypoint.Runner.Jobs;
@@ -124,6 +126,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<Waypoint.Core.SystemState.WorkerRegistryOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.SystemState.WorkerRegistryOptions.SectionName));
 
+		services.AddOptions<ScheduleDispatchOptions>()
+			.Bind(configuration.GetSection(ScheduleDispatchOptions.SectionName));
+
 		services.AddSingleton<ILocalAuthenticationService, InMemoryLocalAuthenticationService>();
 
 		// One scrubber instance serves both sides of security.md control 1: sinks read
@@ -209,6 +214,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new ConfigDocRepository(connectionString));
 			services.AddSingleton(new AttestationSnapshotRepository(connectionString));
 			services.AddSingleton(new StigManager.StigManagerRepository(connectionString));
+			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
@@ -280,6 +286,13 @@ public static class ServiceCollectionExtensions
 		}
 
 		services.AddHostedService<Secrets.RunSecretCleanupHostedService>();
+
+		// Issue #31: control-plane schedule dispatch. API-surface only -- see this
+		// method's own doc comment for why a runner host (which also calls
+		// AddWaypointInfrastructure for its shared repositories) must never start this
+		// loop too, mirroring RunSecretCleanupHostedService's placement above.
+		services.AddSingleton<ScheduleDispatchService>();
+		services.AddHostedService<ScheduleDispatchHostedService>();
 
 		services.AddSingleton<JobEventStreamService>(serviceProvider => new JobEventStreamService(
 			connectionString,
