@@ -113,9 +113,10 @@ public sealed class AuditController : ControllerBase
 	}
 
 	/// <summary>
-	/// RFC 4180-ish minimal CSV: every field this table can carry is either a GUID, an
-	/// event-type/actor token, or JSON -- only <c>detail</c> (raw JSONB text) can
-	/// contain a comma/quote/newline, so only it is quote-escaped.
+	/// RFC 4180-ish minimal CSV. Every user-influenceable field (<c>event_type</c>,
+	/// <c>actor</c>, <c>detail</c>) is run through <see cref="CsvField"/>, which both
+	/// neutralizes spreadsheet formula injection (CWE-1236) and applies RFC-4180
+	/// quoting. GUID/timestamp columns are machine-generated and written directly.
 	/// </summary>
 	private static byte[] BuildCsv(IReadOnlyList<AuditEntry> entries)
 	{
@@ -125,7 +126,7 @@ public sealed class AuditController : ControllerBase
 		foreach (AuditEntry entry in entries)
 		{
 			builder.Append(entry.Id).Append(',')
-				.Append(entry.EventType).Append(',')
+				.Append(CsvField(entry.EventType)).Append(',')
 				.Append(CsvField(entry.Actor)).Append(',')
 				.Append(entry.CredentialId).Append(',')
 				.Append(entry.JobId).Append(',')
@@ -138,8 +139,22 @@ public sealed class AuditController : ControllerBase
 		return Encoding.UTF8.GetBytes(builder.ToString());
 	}
 
+	/// <summary>
+	/// Renders a single user-derived cell safe for CSV export. First neutralizes
+	/// spreadsheet formula injection (CWE-1236) by prefixing a single quote when the
+	/// value leads with a formula trigger (<c>= + - @</c>, tab, or CR), so the cell is
+	/// treated as text rather than executed as a formula in Excel/LibreOffice; then
+	/// applies RFC-4180 quoting for embedded commas/quotes/newlines. All CSV exports
+	/// route user-influenceable columns through this one helper so they inherit the
+	/// guard.
+	/// </summary>
 	private static string CsvField(string value)
 	{
+		if (value.Length > 0 && value[0] is '=' or '+' or '-' or '@' or '\t' or '\r')
+		{
+			value = "'" + value;
+		}
+
 		bool needsQuoting = value.Contains(',', StringComparison.Ordinal)
 			|| value.Contains('"', StringComparison.Ordinal)
 			|| value.Contains('\n', StringComparison.Ordinal);

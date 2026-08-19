@@ -109,6 +109,26 @@ public sealed class AuditEndpointTests : IClassFixture<AuditTestApiFactory>
 		Assert.Equal(jsonCount, csvDataRows);
 	}
 
+	[Fact]
+	public async Task List_AsCsv_NeutralizesFormulaInjectionInUserDerivedFields()
+	{
+		HttpClient client = _factory.CreateClient();
+		// Filter to the single hostile row so its actor cell is unambiguous.
+		HttpResponseMessage response = await SendAsync(client, "/api/v1/audit?kind=login.hostile&format=csv", "Cyber");
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		string dataRow = body.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]; // [0] is the header
+
+		// Header is id,event_type,actor,... so the actor is the third column. The raw
+		// actor "=cmd|'/c calc'!A1" starts with '=', so the guard prepends a single
+		// quote, rendering the cell inert text rather than a formula. The apostrophe
+		// must sit immediately in front of the '=' where the cell begins (after the
+		// preceding comma), and the cell must never present a bare leading '='.
+		Assert.Contains(",'=cmd|'/c calc'!A1,", dataRow, StringComparison.Ordinal);
+		Assert.DoesNotContain(",=cmd", dataRow, StringComparison.Ordinal);
+	}
+
 	private static async Task<HttpResponseMessage> SendAsync(HttpClient client, string path, string role)
 	{
 		HttpRequestMessage request = new(HttpMethod.Get, path);
@@ -161,6 +181,9 @@ public sealed class FakeAuditRepository : IAuditRepository
 		new(Guid.NewGuid(), "credential.deleted", "admin", Guid.NewGuid(), null, null, "{}", DateTimeOffset.UtcNow.AddMinutes(-20)),
 		new(Guid.NewGuid(), "job.retried", "cyber-user", null, Guid.NewGuid(), Guid.NewGuid(), "{\"job_id\":\"x\"}", DateTimeOffset.UtcNow.AddMinutes(-10)),
 		new(Guid.NewGuid(), "secret.decrypted", "system:scan-job", Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "{}", DateTimeOffset.UtcNow.AddMinutes(-5)),
+		// Hostile actor: an attacker-influenceable username leading with a spreadsheet
+		// formula trigger (CWE-1236). Kept as its own EventType so a test can isolate it.
+		new(Guid.NewGuid(), "login.hostile", "=cmd|'/c calc'!A1", null, null, null, "{}", DateTimeOffset.UtcNow.AddMinutes(-1)),
 	];
 
 	public Task<AuditListResult> ListAsync(AuditQuery query, int limit, int offset, CancellationToken cancellationToken)
