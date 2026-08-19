@@ -97,9 +97,10 @@ public sealed partial class OidcClaimsMappingOptionsSetup : IPostConfigureOption
 		// ClaimsPrincipalExtensions.GetRequiredUsername() reads Name, while
 		// AuthController.Me reads NameIdentifier, and both must resolve to the real
 		// caller, not silently collapse to a fallback.
+		string? subject = identity.FindFirst("sub")?.Value;
 		string? username = identity.FindFirst("preferred_username")?.Value
 			?? identity.FindFirst(ClaimTypes.Name)?.Value
-			?? identity.FindFirst("sub")?.Value;
+			?? subject;
 		if (string.IsNullOrWhiteSpace(username))
 		{
 			LogNoUsername();
@@ -115,6 +116,15 @@ public sealed partial class OidcClaimsMappingOptionsSetup : IPostConfigureOption
 		if (identity.FindFirst(ClaimTypes.NameIdentifier) is null)
 		{
 			identity.AddClaim(new Claim(ClaimTypes.NameIdentifier, username));
+		}
+
+		// Issue #512: users.oidc_sub keys on the token's real `sub`, distinct from the
+		// human-readable username above -- falls back to username only in the
+		// (should-not-happen, since JwtBearer already validated the token carries a
+		// subject) case `sub` itself was absent.
+		if (identity.FindFirst(WaypointClaimTypes.Subject) is null)
+		{
+			identity.AddClaim(new Claim(WaypointClaimTypes.Subject, string.IsNullOrWhiteSpace(subject) ? username : subject));
 		}
 
 		// The realm's waypoint-role protocol mapper (deploy/keycloak/realm/waypoint-realm.json)

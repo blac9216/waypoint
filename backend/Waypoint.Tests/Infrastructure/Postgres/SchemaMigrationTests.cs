@@ -51,11 +51,13 @@ public sealed class SchemaMigrationTests
 		"attestation_snapshots",
 		"run_secrets",
 		"worker_registry",
+		"schedules",
+		"users",
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #467 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check, 0020 adds BEFORE UPDATE/DELETE triggers enforcing job_events/audit_log append-only, with a carve-out on audit_log for 0006's FK-driven credential_id SET NULL, 0021 adds attestation_snapshots -- the persisted at-scan-time attestations-applied ledger, issue #306, 0022 adds credentials_credential_type_check mirroring CredentialTypes.All, issue #252, 0023 adds run_secrets + jobs.has_run_secret -- the encrypted run-scoped personal-credential handoff, issue #434, 0024 adds idx_jobs_queue_claim -- the partial index backing the allowlist-filtered atomic claim so runners stop scanning every claimable row, issue #435, 0025 grants least-privilege table access to the waypoint_compliance_runner/waypoint_download_runner roles deploy/postgres/initdb/01-runner-roles.sh creates, issue #442, 0026 adds worker_registry -- the runner heartbeat/capability table GET /system reads to report per-domain availability, issue #443, 0027 grants worker_registry access to the two runner roles, issue #443, 0028 adds the SELECT grant 0027 wrongly withheld -- INSERT...ON CONFLICT DO UPDATE requires it even with no explicit SELECT in the application's own SQL text, issue #444, 0029 adds worker_registry.starved_job_types -- the per-worker resource-admission-starvation snapshot GET /system surfaces, issue #467, 0030 adds schedules -- the control-plane schedule CRUD/dispatch table for read-only job types, issue #31) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 30;
+	/// <summary>Embedded migration count as of issue #512 (0008 adds downloads.run_id, 0009 adds sites/targets, 0010 adds credential owner CHECK + sudo_enabled, 0011 adds inventory_items + discover.progress, 0012 adds credentials.username (#262/#267), 0013 adds config_docs/config_versions, 0014 adds jobs.cancel_requested, 0015 widens the lease-required CHECK to attesting/converting, 0016 widens idx_jobs_lease_recovery to attesting/converting for #282's crashed-worker recovery, 0017 adds stigman_connections (the global STIG Manager connection singleton), 0018 adds jobs.upload_status/upload_detail (per-target STIG Manager upload outcome, independent of state/stage), 0019 adds 'credential-test' to jobs_job_type_check/runs_run_type_check, 0020 adds BEFORE UPDATE/DELETE triggers enforcing job_events/audit_log append-only, with a carve-out on audit_log for 0006's FK-driven credential_id SET NULL, 0021 adds attestation_snapshots -- the persisted at-scan-time attestations-applied ledger, issue #306, 0022 adds credentials_credential_type_check mirroring CredentialTypes.All, issue #252, 0023 adds run_secrets + jobs.has_run_secret -- the encrypted run-scoped personal-credential handoff, issue #434, 0024 adds idx_jobs_queue_claim -- the partial index backing the allowlist-filtered atomic claim so runners stop scanning every claimable row, issue #435, 0025 grants least-privilege table access to the waypoint_compliance_runner/waypoint_download_runner roles deploy/postgres/initdb/01-runner-roles.sh creates, issue #442, 0026 adds worker_registry -- the runner heartbeat/capability table GET /system reads to report per-domain availability, issue #443, 0027 grants worker_registry access to the two runner roles, issue #443, 0028 adds the SELECT grant 0027 wrongly withheld -- INSERT...ON CONFLICT DO UPDATE requires it even with no explicit SELECT in the application's own SQL text, issue #444, 0029 adds worker_registry.starved_job_types -- the per-worker resource-admission-starvation snapshot GET /system surfaces, issue #467, 0030 adds schedules -- the control-plane schedule CRUD/dispatch table for read-only job types, issue #31, 0031 adds users -- the oidc_sub-keyed local mirror table GET/POST/PUT /users and the login-time upsert middleware use, issue #512) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 31;
 
 	private readonly PostgresFixture _fixture;
 
@@ -559,6 +561,74 @@ public sealed class SchemaMigrationTests
 
 		object? id = await insert.ExecuteScalarAsync();
 		Assert.NotNull(id);
+	}
+
+	/// <summary>
+	/// Issue #512: 0031's <c>users_role_check</c> mirrors <c>WaypointRole</c>'s closed
+	/// set -- a bogus role must be rejected at the database, not just by
+	/// <c>UsersController</c>'s API-layer validation.
+	/// </summary>
+	[Fact]
+	public async Task Migrations_Users_RejectsInvalidRole()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO users (oidc_sub, username, role, auth_method) VALUES ($1, 'test', 'SuperAdmin', 'oidc') RETURNING id", connection);
+		insert.Parameters.AddWithValue($"sub-{Guid.NewGuid():N}");
+
+		PostgresException ex = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteScalarAsync());
+		Assert.Equal("23514", ex.SqlState); // check_violation
+		Assert.Contains("users_role_check", ex.MessageText, StringComparison.Ordinal);
+	}
+
+	/// <summary>Issue #512: 0031's <c>users_auth_method_check</c> closes the set to exactly the two schemes this backend registers (<c>OidcOrLocalPolicySchemeDefaults</c>).</summary>
+	[Fact]
+	public async Task Migrations_Users_RejectsInvalidAuthMethod()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO users (oidc_sub, username, role, auth_method) VALUES ($1, 'test', 'Viewer', 'saml') RETURNING id", connection);
+		insert.Parameters.AddWithValue($"sub-{Guid.NewGuid():N}");
+
+		PostgresException ex = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteScalarAsync());
+		Assert.Equal("23514", ex.SqlState); // check_violation
+		Assert.Contains("users_auth_method_check", ex.MessageText, StringComparison.Ordinal);
+	}
+
+	/// <summary>Issue #512: 0031's <c>users_oidc_sub_key</c> is the upsert's ON CONFLICT target -- a duplicate must be rejected at the database.</summary>
+	[Fact]
+	public async Task Migrations_Users_RejectsDuplicateOidcSub()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		string sub = $"sub-{Guid.NewGuid():N}";
+		await using (NpgsqlCommand first = new(
+			"INSERT INTO users (oidc_sub, username, role, auth_method) VALUES ($1, 'test-1', 'Viewer', 'oidc')", connection))
+		{
+			first.Parameters.AddWithValue(sub);
+			await first.ExecuteNonQueryAsync();
+		}
+
+		await using NpgsqlCommand second = new(
+			"INSERT INTO users (oidc_sub, username, role, auth_method) VALUES ($1, 'test-2', 'Viewer', 'oidc')", connection);
+		second.Parameters.AddWithValue(sub);
+
+		PostgresException ex = await Assert.ThrowsAsync<PostgresException>(() => second.ExecuteNonQueryAsync());
+		Assert.Equal("23505", ex.SqlState); // unique_violation
 	}
 
 	/// <summary>

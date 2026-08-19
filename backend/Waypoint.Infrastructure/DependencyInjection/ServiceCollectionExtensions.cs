@@ -16,6 +16,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.Audit;
 using Waypoint.Core.Auth;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Configuration;
@@ -24,6 +25,8 @@ using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Scheduling;
+using Waypoint.Core.Users;
+using Waypoint.Infrastructure.Audit;
 using Waypoint.Infrastructure.Auth;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.ConfigDocs;
@@ -34,6 +37,7 @@ using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Scheduling;
 using Waypoint.Infrastructure.Sites;
 using Waypoint.Infrastructure.SystemState;
+using Waypoint.Infrastructure.Users;
 using Waypoint.Runner.Jobs;
 
 namespace Waypoint.Infrastructure.DependencyInjection;
@@ -215,6 +219,8 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new AttestationSnapshotRepository(connectionString));
 			services.AddSingleton(new StigManager.StigManagerRepository(connectionString));
 			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
+			services.AddSingleton<IUserDirectory>(new UserRepository(connectionString));
+			services.AddSingleton<IAuditRepository>(new AuditRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Secrets.ICredentialSecretStore>(serviceProvider => new Secrets.CredentialSecretStore(
 				connectionString,
 				serviceProvider.GetRequiredService<Waypoint.Core.Secrets.IEnvelopeCipher>(),
