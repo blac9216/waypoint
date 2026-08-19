@@ -61,7 +61,7 @@ download-runner   --> postgres (internal network only; not reachable from nginx/
   build from the repo root, same convention as `backend/Dockerfile` (issue #92),
   because each now has its own `dotnet-build` stage that compiles its .NET host
   executable alongside its domain toolchain (PowerCLI/cinc-auditor/SAF for
-  compliance; pwsh + vendor scripts for download). One replica of each is the
+  compliance; pwsh + project-owned scripts for download). One replica of each is the
   default (ADR-0013 §6) — see "Replica-safe scaling" below before setting
   `deploy.replicas` on either.
 - **postgres** (16) sits on an `internal: true` compose network with no
@@ -673,7 +673,7 @@ work is issue #7); revisit then.
 
 The three PowerShell-script bind mounts this section used to document
 (`dev/local/`, `WAYPOINT_VCF_SCRIPTS_DIR`, `WAYPOINT_VMWARE_STIG_DOCKER_SCRIPTS_DIR`)
-are gone from `backend` — ADR-0013/ADR-0015 moved the project-owned vendor
+are gone from `backend` — ADR-0013/ADR-0015 moved the project-owned sibling-repository
 scripts into `../runners/compliance-runner/powershell/` and
 `../runners/download-runner/powershell/`, baked directly into each runner's
 image at build time (see each Dockerfile's header comment), so there is

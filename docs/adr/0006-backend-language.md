@@ -18,7 +18,8 @@ runspace pools that execute the existing modules, with real .NET objects flowing
 C# and PowerShell — no child-process stdout parsing for the common path.
 
 Exception: remediation keeps the child-`pwsh` process isolation from the predecessor
-design, because unmodified vendor scripts call `Exit`.
+design, because project-owned PowerShell scripts imported from sibling repositories
+call `Exit`.
 
 ## Rationale
 

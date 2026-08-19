@@ -2,7 +2,7 @@
 #
 # Scope: this Dockerfile provisions the toolchain the M2 discover/credential-test/
 # scan call graph needs (see runners/compliance-runner/powershell/README.md for the
-# exact vendor-function inventory): PowerShell 7 + PowerCLI/SsoAdmin for vCenter
+# exact sibling-function inventory): PowerShell 7 + PowerCLI/SsoAdmin for vCenter
 # discovery and credential tests, and cinc-auditor (InSpec) + SAF CLI for scan/
 # attest/convert -- AND the .NET host executable (Waypoint.ComplianceRunner) that
 # claims/executes those jobs (ADR-0013 decision 3/4). It deliberately does NOT
@@ -126,7 +126,7 @@ COPY runners/compliance-runner/powershell/ /powershell/
 # comment). Includes Waypoint.ComplianceRunner.dll and the Waypoint-owned shim
 # modules Waypoint.Infrastructure.csproj copies into the publish output
 # (PowerShell/Modules/Waypoint{Discovery,Scan,CredentialTest}/*.psm1) -- those dot-
-# source the vendor .ps1 files under /vmware-stig-docker-scripts at runtime (see the
+# source the project-owned .ps1 files under /vmware-stig-docker-scripts at runtime (see the
 # WAYPOINT_VMWARE_STIG_DOCKER_*_PATH env vars deploy/docker-compose.yml sets).
 COPY --from=dotnet-build /app /app
 

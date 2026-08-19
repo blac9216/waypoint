@@ -274,11 +274,11 @@ services:
       PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointDiscovery"
       PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointScan"
       PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointCredentialTest"
-      # Vendor .ps1 files the shims above dot-source, baked into the image under
+      # Project-owned .ps1 files the shims above dot-source, baked into the image under
       # /powershell/ (runners/compliance-runner/powershell/, imported from the
       # vmware-stig-docker sibling repo per CLAUDE.md's borrowing policy) -
       # replaces the backend's former host bind mount (issue #395/#427) now that
-      # the vendor source lives in this repository (ADR-0015 decision 2).
+      # the sibling-repository source lives in this repository (ADR-0015 decision 2).
       WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_PATH: "/powershell/module.transport.vmware.ps1"
       WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH: "/powershell/module.transport.nsxapi.ps1"
       WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH: "/powershell/module.common.ps1"
@@ -355,12 +355,12 @@ services:
       # WaypointCatalogIndex now that this is this service's own config.
       PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointCatalogIndex"
       PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDownload"
-      # Vendor script baked into the image under /app/PowerShell/vendor
-      # (runners/download-runner/powershell/vendor/, imported from the
+      # Project-owned script baked into the image under /app/PowerShell/project
+      # (runners/download-runner/powershell/project/, imported from the
       # vcf-docker-download sibling repo per CLAUDE.md's borrowing policy) -
       # replaces the backend's former host bind mount (issue #223) now that the
-      # vendor source lives in this repository (ADR-0015 decision 2).
-      WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH: "/app/PowerShell/vendor/vcf-download-manager.common.ps1"
+      # sibling-repository source lives in this repository (ADR-0015 decision 2).
+      WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH: "/app/PowerShell/project/vcf-download-manager.common.ps1"
     volumes:
       # Offline depot share to index - read-write (ADR-0014 §7: "download
       # runner: managed tool/depot/content write access"). Matches CatalogOptions'
