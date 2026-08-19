@@ -102,6 +102,69 @@ loudly (`role "waypoint_compliance_runner" does not exist`) rather than
 silently granting nothing — `docker compose logs backend` names the missing
 role.
 
+### Keycloak (issue #28, ADR-0004)
+
+`keycloak` is the IdP — OIDC, and the future site of CAC/PIV x.509 and LDAP/AD
+federation. The backend and frontend remain plain OIDC relying parties (no
+Keycloak-specific application code); this dev stack brings Keycloak up and
+bootstraps its realm, but nothing in the backend authenticates against it
+yet — that swap is issue #29. See `deploy/keycloak/README.md` for the realm
+contents (four role groups, the `waypoint-backend` OIDC client, CAC/PIV
+site-enablement steps, an example LDAP federation config) and the
+export/import round-trip scripts.
+
+**Network position mirrors `backend`** — `edge` (nginx proxies `/auth/` to
+it) and `internal` (its own Postgres database). Straddling both is
+deliberate, matching `docs/architecture.md`'s component-view mermaid
+(`nginx --> kc`), not an accident of copy-paste from `backend`'s own service
+block.
+
+**Its own database, not the runner-roles pattern.** Unlike
+`waypoint_compliance_runner`/`waypoint_download_runner` above, which are
+grants-only logins against the shared `waypoint` database,
+`postgres/initdb/02-keycloak-db.sh` creates a `keycloak` role that OWNS a
+separate `keycloak` database outright — Keycloak manages its own schema via
+its own migrations on every boot, so it needs ownership, not table grants
+into a database `backend` owns. There is no `0025`-style backend migration
+for it and there should never be one. Password:
+`POSTGRES_KEYCLOAK_PASSWORD` (`deploy/.env`, gitignored — same dev-only-default
+convention as every other `POSTGRES_*` password in this file).
+
+**No master-key mount, no runner DB roles** (`docs/security.md` control 6).
+Keycloak never receives the envelope-encryption master key and is not one of
+the three trusted services that control has always named (the API,
+`compliance-runner`, `download-runner`) — it has no reason to decrypt a
+Waypoint-managed secret, and control 6's "nginx and Keycloak never see the
+key" line is written for exactly this boundary.
+
+**Pinned image, not a source build.** Unlike `backend` and the two runners,
+Keycloak is third-party, not project-owned code — ADR-0015's "operators build
+from source" duty applies to Waypoint's own images, not to every image this
+stack pulls (the same reasoning already applies to `nginx:1.27-alpine` and
+`postgres:16-alpine` above). The norm here is the one those two already
+follow: pin an exact version (`quay.io/keycloak/keycloak:25.0`, never
+`:latest`) so a fresh `docker compose up` is reproducible and air-gap-safe —
+an operator without direct registry access satisfies the pull from their own
+mirror, a pre-populated image cache, or `docker save`/`docker load` from a
+connected environment, the same way they would for any other pinned base
+image in this stack.
+
+**Realm bootstrap runs on every `compose up`** via `start-dev --import-realm`
+reading `deploy/keycloak/realm/waypoint-realm.json` (bind-mounted read-only)
+— `IGNORE_EXISTING` strategy, so a realm that already exists (a stack with a
+live `pgdata` volume from a previous run) is left alone; only a genuinely
+fresh Keycloak database gets the realm created. The committed realm file's
+OIDC client secret is the literal placeholder `__WAYPOINT_BACKEND_CLIENT_SECRET__`
+— fine for this dev stack (nothing yet authenticates against Keycloak), and
+`deploy/scripts/keycloak-realm-import.sh` is the path to bootstrap with a
+real, usable secret instead. See `deploy/keycloak/README.md` "Round-trip" for
+both scripts.
+
+**Admin console**: `https://localhost:8443/auth/` once nginx and Keycloak are
+both up (dev admin credentials: `KEYCLOAK_ADMIN`/`KEYCLOAK_ADMIN_PASSWORD`,
+same dev-only-default convention as everything else in this file — override
+in `deploy/.env`).
+
 ### Runner health checks (issue #442, ADR-0013 §1)
 
 `compliance-runner` and `download-runner` have no REST/SSE surface, so neither
@@ -329,6 +392,11 @@ the frontend bundle).
    # roles" and postgres/initdb/01-runner-roles.sh.
    POSTGRES_COMPLIANCE_RUNNER_PASSWORD=waypoint_compliance_runner_dev_only
    POSTGRES_DOWNLOAD_RUNNER_PASSWORD=waypoint_download_runner_dev_only
+   # Issue #28: Keycloak's own database role password (see "Keycloak" below
+   # and postgres/initdb/02-keycloak-db.sh) plus its dev admin console login.
+   POSTGRES_KEYCLOAK_PASSWORD=waypoint_keycloak_dev_only
+   KEYCLOAK_ADMIN=admin
+   KEYCLOAK_ADMIN_PASSWORD=waypoint_keycloak_admin_dev_only
    WAYPOINT_HTTPS_PORT=8443
    ```
 
