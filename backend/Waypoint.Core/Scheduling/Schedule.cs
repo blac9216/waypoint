@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Waypoint.Core.Authorization;
+
 namespace Waypoint.Core.Scheduling;
 
 /// <summary>
@@ -70,5 +72,43 @@ public static class ScheduleJobTypes
 		CatalogIndex
 	};
 
+	/// <summary>
+	/// The minimum <see cref="WaypointRole"/> a caller must hold to create, modify, or
+	/// delete a schedule of each job type. A schedule is a deferred, recurring instance
+	/// of a direct action, so its write floor MUST equal the role that action's own
+	/// endpoint requires -- otherwise the scheduling surface becomes a privilege-escalation
+	/// path (issue #517 review): a Cyber user could schedule -- and the dispatcher would
+	/// then execute -- a job they are forbidden from triggering directly. The mapping is:
+	/// <list type="bullet">
+	/// <item><c>scan</c> -> Cyber -- matches <c>RunsController.CreateRun</c>'s scan floor.</item>
+	/// <item><c>discover</c> -> Admin -- matches <c>POST /targets/{id}/discover</c> (<c>DiscoveryController</c>, <c>[RequireAdminRole]</c>).</item>
+	/// <item><c>credential-test</c> -> Admin -- matches <c>POST /credentials/{id}/test</c> (<c>CredentialsController</c>, <c>[RequireAdminRole]</c>).</item>
+	/// <item><c>catalog-index</c> -> Admin -- matches <c>POST /catalog/sync</c> (<c>CatalogController</c>, <c>[RequireAdminRole]</c>).</item>
+	/// </list>
+	/// This map is the single source of truth: every member of <see cref="All"/> has an
+	/// entry, and <see cref="RequiredRole"/> throws for any type not declared here, so a
+	/// future schedulable job type cannot be added without also declaring its write floor.
+	/// </summary>
+	private static readonly Dictionary<string, WaypointRole> MinimumRoleByJobType =
+		new(StringComparer.Ordinal)
+		{
+			[Scan] = WaypointRole.Cyber,
+			[Discover] = WaypointRole.Admin,
+			[CredentialTest] = WaypointRole.Admin,
+			[CatalogIndex] = WaypointRole.Admin,
+		};
+
 	public static bool IsValid(string jobType) => All.Contains(jobType);
+
+	/// <summary>
+	/// The minimum role required to write (create/update/delete) a schedule of
+	/// <paramref name="jobType"/>. Throws <see cref="ArgumentOutOfRangeException"/> for an
+	/// undeclared type -- callers must gate on <see cref="IsValid"/> first, and any new
+	/// schedulable type must be added to <see cref="MinimumRoleByJobType"/> (fails closed).
+	/// </summary>
+	public static WaypointRole RequiredRole(string jobType) =>
+		MinimumRoleByJobType.TryGetValue(jobType, out WaypointRole role)
+			? role
+			: throw new ArgumentOutOfRangeException(
+				nameof(jobType), jobType, "No schedule write-role floor is declared for this job type.");
 }

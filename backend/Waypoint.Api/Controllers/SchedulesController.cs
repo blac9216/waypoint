@@ -24,19 +24,27 @@ namespace Waypoint.Api.Controllers;
 
 /// <summary>
 /// The api-contract.md `/schedules` surface (issue #31, epic #14): cron-style
-/// schedules for read-only job types only. Role mapping (docs/domain-model.md Roles
-/// table): scans are "read-only in effect", and Cyber is the role the table already
-/// grants "initiate scans (using the target's assigned service credential)" to -- a
-/// schedule is exactly a deferred, recurring instance of the same read-only initiation,
-/// always under a stored/service credential (docs/domain-model.md Scheduling: "execute
-/// under the target's service credential"; ADR-0011's ad hoc personal-credential tier
-/// is scan-run-only and explicitly excluded from scheduling). So every schedule
-/// mutation here (create/update/delete) is <see cref="RequireCyberRoleAttribute"/>,
-/// matching <c>RunsController.CreateRun</c>'s floor for a <c>scan</c> run type, not
-/// <c>RequireOperatorRoleAttribute</c> -- Operator's extra grant over Cyber is ad hoc
-/// personal credentials and download/catalog management, neither of which applies to a
-/// scheduled, service-credential-only, read-only job. Reads are Viewer+, matching every
-/// other list/get endpoint in this codebase.
+/// schedules for read-only job types only.
+///
+/// RBAC (issue #517 review): a schedule is a deferred, recurring instance of a direct
+/// action, so its write floor MUST equal the role that action's own endpoint requires --
+/// otherwise the scheduling surface becomes a privilege-escalation path. The four
+/// schedulable job types are NOT uniformly Cyber-gated: <c>scan</c> is Cyber (matching
+/// <c>RunsController.CreateRun</c>'s scan floor), but <c>discover</c>,
+/// <c>credential-test</c>, and <c>catalog-index</c> are Admin at their direct endpoints
+/// (<c>POST /targets/{id}/discover</c>, <c>POST /credentials/{id}/test</c>,
+/// <c>POST /catalog/sync</c> -- all <c>[RequireAdminRole]</c>), consistent with the
+/// domain-model Roles table scoping Cyber to "no config, credentials, downloads, or
+/// remediation" and catalog/download management to Operator+/Admin. The
+/// <c>[RequireCyberRole]</c> attribute on each write action is only the COARSE floor
+/// (the lowest schedulable role, <c>scan</c>); the per-job_type floor is enforced
+/// imperatively via <see cref="ScheduleJobTypes.RequiredRole"/> in
+/// <see cref="EnsureRoleFor"/>, which is the single data-driven source of truth. Create
+/// checks the requested type; update and delete re-check the EXISTING schedule's type
+/// (the update contract carries no <c>job_type</c>, so a type is immutable once created,
+/// but the existing type still governs -- a Cyber user must not modify, pause/resume, or
+/// delete an Admin's <c>discover</c>/<c>credential-test</c>/<c>catalog-index</c> schedule).
+/// Reads are Viewer+, matching every other list/get endpoint in this codebase.
 ///
 /// The server-side read-only rejection this controller performs
 /// (<see cref="ValidateJobType"/>) is the create-side half of a guarantee also enforced
@@ -94,6 +102,7 @@ public sealed class SchedulesController : ControllerBase
 		}
 
 		ValidateJobType(request.JobType);
+		EnsureRoleFor(request.JobType);
 
 		CronExpression cron = ParseCron(request.CronExpression);
 		DateTimeOffset nextRunAt = cron.GetNextOccurrence(DateTimeOffset.UtcNow);
@@ -125,6 +134,11 @@ public sealed class SchedulesController : ControllerBase
 		{
 			throw NotFoundError(id);
 		}
+
+		// The update contract carries no job_type (a schedule's type is immutable), so the
+		// existing type governs. This gates pause/resume too -- both flow through PUT's
+		// `enabled` field -- so a Cyber user cannot pause/resume an Admin's Admin-typed schedule.
+		EnsureRoleFor(existing.JobType);
 
 		DateTimeOffset? nextRunAt = null;
 		if (!string.IsNullOrWhiteSpace(request.CronExpression))
@@ -161,7 +175,37 @@ public sealed class SchedulesController : ControllerBase
 	[ProducesResponseType(StatusCodes.Status204NoContent)]
 	public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
 	{
+		// Re-check the caller's role against the existing schedule's job_type before
+		// deleting: a Cyber user must not delete an Admin's Admin-typed schedule (same
+		// escalation hole the create/update paths close).
+		Schedule? existing = await _schedules.GetAsync(id, cancellationToken).ConfigureAwait(false);
+		if (existing is null)
+		{
+			throw NotFoundError(id);
+		}
+
+		EnsureRoleFor(existing.JobType);
+
 		return await _schedules.DeleteAsync(id, cancellationToken).ConfigureAwait(false) ? NoContent() : throw NotFoundError(id);
+	}
+
+	/// <summary>
+	/// Enforces the per-job_type write floor from <see cref="ScheduleJobTypes.RequiredRole"/>
+	/// against the caller, refining the coarse <c>[RequireCyberRole]</c> attribute. Throws
+	/// 403 <c>forbidden</c> when the caller is below the type's floor -- e.g. a Cyber user
+	/// touching a <c>discover</c>/<c>credential-test</c>/<c>catalog-index</c> schedule they
+	/// could not trigger directly. Assumes <paramref name="jobType"/> has already passed
+	/// <see cref="ValidateJobType"/>.
+	/// </summary>
+	private void EnsureRoleFor(string jobType)
+	{
+		WaypointRole required = ScheduleJobTypes.RequiredRole(jobType);
+		if (!User.HasRoleAtLeast(required))
+		{
+			throw ApiException.Forbidden(
+				$"Scheduling a '{jobType}' job requires the {required} role.",
+				$"The '{jobType}' job type is gated to {required}+ at its direct endpoint, so its schedules carry the same floor (docs/domain-model.md Roles).");
+		}
 	}
 
 	private static void ValidateJobType(string jobType)

@@ -100,6 +100,110 @@ public sealed class SchedulesEndpointTests : IClassFixture<SchedulesTestApiFacto
 		Assert.Equal(HttpStatusCode.Created, response.StatusCode);
 	}
 
+	/// <summary>
+	/// Issue #517 review: the three Admin-gated job types (discover/credential-test/
+	/// catalog-index are <c>[RequireAdminRole]</c> at their direct endpoints) must reject a
+	/// Cyber caller on the scheduling surface too -- otherwise a Cyber user could schedule a
+	/// job they cannot trigger directly (privilege escalation). Operator is also below Admin,
+	/// so it is rejected as well; only Admin succeeds (covered by
+	/// <see cref="Create_WithEveryReadOnlyJobType_Returns201"/>).
+	/// </summary>
+	[Theory]
+	[InlineData("Cyber", "discover")]
+	[InlineData("Cyber", "credential-test")]
+	[InlineData("Cyber", "catalog-index")]
+	[InlineData("Operator", "discover")]
+	[InlineData("Operator", "credential-test")]
+	[InlineData("Operator", "catalog-index")]
+	public async Task Create_BelowAdminForAdminGatedJobType_Returns403(string role, string jobType)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Post, "/api/v1/schedules", role,
+			new { name = $"s-{Guid.NewGuid():N}", job_type = jobType, cron_expression = "0 2 * * *" });
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	/// <summary>The scan floor is Cyber, so Cyber creating a scan schedule still succeeds after the per-type differentiation.</summary>
+	[Fact]
+	public async Task Create_CyberWithScan_Returns201()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Post, "/api/v1/schedules", "Cyber",
+			new { name = $"s-{Guid.NewGuid():N}", job_type = "scan", cron_expression = "0 2 * * *" });
+
+		Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Update re-checks the EXISTING schedule's job_type: a Cyber user must not modify (or
+	/// pause/resume, which flows through the same PUT `enabled` field) an Admin's
+	/// Admin-typed schedule. Admin creates the schedule; Cyber's PUT is 403.
+	/// </summary>
+	[Theory]
+	[InlineData("discover")]
+	[InlineData("credential-test")]
+	[InlineData("catalog-index")]
+	public async Task Update_CyberOnAdminTypedSchedule_Returns403(string jobType)
+	{
+		HttpClient client = _factory.CreateClient();
+		string id = await CreateAsAdminAsync(client, jobType);
+
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Put, $"/api/v1/schedules/{id}", "Cyber",
+			new { enabled = false });
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	/// <summary>A Cyber user updating a Cyber-floor (scan) schedule succeeds.</summary>
+	[Fact]
+	public async Task Update_CyberOnScanSchedule_Returns200()
+	{
+		HttpClient client = _factory.CreateClient();
+		string id = await CreateAsAdminAsync(client, "scan");
+
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Put, $"/api/v1/schedules/{id}", "Cyber",
+			new { enabled = false });
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+	}
+
+	/// <summary>Delete re-checks the existing job_type: a Cyber user must not delete an Admin's Admin-typed schedule.</summary>
+	[Theory]
+	[InlineData("discover")]
+	[InlineData("credential-test")]
+	[InlineData("catalog-index")]
+	public async Task Delete_CyberOnAdminTypedSchedule_Returns403(string jobType)
+	{
+		HttpClient client = _factory.CreateClient();
+		string id = await CreateAsAdminAsync(client, jobType);
+
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Delete, $"/api/v1/schedules/{id}", "Cyber", body: null);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	/// <summary>A Cyber user deleting a scan schedule succeeds.</summary>
+	[Fact]
+	public async Task Delete_CyberOnScanSchedule_Returns204()
+	{
+		HttpClient client = _factory.CreateClient();
+		string id = await CreateAsAdminAsync(client, "scan");
+
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Delete, $"/api/v1/schedules/{id}", "Cyber", body: null);
+
+		Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+	}
+
+	private static async Task<string> CreateAsAdminAsync(HttpClient client, string jobType)
+	{
+		HttpResponseMessage created = await SendAsync(client, HttpMethod.Post, "/api/v1/schedules", "Admin",
+			new { name = $"s-{Guid.NewGuid():N}", job_type = jobType, cron_expression = "0 2 * * *" });
+		Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+		return document.RootElement.GetProperty("id").GetString()!;
+	}
+
 	[Fact]
 	public async Task Create_WithInvalidCron_Returns400()
 	{
