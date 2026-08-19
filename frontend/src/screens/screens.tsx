@@ -1,12 +1,13 @@
 import { PlaceholderScreen } from "./PlaceholderScreen";
 import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
 import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./configuration/ConfigurationScreen";
+import { DashboardScreen as DashboardAggregateScreen } from "./dashboard/DashboardScreen";
 import { LiveRunRoute } from "./liverun/LiveRunScreen";
 import { ResultsScreen as ResultsHistoryScreen } from "./results/ResultsScreen";
 import { StartScanScreen as StartScanWizardScreen } from "./startscan/StartScanScreen";
 
 export function DashboardScreen() {
-	return <PlaceholderScreen title="Dashboard" reads={["GET /api/v1/dashboard", "global SSE /api/v1/events"]} />;
+	return <DashboardAggregateScreen />;
 }
 
 export function LiveRunScreen() {
