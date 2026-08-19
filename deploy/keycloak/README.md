@@ -10,23 +10,67 @@ would otherwise be a secret is templated.
 - `realm/waypoint-realm.json` — the `waypoint` realm: the four role groups
   (`Viewer`/`Cyber`/`Operator`/`Admin`, matching `docs/domain-model.md` "Roles" and
   the exact PascalCase wire values in `docs/api-contract.md`), one confidential OIDC
-  client (`waypoint-backend`) the ASP.NET Core backend will use once #29 swaps local
-  auth for the real OIDC flow, a group-membership protocol mapper that puts the
-  member group's name on the token as a `role` claim — the same field name and value
-  set the API contract already promises, so the eventual Keycloak-backed `/auth/me`
-  needs no reshaping — and (issue #521) a `waypoint-auth-time` mapper
-  (`oidc-usersessionmodel-note-mapper` reading the `AUTH_TIME` session note) that puts
-  the session's real authentication instant on the token as the standard `auth_time`
-  claim. Step-up re-authentication (`docs/security.md` "Step-up re-authentication")
-  depends on this mapper existing on the access token specifically — without it every
+  client (`waypoint-backend`) the ASP.NET Core backend uses (#29's swap from local
+  auth to real OIDC bearer validation), one **public** OIDC client
+  (`waypoint-frontend`, issue #534) the React SPA uses for its own
+  authorization-code + PKCE sign-in redirect, a group-membership protocol mapper on
+  each client that puts the member group's name on the token as a `role` claim — the
+  same field name and value set the API contract already promises, so the
+  Keycloak-backed `/auth/me` needs no reshaping — and (issue #521) a
+  `waypoint-auth-time` mapper (`oidc-usersessionmodel-note-mapper` reading the
+  `AUTH_TIME` session note) on each client that puts the session's real
+  authentication instant on the token as the standard `auth_time` claim. Step-up
+  re-authentication (`docs/security.md` "Step-up re-authentication") depends on this
+  mapper existing on the access token specifically — without it every
   OIDC-authenticated request fails closed as `step_up_required` on the
   credential-overwrite path, since a missing `auth_time` claim is never treated as
   fresh.
+- `waypoint-frontend` (issue #534) has no client secret (`publicClient: true`, no
+  `clientAuthenticatorType`) — a browser-hosted SPA cannot hold one — and instead
+  requires PKCE (`attributes.pkce.code.challenge.method: "S256"`), matching the
+  frontend's hand-rolled `lib/oidc.ts` flow (`frontend/src/lib/oidc.ts`; no external
+  OIDC library — see that file's header comment for why). Its access tokens still
+  carry `aud: waypoint-backend` via an `oidc-audience-mapper` protocol mapper, so the
+  backend's existing `Oidc:Audience` check (`waypoint-backend`) validates SPA-issued
+  tokens with no change. `redirectUris` is the SPA's fixed callback route,
+  `/oidc/callback` — deliberately **not** under nginx's `/auth/` prefix, which is
+  proxied straight to Keycloak (`deploy/nginx/conf.d/default.conf`) and would never
+  let a request through to the React app at all. The backend, in turn, exposes both
+  this client id and the browser-facing authority (`Oidc:PublicAuthority`, default
+  `/auth/realms/waypoint` — a same-origin relative path, since an air-gapped
+  appliance has no fixed public hostname to bake in) through the anonymous
+  `GET /api/v1/auth/config` endpoint, so the SPA never hardcodes either value.
 - The client's `secret` field is the literal placeholder `__WAYPOINT_BACKEND_CLIENT_SECRET__` —
   never a real value. `deploy/scripts/keycloak-realm-import.sh` substitutes the real
   secret from `KEYCLOAK_BACKEND_CLIENT_SECRET` (`deploy/.env`, gitignored) into a
   throwaway copy at import time; the templated file in this repo is never edited
   in place.
+
+## Operator override: `waypoint-frontend` redirect/origin URIs (real hostname)
+
+`waypoint-frontend`'s `redirectUris` and `webOrigins` in `waypoint-realm.json` are
+pinned to `https://localhost:8443` — a **dev-seed placeholder**, kept committed as-is.
+This is intentionally *not* a wildcard (a wildcard redirect/origin on a public PKCE
+client is the security-critical thing to avoid), so a real deployment on any other edge
+hostname must update these two lists to that hostname before SPA sign-in will work —
+Keycloak rejects an authorization request whose redirect URI or origin is not exactly
+listed. This is the same class of operator override as the backend's
+`Oidc__PublicAuthority` note in `deploy/README.md`: change it for your site, do not
+commit your real hostname here.
+
+To change them:
+
+1. In the Keycloak admin console → Clients → `waypoint-frontend` → **Settings**, set
+   *Valid redirect URIs* to `https://<your-edge-host>/oidc/callback` and *Web origins*
+   to `https://<your-edge-host>` (replace, do not add to, the `localhost:8443`
+   placeholders). Keep the `/oidc/callback` path — it is the SPA's fixed callback route.
+2. Or edit the two lists directly in a working copy of `waypoint-realm.json` and import
+   it via `deploy/scripts/keycloak-realm-import.sh` (do **not** commit the edited file
+   with a real hostname — the committed copy stays on the `localhost:8443` placeholder,
+   same discipline as the templated client secret above).
+
+Multiple hostnames (e.g. an FQDN plus a management IP) are supported by listing each in
+both arrays; still no wildcards.
 
 ## Role groups, not realm roles, are what a user is assigned
 

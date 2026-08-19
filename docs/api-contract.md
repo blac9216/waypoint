@@ -99,6 +99,37 @@ the caller, and role claims keep mapping to the same four
 `role` claim → `WaypointClaimTypes.Role` — see
 `deploy/keycloak/realm/waypoint-realm.json` and `OidcClaimsMappingOptionsSetup`).
 
+**`GET /auth/config`** (issue #534): anonymous. `{local_auth_enabled, oidc_authority,
+oidc_client_id}` — how the SPA feature-detects the dev-flag local-auth form
+(`local_auth_enabled`, mirrors `LocalAuth:Enabled`) and learns the browser-facing
+OIDC authority/public client id it needs to build the authorization-code redirect,
+without hardcoding either. `oidc_authority` is deliberately **not** the backend's
+own `Oidc:Authority` (that is the backend's container-network view of Keycloak,
+unreachable from a browser) — it is `Oidc:PublicAuthority`, a same-origin relative
+path by default (`/auth/realms/waypoint`, routed through nginx's `/auth/` proxy to
+Keycloak) so one image works on any operator's hostname, including an air-gapped
+instance with no fixed public hostname at all.
+
+**Frontend OIDC flow (issue #534).** The SPA drives a real authorization-code + PKCE
+(RFC 7636, `S256`) redirect against Keycloak's own `/authorize` and token endpoints
+(discovered from `oidc_authority` via the standard
+`{authority}/.well-known/openid-configuration` document) — hand-rolled with
+`fetch`/`crypto.subtle` (`frontend/src/lib/oidc.ts`), no external OIDC library, so the
+air-gapped build stays free of runtime CDN dependencies. It authenticates as the
+realm's public client (`waypoint-frontend` — `publicClient: true`, no secret, PKCE
+required — distinct from the backend's confidential `waypoint-backend` client), whose
+tokens still carry `aud: waypoint-backend` (an audience protocol mapper) so this
+backend's `Oidc:Audience` check needs no change. The callback lands at the SPA's own
+`/oidc/callback` route (deliberately outside nginx's `/auth/` prefix, which proxies
+straight to Keycloak and would never reach the React app). Step-up re-authentication
+(`docs/security.md`, issue #521) reuses the same redirect with `prompt=login`: a
+`403 step_up_required` from a gated write (e.g. `PUT /credentials/{id}` overwriting
+secret material) triggers the redirect, and the original request is retried once the
+callback completes with a fresh `auth_time`. Logout uses Keycloak's RP-Initiated
+Logout (`end_session_endpoint` from the same discovery document) so the browser's
+Keycloak SSO cookie ends too, not just the SPA's own session state — otherwise the
+next sign-in would silently reuse the still-live Keycloak session.
+
 ### Sites, targets, inventory
 | Endpoint | Methods | Notes |
 |---|---|---|

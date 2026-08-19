@@ -22,3 +22,16 @@ public sealed record LoginResponse(string Token, string Role, DateTimeOffset Exp
 
 /// <summary>Response body for <c>GET /api/v1/auth/me</c>.</summary>
 public sealed record CurrentUserResponse(string Username, string Role);
+
+/// <summary>
+/// Response body for <c>GET /api/v1/auth/config</c> (issue #534) — anonymous, so the
+/// SPA can decide how to sign in before it has a token. <c>local_auth_enabled</c> is
+/// the frontend's feature-detect for the dev-flag username/password form (mirrors
+/// <c>LocalAuth:Enabled</c>; do not hardcode this client-side). <c>oidc_authority</c>
+/// and <c>oidc_client_id</c> are what the SPA needs to build the authorization-code
+/// (+PKCE) redirect and fetch the discovery document — see
+/// <see cref="Waypoint.Core.Configuration.OidcAuthOptions.PublicAuthority"/>'s doc
+/// comment for why this is a same-origin relative path, not the backend's own
+/// (container-network) <c>Authority</c>.
+/// </summary>
+public sealed record AuthConfigResponse(bool LocalAuthEnabled, string OidcAuthority, string OidcClientId);

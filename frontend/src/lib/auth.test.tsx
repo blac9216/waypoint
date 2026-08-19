@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthProvider } from "./auth";
+import { AuthProvider, __resetAuthConfigCacheForTests } from "./auth";
 import { useAuth } from "./auth-context";
 
 const STORAGE_KEY = "waypoint.session";
@@ -21,6 +21,16 @@ function Probe() {
  */
 function mockAuthFetch(loginBody: unknown, meBody: unknown): void {
 	globalThis.fetch = vi.fn(async (url: string) => {
+		if (url === "/api/v1/auth/config") {
+			// AuthProvider always probes this on mount (issue #534) — every
+			// caller of this helper exercises the local-auth login() path, so
+			// local_auth_enabled: true keeps that feature-detect from becoming
+			// a second thing each test has to know about.
+			return new Response(
+				JSON.stringify({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" }),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		}
 		if (url === "/api/v1/auth/login") {
 			return new Response(JSON.stringify(loginBody), {
 				status: 200,
@@ -58,6 +68,7 @@ describe("AuthProvider session restore (issue #64 — login/refresh contract)", 
 	let originalFetch: typeof fetch;
 
 	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
 		originalFetch = globalThis.fetch;
 		window.sessionStorage.clear();
 	});
@@ -153,6 +164,12 @@ describe("AuthProvider session restore (issue #64 — login/refresh contract)", 
 	it("login() persists a session that a fresh mount (simulated refresh) reads back correctly", async () => {
 		const futureExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 		globalThis.fetch = vi.fn(async (url: string) => {
+			if (url === "/api/v1/auth/config") {
+				return new Response(
+					JSON.stringify({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" }),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
 			if (url === "/api/v1/auth/login") {
 				return new Response(
 					JSON.stringify({ token: "tok-roundtrip", role: "Operator", expires_at: futureExpiry }),
@@ -225,6 +242,7 @@ describe("AuthProvider wire-path role validation (issue #64 — fail closed on a
 	const futureExpiry = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
 	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
 		originalFetch = globalThis.fetch;
 		window.sessionStorage.clear();
 	});
@@ -349,6 +367,7 @@ describe("AuthProvider wire-path field validation (issue #64 — token, expires_
 	const goodMe = { username: "admin", role: "Admin" };
 
 	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
 		originalFetch = globalThis.fetch;
 		window.sessionStorage.clear();
 	});
@@ -459,6 +478,12 @@ describe("AuthProvider wire-path field validation (issue #64 — token, expires_
 		const calls: string[] = [];
 		globalThis.fetch = vi.fn(async (url: string) => {
 			calls.push(url);
+			if (url === "/api/v1/auth/config") {
+				return new Response(
+					JSON.stringify({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" }),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
 			if (url === "/api/v1/auth/login") {
 				return new Response(JSON.stringify({ token: "", role: "Admin", expires_at: futureExpiry() }), {
 					status: 200,
@@ -478,7 +503,7 @@ describe("AuthProvider wire-path field validation (issue #64 — token, expires_
 		screen.getByText("go").click();
 
 		await waitFor(() => expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull());
-		expect(calls).toEqual(["/api/v1/auth/login"]);
+		expect(calls).toEqual(["/api/v1/auth/config", "/api/v1/auth/login"]);
 	});
 });
 
@@ -494,6 +519,7 @@ describe("AuthProvider wire-path field validation (issue #64 — token, expires_
  */
 describe("AuthProvider restored-session field validation (issue #98)", () => {
 	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
 		window.sessionStorage.clear();
 	});
 
@@ -575,6 +601,7 @@ describe("AuthProvider restored-session field validation (issue #98)", () => {
  */
 describe("AuthProvider expiry enforcement while mounted (issue #97)", () => {
 	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
 		window.sessionStorage.clear();
 		vi.useFakeTimers();
 	});
@@ -681,5 +708,413 @@ describe("AuthProvider expiry enforcement while mounted (issue #97)", () => {
 		removeSpy.mockRestore();
 		winAddSpy.mockRestore();
 		winRemoveSpy.mockRestore();
+	});
+});
+
+/**
+ * OIDC redirect flow (issue #534): the callback landing that mints a session
+ * from the access token's own claims, the end-session redirect on logout of an
+ * OIDC session, and the two authorize-redirect entry points. These paths were
+ * the coverage gap flagged in PR #537 round 2 — `auth.tsx`'s OIDC branches and
+ * `jwt.ts`'s `decodeJwtPayload`.
+ */
+
+/** Fixed placeholder OIDC config, discovery, and endpoints — all invented,
+ * same-origin/example values (CLAUDE.md sanitization). */
+const OIDC_CONFIG_WIRE = {
+	local_auth_enabled: false,
+	oidc_authority: "/auth/realms/waypoint",
+	oidc_client_id: "waypoint-frontend",
+};
+const DISCOVERY_URL = "/auth/realms/waypoint/.well-known/openid-configuration";
+const TOKEN_ENDPOINT = "https://oidc.example.internal/token";
+const AUTHORIZE_ENDPOINT = "https://oidc.example.internal/authorize";
+const END_SESSION_ENDPOINT = "https://oidc.example.internal/logout";
+
+const DISCOVERY_DOC = {
+	authorization_endpoint: AUTHORIZE_ENDPOINT,
+	token_endpoint: TOKEN_ENDPOINT,
+	end_session_endpoint: END_SESSION_ENDPOINT,
+};
+
+/** base64url-encode a JSON object into a JWT payload segment (mirror of jwt.ts's decode). */
+function encodeJwtSegment(payload: unknown): string {
+	const json = JSON.stringify(payload);
+	const utf8 = encodeURIComponent(json).replace(/%([0-9A-F]{2})/g, (_m, hex: string) =>
+		String.fromCharCode(parseInt(hex, 16)),
+	);
+	return btoa(utf8).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** Assemble a three-segment invented access token carrying the given claims. */
+function fakeAccessToken(claims: Record<string, unknown>): string {
+	return `eyJhbGciOiJub25lIn0.${encodeJwtSegment(claims)}.sig`;
+}
+
+/** Point jsdom's location at a path (+ optional query) without a real navigation. */
+function setLocation(path: string): void {
+	window.history.replaceState(null, "", path);
+}
+
+describe("AuthProvider OIDC callback (issue #534 — mint a session from token claims)", () => {
+	let originalFetch: typeof fetch;
+
+	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
+		originalFetch = globalThis.fetch;
+		window.sessionStorage.clear();
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		setLocation("/");
+	});
+
+	/** Mocks config + discovery + token exchange for the callback landing. The
+	 * token body is returned verbatim so a test can supply a malformed token. */
+	function mockCallbackFetch(tokenBody: unknown): void {
+		globalThis.fetch = vi.fn(async (url: string) => {
+			if (url === "/api/v1/auth/config") {
+				return new Response(JSON.stringify(OIDC_CONFIG_WIRE), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === DISCOVERY_URL) {
+				return new Response(JSON.stringify(DISCOVERY_DOC), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === TOKEN_ENDPOINT) {
+				return new Response(JSON.stringify(tokenBody), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as unknown as typeof fetch;
+	}
+
+	/** Seed the PKCE verifier + state that startLogin would have stashed before
+	 * the redirect, plus the code/state query params on the callback URL, so
+	 * completeLogin's CSRF check passes. */
+	function landOnCallback(returnTo = "/dashboard"): void {
+		window.sessionStorage.setItem("waypoint.oidc.pkce_verifier", "verifier-fixture");
+		window.sessionStorage.setItem("waypoint.oidc.state", "state-fixture");
+		window.sessionStorage.setItem("waypoint.oidc.return_to", returnTo);
+		setLocation("/oidc/callback?code=auth-code-fixture&state=state-fixture");
+	}
+
+	it("mints a signed-in session from the access token's claims and returns to the stashed path", async () => {
+		mockCallbackFetch({
+			access_token: fakeAccessToken({ role: "Operator", preferred_username: "opuser", sub: "s-1", exp: 1893456000 }),
+			expires_in: 3600,
+			token_type: "Bearer",
+		});
+		landOnCallback("/dashboard");
+
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() =>
+			expect(screen.getByText(/signed in as opuser \(Operator\)/)).toBeInTheDocument(),
+		);
+		// Persisted as an OIDC session (drives the end-session logout path).
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toContain('"kind":"oidc"');
+		// The code/state query params are stripped and the app is returned to the
+		// path startLogin was called from.
+		expect(window.location.pathname).toBe("/dashboard");
+		expect(window.location.search).toBe("");
+	});
+
+	it("falls back to `sub` for the username when the token has no preferred_username", async () => {
+		mockCallbackFetch({
+			access_token: fakeAccessToken({ role: "Admin", sub: "subject-42", exp: 1893456000 }),
+			expires_in: 3600,
+			token_type: "Bearer",
+		});
+		landOnCallback();
+
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByText(/signed in as subject-42 \(Admin\)/)).toBeInTheDocument());
+	});
+
+	it("refuses the callback when the access token carries a role outside the closed set", async () => {
+		mockCallbackFetch({
+			access_token: fakeAccessToken({ role: "root", preferred_username: "opuser", exp: 1893456000 }),
+			expires_in: 3600,
+			token_type: "Bearer",
+		});
+		landOnCallback();
+
+		function ErrorProbe() {
+			const { error, status } = useAuth();
+			return <div data-testid="err">{status === "restoring" ? "restoring" : (error ?? "none")}</div>;
+		}
+
+		render(
+			<AuthProvider>
+				<ErrorProbe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByTestId("err")).not.toHaveTextContent("none"));
+		expect(screen.getByTestId("err").textContent).toContain("Keycloak access token");
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	});
+
+	it("surfaces an error when the issued access token cannot be decoded into claims", async () => {
+		mockCallbackFetch({
+			access_token: "not-a-jwt", // one segment — decodeJwtPayload returns null
+			expires_in: 3600,
+			token_type: "Bearer",
+		});
+		landOnCallback();
+
+		function ErrorProbe() {
+			const { error } = useAuth();
+			return <div data-testid="err">{error ?? "none"}</div>;
+		}
+
+		render(
+			<AuthProvider>
+				<ErrorProbe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByTestId("err")).not.toHaveTextContent("none"));
+		expect(screen.getByTestId("err").textContent).toContain("claims");
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	});
+
+	it("surfaces the OIDC state-mismatch error and does not sign in", async () => {
+		mockCallbackFetch({
+			access_token: fakeAccessToken({ role: "Admin", preferred_username: "a", exp: 1893456000 }),
+			expires_in: 3600,
+			token_type: "Bearer",
+		});
+		// Stash a state that does not match the callback URL's state param.
+		window.sessionStorage.setItem("waypoint.oidc.pkce_verifier", "verifier-fixture");
+		window.sessionStorage.setItem("waypoint.oidc.state", "the-expected-state");
+		setLocation("/oidc/callback?code=auth-code-fixture&state=a-different-state");
+
+		function ErrorProbe() {
+			const { error } = useAuth();
+			return <div data-testid="err">{error ?? "none"}</div>;
+		}
+
+		render(
+			<AuthProvider>
+				<ErrorProbe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByTestId("err")).not.toHaveTextContent("none"));
+		expect(screen.getByTestId("err").textContent).toContain("state mismatch");
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	});
+});
+
+describe("AuthProvider OIDC logout + authorize redirects (issue #534)", () => {
+	let originalFetch: typeof fetch;
+	let originalLocation: Location;
+	let assignMock: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
+		originalFetch = globalThis.fetch;
+		window.sessionStorage.clear();
+		// jsdom's window.location.assign is a non-configurable native stub that
+		// throws "Not implemented", and the property itself can't be redefined.
+		// Replace the whole `location` object with a stand-in that carries a
+		// spy `assign` plus the fields these paths read (origin/pathname/…), so
+		// the redirect targets can be asserted.
+		originalLocation = window.location;
+		assignMock = vi.fn();
+		const stub = {
+			origin: originalLocation.origin,
+			href: originalLocation.href,
+			pathname: originalLocation.pathname,
+			search: originalLocation.search,
+			assign: assignMock,
+			replace: vi.fn(),
+			reload: vi.fn(),
+		};
+		Object.defineProperty(window, "location", {
+			configurable: true,
+			writable: true,
+			value: stub as unknown as Location,
+		});
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		Object.defineProperty(window, "location", {
+			configurable: true,
+			writable: true,
+			value: originalLocation,
+		});
+		setLocation("/");
+	});
+
+	function mockConfigAndDiscovery(): void {
+		globalThis.fetch = vi.fn(async (url: string) => {
+			if (url === "/api/v1/auth/config") {
+				return new Response(JSON.stringify(OIDC_CONFIG_WIRE), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === DISCOVERY_URL) {
+				return new Response(JSON.stringify(DISCOVERY_DOC), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as unknown as typeof fetch;
+	}
+
+	/** Seeds a restored OIDC-kind session so logout() takes the end-session path. */
+	function seedOidcSession(): void {
+		window.sessionStorage.setItem(
+			STORAGE_KEY,
+			JSON.stringify({
+				token: "tok-oidc",
+				username: "opuser",
+				role: "Operator",
+				expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+				kind: "oidc",
+			}),
+		);
+	}
+
+	function LogoutTrigger() {
+		const { logout } = useAuth();
+		return (
+			<button type="button" onClick={() => logout()}>
+				logout
+			</button>
+		);
+	}
+
+	it("redirects to Keycloak's end-session endpoint when an OIDC session logs out", async () => {
+		mockConfigAndDiscovery();
+		seedOidcSession();
+
+		render(
+			<AuthProvider>
+				<LogoutTrigger />
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByText(/signed in as opuser/)).toBeInTheDocument());
+		screen.getByText("logout").click();
+
+		// Local session is dropped immediately (chrome returns to signed-out)...
+		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+		// ...and the browser is sent to the RP-initiated logout URL.
+		await waitFor(() => expect(assignMock).toHaveBeenCalledTimes(1));
+		expect(String(assignMock.mock.calls[0][0])).toContain(END_SESSION_ENDPOINT);
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	});
+
+	it("does not redirect on logout of a local session (no IdP session to end)", async () => {
+		mockConfigAndDiscovery();
+		window.sessionStorage.setItem(
+			STORAGE_KEY,
+			JSON.stringify({
+				token: "tok-local",
+				username: "admin",
+				role: "Admin",
+				expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+				kind: "local",
+			}),
+		);
+
+		render(
+			<AuthProvider>
+				<LogoutTrigger />
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByText(/signed in as admin/)).toBeInTheDocument());
+		screen.getByText("logout").click();
+
+		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+		expect(assignMock).not.toHaveBeenCalled();
+	});
+
+	it("startOidcLogin redirects the browser to the authorize endpoint and stashes PKCE state", async () => {
+		mockConfigAndDiscovery();
+
+		function StartTrigger() {
+			const { startOidcLogin } = useAuth();
+			return (
+				<button type="button" onClick={() => void startOidcLogin()}>
+					start
+				</button>
+			);
+		}
+
+		render(
+			<AuthProvider>
+				<StartTrigger />
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+		screen.getByText("start").click();
+
+		await waitFor(() => expect(assignMock).toHaveBeenCalledTimes(1));
+		const target = String(assignMock.mock.calls[0][0]);
+		expect(target).toContain(AUTHORIZE_ENDPOINT);
+		expect(target).toContain("code_challenge_method=S256");
+		expect(target).not.toContain("prompt=login");
+		// PKCE verifier + state were stashed for the eventual callback.
+		expect(window.sessionStorage.getItem("waypoint.oidc.pkce_verifier")).not.toBeNull();
+		expect(window.sessionStorage.getItem("waypoint.oidc.state")).not.toBeNull();
+	});
+
+	it("stepUpOidcLogin adds prompt=login to force a fresh Keycloak credential prompt", async () => {
+		mockConfigAndDiscovery();
+
+		function StepUpTrigger() {
+			const { stepUpOidcLogin } = useAuth();
+			return (
+				<button type="button" onClick={() => void stepUpOidcLogin("/credentials")}>
+					stepup
+				</button>
+			);
+		}
+
+		render(
+			<AuthProvider>
+				<StepUpTrigger />
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
+		screen.getByText("stepup").click();
+
+		await waitFor(() => expect(assignMock).toHaveBeenCalledTimes(1));
+		const target = String(assignMock.mock.calls[0][0]);
+		expect(target).toContain(AUTHORIZE_ENDPOINT);
+		expect(target).toContain("prompt=login");
+		// The requested return-to path is stashed for the callback to restore.
+		expect(window.sessionStorage.getItem("waypoint.oidc.return_to")).toBe("/credentials");
 	});
 });

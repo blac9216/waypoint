@@ -429,6 +429,14 @@ describe("JobLogDrawer", () => {
 			</AuthProvider>,
 		);
 		await waitFor(() => expect(container.querySelector(".job-log-drawer")).toBeNull());
-		expect(globalThis.fetch).not.toHaveBeenCalled();
+		// AuthProvider itself fetches GET /auth/config unconditionally on mount
+		// (issue #534's local-auth feature-detect — it needs an answer whether
+		// or not anyone is signed in yet), so "signed out" no longer means
+		// "zero network calls" the way it did before OIDC landed. What still
+		// must hold is the drawer's OWN concern: no job-log/events-related
+		// call while signed out.
+		expect(vi.mocked(globalThis.fetch).mock.calls.some(([url]) => typeof url === "string" && url.startsWith("/api/v1/events"))).toBe(
+			false,
+		);
 	});
 });

@@ -130,6 +130,18 @@ services:
       Oidc__Authority: "${OIDC_AUTHORITY:-http://keycloak:8080/realms/waypoint}"
       Oidc__Audience: "${OIDC_AUDIENCE:-waypoint-backend}"
       Oidc__RequireHttpsMetadata: "${OIDC_REQUIRE_HTTPS_METADATA:-false}"
+      # Issue #534: the BROWSER-facing authority + public client id, handed to
+      # the SPA anonymously via GET /api/v1/auth/config so it never hardcodes
+      # either. Deliberately NOT the same value as Oidc__Authority above --
+      # that is the backend's container-network view of Keycloak
+      # (http://keycloak:8080/...), which a browser can never reach. The
+      # default here is nginx's own same-origin proxy path (`/auth/`,
+      # deploy/nginx/conf.d/default.conf, issue #28) -- a relative path with
+      # no host/port baked in, since an air-gapped appliance has no fixed
+      # public hostname to assume. Override only if an operator's edge
+      # topology puts Keycloak somewhere else relative to the browser.
+      Oidc__PublicAuthority: "${OIDC_PUBLIC_AUTHORITY:-/auth/realms/waypoint}"
+      Oidc__PublicClientId: "${OIDC_PUBLIC_CLIENT_ID:-waypoint-frontend}"
       # Postgres connection (#103): backend/appsettings.json bakes in a default
       # ConnectionStrings:Waypoint that happens to match the postgres service's
       # own defaults below, so an unconfigured stack still connects out of the
@@ -312,6 +324,23 @@ services:
       # which also listens on plain HTTP behind the edge network.
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: "xforwarded"
+      # Issue #534 (live-verified): without this, Keycloak has no idea it is
+      # reverse-proxied under nginx's /auth/ prefix (deploy/nginx/conf.d
+      # default.conf's `location /auth/`) and renders every self-referential
+      # URL -- the discovery document's authorization_endpoint/token_endpoint,
+      # and every login-form `action=` on its own HTML pages -- WITHOUT the
+      # /auth prefix. A real browser (or this SPA) following any of those
+      # URLs then hits nginx with a bare /realms/... path, which has no
+      # matching location and falls through to the frontend's SPA catch-all
+      # -- a silent, totally-broken login redirect, not an obvious error.
+      # KC_HTTP_RELATIVE_PATH tells Keycloak's own URL-building to include
+      # the prefix it is actually served under, matching nginx's proxy path
+      # exactly. Verified against a real bring-up (docs/testing.md isolation
+      # recipe): before this line, GET .../auth/realms/waypoint/.well-known/
+      # openid-configuration's authorization_endpoint was
+      # https://<host>/realms/waypoint/protocol/openid-connect/auth (missing
+      # /auth); after it, https://<host>/auth/realms/waypoint/... (correct).
+      KC_HTTP_RELATIVE_PATH: "/auth"
     volumes:
       # Realm bootstrap import (issue #28 AC1: "fresh compose up yields a
       # working realm with the four role groups"). --import-realm (see
@@ -340,8 +369,16 @@ services:
     # the main HTTP listener - this image ships neither curl nor wget, so
     # the probe is a raw /dev/tcp request (same technique as this file's
     # other CMD-SHELL health checks that lack a dedicated HTTP client).
+    #
+    # Path is /auth/health/ready, not /health/ready (issue #534,
+    # live-verified): KC_HTTP_RELATIVE_PATH=/auth above shifts EVERY
+    # Keycloak-served path under that prefix, including the management
+    # port's own health endpoints, not just the main app's realm/admin
+    # routes - verified against a real bring-up that a bare /health/ready
+    # 404s once KC_HTTP_RELATIVE_PATH is set, and /auth/health/ready is what
+    # actually answers "UP".
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /auth/health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"]
       interval: 10s
       timeout: 5s
       retries: 6

@@ -57,4 +57,31 @@ public sealed class OidcAuthOptions
 	/// validation succeeds.
 	/// </summary>
 	public string RoleClaimType { get; set; } = "role";
+
+	/// <summary>
+	/// The browser-facing issuer URL the SPA drives its authorization-code (+PKCE)
+	/// redirect and discovery-document fetch against (issue #534). Deliberately
+	/// distinct from <see cref="Authority"/>: that value is the backend's
+	/// container-network view of Keycloak (e.g. <c>http://keycloak:8080/realms/waypoint</c>
+	/// inside the compose network) and is never reachable from a browser. The browser
+	/// instead goes through nginx's same-origin <c>/auth/</c> proxy
+	/// (<c>deploy/nginx/conf.d/default.conf</c>, issue #28) to Keycloak, so the default
+	/// here is the relative path <c>/auth/realms/waypoint</c> — no host/port baked in,
+	/// which is what lets one image serve any operator's hostname (air-gapped
+	/// instances have no fixed public hostname). Exposed read-only via
+	/// <c>GET /api/v1/auth/config</c> (anonymous) so the SPA never hardcodes it.
+	/// </summary>
+	public string PublicAuthority { get; set; } = "/auth/realms/waypoint";
+
+	/// <summary>
+	/// The public (PKCE, no-secret) OIDC client id the SPA authenticates as — distinct
+	/// from <see cref="Audience"/>/<c>waypoint-backend</c>, the confidential client the
+	/// ASP.NET Core backend itself was validated against before #534. See
+	/// <c>deploy/keycloak/realm/waypoint-realm.json</c>'s <c>waypoint-frontend</c>
+	/// client (issue #534): <c>publicClient: true</c>, PKCE required, no
+	/// <c>clientAuthenticatorType</c>/secret. Its tokens still carry
+	/// <c>aud: waypoint-backend</c> (an audience protocol mapper on the client), so
+	/// this backend's existing <see cref="Audience"/> check needs no change.
+	/// </summary>
+	public string PublicClientId { get; set; } = "waypoint-frontend";
 }
