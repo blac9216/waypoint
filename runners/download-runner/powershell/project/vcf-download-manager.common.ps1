@@ -15,7 +15,7 @@
 # Project-owned source migrated from the predecessor vcf-docker-download
 # repository (same author/copyright holder), preserved unmodified per
 # ADR-0013/ADR-0015 and CLAUDE.md's License & Borrowing Policy: Waypoint
-# orchestrates this vendor script via the WaypointDownload/WaypointCatalogIndex
+# orchestrates this project-owned script via the WaypointDownload/WaypointCatalogIndex
 # shim modules, it does not fork it. Only the functions this runner's M1 call
 # graph needs (Save-WebFile, Get-FileManifest, and their shared helpers) are
 # imported; workflow modules for UMDS/VCSA/Photon/VKS/content-library/transfer

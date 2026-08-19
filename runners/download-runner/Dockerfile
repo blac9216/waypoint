@@ -68,8 +68,8 @@ RUN apt-get -y update --fix-missing && \
 
 WORKDIR /app
 
-# Project-owned PowerShell vendor script only: vcf-download-manager.common.ps1,
-# the sibling-repo import this runner's M1 call graph dot-sources (vendor/). No
+# Project-owned PowerShell script only: vcf-download-manager.common.ps1,
+# the sibling-repo import this runner's M1 call graph dot-sources (project/). No
 # vendor installer packages, tokens, or credentials belong under powershell/ —
 # see .dockerignore and the header comment above.
 #
@@ -85,7 +85,7 @@ COPY runners/download-runner/powershell/ /app/PowerShell/
 # WaypointCatalogIndex/WaypointDownload shim modules Waypoint.Infrastructure.
 # Execution.csproj copies into the publish output at PowerShell/Modules/ (the
 # single canonical source, issue #456); at runtime they dot-source
-# vcf-download-manager.common.ps1 under /app/PowerShell/vendor (see
+# vcf-download-manager.common.ps1 under /app/PowerShell/project (see
 # WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH in deploy/docker-compose.yml).
 COPY --from=dotnet-build /app /app
 

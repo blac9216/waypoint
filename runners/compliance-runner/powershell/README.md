@@ -1,4 +1,4 @@
-# compliance-runner: imported vendor PowerShell
+# compliance-runner: imported project-owned PowerShell
 
 These three files are imported unmodified (except for the added Apache-2.0 header and
 one doc-comment sanitization, both noted below and in `NOTICE`) from the sibling
@@ -19,7 +19,7 @@ CredentialTest}/*.psm1`) and the compose env vars that point at them
 | `module.transport.nsxapi.ps1` | `Get-NsxSessionToken` | `WaypointScan.Invoke-WaypointNsxScan`, `WaypointCredentialTest.Invoke-WaypointNsxCredentialTest` |
 | `module.common.ps1` | `Invoke-ExternalCommand`, `New-InspecSecretConfigFile`, `Test-TargetReachable` | `WaypointScan.Invoke-WaypointScan` / `-WaypointAttest` / `-WaypointConvert` / `-WaypointSrgScan`, `WaypointCredentialTest.Invoke-WaypointSshCredentialTest` |
 
-Not imported (out of scope for this issue): `module.remediation.ps1`,
+Not imported because the current runner call graph does not require them: `module.remediation.ps1`,
 `module.orchestrator.ps1`, `module.parallelism.ps1`, `module.catalog.ps1`,
 `module.config.ps1`, `module.logging.ps1`, `module.menu.ps1`, `module.reporting.ps1`,
 `module.watcher.ps1`, `module.sshaccess*.ps1`, `module.transport.ssh.ps1`,
@@ -27,7 +27,7 @@ Not imported (out of scope for this issue): `module.remediation.ps1`,
 `shell_init.ps1`, `stig-runner.ps1`. The Waypoint shims provide their own generic
 `Get-LogSplat`/`Write-Log` stand-ins rather than importing `module.logging.ps1`'s
 parallel-engine logging stack (see the shim modules' own doc comments) -- that
-pattern is preserved here; no vendor logging module is imported.
+pattern is preserved here; no sibling-repository logging module is imported.
 
 ## Provenance and sanitization
 
@@ -43,11 +43,9 @@ were replaced with fictional `example.internal` / RFC 5737 (`192.0.2.0/24`) valu
 per this repo's mandatory sanitization policy (`CLAUDE.md`). No other change was made
 to file content beyond the added license header.
 
-## Not yet wired into runtime
+## Runtime wiring
 
-`deploy/docker-compose.yml` still mounts the shim modules from the backend image and
-these vendor scripts from a host bind mount of the operator's own `vmware-stig-docker`
-checkout (issue #395/#427/`WAYPOINT_VMWARE_STIG_DOCKER_*`). Switching that runtime
-path to consume this build context's copies instead is later work (#440/#442) --
-importing the sources here only establishes the compliance-runner build context and
-proves it builds; it does not change what the running stack does today.
+The compliance-runner image copies these project-owned scripts into `/powershell`.
+`deploy/docker-compose.yml` points the `WAYPOINT_VMWARE_STIG_DOCKER_*_PATH`
+variables at those image paths, replacing the former host bind mount completed by
+#440/#442.
