@@ -84,7 +84,8 @@ gets from a standard token.
 Unix-epoch-seconds instant the End-User actually authenticated at the IdP — distinct
 from `iat` (when *this token* was issued/refreshed) and `exp`. A relying party that
 requests `max_age` in its authorization request is guaranteed `auth_time` back in the
-ID token (OIDC Core §2, §3.1.2.1); this backend does not mint or see ID tokens itself
+ID token (OIDC Core section 2 and the authentication-request parameters in section
+3.1.2, item 1); this backend does not mint or see ID tokens itself
 (it only validates the access/bearer token `AddJwtBearer` receives), so the contract
 here depends on **Keycloak also copying `auth_time` onto the access token** it issues
 (a realm protocol mapper — the same mechanism `deploy/keycloak/realm/waypoint-realm.json`

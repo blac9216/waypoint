@@ -70,8 +70,11 @@ public sealed class RequireFreshAuthAttribute : AuthorizeAttribute
 				HttpStatusCode.Forbidden,
 				"step_up_required",
 				"This action requires you to re-authenticate first.",
-				"The caller's token auth_time is missing or older than the configured StepUpAuth:FreshnessWindow. " +
-				"Re-run the authorization-code flow with prompt=login (or max_age=0) and retry.");
+				// Keep the wire detail generic-actionable: it names only the OIDC remedy a
+				// client can act on, never the internal freshness-window config source. This
+				// mirrors the master_key_unavailable / auth_not_ready split (config-source
+				// names stay log-only; see ErrorHandlingMiddleware).
+				"Re-authenticate and retry: re-run the authorization-code flow with prompt=login (or max_age=0).");
 		}
 	}
 }
