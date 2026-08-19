@@ -1,7 +1,37 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiError, apiFetch, setTokenGetter, setUnauthorizedHandler } from "./api";
+import { decodeJwtPayload } from "./jwt";
+import {
+	completeLogin,
+	consumeReturnTo,
+	discoverOidc,
+	endSessionUrl,
+	startLogin,
+} from "./oidc";
 import { ROLE_ORDER, type Role } from "./roles";
 import { AuthContext, type AuthContextValue } from "./auth-context";
+
+/**
+ * `GET /auth/config` (issue #534, anonymous) — how the SPA learns, without
+ * hardcoding, (a) whether the dev-flag local-auth form should be offered at
+ * all (`LocalAuth:Enabled`) and (b) the browser-facing OIDC authority +
+ * public client id it needs for the real Keycloak redirect. See
+ * `Waypoint.Api.Contracts.AuthConfigResponse` / `OidcAuthOptions` for the
+ * server side of this contract.
+ */
+interface AuthConfigWire {
+	local_auth_enabled: unknown;
+	oidc_authority: unknown;
+	oidc_client_id: unknown;
+}
+
+/** The SPA's own JWT-derived session view — deliberately narrower than a full OIDC client's token set: only what `AuthContext` needs to render (role, username, expiry). */
+interface OidcSessionClaims {
+	role: unknown;
+	preferred_username: unknown;
+	sub: unknown;
+	exp: unknown;
+}
 
 /**
  * Local-auth login/session client — the confirmed contract (issue #64,
@@ -47,6 +77,47 @@ interface CurrentUserResponseWire {
 
 const STORAGE_KEY = "waypoint.session";
 
+interface AuthConfig {
+	localAuthEnabled: boolean;
+	oidcAuthority: string;
+	oidcClientId: string;
+}
+
+/**
+ * Fetched once per page load and cached module-level (not component
+ * state): `GET /auth/config` never changes mid-session — it's server
+ * deployment configuration, not per-user data — and every caller in this
+ * file (the local-auth-availability probe, `startOidcLogin`,
+ * `stepUpOidcLogin`, `logout`'s end-session redirect, the OIDC callback
+ * handler) needs the same answer. A module-level promise (not just a
+ * cached value) also collapses concurrent callers into one in-flight
+ * fetch instead of firing one each.
+ */
+let authConfigPromise: Promise<AuthConfig> | null = null;
+
+function fetchAuthConfig(): Promise<AuthConfig> {
+	authConfigPromise ??= apiFetch<AuthConfigWire>("/auth/config", { unauthenticated: true })
+		.then((wire) => ({
+			localAuthEnabled: wire.local_auth_enabled === true,
+			oidcAuthority: toWireText(wire.oidc_authority, "oidc_authority", "GET /auth/config"),
+			oidcClientId: toWireText(wire.oidc_client_id, "oidc_client_id", "GET /auth/config"),
+		}))
+		.catch((err: unknown) => {
+			// A failed fetch must not poison the module-level cache forever — the
+			// next caller (or the same page, once the backend is reachable
+			// again) gets to try again rather than replaying the same rejection
+			// indefinitely.
+			authConfigPromise = null;
+			throw err;
+		});
+	return authConfigPromise;
+}
+
+/** Test-only escape hatch: `authConfigPromise` is deliberately module-level (see above), so a test suite that mocks `GET /auth/config` differently per test must clear it between tests or every test after the first reuses the first test's cached answer. Not exported from any public entry point — import directly from this module in tests. */
+export function __resetAuthConfigCacheForTests(): void {
+	authConfigPromise = null;
+}
+
 /** Everything needed to restore a session without another round trip: the
  * bearer token, the identity fetched from `/auth/me` at login time, and the
  * server-issued expiry so a stale/expired stored session is rejected on
@@ -56,6 +127,8 @@ interface StoredSession {
 	username: string;
 	role: Role;
 	expiresAt: string;
+	/** `"local"` (dev-flag `POST /auth/login`) or `"oidc"` (Keycloak) — logout behaves differently per kind (see `logout()`): an OIDC session ends with an end-session redirect, a local session just clears storage. Defaults to `"local"` on restore of a session persisted before this field existed (issue #534) so an in-flight dev session isn't dropped by the upgrade. */
+	kind?: "local" | "oidc";
 }
 
 function isRole(value: unknown): value is Role {
@@ -207,7 +280,17 @@ function readStoredSession(): StoredSession | null {
 		if (Date.parse(parsed.expiresAt) <= Date.now()) {
 			return null;
 		}
-		return { token: parsed.token, username: parsed.username, role: parsed.role, expiresAt: parsed.expiresAt };
+		return {
+			token: parsed.token,
+			username: parsed.username,
+			role: parsed.role,
+			expiresAt: parsed.expiresAt,
+			// Pre-#534 stored sessions have no `kind` at all — treat them as
+			// "local" (the only kind that existed before), not as a parse
+			// failure that would sign the user out on the very upgrade that
+			// added this field.
+			kind: parsed.kind === "oidc" ? "oidc" : "local",
+		};
 	} catch {
 		return null;
 	}
@@ -253,6 +336,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	}, [dropSession]);
 
 	useEffect(() => {
+		// The OIDC callback landing (`/oidc/callback`, see oidc.ts's
+		// `redirectUri()`) is handled entirely here, before any route/role
+		// gating runs — App.tsx never learns this path exists. A stored
+		// session (if any) is irrelevant on this exact load: the browser just
+		// came back from Keycloak specifically to mint a new one.
+		if (window.location.pathname === "/oidc/callback") {
+			completeOidcCallback();
+			return;
+		}
 		const restored = readStoredSession();
 		if (!restored) {
 			// A stored session that failed to parse/validate (including one that
@@ -262,7 +354,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 		setSession(restored);
 		setStatus(restored ? "signed-in" : "signed-out");
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
+
+	/**
+	 * Exchanges the authorization code on the current URL for tokens
+	 * (`oidc.ts`'s `completeLogin`), builds a `StoredSession` from the access
+	 * token's own claims (no `/auth/me` round trip needed — the token already
+	 * carries `role`/`preferred_username`/`exp`, mapped by the realm's
+	 * protocol mappers, `deploy/keycloak/realm/waypoint-realm.json`), and
+	 * restores the browser to the path `startLogin`/`stepUpOidcLogin` was
+	 * called from (`consumeReturnTo`) via `history.replaceState` — a plain
+	 * navigation, not `router.navigate`, because this runs before
+	 * `RouterProvider` exists in the tree (`AuthProvider` wraps it, see
+	 * `App.tsx`) and because the code/state query params must not survive
+	 * into browser history (replayable, and ugly in the address bar).
+	 */
+	async function completeOidcCallback(): Promise<void> {
+		setStatus("signing-in");
+		setError(null);
+		try {
+			const config = await fetchAuthConfig();
+			const discovery = await discoverOidc(config.oidcAuthority);
+			const tokens = await completeLogin(discovery, config.oidcClientId, window.location.href);
+			const claims = decodeJwtPayload(tokens.accessToken) as unknown as OidcSessionClaims | null;
+			if (!claims) {
+				throw new Error("Could not read claims from the issued access token.");
+			}
+			const role = toRole(claims.role, "Keycloak access token");
+			const username = toWireText(claims.preferred_username ?? claims.sub, "preferred_username/sub", "Keycloak access token");
+			const next: StoredSession = { token: tokens.accessToken, username, role, expiresAt: tokens.expiresAt, kind: "oidc" };
+			setSession(next);
+			setStatus("signed-in");
+			persistSession(next);
+		} catch (err) {
+			setStatus("signed-out");
+			setError(err instanceof Error ? err.message : "OIDC sign-in failed.");
+		} finally {
+			const returnTo = consumeReturnTo();
+			window.history.replaceState(null, "", returnTo);
+		}
+	}
 
 	/**
 	 * Client-side expiry enforcement (issue #97). Without this, an expired
@@ -383,6 +515,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 				username: meUsername,
 				role: loginRole,
 				expiresAt,
+				kind: "local",
 			};
 			setSession(next);
 			setStatus("signed-in");
@@ -398,9 +531,58 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		}
 	}, []);
 
+	/**
+	 * OIDC sessions end with Keycloak's own RP-Initiated Logout redirect
+	 * (kills the browser's Keycloak SSO cookie too — without it, the very
+	 * next `startOidcLogin` would silently re-authenticate the same user via
+	 * the still-live Keycloak session, which is not what a user who clicked
+	 * "sign out" asked for). Local-auth sessions have no IdP session to end,
+	 * so they fall back to the plain `dropSession()` every prior version of
+	 * this app used. Either way `dropSession()` runs first so the app's own
+	 * state is clean even if the discovery fetch below fails (offline
+	 * Keycloak should never trap a user mid-logout).
+	 */
 	const logout = useCallback(() => {
+		const kind = sessionRef.current?.kind;
 		dropSession();
+		if (kind !== "oidc") {
+			return;
+		}
+		fetchAuthConfig()
+			.then((config) => discoverOidc(config.oidcAuthority))
+			.then((discovery) => {
+				const url = endSessionUrl(discovery);
+				if (url) {
+					window.location.assign(url);
+				}
+			})
+			.catch(() => {
+				// Best-effort: the local session is already dropped either way
+				// (see above) — a Keycloak-side session surviving is a lesser
+				// failure than trapping the user on a logout that can't complete.
+			});
 	}, [dropSession]);
+
+	const [localAuthAvailable, setLocalAuthAvailable] = useState<boolean | null>(null);
+
+	useEffect(() => {
+		fetchAuthConfig()
+			.then((config) => setLocalAuthAvailable(config.localAuthEnabled))
+			.catch(() => setLocalAuthAvailable(false));
+	}, []);
+
+	const startOidcLogin = useCallback(async () => {
+		const config = await fetchAuthConfig();
+		const discovery = await discoverOidc(config.oidcAuthority);
+		await startLogin(discovery, config.oidcClientId);
+	}, []);
+
+	/** Step-up re-auth (issue #521/#534): same redirect mechanism as `startOidcLogin`, `prompt=login` so Keycloak re-issues a fresh `auth_time` even with an active SSO session (docs/security.md "Step-up re-authentication"). */
+	const stepUpOidcLogin = useCallback(async (returnTo?: string) => {
+		const config = await fetchAuthConfig();
+		const discovery = await discoverOidc(config.oidcAuthority);
+		await startLogin(discovery, config.oidcClientId, { prompt: "login", returnTo });
+	}, []);
 
 	const value = useMemo<AuthContextValue>(
 		() => ({
@@ -409,9 +591,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			status,
 			error,
 			login,
+			localAuthAvailable,
+			startOidcLogin,
+			stepUpOidcLogin,
 			logout,
 		}),
-		[session, status, error, login, logout],
+		[session, status, error, login, localAuthAvailable, startOidcLogin, stepUpOidcLogin, logout],
 	);
 
 	return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

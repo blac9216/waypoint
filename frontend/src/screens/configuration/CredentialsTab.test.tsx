@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthProvider } from "../../lib/auth";
+import { AuthProvider, __resetAuthConfigCacheForTests } from "../../lib/auth";
 import { CredentialsTab } from "./CredentialsTab";
 import type { Credential } from "./credentials";
 
@@ -132,6 +132,9 @@ describe("CredentialsTab (issue #247)", () => {
 			const method = init?.method ?? "GET";
 			fetchCalls.push({ url, init });
 
+			if (url === "/api/v1/auth/config") {
+				return jsonResponse({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" });
+			}
 			if (url === "/api/v1/credentials" && method === "GET") {
 				return jsonResponse(credentials);
 			}
@@ -208,6 +211,7 @@ describe("CredentialsTab (issue #247)", () => {
 
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
+		__resetAuthConfigCacheForTests();
 	});
 
 	afterEach(() => {
@@ -354,6 +358,96 @@ describe("CredentialsTab (issue #247)", () => {
 		fireEvent.click(within(row).getByText("Edit"));
 		const reopened = screen.getByPlaceholderText("leave blank to keep current secret") as HTMLInputElement;
 		expect(reopened.value).toBe("");
+	});
+
+	/**
+	 * Issue #521/#534: a secret-overwriting PUT can 403 `step_up_required`
+	 * (stale/missing `auth_time`) — the frontend half is `useCredentialForms`
+	 * redirecting through the OIDC authorization endpoint with `prompt=login`
+	 * rather than just showing the error like any other `ApiError`.
+	 */
+	it("a step_up_required PUT redirects for fresh auth instead of showing a generic error", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		// `stepUpOidcLogin` needs GET /auth/config (already mocked) and OIDC
+		// discovery — same-origin against the mocked oidc_authority.
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "/auth/realms/waypoint/.well-known/openid-configuration") {
+				return jsonResponse({
+					authorization_endpoint: "/auth/realms/waypoint/protocol/openid-connect/auth",
+					token_endpoint: "/auth/realms/waypoint/protocol/openid-connect/token",
+				});
+			}
+			if (url === "/api/v1/credentials/cred-1" && init?.method === "PUT") {
+				return jsonResponse(
+					{ error: { code: "step_up_required", message: "This action requires you to re-authenticate first." } },
+					403,
+				);
+			}
+			return (originalFetch as unknown as typeof globalThis.fetch)(input, init);
+		}) as unknown as typeof fetch;
+
+		let assignedUrl: string | undefined;
+		const originalAssign = window.location.assign;
+		Object.defineProperty(window, "location", {
+			configurable: true,
+			value: {
+				origin: window.location.origin,
+				pathname: window.location.pathname,
+				search: window.location.search,
+				assign: (url: string) => {
+					assignedUrl = url;
+				},
+			},
+		});
+
+		try {
+			const row = screen.getByText("Alpha vCenter service account").closest("tr")!;
+			fireEvent.click(within(row).getByText("Edit"));
+			fireEvent.change(screen.getByPlaceholderText("leave blank to keep current secret"), {
+				target: { value: "rotated-secret" },
+			});
+			fireEvent.click(screen.getByText("Save"));
+
+			// Redirects (via startLogin's window.location.assign) rather than
+			// rendering the 403's message as a generic form error.
+			await waitFor(() => expect(assignedUrl).toBeTruthy());
+			expect(new URL(assignedUrl!, window.location.origin).searchParams.get("prompt")).toBe("login");
+			expect(screen.queryByText("This action requires you to re-authenticate first.")).not.toBeInTheDocument();
+
+			// The in-flight edit (id + field values) is stashed so the caller
+			// resuming after the redirect can replay it — see
+			// stepUpRetry.ts/useCredentialForms.ts's mount-effect resume.
+			const stashed = JSON.parse(window.sessionStorage.getItem("waypoint.stepup.retry") as string);
+			expect(stashed).toEqual({ kind: "credential-edit", payload: { id: "cred-1", form: expect.objectContaining({ secret: "rotated-secret" }) } });
+		} finally {
+			Object.defineProperty(window, "location", { configurable: true, value: { ...window.location, assign: originalAssign } });
+		}
+	});
+
+	it("resumes a stashed step-up-retry edit on mount, re-opening the edit form with the original field values", async () => {
+		installFetchMock("Admin");
+		window.sessionStorage.setItem(
+			"waypoint.stepup.retry",
+			JSON.stringify({
+				kind: "credential-edit",
+				payload: {
+					id: "cred-1",
+					form: { name: "Alpha vCenter service account", credential_type: "vcenter", username: "svc-stig@example.internal", sudo_enabled: false, secret: "rotated-secret" },
+				},
+			}),
+		);
+		await mount();
+
+		// The edit form for cred-1 is already open, pre-filled — no click on
+		// "Edit" needed, matching what a user resuming mid-edit expects.
+		const secretInput = await screen.findByPlaceholderText("leave blank to keep current secret");
+		expect((secretInput as HTMLInputElement).value).toBe("rotated-secret");
+		// Read-once: the stash must not resurrect on a second mount.
+		expect(window.sessionStorage.getItem("waypoint.stepup.retry")).toBeNull();
 	});
 
 	it("no secret value is ever rendered as visible text anywhere in the document after submit", async () => {

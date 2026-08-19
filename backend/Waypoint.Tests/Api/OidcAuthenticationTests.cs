@@ -170,4 +170,33 @@ public sealed class OidcAuthenticationTests : IClassFixture<OidcApiFactory>
 
 		Assert.Equal(HttpStatusCode.OK, meResponse.StatusCode);
 	}
+
+	/// <summary>
+	/// Issue #534: <c>GET /auth/config</c> is the SPA's anonymous feature-detect for
+	/// (a) whether the dev-flag local-auth form should render at all and (b) the
+	/// browser-facing OIDC authority/client id it needs for the authorization-code
+	/// redirect -- reachable with no <c>Authorization</c> header at all, since there is
+	/// no session yet when a client calls this.
+	/// </summary>
+	[Fact]
+	public async Task Config_IsAnonymousAndReportsLocalAuthAndOidcSettings()
+	{
+		HttpClient client = _factory.CreateClient();
+
+		HttpResponseMessage response = await client.GetAsync("/api/v1/auth/config");
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		AuthConfigResponse? body = await response.Content.ReadFromJsonAsync<AuthConfigResponse>(WaypointJsonOptions.Default);
+		Assert.NotNull(body);
+		// OidcApiFactory/WaypointApiFactory leave LocalAuth:Enabled at its
+		// inherited default (true) so both auth schemes stay exercised by this
+		// suite -- see this class's LocalSessionToken_StillWorksAlongsideOidc test.
+		Assert.True(body!.LocalAuthEnabled);
+		// Neither PublicAuthority nor PublicClientId is overridden by the test
+		// host, so both should be OidcAuthOptions' compiled-in defaults --
+		// pinning them here catches an accidental default change same as any
+		// other contract field.
+		Assert.Equal("/auth/realms/waypoint", body.OidcAuthority);
+		Assert.Equal("waypoint-frontend", body.OidcClientId);
+	}
 }

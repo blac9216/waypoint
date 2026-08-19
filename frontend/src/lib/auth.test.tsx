@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthProvider } from "./auth";
+import { AuthProvider, __resetAuthConfigCacheForTests } from "./auth";
 import { useAuth } from "./auth-context";
 
 const STORAGE_KEY = "waypoint.session";
@@ -21,6 +21,16 @@ function Probe() {
  */
 function mockAuthFetch(loginBody: unknown, meBody: unknown): void {
 	globalThis.fetch = vi.fn(async (url: string) => {
+		if (url === "/api/v1/auth/config") {
+			// AuthProvider always probes this on mount (issue #534) — every
+			// caller of this helper exercises the local-auth login() path, so
+			// local_auth_enabled: true keeps that feature-detect from becoming
+			// a second thing each test has to know about.
+			return new Response(
+				JSON.stringify({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" }),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		}
 		if (url === "/api/v1/auth/login") {
 			return new Response(JSON.stringify(loginBody), {
 				status: 200,
@@ -58,6 +68,7 @@ describe("AuthProvider session restore (issue #64 — login/refresh contract)", 
 	let originalFetch: typeof fetch;
 
 	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
 		originalFetch = globalThis.fetch;
 		window.sessionStorage.clear();
 	});
@@ -153,6 +164,12 @@ describe("AuthProvider session restore (issue #64 — login/refresh contract)", 
 	it("login() persists a session that a fresh mount (simulated refresh) reads back correctly", async () => {
 		const futureExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 		globalThis.fetch = vi.fn(async (url: string) => {
+			if (url === "/api/v1/auth/config") {
+				return new Response(
+					JSON.stringify({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" }),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
 			if (url === "/api/v1/auth/login") {
 				return new Response(
 					JSON.stringify({ token: "tok-roundtrip", role: "Operator", expires_at: futureExpiry }),
@@ -225,6 +242,7 @@ describe("AuthProvider wire-path role validation (issue #64 — fail closed on a
 	const futureExpiry = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
 	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
 		originalFetch = globalThis.fetch;
 		window.sessionStorage.clear();
 	});
@@ -349,6 +367,7 @@ describe("AuthProvider wire-path field validation (issue #64 — token, expires_
 	const goodMe = { username: "admin", role: "Admin" };
 
 	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
 		originalFetch = globalThis.fetch;
 		window.sessionStorage.clear();
 	});
@@ -459,6 +478,12 @@ describe("AuthProvider wire-path field validation (issue #64 — token, expires_
 		const calls: string[] = [];
 		globalThis.fetch = vi.fn(async (url: string) => {
 			calls.push(url);
+			if (url === "/api/v1/auth/config") {
+				return new Response(
+					JSON.stringify({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" }),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
 			if (url === "/api/v1/auth/login") {
 				return new Response(JSON.stringify({ token: "", role: "Admin", expires_at: futureExpiry() }), {
 					status: 200,
@@ -478,7 +503,7 @@ describe("AuthProvider wire-path field validation (issue #64 — token, expires_
 		screen.getByText("go").click();
 
 		await waitFor(() => expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull());
-		expect(calls).toEqual(["/api/v1/auth/login"]);
+		expect(calls).toEqual(["/api/v1/auth/config", "/api/v1/auth/login"]);
 	});
 });
 
@@ -494,6 +519,7 @@ describe("AuthProvider wire-path field validation (issue #64 — token, expires_
  */
 describe("AuthProvider restored-session field validation (issue #98)", () => {
 	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
 		window.sessionStorage.clear();
 	});
 
@@ -575,6 +601,7 @@ describe("AuthProvider restored-session field validation (issue #98)", () => {
  */
 describe("AuthProvider expiry enforcement while mounted (issue #97)", () => {
 	beforeEach(() => {
+		__resetAuthConfigCacheForTests();
 		window.sessionStorage.clear();
 		vi.useFakeTimers();
 	});

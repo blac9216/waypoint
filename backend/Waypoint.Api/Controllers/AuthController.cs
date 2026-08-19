@@ -42,11 +42,30 @@ public sealed class AuthController : ControllerBase
 {
 	private readonly ILocalAuthenticationService _authenticationService;
 	private readonly bool _localAuthEnabled;
+	private readonly OidcAuthOptions _oidcOptions;
 
-	public AuthController(ILocalAuthenticationService authenticationService, IOptions<LocalAuthOptions> localAuthOptions)
+	public AuthController(
+		ILocalAuthenticationService authenticationService,
+		IOptions<LocalAuthOptions> localAuthOptions,
+		IOptions<OidcAuthOptions> oidcOptions)
 	{
 		_authenticationService = authenticationService;
 		_localAuthEnabled = localAuthOptions.Value.Enabled;
+		_oidcOptions = oidcOptions.Value;
+	}
+
+	/// <summary>
+	/// Issue #534: anonymous so the SPA can feature-detect the dev-flag local-auth form
+	/// and learn the browser-facing OIDC authority/client id before any sign-in
+	/// attempt, without hardcoding either. Deliberately not gated behind a role —
+	/// there is no session yet when this is called.
+	/// </summary>
+	[HttpGet("config")]
+	[AllowAnonymous]
+	[ProducesResponseType(typeof(AuthConfigResponse), StatusCodes.Status200OK)]
+	public ActionResult<AuthConfigResponse> Config()
+	{
+		return Ok(new AuthConfigResponse(_localAuthEnabled, _oidcOptions.PublicAuthority, _oidcOptions.PublicClientId));
 	}
 
 	[HttpPost("login")]

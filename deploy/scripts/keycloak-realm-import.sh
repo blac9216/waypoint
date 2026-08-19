@@ -123,8 +123,15 @@ fi
 NETWORK="${PROJECT}_internal"
 
 echo "Deleting any existing 'waypoint' realm so the import below recreates it..."
+# Issue #534 (live-verified): every Keycloak-served path now lives under
+# /auth (KC_HTTP_RELATIVE_PATH=/auth, docker-compose.yml's keycloak service --
+# needed so the browser-facing SPA login flow, which goes through nginx's
+# /auth/ proxy path, gets self-referential URLs Keycloak itself renders
+# correctly). This script talks to Keycloak directly, container-to-container,
+# bypassing nginx entirely -- but the /auth prefix is a property of Keycloak's
+# OWN URL space now, not just nginx's proxy path, so it applies here too.
 ADMIN_TOKEN="$(docker run --rm --network "$NETWORK" curlimages/curl:latest -s -X POST \
-	http://keycloak:8080/realms/master/protocol/openid-connect/token \
+	http://keycloak:8080/auth/realms/master/protocol/openid-connect/token \
 	-d "grant_type=password&client_id=admin-cli&username=${KEYCLOAK_ADMIN}&password=${KEYCLOAK_ADMIN_PASSWORD}" \
 	| sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
 
@@ -134,7 +141,7 @@ if [ -z "$ADMIN_TOKEN" ]; then
 fi
 
 docker run --rm --network "$NETWORK" curlimages/curl:latest -s -o /dev/null -X DELETE \
-	http://keycloak:8080/admin/realms/waypoint \
+	http://keycloak:8080/auth/admin/realms/waypoint \
 	-H "Authorization: Bearer ${ADMIN_TOKEN}"
 
 # Stop the compose-managed service before the throwaway boot below (verified

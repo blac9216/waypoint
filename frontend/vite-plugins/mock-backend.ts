@@ -112,6 +112,20 @@ export function mockBackendPlugin(): Plugin {
 			const handler: Connect.NextHandleFunction = async (req, res, next) => {
 				const url = req.url ?? "";
 
+				if (req.method === "GET" && url === "/api/v1/auth/config") {
+					// Matches `AuthConfigResponse` (AuthContracts.cs, issue #534).
+					// `local_auth_enabled: true` unconditionally: `npm run dev` has no
+					// real Keycloak behind it (this whole file is the stand-in), so
+					// the OIDC redirect button would only ever fail here — the local
+					// form is the dev loop's real sign-in path, same as before #534.
+					// oidc_authority/oidc_client_id are still returned (non-empty, so
+					// AuthProvider's narrowing doesn't reject the response) purely so
+					// `lib/oidc.ts` helpers exercised against this mock don't throw on
+					// missing fields; nothing in the dev loop actually redirects there.
+					json(res, 200, { local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" });
+					return;
+				}
+
 				if (req.method === "POST" && url === "/api/v1/auth/login") {
 					const body = await readJsonBody(req);
 					if (body.username === DEV_USERNAME && body.password === DEV_PASSWORD) {

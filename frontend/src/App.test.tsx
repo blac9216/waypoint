@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { __resetAuthConfigCacheForTests } from "./lib/auth";
 import { SYSTEM_FETCH_TIMEOUT_MS } from "./lib/system";
 import { CatalogScreen, ConfigurationScreen } from "./screens/screens";
 
@@ -36,6 +37,9 @@ function jsonResponse(body: unknown, status = 200) {
  * response; identity comes from a separate /auth/me call). */
 function installChromeFetchMock(role: "Viewer" | "Admin" = "Admin") {
 	globalThis.fetch = vi.fn(async (url: string) => {
+		if (url === "/api/v1/auth/config") {
+			return jsonResponse({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" });
+		}
 		if (url === "/api/v1/auth/login") {
 			return jsonResponse({ token: "tok-1", role, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
 		}
@@ -79,6 +83,9 @@ function installDeferredSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = 
 	});
 
 	globalThis.fetch = vi.fn(async (url: string) => {
+		if (url === "/api/v1/auth/config") {
+			return jsonResponse({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" });
+		}
 		if (url === "/api/v1/auth/login") {
 			return jsonResponse({ token: "tok-1", role, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
 		}
@@ -117,6 +124,9 @@ function installDeferredSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = 
  */
 function installHangingSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = "Operator") {
 	globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+		if (url === "/api/v1/auth/config") {
+			return jsonResponse({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" });
+		}
 		if (url === "/api/v1/auth/login") {
 			return jsonResponse({ token: "tok-1", role, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
 		}
@@ -153,6 +163,9 @@ function installHangingSystemFetchMock(role: "Viewer" | "Admin" | "Operator" = "
  */
 function installStallingBodyFetchMock(role: "Viewer" | "Admin" | "Operator" = "Operator") {
 	globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+		if (url === "/api/v1/auth/config") {
+			return jsonResponse({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" });
+		}
 		if (url === "/api/v1/auth/login") {
 			return jsonResponse({ token: "tok-1", role, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
 		}
@@ -180,10 +193,39 @@ function installStallingBodyFetchMock(role: "Viewer" | "Admin" | "Operator" = "O
 	}) as unknown as typeof fetch;
 }
 
+/** Drains the microtask queue without touching real/fake wall-clock time — `setTimeout(fn, 0)` (what fake timers intercept) is a macrotask, but every hop in a `fetch` mock's `async` body and a chained `.then()` is a plain microtask, so enough back-to-back `await Promise.resolve()` rounds flushes them regardless of which timer mode is active. */
+async function flushMicrotasks(rounds = 10): Promise<void> {
+	await act(async () => {
+		for (let i = 0; i < rounds; i += 1) {
+			await Promise.resolve();
+		}
+	});
+}
+
+/**
+ * The local-auth form only renders once `GET /auth/config` resolves (issue
+ * #534's feature-detect), and — once the local-auth POST/`/auth/me` round
+ * trip completes — the chrome takes another render pass to replace the
+ * login screen. Deliberately uses `flushMicrotasks()` rather than
+ * `screen.findByLabelText`/`waitFor` (which polls via `setTimeout`):
+ * several call sites run this under `vi.useFakeTimers()` to assert on both
+ * sides of a real wall-clock deadline (`SYSTEM_FETCH_TIMEOUT_MS`), and a
+ * `setTimeout`-based wait never resolves there unless something else also
+ * drives the fake clock concurrently — none of them do. Using the same
+ * microtask-only approach unconditionally (not just under fake timers)
+ * keeps this helper one code path instead of two, and avoids `waitFor`'s
+ * own timer use leaking a pending callback across into the next
+ * (real-timer) test.
+ */
 async function signIn() {
+	await flushMicrotasks();
 	fireEvent.change(screen.getByLabelText("Username"), { target: { value: "admin" } });
 	fireEvent.change(screen.getByLabelText("Password"), { target: { value: "waypoint-dev" } });
-	fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
+	fireEvent.click(screen.getByRole("button", { name: /sign in \(local\)/i }));
+	// The click kicks off POST /auth/login -> GET /auth/me -> setSession -> a
+	// re-render that swaps LoginScreen for the chrome — all microtask-driven,
+	// same reasoning as above.
+	await flushMicrotasks();
 }
 
 describe("App", () => {
@@ -196,6 +238,9 @@ describe("App", () => {
 		window.history.pushState(null, "", "/");
 		vi.mocked(ConfigurationScreen).mockClear();
 		vi.mocked(CatalogScreen).mockClear();
+		// `auth.tsx` caches GET /auth/config module-level — reset between tests
+		// so each test's own mocked answer is the one actually used.
+		__resetAuthConfigCacheForTests();
 	});
 
 	afterEach(() => {
@@ -206,7 +251,9 @@ describe("App", () => {
 		installChromeFetchMock("Admin");
 		render(<App />);
 
-		expect(screen.getByLabelText("Username")).toBeInTheDocument();
+		// The local-auth form only renders once `GET /auth/config` resolves
+		// (issue #534's feature-detect) — the Keycloak button renders first.
+		expect(await screen.findByLabelText("Username")).toBeInTheDocument();
 
 		await signIn();
 
@@ -319,6 +366,9 @@ describe("App", () => {
 
 	it("hides the Download Catalog nav item entirely in air-gapped mode (mode-gating, not role-gating)", async () => {
 		globalThis.fetch = vi.fn(async (url: string) => {
+			if (url === "/api/v1/auth/config") {
+				return jsonResponse({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" });
+			}
 			if (url === "/api/v1/auth/login") {
 				return jsonResponse({
 					token: "tok-1",
@@ -424,9 +474,7 @@ describe("App", () => {
 				window.history.pushState(null, "", "/catalog");
 				installHangingSystemFetchMock("Operator");
 				render(<App />);
-				await act(async () => {
-					signIn();
-				});
+				await signIn();
 
 				// Just before the deadline: still the pathological state the
 				// review measured — nothing rendered at all, not even chrome.
@@ -463,9 +511,7 @@ describe("App", () => {
 			try {
 				installHangingSystemFetchMock("Operator");
 				render(<App />);
-				await act(async () => {
-					signIn();
-				});
+				await signIn();
 				const systemCall = vi.mocked(globalThis.fetch).mock.calls.find(([url]) => url === "/api/v1/system");
 				const signal = (systemCall?.[1] as RequestInit | undefined)?.signal;
 				expect(signal).toBeDefined();
@@ -497,9 +543,7 @@ describe("App", () => {
 				window.history.pushState(null, "", "/catalog");
 				installStallingBodyFetchMock("Operator");
 				render(<App />);
-				await act(async () => {
-					signIn();
-				});
+				await signIn();
 
 				// Headers are in and a first body chunk landed, so the round-1
 				// timer would already have been cleared here. Still blank.
