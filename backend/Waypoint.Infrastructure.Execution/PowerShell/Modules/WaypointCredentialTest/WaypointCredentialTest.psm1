@@ -13,21 +13,20 @@
 # limitations under the License.
 
 # Waypoint-owned shim (issue #245, epic #13), following WaypointDiscovery/WaypointScan's
-# pattern (issues #21/#274/#308): this module is NOT vendor code -- it is the thin,
-# Waypoint-authored seam that dot-sources UNMODIFIED vmware-stig-docker transport files
-# (CLAUDE.md: "the sibling repos' vendor scripts run as unmodified vendor code --
-# Waypoint orchestrates them, it does not fork them") to open a real, read-only session
+# pattern (issues #21/#274/#308): this is the thin, Waypoint-authored seam that
+# dot-sources the project-owned sibling repository's unmodified vmware-stig-docker
+# transport files to open a real, read-only session
 # per credential type and close it again -- no InSpec run, no scan, no state-changing
 # call against the target.
 #
 #   vcenter -> Connect-StigVIServer / Disconnect-VIServer (module.transport.vmware.ps1),
 #              the exact pair WaypointDiscovery already drives for discovery.
-#   nsx     -> Get-NsxSessionToken (module.transport.nsxapi.ps1), the exact vendor
+#   nsx     -> Get-NsxSessionToken (module.transport.nsxapi.ps1), the exact sibling-repo
 #              function WaypointScan's Invoke-WaypointNsxScan already dot-sources for
 #              the NSX scan path -- a session-token request IS the connectivity probe;
 #              NSX's REST session has no separate "disconnect" call to make.
 #   ssh     -> Test-TargetReachable (module.common.ps1): a TCP connect/close probe on
-#              port 22. The sibling repo has no vendor primitive that opens an
+#              port 22. The sibling repo has no project primitive that opens an
 #              authenticated SSH session on its own (SSH auth for SRG products is
 #              delegated entirely to InSpec's own `ssh` transport at scan time) -- this
 #              is deliberately honest about the boundary: a passing ssh test here proves
@@ -40,8 +39,8 @@
 # Get-NsxSessionToken both call into the sibling repo's module.logging.ps1, which pulls
 # in machinery (LogQueue thread, Write-LogDirect) this single-call test does not need,
 # and that repo carries no LICENSE (CLAUDE.md's Borrowing Policy bars unlicensed code)
-# -- so Waypoint provides tiny generic stand-ins rather than copying the vendor logging
-# stack, letting the vendor connect functions themselves run dot-sourced and unmodified.
+# -- so Waypoint provides tiny generic stand-ins rather than copying the sibling repo's
+# logging stack, letting its connect functions run dot-sourced and unmodified.
 if (-not (Get-Command -Name 'Get-LogSplat' -ErrorAction SilentlyContinue)) {
 	function Get-LogSplat {
 		param([Parameter(Position = 0)][string]$Source = 'CredentialTest')
@@ -149,7 +148,7 @@ function Invoke-WaypointNsxCredentialTest {
 function Invoke-WaypointSshCredentialTest {
 	<#
 	.SYNOPSIS
-	    TCP reachability probe on port 22 via the unmodified vendor Test-TargetReachable
+	    TCP reachability probe on port 22 via the sibling repo's unmodified Test-TargetReachable
 	    (module.common.ps1). Documented limitation: this proves the host is reachable,
 	    not that the credential authenticates -- the sibling repo has no standalone
 	    SSH-auth primitive of its own; SSH auth is delegated to InSpec's ssh transport

@@ -25,7 +25,7 @@ namespace Waypoint.Infrastructure.Downloads;
 /// behavior is untouched; this type only decides whether it runs at all.
 ///
 /// Deliberately checked here rather than inside <see cref="DownloadJobHandler"/>
-/// itself: M1's <c>Invoke-WaypointDownload</c> calls the vendor <c>Save-WebFile</c>
+/// itself: M1's <c>Invoke-WaypointDownload</c> calls the sibling repo's <c>Save-WebFile</c>
 /// directly and does not (yet) shell out to <c>vcf-download-tool</c> at all, so
 /// today's actual transfer path does not strictly require the tool -- but ADR-0015
 /// models the tool as required managed state for the download domain going forward,

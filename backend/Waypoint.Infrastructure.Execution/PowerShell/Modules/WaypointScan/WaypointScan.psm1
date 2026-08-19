@@ -13,22 +13,21 @@
 # limitations under the License.
 
 # Waypoint-owned shim (issue #274, second slice of the #23 split), following
-# WaypointDiscovery's pattern (issue #21): this module is NOT vendor code -- it is the
-# thin, Waypoint-authored seam that dot-sources the UNMODIFIED vmware-stig-docker
-# module.common.ps1 (CLAUDE.md: "the sibling repos' vendor scripts run as unmodified
-# vendor code -- Waypoint orchestrates them, it does not fork them") to reuse its
+# WaypointDiscovery's pattern (issue #21): this is the thin, Waypoint-authored seam
+# that dot-sources the project-owned sibling repository's unmodified
+# vmware-stig-docker module.common.ps1 to reuse its
 # Invoke-ExternalCommand process-capture helper, then drives `inspec exec` against a
 # single vSphere target the same way module.transport.vmware.ps1's
 # Build-VsphereTransportTargets does (VISERVER/VISERVER_USERNAME/VISERVER_PASSWORD env,
 # --reporter=json:<path>, --enhanced-outcomes, AllowedExitCodes 0/100/101).
 #
-# This is deliberately a single-target, vSphere-only invocation -- the vendor's
+# This is deliberately a single-target, vSphere-only invocation -- the sibling repo's
 # Get-ScanScriptBlock is coupled to its parallel engine's $Target object (built by
 # Build-VsphereTransportTargets from a whole-site connect) and to multi-transport
 # branching (ssh/vcsa-component/srg) this M1 slice does not need. Re-driving `inspec`
 # directly here, the same way WaypointDiscovery re-drives PowerCLI directly instead of
 # forcing Get-StigTargets' scan-target shape, keeps this module honest about exactly
-# what it needs from the vendor code: one process-capture helper.
+# what it needs from the sibling-repository code: one process-capture helper.
 
 $Script:VmwareStigDockerCommonModulePath = $env:WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH
 $Script:VmwareStigDockerNsxApiModulePath = $env:WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH
@@ -56,7 +55,7 @@ function Invoke-WaypointScan {
 	    Where InSpec writes its JSON (HDF) report.
 
 	.PARAMETER VmwareStigDockerCommonPath
-	    Path to the sibling repo's module.common.ps1 (unmodified vendor code),
+	    Path to the sibling repo's unmodified module.common.ps1,
 	    dot-sourced to bring Invoke-ExternalCommand into scope.
 
 	.OUTPUTS
@@ -100,7 +99,7 @@ function Invoke-WaypointScan {
 		throw "WaypointScan: module.common.ps1 not found at '$VmwareStigDockerCommonPath'."
 	}
 
-	# Dot-source the unmodified vendor script to bring Invoke-ExternalCommand into scope.
+	# Dot-source the unmodified sibling-repository script to bring Invoke-ExternalCommand into scope.
 	. $VmwareStigDockerCommonPath
 
 	$ReportDirectory = Split-Path -Path $ReportPath -Parent
@@ -243,11 +242,11 @@ function Invoke-WaypointAttest {
 # <input> -o <ckl>`) and "Step 4: Correct CKL benchmark metadata" -- re-driven
 # directly, same rationale as Invoke-WaypointScan/Invoke-WaypointAttest. Metadata
 # correction is Waypoint-owned (Set-WaypointCklBenchmarkMetadata below), not a
-# dot-source of the vendor's Set-CklBenchmarkMetadata: the vendor version's RuleMap
+# dot-source of the sibling repo's Set-CklBenchmarkMetadata: that version's RuleMap
 # correction needs a live STIG Manager connection (Resolve-BenchmarkMetadata), which
 # is #25's integration, not this slice's -- this stamps only the static STIG_INFO
 # identity fields an operator configures ahead of time (ScanOptions.BenchmarkMetadata),
-# and is non-fatal exactly like the vendor's own correction step (a correction failure
+# and is non-fatal exactly like the sibling repo's own correction step (a correction failure
 # still returns Success -- the raw, already-uploadable CKL was already written).
 # Returns [pscustomobject]: Success, CklPath, MetadataApplied, FailureReason.
 function Invoke-WaypointConvert {
@@ -400,19 +399,19 @@ function Set-WaypointCklBenchmarkMetadata {
 	$Xml.Save($CklPath)
 }
 
-# A minimal Waypoint-owned logging shim so the UNMODIFIED vendor Get-NsxSessionToken
-# (module.transport.nsxapi.ps1) runs as-is when dot-sourced below. That vendor function's
+# A minimal Waypoint-owned logging shim so the sibling repo's unmodified
+# Get-NsxSessionToken (module.transport.nsxapi.ps1) runs as-is when dot-sourced below. That function's
 # only dependencies beyond Invoke-WebRequest are Get-LogSplat (returns a splat hashtable)
 # and one Write-Log Debug line; the sibling repo defines both in module.logging.ps1, which
 # in turn pulls in that repo's whole parallel-engine logging stack (LogQueue thread,
 # Write-LogDirect, Format-LogLine) -- machinery this single-target invocation neither has
-# nor needs. Rather than copy the vendor's function body (its Invoke-WebRequest call,
+# nor needs. Rather than copy the sibling repo's function body (its Invoke-WebRequest call,
 # header loop, throw strings, and JSESSIONID regex are the sibling repo's expressive code,
 # and that repo carries no LICENSE -- CLAUDE.md's Borrowing Policy bars unlicensed code),
-# Waypoint provides these two tiny, generic helpers so the vendor function itself can be
-# dot-sourced UNMODIFIED and run as vendor code (the #298 shim pattern, exactly as
+# Waypoint provides these two tiny, generic helpers so the function itself can be
+# dot-sourced unmodified as project-owned sibling-repository code (the #298 shim pattern, exactly as
 # module.common.ps1 is already dot-sourced for Invoke-ExternalCommand). These shims are
-# only defined if the dot-sourced vendor code has not already brought its own into scope,
+# only defined if the dot-sourced sibling-repository code has not already brought its own into scope,
 # so if a future common.ps1 provides the real ones they win.
 if (-not (Get-Command -Name 'Get-LogSplat' -ErrorAction SilentlyContinue)) {
 	function Get-LogSplat {
@@ -423,8 +422,8 @@ if (-not (Get-Command -Name 'Get-LogSplat' -ErrorAction SilentlyContinue)) {
 	}
 }
 if (-not (Get-Command -Name 'Write-Log' -ErrorAction SilentlyContinue)) {
-	# No-op-to-the-runspace sink: routes the vendor's Debug line to Write-Verbose (never
-	# a stream Waypoint watches/persists, never the token). The vendor Get-NsxSessionToken
+	# No-op-to-the-runspace sink: routes the sibling function's Debug line to Write-Verbose (never
+	# a stream Waypoint watches/persists, never the token). Get-NsxSessionToken
 	# never logs the token or credential -- only "Obtained NSX session token for <manager>".
 	function Write-Log {
 		[CmdletBinding()]
@@ -442,10 +441,10 @@ if (-not (Get-Command -Name 'Write-Log' -ErrorAction SilentlyContinue)) {
 # NSX transport (issue #308, first sub-issue of the #24 split). NSX InSpec profiles run
 # with the `local` transport and make NSX Manager REST calls via the InSpec http()
 # resource, authenticated with an X-XSRF-TOKEN header and a JSESSIONID cookie. The session
-# token is obtained by the UNMODIFIED vendor Get-NsxSessionToken (module.transport.nsxapi.ps1),
+# token is obtained by the sibling repo's unmodified Get-NsxSessionToken (module.transport.nsxapi.ps1),
 # dot-sourced at runtime from WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH the same way
 # module.common.ps1 is dot-sourced for Invoke-ExternalCommand (the #298 shim pattern) --
-# nothing from that vendor file is copied into this repo; the two Get-LogSplat/Write-Log
+# no function body from that sibling-repository file is duplicated here; the two Get-LogSplat/Write-Log
 # helpers it needs are provided as generic Waypoint shims above.
 #
 # The session token and cookie are secret material for as long as they are valid (they
@@ -533,9 +532,9 @@ function Invoke-WaypointNsxScan {
 		throw "WaypointScan: module.transport.nsxapi.ps1 not found at '$VmwareStigDockerNsxApiPath'."
 	}
 
-	# Dot-source the unmodified vendor scripts: module.common.ps1 brings Invoke-ExternalCommand
+	# Dot-source the unmodified sibling-repository scripts: module.common.ps1 brings Invoke-ExternalCommand
 	# into scope (same helper the vSphere path reuses), and module.transport.nsxapi.ps1 brings
-	# the vendor Get-NsxSessionToken into scope UNMODIFIED (the #298 shim pattern -- see the
+	# the sibling repo's Get-NsxSessionToken into scope unmodified (the #298 shim pattern -- see the
 	# region comment above this function; the Get-LogSplat/Write-Log helpers that function
 	# needs are provided as Waypoint shims above).
 	. $VmwareStigDockerCommonPath
@@ -547,7 +546,7 @@ function Invoke-WaypointNsxScan {
 	}
 
 	try {
-		# The vendor Get-NsxSessionToken takes a [pscredential]; build one from the decrypted
+		# The sibling repo's Get-NsxSessionToken takes a [pscredential]; build one from the decrypted
 		# username/password halves the handler bound as parameters (the password is never
 		# interpolated into script text -- security.md controls 1/2 -- it goes straight into
 		# the SecureString the PSCredential holds).
@@ -626,7 +625,7 @@ function Invoke-WaypointNsxScan {
 	}
 }
 
-# Reduces an ErrorRecord from the vendor Get-NsxSessionToken to a short, safe-to-log
+# Reduces an ErrorRecord from the sibling repo's Get-NsxSessionToken to a short, safe-to-log
 # reason: Invoke-WebRequest's own exception message for a non-2xx response
 # (Microsoft.PowerShell.Commands.HttpResponseException) already includes the response
 # status line ("401 Unauthorized" etc, which is what AuthFailureClassifier needs to see)
@@ -650,12 +649,12 @@ function Get-NsxAuthFailureReason {
 # guidance they are NOT treated as STIGs: each scan produces HDF JSON only ... with NO
 # CKL and NO STIG Manager upload." This function re-drives `inspec exec -t
 # ssh://<user>@<host>` directly, the same single-target re-drive Invoke-WaypointScan
-# already does for vmware:// -- the vendor's Build-SshTransportTargets/
+# already does for vmware:// -- the sibling repo's Build-SshTransportTargets/
 # Get-ScanScriptBlock machinery is coupled to its whole-site parallel engine and
 # catalog, which this single-target invocation does not need (same rationale as
 # Invoke-WaypointScan's doc comment above). Only module.common.ps1 is dot-sourced --
 # for Invoke-ExternalCommand (same as the vSphere path) AND New-InspecSecretConfigFile,
-# which is how the vendor's own SRG branch (module.scan.ps1's Kind -eq 'srg' case) keeps
+# which is how the sibling repo's own SRG branch (module.scan.ps1's Kind -eq 'srg' case) keeps
 # the ssh password and optional sudo password off InSpec's argv (issue #142): both go
 # into a per-invocation --config JSON file, written 0600, removed in `finally`.
 #
@@ -678,7 +677,7 @@ function Invoke-WaypointSrgScan {
 	.PARAMETER Password
 	    ssh password, bound as a typed parameter -- never interpolated into script text
 	    (security.md controls 1/2) -- and reused as the sudo password when both Sudo and
-	    SudoRequiresPassword are set, matching the vendor's own SRG credential shape (one
+	    SudoRequiresPassword are set, matching the sibling repo's own SRG credential shape (one
 	    resolved credential covers both the ssh login and sudo elevation).
 
 	.PARAMETER ProfilePath
@@ -742,7 +741,7 @@ function Invoke-WaypointSrgScan {
 		throw "WaypointScan: module.common.ps1 not found at '$VmwareStigDockerCommonPath'."
 	}
 
-	# Dot-source the unmodified vendor script to bring Invoke-ExternalCommand and
+	# Dot-source the unmodified sibling-repository script to bring Invoke-ExternalCommand and
 	# New-InspecSecretConfigFile into scope.
 	. $VmwareStigDockerCommonPath
 
@@ -765,7 +764,7 @@ function Invoke-WaypointSrgScan {
 		if ($SudoRequiresPassword) { $SudoPassword = $Password }
 	}
 
-	# Same non-argv discipline as the vendor's own SRG branch (module.scan.ps1): the ssh
+	# Same non-argv discipline as the sibling repo's own SRG branch (module.scan.ps1): the ssh
 	# password (and sudo password, when applicable) go into a per-invocation --config
 	# JSON file -- created 0600 before the secret is written -- never into `inspec`'s
 	# argv or a log line.

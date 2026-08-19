@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Waypoint-owned shim (issue #194, epic #9 slice 2). This module is NOT vendor code --
-# it is the thin, Waypoint-authored seam that dot-sources the UNMODIFIED
-# vcf-docker-download scripts (CLAUDE.md: "the sibling repos' vendor scripts run as
-# unmodified vendor code -- Waypoint orchestrates them, it does not fork them") and
+# Waypoint-owned shim (issue #194, epic #9 slice 2). It is the thin, Waypoint-authored
+# seam that dot-sources the project-owned sibling repository's unmodified
+# vcf-docker-download scripts and
 # adapts their output to the shape Invoke-WaypointCatalogIndex.Command needs.
 #
 # Domain-model open question 4 (docs/domain-model.md) is answered by what this module
@@ -70,7 +69,7 @@ function Invoke-WaypointCatalogIndex {
 		throw "WaypointCatalogIndex: vcf-download-manager.common.ps1 not found at '$VcfDownloadManagerCommonPath'."
 	}
 
-	# Dot-source the unmodified vendor script to bring Get-FileManifest into scope.
+	# Dot-source the unmodified sibling-repository script to bring Get-FileManifest into scope.
 	. $VcfDownloadManagerCommonPath
 
 	Write-Information "Indexing depot share: $DepotPath"

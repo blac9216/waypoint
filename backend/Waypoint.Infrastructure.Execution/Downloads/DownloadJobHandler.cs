@@ -40,7 +40,7 @@ namespace Waypoint.Infrastructure.Downloads;
 /// <c>Save-WebFile</c> -- partial-file resume via a <c>.resume.tmp</c> merge and its
 /// own backoff loop); this handler's own <see cref="MaxHandlerRetries"/> only covers a
 /// transport-level invocation failure (the PS call itself throwing/returning
-/// unsuccessful), not byte-range retries, which the vendor function already owns.
+/// unsuccessful), not byte-range retries, which the sibling-repository function already owns.
 ///
 /// sha256 verification: after a successful invocation, this handler independently
 /// hashes the file on disk and compares to <c>depot_artifacts.sha256</c> — trusting

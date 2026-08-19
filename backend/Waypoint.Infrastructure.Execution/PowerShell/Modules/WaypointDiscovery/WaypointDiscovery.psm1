@@ -13,17 +13,16 @@
 # limitations under the License.
 
 # Waypoint-owned shim (issue #21, epic #13), following WaypointCatalogIndex's pattern
-# (issue #194): this module is NOT vendor code -- it is the thin, Waypoint-authored
-# seam that dot-sources the UNMODIFIED vmware-stig-docker
-# module.transport.vmware.ps1 (CLAUDE.md: "the sibling repos' vendor scripts run as
-# unmodified vendor code -- Waypoint orchestrates them, it does not fork them") and
+# (issue #194): this is the thin, Waypoint-authored seam that dot-sources the
+# project-owned sibling repository's unmodified vmware-stig-docker
+# module.transport.vmware.ps1 and
 # adapts its Connect-StigVIServer/Get-StigTargets output to the flat
 # cluster/host/vm shape DiscoverJobHandler needs.
 #
-# Only the discovery half of the vendor module is used here (Connect-StigVIServer +
+# Only the discovery half of the sibling-repository module is used here (Connect-StigVIServer +
 # a direct Get-View/Get-Cluster/Get-VMHost/Get-VM walk) -- Get-StigTargets itself
-# builds InSpec-scan targets (profile paths, report dirs), which is out of scope for
-# a pure inventory enumeration. Re-implementing the cluster/host/VM walk directly
+# builds InSpec-scan targets (profile paths, report dirs), which a pure inventory
+# enumeration does not require. Re-implementing the cluster/host/VM walk directly
 # against PowerCLI here (rather than trying to coerce Get-StigTargets' scan-target
 # shape into an inventory tree) keeps this module honest about what it actually needs
 # from PowerCLI: object identity (MoRef), name, parent, build, and (for hosts)
@@ -48,8 +47,8 @@ function Invoke-WaypointDiscovery {
 	    script text (security.md controls 1/2).
 
 	.PARAMETER VmwareStigDockerTransportPath
-	    Path to the sibling repo's module.transport.vmware.ps1 (unmodified vendor
-	    code), dot-sourced to bring Connect-StigVIServer into scope.
+	    Path to the sibling repo's unmodified module.transport.vmware.ps1, dot-sourced
+	    to bring Connect-StigVIServer into scope.
 
 	.OUTPUTS
 	    One [pscustomobject] per discovered item: Type ('cluster'|'host'|'vm'), MoRef,
@@ -82,7 +81,7 @@ function Invoke-WaypointDiscovery {
 		throw "WaypointDiscovery: module.transport.vmware.ps1 not found at '$VmwareStigDockerTransportPath'."
 	}
 
-	# Dot-source the unmodified vendor script to bring Connect-StigVIServer into scope.
+	# Dot-source the unmodified sibling-repository script to bring Connect-StigVIServer into scope.
 	. $VmwareStigDockerTransportPath
 
 	$SecurePassword = ConvertTo-SecureString -String $Password -AsPlainText -Force

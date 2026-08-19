@@ -324,7 +324,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 
 	/// <summary>
 	/// Issue #308 AC 2: an NSX session-token auth failure (the stub's "auth" mode, same
-	/// "401" marker the dot-sourced vendor Get-NsxSessionToken's real failure path
+	/// "401" marker the dot-sourced sibling-repository Get-NsxSessionToken's real failure path
 	/// would surface) hits the same credential-halt classification as vsphere.
 	/// </summary>
 	[Fact]
