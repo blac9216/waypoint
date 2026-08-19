@@ -72,6 +72,97 @@ API and runners enforce before choosing to decrypt. Required gates:
   **step-up re-authentication**.
 - Scheduled/system decrypts are gated by the schedule's existence and recorded as such.
 
+### Step-up re-authentication (issue #521, AC3 of #29)
+
+A plain OIDC relying party (ADR-0004) has no login UI and no Keycloak admin API to
+call to force a fresh credential prompt — Waypoint never proxies Keycloak's own
+authorization-code/token endpoints. "Step-up" therefore cannot mean anything
+Keycloak-specific; it has to be built entirely out of what a relying party already
+gets from a standard token.
+
+**Freshness signal: the token's `auth_time` claim.** OIDC defines `auth_time` as the
+Unix-epoch-seconds instant the End-User actually authenticated at the IdP — distinct
+from `iat` (when *this token* was issued/refreshed) and `exp`. A relying party that
+requests `max_age` in its authorization request is guaranteed `auth_time` back in the
+ID token (OIDC Core section 2 and the authentication-request parameters in section
+3.1.2, item 1); this backend does not mint or see ID tokens itself
+(it only validates the access/bearer token `AddJwtBearer` receives), so the contract
+here depends on **Keycloak also copying `auth_time` onto the access token** it issues
+(a realm protocol mapper — the same mechanism `deploy/keycloak/realm/waypoint-realm.json`
+already uses for the `role` claim; standard Keycloak has a hardcoded `Authentication
+Time` mapper for this purpose). Given that, freshness reduces to one comparison the
+API can make locally, with no network call to Keycloak: `now - auth_time <=
+StepUpAuth:FreshnessWindow` (default 5 minutes — short enough that a walked-away
+session can't be used, long enough that the redirect round trip and the subsequent
+API call both comfortably land inside it).
+
+**Triggering a fresh `auth_time`.** The frontend re-runs the authorization-code flow
+immediately before a gated call, passing `prompt=login` (Keycloak: force the login
+screen even with an active SSO session) or `max_age=0` (spec-standard: demand
+`auth_time` be "now") on the `/authorize` redirect. Either directive makes Keycloak
+re-assert the user's credential (CAC/PIV re-tap or LDAP re-prompt, per however the
+realm is federated) and mint a new `auth_time`. This is a real redirect round trip,
+not a silent background refresh — the whole point is a human re-proves presence.
+
+**Backend guard.** `[RequireFreshAuth]` (`Waypoint.Core.Authorization`) is an
+`AuthorizeAttribute` subclass mapped to a `StepUpAuth` policy, structurally the same
+seam as `RequireRoleAttribute`/`MinimumRoleRequirement`/`MinimumRoleAuthorizationHandler`:
+a requirement object, a handler that inspects the principal's claims, `AddPolicy`
+registration in `Program.cs`. On an action that is unconditionally sensitive, it stacks
+alongside `[RequireAdminRole]` on the same action — ASP.NET Core ANDs multiple
+`[Authorize]` policies on one endpoint, so both must pass. Unlike the role guard, a
+failed freshness check does not want a bare 403: the caller needs to distinguish "you
+are not allowed to do this" from "you are allowed, but re-authenticate first and
+retry" — the two demand different UI responses. So `FreshAuthAuthorizationHandler`
+does not fail the requirement itself (an unconditional endpoint's `[RequireFreshAuth]`
+is a defense-in-depth backstop, not the enforcement path); `RequireFreshAuthAttribute`
+instead exposes a static `Check` helper the action calls inline, throwing
+`ApiException(403, "step_up_required", ...)` through the same `ErrorHandlingMiddleware`
+path `master_key_unavailable`/`auth_not_ready` already use.
+
+Credential overwrite specifically is **conditional**, not unconditional: `PUT
+/credentials/{id}` also handles rename and `sudo_enabled` flips, neither of which
+touches key material and neither of which should demand step-up. A declarative
+`[Authorize]` policy runs before model binding, so it cannot see whether *this*
+request's body sets `secret` — applying `[RequireFreshAuth]` at the method level would
+gate every PUT indiscriminately, including a bare rename. `CredentialsController.Update`
+therefore does not carry the attribute at all; it calls `RequireFreshAuthAttribute.Check`
+directly, and only in the branch where `request.Secret` is non-empty, checked before any
+field (including the non-secret ones in the same request) is written.
+
+**Fails closed on OIDC.** A token with no `auth_time` claim at all — a Keycloak realm
+without the protocol mapper configured, or any other IdP — is treated as never fresh:
+`step_up_required` every time, not "trust it because we can't check." This is the same
+philosophy `OidcClaimsMappingOptionsSetup` and `MinimumRoleAuthorizationHandler` already
+apply to a missing role claim. It means step-up literally does not work until the
+mapper is deployed — documented in `deploy/keycloak/realm/waypoint-realm.json` and
+`deploy/README.md` as a required realm configuration step, not left to be discovered
+as a silent bypass.
+
+**Dev-flag local auth is explicit, not fail-closed.** `LocalSessionAuthenticationHandler`
+(the `LocalAuth:Enabled` escape hatch, off by default, never a production identity
+path) issues a session claims set with no `auth_time` at all — there is no IdP behind
+it to re-prompt, so "redirect back through Keycloak with `prompt=login`" has nothing to
+do. Rather than have the same missing-claim fail-closed rule silently make step-up
+permanently unsatisfiable for every local-auth session (locking e2e/dev testing out of
+the credential-overwrite path for a reason unrelated to what this control defends
+against), `FreshAuthAuthorizationHandler`/the inline check special-case the
+`LocalSession` authentication scheme: every local-auth-authenticated request is treated
+as fresh. This is a deliberate, narrow carve-out for a mechanism that is already
+documented as dev-only and already logs a startup Warning when enabled — it does not
+weaken the OIDC path, and it is the same shape as `LocalAuthOptions.AdminPasswordHash`'s
+treatment elsewhere in this document: local auth accepts a lower bar than production
+by design, not by omission.
+
+**Scope today.** Applied to `PUT /credentials/{id}` only when the request body
+overwrites secret material (a non-empty `secret` field) — renaming a credential or
+flipping `sudo_enabled` is not gated, since neither touches key material. `POST
+/credentials` (initial creation) is unaffected: there is no existing secret being
+displaced, so nothing is being "overwritten." Remediation and update-apply call sites
+get the same `[RequireFreshAuth]` treatment when those endpoints land (`docs/roadmap.md`);
+this issue (#521) covers only the credential-overwrite case since it is the only one
+that exists today.
+
 Cryptographic tying exists only where the user supplies material the server never
 *permanently* stores — which in v1 is the run-scoped ad hoc personal-credential flow:
 the encrypted row is bounded to one run's lifetime (terminal completion or expiry),

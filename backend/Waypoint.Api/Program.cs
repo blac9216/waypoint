@@ -153,8 +153,17 @@ try
 				WaypointAuthorizationPolicies.MinimumRole(role),
 				policy => policy.Requirements.Add(new MinimumRoleRequirement(role)));
 		}
+
+		// Issue #521: the declarative backstop for [RequireFreshAuth] -- see that
+		// attribute's doc comment for why the primary enforcement is the imperative
+		// RequireFreshAuthAttribute.Check() call inside the guarded action, not this
+		// policy alone.
+		options.AddPolicy(
+			WaypointAuthorizationPolicies.FreshAuth,
+			policy => policy.Requirements.Add(FreshAuthRequirement.Instance));
 	});
 	builder.Services.AddSingleton<IAuthorizationHandler, MinimumRoleAuthorizationHandler>();
+	builder.Services.AddSingleton<IAuthorizationHandler, FreshAuthAuthorizationHandler>();
 
 	WebApplication app = builder.Build();
 

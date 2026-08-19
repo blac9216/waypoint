@@ -15,7 +15,9 @@
 using System.Net;
 using System.Text;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using Waypoint.Core.Authorization;
+using Waypoint.Core.Configuration;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Secrets;
@@ -46,18 +48,25 @@ public sealed class CredentialsController : ControllerBase
 	private readonly ICredentialSecretStore _secrets;
 	private readonly ICredentialCreationCoordinator _creation;
 	private readonly IJobControlRepository _jobs;
+	private readonly IOptionsMonitor<StepUpAuthOptions> _stepUpAuthOptions;
 
 	public CredentialsController(
-		CredentialRepository credentials, ICredentialSecretStore secrets, ICredentialCreationCoordinator creation, IJobControlRepository jobs)
+		CredentialRepository credentials,
+		ICredentialSecretStore secrets,
+		ICredentialCreationCoordinator creation,
+		IJobControlRepository jobs,
+		IOptionsMonitor<StepUpAuthOptions> stepUpAuthOptions)
 	{
 		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(secrets);
 		ArgumentNullException.ThrowIfNull(creation);
 		ArgumentNullException.ThrowIfNull(jobs);
+		ArgumentNullException.ThrowIfNull(stepUpAuthOptions);
 		_credentials = credentials;
 		_secrets = secrets;
 		_creation = creation;
 		_jobs = jobs;
+		_stepUpAuthOptions = stepUpAuthOptions;
 	}
 
 	[HttpGet]
@@ -143,12 +152,29 @@ public sealed class CredentialsController : ControllerBase
 		return CreatedAtAction(nameof(Get), new { id = createdId }, created);
 	}
 
+	/// <summary>
+	/// Issue #521: a request that overwrites secret material (<see cref="CredentialUpdateRequest.Secret"/>
+	/// set) additionally requires step-up re-authentication -- checked first, before any
+	/// other field is written, so a stale-auth caller cannot slip a rename/sudo-flip
+	/// through alongside a rejected secret rotation. This is conditional on the request
+	/// body (renaming/sudo-only updates are never gated), so it is the imperative
+	/// <see cref="RequireFreshAuthAttribute.Check"/> call below, not a pipeline-level
+	/// <c>[RequireFreshAuth]</c> attribute (a bare `[Authorize]` policy runs before model
+	/// binding decides what this specific request is doing, so it cannot see the body) --
+	/// see that attribute's doc comment for why it still exists as a declarative
+	/// marker/backstop for actions that gate unconditionally.
+	/// </summary>
 	[HttpPut("{id:guid}")]
 	[RequireAdminRole]
 	[ProducesResponseType(typeof(CredentialResponse), StatusCodes.Status200OK)]
 	public async Task<ActionResult<CredentialResponse>> Update(Guid id, [FromBody] CredentialUpdateRequest request, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(request);
+		if (!string.IsNullOrEmpty(request.Secret))
+		{
+			RequireFreshAuthAttribute.Check(User, _stepUpAuthOptions.CurrentValue.FreshnessWindow);
+		}
+
 		CredentialResponse? existing = await _credentials.GetAsync(id, cancellationToken);
 		if (existing is null)
 		{

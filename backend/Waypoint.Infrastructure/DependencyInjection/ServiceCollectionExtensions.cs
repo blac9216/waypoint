@@ -97,6 +97,9 @@ public static class ServiceCollectionExtensions
 		// regardless of options-pipeline ordering.
 		services.AddSingleton<IPostConfigureOptions<LocalAuthOptions>, Waypoint.Core.Auth.LocalAuthOptionsPostConfigure>();
 
+		services.AddOptions<StepUpAuthOptions>()
+			.Bind(configuration.GetSection(StepUpAuthOptions.SectionName));
+
 		services.AddOptions<WaypointBuildOptions>()
 			.Bind(configuration.GetSection(WaypointBuildOptions.SectionName));
 

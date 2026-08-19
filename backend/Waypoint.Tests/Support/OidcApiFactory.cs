@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Globalization;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
@@ -33,8 +34,13 @@ namespace Waypoint.Tests.Support;
 /// <see cref="IssueToken"/>-minted tokens, without standing up a real Keycloak.
 /// LocalAuth stays enabled (inherited default) so both schemes remain exercised by the
 /// same suite.
+///
+/// Not sealed (issue #521): <c>FreshAuthCredentialOverwriteTests</c> subclasses this to
+/// additionally layer the real Postgres-backed credential store on top of the real JWT
+/// pipeline, the same way <c>CredentialsApiTests.SecretsApiFactory</c> layers it on
+/// <see cref="WaypointApiFactory"/> for the local-auth suite.
 /// </summary>
-public sealed class OidcApiFactory : WaypointApiFactory
+public class OidcApiFactory : WaypointApiFactory
 {
 	public const string Issuer = "https://keycloak.example.internal/realms/waypoint";
 	public const string Audience = "waypoint-backend";
@@ -79,13 +85,18 @@ public sealed class OidcApiFactory : WaypointApiFactory
 	/// is set, and <paramref name="username"/> on <c>preferred_username</c> unless
 	/// <paramref name="omitUsername"/> is set -- the two failure-mode knobs
 	/// <c>OidcClaimsMappingOptionsSetupTests</c> needs to prove the fail-closed paths.
+	/// <paramref name="authTime"/> (issue #521) places the standard OIDC <c>auth_time</c>
+	/// claim (Unix-epoch seconds) unless left null, in which case the token carries none
+	/// -- the fail-closed case <c>FreshAuthTests</c> needs to prove for a Keycloak realm
+	/// missing the "Authentication Time" protocol mapper.
 	/// </summary>
 	public static string IssueToken(
 		string username = "jane.doe",
 		string? role = "Admin",
 		bool omitRole = false,
 		bool omitUsername = false,
-		DateTime? expires = null)
+		DateTime? expires = null,
+		DateTimeOffset? authTime = null)
 	{
 		List<Claim> claims = new();
 		if (!omitUsername)
@@ -96,6 +107,11 @@ public sealed class OidcApiFactory : WaypointApiFactory
 		if (!omitRole && role is not null)
 		{
 			claims.Add(new Claim("role", role));
+		}
+
+		if (authTime is DateTimeOffset authTimeValue)
+		{
+			claims.Add(new Claim("auth_time", authTimeValue.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture), ClaimValueTypes.Integer64));
 		}
 
 		JwtSecurityToken token = new(
