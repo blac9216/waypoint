@@ -15,6 +15,7 @@
 using System.Net;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using Waypoint.Core.Auth;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Secrets;
 
@@ -25,8 +26,10 @@ namespace Waypoint.Api.Middleware;
 /// pipeline and turns it into the documented error envelope. A thrown
 /// <see cref="ApiException"/> maps to its own status/code; a thrown
 /// <see cref="MasterKeyUnavailableException"/> maps to the distinct
-/// <c>master_key_unavailable</c> 503 (issue #409); anything else is logged and
-/// reported as an opaque 500 (never leaking exception details to the client).
+/// <c>master_key_unavailable</c> 503 (issue #409); a thrown
+/// <see cref="LocalAuthNotReadyException"/> maps to the analogous <c>auth_not_ready</c>
+/// 503 (issue #505); anything else is logged and reported as an opaque 500 (never
+/// leaking exception details to the client).
 /// </summary>
 public sealed partial class ErrorHandlingMiddleware
 {
@@ -41,6 +44,14 @@ public sealed partial class ErrorHandlingMiddleware
 	internal const string MasterKeyUnavailableMessage =
 		"The appliance secrets master key is not available. An administrator must mount the master key file and " +
 		"restart the appliance -- see deploy/README.md, \"Generate a secrets master key\".";
+
+	/// <summary>
+	/// Wire text for the local-auth warm-up window (issue #505). Deliberately says
+	/// "starting up, retry shortly" rather than naming the admin hash / config source --
+	/// that is server configuration detail, not something a caller needs to act on.
+	/// </summary>
+	internal const string LocalAuthNotReadyMessage =
+		"The authentication backend is still starting up. Retry in a moment.";
 
 	private readonly RequestDelegate _next;
 	private readonly ILogger<ErrorHandlingMiddleware> _logger;
@@ -73,6 +84,17 @@ public sealed partial class ErrorHandlingMiddleware
 				HttpStatusCode.ServiceUnavailable,
 				new ErrorDetail("master_key_unavailable", MasterKeyUnavailableMessage));
 		}
+		catch (LocalAuthNotReadyException notReadyException)
+		{
+			// Same split as MasterKeyUnavailableException above: the exception message
+			// names the unresolved config source (operator-actionable in logs), the wire
+			// body stays generic (issue #505).
+			LogLocalAuthNotReady(notReadyException, context.Request.Path);
+			await ErrorEnvelopeWriter.WriteAsync(
+				context,
+				HttpStatusCode.ServiceUnavailable,
+				new ErrorDetail("auth_not_ready", LocalAuthNotReadyMessage));
+		}
 		catch (Exception exception)
 		{
 			LogUnhandledException(exception, context.Request.Path);
@@ -88,6 +110,9 @@ public sealed partial class ErrorHandlingMiddleware
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "Request to {Path} rejected: master key unavailable")]
 	private partial void LogMasterKeyUnavailable(Exception exception, PathString path);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Request to {Path} rejected: local auth backend not ready")]
+	private partial void LogLocalAuthNotReady(Exception exception, PathString path);
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "Unhandled exception processing {Path}")]
 	private partial void LogUnhandledException(Exception exception, PathString path);

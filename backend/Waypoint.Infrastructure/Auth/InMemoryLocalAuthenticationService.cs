@@ -50,7 +50,9 @@ public sealed partial class InMemoryLocalAuthenticationService : ILocalAuthentic
 		if (string.IsNullOrEmpty(options.AdminPasswordHash))
 		{
 			LogAdminPasswordHashNotConfigured();
-			return null;
+			throw new LocalAuthNotReadyException(
+				"LocalAuth:AdminPasswordHash is not yet configured/resolved; the local auth backend cannot evaluate " +
+				"credentials until an operator sets it (or the mounted AdminPasswordHashFile finishes resolving).");
 		}
 
 		if (!string.Equals(username, options.AdminUsername, StringComparison.Ordinal))

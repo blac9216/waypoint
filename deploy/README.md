@@ -102,13 +102,14 @@ loudly (`role "waypoint_compliance_runner" does not exist`) rather than
 silently granting nothing — `docker compose logs backend` names the missing
 role.
 
-### Keycloak (issue #28, ADR-0004)
+### Keycloak (issues #28/#29, ADR-0004)
 
 `keycloak` is the IdP — OIDC, and the future site of CAC/PIV x.509 and LDAP/AD
 federation. The backend and frontend remain plain OIDC relying parties (no
 Keycloak-specific application code); this dev stack brings Keycloak up and
-bootstraps its realm, but nothing in the backend authenticates against it
-yet — that swap is issue #29. See `deploy/keycloak/README.md` for the realm
+bootstraps its realm, and (issue #29) the backend validates bearer tokens
+against it — `Oidc:Authority` pointed at this realm's issuer URL, `Oidc:Audience`
+at the `waypoint-backend` client id. See `deploy/keycloak/README.md` for the realm
 contents (four role groups, the `waypoint-backend` OIDC client, CAC/PIV
 site-enablement steps, an example LDAP federation config) and the
 export/import round-trip scripts.
@@ -164,6 +165,34 @@ both scripts.
 both up (dev admin credentials: `KEYCLOAK_ADMIN`/`KEYCLOAK_ADMIN_PASSWORD`,
 same dev-only-default convention as everything else in this file — override
 in `deploy/.env`).
+
+### Local auth (dev-flag, issue #29)
+
+`POST /api/v1/auth/login` (the dev-grade single-admin-user local auth stand-in,
+ADR-0004's rollout note) is **off by default** as of issue #29 — set
+`LocalAuth__Enabled=true` to turn it back on. With the flag off, `/auth/login`
+answers `404 not_found` rather than silently succeeding or `401`ing, so a
+misconfigured production deployment fails obviously instead of looking like a
+working (but wrong) auth path. Every request is routed to Keycloak/OIDC
+validation regardless of what a caller presents — the local-session handler
+stays registered but is provably unreachable, not merely undocumented.
+
+**This is a development/test convenience, never a supported production
+identity path.** Enabling it is logged once at Warning on startup. It exists
+because the Playwright e2e suite (`frontend/e2e`) and
+`deploy/scripts/fresh-stack-smoke-test.sh` both still authenticate this way —
+neither drives a real Keycloak login flow (interactive browser redirect) yet,
+so local auth remains their fastest path to an authenticated session for
+now. When both switch to a real OIDC flow, this flag (and the local-auth code
+path entirely) can be removed outright.
+
+To enable for a dev/test compose run: set `LocalAuth__Enabled=true` alongside
+the existing `LocalAuth__AdminPasswordHashFile`/`LocalAuth__AdminPasswordHash`
+bring-up steps above (see "Bring-up" step 3). When both OIDC and local auth
+are enabled at once (the normal e2e/smoke-test configuration), each incoming
+bearer token is routed by shape: a Keycloak-issued JWT (three dot-separated
+segments) validates against Oidc; the dev-grade opaque hex session token
+validates against LocalSession. The two token shapes cannot collide.
 
 ### Runner health checks (issue #442, ADR-0013 §1)
 

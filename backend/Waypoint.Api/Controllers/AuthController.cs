@@ -16,28 +16,37 @@ using System.Net;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Auth;
 using Waypoint.Core.Authorization;
+using Waypoint.Core.Configuration;
 using Waypoint.Core.Errors;
 
 namespace Waypoint.Api.Controllers;
 
 /// <summary>
-/// Dev-grade local auth surface (ADR-0004 rollout note). Both endpoints exist purely to
-/// exercise <see cref="ILocalAuthenticationService"/> over HTTP; issue #29 replaces this
-/// controller's login flow with Keycloak's OIDC authorization-code/token endpoints
-/// without touching <c>/me</c> or the role guards downstream.
+/// <c>/me</c> is issuer-agnostic (works for an OIDC-authenticated caller exactly as it
+/// did for local auth). <c>/login</c> is the dev-grade local-auth stand-in (ADR-0004
+/// rollout note) — issue #29 made it an explicit dev-flag-only path
+/// (<see cref="LocalAuthOptions.Enabled"/>, off by default): production sign-in goes
+/// through Keycloak's own OIDC authorization-code/token endpoints, which this backend
+/// never proxies (ADR-0004 — the app stays a plain OIDC relying party). When the flag is
+/// off, <c>/login</c> answers 404 rather than silently succeeding or 401ing, so a
+/// misconfigured production deployment fails obviously rather than looking like a
+/// working (but wrong) auth path.
 /// </summary>
 [ApiController]
 [Route("api/v1/auth")]
 public sealed class AuthController : ControllerBase
 {
 	private readonly ILocalAuthenticationService _authenticationService;
+	private readonly bool _localAuthEnabled;
 
-	public AuthController(ILocalAuthenticationService authenticationService)
+	public AuthController(ILocalAuthenticationService authenticationService, IOptions<LocalAuthOptions> localAuthOptions)
 	{
 		_authenticationService = authenticationService;
+		_localAuthEnabled = localAuthOptions.Value.Enabled;
 	}
 
 	[HttpPost("login")]
@@ -45,6 +54,13 @@ public sealed class AuthController : ControllerBase
 	[ProducesResponseType(typeof(LoginResponse), StatusCodes.Status200OK)]
 	public ActionResult<LoginResponse> Login([FromBody] LoginRequest request)
 	{
+		if (!_localAuthEnabled)
+		{
+			throw ApiException.NotFound(
+				"Local auth is disabled. Sign in through Keycloak (ADR-0004).",
+				"LocalAuth:Enabled is false or unset -- this is the production default. See deploy/README.md 'Local auth (dev-flag)'.");
+		}
+
 		LocalSession? session = _authenticationService.Authenticate(request.Username, request.Password);
 		if (session is null)
 		{

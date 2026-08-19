@@ -19,14 +19,30 @@ namespace Waypoint.Core.Configuration;
 /// note): a single Admin user, no persistence beyond the process. Bound from the
 /// <c>LocalAuth</c> section. There is deliberately no compiled-in default password —
 /// an unset <see cref="AdminPasswordHash"/> means local auth refuses every login
-/// rather than shipping a guessable default credential. This entire section — and
-/// <see cref="Auth.ILocalAuthenticationService"/>, the abstraction it configures — is
-/// replaced by Keycloak OIDC in issue #29; nothing outside the auth layer should read
-/// these values directly.
+/// rather than shipping a guessable default credential.
+///
+/// Issue #29 replaced OIDC (<see cref="OidcAuthOptions"/>) as the production auth
+/// path — Keycloak-issued bearer tokens are validated by the JwtBearer handler, not
+/// this class. This section survives only as an explicit, off-by-default escape
+/// hatch (<see cref="Enabled"/>) for environments with no Keycloak available: the
+/// Playwright e2e suite and <c>deploy/scripts/fresh-stack-smoke-test.sh</c> both log
+/// in this way today (see <c>deploy/README.md</c> "Local auth (dev-flag)"). Nothing
+/// outside the auth layer should read these values directly.
 /// </summary>
 public sealed class LocalAuthOptions
 {
 	public const string SectionName = "LocalAuth";
+
+	/// <summary>
+	/// Off by default (issue #29). Set <c>LocalAuth__Enabled=true</c> (or
+	/// <c>LocalAuth:Enabled</c> in configuration) to register the local-session
+	/// authentication scheme alongside OIDC — <c>POST /api/v1/auth/login</c> answers
+	/// <c>404</c> when this is false. Every enable is logged once at Warning on
+	/// startup (see <c>LocalSessionAuthenticationHandler</c>'s registration in
+	/// <c>Program.cs</c>): this is a development/test convenience, not a supported
+	/// production identity path, and it must never be silently on.
+	/// </summary>
+	public bool Enabled { get; set; }
 
 	/// <summary>The single local admin account's username.</summary>
 	public string AdminUsername { get; set; } = "admin";

@@ -35,16 +35,20 @@ column.
 ### Auth
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/auth/login` | POST | Anonymous. Local-auth login (ADR-0004 rollout note — dev-grade M1 stand-in; #29 replaces this flow with Keycloak OIDC). Request: `{username, password}`. 200 → `{token, role, expires_at}` — **no `user` object**. 401 → `{ "error": { "code": "invalid_credentials", "message": "Invalid username or password." } }`. |
+| `/auth/login` | POST | Anonymous. Local-auth login (ADR-0004 rollout note — dev-grade stand-in). Issue #29 made this **dev-flag-only** (`LocalAuth:Enabled`, off by default): production sign-in goes through Keycloak's own OIDC authorization-code/token endpoints, which this backend never proxies (ADR-0004 — the app stays a plain OIDC relying party). When the flag is off, `POST /auth/login` answers `404 not_found`. When on: request `{username, password}`, 200 → `{token, role, expires_at}` (no `user` object), 401 → `{ "error": { "code": "invalid_credentials", "message": "Invalid username or password." } }`, and — issue #505 — a warm-up window where the auth backend cannot yet evaluate credentials (e.g. the admin password hash has not finished resolving) answers `503 auth_not_ready` instead of the misleading 401. |
 | `/auth/me` | GET | Viewer+. Current session's identity: `{username, role}`. Unaffected by the #29 Keycloak swap — same shape regardless of which issuer authenticated the caller. |
 
-**Session token.** Opaque bearer string; presented on every subsequent request as
-`Authorization: Bearer <token>`, same header the OIDC flow this stands in for uses —
-callers don't need to know which issuer minted it. There is no `/auth/logout`:
-discarding the client-held token ends the session client-side, and the token also
-expires server-side at `expires_at` regardless (M1 local-auth default session
-lifetime: 8 hours from issue). No refresh endpoint in M1 — an expired token requires
-logging in again.
+**Session token.** Local auth (when enabled) presents an opaque bearer string; a
+Keycloak-authenticated caller presents a real JWT. Both ride `Authorization: Bearer
+<token>` — callers don't need to know which issuer minted it, and the server routes
+each request to the right validator by token shape (a JWT is three dot-separated
+segments; the local token never is). There is no `/auth/logout`: discarding the
+client-held token ends the session client-side, and the token also expires
+server-side regardless — `expires_at` for local auth (default session lifetime: 8
+hours from issue), the token's own `exp` claim for Keycloak. Refreshing an OIDC
+session is the frontend's normal OIDC-client concern (silent renew / refresh token),
+not a Waypoint-specific endpoint; local auth has no refresh endpoint at all — an
+expired local-auth token requires logging in again.
 
 **`role` value casing — read before touching this.** `role` is serialized via the
 backend's `Role.ToString()`, so its value is **PascalCase**, while every *key* in this
@@ -81,15 +85,19 @@ the session survives login only to be rejected on the next restore. Reject the w
 response instead. This is a rule about *responses*; how a client validates a session
 it has already stored is its own business.
 
-**What #29 (Keycloak) changes, and what it doesn't.** `POST /auth/login` is the
-dev-grade local-auth stand-in the ADR-0004 rollout note describes and is expected to
-disappear outright, replaced by Keycloak's OIDC authorization-code/token endpoints —
-its path, request body, and response shape are not part of the durable contract.
-`GET /auth/me` and the role guards it feeds (the client-side disabled-with-reason
-treatment plus every server-side enforcement point) are expected to survive that swap
-unchanged: `/auth/me` keeps returning `{username, role}` no matter which issuer
-authenticated the caller, and role claims keep mapping to the same four
-`Viewer`/`Cyber`/`Operator`/`Admin` values.
+**What #29 (Keycloak) changed, and what it didn't.** Production sign-in is now
+Keycloak's own OIDC authorization-code/token endpoints — this backend never proxies
+them (ADR-0004: plain OIDC relying party) and never issues its own login page or
+token. `POST /auth/login` survives only as the dev-flag-only local-auth path
+described above; its path, request body, and response shape were never part of the
+durable contract and remain out of it. `GET /auth/me` and the role guards it feeds
+(the client-side disabled-with-reason treatment plus every server-side enforcement
+point) are exactly what was expected to survive the swap unchanged, and did:
+`/auth/me` keeps returning `{username, role}` no matter which issuer authenticated
+the caller, and role claims keep mapping to the same four
+`Viewer`/`Cyber`/`Operator`/`Admin` values (Keycloak realm group membership → the
+`role` claim → `WaypointClaimTypes.Role` — see
+`deploy/keycloak/realm/waypoint-realm.json` and `OidcClaimsMappingOptionsSetup`).
 
 ### Sites, targets, inventory
 | Endpoint | Methods | Notes |
