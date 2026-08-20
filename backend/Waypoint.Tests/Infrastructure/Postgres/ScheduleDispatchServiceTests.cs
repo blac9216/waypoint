@@ -173,6 +173,57 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 		Assert.Equal(id, (Guid)scheduleId!);
 	}
 
+	/// <summary>
+	/// Issue #520 / issue #31 acceptance criterion 1 ("a scheduled scan fires unattended
+	/// with initiator 'scheduled'"): pins the scan branch end to end -- a due scan
+	/// schedule's <c>site_id</c> scope is parsed by <see cref="RunCreationService.CreateScanRunAsync"/>,
+	/// a target under that site is fanned out into a job, the created run's
+	/// <c>initiated_by</c> is the dispatcher's <see cref="ScheduleDispatchService.ScheduledInitiator"/>
+	/// (never the schedule's own <see cref="Schedule.CreatedBy"/>, which the API layer
+	/// carries separately per the class doc on <see cref="ScheduleDispatchService"/>), and
+	/// the schedule's <c>CreatedBy</c> attribution is left untouched by dispatch.
+	/// </summary>
+	[Fact]
+	public async Task SweepAsync_DueScanSchedule_DispatchesRunWithScheduledInitiator_ParsesScopeAndFansOutTarget()
+	{
+		Guid siteId = (await _sites.CreateAsync("schedule-scan-e2e-site", null, null, CancellationToken.None))!.Value;
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.Ssh, "schedule-scan-e2e-target", """{"host":"esxi-02.example.internal"}""",
+			credentialId: null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+		Assert.NotNull(targetId);
+
+		string scopeJson = System.Text.Json.JsonSerializer.Serialize(new { site_id = siteId });
+		Guid id = (await _schedules.CreateAsync(
+			$"sweep-scan-e2e-{Guid.NewGuid():N}", "scan", "* * * * *", scopeJson, null,
+			DateTimeOffset.UtcNow.AddMinutes(-1), "bob", CancellationToken.None))!.Value;
+
+		await _dispatch.SweepAsync(CancellationToken.None);
+
+		Schedule after = (await _schedules.GetAsync(id, CancellationToken.None))!;
+		Assert.NotNull(after.LastRunId);
+		// The schedule's own creator attribution is unaffected by dispatch -- it is the
+		// API layer's job (SchedulesController.MapSchedule) to carry it on the wire, not
+		// the dispatcher's job to touch it.
+		Assert.Equal("bob", after.CreatedBy);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand runCommand = new("SELECT initiated_by, run_type FROM runs WHERE id = $1", connection);
+		runCommand.Parameters.AddWithValue(after.LastRunId!.Value);
+		await using NpgsqlDataReader runReader = await runCommand.ExecuteReaderAsync();
+		Assert.True(await runReader.ReadAsync());
+		Assert.Equal(ScheduleDispatchService.ScheduledInitiator, runReader.GetString(0));
+		Assert.Equal("scan", runReader.GetString(1));
+		await runReader.DisposeAsync();
+
+		await using NpgsqlCommand jobCommand = new(
+			"SELECT count(*) FROM jobs WHERE run_id = $1 AND job_type = 'scan' AND target_name = $2", connection);
+		jobCommand.Parameters.AddWithValue(after.LastRunId!.Value);
+		jobCommand.Parameters.AddWithValue("schedule-scan-e2e-target");
+		Assert.Equal(1L, (long)(await jobCommand.ExecuteScalarAsync())!);
+	}
+
 	[Fact]
 	public async Task SweepAsync_CredentialTestSchedule_DispatchesOneJob()
 	{

@@ -195,10 +195,13 @@ public sealed class SchedulesEndpointTests : IClassFixture<SchedulesTestApiFacto
 		Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
 	}
 
-	private static async Task<string> CreateAsAdminAsync(HttpClient client, string jobType)
+	private static Task<string> CreateAsAdminAsync(HttpClient client, string jobType) =>
+		CreateNamedAsAdminAsync(client, $"s-{Guid.NewGuid():N}", jobType);
+
+	private static async Task<string> CreateNamedAsAdminAsync(HttpClient client, string name, string jobType)
 	{
 		HttpResponseMessage created = await SendAsync(client, HttpMethod.Post, "/api/v1/schedules", "Admin",
-			new { name = $"s-{Guid.NewGuid():N}", job_type = jobType, cron_expression = "0 2 * * *" });
+			new { name, job_type = jobType, cron_expression = "0 2 * * *" });
 		Assert.Equal(HttpStatusCode.Created, created.StatusCode);
 		using JsonDocument document = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
 		return document.RootElement.GetProperty("id").GetString()!;
@@ -256,6 +259,110 @@ public sealed class SchedulesEndpointTests : IClassFixture<SchedulesTestApiFacto
 		Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
 	}
 
+	/// <summary>
+	/// Issue #520: an empty repository returns an empty array, not null or 404. Uses its
+	/// own freshly-constructed factory (rather than the class-shared <see cref="_factory"/>,
+	/// whose <see cref="FakeScheduleRepository"/> singleton accumulates schedules across
+	/// every other test in this class) so "empty" is genuinely observed, not assumed.
+	/// </summary>
+	[Fact]
+	public async Task List_NoSchedules_ReturnsEmptyArray()
+	{
+		using SchedulesTestApiFactory factory = new();
+		HttpClient client = factory.CreateClient();
+
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Get, "/api/v1/schedules", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal(JsonValueKind.Array, document.RootElement.ValueKind);
+		Assert.Empty(document.RootElement.EnumerateArray());
+	}
+
+	/// <summary>
+	/// Issue #520: <see cref="_factory"/> is a shared <see cref="IClassFixture{TFixture}"/>
+	/// (its <see cref="FakeScheduleRepository"/> is a singleton persisting across every test
+	/// in this class, matching how <c>RunsTestApiFactory</c> is used elsewhere), so List
+	/// tests below cannot assert global emptiness or an exact global count -- they scope
+	/// their assertions to schedules they themselves created, identified by a per-test
+	/// unique name suffix.
+	/// </summary>
+	[Fact]
+	public async Task List_WithViewerRole_Returns200()
+	{
+		HttpClient client = _factory.CreateClient();
+		await CreateAsAdminAsync(client, "scan");
+
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Get, "/api/v1/schedules", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal(JsonValueKind.Array, document.RootElement.ValueKind);
+	}
+
+	/// <summary>
+	/// Issue #520: List returns every schedule regardless of job_type/role floor (a Viewer
+	/// can see -- not write -- an Admin-typed schedule too), and the wire shape carries the
+	/// full <c>ScheduleResponse</c> projection including <c>next_run_at</c> and
+	/// <c>last_result</c> (null until the schedule has ever dispatched).
+	/// </summary>
+	[Fact]
+	public async Task List_ReturnsEveryScheduleWithFullShape_IncludingNextRunAndLastResult()
+	{
+		HttpClient client = _factory.CreateClient();
+		string suffix = Guid.NewGuid().ToString("N");
+		string scanName = $"list-shape-scan-{suffix}";
+		string discoverName = $"list-shape-discover-{suffix}";
+		string scanId = await CreateNamedAsAdminAsync(client, scanName, "scan");
+		string discoverId = await CreateNamedAsAdminAsync(client, discoverName, "discover");
+
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Get, "/api/v1/schedules", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement[] items = document.RootElement.EnumerateArray()
+			.Where(item => string.Equals(item.GetProperty("id").GetString(), scanId, StringComparison.Ordinal)
+				|| string.Equals(item.GetProperty("id").GetString(), discoverId, StringComparison.Ordinal))
+			.ToArray();
+		Assert.Equal(2, items.Length);
+
+		JsonElement scanItem = items.Single(item => string.Equals(item.GetProperty("id").GetString(), scanId, StringComparison.Ordinal));
+		Assert.Equal("scan", scanItem.GetProperty("job_type").GetString());
+		Assert.False(string.IsNullOrEmpty(scanItem.GetProperty("next_run_at").GetString()));
+		// WaypointJsonOptions.Apply uses JsonIgnoreCondition.WhenWritingNull -- a schedule
+		// that has never dispatched omits last_result/last_run_id entirely rather than
+		// emitting an explicit JSON null, so "not present" is the correct assertion here.
+		Assert.False(scanItem.TryGetProperty("last_result", out _));
+		Assert.False(scanItem.TryGetProperty("last_run_id", out _));
+		Assert.True(scanItem.GetProperty("enabled").GetBoolean());
+		Assert.Equal("test-user", scanItem.GetProperty("created_by").GetString());
+	}
+
+	/// <summary>The repository (real implementation orders by name; the in-memory fake mirrors that ordering) is reflected verbatim on the wire -- List does not silently drop or reorder entries the repository returns.</summary>
+	[Fact]
+	public async Task List_OrdersSchedulesByName()
+	{
+		HttpClient client = _factory.CreateClient();
+		string suffix = Guid.NewGuid().ToString("N");
+		string nameZ = $"zzz-{suffix}";
+		string nameA = $"aaa-{suffix}";
+
+		await SendAsync(client, HttpMethod.Post, "/api/v1/schedules", "Admin",
+			new { name = nameZ, job_type = "scan", cron_expression = "0 2 * * *" });
+		await SendAsync(client, HttpMethod.Post, "/api/v1/schedules", "Admin",
+			new { name = nameA, job_type = "scan", cron_expression = "0 2 * * *" });
+
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Get, "/api/v1/schedules", "Viewer", body: null);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		string[] names = document.RootElement.EnumerateArray()
+			.Select(item => item.GetProperty("name").GetString()!)
+			.Where(name => string.Equals(name, nameZ, StringComparison.Ordinal) || string.Equals(name, nameA, StringComparison.Ordinal))
+			.ToArray();
+
+		Assert.Equal([nameA, nameZ], names);
+	}
+
 	private static async Task<HttpResponseMessage> SendAsync(HttpClient client, HttpMethod method, string path, string role, object? body)
 	{
 		HttpRequestMessage request = new(method, path);
@@ -306,8 +413,10 @@ public sealed class FakeScheduleRepository : IScheduleRepository
 {
 	private readonly Dictionary<Guid, Schedule> _schedules = [];
 
+	/// <summary>Mirrors the real <c>ScheduleRepository.ListAsync</c>'s <c>ORDER BY name</c> so List-ordering tests exercise a faithful double.</summary>
 	public Task<IReadOnlyList<Schedule>> ListAsync(CancellationToken cancellationToken) =>
-		Task.FromResult<IReadOnlyList<Schedule>>(_schedules.Values.ToList());
+		Task.FromResult<IReadOnlyList<Schedule>>(
+			_schedules.Values.OrderBy(s => s.Name, StringComparer.Ordinal).ToList());
 
 	public Task<Schedule?> GetAsync(Guid id, CancellationToken cancellationToken) =>
 		Task.FromResult(_schedules.GetValueOrDefault(id));
