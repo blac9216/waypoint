@@ -624,7 +624,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		return recovered;
 	}
 
-	public async Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken)
+	public async Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken, Guid? scheduleId = null)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(runType);
 
@@ -633,14 +633,15 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 
 		await using NpgsqlCommand command = new(
 			"""
-			INSERT INTO runs (run_type, scope, credential_id, initiated_by, state)
-			VALUES ($1, $2::jsonb, $3, $4, 'pending')
+			INSERT INTO runs (run_type, scope, credential_id, initiated_by, schedule_id, state)
+			VALUES ($1, $2::jsonb, $3, $4, $5, 'pending')
 			RETURNING id
 			""", connection);
 		command.Parameters.AddWithValue(runType);
 		command.Parameters.AddWithValue(string.IsNullOrWhiteSpace(scopeJson) ? "{}" : scopeJson);
 		command.Parameters.AddWithValue((object?)credentialId ?? DBNull.Value);
 		command.Parameters.AddWithValue((object?)initiatedBy ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)scheduleId ?? DBNull.Value);
 
 		return (Guid)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 	}
@@ -794,7 +795,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	/// <summary>
 	/// Shared SELECT/FROM/JOIN for the <see cref="RunSummary"/> projection used by both
 	/// <see cref="GetRunAsync"/> and <see cref="ListRunsAsync"/>. Keeping one copy of
-	/// the 18-column ordinal list means a column added here cannot silently drift out
+	/// the 19-column ordinal list means a column added here cannot silently drift out
 	/// of sync with <see cref="ReadRunSummary"/>.
 	///
 	/// IMPORTANT: a C# raw string literal excludes the newline immediately before its
@@ -811,7 +812,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		SELECT
 			r.id, r.run_type, r.state, r.paused, r.blocked, r.blocked_reason,
 			r.scope::text,
-			r.credential_id, r.initiated_by,
+			r.credential_id, r.initiated_by, r.schedule_id,
 			r.created_at::text, r.started_at::text, r.completed_at::text,
 			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL),
 			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'queued'),
@@ -834,15 +835,16 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		ScopeJson: reader.GetString(6),
 		CredentialId: reader.IsDBNull(7) ? null : reader.GetGuid(7),
 		InitiatedBy: reader.IsDBNull(8) ? null : reader.GetString(8),
-		CreatedAt: reader.GetString(9),
-		StartedAt: reader.IsDBNull(10) ? null : reader.GetString(10),
-		CompletedAt: reader.IsDBNull(11) ? null : reader.GetString(11),
-		JobCount: reader.GetInt32(12),
-		JobCountQueued: reader.GetInt32(13),
-		JobCountRunning: reader.GetInt32(14),
-		JobCountCompleted: reader.GetInt32(15),
-		JobCountFailed: reader.GetInt32(16),
-		JobCountBlocked: reader.GetInt32(17));
+		ScheduleId: reader.IsDBNull(9) ? null : reader.GetGuid(9),
+		CreatedAt: reader.GetString(10),
+		StartedAt: reader.IsDBNull(11) ? null : reader.GetString(11),
+		CompletedAt: reader.IsDBNull(12) ? null : reader.GetString(12),
+		JobCount: reader.GetInt32(13),
+		JobCountQueued: reader.GetInt32(14),
+		JobCountRunning: reader.GetInt32(15),
+		JobCountCompleted: reader.GetInt32(16),
+		JobCountFailed: reader.GetInt32(17),
+		JobCountBlocked: reader.GetInt32(18));
 
 	public async Task<RunSummary?> GetRunAsync(Guid runId, CancellationToken cancellationToken)
 	{

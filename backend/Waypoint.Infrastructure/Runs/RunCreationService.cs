@@ -96,11 +96,14 @@ public sealed class RunCreationService
 	/// Creates any non-scan run: a bare <see cref="IJobControlRepository.CreateRunAsync"/>
 	/// call, <c>scope</c> passed through uninterpreted. The caller (the controller) has
 	/// already applied every role/confirmation gate for the run type.
+	/// <paramref name="scheduleId"/> is null for every controller call site; only
+	/// <see cref="Waypoint.Infrastructure.Scheduling.ScheduleDispatchService"/> passes one
+	/// (issue #515).
 	/// </summary>
 	public async Task<Guid> CreateRunAsync(
-		string runType, string scopeJson, Guid? credentialId, string initiatedBy, CancellationToken cancellationToken)
+		string runType, string scopeJson, Guid? credentialId, string initiatedBy, CancellationToken cancellationToken, Guid? scheduleId = null)
 	{
-		return await _repository.CreateRunAsync(runType, scopeJson, credentialId, initiatedBy, cancellationToken)
+		return await _repository.CreateRunAsync(runType, scopeJson, credentialId, initiatedBy, cancellationToken, scheduleId)
 			.ConfigureAwait(false);
 	}
 
@@ -120,7 +123,8 @@ public sealed class RunCreationService
 		Guid? credentialId,
 		RunSecretCredentialRequest? credential,
 		string initiatedBy,
-		CancellationToken cancellationToken)
+		CancellationToken cancellationToken,
+		Guid? scheduleId = null)
 	{
 		ScanScope scope;
 		try
@@ -193,7 +197,7 @@ public sealed class RunCreationService
 
 		specs.AddRange(BuildStaleDiscoverSpecs(targets));
 
-		Guid runId = await _repository.CreateRunAsync(ScanRunType, scopeJson, credentialId, initiatedBy, cancellationToken)
+		Guid runId = await _repository.CreateRunAsync(ScanRunType, scopeJson, credentialId, initiatedBy, cancellationToken, scheduleId)
 			.ConfigureAwait(false);
 
 		if (useRunSecret)

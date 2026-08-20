@@ -71,8 +71,17 @@ public interface IJobControlRepository
 	/// </summary>
 	Task<JobSummary?> GetJobAsync(Guid jobId, CancellationToken cancellationToken);
 
-	/// <summary>Creates a pending run and returns its identifier.</summary>
-	Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken);
+	/// <summary>
+	/// Creates a pending run and returns its identifier. <paramref name="scheduleId"/> is
+	/// null for every operator-initiated run (the overwhelming majority of call sites);
+	/// only <see cref="Waypoint.Infrastructure.Scheduling.ScheduleDispatchService"/>
+	/// passes a non-null value, stamping <c>runs.schedule_id</c> (FK'd to
+	/// <c>schedules</c>, migration 0032, issue #515) so <c>GET /runs</c>/<c>GET
+	/// /runs/{id}</c> can answer "which schedule produced this run" directly, without
+	/// joining through <c>schedules.last_run_id</c> (which only ever points at the most
+	/// recent run a schedule produced).
+	/// </summary>
+	Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken, Guid? scheduleId = null);
 
 	/// <summary>
 	/// Atomically creates all jobs for a run and marks the run running. A spec whose

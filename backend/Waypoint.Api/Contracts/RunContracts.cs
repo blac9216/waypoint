@@ -101,6 +101,15 @@ public sealed record RunResponse(
 	[property: JsonPropertyName("initiated_by")]
 	string? InitiatedBy,
 
+	/// <summary>
+	/// The schedule that produced this run (issue #515), or null for an
+	/// operator-initiated run. Only <c>ScheduleDispatchService</c> stamps this --
+	/// distinct from <c>schedules.last_run_id</c>, which only ever points at a
+	/// schedule's most recent run.
+	/// </summary>
+	[property: JsonPropertyName("schedule_id")]
+	string? ScheduleId,
+
 	[property: JsonPropertyName("created_at")]
 	string CreatedAt,
 

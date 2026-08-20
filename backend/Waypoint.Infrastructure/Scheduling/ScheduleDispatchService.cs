@@ -149,7 +149,7 @@ public sealed partial class ScheduleDispatchService
 		if (string.Equals(schedule.JobType, ScheduleJobTypes.Scan, StringComparison.Ordinal))
 		{
 			runId = await _runCreation.CreateScanRunAsync(
-				schedule.ScopeJson, schedule.CredentialId, credential: null, ScheduledInitiator, cancellationToken)
+				schedule.ScopeJson, schedule.CredentialId, credential: null, ScheduledInitiator, cancellationToken, schedule.Id)
 				.ConfigureAwait(false);
 		}
 		else
@@ -162,7 +162,7 @@ public sealed partial class ScheduleDispatchService
 				_ => throw new InvalidOperationException($"Schedule '{schedule.Id}' has unsupported job_type '{schedule.JobType}'."),
 			};
 
-			runId = await _jobs.CreateRunAsync(schedule.JobType, schedule.ScopeJson, schedule.CredentialId, ScheduledInitiator, cancellationToken)
+			runId = await _jobs.CreateRunAsync(schedule.JobType, schedule.ScopeJson, schedule.CredentialId, ScheduledInitiator, cancellationToken, schedule.Id)
 				.ConfigureAwait(false);
 			await _jobs.FanOutJobsAsync(
 				runId,

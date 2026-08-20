@@ -29,6 +29,7 @@ public sealed record RunSummary(
 	string ScopeJson,
 	Guid? CredentialId,
 	string? InitiatedBy,
+	Guid? ScheduleId,
 	string? CreatedAt,
 	string? StartedAt,
 	string? CompletedAt,

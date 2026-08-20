@@ -528,7 +528,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	{
 		RunSummary run = new(
 			Id: Guid.NewGuid(), RunType: "scan", State: "running", Paused: false, Blocked: false,
-			BlockedReason: null, ScopeJson: "{}", CredentialId: null, InitiatedBy: "test-user",
+			BlockedReason: null, ScopeJson: "{}", CredentialId: null, InitiatedBy: "test-user", ScheduleId: null,
 			CreatedAt: "2026-01-01T00:00:00Z", StartedAt: null, CompletedAt: null,
 			JobCount: 0, JobCountQueued: 0, JobCountRunning: 0, JobCountCompleted: 0,
 			JobCountFailed: 0, JobCountBlocked: 0);
@@ -700,7 +700,7 @@ public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRe
 		return Task.FromResult<RunSummary?>(new RunSummary(
 			Id: runId, RunType: "scan", State: state.State, Paused: state.Paused,
 			Blocked: state.Blocked, BlockedReason: state.BlockedReason,
-			ScopeJson: "{}", CredentialId: null, InitiatedBy: "test-user",
+			ScopeJson: "{}", CredentialId: null, InitiatedBy: "test-user", ScheduleId: null,
 			CreatedAt: "2026-01-01T00:00:00Z", StartedAt: null, CompletedAt: null,
 			JobCount: 0, JobCountQueued: 0, JobCountRunning: 0,
 			JobCountCompleted: 0, JobCountFailed: 0, JobCountBlocked: 0));
@@ -746,10 +746,14 @@ public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRe
 	/// what the controller actually forwarded (issue #208: initiated_by provenance).</summary>
 	public (string RunType, string ScopeJson, Guid? CredentialId, string? InitiatedBy)? LastCreateRun { get; private set; }
 
-	public Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken)
+	/// <summary>The <c>scheduleId</c> of the last <see cref="CreateRunAsync"/> call (issue #515).</summary>
+	public Guid? LastCreateRunScheduleId { get; private set; }
+
+	public Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken, Guid? scheduleId = null)
 	{
 		_ = cancellationToken;
 		LastCreateRun = (runType, scopeJson, credentialId, initiatedBy);
+		LastCreateRunScheduleId = scheduleId;
 		return Task.FromResult(Guid.NewGuid());
 	}
 
