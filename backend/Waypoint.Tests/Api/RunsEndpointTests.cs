@@ -73,6 +73,10 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		HttpResponseMessage response = await client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		// Issue #515/#551: the /runs API surface never sets schedule attribution --
+		// only ScheduleDispatchService stamps a scheduleId on its own CreateRunAsync
+		// calls (covered against real Postgres in ScheduleDispatchServiceTests).
+		Assert.Null(_factory.Repository.LastCreateRunScheduleId);
 	}
 
 	// -- issue #208: remediation gate + initiator provenance ----------------
