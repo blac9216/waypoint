@@ -66,15 +66,16 @@ public sealed class DownloadsController : ControllerBase
 
 	/// <summary>
 	/// Queue downloads for one or more indexed depot artifacts as a single run of N jobs.
-	/// Admin-gated for M1 -- api-contract.md scopes this "Operator+", but the Operator role
-	/// does not exist until M3/RBAC, so Admin-only is the correct stricter-for-now floor;
-	/// it widens to Operator+ when RBAC lands (matches <c>CatalogController.Sync</c>). An
-	/// unknown artifact id fails the whole request with a 404 before any run is created --
-	/// the batch is validated up front, then fanned out atomically, so a bad id can never
-	/// leave a half-created run.
+	/// Operator+, matching api-contract.md ("POST: artifact ids -> queued `download` jobs
+	/// (Operator+)") and docs/domain-model.md's Roles table ("Operator: Cyber + ...
+	/// download/catalog/content-library management"). Issue #30: this was Admin-gated as
+	/// an M1 stopgap before the Operator role existed (pre-RBAC); RBAC has now landed, so
+	/// it widens to the contract's documented floor. An unknown artifact id fails the
+	/// whole request with a 404 before any run is created -- the batch is validated up
+	/// front, then fanned out atomically, so a bad id can never leave a half-created run.
 	/// </summary>
 	[HttpPost]
-	[RequireAdminRole]
+	[RequireOperatorRole]
 	[ProducesResponseType(typeof(DownloadsQueuedResponse), StatusCodes.Status202Accepted)]
 	public async Task<ActionResult<DownloadsQueuedResponse>> QueueDownloads(
 		QueueDownloadsRequest request, CancellationToken cancellationToken)
@@ -146,8 +147,9 @@ public sealed class DownloadsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Cancel a single download within its run. Admin-gated for M1 (see POST -- widens to
-	/// Operator+ with RBAC in M3). Cancels only this download's own <c>download</c> job
+	/// Cancel a single download within its run. Operator+, matching POST's floor (issue
+	/// #30 widened both from the Admin-only M1 stopgap now that RBAC has landed).
+	/// Cancels only this download's own <c>download</c> job
 	/// via <see cref="IJobControlRepository.CancelJobAsync"/>, never aborting the run or
 	/// touching a sibling artifact's job queued in the same batch. A queued job is
 	/// cancelled cleanly and immediately; a job already running stops cooperatively at the
@@ -157,7 +159,7 @@ public sealed class DownloadsController : ControllerBase
 	/// shape.
 	/// </summary>
 	[HttpDelete("{id:guid}")]
-	[RequireAdminRole]
+	[RequireOperatorRole]
 	[ProducesResponseType(typeof(DownloadCancelledResponse), StatusCodes.Status200OK)]
 	public async Task<ActionResult<DownloadCancelledResponse>> CancelDownload(Guid id, CancellationToken cancellationToken)
 	{

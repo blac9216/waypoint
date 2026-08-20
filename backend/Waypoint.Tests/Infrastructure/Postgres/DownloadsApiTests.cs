@@ -125,8 +125,7 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 	[Theory]
 	[InlineData("Viewer")]
 	[InlineData("Cyber")]
-	[InlineData("Operator")]
-	public async Task PostDownloads_BelowAdmin_Returns403(string role)
+	public async Task PostDownloads_BelowOperator_Returns403(string role)
 	{
 		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads")
 		{
@@ -137,6 +136,28 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #30: POST widened from Admin-only (M1 stopgap) to Operator+, matching
+	/// api-contract.md's `/downloads` row ("Operator+") and domain-model.md's Operator
+	/// capability ("download/catalog/content-library management").
+	/// </summary>
+	[Fact]
+	public async Task PostDownloads_WithOperatorRole_QueuesSuccessfully()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		Guid artifact = await SeedArtifactAsync(tag);
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads")
+		{
+			Content = JsonBody(new { depot_artifact_ids = new[] { artifact.ToString() } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 	}
 
 	/// <summary>
