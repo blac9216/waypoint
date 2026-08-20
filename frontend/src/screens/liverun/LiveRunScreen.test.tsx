@@ -248,6 +248,15 @@ describe("LiveRunScreen (issue #283)", () => {
 	});
 
 	it("Last-Event-ID replay after a reload reproduces the same board the live stream would have (AC2)", async () => {
+		// The header's elapsed-time readout is computed from Date.now() at the
+		// moment each mount's REST seed is mapped (liverun.ts's
+		// elapsedSecondsFrom). Pin the clock so the first mount and the
+		// "reload" second mount land on the identical elapsed second — real
+		// timers stay in effect (only Date.now is stubbed) so the SSE
+		// reconnect's backoff `setTimeout` below still elapses for real, which
+		// the 3000ms waitFor timeout below depends on.
+		const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.parse(RUN_WIRE.started_at as string) + 90_000);
+
 		// First mount = the fully-live board: one long-lived stream delivers all
 		// five frames from the start and never reconnects. This is the reference
 		// board we require the replay path to reconstruct.
@@ -295,6 +304,7 @@ describe("LiveRunScreen (issue #283)", () => {
 		// ...and folds through the same reducer to the identical fully-live board.
 		expect(second.container.innerHTML).toBe(liveBoardHtml);
 		second.unmount();
+		nowSpy.mockRestore();
 	});
 
 	it("enables Pause/Abort for Operator+ and gates them with the role reason for Viewer/Cyber (#285)", async () => {
