@@ -78,6 +78,75 @@ public sealed class SystemEndpointTests : IClassFixture<SystemTestApiFactory>
 		Assert.Equal(600, store.GetProperty("free_bytes").GetInt64());
 	}
 
+	/// <summary>
+	/// Issue #241: api-contract.md's "uptime" field, deferred out of #226/#240 until a
+	/// consumer existed. Pinned through the fake provider rather than asserting against
+	/// a moving wall clock.
+	/// </summary>
+	[Fact]
+	public async Task Get_ReturnsUptimeSecondsFromProvider()
+	{
+		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
+		_factory.DiskUsage.Reset();
+		_factory.Uptime.Reset(TimeSpan.FromSeconds(12345));
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.Equal(12345, doc.RootElement.GetProperty("uptime_seconds").GetInt64());
+	}
+
+	/// <summary>
+	/// Issue #241: api-contract.md's "depot sync" field, derived from the most recent
+	/// completed <c>catalog-index</c> run. A fresh appliance with no such run reports
+	/// the field absent, not an error -- same "graceful empty state" convention as the
+	/// no-stores/no-runners cases below.
+	/// </summary>
+	[Fact]
+	public async Task Get_NoCatalogIndexRunEverCompleted_OmitsDepotSyncField()
+	{
+		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
+		_factory.DiskUsage.Reset();
+		_factory.DepotSync.Reset(null);
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.False(doc.RootElement.TryGetProperty("depot_sync", out _));
+	}
+
+	/// <summary>Issue #241: a completed catalog-index run reports its completion time and outcome.</summary>
+	[Fact]
+	public async Task Get_WithCompletedCatalogIndexRun_ReturnsDepotSync()
+	{
+		DateTimeOffset completedAt = new(2026, 8, 19, 12, 0, 0, TimeSpan.Zero);
+		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
+		_factory.DiskUsage.Reset();
+		_factory.DepotSync.Reset(new DepotSyncStatus(completedAt, Succeeded: true));
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		JsonElement depotSync = doc.RootElement.GetProperty("depot_sync");
+		Assert.Equal(completedAt, depotSync.GetProperty("last_sync_at").GetDateTimeOffset());
+		Assert.True(depotSync.GetProperty("succeeded").GetBoolean());
+	}
+
 	[Fact]
 	public async Task Get_ResponseBody_UsesSnakeCaseFieldNames()
 	{
@@ -206,6 +275,8 @@ public sealed class SystemTestApiFactory : WaypointApiFactory
 	public FakeApplianceStateRepository ApplianceState { get; } = new();
 	public FakeArtifactStoreDiskUsageProvider DiskUsage { get; } = new();
 	public FakeWorkerRegistryReader WorkerRegistry { get; } = new();
+	public FakeApplianceUptimeProvider Uptime { get; } = new();
+	public FakeDepotSyncStatusRepository DepotSync { get; } = new();
 
 	protected override void ConfigureWebHost(IWebHostBuilder builder)
 	{
@@ -228,6 +299,8 @@ public sealed class SystemTestApiFactory : WaypointApiFactory
 			ReplaceSingleton<IApplianceStateRepository>(services, ApplianceState);
 			ReplaceSingleton<IArtifactStoreDiskUsageProvider>(services, DiskUsage);
 			ReplaceSingleton<IWorkerRegistryReader>(services, WorkerRegistry);
+			ReplaceSingleton<IApplianceUptimeProvider>(services, Uptime);
+			ReplaceSingleton<IDepotSyncStatusRepository>(services, DepotSync);
 		});
 	}
 
@@ -279,5 +352,29 @@ public sealed class FakeWorkerRegistryReader : IWorkerRegistryReader
 	{
 		_ = cancellationToken;
 		return Task.FromResult<IReadOnlyList<WorkerHeartbeat>>(_heartbeats);
+	}
+}
+
+/// <summary>Minimal in-memory fake for controller-level tests (issue #241).</summary>
+public sealed class FakeApplianceUptimeProvider : IApplianceUptimeProvider
+{
+	private TimeSpan _uptime = TimeSpan.Zero;
+
+	public void Reset(TimeSpan uptime) => _uptime = uptime;
+
+	public TimeSpan GetUptime() => _uptime;
+}
+
+/// <summary>Minimal in-memory fake for controller-level tests (issue #241).</summary>
+public sealed class FakeDepotSyncStatusRepository : IDepotSyncStatusRepository
+{
+	private DepotSyncStatus? _status;
+
+	public void Reset(DepotSyncStatus? status) => _status = status;
+
+	public Task<DepotSyncStatus?> GetLastSyncAsync(CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult(_status);
 	}
 }

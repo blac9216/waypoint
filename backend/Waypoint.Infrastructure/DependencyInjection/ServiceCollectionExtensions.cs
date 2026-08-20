@@ -149,6 +149,11 @@ public static class ServiceCollectionExtensions
 		// connection string configured (issue #226).
 		services.AddSingleton<Waypoint.Core.SystemState.IArtifactStoreDiskUsageProvider, ArtifactStoreDiskUsageProvider>();
 
+		// Issue #241: process uptime, same "no connection string dependency" shape as
+		// the disk-usage provider above -- GET /system reports it even on a host with
+		// no database configured.
+		services.AddSingleton<Waypoint.Core.SystemState.IApplianceUptimeProvider, ApplianceUptimeProvider>();
+
 		// Issue #441: a filesystem stat like the disk-usage provider above -- no
 		// connection string dependency, registered unconditionally so a host with no
 		// database configured can still answer capability/readiness questions about
@@ -215,6 +220,11 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
 			services.AddSingleton<IDownloadRepository>(new DownloadRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.SystemState.IApplianceStateRepository>(new ApplianceStateRepository(connectionString));
+
+			// Issue #241: depot-sync status is derived from the existing runs table
+			// (no dedicated appliance_state column), so this reads through the same
+			// connection string as the repository above rather than a separate table.
+			services.AddSingleton<Waypoint.Core.SystemState.IDepotSyncStatusRepository>(new SystemState.DepotSyncStatusRepository(connectionString));
 			services.AddSingleton(new SiteRepository(connectionString));
 			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton(new InventoryRepository(connectionString));

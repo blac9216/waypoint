@@ -82,6 +82,12 @@ public sealed class SystemApiTests : IAsyncLifetime
 				// registration never runs -- register it explicitly, same as the two
 				// repositories above.
 				services.AddSingleton<IWorkerRegistryReader>(new WorkerRegistryRepository(_connectionString));
+
+				// Issue #241: same reasoning as the IWorkerRegistryReader registration
+				// above -- SystemController now also depends on IDepotSyncStatusRepository
+				// and IApplianceUptimeProvider, so both are registered explicitly here.
+				services.AddSingleton<IDepotSyncStatusRepository>(new DepotSyncStatusRepository(_connectionString));
+				services.AddSingleton<IApplianceUptimeProvider, ApplianceUptimeProvider>();
 			});
 		}
 	}
@@ -166,6 +172,76 @@ public sealed class SystemApiTests : IAsyncLifetime
 
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Assert.Equal("disconnected", document.RootElement.GetProperty("mode").GetString());
+	}
+
+	/// <summary>Issue #241: uptime_seconds is present and non-negative -- the real provider reads the live process clock, so an exact value can't be pinned here (see the fake-backed pin in SystemEndpointTests).</summary>
+	[Fact]
+	public async Task Get_ReturnsNonNegativeUptimeSeconds()
+	{
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.True(document.RootElement.GetProperty("uptime_seconds").GetInt64() >= 0);
+	}
+
+	/// <summary>Issue #241: no catalog-index run has ever completed -- depot_sync is absent, not an error.</summary>
+	[Fact]
+	public async Task Get_NoCatalogIndexRunCompleted_OmitsDepotSyncField()
+	{
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.False(document.RootElement.TryGetProperty("depot_sync", out _));
+	}
+
+	/// <summary>Issue #241: a completed catalog-index run in the real `runs` table is reflected as depot_sync.</summary>
+	[Fact]
+	public async Task Get_WithCompletedCatalogIndexRun_ReturnsDepotSyncFromRunsTable()
+	{
+		await InsertCompletedCatalogIndexRunAsync(state: "completed");
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement depotSync = document.RootElement.GetProperty("depot_sync");
+		Assert.True(depotSync.GetProperty("succeeded").GetBoolean());
+	}
+
+	/// <summary>Issue #241: `completed_with_failures` still counts as a completed sync, just not a succeeded one.</summary>
+	[Fact]
+	public async Task Get_WithCompletedWithFailuresCatalogIndexRun_ReportsSucceededFalse()
+	{
+		await InsertCompletedCatalogIndexRunAsync(state: "completed_with_failures");
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.False(document.RootElement.GetProperty("depot_sync").GetProperty("succeeded").GetBoolean());
+	}
+
+	private async Task InsertCompletedCatalogIndexRunAsync(string state)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync().ConfigureAwait(false);
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO runs (run_type, state, completed_at)
+			VALUES ('catalog-index', $1, now())
+			""", connection);
+		insert.Parameters.AddWithValue(state);
+		await insert.ExecuteNonQueryAsync().ConfigureAwait(false);
 	}
 
 	private async Task SetModeAsync(string mode)

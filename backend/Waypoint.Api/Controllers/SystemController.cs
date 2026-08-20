@@ -21,8 +21,11 @@ using Waypoint.Core.Configuration;
 using Waypoint.Core.Errors;
 using ApplianceState = Waypoint.Core.SystemState.ApplianceState;
 using ArtifactStoreUsage = Waypoint.Core.SystemState.ArtifactStoreUsage;
+using DepotSyncStatus = Waypoint.Core.SystemState.DepotSyncStatus;
 using IApplianceStateRepository = Waypoint.Core.SystemState.IApplianceStateRepository;
+using IApplianceUptimeProvider = Waypoint.Core.SystemState.IApplianceUptimeProvider;
 using IArtifactStoreDiskUsageProvider = Waypoint.Core.SystemState.IArtifactStoreDiskUsageProvider;
+using IDepotSyncStatusRepository = Waypoint.Core.SystemState.IDepotSyncStatusRepository;
 using IWorkerRegistryReader = Waypoint.Core.SystemState.IWorkerRegistryReader;
 using WorkerHeartbeat = Waypoint.Core.SystemState.WorkerHeartbeat;
 using WorkerRegistryOptions = Waypoint.Core.SystemState.WorkerRegistryOptions;
@@ -48,6 +51,11 @@ namespace Waypoint.Api.Controllers;
 /// unreachable compliance-runner never turns this into a 5xx, it is reported as an
 /// unavailable entry in the list (or a missing one, once its heartbeat ages past
 /// <see cref="WorkerRegistryOptions.StaleAfter"/> and it stops appearing at all).
+///
+/// Issue #241 adds the two fields #226 deferred: <c>uptime_seconds</c> (this API
+/// process's wall-clock uptime) and <c>depot_sync</c> (the most recent completed
+/// <c>catalog-index</c> run, derived from the <c>runs</c> table -- absent, not an
+/// error, when none has ever completed).
 /// </summary>
 [ApiController]
 [Route("api/v1/system")]
@@ -56,6 +64,8 @@ public sealed class SystemController : ControllerBase
 	private readonly IApplianceStateRepository _applianceState;
 	private readonly IArtifactStoreDiskUsageProvider _diskUsage;
 	private readonly IWorkerRegistryReader _workerRegistry;
+	private readonly IApplianceUptimeProvider _uptime;
+	private readonly IDepotSyncStatusRepository _depotSync;
 	private readonly IOptionsMonitor<WaypointBuildOptions> _buildOptions;
 	private readonly IOptionsMonitor<WorkerRegistryOptions> _workerRegistryOptions;
 
@@ -63,17 +73,23 @@ public sealed class SystemController : ControllerBase
 		IApplianceStateRepository applianceState,
 		IArtifactStoreDiskUsageProvider diskUsage,
 		IWorkerRegistryReader workerRegistry,
+		IApplianceUptimeProvider uptime,
+		IDepotSyncStatusRepository depotSync,
 		IOptionsMonitor<WaypointBuildOptions> buildOptions,
 		IOptionsMonitor<WorkerRegistryOptions> workerRegistryOptions)
 	{
 		ArgumentNullException.ThrowIfNull(applianceState);
 		ArgumentNullException.ThrowIfNull(diskUsage);
 		ArgumentNullException.ThrowIfNull(workerRegistry);
+		ArgumentNullException.ThrowIfNull(uptime);
+		ArgumentNullException.ThrowIfNull(depotSync);
 		ArgumentNullException.ThrowIfNull(buildOptions);
 		ArgumentNullException.ThrowIfNull(workerRegistryOptions);
 		_applianceState = applianceState;
 		_diskUsage = diskUsage;
 		_workerRegistry = workerRegistry;
+		_uptime = uptime;
+		_depotSync = depotSync;
 		_buildOptions = buildOptions;
 		_workerRegistryOptions = workerRegistryOptions;
 	}
@@ -108,6 +124,8 @@ public sealed class SystemController : ControllerBase
 			return SystemRunnerStatusResponse.FromDomain(heartbeat, available: heartbeat.Ready && !stale);
 		})];
 
-		return Ok(SystemResponse.Create(state, _buildOptions.CurrentValue.Sha, stores, runners));
+		DepotSyncStatus? depotSync = await _depotSync.GetLastSyncAsync(cancellationToken).ConfigureAwait(false);
+
+		return Ok(SystemResponse.Create(state, _buildOptions.CurrentValue.Sha, stores, runners, _uptime.GetUptime(), depotSync));
 	}
 }

@@ -21,14 +21,17 @@ namespace Waypoint.Api.Contracts;
 /// Response body for <c>GET /api/v1/system</c> (api-contract.md "System, users,
 /// audit": "Version/build, mode, uptime, disk usage by store, depot sync, update
 /// availability"). Issue #226 covers version/build/mode/update_available (already
-/// consumed by the frontend's <c>SystemInfo</c> shape) plus <see cref="Stores"/> --
-/// the depot-sync figure stays a follow-up (no depot-sync mechanism exists to report
-/// on yet; tracked separately from this disk-usage slice). Issue #443 adds
-/// <see cref="Runners"/>: this response distinguishes API/control-plane health (a 200
-/// from this endpoint at all) from execution-domain availability (each entry here) --
-/// the API process itself no longer executes anything, so "is the API up" and "can a
-/// scan/discover/download job actually run right now" are two different questions,
-/// and this is where the second one is answered.
+/// consumed by the frontend's <c>SystemInfo</c> shape) plus <see cref="Stores"/>.
+/// Issue #443 adds <see cref="Runners"/>: this response distinguishes
+/// API/control-plane health (a 200 from this endpoint at all) from execution-domain
+/// availability (each entry here) -- the API process itself no longer executes
+/// anything, so "is the API up" and "can a scan/discover/download job actually run
+/// right now" are two different questions, and this is where the second one is
+/// answered. Issue #241 closes out the two fields #226 deliberately deferred:
+/// <see cref="UptimeSeconds"/> (trivial, but unconsumed until now) and
+/// <see cref="DepotSync"/> (no sync mechanism existed to report on until
+/// <c>catalog-index</c> runs, issue #194, gave it one). Both are additive --
+/// existing consumers of this response are unaffected.
 /// </summary>
 public sealed record SystemResponse(
 	string Version,
@@ -36,19 +39,36 @@ public sealed record SystemResponse(
 	string Mode,
 	string? UpdateAvailable,
 	IReadOnlyList<SystemStoreUsageResponse> Stores,
-	IReadOnlyList<SystemRunnerStatusResponse> Runners)
+	IReadOnlyList<SystemRunnerStatusResponse> Runners,
+	long UptimeSeconds,
+	SystemDepotSyncResponse? DepotSync)
 {
 	public static SystemResponse Create(
 		ApplianceState state,
 		string buildSha,
 		IReadOnlyList<ArtifactStoreUsage> stores,
-		IReadOnlyList<SystemRunnerStatusResponse> runners) => new(
+		IReadOnlyList<SystemRunnerStatusResponse> runners,
+		TimeSpan uptime,
+		DepotSyncStatus? depotSync) => new(
 		Version: state.Version,
 		Build: buildSha,
 		Mode: state.Mode,
 		UpdateAvailable: state.UpdateAvailableVersion,
 		Stores: stores.Select(SystemStoreUsageResponse.FromDomain).ToArray(),
-		Runners: runners);
+		Runners: runners,
+		UptimeSeconds: (long)uptime.TotalSeconds,
+		DepotSync: depotSync is null ? null : SystemDepotSyncResponse.FromDomain(depotSync));
+}
+
+/// <summary>
+/// The depot's last completed <c>catalog-index</c> run (issue #241), per
+/// api-contract.md's "depot sync" field. Absent (not an error) when no
+/// <c>catalog-index</c> run has ever completed -- see
+/// <see cref="IDepotSyncStatusRepository.GetLastSyncAsync"/>.
+/// </summary>
+public sealed record SystemDepotSyncResponse(DateTimeOffset LastSyncAt, bool Succeeded)
+{
+	public static SystemDepotSyncResponse FromDomain(DepotSyncStatus status) => new(status.CompletedAt, status.Succeeded);
 }
 
 /// <summary>One store's disk-usage figures, in bytes, per api-contract.md "disk usage by store".</summary>
