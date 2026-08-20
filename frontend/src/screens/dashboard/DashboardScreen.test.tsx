@@ -36,6 +36,16 @@ const DASHBOARD_DATA = {
 			cat_iii_open: null,
 			last_scan_at: null,
 		},
+		{
+			id: "site-3",
+			name: "Charlie Enclave",
+			target_count: 7,
+			compliance_percent: 60,
+			cat_i_open: 6,
+			cat_ii_open: 9,
+			cat_iii_open: 11,
+			last_scan_at: "2026-08-18T04:12:00Z",
+		},
 	],
 	recent_runs: [
 		{
@@ -126,7 +136,7 @@ describe("DashboardScreen", () => {
 		await waitFor(() => expect(screen.getByText("OPEN FINDINGS")).toBeInTheDocument());
 		expect(screen.getAllByText("TARGETS").length).toBeGreaterThan(0);
 		expect(screen.getByText("42")).toBeInTheDocument();
-		expect(screen.getByText("3")).toBeInTheDocument();
+		expect(document.querySelector(".dashboard__finding--cat-i .dashboard__finding-value")).toHaveTextContent("3");
 	});
 
 	it("renders SITE POSTURE with a no-scan-data state for a site with no completed run", async () => {
@@ -137,6 +147,21 @@ describe("DashboardScreen", () => {
 		expect(screen.getByText("Bravo Enclave")).toBeInTheDocument();
 		expect(screen.getByText("91.5%")).toBeInTheDocument();
 		expect(screen.getByText("no scan data")).toBeInTheDocument();
+	});
+
+	it("colors the compliance bar by threshold, not hardcoded green (#526)", async () => {
+		installFetchMock();
+		renderWithProviders();
+
+		await waitFor(() => expect(screen.getByText("91.5%")).toBeInTheDocument());
+		const okPercent = screen.getByText("91.5%");
+		const okFill = okPercent.parentElement?.querySelector(".dashboard__compliance-fill");
+		expect(okFill).toHaveClass("dashboard__compliance-fill--ok");
+
+		const badPercent = screen.getByText("60%");
+		const badFill = badPercent.parentElement?.querySelector(".dashboard__compliance-fill");
+		expect(badFill).toHaveClass("dashboard__compliance-fill--bad");
+		expect(badFill).not.toHaveClass("dashboard__compliance-fill--ok");
 	});
 
 	it("renders RECENT RUNS rows", async () => {

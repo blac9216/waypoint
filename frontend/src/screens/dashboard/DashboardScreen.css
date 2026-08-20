@@ -226,7 +226,18 @@
 
 .dashboard__compliance-fill {
 	height: 100%;
+}
+
+.dashboard__compliance-fill--ok {
 	background: var(--ok);
+}
+
+.dashboard__compliance-fill--warn {
+	background: var(--warn);
+}
+
+.dashboard__compliance-fill--bad {
+	background: var(--bad);
 }
 
 .dashboard__empty-row {
