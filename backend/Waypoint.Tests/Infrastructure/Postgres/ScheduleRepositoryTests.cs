@@ -159,6 +159,29 @@ public sealed class ScheduleRepositoryTests : IAsyncLifetime
 		Assert.DoesNotContain(pausedId, dueIds);
 	}
 
+	/// <summary>
+	/// Issue #518: <c>ListDueAsync</c> is a plain read with no row lock held past its own
+	/// connection -- a schedule it returns stays "due" for any subsequent call until
+	/// something actually advances <c>next_run_at</c> (<see cref="MarkDispatchedAsync"/>).
+	/// Pins that no-lingering-lock behavior directly, since the previous <c>FOR UPDATE
+	/// SKIP LOCKED</c> clause never actually spanned into dispatch anyway (it was released
+	/// the instant this method's connection closed) -- removing it changes nothing
+	/// observable, which this test demonstrates.
+	/// </summary>
+	[Fact]
+	public async Task ListDueAsync_CalledAgainBeforeDispatch_StillReturnsTheSameSchedule()
+	{
+		DateTimeOffset now = DateTimeOffset.UtcNow;
+		Guid id = (await _schedules.CreateAsync(
+			$"redue-{Guid.NewGuid():N}", "scan", "0 2 * * *", "{}", null, now.AddMinutes(-1), "alice", CancellationToken.None))!.Value;
+
+		IReadOnlyList<Schedule> firstSweep = await _schedules.ListDueAsync(now, CancellationToken.None);
+		IReadOnlyList<Schedule> secondSweep = await _schedules.ListDueAsync(now, CancellationToken.None);
+
+		Assert.Contains(firstSweep, s => s.Id == id);
+		Assert.Contains(secondSweep, s => s.Id == id);
+	}
+
 	[Fact]
 	public async Task MarkDispatchedAsync_AdvancesNextRunAt_AndStampsLastRun()
 	{

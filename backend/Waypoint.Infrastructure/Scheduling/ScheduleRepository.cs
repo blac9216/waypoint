@@ -143,7 +143,6 @@ public sealed class ScheduleRepository : IScheduleRepository
 			{ProjectionSql}
 			WHERE enabled AND paused_reason IS NULL AND next_run_at IS NOT NULL AND next_run_at <= $1
 			ORDER BY next_run_at
-			FOR UPDATE SKIP LOCKED
 			""", connection);
 		command.Parameters.AddWithValue(asOf);
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
