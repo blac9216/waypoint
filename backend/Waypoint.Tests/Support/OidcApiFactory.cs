@@ -96,7 +96,8 @@ public class OidcApiFactory : WaypointApiFactory
 		bool omitRole = false,
 		bool omitUsername = false,
 		DateTime? expires = null,
-		DateTimeOffset? authTime = null)
+		DateTimeOffset? authTime = null,
+		string? issuer = null)
 	{
 		List<Claim> claims = new();
 		if (!omitUsername)
@@ -115,7 +116,7 @@ public class OidcApiFactory : WaypointApiFactory
 		}
 
 		JwtSecurityToken token = new(
-			issuer: Issuer,
+			issuer: issuer ?? Issuer,
 			audience: Audience,
 			claims: claims,
 			expires: expires ?? DateTime.UtcNow.AddMinutes(5),

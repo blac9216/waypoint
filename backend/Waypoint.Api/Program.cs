@@ -18,6 +18,8 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Protocols;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Serilog;
 using Serilog.Formatting.Compact;
 using Waypoint.Api.Authentication;
@@ -129,9 +131,43 @@ try
 		.AddAuthentication(OidcOrLocalPolicySchemeDefaults.Scheme)
 		.AddJwtBearer(options =>
 		{
+			// Issue #536: Authority still drives discovery, but issuer VALIDATION is
+			// deliberately NOT left to AddJwtBearer's default (which derives
+			// ValidIssuer from this same Authority) -- see OidcJwtBearerOptionsFactory
+			// and OidcAuthOptions' doc comments for the full design rationale.
 			options.Authority = oidcOptions.Authority;
 			options.Audience = oidcOptions.Audience;
 			options.RequireHttpsMetadata = oidcOptions.RequireHttpsMetadata;
+
+			// Setting Authority above already makes AddJwtBearer compute a metadata
+			// address internally, but it ALSO defaults ValidIssuer from that same
+			// Authority -- exactly the coupling issue #536 exists to break. Restating
+			// MetadataAddress explicitly keeps discovery/JWKS on the fast internal path
+			// while ApplyIssuerValidation below is free to set a completely different,
+			// browser-facing issuer string.
+			options.MetadataAddress = OidcJwtBearerOptionsFactory.ComputeMetadataAddress(oidcOptions) ?? string.Empty;
+			OidcJwtBearerOptionsFactory.ApplyIssuerValidation(oidcOptions, options);
+
+			// Issue #536 (live-verified): setting MetadataAddress above is not enough
+			// on its own once KC_HOSTNAME (deploy/docker-compose.yml's keycloak
+			// service) pins Keycloak's canonical public identity -- Keycloak then
+			// renders the discovery document's OWN jwks_uri as that same
+			// browser-facing address too, and the framework's default
+			// ConfigurationManager follows that verbatim for the signing-key fetch.
+			// The initial discovery GET reaches Keycloak fine over the internal
+			// network (MetadataAddress), but the JWKS follow-up then targets an
+			// address only a browser (via nginx) can reach, never `backend` itself --
+			// confirmed via a real bring-up: "Connection refused" from inside the
+			// backend container hitting the edge hostname/port. Only wired when
+			// Authority is actually configured (fail-closed already handles the unset
+			// case; DocumentRetriever needs a concrete backchannel to construct).
+			if (!string.IsNullOrWhiteSpace(oidcOptions.Authority))
+			{
+				options.ConfigurationManager = new ConfigurationManager<OpenIdConnectConfiguration>(
+					options.MetadataAddress,
+					new InternalJwksConfigurationRetriever(oidcOptions.Authority),
+					new HttpDocumentRetriever { RequireHttps = oidcOptions.RequireHttpsMetadata });
+			}
 		})
 		.AddScheme<AuthenticationSchemeOptions, LocalSessionAuthenticationHandler>(
 			LocalSessionAuthenticationDefaults.Scheme, _ => { })
