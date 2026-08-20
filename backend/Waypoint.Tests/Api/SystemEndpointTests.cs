@@ -147,6 +147,31 @@ public sealed class SystemEndpointTests : IClassFixture<SystemTestApiFactory>
 		Assert.True(depotSync.GetProperty("succeeded").GetBoolean());
 	}
 
+	/// <summary>
+	/// Issue #241: an <c>aborted</c> catalog-index run did not run to completion, so the repository
+	/// filters it out (see <c>DepotSyncStatusRepository</c>'s <c>state IN
+	/// ('completed', 'completed_with_failures')</c> clause) and returns no last sync. The endpoint
+	/// then omits <c>depot_sync</c> rather than reporting the abort as a failed sync.
+	/// </summary>
+	[Fact]
+	public async Task Get_LastCatalogIndexRunAborted_OmitsDepotSyncField()
+	{
+		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
+		_factory.DiskUsage.Reset();
+		// An aborted run is excluded by the repository, which therefore reports no last sync.
+		_factory.DepotSync.Reset(null);
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.False(doc.RootElement.TryGetProperty("depot_sync", out _));
+	}
+
 	[Fact]
 	public async Task Get_ResponseBody_UsesSnakeCaseFieldNames()
 	{

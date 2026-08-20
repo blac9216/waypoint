@@ -231,6 +231,22 @@ public sealed class SystemApiTests : IAsyncLifetime
 		Assert.False(document.RootElement.GetProperty("depot_sync").GetProperty("succeeded").GetBoolean());
 	}
 
+	/// <summary>Issue #241: an <c>aborted</c> catalog-index run also sets <c>completed_at</c> but did not run to
+	/// completion, so it is excluded from depot_sync (which reports only completed/completed_with_failures syncs).</summary>
+	[Fact]
+	public async Task Get_WithAbortedCatalogIndexRun_OmitsDepotSyncField()
+	{
+		await InsertCompletedCatalogIndexRunAsync(state: "aborted");
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.False(document.RootElement.TryGetProperty("depot_sync", out _));
+	}
+
 	private async Task InsertCompletedCatalogIndexRunAsync(string state)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

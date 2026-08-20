@@ -36,7 +36,9 @@ public sealed class DepotSyncStatusRepository : IDepotSyncStatusRepository
 			"""
 			SELECT completed_at, state
 			FROM runs
-			WHERE run_type = 'catalog-index' AND completed_at IS NOT NULL
+			WHERE run_type = 'catalog-index'
+			  AND completed_at IS NOT NULL
+			  AND state IN ('completed', 'completed_with_failures')
 			ORDER BY completed_at DESC
 			LIMIT 1
 			""", connection);
