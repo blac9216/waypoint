@@ -14,9 +14,11 @@
 -- issue #31's validation notes (claim-side allowlists already separate the two
 -- execution domains; this is the create-side half of the same guarantee).
 --
--- kind distinguishes a depot-backed schedule (catalog-index -- the only download-domain
--- read-only type) from every compliance-domain type, since only depot-kind schedules
--- auto-pause in disconnected mode (docs/api-contract.md `/schedules`: "auto-paused
+-- There is no dedicated depot-kind column: whether a schedule is depot-backed
+-- (catalog-index -- the only download-domain read-only type) is derived from
+-- job_type membership in ScheduleJobTypes.DepotKinds, which is how
+-- ScheduleDispatchService.ReconcileDepotAutoPauseAsync auto-pauses only those
+-- schedules in disconnected mode (docs/api-contract.md `/schedules`: "auto-paused
 -- states in air-gapped mode for depot kinds"). scope carries the same
 -- site/target-selection JSON shape RunCreationService already parses for `/runs`
 -- (ScanScopeParser) -- re-used, not duplicated, by the dispatcher.
