@@ -104,3 +104,21 @@ export function runStateTone(state: string): "ok" | "warn" | "bad" | "accent" | 
 			return "muted";
 	}
 }
+
+/** SITE POSTURE compliance bar/percentage color token per the prototype spec
+ * (docs/ui/prototype/README.md screen 2): `--ok` >=90, `--warn` >=82, else
+ * `--bad`. `null` means no scan data yet — callers render the "no scan data"
+ * label instead of a bar, so this never needs a tone for that case, but is
+ * typed to accept it defensively. */
+export function complianceTone(percent: number | null): "ok" | "warn" | "bad" {
+	if (percent === null) {
+		return "bad";
+	}
+	if (percent >= 90) {
+		return "ok";
+	}
+	if (percent >= 82) {
+		return "warn";
+	}
+	return "bad";
+}

@@ -27,7 +27,7 @@ import { roleGateProps } from "../../lib/roles";
 import { scheduleStateLabel } from "../../lib/schedules";
 import { useRouter } from "../../lib/router-context";
 import { useSystem } from "../../lib/system-context";
-import { formatTimestamp, runStateTone, scopeSiteId } from "./dashboard";
+import { complianceTone, formatTimestamp, runStateTone, scopeSiteId } from "./dashboard";
 import "./DashboardScreen.css";
 import { useDashboard } from "./useDashboard";
 
@@ -154,7 +154,7 @@ export function DashboardScreen() {
 												<div className="dashboard__compliance">
 													<div className="dashboard__compliance-bar">
 														<div
-															className="dashboard__compliance-fill"
+															className={`dashboard__compliance-fill dashboard__compliance-fill--${complianceTone(site.compliance_percent)}`}
 															style={{ width: `${site.compliance_percent}%` }}
 														/>
 													</div>
