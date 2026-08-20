@@ -83,6 +83,83 @@ public sealed class UsersEndpointTests : IClassFixture<UsersTestApiFactory>
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 	}
 
+	/// <summary>
+	/// Issue #530: a malformed site_scope used to reach the repository's <c>::jsonb</c>
+	/// cast unvalidated, so Postgres raised <c>invalid_text_representation</c> and
+	/// <c>ErrorHandlingMiddleware</c> shaped that as an unmapped 500. It must be a 400
+	/// validation_error instead, matching the envelope every other 400 in this
+	/// controller returns.
+	/// </summary>
+	[Fact]
+	public async Task Create_WithMalformedSiteScope_Returns400ValidationError()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Post, "/api/v1/users", "Admin",
+			new { oidc_sub = $"sub-{Guid.NewGuid():N}", username = "new-hire", role = "Viewer", site_scope = "not-json" });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("validation_error", body.RootElement.GetProperty("error").GetProperty("code").GetString());
+	}
+
+	/// <summary>Issue #530: well-formed JSON that is not an array (the documented shape) is also a 400, not silently accepted.</summary>
+	[Fact]
+	public async Task Create_WithNonArraySiteScope_Returns400ValidationError()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Post, "/api/v1/users", "Admin",
+			new { oidc_sub = $"sub-{Guid.NewGuid():N}", username = "new-hire", role = "Viewer", site_scope = "{\"not\":\"an-array\"}" });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("validation_error", body.RootElement.GetProperty("error").GetProperty("code").GetString());
+	}
+
+	/// <summary>Issue #530: valid JSON array site_scope still round-trips through Create.</summary>
+	[Fact]
+	public async Task Create_WithValidSiteScope_RoundTrips()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Post, "/api/v1/users", "Admin",
+			new { oidc_sub = $"sub-{Guid.NewGuid():N}", username = "new-hire", role = "Viewer", site_scope = "[\"site-a\",\"site-b\"]" });
+
+		Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("[\"site-a\",\"site-b\"]", body.RootElement.GetProperty("site_scope").GetString());
+	}
+
+	/// <summary>Issue #530: an absent/blank site_scope on Create still defaults to "[]" -- empty semantics preserved.</summary>
+	[Fact]
+	public async Task Create_WithoutSiteScope_DefaultsToEmptyArray()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Post, "/api/v1/users", "Admin",
+			new { oidc_sub = $"sub-{Guid.NewGuid():N}", username = "new-hire", role = "Viewer" });
+
+		Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("[]", body.RootElement.GetProperty("site_scope").GetString());
+	}
+
+	/// <summary>Issue #530: same malformed-JSON guard applies to PUT's UpdateSiteScopeAsync path, not just Create.</summary>
+	[Fact]
+	public async Task Update_WithMalformedSiteScope_Returns400ValidationError()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage created = await SendAsync(client, HttpMethod.Post, "/api/v1/users", "Admin",
+			new { oidc_sub = $"sub-{Guid.NewGuid():N}", username = "scoped-user", role = "Viewer" });
+		Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+		using JsonDocument createdBody = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+		string id = createdBody.RootElement.GetProperty("id").GetString()!;
+
+		HttpResponseMessage response = await SendAsync(client, HttpMethod.Put, $"/api/v1/users/{id}", "Admin",
+			new { site_scope = "not-json" });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("validation_error", body.RootElement.GetProperty("error").GetProperty("code").GetString());
+	}
+
 	[Fact]
 	public async Task Create_DuplicateOidcSub_Returns409()
 	{
