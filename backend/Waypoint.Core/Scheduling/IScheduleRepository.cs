@@ -57,18 +57,23 @@ public interface IScheduleRepository
 	/// <summary>
 	/// Every enabled schedule whose <c>next_run_at</c> is due (&lt;= <paramref name="asOf"/>)
 	/// and is not depot-auto-paused -- the row set <c>ScheduleDispatchHostedService</c>'s
-	/// sweep enqueues. <c>FOR UPDATE SKIP LOCKED</c>: safe for more than one Waypoint API
-	/// replica to sweep concurrently without double-firing the same schedule, mirroring
-	/// the job queue's own claim discipline (ADR-0008).
+	/// sweep enqueues. A plain read: no row lock spans this call and the later
+	/// <see cref="MarkDispatchedAsync"/> that advances <c>next_run_at</c> (they run on
+	/// separate connections/transactions, and dispatch in between does run-creation work
+	/// that is too long to hold a row lock across). That is safe only because exactly one
+	/// control-plane producer sweeps <c>schedules</c> today -- <c>ScheduleDispatchHostedService</c>
+	/// is registered solely on the API host (<c>AddWaypointApiSurface</c>), never on either
+	/// runner host, and its own sweep loop awaits each pass to completion before starting
+	/// the next (ADR-0013). If a second concurrent sweeper is ever introduced, this method
+	/// must gain real double-dispatch protection (e.g. an atomic claim via
+	/// <c>UPDATE ... RETURNING</c>) before that invariant no longer holds. See issue #518.
 	/// </summary>
 	Task<IReadOnlyList<Schedule>> ListDueAsync(DateTimeOffset asOf, CancellationToken cancellationToken);
 
 	/// <summary>
 	/// Records a dispatch: advances <c>next_run_at</c> to <paramref name="nextRunAt"/> and
-	/// stamps <c>last_run_at</c>/<c>last_run_id</c> in the same statement that the due-sweep's
-	/// row lock covers, so a schedule can never be double-fired by two concurrent sweeps.
-	/// <c>last_result</c> is set once the run reaches a terminal state (out of this
-	/// method's scope -- see <see cref="SetLastResultAsync"/>).
+	/// stamps <c>last_run_at</c>/<c>last_run_id</c>. <c>last_result</c> is set once the run
+	/// reaches a terminal state (out of this method's scope -- see <see cref="SetLastResultAsync"/>).
 	/// </summary>
 	Task MarkDispatchedAsync(Guid id, DateTimeOffset nextRunAt, Guid runId, CancellationToken cancellationToken);
 
