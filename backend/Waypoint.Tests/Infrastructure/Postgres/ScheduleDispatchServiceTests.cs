@@ -20,6 +20,7 @@ using Waypoint.Core.Discovery;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Scheduling;
 using Waypoint.Core.Secrets;
+using Waypoint.Core.Sites;
 using Waypoint.Core.SystemState;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
@@ -52,6 +53,8 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 	private readonly string _keyDirectory = Directory.CreateTempSubdirectory("wp-schedule-dispatch-key").FullName;
 	private ScheduleRepository _schedules = null!;
 	private ScheduleDispatchService _dispatch = null!;
+	private SiteRepository _sites = null!;
+	private TargetRepository _targets = null!;
 
 	public ScheduleDispatchServiceTests(PostgresFixture fixture)
 	{
@@ -74,8 +77,10 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 		RunSecretStore runSecrets = new(
 			_fixture.ConnectionString, cipher, new InPlaySecretRedactor(), Options.Create(new RunSecretOptions()), NullLogger<RunSecretStore>.Instance);
 
+		_sites = new SiteRepository(_fixture.ConnectionString);
+		_targets = new TargetRepository(_fixture.ConnectionString);
 		RunCreationService runCreation = new(
-			jobs, new SiteRepository(_fixture.ConnectionString), new TargetRepository(_fixture.ConnectionString),
+			jobs, _sites, _targets,
 			runSecrets, Options.Create(new DiscoveryOptions()), Options.Create(new RunSecretOptions()));
 
 		IApplianceStateRepository applianceState = new ApplianceStateRepository(_fixture.ConnectionString);
@@ -107,6 +112,65 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 		Assert.True(await reader.ReadAsync());
 		Assert.Equal(ScheduleDispatchService.ScheduledInitiator, reader.GetString(0));
 		Assert.Equal("discover", reader.GetString(1));
+	}
+
+	/// <summary>
+	/// Issue #515: the dispatcher must stamp <c>runs.schedule_id</c> on the run it
+	/// creates -- the non-scan branch calls <see cref="Waypoint.Core.Jobs.IJobControlRepository.CreateRunAsync"/>
+	/// directly (not through <see cref="RunCreationService.CreateScanRunAsync"/>), so
+	/// this is a separate code path from the scan one covered below.
+	/// </summary>
+	[Fact]
+	public async Task SweepAsync_DiscoverSchedule_StampsScheduleIdOnTheCreatedRun()
+	{
+		Guid id = (await _schedules.CreateAsync(
+			$"sweep-discover-schedid-{Guid.NewGuid():N}", "discover", "* * * * *", "{}", null,
+			DateTimeOffset.UtcNow.AddMinutes(-1), "alice", CancellationToken.None))!.Value;
+
+		await _dispatch.SweepAsync(CancellationToken.None);
+
+		Schedule after = (await _schedules.GetAsync(id, CancellationToken.None))!;
+		Assert.NotNull(after.LastRunId);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT schedule_id FROM runs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(after.LastRunId!.Value);
+		object? scheduleId = await command.ExecuteScalarAsync();
+		Assert.Equal(id, (Guid)scheduleId!);
+	}
+
+	/// <summary>
+	/// Issue #515: the scan branch dispatches through <see cref="RunCreationService.CreateScanRunAsync"/>
+	/// (a different code path from the direct <see cref="Waypoint.Core.Jobs.IJobControlRepository.CreateRunAsync"/>
+	/// call the non-scan branch uses) -- both must stamp <c>schedule_id</c>.
+	/// </summary>
+	[Fact]
+	public async Task SweepAsync_ScanSchedule_StampsScheduleIdOnTheCreatedRun()
+	{
+		Guid siteId = (await _sites.CreateAsync("schedule-scan-site", null, null, CancellationToken.None))!.Value;
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.Ssh, "schedule-scan-target", """{"host":"esxi-01.example.internal"}""",
+			credentialId: null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+		Assert.NotNull(targetId);
+
+		string scopeJson = System.Text.Json.JsonSerializer.Serialize(new { site_id = siteId });
+		Guid id = (await _schedules.CreateAsync(
+			$"sweep-scan-schedid-{Guid.NewGuid():N}", "scan", "* * * * *", scopeJson, null,
+			DateTimeOffset.UtcNow.AddMinutes(-1), "alice", CancellationToken.None))!.Value;
+
+		await _dispatch.SweepAsync(CancellationToken.None);
+
+		Schedule after = (await _schedules.GetAsync(id, CancellationToken.None))!;
+		Assert.NotNull(after.LastRunId);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT schedule_id FROM runs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(after.LastRunId!.Value);
+		object? scheduleId = await command.ExecuteScalarAsync();
+		Assert.Equal(id, (Guid)scheduleId!);
 	}
 
 	[Fact]

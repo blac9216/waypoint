@@ -227,9 +227,9 @@ public sealed class CatalogFakeJobQueueRepository : IJobControlRepository, IJobR
 	public (string RunType, string ScopeJson, Guid? CredentialId, string? InitiatedBy)? LastCreateRun { get; private set; }
 	public IReadOnlyList<JobSpec>? LastFanOut { get; private set; }
 
-	public Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken)
+	public Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken, Guid? scheduleId = null)
 	{
-		_ = cancellationToken;
+		_ = (cancellationToken, scheduleId);
 		LastCreateRun = (runType, scopeJson, credentialId, initiatedBy);
 		return Task.FromResult(Guid.NewGuid());
 	}

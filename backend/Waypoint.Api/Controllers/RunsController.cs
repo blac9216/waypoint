@@ -550,6 +550,7 @@ public sealed class RunsController : ControllerBase
 			Scope: run.ScopeJson,
 			CredentialId: run.CredentialId?.ToString(),
 			InitiatedBy: run.InitiatedBy,
+			ScheduleId: run.ScheduleId?.ToString(),
 			CreatedAt: run.CreatedAt!,
 			StartedAt: run.StartedAt,
 			CompletedAt: run.CompletedAt,
