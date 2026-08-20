@@ -123,6 +123,36 @@ public sealed class OidcAuthenticationTests : IClassFixture<OidcApiFactory>
 		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
 	}
 
+	/// <summary>
+	/// Issue #536: the counterpart to <see cref="Me_WithValidOidcToken_ReturnsMappedIdentityAndRole"/>
+	/// above (which already implicitly proves the canonical issuer -- <see cref="OidcApiFactory.Issuer"/>
+	/// -- is accepted, since every other test in this class mints tokens with it
+	/// unchanged). This pins the other half of the same issuer-validation boundary: a
+	/// token that is otherwise perfectly valid (signature, audience, claims, lifetime)
+	/// but carries a DIFFERENT issuer string -- e.g. the backend's internal
+	/// container-network discovery address, or any host other than the one
+	/// Oidc:ValidIssuer is pinned to -- must still be rejected. This is exactly the
+	/// validation gap #536 found: before this issue's fix, AddJwtBearer derived
+	/// ValidIssuer from Oidc:Authority, so a real browser-obtained token (issued
+	/// against the browser-facing canonical issuer) could never match and always
+	/// 401'd; after the fix, Oidc:ValidIssuer is pinned to the canonical issuer
+	/// directly, so only that value (or an explicitly configured second issuer) is
+	/// ever accepted.
+	/// </summary>
+	[Fact]
+	public async Task Me_WithTokenFromAnUnrecognizedIssuer_IsRejected()
+	{
+		HttpClient client = _factory.CreateClient();
+		string token = OidcApiFactory.IssueToken(issuer: "https://not-the-configured-issuer.example.internal/auth/realms/waypoint");
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/auth/me");
+		request.Headers.Add("Authorization", $"Bearer {token}");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
 	[Fact]
 	public async Task Me_WithExpiredToken_IsRejected()
 	{

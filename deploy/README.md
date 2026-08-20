@@ -166,6 +166,49 @@ both up (dev admin credentials: `KEYCLOAK_ADMIN`/`KEYCLOAK_ADMIN_PASSWORD`,
 same dev-only-default convention as everything else in this file — override
 in `deploy/.env`).
 
+**Canonical issuer (issue #536) — pin this together with the edge port/hostname.**
+Keycloak's `KC_HOSTNAME` (hostname-v2 provider, the default since Keycloak 22,
+`--hostname-strict=true` **required** — live-verified that `hostname-strict=false`,
+`start-dev`'s own implicit default, silently keeps deriving the issuer from
+request headers even with `KC_HOSTNAME` set) pins ONE public identity for
+every self-referential URL it renders, including the `iss` claim on every
+token it issues — regardless of whether the request that reached it came from
+a browser through nginx's `/auth/` proxy or directly from `backend` on the
+internal network. `KC_HOSTNAME` must include the `/auth` path explicitly
+(also live-verified: hostname-v2 does not automatically append
+`KC_HTTP_RELATIVE_PATH` to it the way it does the scheme/port). The backend
+independently validates every real token's `iss` against `Oidc:ValidIssuer`,
+which must be set to that exact value plus `/realms/waypoint`
+(`{KC_HOSTNAME}/realms/waypoint`) — `Oidc:Authority` stays pointed at
+Keycloak's internal `http://keycloak:8080/auth/realms/waypoint` address
+purely for fast discovery-document/JWKS fetching, deliberately not also used
+for issuer validation the way `AddJwtBearer` defaults to (a real
+browser-obtained token's `iss` can never match that internal address).
+
+The dev-stack defaults assume `localhost:8443` — this repo's own
+`WAYPOINT_HTTPS_PORT` default — so a fresh `docker compose up` gets a working
+login with **no** override needed. An operator changing the edge port or
+fronting the stack with a real hostname/FQDN **must** override three values
+together, all in `deploy/.env` (never commit a real value — see this repo's
+sanitization rules):
+
+```bash
+# Example: appliance reachable at https://waypoint.example.internal (no
+# custom port) instead of the localhost:8443 dev default.
+KC_HOSTNAME=https://waypoint.example.internal/auth
+OIDC_VALID_ISSUER=https://waypoint.example.internal/auth/realms/waypoint
+# Oidc__PublicAuthority's default (a same-origin relative path) needs no
+# change — it already resolves against whatever origin the browser used to
+# load the SPA, so it tracks KC_HOSTNAME automatically.
+```
+
+Getting `KC_HOSTNAME`/`OIDC_VALID_ISSUER` out of sync is exactly the failure
+this issue fixed: a real login succeeds all the way through Keycloak, but
+`GET /api/v1/auth/me` 401s because the token's `iss` doesn't match what the
+backend expects. There is no external dependency here — `KC_HOSTNAME` only
+controls how Keycloak renders its own URLs, it is never dialled out to, so
+this stays air-gap-safe.
+
 ### Local auth (dev-flag, issue #29)
 
 `POST /api/v1/auth/login` (the dev-grade single-admin-user local auth stand-in,

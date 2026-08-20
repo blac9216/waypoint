@@ -27,13 +27,47 @@ public sealed class OidcAuthOptions
 	public const string SectionName = "Oidc";
 
 	/// <summary>
-	/// The realm's issuer URL (e.g. <c>https://keycloak.example.internal/realms/waypoint</c>),
-	/// used both for token issuer validation and to locate the discovery document
-	/// (<c>{Authority}/.well-known/openid-configuration</c>). Required for OIDC to be
-	/// usable; when unset the JwtBearer handler fails closed (every bearer request is
-	/// rejected) rather than silently accepting unvalidated tokens.
+	/// Where the backend fetches the discovery document/JWKS from
+	/// (<c>{Authority}/.well-known/openid-configuration</c>) — the backend's own
+	/// container-network view of Keycloak, e.g.
+	/// <c>http://keycloak:8080/auth/realms/waypoint</c>. Required for OIDC to be usable;
+	/// when unset the JwtBearer handler fails closed (every bearer request is rejected)
+	/// rather than silently accepting unvalidated tokens.
+	///
+	/// Issue #536: deliberately NOT also used for issuer (<c>iss</c>) validation, unlike
+	/// <c>AddJwtBearer</c>'s default (which derives <c>ValidIssuer</c> from this same
+	/// value) — see <see cref="ValidIssuer"/>/<see cref="ValidIssuers"/> for why that
+	/// default cannot work here: this address is reachable only from <c>backend</c>,
+	/// never from the browser that actually mints tokens.
 	/// </summary>
 	public string? Authority { get; set; }
+
+	/// <summary>
+	/// The single canonical issuer string a real token's <c>iss</c> claim must match
+	/// (issue #536). Distinct from <see cref="Authority"/>: that address is the
+	/// backend's internal, container-network view of Keycloak, used only to fetch the
+	/// discovery document/JWKS quickly and without a TLS trust round trip; a real
+	/// browser-obtained token's issuer instead reflects Keycloak's
+	/// <c>KC_HOSTNAME</c>-pinned canonical public identity (deploy/README.md
+	/// "Keycloak"), which is what this property should be set to. Required in every
+	/// real deployment (an unset value plus an empty <see cref="ValidIssuers"/> fails
+	/// closed — <c>AddJwtBearer</c> falls back to validating against
+	/// <see cref="Authority"/>, which a browser-minted token's <c>iss</c> can never
+	/// match, so login stays broken rather than silently accepting the wrong issuer).
+	/// Program.cs wires <c>MetadataAddress</c> from <see cref="Authority"/> and
+	/// <c>TokenValidationParameters.ValidIssuer</c>/<c>ValidIssuers</c> from this pair
+	/// independently, so discovery and issuer validation can point at two different
+	/// URLs. Prefer this single-value property; use <see cref="ValidIssuers"/> only for
+	/// a deployment that must accept more than one issuer string at once.
+	/// </summary>
+	public string? ValidIssuer { get; set; }
+
+	/// <summary>
+	/// Accepts more than one issuer string at once (issue #536) — e.g. a transition
+	/// between two edge hostnames. Checked alongside <see cref="ValidIssuer"/> when
+	/// both are set; most deployments need only the single-value property above.
+	/// </summary>
+	public IReadOnlyList<string> ValidIssuers { get; set; } = Array.Empty<string>();
 
 	/// <summary>
 	/// The OIDC client/audience this backend validates tokens for — the confidential
