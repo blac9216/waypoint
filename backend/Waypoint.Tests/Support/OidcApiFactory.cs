@@ -48,6 +48,15 @@ public class OidcApiFactory : WaypointApiFactory
 	private static readonly SymmetricSecurityKey SigningKey =
 		new(Encoding.UTF8.GetBytes("test-only-oidc-signing-key-not-for-any-real-use-32bytes+"));
 
+	/// <summary>
+	/// A second key the factory's <see cref="TokenValidationParameters.IssuerSigningKey"/>
+	/// never recognizes -- deliberately a different byte sequence, not just a
+	/// re-derivation of <see cref="SigningKey"/>, so a token signed with it is a stand-in
+	/// for a signature tampered with or forged by any party without the real key.
+	/// </summary>
+	private static readonly SymmetricSecurityKey ForeignSigningKey =
+		new(Encoding.UTF8.GetBytes("a-completely-different-test-only-key-not-recognized-32b+"));
+
 	protected override void ConfigureWebHost(IWebHostBuilder builder)
 	{
 		base.ConfigureWebHost(builder);
@@ -88,7 +97,11 @@ public class OidcApiFactory : WaypointApiFactory
 	/// <paramref name="authTime"/> (issue #521) places the standard OIDC <c>auth_time</c>
 	/// claim (Unix-epoch seconds) unless left null, in which case the token carries none
 	/// -- the fail-closed case <c>FreshAuthTests</c> needs to prove for a Keycloak realm
-	/// missing the "Authentication Time" protocol mapper.
+	/// missing the "Authentication Time" protocol mapper. <paramref name="audience"/>
+	/// (issue #528) overrides the <c>aud</c> claim to prove the wrong-audience fail-closed
+	/// path. <paramref name="useForeignSigningKey"/> (issue #528) signs the token with
+	/// <see cref="ForeignSigningKey"/> instead of <see cref="SigningKey"/> to prove a
+	/// tampered/foreign signature is rejected.
 	/// </summary>
 	public static string IssueToken(
 		string username = "jane.doe",
@@ -97,7 +110,9 @@ public class OidcApiFactory : WaypointApiFactory
 		bool omitUsername = false,
 		DateTime? expires = null,
 		DateTimeOffset? authTime = null,
-		string? issuer = null)
+		string? issuer = null,
+		string? audience = null,
+		bool useForeignSigningKey = false)
 	{
 		List<Claim> claims = new();
 		if (!omitUsername)
@@ -117,10 +132,12 @@ public class OidcApiFactory : WaypointApiFactory
 
 		JwtSecurityToken token = new(
 			issuer: issuer ?? Issuer,
-			audience: Audience,
+			audience: audience ?? Audience,
 			claims: claims,
 			expires: expires ?? DateTime.UtcNow.AddMinutes(5),
-			signingCredentials: new SigningCredentials(SigningKey, SecurityAlgorithms.HmacSha256));
+			signingCredentials: new SigningCredentials(
+				useForeignSigningKey ? ForeignSigningKey : SigningKey,
+				SecurityAlgorithms.HmacSha256));
 
 		return new JwtSecurityTokenHandler().WriteToken(token);
 	}

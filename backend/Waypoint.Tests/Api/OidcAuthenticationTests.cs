@@ -28,8 +28,10 @@ namespace Waypoint.Tests.Api;
 /// covered by <c>MinimumRoleAuthorizationHandlerTests</c> -- these tests are about the
 /// new claims-mapping seam specifically: a valid Keycloak-shaped JWT reaches <c>/me</c>
 /// with the right identity/role, and the fail-closed paths (missing role, missing
-/// username, wrong issuer/audience/signature) are all rejected rather than silently
-/// downgraded.
+/// username, unrecognized role, expired token, no token, wrong issuer, wrong audience,
+/// and a tampered/foreign signature) are all rejected rather than silently downgraded
+/// (issue #528 added the wrong-audience and tampered-signature cases and corrected this
+/// comment, which previously claimed all three were already covered).
 /// </summary>
 public sealed class OidcAuthenticationTests : IClassFixture<OidcApiFactory>
 {
@@ -144,6 +146,54 @@ public sealed class OidcAuthenticationTests : IClassFixture<OidcApiFactory>
 	{
 		HttpClient client = _factory.CreateClient();
 		string token = OidcApiFactory.IssueToken(issuer: "https://not-the-configured-issuer.example.internal/auth/realms/waypoint");
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/auth/me");
+		request.Headers.Add("Authorization", $"Bearer {token}");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #528: the audience counterpart to
+	/// <see cref="Me_WithTokenFromAnUnrecognizedIssuer_IsRejected"/> above -- a token that
+	/// is otherwise perfectly valid (issuer, signature, claims, lifetime) but carries an
+	/// <c>aud</c> other than <see cref="OidcApiFactory.Audience"/> (the value
+	/// <c>ValidateAudience</c> is pinned to for this test host, mirroring
+	/// <c>Oidc:Audience</c> in production) must still be rejected. This was previously
+	/// claimed as covered by this class's doc comment and PR #527's body when it was not.
+	/// </summary>
+	[Fact]
+	public async Task Me_WithTokenForAnUnrecognizedAudience_IsRejected()
+	{
+		HttpClient client = _factory.CreateClient();
+		string token = OidcApiFactory.IssueToken(audience: "some-other-client");
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/auth/me");
+		request.Headers.Add("Authorization", $"Bearer {token}");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #528: the signature counterpart to
+	/// <see cref="Me_WithTokenFromAnUnrecognizedIssuer_IsRejected"/> and
+	/// <see cref="Me_WithTokenForAnUnrecognizedAudience_IsRejected"/> above -- a token
+	/// with an otherwise valid header/payload (correct issuer, audience, claims,
+	/// lifetime) but signed with a key other than the one
+	/// <c>TokenValidationParameters.IssuerSigningKey</c> is pinned to (standing in for a
+	/// tampered or forged signature, since a party without the real key cannot produce a
+	/// signature this validator accepts) must still be rejected. This was previously
+	/// claimed as covered by this class's doc comment and PR #527's body when it was not.
+	/// </summary>
+	[Fact]
+	public async Task Me_WithTokenSignedByAForeignKey_IsRejected()
+	{
+		HttpClient client = _factory.CreateClient();
+		string token = OidcApiFactory.IssueToken(useForeignSigningKey: true);
 
 		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/auth/me");
 		request.Headers.Add("Authorization", $"Bearer {token}");
