@@ -14,6 +14,7 @@
 
 using System.Globalization;
 using System.Net;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
@@ -98,6 +99,7 @@ public sealed class UsersController : ControllerBase
 		}
 
 		string siteScopeJson = string.IsNullOrWhiteSpace(request.SiteScope) ? "[]" : request.SiteScope;
+		ValidateSiteScopeJson(siteScopeJson);
 
 		Guid? id = await _users.CreateAsync(
 			request.OidcSub, request.Username, role, siteScopeJson, "oidc", cancellationToken).ConfigureAwait(false);
@@ -127,6 +129,8 @@ public sealed class UsersController : ControllerBase
 			throw ApiException.Validation("site_scope is required.", "Set \"site_scope\" (a JSON array) in the request body.");
 		}
 
+		ValidateSiteScopeJson(request.SiteScope);
+
 		bool updated = await _users.UpdateSiteScopeAsync(id, request.SiteScope, cancellationToken).ConfigureAwait(false);
 		if (!updated)
 		{
@@ -153,4 +157,37 @@ public sealed class UsersController : ControllerBase
 
 	private static ApiException NotFoundError(Guid id) =>
 		new(HttpStatusCode.NotFound, "not_found", $"No user exists with id '{id}'.");
+
+	/// <summary>
+	/// Guards the <c>$N::jsonb</c> cast in <c>UserRepository.CreateAsync</c> /
+	/// <c>UpdateSiteScopeAsync</c> (issue #530): malformed JSON reaching that cast makes
+	/// Postgres raise <c>invalid_text_representation</c>, which
+	/// <c>Waypoint.Api.Middleware.ErrorHandlingMiddleware</c> shapes as an unmapped 500.
+	/// Parsing here, before the repository call, turns that into the documented 400
+	/// <c>validation_error</c> -- the same "parse in the controller, map to
+	/// ApiException.Validation" shape <c>Waypoint.Core.Jobs.ScanScopeParser</c> uses for
+	/// run scope. site_scope is documented as a JSON array, so a well-formed but
+	/// non-array value (e.g. an object or a bare string) is rejected too.
+	/// </summary>
+	private static void ValidateSiteScopeJson(string siteScopeJson)
+	{
+		JsonElement root;
+		try
+		{
+			root = JsonSerializer.Deserialize<JsonElement>(siteScopeJson);
+		}
+		catch (JsonException)
+		{
+			throw ApiException.Validation(
+				"site_scope is not valid JSON.",
+				"\"site_scope\" must be a JSON array (as a string), e.g. \"[\\\"site-a\\\"]\".");
+		}
+
+		if (root.ValueKind != JsonValueKind.Array)
+		{
+			throw ApiException.Validation(
+				"site_scope must be a JSON array.",
+				"\"site_scope\" must be a JSON array (as a string), e.g. \"[\\\"site-a\\\"]\".");
+		}
+	}
 }
