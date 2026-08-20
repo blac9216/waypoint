@@ -207,6 +207,64 @@ public sealed class DashboardApiTests : IAsyncLifetime, IDisposable
 		Assert.Equal("inventory_stale", attention.GetProperty("kind").GetString());
 	}
 
+	// Issue #524: negative-case fixtures. The positive-path tests above prove the
+	// filters EMIT; without these, a mutation that dropped either predicate entirely
+	// (e.g. `Where(_ => true)`) would pass the suite -- nothing here ever asserted the
+	// excluded row stays excluded.
+
+	[Fact]
+	public async Task Get_WithHealthyCredential_DoesNotSurfaceAttentionSignal()
+	{
+		await CreateCredentialWithHealthAsync("dash-healthy-cred", "valid");
+
+		JsonElement root = await GetDashboardAsync();
+
+		Assert.Empty(root.GetProperty("attention").EnumerateArray());
+	}
+
+	[Fact]
+	public async Task Get_WithFreshTarget_DoesNotSurfaceAttentionSignal()
+	{
+		(_, Guid targetId) = await CreateSiteAndTargetAsync("fresh-site");
+		await StampLastRefreshedAsync(targetId, DateTimeOffset.UtcNow);
+
+		JsonElement root = await GetDashboardAsync();
+
+		Assert.Empty(root.GetProperty("attention").EnumerateArray());
+	}
+
+	/// <summary>
+	/// Pins the <c>Discovery:StaleAfterMinutes</c> boundary itself (the fixture host
+	/// configures 60 minutes -- see <see cref="DashboardApiFactory"/>), mirroring
+	/// issue #426's precedent in <c>AutoDiscoverOnScanInitiationTests</c>:
+	/// <c>DashboardAggregateService.BuildStaleInventoryAttention</c> compares with
+	/// strict <c>&lt;</c>, so equality falls on the FRESH side. A 30-second margin on
+	/// each side of the 60-minute edge brackets that boundary without racing the test's
+	/// clock read against the service's own <c>DateTimeOffset.UtcNow</c> read.
+	/// </summary>
+	[Fact]
+	public async Task Get_WithTargetJustInsideStaleWindow_DoesNotSurfaceAttentionSignal()
+	{
+		(_, Guid targetId) = await CreateSiteAndTargetAsync("boundary-fresh-site");
+		await StampLastRefreshedAsync(targetId, DateTimeOffset.UtcNow.AddMinutes(-60).AddSeconds(30));
+
+		JsonElement root = await GetDashboardAsync();
+
+		Assert.Empty(root.GetProperty("attention").EnumerateArray());
+	}
+
+	[Fact]
+	public async Task Get_WithTargetJustOutsideStaleWindow_SurfacesAttentionSignal()
+	{
+		(_, Guid targetId) = await CreateSiteAndTargetAsync("boundary-stale-site");
+		await StampLastRefreshedAsync(targetId, DateTimeOffset.UtcNow.AddMinutes(-60).AddSeconds(-30));
+
+		JsonElement root = await GetDashboardAsync();
+
+		JsonElement attention = root.GetProperty("attention").EnumerateArray().Single();
+		Assert.Equal("inventory_stale", attention.GetProperty("kind").GetString());
+	}
+
 	private async Task<JsonElement> GetDashboardAsync()
 	{
 		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/dashboard");
@@ -288,13 +346,17 @@ public sealed class DashboardApiTests : IAsyncLifetime, IDisposable
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
 
-	private async Task CreateAuthFailingCredentialAsync(string name)
+	private async Task CreateAuthFailingCredentialAsync(string name) =>
+		await CreateCredentialWithHealthAsync(name, "auth_failing");
+
+	private async Task CreateCredentialWithHealthAsync(string name, string health)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand insert = new(
-			"INSERT INTO credentials (name, credential_type, owner, health) VALUES ($1, 'ssh', 'shared', 'auth_failing')", connection);
+			"INSERT INTO credentials (name, credential_type, owner, health) VALUES ($1, 'ssh', 'shared', $2)", connection);
 		insert.Parameters.AddWithValue(name);
+		insert.Parameters.AddWithValue(health);
 		await insert.ExecuteNonQueryAsync();
 	}
 
