@@ -60,6 +60,17 @@
 --                                                    TargetRepository writes are only
 --                                                    ever called from
 --                                                    Waypoint.Api.Controllers)
+--                                                  -- CORRECTION (migration 0033, issue
+--                                                    #556): targets also gets
+--                                                    UPDATE (discovery_status,
+--                                                    last_refreshed) -- SELECT alone
+--                                                    never covered
+--                                                    TargetRepository.SetDiscoveryStatusAsync,
+--                                                    which DiscoverJobHandler calls on
+--                                                    every discover job. The API-only
+--                                                    claim above still holds for every
+--                                                    other targets column (name,
+--                                                    connection, credential_id, kind).
 --     inventory_items       SELECT, INSERT, UPDATE, DELETE
 --                                                  -- InventoryRepository's discover-job
 --                                                    upsert/replace-per-target shape
@@ -69,6 +80,16 @@
 --                                                    singleton connection row; writing
 --                                                    it is an API-only admin action
 --                                                    (StigManagerController)
+--     config_docs, config_versions SELECT         -- CORRECTION (migration 0033, issue
+--                                                    #556): omitted entirely here --
+--                                                    ScanJobHandler's attest stage
+--                                                    resolves attestation config docs
+--                                                    via ConfigDocRepository before
+--                                                    applying them to a scan's HDF
+--                                                    report (issue #266's global/
+--                                                    site/target layer resolution).
+--                                                    Read-only: doc/version authoring
+--                                                    is POST /config-docs, API-only.
 --     attestation_snapshots SELECT, INSERT        -- scan/convert stage persists the
 --                                                    at-scan-time attestations-applied
 --                                                    ledger; never updated or deleted
@@ -81,6 +102,14 @@
 --                                                    (RunsController registers the
 --                                                    secret at run-creation time,
 --                                                    before any job is claimed)
+--                                                  -- CORRECTION (migration 0033, issue
+--                                                    #556): also gets
+--                                                    UPDATE (expires_at) -- SELECT,
+--                                                    DELETE alone never covered
+--                                                    RunSecretStore.DecryptAsync's
+--                                                    sliding-expiry write (issue #469),
+--                                                    which lands in every successful
+--                                                    decrypt, not just cleanup/delete.
 --
 --   download-runner only (catalog-index/download -- ADR-0014 SS7 "download runner:
 --   managed tool/depot/content write access" is the filesystem-mount statement; the
