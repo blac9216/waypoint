@@ -149,6 +149,17 @@
 	color: var(--bad);
 }
 
+.config-table__discovery-detail {
+	font-size: 10.5px;
+	color: var(--txt2);
+	margin-top: 3px;
+}
+
+.config-table__discovery-link {
+	color: var(--acc);
+	text-decoration: underline;
+}
+
 .config-table__row-actions {
 	display: flex;
 	gap: 6px;

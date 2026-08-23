@@ -145,8 +145,8 @@ describe("SiteTargetsPanel (issue #258 slice: targets table + Targets CRUD)", ()
 		await mount();
 
 		expect(screen.getByText("discovered")).toBeInTheDocument();
-		const failedCell = screen.getByText("discovery failed");
-		expect(failedCell).toHaveClass("config-table__discovery--bad");
+		const failedStatus = screen.getByText("discovery failed");
+		expect(failedStatus.closest("td")).toHaveClass("config-table__discovery--bad");
 	});
 
 	it("Admin can create a target via the Add target form, POSTing connection as {host} only", async () => {
@@ -269,5 +269,187 @@ describe("SiteTargetsPanel (issue #258 slice: targets table + Targets CRUD)", ()
 		fireEvent.click(within(row).getByText("Delete"));
 
 		await waitFor(() => expect(onTargetsChanged).toHaveBeenCalled());
+	});
+});
+
+describe("SiteTargetsPanel Refresh Inventory action (issue #557)", () => {
+	let originalFetch: typeof fetch;
+	let fetchCalls: { url: string; init?: RequestInit }[];
+	let targets: Target[];
+	let runStates: Record<string, { state: string; job_count_failed: number; job_count_blocked: number }>;
+	let discoverResponse: { run_id: string; job_id: string } | { error: { code: string; message: string } } | null;
+
+	function queueRunState(runId: string, state: string, failed = 0, blocked = 0) {
+		runStates[runId] = { state, job_count_failed: failed, job_count_blocked: blocked };
+	}
+
+	function jsonResponse(body: unknown, status = 200): Response {
+		return new Response(body === undefined ? null : JSON.stringify(body), {
+			status,
+			headers: { "Content-Type": "application/json" },
+		});
+	}
+
+	function installFetchMock(role: string) {
+		fetchCalls = [];
+		targets = TARGETS.map((t) => ({ ...t }));
+		runStates = {};
+		discoverResponse = { run_id: "run-1", job_id: "job-1" };
+
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			const method = init?.method ?? "GET";
+			fetchCalls.push({ url, init });
+
+			if (url === "/api/v1/sites/site-1/targets" && method === "GET") {
+				return jsonResponse(targets);
+			}
+			if (/^\/api\/v1\/targets\/[^/]+\/discover$/.test(url) && method === "POST") {
+				if (discoverResponse && "error" in discoverResponse) {
+					return jsonResponse(discoverResponse, 400);
+				}
+				return jsonResponse(discoverResponse, 202);
+			}
+			if (/^\/api\/v1\/runs\/[^/]+$/.test(url) && method === "GET") {
+				const runId = url.split("/").pop()!;
+				const run = runStates[runId] ?? { state: "running", job_count_failed: 0, job_count_blocked: 0 };
+				return jsonResponse({
+					id: runId,
+					run_type: "discover",
+					state: run.state,
+					job_count_failed: run.job_count_failed,
+					job_count_blocked: run.job_count_blocked,
+				});
+			}
+			throw new Error(`unexpected fetch: ${method} ${url}`);
+		}) as unknown as typeof fetch;
+
+		window.sessionStorage.setItem(
+			"waypoint.session",
+			JSON.stringify({
+				token: "tok-1",
+				username: "j.moreno",
+				role,
+				expiresAt: new Date(Date.now() + 60_000).toISOString(),
+			}),
+		);
+	}
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		window.sessionStorage.clear();
+		vi.useRealTimers();
+	});
+
+	async function mount() {
+		render(
+			<AuthProvider>
+				<SiteTargetsPanel siteId="site-1" siteName="Alpha Enclave" credentials={CREDENTIALS} />
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("vcsa-01")).toBeInTheDocument());
+	}
+
+	it("shows Refresh Inventory for the vsphere (inventory-capable) target and not for the ssh target", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		const vsphereRow = screen.getByText("vcsa-01").closest("tr")!;
+		expect(within(vsphereRow).getByText("Refresh Inventory")).toBeInTheDocument();
+
+		const sshRow = screen.getByText("photon-01").closest("tr")!;
+		expect(within(sshRow).queryByText("Refresh Inventory")).not.toBeInTheDocument();
+		expect(within(sshRow).queryByText(/Refresh/)).not.toBeInTheDocument();
+	});
+
+	it("calls POST /targets/{id}/discover exactly once and shows queued/running feedback via aria-live status", async () => {
+		installFetchMock("Admin");
+		queueRunState("run-1", "running");
+		await mount();
+
+		const row = screen.getByText("vcsa-01").closest("tr")!;
+		fireEvent.click(within(row).getByText("Refresh Inventory"));
+
+		await waitFor(() =>
+			expect(fetchCalls.filter((c) => c.url === "/api/v1/targets/target-1/discover" && c.init?.method === "POST")).toHaveLength(1),
+		);
+		await waitFor(() => expect(within(row).getByText("Refreshing inventory…")).toBeInTheDocument());
+		const status = within(row).getByText("Refreshing inventory…");
+		expect(status).toHaveAttribute("aria-live", "polite");
+	});
+
+	it("disables the action while discovery is queued/running, preventing duplicate submissions", async () => {
+		installFetchMock("Admin");
+		queueRunState("run-1", "running");
+		await mount();
+
+		const row = screen.getByText("vcsa-01").closest("tr")!;
+		const button = within(row).getByText("Refresh Inventory");
+		fireEvent.click(button);
+
+		await waitFor(() => expect(within(row).getByText("Refreshing…")).toBeDisabled());
+		fireEvent.click(within(row).getByText("Refreshing…"));
+
+		await waitFor(() =>
+			expect(fetchCalls.filter((c) => c.url === "/api/v1/targets/target-1/discover" && c.init?.method === "POST")).toHaveLength(1),
+		);
+	});
+
+	it("updates from running to discovered without a full-page reload, then re-enables the action", async () => {
+		installFetchMock("Admin");
+		queueRunState("run-1", "running");
+		await mount();
+
+		const row = screen.getByText("vcsa-01").closest("tr")!;
+		fireEvent.click(within(row).getByText("Refresh Inventory"));
+		await waitFor(() => expect(within(row).getByText("Refreshing inventory…")).toBeInTheDocument());
+
+		// Flip the run terminal and let the next poll tick observe it — no
+		// fake timers needed since the component's own 3s poll loop will pick
+		// this up; wait generously for that real tick. On success the local
+		// discovery state clears entirely (a fresh load() reflects the real
+		// discovery_status), so the action reverts to its enabled idle label.
+		queueRunState("run-1", "completed");
+		await waitFor(() => expect(within(row).getByText("Refresh Inventory")).not.toBeDisabled(), { timeout: 6000 });
+	}, 10000);
+
+	it("a terminal failed run exposes a run-detail link and a Retry action", async () => {
+		installFetchMock("Admin");
+		queueRunState("run-1", "completed_with_failures", 1);
+		await mount();
+
+		const row = screen.getByText("vcsa-01").closest("tr")!;
+		fireEvent.click(within(row).getByText("Refresh Inventory"));
+
+		await waitFor(() => expect(within(row).getByText("Retry")).toBeInTheDocument(), { timeout: 6000 });
+		const link = within(row).getByText("View run details") as HTMLAnchorElement;
+		expect(link.getAttribute("href")).toBe("/live-run?run=run-1");
+		expect(within(row).getByText("Retry")).not.toBeDisabled();
+	}, 10000);
+
+	it("surfaces a rejected POST /discover as an error without leaving the action stuck disabled", async () => {
+		installFetchMock("Admin");
+		discoverResponse = { error: { code: "unsupported_kind", message: "discover only supports 'vsphere' targets." } };
+		await mount();
+
+		const row = screen.getByText("vcsa-01").closest("tr")!;
+		fireEvent.click(within(row).getByText("Refresh Inventory"));
+
+		await waitFor(() => expect(screen.getByText(/discover only supports/)).toBeInTheDocument());
+		expect(within(row).getByText("Refresh Inventory")).not.toBeDisabled();
+	});
+
+	it("Viewer sees Refresh Inventory disabled with a Requires Admin reason, matching the backend's Admin-only guard", async () => {
+		installFetchMock("Viewer");
+		await mount();
+
+		const row = screen.getByText("vcsa-01").closest("tr")!;
+		const button = within(row).getByText("Refresh Inventory");
+		expect(button).toBeDisabled();
+		expect(button).toHaveAttribute("title", expect.stringContaining("Requires Admin"));
 	});
 });

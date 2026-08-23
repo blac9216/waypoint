@@ -27,6 +27,23 @@ export const TARGET_KINDS: { value: TargetKind; label: string }[] = [
 	{ value: "ssh", label: "SSH (SRG)" },
 ];
 
+/**
+ * The explicit, shared target-kind inventory-capability contract (issue
+ * #557's Risks/Considerations: "should come from a shared/explicit
+ * target-kind contract rather than accumulating scattered `kind ===
+ * "vsphere"` checks as more integrations are added"). Mirrors the backend's
+ * `DiscoveryController.Discover` guard (`Waypoint.Core.Sites.TargetKinds`),
+ * which today only accepts `vsphere` — kept as a Set (not a single constant)
+ * so a second kind gaining discovery support later is a one-line addition
+ * here, not a new comparison scattered across the UI.
+ */
+export const INVENTORY_CAPABLE_TARGET_KINDS: ReadonlySet<TargetKind> = new Set(["vsphere"]);
+
+/** Whether `kind` supports `POST /targets/{id}/discover` — see {@link INVENTORY_CAPABLE_TARGET_KINDS}. */
+export function isInventoryCapable(kind: TargetKind | string): boolean {
+	return INVENTORY_CAPABLE_TARGET_KINDS.has(kind as TargetKind);
+}
+
 export type DiscoveryStatus = "never_discovered" | "discovering" | "discovered" | "failed";
 
 export interface Site {
@@ -119,6 +136,43 @@ export function updateTarget(id: string, input: TargetWriteInput): Promise<Targe
 
 export function deleteTarget(id: string): Promise<void> {
 	return apiDelete<void>(`/targets/${id}`);
+}
+
+/** `DiscoverQueuedResponse` (DiscoveryController.cs) — `POST /targets/{id}/discover`.
+ * Admin-only server-side (`RequireAdminRole`); queues a one-job `discover`
+ * run and returns both ids so the caller can poll/link to it. */
+export interface DiscoverQueuedResponse {
+	run_id: string;
+	job_id: string;
+}
+
+/** Queues a discovery (inventory refresh) run for one target — issue #557's
+ * "Refresh Inventory" action. Callable regardless of current
+ * `discovery_status`/staleness (a manual refresh, not gated on staleness). */
+export function queueDiscover(targetId: string): Promise<DiscoverQueuedResponse> {
+	return apiPost<DiscoverQueuedResponse>(`/targets/${targetId}/discover`);
+}
+
+/** The subset of `RunResponse` (RunContracts.cs) the discovery-poll needs —
+ * state plus the failure job count, so a failed discover job (which can fail
+ * before `targets.discovery_status` itself updates, per #557/#556) is
+ * detectable from the run alone without a second jobs fetch on every poll
+ * tick. */
+export interface DiscoveryRunStatus {
+	id: string;
+	state: "pending" | "running" | "completed" | "completed_with_failures" | "aborted" | string;
+	job_count_failed: number;
+	job_count_blocked: number;
+}
+
+export function fetchDiscoveryRun(runId: string): Promise<DiscoveryRunStatus> {
+	return apiGet<DiscoveryRunStatus>(`/runs/${runId}`);
+}
+
+/** Run states with no further transition (RunContracts.cs / api-contract.md's
+ * run state machine) — polling stops once the run lands on one of these. */
+export function isTerminalRunState(state: string): boolean {
+	return state === "completed" || state === "completed_with_failures" || state === "aborted";
 }
 
 /** `/credentials` — id/name only, per docs/api-contract.md's data ledger
