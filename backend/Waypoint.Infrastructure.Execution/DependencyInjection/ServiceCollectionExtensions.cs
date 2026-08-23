@@ -106,6 +106,12 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<Downloads.DownloadJobHandler>();
 		services.AddSingleton<IJobHandler, Downloads.ToolGatedDownloadJobHandler>();
 
+		// Issue #39 (ADR-0015): the local-repository and manual-upload install paths,
+		// unwrapped by ToolGatedDownloadJobHandler's gate above -- an install job must
+		// run precisely when the tool is NOT yet present, so it cannot be behind the
+		// same presence gate a download job is.
+		services.AddSingleton<IJobHandler, Downloads.ManagedToolInstallJobHandler>();
+
 		services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 		services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
 		services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();

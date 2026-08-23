@@ -160,6 +160,11 @@ public static class ServiceCollectionExtensions
 		// the managed-tool mount.
 		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolPresenceChecker, Downloads.ManagedToolPresenceChecker>();
 
+		// Issue #39: signature verification is a pure filesystem/crypto operation (the
+		// release public key is a mounted file, not a database row) -- no connection
+		// string dependency, same unconditional shape as the presence checker above.
+		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolSignatureVerifier, Downloads.RsaManagedToolSignatureVerifier>();
+
 		// ADR-0005 crypto core (epic #8 slice 1). Registered unconditionally: the
 		// provider is lazy and fail-closed, so a host without a mounted key boots
 		// fine and refuses secret operations with an operator-actionable error.
@@ -219,6 +224,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new Secrets.CredentialRepository(connectionString));
 			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
 			services.AddSingleton<IDownloadRepository>(new DownloadRepository(connectionString));
+			services.AddSingleton<Waypoint.Core.Downloads.IManagedToolInstallRepository>(new Downloads.ManagedToolInstallRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.SystemState.IApplianceStateRepository>(new ApplianceStateRepository(connectionString));
 
 			// Issue #241: depot-sync status is derived from the existing runs table

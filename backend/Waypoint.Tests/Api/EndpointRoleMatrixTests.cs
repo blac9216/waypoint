@@ -137,6 +137,13 @@ public sealed class EndpointRoleMatrixTests
 		// download can run), not privileged data -- same Viewer+ floor as ListDownloads.
 		["DownloadsController.GetReadiness"] = WaypointRole.Viewer,
 
+		// ManagedToolController -- issue #39, ADR-0015 install paths. Same Operator+
+		// floor as DownloadsController.QueueDownloads (a write that starts real work);
+		// install history read is Viewer+, matching ListDownloads/GetReadiness.
+		["ManagedToolController.Install"] = WaypointRole.Operator,
+		["ManagedToolController.Upload"] = WaypointRole.Operator,
+		["ManagedToolController.ListInstalls"] = WaypointRole.Viewer,
+
 		// EventStreamController -- SSE reads, Viewer+.
 		["EventStreamController.GlobalStream"] = WaypointRole.Viewer,
 		["EventStreamController.RunStream"] = WaypointRole.Viewer,

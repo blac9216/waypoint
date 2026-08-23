@@ -72,7 +72,8 @@ public static class JobCapabilities
 		"bundle-export",
 		"bundle-import",
 		"content-library-sync",
-		"update"
+		"update",
+		"tool-install"
 	};
 
 	/// <summary>
