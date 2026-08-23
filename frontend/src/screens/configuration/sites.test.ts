@@ -152,8 +152,27 @@ describe("sites.ts data layer", () => {
 	});
 
 	it("fetchCredentialOptions issues GET /credentials", async () => {
-		await fetchCredentialOptions();
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			calls.push({ url: input.toString(), method: init?.method ?? "GET", body: undefined });
+			return jsonResponse([{ id: "cred-1", name: "Alpha vCenter", credential_type: "vcenter" }]);
+		}) as unknown as typeof fetch;
+
+		const options = await fetchCredentialOptions();
 		expect(calls[0]).toEqual({ url: "/api/v1/credentials", method: "GET", body: undefined });
+		expect(options).toEqual([{ id: "cred-1", name: "Alpha vCenter" }]);
+	});
+
+	it("fetchCredentialOptions excludes depot-token credentials (issue #571/#560 AC)", async () => {
+		globalThis.fetch = vi.fn(async () =>
+			jsonResponse([
+				{ id: "cred-1", name: "Alpha vCenter", credential_type: "vcenter" },
+				{ id: "cred-2", name: "Broadcom Support Portal", credential_type: "depot-token" },
+			]),
+		) as unknown as typeof fetch;
+
+		const options = await fetchCredentialOptions();
+		expect(options).toEqual([{ id: "cred-1", name: "Alpha vCenter" }]);
+		expect(options.some((o) => o.name === "Broadcom Support Portal")).toBe(false);
 	});
 
 	it("queueDiscover issues POST /targets/{id}/discover with no body", async () => {

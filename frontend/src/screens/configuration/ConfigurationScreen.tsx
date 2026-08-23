@@ -4,14 +4,16 @@
  * large to review) implemented the first tab (Sites & Targets); issue #247
  * added the second (Credentials); issue #40 adds the fourth (Compliance
  * Content); issue #312 adds the fifth (STIG Manager); issue #32 adds the
- * sixth (Users & Roles). Depot & Tokens stays stub text so this shell can be
- * built additively without guessing at unbuilt tabs' shapes — each slots in
- * by adding one entry to `TABS` and one branch below, no change to this
- * file's structure.
+ * sixth (Users & Roles); issue #571 adds the third (Depot & Tokens),
+ * completing #560's frontend half. Every tab now has a real component — the
+ * stub-text fallback branch is kept only as a defensive default for an
+ * unrecognized `tab` value, which should be unreachable given `TABS` is the
+ * only source of tab keys.
  */
 import { useState } from "react";
 import { ComplianceContentTab } from "./ComplianceContentTab";
 import { CredentialsTab } from "./CredentialsTab";
+import { DepotTokensTab } from "./DepotTokensTab";
 import { SitesTargetsTab } from "./SitesTargetsTab";
 import { StigManagerTab } from "./StigManagerTab";
 import { UsersTab } from "./UsersTab";
@@ -48,15 +50,10 @@ export function ConfigurationScreen() {
 			<div className="config-screen__content">
 				{tab === "sites" && <SitesTargetsTab />}
 				{tab === "credentials" && <CredentialsTab />}
+				{tab === "depot" && <DepotTokensTab />}
 				{tab === "content" && <ComplianceContentTab />}
 				{tab === "stigman" && <StigManagerTab />}
 				{tab === "users" && <UsersTab />}
-				{tab !== "sites" && tab !== "credentials" && tab !== "content" && tab !== "stigman" && tab !== "users" && (
-					<div className="config-tab__status">
-						{TABS.find((t) => t.key === tab)?.label} lands in a future PR (docs/ui/prototype/README.md
-						"Configuration").
-					</div>
-				)}
 			</div>
 		</div>
 	);

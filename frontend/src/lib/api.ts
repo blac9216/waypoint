@@ -238,6 +238,54 @@ export function apiDelete<T = void>(path: string, options?: ApiRequestOptions): 
 	return apiFetch<T>(path, { ...options, method: "DELETE" });
 }
 
+/**
+ * `POST` a `multipart/form-data` body (issue #571 — the manual tool-upload
+ * path, `POST /downloads/tool/upload`, is the first caller that needs to send
+ * a file rather than JSON). Deliberately its own function rather than a mode
+ * of `apiFetch`: `apiFetch` always sets `Content-Type: application/json` and
+ * always `JSON.stringify`s its body, and `fetch` must be allowed to set its
+ * own multipart boundary header when a `FormData` body is used — setting
+ * `Content-Type` by hand here would omit the boundary parameter and the
+ * server could never parse the parts.
+ */
+export function apiPostForm<T>(path: string, form: FormData, options?: Omit<ApiRequestOptions, "body">): Promise<T> {
+	const { headers, unauthenticated, ...rest } = options ?? {};
+	const finalHeaders = new Headers(headers);
+	finalHeaders.set("Accept", "application/json");
+	if (!unauthenticated) {
+		const token = getToken();
+		if (token) {
+			finalHeaders.set("Authorization", `Bearer ${token}`);
+		}
+	}
+
+	return (async () => {
+		let response: Response;
+		try {
+			response = await fetch(`${API_BASE}${path}`, { ...rest, method: "POST", headers: finalHeaders, body: form });
+		} catch (err) {
+			throw new ApiError(0, "network_error", "Could not reach the Waypoint API.", err);
+		}
+
+		if (!response.ok) {
+			const error = await parseErrorBody(response);
+			if (response.status === 401 && !unauthenticated) {
+				onUnauthorized();
+			}
+			throw error;
+		}
+
+		if (response.status === 202 || response.status === 200 || response.status === 201) {
+			try {
+				return (await response.json()) as T;
+			} catch {
+				return undefined as T;
+			}
+		}
+		return undefined as T;
+	})();
+}
+
 /** One page of a list endpoint: the parsed array plus the total row count
  * across all pages, read from `X-Total-Count`. */
 export interface PagedResult<T> {
