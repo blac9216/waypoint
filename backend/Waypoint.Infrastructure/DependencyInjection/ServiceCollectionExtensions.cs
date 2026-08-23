@@ -231,6 +231,10 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new ConfigDocRepository(connectionString));
 			services.AddSingleton(new AttestationSnapshotRepository(connectionString));
 			services.AddSingleton(new StigManager.StigManagerRepository(connectionString));
+			services.AddSingleton<Waypoint.Core.ComplianceContent.IComplianceContentRepository>(
+				new Waypoint.Infrastructure.ComplianceContent.ComplianceContentRepository(connectionString));
+			services.AddSingleton<Waypoint.Core.ComplianceContent.IProfileRepository>(
+				new Waypoint.Infrastructure.ComplianceContent.ProfileRepository(connectionString));
 			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
 			services.AddSingleton<IUserDirectory>(new UserRepository(connectionString));
 			services.AddSingleton<IAuditRepository>(new AuditRepository(connectionString));

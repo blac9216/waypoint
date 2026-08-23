@@ -377,9 +377,10 @@ claimed `FOR UPDATE SKIP LOCKED`; Keycloak lives in its own database.
 
 The API inserts jobs. Dedicated runners claim them directly from Postgres with an
 atomic job-type allowlist: `compliance-runner` handles discovery, credential tests,
-scans, and later remediation; `download-runner` handles catalog, download, and content
-work. The claimant owns leases, cancellation, state transitions, and structured
-`job_events`; the API replays those events over SSE (ADR-0013, ADR-0014).
+scans, remediation, and compliance-content pull/import; `download-runner` handles
+catalog, download, and library/bundle content work. The claimant owns leases,
+cancellation, state transitions, and structured `job_events`; the API replays those
+events over SSE (ADR-0013, ADR-0014, ADR-0017).
 
 ## Data ledger (screen → source)
 

@@ -1,0 +1,64 @@
+// Copyright 2026 Justin Black
+//
+// Licensed under the Apache License, Version 2.0 (the "License").
+// You may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+namespace Waypoint.Core.ComplianceContent;
+
+/// <summary>
+/// Storage for the compliance-content singleton config and its pull history
+/// (<c>compliance_content</c>/<c>compliance_content_pulls</c>, migration 0033). Both
+/// the API (config CRUD, history reads) and the compliance-runner's content-pull
+/// handler (recording pull outcomes) use this interface -- ADR-0017 places
+/// <c>content-pull</c>/<c>content-import</c> execution in compliance-runner, but
+/// config authorship (PUT) stays API-only, the same split <c>StigManagerRepository</c>
+/// establishes for its own singleton connection row.
+/// </summary>
+public interface IComplianceContentRepository
+{
+	/// <summary>Returns null when compliance content has never been configured.</summary>
+	Task<ComplianceContentConfig?> GetConfigAsync(CancellationToken cancellationToken);
+
+	/// <summary>Upserts the singleton config row (Admin-only write, via the API).</summary>
+	Task<ComplianceContentConfig> PutConfigAsync(string repositoryUrl, string refType, string refValue, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Records a pull attempt's outcome and, on success, stamps
+	/// <c>pulled_commit</c>/<c>pulled_by</c>/<c>pulled_at</c> on the config row in the
+	/// same transaction. Called by the content-pull job handler, never by the API.
+	/// </summary>
+	Task RecordPullAsync(
+		Guid? jobId, string refType, string refValue, string? commit, string status, string? note, string? initiatedBy, CancellationToken cancellationToken);
+
+	/// <summary>Pull history, newest first, bounded by <paramref name="limit"/>.</summary>
+	Task<IReadOnlyList<ComplianceContentPull>> ListPullsAsync(int limit, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Storage for the profile inventory (<c>profiles</c>, migration 0033). Written only by
+/// the content-pull handler (compliance-runner); read by the API for the profile
+/// inventory endpoint that feeds the Benchmarks screen (#559).
+/// </summary>
+public interface IProfileRepository
+{
+	/// <summary>All installed profiles, ordered by name.</summary>
+	Task<IReadOnlyList<Profile>> ListAsync(CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Replaces the inventory with exactly <paramref name="profiles"/>: upserts each by
+	/// <c>profile_key</c> and deletes any existing row not present in this pull's
+	/// result, mirroring <c>InventoryRepository</c>'s discover-job
+	/// upsert/replace-per-target shape (migration 0011) -- a profile removed upstream
+	/// must disappear from the inventory, not linger as a stale row.
+	/// </summary>
+	Task ReplaceAllAsync(IReadOnlyList<ProfileUpsert> profiles, CancellationToken cancellationToken);
+}

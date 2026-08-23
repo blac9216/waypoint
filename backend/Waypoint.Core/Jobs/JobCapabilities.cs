@@ -35,28 +35,35 @@ namespace Waypoint.Core.Jobs;
 public static class JobCapabilities
 {
 	/// <summary>
-	/// <c>compliance-runner</c>'s allowlist (ADR-0013 §2): <c>discover</c>,
-	/// <c>credential-test</c>, <c>scan</c>, and <c>remediate</c>. <c>remediate</c> has
-	/// no registered <see cref="IJobHandler"/> yet (ADR-0013 lists it as "later"), but
-	/// belongs to this domain the moment one lands.
+	/// <c>compliance-runner</c>'s allowlist (ADR-0013 §2, reassigned by
+	/// <see href="../../docs/adr/0017-compliance-content-runner-placement.md">ADR-0017</see>):
+	/// <c>discover</c>, <c>credential-test</c>, <c>scan</c>, <c>remediate</c>, and
+	/// <c>content-pull</c>/<c>content-import</c>. <c>remediate</c> has no registered
+	/// <see cref="IJobHandler"/> yet (ADR-0013 lists it as "later"), but belongs to
+	/// this domain the moment one lands. <c>content-pull</c>/<c>content-import</c>
+	/// moved here from <see cref="Download"/> per ADR-0017: compliance content is
+	/// consumed only by compliance execution (<c>scan</c> reads profiles from it) and
+	/// shares no dependency with the download domain.
 	/// </summary>
 	public static readonly IReadOnlySet<string> Compliance = new HashSet<string>(StringComparer.Ordinal)
 	{
 		"discover",
 		"credential-test",
 		"scan",
-		"remediate"
+		"remediate",
+		"content-pull",
+		"content-import"
 	};
 
 	/// <summary>
 	/// <c>download-runner</c>'s allowlist (ADR-0013 §2): <c>catalog-index</c>,
-	/// <c>download</c>, and the "later" content-library, repository, and
-	/// managed-content job types already reserved in <c>jobs_job_type_check</c>
-	/// (<c>bundle-export</c>, <c>bundle-import</c>, <c>content-library-sync</c>,
-	/// <c>content-pull</c>, <c>content-import</c>, <c>update</c>). None of the six
-	/// "later" types has a registered <see cref="IJobHandler"/> yet; they are listed
-	/// here so the closed <c>job_type</c> set and the closed capability sets stay in
-	/// lockstep from day one rather than drifting until each handler lands.
+	/// <c>download</c>, and the remaining "later" content-library/repository job types
+	/// reserved in <c>jobs_job_type_check</c> (<c>bundle-export</c>, <c>bundle-import</c>,
+	/// <c>content-library-sync</c>, <c>update</c>). <c>content-pull</c>/<c>content-import</c>
+	/// moved to <see cref="Compliance"/> (ADR-0017) -- see that ADR for why. None of the
+	/// remaining "later" types has a registered <see cref="IJobHandler"/> yet; they are
+	/// listed here so the closed <c>job_type</c> set and the closed capability sets stay
+	/// in lockstep from day one rather than drifting until each handler lands.
 	/// </summary>
 	public static readonly IReadOnlySet<string> Download = new HashSet<string>(StringComparer.Ordinal)
 	{
@@ -65,8 +72,6 @@ public static class JobCapabilities
 		"bundle-export",
 		"bundle-import",
 		"content-library-sync",
-		"content-pull",
-		"content-import",
 		"update"
 	};
 

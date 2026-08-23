@@ -64,6 +64,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<PowerShellOptions>()
 			.Bind(configuration.GetSection(PowerShellOptions.SectionName));
 
+		services.AddOptions<Waypoint.Core.ComplianceContent.ComplianceContentOptions>()
+			.Bind(configuration.GetSection(Waypoint.Core.ComplianceContent.ComplianceContentOptions.SectionName));
+
 		string? connectionString = configuration.GetConnectionString(
 			Waypoint.Infrastructure.DependencyInjection.ServiceCollectionExtensions.ConnectionStringName);
 		if (string.IsNullOrWhiteSpace(connectionString))
@@ -104,6 +107,10 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 		services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
 		services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();
+
+		// Issue #40 (ADR-0017): content-pull is a compliance-runner job type -- see
+		// JobCapabilities.Compliance.
+		services.AddSingleton<IJobHandler, ComplianceContent.ContentPullJobHandler>();
 
 		// Issue #437 (ADR-0014 §5): resource-aware admission -- every host that calls
 		// this method is a dedicated single-process runner bounded by its own

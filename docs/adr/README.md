@@ -37,8 +37,9 @@ An append to Consequences must:
 | [0010](0010-deployment-topology.md) | One appliance, connected/disconnected modes | Accepted; clarified by 0015 |
 | [0011](0011-credential-tiers.md) | Credential tiers; ephemeral personal credentials in v1 | Accepted; storage model superseded by 0016 |
 | [0012](0012-stage-per-execution-dispatcher.md) | Stage-per-execution dispatcher; resume-from-stage | Accepted |
-| [0013](0013-control-plane-and-runners.md) | ASP.NET control plane + dedicated .NET execution runners | Accepted |
+| [0013](0013-control-plane-and-runners.md) | ASP.NET control plane + dedicated .NET execution runners | Accepted; §2 job-type placement for content-pull/content-import superseded by 0017 |
 | [0014](0014-runner-job-ownership.md) | Runner-owned leases, events, secrets, and resource admission | Accepted; §5 per-runner admission superseded by 0018 |
 | [0015](0015-source-build-and-operator-export.md) | Source distribution + operator-built/exported appliances | Accepted |
 | [0016](0016-run-scoped-personal-credential-persistence.md) | Personal credentials persist encrypted, run-scoped, terminal/expiry bounded | Accepted |
+| [0017](0017-compliance-content-runner-placement.md) | `content-pull`/`content-import` run in compliance-runner, not download-runner | Accepted |
 | [0018](0018-shared-capacity-lease-pool.md) | Host-derived capacity discovery, startup admission invariant, shared capacity lease pool (design) | Accepted |
