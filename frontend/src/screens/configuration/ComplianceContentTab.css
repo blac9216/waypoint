@@ -1,0 +1,103 @@
+/* Config → Compliance Content tab (issue #40, frontend slice 2). Shares
+ * .config-panel/.config-table/.config-form from ConfigurationScreen.css;
+ * these rules cover only what's specific to this tab. */
+
+.content-tab__field {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+	font-size: 11.5px;
+	padding: 4px 0;
+}
+
+.content-tab__field-label {
+	color: var(--txt3);
+}
+
+.content-tab__field-value {
+	font-family: var(--mono);
+	font-size: 11px;
+	text-align: right;
+	word-break: break-word;
+}
+
+.content-tab__note {
+	margin-top: 13px;
+	padding: 11px 12px;
+	border: 1px solid var(--line);
+	background: var(--panel2);
+	border-radius: 3px;
+}
+
+.content-tab__note--update {
+	border-color: var(--warn);
+	background: var(--warnd);
+}
+
+.content-tab__note-title {
+	font-size: 11.5px;
+	font-weight: 600;
+	color: var(--txt2);
+}
+
+.content-tab__note--update .content-tab__note-title {
+	color: var(--warn);
+}
+
+.content-tab__note-body {
+	font-size: 11px;
+	color: var(--txt2);
+	margin-top: 6px;
+	line-height: 1.5;
+}
+
+.content-tab__actions {
+	display: flex;
+	gap: 9px;
+	margin-top: 12px;
+	flex-wrap: wrap;
+	align-items: center;
+}
+
+.content-tab__actions-spacer {
+	flex: 1;
+}
+
+.content-tab__pull-status {
+	font-size: 11px;
+	color: var(--txt2);
+}
+
+.content-tab__pull-status--bad {
+	color: var(--bad);
+}
+
+.content-tab__kind {
+	font-family: var(--mono);
+	font-size: 10px;
+}
+
+.content-tab__state {
+	font-family: var(--mono);
+	font-size: 10.5px;
+}
+
+.content-tab__state--current {
+	color: var(--ok);
+}
+
+.content-tab__state--update_pending {
+	color: var(--warn);
+}
+
+.content-tab__state--pinned {
+	color: var(--txt2);
+}
+
+.content-tab__footnote {
+	padding: 10px 14px;
+	border-top: 1px solid var(--line);
+	font-size: 11px;
+	color: var(--txt3);
+	line-height: 1.5;
+}
