@@ -297,6 +297,80 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
 	}
 
+	/// <summary>
+	/// Issue #569 (migration 0036), added at authoring time rather than after a live
+	/// 42501 -- the lesson of this file's own header (and of 0033/0034 before it) is
+	/// that a new runner-executed table without a role-contract test ships grant drift
+	/// silently. Exercises the full capacity-pool protocol as the real
+	/// compliance-runner role: derived-capacity registration (INSERT ... ON CONFLICT
+	/// needs SELECT+INSERT+UPDATE on capacity_pool), claim, reservation, renewal,
+	/// release, and reap on capacity_leases.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CapacityPoolProtocol_FullLifecycleWithoutPermissionDenied()
+	{
+		await ResetCapacityTablesAsync();
+		Guid jobId = await SeedJobAsync(await SeedRunAsync());
+		Guid starvedJobId = await SeedJobAsync(await SeedRunAsync());
+
+		Waypoint.Infrastructure.Capacity.CapacityLeasePoolRepository runnerPool = new(_complianceRunnerConnectionString);
+
+		await runnerPool.RegisterPoolCapacityAsync("compliance-runner-test", 4.0, 4096, operatorSet: false, CancellationToken.None);
+		Assert.True(await runnerPool.TryClaimAsync(jobId, "compliance-runner-test", "scan", 2.0, 1024, TimeSpan.FromMinutes(5), CancellationToken.None));
+		Assert.True(await runnerPool.TryReserveAsync(starvedJobId, "compliance-runner-test", "scan", 3.0, 3000, TimeSpan.FromMinutes(5), CancellationToken.None));
+		Assert.True(await runnerPool.RenewAsync(jobId, "compliance-runner-test", TimeSpan.FromMinutes(5), CancellationToken.None));
+		await runnerPool.ReleaseAsync(jobId, CancellationToken.None);
+		await runnerPool.ReleaseAsync(starvedJobId, CancellationToken.None);
+		Assert.Equal(0, await runnerPool.ReapExpiredAsync(CancellationToken.None));
+	}
+
+	/// <summary>Same protocol as the real download-runner role -- both execution domains share the one pool (migration 0036 grants both roles).</summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CapacityPoolProtocol_ClaimAndReleaseWithoutPermissionDenied()
+	{
+		await ResetCapacityTablesAsync();
+		Guid jobId = await SeedJobAsync(await SeedRunAsync());
+
+		NpgsqlConnectionStringBuilder builder = new(_fixture.ConnectionString)
+		{
+			Username = "waypoint_download_runner",
+			Password = "waypoint_test",
+		};
+		Waypoint.Infrastructure.Capacity.CapacityLeasePoolRepository runnerPool = new(builder.ConnectionString);
+
+		await runnerPool.RegisterPoolCapacityAsync("download-runner-test", 2.0, 2048, operatorSet: false, CancellationToken.None);
+		Assert.True(await runnerPool.TryClaimAsync(jobId, "download-runner-test", "download", 0.5, 512, TimeSpan.FromMinutes(5), CancellationToken.None));
+		await runnerPool.ReleaseAsync(jobId, CancellationToken.None);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary for capacity_pool: DELETE is deliberately withheld
+	/// from both runner roles (migration 0036's header) -- destroying the pool row
+	/// denies all admission appliance-wide and stays an owner/migration action.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotDeleteCapacityPoolRow()
+	{
+		await ResetCapacityTablesAsync();
+		Waypoint.Infrastructure.Capacity.CapacityLeasePoolRepository ownerPool = new(_fixture.ConnectionString);
+		await ownerPool.RegisterPoolCapacityAsync("owner-test", 4.0, 4096, operatorSet: false, CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand delete = new("DELETE FROM capacity_pool WHERE id = 1", connection);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	private async Task ResetCapacityTablesAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("TRUNCATE TABLE capacity_leases; DELETE FROM capacity_pool", connection);
+		await command.ExecuteNonQueryAsync();
+	}
+
 	private async Task<Guid> SeedCredentialAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

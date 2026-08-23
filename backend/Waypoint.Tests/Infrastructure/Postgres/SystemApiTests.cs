@@ -88,6 +88,12 @@ public sealed class SystemApiTests : IAsyncLifetime
 				// and IApplianceUptimeProvider, so both are registered explicitly here.
 				services.AddSingleton<IDepotSyncStatusRepository>(new DepotSyncStatusRepository(_connectionString));
 				services.AddSingleton<IApplianceUptimeProvider, ApplianceUptimeProvider>();
+
+				// Issue #569: same reasoning again -- SystemController now also depends
+				// on ICapacityPoolStatusReader (the real Postgres-backed reader, so this
+				// suite can also pin the capacity_pool surface end to end below).
+				services.AddSingleton<Waypoint.Core.Capacity.ICapacityPoolStatusReader>(
+					new Waypoint.Infrastructure.Capacity.CapacityLeasePoolRepository(_connectionString));
 			});
 		}
 	}
@@ -200,6 +206,41 @@ public sealed class SystemApiTests : IAsyncLifetime
 		Assert.False(document.RootElement.TryGetProperty("depot_sync", out _));
 	}
 
+	/// <summary>Issue #569: real Postgres end to end -- a registered pool with an active lease and a waiting reservation is reflected as capacity_pool; an unregistered pool omits the field.</summary>
+	[Fact]
+	public async Task Get_CapacityPool_AbsentWhenUnregistered_PresentWithLeasesAndReservationsWhenRegistered()
+	{
+		await ExecuteSqlAsync("TRUNCATE TABLE capacity_leases; DELETE FROM capacity_pool");
+
+		HttpRequestMessage absentRequest = new(HttpMethod.Get, "/api/v1/system");
+		absentRequest.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+		HttpResponseMessage absentResponse = await _client.SendAsync(absentRequest);
+		using (JsonDocument document = JsonDocument.Parse(await absentResponse.Content.ReadAsStringAsync()))
+		{
+			Assert.False(document.RootElement.TryGetProperty("capacity_pool", out _));
+		}
+
+		Waypoint.Infrastructure.Capacity.CapacityLeasePoolRepository pool = new(_fixture.ConnectionString);
+		await pool.RegisterPoolCapacityAsync("system-api-test-runner", 4.0, 4096, operatorSet: false, CancellationToken.None);
+		Guid activeJob = await InsertQueuedJobAsync();
+		Guid starvedJob = await InsertQueuedJobAsync();
+		Assert.True(await pool.TryClaimAsync(activeJob, "system-api-test-runner", "scan", 2.0, 1024, TimeSpan.FromMinutes(5), CancellationToken.None));
+		Assert.True(await pool.TryReserveAsync(starvedJob, "system-api-test-runner", "scan", 3.0, 3000, TimeSpan.FromMinutes(5), CancellationToken.None));
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		using JsonDocument populated = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement capacityPool = populated.RootElement.GetProperty("capacity_pool");
+		Assert.Equal(4.0, capacityPool.GetProperty("cpu_cores").GetDouble());
+		Assert.Equal("derived", capacityPool.GetProperty("source").GetString());
+		Assert.Equal(2.0, capacityPool.GetProperty("leased_cpu_cores").GetDouble());
+		Assert.Equal(1, capacityPool.GetProperty("active_lease_count").GetInt32());
+		JsonElement reservation = Assert.Single(capacityPool.GetProperty("reservations").EnumerateArray());
+		Assert.Equal(starvedJob, reservation.GetProperty("job_id").GetGuid());
+	}
+
 	/// <summary>Issue #241: a completed catalog-index run in the real `runs` table is reflected as depot_sync.</summary>
 	[Fact]
 	public async Task Get_WithCompletedCatalogIndexRun_ReturnsDepotSyncFromRunsTable()
@@ -267,6 +308,23 @@ public sealed class SystemApiTests : IAsyncLifetime
 		await using NpgsqlCommand update = new("UPDATE appliance_state SET mode = $1 WHERE id = 1", connection);
 		update.Parameters.AddWithValue(mode);
 		await update.ExecuteNonQueryAsync().ConfigureAwait(false);
+	}
+
+	private async Task ExecuteSqlAsync(string sql)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(sql, connection);
+		await command.ExecuteNonQueryAsync();
+	}
+
+	private async Task<Guid> InsertQueuedJobAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"INSERT INTO jobs (job_type, priority, state) VALUES ('scan', 1, 'queued') RETURNING id", connection);
+		return (Guid)(await command.ExecuteScalarAsync())!;
 	}
 
 	private async Task ResetApplianceStateAsync()

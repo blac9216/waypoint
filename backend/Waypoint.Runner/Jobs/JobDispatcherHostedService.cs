@@ -72,6 +72,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	private readonly JobHandlerRegistry _handlers;
 	private readonly IOptions<JobEngineOptions> _options;
 	private readonly ResourceAdmissionController? _resourceAdmission;
+	private readonly Resources.CapacityLeaseCoordinator? _capacityPool;
 	private readonly ILogger<JobDispatcherHostedService> _logger;
 	private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _inFlight = new();
 
@@ -82,7 +83,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		JobHandlerRegistry handlers,
 		IOptions<JobEngineOptions> options,
 		ILogger<JobDispatcherHostedService> logger)
-		: this(repository, controlRepository, events, handlers, options, resourceAdmission: null, logger)
+		: this(repository, controlRepository, events, handlers, options, resourceAdmission: null, capacityPool: null, logger)
 	{
 	}
 
@@ -94,6 +95,25 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		JobHandlerRegistry handlers,
 		IOptions<JobEngineOptions> options,
 		ResourceAdmissionController? resourceAdmission,
+		ILogger<JobDispatcherHostedService> logger)
+		: this(repository, controlRepository, events, handlers, options, resourceAdmission, capacityPool: null, logger)
+	{
+	}
+
+	/// <summary>
+	/// Issue #569 (ADR-0020): the shared-capacity-pool-aware overload.
+	/// <paramref name="capacityPool"/> is null when the pool is disabled
+	/// (<c>CapacityPool:Enabled=false</c>), preserving ADR-0014 §5's per-runner-only
+	/// admission exactly as before #569.
+	/// </summary>
+	public JobDispatcherHostedService(
+		IJobRunnerRepository repository,
+		IJobControlRepository controlRepository,
+		IJobEventPublisher events,
+		JobHandlerRegistry handlers,
+		IOptions<JobEngineOptions> options,
+		ResourceAdmissionController? resourceAdmission,
+		Resources.CapacityLeaseCoordinator? capacityPool,
 		ILogger<JobDispatcherHostedService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
@@ -109,6 +129,7 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		_handlers = handlers;
 		_options = options;
 		_resourceAdmission = resourceAdmission;
+		_capacityPool = capacityPool;
 		_logger = logger;
 
 		// jobs.claimed_by is unconstrained TEXT (see 0001_initial_schema.sql), so there
@@ -219,6 +240,21 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 				continue;
 			}
 
+			// Issue #569 (ADR-0018 §5 / ADR-0020): the shared pool claim runs strictly
+			// AFTER local admission, so this runner's own discovered/capped budget
+			// stays the authoritative upper bound on what it may claim from the pool.
+			// A pool denial -- including any database failure, which the coordinator
+			// answers with false rather than overcommitting -- releases the claim back
+			// to queued exactly like a local denial.
+			if (_capacityPool is not null && !await _capacityPool.TryAcquireAsync(job.Id, job.JobType, WorkerId, stoppingToken).ConfigureAwait(false))
+			{
+				_resourceAdmission?.Release(job.Id);
+				await _repository.ReleaseClaimAsync(job.Id, WorkerId, stoppingToken).ConfigureAwait(false);
+				gate.Release();
+				await DelayAsync(PausedReleaseRetryDelay, stoppingToken).ConfigureAwait(false);
+				continue;
+			}
+
 			if (job.RunId is Guid runId)
 			{
 				RunQueueState? run = await _repository.GetRunQueueStateAsync(runId, stoppingToken).ConfigureAwait(false);
@@ -243,6 +279,10 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 						await _repository.ReleaseClaimAsync(job.Id, WorkerId, stoppingToken).ConfigureAwait(false);
 					}
 					_resourceAdmission?.Release(job.Id);
+					if (_capacityPool is not null)
+					{
+						await _capacityPool.ReleaseAsync(job.Id, stoppingToken).ConfigureAwait(false);
+					}
 					gate.Release();
 					await DelayAsync(PausedReleaseRetryDelay, stoppingToken).ConfigureAwait(false);
 					continue;
@@ -393,6 +433,14 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		{
 			_inFlight.TryRemove(job.Id, out _);
 			_resourceAdmission?.Release(job.Id);
+			if (_capacityPool is not null)
+			{
+				// CancellationToken.None: this release must run even during host
+				// shutdown (hostToken already cancelled) -- otherwise the pool holds
+				// this job's slice until the lease expires. The coordinator swallows
+				// database failures (the reaper reclaims via expiry).
+				await _capacityPool.ReleaseAsync(job.Id, CancellationToken.None).ConfigureAwait(false);
+			}
 			gate.Release();
 		}
 	}
@@ -443,6 +491,16 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 				{
 					LogHeartbeatLostOwnership(job.Id);
 					return;
+				}
+
+				// Issue #569 (ADR-0020): the capacity lease renews on the same clock as
+				// the job lease, so a worker that stops heartbeating loses both
+				// together and the reaper's expiry semantics stay consistent with
+				// job-lease recovery. The coordinator handles lost/failed renewal
+				// itself (re-claim or log-and-retry) -- never by cancelling the job.
+				if (_capacityPool is not null)
+				{
+					await _capacityPool.RenewAsync(job.Id, job.JobType, WorkerId, stopToken).ConfigureAwait(false);
 				}
 
 				if (job.RunId is Guid runId)

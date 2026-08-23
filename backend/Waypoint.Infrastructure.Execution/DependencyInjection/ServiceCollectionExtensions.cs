@@ -16,8 +16,10 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.Capacity;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.PowerShell;
+using Waypoint.Infrastructure.Capacity;
 using Waypoint.Infrastructure.DependencyInjection;
 using Waypoint.Runner.Jobs;
 using Waypoint.Runner.Resources;
@@ -120,6 +122,25 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<CgroupResourceDiscovery>();
 		services.AddSingleton<ResourceAdmissionController>();
 
+		// Issue #569 (ADR-0018 Option B / ADR-0020): the shared capacity lease pool.
+		// Optional by configuration (CapacityPool:Enabled=false keeps ADR-0014 §5's
+		// per-runner-only admission); when enabled, the coordinator gates every claim
+		// AFTER local admission -- the runner's own discovered/capped budget stays the
+		// authoritative upper bound -- and the existing recovery sweep also reaps
+		// expired capacity leases. Bound to the same connection string this method
+		// already requires: no connection string, no pool (and no dispatcher either).
+		services.AddOptions<CapacityPoolOptions>()
+			.Bind(configuration.GetSection(CapacityPoolOptions.SectionName));
+		bool capacityPoolEnabled = configuration.GetSection(CapacityPoolOptions.SectionName)
+			.GetValue(nameof(CapacityPoolOptions.Enabled), defaultValue: true);
+		if (capacityPoolEnabled)
+		{
+			services.AddSingleton<IHostCapabilitySource, SystemHostCapabilitySource>();
+			services.AddSingleton<ICapacityLeasePool>(new CapacityLeasePoolRepository(connectionString));
+			services.AddSingleton<CapacityLeaseCoordinator>();
+			services.AddHostedService<CapacityPoolRegistrationHostedService>();
+		}
+
 		// Issue #436: JobHandlerRegistry is the mandatory capability-registration
 		// point (fails closed on an empty allowlist or a duplicate handler -- see its
 		// doc comment). This default (JobCapabilities.All) is only ever a placeholder:
@@ -136,9 +157,15 @@ public static class ServiceCollectionExtensions
 			serviceProvider.GetRequiredService<JobHandlerRegistry>(),
 			serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
 			serviceProvider.GetRequiredService<ResourceAdmissionController>(),
+			serviceProvider.GetService<CapacityLeaseCoordinator>(),
 			serviceProvider.GetRequiredService<ILogger<JobDispatcherHostedService>>()));
 		services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobDispatcherHostedService>());
-		services.AddHostedService<LeaseRecoveryHostedService>();
+		services.AddHostedService(serviceProvider => new LeaseRecoveryHostedService(
+			serviceProvider.GetRequiredService<IJobRunnerRepository>(),
+			serviceProvider.GetRequiredService<IJobEventPublisher>(),
+			serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
+			serviceProvider.GetService<ICapacityLeasePool>(),
+			serviceProvider.GetRequiredService<ILogger<LeaseRecoveryHostedService>>()));
 
 		return services;
 	}

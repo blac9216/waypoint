@@ -125,6 +125,72 @@ public sealed class SystemEndpointTests : IClassFixture<SystemTestApiFactory>
 		Assert.False(doc.RootElement.TryGetProperty("depot_sync", out _));
 	}
 
+	/// <summary>Issue #569: no pool registered (pre-0036 runners, or CapacityPool:Enabled=false) reports the field absent -- graceful empty state, same convention as depot_sync.</summary>
+	[Fact]
+	public async Task Get_NoCapacityPoolRegistered_OmitsCapacityPoolField()
+	{
+		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
+		_factory.DiskUsage.Reset();
+		_factory.CapacityPool.Reset(null);
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.False(doc.RootElement.TryGetProperty("capacity_pool", out _));
+	}
+
+	/// <summary>
+	/// Issue #569 (ADR-0020): pool capacity, active leases, and waiting anti-starvation
+	/// reservations -- the "surface pool capacity, active reservations, and starvation
+	/// reasons in GET /system" acceptance criterion, pinned through the fake reader.
+	/// </summary>
+	[Fact]
+	public async Task Get_WithRegisteredCapacityPool_ReturnsCapacityLeasesAndReservations()
+	{
+		Guid starvedJobId = Guid.NewGuid();
+		_factory.ApplianceState.Reset(new ApplianceState("1.2.3", null, "connected", "idle", null));
+		_factory.DiskUsage.Reset();
+		_factory.CapacityPool.Reset(new Waypoint.Core.Capacity.CapacityPoolStatus(
+			CpuCores: 8.0,
+			MemoryBytes: 8192,
+			Source: "derived",
+			UpdatedAt: DateTimeOffset.Parse("2026-08-23T00:00:00Z", System.Globalization.CultureInfo.InvariantCulture),
+			LeasedCpuCores: 2.5,
+			LeasedMemoryBytes: 1024,
+			ActiveLeaseCount: 2,
+			Reservations: [new Waypoint.Core.Capacity.CapacityReservation(
+				starvedJobId, "scan", "compliance-runner-1", 2.0, 1024, DateTimeOffset.Parse("2026-08-23T00:01:00Z", System.Globalization.CultureInfo.InvariantCulture))]));
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/system");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		JsonElement pool = doc.RootElement.GetProperty("capacity_pool");
+
+		Assert.Equal(8.0, pool.GetProperty("cpu_cores").GetDouble());
+		Assert.Equal(8192, pool.GetProperty("memory_bytes").GetInt64());
+		Assert.Equal("derived", pool.GetProperty("source").GetString());
+		Assert.Equal(2.5, pool.GetProperty("leased_cpu_cores").GetDouble());
+		Assert.Equal(1024, pool.GetProperty("leased_memory_bytes").GetInt64());
+		Assert.Equal(2, pool.GetProperty("active_lease_count").GetInt32());
+
+		JsonElement reservation = pool.GetProperty("reservations")[0];
+		Assert.Equal(starvedJobId, reservation.GetProperty("job_id").GetGuid());
+		Assert.Equal("scan", reservation.GetProperty("job_type").GetString());
+		Assert.Equal("compliance-runner-1", reservation.GetProperty("runner_id").GetString());
+		Assert.Equal(2.0, reservation.GetProperty("cpu_cores").GetDouble());
+	}
+
 	/// <summary>Issue #241: a completed catalog-index run reports its completion time and outcome.</summary>
 	[Fact]
 	public async Task Get_WithCompletedCatalogIndexRun_ReturnsDepotSync()
@@ -302,6 +368,7 @@ public sealed class SystemTestApiFactory : WaypointApiFactory
 	public FakeWorkerRegistryReader WorkerRegistry { get; } = new();
 	public FakeApplianceUptimeProvider Uptime { get; } = new();
 	public FakeDepotSyncStatusRepository DepotSync { get; } = new();
+	public FakeCapacityPoolStatusReader CapacityPool { get; } = new();
 
 	protected override void ConfigureWebHost(IWebHostBuilder builder)
 	{
@@ -326,6 +393,7 @@ public sealed class SystemTestApiFactory : WaypointApiFactory
 			ReplaceSingleton<IWorkerRegistryReader>(services, WorkerRegistry);
 			ReplaceSingleton<IApplianceUptimeProvider>(services, Uptime);
 			ReplaceSingleton<IDepotSyncStatusRepository>(services, DepotSync);
+			ReplaceSingleton<Waypoint.Core.Capacity.ICapacityPoolStatusReader>(services, CapacityPool);
 		});
 	}
 
@@ -339,6 +407,20 @@ public sealed class SystemTestApiFactory : WaypointApiFactory
 		}
 
 		services.AddSingleton(instance);
+	}
+}
+
+/// <summary>Minimal in-memory fake for the issue #569 capacity-pool read side.</summary>
+public sealed class FakeCapacityPoolStatusReader : Waypoint.Core.Capacity.ICapacityPoolStatusReader
+{
+	private Waypoint.Core.Capacity.CapacityPoolStatus? _status;
+
+	public void Reset(Waypoint.Core.Capacity.CapacityPoolStatus? status) => _status = status;
+
+	public Task<Waypoint.Core.Capacity.CapacityPoolStatus?> GetStatusAsync(CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult(_status);
 	}
 }
 

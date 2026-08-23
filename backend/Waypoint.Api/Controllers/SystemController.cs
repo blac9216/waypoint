@@ -21,10 +21,12 @@ using Waypoint.Core.Configuration;
 using Waypoint.Core.Errors;
 using ApplianceState = Waypoint.Core.SystemState.ApplianceState;
 using ArtifactStoreUsage = Waypoint.Core.SystemState.ArtifactStoreUsage;
+using CapacityPoolStatus = Waypoint.Core.Capacity.CapacityPoolStatus;
 using DepotSyncStatus = Waypoint.Core.SystemState.DepotSyncStatus;
 using IApplianceStateRepository = Waypoint.Core.SystemState.IApplianceStateRepository;
 using IApplianceUptimeProvider = Waypoint.Core.SystemState.IApplianceUptimeProvider;
 using IArtifactStoreDiskUsageProvider = Waypoint.Core.SystemState.IArtifactStoreDiskUsageProvider;
+using ICapacityPoolStatusReader = Waypoint.Core.Capacity.ICapacityPoolStatusReader;
 using IDepotSyncStatusRepository = Waypoint.Core.SystemState.IDepotSyncStatusRepository;
 using IWorkerRegistryReader = Waypoint.Core.SystemState.IWorkerRegistryReader;
 using WorkerHeartbeat = Waypoint.Core.SystemState.WorkerHeartbeat;
@@ -66,6 +68,7 @@ public sealed class SystemController : ControllerBase
 	private readonly IWorkerRegistryReader _workerRegistry;
 	private readonly IApplianceUptimeProvider _uptime;
 	private readonly IDepotSyncStatusRepository _depotSync;
+	private readonly ICapacityPoolStatusReader _capacityPool;
 	private readonly IOptionsMonitor<WaypointBuildOptions> _buildOptions;
 	private readonly IOptionsMonitor<WorkerRegistryOptions> _workerRegistryOptions;
 
@@ -75,6 +78,7 @@ public sealed class SystemController : ControllerBase
 		IWorkerRegistryReader workerRegistry,
 		IApplianceUptimeProvider uptime,
 		IDepotSyncStatusRepository depotSync,
+		ICapacityPoolStatusReader capacityPool,
 		IOptionsMonitor<WaypointBuildOptions> buildOptions,
 		IOptionsMonitor<WorkerRegistryOptions> workerRegistryOptions)
 	{
@@ -83,6 +87,7 @@ public sealed class SystemController : ControllerBase
 		ArgumentNullException.ThrowIfNull(workerRegistry);
 		ArgumentNullException.ThrowIfNull(uptime);
 		ArgumentNullException.ThrowIfNull(depotSync);
+		ArgumentNullException.ThrowIfNull(capacityPool);
 		ArgumentNullException.ThrowIfNull(buildOptions);
 		ArgumentNullException.ThrowIfNull(workerRegistryOptions);
 		_applianceState = applianceState;
@@ -90,6 +95,7 @@ public sealed class SystemController : ControllerBase
 		_workerRegistry = workerRegistry;
 		_uptime = uptime;
 		_depotSync = depotSync;
+		_capacityPool = capacityPool;
 		_buildOptions = buildOptions;
 		_workerRegistryOptions = workerRegistryOptions;
 	}
@@ -126,6 +132,11 @@ public sealed class SystemController : ControllerBase
 
 		DepotSyncStatus? depotSync = await _depotSync.GetLastSyncAsync(cancellationToken).ConfigureAwait(false);
 
-		return Ok(SystemResponse.Create(state, _buildOptions.CurrentValue.Sha, stores, runners, _uptime.GetUptime(), depotSync));
+		// Issue #569 (ADR-0020): pool capacity, active reservations, and starvation
+		// reasons. Absent (null) when no runner has registered the pool -- graceful
+		// empty state, same convention as depot_sync.
+		CapacityPoolStatus? capacityPool = await _capacityPool.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+
+		return Ok(SystemResponse.Create(state, _buildOptions.CurrentValue.Sha, stores, runners, _uptime.GetUptime(), depotSync, capacityPool));
 	}
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Linq;
+using Waypoint.Core.Capacity;
 using Waypoint.Core.SystemState;
 
 namespace Waypoint.Api.Contracts;
@@ -41,7 +42,8 @@ public sealed record SystemResponse(
 	IReadOnlyList<SystemStoreUsageResponse> Stores,
 	IReadOnlyList<SystemRunnerStatusResponse> Runners,
 	long UptimeSeconds,
-	SystemDepotSyncResponse? DepotSync)
+	SystemDepotSyncResponse? DepotSync,
+	SystemCapacityPoolResponse? CapacityPool = null)
 {
 	public static SystemResponse Create(
 		ApplianceState state,
@@ -49,7 +51,8 @@ public sealed record SystemResponse(
 		IReadOnlyList<ArtifactStoreUsage> stores,
 		IReadOnlyList<SystemRunnerStatusResponse> runners,
 		TimeSpan uptime,
-		DepotSyncStatus? depotSync) => new(
+		DepotSyncStatus? depotSync,
+		CapacityPoolStatus? capacityPool = null) => new(
 		Version: state.Version,
 		Build: buildSha,
 		Mode: state.Mode,
@@ -57,7 +60,61 @@ public sealed record SystemResponse(
 		Stores: stores.Select(SystemStoreUsageResponse.FromDomain).ToArray(),
 		Runners: runners,
 		UptimeSeconds: (long)uptime.TotalSeconds,
-		DepotSync: depotSync is null ? null : SystemDepotSyncResponse.FromDomain(depotSync));
+		DepotSync: depotSync is null ? null : SystemDepotSyncResponse.FromDomain(depotSync),
+		CapacityPool: capacityPool is null ? null : SystemCapacityPoolResponse.FromDomain(capacityPool));
+}
+
+/// <summary>
+/// The shared capacity lease pool's live state (issue #569, ADR-0020): total shareable
+/// appliance capacity, what unexpired active leases currently hold, and every waiting
+/// anti-starvation reservation. Absent (not an error, same convention as
+/// <see cref="SystemResponse.DepotSync"/>) when no runner has registered the pool yet
+/// -- e.g. a stack whose runners predate migration 0036 or run with
+/// <c>CapacityPool:Enabled=false</c>.
+/// </summary>
+/// <param name="Source"><c>operator</c> (explicit configuration, authoritative) or <c>derived</c> (host-derived, ADR-0018 discovery).</param>
+/// <param name="Reservations">
+/// Each entry is a job currently starved of pool capacity whose runner has parked a
+/// reservation holding freed capacity for it (ADR-0020 fairness) -- the "starvation
+/// reasons" surface the issue #569 acceptance criteria call for.
+/// </param>
+public sealed record SystemCapacityPoolResponse(
+	double CpuCores,
+	long MemoryBytes,
+	string Source,
+	DateTimeOffset UpdatedAt,
+	double LeasedCpuCores,
+	long LeasedMemoryBytes,
+	int ActiveLeaseCount,
+	IReadOnlyList<SystemCapacityReservationResponse> Reservations)
+{
+	public static SystemCapacityPoolResponse FromDomain(CapacityPoolStatus status) => new(
+		status.CpuCores,
+		status.MemoryBytes,
+		status.Source,
+		status.UpdatedAt,
+		status.LeasedCpuCores,
+		status.LeasedMemoryBytes,
+		status.ActiveLeaseCount,
+		[.. status.Reservations.Select(SystemCapacityReservationResponse.FromDomain)]);
+}
+
+/// <summary>One waiting anti-starvation reservation (issue #569, ADR-0020).</summary>
+public sealed record SystemCapacityReservationResponse(
+	Guid JobId,
+	string JobType,
+	string RunnerId,
+	double CpuCores,
+	long MemoryBytes,
+	DateTimeOffset WaitingSince)
+{
+	public static SystemCapacityReservationResponse FromDomain(CapacityReservation reservation) => new(
+		reservation.JobId,
+		reservation.JobType,
+		reservation.RunnerId,
+		reservation.CpuCores,
+		reservation.MemoryBytes,
+		reservation.WaitingSince);
 }
 
 /// <summary>
