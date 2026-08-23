@@ -240,6 +240,26 @@ real-world importance:
 - Update/transfer **bundle signing keys** are a separate concern ([ADR-0009](adr/0009-self-update.md))
   and are never stored in the appliance database.
 
+## Global job observability and destructive actions
+
+The global Live Jobs surface does not make authorization global. List, stream, and
+historical-log endpoints filter server-side to work the caller may observe; hiding a
+row in the SPA is not an access control. Persisted history is scrubbed at the sink and
+must not expose raw handler payloads that can carry credentials. Copy/export actions
+operate only on the already-redacted representation.
+
+Observation and control are separate permissions. A caller able to view a download
+or scan log does not thereby gain permission to retry, abort, remediate, download an
+artifact, or mutate its owning domain. Those actions retain their existing job-type
+and domain role checks.
+
+Operational-history deletion never implies domain deletion. Explicit domain purges
+require their own authorization and destructive confirmation, use server-derived
+artifact paths, record retryable partial failure, and retain a non-secret append-only
+audit tombstone ([ADR-0019](adr/0019-global-job-observability.md)). Credential deletion
+is a separate lifecycle operation and never requires erasing history merely to remove
+encrypted secret material.
+
 ## Residual risks (accepted, documented)
 
 - Full compromise of the API or an authorized runner can expose service credentials

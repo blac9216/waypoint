@@ -63,7 +63,7 @@ back. Threat model and leakage controls: [security.md](security.md).
 ### Run and Job
 A **Run** is what a user initiates ("scan site A, products X/Y, these 14 hosts"). The
 job engine fans it out into **Jobs** (one per target/component), each carrying priority,
-state, logs, and results. Job types: `scan`, `remediate`, `discover`, `download`,
+state, logs, and results. Job types: `scan`, `remediate`, `discover`, `credential-test`, `download`,
 `catalog-index`, `bundle-export`, `bundle-import`, `content-library-sync`,
 `content-pull`, `content-import`, `update`.
 
@@ -86,6 +86,25 @@ Run behaviors (from the UI prototype reconciliation, now backend requirements):
 - **Run controls**: pause queue (stop dispatching, let in-flight finish) and abort run.
 - Backend keeps the **six** catalog-declared priorities (NSX=1 … VM=5, SRG=6); the UI
   may group VM+SRG visually, but the priority column is six-valued.
+
+Run/Job records are the **operational history**, not universal ownership of the
+objects produced by work. They retain type, actor and target/context attribution,
+state, timing, and redacted event/log diagnostics. Durable outputs belong to domains:
+
+| Job family | Durable output owner |
+|---|---|
+| `scan`, `remediate` | Compliance Results: findings, attestations, remediation state, CKL/HDF artifacts |
+| `discover`, `credential-test` | Targets: current inventory and connection status |
+| `download`, `catalog-index`, `content-library-sync` | Catalog/Library: catalog state and downloaded content |
+| `content-pull`, `content-import` | Compliance Content: repo/profile inventory |
+| `bundle-export`, `bundle-import` | Transfer: bundle manifests and apply state |
+| `update` | System administration: staged/applied update state |
+
+Live Jobs and generic history may link to these objects but do not duplicate their
+management actions. Removing operational history cannot implicitly delete a domain
+object; destructive domain cleanup is separately authorized, audited, and retryable
+([ADR-0019](adr/0019-global-job-observability.md)). Retention duration for both layers
+remains an operator-policy decision.
 
 ### STIG configuration documents
 SAF attestation YAML, InSpec input YAML, remediation input files — stored as **documents

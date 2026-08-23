@@ -48,3 +48,13 @@ One **job engine** in the backend serves all job types:
 - The job/target state machine and the events schema are the API contract for the
   UI's hero screen (live run view) — design them first.
 - Dead-job recovery (worker crash mid-job) needs a heartbeat/lease column from day one.
+
+### Consequence learned during cross-domain UI integration (2026-08-23, #589)
+
+The global and per-run streams serve different projections, not different job
+engines. The global projection is the top-level **Live Jobs** workspace and may show
+several concurrently active runs/jobs; a selected run/job uses a type-specific detail
+view. The original scan-oriented live run is therefore one detail presentation, not
+the container for download, discovery, content, transfer, or update work. Durable
+outputs remain in their owning domains as decided in
+[ADR-0019](0019-global-job-observability.md).
