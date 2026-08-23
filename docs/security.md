@@ -208,10 +208,16 @@ real-world importance:
    the master key. Each gets narrowly scoped database credentials: the API owns
    control-plane writes, while runners may claim only their allowlisted job types and
    write associated state and events. Postgres listens only on an internal compose
-   network. nginx and Keycloak never see the key. Plaintext credentials never cross a
-   network RPC from the API to a runner. The master key is a mounted file readable
-   solely by each service's non-root user — never an environment variable
-   (env leaks via `/proc/<pid>/environ`, `docker inspect`, and crash dumps).
+   network (`internal: true`, no gateway, no published port) — issue #578's
+   `runner-egress` network (outbound-only reachability for the two runners, see
+   `deploy/README.md` "Runner egress") does not attach to Postgres and does not
+   change this: the runners reach Postgres exclusively over `internal`, same as
+   before, and nothing else gains a route to it. nginx and Keycloak never see the
+   key, and neither is attached to `runner-egress` either. Plaintext credentials
+   never cross a network RPC from the API to a runner. The master key is a mounted
+   file readable solely by each service's non-root user — never an environment
+   variable (env leaks via `/proc/<pid>/environ`, `docker inspect`, and crash
+   dumps).
 
    This control governs the envelope-encryption master key (ADR-0005). Compose mounts
    it into all three trusted services named above — the API, `compliance-runner`, and

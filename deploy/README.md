@@ -32,9 +32,12 @@ source-build direction is recorded in [ADR-0013](../docs/adr/0013-control-plane-
 browser --TLS--> nginx --/api--> backend --> postgres (internal network only)
                     \--> static frontend bundle (frontend/dist/, bind-mounted)
 
-compliance-runner --> postgres (internal network only; not reachable from nginx/host)
-download-runner   --> postgres (internal network only; not reachable from nginx/host)
+compliance-runner --> postgres (internal); lab/target infra (runner-egress)
+download-runner   --> postgres (internal); depot/internet (runner-egress)
 ```
+
+Neither runner is reachable from `nginx` or the host on either network — see
+"Runner egress" below for the second network's shape.
 
 - **nginx** terminates dev TLS, serves the frontend static bundle bind-mounted
   from the static bundle built into the development nginx image,
@@ -55,8 +58,10 @@ download-runner   --> postgres (internal network only; not reachable from nginx/
   (`discover`/`credential-test`/`scan`/later `remediate`, and
   `catalog-index`/`download` respectively) directly from Postgres
   (ADR-0014 §1) and hosting PowerShell in-process. Neither has an HTTP listener
-  or a compose `ports:` mapping — both sit on the `internal` network only, never
-  reachable from `nginx` or the host. Their Dockerfiles
+  or a compose `ports:` mapping — never reachable from `nginx` or the host on
+  either network they sit on: `internal` (Postgres) and `runner-egress`
+  (outbound-only route to lab/target infrastructure and, for download-runner,
+  the internet — see "Runner egress" below). Their Dockerfiles
   (`../runners/compliance-runner/Dockerfile`, `../runners/download-runner/Dockerfile`)
   build from the repo root, same convention as `backend/Dockerfile` (issue #92),
   because each now has its own `dotnet-build` stage that compiles its .NET host
@@ -272,6 +277,69 @@ its container's cgroup allocation independently, so N replicas compete for the
 same underlying host resources rather than multiplying them. It remains an
 operator option, not the default (ADR-0013 §6) — one replica of each runner
 starts by default.
+
+### Runner egress (issue #578)
+
+Both runners previously sat only on the `internal: true` network, which Docker
+gives no default gateway or route out — Compose's embedded resolver cannot
+forward upstream DNS queries from it either. That left `compliance-runner`
+unable to resolve or reach configured vCenters/ESXi/NSX/SRG appliances/STIG
+Manager, and `download-runner` unable to reach the Broadcom depot or any
+operator repository, even in a connected deployment.
+
+`docker-compose.yml` now also declares `runner-egress`: a second, ordinary
+(non-`internal`) bridge network with a normal Docker-assigned gateway. Both
+runners attach to it in addition to `internal`; `postgres`, `backend`,
+`keycloak`, and `nginx` are unchanged and do not touch this network — Postgres
+remains reachable only from `internal`, and neither runner gains any new path
+**in** (still no `ports:`, still no other service attached to `runner-egress`).
+The network is declared inside this compose file like every other one here, so
+`-p`/project-scoping still isolates it per docs/testing.md's recipe
+(`<project>_runner-egress`) — it is never external or shared across stacks.
+
+**DNS.** `runner-egress` uses Docker's normal embedded resolver
+(`127.0.0.11`), which forwards to the host's configured upstream DNS. An
+operator whose lab/target hostnames are only resolvable via a site-specific
+DNS server should configure that resolver at the Docker daemon or host level
+(`/etc/docker/daemon.json`'s `dns`, or the host's own `/etc/resolv.conf`) —
+this compose file does not pin per-container DNS servers, so the operator's
+existing host resolution setup applies uniformly to both runners.
+
+**Firewall.** `runner-egress` is a plain bridge with outbound NAT through the
+host, same as any other Docker bridge network — it is not a proxy or an
+allowlist. Restricting *which* external hosts each runner may reach is an
+operator-owned host/network firewall control (e.g. iptables/nftables rules
+scoped to the bridge's interface, or an upstream network firewall), not
+something this compose file enforces. Document your own egress allowlist
+(target subnets for compliance-runner; the depot's hostname/IP range for
+download-runner) alongside your deployment's actual infrastructure — this
+repository, being public, cannot contain it (see `CLAUDE.md`).
+
+**Proxy.** If a site requires an HTTP(S) proxy for outbound reachability,
+set the standard `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` environment variables
+on the relevant runner service in `deploy/.env` or a
+`docker-compose.override.yml` — both runners' base images/.NET hosts and
+PowerShell's own `Invoke-WebRequest`/`Invoke-RestMethod` honor these when set.
+
+**Disconnected/air-gapped instances.** Per `docs/architecture.md`'s
+connected/disconnected mode table, a disconnected instance has no internet and
+hides/disables download-manager features — `download-runner`'s `runner-egress`
+attachment then simply carries no traffic (no download/catalog-index job is
+ever dispatched to it in that mode). `compliance-runner` still needs
+`runner-egress` in a disconnected deployment: STIG scanning targets
+site-local infrastructure, not the internet, and that reachability requirement
+does not go away because the site is air-gapped. An operator who wants to
+physically remove `download-runner`'s egress path in a disconnected
+deployment (rather than rely on "no job is ever enqueued") should enforce that
+at the host/network layer, not by editing `download-runner`'s service
+definition — Compose has no supported way to subtract a network membership via
+an override file (overrides only add to or replace whole keys). The
+straightforward operator-level option is a host firewall rule that drops
+outbound traffic from `runner-egress`'s bridge interface for a disconnected
+deployment, or pointing the daemon's default bridge subnet at an isolated
+segment with no upstream route at all. Either way this is host/operator
+configuration, not a compose-file toggle, so it is documented here rather than
+built as a profile.
 
 ### Networking: nginx depends on Docker's embedded DNS
 
