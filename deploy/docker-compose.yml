@@ -1,12 +1,14 @@
 # Waypoint dev compose stack (issue #2, epic #1; runner topology issue #442,
-# ADR-0013/0014/0015).
+# ADR-0013/0014/0015; runner egress issue #578).
 #
 # Topology (docs/architecture.md component view; ADR-0001 packaging):
 #   nginx (edge, TLS + static frontend + /api proxy)
 #     -> backend (ASP.NET Core control plane -- REST/RBAC/SSE, no execution)
 #        -> postgres (internal network only, no published port)
-#   compliance-runner (discover/credential-test/scan) -> postgres, internal only
-#   download-runner   (catalog-index/download)        -> postgres, internal only
+#   compliance-runner (discover/credential-test/scan)
+#     -> postgres (internal), lab/target infrastructure (runner-egress)
+#   download-runner   (catalog-index/download)
+#     -> postgres (internal), depot/internet in connected mode (runner-egress)
 #
 # The two runners are long-lived Generic Host services, not additional web APIs
 # (ADR-0013 decision 3) -- they claim jobs directly from Postgres (ADR-0014
@@ -16,6 +18,16 @@
 # (waypoint_compliance_runner / waypoint_download_runner -- see the postgres
 # service below and backend/Waypoint.Infrastructure/Data/Migrations/
 # 0025_runner_db_roles.sql), separate from the backend's own waypoint/owner role.
+#
+# Issue #578: both runners previously sat ONLY on `internal` (no route out), so
+# neither could resolve or reach anything outside the compose stack --
+# compliance-runner cannot reach scan targets/STIG Manager, download-runner
+# cannot reach the Broadcom depot. `runner-egress` (below) is a second,
+# project-scoped bridge network (not `internal: true`) that gives both runners
+# a route out while `postgres` stays on `internal` alone -- neither runner's
+# new network reaches Postgres, and nothing on `edge`/`internal` gains a route
+# out through this change. See deploy/README.md "Runner egress" for the
+# disconnected/air-gapped operator override.
 #
 # Bring-up: `cd deploy && docker compose up -d`. Development-only
 # bootstrap services generate persistent TLS/key/auth state in named volumes,
@@ -434,9 +446,13 @@ services:
 
   # compliance-runner (issue #442, ADR-0013/0014): claims discover/credential-test/
   # scan (later remediate) jobs directly from Postgres and hosts PowerShell/PowerCLI/
-  # cinc-auditor/SAF in-process. Not reachable from nginx or the host - internal
-  # network only, no `ports:`. One replica by default (ADR-0013 decision 6); see
-  # "Replica-safe scaling" in deploy/README.md before setting `deploy.replicas` > 1.
+  # cinc-auditor/SAF in-process. Not reachable from nginx or the host - no
+  # `ports:`, ever. On `internal` for Postgres and `runner-egress` (issue #578)
+  # for lab/target reachability (vCenter/ESXi/NSX/SRG/STIG Manager) - the
+  # latter is the only network this service can dial out on; it still has no
+  # route back in from either network. One replica by default (ADR-0013
+  # decision 6); see "Replica-safe scaling" in deploy/README.md before setting
+  # `deploy.replicas` > 1.
   compliance-runner:
     build:
       # Repo-root context, same convention as backend (issue #92) - this image's
@@ -506,6 +522,7 @@ services:
       #     create_host_path: false
     networks:
       - internal
+      - runner-egress
     # File-sentinel healthcheck (ADR-0013 §1: this process has no HTTP listener
     # to probe) - RunnerHealthReportingHostedService re-evaluates readiness every
     # RunnerHealth:RefreshInterval and writes a JSON report; --health-check reads
@@ -522,10 +539,17 @@ services:
 
   # download-runner (issue #442, ADR-0013/0014): claims catalog-index/download
   # (later content-library/repository/managed-content) jobs directly from Postgres
-  # and hosts PowerShell in-process. Not reachable from nginx or the host -
-  # internal network only, no `ports:`. One replica by default (ADR-0013
-  # decision 6); see "Replica-safe scaling" in deploy/README.md before setting
-  # `deploy.replicas` > 1.
+  # and hosts PowerShell in-process. Not reachable from nginx or the host - no
+  # `ports:`, ever. On `internal` for Postgres and `runner-egress` (issue #578)
+  # for the Broadcom depot/operator repositories in connected mode - the latter
+  # is the only network this service can dial out on; it still has no route
+  # back in from either network. In a disconnected deployment this network
+  # carries no traffic (download features are hidden/disabled per
+  # docs/architecture.md's connected/disconnected mode table) but stays
+  # attached rather than becoming a per-mode compose variant - see
+  # deploy/README.md "Runner egress" for the operator-facing egress lockdown
+  # note. One replica by default (ADR-0013 decision 6); see "Replica-safe
+  # scaling" in deploy/README.md before setting `deploy.replicas` > 1.
   download-runner:
     build:
       context: ..
@@ -585,6 +609,7 @@ services:
       #     create_host_path: false
     networks:
       - internal
+      - runner-egress
     # File-sentinel healthcheck, same convention as compliance-runner above -
     # see ReadinessReportingHostedService/HealthCheckProbe's doc comments. Unlike
     # the compliance-runner's check, this one also confirms Postgres
@@ -622,6 +647,24 @@ networks:
   internal:
     driver: bridge
     internal: true
+  # compliance-runner, download-runner <-> lab/target infrastructure and the
+  # internet (issue #578). A normal (non-`internal:`) bridge network, so Docker
+  # gives it a default gateway/route out through the host -- deliberately the
+  # ONLY network attribute that differs from `internal` above. Project-scoped
+  # like every other network in this file (Compose namespaces it
+  # `<project>_runner-egress`, per docs/testing.md's isolation recipe) --
+  # never external/shared, so concurrent stacks on one Docker host still don't
+  # collide. No `ports:` on either attached service and no other service is
+  # attached to this network, so it grants outbound reachability only -
+  # nothing gains a new path IN to compliance-runner/download-runner, and
+  # postgres/backend/nginx/keycloak are unaffected (still exactly `edge`/
+  # `internal` as before). An operator running a disconnected/air-gapped
+  # instance who wants to physically remove even this egress path (e.g. no
+  # download-runner internet route at all) can override this network's driver
+  # options or detach download-runner from it in a docker-compose.override.yml
+  # -- see deploy/README.md "Runner egress".
+  runner-egress:
+    driver: bridge
 
 volumes:
   # Generated development-only master key and local-auth hash. Persistent so
