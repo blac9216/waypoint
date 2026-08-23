@@ -17,52 +17,66 @@
 # service below and backend/Waypoint.Infrastructure/Data/Migrations/
 # 0025_runner_db_roles.sql), separate from the backend's own waypoint/owner role.
 #
-# Bring-up: see deploy/README.md. Requires deploy/nginx/certs/dev-cert.pem
-# and dev-key.pem (deploy/nginx/certs/generate-dev-certs.sh), and a built
-# ../frontend/dist (npm run build in frontend/) before `up`.
+# Bring-up: `cd deploy && docker compose up -d`. Development-only
+# bootstrap services generate persistent TLS/key/auth state in named volumes,
+# and the nginx image builds the frontend itself. See deploy/README.md.
 
 name: waypoint-dev
 
+x-backend-image: &backend-image
+  build:
+    context: ..
+    dockerfile: backend/Dockerfile
+
 services:
+  dev-bootstrap:
+    build:
+      context: ./dev-bootstrap
+    volumes:
+      - dev-secrets:/run/waypoint-dev-secrets
+      - dev-tls:/run/waypoint-dev-tls
+      - compliance-profiles:/opt/waypoint/profiles
+    network_mode: none
+    restart: "no"
+
+  dev-auth-bootstrap:
+    <<: *backend-image
+    depends_on:
+      dev-bootstrap:
+        condition: service_completed_successfully
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ ! -s /run/waypoint-dev-secrets/local-auth-admin-password-hash ]; then
+          printf '%s\n' "$$WAYPOINT_DEV_PASSWORD" \
+            | dotnet Waypoint.Api.dll --hash-password \
+            > /run/waypoint-dev-secrets/local-auth-admin-password-hash.tmp
+          mv /run/waypoint-dev-secrets/local-auth-admin-password-hash.tmp \
+            /run/waypoint-dev-secrets/local-auth-admin-password-hash
+          chown 1654:1654 /run/waypoint-dev-secrets/local-auth-admin-password-hash
+          chmod 600 /run/waypoint-dev-secrets/local-auth-admin-password-hash
+        fi
+    environment:
+      WAYPOINT_DEV_PASSWORD: "${WAYPOINT_DEV_PASSWORD:-waypoint-dev}"
+    volumes:
+      - dev-secrets:/run/waypoint-dev-secrets
+    network_mode: none
+    restart: "no"
+
   nginx:
-    image: nginx:1.27-alpine
+    build:
+      context: ..
+      dockerfile: deploy/nginx/Dockerfile
     depends_on:
       backend:
         condition: service_healthy
+      dev-bootstrap:
+        condition: service_completed_successfully
     ports:
       - "${WAYPOINT_HTTPS_PORT:-8443}:443"
     volumes:
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
-      # Real frontend static build (issue #11 / #65), bind-mounted rather
-      # than baked into an image so the existing nginx:1.27-alpine image
-      # needs no custom build stage - same pattern already used for conf.d
-      # and certs. Build it first: cd frontend && npm run build.
-      #
-      # Long syntax with `create_host_path: false` on purpose. Docker's
-      # default for a bind mount is to CREATE a missing source path - as a
-      # root-owned empty directory - so forgetting the build step would
-      # bring the stack up "healthy" while nginx served a bare 403 Forbidden
-      # (try_files falls through to an empty dir, autoindex off), and would
-      # leave behind a root-owned ../frontend/dist that a non-root operator
-      # then cannot `npm run build` into (EACCES) without sudo. Refusing the
-      # mount instead fails the `up` immediately with
-      #   invalid mount config for type "bind": bind source path does not
-      #   exist: .../frontend/dist
-      # and creates nothing.
-      #
-      # It guards the ABSENT case only: an ../frontend/dist that exists but is
-      # EMPTY still mounts, still comes up "healthy", and still serves that
-      # same bare 403. `vite build` empties outDir before writing, so a build
-      # that fails partway lands exactly there - the 403 has not gone away,
-      # it just no longer happens from forgetting the build entirely.
-      # See deploy/README.md "Bring-up" step 2.
-      - type: bind
-        source: ../frontend/dist
-        target: /usr/share/nginx/html
-        read_only: true
-        bind:
-          create_host_path: false
+      - dev-tls:/etc/nginx/certs:ro
     networks:
       - edge
     healthcheck:
@@ -78,14 +92,10 @@ services:
   # contract, and its position on the edge+internal networks are the
   # interface nginx and postgres depend on - unchanged across the swap.
   backend:
-    build:
-      # Context is the repo root, not ../backend (issue #92): .editorconfig and
-      # Directory.Build.props live at the repo root, and a backend/-scoped context put
-      # the containerized compile's analyzer posture at the SDK defaults instead of this
-      # repo's (see backend/Dockerfile's header comment for the full mechanism).
-      context: ..
-      dockerfile: backend/Dockerfile
+    <<: *backend-image
     depends_on:
+      dev-auth-bootstrap:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     environment:
@@ -116,7 +126,7 @@ services:
       # (dev-flag)". Set to "true" to re-enable the dev-grade local-session
       # scheme above alongside real OIDC; never set this on a production
       # deployment.
-      LocalAuth__Enabled: "${LOCAL_AUTH_ENABLED:-false}"
+      LocalAuth__Enabled: "${LOCAL_AUTH_ENABLED:-true}"
       # Issue #29, ADR-0004: the backend validates Keycloak-issued bearer
       # tokens as a plain OIDC relying party. Authority drives DISCOVERY ONLY
       # (issue #536 -- see Oidc__ValidIssuer below for issuer validation) and
@@ -183,7 +193,7 @@ services:
       # subnet (see the `edge` network's ipam config below) - the only network
       # nginx and the backend share, and the only source X-Forwarded-For/
       # X-Forwarded-Proto should ever be trusted from in this deployment.
-      ForwardedHeaders__KnownNetworks__0: "192.168.240.0/24"
+      ForwardedHeaders__KnownNetworks__0: "${WAYPOINT_EDGE_SUBNET:-192.168.240.0/24}"
       # Secrets master key (issue #405; ADR-0005, AWX-pattern envelope
       # encryption). Preferred and only delivery path is a mounted file,
       # bind-mounted below from ../config/secrets/master.key (gitignored -
@@ -209,6 +219,7 @@ services:
       # output back to the API caller. compliance-runner and download-runner
       # (below) hold the read-write mount for the same named volume.
       - artifacts:/var/lib/waypoint/artifacts:ro
+      - dev-secrets:/run/secrets:ro
       # Admin password hash file (issue #333) - operator-provided, gitignored
       # (../config/ is covered by .gitignore's anchored /config/ entry).
       # Commented out by default so an unconfigured stack does not fail to
@@ -259,7 +270,8 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:16-alpine
+    build:
+      context: ./postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-waypoint}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-waypoint_dev_only}
@@ -283,10 +295,6 @@ services:
       POSTGRES_KEYCLOAK_PASSWORD: ${POSTGRES_KEYCLOAK_PASSWORD:-waypoint_keycloak_dev_only}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Runs once against a FRESH pgdata volume (docker-entrypoint-initdb.d
-      # convention - see the script's own header comment). Read-only: this
-      # image's entrypoint only ever reads these scripts, never writes back.
-      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
     # No `ports:` - reachable only from other containers on the internal
     # network (ADR-0002; issue #2 acceptance criteria). Not published to
     # the host, not reachable from the edge network nginx sits on.
@@ -316,7 +324,8 @@ services:
   # already follow: pin a version, let the operator's own registry mirror or
   # pre-pulled image cache satisfy it in a disconnected environment).
   keycloak:
-    image: quay.io/keycloak/keycloak:25.0
+    build:
+      context: ./keycloak
     # Issue #536: --hostname-strict=true is REQUIRED for KC_HOSTNAME (below) to
     # actually pin one canonical issuer -- hostname-strict=false ("Disables
     # dynamically resolving the hostname from request headers" per `kc.sh
@@ -396,23 +405,6 @@ services:
       # https://<host>/realms/waypoint/protocol/openid-connect/auth (missing
       # /auth); after it, https://<host>/auth/realms/waypoint/... (correct).
       KC_HTTP_RELATIVE_PATH: "/auth"
-    volumes:
-      # Realm bootstrap import (issue #28 AC1: "fresh compose up yields a
-      # working realm with the four role groups"). --import-realm (see
-      # command above) reads every realm file under this directory at
-      # startup and imports/updates the realm if it doesn't already exist -
-      # read-only, since Keycloak never needs to write back into the
-      # committed template. The committed file has NO real secret in it
-      # (deploy/keycloak/README.md) - the client secret placeholder is
-      # intentionally left untemplated on THIS path, so a fresh stack's
-      # `waypoint-backend` client boots with the literal placeholder string
-      # as its secret. That is fine for this dev stack (nothing yet
-      # authenticates against Keycloak - #29 wires that up) and is called
-      # out in deploy/README.md; deploy/scripts/keycloak-realm-import.sh is
-      # the path that substitutes a real secret, for anyone bootstrapping a
-      # deployment that needs the OIDC flow to actually work end-to-end
-      # before #29 lands.
-      - ./keycloak/realm:/opt/keycloak/data/import:ro
     networks:
       - edge
       - internal
@@ -453,6 +445,8 @@ services:
       context: ..
       dockerfile: runners/compliance-runner/Dockerfile
     depends_on:
+      dev-bootstrap:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     environment:
@@ -464,6 +458,8 @@ services:
       # mount below (issue #405/ADR-0005) - every trusted service reads the same
       # key material, never an env var carrying the key itself.
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
+      RunnerResources__FallbackCpuCores: "${RUNNER_FALLBACK_CPU_CORES:-4}"
+      RunnerResources__FallbackMemoryBytes: "${RUNNER_FALLBACK_MEMORY_BYTES:-4294967296}"
       # Shim modules baked into the image at /app/PowerShell/Modules (Waypoint.
       # Infrastructure.csproj's CopyToPublishDirectory - see the Dockerfile).
       # Preload order matches the mapping deploy/README.md previously documented
@@ -486,6 +482,7 @@ services:
       # operator populates directly for now (matches ScanOptions' ProfilePath/
       # NsxProfilePath/SrgProfilePath defaults, all under this one root).
       - compliance-profiles:/opt/waypoint/profiles:ro
+      - dev-secrets:/run/secrets:ro
       # Scan artifacts (HDF/CKL) - read-write (ADR-0014 §7: "scan-artifact write
       # access"). Same named volume the backend mounts read-only above, so the
       # API can serve already-written results without itself being able to
@@ -534,6 +531,8 @@ services:
       context: ..
       dockerfile: runners/download-runner/Dockerfile
     depends_on:
+      dev-bootstrap:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     environment:
@@ -572,6 +571,7 @@ services:
       # ManagedToolOptions' ToolStatePath default. Read-write so that future
       # install flow can place the binary; download jobs only ever read it.
       - managed-tool:/var/lib/waypoint/managed-tool
+      - dev-secrets:/run/secrets:ro
       # Secrets master key file (issue #405/#442) - same convention as
       # compliance-runner's own mount above; catalog-index resolves the depot
       # token credential and download resolves the target credential, both
@@ -613,7 +613,7 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 192.168.240.0/24
+        - subnet: "${WAYPOINT_EDGE_SUBNET:-192.168.240.0/24}"
   # backend, compliance-runner, download-runner <-> postgres. internal: true
   # means Docker gives this network no route out (no host access, no
   # default-gateway/internet); only containers attached to it can reach each
@@ -624,6 +624,11 @@ networks:
     internal: true
 
 volumes:
+  # Generated development-only master key and local-auth hash. Persistent so
+  # encrypted credentials survive ordinary down/up cycles; `down -v` resets it.
+  dev-secrets:
+  # Generated development-only self-signed nginx certificate and key.
+  dev-tls:
   # Postgres data directory.
   pgdata:
   # Scan (compliance-runner) and download (download-runner) artifact output.

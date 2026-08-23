@@ -37,7 +37,7 @@ download-runner   --> postgres (internal network only; not reachable from nginx/
 ```
 
 - **nginx** terminates dev TLS, serves the frontend static bundle bind-mounted
-  from `../frontend/dist` (the real Vite build output — see "Bring-up" below),
+  from the static bundle built into the development nginx image,
   and reverse-proxies `/api/` to the backend. SSE routes (`/api/v1/events`,
   `/api/v1/runs/{id}/events` — see
   [`docs/api-contract.md`](../docs/api-contract.md#event-streams-sse)) are
@@ -361,7 +361,63 @@ docker compose -p <project> exec nginx wget -qO- http://127.0.0.1:8081/healthz
 docker compose -p <project> exec nginx wget -qO- http://127.0.0.1:8081/healthz/upstream
 ```
 
-### Bring-up
+### Bring-up: one command
+
+Docker Engine with Compose v2 is the only host prerequisite. From a clean checkout:
+
+```bash
+cd deploy
+docker compose up -d
+```
+
+Compose builds the frontend and application images, packages the committed nginx,
+PostgreSQL, and Keycloak bootstrap assets into those images, and runs two idempotent
+one-shot bootstrap services. Those services create a development-only TLS
+certificate, random envelope-encryption master key, local-auth password hash, and
+the empty compliance-profile directory structure in project-scoped named volumes.
+They never print key material. Long-running services wait for bootstrap to complete.
+
+Open `https://localhost:${WAYPOINT_HTTPS_PORT:-8443}` and accept the development
+self-signed certificate. Log in with:
+
+```text
+username: admin
+password: waypoint-dev
+```
+
+Both values are development-only. Override the password before the first startup
+with `WAYPOINT_DEV_PASSWORD`; override the port with `WAYPOINT_HTTPS_PORT`. When the
+port changes, also set `KC_HOSTNAME` and `OIDC_VALID_ISSUER` as described under
+Keycloak above so browser-issued tokens retain one canonical issuer.
+
+Ordinary `docker compose down` preserves PostgreSQL, encrypted credentials, and the
+generated development keys. To intentionally erase the entire development instance
+and generate fresh state on the next startup:
+
+```bash
+docker compose down -v
+```
+
+When multiple stacks share one Docker host, follow `docs/testing.md`: use a unique
+project name, HTTPS port, and edge subnet. For example:
+
+```bash
+WAYPOINT_HTTPS_PORT=19443 \
+WAYPOINT_EDGE_SUBNET=192.0.2.0/24 \
+KC_HOSTNAME=https://localhost:19443/auth \
+OIDC_VALID_ISSUER=https://localhost:19443/auth/realms/waypoint \
+docker compose -p wp-issue561 up -d
+```
+
+Because the development stack uses image `COPY` instructions and named volumes—not
+repository bind mounts—the same command works from the project devcontainer against
+its Docker gateway. No host-path translation override is needed.
+
+The bootstrap defaults are not a production secret-provisioning model. Production
+or appliance deployments must provide operator-owned TLS, authentication, and master
+key material according to the security guidance in this document.
+
+### Advanced/manual provisioning reference
 
 Prerequisites: Docker Engine + Compose v2, `openssl`, Node.js/npm (to build
 the frontend bundle).

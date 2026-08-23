@@ -58,6 +58,8 @@ frontend/build/
 # Dockerfile if a future image genuinely needs one of these (e.g. a frontend image
 # would need an exception for frontend/ — add it there, not by loosening this file).
 docs/
-frontend/
+# The development nginx image builds the SPA from the repo-root context. Build
+# output and dependencies remain excluded by the generic rules above.
+!frontend/
 scripts/
 README.md
