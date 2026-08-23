@@ -56,6 +56,11 @@ public static class JobResourceProfiles
 		// remediate: PowerCLI/Ansible against a target list; no handler yet (ADR-0013
 		// "later"), profiled alongside scan's shape since it walks the same target list.
 		["remediate"] = new JobResourceProfile(CpuCores: 1.5, MemoryBytes: 768L * 1024 * 1024),
+		// content-pull/content-import: compliance-runner job types per ADR-0017 (moved
+		// from the download domain grouping below) -- a git clone/fetch plus a
+		// filesystem walk for profile discovery, similar shape to catalog-index.
+		["content-pull"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024),
+		["content-import"] = Default,
 
 		// Download domain (ADR-0013 §2).
 		// catalog-index: reads/parses depot metadata on disk -- I/O-bound, light CPU/memory.
@@ -63,14 +68,12 @@ public static class JobResourceProfiles
 		// download: vcf-download-tool artifact transfer -- network/disk-bound, moderate
 		// memory for buffering, low CPU.
 		["download"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 512L * 1024 * 1024),
-		// The six "later" download job types (ADR-0013's reserved-but-unimplemented
+		// The remaining "later" download job types (ADR-0013's reserved-but-unimplemented
 		// set): profiled at Default's shape until each lands with its own handler and
 		// can be measured.
 		["bundle-export"] = Default,
 		["bundle-import"] = Default,
 		["content-library-sync"] = Default,
-		["content-pull"] = Default,
-		["content-import"] = Default,
 		["update"] = Default,
 	};
 

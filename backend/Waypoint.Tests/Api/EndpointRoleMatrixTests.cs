@@ -86,6 +86,17 @@ public sealed class EndpointRoleMatrixTests
 		["LibraryController.ListItems"] = WaypointRole.Viewer,
 		["LibraryController.RequestManifest"] = WaypointRole.Viewer,
 
+		// ComplianceContentController -- reads (config, pull history) Viewer+; writes
+		// (config PUT, pull trigger) Admin, matching CatalogController's browse/re-index
+		// split (issue #40).
+		["ComplianceContentController.Get"] = WaypointRole.Viewer,
+		["ComplianceContentController.Put"] = WaypointRole.Admin,
+		["ComplianceContentController.ListPulls"] = WaypointRole.Viewer,
+		["ComplianceContentController.Pull"] = WaypointRole.Admin,
+
+		// ProfilesController -- inventory read is Viewer+ (issue #40, feeds Benchmarks #559).
+		["ProfilesController.List"] = WaypointRole.Viewer,
+
 		// ConfigDocsController -- reads Viewer+; Save (write) Admin (config authoring).
 		["ConfigDocsController.List"] = WaypointRole.Viewer,
 		["ConfigDocsController.Resolve"] = WaypointRole.Viewer,
