@@ -15,6 +15,7 @@
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Secrets;
@@ -361,6 +362,30 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 
 		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
 		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
+	/// Issue #598 (migration 0038): <c>ContentPullJobHandler</c> persists each
+	/// profile's parsed control inventory via <c>ProfileControlRepository.ReplaceForProfileAsync</c>
+	/// as the compliance-runner role -- same replace-per-parent shape 0035's
+	/// <c>profiles</c> grant already covers, extended to the new table.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CanReplaceProfileControls()
+	{
+		Waypoint.Infrastructure.ComplianceContent.ProfileRepository ownerProfiles = new(_fixture.ConnectionString);
+		await ownerProfiles.ReplaceAllAsync(
+			[new ProfileUpsert("role-grant-drift-profile", "Role Grant Drift Profile", "1.0", "commit1", ProfileStates.Current)],
+			CancellationToken.None);
+		Guid profileId = Assert.Single(await ownerProfiles.ListAsync(CancellationToken.None), p => p.ProfileKey == "role-grant-drift-profile").Id;
+
+		Waypoint.Infrastructure.ComplianceContent.ProfileControlRepository runnerProfileControls = new(_complianceRunnerConnectionString);
+		await runnerProfileControls.ReplaceForProfileAsync(
+			profileId, [new ProfileControlUpsert("V-9001", "Runner-written control", "medium")], CancellationToken.None);
+
+		Waypoint.Infrastructure.ComplianceContent.ProfileControlRepository ownerProfileControls = new(_fixture.ConnectionString);
+		ProfileControl control = Assert.Single(await ownerProfileControls.ListByProfileAsync(profileId, CancellationToken.None));
+		Assert.Equal("V-9001", control.ControlId);
 	}
 
 	private async Task ResetCapacityTablesAsync()

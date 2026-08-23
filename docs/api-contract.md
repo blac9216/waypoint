@@ -196,7 +196,7 @@ work once one exists.
 | Endpoint | Methods | Notes |
 |---|---|---|
 | `/profiles` | GET | From compliance content: name, version, STIG\|SRG, benchmark mapping, control/severity counts, inputs-set/attested/missing stats. |
-| `/profiles/{id}/controls` | GET | Control, severity, title, effective input + scope, attest status. |
+| `/profiles/{id}/controls` | GET | Control, severity, title, effective input + scope, attest status. Issue #598: `effective input`/`attest status` are the PROFILE's whole-YAML `input`/`attestation` config-doc resolution for an optional `?target=` query param, applied identically to every control row — not resolved independently per control id, since no per-control structured storage exists in the config-doc schema (domain-model.md: "stored as documents ... not parsed into forms"). Controls themselves (id/title/severity) are parsed from the profile's InSpec control files at content-pull time, not derived from config-docs. |
 | `/benchmarks` | GET, POST | POST = manual XCCDF/zip upload. |
 | `/benchmarks/sync` | POST | Admin + connected; from STIG Manager. |
 | `/profiles/{id}/mapping` | PUT | Change benchmark mapping. |

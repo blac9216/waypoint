@@ -82,16 +82,62 @@ public sealed class ContentPullJobHandlerTests
 			throw new NotSupportedException();
 	}
 
+	/// <summary>
+	/// <see cref="ListAsync"/> synthesizes a stable id per <see cref="ProfileUpsert.ProfileKey"/>
+	/// (a dictionary keyed on the string, not a fresh guid per call) so the handler's
+	/// post-replace "re-read profiles, look up each by key" control-persistence step
+	/// (issue #598) sees the SAME id across the ReplaceAllAsync call and the subsequent
+	/// ListAsync call within one ExecuteAsync -- exactly what the real Postgres-backed
+	/// repository guarantees (a profile_key's row keeps its id across an upsert).
+	/// </summary>
 	private sealed class FakeProfileRepository : IProfileRepository
 	{
+		private readonly Dictionary<string, Guid> _idsByKey = new(StringComparer.Ordinal);
+
 		public IReadOnlyList<ProfileUpsert>? Replaced { get; private set; }
 
-		public Task<IReadOnlyList<Profile>> ListAsync(CancellationToken cancellationToken) =>
+		public Task<IReadOnlyList<Profile>> ListAsync(CancellationToken cancellationToken)
+		{
+			if (Replaced is null)
+			{
+				return Task.FromResult<IReadOnlyList<Profile>>([]);
+			}
+
+			IReadOnlyList<Profile> profiles = [.. Replaced.Select(p => new Profile(IdFor(p.ProfileKey), p.ProfileKey, p.Name, p.Version, p.Commit, p.State, DateTimeOffset.UtcNow))];
+			return Task.FromResult(profiles);
+		}
+
+		public Task<Profile?> GetAsync(Guid id, CancellationToken cancellationToken) =>
 			throw new NotSupportedException();
 
 		public Task ReplaceAllAsync(IReadOnlyList<ProfileUpsert> profiles, CancellationToken cancellationToken)
 		{
 			Replaced = profiles;
+			return Task.CompletedTask;
+		}
+
+		private Guid IdFor(string profileKey)
+		{
+			if (!_idsByKey.TryGetValue(profileKey, out Guid id))
+			{
+				id = Guid.NewGuid();
+				_idsByKey[profileKey] = id;
+			}
+
+			return id;
+		}
+	}
+
+	private sealed class FakeProfileControlRepository : IProfileControlRepository
+	{
+		public Dictionary<Guid, IReadOnlyList<ProfileControlUpsert>> ReplacedByProfileId { get; } = [];
+
+		public Task<IReadOnlyList<ProfileControl>> ListByProfileAsync(Guid profileId, CancellationToken cancellationToken) =>
+			throw new NotSupportedException();
+
+		public Task ReplaceForProfileAsync(Guid profileId, IReadOnlyList<ProfileControlUpsert> controls, CancellationToken cancellationToken)
+		{
+			ReplacedByProfileId[profileId] = controls;
 			return Task.CompletedTask;
 		}
 	}
@@ -135,7 +181,7 @@ public sealed class ContentPullJobHandlerTests
 			CreatedAt: DateTimeOffset.UtcNow, UpdatedAt: DateTimeOffset.UtcNow);
 
 	private static (ContentPullJobHandler Handler, JobExecutionContext Context, RecordingEventPublisher Events,
-		FakeContentRepository Content, FakeProfileRepository Profiles) Build(
+		FakeContentRepository Content, FakeProfileRepository Profiles, FakeProfileControlRepository ProfileControls) Build(
 			PowerShellExecutionResult psResult,
 			ComplianceContentConfig? config,
 			string? initiatedBy = "admin@example.internal")
@@ -143,10 +189,11 @@ public sealed class ContentPullJobHandlerTests
 		FakePowerShellExecutor executor = new(psResult);
 		FakeContentRepository content = new(config);
 		FakeProfileRepository profiles = new();
+		FakeProfileControlRepository profileControls = new();
 		FakeJobRunnerRepository jobs = new(initiatedBy);
 		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions { ContentPath = ContentPath });
 
-		ContentPullJobHandler handler = new(executor, content, profiles, jobs, options);
+		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, jobs, options);
 
 		Guid jobId = Guid.NewGuid();
 		Guid runId = Guid.NewGuid();
@@ -155,7 +202,7 @@ public sealed class ContentPullJobHandlerTests
 		RecordingEventPublisher events = new();
 		JobExecutionContext context = new(job, "worker-1", events, jobs, JobShape.Simple);
 
-		return (handler, context, events, content, profiles);
+		return (handler, context, events, content, profiles, profileControls);
 	}
 
 	private static PSObject Success(string commit, params PSObject[] profiles)
@@ -175,6 +222,22 @@ public sealed class ContentPullJobHandlerTests
 		return profile;
 	}
 
+	private static PSObject ProfileObjectWithControls(string profileKey, string name, params PSObject[] controls)
+	{
+		PSObject profile = ProfileObject(profileKey, name, version: null);
+		profile.Properties.Add(new PSNoteProperty("Controls", controls));
+		return profile;
+	}
+
+	private static PSObject ControlObject(string? controlId, string? title, string? severity)
+	{
+		PSObject control = new();
+		control.Properties.Add(new PSNoteProperty("ControlId", controlId));
+		control.Properties.Add(new PSNoteProperty("Title", title));
+		control.Properties.Add(new PSNoteProperty("Severity", severity));
+		return control;
+	}
+
 	private static PowerShellExecutionResult Ok(params object?[] output) =>
 		new(Succeeded: true, output, HadErrors: false, TimedOut: false, FailureReason: null, NativeExitCode: null);
 
@@ -191,7 +254,7 @@ public sealed class ContentPullJobHandlerTests
 			ProfileObject("dod-vsphere-8-esxi-stig", "vSphere 8 ESXi STIG", "1.2"),
 			ProfileObject("dod-vsphere-8-vcsa-stig", "vSphere 8 vCSA STIG", "1.0"));
 		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events,
-			FakeContentRepository content, FakeProfileRepository profiles) =
+			FakeContentRepository content, FakeProfileRepository profiles, _) =
 			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
@@ -220,7 +283,7 @@ public sealed class ContentPullJobHandlerTests
 	[Fact]
 	public async Task Execute_BranchConfig_LabelsProfilesCurrent()
 	{
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles) =
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, _) =
 			Build(Ok(Success("c1", ProfileObject("p1", "P1", null))), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		await handler.ExecuteAsync(context, CancellationToken.None);
@@ -231,7 +294,7 @@ public sealed class ContentPullJobHandlerTests
 	[Fact]
 	public async Task Execute_TagConfig_LabelsProfilesPinned()
 	{
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles) =
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, _) =
 			Build(Ok(Success("c1", ProfileObject("p1", "P1", null))), Config(ComplianceContentRefTypes.Tag, "v1.2.3"));
 
 		await handler.ExecuteAsync(context, CancellationToken.None);
@@ -239,11 +302,101 @@ public sealed class ContentPullJobHandlerTests
 		Assert.Equal(ProfileStates.Pinned, Assert.Single(profiles.Replaced!).State);
 	}
 
+	/// <summary>Issue #598: a successful pull persists each profile's parsed controls, keyed by that profile's (fake-repository-assigned) id.</summary>
+	[Fact]
+	public async Task Execute_Success_PersistsControlsPerProfile()
+	{
+		PSObject output = Success(
+			"commitC",
+			ProfileObjectWithControls("profile-a", "Profile A",
+				ControlObject("V-1001", "First control", "medium"),
+				ControlObject("V-1002", "Second control", "high")),
+			ProfileObjectWithControls("profile-b", "Profile B",
+				ControlObject("V-2001", "Other profile's control", "low")));
+
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.Equal(2, profileControls.ReplacedByProfileId.Count);
+
+		IReadOnlyList<Profile> stored = await profiles.ListAsync(CancellationToken.None);
+		Profile profileA = Assert.Single(stored, p => p.ProfileKey == "profile-a");
+		Profile profileB = Assert.Single(stored, p => p.ProfileKey == "profile-b");
+
+		IReadOnlyList<ProfileControlUpsert> controlsA = profileControls.ReplacedByProfileId[profileA.Id];
+		Assert.Equal(2, controlsA.Count);
+		Assert.Contains(controlsA, c => c.ControlId == "V-1001" && c.Title == "First control" && c.Severity == "medium");
+		Assert.Contains(controlsA, c => c.ControlId == "V-1002" && c.Title == "Second control" && c.Severity == "high");
+
+		ProfileControlUpsert controlB = Assert.Single(profileControls.ReplacedByProfileId[profileB.Id]);
+		Assert.Equal("V-2001", controlB.ControlId);
+	}
+
+	/// <summary>Issue #598 AC: a profile with no Controls property (older module output, or genuinely zero controls/*.rb files) persists an empty control set rather than failing the pull.</summary>
+	[Fact]
+	public async Task Execute_ProfileWithNoControlsProperty_PersistsEmptyControlSet()
+	{
+		PSObject output = Success("commitD", ProfileObject("no-controls-profile", "No Controls", version: null));
+
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Profile stored = Assert.Single(await profiles.ListAsync(CancellationToken.None));
+		Assert.Empty(profileControls.ReplacedByProfileId[stored.Id]);
+	}
+
+	/// <summary>Issue #598 AC: a malformed control row (missing ControlId, or a non-PSObject entry) is dropped, not fatal to the pull or to its sibling controls.</summary>
+	[Fact]
+	public async Task Execute_MalformedControlRows_AreSkipped_WithoutFailingThePull()
+	{
+		PSObject goodControl = ControlObject("V-3001", "Kept", "critical");
+		PSObject blankIdControl = ControlObject(controlId: null, "Dropped: no id", "low");
+
+		PSObject profile = ProfileObject("profile-c", "Profile C", version: null);
+		profile.Properties.Add(new PSNoteProperty("Controls", new object?[] { goodControl, blankIdControl, "not-a-psobject" }));
+
+		PSObject output = Success("commitE", profile);
+
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Profile stored = Assert.Single(await profiles.ListAsync(CancellationToken.None));
+		ProfileControlUpsert survivor = Assert.Single(profileControls.ReplacedByProfileId[stored.Id]);
+		Assert.Equal("V-3001", survivor.ControlId);
+	}
+
+	/// <summary>A control with an empty/blank Title or Severity normalizes to null rather than storing whitespace (mirrors TryParseProfile's Name fallback discipline).</summary>
+	[Fact]
+	public async Task Execute_ControlWithBlankTitleAndSeverity_NormalizesToNull()
+	{
+		PSObject profile = ProfileObjectWithControls("profile-d", "Profile D", ControlObject("V-4001", "   ", ""));
+		PSObject output = Success("commitF", profile);
+
+		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+
+		await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Profile stored = Assert.Single(await profiles.ListAsync(CancellationToken.None));
+		ProfileControlUpsert control = Assert.Single(profileControls.ReplacedByProfileId[stored.Id]);
+		Assert.Null(control.Title);
+		Assert.Null(control.Severity);
+	}
+
 	[Fact]
 	public async Task Execute_MissingConfig_FailsWithoutInvokingExecutor_AndRecordsNoPull()
 	{
 		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events,
-			FakeContentRepository content, FakeProfileRepository profiles) =
+			FakeContentRepository content, FakeProfileRepository profiles, _) =
 			Build(Ok(), config: null);
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
@@ -260,7 +413,7 @@ public sealed class ContentPullJobHandlerTests
 	public async Task Execute_ExecutorFailure_StillRecordsFailedPull_WithReason()
 	{
 		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events,
-			FakeContentRepository content, FakeProfileRepository profiles) =
+			FakeContentRepository content, FakeProfileRepository profiles, _) =
 			Build(Fail("git checkout failed: ref not found"), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
@@ -278,7 +431,7 @@ public sealed class ContentPullJobHandlerTests
 	[Fact]
 	public async Task Execute_ExecutorFailure_WithNoReason_RecordsFallbackNote()
 	{
-		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, _) =
+		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, _, _) =
 			Build(Fail(reason: null), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
@@ -294,7 +447,7 @@ public sealed class ContentPullJobHandlerTests
 	{
 		// Executor "succeeded" but produced no PSObject carrying a Commit -> unchanged/no-commit path.
 		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events,
-			FakeContentRepository content, FakeProfileRepository profiles) =
+			FakeContentRepository content, FakeProfileRepository profiles, _) =
 			Build(Ok("just a string, not a PSObject"), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
@@ -314,7 +467,7 @@ public sealed class ContentPullJobHandlerTests
 		output.Properties.Add(new PSNoteProperty("Commit", "   "));
 		output.Properties.Add(new PSNoteProperty("Profiles", Array.Empty<PSObject>()));
 
-		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, FakeProfileRepository profiles) =
+		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, FakeProfileRepository profiles, _) =
 			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
@@ -333,7 +486,7 @@ public sealed class ContentPullJobHandlerTests
 			ProfileObject(profileKey: null, "no key", "1.0"), // dropped: blank ProfileKey
 			ProfileObject("good-profile", name: null, version: null)); // name defaults to key
 
-		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, FakeProfileRepository profiles) =
+		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, FakeProfileRepository profiles, _) =
 			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
@@ -353,7 +506,7 @@ public sealed class ContentPullJobHandlerTests
 		root.Properties.Add(new PSNoteProperty("Commit", "commitX"));
 		root.Properties.Add(new PSNoteProperty("Profiles", new object?[] { "not-a-psobject", ProfileObject("kept", "Kept", "9") }));
 
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles) =
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, _) =
 			Build(Ok(root), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
@@ -368,9 +521,10 @@ public sealed class ContentPullJobHandlerTests
 		FakePowerShellExecutor executor = new(Ok(Success("c1")));
 		FakeContentRepository content = new(Config(ComplianceContentRefTypes.Tag, "v2"));
 		FakeProfileRepository profiles = new();
+		FakeProfileControlRepository profileControls = new();
 		FakeJobRunnerRepository jobs = new("admin@example.internal");
 		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions { ContentPath = ContentPath });
-		ContentPullJobHandler handler = new(executor, content, profiles, jobs, options);
+		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, jobs, options);
 
 		ClaimedJob job = new(Guid.NewGuid(), Guid.NewGuid(), "content-pull", null, null, null, 5, "{}", 0, 1);
 		RecordingEventPublisher events = new();
@@ -390,7 +544,7 @@ public sealed class ContentPullJobHandlerTests
 	[Fact]
 	public async Task Execute_NullInitiatedBy_ResolvesActorToSystem()
 	{
-		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, _) =
+		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, _, _) =
 			Build(Ok(Success("c1", ProfileObject("p1", "P1", null))), Config(ComplianceContentRefTypes.Branch, "main"), initiatedBy: null);
 
 		await handler.ExecuteAsync(context, CancellationToken.None);
@@ -404,9 +558,10 @@ public sealed class ContentPullJobHandlerTests
 		FakePowerShellExecutor executor = new(Ok(Success("c1", ProfileObject("p1", "P1", null))));
 		FakeContentRepository content = new(Config(ComplianceContentRefTypes.Branch, "main"));
 		FakeProfileRepository profiles = new();
+		FakeProfileControlRepository profileControls = new();
 		FakeJobRunnerRepository jobs = new("admin@example.internal");
 		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions { ContentPath = ContentPath });
-		ContentPullJobHandler handler = new(executor, content, profiles, jobs, options);
+		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, jobs, options);
 
 		// A job with no run id: ResolveActorAsync short-circuits to "system" without a run-state read.
 		ClaimedJob job = new(Guid.NewGuid(), RunId: null, "content-pull", null, null, null, 5, "{}", 0, 1);

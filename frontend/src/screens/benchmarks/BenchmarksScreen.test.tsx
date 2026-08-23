@@ -69,12 +69,14 @@ interface MockOptions {
 	profiles?: typeof PROFILES;
 	configDocs?: unknown[];
 	resolution?: unknown[];
+	controls?: unknown[];
 	onSave?: (url: string, body: unknown) => Response | undefined;
 }
 
 function installFetchMock(options: MockOptions = {}) {
 	const profiles = options.profiles ?? PROFILES;
 	const configDocs = options.configDocs ?? [GLOBAL_INPUT_DOC];
+	const controls = options.controls ?? [];
 
 	globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 		const url = typeof input === "string" ? input : input.toString();
@@ -82,6 +84,9 @@ function installFetchMock(options: MockOptions = {}) {
 
 		if (url === "/api/v1/profiles") {
 			return jsonResponse(profiles);
+		}
+		if (url.startsWith("/api/v1/profiles/profile-uuid-1/controls")) {
+			return jsonResponse(controls);
 		}
 		if (url === "/api/v1/sites") {
 			return jsonResponse(SITES);
@@ -345,5 +350,108 @@ describe("BenchmarksScreen", () => {
 		// Deep-linked profile is auto-selected: its detail panel (with the
 		// profile_key) renders without any further click.
 		await waitFor(() => expect(screen.getByText("vmware-vsphere-8.0-esxi-stig")).toBeInTheDocument());
+	});
+
+	// --- issue #598: per-control inspection panel -----------------------------
+
+	it("renders the control inventory (id, severity, title) for the selected profile", async () => {
+		installFetchMock({
+			controls: [
+				{
+					id: "control-uuid-1",
+					control_id: "V-1001",
+					title: "Disable weak ciphers",
+					severity: "high",
+					effective_input: null,
+					effective_input_layer: null,
+					attest_status: "none",
+					attest_layer: null,
+				},
+				{
+					id: "control-uuid-2",
+					control_id: "V-1002",
+					title: null,
+					severity: null,
+					effective_input: null,
+					effective_input_layer: null,
+					attest_status: "none",
+					attest_layer: null,
+				},
+			],
+		});
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getAllByText("VMware vSphere 8.0 ESXi STIG")[0]).toBeInTheDocument());
+		fireEvent.click(screen.getAllByText("VMware vSphere 8.0 ESXi STIG")[0]);
+
+		await waitFor(() => expect(screen.getByText("V-1001")).toBeInTheDocument());
+		expect(screen.getByText("Disable weak ciphers")).toBeInTheDocument();
+		expect(screen.getByText("high")).toBeInTheDocument();
+		expect(screen.getByText("V-1002")).toBeInTheDocument();
+	});
+
+	it("distinguishes zero parsed controls from a loading/error state", async () => {
+		installFetchMock({ controls: [] });
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getAllByText("VMware vSphere 8.0 ESXi STIG")[0]).toBeInTheDocument());
+		fireEvent.click(screen.getAllByText("VMware vSphere 8.0 ESXi STIG")[0]);
+
+		await waitFor(() => expect(screen.getByText("No controls were parsed for this profile.")).toBeInTheDocument());
+	});
+
+	it("filters controls by search term (id, title, or severity)", async () => {
+		installFetchMock({
+			controls: [
+				{ id: "c1", control_id: "V-1001", title: "Disable weak ciphers", severity: "high", effective_input: null, effective_input_layer: null, attest_status: "none", attest_layer: null },
+				{ id: "c2", control_id: "V-2002", title: "Enable audit logging", severity: "medium", effective_input: null, effective_input_layer: null, attest_status: "none", attest_layer: null },
+			],
+		});
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getAllByText("VMware vSphere 8.0 ESXi STIG")[0]).toBeInTheDocument());
+		fireEvent.click(screen.getAllByText("VMware vSphere 8.0 ESXi STIG")[0]);
+		await waitFor(() => expect(screen.getByText("V-1001")).toBeInTheDocument());
+
+		fireEvent.change(screen.getByPlaceholderText("Search controls…"), { target: { value: "audit" } });
+		await waitFor(() => expect(screen.getByText("V-2002")).toBeInTheDocument());
+		expect(screen.queryByText("V-1001")).not.toBeInTheDocument();
+	});
+
+	it("shows effective input and attest status columns only once a target is selected", async () => {
+		installFetchMock({
+			controls: [
+				{ id: "c1", control_id: "V-1001", title: "Disable weak ciphers", severity: "high", effective_input: null, effective_input_layer: null, attest_status: "none", attest_layer: null },
+			],
+		});
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getAllByText("VMware vSphere 8.0 ESXi STIG")[0]).toBeInTheDocument());
+		fireEvent.click(screen.getAllByText("VMware vSphere 8.0 ESXi STIG")[0]);
+		await waitFor(() => expect(screen.getByText("V-1001")).toBeInTheDocument());
+
+		expect(screen.queryByText("Effective input")).not.toBeInTheDocument();
+		expect(screen.queryByText("Attest status")).not.toBeInTheDocument();
+
+		fireEvent.change(await screen.findByLabelText("Site"), { target: { value: "site-1" } });
+		fireEvent.change(await screen.findByLabelText("Target"), { target: { value: "target-1" } });
+
+		await waitFor(() => expect(screen.getByText("Effective input")).toBeInTheDocument());
+		expect(screen.getByText("Attest status")).toBeInTheDocument();
+	});
+
+	it("gates nothing extra for a Viewer — the controls panel is read-only for every role", async () => {
+		installFetchMock({
+			controls: [
+				{ id: "c1", control_id: "V-1001", title: "Disable weak ciphers", severity: "high", effective_input: null, effective_input_layer: null, attest_status: "none", attest_layer: null },
+			],
+		});
+		renderWithAuth("Viewer");
+
+		await waitFor(() => expect(screen.getAllByText("VMware vSphere 8.0 ESXi STIG")[0]).toBeInTheDocument());
+		fireEvent.click(screen.getAllByText("VMware vSphere 8.0 ESXi STIG")[0]);
+
+		await waitFor(() => expect(screen.getByText("V-1001")).toBeInTheDocument());
+		expect(screen.getByText("Disable weak ciphers")).toBeInTheDocument();
 	});
 });

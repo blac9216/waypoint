@@ -247,6 +247,8 @@ public static class ServiceCollectionExtensions
 				new Waypoint.Infrastructure.ComplianceContent.ComplianceContentRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.ComplianceContent.IProfileRepository>(
 				new Waypoint.Infrastructure.ComplianceContent.ProfileRepository(connectionString));
+			services.AddSingleton<Waypoint.Core.ComplianceContent.IProfileControlRepository>(
+				new Waypoint.Infrastructure.ComplianceContent.ProfileControlRepository(connectionString));
 			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
 			services.AddSingleton<IUserDirectory>(new UserRepository(connectionString));
 			services.AddSingleton<IAuditRepository>(new AuditRepository(connectionString));

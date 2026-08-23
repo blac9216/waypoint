@@ -79,3 +79,15 @@ public sealed record Profile(
 
 /// <summary>A profile row to upsert -- what a content-pull run discovers per profile.</summary>
 public sealed record ProfileUpsert(string ProfileKey, string Name, string? Version, string Commit, string State);
+
+/// <summary>
+/// One control belonging to an installed profile (<c>profile_controls</c>, migration
+/// 0038). <see cref="Title"/>/<see cref="Severity"/> are nullable -- a malformed or
+/// terse control file still contributes its id (issue #598 AC "malformed control files
+/// must not fail the pull"); a control the parser could not read at all is simply
+/// omitted rather than represented with placeholder text.
+/// </summary>
+public sealed record ProfileControl(Guid Id, Guid ProfileId, string ControlId, string? Title, string? Severity, DateTimeOffset UpdatedAt);
+
+/// <summary>A control row to upsert -- what a content-pull run discovers per (profile, control).</summary>
+public sealed record ProfileControlUpsert(string ControlId, string? Title, string? Severity);

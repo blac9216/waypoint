@@ -57,6 +57,34 @@ public sealed class ProfileRepository : IProfileRepository
 		return profiles;
 	}
 
+	public async Task<Profile?> GetAsync(Guid id, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT id, profile_key, name, version, commit, state, updated_at
+			FROM profiles
+			WHERE id = $1
+			""", connection);
+		command.Parameters.AddWithValue(id);
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			return null;
+		}
+
+		return new Profile(
+			reader.GetGuid(0),
+			reader.GetString(1),
+			reader.GetString(2),
+			reader.IsDBNull(3) ? null : reader.GetString(3),
+			reader.GetString(4),
+			reader.GetString(5),
+			reader.GetFieldValue<DateTimeOffset>(6));
+	}
+
 	public async Task ReplaceAllAsync(IReadOnlyList<ProfileUpsert> profiles, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(profiles);

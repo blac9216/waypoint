@@ -23,6 +23,16 @@
 # ADR-0013 Decision 4 "a child pwsh remains permitted where process isolation is
 # required"; a private/token-gated content source is out of scope for this PR (see the
 # PR body's "remaining scope" note).
+#
+# Issue #598: each profile object additionally carries a Controls array (one entry per
+# InSpec control file under the profile's controls/ directory), feeding
+# `GET /profiles/{id}/controls`. Parsing is regex-based, not a Ruby parser -- InSpec
+# control files are Ruby DSL, but this only needs three well-known top-level calls
+# (`control 'id' do`, `title '...'`, `impact N` / `tag('severity', '...')`/
+# `tag severity: '...'`), the same "read only what this needs" discipline
+# HdfSeverityCounts/AttestationYaml already establish on the C# side. A control file
+# this cannot parse contributes nothing rather than failing the whole pull (issue #598
+# AC "malformed control files must not fail the pull").
 
 function Invoke-WaypointComplianceContentPull {
 	<#
@@ -74,6 +84,10 @@ function Invoke-WaypointComplianceContentPull {
 	$commit = (& git -C $ContentPath rev-parse HEAD).Trim()
 
 	$profiles = @(Get-WaypointComplianceContentProfiles -ContentPath $ContentPath -Commit $commit)
+	foreach ($p in $profiles) {
+		$profileDirectory = Join-Path $ContentPath $p.ProfileKey
+		$p | Add-Member -NotePropertyName Controls -NotePropertyValue @(Get-WaypointComplianceContentControls -ProfileDirectory $profileDirectory)
+	}
 
 	[PSCustomObject]@{
 		Commit   = $commit
@@ -114,4 +128,75 @@ function Get-WaypointComplianceContentProfiles {
 	}
 }
 
-Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles
+function Get-WaypointComplianceContentControls {
+	<#
+	.SYNOPSIS
+	    Parses one profile's controls/*.rb InSpec control files and returns one
+	    PSObject per control with ControlId, Title, Severity -- the properties
+	    ContentPullJobHandler's control parser expects.
+
+	.PARAMETER ProfileDirectory
+	    The profile's root directory (ContentPath/<profile_key>).
+
+	.NOTES
+	    Regex-based, not a Ruby parser (see module doc comment). A file this cannot
+	    match a `control 'id' do` line in is silently skipped -- it contributes no
+	    row, but never throws and never aborts the rest of the enumeration; this is
+	    the same "one malformed row must not fail the whole pull" discipline
+	    ContentPullJobHandler.TryParseProfile already applies one level up.
+	#>
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)][string]$ProfileDirectory
+	)
+
+	$controlsDir = Join-Path $ProfileDirectory 'controls'
+	if (-not (Test-Path $controlsDir)) {
+		return @()
+	}
+
+	Get-ChildItem -Path $controlsDir -Filter '*.rb' -Recurse -File -ErrorAction SilentlyContinue |
+	ForEach-Object {
+		$text = $null
+		try {
+			$text = Get-Content -Path $_.FullName -Raw -ErrorAction Stop
+		}
+		catch {
+			# Unreadable file (permissions, encoding, etc.) -- skip, don't fail the pull.
+			return
+		}
+
+		if ([string]::IsNullOrEmpty($text)) {
+			return
+		}
+
+		$controlMatch = [regex]::Match($text, "control\s+['""]([^'""]+)['""]\s+do")
+		if (-not $controlMatch.Success) {
+			# No recognizable `control 'id' do` in this file -- not a control file
+			# (or malformed beyond what this parser reads); skip silently.
+			return
+		}
+
+		$controlId = $controlMatch.Groups[1].Value
+
+		$title = $null
+		$titleMatch = [regex]::Match($text, "title\s+['""]([^'""]*)['""]")
+		if ($titleMatch.Success) {
+			$title = $titleMatch.Groups[1].Value
+		}
+
+		$severity = $null
+		$tagSeverityMatch = [regex]::Match($text, "tag\s*\(?\s*['""]?severity['""]?\s*[:=]>?\s*['""]([^'""]+)['""]")
+		if ($tagSeverityMatch.Success) {
+			$severity = $tagSeverityMatch.Groups[1].Value
+		}
+
+		[PSCustomObject]@{
+			ControlId = $controlId
+			Title     = $title
+			Severity  = $severity
+		}
+	}
+}
+
+Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls
