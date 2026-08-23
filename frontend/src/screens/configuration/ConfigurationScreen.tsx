@@ -2,13 +2,15 @@
  * Configuration screen shell — docs/ui/prototype/README.md "9. Configuration
  * — Six tabs." Issue #237 (split into #256/#257/#258 after PR #255 was too
  * large to review) implemented the first tab (Sites & Targets); issue #247
- * added the second (Credentials); issue #312 adds the third (STIG Manager);
- * issue #32 adds the fifth (Users & Roles). The remaining two stay stub text
- * so this shell can be built additively without guessing at unbuilt tabs'
- * shapes — each slots in by adding one entry to `TABS` and one branch below,
- * no change to this file's structure.
+ * added the second (Credentials); issue #40 adds the fourth (Compliance
+ * Content); issue #312 adds the fifth (STIG Manager); issue #32 adds the
+ * sixth (Users & Roles). Depot & Tokens stays stub text so this shell can be
+ * built additively without guessing at unbuilt tabs' shapes — each slots in
+ * by adding one entry to `TABS` and one branch below, no change to this
+ * file's structure.
  */
 import { useState } from "react";
+import { ComplianceContentTab } from "./ComplianceContentTab";
 import { CredentialsTab } from "./CredentialsTab";
 import { SitesTargetsTab } from "./SitesTargetsTab";
 import { StigManagerTab } from "./StigManagerTab";
@@ -46,9 +48,10 @@ export function ConfigurationScreen() {
 			<div className="config-screen__content">
 				{tab === "sites" && <SitesTargetsTab />}
 				{tab === "credentials" && <CredentialsTab />}
+				{tab === "content" && <ComplianceContentTab />}
 				{tab === "stigman" && <StigManagerTab />}
 				{tab === "users" && <UsersTab />}
-				{tab !== "sites" && tab !== "credentials" && tab !== "stigman" && tab !== "users" && (
+				{tab !== "sites" && tab !== "credentials" && tab !== "content" && tab !== "stigman" && tab !== "users" && (
 					<div className="config-tab__status">
 						{TABS.find((t) => t.key === tab)?.label} lands in a future PR (docs/ui/prototype/README.md
 						"Configuration").
