@@ -140,3 +140,70 @@ public sealed record DownloadReadinessResponse(
 
 	[property: JsonPropertyName("missing_prerequisites")]
 	IReadOnlyList<string> MissingPrerequisites);
+
+/// <summary>
+/// Request body for <c>POST /api/v1/downloads/tool/install</c> (issue #39 install path
+/// 1: the operator-provisioned local indexed repository). <c>source_path</c> is a file
+/// name under the configured <c>ManagedTool:LocalRepositoryPath</c> root, never an
+/// absolute path -- <c>ManagedToolInstallJobHandler</c> re-validates this server-side
+/// regardless of what the client sends.
+/// </summary>
+public sealed record InstallManagedToolRequest(
+	[property: JsonPropertyName("source_path")]
+	string SourcePath,
+
+	[property: JsonPropertyName("version")]
+	string? Version);
+
+/// <summary>Response body for both tool-install trigger endpoints (202 Accepted) -- the queued job/run so a caller can follow it via the existing job/run SSE surface.</summary>
+public sealed record ManagedToolInstallQueuedResponse(
+	[property: JsonPropertyName("run_id")]
+	string RunId,
+
+	[property: JsonPropertyName("job_id")]
+	string JobId);
+
+/// <summary>One row of <c>GET /api/v1/downloads/tool/installs</c> -- the install history ledger, including rejected attempts (issue #39 acceptance criterion).</summary>
+public sealed record ManagedToolInstallResponse(
+	[property: JsonPropertyName("id")]
+	string Id,
+
+	[property: JsonPropertyName("source")]
+	string Source,
+
+	[property: JsonPropertyName("source_path")]
+	string SourcePath,
+
+	[property: JsonPropertyName("version")]
+	string? Version,
+
+	[property: JsonPropertyName("sha256")]
+	string? Sha256,
+
+	[property: JsonPropertyName("outcome")]
+	string Outcome,
+
+	[property: JsonPropertyName("rejected_reason")]
+	string? RejectedReason,
+
+	[property: JsonPropertyName("initiated_by")]
+	string InitiatedBy,
+
+	[property: JsonPropertyName("created_at")]
+	DateTimeOffset CreatedAt)
+{
+	public static ManagedToolInstallResponse FromDomain(Waypoint.Core.Downloads.ManagedToolInstall install)
+	{
+		ArgumentNullException.ThrowIfNull(install);
+		return new ManagedToolInstallResponse(
+			install.Id.ToString(),
+			install.Source,
+			install.SourcePath,
+			install.Version,
+			install.Sha256,
+			install.Outcome,
+			install.RejectedReason,
+			install.InitiatedBy,
+			install.CreatedAt);
+	}
+}

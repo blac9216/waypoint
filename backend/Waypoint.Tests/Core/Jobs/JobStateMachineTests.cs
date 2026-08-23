@@ -158,7 +158,8 @@ public sealed class JobStateMachineTests
 		foreach (string otherType in new[]
 		{
 			"remediate", "discover", "download", "catalog-index",
-			"bundle-export", "bundle-import", "content-library-sync", "content-pull", "content-import", "update"
+			"bundle-export", "bundle-import", "content-library-sync", "content-pull", "content-import", "update",
+			"tool-install"
 		})
 		{
 			Assert.Equal(JobShape.Simple, JobShapes.ForJobType(otherType));

@@ -75,6 +75,10 @@ public static class JobResourceProfiles
 		["bundle-import"] = Default,
 		["content-library-sync"] = Default,
 		["update"] = Default,
+		// tool-install: copies/verifies a single artifact (local repository or staged
+		// upload) into the managed-tool volume -- disk I/O plus a signature
+		// verification pass, similar shape to catalog-index.
+		["tool-install"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024),
 	};
 
 	/// <summary>
