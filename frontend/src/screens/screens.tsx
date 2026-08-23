@@ -1,5 +1,6 @@
 import { PlaceholderScreen } from "./PlaceholderScreen";
 import { AuditScreen as AuditLogScreen } from "./audit/AuditScreen";
+import { BenchmarksScreen as BenchmarksProfileScreen } from "./benchmarks/BenchmarksScreen";
 import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
 import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./configuration/ConfigurationScreen";
 import { DashboardScreen as DashboardAggregateScreen } from "./dashboard/DashboardScreen";
@@ -25,12 +26,7 @@ export function ResultsScreen() {
 }
 
 export function BenchmarksScreen() {
-	return (
-		<PlaceholderScreen
-			title="Benchmarks"
-			reads={["GET /api/v1/profiles", "GET /api/v1/profiles/{id}/controls", "GET /api/v1/config-docs"]}
-		/>
-	);
+	return <BenchmarksProfileScreen />;
 }
 
 export function CatalogScreen() {

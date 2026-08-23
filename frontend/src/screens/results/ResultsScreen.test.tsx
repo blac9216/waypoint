@@ -11,6 +11,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
+import { RouterProvider } from "../../lib/router";
 import { ResultsScreen } from "./ResultsScreen";
 
 const RUN_LIST = [
@@ -179,7 +180,9 @@ function renderWithAuth(role: "Viewer" | "Cyber" | "Operator" | "Admin" = "Admin
 	);
 	return render(
 		<AuthProvider>
-			<ResultsScreen />
+			<RouterProvider>
+				<ResultsScreen />
+			</RouterProvider>
 		</AuthProvider>,
 	);
 }
@@ -307,13 +310,30 @@ describe("ResultsScreen", () => {
 		expect(retry.title).toMatch(/#25/);
 	});
 
-	it("renders the Open in Benchmarks stub as disabled", async () => {
+	it("enables Open in Benchmarks and navigates with profile+target when an applied attestation carries a target scope (issue #559)", async () => {
 		installFetchMock();
 		renderWithAuth();
 
 		await waitFor(() => expect(screen.getByText("Open in Benchmarks")).toBeInTheDocument());
 		const openBenchmarks = screen.getByText("Open in Benchmarks") as HTMLButtonElement;
+		expect(openBenchmarks).not.toBeDisabled();
+
+		fireEvent.click(openBenchmarks);
+		await waitFor(() =>
+			expect(window.location.pathname + window.location.search).toBe(
+				"/benchmarks?profile=attestation-profile-a&target=11111111-1111-1111-1111-111111111111",
+			),
+		);
+	});
+
+	it("renders Open in Benchmarks as disabled when no attestation identifiers exist for the run", async () => {
+		installFetchMock({ attestationsApplied: [] });
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getByText("Open in Benchmarks")).toBeInTheDocument());
+		const openBenchmarks = screen.getByText("Open in Benchmarks") as HTMLButtonElement;
 		expect(openBenchmarks).toBeDisabled();
+		expect(openBenchmarks.title).toMatch(/no attestation identifiers/i);
 	});
 
 	it("filters the run list by search term", async () => {
