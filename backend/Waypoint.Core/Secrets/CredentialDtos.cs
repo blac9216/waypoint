@@ -75,6 +75,17 @@ public static class CredentialHealthStates
 /// field to mask because none exists -- <c>CredentialResponseHasNoSecretFieldTests</c>
 /// walks this type and fails the build's test run if one ever appears.
 /// </summary>
+/// <param name="LastTestedAt">
+/// Issue #560 (migration 0035): stamped by every <c>credential-test</c> job outcome,
+/// success or failure, any credential_type -- null until the first test ever runs.
+/// </param>
+/// <param name="ExpiresAt">
+/// Issue #560 (migration 0035): null means "unknown", never "no expiry" -- this field
+/// is only ever set from a real upstream-supplied date (CLAUDE.md: never invent one).
+/// Nothing in this slice writes it yet; it exists so the Depot &amp; Tokens screen can
+/// render "expiry unknown" rather than treating an unpopulated Broadcom response the
+/// same as "known, and far away".
+/// </param>
 public sealed record CredentialResponse(
 	Guid Id,
 	string Name,
@@ -87,7 +98,9 @@ public sealed record CredentialResponse(
 	DateTimeOffset? RotatedAt,
 	DateTimeOffset CreatedAt,
 	DateTimeOffset UpdatedAt,
-	string? Username = null);
+	string? Username = null,
+	DateTimeOffset? LastTestedAt = null,
+	DateTimeOffset? ExpiresAt = null);
 
 /// <summary>Create request: metadata plus optional initial secret material (in only; UTF-8). <see cref="SudoEnabled"/> is only meaningful for <see cref="CredentialTypes.Ssh"/> (validated at the controller). <see cref="Username"/> is not secret material (migration 0012) -- it is the protocol-level login a connection-type (vcenter/nsx/ssh) credential's job handler presents, distinct from <see cref="Name"/>'s human-facing label.</summary>
 public sealed record CredentialCreateRequest(string? Name, string? CredentialType, string? Owner, bool? SudoEnabled, string? Secret, string? Username = null);

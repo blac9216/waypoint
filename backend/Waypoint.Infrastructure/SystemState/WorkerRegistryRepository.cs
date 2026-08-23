@@ -30,7 +30,7 @@ public sealed class WorkerRegistryRepository : IWorkerRegistryWriter, IWorkerReg
 		_connectionString = connectionString;
 	}
 
-	public async Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken)
+	public async Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken, bool? toolPresent = null)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
 		ArgumentNullException.ThrowIfNull(jobTypes);
@@ -40,18 +40,20 @@ public sealed class WorkerRegistryRepository : IWorkerRegistryWriter, IWorkerReg
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			INSERT INTO worker_registry (worker_id, job_types, ready, starved_job_types, last_seen_at)
-			VALUES (@worker_id, @job_types, @ready, @starved_job_types, now())
+			INSERT INTO worker_registry (worker_id, job_types, ready, starved_job_types, tool_present, last_seen_at)
+			VALUES (@worker_id, @job_types, @ready, @starved_job_types, @tool_present, now())
 			ON CONFLICT (worker_id) DO UPDATE
 				SET job_types = EXCLUDED.job_types,
 					ready = EXCLUDED.ready,
 					starved_job_types = EXCLUDED.starved_job_types,
+					tool_present = EXCLUDED.tool_present,
 					last_seen_at = EXCLUDED.last_seen_at
 			""", connection);
 		command.Parameters.AddWithValue("worker_id", workerId);
 		command.Parameters.Add(new NpgsqlParameter("job_types", NpgsqlDbType.Jsonb) { Value = JsonSerializer.Serialize(jobTypes) });
 		command.Parameters.AddWithValue("ready", ready);
 		command.Parameters.Add(new NpgsqlParameter("starved_job_types", NpgsqlDbType.Jsonb) { Value = JsonSerializer.Serialize(starvedJobTypes) });
+		command.Parameters.AddWithValue("tool_present", (object?)toolPresent ?? DBNull.Value);
 
 		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
@@ -62,7 +64,7 @@ public sealed class WorkerRegistryRepository : IWorkerRegistryWriter, IWorkerReg
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT worker_id, job_types, ready, last_seen_at, starved_job_types
+			SELECT worker_id, job_types, ready, last_seen_at, starved_job_types, tool_present
 			FROM worker_registry
 			ORDER BY last_seen_at DESC
 			""", connection);
@@ -78,7 +80,8 @@ public sealed class WorkerRegistryRepository : IWorkerRegistryWriter, IWorkerReg
 				JobTypes: jobTypes,
 				Ready: reader.GetBoolean(2),
 				LastSeenAt: reader.GetFieldValue<DateTimeOffset>(3),
-				StarvedJobTypes: starvedJobTypes));
+				StarvedJobTypes: starvedJobTypes,
+				ToolPresent: reader.IsDBNull(5) ? null : reader.GetBoolean(5)));
 		}
 
 		return results;

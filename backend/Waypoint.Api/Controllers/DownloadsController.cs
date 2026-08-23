@@ -16,6 +16,7 @@ using System.Globalization;
 using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.Catalog;
@@ -23,6 +24,9 @@ using Waypoint.Core.Downloads;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Pagination;
+using Waypoint.Core.Secrets;
+using Waypoint.Core.SystemState;
+using Waypoint.Infrastructure.Secrets;
 
 namespace Waypoint.Api.Controllers;
 
@@ -53,15 +57,82 @@ public sealed class DownloadsController : ControllerBase
 	private readonly IDownloadRepository _downloads;
 	private readonly IDepotArtifactRepository _artifacts;
 	private readonly IJobControlRepository _jobs;
+	private readonly CredentialRepository _credentials;
+	private readonly IWorkerRegistryReader _workerRegistry;
+	private readonly IOptions<CatalogOptions> _catalogOptions;
 
-	public DownloadsController(IDownloadRepository downloads, IDepotArtifactRepository artifacts, IJobControlRepository jobs)
+	public DownloadsController(
+		IDownloadRepository downloads,
+		IDepotArtifactRepository artifacts,
+		IJobControlRepository jobs,
+		CredentialRepository credentials,
+		IWorkerRegistryReader workerRegistry,
+		IOptions<CatalogOptions> catalogOptions)
 	{
 		ArgumentNullException.ThrowIfNull(downloads);
 		ArgumentNullException.ThrowIfNull(artifacts);
 		ArgumentNullException.ThrowIfNull(jobs);
+		ArgumentNullException.ThrowIfNull(credentials);
+		ArgumentNullException.ThrowIfNull(workerRegistry);
+		ArgumentNullException.ThrowIfNull(catalogOptions);
 		_downloads = downloads;
 		_artifacts = artifacts;
 		_jobs = jobs;
+		_credentials = credentials;
+		_workerRegistry = workerRegistry;
+		_catalogOptions = catalogOptions;
+	}
+
+	/// <summary>
+	/// Combined download readiness (issue #560): depot-token credential health plus the
+	/// managed <c>vcf-download-tool</c>'s installed state. Viewer+, matching every other
+	/// read on this controller -- this is operational chrome (what's missing before a
+	/// download can run), not privileged data.
+	///
+	/// Tool presence is read from the most recent download-runner heartbeat's
+	/// <c>worker_registry.tool_present</c> column (any row reporting a non-null value;
+	/// several download-runner replicas would all report the same shared managed-tool
+	/// volume) rather than a direct filesystem check -- the API process never mounts
+	/// that volume (deploy/docker-compose.yml), only the download-runner does. A stale
+	/// or absent heartbeat (no download-runner has ever reported) reads as
+	/// <c>tool_installed: null</c> -- "unknown," not "installed" or "missing" -- so the
+	/// UI can distinguish "no runner has weighed in yet" from a real negative.
+	/// </summary>
+	[HttpGet("readiness")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(DownloadReadinessResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<DownloadReadinessResponse>> GetReadiness(CancellationToken cancellationToken)
+	{
+		CredentialResponse? depotToken = await _credentials
+			.FindByTypeAsync(_catalogOptions.Value.DepotTokenCredentialType, cancellationToken)
+			.ConfigureAwait(false);
+
+		bool depotTokenConfigured = depotToken is { HasSecret: true };
+		string? depotTokenHealth = depotToken?.Health;
+
+		IReadOnlyList<WorkerHeartbeat> workers = await _workerRegistry.ListAsync(cancellationToken).ConfigureAwait(false);
+		bool? toolInstalled = workers
+			.Where(worker => worker.ToolPresent is not null)
+			.Select(worker => worker.ToolPresent)
+			.FirstOrDefault();
+
+		List<string> missing = [];
+		if (!depotTokenConfigured)
+		{
+			missing.Add("depot_token");
+		}
+		else if (depotTokenHealth == CredentialHealthStates.AuthFailing)
+		{
+			missing.Add("depot_token_auth_failing");
+		}
+
+		if (toolInstalled != true)
+		{
+			missing.Add("tool_not_installed");
+		}
+
+		bool ready = missing.Count == 0;
+		return Ok(new DownloadReadinessResponse(ready, depotTokenConfigured, depotTokenHealth, toolInstalled, missing));
 	}
 
 	/// <summary>

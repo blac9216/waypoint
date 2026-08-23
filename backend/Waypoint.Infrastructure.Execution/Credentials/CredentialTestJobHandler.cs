@@ -50,14 +50,24 @@ namespace Waypoint.Infrastructure.Credentials;
 /// (rather than leaving the old synchronous 200) so the health-flip source is uniform,
 /// it just never invokes PowerShell or looks up a target.
 ///
-/// <see cref="CredentialTypes.DepotToken"/> (issue #252/#383) gets the same
-/// decrypt-only treatment as <see cref="CredentialTypes.Token"/>, for the same reason:
-/// the credential row carries no depot URL/host of its own (<c>CatalogOptions.DepotPath</c>
-/// is deploy-wide config, not credential-scoped, and this handler's only host source --
-/// <see cref="TargetRepository.FindFirstByCredentialAsync"/> -- is for connection targets,
-/// which a depot-token is never attached to), so there is nothing to dial. A real depot
-/// reachability probe would need a depot base URL this credential doesn't carry; an
-/// intentional skip is the correct call here, not a build-out.
+/// <see cref="CredentialTypes.DepotToken"/> (issue #252/#383, revisited #560) gets the
+/// same decrypt-only treatment as <see cref="CredentialTypes.Token"/>, for a related
+/// but distinct reason: the only thing in this codebase that actually authenticates to
+/// the Broadcom Support Portal is the operator-installed, account-gated
+/// <c>vcf-download-tool</c> binary (ADR-0015) -- and that binary, along with the
+/// managed-tool volume it lives on, is mounted only into <c>download-runner</c>
+/// (deploy/docker-compose.yml), never into <c>compliance-runner</c>, which is where
+/// <c>credential-test</c> is architecturally pinned to run (<c>JobCapabilities.Compliance</c>).
+/// <c>CatalogIndexJobHandler</c> (which does run on download-runner) does not
+/// authenticate either -- its indexing walk is a pure filesystem read
+/// (domain-model.md open question 4) that accepts the decrypted token but never uses
+/// it. There is therefore no real depot-auth code path anywhere yet to invoke honestly
+/// from here; wiring one is a job-routing change (moving depot-token's test to
+/// download-runner) plus a #39 dependency (the tool must be installed to have anything
+/// to invoke), tracked as a follow-up rather than built out in this slice. This handler
+/// still proves the one thing it safely can: the stored token decrypts under the
+/// appliance master key, through the same audited path every other credential type's
+/// decrypt-only test already uses.
 /// </summary>
 public sealed class CredentialTestJobHandler : IJobHandler
 {

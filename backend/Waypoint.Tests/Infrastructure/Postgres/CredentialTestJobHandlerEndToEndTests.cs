@@ -200,8 +200,15 @@ public sealed class CredentialTestJobHandlerEndToEndTests : IAsyncLifetime, IDis
 		// succeed, proving it never tries to resolve a host (the depot has no
 		// connection-target representation to begin with).
 		Guid jobId = await RunTestOnceAsync(credentialId);
-		Assert.Equal(CredentialHealthStates.Valid, (await _credentials.GetAsync(credentialId, CancellationToken.None))!.Health);
+		CredentialResponse? tested = await _credentials.GetAsync(credentialId, CancellationToken.None);
+		Assert.Equal(CredentialHealthStates.Valid, tested!.Health);
 		Assert.Contains("no dialable endpoint", await GetJobNoteAsync(jobId), StringComparison.Ordinal);
+
+		// Issue #560 (migration 0035): last_tested_at is stamped on this outcome even
+		// though the type has no real depot-auth path to invoke from this runner (see
+		// CredentialTestJobHandler's doc comment) -- "was this credential's stored
+		// secret ever decrypt-verified, and when" is still a real, non-fabricated fact.
+		Assert.NotNull(tested.LastTestedAt);
 	}
 
 	private async Task<Guid> RunTestOnceAsync(Guid credentialId, string expectedState = "done")

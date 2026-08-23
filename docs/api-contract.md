@@ -141,7 +141,7 @@ next sign-in would silently reuse the still-live Keycloak session.
 ### Credentials (service/shared only — ADR-0011)
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/credentials` · `/credentials/{id}` | GET, POST, PUT, DELETE | Admin writes. Metadata out: name, type, username?, used_by_count, rotated_at, health (`valid`\|`auth_failing`). `username` is the protocol-level login (e.g. `administrator@vcenter-sso-domain`) a connection-type (vcenter/nsx/ssh) credential's job handler presents — distinct from `name`, which is only ever a human-facing label; not secret material, so it round-trips in responses (issue #262). Secret material in only. Issue #521: a `PUT` that sets `secret` (overwriting existing key material) additionally requires step-up re-authentication — a token whose `auth_time` is missing or older than the configured freshness window answers `403 { "error": { "code": "step_up_required", ... } }` instead of writing anything; renaming or flipping `sudo_enabled` alone is never gated. See `docs/security.md` "Step-up re-authentication" for the full mechanism (frontend re-auth redirect + retry tracked separately, issue #534). |
+| `/credentials` · `/credentials/{id}` | GET, POST, PUT, DELETE | Admin writes. Metadata out: name, type, username?, used_by_count, rotated_at, last_tested_at?, expires_at?, health (`valid`\|`auth_failing`). `username` is the protocol-level login (e.g. `administrator@vcenter-sso-domain`) a connection-type (vcenter/nsx/ssh) credential's job handler presents — distinct from `name`, which is only ever a human-facing label; not secret material, so it round-trips in responses (issue #262). `last_tested_at` (issue #560) is stamped by every `credential-test` outcome, success or failure, any type. `expires_at` (issue #560) is `null` until a real upstream response supplies an expiry — never fabricated; `null` means "unknown," not "no expiry." Secret material in only. Issue #521: a `PUT` that sets `secret` (overwriting existing key material) additionally requires step-up re-authentication — a token whose `auth_time` is missing or older than the configured freshness window answers `403 { "error": { "code": "step_up_required", ... } }` instead of writing anything; renaming or flipping `sudo_enabled` alone is never gated. See `docs/security.md` "Step-up re-authentication" for the full mechanism (frontend re-auth redirect + retry tracked separately, issue #534). |
 | `/credentials/{id}/test` | POST | Connectivity check; 202 → job. |
 
 ### Runs & jobs
@@ -214,6 +214,7 @@ work once one exists.
 | `/catalog/sync` | POST | 202 → `catalog-index` job. |
 | `/downloads` | GET, POST | POST: artifact ids → queued `download` jobs (Operator+). Queue view: rate, ETA, retries. |
 | `/downloads/{id}` | DELETE | Cancel. |
+| `/downloads/readiness` | GET | Issue #560: combined depot-token health + managed-tool-installed state (Viewer+). `tool_installed` is `null` until a download-runner has heartbeated at least once. |
 
 ### Library & content library
 | Endpoint | Methods | Notes |

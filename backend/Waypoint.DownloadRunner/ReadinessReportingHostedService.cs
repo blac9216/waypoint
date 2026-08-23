@@ -97,7 +97,10 @@ public sealed partial class ReadinessReportingHostedService : IHostedService, ID
 			workerRegistry,
 			logger,
 			canHeartbeat: snapshot => snapshot.DatabaseReachable,
-			starvedJobTypes: snapshot => snapshot.Capacity?.StarvedJobTypes.Select(starved => new StarvedJobType(starved.JobType, starved.Permanent)).ToArray() ?? []);
+			starvedJobTypes: snapshot => snapshot.Capacity?.StarvedJobTypes.Select(starved => new StarvedJobType(starved.JobType, starved.Permanent)).ToArray() ?? [],
+			// Issue #560: worker_registry.tool_present feeds GET /downloads/readiness's
+			// combined tool-installed + depot-token-valid answer.
+			toolPresent: snapshot => snapshot.ToolPresent);
 	}
 
 	public Task StartAsync(CancellationToken cancellationToken) => _inner.StartAsync(cancellationToken);

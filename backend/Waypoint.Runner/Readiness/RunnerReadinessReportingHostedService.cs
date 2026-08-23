@@ -46,6 +46,7 @@ public sealed partial class RunnerReadinessReportingHostedService<TReport> : Bac
 	private readonly Func<TReport, IReadOnlyList<string>> _jobTypes;
 	private readonly Func<TReport, bool> _canHeartbeat;
 	private readonly Func<TReport, IReadOnlyList<StarvedJobType>> _starvedJobTypes;
+	private readonly Func<TReport, bool?> _toolPresent;
 	private readonly IOptions<IRunnerReadinessOptions> _options;
 	private readonly IWorkerRegistryWriter? _workerRegistry;
 	private readonly ILogger _logger;
@@ -98,7 +99,8 @@ public sealed partial class RunnerReadinessReportingHostedService<TReport> : Bac
 		IWorkerRegistryWriter? workerRegistry,
 		ILogger logger,
 		Func<TReport, bool>? canHeartbeat = null,
-		Func<TReport, IReadOnlyList<StarvedJobType>>? starvedJobTypes = null)
+		Func<TReport, IReadOnlyList<StarvedJobType>>? starvedJobTypes = null,
+		Func<TReport, bool?>? toolPresent = null)
 	{
 		ArgumentNullException.ThrowIfNull(buildReport);
 		ArgumentNullException.ThrowIfNull(isReady);
@@ -114,6 +116,9 @@ public sealed partial class RunnerReadinessReportingHostedService<TReport> : Bac
 		_logger = logger;
 		_canHeartbeat = canHeartbeat ?? (_ => true);
 		_starvedJobTypes = starvedJobTypes ?? (_ => []);
+		// Issue #560: null for every caller but the download-runner -- "does the
+		// managed tool exist" has no meaning for compliance-runner's TReport.
+		_toolPresent = toolPresent ?? (_ => null);
 	}
 
 	public override async Task StartAsync(CancellationToken cancellationToken)
@@ -210,7 +215,8 @@ public sealed partial class RunnerReadinessReportingHostedService<TReport> : Bac
 				_jobTypes(report),
 				_isReady(report),
 				[.. _starvedJobTypes(report).Select(starved => new StarvedWorkerJobType(starved.JobType, starved.Permanent))],
-				cancellationToken).ConfigureAwait(false);
+				cancellationToken,
+				_toolPresent(report)).ConfigureAwait(false);
 		}
 		catch (Exception exception) when (exception is not OperationCanceledException)
 		{

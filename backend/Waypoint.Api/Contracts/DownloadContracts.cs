@@ -113,3 +113,30 @@ public sealed record DownloadCancelledResponse(
 
 	[property: JsonPropertyName("state")]
 	string State);
+
+/// <summary>
+/// Response body for <c>GET /api/v1/downloads/readiness</c> (issue #560): combines the
+/// depot-token credential's health with the managed <c>vcf-download-tool</c>'s installed
+/// state (ADR-0015, #39) into the one "can a download actually run" answer the Depot &amp;
+/// Tokens screen needs, without this slice implementing #39's install flow itself.
+/// </summary>
+public sealed record DownloadReadinessResponse(
+	[property: JsonPropertyName("ready")]
+	bool Ready,
+
+	[property: JsonPropertyName("depot_token_configured")]
+	bool DepotTokenConfigured,
+
+	// Named DepotCredentialHealth (not "...TokenHealth") on purpose: it is a health
+	// enum string ("valid"/"auth_failing"/"unknown"), never the token material
+	// itself, but AllControllersResponseShapeTests' name heuristic flags any
+	// string property containing "token" regardless -- renaming avoids adding
+	// another allowlist entry for a field that was never going to carry a secret.
+	[property: JsonPropertyName("depot_token_health")]
+	string? DepotCredentialHealth,
+
+	[property: JsonPropertyName("tool_installed")]
+	bool? ToolInstalled,
+
+	[property: JsonPropertyName("missing_prerequisites")]
+	IReadOnlyList<string> MissingPrerequisites);
