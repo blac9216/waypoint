@@ -6,10 +6,14 @@ import {
 	deleteSite,
 	deleteTarget,
 	fetchCredentialOptions,
+	fetchDiscoveryRun,
 	fetchSites,
 	fetchTargets,
 	formatDiscoveryStatus,
 	formatTimestamp,
+	isInventoryCapable,
+	isTerminalRunState,
+	queueDiscover,
 	updateSite,
 	updateTarget,
 } from "./sites";
@@ -150,6 +154,41 @@ describe("sites.ts data layer", () => {
 	it("fetchCredentialOptions issues GET /credentials", async () => {
 		await fetchCredentialOptions();
 		expect(calls[0]).toEqual({ url: "/api/v1/credentials", method: "GET", body: undefined });
+	});
+
+	it("queueDiscover issues POST /targets/{id}/discover with no body", async () => {
+		await queueDiscover("target-1");
+		expect(calls[0]).toEqual({ url: "/api/v1/targets/target-1/discover", method: "POST", body: undefined });
+	});
+
+	it("fetchDiscoveryRun issues GET /runs/{id}", async () => {
+		await fetchDiscoveryRun("run-1");
+		expect(calls[0]).toEqual({ url: "/api/v1/runs/run-1", method: "GET", body: undefined });
+	});
+});
+
+describe("isInventoryCapable (issue #557's shared target-kind contract)", () => {
+	it("is true only for vsphere today, matching DiscoveryController.Discover's server-side guard", () => {
+		expect(isInventoryCapable("vsphere")).toBe(true);
+		expect(isInventoryCapable("nsx-api")).toBe(false);
+		expect(isInventoryCapable("ssh")).toBe(false);
+	});
+
+	it("is false for an unrecognized kind", () => {
+		expect(isInventoryCapable("something-new")).toBe(false);
+	});
+});
+
+describe("isTerminalRunState", () => {
+	it("is true for every run state with no further transition", () => {
+		expect(isTerminalRunState("completed")).toBe(true);
+		expect(isTerminalRunState("completed_with_failures")).toBe(true);
+		expect(isTerminalRunState("aborted")).toBe(true);
+	});
+
+	it("is false for pending/running", () => {
+		expect(isTerminalRunState("pending")).toBe(false);
+		expect(isTerminalRunState("running")).toBe(false);
 	});
 });
 
