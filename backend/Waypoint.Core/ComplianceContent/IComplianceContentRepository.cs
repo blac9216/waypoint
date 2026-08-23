@@ -53,6 +53,9 @@ public interface IProfileRepository
 	/// <summary>All installed profiles, ordered by name.</summary>
 	Task<IReadOnlyList<Profile>> ListAsync(CancellationToken cancellationToken);
 
+	/// <summary>Single profile by its surrogate id, or null when no such profile exists (issue #598: <c>GET /profiles/{id}/controls</c> 404s on an unknown id).</summary>
+	Task<Profile?> GetAsync(Guid id, CancellationToken cancellationToken);
+
 	/// <summary>
 	/// Replaces the inventory with exactly <paramref name="profiles"/>: upserts each by
 	/// <c>profile_key</c> and deletes any existing row not present in this pull's
@@ -61,4 +64,25 @@ public interface IProfileRepository
 	/// must disappear from the inventory, not linger as a stale row.
 	/// </summary>
 	Task ReplaceAllAsync(IReadOnlyList<ProfileUpsert> profiles, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Storage for the per-profile control inventory (<c>profile_controls</c>, migration
+/// 0038, issue #598). Written only by the content-pull handler (compliance-runner) in
+/// the same pull that upserts the owning <see cref="Profile"/> row; read by the API for
+/// <c>GET /profiles/{id}/controls</c> (feeds the Benchmarks screen's per-control panel).
+/// </summary>
+public interface IProfileControlRepository
+{
+	/// <summary>All controls for one profile, ordered by control id.</summary>
+	Task<IReadOnlyList<ProfileControl>> ListByProfileAsync(Guid profileId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Replaces <paramref name="profileId"/>'s whole control set: upserts each by
+	/// (profile_id, control_id) and deletes any existing row for that profile not
+	/// present in this pull's result -- same "replace-per-parent" shape as
+	/// <see cref="IProfileRepository.ReplaceAllAsync"/>, scoped to one profile so a
+	/// pull that touches profile A never disturbs profile B's already-parsed controls.
+	/// </summary>
+	Task ReplaceForProfileAsync(Guid profileId, IReadOnlyList<ProfileControlUpsert> controls, CancellationToken cancellationToken);
 }

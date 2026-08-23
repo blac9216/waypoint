@@ -14,9 +14,9 @@
  * profile still appears in the list; `LayerDocPanel` reports "No <kind>
  * document defined at this layer" per kind/layer, not the whole screen).
  *
- * There is no `/profiles/{id}/controls` endpoint (see benchmarks.ts's module
- * doc) — this screen browses profiles and their config-documents, never
- * individual controls parsed out of benchmark content.
+ * Issue #598 adds a per-control inspection panel (`ControlsPanel`) fed by
+ * `GET /profiles/{id}/controls`, additive alongside the config-document
+ * editor below it.
  */
 import { useEffect, useMemo, useState } from "react";
 import { ApiError } from "../../lib/api";
@@ -24,22 +24,29 @@ import { useAuth } from "../../lib/auth-context";
 import { roleAtLeast } from "../../lib/roles";
 import { fetchSites, fetchTargets, type Site, type Target } from "../configuration/sites";
 import { CONFIG_DOC_KINDS, fetchProfiles, formatTimestamp, type ConfigDocKind, type ProfileSummary } from "./benchmarks";
+import { ControlsPanel } from "./ControlsPanel";
 import { EffectiveResolutionPanel } from "./EffectiveResolutionPanel";
 import { LayerDocPanel } from "./LayerDocPanel";
 import "./BenchmarksScreen.css";
 
-/** Parses `?profile=<key>&target=<id>` — the Results "Open in Benchmarks"
- * deep link's query shape (see `AttestationsPanel.tsx`). Mirrors
+/** Parses `?profile=<key>&target=<id>&control=<id>` — the Results "Open in
+ * Benchmarks" deep link's query shape (see `AttestationsPanel.tsx`). Mirrors
  * `useRunIdFromQuery`'s pattern (lib/router.tsx's documented convention:
- * params ride the query string, not the hand-rolled router's path table). */
-function useBenchmarksDeepLink(): { profile: string | null; target: string | null } {
+ * params ride the query string, not the hand-rolled router's path table).
+ * `control` is issue #598's addition: `AttestationsPanel` cannot supply it
+ * today (`AppliedAttestation.control` is documented as the profile name, not
+ * a per-control id — RunContracts.cs), but the panel and this hook both
+ * already accept it so a future Results row that DOES carry a real control
+ * id (e.g. a per-control HDF finding) works without another round of
+ * plumbing here. */
+function useBenchmarksDeepLink(): { profile: string | null; target: string | null; control: string | null } {
 	const [params, setParams] = useState(() => new URLSearchParams(window.location.search));
 	useEffect(() => {
 		const sync = () => setParams(new URLSearchParams(window.location.search));
 		window.addEventListener("popstate", sync);
 		return () => window.removeEventListener("popstate", sync);
 	}, []);
-	return { profile: params.get("profile"), target: params.get("target") };
+	return { profile: params.get("profile"), target: params.get("target"), control: params.get("control") };
 }
 
 export function BenchmarksScreen() {
@@ -225,6 +232,8 @@ export function BenchmarksScreen() {
 									</select>
 								</label>
 							</div>
+
+							<ControlsPanel profileId={selectedProfile.id} targetId={selectedTargetId} initialSearch={deepLink.control} />
 
 							<div className="bench-kind-tabs">
 								{CONFIG_DOC_KINDS.map((k) => (

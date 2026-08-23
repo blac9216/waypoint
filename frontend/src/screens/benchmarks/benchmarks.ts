@@ -4,23 +4,27 @@
  *
  *   GET  /profiles                       — `ProfilesController` (#40/#566),
  *                                           compliance-content inventory.
+ *   GET  /profiles/{id}/controls         — issue #598: per-control inventory
+ *                                           (id/title/severity), parsed from
+ *                                           the profile's InSpec control
+ *                                           files at content-pull time.
  *   GET  /config-docs                    — filter by kind/profile/layer.
  *   GET  /config-docs/{id}                 GET/PUT, PUT versions.
  *   GET  /config-docs/{id}/versions      — full history, read-only.
  *   GET  /config-docs/{id}/versions/{v}  — inspect one prior version.
  *   GET  /config-docs/resolve            — the EFFECTIVE card.
  *
- * There is no `/profiles/{id}/controls` endpoint yet (docs/api-contract.md
- * documents it, but only the `/profiles` list landed in #566) and no
- * per-control structured storage anywhere in the config-doc schema
- * (docs/domain-model.md "STIG configuration documents": "stored as
- * documents... not parsed into forms; the schemas belong to Broadcom/MITRE").
- * This module and the screen built on it therefore browse profiles (source/
- * version/state metadata) and whole-document YAML per (kind, profile,
- * layer) — never individual controls. Waiver "scope" is a free-text field
- * inside the attestation YAML the operator writes, not a structured
- * control picker; the screen surfaces it as a labeled hint, not a form
- * that implies the backend parses it.
+ * Per-control storage caveat (issue #598): `ProfileControlSummary`'s
+ * `effective_input`/`attest_status` fields are the PROFILE's whole-YAML
+ * config-doc resolution for a selected target, applied identically to
+ * every control row in the response — not a truly independent per-control
+ * lookup. There is still no per-control structured storage anywhere in the
+ * config-doc schema (docs/domain-model.md "STIG configuration documents":
+ * "stored as documents... not parsed into forms; the schemas belong to
+ * Broadcom/MITRE"). Waiver "scope" is a free-text field inside the
+ * attestation YAML the operator writes, not a structured control picker;
+ * the screen surfaces it as a labeled hint, not a form that implies the
+ * backend parses it.
  */
 import { apiGet, apiPut } from "../../lib/api";
 
@@ -37,6 +41,30 @@ export interface ProfileSummary {
 
 export function fetchProfiles(): Promise<ProfileSummary[]> {
 	return apiGet<ProfileSummary[]>("/profiles");
+}
+
+/**
+ * `ProfileControlResponse` (ComplianceContentContracts.cs) —
+ * `GET /profiles/{id}/controls` (issue #598). `title`/`severity` can be
+ * null (a terse or malformed control file). `effective_input`/
+ * `effective_input_layer`/`attest_status`/`attest_layer` are null unless a
+ * `target` was passed to `fetchProfileControls` — see this module's doc
+ * comment on why they are profile-level, not per-control.
+ */
+export interface ProfileControlSummary {
+	id: string;
+	control_id: string;
+	title: string | null;
+	severity: string | null;
+	effective_input: string | null;
+	effective_input_layer: string | null;
+	attest_status: "applied" | "expired" | "none";
+	attest_layer: string | null;
+}
+
+export function fetchProfileControls(profileId: string, target?: string | null): Promise<ProfileControlSummary[]> {
+	const qs = target ? `?target=${encodeURIComponent(target)}` : "";
+	return apiGet<ProfileControlSummary[]>(`/profiles/${profileId}/controls${qs}`);
 }
 
 export type ConfigDocKind = "input" | "attestation" | "remediation-input";

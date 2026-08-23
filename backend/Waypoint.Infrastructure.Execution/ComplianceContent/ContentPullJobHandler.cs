@@ -43,6 +43,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 	private readonly IPowerShellExecutor _executor;
 	private readonly IComplianceContentRepository _content;
 	private readonly IProfileRepository _profiles;
+	private readonly IProfileControlRepository _profileControls;
 	private readonly IJobRunnerRepository _jobs;
 	private readonly IOptions<ComplianceContentOptions> _options;
 
@@ -50,18 +51,21 @@ public sealed class ContentPullJobHandler : IJobHandler
 		IPowerShellExecutor executor,
 		IComplianceContentRepository content,
 		IProfileRepository profiles,
+		IProfileControlRepository profileControls,
 		IJobRunnerRepository jobs,
 		IOptions<ComplianceContentOptions> options)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(content);
 		ArgumentNullException.ThrowIfNull(profiles);
+		ArgumentNullException.ThrowIfNull(profileControls);
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(options);
 
 		_executor = executor;
 		_content = content;
 		_profiles = profiles;
+		_profileControls = profileControls;
 		_jobs = jobs;
 		_options = options;
 	}
@@ -100,7 +104,8 @@ public sealed class ContentPullJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed(note);
 		}
 
-		(string? commit, IReadOnlyList<ProfileUpsert> discoveredProfiles) = ParseOutput(result.Output, config);
+		(string? commit, IReadOnlyList<ProfileUpsert> discoveredProfiles, IReadOnlyDictionary<string, IReadOnlyList<ProfileControlUpsert>> controlsByProfileKey) =
+			ParseOutput(result.Output, config);
 		if (commit is null)
 		{
 			const string note = "content-pull invocation returned no commit.";
@@ -111,6 +116,23 @@ public sealed class ContentPullJobHandler : IJobHandler
 		}
 
 		await _profiles.ReplaceAllAsync(discoveredProfiles, cancellationToken).ConfigureAwait(false);
+
+		// Controls are keyed to the profile's surrogate id, which ReplaceAllAsync just
+		// assigned (or preserved, for an already-existing profile_key) -- re-read the
+		// inventory rather than threading ids back out of the upsert, mirroring how
+		// this handler already treats the profile list as the source of truth after a
+		// replace. One profile's control-parse failure (empty Controls) must not touch
+		// any other profile's already-stored controls -- ReplaceForProfileAsync is
+		// scoped per profile_id for exactly this reason.
+		IReadOnlyList<Profile> storedProfiles = await _profiles.ListAsync(cancellationToken).ConfigureAwait(false);
+		foreach (Profile profile in storedProfiles)
+		{
+			if (controlsByProfileKey.TryGetValue(profile.ProfileKey, out IReadOnlyList<ProfileControlUpsert>? controls))
+			{
+				await _profileControls.ReplaceForProfileAsync(profile.Id, controls, cancellationToken).ConfigureAwait(false);
+			}
+		}
+
 		await _content.RecordPullAsync(
 			context.Job.Id, config.RefType, config.RefValue, commit,
 			ComplianceContentPullStatuses.Succeeded, note: null, actor, cancellationToken).ConfigureAwait(false);
@@ -133,7 +155,8 @@ public sealed class ContentPullJobHandler : IJobHandler
 	/// GET /compliance-content/check (part of the same PR's API surface) computes by
 	/// diffing against upstream without mutating stored rows.
 	/// </summary>
-	private static (string? Commit, IReadOnlyList<ProfileUpsert> Profiles) ParseOutput(IReadOnlyList<object?> output, ComplianceContentConfig config)
+	private static (string? Commit, IReadOnlyList<ProfileUpsert> Profiles, IReadOnlyDictionary<string, IReadOnlyList<ProfileControlUpsert>> ControlsByProfileKey)
+		ParseOutput(IReadOnlyList<object?> output, ComplianceContentConfig config)
 	{
 		string state = config.RefType == ComplianceContentRefTypes.Tag ? ProfileStates.Pinned : ProfileStates.Current;
 
@@ -151,6 +174,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 			}
 
 			List<ProfileUpsert> profiles = [];
+			Dictionary<string, IReadOnlyList<ProfileControlUpsert>> controlsByProfileKey = new(StringComparer.Ordinal);
 			if (psObject.Properties["Profiles"]?.Value is System.Collections.IEnumerable rawProfiles)
 			{
 				foreach (object? rawProfile in rawProfiles)
@@ -159,14 +183,15 @@ public sealed class ContentPullJobHandler : IJobHandler
 					if (parsed is not null)
 					{
 						profiles.Add(parsed);
+						controlsByProfileKey[parsed.ProfileKey] = TryParseControls(rawProfile);
 					}
 				}
 			}
 
-			return (commit, profiles);
+			return (commit, profiles, controlsByProfileKey);
 		}
 
-		return (null, []);
+		return (null, [], new Dictionary<string, IReadOnlyList<ProfileControlUpsert>>(StringComparer.Ordinal));
 	}
 
 	private static ProfileUpsert? TryParseProfile(object? item, string commit, string state)
@@ -188,6 +213,47 @@ public sealed class ContentPullJobHandler : IJobHandler
 		string? name = psObject.Properties["Name"]?.Value as string;
 		string? version = psObject.Properties["Version"]?.Value as string;
 		return new ProfileUpsert(profileKey, string.IsNullOrWhiteSpace(name) ? profileKey : name, version, commit, state);
+	}
+
+	/// <summary>
+	/// Parses a profile row's Controls array. A missing Controls property (e.g. an
+	/// older module build, or a profile with no controls/ directory at all) yields an
+	/// empty list, not a failure -- issue #598 AC "empty vs. no-content distinction" is
+	/// the API's job to surface, not this parser's.
+	/// </summary>
+	private static List<ProfileControlUpsert> TryParseControls(object? item)
+	{
+		List<ProfileControlUpsert> controls = [];
+		if (item is not System.Management.Automation.PSObject psObject
+			|| psObject.Properties["Controls"]?.Value is not System.Collections.IEnumerable rawControls)
+		{
+			return controls;
+		}
+
+		foreach (object? rawControl in rawControls)
+		{
+			if (rawControl is not System.Management.Automation.PSObject controlObject)
+			{
+				// One malformed control row must not fail the whole pull -- same
+				// "individual failures don't halt the batch" principle as profile rows.
+				continue;
+			}
+
+			string? controlId = controlObject.Properties["ControlId"]?.Value as string;
+			if (string.IsNullOrWhiteSpace(controlId))
+			{
+				continue;
+			}
+
+			string? title = controlObject.Properties["Title"]?.Value as string;
+			string? severity = controlObject.Properties["Severity"]?.Value as string;
+			controls.Add(new ProfileControlUpsert(
+				controlId,
+				string.IsNullOrWhiteSpace(title) ? null : title,
+				string.IsNullOrWhiteSpace(severity) ? null : severity));
+		}
+
+		return controls;
 	}
 
 	private async Task<string> ResolveActorAsync(Guid? runId, CancellationToken cancellationToken)

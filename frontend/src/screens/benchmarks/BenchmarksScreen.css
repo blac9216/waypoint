@@ -382,3 +382,69 @@
 	color: var(--txt3);
 	font-size: 10.5px;
 }
+
+/* Issue #598: per-control inspection panel. */
+.bench-controls {
+	margin: 14px 0;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-card);
+	background: var(--panel);
+}
+
+.bench-controls__header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 11px 14px;
+	border-bottom: 1px solid var(--line);
+}
+
+.bench-controls__header .bench-search {
+	margin: 0;
+	width: 220px;
+	flex: none;
+}
+
+.bench-controls__table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 11.5px;
+}
+
+.bench-controls__table th {
+	text-align: left;
+	padding: 8px 14px;
+	color: var(--txt3);
+	font-weight: 600;
+	font-size: 10.5px;
+	letter-spacing: 0.03em;
+	border-bottom: 1px solid var(--line);
+}
+
+.bench-controls__table td {
+	padding: 7px 14px;
+	border-bottom: 1px solid var(--line);
+	vertical-align: top;
+}
+
+.bench-controls__attest-pill {
+	display: inline-block;
+	padding: 1px 8px;
+	border-radius: 3px;
+	font-size: 10.5px;
+	border: 1px solid var(--line);
+}
+
+.bench-controls__attest-pill--applied {
+	color: var(--ok);
+	border-color: var(--ok);
+}
+
+.bench-controls__attest-pill--expired {
+	color: var(--bad);
+	border-color: var(--bad);
+}
+
+.bench-controls__attest-pill--none {
+	color: var(--txt3);
+}

@@ -95,7 +95,10 @@ public sealed class EndpointRoleMatrixTests
 		["ComplianceContentController.Pull"] = WaypointRole.Admin,
 
 		// ProfilesController -- inventory read is Viewer+ (issue #40, feeds Benchmarks #559).
+		// ListControls (issue #598) is the same Viewer+ read-mostly gate as every other
+		// profile/config-doc read in this table.
 		["ProfilesController.List"] = WaypointRole.Viewer,
+		["ProfilesController.ListControls"] = WaypointRole.Viewer,
 
 		// ConfigDocsController -- reads Viewer+; Save (write) Admin (config authoring).
 		["ConfigDocsController.List"] = WaypointRole.Viewer,
