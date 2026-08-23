@@ -308,6 +308,9 @@ describe("BenchmarksScreen", () => {
 		fireEvent.click(screen.getByText("Save new version"));
 
 		await waitFor(() => expect(screen.getByText(/not valid YAML/)).toBeInTheDocument());
+		// The save-failure region announces to screen readers (issue #557 convention,
+		// mirrors SiteTargetsPanel.test.tsx's aria-live status assertion).
+		expect(screen.getByText(/not valid YAML/)).toHaveAttribute("aria-live", "polite");
 		// The draft is untouched — still in the editor, not reverted or cleared.
 		expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(badDraft);
 	});

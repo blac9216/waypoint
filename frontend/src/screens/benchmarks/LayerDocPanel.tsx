@@ -192,8 +192,8 @@ export function LayerDocPanel({
 				})}
 			</div>
 
-			{loading && <div className="bench-layer__status">Loading…</div>}
-			{loadError && <div className="bench-layer__error">{loadError}</div>}
+			{loading && <div className="bench-layer__status" aria-live="polite">Loading…</div>}
+			{loadError && <div className="bench-layer__error" aria-live="polite">{loadError}</div>}
 
 			{!loading && !loadError && (
 				<>
@@ -234,7 +234,7 @@ export function LayerDocPanel({
 								spellCheck={false}
 								disabled={!canWrite || saving}
 							/>
-							{saveError && <div className="bench-layer__error">{saveError}</div>}
+							{saveError && <div className="bench-layer__error" aria-live="polite">{saveError}</div>}
 							<div className="bench-layer__editor-actions">
 								<button type="button" onClick={() => setEditing(false)} disabled={saving}>
 									Cancel

@@ -137,12 +137,12 @@ export function BenchmarksScreen() {
 	const canWrite = roleAtLeast(role, "Admin");
 
 	if (loading && profiles.length === 0) {
-		return <div className="bench-screen__status">Loading profiles…</div>;
+		return <div className="bench-screen__status" aria-live="polite">Loading profiles…</div>;
 	}
 
 	return (
 		<div className="bench-screen">
-			{loadError && <div className="bench-layer__error bench-screen__load-error">{loadError}</div>}
+			{loadError && <div className="bench-layer__error bench-screen__load-error" aria-live="polite">{loadError}</div>}
 
 			<div className="bench-screen__grid">
 				<div className="bench-panel bench-panel--profiles">

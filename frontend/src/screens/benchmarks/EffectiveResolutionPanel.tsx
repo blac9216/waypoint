@@ -54,8 +54,8 @@ export function EffectiveResolutionPanel({
 	return (
 		<div className="bench-effective">
 			<div className="bench-effective__title">EFFECTIVE</div>
-			{loading && <div className="bench-layer__status">Resolving…</div>}
-			{error && <div className="bench-layer__error">{error}</div>}
+			{loading && <div className="bench-layer__status" aria-live="polite">Resolving…</div>}
+			{error && <div className="bench-layer__error" aria-live="polite">{error}</div>}
 			{!loading &&
 				!error &&
 				CONFIG_DOC_KINDS.map(({ value, label }) => {
