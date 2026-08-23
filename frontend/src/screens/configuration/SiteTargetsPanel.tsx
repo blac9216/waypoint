@@ -12,7 +12,7 @@
  * targets — kept as its own focused PR per the review that requested the
  * split.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../../lib/auth-context";
 import { ApiError } from "../../lib/api";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";
@@ -20,9 +20,13 @@ import {
 	connectionHost,
 	createTarget,
 	deleteTarget,
+	fetchDiscoveryRun,
 	fetchTargets,
 	formatDiscoveryStatus,
 	formatTimestamp,
+	isInventoryCapable,
+	isTerminalRunState,
+	queueDiscover,
 	TARGET_KINDS,
 	updateTarget,
 	type CredentialOption,
@@ -31,6 +35,23 @@ import {
 	type TargetWriteInput,
 } from "./sites";
 import "./ConfigurationScreen.css";
+
+/**
+ * Per-target "Refresh Inventory" state (issue #557) — local, not persisted:
+ * the target's own `discovery_status` has no `queued` value (the issue's
+ * Risks/Considerations note), and a discover job can fail before it ever
+ * updates `discovery_status` (#556), so this local run/job tracking is the
+ * more reliable feedback source while a discovery is in flight or has just
+ * finished. Cleared once the row's next `load()` picks up a fresh
+ * `discovery_status` that already reflects the outcome — but kept for a
+ * failure so the error/retry affordance survives a background refetch.
+ */
+interface DiscoveryUiState {
+	runId: string;
+	jobId: string;
+	/** `null` while polling; set once the run reaches a terminal state. */
+	outcome: "failed" | null;
+}
 
 interface TargetFormState {
 	kind: TargetKind;
@@ -90,6 +111,93 @@ export function SiteTargetsPanel({
 	useEffect(() => {
 		load();
 	}, [load]);
+
+	// Refresh Inventory (issue #557), keyed by target id. See DiscoveryUiState's
+	// doc comment for why this rides alongside `targets` rather than being
+	// derived from `discovery_status` alone.
+	const [discovery, setDiscovery] = useState<Record<string, DiscoveryUiState>>({});
+	// Poll timer handles per target id, so unmount/terminal cleanup can clear
+	// exactly the timer(s) in flight without clobbering other targets' polls.
+	const pollTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+	const pollGeneration = useRef<Record<string, number>>({});
+
+	useEffect(() => {
+		const timers = pollTimers.current;
+		return () => {
+			Object.values(timers).forEach(clearTimeout);
+		};
+	}, []);
+
+	const stopPolling = useCallback((targetId: string) => {
+		const timer = pollTimers.current[targetId];
+		if (timer) {
+			clearTimeout(timer);
+			delete pollTimers.current[targetId];
+		}
+	}, []);
+
+	const pollDiscoveryRun = useCallback(
+		(targetId: string, runId: string, jobId: string, generation: number) => {
+			const POLL_INTERVAL_MS = 3000;
+			const tick = async () => {
+				// A newer discover click (new generation) or unmount superseded this
+				// poll loop — stop rather than racing state updates onto a stale run.
+				if (pollGeneration.current[targetId] !== generation) {
+					return;
+				}
+				try {
+					const run = await fetchDiscoveryRun(runId);
+					if (pollGeneration.current[targetId] !== generation) {
+						return;
+					}
+					if (isTerminalRunState(run.state)) {
+						const failed = run.state !== "completed" || run.job_count_failed > 0 || run.job_count_blocked > 0;
+						setDiscovery((prev) => ({ ...prev, [targetId]: { runId, jobId, outcome: failed ? "failed" : null } }));
+						if (!failed) {
+							// Success: drop local state once a fresh load() reflects the
+							// real discovery_status/last_refreshed from the server.
+							load();
+							setDiscovery((prev) => {
+								const next = { ...prev };
+								delete next[targetId];
+								return next;
+							});
+						}
+						stopPolling(targetId);
+						return;
+					}
+					pollTimers.current[targetId] = setTimeout(() => void tick(), POLL_INTERVAL_MS);
+				} catch {
+					// A transient poll failure must not abandon the queued/running
+					// affordance — keep polling until the run itself resolves.
+					pollTimers.current[targetId] = setTimeout(() => void tick(), POLL_INTERVAL_MS);
+				}
+			};
+			void tick();
+		},
+		[load, stopPolling],
+	);
+
+	const startDiscover = useCallback(
+		async (targetId: string) => {
+			// Duplicate-click prevention: bail if this target already has a
+			// non-terminal (no `outcome`) discovery in flight.
+			if (discovery[targetId] && discovery[targetId].outcome === null) {
+				return;
+			}
+			setFormError(null);
+			const generation = (pollGeneration.current[targetId] ?? 0) + 1;
+			pollGeneration.current[targetId] = generation;
+			try {
+				const queued = await queueDiscover(targetId);
+				setDiscovery((prev) => ({ ...prev, [targetId]: { runId: queued.run_id, jobId: queued.job_id, outcome: null } }));
+				pollDiscoveryRun(targetId, queued.run_id, queued.job_id, generation);
+			} catch (err) {
+				setFormError(err instanceof ApiError ? err.message : "Could not queue inventory discovery.");
+			}
+		},
+		[discovery, pollDiscoveryRun],
+	);
 
 	const credentialName = (id: string | null) => {
 		if (!id) return "—";
@@ -248,8 +356,10 @@ export function SiteTargetsPanel({
 										credential_ref: editForm.credential_ref || null,
 									})
 								}
-							/>
-						))}
+							discoveryState={discovery[target.id] ?? null}
+							onRefreshInventory={() => void startDiscover(target.id)}
+						/>
+					))}
 				</tbody>
 			</table>
 		</div>
@@ -270,6 +380,8 @@ function TargetRow({
 	credentials,
 	saving,
 	onSubmitEdit,
+	discoveryState,
+	onRefreshInventory,
 }: {
 	target: Target;
 	credentialName: string;
@@ -284,8 +396,19 @@ function TargetRow({
 	credentials: CredentialOption[];
 	saving: boolean;
 	onSubmitEdit: () => void;
+	discoveryState: DiscoveryUiState | null;
+	onRefreshInventory: () => void;
 }) {
-	const badDiscovery = target.discovery_status === "failed";
+	const badDiscovery = target.discovery_status === "failed" || discoveryState?.outcome === "failed";
+	const inFlight = discoveryState !== null && discoveryState.outcome === null;
+	const capable = isInventoryCapable(target.kind);
+
+	// aria-live status text — never color-only (issue #557 AC): the local
+	// in-flight/failed state takes precedence over the server's last-known
+	// `discovery_status` since it is the more current/reliable source while a
+	// discover run is active or has just failed (see DiscoveryUiState doc).
+	const statusText = inFlight ? "Refreshing inventory…" : formatDiscoveryStatus(target.discovery_status);
+
 	return (
 		<>
 			<tr className="config-table__row">
@@ -299,7 +422,34 @@ function TargetRow({
 					{credentialName}
 				</td>
 				<td className={badDiscovery ? "config-table__discovery--bad" : "config-table__discovery"}>
-					{formatDiscoveryStatus(target.discovery_status)}
+					<span aria-live="polite">{statusText}</span>
+					{discoveryState?.outcome === "failed" && (
+						<div className="config-table__discovery-detail">
+							Discovery failed.{" "}
+							<a href={`/live-run?run=${discoveryState.runId}`} className="config-table__discovery-link">
+								View run details
+							</a>
+						</div>
+					)}
+					{capable && (
+						<div className="config-table__row-actions">
+							<button
+								type="button"
+								{...writeGate}
+								disabled={writeGate.disabled || inFlight}
+								title={
+									writeGate.disabled
+										? writeGate.title
+										: inFlight
+											? "Inventory discovery is already queued or running for this target"
+											: undefined
+								}
+								onClick={onRefreshInventory}
+							>
+								{discoveryState?.outcome === "failed" ? "Retry" : inFlight ? "Refreshing…" : "Refresh Inventory"}
+							</button>
+						</div>
+					)}
 				</td>
 				<td className="config-table__truncate mono">
 					{formatTimestamp(target.last_refreshed)}
