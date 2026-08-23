@@ -70,8 +70,21 @@ public sealed class JobDispatcherResourceAdmissionTests : IAsyncLifetime
 			FallbackCpuCores = cpuCores,
 			FallbackMemoryBytes = memoryBytes,
 		};
-		CgroupResourceDiscovery discovery = new(Options.Create(options), NullLogger<CgroupResourceDiscovery>.Instance);
+		// ADR-0018 (issue #555): an unusable-by-design IHostCapabilitySource so this test
+		// host's own real CPU/memory never intervenes between the empty cgroup root and
+		// the fallback constants (cpuCores/memoryBytes) this suite's budgets are built
+		// from -- otherwise discovery would resolve to HostDerived from the real host
+		// instead of the deliberately tight budgets these tests exercise.
+		CgroupResourceDiscovery discovery = new(Options.Create(options), new UnusableHostCapabilitySource(), NullLogger<CgroupResourceDiscovery>.Instance);
 		return new ResourceAdmissionController(Options.Create(options), discovery, NullLogger<ResourceAdmissionController>.Instance);
+	}
+
+	/// <summary>Zero/zero always fails <c>CgroupResourceDiscovery</c>'s host-derivation usability check, forcing the constant fallback.</summary>
+	private sealed class UnusableHostCapabilitySource : IHostCapabilitySource
+	{
+		public double AvailableCpuCores() => 0;
+
+		public long TotalMemoryBytes() => 0;
 	}
 
 	private JobDispatcherHostedService CreateDispatcher(JobEngineOptions options, ResourceAdmissionController? resourceAdmission, params IJobHandler[] handlers) =>

@@ -24,37 +24,61 @@ namespace Waypoint.Runner.Resources;
 /// unified hierarchy (<c>cpu.max</c>, <c>memory.max</c> at <see cref="RunnerResourceOptions.CgroupRoot"/>),
 /// falls back to cgroup v1's split hierarchy (<c>cpu/cpu.cfs_quota_us</c> +
 /// <c>cpu/cpu.cfs_period_us</c>, <c>memory/memory.limit_in_bytes</c>) when v2 files are
-/// absent, and falls back to <see cref="RunnerResourceOptions.FallbackCpuCores"/>/
-/// <see cref="RunnerResourceOptions.FallbackMemoryBytes"/> -- always logged at Warning,
-/// never silently -- when neither hierarchy yields a usable, finite limit (missing
-/// files, unreadable files, or an explicit "max"/"-1" unlimited marker).
+/// absent, then to host-derived capacity (<see cref="IHostCapabilitySource"/>, ADR-0018
+/// issue #555) when neither cgroup hierarchy yields a usable, finite limit (missing
+/// files, unreadable files, or an explicit "max"/"-1" unlimited marker), and only when
+/// even that is unusable to <see cref="RunnerResourceOptions.FallbackCpuCores"/>/
+/// <see cref="RunnerResourceOptions.FallbackMemoryBytes"/>'s tested conservative
+/// constants -- every one of these fallback steps is always logged, never silent.
 ///
 /// <para>
-/// No .NET GC/runtime API is used here deliberately: <c>GC.GetGCMemoryInfo()</c> reports
-/// what the CLR itself decided its heap limit is (already downstream of the container
+/// An explicit, finite cgroup limit is always authoritative over a host-derived
+/// reading: this order only ever widens what an *unlimited* container would otherwise
+/// be conservatively assumed to have, it never overrides a real container cap. Any
+/// operator cap (<see cref="RunnerResourceOptions.MaxCpuCores"/>/<c>MaxMemoryBytes</c>)
+/// intersects with whichever of these produced the discovered numbers, unchanged from
+/// ADR-0014 §5.
+/// </para>
+///
+/// <para>
+/// No .NET GC/runtime API is used to read a cgroup limit itself: <c>GC.GetGCMemoryInfo()</c>
+/// reports what the CLR decided its heap limit is (already downstream of the container
 /// limit and rounded/adjusted by GC heuristics), not the container's raw allocation --
-/// this reads the same source of truth Docker/Kubernetes/systemd themselves write to.
+/// cgroup reads above use the same source of truth Docker/Kubernetes/systemd themselves
+/// write to. <see cref="SystemHostCapabilitySource"/> does use it, deliberately, for the
+/// host-derived path -- see that type's doc comment for why the same API is the right
+/// answer once cgroup discovery has already established there is no container limit.
 /// </para>
 /// </summary>
 public sealed partial class CgroupResourceDiscovery
 {
 	private readonly IOptions<RunnerResourceOptions> _options;
+	private readonly IHostCapabilitySource _hostCapabilities;
 	private readonly ILogger<CgroupResourceDiscovery> _logger;
 
 	public CgroupResourceDiscovery(IOptions<RunnerResourceOptions> options, ILogger<CgroupResourceDiscovery> logger)
+		: this(options, new SystemHostCapabilitySource(), logger)
+	{
+	}
+
+	/// <summary>Test/DI seam: lets callers supply a fake <see cref="IHostCapabilitySource"/> instead of reading the real host.</summary>
+	public CgroupResourceDiscovery(IOptions<RunnerResourceOptions> options, IHostCapabilitySource hostCapabilities, ILogger<CgroupResourceDiscovery> logger)
 	{
 		ArgumentNullException.ThrowIfNull(options);
+		ArgumentNullException.ThrowIfNull(hostCapabilities);
 		ArgumentNullException.ThrowIfNull(logger);
 
 		_options = options;
+		_hostCapabilities = hostCapabilities;
 		_logger = logger;
 	}
 
 	/// <summary>
-	/// Reads the effective CPU/memory budget, preferring cgroup v2, then v1, then the
-	/// tested conservative fallback. Never throws: every failure mode (missing file,
-	/// unreadable file, malformed content, reported-unlimited) degrades to the next
-	/// source in the chain rather than crashing runner startup over a diagnostics read.
+	/// Reads the effective CPU/memory budget, preferring cgroup v2, then v1, then
+	/// host-derived capacity, then the tested conservative fallback. Never throws: every
+	/// failure mode (missing file, unreadable file, malformed content,
+	/// reported-unlimited, an unusable host reading) degrades to the next source in the
+	/// chain rather than crashing runner startup over a diagnostics read.
 	/// </summary>
 	public HostResourceLimits Discover()
 	{
@@ -74,12 +98,53 @@ public sealed partial class CgroupResourceDiscovery
 			return new HostResourceLimits(cpu1, mem1, HostResourceLimitSource.CgroupV1);
 		}
 
-		// Partial reads (e.g. v2 CPU present but memory missing/unlimited) are treated
-		// as a full fallback rather than mixing sources -- a mixed reading is more
-		// confusing in health diagnostics than a clearly-labeled fallback, and the
-		// fallback values are conservative enough to be safe either way.
+		// Partial cgroup reads (e.g. v2 CPU present but memory missing/unlimited) fall
+		// through to host derivation rather than mixing cgroup sources -- a mixed
+		// cgroup-v2/v1 reading is more confusing in health diagnostics than a clearly
+		// labeled single source, and an unlimited cgroup axis means the container truly
+		// has no cap on that axis, which is exactly the condition host derivation exists
+		// to answer.
+		HostResourceLimits? hostDerived = TryDeriveFromHost();
+		if (hostDerived is { } derived)
+		{
+			return derived;
+		}
+
 		LogFallingBackToConservativeDefaults(options.FallbackCpuCores, options.FallbackMemoryBytes);
 		return new HostResourceLimits(options.FallbackCpuCores, options.FallbackMemoryBytes, HostResourceLimitSource.Fallback);
+	}
+
+	/// <summary>
+	/// ADR-0018 (issue #555): derives capacity from the host itself when no explicit,
+	/// finite cgroup limit was found. Returns <c>null</c> (degrading to the constant
+	/// fallback) only if the host reading itself is unusable -- zero or negative CPU
+	/// cores, or zero or negative memory -- which in practice means
+	/// <see cref="IHostCapabilitySource"/> itself is misbehaving, not a real host
+	/// configuration.
+	/// </summary>
+	private HostResourceLimits? TryDeriveFromHost()
+	{
+		double cpuCores;
+		long memoryBytes;
+		try
+		{
+			cpuCores = _hostCapabilities.AvailableCpuCores();
+			memoryBytes = _hostCapabilities.TotalMemoryBytes();
+		}
+		catch (Exception exception) when (exception is not OutOfMemoryException)
+		{
+			LogHostCapabilityReadFailed(exception);
+			return null;
+		}
+
+		if (cpuCores <= 0 || memoryBytes <= 0)
+		{
+			LogHostCapabilityUnusable(cpuCores, memoryBytes);
+			return null;
+		}
+
+		LogHostDerivedCapacity(cpuCores, memoryBytes);
+		return new HostResourceLimits(cpuCores, memoryBytes, HostResourceLimitSource.HostDerived);
 	}
 
 	private double? ReadCgroupV2Cpu(string root)
@@ -225,6 +290,15 @@ public sealed partial class CgroupResourceDiscovery
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Cgroup file '{Path}' could not be read")]
 	private partial void LogCgroupFileUnreadable(string path, Exception exception);
 
-	[LoggerMessage(Level = LogLevel.Warning, Message = "No usable cgroup CPU/memory limits found; falling back to conservative defaults ({FallbackCpuCores} cores, {FallbackMemoryBytes} bytes). This runner's discovered capacity may not reflect its actual host allocation -- see RunnerResourceOptions.")]
+	[LoggerMessage(Level = LogLevel.Warning, Message = "No usable cgroup or host-derived CPU/memory limits found; falling back to conservative defaults ({FallbackCpuCores} cores, {FallbackMemoryBytes} bytes). This runner's discovered capacity may not reflect its actual host allocation -- see RunnerResourceOptions.")]
 	private partial void LogFallingBackToConservativeDefaults(double fallbackCpuCores, long fallbackMemoryBytes);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "No usable cgroup CPU/memory limits found; deriving capacity from the host instead: {CpuCores} cores, {MemoryBytes} bytes")]
+	private partial void LogHostDerivedCapacity(double cpuCores, long memoryBytes);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Host capability read failed; falling through to the conservative fallback")]
+	private partial void LogHostCapabilityReadFailed(Exception exception);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Host-derived capacity reading was unusable ({CpuCores} cores, {MemoryBytes} bytes); falling through to the conservative fallback")]
+	private partial void LogHostCapabilityUnusable(double cpuCores, long memoryBytes);
 }

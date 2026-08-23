@@ -288,9 +288,20 @@ public sealed class DownloadRunnerHeartbeatTests : IAsyncLifetime
 			FallbackCpuCores = 1.0,
 			FallbackMemoryBytes = 1024L * 1024 * 1024,
 		};
+		// ADR-0018 (issue #555): an unusable-by-design IHostCapabilitySource so this
+		// test host's own real CPU/memory never intervenes between the missing cgroup
+		// root and the fallback constants above.
 		return new(
 			Options.Create(options),
-			new CgroupResourceDiscovery(Options.Create(options), NullLogger<CgroupResourceDiscovery>.Instance),
+			new CgroupResourceDiscovery(Options.Create(options), new UnusableHostCapabilitySource(), NullLogger<CgroupResourceDiscovery>.Instance),
 			NullLogger<ResourceAdmissionController>.Instance);
+	}
+
+	/// <summary>Zero/zero always fails <c>CgroupResourceDiscovery</c>'s host-derivation usability check, forcing the constant fallback.</summary>
+	private sealed class UnusableHostCapabilitySource : IHostCapabilitySource
+	{
+		public double AvailableCpuCores() => 0;
+
+		public long TotalMemoryBytes() => 0;
 	}
 }
