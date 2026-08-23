@@ -3,6 +3,7 @@ import { AuditScreen as AuditLogScreen } from "./audit/AuditScreen";
 import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
 import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./configuration/ConfigurationScreen";
 import { DashboardScreen as DashboardAggregateScreen } from "./dashboard/DashboardScreen";
+import { LibraryScreen as RepositoryLibraryScreen } from "./library/LibraryScreen";
 import { LiveRunRoute } from "./liverun/LiveRunScreen";
 import { ResultsScreen as ResultsHistoryScreen } from "./results/ResultsScreen";
 import { StartScanScreen as StartScanWizardScreen } from "./startscan/StartScanScreen";
@@ -37,7 +38,7 @@ export function CatalogScreen() {
 }
 
 export function LibraryScreen() {
-	return <PlaceholderScreen title="Library" reads={["GET /api/v1/library/items", "GET /api/v1/content-library/items"]} />;
+	return <RepositoryLibraryScreen />;
 }
 
 export function TransferScreen() {

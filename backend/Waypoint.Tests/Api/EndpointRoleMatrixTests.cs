@@ -80,6 +80,12 @@ public sealed class EndpointRoleMatrixTests
 		["CatalogController.ListArtifacts"] = WaypointRole.Viewer,
 		["CatalogController.Sync"] = WaypointRole.Admin,
 
+		// LibraryController -- issue #36. Both read the depot catalog re-presented as
+		// mode-aware presence; same Viewer+ floor as CatalogController.ListArtifacts
+		// (the Library tab is browsable by anyone who can see the appliance).
+		["LibraryController.ListItems"] = WaypointRole.Viewer,
+		["LibraryController.RequestManifest"] = WaypointRole.Viewer,
+
 		// ConfigDocsController -- reads Viewer+; Save (write) Admin (config authoring).
 		["ConfigDocsController.List"] = WaypointRole.Viewer,
 		["ConfigDocsController.Resolve"] = WaypointRole.Viewer,
