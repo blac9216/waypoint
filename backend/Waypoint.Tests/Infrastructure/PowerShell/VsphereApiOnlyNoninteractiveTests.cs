@@ -98,7 +98,7 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 				Parameters: new Dictionary<string, object?>
 				{
 					["VCenter"] = "vcsa-01.example.internal",
-					["Username"] = "administrator@vsphere.local",
+					["Username"] = "administrator@example.internal",
 					["Password"] = "invented-test-password",
 				}),
 			CancellationToken.None);
@@ -116,7 +116,7 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 				Parameters: new Dictionary<string, object?>
 				{
 					["VCenter"] = "vcsa-01.example.internal",
-					["Username"] = "administrator@vsphere.local",
+					["Username"] = "administrator@example.internal",
 					["Password"] = "invented-test-password",
 				}),
 			CancellationToken.None);
@@ -143,7 +143,7 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 				Parameters: new Dictionary<string, object?>
 				{
 					["VCenter"] = "vcsa-02.example.internal",
-					["Username"] = "administrator@vsphere.local",
+					["Username"] = "administrator@example.internal",
 					["Password"] = "invented-test-password",
 				}),
 			CancellationToken.None);
