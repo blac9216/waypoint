@@ -26,7 +26,7 @@ fits the appliance's stack and implement there. Lift the *values* (hex/oklch col
 column widths, copy) from this document and the prototype; do not lift the markup.
 
 Open the prototype in a browser to explore it. Everything is interactive: the mode badge toggles
-deployment mode, the role select changes permissions live, the Live Run view actually streams.
+deployment mode, the role select changes permissions live, and the Live Jobs scan detail actually streams.
 
 ## Fidelity
 **High-fidelity.** Final colors, typography, spacing, density, states, and copy. Recreate pixel-closely
@@ -69,8 +69,8 @@ separators still read as clusters.
 
 | Group | Items |
 |---|---|
-| _(ungrouped)_ | **Dashboard** — 4-square grid icon |
-| COMPLIANCE | **Live Run** (pulse-line icon, amber count badge for active runs) · **Start a Scan** (magnifier) · **Results** (3 lines) · **Benchmarks** (document with lines) |
+| _(ungrouped)_ | **Dashboard** — 4-square grid icon · **Live Jobs** (pulse-line icon, amber count badge for all active jobs) |
+| COMPLIANCE | **Start a Scan** (magnifier) · **Compliance Results** (3 lines) · **Benchmarks** (document with lines) |
 | CONTENT | **Download Catalog** (down arrow over a baseline; hidden entirely in air-gapped mode; badge shows queue depth) · **Library** (bar-chart-ish shelf icon; amber badge shows the missing-artifact count when air-gapped) · **Transfer** (two opposed arrows) |
 | CONFIGURE | **Configuration** (concentric circles) |
 
@@ -118,8 +118,17 @@ Dashboard. Do not rely on gating the nav entry point alone.
 
 ## Screens
 
-### 1. Live Run — the hero screen
-A scan run fanning out across ~40 targets in priority queues. 18px/20px header on `--panel`.
+### 1. Live Jobs — global workspace and scan detail
+
+A persistent selector lists all active runs and jobs, grouped by run, with type, state,
+progress, elapsed/wait time, and target/context. Multiple entries may be active at
+once; selecting one changes only the detail pane and never constrains execution.
+Unknown job types use lifecycle metadata plus redacted logs. Discovery, credential
+test, download, catalog, content, transfer, and update entries use type-specific
+summaries and link to the domain screen that owns their durable output.
+
+The scan detail below is the scan renderer: a run fanning out across ~40 targets in
+priority queues. 18px/20px header on `--panel`.
 
 **Header:** pulsing `--acc` dot · run id (mono 13px/600, nowrap) · "SCAN · READ-ONLY" pill
 (`--accd` bg/border, `--acc` text, nowrap) · a describing sentence that is the only shrinking element
@@ -189,9 +198,14 @@ cards) and schedule (Run now / Schedule), with the rule stated plainly — **sca
 schedulable; remediation is destructive, Admin-only, requires typed confirmation, and can never be
 scheduled.**
 
-### 4. Results & History
+### 4. Compliance Results
 Left rail 330px (can compress to 240px): searchable run list, each row with status dot, run id, kind pill,
 site/targets/duration, timestamp and initiator. Selected row gets an `--acc` left border and `--accd` background.
+
+This list contains scan/remediation runs only. Operational status and logs for every
+job type remain in Live Jobs; discovery inventory, downloads, content, bundles, and
+updates are managed from Targets, Catalog/Library, Compliance Content, Transfer, and
+Configuration/System respectively.
 
 Detail pane: title block with an Export CKL bundle button and a red "Remediate findings…" button (Admin only,
 tooltip notes the typed confirmation). Five KPI tiles (auto-fit, 140px floor): compliance, CAT I/II/III open,

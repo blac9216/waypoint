@@ -256,7 +256,7 @@ work once one exists.
 ## Event streams (SSE)
 
 `/api/v1/events` (global — feeds the job log drawer and nav badges) and
-`/api/v1/runs/{id}/events` (per-run — feeds the live run view). Event envelope:
+`/api/v1/runs/{id}/events` (per-run — feeds the selected Live Jobs detail). Event envelope:
 
 ```json
 { "seq": 48211, "ts": "2026-08-02T14:07:31Z", "type": "job.state",
@@ -316,6 +316,17 @@ execution flows through the job queue), so a progress emitter always has a
 `job_id`; a hypothetical job-less download
 would need a contract change plus a `job_events_scope_check` relaxation, decided
 here to be rejected rather than left open (#116).
+
+### Live Jobs and historical log queries (ADR-0019; planned by #581/#590)
+
+SSE remains the live transport, but it is not the historical paging API. The planned
+read contract is `GET /runs?state=<active|terminal>&run_type=<type>&cursor=...`, with
+job/type filters where applicable, plus
+`GET /runs/{id}/events/history?job_id=...&kind=...&level=...&cursor=...&limit=...`.
+History responses use stable event `seq` cursors, bounded limits, and distinguish an
+empty history from forbidden, missing, or retention-expired history. They apply the
+same authorization and redaction contract as SSE. These endpoints are normative
+design targets and are not yet implemented.
 
 Queue-halt observability (#147): tripping the consecutive-auth-failure halt emits
 `queue.state` for each newly-blocked run and one `system.notice` — including when
@@ -386,15 +397,19 @@ events over SSE (ADR-0013, ADR-0014, ADR-0017).
 
 | Screen | Reads | Writes / actions |
 |---|---|---|
-| Live Run | `/runs/{id}`, `/runs/{id}/jobs`, run SSE | pause/resume/abort, resume-blocked |
+| Live Jobs | filtered `/runs`, `/runs/{id}/jobs`, global + run SSE, bounded event history (planned) | select concurrent work; type-authorized pause/resume/abort/retry |
 | Dashboard | `/dashboard`, global SSE | — |
 | Start a Scan | `/sites`, `/targets`, `/targets/{id}/inventory`, `/profiles`, `/credentials` (names only) | POST `/runs`, POST `/schedules`, POST discover (refresh) |
-| Results | `/runs`, `/runs/{id}` + artifacts + attestations-applied | export bundle; Remediate entry → POST `/runs` (Admin) |
+| Compliance Results | compliance-filtered `/runs`, `/runs/{id}` + artifacts + attestations-applied | export bundle; Remediate entry → POST `/runs` (Admin); explicit compliance purge (planned) |
 | Benchmarks | `/profiles`, `/profiles/{id}/controls`, `/config-docs` + resolve, `/benchmarks` | PUT config-docs (new version), sync/upload benchmarks, change mapping |
 | Download Catalog | `/catalog/artifacts`, `/downloads`, `/system` (stores) | POST downloads, catalog sync, schedule edits |
 | Library | `/library/items`, `/content-library/items` | uploads, import-from-repo, copy-to-vcenter, request-manifest |
 | Transfer | `/bundles`, import verification detail | POST export / import / apply |
 | Configuration | `/sites`, `/targets`, `/credentials`, `/stigman`, `/compliance-content`, `/users`, `/system` | full CRUD (Admin), tests, tool install, update upload/apply |
+
+Live Jobs owns operational state and diagnostics only. Discovery links to Targets,
+downloads to Catalog/Library, content jobs to Compliance Content, bundles to Transfer,
+and updates to Configuration/System for durable state and domain actions.
 
 Every prototype element traces to a row above; if a future design element cannot be
 traced to a resource here, that's the trigger to amend this contract *first*

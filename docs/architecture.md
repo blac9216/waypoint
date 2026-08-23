@@ -124,6 +124,20 @@ engine serves both products and all future features ([ADR-0008](adr/0008-job-eng
   PowerShell modules are adaptable workers. A future execution domain adds a runner
   host/image and handler registrations rather than changing the API/queue protocol.
 
+### Operational projection and domain results
+
+The common engine has a global **Live Jobs** projection over every active run/job.
+It groups concurrent jobs by run and delegates the selected detail to a job-type
+renderer; the selected item does not constrain runner concurrency. The existing
+global SSE stream drives appliance-wide activity, while per-run streams drive the
+selected run and bounded persisted-event queries provide completed diagnostics.
+
+Operational history owns lifecycle metadata, timing, redacted logs, and diagnostics.
+It does not become a second store for durable outputs: compliance findings and
+artifacts stay in Compliance Results, inventory stays with Targets, downloads stay in
+Catalog/Library, profiles stay in Compliance Content, and bundles stay in Transfer.
+Deletion follows the same boundary ([ADR-0019](adr/0019-global-job-observability.md)).
+
 ## Discovery is a job type
 
 ✅ **Built** (M2, issue #21): the `discover` job type and inventory cache below are

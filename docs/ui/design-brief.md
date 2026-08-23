@@ -70,19 +70,19 @@ imports bundles; download features hidden). A top-bar badge always shows the mod
 
 ## Screens, in priority order
 
-1. **Live run view — the hero screen.** A scan fanning out across ~40 targets in
-   priority queues (NSX → VCSA components → vCenter → ESXi → VMs → SRG). Per-target
-   rows with states (`queued / running / attesting / converting / uploaded / failed`),
-   streaming monospace log pane, live pass/fail/N-A counts, overall progress. Iterate
-   here first — this screen constrains the backend most (state machine, SSE schema,
-   log storage).
+1. **Live Jobs — the operational workspace.** A global selector shows every active
+   run and job concurrently, grouped by run. Selecting a scan opens its priority-queue
+   detail (NSX → VCSA → vCenter → ESXi → VMs → SRG); discovery, downloads, content,
+   transfers, credential tests, and updates use type-specific details with a safe
+   generic fallback. Selection never serializes runner execution.
 2. **Dashboard** — fleet compliance posture by site, recent runs, repo disk usage,
    update status, mode badge.
 3. **Start-a-scan flow** — pick site → scope (product filters + checkbox tree of cached
    hosts/VMs) → credential choice (mine vs service) → run now or schedule → confirm.
-4. **Results & history** — runs list; run detail with per-target artifacts (CKL/HDF),
+4. **Compliance Results** — scan/remediation runs only; run detail with per-target artifacts (CKL/HDF),
    CAT I/II/III severity counts, STIG Manager upload status, attestation version
-   history.
+   history. Generic lifecycle/log history remains in Live Jobs; other outputs remain
+   in their owning domain screens.
 5. **Download catalog browser** (connected) — indexed depot catalog: search/filter by
    product/version; rows with size + status (not downloaded / queued / downloading 43% /
    verified / failed); multi-select → queue; downloads queue view; content library +
