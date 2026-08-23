@@ -40,10 +40,22 @@ public enum HostResourceLimitSource
 	CgroupV1,
 
 	/// <summary>
-	/// Cgroup data was missing, unreadable, or reported "unlimited" -- the tested
-	/// conservative host fallback in <see cref="RunnerResourceOptions"/> was used
-	/// instead. Always logged (see <c>CgroupResourceDiscovery</c>) and always surfaced
-	/// through health diagnostics; never a silent default.
+	/// ADR-0018 (issue #555): cgroup data was missing, unreadable, or reported
+	/// "unlimited" -- <see cref="IHostCapabilitySource"/> was used to derive capacity
+	/// from the host's own CPU availability and physical memory instead. Always logged
+	/// (see <c>CgroupResourceDiscovery</c>) and always surfaced through health
+	/// diagnostics; a materially larger and more accurate reading than
+	/// <see cref="Fallback"/>, not a degraded case.
+	/// </summary>
+	HostDerived,
+
+	/// <summary>
+	/// ADR-0018 (issue #555): neither an explicit cgroup limit nor a usable host-derived
+	/// reading was available -- the tested conservative constant fallback in
+	/// <see cref="RunnerResourceOptions"/> was used instead. Always logged (see
+	/// <c>CgroupResourceDiscovery</c>) and always surfaced through health diagnostics;
+	/// never a silent default. This is the genuinely degraded case: neither the
+	/// container nor the host itself yielded a trustworthy reading.
 	/// </summary>
 	Fallback
 }

@@ -87,3 +87,10 @@ container rather than one hard-coded global worker count.
   discovery; it must fail closed when required dependencies or mounts are unavailable.
 - Scaling replicas improves process/failure isolation, but does not create more host
   resources. It remains an operator option rather than the default concurrency tool.
+- [ADR-0018](0018-shared-capacity-lease-pool.md) supersedes this section's per-runner
+  admission model for the multi-runner case (issue #555's owner ruling, 2026-08-23):
+  discovery now derives capacity from the host when cgroup limits are unlimited, a
+  startup invariant fails readiness when an advertised job type can never be admitted,
+  and a shared Postgres capacity lease pool (design accepted, delivery in #569) will
+  let runner replicas share real appliance capacity dynamically rather than each
+  bounding itself only to its own static allocation.

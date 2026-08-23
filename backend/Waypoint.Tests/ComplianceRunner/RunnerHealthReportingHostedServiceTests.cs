@@ -252,9 +252,13 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 			FallbackCpuCores = fallbackCpuCores,
 			FallbackMemoryBytes = fallbackMemoryBytes,
 		};
+		// ADR-0018 (issue #555): supplies an unusable-by-design IHostCapabilitySource so
+		// this test host's own real CPU/memory never intervenes between the missing
+		// cgroup root and the fallback constants above -- otherwise CgroupResourceDiscovery
+		// would resolve to HostDerived from the real SystemHostCapabilitySource instead.
 		ResourceAdmissionController resourceAdmission = new(
 			Options.Create(resourceOptions),
-			new CgroupResourceDiscovery(Options.Create(resourceOptions), NullLogger<CgroupResourceDiscovery>.Instance),
+			new CgroupResourceDiscovery(Options.Create(resourceOptions), new UnusableHostCapabilitySource(), NullLogger<CgroupResourceDiscovery>.Instance),
 			NullLogger<ResourceAdmissionController>.Instance);
 
 		return new RunnerHealthReportingHostedService(
@@ -274,6 +278,14 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 	private sealed class FakeMasterKeyProvider : IMasterKeyProvider
 	{
 		public MasterKey GetKey() => new(new byte[32], "wpk-fake0000");
+	}
+
+	/// <summary>Zero/zero always fails <c>CgroupResourceDiscovery</c>'s host-derivation usability check, forcing the constant fallback.</summary>
+	private sealed class UnusableHostCapabilitySource : IHostCapabilitySource
+	{
+		public double AvailableCpuCores() => 0;
+
+		public long TotalMemoryBytes() => 0;
 	}
 
 	private sealed class RecordingWorkerRegistry : IWorkerRegistryWriter

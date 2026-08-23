@@ -24,7 +24,7 @@ namespace Waypoint.Runner.Readiness;
 /// download-runner and compliance-runner projects) so operators reading any host's
 /// report see the same vocabulary.
 /// </summary>
-/// <param name="Source">Where the discovered budget came from: <c>"CgroupV2"</c>, <c>"CgroupV1"</c>, or <c>"Fallback"</c> (see <see cref="HostResourceLimitSource"/>).</param>
+/// <param name="Source">Where the discovered budget came from: <c>"CgroupV2"</c>, <c>"CgroupV1"</c>, <c>"HostDerived"</c>, or <c>"Fallback"</c> (see <see cref="HostResourceLimitSource"/>; ADR-0018 added <c>HostDerived</c>).</param>
 /// <param name="IsFallback">True when <paramref name="Source"/> is <c>"Fallback"</c> -- surfaced as its own boolean so a dashboard need not string-match <paramref name="Source"/> to flag it.</param>
 /// <param name="DiscoveredCpuCores">Raw discovered CPU budget, in cores, before any operator cap.</param>
 /// <param name="DiscoveredMemoryBytes">Raw discovered memory budget, in bytes, before any operator cap.</param>

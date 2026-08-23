@@ -50,7 +50,10 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 	/// <summary>
 	/// A real controller pointed at a nonexistent cgroup root -- exercises the
 	/// documented fallback path (issue #437) rather than a mock, since this type has no
-	/// interface seam and its constructor-time discovery is cheap/deterministic.
+	/// interface seam and its constructor-time discovery is cheap/deterministic. Supplies
+	/// an unusable-by-design <see cref="IHostCapabilitySource"/> (ADR-0018, issue #555)
+	/// so this test host's own real CPU/memory never intervenes between the missing
+	/// cgroup root and the configured fallback constants these tests assert against.
 	/// </summary>
 	private static ResourceAdmissionController CreateResourceAdmission(
 		double fallbackCpuCores = 1.0,
@@ -64,8 +67,16 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 		};
 		return new(
 			Options.Create(options),
-			new CgroupResourceDiscovery(Options.Create(options), NullLogger<CgroupResourceDiscovery>.Instance),
+			new CgroupResourceDiscovery(Options.Create(options), new UnusableHostCapabilitySource(), NullLogger<CgroupResourceDiscovery>.Instance),
 			NullLogger<ResourceAdmissionController>.Instance);
+	}
+
+	/// <summary>Zero/zero always fails <c>CgroupResourceDiscovery</c>'s host-derivation usability check, forcing the constant fallback.</summary>
+	private sealed class UnusableHostCapabilitySource : IHostCapabilitySource
+	{
+		public double AvailableCpuCores() => 0;
+
+		public long TotalMemoryBytes() => 0;
 	}
 
 	[Fact]

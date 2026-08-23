@@ -24,6 +24,14 @@ namespace Waypoint.Tests.Runner.Resources;
 /// Issue #437's admission acceptance criteria: both the CPU and memory budgets must
 /// independently bound admission, mixed handler profiles must not oversubscribe either
 /// axis, and an operator cap intersects with (never widens past) the discovered budget.
+///
+/// ADR-0018 (issue #555) inserted host-derived capacity ahead of the constant fallback
+/// in <c>CgroupResourceDiscovery</c>; every controller built here supplies an
+/// unusable-by-design fake <see cref="IHostCapabilitySource"/> so an empty cgroup root
+/// still resolves deterministically to the configured
+/// <see cref="RunnerResourceOptions.FallbackCpuCores"/>/<c>FallbackMemoryBytes"</c>
+/// constants these tests assert against, rather than the real (and non-deterministic
+/// across test hosts) machine CPU/memory <c>SystemHostCapabilitySource</c> would report.
 /// </summary>
 public sealed class ResourceAdmissionControllerTests : IDisposable
 {
@@ -41,7 +49,7 @@ public sealed class ResourceAdmissionControllerTests : IDisposable
 	{
 		RunnerResourceOptions effective = options ?? new RunnerResourceOptions();
 		effective.CgroupRoot = _emptyCgroupRoot; // Always empty -> always falls back to the configured defaults below, deterministically.
-		CgroupResourceDiscovery discovery = new(Options.Create(effective), NullLogger<CgroupResourceDiscovery>.Instance);
+		CgroupResourceDiscovery discovery = new(Options.Create(effective), new UnusableHostCapabilitySource(), NullLogger<CgroupResourceDiscovery>.Instance);
 		return new ResourceAdmissionController(Options.Create(effective), discovery, NullLogger<ResourceAdmissionController>.Instance);
 	}
 
@@ -49,11 +57,19 @@ public sealed class ResourceAdmissionControllerTests : IDisposable
 	{
 		RunnerResourceOptions effective = options ?? new RunnerResourceOptions();
 		effective.CgroupRoot = _emptyCgroupRoot;
-		CgroupResourceDiscovery discovery = new(Options.Create(effective), NullLogger<CgroupResourceDiscovery>.Instance);
+		CgroupResourceDiscovery discovery = new(Options.Create(effective), new UnusableHostCapabilitySource(), NullLogger<CgroupResourceDiscovery>.Instance);
 		RecordingLogger logger = new();
 		ManualTimeProvider timeProvider = new();
 		ResourceAdmissionController controller = new(Options.Create(effective), discovery, logger, timeProvider);
 		return (controller, logger, timeProvider);
+	}
+
+	/// <summary>Zero/zero always fails <c>CgroupResourceDiscovery</c>'s host-derivation usability check, forcing the constant fallback.</summary>
+	private sealed class UnusableHostCapabilitySource : IHostCapabilitySource
+	{
+		public double AvailableCpuCores() => 0;
+
+		public long TotalMemoryBytes() => 0;
 	}
 
 	[Fact]

@@ -23,6 +23,7 @@ using Waypoint.DownloadRunner;
 using Waypoint.Infrastructure.DependencyInjection;
 using Waypoint.Infrastructure.SystemState;
 using Waypoint.Runner.Jobs;
+using Waypoint.Runner.Resources;
 using ExecutionServiceCollectionExtensions = Waypoint.Infrastructure.Execution.DependencyInjection.ServiceCollectionExtensions;
 
 // The container health probe (see HealthCheckProbe): reads the readiness marker
@@ -93,6 +94,18 @@ if (string.IsNullOrWhiteSpace(managedToolOptions.ToolStatePath))
 	throw new InvalidOperationException(
 		"ManagedTool:ToolStatePath must be configured (even if the directory is currently empty) -- " +
 		"see ADR-0015 and ManagedToolOptions.");
+}
+
+// ADR-0018 (issue #555): fail readiness at startup rather than starting a runner that
+// advertises a job type its own effective resource budget can never admit. Only
+// evaluated when AddWaypointExecution actually wired execution (a runner started with
+// no connection string registers neither of these singletons -- see that method's
+// "no-op... no connection string" guard -- and has nothing to dispatch from anyway).
+JobHandlerRegistry? jobHandlerRegistry = host.Services.GetService<JobHandlerRegistry>();
+ResourceAdmissionController? resourceAdmission = host.Services.GetService<ResourceAdmissionController>();
+if (jobHandlerRegistry is not null && resourceAdmission is not null)
+{
+	ResourceAdmissionInvariant.Validate(jobHandlerRegistry.AllowedJobTypes, resourceAdmission.EffectiveBudget);
 }
 
 host.Run();
