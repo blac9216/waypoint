@@ -225,6 +225,12 @@ public static class ServiceCollectionExtensions
 			// (no dedicated appliance_state column), so this reads through the same
 			// connection string as the repository above rather than a separate table.
 			services.AddSingleton<Waypoint.Core.SystemState.IDepotSyncStatusRepository>(new SystemState.DepotSyncStatusRepository(connectionString));
+
+			// Issue #569 (ADR-0020): shared-capacity-pool read side for GET /system --
+			// pool capacity, active leases, and waiting anti-starvation reservations.
+			// The claim/heartbeat/release write side is runner-only, wired by
+			// AddWaypointExecution.
+			services.AddSingleton<Waypoint.Core.Capacity.ICapacityPoolStatusReader>(new Capacity.CapacityLeasePoolRepository(connectionString));
 			services.AddSingleton(new SiteRepository(connectionString));
 			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton(new InventoryRepository(connectionString));

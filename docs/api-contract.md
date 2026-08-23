@@ -247,7 +247,7 @@ work once one exists.
 ### System, users, audit
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/system` | GET | Version/build, mode, uptime, disk usage by store, depot sync, update availability. |
+| `/system` | GET | Version/build, mode, uptime, disk usage by store, depot sync, update availability, runner status, shared capacity pool (capacity/source, active leases, waiting anti-starvation reservations — issue #569, ADR-0020). |
 | `/system/update` | POST (upload), `/apply` POST | Admin + re-auth; importing newer locally built images stages `update_available`; apply is a separate intentional action with pre-flight checks and returns 202 → `update` job (ADR-0009, ADR-0015). |
 | `/users` | GET, POST, PUT | Admin; role, site scope, auth method, last seen. |
 | `/audit` | GET | Cyber+; decrypt events, config versions, run initiations, imports/updates. |

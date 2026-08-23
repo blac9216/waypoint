@@ -16,6 +16,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.Capacity;
 using Waypoint.Core.Jobs;
 
 namespace Waypoint.Runner.Jobs;
@@ -34,10 +35,18 @@ public sealed partial class LeaseRecoveryHostedService : BackgroundService
 	private readonly IJobRunnerRepository _repository;
 	private readonly IJobEventPublisher _events;
 	private readonly IOptions<JobEngineOptions> _options;
+	private readonly ICapacityLeasePool? _capacityPool;
 	private readonly ILogger<LeaseRecoveryHostedService> _logger;
 
 	public LeaseRecoveryHostedService(
 		IJobRunnerRepository repository, IJobEventPublisher events, IOptions<JobEngineOptions> options, ILogger<LeaseRecoveryHostedService> logger)
+		: this(repository, events, options, capacityPool: null, logger)
+	{
+	}
+
+	/// <summary>Issue #569 (ADR-0020): the capacity-pool-aware overload -- the same sweep that recovers expired job leases also reaps expired capacity leases/reservations, keeping both recovery paths on one clock. <paramref name="capacityPool"/> is null when the pool is disabled.</summary>
+	public LeaseRecoveryHostedService(
+		IJobRunnerRepository repository, IJobEventPublisher events, IOptions<JobEngineOptions> options, ICapacityLeasePool? capacityPool, ILogger<LeaseRecoveryHostedService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(events);
@@ -47,6 +56,7 @@ public sealed partial class LeaseRecoveryHostedService : BackgroundService
 		_repository = repository;
 		_events = events;
 		_options = options;
+		_capacityPool = capacityPool;
 		_logger = logger;
 	}
 
@@ -85,6 +95,19 @@ public sealed partial class LeaseRecoveryHostedService : BackgroundService
 	{
 		const int maxPassesPerTick = 5;
 
+		// Issue #569: reap expired capacity leases on the same cadence as expired job
+		// leases. Deletion is bookkeeping -- expired rows already stopped counting
+		// against the pool (every claim filters expires_at > now()), so a failure here
+		// is non-fatal and simply retried next tick with the job-lease sweep.
+		if (_capacityPool is not null)
+		{
+			int reaped = await _capacityPool.ReapExpiredAsync(cancellationToken).ConfigureAwait(false);
+			if (reaped > 0)
+			{
+				LogCapacityLeasesReaped(reaped);
+			}
+		}
+
 		for (int pass = 0; pass < maxPassesPerTick; pass++)
 		{
 			IReadOnlyList<RecoveredJob> recovered = await _repository.RecoverExpiredLeasesAsync(batchSize, cancellationToken).ConfigureAwait(false);
@@ -121,4 +144,7 @@ public sealed partial class LeaseRecoveryHostedService : BackgroundService
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "Lease recovery sweep failed")]
 	private partial void LogSweepFailed(Exception exception);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Reaped {Count} expired capacity lease(s)/reservation(s) (worker loss -- issue #569, ADR-0020)")]
+	private partial void LogCapacityLeasesReaped(int count);
 }
