@@ -16,7 +16,7 @@ namespace Waypoint.Core.ComplianceContent;
 
 /// <summary>
 /// Storage for the compliance-content singleton config and its pull history
-/// (<c>compliance_content</c>/<c>compliance_content_pulls</c>, migration 0033). Both
+/// (<c>compliance_content</c>/<c>compliance_content_pulls</c>, migration 0034). Both
 /// the API (config CRUD, history reads) and the compliance-runner's content-pull
 /// handler (recording pull outcomes) use this interface -- ADR-0017 places
 /// <c>content-pull</c>/<c>content-import</c> execution in compliance-runner, but
@@ -44,7 +44,7 @@ public interface IComplianceContentRepository
 }
 
 /// <summary>
-/// Storage for the profile inventory (<c>profiles</c>, migration 0033). Written only by
+/// Storage for the profile inventory (<c>profiles</c>, migration 0034). Written only by
 /// the content-pull handler (compliance-runner); read by the API for the profile
 /// inventory endpoint that feeds the Benchmarks screen (#559).
 /// </summary>
