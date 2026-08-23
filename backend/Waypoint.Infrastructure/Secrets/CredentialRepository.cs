@@ -46,7 +46,7 @@ public sealed class CredentialRepository
 		SELECT c.id, c.name, c.credential_type, c.owner, c.health, c.sudo_enabled,
 			EXISTS (SELECT 1 FROM credential_secrets s WHERE s.credential_id = c.id) AS has_secret,
 			(SELECT count(*) FROM jobs j WHERE j.credential_id = c.id) AS used_by_job_count,
-			c.rotated_at, c.created_at, c.updated_at, c.username
+			c.rotated_at, c.created_at, c.updated_at, c.username, c.last_tested_at, c.expires_at
 		FROM credentials c
 		""";
 
@@ -226,7 +226,12 @@ public sealed class CredentialRepository
 		string health = succeeded ? CredentialHealthStates.Valid : CredentialHealthStates.AuthFailing;
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new("UPDATE credentials SET health = $2 WHERE id = $1 RETURNING id", connection);
+		// Issue #560 (migration 0035): last_tested_at is stamped on every outcome,
+		// success or failure -- "was this ever tested, and when" is meaningful even
+		// for a failing credential, unlike rotated_at which only moves on a secret
+		// write.
+		await using NpgsqlCommand command = new(
+			"UPDATE credentials SET health = $2, last_tested_at = now() WHERE id = $1 RETURNING id", connection);
 		command.Parameters.AddWithValue(id);
 		command.Parameters.AddWithValue(health);
 		return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null
@@ -303,6 +308,8 @@ public sealed class CredentialRepository
 			reader.IsDBNull(8) ? null : reader.GetFieldValue<DateTimeOffset>(8),
 			reader.GetFieldValue<DateTimeOffset>(9),
 			reader.GetFieldValue<DateTimeOffset>(10),
-			reader.IsDBNull(11) ? null : reader.GetString(11));
+			reader.IsDBNull(11) ? null : reader.GetString(11),
+			reader.IsDBNull(12) ? null : reader.GetFieldValue<DateTimeOffset>(12),
+			reader.IsDBNull(13) ? null : reader.GetFieldValue<DateTimeOffset>(13));
 	}
 }

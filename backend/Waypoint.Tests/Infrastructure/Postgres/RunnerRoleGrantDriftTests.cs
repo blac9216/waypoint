@@ -222,6 +222,91 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
 	}
 
+	/// <summary>
+	/// Issue #560 (migration 0034), same class of drift as this file's other cases:
+	/// migration 0025's column-scoped grants on <c>credentials</c> predate the two
+	/// columns 0034 adds. <see cref="CredentialTestJobHandler"/> runs as the real
+	/// compliance-runner role and, per test job, calls
+	/// <see cref="CredentialRepository.GetAsync"/> (whose ProjectionSql now selects
+	/// <c>last_tested_at, expires_at</c>) and <see cref="CredentialRepository.MarkTestOutcomeAsync"/>
+	/// (<c>UPDATE credentials SET health = ..., last_tested_at = now()</c>). Both must
+	/// succeed as the runner role, not just as the fixture owner.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CredentialTestOutcome_ReadsAndStampsWithoutPermissionDenied()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+
+		CredentialRepository runnerCredentials = new(_complianceRunnerConnectionString);
+
+		// SELECT path: ProjectionSql now includes last_tested_at, expires_at -- would
+		// hit 42501 without the 0034 SELECT grant on those two columns.
+		CredentialResponse? beforeTest = await runnerCredentials.GetAsync(credentialId, CancellationToken.None);
+		Assert.NotNull(beforeTest);
+		Assert.Null(beforeTest!.LastTestedAt);
+
+		// UPDATE path: MarkTestOutcomeAsync stamps last_tested_at (+ health) -- would
+		// hit 42501 without the 0034 UPDATE grant on last_tested_at.
+		CredentialWriteOutcome outcome = await runnerCredentials.MarkTestOutcomeAsync(credentialId, succeeded: true, CancellationToken.None);
+		Assert.Equal(CredentialWriteOutcome.Ok, outcome);
+
+		CredentialResponse? afterTest = await runnerCredentials.GetAsync(credentialId, CancellationToken.None);
+		Assert.NotNull(afterTest);
+		Assert.NotNull(afterTest!.LastTestedAt);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check for the 0034 credentials columns: the runner
+	/// role gets <c>UPDATE (last_tested_at)</c> only. <c>expires_at</c> is SELECT-only
+	/// for runners (never fabricated; any upstream-supplied expiry is an API-side
+	/// write), so a runner-role UPDATE of <c>expires_at</c> must still fail 42501 even
+	/// though the role now has SOME UPDATE privilege on this table.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotUpdateCredentialExpiresAt()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new(
+			"UPDATE credentials SET expires_at = now() + interval '30 days' WHERE id = $1", connection);
+		update.Parameters.AddWithValue(credentialId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
+	/// Second least-privilege boundary check for credentials: the runner's UPDATE grant
+	/// stays column-scoped. Representative prohibited column -- <c>name</c> is API-only
+	/// (CredentialsController) and must still fail 42501.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotUpdateCredentialName()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new(
+			"UPDATE credentials SET name = 'renamed-by-runner' WHERE id = $1", connection);
+		update.Parameters.AddWithValue(credentialId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	private async Task<Guid> SeedCredentialAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'token') RETURNING id", connection);
+		command.Parameters.AddWithValue($"role-grant-drift-cred-{Guid.NewGuid():N}");
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
 	private string WriteKeyFile()
 	{
 		string path = Path.Combine(_keyDirectory, $"key-{Guid.NewGuid():N}");

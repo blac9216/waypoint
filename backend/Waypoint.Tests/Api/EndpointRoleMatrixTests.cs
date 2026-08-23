@@ -122,6 +122,9 @@ public sealed class EndpointRoleMatrixTests
 		["DownloadsController.QueueDownloads"] = WaypointRole.Operator,
 		["DownloadsController.ListDownloads"] = WaypointRole.Viewer,
 		["DownloadsController.CancelDownload"] = WaypointRole.Operator,
+		// Issue #560: combined readiness is operational chrome (what's missing before a
+		// download can run), not privileged data -- same Viewer+ floor as ListDownloads.
+		["DownloadsController.GetReadiness"] = WaypointRole.Viewer,
 
 		// EventStreamController -- SSE reads, Viewer+.
 		["EventStreamController.GlobalStream"] = WaypointRole.Viewer,

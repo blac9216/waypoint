@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -24,10 +25,13 @@ using Npgsql;
 using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.SystemState;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.Secrets;
+using Waypoint.Infrastructure.SystemState;
 using Waypoint.Runner.Jobs;
 using Waypoint.Tests.Support;
 using Xunit;
@@ -80,6 +84,13 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 				JobQueueRepository jobs = new(_connectionString, NullLogger<JobQueueRepository>.Instance);
 				services.AddSingleton<IJobControlRepository>(jobs);
 				services.AddSingleton<IJobRunnerRepository>(jobs);
+
+				// Issue #560: GET /downloads/readiness needs both -- same
+				// container-level override CredentialsApiTests uses (config-level
+				// connection-string overrides do not stick for this minimal-hosting
+				// factory).
+				services.AddSingleton(new CredentialRepository(_connectionString));
+				services.AddSingleton<IWorkerRegistryReader>(new WorkerRegistryRepository(_connectionString));
 			});
 		}
 	}
@@ -405,6 +416,139 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #560: no depot-token credential configured and no download-runner has
+	/// ever heartbeated -- both prerequisites report missing, tool_installed stays
+	/// null (unknown, not "false") because nothing has weighed in.
+	/// </summary>
+	[Fact]
+	public async Task GetReadiness_NothingConfigured_ReportsBothPrerequisitesMissing_ToolUnknown()
+	{
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/downloads/readiness");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = document.RootElement;
+		Assert.False(root.GetProperty("ready").GetBoolean());
+		Assert.False(root.GetProperty("depot_token_configured").GetBoolean());
+		// WaypointJsonOptions.Default (WhenWritingNull) omits a null optional field
+		// entirely rather than emitting a JSON null -- same convention rotated_at/
+		// username already use -- so "unknown" reads as the property being absent.
+		Assert.False(root.TryGetProperty("depot_token_health", out _));
+		Assert.False(root.TryGetProperty("tool_installed", out _));
+		string[] missing = root.GetProperty("missing_prerequisites").EnumerateArray().Select(e => e.GetString()!).ToArray();
+		Assert.Contains("depot_token", missing);
+		Assert.Contains("tool_not_installed", missing);
+	}
+
+	/// <summary>
+	/// A valid depot-token credential plus a download-runner heartbeat reporting the
+	/// tool present combine into ready:true and an empty missing-prerequisites list.
+	/// </summary>
+	[Fact]
+	public async Task GetReadiness_TokenValidAndToolPresent_ReportsReady()
+	{
+		Guid credentialId = await SeedDepotTokenCredentialAsync();
+		await MarkCredentialHealthAsync(credentialId, "valid");
+		await SeedDownloadRunnerHeartbeatAsync(toolPresent: true);
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/downloads/readiness");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = document.RootElement;
+
+		Assert.True(root.GetProperty("ready").GetBoolean());
+		Assert.True(root.GetProperty("depot_token_configured").GetBoolean());
+		Assert.Equal("valid", root.GetProperty("depot_token_health").GetString());
+		Assert.True(root.GetProperty("tool_installed").GetBoolean());
+		Assert.Empty(root.GetProperty("missing_prerequisites").EnumerateArray());
+	}
+
+	/// <summary>An auth-failing depot token is reported as its own distinct missing prerequisite, not conflated with "not configured".</summary>
+	[Fact]
+	public async Task GetReadiness_TokenAuthFailing_ReportsDistinctFromMissing()
+	{
+		Guid credentialId = await SeedDepotTokenCredentialAsync();
+		await MarkCredentialHealthAsync(credentialId, "auth_failing");
+		await SeedDownloadRunnerHeartbeatAsync(toolPresent: true);
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/downloads/readiness");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = document.RootElement;
+
+		Assert.False(root.GetProperty("ready").GetBoolean());
+		Assert.True(root.GetProperty("depot_token_configured").GetBoolean());
+		string[] missing = root.GetProperty("missing_prerequisites").EnumerateArray().Select(e => e.GetString()!).ToArray();
+		Assert.Contains("depot_token_auth_failing", missing);
+		Assert.DoesNotContain("depot_token", missing);
+		Assert.DoesNotContain("tool_not_installed", missing);
+	}
+
+	[Fact]
+	public async Task GetReadiness_WithoutAuth_Returns401()
+	{
+		HttpResponseMessage response = await _client.GetAsync("/api/v1/downloads/readiness");
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	private async Task<Guid> SeedDepotTokenCredentialAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync().ConfigureAwait(false);
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'depot-token') RETURNING id", connection);
+		insert.Parameters.AddWithValue($"depot-token-{Guid.NewGuid():N}");
+		Guid id = (Guid)(await insert.ExecuteScalarAsync())!;
+
+		// has_secret is derived from credential_secrets, not a credentials column --
+		// seed a real (invented) ciphertext row so CredentialResponse.HasSecret is
+		// true, same as CredentialsController.Create's normal path would leave it.
+		await using NpgsqlCommand secret = new(
+			"""
+			INSERT INTO credential_secrets (credential_id, ciphertext, data_key_wrapped, master_key_id)
+			VALUES ($1, $2, $3, 'invented-test-key-id')
+			""", connection);
+		secret.Parameters.AddWithValue(id);
+		secret.Parameters.AddWithValue(Encoding.UTF8.GetBytes("invented-ciphertext-not-real"));
+		secret.Parameters.AddWithValue(Encoding.UTF8.GetBytes("invented-wrapped-key-not-real"));
+		await secret.ExecuteNonQueryAsync();
+
+		return id;
+	}
+
+	private async Task MarkCredentialHealthAsync(Guid credentialId, string health)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync().ConfigureAwait(false);
+		await using NpgsqlCommand update = new("UPDATE credentials SET health = $2 WHERE id = $1", connection);
+		update.Parameters.AddWithValue(credentialId);
+		update.Parameters.AddWithValue(health);
+		await update.ExecuteNonQueryAsync();
+	}
+
+	private async Task SeedDownloadRunnerHeartbeatAsync(bool toolPresent)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync().ConfigureAwait(false);
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO worker_registry (worker_id, job_types, ready, starved_job_types, tool_present)
+			VALUES ($1, '["download","catalog-index"]'::jsonb, true, '[]'::jsonb, $2)
+			ON CONFLICT (worker_id) DO UPDATE SET tool_present = EXCLUDED.tool_present
+			""", connection);
+		insert.Parameters.AddWithValue($"download-runner-readiness-test");
+		insert.Parameters.AddWithValue(toolPresent);
+		await insert.ExecuteNonQueryAsync();
 	}
 
 	private async Task<Guid> SeedArtifactAsync(string externalIdTag)

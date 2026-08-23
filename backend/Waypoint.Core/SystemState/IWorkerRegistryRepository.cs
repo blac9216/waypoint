@@ -39,7 +39,11 @@ public interface IWorkerRegistryWriter
 	/// Issue #467 (migration 0029): job types this worker is currently denying resource
 	/// admission to. Empty (not null) when nothing is starved.
 	/// </param>
-	Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken);
+	/// <param name="toolPresent">
+	/// Issue #560 (migration 0035): the download-runner's managed-tool presence check,
+	/// or null for a compliance-runner (or any caller with nothing to report here).
+	/// </param>
+	Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken, bool? toolPresent = null);
 }
 
 /// <summary>See <see cref="IWorkerRegistryWriter"/> for why this is a separate interface.</summary>

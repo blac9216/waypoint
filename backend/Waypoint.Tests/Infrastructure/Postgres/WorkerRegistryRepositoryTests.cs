@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.SystemState;
@@ -129,6 +130,30 @@ public sealed class WorkerRegistryRepositoryTests : IAsyncLifetime
 		await _registry.HeartbeatAsync("compliance-runner-1", ["scan"], ready: true, [], CancellationToken.None);
 		WorkerHeartbeat cleared = Assert.Single(await _registry.ListAsync(CancellationToken.None));
 		Assert.Empty(cleared.StarvedJobTypes);
+	}
+
+	/// <summary>
+	/// Issue #560 (migration 0035): tool_present round-trips true/false for a
+	/// download-runner-style heartbeat, and stays null when the caller never supplies
+	/// it (the default every non-download caller uses) -- GET /downloads/readiness
+	/// relies on that null meaning "no download-runner has reported," not "installed"
+	/// or "missing".
+	/// </summary>
+	[Fact]
+	public async Task HeartbeatAsync_ToolPresent_RoundTrips_AndDefaultsToNull()
+	{
+		await _registry.HeartbeatAsync("compliance-runner-1", ["scan"], ready: true, [], CancellationToken.None);
+		WorkerHeartbeat complianceRow = Assert.Single(await _registry.ListAsync(CancellationToken.None));
+		Assert.Null(complianceRow.ToolPresent);
+
+		await _registry.HeartbeatAsync("download-runner-1", ["download"], ready: true, [], CancellationToken.None, toolPresent: false);
+		WorkerHeartbeat downloadRow = (await _registry.ListAsync(CancellationToken.None))
+			.Single(row => row.WorkerId == "download-runner-1");
+		Assert.False(downloadRow.ToolPresent);
+
+		await _registry.HeartbeatAsync("download-runner-1", ["download"], ready: true, [], CancellationToken.None, toolPresent: true);
+		downloadRow = (await _registry.ListAsync(CancellationToken.None)).Single(row => row.WorkerId == "download-runner-1");
+		Assert.True(downloadRow.ToolPresent);
 	}
 
 	private async Task ForceOlderLastSeenAsync(string workerId, TimeSpan age)

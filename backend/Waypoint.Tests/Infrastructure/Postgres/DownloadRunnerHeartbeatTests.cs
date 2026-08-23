@@ -262,7 +262,7 @@ public sealed class DownloadRunnerHeartbeatTests : IAsyncLifetime
 
 		public int Count => Volatile.Read(ref _count);
 
-		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken)
+		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken, bool? toolPresent = null)
 		{
 			Interlocked.Increment(ref _count);
 			return Task.CompletedTask;
@@ -273,7 +273,7 @@ public sealed class DownloadRunnerHeartbeatTests : IAsyncLifetime
 	{
 		public bool WasCalled { get; private set; }
 
-		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken)
+		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken, bool? toolPresent = null)
 		{
 			WasCalled = true;
 			throw new InvalidOperationException("simulated heartbeat write failure");

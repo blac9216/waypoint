@@ -282,7 +282,7 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 
 		public List<Heartbeat> Heartbeats { get; } = [];
 
-		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken)
+		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken, bool? toolPresent = null)
 		{
 			Heartbeats.Add(new Heartbeat(workerId, jobTypes, ready));
 			return Task.CompletedTask;
@@ -293,7 +293,7 @@ public sealed class RunnerHealthReportingHostedServiceTests : IDisposable
 	{
 		public bool WasCalled { get; private set; }
 
-		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken)
+		public Task HeartbeatAsync(string workerId, IReadOnlyList<string> jobTypes, bool ready, IReadOnlyList<StarvedWorkerJobType> starvedJobTypes, CancellationToken cancellationToken, bool? toolPresent = null)
 		{
 			WasCalled = true;
 			throw new InvalidOperationException("simulated heartbeat write failure");

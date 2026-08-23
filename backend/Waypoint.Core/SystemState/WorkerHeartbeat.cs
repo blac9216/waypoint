@@ -28,12 +28,20 @@ namespace Waypoint.Core.SystemState;
 /// budget) or transient (would fit once running jobs release budget). Empty when nothing
 /// was starved.
 /// </param>
+/// <param name="ToolPresent">
+/// Issue #560 (migration 0035): the download-runner's <c>ManagedToolPresenceChecker</c>
+/// result as of its last heartbeat -- null for a compliance-runner row, which has
+/// nothing to report here. Feeds <c>GET /downloads/readiness</c>'s combined
+/// tool-installed + depot-token-valid answer without duplicating #39's future
+/// install-flow scope.
+/// </param>
 public sealed record WorkerHeartbeat(
 	string WorkerId,
 	IReadOnlyList<string> JobTypes,
 	bool Ready,
 	DateTimeOffset LastSeenAt,
-	IReadOnlyList<StarvedWorkerJobType> StarvedJobTypes);
+	IReadOnlyList<StarvedWorkerJobType> StarvedJobTypes,
+	bool? ToolPresent = null);
 
 /// <summary>JSON/DB-persisted twin of <c>Waypoint.Runner.Resources.StarvedJobType</c> -- <c>Waypoint.Core</c> cannot reference the runner project, so this is the control-plane-side shape.</summary>
 /// <param name="JobType">The <c>jobs.job_type</c> value being denied admission.</param>
