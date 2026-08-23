@@ -14,7 +14,7 @@
 
 namespace Waypoint.Core.ComplianceContent;
 
-/// <summary>Closed <c>ref_type</c> values (migration 0034's CHECK constraint).</summary>
+/// <summary>Closed <c>ref_type</c> values (migration 0035's CHECK constraint).</summary>
 public static class ComplianceContentRefTypes
 {
 	public const string Tag = "tag";
@@ -41,7 +41,7 @@ public static class ProfileStates
 
 /// <summary>
 /// The singleton compliance-content configuration (<c>compliance_content</c>,
-/// migration 0034): which upstream ref to track and the commit last actually pulled.
+/// migration 0035): which upstream ref to track and the commit last actually pulled.
 /// Null <see cref="PulledCommit"/>/<see cref="PulledBy"/>/<see cref="PulledAt"/> means
 /// configured but never successfully pulled yet.
 /// </summary>
