@@ -2,11 +2,43 @@
  * Attestations-applied sidebar panel — extracted from `ResultsScreen.tsx`
  * (issue #416 decomposition, no behavior change). See that file's module doc
  * for the persisted, at-scan-time snapshot semantics (#306/PR #336).
+ *
+ * "Open in Benchmarks" (issue #559): navigates to `/benchmarks` with
+ * whatever identifiers this row actually carries. `AppliedAttestationResponse.control`
+ * is documented as "always the fixed AttestationProfile profile name, not a
+ * per-control id" (RunContracts.cs) — so `profile` is the only identifier a
+ * row is guaranteed to have; a `site:{id}`/`target:{id}` `scope` additionally
+ * supplies a real target/site ref for `applied` rows (never for `expired`
+ * rows, which only carry a target NAME — `ExpiredAttestation.target` — not a
+ * guid). The link is only ever built from identifiers that exist; it never
+ * invents a target id to satisfy the deep link.
  */
+import { useRouter } from "../../lib/router-context";
 import { formatTimestamp, parseAttestationScope, type AppliedAttestation } from "./results";
 import type { ExpiredAttestation } from "./useRunDetail";
 
+function benchmarksHref(profile: string, targetRef: string | null): string {
+	const params = new URLSearchParams({ profile });
+	if (targetRef) {
+		params.set("target", targetRef);
+	}
+	return `/benchmarks?${params.toString()}`;
+}
+
 export function AttestationsPanel({ expired, applied }: { expired: ExpiredAttestation[]; applied: AppliedAttestation[] | null }) {
+	const { navigate } = useRouter();
+
+	const firstApplied = applied && applied.length > 0 ? applied[0] : null;
+	const firstExpired = expired.length > 0 ? expired[0] : null;
+
+	let openInBenchmarksHref: string | null = null;
+	if (firstApplied) {
+		const { layer, ref } = parseAttestationScope(firstApplied.scope);
+		openInBenchmarksHref = benchmarksHref(firstApplied.control, layer === "target" ? ref : null);
+	} else if (firstExpired) {
+		openInBenchmarksHref = benchmarksHref(firstExpired.profile, null);
+	}
+
 	return (
 		<div className="results__panel results__panel--sidebar">
 			<div className="results__panel-title">ATTESTATIONS APPLIED</div>
@@ -67,8 +99,13 @@ export function AttestationsPanel({ expired, applied }: { expired: ExpiredAttest
 			<button
 				type="button"
 				className="results__open-benchmarks-btn"
-				disabled
-				title="Open in Benchmarks is stubbed until the full config-doc editor lands (docs/ui/prototype screen 5)"
+				disabled={!openInBenchmarksHref}
+				title={openInBenchmarksHref ? undefined : "No attestation identifiers are available for this run to open in Benchmarks."}
+				onClick={() => {
+					if (openInBenchmarksHref) {
+						navigate(openInBenchmarksHref);
+					}
+				}}
 			>
 				Open in Benchmarks
 			</button>
