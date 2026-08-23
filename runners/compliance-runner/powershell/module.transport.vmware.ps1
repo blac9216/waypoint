@@ -15,7 +15,13 @@
 # Imported from the sibling vmware-stig-docker repository (issue #438, ADR-0013,
 # ADR-0015): project-owned PowerShell authored by the same copyright holder as this
 # repository, relicensed under Apache-2.0 at import time and copied unmodified except
-# for this header and the sanitization noted in NOTICE. See NOTICE for provenance.
+# for this header, the sanitization noted in NOTICE, and one functional edit (issue
+# #580): Connect-StigVIServer gained an optional -SkipVCSACredential switch so
+# Waypoint's API-only callers (discovery, vSphere API credential test) can decline
+# VCSA credential resolution/prompting instead of hitting an impossible Get-Credential
+# prompt in the noninteractive compliance runner. Every other caller and default
+# behavior is unchanged. See runners/compliance-runner/powershell/README.md and
+# NOTICE for full provenance.
 
 <#
 .MODULE
@@ -64,6 +70,16 @@
 .PARAMETER VCSACredential
 	PSCredential for VCSA SSH authentication (root).
 
+.PARAMETER SkipVCSACredential
+	Waypoint noninteractive addition (issue #580): when set, never resolves or
+	prompts for a VCSA SSH credential -- the returned VCSACredential is always
+	$null in that case, regardless of whether -VCSACredential was supplied. Use
+	for API-only operations (inventory discovery, vSphere API credential testing)
+	that only ever open a vSphere SSO session and have no legitimate use for a
+	VCSA credential at all. Defaults to $false so every pre-existing caller (bare
+	CLI, full scan setup via Connect-VsphereTransportRow) is unchanged: VCSA
+	credential resolution/prompting still happens exactly as before.
+
 .PARAMETER Source
 	Component identifier for logging.
 
@@ -81,6 +97,9 @@ function Connect-StigVIServer {
 
 		[Parameter()]
 		[pscredential]$VCSACredential,
+
+		[Parameter()]
+		[switch]$SkipVCSACredential,
 
 		[Parameter()]
 		[string]$Source = 'vSphere'
@@ -111,7 +130,13 @@ function Connect-StigVIServer {
 			$VSphereCredential = Get-Credential -Message "Enter vSphere SSO credentials (e.g., administrator@vsphere.local)"
 		}
 
-		if ($null -eq $VCSACredential) {
+		if ($SkipVCSACredential) {
+			# Waypoint noninteractive addition (issue #580): the caller has declared
+			# this connection is API-only (discovery, vSphere API credential test)
+			# and will never use a VCSA credential -- never resolve or prompt for
+			# one, and never carry forward one that happened to be passed anyway.
+			$VCSACredential = $null
+		} elseif ($null -eq $VCSACredential) {
 			Write-Log "VCSA root credentials not provided. Prompting for input." -Severity 'Info' @WriteLogParams
 			$VCSACredential = Get-Credential -Message "Enter VCSA root SSH credentials (Username: root)" -UserName "root"
 		}
