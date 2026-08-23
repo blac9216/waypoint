@@ -40,8 +40,23 @@ file for the formal entry.
 One doc comment in `module.common.ps1` (`Get-TargetShortName`) originally illustrated
 FQDN/IP-collision behavior with a real lab hostname and private IP addresses; those
 were replaced with fictional `example.internal` / RFC 5737 (`192.0.2.0/24`) values
-per this repo's mandatory sanitization policy (`CLAUDE.md`). No other change was made
-to file content beyond the added license header.
+per this repo's mandatory sanitization policy (`CLAUDE.md`).
+
+`module.transport.vmware.ps1`'s `Connect-StigVIServer` carries one functional edit
+(issue #580): a new, optional `-SkipVCSACredential` switch parameter. Upstream,
+`Connect-StigVIServer` always resolves or interactively prompts (`Get-Credential`)
+for a VCSA SSH credential whenever the caller doesn't supply one -- correct for full
+scan setup (`Connect-VsphereTransportRow`, still unchanged and still defaulting to
+`$false`/prompting behavior), but wrong for the two Waypoint-owned, API-only callers
+(`WaypointDiscovery.Invoke-WaypointDiscovery`, `WaypointCredentialTest.
+Invoke-WaypointVCenterCredentialTest`), which open only a vSphere SSO session and have
+no legitimate use for a VCSA credential at all. In Waypoint's noninteractive
+compliance-runner host, that prompt can never be satisfied and previously hung/failed
+every discovery and vSphere-credential-test job. `-SkipVCSACredential` lets those two
+callers opt out of VCSA credential resolution/prompting entirely without forking the
+function; every other caller's behavior, parameters, and defaults are unchanged. This
+is the only functional (non-header, non-sanitization) edit made to any file in this
+directory.
 
 ## Runtime wiring
 

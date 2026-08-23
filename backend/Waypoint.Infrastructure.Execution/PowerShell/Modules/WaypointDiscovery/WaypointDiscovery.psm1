@@ -88,7 +88,13 @@ function Invoke-WaypointDiscovery {
 	$Credential = [pscredential]::new($Username, $SecurePassword)
 
 	Write-Information "Connecting to vCenter '$VCenter' for discovery..."
-	$Connection = Connect-StigVIServer -VCenter $VCenter -VSphereCredential $Credential -Source 'Discovery'
+	# Issue #580: discovery is an API-only operation -- it never walks VCSA over SSH,
+	# so it must never resolve or prompt for a VCSA credential. -SkipVCSACredential
+	# tells the shared Connect-StigVIServer (module.transport.vmware.ps1, which
+	# carries this one small parameterization -- see its README/NOTICE) to skip that
+	# resolution/prompt entirely rather than falling into Get-Credential, which can
+	# never succeed in the noninteractive compliance runner.
+	$Connection = Connect-StigVIServer -VCenter $VCenter -VSphereCredential $Credential -SkipVCSACredential -Source 'Discovery'
 
 	try {
 		foreach ($Session in $Connection.Sessions) {

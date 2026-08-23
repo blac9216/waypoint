@@ -95,7 +95,15 @@ function Invoke-WaypointVCenterCredentialTest {
 	$Credential = [System.Management.Automation.PSCredential]::new($Username, $SecurePassword)
 
 	try {
-		$Connection = Connect-StigVIServer -VCenter $VCenter -VSphereCredential $Credential -Source 'CredentialTest'
+		# Issue #580: testing a vSphere API credential is an API-only operation -- it
+		# never opens a VCSA SSH session, so it must never resolve or prompt for a
+		# VCSA credential. -SkipVCSACredential tells the shared Connect-StigVIServer
+		# (module.transport.vmware.ps1, which carries this one small parameterization
+		# -- see its README/NOTICE) to skip that resolution/prompt entirely rather than
+		# falling into Get-Credential, which can never succeed in the noninteractive
+		# compliance runner -- and a successful API connection must mark this test
+		# successful regardless of any VCSA SSH binding's existence.
+		$Connection = Connect-StigVIServer -VCenter $VCenter -VSphereCredential $Credential -SkipVCSACredential -Source 'CredentialTest'
 		if ($Connection.DisconnectAtCleanup) {
 			Disconnect-VIServer -Server $Connection.Sessions -Confirm:$false -ErrorAction SilentlyContinue
 		}
