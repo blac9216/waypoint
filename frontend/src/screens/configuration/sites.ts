@@ -185,8 +185,30 @@ export interface CredentialOption {
 	name: string;
 }
 
+/** The one wire field this module reads beyond `CredentialOption` purely to
+ * filter — never rendered, never carried onto `CredentialOption` itself. */
+interface CredentialOptionSource extends CredentialOption {
+	credential_type?: string;
+}
+
+/**
+ * Issue #571 (#560 AC: "Depot tokens do not appear in target credential
+ * selectors"): `GET /credentials` returns every stored credential, including
+ * a `depot-token` row (the well-known credential `CatalogIndexJobHandler`/
+ * catalog-index resolves by type — see credentials.ts's `CREDENTIAL_TYPES`
+ * doc comment). A depot-token has no dialable host and is not one of
+ * domain-model.md's four connection types, so it must never be selectable
+ * from a target/scan-wizard credential picker. Filtered client-side rather
+ * than with a server-side query param: the full list is already fetched
+ * unpaginated (this endpoint has no pagination), so a second round trip or a
+ * new backend contract would add nothing.
+ */
 export function fetchCredentialOptions(): Promise<CredentialOption[]> {
-	return apiGet<CredentialOption[]>("/credentials");
+	return apiGet<CredentialOptionSource[]>("/credentials").then((credentials) =>
+		credentials
+			.filter((c) => c.credential_type !== "depot-token")
+			.map((c) => ({ id: c.id, name: c.name })),
+	);
 }
 
 export function formatDiscoveryStatus(status: string): string {

@@ -1,0 +1,90 @@
+/* Config → Depot & Tokens tab (issue #571). Shares .config-panel/.config-table/
+ * .config-form/.content-tab__* from ConfigurationScreen.css/ComplianceContentTab.css;
+ * these rules cover only what's specific to this tab. */
+
+.depot-tab__field-list {
+	padding: 4px 14px 12px;
+}
+
+.depot-tab__readiness {
+	font-size: 12px;
+	font-weight: 600;
+	padding: 8px 0 10px;
+}
+
+.depot-tab__readiness--ok {
+	color: var(--ok);
+}
+
+.depot-tab__readiness--bad {
+	color: var(--bad);
+}
+
+.depot-tab__readiness-ok {
+	color: var(--ok);
+	font-family: var(--mono);
+	font-size: 11px;
+}
+
+.depot-tab__readiness-missing {
+	color: var(--bad);
+	font-family: var(--mono);
+	font-size: 11px;
+}
+
+.depot-tab__expiry-unknown {
+	color: var(--txt3);
+	font-family: var(--mono);
+	font-size: 11px;
+}
+
+.depot-tab__expiry-soon {
+	color: var(--warn);
+	font-family: var(--mono);
+	font-size: 11px;
+	font-weight: 600;
+}
+
+.depot-tab__tool-state {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	padding: 1px 8px;
+	border-radius: 2px;
+	border: 1px solid var(--soft);
+}
+
+.depot-tab__tool-state--ok {
+	color: var(--ok);
+	border-color: var(--ok);
+}
+
+.depot-tab__tool-state--amber {
+	color: var(--warn);
+	border-color: var(--warn);
+}
+
+.depot-tab__tool-forms {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+	gap: 12px;
+	padding: 0 14px 14px;
+}
+
+.depot-tab__tool-form {
+	border: 1px solid var(--line) !important;
+	border-radius: var(--radius-card);
+	background: var(--panel2) !important;
+}
+
+.depot-tab__depot-fetch {
+	padding: 12px 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.depot-tab__depot-fetch-note {
+	font-size: 11px;
+	color: var(--txt3);
+	line-height: 1.5;
+}

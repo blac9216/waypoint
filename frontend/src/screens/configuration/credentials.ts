@@ -44,12 +44,11 @@ export type CredentialType = "vcenter" | "nsx" | "ssh" | "token" | "depot-token"
  * excludes `depot-token`: per `CredentialTypes`' backend doc comment (#252/#383),
  * depot-token is the single well-known row `CatalogIndexJobHandler` resolves by
  * type to authenticate catalog-index runs to the Broadcom depot — it is not one
- * of domain-model.md's four user-facing connection types, and this repo has no
- * separate depot-credential creation flow yet either (the catalog/download
- * screens don't manage credentials). It stays out of this dropdown so an
- * operator can't half-configure it here (no dialable host, no username in the
- * normal sense); when a depot-credential creation flow is built, add it there,
- * not to this connection-credential list.
+ * of domain-model.md's four user-facing connection types. It stays out of
+ * this dropdown so an operator can't half-configure it here (no dialable
+ * host, no username in the normal sense); depot-token creation/replacement
+ * lives in its own dedicated flow — the Config → Depot & Tokens tab
+ * (`DepotTokensTab.tsx`, issue #571) — not this connection-credential list.
  */
 export const CREDENTIAL_TYPES: { value: CredentialType; label: string }[] = [
 	{ value: "vcenter", label: "vCenter" },
@@ -77,6 +76,14 @@ export interface Credential {
 	updated_at: string;
 	/** Omitted from the wire until set — see `rotated_at`. */
 	username?: string;
+	/** Migration 0035 (PR #570): omitted until the first `credential-test` job
+	 * outcome, any credential type, success or failure — see `rotated_at`. */
+	last_tested_at?: string;
+	/** Migration 0035 (PR #570): omitted until a real upstream response
+	 * supplies one — nothing populates this yet for any credential type.
+	 * Never rendered as a fabricated date when absent (issue #560/#571 AC) —
+	 * see `DepotTokensTab.tsx`'s `ExpiryValue`. */
+	expires_at?: string;
 }
 
 export function fetchCredentials(): Promise<Credential[]> {
