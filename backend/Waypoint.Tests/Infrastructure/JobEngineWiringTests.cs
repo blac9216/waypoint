@@ -231,7 +231,9 @@ public sealed class ExecutionCompositionTests
 		using ServiceProvider provider = BuildProvider();
 
 		HashSet<string> jobTypes = [.. provider.GetServices<IJobHandler>().Select(handler => handler.JobType)];
-		Assert.Equal(new HashSet<string> { "catalog-index", "download", "discover", "scan", "credential-test" }, jobTypes);
+		Assert.Equal(
+			new HashSet<string> { "catalog-index", "download", "discover", "scan", "credential-test", "content-pull" },
+			jobTypes);
 	}
 
 	/// <summary>

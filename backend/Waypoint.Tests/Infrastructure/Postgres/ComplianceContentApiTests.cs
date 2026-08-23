@@ -45,6 +45,13 @@ public sealed class ComplianceContentApiTests : IAsyncLifetime
 {
 	private sealed class ComplianceContentApiFactory : WaypointApiFactory
 	{
+		private readonly string _connectionString;
+
+		public ComplianceContentApiFactory(string connectionString)
+		{
+			_connectionString = connectionString;
+		}
+
 		protected override void ConfigureWebHost(IWebHostBuilder builder)
 		{
 			base.ConfigureWebHost(builder);
@@ -62,6 +69,16 @@ public sealed class ComplianceContentApiTests : IAsyncLifetime
 					options.DefaultChallengeScheme = TestAuthHandler.SchemeName;
 					options.DefaultForbidScheme = TestAuthHandler.SchemeName;
 				});
+
+				// This factory wires repositories directly (no ConnectionStrings:Waypoint
+				// in test config), so AddWaypointInfrastructure's connection-string-gated
+				// registration never runs -- register everything the two controllers
+				// depend on explicitly, matching SystemApiTests' pattern.
+				services.AddSingleton<IComplianceContentRepository>(new ComplianceContentRepository(_connectionString));
+				services.AddSingleton<IProfileRepository>(new ProfileRepository(_connectionString));
+				JobQueueRepository jobs = new(_connectionString, NullLogger<JobQueueRepository>.Instance);
+				services.AddSingleton<IJobControlRepository>(jobs);
+				services.AddSingleton<IJobRunnerRepository>(jobs);
 			});
 		}
 	}
@@ -84,7 +101,7 @@ public sealed class ComplianceContentApiTests : IAsyncLifetime
 		await _fixture.ResetJobEngineDataAsync();
 		await ResetComplianceContentDataAsync();
 
-		_factory = new ComplianceContentApiFactory();
+		_factory = new ComplianceContentApiFactory(_fixture.ConnectionString);
 		_client = _factory.CreateClient();
 	}
 
@@ -135,7 +152,9 @@ public sealed class ComplianceContentApiTests : IAsyncLifetime
 		using JsonDocument document = JsonDocument.Parse(await getResponse.Content.ReadAsStringAsync());
 		Assert.Equal("tag", document.RootElement.GetProperty("ref_type").GetString());
 		Assert.Equal("v1.2.3", document.RootElement.GetProperty("ref_value").GetString());
-		Assert.True(document.RootElement.GetProperty("pulled_commit").ValueKind == JsonValueKind.Null);
+		// WaypointJsonOptions omits null properties from the wire (WhenWritingNull) --
+		// an unconfigured pull leaves pulled_commit absent, not present-as-null.
+		Assert.False(document.RootElement.TryGetProperty("pulled_commit", out _));
 	}
 
 	[Fact]
