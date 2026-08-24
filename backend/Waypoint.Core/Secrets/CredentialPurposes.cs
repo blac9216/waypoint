@@ -153,4 +153,59 @@ public static class CredentialPurposeMatrix
 			.Distinct()
 			.ToArray();
 	}
+
+	/// <summary>
+	/// Issue #585: the purposes a scan of <paramref name="targetKind"/> unconditionally
+	/// requires -- those present in <see cref="CredentialPurposeMatrixEntry.RequiredPurposes"/>
+	/// of EVERY scan row for the kind (ADR-0021 §3). Run creation must resolve each of
+	/// these for every selected target or reject the run (§6). Component-conditional
+	/// purposes (required by only some scan components, e.g. <c>vcsa-ssh</c> for the
+	/// VCSA component) are <see cref="ConditionalScanPurposes"/> instead: until scan
+	/// component selection exists on the wire (issue #587's wizard slice), they resolve
+	/// opportunistically when bound/overridden and are never a rejection.
+	/// </summary>
+	public static IReadOnlyCollection<string> RequiredScanPurposes(string targetKind)
+	{
+		CredentialPurposeMatrixEntry[] scanEntries = ScanEntries(targetKind);
+		return scanEntries.Length == 0
+			? []
+			: scanEntries
+				.Skip(1)
+				.Aggregate(
+					scanEntries[0].RequiredPurposes.AsEnumerable(),
+					(intersection, entry) => intersection.Intersect(entry.RequiredPurposes, StringComparer.Ordinal))
+				.ToArray();
+	}
+
+	/// <summary>
+	/// Issue #585: purposes required by SOME but not ALL scan components of
+	/// <paramref name="targetKind"/> (today: <c>vcsa-ssh</c> for <c>vsphere</c>'s VCSA
+	/// component only) -- resolved into a job's snapshot when a binding or override
+	/// exists, absent otherwise, mirroring the transport's own graceful VCSA skip
+	/// (ADR-0021 §3 note). See <see cref="RequiredScanPurposes"/>.
+	/// </summary>
+	public static IReadOnlyCollection<string> ConditionalScanPurposes(string targetKind)
+	{
+		IReadOnlyCollection<string> required = RequiredScanPurposes(targetKind);
+		return ScanEntries(targetKind)
+			.SelectMany(e => e.RequiredPurposes.Concat(e.OptionalPurposes))
+			.Distinct(StringComparer.Ordinal)
+			.Where(p => !required.Contains(p, StringComparer.Ordinal))
+			.ToArray();
+	}
+
+	/// <summary>True when <paramref name="credentialType"/> is in <paramref name="purpose"/>'s compatibility set (ADR-0021 §2). Unknown purposes are compatible with nothing.</summary>
+	public static bool IsCompatible(string purpose, string credentialType)
+	{
+		return SatisfyingCredentialTypes.TryGetValue(purpose, out IReadOnlyCollection<string>? types)
+			&& types.Contains(credentialType, StringComparer.Ordinal);
+	}
+
+	private static CredentialPurposeMatrixEntry[] ScanEntries(string targetKind)
+	{
+		return Entries
+			.Where(e => string.Equals(e.TargetKind, targetKind, StringComparison.Ordinal)
+				&& string.Equals(e.Operation, CredentialPurposeOperations.Scan, StringComparison.Ordinal))
+			.ToArray();
+	}
 }

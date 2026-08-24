@@ -93,7 +93,10 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 		_profileId = (await _profiles.ListAsync(CancellationToken.None)).Single().Id;
 
 		RunCreationService runCreation = new(
-			jobs, _sites, _targets, _profiles,
+			jobs, _sites, _targets,
+			new TargetCredentialBindingRepository(_fixture.ConnectionString),
+			new Waypoint.Infrastructure.Secrets.CredentialRepository(_fixture.ConnectionString),
+			_profiles,
 			runSecrets, Options.Create(new DiscoveryOptions()), Options.Create(new RunSecretOptions()));
 
 		IApplianceStateRepository applianceState = new ApplianceStateRepository(_fixture.ConnectionString);
@@ -164,7 +167,7 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 		Guid siteId = (await _sites.CreateAsync("schedule-scan-site", null, null, CancellationToken.None))!.Value;
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
 			siteId, TargetKinds.Ssh, "schedule-scan-target", """{"host":"esxi-01.example.internal"}""",
-			credentialId: null, CancellationToken.None);
+			await SeedSshCredentialAsync(), CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 		Assert.NotNull(targetId);
 
@@ -202,7 +205,7 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 		Guid siteId = (await _sites.CreateAsync("schedule-scan-e2e-site", null, null, CancellationToken.None))!.Value;
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
 			siteId, TargetKinds.Ssh, "schedule-scan-e2e-target", """{"host":"esxi-02.example.internal"}""",
-			credentialId: null, CancellationToken.None);
+			await SeedSshCredentialAsync(), CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 		Assert.NotNull(targetId);
 
@@ -313,5 +316,23 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 		await using NpgsqlCommand command = new("UPDATE appliance_state SET mode = $1 WHERE id = 1", connection);
 		command.Parameters.AddWithValue(mode);
 		await command.ExecuteNonQueryAsync();
+	}
+
+	/// <summary>
+	/// Issue #585: scan dispatch resolves each target's required credential purpose
+	/// from its bindings, so scan-schedule fixtures assign an ssh-type credential --
+	/// TargetRepository's 0043 dual-write mirrors it into the srg-ssh binding the
+	/// resolution step reads. This is also the stored-schedule compatibility proof:
+	/// the schedule rows themselves are created with the SAME pre-#585 scope shape
+	/// ({site_id, profile_id}), and dispatch keeps working unchanged.
+	/// </summary>
+	private async Task<Guid> SeedSshCredentialAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"INSERT INTO credentials (name, credential_type, username) VALUES ($1, 'ssh', 'svc-schedule@example.internal') RETURNING id", connection);
+		command.Parameters.AddWithValue($"schedule-scan-cred-{Guid.NewGuid():N}");
+		return (Guid)(await command.ExecuteScalarAsync())!;
 	}
 }

@@ -824,6 +824,88 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
 	}
 
+	/// <summary>
+	/// Issue #585 (epic #582, migration 0044): POSITIVE-direction grant check, written
+	/// at authoring time with the grant itself. The compliance runner resolves its
+	/// claimed job's per-purpose credential snapshot
+	/// (<c>IJobRunnerRepository.GetJobCredentialBindingsAsync</c> in ScanJobHandler/
+	/// DiscoverJobHandler) -- SELECT on <c>job_credential_bindings</c> must succeed for
+	/// its role, and must return the seeded row, not merely avoid throwing.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CanReadJobCredentialBindings()
+	{
+		Guid jobId = await SeedJobAsync(await SeedRunAsync());
+		Guid credentialId = await SeedCredentialAsync();
+		await SeedJobCredentialBindingAsync(jobId, credentialId);
+
+		JobQueueRepository runnerRepository = new(_complianceRunnerConnectionString, NullLogger<JobQueueRepository>.Instance);
+		IReadOnlyList<JobCredentialBinding> bindings = await runnerRepository.GetJobCredentialBindingsAsync(jobId, CancellationToken.None);
+
+		JobCredentialBinding binding = Assert.Single(bindings);
+		Assert.Equal("vsphere-api", binding.Purpose);
+		Assert.Equal(credentialId, binding.CredentialId);
+	}
+
+	/// <summary>Migration 0044 grants the compliance runner SELECT only -- fan-out INSERT stays API-side (RunCreationService's transaction), so a runner-role INSERT must still fail 42501.</summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotInsertJobCredentialBindings()
+	{
+		Guid jobId = await SeedJobAsync(await SeedRunAsync());
+		Guid credentialId = await SeedCredentialAsync();
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO job_credential_bindings (job_id, purpose, credential_id) VALUES ($1, 'vsphere-api', $2)", connection);
+		insert.Parameters.AddWithValue(jobId);
+		insert.Parameters.AddWithValue(credentialId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>The credential swap (#146) and #593's terminal detach both rewrite binding rows API-side only -- a runner-role UPDATE must still fail 42501.</summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotUpdateJobCredentialBindings()
+	{
+		Guid jobId = await SeedJobAsync(await SeedRunAsync());
+		Guid credentialId = await SeedCredentialAsync();
+		await SeedJobCredentialBindingAsync(jobId, credentialId);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new(
+			"UPDATE job_credential_bindings SET credential_id = NULL WHERE job_id = $1", connection);
+		update.Parameters.AddWithValue(jobId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>The download runner's job types (JobCapabilities.Download) carry no purpose bindings -- migration 0044 deliberately grants it nothing, even SELECT.</summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotReadJobCredentialBindings()
+	{
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand select = new("SELECT id FROM job_credential_bindings LIMIT 1", connection);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => select.ExecuteScalarAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	private async Task SeedJobCredentialBindingAsync(Guid jobId, Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"INSERT INTO job_credential_bindings (job_id, purpose, credential_id) VALUES ($1, 'vsphere-api', $2)", connection);
+		command.Parameters.AddWithValue(jobId);
+		command.Parameters.AddWithValue(credentialId);
+		await command.ExecuteNonQueryAsync();
+	}
+
 	private async Task ResetCapacityTablesAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

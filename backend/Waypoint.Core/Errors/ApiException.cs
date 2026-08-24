@@ -23,13 +23,16 @@ namespace Waypoint.Core.Errors;
 /// </summary>
 public class ApiException : Exception
 {
-	public ApiException(HttpStatusCode statusCode, string code, string message, string? detail = null, IReadOnlyList<BlockingCategory>? blockers = null)
+	public ApiException(
+		HttpStatusCode statusCode, string code, string message, string? detail = null,
+		IReadOnlyList<BlockingCategory>? blockers = null, IReadOnlyList<CredentialBindingGap>? bindingGaps = null)
 		: base(message)
 	{
 		StatusCode = statusCode;
 		Code = code;
 		Detail = detail;
 		Blockers = blockers;
+		BindingGaps = bindingGaps;
 	}
 
 	public HttpStatusCode StatusCode { get; }
@@ -41,9 +44,12 @@ public class ApiException : Exception
 	/// <summary>Issue #593: optional structured breakdown -- see <see cref="ErrorDetail.Blockers"/>.</summary>
 	public IReadOnlyList<BlockingCategory>? Blockers { get; }
 
+	/// <summary>Issue #585: optional per-target/per-purpose credential-resolution gaps -- see <see cref="ErrorDetail.BindingGaps"/>.</summary>
+	public IReadOnlyList<CredentialBindingGap>? BindingGaps { get; }
+
 	public ErrorDetail ToErrorDetail()
 	{
-		return new ErrorDetail(Code, Message, Detail, Blockers);
+		return new ErrorDetail(Code, Message, Detail, Blockers, BindingGaps);
 	}
 
 	public static ApiException Unauthorized(string message = "Authentication is required.", string? detail = null)

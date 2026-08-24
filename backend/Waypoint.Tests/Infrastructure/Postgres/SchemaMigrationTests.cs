@@ -63,11 +63,12 @@ public sealed class SchemaMigrationTests
 		"run_purges",
 		"run_purge_tombstones",
 		"target_credential_bindings",
+		"job_credential_bindings",
 		"schema_migrations"
 	];
 
 	/// <summary>Embedded migration count as of issue #584 (... 0042 adds run_purges + run_purge_tombstones -- the durable retryable purge lifecycle and append-only audit tombstone for the admin-only terminal-compliance-run purge, plus runs.purged_at, 'purge' in jobs_job_type_check/runs_run_type_check, relaxes schedules.last_run_id from RESTRICT to ON DELETE SET NULL, and the compliance-runner's run_purges progress-reporting grant, issue #594, 0043 adds target_credential_bindings -- the normalized purpose-specific credential binding table (ADR-0021), backfills existing targets.credential_id references into the kind-appropriate default-purpose binding, and documents the dual-write contract keeping targets.credential_id and the default-purpose binding consistent until #585 removes the legacy column -- no new runner grants, issue #584) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 43;
+	private const int ExpectedMigrationCount = 44;
 
 	private readonly PostgresFixture _fixture;
 

@@ -460,12 +460,30 @@ public sealed class CrossProcessRunnerParityMatrixTests : IAsyncLifetime
 		return document.RootElement.GetProperty("id").GetGuid();
 	}
 
+	/// <summary>Issue #585: scan-run creation requires a resolvable binding per target, so every target here carries a kind-compatible credential (mirrored into its default-purpose binding by the 0043 dual-write).</summary>
 	private async Task<Guid> CreateTargetAsync(Guid siteId, string kind, string name, string connectionJson)
 	{
+		string credentialType = kind switch
+		{
+			"vsphere" => "vcenter",
+			"nsx-api" => "nsx",
+			_ => "ssh",
+		};
+		Guid credentialId;
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand command = new(
+				"INSERT INTO credentials (name, credential_type, username) VALUES ($1, $2, 'svc-parity@example.internal') RETURNING id", connection);
+			command.Parameters.AddWithValue($"parity-cred-{Guid.NewGuid():N}");
+			command.Parameters.AddWithValue(credentialType);
+			credentialId = (Guid)(await command.ExecuteScalarAsync())!;
+		}
+
 		using JsonDocument connectionDocument = JsonDocument.Parse(connectionJson);
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/sites/{siteId}/targets");
 		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
-		string body = JsonSerializer.Serialize(new { kind, name, connection = connectionDocument.RootElement });
+		string body = JsonSerializer.Serialize(new { kind, name, connection = connectionDocument.RootElement, credential_ref = credentialId });
 		request.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
 		HttpResponseMessage response = await _client.SendAsync(request);

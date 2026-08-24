@@ -22,6 +22,7 @@ using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Pagination;
 using Waypoint.Core.Scans;
+using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
 using Waypoint.Core.Runs;
 using Waypoint.Infrastructure.ConfigDocs;
@@ -162,6 +163,7 @@ public sealed class RunsController : ControllerBase
 		}
 
 		ValidateEphemeralCredentialRequest(request);
+		ValidateCredentialOverridesRequest(request);
 
 		string initiatedBy = User.GetRequiredUsername();
 
@@ -171,8 +173,13 @@ public sealed class RunsController : ControllerBase
 				? null
 				: new RunSecretCredentialRequest(request.Credential.Username, request.Credential.Secret);
 
+			IReadOnlyList<RunCredentialOverride>? overrides = request.CredentialOverrides is not { Count: > 0 }
+				? null
+				: [.. request.CredentialOverrides.Select(o => new RunCredentialOverride(o.TargetId, o.Purpose, o.CredentialId))];
+
 			Guid scanRunId = await _runCreation.CreateScanRunAsync(
-				request.Scope, request.CredentialId, credential, initiatedBy, cancellationToken).ConfigureAwait(false);
+				request.Scope, request.CredentialId, credential, initiatedBy, cancellationToken,
+				credentialOverrides: overrides).ConfigureAwait(false);
 
 			return Accepted(new RunCreatedResponse(scanRunId.ToString()));
 		}
@@ -232,6 +239,52 @@ public sealed class RunsController : ControllerBase
 			throw ApiException.Validation(
 				"credential requires both username and secret.",
 				"Set non-empty \"credential.username\" and \"credential.secret\" in the request body.");
+		}
+	}
+
+	/// <summary>
+	/// Issue #585 shape gates for <c>credential_overrides</c>: scan runs only, no inline
+	/// ad hoc credential alongside (per-target ad hoc secrets are #586), and every
+	/// purpose string must be a member of the closed <see cref="CredentialPurposes"/> set
+	/// (a garbage purpose is a malformed request, not a per-target resolution gap --
+	/// same split the binding CRUD endpoints' <c>invalid_purpose</c> check uses).
+	/// Semantic validation (target in scope, purpose applicable to the target's kind,
+	/// credential exists/compatible) happens in
+	/// <see cref="Waypoint.Infrastructure.Runs.RunCreationService"/>'s resolution step,
+	/// which enumerates every gap in one <c>credential_binding_gaps</c> 400. No role
+	/// gate beyond the scan-creation floor: a caller who may start a scan with a stored
+	/// <c>credential_id</c> (Cyber+) may name stored credentials per target/purpose the
+	/// same way -- overrides reference the service tier only, never personal secrets.
+	/// </summary>
+	private static void ValidateCredentialOverridesRequest(RunCreateRequest request)
+	{
+		if (request.CredentialOverrides is not { Count: > 0 })
+		{
+			return;
+		}
+
+		if (!string.Equals(request.RunType, ScanRunType, StringComparison.Ordinal))
+		{
+			throw ApiException.Validation(
+				"credential_overrides are only valid for scan runs.",
+				$"\"credential_overrides\" may only be set when \"run_type\" is \"{ScanRunType}\".");
+		}
+
+		if (request.Credential is not null)
+		{
+			throw ApiException.Validation(
+				"credential_overrides and credential are mutually exclusive.",
+				"Per-target saved-credential overrides apply to stored-credential scans only; per-target ad hoc secrets land with issue #586.");
+		}
+
+		foreach (RunCredentialOverrideRequest @override in request.CredentialOverrides)
+		{
+			if (!CredentialPurposes.IsValid(@override.Purpose))
+			{
+				throw ApiException.Validation(
+					"credential_overrides contains an unknown purpose.",
+					$"'{@override.Purpose}' is not a credential purpose; valid values: {string.Join(", ", CredentialPurposes.All)}.");
+			}
 		}
 	}
 

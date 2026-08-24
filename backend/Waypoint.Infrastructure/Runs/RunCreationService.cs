@@ -67,6 +67,8 @@ public sealed class RunCreationService
 	private readonly IJobControlRepository _repository;
 	private readonly SiteRepository _sites;
 	private readonly TargetRepository _targets;
+	private readonly TargetCredentialBindingRepository _bindings;
+	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
 	private readonly IProfileRepository _profiles;
 	private readonly IRunSecretStore _runSecrets;
 	private readonly IOptions<DiscoveryOptions> _discoveryOptions;
@@ -76,6 +78,8 @@ public sealed class RunCreationService
 		IJobControlRepository repository,
 		SiteRepository sites,
 		TargetRepository targets,
+		TargetCredentialBindingRepository bindings,
+		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
 		IProfileRepository profiles,
 		IRunSecretStore runSecrets,
 		IOptions<DiscoveryOptions> discoveryOptions,
@@ -84,6 +88,8 @@ public sealed class RunCreationService
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(sites);
 		ArgumentNullException.ThrowIfNull(targets);
+		ArgumentNullException.ThrowIfNull(bindings);
+		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(profiles);
 		ArgumentNullException.ThrowIfNull(runSecrets);
 		ArgumentNullException.ThrowIfNull(discoveryOptions);
@@ -91,6 +97,8 @@ public sealed class RunCreationService
 		_repository = repository;
 		_sites = sites;
 		_targets = targets;
+		_bindings = bindings;
+		_credentials = credentials;
 		_profiles = profiles;
 		_runSecrets = runSecrets;
 		_discoveryOptions = discoveryOptions;
@@ -129,7 +137,8 @@ public sealed class RunCreationService
 		RunSecretCredentialRequest? credential,
 		string initiatedBy,
 		CancellationToken cancellationToken,
-		Guid? scheduleId = null)
+		Guid? scheduleId = null,
+		IReadOnlyList<RunCredentialOverride>? credentialOverrides = null)
 	{
 		ScanScope scope;
 		try
@@ -182,6 +191,24 @@ public sealed class RunCreationService
 		}
 
 		bool useRunSecret = credential is not null;
+		if (useRunSecret && credentialOverrides is { Count: > 0 })
+		{
+			// The ad hoc ("my credentials") tier is one flat username/secret per run
+			// (issue #434); per-target/per-purpose ad hoc secrets are issue #586's
+			// redesign. Mixing the two tiers in one request has no defined semantics yet.
+			throw ApiException.Validation(
+				"credential_overrides cannot be combined with an inline credential.",
+				"Saved-credential overrides apply to stored-credential scans only; per-target ad hoc secrets land with issue #586.");
+		}
+
+		// Issue #585 (epic #582, ADR-0021 §5): resolve every purpose each selected
+		// target's scan requires -- target-assigned bindings, the legacy run-level
+		// credential_id (reinterpreted as a default-purpose override), and validated
+		// per-target/per-purpose overrides -- BEFORE any run/job row exists, so an
+		// unresolvable plan is a clean 4xx enumerating every gap, never a partial run.
+		IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings = useRunSecret
+			? new Dictionary<Guid, IReadOnlyDictionary<string, Guid>>()
+			: await ResolveCredentialBindingsAsync(targets, credentialId, credentialOverrides, cancellationToken).ConfigureAwait(false);
 
 		List<JobSpec> specs = [];
 		foreach (Target target in targets)
@@ -201,7 +228,8 @@ public sealed class RunCreationService
 				// run_secrets, keyed by the run id (one row per run, issue #434) rather
 				// than one row per job. Falling back to target.CredentialId here would
 				// silently mix tiers (a "my credentials" run quietly using a stored
-				// service secret).
+				// service secret). No job_credential_bindings rows either: per-purpose
+				// ad hoc secrets are issue #586's redesign.
 				specs.Add(new JobSpec(
 					ScanJobType,
 					ScanTargetPriority.ForTargetKind(target.Kind),
@@ -212,18 +240,32 @@ public sealed class RunCreationService
 			}
 			else
 			{
-				Guid? effectiveCredentialId = credentialId ?? target.CredentialId;
+				// Migration 0044's dual-write contract: jobs.credential_id keeps carrying
+				// the execution purpose's resolved credential (the kind's default purpose
+				// -- the one today's wrappers authenticate with), and the full per-purpose
+				// snapshot (including e.g. a vsphere target's vcsa-ssh binding, which has
+				// no jobs-column slot) rides CredentialBindings into job_credential_bindings
+				// in the same fan-out transaction.
+				IReadOnlyDictionary<string, Guid> purposes = resolvedBindings[target.Id];
+				Guid? effectiveCredentialId =
+					CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(target.Kind, out string? defaultPurpose)
+					&& purposes.TryGetValue(defaultPurpose, out Guid executionCredentialId)
+						? executionCredentialId
+						: null;
 				specs.Add(new JobSpec(
 					ScanJobType,
 					ScanTargetPriority.ForTargetKind(target.Kind),
 					TargetId: target.Id,
 					TargetName: target.Name,
 					CredentialId: effectiveCredentialId,
-					Payload: payload));
+					Payload: payload,
+					CredentialBindings: [.. purposes
+						.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+						.Select(pair => new JobCredentialBindingSpec(pair.Key, pair.Value))]));
 			}
 		}
 
-		specs.AddRange(BuildStaleDiscoverSpecs(targets));
+		specs.AddRange(await BuildStaleDiscoverSpecsAsync(targets, useRunSecret ? null : resolvedBindings, cancellationToken).ConfigureAwait(false));
 
 		Guid runId = await _repository.CreateRunAsync(ScanRunType, scopeJson, credentialId, initiatedBy, cancellationToken, scheduleId)
 			.ConfigureAwait(false);
@@ -282,11 +324,14 @@ public sealed class RunCreationService
 	/// makes scan execution inventory-aware (e.g. per-inventory-item fan-out), this
 	/// call site is exactly where a hard dependency would need to be introduced.
 	/// </summary>
-	private List<JobSpec> BuildStaleDiscoverSpecs(IReadOnlyList<Target> targets)
+	private async Task<List<JobSpec>> BuildStaleDiscoverSpecsAsync(
+		IReadOnlyList<Target> targets,
+		IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>>? resolvedBindings,
+		CancellationToken cancellationToken)
 	{
 		DateTimeOffset staleBefore = DateTimeOffset.UtcNow.AddMinutes(-_discoveryOptions.Value.StaleAfterMinutes);
 
-		List<JobSpec> specs = [];
+		List<Target> staleTargets = [];
 		foreach (Target target in targets)
 		{
 			if (!string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal))
@@ -295,9 +340,49 @@ public sealed class RunCreationService
 			}
 
 			bool stale = target.LastRefreshed is null || target.LastRefreshed.Value < staleBefore;
-			if (!stale)
+			if (stale)
 			{
-				continue;
+				staleTargets.Add(target);
+			}
+		}
+
+		if (staleTargets.Count == 0)
+		{
+			return [];
+		}
+
+		// Issue #585: discovery requires exactly vsphere-api (ADR-0021 §3, the #580
+		// defect's fix made law). A stored-credential scan already resolved that purpose
+		// for every vsphere target (it is scan-required too), so the piggybacked discover
+		// job reuses the scan's resolution -- which also honors a vsphere-api override
+		// naturally. A run-secret scan resolves no stored bindings for its scan jobs
+		// (resolvedBindings null), so the discover jobs -- which always run on the
+		// stored/service tier, never on the run's ad hoc secret -- read the target's own
+		// vsphere-api binding directly; a target with none fans out with a NULL
+		// credential exactly as the legacy target.CredentialId path did (fire-and-forget:
+		// the discover job fails auth-style without affecting the scan, see the
+		// design-decision note above).
+		IReadOnlyDictionary<Guid, IReadOnlyList<TargetCredentialBinding>>? bindingsByTarget = resolvedBindings is null
+			? await _bindings.ListForTargetsAsync([.. staleTargets.Select(t => t.Id)], cancellationToken).ConfigureAwait(false)
+			: null;
+
+		List<JobSpec> specs = [];
+		foreach (Target target in staleTargets)
+		{
+			Guid? discoverCredentialId = null;
+			if (resolvedBindings is not null)
+			{
+				if (resolvedBindings.TryGetValue(target.Id, out IReadOnlyDictionary<string, Guid>? purposes)
+					&& purposes.TryGetValue(CredentialPurposes.VSphereApi, out Guid resolvedId))
+				{
+					discoverCredentialId = resolvedId;
+				}
+			}
+			else if (bindingsByTarget!.TryGetValue(target.Id, out IReadOnlyList<TargetCredentialBinding>? targetBindings))
+			{
+				discoverCredentialId = targetBindings
+					.FirstOrDefault(b => string.Equals(b.Purpose, CredentialPurposes.VSphereApi, StringComparison.Ordinal))
+					?.CredentialId;
 			}
 
 			string payload = JsonSerializer.Serialize(new { target_id = target.Id });
@@ -306,11 +391,191 @@ public sealed class RunCreationService
 				AutoDiscoverPriority,
 				TargetId: target.Id,
 				TargetName: target.Name,
-				CredentialId: target.CredentialId,
-				Payload: payload));
+				CredentialId: discoverCredentialId,
+				Payload: payload,
+				CredentialBindings: discoverCredentialId is { } boundId
+					? [new JobCredentialBindingSpec(CredentialPurposes.VSphereApi, boundId)]
+					: null));
 		}
 
 		return specs;
+	}
+
+	/// <summary>
+	/// Issue #585 (epic #582, ADR-0021 §§4-6): resolves, per selected target, every
+	/// credential purpose its scan requires (plus any component-conditional purpose that
+	/// happens to be bound/overridden) into concrete credential ids. Precedence per
+	/// (target, purpose): explicit override &gt; the legacy run-level
+	/// <paramref name="runCredentialId"/> (default/execution purpose only -- its
+	/// pre-#585 semantics, "use this credential for all targets," preserved but now
+	/// type-checked) &gt; the target's own <c>target_credential_bindings</c> row. Every
+	/// problem is collected -- never first-failure-only -- and thrown as one
+	/// <c>credential_binding_gaps</c> 400 enumerating each (target, purpose, reason)
+	/// triple, the resolution counterpart of #593/#655's blocker-category breakdown.
+	/// Binding-sourced credentials are not re-validated for type here: the 0043 CHECK/
+	/// UPSERT surface and its backfill only ever admit compatible rows.
+	/// </summary>
+	private async Task<IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>>> ResolveCredentialBindingsAsync(
+		IReadOnlyList<Target> targets,
+		Guid? runCredentialId,
+		IReadOnlyList<RunCredentialOverride>? overrides,
+		CancellationToken cancellationToken)
+	{
+		Dictionary<Guid, Target> targetsById = targets.ToDictionary(t => t.Id);
+		IReadOnlyDictionary<Guid, IReadOnlyList<TargetCredentialBinding>> bindingsByTarget =
+			await _bindings.ListForTargetsAsync([.. targetsById.Keys], cancellationToken).ConfigureAwait(false);
+
+		// One lookup per distinct referenced credential (overrides + the legacy
+		// run-level id) -- binding rows are FK-guaranteed to exist and were
+		// type-validated at write time, so only request-supplied ids need fetching.
+		Dictionary<Guid, CredentialResponse> referencedCredentials = [];
+		IEnumerable<Guid> referencedIds = (overrides ?? []).Select(o => o.CredentialId);
+		if (runCredentialId is { } runCredential)
+		{
+			referencedIds = referencedIds.Append(runCredential);
+		}
+
+		foreach (Guid referencedId in referencedIds.Distinct())
+		{
+			CredentialResponse? found = await _credentials.GetAsync(referencedId, cancellationToken).ConfigureAwait(false);
+			if (found is not null)
+			{
+				referencedCredentials[referencedId] = found;
+			}
+		}
+
+		List<CredentialBindingGap> gaps = [];
+
+		// The legacy run-level credential must at least exist -- pre-#585 this was
+		// only caught by the runs.credential_id FK as an unmapped error; now it is the
+		// same clean 404 an unknown site/profile gets.
+		if (runCredentialId is { } legacyCredentialId && !referencedCredentials.ContainsKey(legacyCredentialId))
+		{
+			throw ApiException.NotFound(
+				"Credential not found.",
+				$"Credential '{legacyCredentialId}' does not exist; pick one from GET /credentials.");
+		}
+
+		Dictionary<(Guid TargetId, string Purpose), Guid> acceptedOverrides = [];
+		foreach (RunCredentialOverride @override in overrides ?? [])
+		{
+			if (!targetsById.TryGetValue(@override.TargetId, out Target? overrideTarget))
+			{
+				gaps.Add(new CredentialBindingGap(
+					@override.TargetId, null, @override.Purpose, CredentialBindingGapReasons.TargetNotInScope, @override.CredentialId));
+				continue;
+			}
+
+			if (!CredentialPurposeMatrix.ApplicablePurposes(overrideTarget.Kind).Contains(@override.Purpose, StringComparer.Ordinal))
+			{
+				gaps.Add(new CredentialBindingGap(
+					overrideTarget.Id, overrideTarget.Name, @override.Purpose, CredentialBindingGapReasons.PurposeNotApplicable, @override.CredentialId));
+				continue;
+			}
+
+			if (acceptedOverrides.ContainsKey((@override.TargetId, @override.Purpose)))
+			{
+				gaps.Add(new CredentialBindingGap(
+					overrideTarget.Id, overrideTarget.Name, @override.Purpose, CredentialBindingGapReasons.DuplicateOverride, @override.CredentialId));
+				continue;
+			}
+
+			if (!referencedCredentials.TryGetValue(@override.CredentialId, out CredentialResponse? overrideCredential))
+			{
+				gaps.Add(new CredentialBindingGap(
+					overrideTarget.Id, overrideTarget.Name, @override.Purpose, CredentialBindingGapReasons.CredentialNotFound, @override.CredentialId));
+				continue;
+			}
+
+			if (!CredentialPurposeMatrix.IsCompatible(@override.Purpose, overrideCredential.CredentialType))
+			{
+				gaps.Add(new CredentialBindingGap(
+					overrideTarget.Id, overrideTarget.Name, @override.Purpose, CredentialBindingGapReasons.IncompatibleCredentialType, @override.CredentialId));
+				continue;
+			}
+
+			acceptedOverrides[(@override.TargetId, @override.Purpose)] = @override.CredentialId;
+		}
+
+		Dictionary<Guid, IReadOnlyDictionary<string, Guid>> resolved = [];
+		foreach (Target target in targets)
+		{
+			Dictionary<string, Guid> purposes = new(StringComparer.Ordinal);
+			IReadOnlyList<TargetCredentialBinding> targetBindings =
+				bindingsByTarget.TryGetValue(target.Id, out IReadOnlyList<TargetCredentialBinding>? found) ? found : [];
+			CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(target.Kind, out string? defaultPurpose);
+
+			foreach (string purpose in CredentialPurposeMatrix.RequiredScanPurposes(target.Kind))
+			{
+				if (acceptedOverrides.TryGetValue((target.Id, purpose), out Guid overrideCredentialId))
+				{
+					purposes[purpose] = overrideCredentialId;
+					continue;
+				}
+
+				if (runCredentialId is { } runLevelCredentialId && string.Equals(purpose, defaultPurpose, StringComparison.Ordinal))
+				{
+					// Pre-#585 the run-level credential was copied to every job with no
+					// type check at all -- a vcenter credential silently "scanned" ssh
+					// targets and failed at execution. Rejecting the incompatible pair up
+					// front is the epic's own AC ("atomically rejects all
+					// missing/incompatible bindings before dispatch").
+					if (CredentialPurposeMatrix.IsCompatible(purpose, referencedCredentials[runLevelCredentialId].CredentialType))
+					{
+						purposes[purpose] = runLevelCredentialId;
+					}
+					else
+					{
+						gaps.Add(new CredentialBindingGap(
+							target.Id, target.Name, purpose, CredentialBindingGapReasons.IncompatibleCredentialType, runLevelCredentialId));
+					}
+
+					continue;
+				}
+
+				TargetCredentialBinding? binding = targetBindings
+					.FirstOrDefault(b => string.Equals(b.Purpose, purpose, StringComparison.Ordinal));
+				if (binding is null)
+				{
+					gaps.Add(new CredentialBindingGap(target.Id, target.Name, purpose, CredentialBindingGapReasons.MissingBinding));
+				}
+				else
+				{
+					purposes[purpose] = binding.CredentialId;
+				}
+			}
+
+			foreach (string purpose in CredentialPurposeMatrix.ConditionalScanPurposes(target.Kind))
+			{
+				if (acceptedOverrides.TryGetValue((target.Id, purpose), out Guid overrideCredentialId))
+				{
+					purposes[purpose] = overrideCredentialId;
+					continue;
+				}
+
+				TargetCredentialBinding? binding = targetBindings
+					.FirstOrDefault(b => string.Equals(b.Purpose, purpose, StringComparison.Ordinal));
+				if (binding is not null)
+				{
+					purposes[purpose] = binding.CredentialId;
+				}
+			}
+
+			resolved[target.Id] = purposes;
+		}
+
+		if (gaps.Count > 0)
+		{
+			throw new ApiException(
+				System.Net.HttpStatusCode.BadRequest,
+				"credential_binding_gaps",
+				"One or more selected targets cannot resolve every required credential purpose.",
+				"Each gap names the target, the credential purpose, and why it could not resolve. "
+					+ "Assign the missing/compatible bindings on the targets (PUT /targets/{id}/credential-bindings/{purpose}) or supply valid credential_overrides.",
+				bindingGaps: gaps);
+		}
+
+		return resolved;
 	}
 
 	/// <summary>
@@ -355,3 +620,12 @@ public sealed class RunCreationService
 /// so this service does not depend on <c>Waypoint.Api</c>.
 /// </summary>
 public sealed record RunSecretCredentialRequest(string Username, string Secret);
+
+/// <summary>
+/// One structured per-target/per-purpose saved-credential override on a scan-run
+/// create request (issue #585, ADR-0021 §4), decoupled from the wire contract type
+/// (<c>Waypoint.Api.Contracts.RunCredentialOverrideRequest</c>) so this service does
+/// not depend on <c>Waypoint.Api</c>. Applies to exactly the named (target, purpose)
+/// pair -- never any other target, never any other purpose of the same target.
+/// </summary>
+public sealed record RunCredentialOverride(Guid TargetId, string Purpose, Guid CredentialId);

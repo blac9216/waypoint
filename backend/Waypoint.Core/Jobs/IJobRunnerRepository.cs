@@ -160,4 +160,18 @@ public interface IJobRunnerRepository
 	/// the compliance runner's upload coordinator during/after scan execution.
 	/// </summary>
 	Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Issue #585 (epic #582): a claimed job's immutable per-purpose credential snapshot
+	/// (<c>job_credential_bindings</c>, migration 0044), resolved and persisted at
+	/// run-creation fan-out. Handlers use the entry for their execution purpose
+	/// (<see cref="Waypoint.Core.Secrets.CredentialPurposeMatrix.DefaultPurposeByTargetKind"/>)
+	/// to select which credential to decrypt; an empty result means the job predates
+	/// migration 0044 (fall back to <see cref="ClaimedJob.CredentialId"/>) or is a
+	/// run-secret job (which never has rows here -- ADR-0011, issue #586). Read-only
+	/// for the runner role: the rows are written API-side inside
+	/// <see cref="IJobControlRepository.FanOutJobsAsync"/>'s transaction and only ever
+	/// updated by the API-side credential swap (#146) and terminal-history detach (#593).
+	/// </summary>
+	Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken);
 }

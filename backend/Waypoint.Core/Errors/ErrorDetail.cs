@@ -31,7 +31,58 @@ namespace Waypoint.Core.Errors;
 /// human-readable summary; this is the structured form a caller can branch on without
 /// parsing prose.
 /// </param>
-public sealed record ErrorDetail(string Code, string Message, string? Detail = null, IReadOnlyList<BlockingCategory>? Blockers = null);
+/// <param name="BindingGaps">
+/// Issue #585 (epic #582): an optional machine-readable enumeration of every
+/// per-target/per-purpose credential-binding problem that made a run request invalid --
+/// the credential-resolution counterpart of <paramref name="Blockers"/>' category/count
+/// shape, carrying the (target, purpose, reason) triple a caller (the #587 wizard)
+/// needs to point the operator at the exact gap. Omitted for every error whose cause is
+/// not a binding-resolution failure.
+/// </param>
+public sealed record ErrorDetail(
+	string Code,
+	string Message,
+	string? Detail = null,
+	IReadOnlyList<BlockingCategory>? Blockers = null,
+	IReadOnlyList<CredentialBindingGap>? BindingGaps = null);
+
+/// <summary>
+/// One machine-readable per-target/per-purpose credential-resolution failure (issue
+/// #585, ADR-0021 §6): which target, which purpose, and why it could not resolve.
+/// <see cref="Reason"/> values are the closed <see cref="CredentialBindingGapReasons"/>
+/// set; never free text. <see cref="CredentialId"/> names the offending credential for
+/// override-shaped reasons (<c>incompatible_credential_type</c>,
+/// <c>credential_not_found</c>), null for <c>missing_binding</c>-shaped ones. Identity
+/// only -- never secret material.
+/// </summary>
+public sealed record CredentialBindingGap(
+	Guid TargetId,
+	string? TargetName,
+	string Purpose,
+	string Reason,
+	Guid? CredentialId = null);
+
+/// <summary>The closed set of <see cref="CredentialBindingGap.Reason"/> values.</summary>
+public static class CredentialBindingGapReasons
+{
+	/// <summary>A required purpose has no target-assigned binding and no override.</summary>
+	public const string MissingBinding = "missing_binding";
+
+	/// <summary>The named credential's type is not in the purpose's compatibility set (ADR-0021 §2).</summary>
+	public const string IncompatibleCredentialType = "incompatible_credential_type";
+
+	/// <summary>The named override/run-level credential does not exist.</summary>
+	public const string CredentialNotFound = "credential_not_found";
+
+	/// <summary>An override names a target outside the run's resolved scope.</summary>
+	public const string TargetNotInScope = "target_not_in_scope";
+
+	/// <summary>An override names a purpose the target's kind never uses (ADR-0021 §3).</summary>
+	public const string PurposeNotApplicable = "purpose_not_applicable";
+
+	/// <summary>Two overrides name the same (target, purpose) pair.</summary>
+	public const string DuplicateOverride = "duplicate_override";
+}
 
 /// <summary>
 /// One machine-readable reason a request is blocked, plus how many rows are

@@ -367,4 +367,6 @@ public sealed class CatalogFakeJobQueueRepository : IJobControlRepository, IJobR
 		_ = (jobId, uploadStatus, detail, cancellationToken);
 		return Task.CompletedTask;
 	}
+
+	public Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<JobCredentialBinding>>([]);
 }
