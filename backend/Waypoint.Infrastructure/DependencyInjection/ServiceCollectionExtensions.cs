@@ -301,6 +301,19 @@ public static class ServiceCollectionExtensions
 			// Issue #513: dashboard aggregate service, reusing RunArtifactProjectionService's
 			// HDF-derived CAT counting rather than a second implementation.
 			services.AddSingleton<Runs.DashboardAggregateService>();
+
+			// Issue #594 (epic #577): admin-only terminal-compliance-run purge.
+			// IRunPurgeRepository is registered here (control-plane composition, same
+			// host-kind gate as everything else in this connection-string-gated block)
+			// because both the API (RunsController, via RunPurgeService) and the
+			// compliance-runner (PurgeJobHandler, reporting its own outcome) need it --
+			// AddWaypointInfrastructure is the one composition root both hosts call.
+			services.AddSingleton<Waypoint.Core.Runs.IRunPurgeRepository>(new Runs.RunPurgeRepository(connectionString));
+			services.AddSingleton(serviceProvider => new Runs.RunPurgeService(
+				serviceProvider.GetRequiredService<IJobControlRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunPurgeRepository>(),
+				serviceProvider.GetRequiredService<AttestationSnapshotRepository>(),
+				connectionString));
 		}
 
 		return services;

@@ -69,12 +69,21 @@ public sealed class SchedulesEndpointTests : IClassFixture<SchedulesTestApiFacto
 	/// The domain rule this issue exists to enforce: remediate/download/bundle-import/
 	/// update are excluded from scheduling BY DESIGN. Covers the exact three named in
 	/// the issue's acceptance criteria plus a fourth non-read-only type for the axis.
+	/// <c>purge</c> (issue #594, epic #577) joins this list for the same reason
+	/// <c>remediate</c> does -- a destructive, explicit-confirmation-gated operation
+	/// must never be schedulable/implicit. <c>jobs_job_type_check</c>/<c>runs_run_type_check</c>
+	/// (migration 0042) accept <c>purge</c> for the job-queue/audit shape, but
+	/// <see cref="Waypoint.Core.Scheduling.ScheduleJobTypes.All"/> -- the closed set
+	/// this endpoint actually validates against -- never includes it, so no separate
+	/// enforcement point had to be added; this proves that structural guarantee rather
+	/// than asserting it only in a migration comment.
 	/// </summary>
 	[Theory]
 	[InlineData("remediate")]
 	[InlineData("bundle-import")]
 	[InlineData("update")]
 	[InlineData("download")]
+	[InlineData("purge")]
 	public async Task Create_WithNonReadOnlyJobType_Returns400(string jobType)
 	{
 		HttpClient client = _factory.CreateClient();

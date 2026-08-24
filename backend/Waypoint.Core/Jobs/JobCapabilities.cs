@@ -43,7 +43,11 @@ public static class JobCapabilities
 	/// this domain the moment one lands. <c>content-pull</c>/<c>content-import</c>
 	/// moved here from <see cref="Download"/> per ADR-0017: compliance content is
 	/// consumed only by compliance execution (<c>scan</c> reads profiles from it) and
-	/// shares no dependency with the download domain.
+	/// shares no dependency with the download domain. <c>purge</c> (issue #594, epic
+	/// #577) belongs here for the same reason <c>scan</c> does: deleting a terminal
+	/// run's HDF/CKL artifact files requires write access to the scan-artifact volume
+	/// (ADR-0014 §7), which only <c>compliance-runner</c>'s mount grants -- the API
+	/// process mounts that volume read-only (deploy/docker-compose.yml).
 	/// </summary>
 	public static readonly IReadOnlySet<string> Compliance = new HashSet<string>(StringComparer.Ordinal)
 	{
@@ -52,7 +56,8 @@ public static class JobCapabilities
 		"scan",
 		"remediate",
 		"content-pull",
-		"content-import"
+		"content-import",
+		"purge"
 	};
 
 	/// <summary>

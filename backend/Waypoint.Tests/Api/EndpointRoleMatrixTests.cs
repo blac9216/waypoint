@@ -175,6 +175,11 @@ public sealed class EndpointRoleMatrixTests
 		["RunsController.ResumeRun"] = WaypointRole.Operator,
 		["RunsController.AbortRun"] = WaypointRole.Operator,
 		["RunsController.ResumeBlocked"] = WaypointRole.Admin,
+		// Issue #594 (epic #577): purge is Admin-only, stronger than pause/resume/
+		// abort's Operator+-own-runs, matching resume-blocked's precedent for an
+		// action with wider blast radius than ordinary dispatch control.
+		["RunsController.PurgeRun"] = WaypointRole.Admin,
+		["RunsController.GetPurgeStatus"] = WaypointRole.Viewer,
 
 		// SchedulesController -- reads Viewer+; writes are Cyber+ at the attribute floor
 		// (the coarse "lowest schedulable role"), refined per-job_type in-action by

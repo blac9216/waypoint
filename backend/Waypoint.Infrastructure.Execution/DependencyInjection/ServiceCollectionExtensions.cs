@@ -120,6 +120,10 @@ public static class ServiceCollectionExtensions
 		// JobCapabilities.Compliance.
 		services.AddSingleton<IJobHandler, ComplianceContent.ContentPullJobHandler>();
 
+		// Issue #594 (epic #577): purge deletes a terminal run's on-disk scan-artifact
+		// files -- compliance-runner only, see JobCapabilities.Compliance's doc comment.
+		services.AddSingleton<IJobHandler, Scans.PurgeJobHandler>();
+
 		// Issue #437 (ADR-0014 §5): resource-aware admission -- every host that calls
 		// this method is a dedicated single-process runner bounded by its own
 		// container's cgroup allocation, so this is unconditional here (unlike the old

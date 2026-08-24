@@ -23,6 +23,7 @@ using Waypoint.Core.Jobs;
 using Waypoint.Core.Pagination;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Sites;
+using Waypoint.Core.Runs;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Runs;
 using Waypoint.Infrastructure.Sites;
@@ -41,6 +42,7 @@ public sealed class RunsController : ControllerBase
 	private const string RemediateConfirmation = "REMEDIATE";
 	private const string ScanRunType = "scan";
 	private const string PersonalCredentialKind = "personal";
+	private const string PurgeConfirmation = "PURGE";
 
 	private readonly IJobControlRepository _repository;
 	private readonly ConfigDocRepository _configDocs;
@@ -49,6 +51,7 @@ public sealed class RunsController : ControllerBase
 	private readonly RunCreationService _runCreation;
 	private readonly RunArtifactProjectionService _artifactProjection;
 	private readonly RunControlService _runControl;
+	private readonly RunPurgeService _runPurge;
 
 	public RunsController(
 		IJobControlRepository repository,
@@ -57,7 +60,8 @@ public sealed class RunsController : ControllerBase
 		TargetRepository targets,
 		RunCreationService runCreation,
 		RunArtifactProjectionService artifactProjection,
-		RunControlService runControl)
+		RunControlService runControl,
+		RunPurgeService runPurge)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(configDocs);
@@ -66,6 +70,7 @@ public sealed class RunsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(runCreation);
 		ArgumentNullException.ThrowIfNull(artifactProjection);
 		ArgumentNullException.ThrowIfNull(runControl);
+		ArgumentNullException.ThrowIfNull(runPurge);
 		_repository = repository;
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
@@ -73,6 +78,7 @@ public sealed class RunsController : ControllerBase
 		_runCreation = runCreation;
 		_artifactProjection = artifactProjection;
 		_runControl = runControl;
+		_runPurge = runPurge;
 	}
 
 	/// <summary>
@@ -536,7 +542,91 @@ public sealed class RunsController : ControllerBase
 		}
 	}
 
+	/// <summary>
+	/// Purges a terminal compliance run's owned database projections and artifact
+	/// files (issue #594, epic #577). Admin-only -- a stronger gate than
+	/// pause/resume/abort's Operator+-own-runs, matching <see cref="ResumeBlocked"/>'s
+	/// precedent for an action with wider blast radius than ordinary dispatch control.
+	/// Requires the explicit <c>confirmation: "PURGE"</c> body field, mirroring
+	/// <see cref="RemediateConfirmation"/>'s step-up pattern -- purge is destructive and
+	/// irreversible. Non-terminal runs are rejected with a machine-readable 409
+	/// (<c>run_not_terminal</c>); the run is left untouched. Safe to call again at any
+	/// point (see <see cref="RunPurgeService"/>'s doc comment) -- an already-purged run
+	/// returns its tombstone rather than erroring, and a partially-purged run resumes.
+	/// </summary>
+	[HttpPost("{id:guid}/purge")]
+	[RequireAdminRole]
+	[ProducesResponseType(typeof(RunPurgeStatusResponse), StatusCodes.Status200OK)]
+	[ProducesResponseType(typeof(RunPurgeStatusResponse), StatusCodes.Status202Accepted)]
+	public async Task<ActionResult<RunPurgeStatusResponse>> PurgeRun(Guid id, [FromBody] RunPurgeRequest? request, CancellationToken cancellationToken)
+	{
+		if (!string.Equals(request?.Confirmation, PurgeConfirmation, StringComparison.Ordinal))
+		{
+			throw ApiException.Validation(
+				"Purge requires explicit confirmation.",
+				$"Set \"confirmation\": \"{PurgeConfirmation}\" in the request body to purge this run.");
+		}
+
+		string actor = User.GetRequiredUsername();
+		RunPurgeResult result = await _runPurge.PurgeRunAsync(id, actor, cancellationToken).ConfigureAwait(false);
+
+		switch (result.Outcome)
+		{
+			case RunPurgeOutcome.RunNotFound:
+				throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+			case RunPurgeOutcome.RunNotTerminal:
+				throw new ApiException(
+					System.Net.HttpStatusCode.Conflict, "run_not_terminal",
+					"Run cannot be purged.", $"Run '{id}' is not in a terminal state (completed, completed_with_failures, or aborted).");
+			case RunPurgeOutcome.Completed:
+			case RunPurgeOutcome.AlreadyPurged:
+				return Ok(MapPurgeStatus(id, result));
+			case RunPurgeOutcome.InProgress:
+			case RunPurgeOutcome.Failed:
+			default:
+				return Accepted(MapPurgeStatus(id, result));
+		}
+	}
+
+	/// <summary>
+	/// Polls purge progress/terminal state for a run (issue #594) -- the frontend's
+	/// progress/retry UI reads this rather than re-issuing <see cref="PurgeRun"/> just
+	/// to check status. 404 when purge was never requested for this run (distinct from
+	/// the run itself not existing, which is also 404 -- both cases return the same
+	/// generic not-found shape since neither leaks which one it was).
+	/// </summary>
+	[HttpGet("{id:guid}/purge")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(RunPurgeStatusResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunPurgeStatusResponse>> GetPurgeStatus(Guid id, CancellationToken cancellationToken)
+	{
+		RunPurgeResult? result = await _runPurge.GetStatusAsync(id, cancellationToken).ConfigureAwait(false);
+		if (result is null)
+		{
+			throw ApiException.NotFound("No purge has been requested for this run.", $"Run '{id}' has never had a purge requested.");
+		}
+
+		return Ok(MapPurgeStatus(id, result));
+	}
+
 	// -- mapping helpers ---------------------------------------------------
+
+	private static RunPurgeStatusResponse MapPurgeStatus(Guid runId, RunPurgeResult result)
+	{
+		RunPurgeStatus? status = result.Status;
+		return new RunPurgeStatusResponse(
+			RunId: runId.ToString(),
+			Outcome: result.Outcome.ToString(),
+			RequestedBy: status?.RequestedBy ?? string.Empty,
+			RequestedAt: status?.RequestedAt.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty,
+			PriorState: status?.PriorState ?? string.Empty,
+			DbPhaseDone: status?.DbPhaseDone ?? false,
+			ArtifactsPhase: status?.ArtifactsPhase ?? "pending",
+			ArtifactsTotal: status?.ArtifactsTotal ?? 0,
+			ArtifactsDeleted: status?.ArtifactsDeleted ?? 0,
+			LastError: status?.LastError,
+			CompletedAt: status?.CompletedAt?.ToString("O", CultureInfo.InvariantCulture));
+	}
 
 	private static RunResponse MapRun(RunSummary run)
 	{

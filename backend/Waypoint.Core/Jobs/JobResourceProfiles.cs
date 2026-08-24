@@ -61,6 +61,9 @@ public static class JobResourceProfiles
 		// filesystem walk for profile discovery, similar shape to catalog-index.
 		["content-pull"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024),
 		["content-import"] = Default,
+		// purge: deletes up to three small files per job on local disk -- pure I/O,
+		// negligible CPU/memory, similar shape to discover/credential-test.
+		["purge"] = new JobResourceProfile(CpuCores: 0.25, MemoryBytes: 128L * 1024 * 1024),
 
 		// Download domain (ADR-0013 §2).
 		// catalog-index: reads/parses depot metadata on disk -- I/O-bound, light CPU/memory.
