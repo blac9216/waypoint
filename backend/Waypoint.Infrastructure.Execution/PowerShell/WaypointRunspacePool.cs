@@ -135,6 +135,17 @@ public sealed partial class WaypointRunspacePool : IDisposable
 			sessionState.ImportPSModule(modulePath);
 		}
 
+		// Issue #629/#618: by-name imports (e.g. VMware.PowerCLI) resolved via
+		// PSModulePath, imported into the same initial session state as the disk-path
+		// modules above. The full PowerCLI meta-module MUST be imported here rather than
+		// left to first-cmdlet autoload: in the runner's in-process host a partially
+		// autoloaded PowerCLI hydrates discovery pscustomobjects whose NoteProperties do
+		// not survive the executor's output capture, silently storing zero inventory.
+		if (_options.Value.ModulePreloadNames.Count > 0)
+		{
+			sessionState.ImportPSModule([.. _options.Value.ModulePreloadNames]);
+		}
+
 		Runspace runspace = RunspaceFactory.CreateRunspace(sessionState);
 		runspace.Open();
 		long createdTotal = Interlocked.Increment(ref _createdTotal);

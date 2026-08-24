@@ -111,6 +111,41 @@ public sealed class PowerShellExecutorTests : IDisposable
 		}
 	}
 
+	/// <summary>
+	/// Issue #629/#618: entries in <see cref="PowerShellOptions.ModulePreloadNames"/> are
+	/// genuinely imported into every pooled runspace's initial session state, through a
+	/// code path separate from <see cref="PowerShellOptions.ModulePreloadPaths"/>. The
+	/// live fix puts <c>VMware.PowerCLI</c> there so the full meta-module hydrates
+	/// discovery objects correctly; that module cannot be relied on off-lab, so this pins
+	/// the wiring with the invented stub module (given via the NAMES list) and asserts one
+	/// of its exported functions is callable in a runspace whose ModulePreloadPaths was
+	/// deliberately left empty -- proving the import came from ModulePreloadNames, not the
+	/// paths list.
+	/// </summary>
+	[Fact]
+	public async Task ModulePreloadNames_AreImportedIntoEveryRunspace()
+	{
+		PowerShellOptions options = new()
+		{
+			MaxRunspaces = 1,
+			DefaultInvocationTimeout = TimeSpan.FromMinutes(2),
+			StopGracePeriod = TimeSpan.FromSeconds(2),
+		};
+		// Intentionally NOT adding StubModulePath to ModulePreloadPaths: the only way
+		// Get-StubEcho can resolve below is via the ModulePreloadNames import.
+		options.ModulePreloadNames.Add(StubModulePath);
+		IOptions<PowerShellOptions> wrapped = Options.Create(options);
+		_pool = new WaypointRunspacePool(wrapped, NullLogger<WaypointRunspacePool>.Instance);
+		PowerShellExecutor executor = new(_pool, _buffer, wrapped, NullLogger<PowerShellExecutor>.Instance);
+
+		PowerShellExecutionResult result = await executor.ExecuteAsync(
+			new PowerShellRequest("Get-StubEcho", Parameters: new Dictionary<string, object?> { ["Value"] = "from-names-list" }),
+			CancellationToken.None);
+
+		Assert.True(result.Succeeded, result.FailureReason);
+		Assert.Equal("from-names-list", Assert.Single(result.Output)?.ToString());
+	}
+
 	/// <summary>The injection-unrepresentability claim, tested from the outside: a
 	/// parameter stuffed with PowerShell metacharacters round-trips byte-identical.
 	/// If any code path interpolated it into script text, the subexpression would

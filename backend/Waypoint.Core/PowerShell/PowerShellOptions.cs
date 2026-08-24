@@ -30,8 +30,28 @@ public sealed class PowerShellOptions
 	/// Module paths (or names resolvable via PSModulePath) imported into every
 	/// runspace's initial session state. In production these are the
 	/// vcf-docker-download modules; tests point this at an invented stub module.
+	/// These are disk paths the compliance runner's readiness check verifies exist.
 	/// </summary>
 	public IList<string> ModulePreloadPaths { get; } = [];
+
+	/// <summary>
+	/// Module NAMES (not disk paths) imported into every runspace's initial session
+	/// state, resolved via PSModulePath. Separate from <see cref="ModulePreloadPaths"/>
+	/// because these are not files under <c>/app</c> the readiness check can stat --
+	/// they live in the image's system module tree.
+	///
+	/// Issue #629/#618: the compliance runner names <c>VMware.PowerCLI</c> here so the
+	/// full meta-module is imported into every pooled runspace up front. Without it,
+	/// PowerCLI cmdlets (<c>Get-Cluster</c>/<c>Get-VMHost</c>/<c>Get-VM</c>) run under
+	/// partial cmdlet-autoload -- the same profile-never-ran state issue #307 documents
+	/// -- and in the runner's in-process (non-pwsh) host that partial state produces
+	/// discovery <c>[pscustomobject]</c> rows whose NoteProperties do not survive the
+	/// executor's output capture, so live discovery silently persisted zero inventory.
+	/// A full meta-module import (mirroring the sibling repo's
+	/// <c>Test-EnvironmentDependencies</c> self-heal) makes the objects hydrate
+	/// correctly; verified live against a populated vCenter.
+	/// </summary>
+	public IList<string> ModulePreloadNames { get; } = [];
 
 	/// <summary>
 	/// Case-insensitive markers that classify a failure reason as an authentication

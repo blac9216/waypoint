@@ -494,6 +494,15 @@ services:
       PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointScan"
       PowerShell__ModulePreloadPaths__3: "/app/PowerShell/Modules/WaypointCredentialTest"
       PowerShell__ModulePreloadPaths__4: "/app/PowerShell/Modules/WaypointComplianceContent"
+      # By-NAME module import (issue #629/#618), resolved via PSModulePath rather than a
+      # disk path under /app. The full VMware.PowerCLI meta-module must be imported into
+      # every pooled runspace up front: without it, PowerCLI cmdlets run under partial
+      # cmdlet-autoload (the same profile-never-ran state issue #307 documents), and in
+      # this runner's in-process host that partial state makes discovery pscustomobject
+      # rows arrive with their NoteProperties stripped through the executor's output
+      # capture -- live discovery then silently stored zero inventory. Kept separate from
+      # ModulePreloadPaths so the readiness check does not stat it as a filesystem path.
+      PowerShell__ModulePreloadNames__0: "VMware.PowerCLI"
       # Project-owned .ps1 files the shims above dot-source, baked into the image under
       # /powershell/ (runners/compliance-runner/powershell/, imported from the
       # vmware-stig-docker sibling repo per CLAUDE.md's borrowing policy) -

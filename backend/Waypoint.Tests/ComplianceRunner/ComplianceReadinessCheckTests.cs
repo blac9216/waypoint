@@ -172,9 +172,25 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 		}
 	}
 
+	[Fact]
+	public void ByNameModulePreload_IsNotDiskChecked_AndDoesNotFailReadiness()
+	{
+		// Issue #629/#618: ModulePreloadNames are imported by NAME via PSModulePath
+		// (e.g. VMware.PowerCLI), not as files under /app. The readiness check must not
+		// stat them as filesystem paths -- a name that is obviously not a path present
+		// on disk must leave the runner ready.
+		ComplianceReadinessCheck check = BuildCheck(out _, modulePreloadNames: ["VMware.PowerCLI"]);
+
+		ReadinessReport report = check.Evaluate();
+
+		Assert.True(report.Ready);
+		Assert.DoesNotContain(report.Problems, problem => problem.Contains("VMware.PowerCLI", StringComparison.Ordinal));
+	}
+
 	private ComplianceReadinessCheck BuildCheck(
 		out Paths paths,
 		IReadOnlyList<string>? modulePreloadPaths = null,
+		IReadOnlyList<string>? modulePreloadNames = null,
 		string? missingContentRoot = null,
 		bool missingArtifactStore = false,
 		bool masterKeyThrows = false,
@@ -223,6 +239,11 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 		foreach (string path in modulePreloadPaths ?? [modulesDir])
 		{
 			powerShellOptions.ModulePreloadPaths.Add(path);
+		}
+
+		foreach (string name in modulePreloadNames ?? [])
+		{
+			powerShellOptions.ModulePreloadNames.Add(name);
 		}
 
 		ScanOptions scanOptions = new()
