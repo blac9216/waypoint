@@ -79,7 +79,8 @@ public static class JobCapabilities
 		"content-library-sync",
 		"update",
 		"tool-install",
-		"depot-enrollment"
+		"depot-enrollment",
+		"catalog-pull"
 	};
 
 	/// <summary>

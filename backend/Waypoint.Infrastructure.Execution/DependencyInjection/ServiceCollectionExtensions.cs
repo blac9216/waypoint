@@ -97,6 +97,14 @@ public static class ServiceCollectionExtensions
 		// (jobs.job_type is a closed CHECK set with no generic member).
 		services.AddSingleton<IJobHandler, Catalog.CatalogIndexJobHandler>();
 
+		// Issue #687: the connected vendor catalog-pull job -- distinct job type from
+		// catalog-index above (that one stays local/credential-free, issue #690 AC).
+		// Gated on issue #691's depot_enrollment state; registered here as its own
+		// handler like every other job type rather than folded into
+		// CatalogIndexJobHandler, matching this file's one-handler-per-job-type
+		// convention.
+		services.AddSingleton<IJobHandler, Catalog.CatalogPullJobHandler>();
+
 		// Download execution always runs behind the ADR-0015 tool-presence gate now
 		// that the API no longer hosts an ungated download path (issue #443 removed
 		// the Combined/ungated branch this used to have -- see git history on this

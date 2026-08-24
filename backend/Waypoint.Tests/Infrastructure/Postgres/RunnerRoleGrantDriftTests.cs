@@ -486,6 +486,57 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #687 (migration 0049), added at authoring time per this file's own
+	/// standing convention. The <c>catalog-pull</c> job handler both reads
+	/// <c>catalog_pull_state</c> (readiness/status) and records outcomes on it as the
+	/// real <c>waypoint_download_runner</c> role -- proves the migration's
+	/// SELECT+INSERT+UPDATE grant actually lands, not just that the GRANT statement
+	/// ran without error. The row is pre-seeded by the migration itself
+	/// (<c>id = 1</c>), so this proves the runner's actual UPDATE path
+	/// (<see cref="Waypoint.Infrastructure.Catalog.CatalogPullStateRepository.RecordSuccessAsync"/>/
+	/// <c>RecordFailureAsync</c> both issue UPDATE, never INSERT, against the existing
+	/// singleton row).
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CanSelectAndUpdateCatalogPullStateWithoutPermissionDenied()
+	{
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand select = new("SELECT last_outcome FROM catalog_pull_state WHERE id = 1", connection);
+		await using NpgsqlDataReader reader = await select.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		await reader.DisposeAsync();
+
+		await using NpgsqlCommand update = new(
+			"UPDATE catalog_pull_state SET last_attempt_at = now(), last_outcome = 'succeeded', last_success_at = now(), last_success_item_count = 0 WHERE id = 1",
+			connection);
+		int affected = await update.ExecuteNonQueryAsync();
+		Assert.Equal(1, affected);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check mirroring
+	/// <see cref="DownloadRunnerRole_CannotInsertOrDeleteDepotEnrollmentRows"/>:
+	/// <c>waypoint_download_runner</c> gets no DELETE on <c>catalog_pull_state</c> --
+	/// the singleton row is seeded once by migration 0049 and never removed by any
+	/// runner. Unlike <c>depot_enrollment</c>, the migration DOES grant INSERT here
+	/// (the repository's own convention mirrors <c>depot_enrollment</c>'s
+	/// UPDATE-only usage, but a future caller upserting is a legitimate shape for
+	/// this table), so only the DELETE boundary is asserted.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotDeleteCatalogPullStateRows()
+	{
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand delete = new("DELETE FROM catalog_pull_state WHERE id = 1", connection);
+		PostgresException deleteException = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, deleteException.SqlState);
+	}
+
+	/// <summary>
 	/// Issue #569 (migration 0036), added at authoring time rather than after a live
 	/// 42501 -- the lesson of this file's own header (and of 0033/0034 before it) is
 	/// that a new runner-executed table without a role-contract test ships grant drift

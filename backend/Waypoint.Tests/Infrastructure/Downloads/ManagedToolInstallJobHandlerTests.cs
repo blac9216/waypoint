@@ -72,6 +72,11 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 
 	private sealed class FakeManagedToolCatalogVerifier(bool valid = true, string? reason = null) : IManagedToolCatalogVerifier
 	{
+		// Install path exercises VerifyAsync only; the catalog-only entry point is the
+		// connected catalog-pull path (issue #687), unused here.
+		public Task<ManagedToolCatalogAuthenticationResult> AuthenticateCatalogAsync(string repositoryRoot, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("The install path uses VerifyAsync, not the catalog-only AuthenticateCatalogAsync.");
+
 		public Task<ManagedToolCatalogVerificationResult> VerifyAsync(string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken) =>
 			Task.FromResult(valid ? ManagedToolCatalogVerificationResult.Ok("fake-sha256") : ManagedToolCatalogVerificationResult.Fail(reason ?? "invalid catalog"));
 	}

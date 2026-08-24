@@ -43,11 +43,12 @@ public static class RunTypes
 	public const string ToolInstall = "tool-install";
 	public const string Purge = "purge";
 	public const string DepotEnrollment = "depot-enrollment";
+	public const string CatalogPull = "catalog-pull";
 
 	public static readonly IReadOnlyList<string> All =
 	[
 		Scan, Remediate, Discover, Download, CatalogIndex, BundleExport, BundleImport,
-		ContentLibrarySync, ContentPull, ContentImport, Update, CredentialTest, ToolInstall, Purge, DepotEnrollment,
+		ContentLibrarySync, ContentPull, ContentImport, Update, CredentialTest, ToolInstall, Purge, DepotEnrollment, CatalogPull,
 	];
 
 	public static bool IsValid(string runType) => All.Contains(runType, StringComparer.Ordinal);

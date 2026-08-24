@@ -22,11 +22,37 @@ public sealed record ManagedToolCatalogVerificationResult(bool Valid, string? Ac
 }
 
 /// <summary>
+/// Result of authenticating the Broadcom product-version catalog <em>document</em>
+/// itself -- trust-chain + detached-signature + size/shape bounds -- with no
+/// per-artifact size/SHA match (issue #687's connected <c>catalog-pull</c>, which
+/// pulls the whole catalog rather than installing one named binary).
+/// </summary>
+public sealed record ManagedToolCatalogAuthenticationResult(bool Valid, string? FailureReason)
+{
+	public static ManagedToolCatalogAuthenticationResult Ok() => new(true, null);
+	public static ManagedToolCatalogAuthenticationResult Fail(string reason) => new(false, reason);
+}
+
+/// <summary>
 /// Authenticates Broadcom's product-version catalog against an independently
-/// provisioned certificate, then verifies a candidate's catalog size and SHA-256.
+/// provisioned certificate. <see cref="AuthenticateCatalogAsync"/> stops after the
+/// catalog document's own trust-chain/signature/shape check (the connected
+/// <c>catalog-pull</c> path, issue #687); <see cref="VerifyAsync"/> additionally
+/// matches a single named candidate's catalog size and SHA-256 (the install path).
+/// Both share the same publisher trust anchor and signature-envelope convention.
 /// </summary>
 public interface IManagedToolCatalogVerifier
 {
+	/// <summary>
+	/// Authenticates the catalog document only: the independently provisioned trust
+	/// certificate, the detached signature envelope over the catalog's exact bytes,
+	/// and the catalog's size/JSON-shape bounds -- no per-artifact match. Used by the
+	/// connected <c>catalog-pull</c> job, which pulls and indexes the whole catalog
+	/// rather than installing one named binary.
+	/// </summary>
+	Task<ManagedToolCatalogAuthenticationResult> AuthenticateCatalogAsync(
+		string repositoryRoot, CancellationToken cancellationToken);
+
 	Task<ManagedToolCatalogVerificationResult> VerifyAsync(
 		string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken);
 }
