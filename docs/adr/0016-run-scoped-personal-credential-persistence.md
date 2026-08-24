@@ -92,3 +92,11 @@ already rejected that shape for claimed-job credentials generally).
 - docs/security.md's credential-tier table and residual-risk list, and
   docs/domain-model.md's Credential section, are updated to describe "encrypted,
   run-scoped, terminal/expiry bounded" rather than "not stored" (issue #434).
+- [ADR-0021](0021-credential-purpose-matrix.md) §5/§7 (epic #582) extends Decision #1's
+  "one `run_secrets` row per run" particular to one row per `(run, target, purpose)`
+  (migration 0045, issue #586), so a heterogeneous multi-target/multi-purpose scan can
+  carry a distinct ad hoc credential per target/purpose rather than one shared secret
+  for every fanned-out job. Decisions #2-#4 (no reusable-store rows, ever; decrypt
+  locally at point of use, audited, not single-shot; terminal/expiry bounded) are
+  unchanged and now apply per key rather than per run — see ADR-0021 for the superseding
+  decision text.

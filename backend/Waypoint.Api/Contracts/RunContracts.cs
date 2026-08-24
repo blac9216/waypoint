@@ -83,7 +83,21 @@ public sealed record RunCreateRequest(
 	/// enumerating every (target, purpose, reason).
 	/// </summary>
 	[property: JsonPropertyName("credential_overrides")]
-	IReadOnlyList<RunCredentialOverrideRequest>? CredentialOverrides = null);
+	IReadOnlyList<RunCredentialOverrideRequest>? CredentialOverrides = null,
+
+	/// <summary>
+	/// Issue #586 (epic #582, ADR-0021 §4): structured per-target/per-purpose AD HOC
+	/// ("my credentials", ADR-0011) overrides for a scan run -- the per-target/per-purpose
+	/// counterpart of <see cref="Credential"/>'s single flat inline pair. Each entry
+	/// supplies an inline username/secret for exactly one (target, purpose) pair,
+	/// encrypted at rest under that pair's own <c>run_secrets</c> row (never a stored
+	/// <c>credentials</c> row -- ADR-0011's "no personal rows, ever"). Multiple entries
+	/// for DIFFERENT (target, purpose) pairs coexist freely on one request; a duplicate
+	/// pair, or a pair also named in <see cref="CredentialOverrides"/>, is a validation
+	/// gap. Scan runs only; requires Operator+ (same floor as <see cref="Credential"/>).
+	/// </summary>
+	[property: JsonPropertyName("ad_hoc_credentials")]
+	IReadOnlyList<RunAdHocCredentialRequest>? AdHocCredentials = null);
 
 /// <summary>One saved-credential override for a specific (target, purpose) pair -- see <see cref="RunCreateRequest.CredentialOverrides"/>.</summary>
 public sealed record RunCredentialOverrideRequest(
@@ -95,6 +109,26 @@ public sealed record RunCredentialOverrideRequest(
 
 	[property: JsonPropertyName("credential_id")]
 	Guid CredentialId);
+
+/// <summary>
+/// One inline ad hoc ("my credentials") credential for a specific (target, purpose)
+/// pair -- see <see cref="RunCreateRequest.AdHocCredentials"/>. Never logged, never
+/// echoed in any response, never written anywhere except envelope-encrypted, run-scoped
+/// storage keyed by (run, target, purpose) (<see cref="Waypoint.Core.Secrets.IRunSecretStore"/>,
+/// issue #586).
+/// </summary>
+public sealed record RunAdHocCredentialRequest(
+	[property: JsonPropertyName("target_id")]
+	Guid TargetId,
+
+	[property: JsonPropertyName("purpose")]
+	string Purpose,
+
+	[property: JsonPropertyName("username")]
+	string Username,
+
+	[property: JsonPropertyName("secret")]
+	string Secret);
 
 /// <summary>Response body for <c>GET /api/v1/runs/{id}</c>.</summary>
 public sealed record RunResponse(

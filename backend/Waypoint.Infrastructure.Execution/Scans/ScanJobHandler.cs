@@ -634,24 +634,32 @@ public sealed class ScanJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// Issue #585 (epic #582): the job's immutable per-purpose credential snapshot
+	/// Issue #585/#586 (epic #582): the job's immutable per-purpose credential snapshot
 	/// (<c>job_credential_bindings</c>, migration 0044) is the preferred source -- the
 	/// entry for the target kind's execution purpose
 	/// (<see cref="CredentialPurposeMatrix.DefaultPurposeByTargetKind"/>: the credential
-	/// the InSpec transport actually authenticates with) selects which stored credential
-	/// to decrypt, so a later edit to the target's bindings can never change what an
-	/// in-flight job executes with. A snapshotted-but-unconsumed purpose (a vsphere
-	/// job's <c>vcsa-ssh</c> row) is deliberately NOT decrypted here: nothing in
-	/// <c>Invoke-WaypointScan</c>'s <c>inspec -t vmware://</c> invocation consumes a
-	/// VCSA SSH credential today (the VCSA component pipeline is not yet imported from
-	/// the sibling repo), and decrypting a secret no transport uses would violate
-	/// least-privilege and fabricate decrypt-audit rows (ADR-0021's own "do not encode
-	/// a credential requirement the underlying transport does not actually use").
+	/// the InSpec transport actually authenticates with) selects which source to decrypt,
+	/// so a later edit to the target's bindings can never change what an in-flight job
+	/// executes with. That entry is either a STORED credential (decrypted exactly as
+	/// before) or, when <see cref="JobCredentialBinding.IsRunSecret"/> is true (issue
+	/// #586), an AD HOC per-target/per-purpose secret decrypted from
+	/// <c>run_secrets</c> keyed by <c>RunSecretKey.For(job.TargetId, executionPurpose)</c>
+	/// -- least-privilege: this reads exactly the one (target, purpose) row this job's
+	/// execution purpose needs, never any sibling purpose/target row on the same run
+	/// (issue #586 AC "every decrypt is least-privilege"). A snapshotted-but-unconsumed
+	/// purpose (a vsphere job's <c>vcsa-ssh</c> row, stored or ad hoc) is deliberately NOT
+	/// decrypted here: nothing in <c>Invoke-WaypointScan</c>'s <c>inspec -t vmware://</c>
+	/// invocation consumes a VCSA SSH credential today (the VCSA component pipeline is not
+	/// yet imported from the sibling repo), and decrypting a secret no transport uses
+	/// would violate least-privilege and fabricate decrypt-audit rows (ADR-0021's own "do
+	/// not encode a credential requirement the underlying transport does not actually
+	/// use").
 	///
 	/// A job with NO snapshot rows is a legacy row (fanned out before migration 0044)
-	/// or a run-secret job: fall through to the pre-#585 behavior -- stored credential
-	/// (<c>jobs.credential_id</c>) when set, otherwise the ad hoc run secret registered
-	/// for this job's run (#276/#434). The two tiers never mix: a NULL
+	/// or a LEGACY flat run-secret job (the pre-#586 one-row-per-run shape, wire-compat):
+	/// fall through to the pre-#585 behavior -- stored credential (<c>jobs.credential_id</c>)
+	/// when set, otherwise the legacy ad hoc run secret registered for this job's run
+	/// (#276/#434, <see cref="RunSecretKey.Legacy"/>). The two tiers never mix: a NULL
 	/// <c>credential_id</c> with no run secret row available (never registered, already
 	/// deleted on a prior terminal completion, or swept as expired) is an auth-style
 	/// failure, never a silent fall-through to a stored credential -- see
@@ -675,6 +683,11 @@ public sealed class ScanJobHandler : IJobHandler
 			{
 				throw new ScanCredentialException(
 					$"job '{context.Job.Id}' carries a credential snapshot with no entry for its execution purpose '{executionPurpose}'.");
+			}
+
+			if (executionBinding.IsRunSecret)
+			{
+				return await ResolveAdHocPurposeCredentialAsync(context, executionPurpose, cancellationToken).ConfigureAwait(false);
 			}
 
 			if (executionBinding.CredentialId is not { } snapshotCredentialId)
@@ -717,15 +730,55 @@ public sealed class ScanJobHandler : IJobHandler
 					$"job '{context.Job.Id}' has no stored credential and no run secret is available for run '{runId}' (never registered, already deleted on a prior terminal completion, or swept as expired).");
 			}
 
-			// The ad hoc "my credentials" tier (ADR-0011, #276/#434) carries no sudo flag --
-			// it is a personal, ad hoc secret with no stored typed-credential row to read
-			// SudoEnabled from -- so an SRG scan using an ad hoc credential always runs
-			// without sudo. Sudo (#249's typed credentials field) is only meaningful for a
-			// stored credential.
+			// The legacy flat ad hoc "my credentials" tier (ADR-0011, #276/#434) carries no
+			// sudo flag -- it is a personal, ad hoc secret with no stored typed-credential
+			// row to read SudoEnabled from -- so an SRG scan using it always runs without
+			// sudo. Sudo (#249's typed credentials field) is only meaningful for a stored
+			// credential.
 			return new ResolvedCredential(runSecret.Username, runSecret.Secret, SudoEnabled: false, runSecret.Dispose);
 		}
 
 		return await ResolveStoredCredentialAsync(context, credentialId, cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Issue #586: decrypts a per-target/per-purpose ad hoc credential for
+	/// <paramref name="purpose"/> from <c>run_secrets</c>, keyed by
+	/// <c>RunSecretKey.For(context.Job.TargetId, purpose)</c> -- the same least-privilege,
+	/// per-job-attributed decrypt discipline the legacy flat tier already has (fail-closed
+	/// audit in the same transaction as the ciphertext read, sliding expiry, "no personal
+	/// rows, ever" -- never a silent fall-through to a stored credential on a miss).
+	/// </summary>
+	private async Task<ResolvedCredential> ResolveAdHocPurposeCredentialAsync(JobExecutionContext context, string purpose, CancellationToken cancellationToken)
+	{
+		if (context.Job.RunId is not { } runId || context.Job.TargetId is not { } targetId)
+		{
+			// An ad hoc-purpose snapshot row is only ever produced by RunCreationService's
+			// scan fan-out, which always carries both a run and a target -- defensive guard,
+			// not an expected path.
+			throw new ScanCredentialException(
+				$"job '{context.Job.Id}' carries an ad hoc credential snapshot for purpose '{purpose}' but has no run/target to resolve it against.");
+		}
+
+		string runSecretActor = await ResolveActorAsync(runId, cancellationToken).ConfigureAwait(false);
+		DecryptedRunSecret? runSecret;
+		try
+		{
+			runSecret = await _runSecrets.DecryptAsync(runId, RunSecretKey.For(targetId, purpose), context.Job.Id, runSecretActor, cancellationToken).ConfigureAwait(false);
+		}
+		catch (MasterKeyUnavailableException exception)
+		{
+			throw new ScanCredentialException($"ad hoc credential for target '{targetId}', purpose '{purpose}' could not be decrypted: {exception.Message}");
+		}
+
+		if (runSecret is null)
+		{
+			throw new ScanCredentialException(
+				$"job '{context.Job.Id}' carries an ad hoc credential snapshot for target '{targetId}', purpose '{purpose}', but no run secret row is available (never registered, already deleted on a prior terminal completion, or swept as expired).");
+		}
+
+		// Same as the legacy flat tier: an ad hoc secret carries no sudo flag.
+		return new ResolvedCredential(runSecret.Username, runSecret.Secret, SudoEnabled: false, runSecret.Dispose);
 	}
 
 	/// <summary>Decrypt-under-identity for a stored credential (security.md control 4) -- shared by the #585 snapshot path and the legacy <c>jobs.credential_id</c> fallback.</summary>

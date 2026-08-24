@@ -164,6 +164,7 @@ public sealed class RunsController : ControllerBase
 
 		ValidateEphemeralCredentialRequest(request);
 		ValidateCredentialOverridesRequest(request);
+		ValidateAdHocCredentialsRequest(request);
 
 		string initiatedBy = User.GetRequiredUsername();
 
@@ -177,9 +178,13 @@ public sealed class RunsController : ControllerBase
 				? null
 				: [.. request.CredentialOverrides.Select(o => new RunCredentialOverride(o.TargetId, o.Purpose, o.CredentialId))];
 
+			IReadOnlyList<RunAdHocCredential>? adHocCredentials = request.AdHocCredentials is not { Count: > 0 }
+				? null
+				: [.. request.AdHocCredentials.Select(a => new RunAdHocCredential(a.TargetId, a.Purpose, a.Username, a.Secret))];
+
 			Guid scanRunId = await _runCreation.CreateScanRunAsync(
 				request.Scope, request.CredentialId, credential, initiatedBy, cancellationToken,
-				credentialOverrides: overrides).ConfigureAwait(false);
+				credentialOverrides: overrides, adHocCredentials: adHocCredentials).ConfigureAwait(false);
 
 			return Accepted(new RunCreatedResponse(scanRunId.ToString()));
 		}
@@ -274,7 +279,7 @@ public sealed class RunsController : ControllerBase
 		{
 			throw ApiException.Validation(
 				"credential_overrides and credential are mutually exclusive.",
-				"Per-target saved-credential overrides apply to stored-credential scans only; per-target ad hoc secrets land with issue #586.");
+				"Per-target saved-credential overrides apply to stored-credential scans only; use ad_hoc_credentials for per-target ad hoc secrets (issue #586).");
 		}
 
 		foreach (RunCredentialOverrideRequest @override in request.CredentialOverrides)
@@ -284,6 +289,81 @@ public sealed class RunsController : ControllerBase
 				throw ApiException.Validation(
 					"credential_overrides contains an unknown purpose.",
 					$"'{@override.Purpose}' is not a credential purpose; valid values: {string.Join(", ", CredentialPurposes.All)}.");
+			}
+		}
+	}
+
+	/// <summary>
+	/// Issue #586 shape gates for <c>ad_hoc_credentials</c>: Operator+ (same floor as
+	/// <see cref="Credential"/> -- personal secrets are always the Operator tier,
+	/// docs/domain-model.md), scan runs only, no duplicate (target, purpose) pair within
+	/// the array itself, no pair also named in <see cref="RunCreateRequest.CredentialOverrides"/>
+	/// (a single (target, purpose) slot has exactly one source of truth -- mixing an ad
+	/// hoc secret and a saved-credential override for the SAME pair has no defined
+	/// precedence), and every purpose string must be a member of the closed
+	/// <see cref="CredentialPurposes"/> set. Unlike <see cref="ValidateCredentialOverridesRequest"/>,
+	/// this tier is NOT globally mutually exclusive with <see cref="RunCreateRequest.Credential"/>
+	/// or <see cref="RunCreateRequest.CredentialOverrides"/> -- a caller may combine the
+	/// legacy flat ad hoc credential, saved overrides, and per-target ad hoc overrides in
+	/// one request as long as no two sources ever name the same (target, purpose) pair
+	/// (semantic scope/target-membership checks happen in
+	/// <see cref="Waypoint.Infrastructure.Runs.RunCreationService"/>'s resolution step,
+	/// which enumerates every gap in one <c>credential_binding_gaps</c> 400).
+	/// </summary>
+	private void ValidateAdHocCredentialsRequest(RunCreateRequest request)
+	{
+		if (request.AdHocCredentials is not { Count: > 0 })
+		{
+			return;
+		}
+
+		if (!CallerHasAtLeast(WaypointRole.Operator))
+		{
+			throw ApiException.Forbidden(
+				"Ad hoc credentials require the Operator role.",
+				"Only Operator+ may start a run with per-target \"ad_hoc_credentials\" (ADR-0011 personal tier); use credential_overrides with a stored credential, or ask an Operator to start this run.");
+		}
+
+		if (!string.Equals(request.RunType, ScanRunType, StringComparison.Ordinal))
+		{
+			throw ApiException.Validation(
+				"ad_hoc_credentials are only valid for scan runs.",
+				$"\"ad_hoc_credentials\" may only be set when \"run_type\" is \"{ScanRunType}\".");
+		}
+
+		HashSet<(Guid TargetId, string Purpose)> seen = [];
+		HashSet<(Guid TargetId, string Purpose)> savedOverridePairs = request.CredentialOverrides is { Count: > 0 }
+			? [.. request.CredentialOverrides.Select(o => (o.TargetId, o.Purpose))]
+			: [];
+
+		foreach (RunAdHocCredentialRequest adHoc in request.AdHocCredentials)
+		{
+			if (!CredentialPurposes.IsValid(adHoc.Purpose))
+			{
+				throw ApiException.Validation(
+					"ad_hoc_credentials contains an unknown purpose.",
+					$"'{adHoc.Purpose}' is not a credential purpose; valid values: {string.Join(", ", CredentialPurposes.All)}.");
+			}
+
+			if (string.IsNullOrWhiteSpace(adHoc.Username) || string.IsNullOrWhiteSpace(adHoc.Secret))
+			{
+				throw ApiException.Validation(
+					"ad_hoc_credentials entries require both username and secret.",
+					$"Set non-empty \"username\" and \"secret\" for target '{adHoc.TargetId}', purpose '{adHoc.Purpose}'.");
+			}
+
+			if (!seen.Add((adHoc.TargetId, adHoc.Purpose)))
+			{
+				throw ApiException.Validation(
+					"ad_hoc_credentials contains a duplicate (target_id, purpose) pair.",
+					$"Target '{adHoc.TargetId}' purpose '{adHoc.Purpose}' appears more than once in \"ad_hoc_credentials\".");
+			}
+
+			if (savedOverridePairs.Contains((adHoc.TargetId, adHoc.Purpose)))
+			{
+				throw ApiException.Validation(
+					"ad_hoc_credentials and credential_overrides name the same (target_id, purpose) pair.",
+					$"Target '{adHoc.TargetId}' purpose '{adHoc.Purpose}' is named in both \"ad_hoc_credentials\" and \"credential_overrides\"; each (target, purpose) pair may have only one credential source.");
 			}
 		}
 	}

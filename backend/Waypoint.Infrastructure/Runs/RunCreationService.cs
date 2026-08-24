@@ -138,7 +138,8 @@ public sealed class RunCreationService
 		string initiatedBy,
 		CancellationToken cancellationToken,
 		Guid? scheduleId = null,
-		IReadOnlyList<RunCredentialOverride>? credentialOverrides = null)
+		IReadOnlyList<RunCredentialOverride>? credentialOverrides = null,
+		IReadOnlyList<RunAdHocCredential>? adHocCredentials = null)
 	{
 		ScanScope scope;
 		try
@@ -193,22 +194,42 @@ public sealed class RunCreationService
 		bool useRunSecret = credential is not null;
 		if (useRunSecret && credentialOverrides is { Count: > 0 })
 		{
-			// The ad hoc ("my credentials") tier is one flat username/secret per run
-			// (issue #434); per-target/per-purpose ad hoc secrets are issue #586's
-			// redesign. Mixing the two tiers in one request has no defined semantics yet.
+			// The legacy flat ad hoc ("my credentials") tier is one shared username/secret
+			// for the whole run (issue #434) -- wire compat, see the type doc comment.
+			// Mixing it with saved-credential overrides has no defined semantics.
 			throw ApiException.Validation(
 				"credential_overrides cannot be combined with an inline credential.",
-				"Saved-credential overrides apply to stored-credential scans only; per-target ad hoc secrets land with issue #586.");
+				"Saved-credential overrides apply to stored-credential scans only; use ad_hoc_credentials for per-target ad hoc secrets (issue #586).");
 		}
 
-		// Issue #585 (epic #582, ADR-0021 §5): resolve every purpose each selected
+		if (useRunSecret && adHocCredentials is { Count: > 0 })
+		{
+			throw ApiException.Validation(
+				"ad_hoc_credentials cannot be combined with an inline credential.",
+				"The flat inline \"credential\" and per-target \"ad_hoc_credentials\" are alternative ways to supply ad hoc secrets for the same run; use one or the other.");
+		}
+
+		// Issue #585/#586 (epic #582, ADR-0021 §5): resolve every purpose each selected
 		// target's scan requires -- target-assigned bindings, the legacy run-level
-		// credential_id (reinterpreted as a default-purpose override), and validated
-		// per-target/per-purpose overrides -- BEFORE any run/job row exists, so an
-		// unresolvable plan is a clean 4xx enumerating every gap, never a partial run.
-		IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings = useRunSecret
-			? new Dictionary<Guid, IReadOnlyDictionary<string, Guid>>()
-			: await ResolveCredentialBindingsAsync(targets, credentialId, credentialOverrides, cancellationToken).ConfigureAwait(false);
+		// credential_id (reinterpreted as a default-purpose override), validated
+		// per-target/per-purpose SAVED overrides, and validated per-target/per-purpose
+		// AD HOC overrides -- BEFORE any run/job row exists, so an unresolvable plan is a
+		// clean 4xx enumerating every gap, never a partial run.
+		CredentialBindingResolution resolution = useRunSecret
+			? new CredentialBindingResolution(
+				new Dictionary<Guid, IReadOnlyDictionary<string, Guid>>(),
+				new Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>>())
+			: await ResolveCredentialBindingsAsync(targets, credentialId, credentialOverrides, adHocCredentials, cancellationToken).ConfigureAwait(false);
+		IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings = resolution.SavedByTarget;
+		IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> adHocByTarget = resolution.AdHocByTarget;
+
+		// Ad hoc credentials are stored under (run, target, purpose) BEFORE fan-out: a job
+		// claimed the instant it is queued must already be able to find its row. Collected
+		// here (not written per-target below) so the write happens once run creation
+		// itself succeeds, in the same "no jobs without a committed secret" discipline the
+		// legacy flat tier already has.
+		List<(Guid TargetId, string Purpose, RunAdHocCredential Credential)> adHocToStore = [.. adHocByTarget
+			.SelectMany(pair => pair.Value.Select(inner => (pair.Key, inner.Key, inner.Value)))];
 
 		List<JobSpec> specs = [];
 		foreach (Target target in targets)
@@ -225,11 +246,11 @@ public sealed class RunCreationService
 			if (useRunSecret)
 			{
 				// No credential_id at all for an ad hoc job -- the secret lives only in
-				// run_secrets, keyed by the run id (one row per run, issue #434) rather
-				// than one row per job. Falling back to target.CredentialId here would
-				// silently mix tiers (a "my credentials" run quietly using a stored
-				// service secret). No job_credential_bindings rows either: per-purpose
-				// ad hoc secrets are issue #586's redesign.
+				// run_secrets, keyed by the run id (one legacy row per run, issue #434)
+				// rather than one row per job. Falling back to target.CredentialId here
+				// would silently mix tiers (a "my credentials" run quietly using a stored
+				// service secret). No job_credential_bindings rows either: this is the
+				// pre-#586 flat shape, not the per-purpose one.
 				specs.Add(new JobSpec(
 					ScanJobType,
 					ScanTargetPriority.ForTargetKind(target.Kind),
@@ -245,13 +266,31 @@ public sealed class RunCreationService
 				// -- the one today's wrappers authenticate with), and the full per-purpose
 				// snapshot (including e.g. a vsphere target's vcsa-ssh binding, which has
 				// no jobs-column slot) rides CredentialBindings into job_credential_bindings
-				// in the same fan-out transaction.
-				IReadOnlyDictionary<string, Guid> purposes = resolvedBindings[target.Id];
+				// in the same fan-out transaction. An ad hoc purpose (issue #586) never
+				// has a jobs.credential_id slot -- if the target's DEFAULT purpose itself
+				// resolved ad hoc, effectiveCredentialId stays null (the legacy column has
+				// no ad hoc representation; ScanJobHandler's snapshot-preferred resolution
+				// reads the job_credential_bindings row, not this column, whenever any
+				// snapshot rows exist at all).
+				IReadOnlyDictionary<string, Guid> purposes = resolvedBindings.TryGetValue(target.Id, out IReadOnlyDictionary<string, Guid>? foundSaved)
+					? foundSaved
+					: new Dictionary<string, Guid>();
+				IReadOnlyDictionary<string, RunAdHocCredential> adHocPurposes = adHocByTarget.TryGetValue(target.Id, out IReadOnlyDictionary<string, RunAdHocCredential>? foundAdHoc)
+					? foundAdHoc
+					: new Dictionary<string, RunAdHocCredential>();
+
 				Guid? effectiveCredentialId =
 					CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(target.Kind, out string? defaultPurpose)
 					&& purposes.TryGetValue(defaultPurpose, out Guid executionCredentialId)
 						? executionCredentialId
 						: null;
+
+				List<JobCredentialBindingSpec> bindingSpecs = [
+					.. purposes.Select(pair => new JobCredentialBindingSpec(pair.Key, pair.Value)),
+					.. adHocPurposes.Keys.Select(purpose => new JobCredentialBindingSpec(purpose, CredentialId: null, IsRunSecret: true)),
+				];
+				bindingSpecs.Sort((a, b) => string.CompareOrdinal(a.Purpose, b.Purpose));
+
 				specs.Add(new JobSpec(
 					ScanJobType,
 					ScanTargetPriority.ForTargetKind(target.Kind),
@@ -259,9 +298,7 @@ public sealed class RunCreationService
 					TargetName: target.Name,
 					CredentialId: effectiveCredentialId,
 					Payload: payload,
-					CredentialBindings: [.. purposes
-						.OrderBy(pair => pair.Key, StringComparer.Ordinal)
-						.Select(pair => new JobCredentialBindingSpec(pair.Key, pair.Value))]));
+					CredentialBindings: bindingSpecs.Count == 0 ? null : bindingSpecs));
 			}
 		}
 
@@ -284,6 +321,18 @@ public sealed class RunCreationService
 			// half-armed credential leak.
 			RunSecretCredential runSecretCredential = new(credential!.Username, credential.Secret);
 			await _runSecrets.StoreAsync(runId, runSecretCredential, initiatedBy, _runSecretOptions.Value.Expiry, cancellationToken)
+				.ConfigureAwait(false);
+		}
+
+		// Issue #586: one run_secrets row per (target, purpose) ad hoc override, each
+		// under its own RunSecretKey -- fail closed exactly like the legacy tier above; a
+		// write that does not commit throws before any job is fanned out, so a run either
+		// has every ad hoc secret its jobs will need, or has no jobs at all.
+		foreach ((Guid targetId, string purpose, RunAdHocCredential adHoc) in adHocToStore)
+		{
+			RunSecretCredential runSecretCredential = new(adHoc.Username, adHoc.Secret);
+			await _runSecrets.StoreAsync(
+				runId, RunSecretKey.For(targetId, purpose), runSecretCredential, initiatedBy, _runSecretOptions.Value.Expiry, cancellationToken)
 				.ConfigureAwait(false);
 		}
 
@@ -402,10 +451,12 @@ public sealed class RunCreationService
 	}
 
 	/// <summary>
-	/// Issue #585 (epic #582, ADR-0021 §§4-6): resolves, per selected target, every
+	/// Issue #585/#586 (epic #582, ADR-0021 §§4-6): resolves, per selected target, every
 	/// credential purpose its scan requires (plus any component-conditional purpose that
-	/// happens to be bound/overridden) into concrete credential ids. Precedence per
-	/// (target, purpose): explicit override &gt; the legacy run-level
+	/// happens to be bound/overridden) into either a concrete SAVED credential id or an
+	/// AD HOC (run_secrets-backed) source. Precedence per (target, purpose): ad hoc
+	/// override (issue #586, the most explicit action an operator can take for a single
+	/// purpose) &gt; explicit SAVED override &gt; the legacy run-level
 	/// <paramref name="runCredentialId"/> (default/execution purpose only -- its
 	/// pre-#585 semantics, "use this credential for all targets," preserved but now
 	/// type-checked) &gt; the target's own <c>target_credential_bindings</c> row. Every
@@ -413,12 +464,19 @@ public sealed class RunCreationService
 	/// <c>credential_binding_gaps</c> 400 enumerating each (target, purpose, reason)
 	/// triple, the resolution counterpart of #593/#655's blocker-category breakdown.
 	/// Binding-sourced credentials are not re-validated for type here: the 0043 CHECK/
-	/// UPSERT surface and its backfill only ever admit compatible rows.
+	/// UPSERT surface and its backfill only ever admit compatible rows. Ad hoc entries
+	/// carry no credential TYPE to check -- ADR-0021 §2's compatibility matrix applies to
+	/// stored <c>credentials</c> rows, which an ad hoc secret never becomes (ADR-0011
+	/// "no personal rows, ever"); the caller (RunsController) already rejected a
+	/// (target, purpose) pair supplied by both <paramref name="adHocCredentials"/> and
+	/// <paramref name="overrides"/>, but this method re-checks it defensively (a service
+	/// caller other than the controller must not be able to silently pick a winner).
 	/// </summary>
-	private async Task<IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>>> ResolveCredentialBindingsAsync(
+	private async Task<CredentialBindingResolution> ResolveCredentialBindingsAsync(
 		IReadOnlyList<Target> targets,
 		Guid? runCredentialId,
 		IReadOnlyList<RunCredentialOverride>? overrides,
+		IReadOnlyList<RunAdHocCredential>? adHocCredentials,
 		CancellationToken cancellationToken)
 	{
 		Dictionary<Guid, Target> targetsById = targets.ToDictionary(t => t.Id);
@@ -454,6 +512,42 @@ public sealed class RunCreationService
 			throw ApiException.NotFound(
 				"Credential not found.",
 				$"Credential '{legacyCredentialId}' does not exist; pick one from GET /credentials.");
+		}
+
+		// Issue #586: ad hoc overrides are validated first (highest precedence) --
+		// target-in-scope and purpose-applicable exactly mirror the saved-override checks
+		// below, but there is no credential to look up/type-check (ADR-0011: an ad hoc
+		// secret is never a `credentials` row). A pair also named by a saved override is
+		// a gap either way (DuplicateOverride) -- the two tiers can never silently pick a
+		// winner for the same (target, purpose).
+		Dictionary<(Guid TargetId, string Purpose), RunAdHocCredential> acceptedAdHoc = [];
+		HashSet<(Guid TargetId, string Purpose)> overridePairs = overrides is { Count: > 0 }
+			? [.. overrides.Select(o => (o.TargetId, o.Purpose))]
+			: [];
+		foreach (RunAdHocCredential adHoc in adHocCredentials ?? [])
+		{
+			if (!targetsById.TryGetValue(adHoc.TargetId, out Target? adHocTarget))
+			{
+				gaps.Add(new CredentialBindingGap(
+					adHoc.TargetId, null, adHoc.Purpose, CredentialBindingGapReasons.TargetNotInScope));
+				continue;
+			}
+
+			if (!CredentialPurposeMatrix.ApplicablePurposes(adHocTarget.Kind).Contains(adHoc.Purpose, StringComparer.Ordinal))
+			{
+				gaps.Add(new CredentialBindingGap(
+					adHocTarget.Id, adHocTarget.Name, adHoc.Purpose, CredentialBindingGapReasons.PurposeNotApplicable));
+				continue;
+			}
+
+			if (acceptedAdHoc.ContainsKey((adHoc.TargetId, adHoc.Purpose)) || overridePairs.Contains((adHoc.TargetId, adHoc.Purpose)))
+			{
+				gaps.Add(new CredentialBindingGap(
+					adHocTarget.Id, adHocTarget.Name, adHoc.Purpose, CredentialBindingGapReasons.DuplicateOverride));
+				continue;
+			}
+
+			acceptedAdHoc[(adHoc.TargetId, adHoc.Purpose)] = adHoc;
 		}
 
 		Dictionary<(Guid TargetId, string Purpose), Guid> acceptedOverrides = [];
@@ -498,15 +592,25 @@ public sealed class RunCreationService
 		}
 
 		Dictionary<Guid, IReadOnlyDictionary<string, Guid>> resolved = [];
+		Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> resolvedAdHoc = [];
 		foreach (Target target in targets)
 		{
 			Dictionary<string, Guid> purposes = new(StringComparer.Ordinal);
+			Dictionary<string, RunAdHocCredential> adHocPurposes = new(StringComparer.Ordinal);
 			IReadOnlyList<TargetCredentialBinding> targetBindings =
 				bindingsByTarget.TryGetValue(target.Id, out IReadOnlyList<TargetCredentialBinding>? found) ? found : [];
 			CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(target.Kind, out string? defaultPurpose);
 
 			foreach (string purpose in CredentialPurposeMatrix.RequiredScanPurposes(target.Kind))
 			{
+				// Issue #586: ad hoc has the highest precedence -- checked before the saved
+				// override, the run-level default, and the target's own binding.
+				if (acceptedAdHoc.TryGetValue((target.Id, purpose), out RunAdHocCredential? adHocCredential))
+				{
+					adHocPurposes[purpose] = adHocCredential;
+					continue;
+				}
+
 				if (acceptedOverrides.TryGetValue((target.Id, purpose), out Guid overrideCredentialId))
 				{
 					purposes[purpose] = overrideCredentialId;
@@ -547,6 +651,12 @@ public sealed class RunCreationService
 
 			foreach (string purpose in CredentialPurposeMatrix.ConditionalScanPurposes(target.Kind))
 			{
+				if (acceptedAdHoc.TryGetValue((target.Id, purpose), out RunAdHocCredential? adHocCredential))
+				{
+					adHocPurposes[purpose] = adHocCredential;
+					continue;
+				}
+
 				if (acceptedOverrides.TryGetValue((target.Id, purpose), out Guid overrideCredentialId))
 				{
 					purposes[purpose] = overrideCredentialId;
@@ -562,6 +672,7 @@ public sealed class RunCreationService
 			}
 
 			resolved[target.Id] = purposes;
+			resolvedAdHoc[target.Id] = adHocPurposes;
 		}
 
 		if (gaps.Count > 0)
@@ -571,11 +682,12 @@ public sealed class RunCreationService
 				"credential_binding_gaps",
 				"One or more selected targets cannot resolve every required credential purpose.",
 				"Each gap names the target, the credential purpose, and why it could not resolve. "
-					+ "Assign the missing/compatible bindings on the targets (PUT /targets/{id}/credential-bindings/{purpose}) or supply valid credential_overrides.",
+					+ "Assign the missing/compatible bindings on the targets (PUT /targets/{id}/credential-bindings/{purpose}) or supply valid credential_overrides, "
+					+ "or supply a valid ad_hoc_credentials entry (issue #586).",
 				bindingGaps: gaps);
 		}
 
-		return resolved;
+		return new CredentialBindingResolution(resolved, resolvedAdHoc);
 	}
 
 	/// <summary>
@@ -629,3 +741,28 @@ public sealed record RunSecretCredentialRequest(string Username, string Secret);
 /// pair -- never any other target, never any other purpose of the same target.
 /// </summary>
 public sealed record RunCredentialOverride(Guid TargetId, string Purpose, Guid CredentialId);
+
+/// <summary>
+/// One structured per-target/per-purpose AD HOC ("my credentials", ADR-0011) override on
+/// a scan-run create request (issue #586, epic #582, ADR-0021 §4) -- the ad hoc
+/// counterpart of <see cref="RunCredentialOverride"/>, decoupled from the wire contract
+/// type (<c>Waypoint.Api.Contracts.RunAdHocCredentialRequest</c>) so this service does not
+/// depend on <c>Waypoint.Api</c>. Applies to exactly the named (target, purpose) pair;
+/// <see cref="Username"/>/<see cref="Secret"/> are stored ONLY as an envelope-encrypted
+/// <c>run_secrets</c> row keyed by <c>RunSecretKey.For(TargetId, Purpose)</c> under the
+/// created run -- never a <c>credentials</c>/<c>credential_secrets</c> row.
+/// </summary>
+public sealed record RunAdHocCredential(Guid TargetId, string Purpose, string Username, string Secret);
+
+/// <summary>
+/// The result of <see cref="RunCreationService.ResolveCredentialBindingsAsync"/>: per
+/// target, the purposes resolved to a SAVED credential id (<see cref="SavedByTarget"/>,
+/// pre-#586 shape) and the purposes resolved to an AD HOC inline credential
+/// (<see cref="AdHocByTarget"/>, issue #586) -- disjoint per (target, purpose): a purpose
+/// appears in exactly one of the two dictionaries for a given target, never both (ad hoc
+/// takes precedence at resolution time, so a purpose that resolved ad hoc is never also
+/// present in <see cref="SavedByTarget"/>).
+/// </summary>
+public sealed record CredentialBindingResolution(
+	IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>> SavedByTarget,
+	IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> AdHocByTarget);

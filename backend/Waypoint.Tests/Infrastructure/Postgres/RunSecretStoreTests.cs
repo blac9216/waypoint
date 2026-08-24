@@ -104,6 +104,71 @@ public sealed class RunSecretStoreTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #586: two DIFFERENT (target, purpose) keys on the SAME run coexist as two
+	/// separate rows, each independently round-tripping its own username/secret --
+	/// proves the re-keying's headline claim ("multiple ad hoc credentials coexist
+	/// without cross-target/purpose access") at the store level, before any HTTP layer
+	/// is involved.
+	/// </summary>
+	[Fact]
+	public async Task StoreDecryptRoundTrip_TwoKeysOnSameRun_CoexistWithoutCrossAccess()
+	{
+		Guid targetA = await SeedTargetAsync();
+		Guid targetB = await SeedTargetAsync();
+		RunSecretKey keyA = RunSecretKey.For(targetA, CredentialPurposes.VSphereApi);
+		RunSecretKey keyB = RunSecretKey.For(targetB, CredentialPurposes.VSphereApi);
+
+		await _store.StoreAsync(_runId, keyA, new RunSecretCredential("user-a@example.internal", "invented-value-a"), "tester", TimeSpan.FromHours(1), CancellationToken.None);
+		await _store.StoreAsync(_runId, keyB, new RunSecretCredential("user-b@example.internal", "invented-value-b"), "tester", TimeSpan.FromHours(1), CancellationToken.None);
+
+		Guid jobId = await SeedJobAsync(_runId);
+		using (DecryptedRunSecret? handleA = await _store.DecryptAsync(_runId, keyA, jobId, "engine", CancellationToken.None))
+		{
+			Assert.NotNull(handleA);
+			Assert.Equal("user-a@example.internal", handleA!.Username);
+			Assert.Equal("invented-value-a", handleA.Secret);
+		}
+
+		using (DecryptedRunSecret? handleB = await _store.DecryptAsync(_runId, keyB, jobId, "engine", CancellationToken.None))
+		{
+			Assert.NotNull(handleB);
+			Assert.Equal("user-b@example.internal", handleB!.Username);
+			Assert.Equal("invented-value-b", handleB.Secret);
+		}
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand count = new("SELECT count(*) FROM run_secrets WHERE run_id = $1", connection);
+		count.Parameters.AddWithValue(_runId);
+		Assert.Equal(2L, (long)(await count.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// Issue #586: a second Store for the SAME (run, key) throws, exactly like the
+	/// legacy shape's one-row-per-run rejection -- but a DIFFERENT key on the same run
+	/// is unaffected (proven by the coexistence test above); this test isolates the
+	/// "same key twice" failure mode specifically.
+	/// </summary>
+	[Fact]
+	public async Task Store_SameRunAndKeyTwice_Throws_ButDoesNotAffectOtherKeys()
+	{
+		Guid targetId = await SeedTargetAsync();
+		RunSecretKey key = RunSecretKey.For(targetId, CredentialPurposes.VSphereApi);
+		await _store.StoreAsync(_runId, key, new RunSecretCredential("user@example.internal", "first-invented"), "tester", TimeSpan.FromHours(1), CancellationToken.None);
+
+		await Assert.ThrowsAsync<InvalidOperationException>(
+			() => _store.StoreAsync(_runId, key, new RunSecretCredential("user@example.internal", "second-invented"), "tester", TimeSpan.FromHours(1), CancellationToken.None));
+
+		// A different purpose on the SAME target is a different key -- unaffected.
+		RunSecretKey otherPurposeKey = RunSecretKey.For(targetId, CredentialPurposes.VcsaSsh);
+		await _store.StoreAsync(_runId, otherPurposeKey, new RunSecretCredential("user2@example.internal", "third-invented"), "tester", TimeSpan.FromHours(1), CancellationToken.None);
+
+		Guid jobId = await SeedJobAsync(_runId);
+		using DecryptedRunSecret? handle = await _store.DecryptAsync(_runId, key, jobId, "tester", CancellationToken.None);
+		Assert.Equal("first-invented", handle!.Secret);
+	}
+
+	/// <summary>
 	/// Unlike the predecessor single-shot in-memory cache (and unlike
 	/// <see cref="CredentialSecretStoreTests"/>'s DELETE-based tests), decrypt is not
 	/// single-shot -- a second decrypt while the row still exists succeeds again. This
@@ -346,6 +411,44 @@ public sealed class RunSecretStoreTests : IAsyncLifetime, IDisposable
 		Assert.Equal(0, await CountAuditAsync("secret.run_expired", freshRunId));
 	}
 
+	/// <summary>
+	/// Issue #586: expiry is a PER-ROW property, not per-run -- two per-target/per-purpose
+	/// rows on the SAME run can expire independently. Sweeping deletes only the one whose
+	/// window has passed, leaves the other (still fresh) row untouched, and audits each
+	/// deleted row with its own target/purpose attribution.
+	/// </summary>
+	[Fact]
+	public async Task DeleteExpiredAsync_PerTargetPurposeRows_ExpireIndependentlyOnTheSameRun()
+	{
+		Guid targetA = await SeedTargetAsync();
+		Guid targetB = await SeedTargetAsync();
+		RunSecretKey keyA = RunSecretKey.For(targetA, CredentialPurposes.VSphereApi);
+		RunSecretKey keyB = RunSecretKey.For(targetB, CredentialPurposes.VSphereApi);
+
+		await _store.StoreAsync(_runId, keyA, new RunSecretCredential("user-a@example.internal", "invented-expiring"), "tester", TimeSpan.FromMinutes(1), CancellationToken.None);
+		await _store.StoreAsync(_runId, keyB, new RunSecretCredential("user-b@example.internal", "invented-fresh"), "tester", TimeSpan.FromHours(1), CancellationToken.None);
+
+		// Backdate only target A's row -- target B's stays within its 1-hour window.
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand update = new(
+				"UPDATE run_secrets SET expires_at = now() - interval '1 minute' WHERE run_id = $1 AND target_id = $2", connection);
+			update.Parameters.AddWithValue(_runId);
+			update.Parameters.AddWithValue(targetA);
+			await update.ExecuteNonQueryAsync();
+		}
+
+		int deleted = await _store.DeleteExpiredAsync(CancellationToken.None);
+
+		Assert.Equal(1, deleted);
+		Guid jobId = await SeedJobAsync(_runId);
+		Assert.Null(await _store.DecryptAsync(_runId, keyA, jobId, "tester", CancellationToken.None));
+		using DecryptedRunSecret? stillFresh = await _store.DecryptAsync(_runId, keyB, jobId, "tester", CancellationToken.None);
+		Assert.NotNull(stillFresh);
+		Assert.Equal("invented-fresh", stillFresh!.Secret);
+	}
+
 	[Fact]
 	public async Task DeleteExpiredAsync_NothingExpired_ReturnsZero_NoAudit()
 	{
@@ -391,6 +494,29 @@ public sealed class RunSecretStoreTests : IAsyncLifetime, IDisposable
 		await using NpgsqlCommand count = new("SELECT count(*) FROM run_secrets WHERE run_id = $1", verify);
 		count.Parameters.AddWithValue(_runId);
 		Assert.Equal(0L, (long)(await count.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>Issue #586: seeds a target for a per-target/per-purpose RunSecretKey.</summary>
+	private async Task<Guid> SeedTargetAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid siteId;
+		await using (NpgsqlCommand site = new("INSERT INTO sites (name) VALUES ($1) RETURNING id", connection))
+		{
+			site.Parameters.AddWithValue($"run-secret-store-site-{Guid.NewGuid():N}");
+			siteId = (Guid)(await site.ExecuteScalarAsync())!;
+		}
+
+		await using NpgsqlCommand target = new(
+			"""
+			INSERT INTO targets (site_id, kind, name, connection, discovery_status)
+			VALUES ($1, 'vsphere', $2, '{"host":"vcsa-01.example.internal"}'::jsonb, 'never_discovered')
+			RETURNING id
+			""", connection);
+		target.Parameters.AddWithValue(siteId);
+		target.Parameters.AddWithValue($"run-secret-store-target-{Guid.NewGuid():N}");
+		return (Guid)(await target.ExecuteScalarAsync())!;
 	}
 
 	private async Task<Guid> SeedRunAsync()

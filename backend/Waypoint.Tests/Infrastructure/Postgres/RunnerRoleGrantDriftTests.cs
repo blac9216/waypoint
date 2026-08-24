@@ -125,9 +125,44 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #586: the re-keyed per-target/per-purpose shape (migration 0045) rides the
+	/// SAME table-level grants as the pre-#586 legacy shape (0025/0033) -- proven here
+	/// through the real compliance-runner role decrypting a <see cref="RunSecretKey.For"/>
+	/// row (not <see cref="RunSecretKey.Legacy"/>), least-privilege-scoped to exactly the
+	/// (target, purpose) pair named, mirroring
+	/// <see cref="ComplianceRunnerRole_DecryptAsync_SlidesExpiryWithoutPermissionDenied"/>
+	/// for the new shape.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_DecryptAsync_PerTargetPurpose_SlidesExpiryWithoutPermissionDenied()
+	{
+		Guid siteId = await SeedSiteAsync();
+		Guid targetId = await SeedTargetAsync(siteId);
+		Guid runId = await SeedRunAsync();
+		Guid jobId = await SeedJobAsync(runId);
+		RunSecretKey key = RunSecretKey.For(targetId, CredentialPurposes.VSphereApi);
+
+		AesGcmEnvelopeCipher cipher = new(new FileMasterKeyProvider(WriteKeyFile()));
+		RunSecretStore ownerStore = new(_fixture.ConnectionString, cipher, _redactor, Microsoft.Extensions.Options.Options.Create(new RunSecretOptions()), NullLogger<RunSecretStore>.Instance);
+		await ownerStore.StoreAsync(runId, key, new RunSecretCredential("adhoc-user@example.internal", "invented-per-purpose-token-3d7e"), "tester", TimeSpan.FromMinutes(5), CancellationToken.None);
+
+		DateTimeOffset expiresBefore = await ReadExpiresAtAsync(runId, key);
+
+		RunSecretStore runnerStore = new(_complianceRunnerConnectionString, cipher, _redactor, Microsoft.Extensions.Options.Options.Create(new RunSecretOptions { Expiry = TimeSpan.FromHours(2) }), NullLogger<RunSecretStore>.Instance);
+		using (DecryptedRunSecret? handle = await runnerStore.DecryptAsync(runId, key, jobId, "engine", CancellationToken.None))
+		{
+			Assert.NotNull(handle);
+		}
+
+		DateTimeOffset expiresAfter = await ReadExpiresAtAsync(runId, key);
+		Assert.True(expiresAfter > expiresBefore, "expected the compliance-runner role's per-target/per-purpose decrypt to slide expires_at forward, not merely avoid throwing.");
+	}
+
+	/// <summary>
 	/// Least-privilege boundary check for run_secrets: the runner role gets
 	/// <c>UPDATE (expires_at)</c> only. INSERT stays API-only (RunsController
-	/// registers the secret at run-creation time) -- this must still fail 42501.
+	/// registers the secret at run-creation time) -- this must still fail 42501, for
+	/// both the legacy shape and the migration 0045 per-target/per-purpose shape.
 	/// </summary>
 	[Fact]
 	public async Task ComplianceRunnerRole_CannotInsertRunSecrets()
@@ -847,6 +882,27 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.Equal(credentialId, binding.CredentialId);
 	}
 
+	/// <summary>
+	/// Issue #586 (migration 0045's <c>is_run_secret</c> column): the same table-level
+	/// SELECT grant migration 0044 gave the compliance runner covers the new column
+	/// automatically -- proven through the real repository method reading an AD HOC
+	/// snapshot row (no credential_id), not just a stored-credential one.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CanReadAdHocJobCredentialBindings()
+	{
+		Guid jobId = await SeedJobAsync(await SeedRunAsync());
+		await SeedAdHocJobCredentialBindingAsync(jobId, CredentialPurposes.VcsaSsh);
+
+		JobQueueRepository runnerRepository = new(_complianceRunnerConnectionString, NullLogger<JobQueueRepository>.Instance);
+		IReadOnlyList<JobCredentialBinding> bindings = await runnerRepository.GetJobCredentialBindingsAsync(jobId, CancellationToken.None);
+
+		JobCredentialBinding binding = Assert.Single(bindings);
+		Assert.Equal(CredentialPurposes.VcsaSsh, binding.Purpose);
+		Assert.True(binding.IsRunSecret);
+		Assert.Null(binding.CredentialId);
+	}
+
 	/// <summary>Migration 0044 grants the compliance runner SELECT only -- fan-out INSERT stays API-side (RunCreationService's transaction), so a runner-role INSERT must still fail 42501.</summary>
 	[Fact]
 	public async Task ComplianceRunnerRole_CannotInsertJobCredentialBindings()
@@ -903,6 +959,18 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 			"INSERT INTO job_credential_bindings (job_id, purpose, credential_id) VALUES ($1, 'vsphere-api', $2)", connection);
 		command.Parameters.AddWithValue(jobId);
 		command.Parameters.AddWithValue(credentialId);
+		await command.ExecuteNonQueryAsync();
+	}
+
+	/// <summary>Issue #586: seeds an AD HOC purpose snapshot row (is_run_secret = true, no credential_id).</summary>
+	private async Task SeedAdHocJobCredentialBindingAsync(Guid jobId, string purpose)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"INSERT INTO job_credential_bindings (job_id, purpose, credential_id, is_run_secret) VALUES ($1, $2, NULL, true)", connection);
+		command.Parameters.AddWithValue(jobId);
+		command.Parameters.AddWithValue(purpose);
 		await command.ExecuteNonQueryAsync();
 	}
 
@@ -1032,6 +1100,21 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		await connection.OpenAsync();
 		await using NpgsqlCommand command = new("SELECT expires_at FROM run_secrets WHERE run_id = $1", connection);
 		command.Parameters.AddWithValue(runId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		await reader.ReadAsync();
+		return reader.GetFieldValue<DateTimeOffset>(0);
+	}
+
+	/// <summary>Issue #586 overload: reads a specific per-target/per-purpose row's <c>expires_at</c>, never a sibling row on the same run.</summary>
+	private async Task<DateTimeOffset> ReadExpiresAtAsync(Guid runId, RunSecretKey key)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT expires_at FROM run_secrets WHERE run_id = $1 AND target_id IS NOT DISTINCT FROM $2 AND purpose = $3", connection);
+		command.Parameters.AddWithValue(runId);
+		command.Parameters.AddWithValue((object?)key.TargetId ?? DBNull.Value);
+		command.Parameters.AddWithValue(key.Purpose ?? "_legacy");
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
 		await reader.ReadAsync();
 		return reader.GetFieldValue<DateTimeOffset>(0);

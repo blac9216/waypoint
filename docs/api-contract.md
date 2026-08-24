@@ -138,7 +138,7 @@ next sign-in would silently reuse the still-live Keycloak session.
 | `/targets/{id}/inventory` | GET | Cached hosts/VMs tree (cluster → host → vm), build info, maintenance_mode. |
 | `/targets/{id}/discover` | POST | 202 → `discover` job. |
 
-**Shipped by #584/#585, remaining for #586/#587** ([ADR-0021](adr/0021-credential-purpose-matrix.md)):
+**Shipped by #584/#585/#586, remaining for #587** ([ADR-0021](adr/0021-credential-purpose-matrix.md)):
 #584 shipped the per-`(target, purpose)` binding surface —
 `PUT`/`DELETE /targets/{id}/credential-bindings/{purpose}` (Admin, purpose
 applicability and credential-type compatibility validated against the shared matrix;
@@ -148,8 +148,16 @@ machine-readable `invalid_purpose`/`purpose_not_applicable`/
 mirror of the kind's default purpose (migration 0043's dual-write). #585 shipped
 execution resolution: those bindings (plus validated `POST /runs`
 `credential_overrides`) snapshot into immutable per-job `job_credential_bindings` rows
-at run creation — see the Runs section. Per-target/per-purpose **ad hoc** secrets are
-#586; the wizard UI defaulting to assigned credentials is #587.
+at run creation — see the Runs section. #586 shipped the per-target/per-purpose **ad
+hoc** tier: `POST /runs` optional `ad_hoc_credentials` (`[{ target_id, purpose,
+username, secret }]`, Operator+, scan runs only), each an inline personal credential for
+exactly one `(target, purpose)` pair, stored envelope-encrypted in `run_secrets` keyed
+by `(run, target, purpose)` (migration 0045 re-keyed `run_secrets` from one row per run
+to one row per key) — never a `credentials`/`credential_secrets` row (ADR-0011). Ad hoc
+takes precedence over a saved `credential_overrides` entry for the same pair (naming
+both is a 400); the flat legacy `credential` tier (one shared secret for the whole run)
+remains and is mutually exclusive with `ad_hoc_credentials`. The wizard UI defaulting to
+assigned credentials is #587.
 
 ### Credentials (service/shared only — ADR-0011)
 | Endpoint | Methods | Notes |
@@ -160,16 +168,18 @@ at run creation — see the Runs section. Per-target/per-purpose **ad hoc** secr
 ### Runs & jobs
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/runs` | GET, POST | POST body: `run_type`, `scope` (JSON string — a scan run's `scope.site_id` and `scope.profile_id` are both required, optional `target_ids`), `credential_id` \| inline `credential` (personal tier, ADR-0011 — never persisted), `confirmation` (remediate only). Cyber+ for scans; remediation POSTs require Admin + `confirmation: "REMEDIATE"`. 202 body: `run_id`. Issue #639: `scope.profile_id` selects which pulled compliance-content profile (`profiles.id`, `GET /profiles`) the scan executes — must reference an installed profile or the request 404s/400s (missing entirely is a 400 `validation_error`; an unknown id is a 404 `not_found`); the run persists it in `scope` so run history shows what was actually scanned.Issue #585 (ADR-0021): optional `credential_overrides` (scan runs only, mutually exclusive with inline `credential`): `[{ target_id, purpose, credential_id }]`, each substituting a stored credential for exactly one (target, purpose) pair. At creation the API resolves every purpose each selected target's scan requires (shared `CredentialPurposeMatrix`) from the target's own `credential-bindings`, the legacy run-level `credential_id` (now reinterpreted as a type-checked override of each target's default purpose), and these overrides — then snapshots the result as immutable per-job `job_credential_bindings` rows (later target/binding edits never change an in-flight run). Any missing/incompatible/out-of-scope pair rejects the whole request with a 400 `credential_binding_gaps` whose `error.binding_gaps` array enumerates every `{ target_id, target_name, purpose, reason, credential_id? }` (`reason` ∈ `missing_binding`, `incompatible_credential_type`, `credential_not_found`, `target_not_in_scope`, `purpose_not_applicable`, `duplicate_override`) before any run/job row exists. |
+| `/runs` | GET, POST | POST body: `run_type`, `scope` (JSON string — a scan run's `scope.site_id` and `scope.profile_id` are both required, optional `target_ids`), `credential_id` \| inline `credential` (personal tier, ADR-0011 — never persisted), `confirmation` (remediate only). Cyber+ for scans; remediation POSTs require Admin + `confirmation: "REMEDIATE"`. 202 body: `run_id`. Issue #639: `scope.profile_id` selects which pulled compliance-content profile (`profiles.id`, `GET /profiles`) the scan executes — must reference an installed profile or the request 404s/400s (missing entirely is a 400 `validation_error`; an unknown id is a 404 `not_found`); the run persists it in `scope` so run history shows what was actually scanned. Issue #585 (ADR-0021): optional `credential_overrides` (scan runs only, mutually exclusive with inline `credential`): `[{ target_id, purpose, credential_id }]`, each substituting a stored credential for exactly one (target, purpose) pair. Issue #586 (ADR-0021): optional `ad_hoc_credentials` (scan runs only, Operator+, mutually exclusive with inline `credential`): `[{ target_id, purpose, username, secret }]`, each an inline personal credential for exactly one (target, purpose) pair — encrypted at rest as its own `run_secrets` row keyed by `(run, target, purpose)`, never a stored `credentials` row. Ad hoc takes precedence over `credential_overrides` for the same pair; naming the same `(target_id, purpose)` in both, or twice within `ad_hoc_credentials` itself, is a 400. At creation the API resolves every purpose each selected target's scan requires (shared `CredentialPurposeMatrix`) from `ad_hoc_credentials` first, then `credential_overrides`, then the target's own `credential-bindings`, then the legacy run-level `credential_id` (now reinterpreted as a type-checked override of each target's default purpose) — then snapshots the result as immutable per-job `job_credential_bindings` rows (later target/binding edits never change an in-flight run; an ad hoc-resolved purpose sets `is_run_secret: true` on its snapshot row instead of a `credential_id`). Any missing/incompatible/out-of-scope pair rejects the whole request with a 400 `credential_binding_gaps` whose `error.binding_gaps` array enumerates every `{ target_id, target_name, purpose, reason, credential_id? }` (`reason` ∈ `missing_binding`, `incompatible_credential_type`, `credential_not_found`, `target_not_in_scope`, `purpose_not_applicable`, `duplicate_override`) before any run/job row exists. |
 
-**Shipped by #585 / remaining for #586** ([ADR-0021](adr/0021-credential-purpose-matrix.md)):
+**Shipped by #585/#586** ([ADR-0021](adr/0021-credential-purpose-matrix.md)):
 #585 landed the stored-credential half of per-purpose resolution — `credential_overrides`
 on `POST /runs`, per-job `job_credential_bindings` snapshots, and the
-`credential_binding_gaps` rejection contract (see the `/runs` row above). The ad hoc
-(`credential`) tier is still one flat username/secret per run: `run_secrets` (ADR-0016)
-extending from one secret per run to one keyed by `(run, target, purpose)` is #586's
-slice, and until it lands `credential_overrides` and inline `credential` are mutually
-exclusive.
+`credential_binding_gaps` rejection contract (see the `/runs` row above). #586 landed
+the ad hoc half: `run_secrets` (ADR-0016) re-keyed from one row per run to one row per
+`(run, target, purpose)`, and `POST /runs`'s new `ad_hoc_credentials` field for
+per-target/per-purpose inline secrets — see the `/runs` row above. The flat inline
+`credential` tier remains for wire compat (one shared secret for the whole run, mapped
+to every selected target's default purpose) and stays mutually exclusive with both
+`credential_overrides` and `ad_hoc_credentials`.
 
 | `/runs/{id}` | GET | `RunResponse` (issue #494, matches shipped `RunsController`/`RunContracts.cs` exactly): `id`, `run_type`, `state`, `paused`, `blocked`, `blocked_reason`, `scope`, `credential_id`, `initiated_by`, `schedule_id` (issue #515 — the schedule that dispatched this run, null for an operator-initiated one; distinct from `schedules.last_run_id`, which only ever points at a schedule's most recent run), `created_at`/`started_at`/`completed_at`, and job counts by state (`job_count`, `job_count_queued`, `job_count_running`, `job_count_completed`, `job_count_failed`, `job_count_blocked`). No per-queue/per-benchmark breakdown and no aggregate `pass`/`fail`/`na` — those live only on `/runs/{id}/artifacts`. `blocked`/`blocked_reason` are the run's single credential-halt flag (ADR-0008), not a list of independently-blockable named queues; the frontend (`liverun.ts`) synthesizes a queue-like grouping client-side from each job's `priority` for display, it is not a server concept. |
 | `/runs/{id}/jobs` | GET | `JobResponse[]`: `id`, `run_id`, `job_type`, `target_id`, `target_name`, `state`, `stage`, `priority`, `attempt_count`, `created_at`/`started_at`/`finished_at`. No `benchmark` label and no per-job `pass`/`fail`/`na`/`note` on this endpoint — CAT counts are `/runs/{id}/artifacts`'s concern; a job's latest log line arrives only via `job.log` SSE, never a REST field. |

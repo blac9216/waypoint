@@ -316,6 +316,228 @@ public sealed class RunSecretScanRunTests : IAsyncLifetime
 		Assert.Equal(canarySecret, decryptedAgain!.Secret);
 	}
 
+	/// <summary>
+	/// Issue #586 AC "Multiple ad hoc credentials can coexist in one run without
+	/// cross-target/purpose access": two vsphere targets, each with its own inline
+	/// vsphere-api ad hoc credential, land as two SEPARATE run_secrets rows (not one
+	/// shared row) and decrypt-audit proves target A's job decrypts only target A's
+	/// canary, never target B's -- the least-privilege AC, not merely "both exist".
+	/// Also proves neither canary ever appears anywhere in the clear (payload, response,
+	/// job_events, audit_log.detail, jobs.credential_id) -- the same canary-proof
+	/// discipline as <see cref="CreateScanRun_WithRunSecret_NeverPersistedInsecurely_CanaryProof"/>,
+	/// extended to the per-target/per-purpose shape.
+	/// </summary>
+	[Fact]
+	public async Task CreateScanRun_WithAdHocCredentials_MultipleTargets_CoexistWithoutCrossAccess()
+	{
+		const string canaryA = "invented-adhoc-target-a-8f3e"; // gitleaks:allow — invented test canary, asserted absent from every persistence surface
+		const string canaryB = "invented-adhoc-target-b-1c9d"; // gitleaks:allow — invented test canary, asserted absent from every persistence surface
+		const string usernameA = "adhoc-a@example.internal";
+		const string usernameB = "adhoc-b@example.internal";
+
+		Guid siteId = await CreateSiteAsync("adhoc-multi-site");
+		Guid targetA = await CreateTargetAsync(siteId, "vsphere", "vcsa-a", """{"host":"vcsa-a.example.internal"}""");
+		Guid targetB = await CreateTargetAsync(siteId, "vsphere", "vcsa-b", """{"host":"vcsa-b.example.internal"}""");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Operator", new
+		{
+			run_type = "scan",
+			scope = JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId }),
+			ad_hoc_credentials = new[]
+			{
+				new { target_id = targetA, purpose = "vsphere-api", username = usernameA, secret = canaryA },
+				new { target_id = targetB, purpose = "vsphere-api", username = usernameB, secret = canaryB },
+			},
+		});
+
+		string responseBody = await response.Content.ReadAsStringAsync();
+		Assert.True(response.StatusCode == HttpStatusCode.Accepted, $"expected 202, got {(int)response.StatusCode}: {responseBody}");
+		Assert.DoesNotContain(canaryA, responseBody, StringComparison.Ordinal);
+		Assert.DoesNotContain(canaryB, responseBody, StringComparison.Ordinal);
+
+		using JsonDocument created = JsonDocument.Parse(responseBody);
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		HttpResponseMessage jobsResponse = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/jobs", "Viewer", body: null);
+		string jobsBody = await jobsResponse.Content.ReadAsStringAsync();
+		Assert.DoesNotContain(canaryA, jobsBody, StringComparison.Ordinal);
+		Assert.DoesNotContain(canaryB, jobsBody, StringComparison.Ordinal);
+
+		// Both targets are freshly-discovered vsphere targets, so each also gets an
+		// auto-queued "discover" job (issue #259) sharing its target_id with the "scan"
+		// job -- filter to scan jobs only, or ToDictionary would collide on target_id.
+		using JsonDocument jobs = JsonDocument.Parse(jobsBody);
+		Dictionary<Guid, Guid> jobIdByTarget = jobs.RootElement.EnumerateArray()
+			.Where(row => row.GetProperty("job_type").GetString() == "scan")
+			.ToDictionary(row => row.GetProperty("target_id").GetGuid(), row => row.GetProperty("id").GetGuid());
+		Assert.Equal(2, jobIdByTarget.Count);
+		Guid jobA = jobIdByTarget[targetA];
+		Guid jobB = jobIdByTarget[targetB];
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// jobs.credential_id stays NULL for both -- the default (execution) purpose
+		// resolved ad hoc, which has no legacy-column representation.
+		await using (NpgsqlCommand jobRow = new("SELECT credential_id, payload::text FROM jobs WHERE id = ANY($1)", connection))
+		{
+			jobRow.Parameters.AddWithValue(new[] { jobA, jobB });
+			await using NpgsqlDataReader reader = await jobRow.ExecuteReaderAsync();
+			while (await reader.ReadAsync())
+			{
+				Assert.True(reader.IsDBNull(0), "an ad hoc-resolved purpose must leave jobs.credential_id NULL.");
+				Assert.DoesNotContain(canaryA, reader.GetString(1), StringComparison.Ordinal);
+				Assert.DoesNotContain(canaryB, reader.GetString(1), StringComparison.Ordinal);
+			}
+		}
+
+		await AssertNoCanaryAsync(connection, "SELECT count(*) FROM jobs WHERE payload::text LIKE '%' || $1 || '%' OR note LIKE '%' || $1 || '%'", canaryA);
+		await AssertNoCanaryAsync(connection, "SELECT count(*) FROM jobs WHERE payload::text LIKE '%' || $1 || '%' OR note LIKE '%' || $1 || '%'", canaryB);
+		await AssertNoCanaryAsync(connection, "SELECT count(*) FROM job_events WHERE payload::text LIKE '%' || $1 || '%'", canaryA);
+		await AssertNoCanaryAsync(connection, "SELECT count(*) FROM audit_log WHERE detail::text LIKE '%' || $1 || '%'", canaryA);
+
+		// Two SEPARATE run_secrets rows, each scoped to its own target -- not one shared
+		// row (the legacy flat shape) and not collapsed into a single row.
+		await using (NpgsqlCommand runSecretCount = new("SELECT count(*) FROM run_secrets WHERE run_id = $1", connection))
+		{
+			runSecretCount.Parameters.AddWithValue(runId);
+			Assert.Equal(2L, (long)(await runSecretCount.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand ciphertextCheck = new("SELECT encode(ciphertext, 'hex') FROM run_secrets WHERE run_id = $1", connection))
+		{
+			ciphertextCheck.Parameters.AddWithValue(runId);
+			await using NpgsqlDataReader reader = await ciphertextCheck.ExecuteReaderAsync();
+			while (await reader.ReadAsync())
+			{
+				string hex = reader.GetString(0);
+				Assert.DoesNotContain(canaryA, hex, StringComparison.OrdinalIgnoreCase);
+				Assert.DoesNotContain(canaryB, hex, StringComparison.OrdinalIgnoreCase);
+			}
+		}
+
+		// Least-privilege proof (the AC's core claim): target A's job decrypts ONLY
+		// target A's canary via its own (target, purpose) key, never target B's, and
+		// vice versa.
+		IRunSecretStore store = _factory.Services.GetRequiredService<IRunSecretStore>();
+		using (DecryptedRunSecret? decryptedA = await store.DecryptAsync(
+			runId, RunSecretKey.For(targetA, CredentialPurposes.VSphereApi), jobA, "runner-under-test", CancellationToken.None))
+		{
+			Assert.NotNull(decryptedA);
+			Assert.Equal(usernameA, decryptedA!.Username);
+			Assert.Equal(canaryA, decryptedA.Secret);
+		}
+
+		using (DecryptedRunSecret? decryptedB = await store.DecryptAsync(
+			runId, RunSecretKey.For(targetB, CredentialPurposes.VSphereApi), jobB, "runner-under-test", CancellationToken.None))
+		{
+			Assert.NotNull(decryptedB);
+			Assert.Equal(usernameB, decryptedB!.Username);
+			Assert.Equal(canaryB, decryptedB.Secret);
+		}
+
+		// Cross-target decrypt: target A's key must never resolve target B's secret.
+		using (DecryptedRunSecret? crossDecrypt = await store.DecryptAsync(
+			runId, RunSecretKey.For(targetB, CredentialPurposes.VSphereApi), jobA, "runner-under-test", CancellationToken.None))
+		{
+			Assert.NotNull(crossDecrypt);
+			Assert.NotEqual(canaryA, crossDecrypt!.Secret);
+			Assert.Equal(canaryB, crossDecrypt.Secret);
+		}
+
+		foreach (CapturedLogEntry entry in _factory.StoreLogger.Entries)
+		{
+			Assert.DoesNotContain(canaryA, entry.Message, StringComparison.Ordinal);
+			Assert.DoesNotContain(canaryB, entry.Message, StringComparison.Ordinal);
+		}
+	}
+
+	/// <summary>Issue #586: same Operator+ floor as the legacy flat <c>credential</c> tier.</summary>
+	[Fact]
+	public async Task CreateScanRun_WithAdHocCredentials_BelowOperatorRole_Returns403()
+	{
+		Guid siteId = await CreateSiteAsync("adhoc-purpose-role-site");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber", new
+		{
+			run_type = "scan",
+			scope = JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId }),
+			ad_hoc_credentials = new[] { new { target_id = targetId, purpose = "vsphere-api", username = "x@example.internal", secret = "not-a-real-secret" } },
+		});
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand count = new("SELECT count(*) FROM runs", connection);
+		Assert.Equal(0L, (long)(await count.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>Issue #586: a duplicate (target_id, purpose) pair within ad_hoc_credentials is a 400, and creates nothing.</summary>
+	[Fact]
+	public async Task CreateScanRun_WithAdHocCredentials_DuplicatePair_Returns400()
+	{
+		Guid siteId = await CreateSiteAsync("adhoc-dup-site");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Operator", new
+		{
+			run_type = "scan",
+			scope = JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId }),
+			ad_hoc_credentials = new[]
+			{
+				new { target_id = targetId, purpose = "vsphere-api", username = "first@example.internal", secret = "first-secret-value" },
+				new { target_id = targetId, purpose = "vsphere-api", username = "second@example.internal", secret = "second-secret-value" },
+			},
+		});
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand count = new("SELECT count(*) FROM runs", connection);
+		Assert.Equal(0L, (long)(await count.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>Issue #586: the same (target_id, purpose) pair named by both ad_hoc_credentials and credential_overrides is a 400 -- neither tier may silently win.</summary>
+	[Fact]
+	public async Task CreateScanRun_WithAdHocCredentials_OverlappingCredentialOverride_Returns400()
+	{
+		Guid siteId = await CreateSiteAsync("adhoc-overlap-site");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Operator", new
+		{
+			run_type = "scan",
+			scope = JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId }),
+			ad_hoc_credentials = new[] { new { target_id = targetId, purpose = "vsphere-api", username = "x@example.internal", secret = "not-a-real-secret" } },
+			credential_overrides = new[] { new { target_id = targetId, purpose = "vsphere-api", credential_id = Guid.NewGuid() } },
+		});
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	/// <summary>Issue #586: ad_hoc_credentials and the flat legacy credential tier are alternative ways to supply ad hoc secrets -- combining them is a 400.</summary>
+	[Fact]
+	public async Task CreateScanRun_WithAdHocCredentialsAndInlineCredential_Returns400()
+	{
+		Guid siteId = await CreateSiteAsync("adhoc-mixed-tier-site");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Operator", new
+		{
+			run_type = "scan",
+			scope = JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId }),
+			credential = new { kind = "personal", username = "flat@example.internal", secret = "not-a-real-secret" },
+			ad_hoc_credentials = new[] { new { target_id = targetId, purpose = "vsphere-api", username = "x@example.internal", secret = "not-a-real-secret-2" } },
+		});
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
 	[Fact]
 	public async Task CreateScanRun_WithRunSecret_BelowOperatorRole_Returns403()
 	{
