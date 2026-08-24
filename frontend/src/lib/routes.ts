@@ -42,13 +42,13 @@ export const ROUTES: RouteDef[] = [
 	// operational projection, not scoped to Compliance — it sits above the
 	// COMPLIANCE nav group in LeftRail.tsx's NAV_GROUPS, not inside it.
 	{ key: "live-jobs", path: "/live-jobs", title: "Live Jobs", requiredRole: "Viewer" },
-	// Deep-link compat only (issue #590 AC "old scan Live Run route
-	// redirects... for deep-link compat"): no nav entry, no ROUTES-driven
-	// screen render — App.tsx's LiveRunRedirect rewrites this path (and its
-	// `?run=` query) to /live-jobs before anything mounts. Kept in ROUTES so
-	// `routeForPath("/live-run")` still resolves (role/mode guard needs a
-	// real RouteDef to evaluate) rather than falling through to 404-like
-	// DEFAULT_ROUTE handling.
+	// Restored by issue #707 (epic #706): the dedicated compliance scan/
+	// remediate monitoring console (three layouts, stage board, run
+	// controls). Issue #693 had reduced this to a redirect to /live-jobs on
+	// the premise that #591's generic renderer covered scan detail — #704/
+	// #705 found that premise wrong (no controls, no board, no layouts). No
+	// nav entry (same as before): reached via Start-a-Scan, the global Live
+	// Jobs workspace's scan/remediate rows, and old bookmarked `?run=` links.
 	{ key: "live-run", path: "/live-run", title: "Live Run", requiredRole: "Viewer" },
 	{ key: "start-scan", path: "/scan/new", title: "Start a Scan", requiredRole: "Cyber" },
 	// Renamed from "Results & History" (issue #591): the screen is filtered to

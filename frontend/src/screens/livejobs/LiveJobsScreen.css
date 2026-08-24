@@ -192,6 +192,14 @@
 	font-size: 12px;
 }
 
+/* Issue #707: the console link renders as its own emphasized row, distinct
+   from the plain-text domain-link row above it (e.g. Results). */
+.live-jobs-detail__primary-link {
+	margin: 0 0 10px;
+	font-size: 13px;
+	font-weight: 600;
+}
+
 .live-jobs-detail__facts {
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

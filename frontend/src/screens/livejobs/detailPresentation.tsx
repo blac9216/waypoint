@@ -44,12 +44,20 @@ export function TypeDetailShell({
 	kicker,
 	facts,
 	domainLink,
+	primaryLink,
 	note,
 }: JobDetailProps & {
 	/** Short label naming the domain this renderer belongs to, e.g. "Compliance scan", "Discovery". */
 	kicker: string;
 	facts?: ReactNode;
 	domainLink?: { to: string; label: string };
+	/** Issue #707: a second, visually prominent link rendered above
+	 * `domainLink` — for scan/remediate, the restored Live Run console (the
+	 * operational monitoring surface: layouts, board, controls), distinct
+	 * from `domainLink`'s Results screen (the outcome/artifact surface). Kept
+	 * as its own prop rather than folded into `domainLink` so the two
+	 * destinations (monitor vs. results) stay visibly distinct. */
+	primaryLink?: { to: string; label: string };
 	/** Optional freeform note below the facts — e.g. the HadErrors-is-advisory caveat (issue #612). */
 	note?: ReactNode;
 }) {
@@ -58,6 +66,11 @@ export function TypeDetailShell({
 			<div className="live-jobs-detail__kicker mono">{kicker}</div>
 			{facts && <dl className="live-jobs-detail__facts">{facts}</dl>}
 			{note && <p className="live-jobs-detail__note">{note}</p>}
+			{primaryLink && (
+				<p className="live-jobs-detail__primary-link">
+					<Link to={primaryLink.to}>{primaryLink.label} →</Link>
+				</p>
+			)}
 			{domainLink && (
 				<p className="live-jobs-detail__domain-link">
 					<Link to={domainLink.to}>{domainLink.label} →</Link>

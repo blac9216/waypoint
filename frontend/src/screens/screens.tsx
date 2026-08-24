@@ -6,6 +6,7 @@ import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./config
 import { DashboardScreen as DashboardAggregateScreen } from "./dashboard/DashboardScreen";
 import { LibraryScreen as RepositoryLibraryScreen } from "./library/LibraryScreen";
 import { LiveJobsRoute } from "./livejobs/LiveJobsScreen";
+import { LiveRunRoute } from "./liverun/LiveRunScreen";
 import { ResultsScreen as ResultsHistoryScreen } from "./results/ResultsScreen";
 import { StartScanScreen as StartScanWizardScreen } from "./startscan/StartScanScreen";
 
@@ -15,6 +16,10 @@ export function DashboardScreen() {
 
 export function LiveJobsScreen() {
 	return <LiveJobsRoute />;
+}
+
+export function LiveRunScreen() {
+	return <LiveRunRoute />;
 }
 
 export function StartScanScreen() {

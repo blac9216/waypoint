@@ -9,17 +9,30 @@
  * compliance domain: `ArtifactsTable`/`AttestationsPanel`/`UploadStatusPanel`
  * (screens/results/*) already render that, run-scoped, once a scan's
  * artifacts exist — re-fetching and duplicating those tables at job-scope
- * here would fork the same data through two code paths. Instead, the scan
- * and remediate renderers show the same lifecycle/stage/log facts every job
- * gets (via `TypeDetailShell` -> `GenericJobDetail`) plus a link to the
- * renamed Compliance Scan Results screen (issue #591) for the owning run,
- * which is where the real per-target artifacts/attestations/CKL export live.
+ * here would fork the same data through two code paths. The scan and
+ * remediate renderers show the same lifecycle/stage/log facts every job
+ * gets (via `TypeDetailShell` -> `GenericJobDetail`) plus two links: the
+ * restored Live Run console (issue #707/epic #706 — the operational
+ * monitoring surface: three layouts, stage board, run controls) as the
+ * prominent `primaryLink`, and the renamed Compliance Scan Results screen
+ * (issue #591) for the owning run's real per-target artifacts/attestations/
+ * CKL export as `domainLink`. This renderer stays a summary, never
+ * duplicating the console inside it — see issue #705's own framing ("this
+ * is a port into the JOB_DETAIL_RENDERERS seam, not a rewrite").
  */
 import { TypeDetailShell, SummaryFact } from "./detailPresentation";
 import type { JobDetailProps } from "./detailRenderers";
 
 function resultsLink(runId: string) {
 	return { to: `/results?run=${encodeURIComponent(runId)}`, label: "View in Compliance Scan Results" };
+}
+
+/** Issue #707: the restored per-run monitoring console — layouts, stage
+ * board, run controls (pause/resume/abort/cancel, blocked-banner
+ * credential swap) — none of which this generic-workspace renderer
+ * duplicates. */
+function liveRunLink(runId: string) {
+	return { to: `/live-run?run=${encodeURIComponent(runId)}`, label: "Open Live Run console" };
 }
 
 export function ScanJobDetail({ job, group }: JobDetailProps) {
@@ -34,6 +47,7 @@ export function ScanJobDetail({ job, group }: JobDetailProps) {
 					value={`${group.job_count_completed}/${group.job_count} targets complete${group.job_count_failed > 0 ? `, ${group.job_count_failed} failed` : ""}`}
 				/>
 			}
+			primaryLink={liveRunLink(group.run_id)}
 			domainLink={resultsLink(group.run_id)}
 		/>
 	);
@@ -56,6 +70,7 @@ export function RemediateJobDetail({ job, group }: JobDetailProps) {
 					value={`${group.job_count_completed}/${group.job_count} targets complete${group.job_count_failed > 0 ? `, ${group.job_count_failed} failed` : ""}`}
 				/>
 			}
+			primaryLink={liveRunLink(group.run_id)}
 			domainLink={resultsLink(group.run_id)}
 		/>
 	);

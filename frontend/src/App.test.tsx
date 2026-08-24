@@ -601,32 +601,97 @@ describe("App", () => {
 	});
 
 	/**
-	 * Issue #693: the old scan-only Live Run screen cluster
-	 * (`screens/liverun/*`) was deleted once #591 gave scan/remediate jobs a
-	 * type-specific Live Jobs renderer — but the deep-link redirect itself
-	 * (`App.tsx`'s `LiveRunRedirect`, added by #590/#688) must keep working
-	 * for old bookmarked/shared `/live-run` links. Covers both the bare path
-	 * and the `?run=<id>` carry-forward the redirect's own doc comment
-	 * promises.
+	 * Issue #707 (epic #706): `/live-run` is the restored console again, not a
+	 * redirect to `/live-jobs` (issue #693's regression — see #704/#705). A
+	 * bare `/live-run` (no `?run=`) renders the console's own "No run
+	 * selected" empty state rather than bouncing anywhere; `?run=<id>` mounts
+	 * the console against that run. Old bookmarked/shared `/live-run?run=`
+	 * links therefore keep working natively, without ever touching
+	 * `/live-jobs`.
 	 */
-	describe("/live-run deep-link redirect (issue #693: screen deleted, redirect stays)", () => {
-		it("redirects a bare /live-run to /live-jobs", async () => {
+	describe("/live-run route (issue #707: restored console, no longer a redirect)", () => {
+		it("renders the console's empty state for a bare /live-run, without redirecting", async () => {
 			window.history.pushState(null, "", "/live-run");
 			installChromeFetchMock("Admin");
 			render(<App />);
 			await signIn();
 
-			await waitFor(() => expect(window.location.pathname).toBe("/live-jobs"));
+			await waitFor(() => expect(screen.getByText("No run selected.")).toBeInTheDocument());
+			expect(window.location.pathname).toBe("/live-run");
 			expect(window.location.search).toBe("");
 		});
 
-		it("carries a ?run=<id> query forward to /live-jobs", async () => {
+		it("mounts the console for /live-run?run=<id> without redirecting to /live-jobs", async () => {
 			window.history.pushState(null, "", "/live-run?run=run-123");
-			installChromeFetchMock("Admin");
+			globalThis.fetch = vi.fn(async (url: string) => {
+				if (url === "/api/v1/runs/run-123") {
+					return jsonResponse({
+						id: "run-123",
+						run_type: "scan",
+						state: "running",
+						paused: false,
+						blocked: false,
+						blocked_reason: null,
+						scope: "{}",
+						credential_id: "cred-1",
+						credential_name: "svc-stig-scan",
+						initiated_by: "j.moreno",
+						schedule_id: null,
+						created_at: "2026-08-23T00:00:00Z",
+						started_at: "2026-08-23T00:00:01Z",
+						completed_at: null,
+						job_count: 1,
+						job_count_queued: 0,
+						job_count_running: 1,
+						job_count_completed: 0,
+						job_count_failed: 0,
+						job_count_blocked: 0,
+					});
+				}
+				if (url === "/api/v1/runs/run-123/jobs") {
+					return jsonResponse([
+						{
+							id: "job-1",
+							run_id: "run-123",
+							job_type: "scan",
+							target_id: "target-1",
+							target_name: "esxi-01.example.internal",
+							state: "running",
+							stage: null,
+							priority: 0,
+							attempt_count: 1,
+							created_at: "2026-08-23T00:00:00Z",
+							started_at: "2026-08-23T00:00:01Z",
+							finished_at: null,
+						},
+					]);
+				}
+				if (url === "/api/v1/auth/config") {
+					return jsonResponse({ local_auth_enabled: true, oidc_authority: "/auth/realms/waypoint", oidc_client_id: "waypoint-frontend" });
+				}
+				if (url === "/api/v1/auth/login") {
+					return jsonResponse({ token: "tok-1", role: "Admin", expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
+				}
+				if (url === "/api/v1/auth/me") {
+					return jsonResponse({ username: "j.moreno", role: "Admin" });
+				}
+				if (url === "/api/v1/system") {
+					return jsonResponse({ version: "0.1.0-dev", build: "local", mode: "connected", update_available: null });
+				}
+				if (url === "/api/v1/stigman") {
+					return jsonResponse({ error: { code: "not_found", message: "No global STIG Manager connection is configured." } }, 404);
+				}
+				if (url.startsWith("/api/v1/events") || url.startsWith("/api/v1/runs/run-123/events")) {
+					return new Promise(() => {});
+				}
+				return jsonResponse({ error: { code: "not_found", message: "unhandled in test" } }, 404);
+			}) as unknown as typeof fetch;
+
 			render(<App />);
 			await signIn();
 
-			await waitFor(() => expect(window.location.pathname).toBe("/live-jobs"));
+			await waitFor(() => expect(screen.getByText("run-123")).toBeInTheDocument());
+			expect(window.location.pathname).toBe("/live-run");
 			expect(window.location.search).toBe("?run=run-123");
 		});
 	});
