@@ -82,7 +82,7 @@ export function RunHistoryDeletionPanel({ run }: RunHistoryDeletionPanelProps) {
 			{confirming && (
 				<div className="purge-panel__confirm" role="group" aria-label="Confirm history deletion">
 					<div className="purge-panel__confirm-warning">
-						This permanently deletes this run's operational history record (its visibility in Live Jobs/history). The run's
+						This permanently deletes this run's operational history record (its visibility in Jobs/history). The run's
 						compliance results have already been purged separately. This cannot be undone.
 					</div>
 					<label className="purge-panel__confirm-label">

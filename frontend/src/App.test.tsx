@@ -264,8 +264,9 @@ describe("App", () => {
 
 		// Left rail: nav groups are present with their items. Jobs (renamed from
 		// "Live Jobs" by issue #708 once it gained a History mode) is top-level
-		// (issue #590, ADR-0019) — it renders above COMPLIANCE, not inside it;
-		// the old scan-only Live Run route no longer has a nav entry.
+		// (issue #590, ADR-0019) — it renders above COMPLIANCE, not inside it.
+		// Live Run (the compliance scan/remediate console) has a COMPLIANCE nav
+		// entry again as of issue #711.
 		expect(screen.getByText("Jobs")).toBeInTheDocument();
 		expect(screen.getByText("COMPLIANCE")).toBeInTheDocument();
 		expect(screen.getByText("Configuration")).toBeInTheDocument();

@@ -50,9 +50,10 @@ export const ROUTES: RouteDef[] = [
 	// remediate monitoring console (three layouts, stage board, run
 	// controls). Issue #693 had reduced this to a redirect to /live-jobs on
 	// the premise that #591's generic renderer covered scan detail — #704/
-	// #705 found that premise wrong (no controls, no board, no layouts). No
-	// nav entry (same as before): reached via Start-a-Scan, the global Jobs
-	// workspace's scan/remediate rows, and old bookmarked `?run=` links.
+	// #705 found that premise wrong (no controls, no board, no layouts). Now
+	// has a nav entry (issue #711): the COMPLIANCE group in LeftRail.tsx, in
+	// addition to Start-a-Scan, the global Jobs workspace's scan/remediate
+	// rows, and old bookmarked `?run=` links.
 	{ key: "live-run", path: "/live-run", title: "Live Run", requiredRole: "Viewer" },
 	{ key: "start-scan", path: "/scan/new", title: "Start a Scan", requiredRole: "Cyber" },
 	// Renamed from "Results & History" (issue #591): the screen is filtered to
