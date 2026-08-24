@@ -361,9 +361,10 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	}
 
 	/// <summary>
-	/// Issue #434 AC "terminal completion deletes the secret": the run-scoped
-	/// encrypted secret (<c>run_secrets</c>, <see cref="Waypoint.Core.Secrets.IRunSecretStore"/>)
-	/// is deleted in the SAME transaction that flips the run to a terminal state --
+	/// Issue #434 AC "terminal completion deletes the secret", extended by issue #586 to
+	/// the per-target/per-purpose shape: the run-scoped encrypted secret(s)
+	/// (<c>run_secrets</c>, <see cref="Waypoint.Core.Secrets.IRunSecretStore"/>) are
+	/// deleted in the SAME transaction that flips the run to a terminal state --
 	/// <see cref="TryCompleteRunAsync"/> above (completed/completed_with_failures) and
 	/// <see cref="AbortRunAsync"/> below (aborted) -- rather than as a follow-up call
 	/// after commit. That is what makes this race-safe against a concurrent job claim:
@@ -377,29 +378,42 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	/// cannot be composed into a transaction this method does not own. A no-op (zero
 	/// rows deleted) is the common case -- most jobs use a stored credential and have no
 	/// run secret at all -- so no audit row is written unless one was actually deleted.
+	/// This DELETE is unconditionally <c>run_id</c>-scoped (never target/purpose-scoped),
+	/// so it covers BOTH the pre-#586 legacy shape (at most one row) and the #586
+	/// per-target/per-purpose shape (any number of rows) with the same statement -- issue
+	/// #586's migration/cleanup design point. Issue #586 also requires the deletion to
+	/// stay individually attributed (one audit row per row actually deleted, each
+	/// carrying its own target/purpose), so the DELETE is a <c>RETURNING</c> and the
+	/// audit write is one INSERT per returned row rather than a single row for the whole
+	/// run -- mirroring <see cref="Waypoint.Infrastructure.Secrets.RunSecretStore.DeleteAsync"/>'s
+	/// own per-row audit loop.
 	/// </summary>
 	private static async Task DeleteRunSecretIfPresentAsync(
 		Guid runId, NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
 	{
-		int deleted;
-		await using (NpgsqlCommand delete = new("DELETE FROM run_secrets WHERE run_id = $1", connection, transaction))
+		List<(Guid? TargetId, string Purpose)> deletedKeys = [];
+		await using (NpgsqlCommand delete = new(
+			"DELETE FROM run_secrets WHERE run_id = $1 RETURNING target_id, purpose", connection, transaction))
 		{
 			delete.Parameters.AddWithValue(runId);
-			deleted = await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			await using NpgsqlDataReader reader = await delete.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				deletedKeys.Add((reader.IsDBNull(0) ? null : reader.GetGuid(0), reader.GetString(1)));
+			}
 		}
 
-		if (deleted == 0)
+		foreach ((Guid? targetId, string purpose) in deletedKeys)
 		{
-			return;
+			await using NpgsqlCommand audit = new(
+				"""
+				INSERT INTO audit_log (event_type, actor, credential_id, job_id, run_id, detail)
+				VALUES ('secret.run_deleted', 'system:run-completion', NULL, NULL, $1, $2::jsonb)
+				""", connection, transaction);
+			audit.Parameters.AddWithValue(runId);
+			audit.Parameters.AddWithValue(System.Text.Json.JsonSerializer.Serialize(new { target_id = targetId, purpose }));
+			await audit.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
-
-		await using NpgsqlCommand audit = new(
-			"""
-			INSERT INTO audit_log (event_type, actor, credential_id, job_id, run_id, detail)
-			VALUES ('secret.run_deleted', 'system:run-completion', NULL, NULL, $1, '{}'::jsonb)
-			""", connection, transaction);
-		audit.Parameters.AddWithValue(runId);
-		await audit.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	/// <summary>
@@ -728,11 +742,15 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			foreach (JobCredentialBindingSpec bindingSpec in spec.CredentialBindings ?? [])
 			{
 				await using NpgsqlCommand insertBinding = new(
-					"INSERT INTO job_credential_bindings (job_id, purpose, credential_id) VALUES ($1, $2, $3)",
+					"INSERT INTO job_credential_bindings (job_id, purpose, credential_id, is_run_secret) VALUES ($1, $2, $3, $4)",
 					connection, transaction);
 				insertBinding.Parameters.AddWithValue(jobId);
 				insertBinding.Parameters.AddWithValue(bindingSpec.Purpose);
-				insertBinding.Parameters.AddWithValue(bindingSpec.CredentialId);
+				// Issue #586: an ad hoc purpose (IsRunSecret) never names a credential row --
+				// CredentialId is null and the schema's run_secrets_binding_shape_check
+				// backstops that at the database layer too.
+				insertBinding.Parameters.AddWithValue((object?)bindingSpec.CredentialId ?? DBNull.Value);
+				insertBinding.Parameters.AddWithValue(bindingSpec.IsRunSecret);
 				await insertBinding.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 			}
 		}
@@ -1024,7 +1042,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT job_id, purpose, credential_id, credential_name, credential_type, credential_username
+			SELECT job_id, purpose, credential_id, credential_name, credential_type, credential_username, is_run_secret
 			FROM job_credential_bindings
 			WHERE job_id = $1
 			ORDER BY purpose
@@ -1041,7 +1059,8 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 				CredentialId: reader.IsDBNull(2) ? null : reader.GetGuid(2),
 				CredentialName: reader.IsDBNull(3) ? null : reader.GetString(3),
 				CredentialType: reader.IsDBNull(4) ? null : reader.GetString(4),
-				CredentialUsername: reader.IsDBNull(5) ? null : reader.GetString(5)));
+				CredentialUsername: reader.IsDBNull(5) ? null : reader.GetString(5),
+				IsRunSecret: reader.GetBoolean(6)));
 		}
 
 		return bindings;

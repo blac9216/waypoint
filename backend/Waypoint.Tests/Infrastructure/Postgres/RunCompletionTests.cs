@@ -271,6 +271,33 @@ public sealed class RunCompletionTests : IAsyncLifetime
 		Assert.Equal(0, await CountAuditRowsAsync(runId, "secret.run_deleted"));
 	}
 
+	/// <summary>
+	/// Issue #586: the unconditional completion-transaction delete
+	/// (<c>DeleteRunSecretIfPresentAsync</c>, run_id-scoped, not shape-aware) deletes
+	/// EVERY per-target/per-purpose row a run accumulated, not just one -- proving the
+	/// migration/cleanup design point that the pre-existing delete needs no change to
+	/// cover multiple new-shape rows on the same run.
+	/// </summary>
+	[Fact]
+	public async Task AllJobsSucceed_RunCompletes_DeletesEveryPerTargetPurposeRunSecret()
+	{
+		Guid siteId = await SeedSiteAsync();
+		Guid targetA = await SeedTargetAsync(siteId);
+		Guid targetB = await SeedTargetAsync(siteId);
+		Guid runId = await SeedRunAsync("running");
+		Guid jobA = await InsertJobAsync(runId, JobStates.Running, "worker-a");
+		await InsertTargetedRunSecretAsync(runId, targetA, "vsphere-api");
+		await InsertTargetedRunSecretAsync(runId, targetB, "vsphere-api");
+		Assert.Equal(2, await RunSecretCountAsync(runId));
+
+		bool advanced = await _repository.AdvanceStateAsync(jobA, "worker-a", JobStates.Running, JobStates.Done, null, clearLease: true, CancellationToken.None);
+
+		Assert.True(advanced);
+		Assert.Equal("completed", await GetRunStateAsync(runId));
+		Assert.Equal(0, await RunSecretCountAsync(runId));
+		Assert.Equal(2, await CountAuditRowsAsync(runId, "secret.run_deleted"));
+	}
+
 	/// <summary>Issue #434 AC: abort is also a terminal transition -- AbortRunAsync deletes the run secret too.</summary>
 	[Fact]
 	public async Task AbortRun_DeletesRunSecret()
@@ -314,6 +341,32 @@ public sealed class RunCompletionTests : IAsyncLifetime
 		Assert.True(advanced);
 		Assert.Equal("running", await GetRunStateAsync(runId));
 		Assert.True(await RunSecretExistsAsync(runId));
+		_ = jobB;
+	}
+
+	/// <summary>
+	/// Issue #586: the retry-keeps-rows guarantee holds identically for the new
+	/// per-target/per-purpose shape -- a failed-but-retryable job (one sibling job
+	/// still outstanding) must not lose the OTHER target's ad hoc secret it has not
+	/// even attempted yet.
+	/// </summary>
+	[Fact]
+	public async Task RunWithOutstandingJobs_PerTargetPurposeRunSecretsUntouched()
+	{
+		Guid siteId = await SeedSiteAsync();
+		Guid targetA = await SeedTargetAsync(siteId);
+		Guid targetB = await SeedTargetAsync(siteId);
+		Guid runId = await SeedRunAsync("running");
+		Guid jobA = await InsertJobAsync(runId, JobStates.Running, "worker-a");
+		Guid jobB = await InsertJobAsync(runId, JobStates.Running, "worker-b");
+		await InsertTargetedRunSecretAsync(runId, targetA, "vsphere-api");
+		await InsertTargetedRunSecretAsync(runId, targetB, "vsphere-api");
+
+		bool advanced = await _repository.AdvanceStateAsync(jobA, "worker-a", JobStates.Running, JobStates.Done, null, clearLease: true, CancellationToken.None);
+
+		Assert.True(advanced);
+		Assert.Equal("running", await GetRunStateAsync(runId));
+		Assert.Equal(2, await RunSecretCountAsync(runId));
 		_ = jobB;
 	}
 
@@ -482,6 +535,55 @@ public sealed class RunCompletionTests : IAsyncLifetime
 		await using NpgsqlCommand q = new("SELECT count(*) FROM run_secrets WHERE run_id = $1", c);
 		q.Parameters.AddWithValue(runId);
 		return (long)(await q.ExecuteScalarAsync())! > 0;
+	}
+
+	private async Task<int> RunSecretCountAsync(Guid runId)
+	{
+		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
+		await using NpgsqlCommand q = new("SELECT count(*) FROM run_secrets WHERE run_id = $1", c);
+		q.Parameters.AddWithValue(runId);
+		return Convert.ToInt32((long)(await q.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// Issue #586: seeds a per-target/per-purpose row directly (migration 0045 shape),
+	/// mirroring <see cref="InsertRunSecretAsync"/>'s legacy-shape helper -- these tests
+	/// only care whether the ROW exists after a completion/abort write.
+	/// </summary>
+	private async Task InsertTargetedRunSecretAsync(Guid runId, Guid targetId, string purpose)
+	{
+		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
+		await using NpgsqlCommand q = new(
+			"""
+			INSERT INTO run_secrets (run_id, target_id, purpose, username, ciphertext, data_key_wrapped, master_key_id, algorithm, expires_at)
+			VALUES ($1, $2, $3, 'placeholder@example.internal', E'\\x00', E'\\x00', 'test-key', 'AES-256-GCM', now() + interval '1 hour')
+			""", c);
+		q.Parameters.AddWithValue(runId);
+		q.Parameters.AddWithValue(targetId);
+		q.Parameters.AddWithValue(purpose);
+		await q.ExecuteNonQueryAsync();
+	}
+
+	private async Task<Guid> SeedTargetAsync(Guid siteId)
+	{
+		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
+		await using NpgsqlCommand q = new(
+			"""
+			INSERT INTO targets (site_id, kind, name, connection, discovery_status)
+			VALUES ($1, 'vsphere', $2, '{"host":"vcsa-01.example.internal"}'::jsonb, 'never_discovered')
+			RETURNING id
+			""", c);
+		q.Parameters.AddWithValue(siteId);
+		q.Parameters.AddWithValue($"run-completion-target-{Guid.NewGuid():N}");
+		return (Guid)(await q.ExecuteScalarAsync())!;
+	}
+
+	private async Task<Guid> SeedSiteAsync()
+	{
+		await using NpgsqlConnection c = new(_fixture.ConnectionString); await c.OpenAsync();
+		await using NpgsqlCommand q = new("INSERT INTO sites (name) VALUES ($1) RETURNING id", c);
+		q.Parameters.AddWithValue($"run-completion-site-{Guid.NewGuid():N}");
+		return (Guid)(await q.ExecuteScalarAsync())!;
 	}
 
 	private async Task<int> CountAuditRowsAsync(Guid runId, string eventType)

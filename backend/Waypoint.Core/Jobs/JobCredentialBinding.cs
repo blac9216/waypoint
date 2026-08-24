@@ -24,15 +24,28 @@ namespace Waypoint.Core.Jobs;
 /// never secret material; decryption happens per claimed job, per purpose, inside the
 /// executing runner (ADR-0014 §6).
 /// </summary>
-public sealed record JobCredentialBindingSpec(string Purpose, Guid CredentialId);
+/// <param name="IsRunSecret">
+/// Issue #586 (epic #582): true when this purpose is satisfied by a per-target/per-purpose
+/// AD HOC credential rather than a saved one -- <paramref name="CredentialId"/> is
+/// <c>null</c> in that case (migration 0045's <c>run_secrets_binding_shape_check</c>
+/// backstop), and the executing runner instead decrypts
+/// <c>run_secrets</c> keyed by <c>(job.RunId, job.TargetId, Purpose)</c>
+/// (<see cref="Waypoint.Core.Secrets.IRunSecretStore"/>, <see cref="Waypoint.Core.Secrets.RunSecretKey.For"/>).
+/// </param>
+public sealed record JobCredentialBindingSpec(string Purpose, Guid? CredentialId, bool IsRunSecret = false);
 
 /// <summary>
 /// A job's persisted per-purpose credential snapshot row (migration 0044), as read by
 /// the executing runner (<see cref="IJobRunnerRepository.GetJobCredentialBindingsAsync"/>).
-/// <see cref="CredentialId"/> is null only after issue #593's terminal-history detach
-/// (the credential was deleted while every reference to it was terminal); the three
-/// attribution fields are the non-secret snapshot captured at that detach, null while
-/// <see cref="CredentialId"/> still names a live credential.
+/// <see cref="CredentialId"/> is null in two cases distinguished by
+/// <see cref="IsRunSecret"/>: an ad hoc purpose (issue #586, <see cref="IsRunSecret"/>
+/// true -- the secret lives in <c>run_secrets</c>, not <c>credentials</c>, and never had a
+/// credential id to begin with), or issue #593's terminal-history detach (the credential
+/// was deleted while every reference to it was terminal, <see cref="IsRunSecret"/> false);
+/// the three attribution fields are the non-secret snapshot captured at THAT detach, null
+/// while <see cref="CredentialId"/> still names a live credential or whenever
+/// <see cref="IsRunSecret"/> is true (an ad hoc purpose was never a <c>credentials</c> row
+/// and so has no name/type/username to snapshot here).
 /// </summary>
 public sealed record JobCredentialBinding(
 	Guid JobId,
@@ -40,4 +53,5 @@ public sealed record JobCredentialBinding(
 	Guid? CredentialId,
 	string? CredentialName,
 	string? CredentialType,
-	string? CredentialUsername);
+	string? CredentialUsername,
+	bool IsRunSecret = false);

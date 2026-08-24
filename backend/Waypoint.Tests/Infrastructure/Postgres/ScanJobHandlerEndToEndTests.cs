@@ -815,6 +815,65 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		await AssertCanaryNeverLeakedAsync(runSecretValue, credentialId: null);
 	}
 
+	/// <summary>
+	/// Issue #586 (epic #582): a job carrying an AD HOC per-purpose
+	/// <c>job_credential_bindings</c> snapshot (<c>IsRunSecret</c> true, no
+	/// <c>credential_id</c>) decrypts the target's own <c>run_secrets</c> row -- keyed by
+	/// <c>RunSecretKey.For(targetId, "vsphere-api")</c> -- and never falls back to the
+	/// target's STORED credential, even though this target has one (proven via the
+	/// canary machinery, mirroring <see cref="RunSecret_UsedWhenJobCredentialIdIsNull_NeverFallsBackToStoredCredential"/>
+	/// for the new per-purpose shape). Terminal run completion deletes the per-target
+	/// row exactly as it deletes the legacy flat one -- the unconditional
+	/// completion-transaction delete (<c>DeleteRunSecretIfPresentAsync</c>) is
+	/// run_id-scoped, so it covers this shape with no code change (issue #586's
+	/// migration/cleanup design point).
+	/// </summary>
+	[Fact]
+	public async Task AdHocPurposeRunSecret_UsedWhenSnapshotIsRunSecret_NeverFallsBackToStoredCredential()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-unused-stored-secret-586", username: "stored-user@example.internal");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		const string adHocSecretValue = "invented-adhoc-purpose-canary-7b2f"; // gitleaks:allow — invented test canary, asserted never to reach the stub or any persistence surface
+		await _runSecrets.StoreAsync(
+			runId, RunSecretKey.For(targetId, CredentialPurposes.VSphereApi),
+			new RunSecretCredential("adhoc-purpose-user@example.internal", adHocSecretValue), "tester", TimeSpan.FromHours(1), CancellationToken.None);
+
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec(
+				"scan", 3, TargetId: targetId, Payload: payload,
+				CredentialBindings: [new JobCredentialBindingSpec(CredentialPurposes.VSphereApi, CredentialId: null, IsRunSecret: true)])],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		// Terminal run completion deletes ALL of the run's run_secrets rows, including
+		// this per-target/per-purpose one -- proving the unconditional
+		// DeleteRunSecretIfPresentAsync delete (run_id-scoped, not shape-aware) covers
+		// the new shape with no code change.
+		using DecryptedRunSecret? afterTerminal = await _runSecrets.DecryptAsync(
+			runId, RunSecretKey.For(targetId, CredentialPurposes.VSphereApi), jobIds[0], "test-verify", CancellationToken.None);
+		Assert.Null(afterTerminal);
+
+		await AssertCanaryNeverLeakedAsync(adHocSecretValue, credentialId: null);
+	}
+
 	/// <summary>No credential_id AND no run_secrets row (never registered) fails auth-style, never a stored-credential fallback.</summary>
 	[Fact]
 	public async Task NoCredentialIdAndNoRunSecret_FailsCleanly()

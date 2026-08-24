@@ -58,6 +58,23 @@ the secret durable enough to survive the handoff between API and runner. It is n
 passphrase-wrapped *long-lived* personal credential store; that convenience feature
 remains explicitly out of v1.
 
+Issue #586 (epic #582) re-keyed `run_secrets` from one row per run to one row per
+`(run, target, purpose)` (migration 0045), so a heterogeneous multi-target scan can
+carry a distinct ad hoc credential per target/purpose without one target's operator
+ever being able to decrypt another's. Every decrypt is scoped to exactly the (run,
+target, purpose) key a claimed job's own `job_credential_bindings` snapshot names
+(never a sibling row on the same run) and audited with that full attribution
+(`run_id`/`job_id` plus `target_id`/`purpose` in `audit_log.detail`) — the same
+least-privilege, fail-closed-audit discipline the legacy one-row-per-run shape already
+had, generalized to N keys. Cleanup is unchanged in mechanism: the same unconditional
+per-terminal-completion `DELETE FROM run_secrets WHERE run_id = $1`
+(`JobQueueRepository.DeleteRunSecretIfPresentAsync`) removes every row for the run
+regardless of shape, and the expiry sweep (`RunSecretStore.DeleteExpiredAsync`) treats
+`expires_at` as a per-row property, so one target's ad hoc credential expiring does not
+touch a sibling target's still-active one. The flat legacy shape (one row, `target_id
+IS NULL`) remains fully supported for wire compat — the inline `credential` field on
+`POST /runs` still maps to it.
+
 ## Authorization gating vs cryptographic tying
 
 Keycloak provides **assertions, not key material** — OIDC tokens cannot make
