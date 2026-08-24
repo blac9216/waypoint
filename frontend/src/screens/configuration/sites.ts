@@ -55,6 +55,21 @@ export interface Site {
 	updated_at: string;
 }
 
+/**
+ * One purpose → credential binding on a target (issue #584, ADR-0021
+ * docs/adr/0021-credential-purpose-matrix.md). `credential_name`/
+ * `credential_type` are display-only enrichment the backend attaches (never
+ * secret material) — `credential_ref` is the only field ever written back.
+ */
+export interface TargetCredentialBinding {
+	purpose: string;
+	credential_ref: string;
+	credential_name: string | null;
+	credential_type: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
 export interface Target {
 	id: string;
 	site_id: string;
@@ -62,11 +77,14 @@ export interface Target {
 	name: string;
 	/** Raw JSON text, e.g. `{"host":"vcsa-01.example.internal"}` — see module doc. */
 	connection: string;
+	/** DEPRECATED (issue #584): mirrors the target kind's default-purpose binding in `bindings` — see TargetContracts.cs's doc comment. Still round-tripped; prefer `bindings`. */
 	credential_ref: string | null;
 	discovery_status: DiscoveryStatus | string;
 	last_refreshed: string | null;
 	created_at: string;
 	updated_at: string;
+	/** Issue #584: purpose-specific credential bindings — see `TargetCredentialBinding`. Always present (possibly empty) from #584 onward. */
+	bindings: TargetCredentialBinding[];
 }
 
 /** The one connection field the UI (and the backend's only documented shape) uses. */
@@ -138,6 +156,16 @@ export function deleteTarget(id: string): Promise<void> {
 	return apiDelete<void>(`/targets/${id}`);
 }
 
+/** Issue #584: sets (creates or replaces/overrides) the credential bound to one purpose on a target. Returns the updated target (including the full `bindings` array) so the caller can refresh from one response. */
+export function setTargetCredentialBinding(targetId: string, purpose: string, credentialId: string): Promise<Target> {
+	return apiPut<Target>(`/targets/${targetId}/credential-bindings/${purpose}`, { credential_ref: credentialId });
+}
+
+/** Issue #584: clears (removes) the binding for one purpose on a target, if present. */
+export function clearTargetCredentialBinding(targetId: string, purpose: string): Promise<Target> {
+	return apiDelete<Target>(`/targets/${targetId}/credential-bindings/${purpose}`);
+}
+
 /** `DiscoverQueuedResponse` (DiscoveryController.cs) — `POST /targets/{id}/discover`.
  * Admin-only server-side (`RequireAdminRole`); queues a one-job `discover`
  * run and returns both ids so the caller can poll/link to it. */
@@ -175,20 +203,16 @@ export function isTerminalRunState(state: string): boolean {
 	return state === "completed" || state === "completed_with_failures" || state === "aborted";
 }
 
-/** `/credentials` — id/name only, per docs/api-contract.md's data ledger
- * ("`/credentials` (names only)"). The full response carries more (type,
- * health, ...) but the picker only ever reads `id`/`name`; it must never
- * request or render secret material (there is none to request — the
+/** `/credentials` — id/name/type, per docs/api-contract.md's data ledger
+ * ("`/credentials` (names only)"). The full response carries more (health,
+ * ...) but the picker only ever reads `id`/`name`/`credential_type` (the
+ * last purely to filter purpose-compatible options, issue #584); it must
+ * never request or render secret material (there is none to request — the
  * backend's CredentialResponse has no secret field at all). */
 export interface CredentialOption {
 	id: string;
 	name: string;
-}
-
-/** The one wire field this module reads beyond `CredentialOption` purely to
- * filter — never rendered, never carried onto `CredentialOption` itself. */
-interface CredentialOptionSource extends CredentialOption {
-	credential_type?: string;
+	credential_type: string;
 }
 
 /**
@@ -204,10 +228,10 @@ interface CredentialOptionSource extends CredentialOption {
  * new backend contract would add nothing.
  */
 export function fetchCredentialOptions(): Promise<CredentialOption[]> {
-	return apiGet<CredentialOptionSource[]>("/credentials").then((credentials) =>
+	return apiGet<CredentialOption[]>("/credentials").then((credentials) =>
 		credentials
 			.filter((c) => c.credential_type !== "depot-token")
-			.map((c) => ({ id: c.id, name: c.name })),
+			.map((c) => ({ id: c.id, name: c.name, credential_type: c.credential_type })),
 	);
 }
 

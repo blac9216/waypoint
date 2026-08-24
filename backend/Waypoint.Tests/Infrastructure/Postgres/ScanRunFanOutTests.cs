@@ -79,6 +79,8 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 				// database the assertions below read back from.
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
+				services.AddSingleton(new TargetCredentialBindingRepository(_connectionString));
+				services.AddSingleton(new Waypoint.Infrastructure.Secrets.CredentialRepository(_connectionString));
 
 				// Issue #639: RunCreationService.CreateScanRunAsync now resolves
 				// scope.profile_id through IProfileRepository -- same "point the real

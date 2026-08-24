@@ -188,4 +188,53 @@ public class CredentialPurposeMatrixTests
 	{
 		Assert.True(CredentialPurposes.IsValid(purpose));
 	}
+
+	/// <summary>
+	/// Issue #584: every target kind maps to exactly one default purpose -- the one
+	/// migration 0043's data-migration/dual-write logic mirrors
+	/// <c>targets.credential_id</c> into. This is the purpose required
+	/// unconditionally by every operation row for that kind (never the VCSA-only
+	/// <c>vcsa-ssh</c> purpose, which is optional-until-selected).
+	/// </summary>
+	[Theory]
+	[InlineData(TargetKinds.VSphere, CredentialPurposes.VSphereApi)]
+	[InlineData(TargetKinds.NsxApi, CredentialPurposes.NsxApi)]
+	[InlineData(TargetKinds.Ssh, CredentialPurposes.SrgSsh)]
+	public void DefaultPurposeByTargetKind_MapsEachKindToItsUnconditionallyRequiredPurpose(string kind, string expectedDefault)
+	{
+		Assert.True(CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(kind, out string? actual));
+		Assert.Equal(expectedDefault, actual);
+	}
+
+	[Fact]
+	public void DefaultPurposeByTargetKind_CoversEveryTargetKind()
+	{
+		foreach (string kind in TargetKinds.All)
+		{
+			Assert.True(CredentialPurposeMatrix.DefaultPurposeByTargetKind.ContainsKey(kind), $"'{kind}' has no default purpose mapping.");
+		}
+	}
+
+	[Fact]
+	public void ApplicablePurposes_VSphere_IncludesBothVSphereApiAndVcsaSsh()
+	{
+		IReadOnlyCollection<string> applicable = CredentialPurposeMatrix.ApplicablePurposes(TargetKinds.VSphere);
+
+		Assert.Contains(CredentialPurposes.VSphereApi, applicable);
+		Assert.Contains(CredentialPurposes.VcsaSsh, applicable);
+		Assert.DoesNotContain(CredentialPurposes.NsxApi, applicable);
+		Assert.DoesNotContain(CredentialPurposes.SrgSsh, applicable);
+	}
+
+	[Fact]
+	public void ApplicablePurposes_NsxApi_IsExactlyNsxApi()
+	{
+		Assert.Equal([CredentialPurposes.NsxApi], CredentialPurposeMatrix.ApplicablePurposes(TargetKinds.NsxApi));
+	}
+
+	[Fact]
+	public void ApplicablePurposes_Ssh_IsExactlySrgSsh()
+	{
+		Assert.Equal([CredentialPurposes.SrgSsh], CredentialPurposeMatrix.ApplicablePurposes(TargetKinds.Ssh));
+	}
 }

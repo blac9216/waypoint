@@ -16,7 +16,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../../lib/auth-context";
 import { ApiError } from "../../lib/api";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";
+import { CREDENTIAL_PURPOSES, CREDENTIAL_PURPOSE_MATRIX, CREDENTIAL_PURPOSE_SATISFYING_TYPES, type CredentialPurpose } from "./credential-purposes";
 import {
+	clearTargetCredentialBinding,
 	connectionHost,
 	createTarget,
 	deleteTarget,
@@ -27,6 +29,7 @@ import {
 	isInventoryCapable,
 	isTerminalRunState,
 	queueDiscover,
+	setTargetCredentialBinding,
 	TARGET_KINDS,
 	updateTarget,
 	type CredentialOption,
@@ -35,6 +38,40 @@ import {
 	type TargetWriteInput,
 } from "./sites";
 import "./ConfigurationScreen.css";
+
+/**
+ * Every purpose applicable to a target kind (issue #584), derived from the
+ * shared matrix (`CREDENTIAL_PURPOSE_MATRIX`, mirrored 1:1 from the
+ * backend's `CredentialPurposeMatrix.ApplicablePurposes` — ADR-0021 §10) --
+ * required or optional, across every operation row for that kind. Computed
+ * here rather than re-deriving a second matrix: this is the wizard/UI's own
+ * "coverage" read of the same design/contracts data #583 shipped.
+ */
+function applicablePurposes(kind: TargetKind | string): CredentialPurpose[] {
+	const purposes = new Set<CredentialPurpose>();
+	for (const entry of CREDENTIAL_PURPOSE_MATRIX) {
+		if (entry.kind === kind) {
+			entry.requiredPurposes.forEach((p) => purposes.add(p));
+			entry.optionalPurposes.forEach((p) => purposes.add(p));
+		}
+	}
+	return CREDENTIAL_PURPOSES.map((p) => p.value).filter((p) => purposes.has(p));
+}
+
+/** Every purpose REQUIRED (not merely optional) by at least one operation row for the kind — drives the "missing required binding" coverage warning. */
+function requiredPurposes(kind: TargetKind | string): CredentialPurpose[] {
+	const purposes = new Set<CredentialPurpose>();
+	for (const entry of CREDENTIAL_PURPOSE_MATRIX) {
+		if (entry.kind === kind) {
+			entry.requiredPurposes.forEach((p) => purposes.add(p));
+		}
+	}
+	return CREDENTIAL_PURPOSES.map((p) => p.value).filter((p) => purposes.has(p));
+}
+
+function purposeLabel(purpose: CredentialPurpose): string {
+	return CREDENTIAL_PURPOSES.find((p) => p.value === purpose)?.label ?? purpose;
+}
 
 /**
  * Per-target "Refresh Inventory" state (issue #557) — local, not persisted:
@@ -257,6 +294,45 @@ export function SiteTargetsPanel({
 		[load, onTargetsChanged],
 	);
 
+	// Issue #584: purpose-specific credential binding management, per target
+	// row. Bindings are saved immediately (no separate form "Save" step) since
+	// each purpose is independently overridable (ADR-0021 §4) — matches how
+	// "Refresh Inventory" above is also an immediate action, not a form field.
+	const [bindingError, setBindingError] = useState<string | null>(null);
+	const [savingBinding, setSavingBinding] = useState<string | null>(null);
+
+	const doSetBinding = useCallback(
+		async (targetId: string, purpose: CredentialPurpose, credentialId: string) => {
+			setBindingError(null);
+			setSavingBinding(`${targetId}:${purpose}`);
+			try {
+				await setTargetCredentialBinding(targetId, purpose, credentialId);
+				load();
+			} catch (err) {
+				setBindingError(err instanceof ApiError ? err.message : "Could not save the credential binding.");
+			} finally {
+				setSavingBinding(null);
+			}
+		},
+		[load],
+	);
+
+	const doClearBinding = useCallback(
+		async (targetId: string, purpose: CredentialPurpose) => {
+			setBindingError(null);
+			setSavingBinding(`${targetId}:${purpose}`);
+			try {
+				await clearTargetCredentialBinding(targetId, purpose);
+				load();
+			} catch (err) {
+				setBindingError(err instanceof ApiError ? err.message : "Could not clear the credential binding.");
+			} finally {
+				setSavingBinding(null);
+			}
+		},
+		[load],
+	);
+
 	return (
 		<div className="config-panel">
 			<div className="config-panel__header">
@@ -276,6 +352,7 @@ export function SiteTargetsPanel({
 
 			{error && <div className="config-panel__error">{error}</div>}
 			{formError && <div className="config-panel__error">{formError}</div>}
+			{bindingError && <div className="config-panel__error">{bindingError}</div>}
 
 			{creating && canWrite && (
 				<TargetForm
@@ -358,6 +435,9 @@ export function SiteTargetsPanel({
 								}
 							discoveryState={discovery[target.id] ?? null}
 							onRefreshInventory={() => void startDiscover(target.id)}
+							onSetBinding={(purpose, credentialId) => void doSetBinding(target.id, purpose, credentialId)}
+							onClearBinding={(purpose) => void doClearBinding(target.id, purpose)}
+							savingBindingKey={savingBinding}
 						/>
 					))}
 				</tbody>
@@ -382,6 +462,9 @@ function TargetRow({
 	onSubmitEdit,
 	discoveryState,
 	onRefreshInventory,
+	onSetBinding,
+	onClearBinding,
+	savingBindingKey,
 }: {
 	target: Target;
 	credentialName: string;
@@ -398,6 +481,9 @@ function TargetRow({
 	onSubmitEdit: () => void;
 	discoveryState: DiscoveryUiState | null;
 	onRefreshInventory: () => void;
+	onSetBinding: (purpose: CredentialPurpose, credentialId: string) => void;
+	onClearBinding: (purpose: CredentialPurpose) => void;
+	savingBindingKey: string | null;
 }) {
 	const badDiscovery = target.discovery_status === "failed" || discoveryState?.outcome === "failed";
 	const inFlight = discoveryState !== null && discoveryState.outcome === null;
@@ -475,10 +561,108 @@ function TargetRow({
 							onCancel={onCancelEdit}
 							onSubmit={onSubmitEdit}
 						/>
+						<TargetCredentialBindingsPanel
+							target={target}
+							credentials={credentials}
+							onSetBinding={onSetBinding}
+							onClearBinding={onClearBinding}
+							savingBindingKey={savingBindingKey}
+						/>
 					</td>
 				</tr>
 			)}
 		</>
+	);
+}
+
+/**
+ * Issue #584 (ADR-0021): manage this target's purpose-specific credential
+ * bindings — one row per purpose APPLICABLE to the target's kind (the shared
+ * matrix, `applicablePurposes`), each with its own picker filtered to
+ * compatible credential types (`CREDENTIAL_PURPOSE_SATISFYING_TYPES`) and its
+ * own immediate save/clear. A required purpose with no bound credential is
+ * flagged as "missing" (coverage display, issue #584 AC: "explain missing
+ * required bindings") — never silently absent.
+ */
+function TargetCredentialBindingsPanel({
+	target,
+	credentials,
+	onSetBinding,
+	onClearBinding,
+	savingBindingKey,
+}: {
+	target: Target;
+	credentials: CredentialOption[];
+	onSetBinding: (purpose: CredentialPurpose, credentialId: string) => void;
+	onClearBinding: (purpose: CredentialPurpose) => void;
+	savingBindingKey: string | null;
+}) {
+	const purposes = applicablePurposes(target.kind);
+	if (purposes.length === 0) {
+		return null;
+	}
+
+	const required = new Set(requiredPurposes(target.kind));
+	const bindingsByPurpose = new Map(target.bindings.map((b) => [b.purpose, b]));
+
+	return (
+		<div className="config-form" aria-label={`Credential bindings for ${target.name}`}>
+			<div className="config-form__title">Credential bindings</div>
+			<table className="config-table">
+				<thead>
+					<tr>
+						<th>PURPOSE</th>
+						<th>CREDENTIAL</th>
+						<th>COVERAGE</th>
+					</tr>
+				</thead>
+				<tbody>
+					{purposes.map((purpose) => {
+						const binding = bindingsByPurpose.get(purpose);
+						const compatibleTypes = CREDENTIAL_PURPOSE_SATISFYING_TYPES[purpose];
+						const compatibleCredentials = credentials.filter((c) => compatibleTypes.includes(c.credential_type as never));
+						const isSaving = savingBindingKey === `${target.id}:${purpose}`;
+						const missing = required.has(purpose) && !binding;
+
+						return (
+							<tr key={purpose} className="config-table__row">
+								<td>{purposeLabel(purpose)}</td>
+								<td>
+									<select
+										aria-label={`${purposeLabel(purpose)} credential`}
+										value={binding?.credential_ref ?? ""}
+										disabled={isSaving}
+										onChange={(e) => {
+											if (e.target.value) {
+												onSetBinding(purpose, e.target.value);
+											} else {
+												onClearBinding(purpose);
+											}
+										}}
+									>
+										<option value="">No credential</option>
+										{compatibleCredentials.map((c) => (
+											<option key={c.id} value={c.id}>
+												{c.name}
+											</option>
+										))}
+									</select>
+								</td>
+								<td>
+									{missing ? (
+										<span className="config-table__discovery--bad">Missing required binding</span>
+									) : binding ? (
+										"Bound"
+									) : (
+										"Optional — not bound"
+									)}
+								</td>
+							</tr>
+						);
+					})}
+				</tbody>
+			</table>
+		</div>
 	);
 }
 

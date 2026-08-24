@@ -775,6 +775,55 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.Contains("append-only", exception.Message, StringComparison.Ordinal);
 	}
 
+	/// <summary>
+	/// Issue #584 (epic #582, migration 0043): negative-direction grant check, written
+	/// at authoring time per this file's own "a new runner-executed table without a
+	/// role-contract test ships grant drift silently" lesson. Execution does not read
+	/// <c>target_credential_bindings</c> until #585 -- this proves NO grant was added
+	/// prematurely, both roles must still be denied even a bare SELECT.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotReadTargetCredentialBindings()
+	{
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand select = new("SELECT id FROM target_credential_bindings LIMIT 1", connection);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => select.ExecuteScalarAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>Same negative-direction check as <see cref="ComplianceRunnerRole_CannotReadTargetCredentialBindings"/>, for the other runner role.</summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotReadTargetCredentialBindings()
+	{
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand select = new("SELECT id FROM target_credential_bindings LIMIT 1", connection);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => select.ExecuteScalarAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>Neither runner role may write <c>target_credential_bindings</c> either -- INSERT stays API-only (TargetsController), same as every other domain-config table.</summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotInsertTargetCredentialBindings()
+	{
+		Guid siteId = await SeedSiteAsync();
+		Guid targetId = await SeedTargetAsync(siteId);
+		Guid credentialId = await SeedCredentialAsync();
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO target_credential_bindings (target_id, purpose, credential_id) VALUES ($1, 'vsphere-api', $2)", connection);
+		insert.Parameters.AddWithValue(targetId);
+		insert.Parameters.AddWithValue(credentialId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
 	private async Task ResetCapacityTablesAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

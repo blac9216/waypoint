@@ -126,4 +126,31 @@ public static class CredentialPurposeMatrix
 		new(TargetKinds.Ssh, CredentialPurposeOperations.Scan, null, [CredentialPurposes.SrgSsh], []),
 		new(TargetKinds.Ssh, CredentialPurposeOperations.RemediationReadyPlanning, null, [CredentialPurposes.SrgSsh], []),
 	];
+
+	/// <summary>
+	/// Target kind -&gt; the ONE purpose <see cref="targets.CredentialId"/>-style
+	/// dual-write logic (issue #584, migration 0043's data-migration/dual-write
+	/// contract) mirrors. This is the single purpose every row in <see cref="Entries"/>
+	/// for that kind requires unconditionally (present as a <c>RequiredPurposes</c>
+	/// entry on every operation row for the kind) -- <c>vsphere</c>'s second purpose,
+	/// <see cref="CredentialPurposes.VcsaSsh"/>, is required only for the optional VCSA
+	/// scan component (ADR-0021 §3's note), so it is never inferable from the single
+	/// legacy column and is deliberately excluded here.
+	/// </summary>
+	public static readonly IReadOnlyDictionary<string, string> DefaultPurposeByTargetKind = new Dictionary<string, string>
+	{
+		[TargetKinds.VSphere] = CredentialPurposes.VSphereApi,
+		[TargetKinds.NsxApi] = CredentialPurposes.NsxApi,
+		[TargetKinds.Ssh] = CredentialPurposes.SrgSsh,
+	};
+
+	/// <summary>Every purpose that appears anywhere in <see cref="Entries"/> for <paramref name="targetKind"/> (required or optional, across every operation) -- the applicable-purpose set a target of this kind may bind, used to reject an inapplicable purpose (issue #584 AC) before it ever reaches storage.</summary>
+	public static IReadOnlyCollection<string> ApplicablePurposes(string targetKind)
+	{
+		return Entries
+			.Where(e => string.Equals(e.TargetKind, targetKind, StringComparison.Ordinal))
+			.SelectMany(e => e.RequiredPurposes.Concat(e.OptionalPurposes))
+			.Distinct()
+			.ToArray();
+	}
 }

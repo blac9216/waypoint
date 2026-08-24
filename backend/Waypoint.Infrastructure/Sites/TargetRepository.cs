@@ -14,6 +14,7 @@
 
 using Npgsql;
 using Waypoint.Core.Pagination;
+using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
 
 namespace Waypoint.Infrastructure.Sites;
@@ -144,53 +145,89 @@ public sealed class TargetRepository
 	/// Creates a target under a site. Returns the outcome discriminated union rather
 	/// than throwing for the two known conflict shapes (site missing, name taken within
 	/// the site) so the controller maps each to its documented status code.
+	///
+	/// Issue #584/migration 0043 dual-write: a non-null <paramref name="credentialId"/>
+	/// also upserts a binding for the target kind's DEFAULT purpose
+	/// (<c>CredentialPurposeMatrix.DefaultPurposeByTargetKind</c>) to the same
+	/// credential, in the same transaction as the insert -- the legacy
+	/// <c>credential_ref</c> surface and the new binding CRUD stay consistent for that
+	/// one purpose regardless of which surface an operator used (migration 0043's
+	/// documented dual-write contract).
 	/// </summary>
 	public async Task<(TargetWriteOutcome Outcome, Guid? Id)> CreateAsync(
 		Guid siteId, string kind, string name, string connectionJson, Guid? credentialId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-		await using (NpgsqlCommand siteCheck = new("SELECT 1 FROM sites WHERE id = $1", connection))
+		await using (NpgsqlCommand siteCheck = new("SELECT 1 FROM sites WHERE id = $1", connection, transaction))
 		{
 			siteCheck.Parameters.AddWithValue(siteId);
 			if (await siteCheck.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null)
 			{
+				await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
 				return (TargetWriteOutcome.SiteNotFound, null);
 			}
 		}
 
-		await using NpgsqlCommand command = new(
+		Guid id;
+		await using (NpgsqlCommand command = new(
 			"""
 			INSERT INTO targets (site_id, kind, name, connection, credential_id)
 			VALUES ($1, $2, $3, $4::jsonb, $5)
 			ON CONFLICT (site_id, name) DO NOTHING
 			RETURNING id
-			""", connection);
-		command.Parameters.AddWithValue(siteId);
-		command.Parameters.AddWithValue(kind);
-		command.Parameters.AddWithValue(name);
-		command.Parameters.AddWithValue(connectionJson);
-		command.Parameters.AddWithValue((object?)credentialId ?? DBNull.Value);
+			""", connection, transaction))
+		{
+			command.Parameters.AddWithValue(siteId);
+			command.Parameters.AddWithValue(kind);
+			command.Parameters.AddWithValue(name);
+			command.Parameters.AddWithValue(connectionJson);
+			command.Parameters.AddWithValue((object?)credentialId ?? DBNull.Value);
 
-		try
-		{
-			object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-			return result is Guid id ? (TargetWriteOutcome.Ok, id) : (TargetWriteOutcome.NameTaken, null);
+			try
+			{
+				object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+				if (result is not Guid createdId)
+				{
+					await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+					return (TargetWriteOutcome.NameTaken, null);
+				}
+
+				id = createdId;
+			}
+			catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+			{
+				await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+				return (TargetWriteOutcome.CredentialNotFound, null);
+			}
 		}
-		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+
+		if (credentialId.HasValue && CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(kind, out string? defaultPurpose))
 		{
-			return (TargetWriteOutcome.CredentialNotFound, null);
+			await MirrorIfCompatibleAsync(connection, transaction, id, defaultPurpose, credentialId.Value, cancellationToken).ConfigureAwait(false);
 		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		return (TargetWriteOutcome.Ok, id);
 	}
 
-	/// <summary>Full replacement update: a null argument leaves the corresponding column unchanged.</summary>
+	/// <summary>
+	/// Full replacement update: a null argument leaves the corresponding column
+	/// unchanged. Same dual-write contract as <see cref="CreateAsync"/>: a supplied
+	/// <paramref name="credentialId"/> or <paramref name="clearCredential"/> mirrors
+	/// into the (possibly-updated) kind's default-purpose binding.
+	/// </summary>
 	public async Task<TargetWriteOutcome> UpdateAsync(
 		Guid id, string? kind, string? name, string? connectionJson, Guid? credentialId, bool clearCredential, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new(
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		string resolvedKind;
+		await using (NpgsqlCommand command = new(
 			"""
 			UPDATE targets SET
 				kind = COALESCE($2, kind),
@@ -198,29 +235,100 @@ public sealed class TargetRepository
 				connection = COALESCE($4::jsonb, connection),
 				credential_id = CASE WHEN $6 THEN NULL ELSE COALESCE($5, credential_id) END
 			WHERE id = $1
-			RETURNING id
-			""", connection);
-		command.Parameters.AddWithValue(id);
-		command.Parameters.AddWithValue((object?)kind ?? DBNull.Value);
-		command.Parameters.AddWithValue((object?)name ?? DBNull.Value);
-		command.Parameters.AddWithValue((object?)connectionJson ?? DBNull.Value);
-		command.Parameters.AddWithValue((object?)credentialId ?? DBNull.Value);
-		command.Parameters.AddWithValue(clearCredential);
+			RETURNING kind
+			""", connection, transaction))
+		{
+			command.Parameters.AddWithValue(id);
+			command.Parameters.AddWithValue((object?)kind ?? DBNull.Value);
+			command.Parameters.AddWithValue((object?)name ?? DBNull.Value);
+			command.Parameters.AddWithValue((object?)connectionJson ?? DBNull.Value);
+			command.Parameters.AddWithValue((object?)credentialId ?? DBNull.Value);
+			command.Parameters.AddWithValue(clearCredential);
 
-		try
-		{
-			return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null
-				? TargetWriteOutcome.Ok
-				: TargetWriteOutcome.NotFound;
+			try
+			{
+				object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+				if (result is not string kindResult)
+				{
+					await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+					return TargetWriteOutcome.NotFound;
+				}
+
+				resolvedKind = kindResult;
+			}
+			catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+			{
+				await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+				return TargetWriteOutcome.NameTaken;
+			}
+			catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+			{
+				await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+				return TargetWriteOutcome.CredentialNotFound;
+			}
 		}
-		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.UniqueViolation)
+
+		if (CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(resolvedKind, out string? defaultPurpose))
 		{
-			return TargetWriteOutcome.NameTaken;
+			if (clearCredential)
+			{
+				await using NpgsqlCommand deleteBinding = new(
+					"DELETE FROM target_credential_bindings WHERE target_id = $1 AND purpose = $2", connection, transaction);
+				deleteBinding.Parameters.AddWithValue(id);
+				deleteBinding.Parameters.AddWithValue(defaultPurpose);
+				await deleteBinding.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			}
+			else if (credentialId.HasValue)
+			{
+				await MirrorIfCompatibleAsync(connection, transaction, id, defaultPurpose, credentialId.Value, cancellationToken).ConfigureAwait(false);
+			}
 		}
-		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		return TargetWriteOutcome.Ok;
+	}
+
+	/// <summary>
+	/// Mirrors <paramref name="credentialId"/> into the target kind's default-purpose
+	/// binding ONLY when the credential's type actually satisfies that purpose
+	/// (<c>CredentialPurposeMatrix.SatisfyingCredentialTypes</c>). The legacy
+	/// <c>credential_ref</c> write path (this class's whole reason to still exist,
+	/// pending #585) has never validated credential type -- an operator could always
+	/// point a target at a <c>token</c>-type credential, and that must keep working
+	/// unchanged (issue #584 scope: "the run/job path must be BEHAVIOR-UNCHANGED").
+	/// Silently skipping the mirror on a type mismatch (rather than rejecting the
+	/// legacy write) preserves that: the binding table simply has no default-purpose
+	/// row for a target whose legacy credential is not purpose-compatible, which is a
+	/// true statement -- that credential could never satisfy the purpose regardless of
+	/// which surface named it.
+	/// </summary>
+	private static async Task MirrorIfCompatibleAsync(
+		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid targetId, string purpose, Guid credentialId, CancellationToken cancellationToken)
+	{
+		string? credentialType;
+		await using (NpgsqlCommand lookup = new("SELECT credential_type FROM credentials WHERE id = $1", connection, transaction))
 		{
-			return TargetWriteOutcome.CredentialNotFound;
+			lookup.Parameters.AddWithValue(credentialId);
+			credentialType = (string?)await lookup.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 		}
+
+		if (credentialType is null
+			|| !CredentialPurposeMatrix.SatisfyingCredentialTypes.TryGetValue(purpose, out IReadOnlyCollection<string>? satisfyingTypes)
+			|| !satisfyingTypes.Contains(credentialType))
+		{
+			return;
+		}
+
+		await using NpgsqlCommand upsert = new(
+			"""
+			INSERT INTO target_credential_bindings (target_id, purpose, credential_id)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (target_id, purpose) DO UPDATE SET credential_id = EXCLUDED.credential_id
+			""", connection, transaction);
+		upsert.Parameters.AddWithValue(targetId);
+		upsert.Parameters.AddWithValue(purpose);
+		upsert.Parameters.AddWithValue(credentialId);
+		await upsert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	public async Task<TargetDeleteOutcome> DeleteAsync(Guid id, CancellationToken cancellationToken)

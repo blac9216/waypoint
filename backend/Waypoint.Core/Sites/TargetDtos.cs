@@ -86,3 +86,42 @@ public enum TargetDeleteOutcome
 	Deleted,
 	NotFound,
 }
+
+/// <summary>
+/// One purpose-specific credential binding on a target (issue #584, migration 0043,
+/// ADR-0021 docs/adr/0021-credential-purpose-matrix.md), keyed by
+/// <c>(target_id, purpose)</c> -- at most one credential per purpose per target. This
+/// is a normalized generalization of <see cref="Target.CredentialId"/>: a
+/// <c>vsphere</c> target can carry both a <see cref="Waypoint.Core.Secrets.CredentialPurposes.VSphereApi"/>
+/// and a <see cref="Waypoint.Core.Secrets.CredentialPurposes.VcsaSsh"/> binding at
+/// once, independently overridable/removable (ADR-0021 §4).
+/// </summary>
+public sealed record TargetCredentialBinding(
+	Guid Id,
+	Guid TargetId,
+	string Purpose,
+	Guid CredentialId,
+	DateTimeOffset CreatedAt,
+	DateTimeOffset UpdatedAt);
+
+public enum TargetCredentialBindingWriteOutcome
+{
+	Ok,
+	TargetNotFound,
+	CredentialNotFound,
+
+	/// <summary>The purpose is not in <see cref="Waypoint.Core.Secrets.CredentialPurposes"/>'s closed set.</summary>
+	InvalidPurpose,
+
+	/// <summary>The purpose does not apply to the target's kind (<c>CredentialPurposeMatrix.ApplicablePurposes</c>).</summary>
+	PurposeNotApplicable,
+
+	/// <summary>The credential's type does not satisfy the purpose (ADR-0021 §2, <c>CredentialPurposeMatrix.SatisfyingCredentialTypes</c>).</summary>
+	IncompatibleCredentialType,
+}
+
+public enum TargetCredentialBindingDeleteOutcome
+{
+	Deleted,
+	NotFound,
+}

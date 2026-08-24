@@ -79,6 +79,8 @@ public sealed class ProfileControlsApiTests : IAsyncLifetime
 				services.AddSingleton(new ConfigDocRepository(_connectionString));
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
+				services.AddSingleton(new TargetCredentialBindingRepository(_connectionString));
+				services.AddSingleton(new Waypoint.Infrastructure.Secrets.CredentialRepository(_connectionString));
 			});
 		}
 	}

@@ -84,6 +84,8 @@ public sealed class RunSecretScanRunTests : IAsyncLifetime
 
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
+				services.AddSingleton(new TargetCredentialBindingRepository(_connectionString));
+				services.AddSingleton(new Waypoint.Infrastructure.Secrets.CredentialRepository(_connectionString));
 
 				// Issue #639: same fixture-pointed override as Site/TargetRepository above
 				// -- RunCreationService.CreateScanRunAsync now resolves scope.profile_id

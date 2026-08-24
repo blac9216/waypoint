@@ -24,7 +24,16 @@ namespace Waypoint.Api.Contracts;
 /// <see cref="Connection"/> rides as a raw JSON string -- same convention as
 /// <see cref="SiteResponse.StigmanOverride"/> -- and, per
 /// docs/domain-model.md's "service credential referenced, never embedded" rule, never
-/// carries secret material: only <see cref="CredentialId"/> ever names the credential.
+/// carries secret material: only <see cref="CredentialId"/>/<see cref="Bindings"/> ever
+/// name a credential.
+///
+/// <see cref="CredentialId"/> (<c>credential_ref</c>) is DEPRECATED (issue #584, ADR-0021):
+/// it still round-trips and execution (RunCreationService/ScanJobHandler/etc.) still
+/// reads only this field until #585 lands purpose-aware resolution, but it now always
+/// mirrors the target kind's DEFAULT purpose binding in <see cref="Bindings"/>
+/// (migration 0043's dual-write contract) -- new integrations should read/write
+/// <see cref="Bindings"/> instead. It is kept on the wire, not removed, so no existing
+/// caller breaks; removal is #585's scope.
 /// </summary>
 public sealed record TargetResponse(
 	[property: JsonPropertyName("id")]
@@ -55,16 +64,56 @@ public sealed record TargetResponse(
 	DateTimeOffset CreatedAt,
 
 	[property: JsonPropertyName("updated_at")]
-	DateTimeOffset UpdatedAt)
+	DateTimeOffset UpdatedAt,
+
+	[property: JsonPropertyName("bindings")]
+	IReadOnlyList<TargetCredentialBindingResponse> Bindings)
 {
-	public static TargetResponse FromDomain(Target target)
+	public static TargetResponse FromDomain(Target target, IReadOnlyList<TargetCredentialBinding>? bindings = null)
 	{
 		ArgumentNullException.ThrowIfNull(target);
 		return new TargetResponse(
 			target.Id, target.SiteId, target.Kind, target.Name, target.ConnectionJson,
-			target.CredentialId, target.DiscoveryStatus, target.LastRefreshed, target.CreatedAt, target.UpdatedAt);
+			target.CredentialId, target.DiscoveryStatus, target.LastRefreshed, target.CreatedAt, target.UpdatedAt,
+			(bindings ?? []).Select(b => TargetCredentialBindingResponse.FromDomain(b)).ToArray());
 	}
 }
+
+/// <summary>
+/// One purpose -&gt; credential binding on a target (issue #584, migration 0043,
+/// ADR-0021). <see cref="CredentialId"/> is a reference only -- never secret material,
+/// same rule as <see cref="TargetResponse.CredentialId"/>.
+/// </summary>
+public sealed record TargetCredentialBindingResponse(
+	[property: JsonPropertyName("purpose")]
+	string Purpose,
+
+	[property: JsonPropertyName("credential_ref")]
+	Guid CredentialId,
+
+	[property: JsonPropertyName("credential_name")]
+	string? CredentialName,
+
+	[property: JsonPropertyName("credential_type")]
+	string? CredentialType,
+
+	[property: JsonPropertyName("created_at")]
+	DateTimeOffset CreatedAt,
+
+	[property: JsonPropertyName("updated_at")]
+	DateTimeOffset UpdatedAt)
+{
+	public static TargetCredentialBindingResponse FromDomain(TargetCredentialBinding binding, string? credentialName = null, string? credentialType = null)
+	{
+		ArgumentNullException.ThrowIfNull(binding);
+		return new TargetCredentialBindingResponse(binding.Purpose, binding.CredentialId, credentialName, credentialType, binding.CreatedAt, binding.UpdatedAt);
+	}
+}
+
+/// <summary>Request body for <c>PUT /api/v1/targets/{id}/credential-bindings/{purpose}</c> -- sets (creates or replaces/overrides) the binding for that purpose.</summary>
+public sealed record TargetCredentialBindingSetBody(
+	[property: JsonPropertyName("credential_ref")]
+	Guid? CredentialId);
 
 /// <summary>Request body for <c>POST /api/v1/sites/{id}/targets</c>.</summary>
 public sealed record TargetCreateBody(

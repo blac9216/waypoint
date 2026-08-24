@@ -210,11 +210,16 @@ public sealed class EndpointRoleMatrixTests
 		["SystemController.Get"] = WaypointRole.Viewer,
 
 		// TargetsController -- reads Viewer+; every write Admin (same as Sites).
+		// Issue #584: the credential-binding CRUD surface is Admin-only too, same
+		// gate as every other target write (SetBinding/ClearBinding write a
+		// credential reference onto a target's live connection configuration).
 		["TargetsController.ListForSite"] = WaypointRole.Viewer,
 		["TargetsController.Get"] = WaypointRole.Viewer,
 		["TargetsController.Create"] = WaypointRole.Admin,
 		["TargetsController.Update"] = WaypointRole.Admin,
 		["TargetsController.Delete"] = WaypointRole.Admin,
+		["TargetsController.SetBinding"] = WaypointRole.Admin,
+		["TargetsController.ClearBinding"] = WaypointRole.Admin,
 
 		// UsersController -- Admin-only in full (domain-model.md: "users/roles" is an
 		// Admin capability; role itself is a read-only IdP mirror -- see class doc

@@ -70,6 +70,8 @@ public sealed class SitesTargetsApiTests : IAsyncLifetime
 
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
+				services.AddSingleton(new TargetCredentialBindingRepository(_connectionString));
+				services.AddSingleton(new Waypoint.Infrastructure.Secrets.CredentialRepository(_connectionString));
 			});
 		}
 	}
@@ -279,6 +281,127 @@ public sealed class SitesTargetsApiTests : IAsyncLifetime
 		}
 	}
 
+	/// <summary>
+	/// Issue #584 (epic #582, ADR-0021): a target's response carries a `bindings`
+	/// array alongside the deprecated `credential_ref`, and `PUT
+	/// /targets/{id}/credential-bindings/{purpose}` sets a purpose-specific binding.
+	/// </summary>
+	[Fact]
+	public async Task SetCredentialBinding_AddsToTheBindingsArray_AndMirrorsDefaultPurposeIntoLegacyCredentialRef()
+	{
+		Guid vcenterCredentialId = await SeedCredentialAsync("vcenter-purpose-cred", credentialType: "vcenter");
+		Guid siteId = await CreateSiteAsync("binding-site", null);
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "binding-target", """{"host":"vcsa-01.example.internal"}""");
+
+		HttpResponseMessage setResponse = await SendAsync(
+			HttpMethod.Put, $"/api/v1/targets/{targetId}/credential-bindings/vsphere-api", "Admin",
+			new { credential_ref = vcenterCredentialId });
+		Assert.Equal(HttpStatusCode.OK, setResponse.StatusCode);
+
+		using JsonDocument setDocument = JsonDocument.Parse(await setResponse.Content.ReadAsStringAsync());
+		JsonElement[] bindings = setDocument.RootElement.GetProperty("bindings").EnumerateArray().ToArray();
+		JsonElement binding = Assert.Single(bindings);
+		Assert.Equal("vsphere-api", binding.GetProperty("purpose").GetString());
+		Assert.Equal(vcenterCredentialId, binding.GetProperty("credential_ref").GetGuid());
+
+		// vsphere-api is the vsphere kind's default purpose (ADR-0021/migration
+		// 0043) -- it must mirror into the deprecated but still-live credential_ref.
+		Assert.Equal(vcenterCredentialId, setDocument.RootElement.GetProperty("credential_ref").GetGuid());
+	}
+
+	/// <summary>Issue #584: a `vsphere` target can carry both `vsphere-api` and `vcsa-ssh` bindings at once -- ADR-0021's headline distinction persisted.</summary>
+	[Fact]
+	public async Task SetCredentialBinding_VSphereTarget_CanCarryBothVSphereApiAndVcsaSshBindings()
+	{
+		Guid vcenterCredentialId = await SeedCredentialAsync("vcenter-two-purpose", credentialType: "vcenter");
+		Guid sshCredentialId = await SeedCredentialAsync("vcsa-ssh-two-purpose", credentialType: "ssh");
+		Guid siteId = await CreateSiteAsync("two-purpose-site", null);
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "two-purpose-target", """{"host":"vcsa-01.example.internal"}""");
+
+		await SendAsync(HttpMethod.Put, $"/api/v1/targets/{targetId}/credential-bindings/vsphere-api", "Admin", new { credential_ref = vcenterCredentialId });
+		HttpResponseMessage response = await SendAsync(HttpMethod.Put, $"/api/v1/targets/{targetId}/credential-bindings/vcsa-ssh", "Admin", new { credential_ref = sshCredentialId });
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement[] bindings = document.RootElement.GetProperty("bindings").EnumerateArray().ToArray();
+		Assert.Equal(2, bindings.Length);
+		Assert.Contains(bindings, b => b.GetProperty("purpose").GetString() == "vsphere-api" && b.GetProperty("credential_ref").GetGuid() == vcenterCredentialId);
+		Assert.Contains(bindings, b => b.GetProperty("purpose").GetString() == "vcsa-ssh" && b.GetProperty("credential_ref").GetGuid() == sshCredentialId);
+	}
+
+	[Fact]
+	public async Task SetCredentialBinding_InapplicablePurposeForKind_Is400()
+	{
+		Guid credentialId = await SeedCredentialAsync("nsx-for-ssh-target", credentialType: "nsx");
+		Guid siteId = await CreateSiteAsync("inapplicable-purpose-site", null);
+		Guid targetId = await CreateTargetAsync(siteId, "ssh", "srg-box", """{"host":"photon-01.example.internal"}""");
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Put, $"/api/v1/targets/{targetId}/credential-bindings/nsx-api", "Admin", new { credential_ref = credentialId });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		Assert.Contains("purpose_not_applicable", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task SetCredentialBinding_IncompatibleCredentialType_Is400()
+	{
+		Guid tokenCredentialId = await SeedCredentialAsync("token-for-vsphere-api", credentialType: "token");
+		Guid siteId = await CreateSiteAsync("incompatible-type-site", null);
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "incompatible-type-target", """{"host":"vcsa-01.example.internal"}""");
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Put, $"/api/v1/targets/{targetId}/credential-bindings/vsphere-api", "Admin", new { credential_ref = tokenCredentialId });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		Assert.Contains("incompatible_credential_type", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task ClearCredentialBinding_RemovesIt()
+	{
+		Guid credentialId = await SeedCredentialAsync("clear-binding-cred", credentialType: "nsx");
+		Guid siteId = await CreateSiteAsync("clear-binding-site", null);
+		Guid targetId = await CreateTargetAsync(siteId, "nsx-api", "clear-binding-target", """{"host":"nsx-01.example.internal"}""");
+		await SendAsync(HttpMethod.Put, $"/api/v1/targets/{targetId}/credential-bindings/nsx-api", "Admin", new { credential_ref = credentialId });
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/targets/{targetId}/credential-bindings/nsx-api", "Admin", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Empty(document.RootElement.GetProperty("bindings").EnumerateArray());
+	}
+
+	[Fact]
+	public async Task ClearCredentialBinding_NoExistingBinding_Is404()
+	{
+		Guid siteId = await CreateSiteAsync("clear-missing-binding-site", null);
+		Guid targetId = await CreateTargetAsync(siteId, "nsx-api", "clear-missing-binding-target", """{"host":"nsx-01.example.internal"}""");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/targets/{targetId}/credential-bindings/nsx-api", "Admin", body: null);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData("Viewer")]
+	[InlineData("Cyber")]
+	[InlineData("Operator")]
+	public async Task CredentialBindingWriteEndpoints_BelowAdmin_Return403(string role)
+	{
+		Guid credentialId = await SeedCredentialAsync("role-gate-binding-cred", credentialType: "nsx");
+		Guid siteId = await CreateSiteAsync("binding-role-gate-site", null);
+		Guid targetId = await CreateTargetAsync(siteId, "nsx-api", "binding-role-gate-target", """{"host":"nsx-01.example.internal"}""");
+
+		HttpResponseMessage setResponse = await SendAsync(
+			HttpMethod.Put, $"/api/v1/targets/{targetId}/credential-bindings/nsx-api", role, new { credential_ref = credentialId });
+		Assert.Equal(HttpStatusCode.Forbidden, setResponse.StatusCode);
+
+		HttpResponseMessage deleteResponse = await SendAsync(
+			HttpMethod.Delete, $"/api/v1/targets/{targetId}/credential-bindings/nsx-api", role, body: null);
+		Assert.Equal(HttpStatusCode.Forbidden, deleteResponse.StatusCode);
+	}
+
 	[Fact]
 	public async Task Crud_ForSitesAndTargets_WorksEndToEnd()
 	{
@@ -404,13 +527,14 @@ public sealed class SitesTargetsApiTests : IAsyncLifetime
 		return document.RootElement.GetProperty("id").GetGuid();
 	}
 
-	private async Task<Guid> SeedCredentialAsync(string namePrefix)
+	private async Task<Guid> SeedCredentialAsync(string namePrefix, string credentialType = "token")
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand insert = new(
-			"INSERT INTO credentials (name, credential_type, owner) VALUES ($1, 'token', 'shared') RETURNING id", connection);
+			"INSERT INTO credentials (name, credential_type, owner) VALUES ($1, $2, 'shared') RETURNING id", connection);
 		insert.Parameters.AddWithValue($"{namePrefix}-{Guid.NewGuid():N}");
+		insert.Parameters.AddWithValue(credentialType);
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
 
@@ -431,7 +555,7 @@ public sealed class SitesTargetsApiTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync().ConfigureAwait(false);
 		await using NpgsqlCommand truncate = new(
-			"TRUNCATE TABLE targets, sites, downloads, credential_secrets, credentials RESTART IDENTITY CASCADE", connection);
+			"TRUNCATE TABLE target_credential_bindings, targets, sites, downloads, credential_secrets, credentials RESTART IDENTITY CASCADE", connection);
 		await truncate.ExecuteNonQueryAsync().ConfigureAwait(false);
 	}
 }
