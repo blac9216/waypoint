@@ -279,4 +279,49 @@ public sealed class ComplianceContentApiTests : IAsyncLifetime
 		Assert.Equal("dod-vsphere-8-esxi-stig", items[0].GetProperty("profile_key").GetString());
 		Assert.Equal("current", items[0].GetProperty("state").GetString());
 	}
+
+	/// <summary>
+	/// Issue #617 key-stability requirement: profile_key is now a nested,
+	/// path-shaped identifier (not a bare basename) -- a re-pull of the same repo
+	/// layout must present the SAME key each time so <c>ON CONFLICT (profile_key)</c>
+	/// (0035/ProfileRepository.ReplaceAllAsync) upserts the existing row in place
+	/// rather than the profile table quietly accumulating a duplicate every pull.
+	/// Also proves two profiles that share a leaf directory basename (the exact #617
+	/// collision) coexist as distinct rows once keyed by their full relative path.
+	/// </summary>
+	[Fact]
+	public async Task ReplaceAllAsync_RepeatedWithSameNestedKeys_UpsertsInPlace_NoDuplication()
+	{
+		ProfileRepository repository = new(_fixture.ConnectionString);
+
+		string vidmPostgresKey = "vidm/3.3.x/v1r3-srg/inspec/vmware-vidm-3.3.x-stig-baseline/postgresql";
+		string vropsPostgresKey = "vrops/8.6.x/v1r2-srg/inspec/vmware-vrops-8.6.x-stig-baseline/postgresql";
+
+		await repository.ReplaceAllAsync(
+			[
+				new ProfileUpsert(vidmPostgresKey, "postgresql", "1.0", "commit-1", ProfileStates.Current),
+				new ProfileUpsert(vropsPostgresKey, "postgresql", "1.0", "commit-1", ProfileStates.Current),
+			],
+			CancellationToken.None);
+
+		// Re-pull at a new commit: same two nested keys (same repo layout), just an
+		// updated commit/state -- this must UPDATE the existing two rows, not insert
+		// two more.
+		await repository.ReplaceAllAsync(
+			[
+				new ProfileUpsert(vidmPostgresKey, "postgresql", "1.0", "commit-2", ProfileStates.Current),
+				new ProfileUpsert(vropsPostgresKey, "postgresql", "1.0", "commit-2", ProfileStates.Current),
+			],
+			CancellationToken.None);
+
+		IReadOnlyList<Profile> profiles = await repository.ListAsync(CancellationToken.None);
+		Assert.Equal(2, profiles.Count);
+		Assert.All(profiles, p => Assert.Equal("commit-2", p.Commit));
+		Assert.Contains(profiles, p => p.ProfileKey == vidmPostgresKey);
+		Assert.Contains(profiles, p => p.ProfileKey == vropsPostgresKey);
+
+		// Both survive as distinct rows despite an identical "postgresql" basename --
+		// the #617 collision this key change fixes.
+		Assert.Equal(2, profiles.Select(p => p.ProfileKey).Distinct(StringComparer.Ordinal).Count());
+	}
 }

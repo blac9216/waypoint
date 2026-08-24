@@ -33,6 +33,21 @@
 # HdfSeverityCounts/AttestationYaml already establish on the C# side. A control file
 # this cannot parse contributes nothing rather than failing the whole pull (issue #598
 # AC "malformed control files must not fail the pull").
+#
+# Issue #617: the real vmware/dod-compliance-and-automation repo nests its ~385 InSpec
+# profiles many directories deep (e.g.
+# ".../vidm/3.3.x/v1r3-srg/inspec/vmware-vidm-3.3.x-stig-baseline/postgresql/inspec.yml"),
+# and many leaf directory names collide across baselines (multiple "postgresql", "aaa",
+# "tomcat" profiles under different parents). ProfileKey is therefore the
+# ContentPath-relative profile directory path (forward-slash normalized -- collision-free
+# and stable across re-pulls of the same layout), not the bare basename:
+# profiles.profile_key is UNIQUE (0035) and ReplaceAllAsync/ContentPullJobHandler
+# upsert/dedup by it, so a non-unique key was silently collapsing distinct profiles into
+# one stored row (385 -> 91). Name still falls back to the basename for display
+# friendliness; inspec.yml title parsing remains deferred (see #595 -- that issue defers
+# *title* parsing, not key uniqueness, which must hold today regardless). The profile's
+# real, already-known directory (not a path recomputed from the key) is threaded
+# straight into control discovery so nested controls/*.rb resolve regardless of depth.
 
 function Invoke-WaypointComplianceContentPull {
 	<#
@@ -85,8 +100,13 @@ function Invoke-WaypointComplianceContentPull {
 
 	$profiles = @(Get-WaypointComplianceContentProfiles -ContentPath $ContentPath -Commit $commit)
 	foreach ($p in $profiles) {
-		$profileDirectory = Join-Path $ContentPath $p.ProfileKey
-		$p | Add-Member -NotePropertyName Controls -NotePropertyValue @(Get-WaypointComplianceContentControls -ProfileDirectory $profileDirectory)
+		# Issue #617: use the profile's real directory (carried through as
+		# _ProfileDirectory by Get-WaypointComplianceContentProfiles), not a path
+		# reconstructed from ProfileKey/basename -- the real repo's profiles are nested
+		# many levels below ContentPath, so Join-Path $ContentPath $p.ProfileKey would
+		# only work by coincidence at depth 1.
+		$p | Add-Member -NotePropertyName Controls -NotePropertyValue @(Get-WaypointComplianceContentControls -ProfileDirectory $p._ProfileDirectory)
+		$p.PSObject.Properties.Remove('_ProfileDirectory')
 	}
 
 	[PSCustomObject]@{
@@ -106,10 +126,20 @@ function Get-WaypointComplianceContentProfiles {
 	    inspec.yml's title/version fields are not parsed here -- this slice has no
 	    YAML dependency in this module (the C#-side config-doc store already brings in
 	    YamlDotNet for a different purpose; duplicating that here for two optional
-	    display fields is not worth a second YAML dependency path). ProfileKey (the
-	    directory name) is the only value the handler treats as load-bearing; Name
-	    falls back to it and Version is left unset until a follow-up parses the
-	    manifest for display purposes.
+	    display fields is not worth a second YAML dependency path). Version is left
+	    unset until a follow-up parses the manifest for display purposes (#595).
+
+	    Issue #617: ProfileKey is the ContentPath-relative profile directory path
+	    (forward-slash normalized so it is stable regardless of the host OS's path
+	    separator), NOT the bare directory basename -- the real content repo nests
+	    profiles many levels deep and reuses leaf directory names (e.g. "postgresql",
+	    "aaa") across different baselines, so the basename alone collides and silently
+	    collapses distinct profiles under profiles.profile_key's UNIQUE constraint.
+	    Name still falls back to the basename, which stays display-friendly. The
+	    profile's real, absolute directory is carried on the returned object as
+	    _ProfileDirectory (an internal/private property, stripped by
+	    Invoke-WaypointComplianceContentPull before the object is handed to the job
+	    handler) so control discovery never has to reconstruct that path from the key.
 	#>
 	[CmdletBinding()]
 	param(
@@ -117,13 +147,20 @@ function Get-WaypointComplianceContentProfiles {
 		[Parameter(Mandatory)][string]$Commit
 	)
 
+	$root = (Resolve-Path -LiteralPath $ContentPath).ProviderPath.TrimEnd('/', '\')
+
 	Get-ChildItem -Path $ContentPath -Filter 'inspec.yml' -Recurse -File -ErrorAction SilentlyContinue |
 	ForEach-Object {
 		$profileDir = $_.Directory
+		$fullPath = $profileDir.FullName
+		$relative = $fullPath.Substring($root.Length).TrimStart('/', '\')
+		$profileKey = $relative.Replace('\', '/')
+
 		[PSCustomObject]@{
-			ProfileKey = $profileDir.Name
-			Name       = $profileDir.Name
-			Version    = $null
+			ProfileKey        = $profileKey
+			Name              = $profileDir.Name
+			Version           = $null
+			_ProfileDirectory = $fullPath
 		}
 	}
 }
@@ -136,7 +173,9 @@ function Get-WaypointComplianceContentControls {
 	    ContentPullJobHandler's control parser expects.
 
 	.PARAMETER ProfileDirectory
-	    The profile's root directory (ContentPath/<profile_key>).
+	    The profile's real, absolute root directory (issue #617: NOT recomputed as
+	    ContentPath/<profile_key> -- profile_key is a nested relative path today, but
+	    this function takes the caller's already-known directory regardless).
 
 	.NOTES
 	    Regex-based, not a Ruby parser (see module doc comment). A file this cannot
