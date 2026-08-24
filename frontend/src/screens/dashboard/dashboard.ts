@@ -61,6 +61,22 @@ export interface DashboardData {
 	attention: DashboardAttentionItem[];
 }
 
+/** Compliance-owned `run_type` values — same closed set `useRunList.ts`'s
+ * `COMPLIANCE_RUN_TYPES` filters the Results screen to (issue #591). RECENT
+ * RUNS is a compliance summary per the prototype (docs/ui/prototype/README.md
+ * screen 2: kind pills are scan/remediate) and every row links into Results,
+ * so it must apply the same domain-ownership filter Results does (issue
+ * #717) — the backend aggregate returns every `run_type` unfiltered, mixing
+ * in operational rows (discover/credential-test/content-pull/catalog-index/
+ * tool-install/etc.) that Results silently drops, leaving the row's
+ * destination looking empty. Operational activity remains reachable via
+ * Jobs/history, which is not scoped by this filter. */
+const COMPLIANCE_RUN_TYPES: ReadonlySet<string> = new Set(["scan", "remediate"]);
+
+export function isComplianceRun(runType: string): boolean {
+	return COMPLIANCE_RUN_TYPES.has(runType);
+}
+
 export function fetchDashboard(): Promise<DashboardData> {
 	return apiGet<DashboardData>("/dashboard");
 }

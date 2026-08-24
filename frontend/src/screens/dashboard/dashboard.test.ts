@@ -4,7 +4,7 @@
  * `--ok` >=90, `--warn` >=82, else `--bad`).
  */
 import { describe, expect, it } from "vitest";
-import { complianceTone } from "./dashboard";
+import { complianceTone, isComplianceRun } from "./dashboard";
 
 describe("complianceTone", () => {
 	it("returns ok at the 90 boundary", () => {
@@ -33,5 +33,18 @@ describe("complianceTone", () => {
 
 	it("returns bad for the null no-scan-data case", () => {
 		expect(complianceTone(null)).toBe("bad");
+	});
+});
+
+describe("isComplianceRun", () => {
+	it("accepts scan and remediate", () => {
+		expect(isComplianceRun("scan")).toBe(true);
+		expect(isComplianceRun("remediate")).toBe(true);
+	});
+
+	it("rejects operational run types (issue #717)", () => {
+		for (const runType of ["discover", "credential-test", "content-pull", "content-import", "catalog-index", "tool-install", "purge"]) {
+			expect(isComplianceRun(runType)).toBe(false);
+		}
 	});
 });

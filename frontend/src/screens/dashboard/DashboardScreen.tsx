@@ -27,7 +27,7 @@ import { roleGateProps } from "../../lib/roles";
 import { scheduleStateLabel } from "../../lib/schedules";
 import { useRouter } from "../../lib/router-context";
 import { useSystem } from "../../lib/system-context";
-import { complianceTone, formatTimestamp, runStateTone, scopeSiteId } from "./dashboard";
+import { complianceTone, formatTimestamp, isComplianceRun, runStateTone, scopeSiteId } from "./dashboard";
 import "./DashboardScreen.css";
 import { useDashboard } from "./useDashboard";
 
@@ -62,6 +62,12 @@ export function DashboardScreen() {
 	}
 
 	const kindLabel: Record<string, string> = { vsphere: "vCenter", "nsx-api": "NSX", ssh: "SSH" };
+	// RECENT RUNS is a compliance summary (issue #717) — operational run
+	// types (discover/credential-test/content-pull/catalog-index/etc.) are
+	// excluded here since they'd link into Results only to be filtered back
+	// out by `useRunList.ts`'s matching COMPLIANCE_RUN_TYPES set. Operational
+	// activity stays reachable via its own Jobs/history surface.
+	const recentComplianceRuns = data.recent_runs.filter((run) => isComplianceRun(run.run_type));
 
 	return (
 		<div className="dashboard-screen">
@@ -187,12 +193,12 @@ export function DashboardScreen() {
 								View all →
 							</button>
 						</div>
-						{data.recent_runs.map((run) => (
+						{recentComplianceRuns.map((run) => (
 							<button
 								type="button"
 								key={run.id}
 								className="dashboard__run-row"
-								onClick={() => navigate("/results")}
+								onClick={() => navigate(`/results?run=${encodeURIComponent(run.id)}`)}
 							>
 								<span className={`dashboard__dot dashboard__dot--${runStateTone(run.state)}`} />
 								<span className="mono dashboard__run-id">{run.id}</span>
@@ -206,7 +212,7 @@ export function DashboardScreen() {
 								<span className="mono dashboard__run-when">{formatTimestamp(run.created_at)}</span>
 							</button>
 						))}
-						{data.recent_runs.length === 0 && <div className="dashboard__empty-row">No runs yet.</div>}
+						{recentComplianceRuns.length === 0 && <div className="dashboard__empty-row">No scan or remediation runs yet.</div>}
 					</div>
 				</div>
 
