@@ -49,9 +49,21 @@ public sealed class ManagedToolOptions
 	/// local/manual source") reads a candidate tool artifact from. Distinct from
 	/// <see cref="Waypoint.Core.Catalog.CatalogOptions.DepotPath"/> (the VCF artifact
 	/// depot share): this is wherever the operator has staged the vcf-download-tool
-	/// distribution and its detached signature for offline install.
+	/// distribution and Broadcom's signed product-version catalog for offline install.
 	/// </summary>
 	public string LocalRepositoryPath { get; set; } = "/vcf/tool";
+
+	/// <summary>Catalog path, relative to <see cref="LocalRepositoryPath"/>.</summary>
+	public string ProductVersionCatalogPath { get; set; } = "PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json";
+
+	/// <summary>Broadcom catalog signature-envelope path, relative to <see cref="LocalRepositoryPath"/>.</summary>
+	public string ProductVersionCatalogSignaturePath { get; set; } = "PROD/metadata/productVersionCatalog/v1/productVersionCatalog.sig";
+
+	/// <summary>
+	/// Independently provisioned VMware/Broadcom certificate used to trust the
+	/// certificate embedded in the catalog signature envelope.
+	/// </summary>
+	public string CatalogTrustCertificatePath { get; set; } = "/var/lib/waypoint/managed-tool/catalog-trust.cert";
 
 	/// <summary>
 	/// Directory manual uploads (issue #39's third install path) are staged into by
