@@ -21,8 +21,8 @@ import {
  * rendering"). Every job here is non-terminal (`state: "running"`) so
  * `GenericJobDetail`'s live-tail log path renders without needing to mock
  * `fetchAllJobEventHistory` (terminal jobs route through that fetch instead
- * — already covered for the shared fallback by `detailRenderers.test.tsx`/
- * `LiveJobsScreen.test.tsx`, not re-tested per type here).
+ * — already covered for the shared fallback by `LiveJobsScreen.test.tsx`,
+ * not re-tested per type here).
  */
 function job(overrides: Partial<LiveJobRow> = {}): LiveJobRow {
 	return {
