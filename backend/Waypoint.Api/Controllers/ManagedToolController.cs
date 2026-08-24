@@ -44,6 +44,15 @@ public sealed class ManagedToolController : ControllerBase
 	/// <summary>Same low-urgency tier as an ordinary artifact download (<c>DownloadsController.DownloadPriority</c>) -- an install must never starve a scan.</summary>
 	private const short ToolInstallPriority = 6;
 
+	// Single source of truth for the upload endpoint's size ceiling. Two OTHER limits
+	// must be kept in lockstep with this constant (issue #641 -- they had drifted):
+	//  - deploy/nginx/conf.d/default.conf, the `location = /api/v1/downloads/tool/upload`
+	//    block's `client_max_body_size 512m` (nginx has no way to reference a C#
+	//    constant; its comment points back here).
+	//  - [RequestFormLimits(MultipartBodyLengthLimit = MaxUploadBytes)] on Upload()
+	//    below -- the multipart FORM reader's own cap, separate from RequestSizeLimit's
+	//    connection/body-read cap. Both attributes reference this constant so they
+	//    cannot silently diverge from each other; only nginx must be changed by hand.
 	private const long MaxUploadBytes = 512L * 1024 * 1024;
 
 	private readonly IJobControlRepository _jobs;
@@ -101,6 +110,15 @@ public sealed class ManagedToolController : ControllerBase
 	[HttpPost("upload")]
 	[RequireOperatorRole]
 	[RequestSizeLimit(MaxUploadBytes)]
+	// Issue #641: RequestSizeLimit above only raises Kestrel's connection/body-read
+	// ceiling. The IFormFile-bound multipart reader enforces its OWN, separate cap --
+	// FormOptions.MultipartBodyLengthLimit, defaulting to 128 MiB -- and throws before
+	// the file is staged if a part exceeds it. The real vcf-download-tool artifact is
+	// 383-490 MB, so without this attribute every real upload 400s here even though it
+	// cleared nginx and Kestrel. Scoped to this action (not a global FormOptions
+	// change) so unrelated form endpoints keep the conservative 128 MiB default. See
+	// MaxUploadBytes's own comment above for the three places this ceiling must agree.
+	[RequestFormLimits(MultipartBodyLengthLimit = MaxUploadBytes)]
 	[ProducesResponseType(typeof(ManagedToolInstallQueuedResponse), StatusCodes.Status202Accepted)]
 	public async Task<ActionResult<ManagedToolInstallQueuedResponse>> Upload(
 		IFormFile? artifact, IFormFile? signature, [FromForm] string? version, CancellationToken cancellationToken)
