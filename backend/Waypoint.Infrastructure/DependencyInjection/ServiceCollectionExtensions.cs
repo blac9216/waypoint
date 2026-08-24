@@ -180,6 +180,11 @@ public static class ServiceCollectionExtensions
 		// just above it.
 		services.AddSingleton<Waypoint.Core.Downloads.IDepotIdentityTool, Downloads.DepotIdentityTool>();
 
+		// Issue #687: the connected catalog-pull job's metadata-download invocation is
+		// the same pure process/filesystem shape as IDepotIdentityTool immediately
+		// above (and shares its presence-checker dependency).
+		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolMetadataPuller, Downloads.ManagedToolMetadataPuller>();
+
 		// ADR-0005 crypto core (epic #8 slice 1). Registered unconditionally: the
 		// provider is lazy and fail-closed, so a host without a mounted key boots
 		// fine and refuses secret operations with an operator-actionable error.
@@ -245,6 +250,7 @@ public static class ServiceCollectionExtensions
 
 			services.AddSingleton(new Secrets.CredentialRepository(connectionString));
 			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
+			services.AddSingleton<ICatalogPullStateRepository>(new Catalog.CatalogPullStateRepository(connectionString));
 			services.AddSingleton<IDownloadRepository>(new DownloadRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IManagedToolInstallRepository>(new Downloads.ManagedToolInstallRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.SystemState.IApplianceStateRepository>(new ApplianceStateRepository(connectionString));

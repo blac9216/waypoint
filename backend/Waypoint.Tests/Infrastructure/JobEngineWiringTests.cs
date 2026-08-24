@@ -234,7 +234,7 @@ public sealed class ExecutionCompositionTests
 		Assert.Equal(
 			new HashSet<string>
 			{
-				"catalog-index", "download", "tool-install", "depot-enrollment", "discover", "scan", "credential-test", "content-pull", "purge",
+				"catalog-index", "catalog-pull", "download", "tool-install", "depot-enrollment", "discover", "scan", "credential-test", "content-pull", "purge",
 			},
 			jobTypes);
 	}

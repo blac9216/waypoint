@@ -222,4 +222,24 @@ public sealed class ManagedToolOptions
 
 	/// <summary>Wall-clock budget for a bounded noninteractive <c>vcf-download-tool</c> enrollment call (Depot ID generation or Activation Code validation) -- neither call may prompt interactively or hang the job indefinitely.</summary>
 	public TimeSpan EnrollmentCommandTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+	/// <summary>
+	/// Wall-clock budget for the connected <c>catalog-pull</c> job's <c>metadata
+	/// download</c> invocation (issue #687) -- a hung or unreachable Broadcom depot
+	/// must fail the job rather than block the download-runner's job slot
+	/// indefinitely. Longer than <see cref="EnrollmentCommandTimeout"/> because a real
+	/// vendor metadata catalog is a meaningfully larger download than an enrollment
+	/// identity check.
+	/// </summary>
+	public TimeSpan CatalogPullTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
+	/// <summary>
+	/// Scratch directory, under <see cref="ToolStatePath"/> (same persistent volume),
+	/// that a <c>catalog-pull</c> job's <c>metadata download</c> writes into before
+	/// the downloaded metadata is authenticated and atomically promoted into
+	/// <see cref="Waypoint.Core.Catalog.CatalogOptions.DepotPath"/> (issue #687). Kept
+	/// off the operator-facing depot share so a failed/partial pull never corrupts the
+	/// prior-good on-disk catalog the local re-index and download queue both read.
+	/// </summary>
+	public string CatalogPullStagingDirectoryName { get; set; } = "catalog-pull-staging";
 }
