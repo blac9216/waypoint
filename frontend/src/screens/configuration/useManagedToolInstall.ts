@@ -41,7 +41,7 @@ export interface UseManagedToolInstallResult {
 	installError: string | null;
 	inFlight: boolean;
 	installFromLocalRepository: (sourcePath: string, version?: string) => Promise<void>;
-	uploadTool: (artifact: File, signature: File, version?: string) => Promise<void>;
+	uploadTool: (artifact: File, checksums: { sha256?: string; md5?: string }, version?: string) => Promise<void>;
 	fetchFromDepot: (version?: string) => Promise<void>;
 }
 
@@ -122,7 +122,8 @@ export function useManagedToolInstall(onSettled: () => void): UseManagedToolInst
 	);
 
 	const uploadTool = useCallback(
-		(artifact: File, signature: File, version?: string) => start(() => uploadManagedTool(artifact, signature, version)),
+		(artifact: File, checksums: { sha256?: string; md5?: string }, version?: string) =>
+			start(() => uploadManagedTool(artifact, checksums, version)),
 		[start],
 	);
 

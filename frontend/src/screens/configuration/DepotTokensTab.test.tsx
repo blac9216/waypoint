@@ -591,11 +591,21 @@ describe("DepotTokensTab (issue #571)", () => {
 		expect(depotFetchButton.title).toMatch(/Requires Operator/);
 	});
 
-	it("manual upload requires both the artifact and the signature file before Upload is enabled", async () => {
+	it("manual upload requires an artifact and at least one valid published checksum", async () => {
 		installFetchMock("Operator");
 		await mount();
 
-		const uploadButton = within(screen.getByText("Manual upload").closest("form")!).getByText("Upload & install") as HTMLButtonElement;
+		const form = screen.getByText("Manual upload").closest("form")!;
+		const uploadButton = within(form).getByText("Upload & install") as HTMLButtonElement;
 		expect(uploadButton.disabled).toBe(true);
+
+		fireEvent.change(within(form).getByLabelText("Artifact file"), {
+			target: { files: [new File(["binary"], "tool.tar.gz")] },
+		});
+		fireEvent.change(within(form).getByLabelText("SHA-256 (preferred)"), { target: { value: "bad" } });
+		expect(uploadButton.disabled).toBe(true);
+
+		fireEvent.change(within(form).getByLabelText("SHA-256 (preferred)"), { target: { value: "a".repeat(64) } });
+		expect(uploadButton.disabled).toBe(false);
 	});
 });

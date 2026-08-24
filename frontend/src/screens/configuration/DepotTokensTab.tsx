@@ -379,13 +379,14 @@ function ManagedToolPanel({
 	installError: string | null;
 	inFlight: boolean;
 	onInstallFromLocalRepository: (sourcePath: string, version?: string) => Promise<void>;
-	onUpload: (artifact: File, signature: File, version?: string) => Promise<void>;
+	onUpload: (artifact: File, checksums: { sha256?: string; md5?: string }, version?: string) => Promise<void>;
 	onFetchFromDepot: (version?: string) => Promise<void>;
 }) {
 	const [sourcePath, setSourcePath] = useState("");
 	const [localVersion, setLocalVersion] = useState("");
 	const [artifactFile, setArtifactFile] = useState<File | null>(null);
-	const [signatureFile, setSignatureFile] = useState<File | null>(null);
+	const [uploadSha256, setUploadSha256] = useState("");
+	const [uploadMd5, setUploadMd5] = useState("");
 	const [uploadVersion, setUploadVersion] = useState("");
 	const [depotVersion, setDepotVersion] = useState("");
 
@@ -414,6 +415,11 @@ function ManagedToolPanel({
 
 	const installGateDisabled = writeGate.disabled || inFlight;
 	const installGateTitle = writeGate.disabled ? writeGate.title : inFlight ? "An install is already queued or running" : undefined;
+	const normalizedSha256 = uploadSha256.trim();
+	const normalizedMd5 = uploadMd5.trim();
+	const sha256Valid = !normalizedSha256 || /^[0-9a-fA-F]{64}$/.test(normalizedSha256);
+	const md5Valid = !normalizedMd5 || /^[0-9a-fA-F]{32}$/.test(normalizedMd5);
+	const uploadChecksumsValid = (Boolean(normalizedSha256) || Boolean(normalizedMd5)) && sha256Valid && md5Valid;
 
 	const statusText = inFlight
 		? "Install queued or running…"
@@ -492,8 +498,12 @@ function ManagedToolPanel({
 					className="config-form depot-tab__tool-form"
 					onSubmit={(e) => {
 						e.preventDefault();
-						if (artifactFile && signatureFile) {
-							void onUpload(artifactFile, signatureFile, uploadVersion.trim() || undefined);
+						if (artifactFile && uploadChecksumsValid) {
+							void onUpload(
+								artifactFile,
+								{ sha256: normalizedSha256 || undefined, md5: normalizedMd5 || undefined },
+								uploadVersion.trim() || undefined,
+							);
 						}
 					}}
 				>
@@ -508,14 +518,26 @@ function ManagedToolPanel({
 							/>
 						</label>
 						<label className="config-form__field">
-							<span>Detached signature (.sig) — required</span>
+							<span>SHA-256 (preferred)</span>
 							<input
-								type="file"
-								accept=".sig"
-								onChange={(e) => setSignatureFile(e.target.files?.[0] ?? null)}
+								value={uploadSha256}
+								onChange={(e) => setUploadSha256(e.target.value)}
+								placeholder="64 hexadecimal characters"
 								disabled={writeGate.disabled}
 							/>
 						</label>
+						<label className="config-form__field">
+							<span>MD5 (legacy integrity only)</span>
+							<input
+								value={uploadMd5}
+								onChange={(e) => setUploadMd5(e.target.value)}
+								placeholder="32 hexadecimal characters"
+								disabled={writeGate.disabled}
+							/>
+						</label>
+						<div className="depot-tab__depot-fetch-note">
+							Copy SHA2 or MD5 from the authenticated Broadcom support download record. Checksums verify file integrity; they do not authenticate the publisher.
+						</div>
 						<label className="config-form__field">
 							<span>Version (optional)</span>
 							<input value={uploadVersion} onChange={(e) => setUploadVersion(e.target.value)} disabled={writeGate.disabled} />
@@ -525,7 +547,7 @@ function ManagedToolPanel({
 						<button
 							type="submit"
 							className="config-form__submit"
-							disabled={installGateDisabled || !artifactFile || !signatureFile}
+							disabled={installGateDisabled || !artifactFile || !uploadChecksumsValid}
 							title={installGateTitle}
 						>
 							Upload &amp; install
