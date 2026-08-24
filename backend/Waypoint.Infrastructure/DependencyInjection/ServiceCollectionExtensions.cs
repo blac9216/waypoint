@@ -316,6 +316,15 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunPurgeRepository>(),
 				serviceProvider.GetRequiredService<AttestationSnapshotRepository>(),
 				connectionString));
+
+			// Issue #592 (epic #588, last child): admin-only generic operational-history
+			// deletion, API-only (no runner-side reader/writer, unlike purge above) --
+			// registered here anyway for the same "one composition root" consistency,
+			// even though only the API host resolves it today.
+			services.AddSingleton<Waypoint.Core.Runs.IRunHistoryDeletionRepository>(new Runs.RunHistoryDeletionRepository(connectionString));
+			services.AddSingleton(serviceProvider => new Runs.RunHistoryDeletionService(
+				serviceProvider.GetRequiredService<IJobControlRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunHistoryDeletionRepository>()));
 		}
 
 		return services;

@@ -510,6 +510,40 @@ public sealed record RunPurgeStatusResponse(
 	string? CompletedAt);
 
 /// <summary>
+/// Request body for <c>DELETE /api/v1/runs/{id}/history</c> (issue #592, epic #588).
+/// <see cref="Confirmation"/> mirrors <see cref="RunPurgeRequest.Confirmation"/>'s
+/// explicit step-up pattern -- history deletion is irreversible for that run's
+/// operational record, so it is never implicit.
+/// </summary>
+public sealed record RunHistoryDeletionRequest(
+	[property: JsonPropertyName("confirmation")]
+	string? Confirmation);
+
+/// <summary>
+/// Response body for both <c>DELETE /api/v1/runs/{id}/history</c> and
+/// <c>GET /api/v1/runs/{id}/history</c> -- the tombstone, once deletion has
+/// completed. Deliberately a sibling of <see cref="RunPurgeStatusResponse"/>, not a
+/// shared shape (no artifact-phase progress here: this operation completes
+/// synchronously in one database transaction, unlike purge's runner-executed
+/// artifact-deletion phase).
+/// </summary>
+public sealed record RunHistoryDeletionStatusResponse(
+	[property: JsonPropertyName("run_id")]
+	string RunId,
+
+	[property: JsonPropertyName("outcome")]
+	string Outcome,
+
+	[property: JsonPropertyName("actor")]
+	string Actor,
+
+	[property: JsonPropertyName("prior_state")]
+	string PriorState,
+
+	[property: JsonPropertyName("occurred_at")]
+	string OccurredAt);
+
+/// <summary>
 /// Query parameters for <c>GET /api/v1/runs/{id}/events/history</c> (issue #581,
 /// ADR-0019): the bounded historical counterpart to the SSE stream. All bind from the
 /// query string via <c>[FromQuery]</c>; <see cref="RunsController.MapHistoryQuery"/>

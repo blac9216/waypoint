@@ -184,6 +184,10 @@ public sealed class EndpointRoleMatrixTests
 		// action with wider blast radius than ordinary dispatch control.
 		["RunsController.PurgeRun"] = WaypointRole.Admin,
 		["RunsController.GetPurgeStatus"] = WaypointRole.Viewer,
+		// Issue #592 (epic #588): generic operational-history deletion is Admin-only,
+		// same wider-blast-radius gate as purge above.
+		["RunsController.DeleteRunHistory"] = WaypointRole.Admin,
+		["RunsController.GetRunHistoryDeletionStatus"] = WaypointRole.Viewer,
 
 		// SchedulesController -- reads Viewer+; writes are Cyber+ at the attribute floor
 		// (the coarse "lowest schedulable role"), refined per-job_type in-action by

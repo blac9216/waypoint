@@ -65,6 +65,7 @@ import { kpiTiles } from "./results-metrics";
 import { formatRunDuration, formatTimestamp, scopeSiteId } from "./results";
 import "./ResultsScreen.css";
 import { PurgeRunPanel } from "./PurgeRunPanel";
+import { RunHistoryDeletionPanel } from "./RunHistoryDeletionPanel";
 import { UploadStatusPanel } from "./UploadStatusPanel";
 import { useCklExport } from "./useCklExport";
 import { useRunDetail } from "./useRunDetail";
@@ -190,6 +191,13 @@ export function ResultsScreen() {
 						</div>
 
 						<PurgeRunPanel key={run.id} run={run} onPurged={() => setPurged(true)} />
+
+						{/* Issue #592 (epic #588): generic operational-history deletion is a
+						   distinct, later-ordered action from the purge above -- the server
+						   itself enforces "purge first" (409 requires_domain_purge_first) for
+						   scan/remediate runs, so this panel only renders once purged is
+						   true rather than let an operator hit that refusal from this screen. */}
+						{purged && <RunHistoryDeletionPanel key={`history-${run.id}`} run={run} />}
 
 						{!purged && (
 							<>

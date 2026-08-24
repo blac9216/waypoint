@@ -140,6 +140,54 @@ object; destructive domain cleanup is separately authorized, audited, and retrya
 ([ADR-0019](adr/0019-global-job-observability.md)). Retention duration for both layers
 remains an operator-policy decision.
 
+#### Operational vs. domain retention ownership (issue #592, epic #588's last child)
+
+Every closed-set `run_type`/`job_type` classified by what it retains where, and who is
+authorized to delete which layer. "Operational metadata" is always the `runs`/`jobs`
+rows themselves plus their `job_events` diagnostics — retained for **every** type,
+because `job_events` is append-only-by-trigger and FK'd to `jobs` with no cascade
+action (migration 0001/0020), the same structural reason both `purged_at`
+(migration 0042) and `history_deleted_at` (migration 0046) mark a run's row in place
+rather than deleting it. "Domain outputs" is what a type's handler durably writes
+outside the job engine. "Generic deletion" is `DELETE /runs/{id}/history` (this issue);
+"domain purge" is `POST /runs/{id}/purge` (issue #594, `scan`/`remediate` only — no
+other type has a domain-purge operation today, so generic deletion applies to them
+directly once terminal).
+
+| `run_type`/`job_type` | Operational metadata | Domain outputs | Retention owner | Generic deletion gate |
+|---|---|---|---|---|
+| `scan`, `remediate` | run/job rows, `job_events`, `attestation_snapshots` while unpurged | Compliance Results: findings, attestations-applied ledger, CKL/HDF artifact files | Compliance Results (`RunPurgeService`) | **Requires `runs.purged_at` set first** (409 `requires_domain_purge_first` otherwise) — see below |
+| `discover`, `credential-test` | run/job rows, `job_events` | Targets: `discovery_status`/`last_refreshed`, connection health (invented example: a target's discovered vSphere version) | Targets screen (mutated in place per target, never deleted by run history) | None — deletes directly once terminal |
+| `download` | run/job rows, `job_events`, `run_secrets` (already swept at terminal) | Catalog/Library: downloaded artifact files, `downloads`/`depot_artifacts` rows (invented example: a fetched VCF ISO) | Library/Catalog screens | None — deletes directly once terminal |
+| `catalog-index`, `content-library-sync` | run/job rows, `job_events` | Catalog/Library: synced catalog metadata rows | Library/Catalog screens | None — deletes directly once terminal |
+| `content-pull`, `content-import` | run/job rows, `job_events` | Compliance Content: `profiles`/`profile_controls` rows (invented example: an imported STIG benchmark's control list) | Compliance Content screen | None — deletes directly once terminal |
+| `bundle-export`, `bundle-import` | run/job rows, `job_events` | Transfer: bundle manifest/apply-state rows (invented example: a signed export bundle's manifest) | Transfer screen | None — deletes directly once terminal |
+| `update` | run/job rows, `job_events` | System administration: staged/applied update state (invented example: a recorded appliance version bump) | System screen | None — deletes directly once terminal |
+| `purge` | run/job rows, `job_events` (the purge-wrapper run migration 0042 creates, `initiated_by = "purge:<actor>"`) | None — this run type has no domain output of its own; it is the mechanism that deletes another run's | N/A (never independently purged/deleted; it is retained exactly like any other terminal run's history) | None — deletes directly once terminal, same as any non-compliance type |
+
+**The compliance gate, precisely.** `RunHistoryDeletionService.DeleteHistoryAsync`
+checks `run_type IN ('scan', 'remediate')`; if true, it additionally requires
+`runs.purged_at IS NOT NULL` (i.e., `POST /runs/{id}/purge` already completed for that
+run) before it will set `runs.history_deleted_at`. This is the concrete form of epic
+#588's design principle: "generic cleanup DEFERS to domain purge when compliance-owned
+artifacts are involved" — the operational history for a scan/remediate run is not
+deletable while its findings/attestations/artifacts might still exist, because an
+operator reading `GET /runs/{id}/history` after a bare history deletion would otherwise
+see no record that a run *ever* produced those still-present compliance artifacts. No
+other run type has this ordering requirement, since none of them has a domain-purge
+operation to defer to — their durable outputs are mutated/replaced in place by later
+runs of the same job type (a target's `discovery_status` is overwritten, not versioned
+per run) rather than being a la carte deletable per run.
+
+**What generic deletion actually deletes**, for every type: nothing at the row level
+beyond marking `runs.history_deleted_at` and severing `schedules.last_run_id` if this
+run was a schedule's most-recent-run pointer (the same "FK is a backstop, not the
+enforcement point" idiom `purged_at`'s schedule-nulling already established). The run,
+job, and `job_events` rows are retained — see migration 0046's header comment for why
+that is structural, not a policy choice. An append-only `run_history_deletion_tombstones`
+row records actor/time/prior-state/outcome, mirroring `run_purge_tombstones`'s shape as
+a deliberate sibling (not a shared table — see that migration for why).
+
 ### STIG configuration documents
 SAF attestation YAML, InSpec input YAML, remediation input files — stored as **documents
 in Postgres** (not parsed into forms; the schemas belong to Broadcom/MITRE and change

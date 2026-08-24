@@ -39,7 +39,7 @@
  *   `ResultsScreen.tsx`'s sidebar still uses them for the "which are
  *   currently expired" slice, alongside the real endpoint.
  */
-import { apiGet, apiPost } from "../../lib/api";
+import { apiFetch, apiGet, apiPost } from "../../lib/api";
 
 /** `RunResponse` (RunContracts.cs) — this screen's subset. */
 export interface RunListItem {
@@ -148,6 +148,38 @@ export function purgeRun(runId: string): Promise<RunPurgeStatus> {
  * `purgeRun`. */
 export function fetchPurgeStatus(runId: string): Promise<RunPurgeStatus> {
 	return apiGet<RunPurgeStatus>(`/runs/${runId}/purge`);
+}
+
+/** `RunHistoryDeletionStatusResponse` (RunContracts.cs) — the tombstone shape
+ * both `DELETE /runs/{id}/history` and `GET /runs/{id}/history` return
+ * (issue #592, epic #588). Unlike `RunPurgeStatus` there is no in-progress
+ * phase to poll: deletion completes synchronously in one transaction, so
+ * `outcome` is always terminal (`"Completed"` or `"AlreadyDeleted"`) the
+ * moment a 200 comes back. */
+export interface RunHistoryDeletionStatus {
+	run_id: string;
+	outcome: "Completed" | "AlreadyDeleted" | string;
+	actor: string;
+	prior_state: string;
+	occurred_at: string;
+}
+
+/** `DELETE /runs/{id}/history` — Admin-only, requires the literal `"DELETE"`
+ * confirmation string (RunsController.HistoryDeletionConfirmation) or the
+ * server 400s. For a compliance run (`scan`/`remediate`) the server 409s
+ * with `requires_domain_purge_first` unless `purgeRun` already completed —
+ * callers should only offer this action once `PurgeRunPanel`'s tombstone is
+ * visible for those two run types (this screen's own gate), or unconditionally
+ * for any other terminal run type. */
+export function deleteRunHistory(runId: string): Promise<RunHistoryDeletionStatus> {
+	return apiFetch<RunHistoryDeletionStatus>(`/runs/${runId}/history`, { method: "DELETE", body: { confirmation: "DELETE" } });
+}
+
+/** `GET /runs/{id}/history` — reads back the tombstone without triggering
+ * anything. 404s (via `apiGet`'s `ApiError`) if deletion was never requested
+ * for this run. */
+export function fetchRunHistoryDeletionStatus(runId: string): Promise<RunHistoryDeletionStatus> {
+	return apiGet<RunHistoryDeletionStatus>(`/runs/${runId}/history`);
 }
 
 /** CAT I/II/III severity, spelled out — never abbreviated to a bare "I"/"II"/"III"
