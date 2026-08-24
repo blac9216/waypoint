@@ -52,6 +52,7 @@
  * the pre-existing placeholder in screens.tsx (which this component
  * replaces) — stubbed until M4 (epic #15).
  */
+import { useEffect, useState } from "react";
 import { useAuth } from "../../lib/auth-context";
 import { roleGateProps } from "../../lib/roles";
 import { ArtifactsTable } from "./ArtifactsTable";
@@ -59,6 +60,7 @@ import { AttestationsPanel } from "./AttestationsPanel";
 import { kpiTiles } from "./results-metrics";
 import { formatRunDuration, formatTimestamp, scopeSiteId } from "./results";
 import "./ResultsScreen.css";
+import { PurgeRunPanel } from "./PurgeRunPanel";
 import { UploadStatusPanel } from "./UploadStatusPanel";
 import { useCklExport } from "./useCklExport";
 import { useRunDetail } from "./useRunDetail";
@@ -72,6 +74,16 @@ export function ResultsScreen() {
 		useRunDetail(selectedRunId, selectedRow);
 
 	const { exporting, handleExport } = useCklExport(run, jobs, token);
+
+	// Purged (issue #656/#594): once PurgeRunPanel confirms the tombstone
+	// outcome, the results panes/export/remediate actions are hidden — a
+	// purged run's artifacts/attestations are genuinely gone server-side, so
+	// this screen must render that honestly rather than keep showing stale
+	// rows next to the tombstone. Reset per-run via `key` below (PurgeRunPanel
+	// re-mounts and re-checks on selection change).
+	const [purged, setPurged] = useState(false);
+	// eslint-disable-next-line react-hooks/exhaustive-deps
+	useEffect(() => setPurged(false), [selectedRunId]);
 
 	// Remediate is a stub regardless of role (epic #15/M4 has not landed) — but
 	// still runs through roleGateProps for the same visible-but-disabled
@@ -156,32 +168,47 @@ export function ResultsScreen() {
 								</div>
 							</div>
 							<div className="results__spacer" />
-							<button type="button" className="results__export-btn" onClick={handleExport} disabled={exporting || jobs.length === 0}>
-								{exporting ? "Exporting…" : "Export CKL bundle"}
-							</button>
-							<button type="button" className="results__remediate-btn" {...remediateGate}>
-								Remediate findings…
-							</button>
+							{!purged && (
+								<>
+									<button
+										type="button"
+										className="results__export-btn"
+										onClick={handleExport}
+										disabled={exporting || jobs.length === 0}
+									>
+										{exporting ? "Exporting…" : "Export CKL bundle"}
+									</button>
+									<button type="button" className="results__remediate-btn" {...remediateGate}>
+										Remediate findings…
+									</button>
+								</>
+							)}
 						</div>
 
-						<div className="results__kpis">
-							{kpiTiles(run, artifacts).map((tile) => (
-								<div key={tile.label} className="results__kpi-tile">
-									<div className="results__kpi-label">{tile.label}</div>
-									<div className={`results__kpi-value ${tile.className}`}>{tile.value}</div>
+						<PurgeRunPanel key={run.id} run={run} onPurged={() => setPurged(true)} />
+
+						{!purged && (
+							<>
+								<div className="results__kpis">
+									{kpiTiles(run, artifacts).map((tile) => (
+										<div key={tile.label} className="results__kpi-tile">
+											<div className="results__kpi-label">{tile.label}</div>
+											<div className={`results__kpi-value ${tile.className}`}>{tile.value}</div>
+										</div>
+									))}
 								</div>
-							))}
-						</div>
 
-						{loadError && <div className="results__action-error">{loadError}</div>}
+								{loadError && <div className="results__action-error">{loadError}</div>}
 
-						<div className="results__panes">
-							<ArtifactsTable loading={loading} artifacts={artifacts} unavailable={artifactsUnavailable} jobs={jobs} />
-							<div className="results__side-panels">
-								<AttestationsPanel expired={expiredAttestations} applied={attestationsApplied} />
-								<UploadStatusPanel jobs={jobs} />
-							</div>
-						</div>
+								<div className="results__panes">
+									<ArtifactsTable loading={loading} artifacts={artifacts} unavailable={artifactsUnavailable} jobs={jobs} />
+									<div className="results__side-panels">
+										<AttestationsPanel expired={expiredAttestations} applied={attestationsApplied} />
+										<UploadStatusPanel jobs={jobs} />
+									</div>
+								</div>
+							</>
+						)}
 					</>
 				)}
 			</div>

@@ -1,0 +1,139 @@
+/* Purge action (issue #656) — same panel language as ResultsScreen.css's
+ * destructive `results__remediate-btn` treatment (bad-colored outline, never
+ * filled-solid) and the config tabs' `config-panel`/`config-form` idiom. */
+
+.purge-panel {
+	margin-bottom: 14px;
+}
+
+.purge-panel__trigger {
+	background: transparent;
+	border: 1px solid var(--bad);
+	color: var(--bad);
+	padding: 6px 13px;
+	border-radius: 3px;
+	font-size: 11.5px;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.purge-panel__trigger:disabled {
+	cursor: default;
+}
+
+.purge-panel__confirm {
+	border: 1px solid var(--bad);
+	border-radius: 4px;
+	padding: 12px 14px;
+	background: var(--panel2);
+	max-width: 480px;
+}
+
+.purge-panel__confirm-warning {
+	font-size: 12px;
+	color: var(--txt2);
+	margin-bottom: 10px;
+}
+
+.purge-panel__confirm-label {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	font-size: 11.5px;
+	color: var(--txt2);
+	margin-bottom: 10px;
+}
+
+.purge-panel__confirm-word {
+	color: var(--bad);
+	font-weight: 650;
+}
+
+.purge-panel__confirm-input {
+	background: var(--bg);
+	border: 1px solid var(--line);
+	color: var(--txt);
+	padding: 6px 9px;
+	border-radius: 3px;
+	font-size: 12px;
+}
+
+.purge-panel__confirm-actions {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
+}
+
+.purge-panel__confirm-submit {
+	background: var(--badd);
+	border: 1px solid var(--bad);
+	color: var(--bad);
+	padding: 6px 13px;
+	border-radius: 3px;
+	font-size: 11.5px;
+	cursor: pointer;
+}
+
+.purge-panel__confirm-submit:disabled {
+	cursor: default;
+	opacity: 0.5;
+}
+
+.purge-panel__progress {
+	font-size: 12px;
+	color: var(--txt2);
+}
+
+.purge-panel__failed {
+	border: 1px solid var(--bad);
+	border-radius: 4px;
+	padding: 10px 14px;
+	background: var(--badd);
+}
+
+.purge-panel__failed-message {
+	font-size: 12px;
+	color: var(--bad);
+	margin-bottom: 8px;
+}
+
+.purge-panel__retry {
+	background: transparent;
+	border: 1px solid var(--bad);
+	color: var(--bad);
+	padding: 5px 12px;
+	border-radius: 3px;
+	font-size: 11.5px;
+	cursor: pointer;
+}
+
+.purge-panel__retry:disabled {
+	cursor: default;
+	opacity: 0.6;
+}
+
+.purge-panel__error {
+	color: var(--bad);
+	font-size: 11.5px;
+	margin-bottom: 8px;
+}
+
+.purge-panel--tombstone {
+	border: 1px solid var(--line);
+	border-radius: 4px;
+	padding: 14px;
+	background: var(--panel2);
+}
+
+.purge-panel__title {
+	font-size: 10px;
+	letter-spacing: 0.1em;
+	color: var(--txt3);
+	font-weight: 650;
+	margin-bottom: 8px;
+}
+
+.purge-panel__tombstone-body {
+	font-size: 12px;
+	color: var(--txt2);
+}
