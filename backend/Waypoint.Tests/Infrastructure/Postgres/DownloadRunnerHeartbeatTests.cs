@@ -113,7 +113,7 @@ public sealed class DownloadRunnerHeartbeatTests : IAsyncLifetime
 		// The runner reports its full allowlist; all required paths exist, so it is ready.
 		Assert.True(row.Ready);
 		Assert.Equal(
-			new HashSet<string>(StringComparer.Ordinal) { "catalog-index", "download" },
+			Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed,
 			new HashSet<string>(row.JobTypes, StringComparer.Ordinal));
 	}
 

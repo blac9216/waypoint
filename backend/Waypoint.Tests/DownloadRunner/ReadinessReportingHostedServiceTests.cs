@@ -108,7 +108,7 @@ public sealed class ReadinessReportingHostedServiceTests : IDisposable
 		Assert.True(snapshot.ArtifactStoreWritable);
 		Assert.True(snapshot.DepotPathReadable);
 		Assert.False(snapshot.ToolPresent);
-		Assert.Equal(new HashSet<string>(StringComparer.Ordinal) { "catalog-index", "download" }, new HashSet<string>(snapshot.JobTypes, StringComparer.Ordinal));
+		Assert.Equal(Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed, new HashSet<string>(snapshot.JobTypes, StringComparer.Ordinal));
 	}
 
 	[Fact]

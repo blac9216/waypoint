@@ -116,20 +116,50 @@ public sealed class ManagedToolController : ControllerBase
 		}
 
 		ManagedToolOptions options = _options.Value;
-		Directory.CreateDirectory(options.UploadStagingPath);
+
+		// Issue #621 (re-scoped per #630 review): the backend's UploadStagingPath
+		// must be a writable mounted volume shared with the download-runner
+		// (deploy/docker-compose.yml's dedicated `tool-upload-staging` volume,
+		// chowned by this image's entrypoint -- see backend/docker-entrypoint.sh)
+		// so the tool-install job can later read what this request stages. This is
+		// deliberately NOT the `managed-tool` tool store: the backend never mounts
+		// that, keeping the API off the verified tool binary and the release-key
+		// trust anchor (ADR-0014 §7). A missing mount or an ownership mismatch
+		// surfaces here as UnauthorizedAccessException/IOException; map it to a
+		// clean 503 instead of letting it fall through as an unhandled 500 that
+		// leaks a stack trace.
+		try
+		{
+			Directory.CreateDirectory(options.UploadStagingPath);
+		}
+		catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+		{
+			throw ApiException.Unavailable(
+				"The upload-staging location is not writable on this appliance.",
+				"Confirm the tool-upload-staging volume is mounted and writable by the backend service (see deploy/docker-compose.yml and deploy/README.md).");
+		}
 
 		string stagedName = $"{Guid.NewGuid():N}-{Path.GetFileName(artifact.FileName)}";
 		string stagedArtifactPath = Path.Combine(options.UploadStagingPath, stagedName);
 		string stagedSignaturePath = stagedArtifactPath + ".sig";
 
-		await using (FileStream artifactStream = System.IO.File.Create(stagedArtifactPath))
+		try
 		{
-			await artifact.CopyToAsync(artifactStream, cancellationToken).ConfigureAwait(false);
-		}
+			await using (FileStream artifactStream = System.IO.File.Create(stagedArtifactPath))
+			{
+				await artifact.CopyToAsync(artifactStream, cancellationToken).ConfigureAwait(false);
+			}
 
-		await using (FileStream signatureStream = System.IO.File.Create(stagedSignaturePath))
+			await using (FileStream signatureStream = System.IO.File.Create(stagedSignaturePath))
+			{
+				await signature.CopyToAsync(signatureStream, cancellationToken).ConfigureAwait(false);
+			}
+		}
+		catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
 		{
-			await signature.CopyToAsync(signatureStream, cancellationToken).ConfigureAwait(false);
+			throw ApiException.Unavailable(
+				"The upload-staging location is not writable on this appliance.",
+				"Confirm the tool-upload-staging volume is mounted and writable by the backend service (see deploy/docker-compose.yml and deploy/README.md).");
 		}
 
 		return await QueueInstallAsync(ManagedToolInstallSources.Upload, stagedName, version, cancellationToken).ConfigureAwait(false);

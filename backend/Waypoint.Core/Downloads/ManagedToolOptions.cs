@@ -56,10 +56,18 @@ public sealed class ManagedToolOptions
 	/// <summary>
 	/// Directory manual uploads (issue #39's third install path) are staged into by
 	/// <c>POST /downloads/tool/upload</c> before the <c>tool-install</c> job picks them
-	/// up. Kept separate from <see cref="ToolStatePath"/> so a staged-but-not-yet-verified
-	/// upload can never be mistaken for an installed tool.
+	/// up. Lives on its OWN dedicated volume (<c>tool-upload-staging</c> in
+	/// <c>deploy/docker-compose.yml</c>), NOT under <see cref="ToolStatePath"/>: the
+	/// backend mounts only this staging volume read-write and never the
+	/// <c>managed-tool</c> tool store, so the API-facing process cannot write the
+	/// verified tool binary or the <see cref="ReleasePublicKeyPath"/> trust anchor
+	/// (ADR-0014 §7, issue #442 AC5, #570 -- re-scoped per #630 review). The
+	/// download-runner mounts the SAME staging volume read-write so it can read the
+	/// staged artifact/signature when it claims the install job (and write the
+	/// depot-fetch subdir). Keeping staging off the tool store also means a
+	/// staged-but-not-yet-verified upload can never be mistaken for an installed tool.
 	/// </summary>
-	public string UploadStagingPath { get; set; } = "/var/lib/waypoint/managed-tool/uploads";
+	public string UploadStagingPath { get; set; } = "/var/lib/waypoint/tool-upload-staging";
 
 	/// <summary>
 	/// PEM-encoded RSA public key file used to verify every candidate artifact's

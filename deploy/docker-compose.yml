@@ -231,6 +231,23 @@ services:
       # output back to the API caller. compliance-runner and download-runner
       # (below) hold the read-write mount for the same named volume.
       - artifacts:/var/lib/waypoint/artifacts:ro
+      # Read-write (issue #621, re-scoped per #630 review): ManagedToolController.Upload
+      # (POST /api/v1/downloads/tool/upload) stages the uploaded artifact +
+      # detached signature under ManagedToolOptions.UploadStagingPath before
+      # queuing the tool-install job that reads it back. This is a SEPARATE,
+      # staging-only named volume (NOT the managed-tool tool store): the backend
+      # deliberately does NOT mount `managed-tool`, so it never has write access
+      # to the verified tool binary (ToolStatePath) or the RSA release-key trust
+      # anchor (ReleasePublicKeyPath) -- ADR-0014 §7 (backend read-only where
+      # required; tool mounts scoped to the domain that needs them) and the
+      # issue-#442 AC5 boundary (see the artifacts comment above; #570 kept the
+      # API off the tool store). The SAME `tool-upload-staging` volume is mounted
+      # into download-runner (below) so a file this controller stages is on a
+      # filesystem the download-runner reads once it claims that job -- a distinct
+      # volume per service would stage a file the runner could never see. The
+      # backend's docker-entrypoint.sh chowns ONLY this staging mount to `app` at
+      # container start (the same root-then-drop pattern download-runner uses).
+      - tool-upload-staging:/var/lib/waypoint/tool-upload-staging
       - dev-secrets:/run/secrets:ro
       # Admin password hash file (issue #333) - operator-provided, gitignored
       # (../config/ is covered by .gitignore's anchored /config/ entry).
@@ -623,6 +640,15 @@ services:
       # ManagedToolOptions' ToolStatePath default. Read-write so that future
       # install flow can place the binary; download jobs only ever read it.
       - managed-tool:/var/lib/waypoint/managed-tool
+      # Manual-upload staging (issue #621, re-scoped per #630 review): the SAME
+      # staging-only volume the backend mounts read-write. The tool-install job
+      # reads the artifact + detached signature the backend staged under
+      # ManagedToolOptions.UploadStagingPath here (and the depot-fetch path
+      # writes its own subdir), then activates the verified binary onto the
+      # managed-tool store above. Kept OFF the managed-tool volume so the backend
+      # never needs write access to the tool store or the release-key trust
+      # anchor (ADR-0014 §7 / issue #442 AC5 / #570).
+      - tool-upload-staging:/var/lib/waypoint/tool-upload-staging
       - dev-secrets:/run/secrets:ro
       # Secrets master key file (issue #405/#442) - same convention as
       # compliance-runner's own mount above; catalog-index resolves the depot
@@ -710,8 +736,20 @@ volumes:
   # layout) - download-runner only.
   depot:
   # Operator-installed managed tool state (ADR-0015 decision 3, e.g. the
-  # account-gated vcf-download-tool) - download-runner only.
+  # account-gated vcf-download-tool executable + the RSA release-key trust
+  # anchor) - download-runner only. The backend deliberately does NOT mount
+  # this: it would hand the API-facing process write access to the verified
+  # tool binary and the signature-verification key (ADR-0014 §7, issue #442
+  # AC5, #570). Manual uploads land on the separate `tool-upload-staging`
+  # volume below instead.
   managed-tool:
+  # Manual-upload staging (issue #621, re-scoped per #630 review) - mounted
+  # read-write by BOTH backend (ManagedToolController.Upload stages here) and
+  # download-runner (the tool-install job reads the staged artifact/signature,
+  # and the depot-fetch path writes a subdir). Deliberately separate from
+  # `managed-tool` so the backend gets a writable staging path WITHOUT any
+  # access to the tool store or release key. Matches ManagedToolOptions.UploadStagingPath.
+  tool-upload-staging:
   # Compliance content (InSpec profiles) - compliance-runner only, read-only at
   # the mount (see that service's volumes:).
   compliance-profiles:

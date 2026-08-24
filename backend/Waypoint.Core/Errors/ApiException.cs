@@ -72,4 +72,20 @@ public class ApiException : Exception
 	{
 		return new ApiException(HttpStatusCode.Conflict, "mode_unavailable", message, detail);
 	}
+
+	/// <summary>
+	/// The endpoint cannot complete because something the deployment is responsible for
+	/// provisioning (a mounted volume, a writable staging directory) is missing or
+	/// misconfigured on this host -- distinct from <see cref="ModeUnavailable"/> (a
+	/// connected/disconnected-mode gate) and from an unmapped 500 (an actual bug). Issue
+	/// #621: <c>ManagedToolController.Upload</c> used to let a staging-directory
+	/// <see cref="UnauthorizedAccessException"/>/<see cref="IOException"/> surface as an
+	/// unhandled 500 (leaking a stack trace server-side) when its configured
+	/// <c>UploadStagingPath</c> mount was missing or unwritable; this gives that failure
+	/// mode a clean, documented shape instead.
+	/// </summary>
+	public static ApiException Unavailable(string message, string? detail = null)
+	{
+		return new ApiException(HttpStatusCode.ServiceUnavailable, "service_unavailable", message, detail);
+	}
 }

@@ -23,16 +23,18 @@ namespace Waypoint.Tests.DownloadRunner;
 /// <summary>
 /// Issue #441's registration acceptance criterion: "Catalog-index and download jobs
 /// execute only in the download runner" -- proven here as "this host's allowlist and
-/// registered handlers are exactly {catalog-index, download}, nothing from
-/// JobCapabilities.Compliance and none of Download's six unimplemented 'later' types."
+/// registered handlers are exactly {catalog-index, download, tool-install}, nothing
+/// from JobCapabilities.Compliance and none of Download's five remaining unimplemented
+/// 'later' types." <c>tool-install</c> joined the set in issue #619, which fixed the
+/// handler-registered-but-never-claimable gap it had sat in since #39/#602.
 /// </summary>
 public sealed class DownloadRunnerJobTypesTests
 {
 	[Fact]
-	public void Allowed_IsExactlyCatalogIndexAndDownload()
+	public void Allowed_IsExactlyCatalogIndexDownloadAndToolInstall()
 	{
 		Assert.Equal(
-			new HashSet<string>(StringComparer.Ordinal) { "catalog-index", "download" },
+			new HashSet<string>(StringComparer.Ordinal) { "catalog-index", "download", "tool-install" },
 			Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed);
 	}
 
