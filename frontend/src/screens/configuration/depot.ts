@@ -17,7 +17,7 @@
  *                                               (PR #570).
  *   POST           /downloads/tool/install    — local-repository install path
  *   POST           /downloads/tool/upload     — manual upload (multipart +
- *                                               mandatory detached .sig)
+ *                                               published checksum)
  *   POST           /downloads/tool/fetch      — depot-fetch install path
  *                                               (connected mode only — the
  *                                               backend refuses with 409
@@ -67,11 +67,16 @@ export function installManagedToolFromLocalRepository(sourcePath: string, versio
 	});
 }
 
-/** Manual upload: artifact + mandatory detached `.sig` (issue #39 AC — an unsigned upload is never accepted, even before verification runs). Field names (`artifact`, `signature`, `version`) match `ManagedToolController.Upload`'s parameter names exactly. */
-export function uploadManagedTool(artifact: File, signature: File, version?: string): Promise<ManagedToolInstallQueuedResponse> {
+/** Manual upload with SHA-256 preferred and MD5 accepted only as legacy integrity. */
+export function uploadManagedTool(
+	artifact: File,
+	checksums: { sha256?: string; md5?: string },
+	version?: string,
+): Promise<ManagedToolInstallQueuedResponse> {
 	const form = new FormData();
 	form.set("artifact", artifact);
-	form.set("signature", signature);
+	if (checksums.sha256) form.set("sha256", checksums.sha256);
+	if (checksums.md5) form.set("md5", checksums.md5);
 	if (version) {
 		form.set("version", version);
 	}

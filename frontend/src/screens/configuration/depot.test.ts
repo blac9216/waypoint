@@ -57,17 +57,17 @@ describe("depot.ts data layer (issue #571/#39/#560)", () => {
 		expect(calls[0].body).toEqual({ source_path: "tool.tar.gz", version: "1.4.2" });
 	});
 
-	it("uploadManagedTool posts multipart form data with artifact + signature field names matching the backend", async () => {
+	it("uploadManagedTool posts artifact plus both published checksum fields", async () => {
 		const artifact = new File(["binary"], "vcf-download-tool.tar.gz");
-		const signature = new File(["sig"], "vcf-download-tool.tar.gz.sig");
-		await uploadManagedTool(artifact, signature, "1.4.2");
+		await uploadManagedTool(artifact, { sha256: "a".repeat(64), md5: "b".repeat(32) }, "1.4.2");
 
 		expect(calls[0].url).toBe("/api/v1/downloads/tool/upload");
 		expect(calls[0].method).toBe("POST");
 		const form = calls[0].init?.body as FormData;
 		expect(form).toBeInstanceOf(FormData);
 		expect(form.get("artifact")).toBe(artifact);
-		expect(form.get("signature")).toBe(signature);
+		expect(form.get("sha256")).toBe("a".repeat(64));
+		expect(form.get("md5")).toBe("b".repeat(32));
 		expect(form.get("version")).toBe("1.4.2");
 		// Content-Type must NOT be set by hand — fetch derives the multipart
 		// boundary itself; a hand-set header here would omit it and the
@@ -78,8 +78,7 @@ describe("depot.ts data layer (issue #571/#39/#560)", () => {
 
 	it("uploadManagedTool omits the version field when not provided", async () => {
 		const artifact = new File(["binary"], "tool.tar.gz");
-		const signature = new File(["sig"], "tool.tar.gz.sig");
-		await uploadManagedTool(artifact, signature);
+		await uploadManagedTool(artifact, { sha256: "a".repeat(64) });
 
 		const form = calls[0].init?.body as FormData;
 		expect(form.get("version")).toBeNull();
