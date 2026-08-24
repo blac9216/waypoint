@@ -87,3 +87,16 @@ an appliance that loses required tooling when transferred.
 - Project documentation must say what Waypoint distributes factually and leave license
   compliance for acquired/transferred material with the operator; it must not promise
   a legal conclusion.
+
+### Consequence learned from the real VCFDT distribution (2026-08-24, #669)
+
+Broadcom does not publish a detached signature beside each VCF Download Tool archive.
+The offline depot instead publishes the artifact's byte size and SHA-256 in
+`PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json`, with an RSA
+PKCS#1 v1.5/SHA-256 signature envelope in `productVersionCatalog.sig`. A local
+repository install therefore authenticates the exact catalog bytes against an
+independently provisioned VMware/Broadcom certificate, then verifies the candidate's
+catalog size and SHA-256 before activation. A certificate embedded in the signature
+envelope is not trusted merely because it is embedded there. Manual-upload and
+connected-fetch delivery are tracked separately under Epic #667 because their
+metadata sources differ.

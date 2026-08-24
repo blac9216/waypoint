@@ -955,13 +955,20 @@ provisioning UI):
   still comes up healthy without it.
 - **`managed-tool`** (mounted read-write into `download-runner` **only** at
   `/var/lib/waypoint/managed-tool`) — the account-gated `vcf-download-tool`
-  executable and the RSA release-key trust anchor (ADR-0015 decision 3:
+  executable and independently obtained catalog-trust certificate (ADR-0015 decision 3:
   operator-installed through the appliance, never baked into the image). A
   `download` job fails closed with a clear "tool not installed" error until
   this is populated; the stack still comes up healthy without it. The
   `backend` deliberately does **not** mount this volume, so the API-facing
   process never has write access to the verified binary or the
-  signature-verification key (ADR-0014 §7, issue #442 AC5, #570).
+  catalog trust anchor (ADR-0014 §7, issue #442 AC5, #570). For a standard
+  offline repository mounted at `/vcf`, provision the trusted VMware/Broadcom
+  certificate at `/var/lib/waypoint/managed-tool/catalog-trust.cert`; the runner
+  verifies `PROD/metadata/productVersionCatalog/v1/productVersionCatalog.sig`
+  over the exact catalog JSON, then checks the selected VCFDT archive's catalog
+  byte size and SHA-256. Obtain the trust certificate independently through an
+  authenticated Broadcom channel — do not copy it blindly from the catalog
+  signature envelope being verified.
 - **`tool-upload-staging`** (mounted read-write into **both** `backend` and
   `download-runner` at `/var/lib/waypoint/tool-upload-staging`, issue #621) —
   a dedicated, staging-only volume. `ManagedToolController.Upload`
