@@ -24,9 +24,11 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.SystemState;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.SystemState;
 using Waypoint.Tests.Support;
 using Xunit;
 
@@ -78,6 +80,7 @@ public sealed class ManagedToolApiTests : IAsyncLifetime
 				services.AddSingleton<IJobControlRepository>(jobs);
 				services.AddSingleton<IJobRunnerRepository>(jobs);
 				services.AddSingleton<IManagedToolInstallRepository>(new ManagedToolInstallRepository(_connectionString));
+				services.AddSingleton<IApplianceStateRepository>(new ApplianceStateRepository(_connectionString));
 				services.Configure<ManagedToolOptions>(options => options.UploadStagingPath = _uploadStagingPath);
 			});
 		}
@@ -230,6 +233,74 @@ public sealed class ManagedToolApiTests : IAsyncLifetime
 
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 		Assert.Empty(Directory.GetFiles(_uploadStagingPath));
+	}
+
+	[Fact]
+	public async Task PostFetch_ConnectedWithOperatorRole_QueuesOneDepotSourcedJob()
+	{
+		await SetModeAsync("connected");
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/tool/fetch")
+		{
+			Content = JsonBody(new { version = "1.4.2" }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid jobId = Guid.Parse(document.RootElement.GetProperty("job_id").GetString()!);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand payloadQuery = new("SELECT payload::text FROM jobs WHERE id = $1", connection);
+		payloadQuery.Parameters.AddWithValue(jobId);
+		string payload = (string)(await payloadQuery.ExecuteScalarAsync())!;
+		Assert.Contains("\"depot\"", payload, StringComparison.Ordinal);
+		Assert.Contains("1.4.2", payload, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task PostFetch_Disconnected_Returns409_NoJobQueued()
+	{
+		await SetModeAsync("disconnected");
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/tool/fetch") { Content = JsonBody(new { }) };
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("mode_unavailable", document.RootElement.GetProperty("error").GetProperty("code").GetString());
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand count = new("SELECT count(*) FROM jobs WHERE job_type = 'tool-install'", connection);
+		Assert.Equal(0L, (long)(await count.ExecuteScalarAsync())!);
+	}
+
+	[Fact]
+	public async Task PostFetch_BelowOperator_Returns403()
+	{
+		await SetModeAsync("connected");
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/tool/fetch") { Content = JsonBody(new { }) };
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	private async Task SetModeAsync(string mode)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("UPDATE appliance_state SET mode = $1 WHERE id = 1", connection);
+		command.Parameters.AddWithValue(mode);
+		await command.ExecuteNonQueryAsync();
 	}
 
 	[Fact]

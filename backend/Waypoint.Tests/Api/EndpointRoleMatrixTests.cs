@@ -145,6 +145,7 @@ public sealed class EndpointRoleMatrixTests
 		// install history read is Viewer+, matching ListDownloads/GetReadiness.
 		["ManagedToolController.Install"] = WaypointRole.Operator,
 		["ManagedToolController.Upload"] = WaypointRole.Operator,
+		["ManagedToolController.Fetch"] = WaypointRole.Operator,
 		["ManagedToolController.ListInstalls"] = WaypointRole.Viewer,
 
 		// EventStreamController -- SSE reads, Viewer+.

@@ -18,6 +18,11 @@
  *   POST           /downloads/tool/install    — local-repository install path
  *   POST           /downloads/tool/upload     — manual upload (multipart +
  *                                               mandatory detached .sig)
+ *   POST           /downloads/tool/fetch      — depot-fetch install path
+ *                                               (connected mode only — the
+ *                                               backend refuses with 409
+ *                                               mode_unavailable otherwise,
+ *                                               issue #39 remainder)
  *   GET            /downloads/tool/installs   — install ledger, newest first,
  *                                               including rejected attempts
  *
@@ -71,6 +76,13 @@ export function uploadManagedTool(artifact: File, signature: File, version?: str
 		form.set("version", version);
 	}
 	return apiPostForm<ManagedToolInstallQueuedResponse>("/downloads/tool/upload", form);
+}
+
+/** `POST /downloads/tool/fetch` (issue #39 remainder): connected-mode-only depot fetch, authenticated with the stored depot-token credential. No `source_path` — the depot URL is server-side configuration, not something the client names. */
+export function fetchManagedToolFromDepot(version?: string): Promise<ManagedToolInstallQueuedResponse> {
+	return apiPost<ManagedToolInstallQueuedResponse>("/downloads/tool/fetch", {
+		version: version || undefined,
+	});
 }
 
 export type ManagedToolInstallOutcome = "installed" | "rejected" | "failed" | string;

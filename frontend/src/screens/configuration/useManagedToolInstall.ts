@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../../lib/api";
 import { fetchDiscoveryRun } from "./sites"; // GET /runs/{id} — same RunResponse subset every poller in this app reuses
 import {
+	fetchManagedToolFromDepot,
 	installManagedToolFromLocalRepository,
 	uploadManagedTool,
 	type ManagedToolInstallQueuedResponse,
@@ -41,6 +42,7 @@ export interface UseManagedToolInstallResult {
 	inFlight: boolean;
 	installFromLocalRepository: (sourcePath: string, version?: string) => Promise<void>;
 	uploadTool: (artifact: File, signature: File, version?: string) => Promise<void>;
+	fetchFromDepot: (version?: string) => Promise<void>;
 }
 
 export function useManagedToolInstall(onSettled: () => void): UseManagedToolInstallResult {
@@ -124,7 +126,9 @@ export function useManagedToolInstall(onSettled: () => void): UseManagedToolInst
 		[start],
 	);
 
+	const fetchFromDepot = useCallback((version?: string) => start(() => fetchManagedToolFromDepot(version)), [start]);
+
 	const inFlight = install !== null && install.outcome === null;
 
-	return { install, installError, inFlight, installFromLocalRepository, uploadTool };
+	return { install, installError, inFlight, installFromLocalRepository, uploadTool, fetchFromDepot };
 }
