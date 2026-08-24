@@ -21,6 +21,7 @@ using Waypoint.Core.Authorization;
 using Waypoint.Core.Discovery;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
 using Waypoint.Infrastructure.Discovery;
 using Waypoint.Infrastructure.Sites;
@@ -48,17 +49,25 @@ public sealed class DiscoveryController : ControllerBase
 	private const short DiscoverPriority = 4;
 
 	private readonly TargetRepository _targets;
+	private readonly TargetCredentialBindingRepository _bindings;
 	private readonly InventoryRepository _inventory;
 	private readonly IJobControlRepository _jobs;
 	private readonly IOptions<DiscoveryOptions> _options;
 
-	public DiscoveryController(TargetRepository targets, InventoryRepository inventory, IJobControlRepository jobs, IOptions<DiscoveryOptions> options)
+	public DiscoveryController(
+		TargetRepository targets,
+		TargetCredentialBindingRepository bindings,
+		InventoryRepository inventory,
+		IJobControlRepository jobs,
+		IOptions<DiscoveryOptions> options)
 	{
 		ArgumentNullException.ThrowIfNull(targets);
+		ArgumentNullException.ThrowIfNull(bindings);
 		ArgumentNullException.ThrowIfNull(inventory);
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(options);
 		_targets = targets;
+		_bindings = bindings;
 		_inventory = inventory;
 		_jobs = jobs;
 		_options = options;
@@ -119,11 +128,34 @@ public sealed class DiscoveryController : ControllerBase
 
 		string initiatedBy = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
 
+		// Issue #585 (epic #582): discovery requires exactly the vsphere-api purpose
+		// (ADR-0021 §3, the #580 defect made law) -- resolve it from the target's
+		// bindings rather than the legacy targets.credential_id column, and snapshot it
+		// onto the job (job_credential_bindings) so a later binding edit cannot change
+		// this in-flight refresh. The 0043 dual-write/backfill keeps the two sources
+		// equal wherever the legacy column carried a compatible credential, so behavior
+		// only differs for a legacy column pointing at a type-incompatible credential --
+		// which discovery could never authenticate with anyway.
+		IReadOnlyList<TargetCredentialBinding> targetBindings =
+			await _bindings.ListForTargetAsync(id, cancellationToken).ConfigureAwait(false);
+		Guid? discoverCredentialId = targetBindings
+			.FirstOrDefault(b => string.Equals(b.Purpose, CredentialPurposes.VSphereApi, StringComparison.Ordinal))
+			?.CredentialId;
+
 		string payload = JsonSerializer.Serialize(new { target_id = id });
-		Guid runId = await _jobs.CreateRunAsync("discover", "{}", target.CredentialId, initiatedBy, cancellationToken).ConfigureAwait(false);
+		Guid runId = await _jobs.CreateRunAsync("discover", "{}", discoverCredentialId, initiatedBy, cancellationToken).ConfigureAwait(false);
 		IReadOnlyList<Guid> jobIds = await _jobs.FanOutJobsAsync(
 			runId,
-			[new JobSpec("discover", DiscoverPriority, TargetId: id, TargetName: target.Name, CredentialId: target.CredentialId, Payload: payload)],
+			[new JobSpec(
+				"discover",
+				DiscoverPriority,
+				TargetId: id,
+				TargetName: target.Name,
+				CredentialId: discoverCredentialId,
+				Payload: payload,
+				CredentialBindings: discoverCredentialId is { } boundId
+					? [new JobCredentialBindingSpec(CredentialPurposes.VSphereApi, boundId)]
+					: null)],
 			initiatedBy,
 			cancellationToken).ConfigureAwait(false);
 

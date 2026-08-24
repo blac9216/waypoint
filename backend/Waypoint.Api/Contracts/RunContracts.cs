@@ -70,7 +70,31 @@ public sealed record RunCreateRequest(
 	/// credentials, Operator = Cyber + ad hoc scans with personal credentials").
 	/// </summary>
 	[property: JsonPropertyName("credential")]
-	EphemeralCredentialRequest? Credential = null);
+	EphemeralCredentialRequest? Credential = null,
+
+	/// <summary>
+	/// Issue #585 (epic #582, ADR-0021 §4): structured per-target/per-purpose
+	/// SAVED-credential overrides for a scan run. Each entry substitutes the named
+	/// stored credential for exactly one (target, purpose) pair, replacing that
+	/// target's own binding (and, for the target's default purpose, any run-level
+	/// <see cref="CredentialId"/>). Scan runs only; mutually exclusive with the inline
+	/// <see cref="Credential"/> tier (per-target ad hoc secrets are issue #586).
+	/// Validation failures come back as one 400 <c>credential_binding_gaps</c>
+	/// enumerating every (target, purpose, reason).
+	/// </summary>
+	[property: JsonPropertyName("credential_overrides")]
+	IReadOnlyList<RunCredentialOverrideRequest>? CredentialOverrides = null);
+
+/// <summary>One saved-credential override for a specific (target, purpose) pair -- see <see cref="RunCreateRequest.CredentialOverrides"/>.</summary>
+public sealed record RunCredentialOverrideRequest(
+	[property: JsonPropertyName("target_id")]
+	Guid TargetId,
+
+	[property: JsonPropertyName("purpose")]
+	string Purpose,
+
+	[property: JsonPropertyName("credential_id")]
+	Guid CredentialId);
 
 /// <summary>Response body for <c>GET /api/v1/runs/{id}</c>.</summary>
 public sealed record RunResponse(

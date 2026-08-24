@@ -200,13 +200,16 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		const int TargetCount = 250;
 		Guid siteId = await CreateSiteAsync("large-site");
 
+		// Issue #585: one shared ssh credential bound to every target (via the 0043
+		// dual-write mirror) so the full-site scan resolves srg-ssh for all 250 rows.
+		Guid sharedCredentialId = await SeedKindCompatibleCredentialAsync(TargetKinds.Ssh);
 		TargetRepository targets = new(_fixture.ConnectionString);
 		for (int i = 0; i < TargetCount; i++)
 		{
 			string name = $"esxi-{i:D4}";
 			string connectionJson = $$"""{"host":"esxi-{{i:D4}}.example.internal"}""";
 			(TargetWriteOutcome outcome, Guid? id) = await targets.CreateAsync(
-				siteId, TargetKinds.Ssh, name, connectionJson, credentialId: null, CancellationToken.None);
+				siteId, TargetKinds.Ssh, name, connectionJson, sharedCredentialId, CancellationToken.None);
 			Assert.Equal(TargetWriteOutcome.Ok, outcome);
 			Assert.NotNull(id);
 		}
@@ -392,18 +395,45 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		return document.RootElement.GetProperty("id").GetGuid();
 	}
 
+	/// <summary>
+	/// Issue #585: scan-run creation now rejects any target whose required credential
+	/// purpose has no binding (400 <c>credential_binding_gaps</c>), so every target
+	/// this fixture creates carries a kind-compatible credential as its
+	/// <c>credential_ref</c> -- the 0043 dual-write mirrors it into the default-purpose
+	/// binding the resolution step reads. Fan-out mechanics stay this class's subject;
+	/// the resolution rules themselves are covered by
+	/// <see cref="CredentialBindingResolutionTests"/>.
+	/// </summary>
 	private async Task<Guid> CreateTargetAsync(Guid siteId, string kind, string name, string connectionJson)
 	{
+		Guid credentialId = await SeedKindCompatibleCredentialAsync(kind);
 		using JsonDocument connectionDocument = JsonDocument.Parse(connectionJson);
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/sites/{siteId}/targets");
 		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
-		string body = JsonSerializer.Serialize(new { kind, name, connection = connectionDocument.RootElement });
+		string body = JsonSerializer.Serialize(new { kind, name, connection = connectionDocument.RootElement, credential_ref = credentialId });
 		request.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
 		HttpResponseMessage response = await _client.SendAsync(request);
 		response.EnsureSuccessStatusCode();
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		return document.RootElement.GetProperty("id").GetGuid();
+	}
+
+	private async Task<Guid> SeedKindCompatibleCredentialAsync(string kind)
+	{
+		string credentialType = kind switch
+		{
+			"vsphere" => "vcenter",
+			"nsx-api" => "nsx",
+			_ => "ssh",
+		};
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"INSERT INTO credentials (name, credential_type, username) VALUES ($1, $2, 'svc-scan@example.internal') RETURNING id", connection);
+		command.Parameters.AddWithValue($"fanout-cred-{Guid.NewGuid():N}");
+		command.Parameters.AddWithValue(credentialType);
+		return (Guid)(await command.ExecuteScalarAsync())!;
 	}
 
 	private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, string role, object? body)

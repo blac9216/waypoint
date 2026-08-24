@@ -30,6 +30,17 @@ namespace Waypoint.Core.Jobs;
 /// caller (<c>RunsController</c>) enforces that at the API layer and
 /// <c>jobs_credential_exclusivity_check</c> backstops it at the schema layer.
 /// </param>
+/// <param name="CredentialBindings">
+/// Issue #585 (epic #582): the per-purpose credential references resolved for this job
+/// at run creation (target-assigned bindings plus validated overrides, ADR-0021 §5),
+/// persisted as <c>job_credential_bindings</c> rows (migration 0044) in the same
+/// fan-out transaction. When present, the entry for the job's execution purpose
+/// (<c>CredentialPurposeMatrix.DefaultPurposeByTargetKind</c>) carries the same id as
+/// <paramref name="CredentialId"/> -- the legacy column stays the mirrored single-value
+/// view (migration 0044's dual-write contract). Null/empty for job types with no
+/// purpose model (downloads, credential-test's explicit credential-under-test) and for
+/// run-secret jobs (ad hoc per-purpose secrets are issue #586).
+/// </param>
 public sealed record JobSpec(
 	string JobType,
 	short Priority,
@@ -37,4 +48,5 @@ public sealed record JobSpec(
 	string? TargetName = null,
 	Guid? CredentialId = null,
 	string Payload = "{}",
-	bool HasRunSecret = false);
+	bool HasRunSecret = false,
+	IReadOnlyList<JobCredentialBindingSpec>? CredentialBindings = null);

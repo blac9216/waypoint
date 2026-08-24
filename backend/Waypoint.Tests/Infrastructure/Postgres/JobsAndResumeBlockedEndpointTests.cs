@@ -465,6 +465,60 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 		Assert.Equal(newCredentialId.ToString(), detail.RootElement.GetProperty("new_credential_id").GetString());
 	}
 
+	/// <summary>
+	/// Issue #585 (epic #582): the swap must rewrite the blocked jobs' per-purpose
+	/// snapshot rows (<c>job_credential_bindings</c>, migration 0044) in the same
+	/// transaction as <c>jobs.credential_id</c> -- handlers prefer the snapshot row for
+	/// their execution purpose, so a stale row would make the resumed job decrypt the
+	/// very credential the swap replaced. A binding row naming a DIFFERENT credential
+	/// (an unrelated vcsa-ssh purpose) is untouched.
+	/// </summary>
+	[Fact]
+	public async Task ResumeBlocked_SwapsMatchingJobCredentialBindingRows_LeavesOtherPurposesAlone()
+	{
+		Guid oldCredentialId = await SeedCredentialAsync("cred-old-bound");
+		Guid newCredentialId = await SeedCredentialAsync("cred-new-bound");
+		Guid unrelatedVcsaCredentialId = await SeedCredentialAsync("cred-vcsa-untouched", credentialType: "ssh");
+		Guid runId = await SeedRunAsync(oldCredentialId);
+		Guid blockedJobId = await SeedBlockedJobAsync(runId, oldCredentialId);
+		await SeedJobBindingAsync(blockedJobId, "vsphere-api", oldCredentialId);
+		await SeedJobBindingAsync(blockedJobId, "vcsa-ssh", unrelatedVcsaCredentialId);
+		await HaltCredentialAsync(oldCredentialId);
+		await MarkRunBlockedAsync(runId);
+
+		HttpResponseMessage response = await SendAsync(
+			HttpMethod.Post, $"/api/v1/runs/{runId}/resume-blocked", "Admin", new { credential_id = newCredentialId.ToString() });
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand bindingsQuery = new(
+			"SELECT purpose, credential_id FROM job_credential_bindings WHERE job_id = $1 ORDER BY purpose", connection);
+		bindingsQuery.Parameters.AddWithValue(blockedJobId);
+		Dictionary<string, Guid?> bindings = [];
+		await using NpgsqlDataReader reader = await bindingsQuery.ExecuteReaderAsync();
+		while (await reader.ReadAsync())
+		{
+			bindings[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetGuid(1);
+		}
+
+		Assert.Equal(2, bindings.Count);
+		Assert.Equal(newCredentialId, bindings["vsphere-api"]);
+		Assert.Equal(unrelatedVcsaCredentialId, bindings["vcsa-ssh"]);
+	}
+
+	private async Task SeedJobBindingAsync(Guid jobId, string purpose, Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"INSERT INTO job_credential_bindings (job_id, purpose, credential_id) VALUES ($1, $2, $3)", connection);
+		command.Parameters.AddWithValue(jobId);
+		command.Parameters.AddWithValue(purpose);
+		command.Parameters.AddWithValue(credentialId);
+		await command.ExecuteNonQueryAsync();
+	}
+
 	[Fact]
 	public async Task ResumeBlocked_RunNotHalted_Returns409()
 	{

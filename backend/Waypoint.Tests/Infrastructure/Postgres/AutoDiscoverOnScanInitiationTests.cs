@@ -378,7 +378,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Guid siteId = await CreateSiteAsync("fresh-target-site");
 		string connectionJson = """{"host":"vcsa-fresh.example.internal"}""";
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
-			siteId, TargetKinds.VSphere, $"vcsa-fresh-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+			siteId, TargetKinds.VSphere, $"vcsa-fresh-{Guid.NewGuid():N}", connectionJson, await SeedVCenterCredentialAsync(), CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
 
@@ -413,7 +413,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Guid siteId = await CreateSiteAsync("old-refresh-site");
 		string connectionJson = """{"host":"vcsa-old.example.internal"}""";
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
-			siteId, TargetKinds.VSphere, $"vcsa-old-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+			siteId, TargetKinds.VSphere, $"vcsa-old-{Guid.NewGuid():N}", connectionJson, await SeedVCenterCredentialAsync(), CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
 		await StampLastRefreshedAsync(targetId.Value, DateTimeOffset.UtcNow.AddHours(-2));
@@ -464,7 +464,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Guid siteId = await CreateSiteAsync("srg-only-site");
 		string connectionJson = """{"host":"photon-01.example.internal"}""";
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
-			siteId, TargetKinds.Ssh, $"photon-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+			siteId, TargetKinds.Ssh, $"photon-{Guid.NewGuid():N}", connectionJson, await SeedSshCredentialAsync(), CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
@@ -503,7 +503,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Guid siteId = await CreateSiteAsync("non-default-window-stale-site", client);
 		string connectionJson = """{"host":"vcsa-nondefault-stale.example.internal"}""";
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
-			siteId, TargetKinds.VSphere, $"vcsa-nondefault-stale-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+			siteId, TargetKinds.VSphere, $"vcsa-nondefault-stale-{Guid.NewGuid():N}", connectionJson, await SeedVCenterCredentialAsync(), CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
 		await StampLastRefreshedAsync(targetId.Value, DateTimeOffset.UtcNow.AddMinutes(-10));
@@ -535,7 +535,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Guid siteId = await CreateSiteAsync("non-default-window-fresh-site", client);
 		string connectionJson = """{"host":"vcsa-nondefault-fresh.example.internal"}""";
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
-			siteId, TargetKinds.VSphere, $"vcsa-nondefault-fresh-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+			siteId, TargetKinds.VSphere, $"vcsa-nondefault-fresh-{Guid.NewGuid():N}", connectionJson, await SeedVCenterCredentialAsync(), CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
 		await StampLastRefreshedAsync(targetId.Value, DateTimeOffset.UtcNow.AddMinutes(-10));
@@ -580,7 +580,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Guid siteId = await CreateSiteAsync("boundary-inside-site", client);
 		string connectionJson = """{"host":"vcsa-boundary-inside.example.internal"}""";
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
-			siteId, TargetKinds.VSphere, $"vcsa-boundary-inside-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+			siteId, TargetKinds.VSphere, $"vcsa-boundary-inside-{Guid.NewGuid():N}", connectionJson, await SeedVCenterCredentialAsync(), CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
 
@@ -617,7 +617,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Guid siteId = await CreateSiteAsync("boundary-outside-site", client);
 		string connectionJson = """{"host":"vcsa-boundary-outside.example.internal"}""";
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
-			siteId, TargetKinds.VSphere, $"vcsa-boundary-outside-{Guid.NewGuid():N}", connectionJson, credentialId: null, CancellationToken.None);
+			siteId, TargetKinds.VSphere, $"vcsa-boundary-outside-{Guid.NewGuid():N}", connectionJson, await SeedVCenterCredentialAsync(), CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
 
@@ -714,5 +714,22 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		{
 			throw new InvalidOperationException("Not expected to be called: no STIG Manager connection is configured in this test suite.");
 		}
+	}
+
+	/// <summary>Issue #585: scan-run creation now requires a resolvable binding for each target's required purpose, so these fixtures assign a kind-compatible credential (mirrored into the binding by the 0043 dual-write).</summary>
+	private async Task<Guid> SeedVCenterCredentialAsync()
+	{
+		return (await _credentials.CreateAsync(
+			$"svc-auto-discover-{Guid.NewGuid():N}@example.internal", Waypoint.Core.Secrets.CredentialTypes.VCenter,
+			Waypoint.Core.Secrets.CredentialOwners.Shared, sudoEnabled: false, CancellationToken.None,
+			"administrator@example.internal"))!.Value;
+	}
+
+	private async Task<Guid> SeedSshCredentialAsync()
+	{
+		return (await _credentials.CreateAsync(
+			$"svc-auto-discover-ssh-{Guid.NewGuid():N}", Waypoint.Core.Secrets.CredentialTypes.Ssh,
+			Waypoint.Core.Secrets.CredentialOwners.Shared, sudoEnabled: false, CancellationToken.None,
+			"svc-scan"))!.Value;
 	}
 }

@@ -208,6 +208,68 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #585 (epic #582, migration 0044): a job carrying a per-purpose credential
+	/// snapshot (<c>job_credential_bindings</c>) makes the handler decrypt the
+	/// SNAPSHOT's execution-purpose credential, not the legacy <c>jobs.credential_id</c>
+	/// column -- proven by decrypt-audit attribution: only the snapshot credential gets
+	/// a <c>secret.decrypted</c> row. The sibling tests in this class fan out specs
+	/// with NO CredentialBindings, which is exactly the pre-0044 legacy job shape --
+	/// their continued passing is the legacy-fallback proof.
+	/// </summary>
+	[Fact]
+	public async Task SnapshotBinding_PreferredOverLegacyJobColumn_ForExecutionPurpose()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid legacyColumnCredentialId) = await SeedVsphereTargetAsync("invented-legacy-column-secret");
+		Guid snapshotCredentialId = (await _credentials.CreateAsync(
+			$"svc-snapshot-{Guid.NewGuid():N}@example.internal", CredentialTypes.VCenter, CredentialOwners.Shared,
+			sudoEnabled: false, CancellationToken.None, "snapshot-admin@example.internal"))!.Value;
+		await _secretStore.StoreAsync(snapshotCredentialId, System.Text.Encoding.UTF8.GetBytes("invented-snapshot-secret"), "test", CancellationToken.None);
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId, site_id = Guid.NewGuid() });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec(
+				"scan", 3, TargetId: targetId, CredentialId: legacyColumnCredentialId, Payload: payload,
+				CredentialBindings: [new JobCredentialBindingSpec("vsphere-api", snapshotCredentialId)])],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using (NpgsqlCommand snapshotDecrypts = new(
+			"SELECT count(*) FROM audit_log WHERE event_type = 'secret.decrypted' AND credential_id = $1 AND job_id = $2", connection))
+		{
+			snapshotDecrypts.Parameters.AddWithValue(snapshotCredentialId);
+			snapshotDecrypts.Parameters.AddWithValue(jobIds[0]);
+			Assert.Equal(1L, (long)(await snapshotDecrypts.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand legacyDecrypts = new(
+			"SELECT count(*) FROM audit_log WHERE event_type = 'secret.decrypted' AND credential_id = $1 AND job_id = $2", connection))
+		{
+			legacyDecrypts.Parameters.AddWithValue(legacyColumnCredentialId);
+			legacyDecrypts.Parameters.AddWithValue(jobIds[0]);
+			Assert.Equal(0L, (long)(await legacyDecrypts.ExecuteScalarAsync())!);
+		}
+	}
+
+	/// <summary>
 	/// Issue #639's core fix: a job payload carrying <c>profile_key</c> (set by
 	/// <see cref="Waypoint.Infrastructure.Runs.RunCreationService.CreateScanRunAsync"/>
 	/// after validating the profile is installed) makes the handler resolve

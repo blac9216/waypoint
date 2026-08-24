@@ -338,6 +338,8 @@ public sealed class JobDispatcherCapacityPoolTests : IAsyncLifetime
 			inner.CheckConsecutiveAuthFailuresAsync(credentialId, threshold, cancellationToken);
 
 		public Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken) => inner.SetUploadStatusAsync(jobId, uploadStatus, detail, cancellationToken);
+
+		public Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken) => inner.GetJobCredentialBindingsAsync(jobId, cancellationToken);
 	}
 
 	private Task<Guid> SeedQueuedJobAsync(string jobType) => SeedJobAsync(jobType, "queued");

@@ -118,16 +118,42 @@ public sealed class DiscoverJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed($"target '{targetId}' is kind '{target.Kind}'; discover only supports '{TargetKinds.VSphere}'.");
 		}
 
-		if (target.CredentialId is null)
+		// Issue #585 (epic #582): the job's own immutable snapshot (job_credential_bindings,
+		// migration 0044 -- discovery's one required purpose is vsphere-api, ADR-0021 §3)
+		// is the preferred credential source, so a target edit after enqueue can no
+		// longer change what an in-flight discover job authenticates with. A job with no
+		// snapshot rows (fanned out before 0044, or enqueued by a legacy path) keeps the
+		// pre-#585 live read of the target's assigned credential.
+		Guid? discoverCredentialId = null;
+		IReadOnlyList<JobCredentialBinding> bindings = await _jobs
+			.GetJobCredentialBindingsAsync(context.Job.Id, cancellationToken).ConfigureAwait(false);
+		JobCredentialBinding? snapshotBinding = bindings
+			.FirstOrDefault(b => string.Equals(b.Purpose, Waypoint.Core.Secrets.CredentialPurposes.VSphereApi, StringComparison.Ordinal));
+		if (snapshotBinding is not null)
+		{
+			if (snapshotBinding.CredentialId is null)
+			{
+				return JobExecutionOutcome.Failed(
+					$"job '{context.Job.Id}' snapshot for purpose '{Waypoint.Core.Secrets.CredentialPurposes.VSphereApi}' no longer names a credential (deleted after this job reached a terminal state).");
+			}
+
+			discoverCredentialId = snapshotBinding.CredentialId;
+		}
+		else
+		{
+			discoverCredentialId = target.CredentialId;
+		}
+
+		if (discoverCredentialId is null)
 		{
 			return JobExecutionOutcome.Failed($"target '{targetId}' has no credential assigned.");
 		}
 
 		Waypoint.Core.Secrets.CredentialResponse? credential = await _credentials
-			.GetAsync(target.CredentialId.Value, cancellationToken).ConfigureAwait(false);
+			.GetAsync(discoverCredentialId.Value, cancellationToken).ConfigureAwait(false);
 		if (credential is null)
 		{
-			return JobExecutionOutcome.Failed($"target '{targetId}' references credential '{target.CredentialId}', which no longer exists.");
+			return JobExecutionOutcome.Failed($"target '{targetId}' references credential '{discoverCredentialId}', which no longer exists.");
 		}
 
 		string? host = TryGetConnectionHost(target.ConnectionJson);
@@ -161,7 +187,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 			// this method -- attribution is durable even if this handler crashes on the
 			// next line.
 			decrypted = await _secrets
-				.DecryptAsync(target.CredentialId.Value, actor, context.Job.Id, context.Job.RunId, cancellationToken)
+				.DecryptAsync(discoverCredentialId.Value, actor, context.Job.Id, context.Job.RunId, cancellationToken)
 				.ConfigureAwait(false);
 
 			Dictionary<string, object?> parameters = new(StringComparer.Ordinal)

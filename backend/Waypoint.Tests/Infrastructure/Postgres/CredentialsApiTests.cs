@@ -483,6 +483,77 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		Assert.Equal(1, blockers[0].GetProperty("count").GetInt32());
 	}
 
+	/// <summary>
+	/// Issue #585 (epic #582, migration 0044): a NON-terminal job can reference a
+	/// credential purely through its per-purpose snapshot
+	/// (<c>job_credential_bindings</c>) for a purpose <c>jobs.credential_id</c> never
+	/// carried -- e.g. a vsphere scan job's <c>vcsa-ssh</c> row while the column names
+	/// the vsphere-api credential. Deleting the binding-only-referenced credential must
+	/// still be blocked as <c>active_jobs</c> (the blocker IS the active job).
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_ReferencedOnlyByAnActiveJobsBindingRow_Is409_WithActiveJobsBlocker()
+	{
+		Guid executionCredentialId = await CreateCredentialAsync("job-column-cred");
+		Guid bindingOnlyCredentialId = await CreateCredentialAsync("job-binding-only-cred", credentialType: "ssh");
+		Guid jobId = await SeedJobAsync(executionCredentialId);
+		await SeedJobCredentialBindingAsync(jobId, "vcsa-ssh", bindingOnlyCredentialId);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{bindingOnlyCredentialId}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
+		Assert.Equal(1, blockers.GetArrayLength());
+		Assert.Equal("active_jobs", blockers[0].GetProperty("category").GetString());
+		Assert.Equal(1, blockers[0].GetProperty("count").GetInt32());
+	}
+
+	/// <summary>
+	/// Issue #585: the #593 terminal-history detach extends to per-purpose snapshot
+	/// rows -- deleting a credential referenced only by a TERMINAL job's binding row
+	/// succeeds, and the row keeps non-secret attribution (name/type/username, plus its
+	/// purpose) with <c>credential_id</c> nulled.
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_ReferencedOnlyByATerminalJobsBindingRow_Succeeds_AndSnapshotsBindingAttribution()
+	{
+		Guid executionCredentialId = await CreateCredentialAsync("terminal-column-cred");
+		Guid bindingCredentialId = await CreateCredentialAsync("terminal-binding-cred", credentialType: "ssh");
+		await SendAsync(HttpMethod.Put, $"/api/v1/credentials/{bindingCredentialId}", new { username = "root" });
+		string bindingCredentialName = (await GetFieldAsync(bindingCredentialId, "name"))!;
+		(_, Guid jobId) = await SeedTerminalRunAndJobAsync(executionCredentialId, jobState: "done", runState: "completed");
+		await SeedJobCredentialBindingAsync(jobId, "vcsa-ssh", bindingCredentialId);
+
+		HttpResponseMessage deleted = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{bindingCredentialId}", body: null);
+		Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand bindingRow = new(
+			"SELECT credential_id, credential_name, credential_type, credential_username, purpose FROM job_credential_bindings WHERE job_id = $1", connection);
+		bindingRow.Parameters.AddWithValue(jobId);
+		await using NpgsqlDataReader reader = await bindingRow.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		Assert.True(reader.IsDBNull(0));
+		Assert.Equal(bindingCredentialName, reader.GetString(1));
+		Assert.Equal("ssh", reader.GetString(2));
+		Assert.Equal("root", reader.GetString(3));
+		Assert.Equal("vcsa-ssh", reader.GetString(4));
+	}
+
+	private async Task SeedJobCredentialBindingAsync(Guid jobId, string purpose, Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"INSERT INTO job_credential_bindings (job_id, purpose, credential_id) VALUES ($1, $2, $3)", connection);
+		command.Parameters.AddWithValue(jobId);
+		command.Parameters.AddWithValue(purpose);
+		command.Parameters.AddWithValue(credentialId);
+		await command.ExecuteNonQueryAsync();
+	}
+
 	/// <summary>Issue #593: a live <c>schedules.credential_id</c> reference blocks deletion -- same "config, not history" reasoning as the targets case.</summary>
 	[Fact]
 	public async Task DeletingACredential_ReferencedByASchedule_Is409_WithSchedulesBlocker()

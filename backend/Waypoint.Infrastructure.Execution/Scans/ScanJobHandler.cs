@@ -195,7 +195,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ResolvedCredential resolved;
 		try
 		{
-			resolved = await ResolveCredentialAsync(context, cancellationToken).ConfigureAwait(false);
+			resolved = await ResolveCredentialAsync(context, target.Kind, cancellationToken).ConfigureAwait(false);
 		}
 		catch (ScanCredentialException exception)
 		{
@@ -634,16 +634,61 @@ public sealed class ScanJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// Stored credential (decrypt-under-identity) when <c>jobs.credential_id</c> is set,
-	/// otherwise the ad hoc run secret registered for this job's run (#276/#434). The
-	/// two tiers never mix: a NULL <c>credential_id</c> with no run secret row available
-	/// (never registered, already deleted on a prior terminal completion, or swept as
-	/// expired) is an auth-style failure, never a silent fall-through to a stored
-	/// credential -- see <see cref="IRunSecretStore"/>'s "no personal rows, ever"
-	/// contract.
+	/// Issue #585 (epic #582): the job's immutable per-purpose credential snapshot
+	/// (<c>job_credential_bindings</c>, migration 0044) is the preferred source -- the
+	/// entry for the target kind's execution purpose
+	/// (<see cref="CredentialPurposeMatrix.DefaultPurposeByTargetKind"/>: the credential
+	/// the InSpec transport actually authenticates with) selects which stored credential
+	/// to decrypt, so a later edit to the target's bindings can never change what an
+	/// in-flight job executes with. A snapshotted-but-unconsumed purpose (a vsphere
+	/// job's <c>vcsa-ssh</c> row) is deliberately NOT decrypted here: nothing in
+	/// <c>Invoke-WaypointScan</c>'s <c>inspec -t vmware://</c> invocation consumes a
+	/// VCSA SSH credential today (the VCSA component pipeline is not yet imported from
+	/// the sibling repo), and decrypting a secret no transport uses would violate
+	/// least-privilege and fabricate decrypt-audit rows (ADR-0021's own "do not encode
+	/// a credential requirement the underlying transport does not actually use").
+	///
+	/// A job with NO snapshot rows is a legacy row (fanned out before migration 0044)
+	/// or a run-secret job: fall through to the pre-#585 behavior -- stored credential
+	/// (<c>jobs.credential_id</c>) when set, otherwise the ad hoc run secret registered
+	/// for this job's run (#276/#434). The two tiers never mix: a NULL
+	/// <c>credential_id</c> with no run secret row available (never registered, already
+	/// deleted on a prior terminal completion, or swept as expired) is an auth-style
+	/// failure, never a silent fall-through to a stored credential -- see
+	/// <see cref="IRunSecretStore"/>'s "no personal rows, ever" contract.
 	/// </summary>
-	private async Task<ResolvedCredential> ResolveCredentialAsync(JobExecutionContext context, CancellationToken cancellationToken)
+	private async Task<ResolvedCredential> ResolveCredentialAsync(JobExecutionContext context, string targetKind, CancellationToken cancellationToken)
 	{
+		IReadOnlyList<JobCredentialBinding> bindings = await _jobs
+			.GetJobCredentialBindingsAsync(context.Job.Id, cancellationToken).ConfigureAwait(false);
+		if (bindings.Count > 0)
+		{
+			if (!CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(targetKind, out string? executionPurpose))
+			{
+				throw new ScanCredentialException(
+					$"job '{context.Job.Id}' carries a credential snapshot but target kind '{targetKind}' has no execution purpose in the shared matrix.");
+			}
+
+			JobCredentialBinding? executionBinding = bindings
+				.FirstOrDefault(b => string.Equals(b.Purpose, executionPurpose, StringComparison.Ordinal));
+			if (executionBinding is null)
+			{
+				throw new ScanCredentialException(
+					$"job '{context.Job.Id}' carries a credential snapshot with no entry for its execution purpose '{executionPurpose}'.");
+			}
+
+			if (executionBinding.CredentialId is not { } snapshotCredentialId)
+			{
+				// Only reachable if the credential was deleted while this job was
+				// terminal (#593's detach) and the job was somehow re-executed anyway --
+				// fail auth-style rather than guessing.
+				throw new ScanCredentialException(
+					$"job '{context.Job.Id}' snapshot for purpose '{executionPurpose}' no longer names a credential (deleted after this job reached a terminal state).");
+			}
+
+			return await ResolveStoredCredentialAsync(context, snapshotCredentialId, cancellationToken).ConfigureAwait(false);
+		}
+
 		if (context.Job.CredentialId is not { } credentialId)
 		{
 			if (context.Job.RunId is not { } runId)
@@ -680,6 +725,12 @@ public sealed class ScanJobHandler : IJobHandler
 			return new ResolvedCredential(runSecret.Username, runSecret.Secret, SudoEnabled: false, runSecret.Dispose);
 		}
 
+		return await ResolveStoredCredentialAsync(context, credentialId, cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>Decrypt-under-identity for a stored credential (security.md control 4) -- shared by the #585 snapshot path and the legacy <c>jobs.credential_id</c> fallback.</summary>
+	private async Task<ResolvedCredential> ResolveStoredCredentialAsync(JobExecutionContext context, Guid credentialId, CancellationToken cancellationToken)
+	{
 		CredentialResponse? credential = await _credentials.GetAsync(credentialId, cancellationToken).ConfigureAwait(false);
 		if (credential is null)
 		{

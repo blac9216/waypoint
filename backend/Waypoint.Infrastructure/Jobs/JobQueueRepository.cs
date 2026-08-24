@@ -699,22 +699,41 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			insertJob.Parameters.AddWithValue((object?)createdBy ?? DBNull.Value);
 			insertJob.Parameters.AddWithValue(spec.HasRunSecret);
 
-			await using NpgsqlDataReader reader = await insertJob.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-			await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-			jobIds.Add(reader.GetGuid(0));
-			if (string.Equals(reader.GetString(1), JobStates.Blocked, StringComparison.Ordinal))
+			Guid jobId;
+			await using (NpgsqlDataReader reader = await insertJob.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
 			{
-				blockedCount++;
-				blockedNote ??= reader.IsDBNull(2) ? null : reader.GetString(2);
-				// #174: the 0005 trigger coerces per-row keyed by that row's own
-				// credential_id, so a single fan-out can in principle be born blocked by
-				// more than one halted credential -- collect the distinct set actually
-				// observed rather than assuming one. Identity only (id) -- the halt
-				// carries no secret material to leak here.
-				if (spec.CredentialId is Guid blockedCredentialId && !blockedCredentialIds.Contains(blockedCredentialId))
+				await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+				jobId = reader.GetGuid(0);
+				jobIds.Add(jobId);
+				if (string.Equals(reader.GetString(1), JobStates.Blocked, StringComparison.Ordinal))
 				{
-					blockedCredentialIds.Add(blockedCredentialId);
+					blockedCount++;
+					blockedNote ??= reader.IsDBNull(2) ? null : reader.GetString(2);
+					// #174: the 0005 trigger coerces per-row keyed by that row's own
+					// credential_id, so a single fan-out can in principle be born blocked by
+					// more than one halted credential -- collect the distinct set actually
+					// observed rather than assuming one. Identity only (id) -- the halt
+					// carries no secret material to leak here.
+					if (spec.CredentialId is Guid blockedCredentialId && !blockedCredentialIds.Contains(blockedCredentialId))
+					{
+						blockedCredentialIds.Add(blockedCredentialId);
+					}
 				}
+			}
+
+			// Issue #585: the job's immutable per-purpose credential snapshot (migration
+			// 0044), inserted in the SAME transaction as the job row so a claim can never
+			// observe a job whose snapshot has not landed yet. Identity only -- ids, never
+			// secret material.
+			foreach (JobCredentialBindingSpec bindingSpec in spec.CredentialBindings ?? [])
+			{
+				await using NpgsqlCommand insertBinding = new(
+					"INSERT INTO job_credential_bindings (job_id, purpose, credential_id) VALUES ($1, $2, $3)",
+					connection, transaction);
+				insertBinding.Parameters.AddWithValue(jobId);
+				insertBinding.Parameters.AddWithValue(bindingSpec.Purpose);
+				insertBinding.Parameters.AddWithValue(bindingSpec.CredentialId);
+				await insertBinding.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 			}
 		}
 
@@ -997,6 +1016,35 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		command.Parameters.AddWithValue((object?)detail ?? DBNull.Value);
 		command.Parameters.AddWithValue(jobId);
 		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
+	public async Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT job_id, purpose, credential_id, credential_name, credential_type, credential_username
+			FROM job_credential_bindings
+			WHERE job_id = $1
+			ORDER BY purpose
+			""", connection);
+		command.Parameters.AddWithValue(jobId);
+
+		List<JobCredentialBinding> bindings = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			bindings.Add(new JobCredentialBinding(
+				JobId: reader.GetGuid(0),
+				Purpose: reader.GetString(1),
+				CredentialId: reader.IsDBNull(2) ? null : reader.GetGuid(2),
+				CredentialName: reader.IsDBNull(3) ? null : reader.GetString(3),
+				CredentialType: reader.IsDBNull(4) ? null : reader.GetString(4),
+				CredentialUsername: reader.IsDBNull(5) ? null : reader.GetString(5)));
+		}
+
+		return bindings;
 	}
 
 	public async Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken)
@@ -1691,6 +1739,26 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			{
 				resumedJobIds.Add(reader.GetGuid(0));
 			}
+		}
+
+		// Issue #585: keep the swapped jobs' per-purpose snapshot (job_credential_bindings,
+		// migration 0044) in lockstep with jobs.credential_id -- handlers prefer the
+		// snapshot row for their execution purpose, so leaving it pointing at the halted
+		// credential would make the resumed job decrypt the very credential the swap just
+		// replaced. Scoped to exactly the resumed job set and the old credential, so a
+		// purpose bound to a DIFFERENT credential (e.g. an unrelated vcsa-ssh binding) is
+		// untouched. The controller has already enforced replacement type == halted type,
+		// which keeps every purpose the old credential satisfied satisfiable by the new
+		// one (ADR-0021 §2 compatibility is type-keyed).
+		if (resumedJobIds.Count > 0)
+		{
+			await using NpgsqlCommand swapBindings = new(
+				"UPDATE job_credential_bindings SET credential_id = $3 WHERE job_id = ANY($1) AND credential_id = $2",
+				connection, transaction);
+			swapBindings.Parameters.AddWithValue(resumedJobIds.ToArray());
+			swapBindings.Parameters.AddWithValue(oldCredentialId);
+			swapBindings.Parameters.AddWithValue(replacementCredentialId);
+			await swapBindings.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
 		// Step 4: unblock the run itself now that its halted jobs have moved off the

@@ -429,9 +429,20 @@ public sealed class CredentialRepository
 			blockers.Add(new BlockingCategory(CredentialBlockingCategories.Configuration, configuration));
 		}
 
+		// Issue #585: a non-terminal job can reference this credential through its
+		// per-purpose snapshot (job_credential_bindings, migration 0044) for a purpose
+		// jobs.credential_id never carried -- e.g. a vsphere scan job's vcsa-ssh row.
+		// Counted as the same active_jobs category (the blocker IS the active job, not a
+		// new kind of thing), as DISTINCT jobs so a job referencing via both the column
+		// and a binding row is one blocker, not two.
 		int activeJobs = await CountAsync(
 			connection, transaction,
-			"SELECT count(*) FROM jobs WHERE credential_id = $1 AND state NOT IN ('uploaded', 'done', 'failed', 'auth-failed', 'cancelled')",
+			"""
+			SELECT count(*) FROM jobs j
+			WHERE j.state NOT IN ('uploaded', 'done', 'failed', 'auth-failed', 'cancelled')
+			  AND (j.credential_id = $1
+			       OR EXISTS (SELECT 1 FROM job_credential_bindings b WHERE b.job_id = j.id AND b.credential_id = $1))
+			""",
 			id, cancellationToken).ConfigureAwait(false);
 		if (activeJobs > 0)
 		{
@@ -483,6 +494,28 @@ public sealed class CredentialRepository
 			jobs.Parameters.AddWithValue(credentialType);
 			jobs.Parameters.AddWithValue((object?)username ?? DBNull.Value);
 			await jobs.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// Issue #585: terminal jobs' per-purpose snapshot rows (job_credential_bindings,
+		// migration 0044) get the same snapshot-then-null detach -- purpose attribution
+		// survives ("which purpose did the deleted credential satisfy for this job")
+		// while the FK is released. CountBlockersAsync has already proven no NON-terminal
+		// job references this credential through a binding row; the terminal check is
+		// repeated here anyway, same defense-in-depth as the jobs UPDATE above.
+		await using (NpgsqlCommand jobBindings = new(
+			"""
+			UPDATE job_credential_bindings b
+			SET credential_name = $2, credential_type = $3, credential_username = $4, credential_id = NULL
+			FROM jobs j
+			WHERE b.job_id = j.id AND b.credential_id = $1
+			  AND j.state IN ('uploaded', 'done', 'failed', 'auth-failed', 'cancelled')
+			""", connection, transaction))
+		{
+			jobBindings.Parameters.AddWithValue(id);
+			jobBindings.Parameters.AddWithValue(name);
+			jobBindings.Parameters.AddWithValue(credentialType);
+			jobBindings.Parameters.AddWithValue((object?)username ?? DBNull.Value);
+			await jobBindings.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
 		// A run's own credential_id (docs/api-contract.md: the credential a scan/
