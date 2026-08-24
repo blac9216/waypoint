@@ -17,10 +17,12 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.ConfigDocs;
+using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Secrets;
 using Waypoint.Infrastructure.Sites;
 using Xunit;
@@ -423,6 +425,122 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #642 (root cause of #640): the fourth instance of the #556 grant-drift
+	/// class. <see cref="JobQueueRepository.AdvanceStateAsync"/>'s terminal-state
+	/// write runs <c>TryCompleteRunAsync</c> -&gt; <c>DeleteRunSecretIfPresentAsync</c>
+	/// (<c>DELETE FROM run_secrets WHERE run_id = $1</c>) inside the SAME transaction
+	/// for EVERY job of EITHER runner domain that lands a run's last job on a
+	/// terminal state -- not just jobs that registered a run secret; a no-op delete
+	/// still executes the statement and still needs the grant. Before migration 0040
+	/// this throws 42501 as the real download-runner role, which rolls back the
+	/// entire transaction (including the jobs UPDATE) -- reproducing #640's exact
+	/// symptom: a tool-install job whose handler returns Failed never reaches
+	/// 'failed' at all. This drives a job to 'failed' as the real
+	/// waypoint_download_runner role and asserts it actually lands.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_AdvanceStateAsync_CompletesRunTerminalWithoutPermissionDenied()
+	{
+		Guid runId = await SeedRunAsync();
+		Guid jobId = await SeedJobAsync(runId);
+		await ClaimSeededJobAsync(jobId, "download-runner-test-worker");
+
+		JobQueueRepository runnerRepository = new(_downloadRunnerConnectionString, NullLogger<JobQueueRepository>.Instance);
+
+		bool advanced = await runnerRepository.AdvanceStateAsync(
+			jobId, "download-runner-test-worker", JobStates.Running, JobStates.Failed,
+			note: "verification rejected", clearLease: true, CancellationToken.None);
+
+		Assert.True(advanced, "expected the download-runner role's terminal AdvanceStateAsync to succeed, not hit 42501 on run_secrets.");
+
+		(string jobState, string runState) = await ReadJobAndRunStateAsync(jobId, runId);
+		Assert.Equal(JobStates.Failed, jobState);
+		Assert.Equal("completed_with_failures", runState);
+	}
+
+	/// <summary>
+	/// Same root cause as <see cref="DownloadRunnerRole_AdvanceStateAsync_CompletesRunTerminalWithoutPermissionDenied"/>,
+	/// exercised via the OTHER shared completion path: lease recovery
+	/// (<see cref="JobQueueRepository.RecoverExpiredLeasesAsync"/>) also calls
+	/// <c>TryCompleteRunAsync</c> in-transaction whenever an exhausted-attempt job
+	/// gets recovered straight to 'failed' -- the exact mechanism #642's issue body
+	/// documents as the "duplicate ledger row per lease-recovery cycle" loop for
+	/// #640. Seeds a job at its last attempt with an already-expired lease and drives
+	/// the sweep as the real download-runner role.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_RecoverExpiredLeasesAsync_CompletesRunTerminalWithoutPermissionDenied()
+	{
+		Guid runId = await SeedRunAsync();
+		Guid jobId = await SeedJobAsync(runId);
+		await ClaimSeededJobAsync(jobId, "download-runner-test-worker");
+		await ExpireLeaseAndExhaustAttemptsAsync(jobId);
+
+		JobQueueRepository runnerRepository = new(_downloadRunnerConnectionString, NullLogger<JobQueueRepository>.Instance);
+
+		IReadOnlyList<Waypoint.Core.Jobs.RecoveredJob> recovered = await runnerRepository.RecoverExpiredLeasesAsync(10, CancellationToken.None);
+
+		Assert.Contains(recovered, job => job.Id == jobId && job.NewState == JobStates.Failed);
+
+		(string jobState, string runState) = await ReadJobAndRunStateAsync(jobId, runId);
+		Assert.Equal(JobStates.Failed, jobState);
+		Assert.Equal("completed_with_failures", runState);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check mirroring
+	/// <see cref="ComplianceRunnerRole_CannotInsertRunSecrets"/>: migration 0040 gives
+	/// waypoint_download_runner the identical SELECT, DELETE, UPDATE (expires_at)
+	/// shape as the compliance-runner role -- never INSERT, which stays API-only
+	/// (RunsController registers the secret at run-creation time).
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotInsertRunSecrets()
+	{
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO run_secrets (run_id, username, ciphertext, data_key_wrapped, master_key_id, algorithm, expires_at)
+			VALUES ($1, 'x', '\x00'::bytea, '\x00'::bytea, 'k', 'AES-256-GCM', now() + interval '1 hour')
+			""", connection);
+		insert.Parameters.AddWithValue(Guid.NewGuid());
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
+	/// The issue's example, reproduced and fixed for the download-runner role: a
+	/// decrypt as the real waypoint_download_runner role must succeed and must slide
+	/// expires_at forward, mirroring <see cref="ComplianceRunnerRole_DecryptAsync_SlidesExpiryWithoutPermissionDenied"/>.
+	/// ADR-0011's personal-credential tier was never actually restricted to
+	/// compliance jobs at the persistence layer -- only under-exercised by download
+	/// jobs until #558's live validation surfaced this gap.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_DecryptAsync_SlidesExpiryWithoutPermissionDenied()
+	{
+		Guid runId = await SeedRunAsync();
+		Guid jobId = await SeedJobAsync(runId);
+
+		AesGcmEnvelopeCipher cipher = new(new FileMasterKeyProvider(WriteKeyFile()));
+		RunSecretStore ownerStore = new(_fixture.ConnectionString, cipher, _redactor, Microsoft.Extensions.Options.Options.Create(new RunSecretOptions()), NullLogger<RunSecretStore>.Instance);
+		await ownerStore.StoreAsync(runId, new RunSecretCredential("adhoc-user@example.internal", "invented-adhoc-token-6a1d"), "tester", TimeSpan.FromMinutes(5), CancellationToken.None);
+
+		DateTimeOffset expiresBefore = await ReadExpiresAtAsync(runId);
+
+		RunSecretStore runnerStore = new(_downloadRunnerConnectionString, cipher, _redactor, Microsoft.Extensions.Options.Options.Create(new RunSecretOptions { Expiry = TimeSpan.FromHours(2) }), NullLogger<RunSecretStore>.Instance);
+		using (DecryptedRunSecret? handle = await runnerStore.DecryptAsync(runId, jobId, "engine", CancellationToken.None))
+		{
+			Assert.NotNull(handle);
+		}
+
+		DateTimeOffset expiresAfter = await ReadExpiresAtAsync(runId);
+		Assert.True(expiresAfter > expiresBefore, "expected the download-runner role's decrypt to slide expires_at forward, not merely avoid throwing.");
+	}
+
+	/// <summary>
 	/// Least-privilege boundary for capacity_pool: DELETE is deliberately withheld
 	/// from both runner roles (migration 0036's header) -- destroying the pool row
 	/// denies all admission appliance-wide and stays an owner/migration action.
@@ -544,6 +662,46 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		command.Parameters.AddWithValue(siteId);
 		command.Parameters.AddWithValue($"role-grant-drift-target-{Guid.NewGuid():N}");
 		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private async Task ClaimSeededJobAsync(Guid jobId, string workerId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE jobs SET state = 'running', claimed_by = $2, claimed_at = now(),
+				lease_expires_at = now() + interval '5 minutes', heartbeat_at = now(),
+				attempt_count = attempt_count + 1
+			WHERE id = $1
+			""", connection);
+		command.Parameters.AddWithValue(jobId);
+		command.Parameters.AddWithValue(workerId);
+		await command.ExecuteNonQueryAsync();
+	}
+
+	/// <summary>Sets the job's lease in the past and attempt_count = max_attempts so RecoverSql's CASE picks the 'failed' arm (attempts exhausted) rather than requeuing to 'queued'.</summary>
+	private async Task ExpireLeaseAndExhaustAttemptsAsync(Guid jobId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"UPDATE jobs SET lease_expires_at = now() - interval '1 minute', attempt_count = max_attempts WHERE id = $1", connection);
+		command.Parameters.AddWithValue(jobId);
+		await command.ExecuteNonQueryAsync();
+	}
+
+	private async Task<(string JobState, string RunState)> ReadJobAndRunStateAsync(Guid jobId, Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT (SELECT state FROM jobs WHERE id = $1), (SELECT state FROM runs WHERE id = $2)", connection);
+		command.Parameters.AddWithValue(jobId);
+		command.Parameters.AddWithValue(runId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		await reader.ReadAsync();
+		return (reader.GetString(0), reader.GetString(1));
 	}
 
 	private async Task<DateTimeOffset> ReadExpiresAtAsync(Guid runId)
