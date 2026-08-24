@@ -479,10 +479,14 @@ services:
       # Shim modules baked into the image at /app/PowerShell/Modules (Waypoint.
       # Infrastructure.csproj's CopyToPublishDirectory - see the Dockerfile).
       # Preload order matches the mapping deploy/README.md previously documented
-      # on the backend service - now this service's own.
-      PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointDiscovery"
-      PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointScan"
-      PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointCredentialTest"
+      # on the backend service - now this service's own. WaypointLogging preloads
+      # FIRST (issue #579): it provides Get-LogSplat/Write-Log, which the imported
+      # vmware-stig-docker transport files dot-sourced by the other three modules
+      # expect to already be in scope.
+      PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointLogging"
+      PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDiscovery"
+      PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointScan"
+      PowerShell__ModulePreloadPaths__3: "/app/PowerShell/Modules/WaypointCredentialTest"
       # Project-owned .ps1 files the shims above dot-source, baked into the image under
       # /powershell/ (runners/compliance-runner/powershell/, imported from the
       # vmware-stig-docker sibling repo per CLAUDE.md's borrowing policy) -

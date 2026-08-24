@@ -34,32 +34,12 @@
 #              That limitation is documented on CredentialTestJobHandler and surfaced in
 #              the job's success note.
 #
-# The two Get-LogSplat/Write-Log shims below are the same generic, non-secret-carrying
-# helpers WaypointScan.psm1 defines for the identical reason: Connect-StigVIServer and
-# Get-NsxSessionToken both call into the sibling repo's module.logging.ps1, which pulls
-# in machinery (LogQueue thread, Write-LogDirect) this single-call test does not need,
-# and that repo carries no LICENSE (CLAUDE.md's Borrowing Policy bars unlicensed code)
-# -- so Waypoint provides tiny generic stand-ins rather than copying the sibling repo's
-# logging stack, letting its connect functions run dot-sourced and unmodified.
-if (-not (Get-Command -Name 'Get-LogSplat' -ErrorAction SilentlyContinue)) {
-	function Get-LogSplat {
-		param([Parameter(Position = 0)][string]$Source = 'CredentialTest')
-		return @{ Source = $Source }
-	}
-}
-if (-not (Get-Command -Name 'Write-Log' -ErrorAction SilentlyContinue)) {
-	function Write-Log {
-		[CmdletBinding()]
-		param(
-			[Parameter(Mandatory, Position = 0)][string]$Message,
-			[Parameter()][string]$Severity = 'Info',
-			[Parameter()][object]$LogQueue = $null,
-			[Parameter()][string]$Source,
-			[Parameter()][datetime]$Timestamp = (Get-Date)
-		)
-		Write-Verbose $Message
-	}
-}
+# Get-LogSplat/Write-Log for Connect-StigVIServer and Get-NsxSessionToken (both
+# dot-sourced below, both calling into the sibling repo's module.logging.ps1
+# contract) are provided by the shared WaypointLogging adapter module (issue
+# #579), preloaded into every compliance runspace ahead of any imported transport
+# module -- see Modules/WaypointLogging/WaypointLogging.psm1 for the full
+# rationale. This module no longer carries its own stand-ins.
 
 $Script:VmwareStigDockerVmwareTransportPath = $env:WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_PATH
 $Script:VmwareStigDockerNsxApiModulePath = $env:WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH

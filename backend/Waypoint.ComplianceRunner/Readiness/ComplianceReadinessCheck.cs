@@ -29,8 +29,9 @@ namespace Waypoint.ComplianceRunner.Readiness;
 /// <list type="bullet">
 /// <item><description>every configured PowerShell module preload path
 /// (<see cref="PowerShellOptions.ModulePreloadPaths"/>) -- the compliance shim modules
-/// this image's Dockerfile provisions (module.common/module.transport.*, and the
-/// Waypoint{Discovery,Scan,CredentialTest} shims) -- exists on disk;</description></item>
+/// this image's Dockerfile provisions (module.common/module.transport.*, the shared
+/// WaypointLogging adapter (issue #579), and the Waypoint{Discovery,Scan,CredentialTest}
+/// shims) -- exists on disk;</description></item>
 /// <item><description>the compliance-content roots
 /// (<see cref="ScanOptions.ProfilePath"/>, <see cref="ScanOptions.NsxProfilePath"/>,
 /// <see cref="ScanOptions.SrgProfilePath"/>) are mounted read-only content the scan
