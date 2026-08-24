@@ -48,4 +48,36 @@ public static class JobEventTypes
 
 	/// <summary>Appliance-wide (job_id and run_id both NULL).</summary>
 	public const string SystemNotice = "system.notice";
+
+	/// <summary>
+	/// Every value the schema's <c>job_events_event_type_check</c> CHECK constraint
+	/// allows. Issue #581's bounded history read validates its <c>kind</c> filter
+	/// against this set client-side (400 on an unknown kind) rather than letting a
+	/// typo silently match zero rows and look like an empty history.
+	/// </summary>
+	public static readonly IReadOnlyList<string> All =
+	[
+		JobState, JobLog, RunProgress, QueueState, DownloadProgress, DiscoverProgress, SystemNotice,
+	];
+
+	public static bool IsValid(string eventType) => All.Contains(eventType, StringComparer.Ordinal);
+}
+
+/// <summary>
+/// The closed set of <c>job.log</c> payload <c>severity</c> values PowerShell stream
+/// capture emits (<c>PowerShellExecutor.WireStreamCapture</c>: Information/Warning/
+/// Error/Verbose/Debug streams, one severity string each). Issue #581's history read
+/// validates its <c>level</c> filter against this set (400 on an unknown value).
+/// </summary>
+public static class JobLogSeverities
+{
+	public const string Information = "information";
+	public const string Warning = "warning";
+	public const string Error = "error";
+	public const string Verbose = "verbose";
+	public const string Debug = "debug";
+
+	public static readonly IReadOnlyList<string> All = [Information, Warning, Error, Verbose, Debug];
+
+	public static bool IsValid(string severity) => All.Contains(severity, StringComparer.Ordinal);
 }

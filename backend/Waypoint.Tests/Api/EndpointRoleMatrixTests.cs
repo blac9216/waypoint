@@ -171,6 +171,10 @@ public sealed class EndpointRoleMatrixTests
 		["RunsController.RetryJob"] = WaypointRole.Operator,
 		["RunsController.GetArtifacts"] = WaypointRole.Viewer,
 		["RunsController.GetAttestationsApplied"] = WaypointRole.Viewer,
+		// Issue #581 (ADR-0019): bounded historical job-log/event reads are Viewer+,
+		// matching every other run read -- visibility of operational history is not a
+		// domain action (ADR-0019 decision 6).
+		["RunsController.GetEventHistory"] = WaypointRole.Viewer,
 		["RunsController.PauseRun"] = WaypointRole.Operator,
 		["RunsController.ResumeRun"] = WaypointRole.Operator,
 		["RunsController.AbortRun"] = WaypointRole.Operator,
