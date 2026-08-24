@@ -62,6 +62,16 @@ public sealed class ManagedToolInstallRepository : IManagedToolInstallRepository
 		return (Guid)result!;
 	}
 
+	public async Task<ManagedToolInstall?> FindByJobIdAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new($"{ProjectionSql} WHERE job_id = $1 ORDER BY created_at DESC LIMIT 1", connection);
+		command.Parameters.AddWithValue(jobId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
+	}
+
 	public async Task<IReadOnlyList<ManagedToolInstall>> ListAsync(int limit, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

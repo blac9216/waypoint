@@ -24,6 +24,17 @@ public interface IManagedToolInstallRepository
 	/// <summary>Appends one install attempt (installed, rejected, or failed) to the ledger. Returns the new row's id.</summary>
 	Task<Guid> RecordAsync(ManagedToolInstallAttempt attempt, CancellationToken cancellationToken);
 
+	/// <summary>
+	/// The ledger row already recorded for <paramref name="jobId"/>, or <c>null</c> if
+	/// this job has never recorded an outcome. Issue #647: <c>job_id</c> is the natural
+	/// dedup key for one <c>tool-install</c> job's attempt -- a genuine crash-recovery
+	/// requeue re-runs the same <c>jobs.id</c> row (attempt_count increments, the id
+	/// does not), so the <c>tool-install</c> job handler checks this before calling
+	/// <see cref="RecordAsync"/> to avoid writing a second row for the same logical
+	/// install attempt.
+	/// </summary>
+	Task<ManagedToolInstall?> FindByJobIdAsync(Guid jobId, CancellationToken cancellationToken);
+
 	/// <summary>Newest-first install history, for the Depot &amp; Tokens screen and <c>GET /downloads/tool/installs</c>.</summary>
 	Task<IReadOnlyList<ManagedToolInstall>> ListAsync(int limit, CancellationToken cancellationToken);
 

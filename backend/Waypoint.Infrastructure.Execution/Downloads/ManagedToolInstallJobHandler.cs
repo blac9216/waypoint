@@ -148,6 +148,26 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 
 		string initiatedBy = payload.InitiatedBy ?? "system";
 
+		// Issue #647: job_id is the natural dedup key for one tool-install attempt. A
+		// genuine crash-recovery requeue (runner dies mid-handler; lease-recovery sweep
+		// puts the same jobs.id row back on the queue) re-runs this method for a job
+		// that may have already recorded a terminal ledger outcome on a prior
+		// execution. Re-running verify-then-activate in that case would both duplicate
+		// the append-only ledger row and, for an already-installed outcome,
+		// re-extract/re-smoke-test/re-activate the distribution a second time --
+		// pointless work and a window where the active install is briefly replaced by
+		// an identical copy of itself for no reason. Short-circuit here, before any
+		// file or network I/O, by returning the recorded outcome unchanged.
+		ManagedToolInstall? existing = await _installs.FindByJobIdAsync(context.Job.Id, cancellationToken).ConfigureAwait(false);
+		if (existing is not null)
+		{
+			return existing.Outcome == ManagedToolInstallOutcomes.Installed
+				? JobExecutionOutcome.Succeeded(
+					$"tool-install job {context.Job.Id} already recorded outcome '{existing.Outcome}' (ledger row {existing.Id}) on a prior execution; requeue re-run skipped without duplicating the ledger or re-activating.")
+				: JobExecutionOutcome.Failed(
+					$"tool-install job {context.Job.Id} already recorded outcome '{existing.Outcome}' (ledger row {existing.Id}) on a prior execution; requeue re-run skipped without duplicating the ledger.");
+		}
+
 		return payload.Source == ManagedToolInstallSources.Depot
 			? await ExecuteDepotFetchAsync(payload, initiatedBy, context, cancellationToken).ConfigureAwait(false)
 			: await ExecuteFileBasedAsync(payload, initiatedBy, context, cancellationToken).ConfigureAwait(false);
