@@ -37,7 +37,7 @@
  *   `ResultsScreen.tsx`'s sidebar still uses them for the "which are
  *   currently expired" slice, alongside the real endpoint.
  */
-import { apiGet } from "../../lib/api";
+import { apiGet, apiPost } from "../../lib/api";
 
 /** `RunResponse` (RunContracts.cs) — this screen's subset. */
 export interface RunListItem {
@@ -100,6 +100,52 @@ export interface RunJobItem {
 
 export function fetchRunJobs(runId: string): Promise<RunJobItem[]> {
 	return apiGet<RunJobItem[]>(`/runs/${runId}/jobs`);
+}
+
+/** Run states with no further transition (RunContracts.cs / api-contract.md's
+ * run state machine) — mirrors `configuration/sites.ts`'s `isTerminalRunState`
+ * (kept separate per that module's own precedent: this screen has no
+ * SSE/state-machine coupling to the config tabs, so duplicating this one-line
+ * predicate is cheaper than an incidental cross-screen import). Purge is only
+ * offered once a run lands here. */
+export function isTerminalRunState(state: string): boolean {
+	return state === "completed" || state === "completed_with_failures" || state === "aborted";
+}
+
+/** `RunPurgeStatusResponse` (RunContracts.cs) — the durable status shape both
+ * `POST /runs/{id}/purge` and `GET /runs/{id}/purge` return (issue #594/#656,
+ * epic #577). `outcome` drives all UI branching: `"InProgress"` polls,
+ * `"Failed"` offers retry (re-`POST`), `"Completed"`/`"AlreadyPurged"` render
+ * the purged tombstone. `artifacts_phase`/`last_error` are what the retry
+ * affordance keys off, per the response's own doc comment on the C# side. */
+export interface RunPurgeStatus {
+	run_id: string;
+	outcome: "Completed" | "AlreadyPurged" | "InProgress" | "Failed" | string;
+	requested_by: string;
+	requested_at: string;
+	prior_state: string;
+	db_phase_done: boolean;
+	artifacts_phase: "pending" | "running" | "done" | "failed" | string;
+	artifacts_total: number;
+	artifacts_deleted: number;
+	last_error: string | null;
+	completed_at: string | null;
+}
+
+/** `POST /runs/{id}/purge` — Admin-only, requires the literal `"PURGE"`
+ * confirmation string (RunsController.PurgeConfirmation) or the server 400s.
+ * Safe to call again on an in-flight or failed purge — the backend resumes
+ * rather than double-runs (see RunPurgeStatus's doc comment). */
+export function purgeRun(runId: string): Promise<RunPurgeStatus> {
+	return apiPost<RunPurgeStatus>(`/runs/${runId}/purge`, { confirmation: "PURGE" });
+}
+
+/** `GET /runs/{id}/purge` — polls purge progress/terminal state without
+ * re-triggering anything. 404s (via `apiGet`'s `ApiError`) if a purge was
+ * never requested for this run — callers must not call this before the first
+ * `purgeRun`. */
+export function fetchPurgeStatus(runId: string): Promise<RunPurgeStatus> {
+	return apiGet<RunPurgeStatus>(`/runs/${runId}/purge`);
 }
 
 /** CAT I/II/III severity, spelled out — never abbreviated to a bare "I"/"II"/"III"
