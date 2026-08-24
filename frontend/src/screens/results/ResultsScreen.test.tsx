@@ -133,16 +133,18 @@ function installFetchMock(
 		artifactsAvailable?: boolean;
 		artifacts?: unknown[];
 		attestationsApplied?: unknown[] | "unavailable";
+		runList?: unknown[];
 	} = {},
 ) {
 	const artifactsAvailable = options.artifactsAvailable ?? true;
 	const artifacts = options.artifacts ?? RUN_ARTIFACTS;
 	const attestationsApplied = options.attestationsApplied ?? ATTESTATIONS_APPLIED;
+	const runList = options.runList ?? RUN_LIST;
 	globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
 		const url = typeof input === "string" ? input : input.toString();
 
 		if (url.startsWith("/api/v1/runs?")) {
-			return jsonResponse(RUN_LIST, { "X-Total-Count": String(RUN_LIST.length) });
+			return jsonResponse(runList, { "X-Total-Count": String(runList.length) });
 		}
 		if (url === "/api/v1/runs/RUN-2026-0802-0412") {
 			return jsonResponse(RUN_LIST[0]);
@@ -449,5 +451,52 @@ describe("ResultsScreen", () => {
 		// falls back to its expired-only view (empty here, since RUN_ARTIFACTS'
 		// single row has no matching config-doc resolution in this fixture).
 		expect(screen.getByText("No expired attestations resolved for this run.")).toBeInTheDocument();
+	});
+
+	/**
+	 * Issue #591 AC: "Compliance Results lists only scan/remediation-owned
+	 * results". `GET /runs` is not itself filtered server-side by run_type
+	 * (it returns every run) — the filter is this screen's own
+	 * `useRunList.ts`/`COMPLIANCE_RUN_TYPES`, so a non-compliance run
+	 * (`download`, `discover`, etc.) in the raw response must never reach the
+	 * rendered list or become selectable.
+	 */
+	describe("Compliance-owned run type filtering (issue #591)", () => {
+		const DOWNLOAD_RUN = {
+			...RUN_LIST[0],
+			id: "RUN-2026-0810-0000",
+			run_type: "download",
+			scope: JSON.stringify({ site_id: "Bravo Enclave" }),
+		};
+		const DISCOVER_RUN = {
+			...RUN_LIST[0],
+			id: "RUN-2026-0811-0000",
+			run_type: "discover",
+			scope: JSON.stringify({ site_id: "Charlie Enclave" }),
+		};
+
+		it("does not list a non-compliance run (download) even though GET /runs returned it", async () => {
+			installFetchMock({ runList: [...RUN_LIST, DOWNLOAD_RUN] });
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("RUN-2026-0802-0412")).toBeInTheDocument());
+			expect(screen.queryByText("RUN-2026-0810-0000")).not.toBeInTheDocument();
+			expect(screen.queryByText("Bravo Enclave")).not.toBeInTheDocument();
+		});
+
+		it("does not list a discovery run either — only scan/remediate are compliance-owned", async () => {
+			installFetchMock({ runList: [...RUN_LIST, DISCOVER_RUN] });
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("RUN-2026-0802-0412")).toBeInTheDocument());
+			expect(screen.queryByText("RUN-2026-0811-0000")).not.toBeInTheDocument();
+		});
+
+		it("still lists a scan run normally when a non-compliance run is mixed into the same response", async () => {
+			installFetchMock({ runList: [DOWNLOAD_RUN, ...RUN_LIST] });
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("RUN-2026-0802-0412")).toBeInTheDocument());
+		});
 	});
 });

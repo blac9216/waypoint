@@ -1,7 +1,8 @@
 /**
  * Live Jobs data layer (issue #590, ADR-0019, epic #588) — the global
  * concurrent operational projection over every active Run/Job, replacing
- * the scan-only board `../liverun/liverun.ts` builds for a single run.
+ * the scan-only board the former `screens/liverun/liverun.ts` built for a
+ * single run (removed by issue #693 once #591's type renderers covered it).
  *
  * ADR-0019 decision 1: "A top-level workspace lists every active Run and
  * Job, groups jobs by run, and lets the operator select among concurrent
@@ -11,8 +12,8 @@
  *
  * Seed: `GET /runs` (`RunResponse[]`, already paginated newest-first) plus,
  * for every non-terminal run, `GET /runs/{id}/jobs` (`JobResponse[]`) — the
- * same wire shapes `../liverun/liverun.ts` and `../results/results.ts`
- * already map, reused here rather than re-typed a third time. There is no
+ * same wire shapes `../results/results.ts` already maps, reused here
+ * rather than re-typed a second time. There is no
  * server-side "active runs" filter yet (ADR-0019's "planned" section: "the
  * global `/runs?cursor=...` list read remains planned, unimplemented"), so
  * "active" is a client-side filter over `RunListItem.state` — additive-only,
@@ -22,7 +23,7 @@
  * consumes (`GET /api/v1/events`, `lib/events.ts`), folded by `applyEvent`
  * below — a pure reducer so the identical function drives live events and
  * Last-Event-ID replay after reconnect, the same convergence property
- * `../liverun/liverun.ts`'s `applyEvent` documents for the single-run case.
+ * the former single-run `liverun.ts` `applyEvent` documented.
  */
 import type { RunJobItem, RunListItem } from "../results/results";
 import type { WaypointEvent } from "../../lib/events";
@@ -35,8 +36,8 @@ export function isTerminalRunState(state: string): boolean {
 	return state === "completed" || state === "completed_with_failures" || state === "aborted";
 }
 
-/** Job states with no further transition — the same closed set
- * `../liverun/liverun.ts`'s `TERMINAL_JOB_STATES` uses. */
+/** Job states with no further transition — the same closed set the former
+ * `liverun.ts` `TERMINAL_JOB_STATES` used (docs/api-contract.md job states). */
 const TERMINAL_JOB_STATES: ReadonlySet<string> = new Set(["uploaded", "done", "failed", "auth-failed", "cancelled"]);
 
 export function isTerminalJobState(state: string): boolean {
@@ -58,7 +59,7 @@ export interface LiveJobRow {
 	started_at: string | null;
 	finished_at: string | null;
 	/** Most recent `job.log` line seen for this job, if any — the same
-	 * "latest note" treatment `../liverun/liverun.ts`'s `RunJob.note` uses. */
+	 * "latest note" treatment the former `liverun.ts` `RunJob.note` used. */
 	lastLogLine: string | null;
 	/** Bounded live-tail buffer of recent `job.log` lines for this job
 	 * (newest last), capped at `MAX_JOB_LOG_LINES`. Feeds the generic detail
@@ -171,7 +172,7 @@ interface RunProgressData {
 
 /**
  * Folds one global SSE event into a `LiveJobsSnapshot`. Mirrors
- * `../liverun/liverun.ts`'s `applyEvent` shape (pure, returns a new
+ * the former single-run `liverun.ts` `applyEvent` shape (pure, returns a new
  * snapshot) but is multi-run: every event carries its own `run_id`, so
  * routing is "find the group with this run_id" rather than "is this event
  * for my one run". A `job.state`/`job.log` event for a job not present in

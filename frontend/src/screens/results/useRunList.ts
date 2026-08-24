@@ -4,10 +4,32 @@
  * Fetches `GET /runs` once on mount, auto-selects the first row so the
  * detail pane isn't empty on load, and exposes a case-insensitive filter
  * over the run id and scope's site id (matching the prior inline behavior).
+ *
+ * List is filtered to compliance-owned run types (issue #591: "Compliance
+ * Results lists only scan/remediation-owned results") — `run_type` is the
+ * closed set `JobCapabilities.cs`/`jobs_job_type_check` enforce server-side;
+ * `scan`/`remediate` are the only two this screen owns (see `COMPLIANCE_RUN_TYPES`).
+ *
+ * `?run=<id>` (issue #591): if present and it names a run in the (filtered)
+ * list, it is auto-selected instead of the first row — the same read-only
+ * "ride the existing path's query string" pattern the former
+ * `screens/liverun/useRunIdFromQuery.ts` used, now needed here so a
+ * type-specific Live Jobs detail renderer can link a scan/remediate job
+ * straight to its run's Results row.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError } from "../../lib/api";
 import { fetchRunList, scopeSiteId, type RunListItem } from "./results";
+
+/** Compliance-owned `run_type` values (`JobCapabilities.Compliance`'s
+ * scan/remediate; the rest of that set — discover/credential-test/
+ * content-pull/content-import/purge — has no results/artifacts presentation
+ * and is not a "result" in this screen's sense). */
+const COMPLIANCE_RUN_TYPES: ReadonlySet<string> = new Set(["scan", "remediate"]);
+
+function readRunIdFromQuery(): string | undefined {
+	return new URLSearchParams(window.location.search).get("run") ?? undefined;
+}
 
 export interface UseRunListResult {
 	runs: RunListItem[];
@@ -36,10 +58,14 @@ export function useRunList(): UseRunListResult {
 				if (cancelled) {
 					return;
 				}
-				setRuns(result.items);
-				if (result.items.length > 0) {
-					setSelectedRunId((current) => current ?? result.items[0].id);
-					setSelectedRow((current) => current ?? result.items[0]);
+				const items = result.items.filter((r) => COMPLIANCE_RUN_TYPES.has(r.run_type));
+				setRuns(items);
+				if (items.length > 0) {
+					const deepLinkedId = readRunIdFromQuery();
+					const deepLinked = deepLinkedId ? items.find((r) => r.id === deepLinkedId) : undefined;
+					const initial = deepLinked ?? items[0];
+					setSelectedRunId((current) => current ?? initial.id);
+					setSelectedRow((current) => current ?? initial);
 				}
 			})
 			.catch((err) => {

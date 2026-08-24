@@ -273,6 +273,23 @@ describe("App", () => {
 		expect(screen.getByText("JOB LOG")).toBeInTheDocument();
 	});
 
+	it("renames Results & History to Compliance Scan Results everywhere the route title flows (nav label + top bar heading, issue #591)", async () => {
+		installChromeFetchMock("Admin");
+		render(<App />);
+		await signIn();
+
+		await waitFor(() => expect(screen.getByText("WAYPOINT")).toBeInTheDocument());
+
+		// Nav label (LeftRail reads RouteDef.title directly).
+		expect(screen.getByText("Compliance Scan Results")).toBeInTheDocument();
+		expect(screen.queryByText("Results & History")).not.toBeInTheDocument();
+
+		// Top bar heading updates to the same title once the screen is active.
+		window.history.pushState(null, "", "/results");
+		window.dispatchEvent(new PopStateEvent("popstate"));
+		await waitFor(() => expect(screen.getAllByText("Compliance Scan Results").length).toBeGreaterThan(1));
+	});
+
 	it("redirects a Viewer away from an Admin-only screen instead of rendering it (screen-level guard)", async () => {
 		installChromeFetchMock("Viewer");
 		render(<App />);
@@ -580,6 +597,37 @@ describe("App", () => {
 
 			await waitFor(() => expect(window.location.pathname).toBe("/"));
 			expect(CatalogScreen).not.toHaveBeenCalled();
+		});
+	});
+
+	/**
+	 * Issue #693: the old scan-only Live Run screen cluster
+	 * (`screens/liverun/*`) was deleted once #591 gave scan/remediate jobs a
+	 * type-specific Live Jobs renderer — but the deep-link redirect itself
+	 * (`App.tsx`'s `LiveRunRedirect`, added by #590/#688) must keep working
+	 * for old bookmarked/shared `/live-run` links. Covers both the bare path
+	 * and the `?run=<id>` carry-forward the redirect's own doc comment
+	 * promises.
+	 */
+	describe("/live-run deep-link redirect (issue #693: screen deleted, redirect stays)", () => {
+		it("redirects a bare /live-run to /live-jobs", async () => {
+			window.history.pushState(null, "", "/live-run");
+			installChromeFetchMock("Admin");
+			render(<App />);
+			await signIn();
+
+			await waitFor(() => expect(window.location.pathname).toBe("/live-jobs"));
+			expect(window.location.search).toBe("");
+		});
+
+		it("carries a ?run=<id> query forward to /live-jobs", async () => {
+			window.history.pushState(null, "", "/live-run?run=run-123");
+			installChromeFetchMock("Admin");
+			render(<App />);
+			await signIn();
+
+			await waitFor(() => expect(window.location.pathname).toBe("/live-jobs"));
+			expect(window.location.search).toBe("?run=run-123");
 		});
 	});
 });

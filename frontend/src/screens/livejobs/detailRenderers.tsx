@@ -1,14 +1,16 @@
 /**
- * Job-detail renderer registry (ADR-0019 decision 2: "A renderer selected
+ * Job-detail generic fallback (ADR-0019 decision 2: "A renderer selected
  * from the authoritative run/job type presents relevant progress and
  * controls... Unknown types use a safe generic lifecycle/log renderer.").
  *
- * Issue #590 builds the workspace shell and this generic fallback only —
- * type-specific renderers (scan stage detail, download progress, discovery
- * results, etc.) are issue #591's scope. The seam is this registry: a
- * renderer is a component keyed by `job_type`; #591 registers additional
- * entries here (or in its own module that merges into `JOB_DETAIL_RENDERERS`)
- * without touching the workspace shell that looks them up.
+ * Issue #590 built the workspace shell and this generic fallback. Issue #591
+ * added type-specific renderers (scan stage detail, download progress,
+ * discovery results, etc.) — the registry mapping `job_type` to a renderer
+ * component lives in `detailRenderers.registry.ts` (split out per issue #692
+ * so this file exports only the `GenericJobDetail` component, keeping
+ * Fast-Refresh-friendly component-only exports). This module stays the
+ * fallback every unmapped `job_type` — including any future addition to the
+ * closed `job_type` set — resolves to.
  */
 import type { ReactElement } from "react";
 import type { LiveJobRow, LiveRunGroup } from "./livejobs";
@@ -21,9 +23,9 @@ export interface JobDetailProps {
 	group: LiveRunGroup;
 }
 
-/** A registered detail renderer. Only `GenericJobDetail` is registered by
- * this issue; #591 adds `job_type`-keyed entries (e.g. `"download"`,
- * `"discover"`, `"credential-test"`) that this map is looked up by. */
+/** A registered detail renderer, keyed by `job_type` in
+ * `detailRenderers.registry.ts`'s `JOB_DETAIL_RENDERERS` (e.g. `"scan"`,
+ * `"download"`, `"discover"`, `"credential-test"`). */
 export type JobDetailRenderer = (props: JobDetailProps) => ReactElement;
 
 function formatEventLine(event: WaypointEvent): string {
@@ -131,13 +133,4 @@ export function GenericJobDetail({ job, group }: JobDetailProps): ReactElement {
 			</div>
 		</div>
 	);
-}
-
-/** Renderer registry keyed by `job_type`. Empty today — every type falls
- * through to `GenericJobDetail` via `resolveJobDetailRenderer`. #591 adds
- * entries here. */
-export const JOB_DETAIL_RENDERERS: Record<string, JobDetailRenderer> = {};
-
-export function resolveJobDetailRenderer(jobType: string): JobDetailRenderer {
-	return JOB_DETAIL_RENDERERS[jobType] ?? GenericJobDetail;
 }

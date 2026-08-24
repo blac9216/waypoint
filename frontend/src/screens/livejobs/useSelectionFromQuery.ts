@@ -1,6 +1,7 @@
 /**
  * Deep-link selection state for the Live Jobs workspace (issue #590 AC4):
- * `?run=<id>&job=<id>` on `/live-jobs`, mirroring `../liverun/useRunIdFromQuery.ts`'s
+ * `?run=<id>&job=<id>` on `/live-jobs`, mirroring the former
+ * `liverun/useRunIdFromQuery.ts` (removed by issue #693)
  * "ride the existing path's query string" approach rather than graduating
  * the hand-rolled router (`lib/router.tsx`) to param routes for one screen.
  * `job` is optional — selecting a run alone (no job) is a valid deep link

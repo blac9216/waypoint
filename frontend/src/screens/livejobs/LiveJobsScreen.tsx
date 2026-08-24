@@ -1,19 +1,21 @@
 /**
  * Live Jobs — the global concurrent operational workspace (issue #590,
- * ADR-0019, epic #588). Replaces the scan-only Live Run screen
- * (`../liverun/LiveRunScreen.tsx`) as the top-level "what is happening right
- * now" surface: every active run, grouped, with jobs selectable among
- * concurrent work — never implying only one run/job can be active.
+ * ADR-0019, epic #588). Replaced the old scan-only Live Run screen (removed
+ * by issue #693 once #591 gave scan/remediate jobs a type-specific renderer
+ * here) as the top-level "what is happening right now" surface: every
+ * active run, grouped, with jobs selectable among concurrent work — never
+ * implying only one run/job can be active.
  *
  * Composition mirrors the Live Run screen's own decomposition: this file is
  * the orchestrator only. `useLiveJobs.ts` owns the REST seed + global SSE
  * subscription; `useSelectionFromQuery.ts` owns deep-link URL state;
- * `livejobs.ts` is the pure view-model/reducer; `detailRenderers.tsx` is the
- * renderer-registry seam #591 extends with type-specific detail views.
+ * `livejobs.ts` is the pure view-model/reducer; `detailRenderers.registry.ts`
+ * is the renderer-registry seam #591 populates with type-specific detail
+ * views (`detailRenderers.tsx` keeps only the generic fallback component).
  */
 import { useEffect, useMemo, useRef, type KeyboardEvent } from "react";
 import { useAuth } from "../../lib/auth-context";
-import { resolveJobDetailRenderer } from "./detailRenderers";
+import { resolveJobDetailRenderer } from "./detailRenderers.registry";
 import { isActiveGroup, isTerminalJobState, waitReasonForJob, type LiveJobRow, type LiveRunGroup } from "./livejobs";
 import { useLiveJobs } from "./useLiveJobs";
 import { useSelectionFromQuery } from "./useSelectionFromQuery";

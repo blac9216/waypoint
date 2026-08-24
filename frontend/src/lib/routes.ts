@@ -51,7 +51,12 @@ export const ROUTES: RouteDef[] = [
 	// DEFAULT_ROUTE handling.
 	{ key: "live-run", path: "/live-run", title: "Live Run", requiredRole: "Viewer" },
 	{ key: "start-scan", path: "/scan/new", title: "Start a Scan", requiredRole: "Cyber" },
-	{ key: "results", path: "/results", title: "Results & History", requiredRole: "Viewer" },
+	// Renamed from "Results & History" (issue #591): the screen is filtered to
+	// compliance-owned run types (scan/remediate) only — downloads and other
+	// domains route to their own screens — so the name says so explicitly
+	// rather than implying it's every kind of run's history. `key`/`path`
+	// stay `results`/`/results` (no deep-link break).
+	{ key: "results", path: "/results", title: "Compliance Scan Results", requiredRole: "Viewer" },
 	{ key: "benchmarks", path: "/benchmarks", title: "Benchmarks", requiredRole: "Viewer" },
 	{ key: "catalog", path: "/catalog", title: "Download Catalog", requiredRole: "Operator", connectedOnly: true },
 	{ key: "library", path: "/library", title: "Library", requiredRole: "Viewer" },
