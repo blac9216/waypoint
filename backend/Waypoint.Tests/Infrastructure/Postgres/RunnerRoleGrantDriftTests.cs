@@ -577,6 +577,44 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #668: the download-runner counterpart to
+	/// <see cref="ComplianceRunnerRole_DecryptAsync_PerTargetPurpose_SlidesExpiryWithoutPermissionDenied"/>,
+	/// closing the exact symmetry gap that test's own migration-0045 sliding-expiry
+	/// proof left open -- <see cref="DownloadRunnerRole_DecryptAsync_SlidesExpiryWithoutPermissionDenied"/>
+	/// above exercises only the legacy (<see cref="RunSecretKey.Legacy"/>) shape.
+	/// Migration 0045's widened <c>UPDATE run_secrets SET expires_at</c> is a
+	/// table-level grant (not shape-specific), so this is low-risk by construction,
+	/// but the drift-guard suite (#573) is meant to be exhaustive per role -- this
+	/// decrypts a <see cref="RunSecretKey.For"/> row through the real
+	/// <c>waypoint_download_runner</c> connection and asserts <c>expires_at</c>
+	/// slides forward, restoring that symmetry.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_DecryptAsync_PerTargetPurpose_SlidesExpiryWithoutPermissionDenied()
+	{
+		Guid siteId = await SeedSiteAsync();
+		Guid targetId = await SeedTargetAsync(siteId);
+		Guid runId = await SeedRunAsync();
+		Guid jobId = await SeedJobAsync(runId);
+		RunSecretKey key = RunSecretKey.For(targetId, CredentialPurposes.VSphereApi);
+
+		AesGcmEnvelopeCipher cipher = new(new FileMasterKeyProvider(WriteKeyFile()));
+		RunSecretStore ownerStore = new(_fixture.ConnectionString, cipher, _redactor, Microsoft.Extensions.Options.Options.Create(new RunSecretOptions()), NullLogger<RunSecretStore>.Instance);
+		await ownerStore.StoreAsync(runId, key, new RunSecretCredential("adhoc-user@example.internal", "invented-per-purpose-token-9c4f"), "tester", TimeSpan.FromMinutes(5), CancellationToken.None);
+
+		DateTimeOffset expiresBefore = await ReadExpiresAtAsync(runId, key);
+
+		RunSecretStore runnerStore = new(_downloadRunnerConnectionString, cipher, _redactor, Microsoft.Extensions.Options.Options.Create(new RunSecretOptions { Expiry = TimeSpan.FromHours(2) }), NullLogger<RunSecretStore>.Instance);
+		using (DecryptedRunSecret? handle = await runnerStore.DecryptAsync(runId, key, jobId, "engine", CancellationToken.None))
+		{
+			Assert.NotNull(handle);
+		}
+
+		DateTimeOffset expiresAfter = await ReadExpiresAtAsync(runId, key);
+		Assert.True(expiresAfter > expiresBefore, "expected the download-runner role's per-target/per-purpose decrypt to slide expires_at forward, not merely avoid throwing.");
+	}
+
+	/// <summary>
 	/// Least-privilege boundary for capacity_pool: DELETE is deliberately withheld
 	/// from both runner roles (migration 0036's header) -- destroying the pool row
 	/// denies all admission appliance-wide and stays an owner/migration action.
