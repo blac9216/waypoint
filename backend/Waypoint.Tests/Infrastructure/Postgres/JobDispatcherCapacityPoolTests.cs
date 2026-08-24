@@ -248,6 +248,98 @@ public sealed class JobDispatcherCapacityPoolTests : IAsyncLifetime
 		}
 	}
 
+	/// <summary>
+	/// Issue #631 regression: a transient DB fault in the in-flight heartbeat loop
+	/// (here <see cref="IJobRunnerRepository.RenewLeaseAsync"/>) faults the heartbeat
+	/// Task. Awaiting that faulted Task in the completion path's finally block must NOT
+	/// discard the handler's successful outcome and skip the terminal state advance --
+	/// the job must still reach its terminal state, not sit at <c>running</c> until
+	/// lease-recovery reclaims and (non-idempotently) retries it.
+	/// </summary>
+	[Fact]
+	public async Task Issue631_HeartbeatFault_DoesNotBlockTerminalStateAdvance()
+	{
+		await _pool.RegisterPoolCapacityAsync("test", 4.0, 4L * 1024 * 1024 * 1024, operatorSet: false, CancellationToken.None);
+
+		Guid runId = await _repository.CreateRunAsync("tool-install", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("tool-install", 1, Payload: "{}")], "tester", CancellationToken.None);
+		Guid jobId = jobIds[0];
+
+		// The heartbeat's first lease-renewal throws a transient DB-shaped error while
+		// the handler is still running -- reproducing a Postgres connection reset /
+		// timeout on a heartbeat tick in the live stack.
+		FaultOnFirstRenewRepository faultingRepository = new(_repository);
+
+		// Handler outlasts a short heartbeat interval so the faulting renewal fires
+		// DURING execution, then returns success.
+		FakeJobHandler handler = new("tool-install", async (_, ct) =>
+		{
+			await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+			return JobExecutionOutcome.Succeeded("ok");
+		});
+
+		JobDispatcherHostedService dispatcher = new(
+			faultingRepository, _repository, _events, new JobHandlerRegistry([handler]),
+			Options.Create(new JobEngineOptions { Enabled = true, PollInterval = TimeSpan.FromMilliseconds(50), HeartbeatInterval = TimeSpan.FromMilliseconds(120) }),
+			resourceAdmission: null, CreateCoordinator(_pool), NullLogger<JobDispatcherHostedService>.Instance);
+
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilAsync(() => GetJobStateAsync(jobId), state => state == JobStates.Done);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.True(faultingRepository.RenewFaultFired, "the injected heartbeat fault never fired -- test did not exercise the bug");
+		Assert.Equal(JobStates.Done, await GetJobStateAsync(jobId));
+		Assert.Equal(0, await CountLeasesAsync());
+	}
+
+	/// <summary>Delegates every call to the real repository except the first <see cref="RenewLeaseAsync"/>, which throws a transient DB-shaped exception.</summary>
+	private sealed class FaultOnFirstRenewRepository(IJobRunnerRepository inner) : IJobRunnerRepository
+	{
+		private int _renewCalls;
+
+		public bool RenewFaultFired { get; private set; }
+
+		public Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
+		{
+			if (Interlocked.Increment(ref _renewCalls) == 1)
+			{
+				RenewFaultFired = true;
+				throw new InvalidOperationException("Injected transient heartbeat DB fault (issue #631 repro).");
+			}
+
+			return inner.RenewLeaseAsync(jobId, workerId, leaseDuration, cancellationToken);
+		}
+
+		public Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, IReadOnlySet<string> allowedJobTypes, CancellationToken cancellationToken) =>
+			inner.ClaimJobAsync(workerId, leaseDuration, allowedJobTypes, cancellationToken);
+
+		public Task<bool> IsCancelRequestedAsync(Guid jobId, CancellationToken cancellationToken) => inner.IsCancelRequestedAsync(jobId, cancellationToken);
+
+		public Task<bool> AdvanceStateAsync(Guid jobId, string workerId, string expectedFromState, string toState, string? note, bool clearLease, CancellationToken cancellationToken) =>
+			inner.AdvanceStateAsync(jobId, workerId, expectedFromState, toState, note, clearLease, cancellationToken);
+
+		public Task<bool> RequeueAtStageAsync(Guid jobId, string workerId, string expectedFromState, string stage, string? note, CancellationToken cancellationToken) =>
+			inner.RequeueAtStageAsync(jobId, workerId, expectedFromState, stage, note, cancellationToken);
+
+		public Task<IReadOnlyList<RecoveredJob>> RecoverExpiredLeasesAsync(int batchSize, CancellationToken cancellationToken) => inner.RecoverExpiredLeasesAsync(batchSize, cancellationToken);
+
+		public Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken) => inner.GetRunQueueStateAsync(runId, cancellationToken);
+
+		public Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken) => inner.ReleaseClaimAsync(jobId, workerId, cancellationToken);
+
+		public Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken) =>
+			inner.CheckConsecutiveAuthFailuresAsync(credentialId, threshold, cancellationToken);
+
+		public Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken) => inner.SetUploadStatusAsync(jobId, uploadStatus, detail, cancellationToken);
+	}
+
 	private Task<Guid> SeedQueuedJobAsync(string jobType) => SeedJobAsync(jobType, "queued");
 
 	private async Task<Guid> SeedJobAsync(string jobType, string state)
