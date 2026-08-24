@@ -164,6 +164,7 @@ public static class ServiceCollectionExtensions
 		// release public key is a mounted file, not a database row) -- no connection
 		// string dependency, same unconditional shape as the presence checker above.
 		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolSignatureVerifier, Downloads.RsaManagedToolSignatureVerifier>();
+		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolCatalogVerifier, Downloads.BroadcomManagedToolCatalogVerifier>();
 
 		// ADR-0005 crypto core (epic #8 slice 1). Registered unconditionally: the
 		// provider is lazy and fail-closed, so a host without a mounted key boots

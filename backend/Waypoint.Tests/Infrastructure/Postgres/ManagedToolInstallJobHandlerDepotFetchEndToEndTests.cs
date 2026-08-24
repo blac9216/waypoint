@@ -107,8 +107,14 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 		CatalogOptions catalogOptions = new() { DepotTokenCredentialType = "depot-token" };
 
 		_handler = new ManagedToolInstallJobHandler(
-			_verifier, _installs, Options.Create(toolOptions), _fetcher, _secretStore, _credentials, _applianceState,
+			_verifier, new FakeManagedToolCatalogVerifier(), _installs, Options.Create(toolOptions), _fetcher, _secretStore, _credentials, _applianceState,
 			Options.Create(catalogOptions));
+	}
+
+	private sealed class FakeManagedToolCatalogVerifier : IManagedToolCatalogVerifier
+	{
+		public Task<ManagedToolCatalogVerificationResult> VerifyAsync(string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken) =>
+			Task.FromResult(ManagedToolCatalogVerificationResult.Ok("fake-sha256"));
 	}
 
 	public async Task DisposeAsync()
