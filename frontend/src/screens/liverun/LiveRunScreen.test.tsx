@@ -234,16 +234,16 @@ describe("LiveRunScreen (issue #283)", () => {
 		expect(screen.getByText("esxi-02.example.internal")).toBeInTheDocument();
 	});
 
-	/** Issue #707 (epic #706): the console links back to the global Live Jobs
-	 * workspace and out to Compliance Scan Results for the same run — the
-	 * bidirectional linkage the epic requires. */
-	it("links back to Live Jobs and out to Compliance Scan Results for this run", async () => {
+	/** Issue #707 (epic #706): the console links back to the global Jobs
+	 * workspace (renamed from "Live Jobs" by #708) and out to Compliance Scan
+	 * Results for the same run — the bidirectional linkage the epic requires. */
+	it("links back to Jobs and out to Compliance Scan Results for this run", async () => {
 		installFetchMock(() => ({ frames: [] }));
 		renderWithAuth("run-0808-0100Z");
 
 		await waitFor(() => expect(screen.getByText("run-0808-0100Z")).toBeInTheDocument());
 
-		const backLink = screen.getByRole("link", { name: "← Live Jobs" });
+		const backLink = screen.getByRole("link", { name: "← Jobs" });
 		expect(backLink).toHaveAttribute("href", "/live-jobs");
 
 		const resultsLink = screen.getByRole("link", { name: "View in Compliance Scan Results →" });

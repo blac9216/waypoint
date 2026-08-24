@@ -30,8 +30,12 @@ const TERMINAL_STATES = "completed,completed_with_failures,aborted";
 
 /** Every closed `runs.run_type` value except the two compliance-owned ones
  * (`scan`, `remediate`) -- ADR-0019/epic #706: compliance run history is
- * windowed out of the default view, reachable only by explicit filter. */
-const NON_COMPLIANCE_RUN_TYPES = "discover,download,catalog-index,bundle-export,bundle-import,content-library-sync,content-pull,content-import,update";
+ * windowed out of the default view, reachable only by explicit filter. Must
+ * mirror the backend closed set (`Waypoint.Core.Jobs.RunTypes.All`, authoritative
+ * `runs_run_type_check` as of migration 0042) minus scan/remediate; the sync test
+ * `runTypes.test.ts` asserts this against the backend list. */
+export const NON_COMPLIANCE_RUN_TYPES =
+	"discover,download,catalog-index,bundle-export,bundle-import,content-library-sync,content-pull,content-import,update,credential-test,tool-install,purge";
 
 function defaultFilters(includeCompliance: boolean): RunHistoryFilters {
 	return {

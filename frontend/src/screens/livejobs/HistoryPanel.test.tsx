@@ -208,6 +208,24 @@ describe("Jobs workspace History mode (issue #708/#689)", () => {
 		});
 	});
 
+	it("includes the non-compliance types migration 0042 added in the default run_type filter", async () => {
+		window.history.pushState(null, "", "/live-jobs?mode=history");
+		installFetchMock({});
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getByText("run-old-1")).toBeInTheDocument());
+
+		const defaultCall = (globalThis.fetch as unknown as { mock: { calls: [string][] } }).mock.calls.find(([u]) =>
+			u.startsWith("/api/v1/runs/history"),
+		)!;
+		const decoded = decodeURIComponent(defaultCall[0]);
+		// credential-test/tool-install/purge are browsable non-compliance history and
+		// must be in the default (compliance-excluded) view -- not silently hidden.
+		expect(decoded).toContain("credential-test");
+		expect(decoded).toContain("tool-install");
+		expect(decoded).toContain("purge");
+	});
+
 	it("shows the honest tombstone state for a history-deleted run instead of its detail", async () => {
 		window.history.pushState(null, "", "/live-jobs?mode=history");
 		installFetchMock({

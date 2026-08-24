@@ -996,6 +996,26 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
 	}
 
+	// The three run types migration 0042 added to runs_run_type_check
+	// (credential-test, tool-install, purge) are gate=None non-compliance history
+	// (docs/domain-model.md) and MUST be accepted as run_type filter values -- PR #712's
+	// review caught them 400ing because RunTypes.All was stale against the constraint.
+	[Theory]
+	[InlineData("credential-test")]
+	[InlineData("tool-install")]
+	[InlineData("purge")]
+	public async Task ListRunHistory_AcceptsEveryRunTypeAddedByMigration0042(string runType)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/history?run_type={runType}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal([runType], _factory.Repository.LastRunHistoryQuery?.RunTypes);
+	}
+
 	[Fact]
 	public async Task ListRunHistory_UnparseableSince_Returns400ValidationError()
 	{

@@ -92,7 +92,7 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 				<div className="live-run__header-top">
 					<div className="live-run__title-block">
 						<div className="live-run__breadcrumb">
-							<Link to="/live-jobs">← Live Jobs</Link>
+							<Link to="/live-jobs">← Jobs</Link>
 						</div>
 						<div className="live-run__title-row">
 							<span className="live-run__pulse-dot" />
