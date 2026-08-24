@@ -14,10 +14,14 @@
 
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Secrets;
+using Waypoint.Core.SystemState;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.Secrets;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Downloads;
@@ -25,9 +29,18 @@ namespace Waypoint.Tests.Infrastructure.Downloads;
 /// <summary>
 /// The <c>tool-install</c> job handler (issue #39): local-repository and upload paths,
 /// signature-gated activation, and append-only ledger recording on every outcome
-/// (installed, rejected, failed). No Postgres dependency -- <see cref="FakeManagedToolInstallRepository"/>
-/// and <see cref="FakeManagedToolSignatureVerifier"/> stand in for the real
-/// infrastructure so this exercises only the handler's own decision logic.
+/// (installed, rejected, failed), plus the depot-fetch path's disconnected-mode
+/// refusal and misconfiguration guard (its full connected-mode/decrypt/HTTP behavior
+/// is covered end to end against real Postgres by
+/// <c>ManagedToolInstallJobHandlerDepotFetchEndToEndTests</c>, the same split
+/// <c>CatalogIndexJobHandler</c>'s depot-token path already uses). No Postgres
+/// dependency here -- <see cref="FakeManagedToolInstallRepository"/>,
+/// <see cref="FakeManagedToolSignatureVerifier"/>, <see cref="FakeManagedToolDepotFetcher"/>,
+/// and <see cref="FakeApplianceStateRepository"/> stand in for the real infrastructure.
+/// The concrete <see cref="CredentialRepository"/> dependency (mirroring
+/// <c>CatalogIndexJobHandler</c>'s own constructor shape) is constructed with a
+/// syntactically valid but unreachable connection string -- every test in this file
+/// exercises only branches that never call it.
 /// </summary>
 public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 {
@@ -78,6 +91,19 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 		public Task EmitAsync(string eventType, Guid? jobId, Guid? runId, string payloadJson, CancellationToken cancellationToken) => Task.CompletedTask;
 	}
 
+	/// <summary>Never actually invoked by any test in this file -- the disconnected-mode and no-URL-configured guards both return before <see cref="ManagedToolInstallJobHandler"/> would call this.</summary>
+	private sealed class FakeManagedToolDepotFetcher : IManagedToolDepotFetcher
+	{
+		public Task<ManagedToolDepotFetchResult> FetchAsync(string depotToken, string? version, string destinationDirectory, CancellationToken cancellationToken) =>
+			throw new InvalidOperationException("Not expected to be called by this test file's scenarios.");
+	}
+
+	private sealed class FakeApplianceStateRepository(string mode) : IApplianceStateRepository
+	{
+		public Task<ApplianceState?> GetAsync(CancellationToken cancellationToken) =>
+			Task.FromResult<ApplianceState?>(new ApplianceState("1.0.0", null, mode, "idle", null));
+	}
+
 	private static JobExecutionContext ContextFor(string payload)
 	{
 		ClaimedJob job = new(
@@ -90,7 +116,7 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 	}
 
 	private ManagedToolInstallJobHandler CreateHandler(
-		FakeManagedToolSignatureVerifier verifier, FakeManagedToolInstallRepository installs)
+		FakeManagedToolSignatureVerifier verifier, FakeManagedToolInstallRepository installs, string applianceMode = "disconnected")
 	{
 		ManagedToolOptions options = new()
 		{
@@ -99,7 +125,23 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 			ToolStatePath = _toolStateRoot,
 			ExecutableName = "vcf-download-tool",
 		};
-		return new ManagedToolInstallJobHandler(verifier, installs, Options.Create(options));
+		return new ManagedToolInstallJobHandler(
+			verifier,
+			installs,
+			Options.Create(options),
+			new FakeManagedToolDepotFetcher(),
+			// ICredentialSecretStore is never called by any scenario in this file --
+			// the depot-fetch tests here only exercise the pre-decrypt guards
+			// (disconnected mode, no configured credential), which is what
+			// FakeApplianceStateRepository/the below no-credential path drives.
+			new CredentialSecretStore(
+				"Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x",
+				new Waypoint.Infrastructure.Secrets.AesGcmEnvelopeCipher(new Waypoint.Infrastructure.Secrets.FileMasterKeyProvider(Path.Combine(_toolStateRoot, "unused.key"))),
+				new Waypoint.Core.Logging.InPlaySecretRedactor(),
+				NullLogger<CredentialSecretStore>.Instance),
+			new CredentialRepository("Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x"),
+			new FakeApplianceStateRepository(applianceMode),
+			Options.Create(new CatalogOptions()));
 	}
 
 	[Fact]
@@ -184,18 +226,46 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 	}
 
 	[Fact]
-	public async Task DepotSource_IsNotImplementedByThisHandler_FailsCleanly()
+	public async Task UnknownSource_FailsCleanly_NoLedgerRow()
 	{
 		FakeManagedToolInstallRepository installs = new();
 		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
 
-		string payload = """{"source":"depot","source_path":"whatever","initiated_by":"tester"}""";
+		string payload = """{"source":"floppy-disk","source_path":"whatever","initiated_by":"tester"}""";
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(payload), CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
 		Assert.Contains("not implemented", outcome.Note, StringComparison.OrdinalIgnoreCase);
 		Assert.Empty(installs.Recorded);
 	}
+
+	/// <summary>
+	/// The depot-fetch path's connected-mode-only guard (issue #39 remainder): a
+	/// disconnected appliance refuses before any network attempt and before recording
+	/// any ledger row -- the full connected-mode decrypt/HTTP/verify/activate flow is
+	/// covered end to end against real Postgres by
+	/// <c>ManagedToolInstallJobHandlerDepotFetchEndToEndTests</c>.
+	/// </summary>
+	[Fact]
+	public async Task DepotSource_DisconnectedMode_RefusesCleanlyWithoutAnyLedgerRow()
+	{
+		FakeManagedToolInstallRepository installs = new();
+		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs, applianceMode: "disconnected");
+
+		string payload = """{"source":"depot","initiated_by":"tester"}""";
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(payload), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("disconnected", outcome.Note, StringComparison.OrdinalIgnoreCase);
+		Assert.Empty(installs.Recorded);
+	}
+
+	// The "connected but no depot-token credential configured" and "connected,
+	// credential configured, fetch/verify/activate" scenarios both need a real
+	// CredentialRepository backed by Postgres (FindByTypeAsync opens a real
+	// connection) -- covered end to end by
+	// ManagedToolInstallJobHandlerDepotFetchEndToEndTests, mirroring
+	// CatalogIndexJobHandlerEndToEndTests's equivalent split for the same reason.
 
 	[Fact]
 	public async Task MissingArtifact_FailsWithoutRecordingALedgerRow()

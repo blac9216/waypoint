@@ -21,20 +21,21 @@ using Waypoint.Core.Authorization;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.SystemState;
 
 namespace Waypoint.Api.Controllers;
 
 /// <summary>
-/// Issue #39 (epic #558) backend part 1: the three ADR-0015 install paths for the
+/// Issue #39 (epic #558) backend: the three ADR-0015 install paths for the
 /// operator-gated <c>vcf-download-tool</c>, as jobs the download-runner executes and
 /// verifies before activating. The project never publishes this binary (ADR-0015); every
 /// path here writes verified state into the persistent managed-tool volume rather than
 /// anything shipped in source or images.
 ///
-/// <c>POST .../install</c> (local-repository) and <c>POST .../upload</c> (manual upload)
-/// both queue exactly one <c>tool-install</c> job, mirroring <c>DownloadsController</c>'s
-/// one-run-per-request shape. The connected-mode depot-fetch path is deferred to a
-/// follow-up issue (see this PR's body) -- not exposed here.
+/// <c>POST .../install</c> (local-repository), <c>POST .../upload</c> (manual upload),
+/// and <c>POST .../fetch</c> (depot, connected-mode only) each queue exactly one
+/// <c>tool-install</c> job, mirroring <c>DownloadsController</c>'s one-run-per-request
+/// shape.
 /// </summary>
 [ApiController]
 [Route("api/v1/downloads/tool")]
@@ -48,18 +49,22 @@ public sealed class ManagedToolController : ControllerBase
 	private readonly IJobControlRepository _jobs;
 	private readonly IManagedToolInstallRepository _installs;
 	private readonly IOptions<ManagedToolOptions> _options;
+	private readonly IApplianceStateRepository _applianceState;
 
 	public ManagedToolController(
 		IJobControlRepository jobs,
 		IManagedToolInstallRepository installs,
-		IOptions<ManagedToolOptions> options)
+		IOptions<ManagedToolOptions> options,
+		IApplianceStateRepository applianceState)
 	{
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(installs);
 		ArgumentNullException.ThrowIfNull(options);
+		ArgumentNullException.ThrowIfNull(applianceState);
 		_jobs = jobs;
 		_installs = installs;
 		_options = options;
+		_applianceState = applianceState;
 	}
 
 	/// <summary>
@@ -128,6 +133,33 @@ public sealed class ManagedToolController : ControllerBase
 		}
 
 		return await QueueInstallAsync(ManagedToolInstallSources.Upload, stagedName, version, cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Install path 2 (ADR-0015): connected-mode-only depot fetch, authenticated with
+	/// the stored depot-token credential. Refuses with <see cref="ApiException.ModeUnavailable"/>
+	/// before any job is even queued when the appliance is disconnected -- the same
+	/// clean-refusal bar the job handler itself also enforces (defense in depth
+	/// against a job that outlives a mode flip between being queued and claimed).
+	/// <c>source_path</c> plays no role here (the depot URL is server-side
+	/// configuration); only an optional <c>version</c> is accepted.
+	/// </summary>
+	[HttpPost("fetch")]
+	[RequireOperatorRole]
+	[ProducesResponseType(typeof(ManagedToolInstallQueuedResponse), StatusCodes.Status202Accepted)]
+	public async Task<ActionResult<ManagedToolInstallQueuedResponse>> Fetch(
+		FetchManagedToolRequest? request, CancellationToken cancellationToken)
+	{
+		ApplianceState? state = await _applianceState.GetAsync(cancellationToken).ConfigureAwait(false);
+		if (!string.Equals(state?.Mode, "connected", StringComparison.Ordinal))
+		{
+			throw ApiException.ModeUnavailable(
+				"Depot-fetch install requires connected mode.",
+				"Use the local-repository or manual-upload install path while disconnected.");
+		}
+
+		return await QueueInstallAsync(ManagedToolInstallSources.Depot, sourcePath: "depot", request?.Version, cancellationToken)
+			.ConfigureAwait(false);
 	}
 
 	/// <summary>Install history, newest first, including rejected attempts (issue #39 acceptance criterion). Viewer+, matching every other read on the downloads surface.</summary>

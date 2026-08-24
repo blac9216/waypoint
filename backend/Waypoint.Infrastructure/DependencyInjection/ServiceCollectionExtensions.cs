@@ -182,6 +182,13 @@ public static class ServiceCollectionExtensions
 		// connection string dependency of its own).
 		services.AddSingleton<Waypoint.Core.StigManager.IStigManagerUploadClient, StigManager.HttpStigManagerUploadClient>();
 
+		// Issue #39 depot-fetch install path: the HTTP boundary to the configured
+		// depot for the vcf-download-tool artifact + detached signature. Unconditional
+		// like the two STIG Manager HTTP boundaries above -- the fetcher itself has no
+		// connection-string dependency; ManagedToolInstallJobHandler is what decides
+		// whether depot-fetch may run at all (connected mode + configured URL).
+		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolDepotFetcher, Downloads.HttpManagedToolDepotFetcher>();
+
 		string? connectionString = configuration.GetConnectionString(ConnectionStringName);
 		if (!string.IsNullOrWhiteSpace(connectionString))
 		{

@@ -70,4 +70,33 @@ public sealed class ManagedToolOptions
 	/// it be mistaken for project-endorsed); an operator provisions it out of band.
 	/// </summary>
 	public string ReleasePublicKeyPath { get; set; } = "/var/lib/waypoint/managed-tool/release-public-key.pem";
+
+	/// <summary>
+	/// Depot-fetch install path (issue #39, ADR-0015 decision 3's "fetch from its
+	/// authorized upstream repository using operator-supplied credentials"),
+	/// connected-mode only. An operator-provisioned URL template for the
+	/// <c>vcf-download-tool</c> artifact; <c>{version}</c> is substituted with the
+	/// payload's requested version when present (an empty/omitted placeholder means
+	/// the URL always resolves to the depot's "latest" endpoint). The detached
+	/// signature is always fetched from the same URL with <c>.sig</c> appended,
+	/// mirroring every other install path's artifact/signature pairing. Null/blank
+	/// (the default -- the project ships no depot URL, ADR-0015) fails the depot-fetch
+	/// path cleanly rather than attempting a request with nothing configured.
+	/// </summary>
+	public string? DepotFetchUrlTemplate { get; set; }
+
+	/// <summary>
+	/// Wall-clock budget for the depot-fetch HTTP path (artifact + signature GET,
+	/// combined) -- an unreachable or hanging depot must fail the job rather than
+	/// block the download-runner's job slot indefinitely.
+	/// </summary>
+	public TimeSpan DepotFetchTimeout { get; set; } = TimeSpan.FromMinutes(10);
+
+	/// <summary>
+	/// Hard cap on the depot-fetched artifact's size, matching
+	/// <c>ManagedToolController</c>'s manual-upload cap
+	/// (<c>MaxUploadBytes</c> = 512 MiB) -- the same ceiling applies regardless of which
+	/// path delivered the candidate.
+	/// </summary>
+	public long DepotFetchMaxBytes { get; set; } = 512L * 1024 * 1024;
 }

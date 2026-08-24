@@ -186,11 +186,17 @@ describe("DepotTokensTab (issue #571)", () => {
 			if (url === "/api/v1/downloads/tool/upload" && method === "POST") {
 				return jsonResponse({ run_id: "run-upload-1", job_id: "job-upload-1" }, 202);
 			}
+			if (url === "/api/v1/downloads/tool/fetch" && method === "POST") {
+				return jsonResponse({ run_id: "run-fetch-1", job_id: "job-fetch-1" }, 202);
+			}
 			if (url === "/api/v1/runs/run-install-1" && method === "GET") {
 				return jsonResponse({ id: "run-install-1", ...installRunState });
 			}
 			if (url === "/api/v1/runs/run-upload-1" && method === "GET") {
 				return jsonResponse({ id: "run-upload-1", ...installRunState });
+			}
+			if (url === "/api/v1/runs/run-fetch-1" && method === "GET") {
+				return jsonResponse({ id: "run-fetch-1", ...installRunState });
 			}
 			throw new Error(`unexpected fetch: ${method} ${url}`);
 		}) as unknown as typeof fetch;
@@ -532,13 +538,57 @@ describe("DepotTokensTab (issue #571)", () => {
 		expect(screen.getByText("installed and verified")).toBeInTheDocument();
 	});
 
-	it("depot-fetch action is visible but always disabled with an honest 'not yet available' reason", async () => {
-		installFetchMock("Operator");
+	it("depot-fetch action is disabled with a connected-mode reason while disconnected, even with a healthy credential", async () => {
+		installFetchMock("Operator", { mode: "disconnected", readiness: READY_READINESS });
 		await mount();
 
 		const depotFetchButton = screen.getByRole("button", { name: "Fetch from depot" }) as HTMLButtonElement;
 		expect(depotFetchButton.disabled).toBe(true);
-		expect(depotFetchButton.title).toMatch(/not yet implemented|connected mode/);
+		expect(depotFetchButton.title).toMatch(/connected mode/);
+	});
+
+	it("depot-fetch action is disabled with a credential reason when connected but no depot token is configured", async () => {
+		installFetchMock("Operator", { mode: "connected", readiness: NO_TOKEN_READINESS });
+		await mount();
+
+		const depotFetchButton = screen.getByRole("button", { name: "Fetch from depot" }) as HTMLButtonElement;
+		expect(depotFetchButton.disabled).toBe(true);
+		expect(depotFetchButton.title).toMatch(/depot credential/);
+	});
+
+	it("depot-fetch action is disabled when the depot token is configured but auth-failing", async () => {
+		installFetchMock("Operator", { mode: "connected", readiness: AUTH_FAILING_READINESS });
+		await mount();
+
+		const depotFetchButton = screen.getByRole("button", { name: "Fetch from depot" }) as HTMLButtonElement;
+		expect(depotFetchButton.disabled).toBe(true);
+		expect(depotFetchButton.title).toMatch(/depot credential/);
+	});
+
+	it("depot-fetch action is enabled when connected with a healthy depot credential, and queues a depot-sourced install", async () => {
+		installFetchMock("Operator", { mode: "connected", readiness: READY_READINESS });
+		await mount();
+
+		const depotFetchButton = screen.getByRole("button", { name: "Fetch from depot" }) as HTMLButtonElement;
+		expect(depotFetchButton.disabled).toBe(false);
+
+		fireEvent.click(depotFetchButton);
+
+		await waitFor(() => expect(fetchCalls.some((c) => c.url === "/api/v1/downloads/tool/fetch" && c.init?.method === "POST")).toBe(true));
+		const call = fetchCalls.find((c) => c.url === "/api/v1/downloads/tool/fetch")!;
+		expect(JSON.parse(call.init!.body as string)).toEqual({});
+
+		installRunState = { state: "completed", job_count_failed: 0, job_count_blocked: 0 };
+		await waitFor(() => expect(screen.getByText("Install succeeded.")).toBeInTheDocument(), { timeout: 6000 });
+	}, 10000);
+
+	it("depot-fetch action is disabled with an Operator-required reason for a Viewer, even when connected and healthy", async () => {
+		installFetchMock("Viewer", { mode: "connected", readiness: READY_READINESS });
+		await mount();
+
+		const depotFetchButton = screen.getByRole("button", { name: "Fetch from depot" }) as HTMLButtonElement;
+		expect(depotFetchButton.disabled).toBe(true);
+		expect(depotFetchButton.title).toMatch(/Requires Operator/);
 	});
 
 	it("manual upload requires both the artifact and the signature file before Upload is enabled", async () => {

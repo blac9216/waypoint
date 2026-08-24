@@ -155,6 +155,17 @@ public sealed record InstallManagedToolRequest(
 	[property: JsonPropertyName("version")]
 	string? Version);
 
+/// <summary>
+/// Request body for <c>POST /api/v1/downloads/tool/fetch</c> (issue #39 install path
+/// 2: connected-mode-only depot fetch). No <c>source_path</c> -- the depot URL is
+/// server-side <c>ManagedTool:DepotFetchUrlTemplate</c> configuration, not something
+/// the client names. <c>version</c> is optional (omitted fetches whatever the
+/// configured URL template resolves to without substitution).
+/// </summary>
+public sealed record FetchManagedToolRequest(
+	[property: JsonPropertyName("version")]
+	string? Version);
+
 /// <summary>Response body for both tool-install trigger endpoints (202 Accepted) -- the queued job/run so a caller can follow it via the existing job/run SSE surface.</summary>
 public sealed record ManagedToolInstallQueuedResponse(
 	[property: JsonPropertyName("run_id")]

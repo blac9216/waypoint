@@ -85,7 +85,7 @@ export function DepotTokensTab() {
 		depotToken.reload();
 	}, [loadReadinessAndHistory, depotToken]);
 
-	const { install, installError, inFlight, installFromLocalRepository, uploadTool } = useManagedToolInstall(onInstallSettled);
+	const { install, installError, inFlight, installFromLocalRepository, uploadTool, fetchFromDepot } = useManagedToolInstall(onInstallSettled);
 
 	return (
 		<div className="config-tab config-tab--depot">
@@ -107,6 +107,7 @@ export function DepotTokensTab() {
 					inFlight={inFlight}
 					onInstallFromLocalRepository={installFromLocalRepository}
 					onUpload={uploadTool}
+					onFetchFromDepot={fetchFromDepot}
 				/>
 			</div>
 			<div className="config-panel" style={{ marginTop: 14 }}>
@@ -369,6 +370,7 @@ function ManagedToolPanel({
 	inFlight,
 	onInstallFromLocalRepository,
 	onUpload,
+	onFetchFromDepot,
 }: {
 	disconnected: boolean;
 	writeGate: { disabled: boolean; style?: { opacity: number }; title?: string };
@@ -378,12 +380,32 @@ function ManagedToolPanel({
 	inFlight: boolean;
 	onInstallFromLocalRepository: (sourcePath: string, version?: string) => Promise<void>;
 	onUpload: (artifact: File, signature: File, version?: string) => Promise<void>;
+	onFetchFromDepot: (version?: string) => Promise<void>;
 }) {
 	const [sourcePath, setSourcePath] = useState("");
 	const [localVersion, setLocalVersion] = useState("");
 	const [artifactFile, setArtifactFile] = useState<File | null>(null);
 	const [signatureFile, setSignatureFile] = useState<File | null>(null);
 	const [uploadVersion, setUploadVersion] = useState("");
+	const [depotVersion, setDepotVersion] = useState("");
+
+	// The depot-fetch action needs BOTH connected mode and a healthy depot
+	// credential (issue #39 remainder) -- readiness already reports both, and
+	// this mirrors exactly what the backend itself enforces (409
+	// mode_unavailable when disconnected; the job fails cleanly with an
+	// actionable reason if the credential is missing/auth-failing), so the UI
+	// gate is never stricter or looser than the server's own rule.
+	const depotCredentialHealthy = readiness?.depot_token_health === "valid";
+	const depotFetchDisabled = writeGate.disabled || inFlight || disconnected || !depotCredentialHealthy;
+	const depotFetchTitle = writeGate.disabled
+		? writeGate.title
+		: inFlight
+			? "An install is already queued or running"
+			: disconnected
+				? "Requires connected mode"
+				: !depotCredentialHealthy
+					? "Requires a configured, healthy depot credential (see DEPOT CREDENTIAL above)"
+					: undefined;
 
 	const toolInstalled = readiness?.tool_installed;
 	const stateLabel = toolInstalled === undefined ? "unknown" : toolInstalled ? "installed" : "not installed";
@@ -511,18 +533,27 @@ function ManagedToolPanel({
 					</div>
 				</form>
 
-				<div className="depot-tab__tool-form depot-tab__depot-fetch">
+				<form
+					className="config-form depot-tab__tool-form depot-tab__depot-fetch"
+					onSubmit={(e) => {
+						e.preventDefault();
+						void onFetchFromDepot(depotVersion.trim() || undefined);
+					}}
+				>
 					<div className="config-form__title">Fetch from depot</div>
-					<div className="depot-tab__depot-fetch-note">
-						Requires connected mode and a valid depot credential. Not yet available — the depot-fetch install path is
-						still tracked by issue #39.
+					<div className="depot-tab__depot-fetch-note">Requires connected mode and a valid depot credential.</div>
+					<div className="config-form__grid config-form__grid--single">
+						<label className="config-form__field">
+							<span>Version (optional)</span>
+							<input value={depotVersion} onChange={(e) => setDepotVersion(e.target.value)} disabled={depotFetchDisabled} />
+						</label>
 					</div>
 					<div className="config-form__actions">
-						<button type="button" disabled title={disconnected ? "Requires connected mode" : "Depot fetch is not yet implemented"}>
+						<button type="submit" className="config-form__submit" disabled={depotFetchDisabled} title={depotFetchTitle}>
 							Fetch from depot
 						</button>
 					</div>
-				</div>
+				</form>
 			</div>
 		</div>
 	);

@@ -15,34 +15,41 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.Catalog;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Secrets;
+using Waypoint.Core.SystemState;
 
 namespace Waypoint.Infrastructure.Downloads;
 
 /// <summary>
 /// The <c>tool-install</c> <see cref="Waypoint.Core.Jobs.JobShape.Simple"/> job handler
-/// (issue #39, ADR-0015 decision 3): copies a candidate <c>vcf-download-tool</c>
+/// (issue #39, ADR-0015 decision 3): places a candidate <c>vcf-download-tool</c>
 /// artifact into the managed-tool volume once its detached signature verifies against
 /// the Broadcom release key, and appends the outcome (installed, rejected, or failed) to
 /// the append-only <c>managed_tool_installs</c> ledger regardless of which way it goes.
 ///
-/// Covers two of the three ADR-0015 install paths this slice implements:
+/// Implements all three ADR-0015 install paths:
 /// <see cref="ManagedToolInstallSources.LocalRepository"/> (an operator-provisioned
-/// local indexed repository, works air-gapped) and
-/// <see cref="ManagedToolInstallSources.Upload"/> (a manual upload already staged by
-/// <c>ManagedToolController.Upload</c>). The connected-mode depot-fetch path
-/// (<see cref="ManagedToolInstallSources.Depot"/>) is deferred to a follow-up issue (see
-/// this PR's body) -- a payload naming that source fails cleanly here rather than being
-/// silently accepted.
+/// local indexed repository, works air-gapped), <see cref="ManagedToolInstallSources.Upload"/>
+/// (a manual upload already staged by <c>ManagedToolController.Upload</c>), and
+/// <see cref="ManagedToolInstallSources.Depot"/> (connected-mode-only: fetched live
+/// using the stored depot-token credential, mirroring <c>CatalogIndexJobHandler</c>'s
+/// decrypt-for-one-call pattern). The first two resolve a file already on this host's
+/// filesystem; the depot path additionally fetches the candidate over HTTP via
+/// <see cref="IManagedToolDepotFetcher"/> before the same verify-then-activate
+/// pipeline every path shares.
 ///
 /// Payload contract (JSON object, set by <c>ManagedToolController</c>):
-/// <c>{"source": "local-repository"|"upload", "source_path": "&lt;file name under the
-/// configured source root&gt;"}</c>. <c>source_path</c> is resolved against
+/// <c>{"source": "local-repository"|"upload"|"depot", "source_path": "&lt;file name
+/// under the configured source root&gt;"}</c> -- <c>source_path</c> is required for
+/// <c>local-repository</c>/<c>upload</c> (resolved against
 /// <see cref="ManagedToolOptions.LocalRepositoryPath"/> or
-/// <see cref="ManagedToolOptions.UploadStagingPath"/> depending on <c>source</c> --
-/// never taken as an absolute path from the payload, so a crafted payload cannot walk
-/// outside the configured root (path traversal is rejected before any file I/O).
+/// <see cref="ManagedToolOptions.UploadStagingPath"/>, never taken as an absolute path
+/// from the payload so a crafted payload cannot walk outside the configured root) and
+/// ignored for <c>depot</c> (the depot URL is server-side configuration, not
+/// operator-supplied).
 /// </summary>
 public sealed class ManagedToolInstallJobHandler : IJobHandler
 {
@@ -57,18 +64,38 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 	private readonly IManagedToolSignatureVerifier _verifier;
 	private readonly IManagedToolInstallRepository _installs;
 	private readonly IOptions<ManagedToolOptions> _options;
+	private readonly IManagedToolDepotFetcher _depotFetcher;
+	private readonly ICredentialSecretStore _secrets;
+	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
+	private readonly IApplianceStateRepository _applianceState;
+	private readonly IOptions<CatalogOptions> _catalogOptions;
 
 	public ManagedToolInstallJobHandler(
 		IManagedToolSignatureVerifier verifier,
 		IManagedToolInstallRepository installs,
-		IOptions<ManagedToolOptions> options)
+		IOptions<ManagedToolOptions> options,
+		IManagedToolDepotFetcher depotFetcher,
+		ICredentialSecretStore secrets,
+		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
+		IApplianceStateRepository applianceState,
+		IOptions<CatalogOptions> catalogOptions)
 	{
 		ArgumentNullException.ThrowIfNull(verifier);
 		ArgumentNullException.ThrowIfNull(installs);
 		ArgumentNullException.ThrowIfNull(options);
+		ArgumentNullException.ThrowIfNull(depotFetcher);
+		ArgumentNullException.ThrowIfNull(secrets);
+		ArgumentNullException.ThrowIfNull(credentials);
+		ArgumentNullException.ThrowIfNull(applianceState);
+		ArgumentNullException.ThrowIfNull(catalogOptions);
 		_verifier = verifier;
 		_installs = installs;
 		_options = options;
+		_depotFetcher = depotFetcher;
+		_secrets = secrets;
+		_credentials = credentials;
+		_applianceState = applianceState;
+		_catalogOptions = catalogOptions;
 	}
 
 	public string JobType => "tool-install";
@@ -87,32 +114,51 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed($"Malformed tool-install payload: {exception.Message}");
 		}
 
-		if (payload is null || string.IsNullOrWhiteSpace(payload.Source) || string.IsNullOrWhiteSpace(payload.SourcePath))
+		if (payload is null || string.IsNullOrWhiteSpace(payload.Source))
 		{
-			return JobExecutionOutcome.Failed("tool-install payload requires non-empty 'source' and 'source_path'.");
+			return JobExecutionOutcome.Failed("tool-install payload requires a non-empty 'source'.");
 		}
 
-		if (payload.Source != ManagedToolInstallSources.LocalRepository && payload.Source != ManagedToolInstallSources.Upload)
+		if (payload.Source != ManagedToolInstallSources.LocalRepository
+			&& payload.Source != ManagedToolInstallSources.Upload
+			&& payload.Source != ManagedToolInstallSources.Depot)
 		{
-			// Depot-fetch is deferred (see this type's doc comment); any other value is
-			// simply unknown. Either way: fail the job, do not touch the filesystem, and
-			// do not write a ledger row for a source we never validated a real path for.
+			// Any other value is simply unknown -- fail the job, do not touch the
+			// filesystem, and do not write a ledger row for a source we never
+			// validated a real candidate for.
 			return JobExecutionOutcome.Failed(
-				$"tool-install source '{payload.Source}' is not implemented by this handler. Supported: '{ManagedToolInstallSources.LocalRepository}', '{ManagedToolInstallSources.Upload}'.");
+				$"tool-install source '{payload.Source}' is not implemented by this handler. Supported: " +
+				$"'{ManagedToolInstallSources.LocalRepository}', '{ManagedToolInstallSources.Upload}', '{ManagedToolInstallSources.Depot}'.");
 		}
 
-		ManagedToolOptions options = _options.Value;
+		if (payload.Source != ManagedToolInstallSources.Depot && string.IsNullOrWhiteSpace(payload.SourcePath))
+		{
+			return JobExecutionOutcome.Failed("tool-install payload requires non-empty 'source_path' for this source.");
+		}
+
 		string initiatedBy = payload.InitiatedBy ?? "system";
 
-		string rootPath = payload.Source == ManagedToolInstallSources.LocalRepository
+		return payload.Source == ManagedToolInstallSources.Depot
+			? await ExecuteDepotFetchAsync(payload, initiatedBy, context, cancellationToken).ConfigureAwait(false)
+			: await ExecuteFileBasedAsync(payload, initiatedBy, context, cancellationToken).ConfigureAwait(false);
+	}
+
+	private async Task<JobExecutionOutcome> ExecuteFileBasedAsync(
+		ToolInstallPayload payload, string initiatedBy, JobExecutionContext context, CancellationToken cancellationToken)
+	{
+		ManagedToolOptions options = _options.Value;
+		string source = payload.Source!;
+		string sourcePath = payload.SourcePath!;
+
+		string rootPath = source == ManagedToolInstallSources.LocalRepository
 			? options.LocalRepositoryPath
 			: options.UploadStagingPath;
 
-		string? resolvedArtifactPath = ResolveWithinRoot(rootPath, payload.SourcePath);
+		string? resolvedArtifactPath = ResolveWithinRoot(rootPath, sourcePath);
 		if (resolvedArtifactPath is null)
 		{
 			return JobExecutionOutcome.Failed(
-				$"source_path '{payload.SourcePath}' does not resolve within the configured '{payload.Source}' root. Rejected without recording a ledger row (not a legitimate candidate path).");
+				$"source_path '{sourcePath}' does not resolve within the configured '{source}' root. Rejected without recording a ledger row (not a legitimate candidate path).");
 		}
 
 		string signaturePath = resolvedArtifactPath + ".sig";
@@ -122,17 +168,148 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed($"Candidate artifact not found at '{resolvedArtifactPath}'.");
 		}
 
-		string sha256 = await ComputeSha256Async(resolvedArtifactPath, cancellationToken).ConfigureAwait(false);
+		return await VerifyAndActivateAsync(
+			source, sourcePath, payload.Version, resolvedArtifactPath, signaturePath, initiatedBy, context, cancellationToken)
+			.ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// The connected-mode-only depot-fetch path (issue #39 remainder): refuses
+	/// cleanly and without any network attempt when disconnected or when no
+	/// depot-token credential is configured, decrypts the credential for exactly the
+	/// duration of the fetch (the same fail-closed audit + in-play redaction
+	/// <c>CatalogIndexJobHandler</c> already relies on), then runs the fetched pair
+	/// through the identical verify-then-activate pipeline the file-based paths use.
+	/// </summary>
+	private async Task<JobExecutionOutcome> ExecuteDepotFetchAsync(
+		ToolInstallPayload payload, string initiatedBy, JobExecutionContext context, CancellationToken cancellationToken)
+	{
+		ApplianceState? state = await _applianceState.GetAsync(cancellationToken).ConfigureAwait(false);
+		bool connected = string.Equals(state?.Mode, "connected", StringComparison.Ordinal);
+		if (!connected)
+		{
+			// Disconnected (or an unreadable appliance_state row -- treated as
+			// disconnected, same fail-safe default LibraryController/ScheduleDispatchService
+			// use) refuses before any network attempt and before any ledger row --
+			// this is a configuration/mode mismatch, not a real install attempt.
+			return JobExecutionOutcome.Failed(
+				"Depot-fetch install is unavailable in disconnected mode. Use the local-repository or manual-upload install path instead.");
+		}
+
+		CredentialResponse? depotTokenCredential = await _credentials
+			.FindByTypeAsync(_catalogOptions.Value.DepotTokenCredentialType, cancellationToken)
+			.ConfigureAwait(false);
+		if (depotTokenCredential is null || !depotTokenCredential.HasSecret)
+		{
+			return JobExecutionOutcome.Failed(
+				$"No credential of type '{_catalogOptions.Value.DepotTokenCredentialType}' is configured for the depot token. Configure a depot token before using the depot-fetch install path.");
+		}
+
+		ManagedToolOptions options = _options.Value;
+		string stagingDirectory = Path.Combine(options.UploadStagingPath, "depot-fetch");
+
+		ManagedToolDepotFetchResult fetchResult;
+		DecryptedSecret? decrypted = null;
+		try
+		{
+			// security.md control 4 / #8's fail-closed decrypt audit: writes the
+			// secret.decrypted audit row before any plaintext reaches this method.
+			decrypted = await _secrets
+				.DecryptAsync(depotTokenCredential.Id, initiatedBy, context.Job.Id, context.Job.RunId, cancellationToken)
+				.ConfigureAwait(false);
+
+			fetchResult = await _depotFetcher
+				.FetchAsync(decrypted.Value, payload.Version, stagingDirectory, cancellationToken)
+				.ConfigureAwait(false);
+		}
+		catch (CredentialSecretNotFoundException exception)
+		{
+			return JobExecutionOutcome.Failed($"Depot token credential has no stored secret: {exception.Message}");
+		}
+		catch (MasterKeyUnavailableException exception)
+		{
+			return JobExecutionOutcome.Failed($"Depot token could not be decrypted: {exception.Message}");
+		}
+		finally
+		{
+			// Ends the in-play redaction window as soon as the fetch is done, whether
+			// it succeeded or not -- the value must not still be "in play" once this
+			// method has returned.
+			decrypted?.Dispose();
+		}
+
+		if (!fetchResult.Succeeded)
+		{
+			// A fetch failure (auth, unreachable, oversize, misconfigured) never wrote
+			// any file worth verifying and is not itself a signature rejection -- no
+			// ledger row, same "not a legitimate candidate" treatment path-traversal
+			// and missing-file cases get on the file-based paths above. The reason
+			// string here is fully own-authored (never echoes response bodies), so it
+			// cannot carry the token even indirectly.
+			return JobExecutionOutcome.Failed($"Depot fetch failed ({fetchResult.FailureKind}): {fetchResult.FailureReason}");
+		}
+
+		try
+		{
+			return await VerifyAndActivateAsync(
+				ManagedToolInstallSources.Depot, ArtifactDescription(payload.Version), payload.Version,
+				fetchResult.ArtifactPath!, fetchResult.SignaturePath!, initiatedBy, context, cancellationToken)
+				.ConfigureAwait(false);
+		}
+		finally
+		{
+			DeleteIfDifferent(fetchResult.ArtifactPath!, fetchResult.SignaturePath!);
+		}
+	}
+
+	private static string ArtifactDescription(string? version) =>
+		string.IsNullOrWhiteSpace(version) ? "depot:latest" : $"depot:{version}";
+
+	/// <summary>Removes the transient depot-fetch staging files once verification/activation has run its course -- unlike upload's staging path, a depot-fetched candidate has no independent lifecycle worth preserving after this one job.</summary>
+	private static void DeleteIfDifferent(string artifactPath, string signaturePath)
+	{
+		try
+		{
+			if (File.Exists(artifactPath))
+			{
+				File.Delete(artifactPath);
+			}
+
+			if (signaturePath != artifactPath && File.Exists(signaturePath))
+			{
+				File.Delete(signaturePath);
+			}
+		}
+		catch (IOException)
+		{
+			// Best-effort cleanup only -- a stray staging file is not a correctness
+			// issue for a job that has already recorded its ledger outcome.
+		}
+	}
+
+	/// <summary>
+	/// The shared tail every install path funnels through once it has a candidate
+	/// artifact + signature pair sitting on disk: hash, verify, and either record a
+	/// <c>rejected</c> ledger row (bad signature) or atomically activate and record
+	/// <c>installed</c>/<c>failed</c>.
+	/// </summary>
+	private async Task<JobExecutionOutcome> VerifyAndActivateAsync(
+		string source, string sourcePath, string? version, string artifactPath, string signaturePath,
+		string initiatedBy, JobExecutionContext context, CancellationToken cancellationToken)
+	{
+		ManagedToolOptions options = _options.Value;
+
+		string sha256 = await ComputeSha256Async(artifactPath, cancellationToken).ConfigureAwait(false);
 
 		ManagedToolSignatureResult verification = await _verifier
-			.VerifyAsync(resolvedArtifactPath, signaturePath, cancellationToken)
+			.VerifyAsync(artifactPath, signaturePath, cancellationToken)
 			.ConfigureAwait(false);
 
 		if (!verification.Valid)
 		{
 			await _installs.RecordAsync(
 				new ManagedToolInstallAttempt(
-					payload.Source, payload.SourcePath, payload.Version, sha256,
+					source, sourcePath, version, sha256,
 					ManagedToolInstallOutcomes.Rejected, verification.FailureReason, initiatedBy, context.Job.Id),
 				cancellationToken).ConfigureAwait(false);
 
@@ -149,7 +326,7 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 			// place (File.Move with overwrite is atomic on the same filesystem on both
 			// Linux and Windows) -- a download job's tool-presence check must never
 			// observe a partially-written executable.
-			File.Copy(resolvedArtifactPath, stagingPath, overwrite: true);
+			File.Copy(artifactPath, stagingPath, overwrite: true);
 			File.Move(stagingPath, destinationPath, overwrite: true);
 			TrySetExecutable(destinationPath);
 		}
@@ -157,7 +334,7 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 		{
 			await _installs.RecordAsync(
 				new ManagedToolInstallAttempt(
-					payload.Source, payload.SourcePath, payload.Version, sha256,
+					source, sourcePath, version, sha256,
 					ManagedToolInstallOutcomes.Failed, null, initiatedBy, context.Job.Id),
 				cancellationToken).ConfigureAwait(false);
 
@@ -166,11 +343,11 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 
 		await _installs.RecordAsync(
 			new ManagedToolInstallAttempt(
-				payload.Source, payload.SourcePath, payload.Version, sha256,
+				source, sourcePath, version, sha256,
 				ManagedToolInstallOutcomes.Installed, null, initiatedBy, context.Job.Id),
 			cancellationToken).ConfigureAwait(false);
 
-		return JobExecutionOutcome.Succeeded($"vcf-download-tool installed from {payload.Source}.");
+		return JobExecutionOutcome.Succeeded($"vcf-download-tool installed from {source}.");
 	}
 
 	/// <summary>
