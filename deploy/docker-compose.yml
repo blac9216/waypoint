@@ -483,10 +483,17 @@ services:
       # FIRST (issue #579): it provides Get-LogSplat/Write-Log, which the imported
       # vmware-stig-docker transport files dot-sourced by the other three modules
       # expect to already be in scope.
+      # Issue #613 (live-verified): WaypointComplianceContent was never added to
+      # this list, so Invoke-WaypointComplianceContentPull was undefined in the
+      # runspace and content-pull/content-import always failed with "term ...
+      # is not recognized". ComplianceContentJobHandlerTests' preload-completeness
+      # guard (Waypoint.Tests) fails the build if a future handler's module ships
+      # without an entry here.
       PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointLogging"
       PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDiscovery"
       PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointScan"
       PowerShell__ModulePreloadPaths__3: "/app/PowerShell/Modules/WaypointCredentialTest"
+      PowerShell__ModulePreloadPaths__4: "/app/PowerShell/Modules/WaypointComplianceContent"
       # Project-owned .ps1 files the shims above dot-source, baked into the image under
       # /powershell/ (runners/compliance-runner/powershell/, imported from the
       # vmware-stig-docker sibling repo per CLAUDE.md's borrowing policy) -
@@ -508,6 +515,14 @@ services:
       # API can serve already-written results without itself being able to
       # write into the store.
       - artifacts:/var/lib/waypoint/artifacts
+      # content-pull/content-import working tree (ADR-0017; issue #616,
+      # live-verified) - read-write, this service only. Matches
+      # ComplianceContentOptions.ContentPath's default. Without this named
+      # volume the clone target does not exist at all, and even if the app
+      # created it itself it would be root-owned like every other Compose
+      # mount point until docker-entrypoint.sh chowns it below (same fix
+      # shape as the download-runner's managed-tool volume).
+      - compliance-content:/var/lib/waypoint/compliance-content
       # Secrets master key file (issue #405/#442) - operator-provided, gitignored
       # (../config/ is covered by .gitignore's anchored /config/ entry). Same
       # file, same in-container path, and the same optional/fail-closed
@@ -691,3 +706,9 @@ volumes:
   # Compliance content (InSpec profiles) - compliance-runner only, read-only at
   # the mount (see that service's volumes:).
   compliance-profiles:
+  # content-pull/content-import working tree (ADR-0017, issue #616) -
+  # compliance-runner only, read-write at the mount (see that service's
+  # volumes:). Distinct from compliance-profiles above: this is the git
+  # clone target content-pull writes into, not the operator-provisioned
+  # read-only profile set scan/discover/credential-test consume.
+  compliance-content:

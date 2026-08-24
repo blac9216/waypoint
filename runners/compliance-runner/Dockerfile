@@ -51,7 +51,7 @@ FROM ubuntu:20.04
 RUN apt-get -y update --fix-missing && \
     DEBIAN_FRONTEND=noninteractive apt-get -y install \
     ca-certificates wget bash-completion less curl gnupg2 \
-    apt-transport-https software-properties-common openssh-client
+    apt-transport-https software-properties-common openssh-client git
 
 # PowerShell 7
 RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | apt-key add - && \

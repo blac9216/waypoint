@@ -1,7 +1,8 @@
 #!/bin/sh
 # Fixes ownership of externally-provisioned mount points before dropping to the
 # unprivileged `waypoint` user (issue #442). Compose named volumes (artifacts,
-# compliance-profiles) and host bind mounts (the master key file) are created/
+# compliance-content, compliance-profiles) and host bind mounts (the master key
+# file) are created/
 # owned by root regardless of what the image's own Dockerfile chowns at build
 # time -- only content baked INTO the image (e.g. /app) survives a build-time
 # chown; anything mounted at `docker run`/`docker compose up` time arrives
@@ -27,6 +28,15 @@ if [ "$(id -u)" = '0' ]; then
 	# volume instead of reporting "does not exist or is not mounted" forever.
 	mkdir -p /var/lib/waypoint/artifacts/scans
 	chown -R waypoint:waypoint /var/lib/waypoint/artifacts
+
+	# content-pull/content-import working tree (ADR-0017, issue #616,
+	# live-verified) -- ComplianceContentOptions.ContentPath, backed by the
+	# compliance-content named volume (deploy/docker-compose.yml). Compose
+	# named volumes always arrive root-owned regardless of what the image
+	# chowns at build time (see header comment); without this, `git clone`
+	# as uid 1654 fails with exit 128 before ever reaching the network.
+	mkdir -p /var/lib/waypoint/compliance-content
+	chown -R waypoint:waypoint /var/lib/waypoint/compliance-content
 
 	exec su -s /bin/sh waypoint -c 'exec "$0" "$@"' -- "$@"
 fi
