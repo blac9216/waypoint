@@ -229,6 +229,191 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 	}
 
+	// -- issue #592 (epic #588, last child): generic operational-history deletion ---
+
+	[Theory]
+	[InlineData(null)]
+	[InlineData("purge")]
+	[InlineData("delete")]
+	public async Task DeleteRunHistory_WithoutExactConfirmation_Returns400(string? confirmation)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Delete, $"/api/v1/runs/{Guid.NewGuid()}/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData("Viewer")]
+	[InlineData("Cyber")]
+	[InlineData("Operator")]
+	public async Task DeleteRunHistory_BelowAdmin_Returns403(string role)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Delete, $"/api/v1/runs/{Guid.NewGuid()}/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation = "DELETE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		// [RequireAdminRole] rejects before the controller action's own confirmation
+		// check ever runs -- same proof shape as PurgeRun_BelowAdmin_Returns403.
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task DeleteRunHistory_UnknownRun_Returns404()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Delete, $"/api/v1/runs/{Guid.NewGuid()}/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation = "DELETE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task DeleteRunHistory_NonTerminalRun_Returns409()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		_factory.Repository.SetRunType(runId, "discover");
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Delete, $"/api/v1/runs/{runId}/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation = "DELETE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		Assert.Contains("run_not_terminal", body, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task DeleteRunHistory_UnpurgedComplianceRun_Returns409RequiresDomainPurgeFirst()
+	{
+		// Default RunType from FakeJobQueueRepository.GetRunAsync is "scan" (a
+		// compliance-owned type) unless overridden -- exercises the epic #588 "generic
+		// cleanup DEFERS to domain purge" gate without needing SetRunType.
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.HistoryDeletionRepository.SetPurged(runId, purged: false);
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Delete, $"/api/v1/runs/{runId}/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation = "DELETE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		Assert.Contains("requires_domain_purge_first", body, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task DeleteRunHistory_PurgedComplianceRun_Returns200AndWritesTombstone()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.HistoryDeletionRepository.SetPurged(runId, purged: true);
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Delete, $"/api/v1/runs/{runId}/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation = "DELETE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.Equal("Completed", doc.RootElement.GetProperty("outcome").GetString());
+		Assert.NotNull(await _factory.HistoryDeletionRepository.GetTombstoneAsync(runId, CancellationToken.None));
+	}
+
+	[Fact]
+	public async Task DeleteRunHistory_NonComplianceRun_Returns200WithoutPurgeGate()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.Repository.SetRunType(runId, "discover");
+		// Deliberately never purged -- a discover run has no RunPurgeService scope at
+		// all (issue #594 is scan/remediate-only), so the gate must not apply here.
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Delete, $"/api/v1/runs/{runId}/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation = "DELETE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task DeleteRunHistory_AlreadyDeleted_IsIdempotentNoOp()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.Repository.SetRunType(runId, "discover");
+
+		HttpClient client = _factory.CreateClient();
+
+		HttpRequestMessage first = new(HttpMethod.Delete, $"/api/v1/runs/{runId}/history");
+		first.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		first.Content = new StringContent(JsonSerializer.Serialize(new { confirmation = "DELETE" }), System.Text.Encoding.UTF8, "application/json");
+		HttpResponseMessage firstResponse = await client.SendAsync(first);
+		Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+
+		HttpRequestMessage second = new(HttpMethod.Delete, $"/api/v1/runs/{runId}/history");
+		second.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		second.Content = new StringContent(JsonSerializer.Serialize(new { confirmation = "DELETE" }), System.Text.Encoding.UTF8, "application/json");
+		HttpResponseMessage secondResponse = await client.SendAsync(second);
+
+		Assert.Equal(HttpStatusCode.OK, secondResponse.StatusCode);
+		string body = await secondResponse.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.Equal("AlreadyDeleted", doc.RootElement.GetProperty("outcome").GetString());
+	}
+
+	[Fact]
+	public async Task GetRunHistoryDeletionStatus_NeverRequested_Returns404()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
 	[Fact]
 	public async Task CreateRun_InitiatedByComesFromIdentity_NotFromBody()
 	{
@@ -962,6 +1147,15 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 			}
 			services.AddSingleton<Waypoint.Core.Runs.IRunPurgeRepository>(PurgeRepository);
 
+			// Issue #592: same fake-swap pattern as IRunPurgeRepository above, for
+			// RunHistoryDeletionService's IRunHistoryDeletionRepository dependency.
+			var historyDeletionRepositoryDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(Waypoint.Core.Runs.IRunHistoryDeletionRepository));
+			if (historyDeletionRepositoryDescriptor != null)
+			{
+				services.Remove(historyDeletionRepositoryDescriptor);
+			}
+			services.AddSingleton<Waypoint.Core.Runs.IRunHistoryDeletionRepository>(HistoryDeletionRepository);
+
 			// Issue #581: GetEventHistory resolves IJobEventHistoryReader through
 			// RunsController -- same fake-swap pattern as every other dependency above,
 			// so role-guard/happy-path tests never touch Postgres.
@@ -975,6 +1169,8 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 	}
 
 	public FakeRunPurgeRepository PurgeRepository { get; } = new();
+
+	public FakeRunHistoryDeletionRepository HistoryDeletionRepository { get; } = new();
 
 	public FakeJobEventHistoryReader EventHistory { get; } = new();
 }
@@ -1013,12 +1209,22 @@ public sealed class FakeJobEventHistoryReader : IJobEventHistoryReader
 public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRepository
 {
 	private readonly Dictionary<Guid, RunQueueState> _runs = new();
+	// Issue #592: per-run run_type override, defaulting to "scan" (GetRunAsync's
+	// prior hardcoded value) so every pre-existing SetRun call site keeps behaving
+	// identically -- only tests that need a non-compliance run_type (to exercise
+	// RunHistoryDeletionService's compliance-purge gate) call SetRunType.
+	private readonly Dictionary<Guid, string> _runTypes = new();
 	private bool _pauseResult = true;
 	private bool _resumeResult = true;
 
 	public void SetRun(Guid runId, RunQueueState state)
 	{
 		_runs[runId] = state;
+	}
+
+	public void SetRunType(Guid runId, string runType)
+	{
+		_runTypes[runId] = runType;
 	}
 
 	public void SetPauseResult(bool result) => _pauseResult = result;
@@ -1037,8 +1243,9 @@ public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRe
 		{
 			return Task.FromResult<RunSummary?>(null);
 		}
+		string runType = _runTypes.TryGetValue(runId, out var overriddenType) ? overriddenType : "scan";
 		return Task.FromResult<RunSummary?>(new RunSummary(
-			Id: runId, RunType: "scan", State: state.State, Paused: state.Paused,
+			Id: runId, RunType: runType, State: state.State, Paused: state.Paused,
 			Blocked: state.Blocked, BlockedReason: state.BlockedReason,
 			ScopeJson: "{}", CredentialId: null, InitiatedBy: "test-user", ScheduleId: null,
 			CreatedAt: "2026-01-01T00:00:00Z", StartedAt: null, CompletedAt: null,
@@ -1280,5 +1487,50 @@ public sealed class FakeRunPurgeRepository : IRunPurgeRepository
 	{
 		_ = cancellationToken;
 		return Task.FromResult(new RunPurgeTombstone(Guid.NewGuid(), runId, runType, priorState, actor, "completed", "{}", DateTimeOffset.UtcNow));
+	}
+}
+
+/// <summary>
+/// Issue #592: minimal in-memory fake for <see cref="IRunHistoryDeletionRepository"/>,
+/// mirroring <see cref="FakeRunPurgeRepository"/>'s shape -- lets controller-level
+/// tests exercise role/confirmation/not-found/not-terminal/compliance-gate mapping
+/// without a live Postgres connection. <see cref="SetPurged"/> lets a test simulate a
+/// compliance run that has (or has not) already been through <c>POST /runs/{id}/purge</c>.
+/// </summary>
+public sealed class FakeRunHistoryDeletionRepository : IRunHistoryDeletionRepository
+{
+	private readonly HashSet<Guid> _purgedRuns = new();
+	private readonly Dictionary<Guid, RunHistoryDeletionTombstone> _tombstones = new();
+
+	public void SetPurged(Guid runId, bool purged)
+	{
+		if (purged)
+		{
+			_purgedRuns.Add(runId);
+		}
+		else
+		{
+			_purgedRuns.Remove(runId);
+		}
+	}
+
+	public Task<RunHistoryDeletionTombstone?> GetTombstoneAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult(_tombstones.TryGetValue(runId, out var tombstone) ? tombstone : null);
+	}
+
+	public Task<bool> IsPurgedAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult(_purgedRuns.Contains(runId));
+	}
+
+	public Task<RunHistoryDeletionTombstone> CompleteAsync(Guid runId, string runType, string actor, string priorState, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		RunHistoryDeletionTombstone tombstone = new(Guid.NewGuid(), runId, runType, priorState, actor, "completed", "{}", DateTimeOffset.UtcNow);
+		_tombstones[runId] = tombstone;
+		return Task.FromResult(tombstone);
 	}
 }

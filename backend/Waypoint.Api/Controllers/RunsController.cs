@@ -45,6 +45,7 @@ public sealed class RunsController : ControllerBase
 	private const string ScanRunType = "scan";
 	private const string PersonalCredentialKind = "personal";
 	private const string PurgeConfirmation = "PURGE";
+	private const string HistoryDeletionConfirmation = "DELETE";
 
 	private readonly IJobControlRepository _repository;
 	private readonly ConfigDocRepository _configDocs;
@@ -54,6 +55,7 @@ public sealed class RunsController : ControllerBase
 	private readonly RunArtifactProjectionService _artifactProjection;
 	private readonly RunControlService _runControl;
 	private readonly RunPurgeService _runPurge;
+	private readonly RunHistoryDeletionService _historyDeletion;
 	private readonly IJobEventHistoryReader _eventHistory;
 
 	public RunsController(
@@ -65,6 +67,7 @@ public sealed class RunsController : ControllerBase
 		RunArtifactProjectionService artifactProjection,
 		RunControlService runControl,
 		RunPurgeService runPurge,
+		RunHistoryDeletionService historyDeletion,
 		IJobEventHistoryReader eventHistory)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
@@ -75,6 +78,7 @@ public sealed class RunsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(artifactProjection);
 		ArgumentNullException.ThrowIfNull(runControl);
 		ArgumentNullException.ThrowIfNull(runPurge);
+		ArgumentNullException.ThrowIfNull(historyDeletion);
 		ArgumentNullException.ThrowIfNull(eventHistory);
 		_repository = repository;
 		_configDocs = configDocs;
@@ -84,6 +88,7 @@ public sealed class RunsController : ControllerBase
 		_artifactProjection = artifactProjection;
 		_runControl = runControl;
 		_runPurge = runPurge;
+		_historyDeletion = historyDeletion;
 		_eventHistory = eventHistory;
 	}
 
@@ -748,6 +753,74 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
+	/// Deletes a TERMINAL run's operational history record (issue #592, epic #588's
+	/// last child) -- structurally separate from <see cref="PurgeRun"/> (issue #594).
+	/// Admin-only, same wider-blast-radius gate as purge. Requires the explicit
+	/// <c>confirmation: "DELETE"</c> body field, same step-up pattern as purge's
+	/// <c>"PURGE"</c>. Non-terminal runs are rejected with 409 <c>run_not_terminal</c>.
+	/// A compliance-owned run (<c>scan</c>/<c>remediate</c>) that has not been purged
+	/// yet is rejected with 409 <c>requires_domain_purge_first</c> -- epic #588's
+	/// design: generic history deletion defers to <see cref="RunPurgeService"/> for
+	/// compliance-owned artifacts rather than deleting the operational record out from
+	/// under results/attestations that still exist; call <c>POST /runs/{id}/purge</c>
+	/// first. Idempotent: an already-deleted run's history returns its tombstone
+	/// rather than erroring.
+	/// </summary>
+	[HttpDelete("{id:guid}/history")]
+	[RequireAdminRole]
+	[ProducesResponseType(typeof(RunHistoryDeletionStatusResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunHistoryDeletionStatusResponse>> DeleteRunHistory(Guid id, [FromBody] RunHistoryDeletionRequest? request, CancellationToken cancellationToken)
+	{
+		if (!string.Equals(request?.Confirmation, HistoryDeletionConfirmation, StringComparison.Ordinal))
+		{
+			throw ApiException.Validation(
+				"History deletion requires explicit confirmation.",
+				$"Set \"confirmation\": \"{HistoryDeletionConfirmation}\" in the request body to delete this run's operational history.");
+		}
+
+		string actor = User.GetRequiredUsername();
+		RunHistoryDeletionResult result = await _historyDeletion.DeleteHistoryAsync(id, actor, cancellationToken).ConfigureAwait(false);
+
+		switch (result.Outcome)
+		{
+			case RunHistoryDeletionOutcome.RunNotFound:
+				throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+			case RunHistoryDeletionOutcome.RunNotTerminal:
+				throw new ApiException(
+					System.Net.HttpStatusCode.Conflict, "run_not_terminal",
+					"Run cannot have its history deleted.", $"Run '{id}' is not in a terminal state (completed, completed_with_failures, or aborted).");
+			case RunHistoryDeletionOutcome.RequiresDomainPurgeFirst:
+				throw new ApiException(
+					System.Net.HttpStatusCode.Conflict, "requires_domain_purge_first",
+					"Run must be purged before its history can be deleted.",
+					$"Run '{id}' is a compliance run (scan/remediate) with unpurged artifacts. Call POST /runs/{id}/purge first.");
+			case RunHistoryDeletionOutcome.Completed:
+			case RunHistoryDeletionOutcome.AlreadyDeleted:
+			default:
+				return Ok(MapHistoryDeletionStatus(id, result.Outcome.ToString(), result.Tombstone));
+		}
+	}
+
+	/// <summary>
+	/// Reads back the history-deletion tombstone for a run (issue #592) -- mirrors
+	/// <see cref="GetPurgeStatus"/>. 404 when history deletion was never requested for
+	/// this run.
+	/// </summary>
+	[HttpGet("{id:guid}/history")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(RunHistoryDeletionStatusResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunHistoryDeletionStatusResponse>> GetRunHistoryDeletionStatus(Guid id, CancellationToken cancellationToken)
+	{
+		RunHistoryDeletionTombstone? tombstone = await _historyDeletion.GetStatusAsync(id, cancellationToken).ConfigureAwait(false);
+		if (tombstone is null)
+		{
+			throw ApiException.NotFound("No history deletion has been requested for this run.", $"Run '{id}' has never had its history deleted.");
+		}
+
+		return Ok(MapHistoryDeletionStatus(id, RunHistoryDeletionOutcome.AlreadyDeleted.ToString(), tombstone));
+	}
+
+	/// <summary>
 	/// Bounded, cursor-paged historical read over a run's persisted <c>job_events</c>
 	/// (issue #581, ADR-0019) -- the complement to the SSE stream
 	/// (<see cref="EventStreamController.RunStream"/>): SSE is the live/replay
@@ -901,6 +974,14 @@ public sealed class RunsController : ControllerBase
 			LastError: status?.LastError,
 			CompletedAt: status?.CompletedAt?.ToString("O", CultureInfo.InvariantCulture));
 	}
+
+	private static RunHistoryDeletionStatusResponse MapHistoryDeletionStatus(Guid runId, string outcome, RunHistoryDeletionTombstone? tombstone) =>
+		new(
+			RunId: runId.ToString(),
+			Outcome: outcome,
+			Actor: tombstone?.Actor ?? string.Empty,
+			PriorState: tombstone?.PriorState ?? string.Empty,
+			OccurredAt: tombstone?.OccurredAt.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
 
 	private static RunResponse MapRun(RunSummary run)
 	{

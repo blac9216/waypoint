@@ -951,6 +951,48 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
 	}
 
+	/// <summary>
+	/// Issue #592 (epic #588, migration 0046): negative-direction grant check, written
+	/// at authoring time per this file's own "a new runner-executed table without a
+	/// role-contract test ships grant drift silently" lesson -- except here the whole
+	/// point is that NEITHER runner role gets anything: unlike purge (0042), history
+	/// deletion is entirely API-side (no runner-executed job reports back into it), so
+	/// migration 0046 grants nothing on the new table to either runner role.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotReadRunHistoryDeletionTombstones()
+	{
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand select = new("SELECT id FROM run_history_deletion_tombstones LIMIT 1", connection);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => select.ExecuteScalarAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>Same negative-direction check as <see cref="ComplianceRunnerRole_CannotReadRunHistoryDeletionTombstones"/>, for the other runner role.</summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotReadRunHistoryDeletionTombstones()
+	{
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand select = new("SELECT id FROM run_history_deletion_tombstones LIMIT 1", connection);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => select.ExecuteScalarAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	// NOTE: no negative-direction test for a runner role writing
+	// runs.history_deleted_at (unlike run_purges' column-scoped grants, which DO
+	// have such tests) -- migration 0025 already grants both runner roles
+	// table-wide SELECT, UPDATE on runs (not column-scoped), the same reason no
+	// equivalent test exists for runs.purged_at (migration 0042) either. Neither
+	// runner ever legitimately writes either column (both are exclusively written
+	// by RunPurgeService/RunHistoryDeletionRepository on the API-side owner
+	// connection), but the database grant itself does not structurally prevent it
+	// the way run_purges' column-scoped grant does -- documented here rather than
+	// asserted by a test that would (correctly) fail against the real grant.
+
 	private async Task SeedJobCredentialBindingAsync(Guid jobId, Guid credentialId)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
