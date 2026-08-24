@@ -80,11 +80,24 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 	{
 		public List<ManagedToolInstallAttempt> Recorded { get; } = [];
 
+		private readonly Dictionary<Guid, ManagedToolInstall> _byJobId = [];
+
 		public Task<Guid> RecordAsync(ManagedToolInstallAttempt attempt, CancellationToken cancellationToken)
 		{
 			Recorded.Add(attempt);
-			return Task.FromResult(Guid.NewGuid());
+			Guid id = Guid.NewGuid();
+			if (attempt.JobId is { } jobId)
+			{
+				_byJobId[jobId] = new ManagedToolInstall(
+					id, attempt.Source, attempt.SourcePath, attempt.Version, attempt.Sha256,
+					attempt.Outcome, attempt.RejectedReason, attempt.InitiatedBy, attempt.JobId, DateTimeOffset.UtcNow);
+			}
+
+			return Task.FromResult(id);
 		}
+
+		public Task<ManagedToolInstall?> FindByJobIdAsync(Guid jobId, CancellationToken cancellationToken) =>
+			Task.FromResult(_byJobId.TryGetValue(jobId, out ManagedToolInstall? install) ? install : null);
 
 		public Task<IReadOnlyList<ManagedToolInstall>> ListAsync(int limit, CancellationToken cancellationToken) =>
 			Task.FromResult<IReadOnlyList<ManagedToolInstall>>([]);
@@ -110,11 +123,19 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 			Task.FromResult<ApplianceState?>(new ApplianceState("1.0.0", null, mode, "idle", null));
 	}
 
-	private static JobExecutionContext ContextFor(string payload)
+	private static JobExecutionContext ContextFor(string payload) => ContextFor(payload, Guid.NewGuid(), attemptCount: 1);
+
+	/// <summary>
+	/// Issue #647's requeue simulation: a second call with the SAME <paramref name="jobId"/>
+	/// and a higher <paramref name="attemptCount"/> is exactly what a genuine
+	/// crash-recovery requeue (or the lease-recovery sweep) produces -- the same
+	/// <c>jobs.id</c> row re-claimed, <c>attempt_count</c> incremented, id unchanged.
+	/// </summary>
+	private static JobExecutionContext ContextFor(string payload, Guid jobId, int attemptCount)
 	{
 		ClaimedJob job = new(
-			Id: Guid.NewGuid(), RunId: null, JobType: "tool-install", TargetId: null, TargetName: null,
-			CredentialId: null, Priority: 1, Payload: payload, AttemptCount: 1, MaxAttempts: 3);
+			Id: jobId, RunId: null, JobType: "tool-install", TargetId: null, TargetName: null,
+			CredentialId: null, Priority: 1, Payload: payload, AttemptCount: attemptCount, MaxAttempts: 3);
 		return new JobExecutionContext(
 			job, "worker-test", new FakeEventPublisher(),
 			new JobQueueRepository("Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x", NullLogger<JobQueueRepository>.Instance),
@@ -357,5 +378,84 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor("not json"), CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+	}
+
+	/// <summary>
+	/// Issue #647: a genuine crash-recovery requeue re-runs the SAME <c>jobs.id</c> --
+	/// the runner died after the first execution had already recorded 'installed' and
+	/// activated the distribution, and lease-recovery put the job back on the queue.
+	/// The re-run must not write a second ledger row, and (interaction with #715's
+	/// installer) must not re-extract/re-smoke-test/re-activate the already-active
+	/// distribution.
+	/// </summary>
+	[Fact]
+	public async Task RequeueAfterSuccessfulInstall_DoesNotDuplicateLedgerOrReactivate()
+	{
+		string archivePath = Path.Combine(_repositoryRoot, "vcf-download-tool-1.2.3");
+		ManagedToolDistributionFixture.WriteHappyPathArchive(archivePath);
+
+		FakeManagedToolInstallRepository installs = new();
+		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
+		string payload = """{"source":"local-repository","source_path":"vcf-download-tool-1.2.3","version":"1.2.3","initiated_by":"tester"}""";
+		Guid jobId = Guid.NewGuid();
+
+		JobExecutionOutcome first = await handler.ExecuteAsync(ContextFor(payload, jobId, attemptCount: 1), CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.Succeeded, first.Kind);
+		Assert.Single(installs.Recorded);
+
+		DateTime activeWriteTimeAfterFirstRun = File.GetLastWriteTimeUtc(ActiveExecutablePath);
+
+		// Simulate the crash-recovery requeue: same job id, incremented attempt_count,
+		// re-claimed and re-executed exactly as the dispatcher would after lease
+		// recovery puts the row back on the queue.
+		JobExecutionOutcome requeued = await handler.ExecuteAsync(ContextFor(payload, jobId, attemptCount: 2), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, requeued.Kind);
+		Assert.Single(installs.Recorded); // still exactly one ledger row -- no duplicate
+		Assert.Equal(ManagedToolInstallOutcomes.Installed, installs.Recorded[0].Outcome);
+
+		// The active install was not touched a second time -- no re-extraction/re-activation.
+		Assert.Equal(activeWriteTimeAfterFirstRun, File.GetLastWriteTimeUtc(ActiveExecutablePath));
+	}
+
+	/// <summary>Issue #647: the same dedup guard applies to a rejected/failed terminal outcome, not just 'installed'.</summary>
+	[Fact]
+	public async Task RequeueAfterRejectedOutcome_DoesNotDuplicateLedgerRow()
+	{
+		string archivePath = Path.Combine(_repositoryRoot, "vcf-download-tool-bad");
+		ManagedToolDistributionFixture.WriteHappyPathArchive(archivePath);
+
+		FakeManagedToolInstallRepository installs = new();
+		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs,
+			catalogVerifier: new FakeManagedToolCatalogVerifier(false, "catalog checksum mismatch"));
+		string payload = """{"source":"local-repository","source_path":"vcf-download-tool-bad","initiated_by":"tester"}""";
+		Guid jobId = Guid.NewGuid();
+
+		JobExecutionOutcome first = await handler.ExecuteAsync(ContextFor(payload, jobId, attemptCount: 1), CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.Failed, first.Kind);
+		Assert.Single(installs.Recorded);
+
+		JobExecutionOutcome requeued = await handler.ExecuteAsync(ContextFor(payload, jobId, attemptCount: 2), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, requeued.Kind);
+		Assert.Single(installs.Recorded); // still exactly one ledger row -- no duplicate
+		Assert.Equal(ManagedToolInstallOutcomes.Rejected, installs.Recorded[0].Outcome);
+	}
+
+	/// <summary>A different job id is a genuinely new install attempt, not a requeue -- the dedup guard must not conflate the two.</summary>
+	[Fact]
+	public async Task DifferentJobId_IsNotTreatedAsARequeue_RecordsItsOwnLedgerRow()
+	{
+		string archivePath = Path.Combine(_repositoryRoot, "vcf-download-tool-1.2.3");
+		ManagedToolDistributionFixture.WriteHappyPathArchive(archivePath);
+
+		FakeManagedToolInstallRepository installs = new();
+		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
+		string payload = """{"source":"local-repository","source_path":"vcf-download-tool-1.2.3","version":"1.2.3","initiated_by":"tester"}""";
+
+		await handler.ExecuteAsync(ContextFor(payload, Guid.NewGuid(), attemptCount: 1), CancellationToken.None);
+		await handler.ExecuteAsync(ContextFor(payload, Guid.NewGuid(), attemptCount: 1), CancellationToken.None);
+
+		Assert.Equal(2, installs.Recorded.Count);
 	}
 }
