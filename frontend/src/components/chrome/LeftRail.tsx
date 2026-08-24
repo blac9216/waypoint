@@ -14,21 +14,23 @@ import {
 	DashboardIcon,
 	JobsIcon,
 	LibraryIcon,
+	LiveRunIcon,
 	ResultsIcon,
 	ScanIcon,
 	TransferIcon,
 } from "./icons";
 import "./LeftRail.css";
 
-// `live-run` intentionally has no entry here (issue #590, ADR-0019 decision
-// 1): the old scan-only Live Run route still exists in ROUTES for deep-link
-// redirect compat (see routes.ts), but it is not a navigable destination —
-// Jobs (formerly "Live Jobs", renamed by issue #708 once it gained a History
-// mode — title-only, same route key/path) replaces it as the global "what's
-// happening now" nav entry.
-const ICONS: Record<Exclude<ScreenKey, "live-run">, ComponentType> = {
+// Live Run sits in the COMPLIANCE group (issue #711, epic #706's last open
+// child): PR #709 restored the /live-run console but left it unreachable
+// from nav (a #590/ADR-0019-era decision that predated the console's
+// restoration). Jobs (formerly "Live Jobs", renamed by issue #708 once it
+// gained a History mode — title-only, same route key/path) remains the
+// separate top-level "what's happening now across every domain" entry.
+const ICONS: Record<ScreenKey, ComponentType> = {
 	dashboard: DashboardIcon,
 	"live-jobs": JobsIcon,
+	"live-run": LiveRunIcon,
 	"start-scan": ScanIcon,
 	results: ResultsIcon,
 	benchmarks: BenchmarksIcon,
@@ -41,16 +43,16 @@ const ICONS: Record<Exclude<ScreenKey, "live-run">, ComponentType> = {
 
 interface NavGroup {
 	label: string | null;
-	items: Exclude<ScreenKey, "live-run">[];
+	items: ScreenKey[];
 }
 
 const NAV_GROUPS: NavGroup[] = [
 	// Jobs sits with Dashboard, above every domain group — ADR-0019 decision 1:
 	// "Live Jobs is top-level and cross-domain," not owned by Compliance the
-	// way the old Live Run route was. Renamed from "Live Jobs" by issue #708
+	// way the Live Run console is. Renamed from "Live Jobs" by issue #708
 	// once it gained a History mode alongside active work.
 	{ label: null, items: ["dashboard", "live-jobs"] },
-	{ label: "COMPLIANCE", items: ["start-scan", "results", "benchmarks"] },
+	{ label: "COMPLIANCE", items: ["live-run", "start-scan", "results", "benchmarks"] },
 	{ label: "CONTENT", items: ["catalog", "library", "transfer"] },
 	{ label: "CONFIGURE", items: ["configuration", "audit"] },
 ];
