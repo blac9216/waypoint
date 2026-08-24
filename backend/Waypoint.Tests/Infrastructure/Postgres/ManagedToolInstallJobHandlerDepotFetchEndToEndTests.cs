@@ -36,7 +36,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// Issue #39 remainder (depot-fetch install path): the REAL loop through real
 /// Postgres, mirroring <see cref="CatalogIndexJobHandlerEndToEndTests"/>'s split for
 /// the identical reason -- <c>ManagedToolInstallJobHandler</c> takes a concrete
-/// <c>CredentialRepository</c> (sealed, Postgres-only), so its depot-token lookup
+/// <c>CredentialRepository</c> (sealed, Postgres-only), so its depot Activation Code lookup
 /// cannot be exercised by a pure in-memory unit test. <see cref="FakeManagedToolDepotFetcher"/>
 /// stands in for the real HTTP boundary (covered on its own by
 /// <c>HttpManagedToolDepotFetcherTests</c>) so this file's focus stays on the
@@ -107,7 +107,7 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 			LibraryRelativePath = "lib",
 			SmokeTestTimeout = TimeSpan.FromSeconds(10),
 		};
-		CatalogOptions catalogOptions = new() { DepotTokenCredentialType = "depot-token" };
+		CatalogOptions catalogOptions = new() { DepotActivationCodeCredentialType = "depot-activation-code" };
 
 		_handler = new ManagedToolInstallJobHandler(
 			_verifier, new FakeManagedToolCatalogVerifier(), _installs, Options.Create(toolOptions), _fetcher, _secretStore, _credentials, _applianceState,
@@ -171,7 +171,7 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 	[Fact]
 	public async Task DepotFetch_ConnectedWithValidCredentialAndSignature_ActivatesAndRecordsInstalled_TokenNeverLeaks()
 	{
-		Guid credentialId = await SeedDepotTokenCredentialAsync(Token);
+		Guid credentialId = await SeedDepotActivationCodeCredentialAsync(Token);
 
 		Guid jobId = await RunDepotFetchOnceAsync();
 
@@ -190,7 +190,7 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 	[Fact]
 	public async Task DepotFetch_BadSignature_RejectedAndRecorded_ArtifactNeverActivated()
 	{
-		await SeedDepotTokenCredentialAsync(Token);
+		await SeedDepotActivationCodeCredentialAsync(Token);
 		_verifier.Valid = false;
 		_verifier.Reason = "signature does not match the Broadcom release key";
 
@@ -207,9 +207,9 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 	[Fact]
 	public async Task DepotFetch_AuthFailure_FailsCleanly_NoLedgerRow_TokenNeverInJobNote()
 	{
-		await SeedDepotTokenCredentialAsync(Token);
+		await SeedDepotActivationCodeCredentialAsync(Token);
 		_fetcher.NextResult = ManagedToolDepotFetchResult.Failure(
-			ManagedToolDepotFetchFailureKind.AuthFailure, "The depot rejected the depot-token credential (401).");
+			ManagedToolDepotFetchFailureKind.AuthFailure, "The depot rejected the depot-activation-code credential (401).");
 
 		Guid jobId = await RunDepotFetchOnceAsync(expectSuccess: false);
 
@@ -217,13 +217,13 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 		Assert.Empty(await _installs.ListAsync(10, CancellationToken.None));
 		string note = await GetJobNoteAsync(jobId);
 		Assert.DoesNotContain(Token, note, StringComparison.Ordinal);
-		Assert.Contains("rejected the depot-token credential", note, StringComparison.Ordinal);
+		Assert.Contains("rejected the depot-activation-code credential", note, StringComparison.Ordinal);
 	}
 
 	[Fact]
 	public async Task DepotFetch_Unreachable_FailsCleanly_NoLedgerRow()
 	{
-		await SeedDepotTokenCredentialAsync(Token);
+		await SeedDepotActivationCodeCredentialAsync(Token);
 		_fetcher.NextResult = ManagedToolDepotFetchResult.Failure(
 			ManagedToolDepotFetchFailureKind.Unreachable, "The depot-fetch request timed out.");
 
@@ -237,7 +237,7 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 	[Fact]
 	public async Task DepotFetch_TooLarge_FailsCleanly_NoLedgerRow()
 	{
-		await SeedDepotTokenCredentialAsync(Token);
+		await SeedDepotActivationCodeCredentialAsync(Token);
 		_fetcher.NextResult = ManagedToolDepotFetchResult.Failure(
 			ManagedToolDepotFetchFailureKind.TooLarge, "The depot response exceeded the 536870912-byte cap and was aborted.");
 
@@ -251,7 +251,7 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 	[Fact]
 	public async Task DepotFetch_DisconnectedMode_RefusesCleanly_NoNetworkAttempt_NoLedgerRow()
 	{
-		await SeedDepotTokenCredentialAsync(Token);
+		await SeedDepotActivationCodeCredentialAsync(Token);
 		await SetModeAsync("disconnected");
 
 		Guid jobId = await RunDepotFetchOnceAsync(expectSuccess: false);
@@ -263,13 +263,35 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 	}
 
 	[Fact]
-	public async Task DepotFetch_NoDepotTokenCredentialConfigured_FailsCleanly_NoLedgerRow()
+	public async Task DepotFetch_NoActivationCodeCredentialConfigured_FailsCleanly_NoLedgerRow()
 	{
 		Guid jobId = await RunDepotFetchOnceAsync(expectSuccess: false);
 
 		Assert.Equal("failed", await GetJobFieldAsync(jobId, "state"));
-		Assert.Contains("depot-token", await GetJobNoteAsync(jobId), StringComparison.Ordinal);
+		Assert.Contains("depot-activation-code", await GetJobNoteAsync(jobId), StringComparison.Ordinal);
 		Assert.Empty(await _installs.ListAsync(10, CancellationToken.None));
+	}
+
+	/// <summary>
+	/// Issue #690 AC: a legacy Download Token credential is never selected or
+	/// decrypted for the VCF 9.1 depot-fetch path -- only
+	/// <c>CredentialTypes.DepotActivationCode</c> satisfies it. A stored
+	/// <c>legacy-download-token</c> row must not be silently accepted as a substitute.
+	/// </summary>
+	[Fact]
+	public async Task DepotFetch_OnlyLegacyDownloadTokenConfigured_FailsCleanly_NeverResolvesCrossPurpose()
+	{
+		Guid? credentialId = await _credentials.CreateAsync(
+			$"legacy-download-token-{Guid.NewGuid():N}", "legacy-download-token", "shared", sudoEnabled: false, CancellationToken.None);
+		Assert.NotNull(credentialId);
+		await _secretStore.StoreAsync(credentialId!.Value, System.Text.Encoding.UTF8.GetBytes(Token), "test", CancellationToken.None);
+
+		Guid jobId = await RunDepotFetchOnceAsync(expectSuccess: false);
+
+		Assert.Equal("failed", await GetJobFieldAsync(jobId, "state"));
+		Assert.Contains("depot-activation-code", await GetJobNoteAsync(jobId), StringComparison.Ordinal);
+		Assert.Empty(await _installs.ListAsync(10, CancellationToken.None));
+		Assert.Null(_fetcher.LastTokenSeen); // the fetcher was never even called -- no cross-purpose decrypt happened
 	}
 
 	private async Task SetModeAsync(string mode)
@@ -281,9 +303,9 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 		await command.ExecuteNonQueryAsync();
 	}
 
-	private async Task<Guid> SeedDepotTokenCredentialAsync(string secretValue)
+	private async Task<Guid> SeedDepotActivationCodeCredentialAsync(string secretValue)
 	{
-		Guid? credentialId = await _credentials.CreateAsync($"depot-token-{Guid.NewGuid():N}", "depot-token", "shared", sudoEnabled: false, CancellationToken.None);
+		Guid? credentialId = await _credentials.CreateAsync($"depot-activation-code-{Guid.NewGuid():N}", "depot-activation-code", "shared", sudoEnabled: false, CancellationToken.None);
 		Assert.NotNull(credentialId);
 		await _secretStore.StoreAsync(credentialId!.Value, System.Text.Encoding.UTF8.GetBytes(secretValue), "test", CancellationToken.None);
 		return credentialId.Value;

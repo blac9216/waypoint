@@ -34,12 +34,11 @@ namespace Waypoint.Tests.Infrastructure.Downloads;
 /// refusal and misconfiguration guard (its full connected-mode/decrypt/HTTP behavior
 /// is covered end to end against real Postgres by
 /// <c>ManagedToolInstallJobHandlerDepotFetchEndToEndTests</c>, the same split
-/// <c>CatalogIndexJobHandler</c>'s depot-token path already uses). No Postgres
+/// <c>ManagedToolInstallJobHandlerDepotFetchEndToEndTests</c>'s own Postgres-only split needs). No Postgres
 /// dependency here -- <see cref="FakeManagedToolInstallRepository"/>,
 /// <see cref="FakeManagedToolSignatureVerifier"/>, <see cref="FakeManagedToolDepotFetcher"/>,
 /// and <see cref="FakeApplianceStateRepository"/> stand in for the real infrastructure.
-/// The concrete <see cref="CredentialRepository"/> dependency (mirroring
-/// <c>CatalogIndexJobHandler</c>'s own constructor shape) is constructed with a
+/// The concrete <see cref="CredentialRepository"/> dependency is constructed with a
 /// syntactically valid but unreachable connection string -- every test in this file
 /// exercises only branches that never call it.
 /// </summary>
@@ -332,12 +331,10 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 		Assert.Empty(installs.Recorded);
 	}
 
-	// The "connected but no depot-token credential configured" and "connected,
-	// credential configured, fetch/verify/activate" scenarios both need a real
-	// CredentialRepository backed by Postgres (FindByTypeAsync opens a real
-	// connection) -- covered end to end by
-	// ManagedToolInstallJobHandlerDepotFetchEndToEndTests, mirroring
-	// CatalogIndexJobHandlerEndToEndTests's equivalent split for the same reason.
+	// The "connected but no depot-activation-code credential configured" and
+	// "connected, credential configured, fetch/verify/activate" scenarios both need
+	// a real CredentialRepository backed by Postgres (FindByTypeAsync opens a real
+	// connection) -- covered end to end by ManagedToolInstallJobHandlerDepotFetchEndToEndTests.
 
 	[Fact]
 	public async Task MissingArtifact_FailsWithoutRecordingALedgerRow()

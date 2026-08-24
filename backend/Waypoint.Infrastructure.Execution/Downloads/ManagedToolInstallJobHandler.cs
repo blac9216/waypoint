@@ -35,8 +35,11 @@ namespace Waypoint.Infrastructure.Downloads;
 /// local indexed repository, works air-gapped), <see cref="ManagedToolInstallSources.Upload"/>
 /// (a manual upload already staged by <c>ManagedToolController.Upload</c>), and
 /// <see cref="ManagedToolInstallSources.Depot"/> (connected-mode-only: fetched live
-/// using the stored depot-token credential, mirroring <c>CatalogIndexJobHandler</c>'s
-/// decrypt-for-one-call pattern). The first two resolve a file already on this host's
+/// using the stored <see cref="CredentialTypes.DepotActivationCode"/> credential --
+/// issue #690: this is the VCF 9.1 Activation Code, never the legacy Download Token,
+/// which cannot authenticate <c>vcf-download-tool</c> commands -- mirroring the
+/// decrypt-for-one-call pattern <c>CatalogIndexJobHandler</c> used before #690
+/// removed its own credential dependency). The first two resolve a file already on this host's
 /// filesystem; the depot path additionally fetches the candidate over HTTP via
 /// <see cref="IManagedToolDepotFetcher"/> before the same verify-then-activate
 /// pipeline every path shares.
@@ -181,12 +184,16 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// The connected-mode-only depot-fetch path (issue #39 remainder): refuses
-	/// cleanly and without any network attempt when disconnected or when no
-	/// depot-token credential is configured, decrypts the credential for exactly the
-	/// duration of the fetch (the same fail-closed audit + in-play redaction
-	/// <c>CatalogIndexJobHandler</c> already relies on), then runs the fetched pair
+	/// The connected-mode-only depot-fetch path (issue #39 remainder, #690's
+	/// purpose-specific resolution): refuses cleanly and without any network attempt
+	/// when disconnected or when no <see cref="CredentialTypes.DepotActivationCode"/>
+	/// credential is configured, decrypts that credential for exactly the duration of
+	/// the fetch (the same fail-closed audit + in-play redaction pattern the rest of
+	/// this codebase's decrypt-for-one-call handlers use), then runs the fetched pair
 	/// through the identical verify-then-activate pipeline the file-based paths use.
+	/// This never resolves <see cref="CredentialTypes.DepotToken"/> (the deprecated
+	/// legacy alias) or <see cref="CredentialTypes.LegacyDownloadToken"/> -- only the
+	/// Activation Code authenticates <c>vcf-download-tool</c> commands.
 	/// </summary>
 	private async Task<JobExecutionOutcome> ExecuteDepotFetchAsync(
 		ToolInstallPayload payload, string initiatedBy, JobExecutionContext context, CancellationToken cancellationToken)
@@ -203,13 +210,13 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 				"Depot-fetch install is unavailable in disconnected mode. Use the local-repository or manual-upload install path instead.");
 		}
 
-		CredentialResponse? depotTokenCredential = await _credentials
-			.FindByTypeAsync(_catalogOptions.Value.DepotTokenCredentialType, cancellationToken)
+		CredentialResponse? activationCodeCredential = await _credentials
+			.FindByTypeAsync(_catalogOptions.Value.DepotActivationCodeCredentialType, cancellationToken)
 			.ConfigureAwait(false);
-		if (depotTokenCredential is null || !depotTokenCredential.HasSecret)
+		if (activationCodeCredential is null || !activationCodeCredential.HasSecret)
 		{
 			return JobExecutionOutcome.Failed(
-				$"No credential of type '{_catalogOptions.Value.DepotTokenCredentialType}' is configured for the depot token. Configure a depot token before using the depot-fetch install path.");
+				$"No credential of type '{_catalogOptions.Value.DepotActivationCodeCredentialType}' is configured for the Software Depot Activation Code. Configure a depot Activation Code before using the depot-fetch install path.");
 		}
 
 		ManagedToolOptions options = _options.Value;
@@ -222,7 +229,7 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 			// security.md control 4 / #8's fail-closed decrypt audit: writes the
 			// secret.decrypted audit row before any plaintext reaches this method.
 			decrypted = await _secrets
-				.DecryptAsync(depotTokenCredential.Id, initiatedBy, context.Job.Id, context.Job.RunId, cancellationToken)
+				.DecryptAsync(activationCodeCredential.Id, initiatedBy, context.Job.Id, context.Job.RunId, cancellationToken)
 				.ConfigureAwait(false);
 
 			fetchResult = await _depotFetcher
@@ -231,11 +238,11 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 		}
 		catch (CredentialSecretNotFoundException exception)
 		{
-			return JobExecutionOutcome.Failed($"Depot token credential has no stored secret: {exception.Message}");
+			return JobExecutionOutcome.Failed($"Depot Activation Code credential has no stored secret: {exception.Message}");
 		}
 		catch (MasterKeyUnavailableException exception)
 		{
-			return JobExecutionOutcome.Failed($"Depot token could not be decrypted: {exception.Message}");
+			return JobExecutionOutcome.Failed($"Depot Activation Code could not be decrypted: {exception.Message}");
 		}
 		finally
 		{

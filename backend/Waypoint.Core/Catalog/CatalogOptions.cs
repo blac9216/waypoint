@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Waypoint.Core.Secrets;
+
 namespace Waypoint.Core.Catalog;
 
 /// <summary>
-/// Configuration for the <c>catalog-index</c> handler (issue #194, epic #9 slice 2).
+/// Configuration for the <c>catalog-index</c> handler (issue #194, epic #9 slice 2)
+/// and the depot-fetch tool-install path (<c>ManagedToolInstallJobHandler</c>).
 /// </summary>
 public sealed class CatalogOptions
 {
@@ -25,12 +28,14 @@ public sealed class CatalogOptions
 	public string DepotPath { get; set; } = "/vcf";
 
 	/// <summary>
-	/// The well-known <c>credentials.credential_type</c> value identifying the single
-	/// stored Broadcom depot token (docs/roadmap.md: the M1 secrets store "initially
-	/// hold[s] just the Broadcom depot token" -- one credential row, looked up by type
-	/// rather than carried on the job, since <c>POST /catalog/sync</c> fans the
-	/// <c>catalog-index</c> job out with <c>CredentialId: null</c> -- catalog-index has
-	/// no per-target credential the way a scan or download job does).
+	/// Issue #690: the well-known <c>credentials.credential_type</c> value identifying
+	/// the VCF 9.1 Software Depot Activation Code (<see cref="CredentialTypes.DepotActivationCode"/>)
+	/// that the connected-mode depot-fetch tool-install path
+	/// (<c>ManagedToolInstallJobHandler.ExecuteDepotFetchAsync</c>) resolves to
+	/// authenticate <c>vcf-download-tool</c> commands. Local catalog re-index
+	/// (<c>CatalogIndexJobHandler</c>) no longer resolves or decrypts any credential
+	/// at all (issue #690 AC) -- the offline indexing walk is a pure filesystem read
+	/// (docs/domain-model.md open question 4) that never needed one.
 	/// </summary>
-	public string DepotTokenCredentialType { get; set; } = "depot-token";
+	public string DepotActivationCodeCredentialType { get; set; } = CredentialTypes.DepotActivationCode;
 }

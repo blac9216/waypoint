@@ -311,14 +311,17 @@ Resolved:
   `vcf-docker-download`'s `Get-FileManifest` (`vcf-download-manager.common.ps1`), which
   is a pure filesystem walk (`Get-ChildItem -Recurse` + optional `Get-FileHash`) over
   files already present on the depot share — it never shells out to
-  `vcf-download-tool` or any other vendor binary, and takes no depot-token parameter at
-  all. The adjacent vendor-catalog readers (`Get-VcsaLatestRelease` /
-  `Get-VcsaCatalogPath`) are the same shape: they parse a local
-  `productVersionCatalog.json` already on disk, not a live vendor call. The download
-  tool (and the depot token) is only needed to *populate or refresh* depot content in
-  the first place — a distinct, already-resolved concern (previous bullet) — not to
-  read back what is already there. This is why `GET /catalog/artifacts` stays
-  browsable with the tool absent, and why `catalog-index`'s depot-token parameter
-  (threaded through under security.md controls 1/2 for forward compatibility with a
-  future vendor-catalog-refresh addition) is accepted but unused by the indexing walk
-  itself.
+  `vcf-download-tool` or any other vendor binary. The adjacent vendor-catalog readers
+  (`Get-VcsaLatestRelease` / `Get-VcsaCatalogPath`) are the same shape: they parse a
+  local `productVersionCatalog.json` already on disk, not a live vendor call. The
+  download tool (and the Activation Code that authenticates it) is only needed to
+  *populate or refresh* depot content in the first place — a distinct, already-resolved
+  concern (previous bullet) — not to read back what is already there. This is why
+  `GET /catalog/artifacts` stays browsable with the tool absent, and why issue #690
+  removed `CatalogIndexJobHandler`'s credential resolution/decrypt entirely rather than
+  merely leaving it unused: the handler now resolves NO credential of any kind
+  (`depot-activation-code`, `legacy-download-token`, or the deprecated `depot-token`
+  alias). `Invoke-WaypointCatalogIndex`'s `-DepotToken` parameter stays on the module
+  signature, optional and unbound by the C# handler, for forward compatibility with a
+  future vendor-catalog-refresh addition — the module itself still never reads it for
+  the indexing walk.

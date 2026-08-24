@@ -84,10 +84,18 @@ public sealed class DownloadsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Combined download readiness (issue #560): depot-token credential health plus the
-	/// managed <c>vcf-download-tool</c>'s installed state. Viewer+, matching every other
-	/// read on this controller -- this is operational chrome (what's missing before a
-	/// download can run), not privileged data.
+	/// Combined download readiness (issue #560, extended by issue #690): the Activation
+	/// Code and legacy Download Token credentials' health, reported INDEPENDENTLY (never
+	/// collapsed into one flag -- issue #690 AC), plus the managed
+	/// <c>vcf-download-tool</c>'s installed state. Viewer+, matching every other read on
+	/// this controller -- this is operational chrome (what's missing before a download
+	/// can run), not privileged data.
+	///
+	/// The legacy Download Token is reported for visibility (an operator migrating off
+	/// it should see its status) but never gates <see cref="DownloadReadinessResponse.Ready"/>
+	/// or contributes a <c>missing_prerequisites</c> entry -- nothing in this codebase's
+	/// connected-fetch path resolves it (only <see cref="CredentialTypes.DepotActivationCode"/>
+	/// authenticates <c>vcf-download-tool</c> commands).
 	///
 	/// Tool presence is read from the most recent download-runner heartbeat's
 	/// <c>worker_registry.tool_present</c> column (any row reporting a non-null value;
@@ -103,12 +111,17 @@ public sealed class DownloadsController : ControllerBase
 	[ProducesResponseType(typeof(DownloadReadinessResponse), StatusCodes.Status200OK)]
 	public async Task<ActionResult<DownloadReadinessResponse>> GetReadiness(CancellationToken cancellationToken)
 	{
-		CredentialResponse? depotToken = await _credentials
-			.FindByTypeAsync(_catalogOptions.Value.DepotTokenCredentialType, cancellationToken)
+		CredentialResponse? activationCode = await _credentials
+			.FindByTypeAsync(_catalogOptions.Value.DepotActivationCodeCredentialType, cancellationToken)
+			.ConfigureAwait(false);
+		CredentialResponse? legacyToken = await _credentials
+			.FindByTypeAsync(CredentialTypes.LegacyDownloadToken, cancellationToken)
 			.ConfigureAwait(false);
 
-		bool depotTokenConfigured = depotToken is { HasSecret: true };
-		string? depotTokenHealth = depotToken?.Health;
+		bool activationCodeConfigured = activationCode is { HasSecret: true };
+		string? activationCodeHealth = activationCode?.Health;
+		bool legacyTokenConfigured = legacyToken is { HasSecret: true };
+		string? legacyTokenHealth = legacyToken?.Health;
 
 		IReadOnlyList<WorkerHeartbeat> workers = await _workerRegistry.ListAsync(cancellationToken).ConfigureAwait(false);
 		bool? toolInstalled = workers
@@ -117,13 +130,13 @@ public sealed class DownloadsController : ControllerBase
 			.FirstOrDefault();
 
 		List<string> missing = [];
-		if (!depotTokenConfigured)
+		if (!activationCodeConfigured)
 		{
-			missing.Add("depot_token");
+			missing.Add("activation_code");
 		}
-		else if (depotTokenHealth == CredentialHealthStates.AuthFailing)
+		else if (activationCodeHealth == CredentialHealthStates.AuthFailing)
 		{
-			missing.Add("depot_token_auth_failing");
+			missing.Add("activation_code_auth_failing");
 		}
 
 		if (toolInstalled != true)
@@ -132,7 +145,8 @@ public sealed class DownloadsController : ControllerBase
 		}
 
 		bool ready = missing.Count == 0;
-		return Ok(new DownloadReadinessResponse(ready, depotTokenConfigured, depotTokenHealth, toolInstalled, missing));
+		return Ok(new DownloadReadinessResponse(
+			ready, activationCodeConfigured, activationCodeHealth, legacyTokenConfigured, legacyTokenHealth, toolInstalled, missing));
 	}
 
 	/// <summary>

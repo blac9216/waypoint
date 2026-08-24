@@ -132,7 +132,7 @@ public sealed partial class HttpManagedToolDepotFetcher : IManagedToolDepotFetch
 			{
 				return ManagedToolDepotFetchResult.Failure(
 					ManagedToolDepotFetchFailureKind.AuthFailure,
-					$"The depot rejected the depot-token credential ({(int)response.StatusCode}).");
+					$"The depot rejected the depot-activation-code credential ({(int)response.StatusCode}).");
 			}
 
 			if (!response.IsSuccessStatusCode)
