@@ -29,6 +29,7 @@ import {
 	type DownloadQueueItem,
 } from "./catalog";
 import { useDownloadQueue } from "./useDownloadQueue";
+import { useCatalogPull, type UseCatalogPullResult } from "./useCatalogPull";
 import { ArtifactTable } from "./ArtifactTable";
 import { StoresUsagePanel } from "./StoresUsagePanel";
 import "./DownloadCatalogScreen.css";
@@ -73,6 +74,7 @@ export function DownloadCatalogScreen() {
 	const [queueing, setQueueing] = useState(false);
 
 	const { items: queueItems, byArtifact } = useDownloadQueue(token, Boolean(user));
+	const catalogPull = useCatalogPull();
 
 	const load = useCallback((query: CatalogArtifactsQuery) => {
 		setLoading(true);
@@ -147,6 +149,9 @@ export function DownloadCatalogScreen() {
 	const canQueue = user ? roleAtLeast(user.role, "Operator") : false;
 	const queueGate = user
 		? roleGateProps(user.role, "Operator", `Requires Operator or Admin — downloads are not available to ${user.role}`)
+		: { disabled: true };
+	const adminGate = user
+		? roleGateProps(user.role, "Admin", `Requires Admin — pulling the vendor catalog is not available to ${user.role}`)
 		: { disabled: true };
 
 	const doQueue = useCallback(
@@ -260,12 +265,14 @@ export function DownloadCatalogScreen() {
 					</select>
 					<div className="catalog-filterbar__spacer" />
 					<div className="catalog-filterbar__sync mono">Index synced {formatSyncTime(indexSyncedAt)}</div>
-					<button type="button" onClick={doSync} disabled={syncing}>
-						{syncing ? "Syncing…" : "Sync catalog"}
+					<button type="button" onClick={doSync} disabled={syncing} title="Walks the local /vcf filesystem only — no network call, no Broadcom contact.">
+						{syncing ? "Re-indexing…" : "Local re-index"}
 					</button>
 				</div>
 
 				{loadError && <div className="catalog-screen__error">{loadError}</div>}
+
+				<CatalogPullPanel pull={catalogPull} adminGate={adminGate} />
 
 				<ArtifactTable
 					artifacts={artifacts}
@@ -307,6 +314,92 @@ export function DownloadCatalogScreen() {
 				<DownloadQueuePanel byArtifact={byArtifact} artifacts={artifacts} />
 				<StoresUsagePanel />
 			</aside>
+		</div>
+	);
+}
+
+/**
+ * "Pull vendor catalog" — the connected counterpart to "Local re-index"
+ * above, distinct in both copy and mechanism: this contacts Broadcom via the
+ * installed managed tool and the stored, validated Activation Code
+ * (`POST /catalog/pull`), rather than walking the local `/vcf` filesystem.
+ * Disabled-with-reason is driven entirely by `status.ready`/
+ * `not_ready_reason` from `GET /catalog/pull` — never a client-side guess —
+ * so it can never claim readiness the server doesn't also grant, and a raced
+ * 409 `catalog_pull_not_ready` still surfaces via `actionError`.
+ */
+function CatalogPullPanel({
+	pull,
+	adminGate,
+}: {
+	pull: UseCatalogPullResult;
+	adminGate: { disabled: boolean; style?: { opacity: number }; title?: string };
+}) {
+	const { status, loading, loadError, running, logLines, actionError, doPull } = pull;
+
+	const serverReady = status?.ready ?? false;
+	const pullDisabled = adminGate.disabled || running || loading || !serverReady;
+	const pullTitle = adminGate.disabled
+		? adminGate.title
+		: running
+			? "A catalog pull is already in progress"
+			: !serverReady
+				? status?.not_ready_reason
+				: undefined;
+
+	let lastResultText: string | null = null;
+	let lastResultBad = false;
+	if (status?.last_outcome === "succeeded") {
+		const count = status.last_success_item_count;
+		lastResultText =
+			count === 0
+				? `Last pull succeeded — the vendor catalog reported 0 items.`
+				: `Last pull succeeded — indexed ${count ?? "?"} item(s).`;
+	} else if (status?.last_outcome === "failed" || status?.last_outcome === "auth_failed") {
+		lastResultBad = true;
+		lastResultText = `Last pull failed${status.last_failure_reason ? `: ${status.last_failure_reason}` : "."}`;
+	}
+
+	return (
+		<div className="catalog-pull-panel">
+			<div className="catalog-pull-panel__header">
+				<div className="catalog-pull-panel__title">
+					PULL VENDOR CATALOG
+					<span className="catalog-pull-panel__subtitle">Contacts Broadcom via the installed download tool — distinct from local re-index.</span>
+				</div>
+				<div className="catalog-filterbar__spacer" />
+				<button type="button" onClick={() => void doPull()} disabled={pullDisabled} title={pullTitle}>
+					{running ? "Pulling…" : "Pull vendor catalog"}
+				</button>
+			</div>
+
+			{loadError && <div className="catalog-screen__error">{loadError}</div>}
+			{actionError && <div className="catalog-screen__error">{actionError}</div>}
+
+			{!loading && !serverReady && !running && status?.not_ready_reason && (
+				<div className="catalog-pull-panel__not-ready">{status.not_ready_reason}</div>
+			)}
+
+			<div className="catalog-pull-panel__facts mono">
+				<span>Last attempt {formatSyncTime(status?.last_attempt_at ?? null)}</span>
+				<span>Last success {formatSyncTime(status?.last_success_at ?? null)}</span>
+			</div>
+
+			{lastResultText && !running && (
+				<div className={lastResultBad ? "catalog-pull-panel__result--bad" : "catalog-pull-panel__result--ok"} aria-live="polite">
+					{lastResultText}
+				</div>
+			)}
+
+			{(running || logLines.length > 0) && (
+				<div className="catalog-pull-panel__log mono" aria-live="polite">
+					{logLines.length === 0 ? (
+						<div className="catalog-pull-panel__log-empty">Waiting for progress…</div>
+					) : (
+						logLines.map((line) => <div key={line.seq}>{line.message}</div>)
+					)}
+				</div>
+			)}
 		</div>
 	);
 }

@@ -4,7 +4,7 @@ import { AuthProvider } from "../../lib/auth";
 import { SystemProvider } from "../../lib/system";
 import type { WaypointEvent } from "../../lib/events";
 import { DownloadCatalogScreen } from "./DownloadCatalogScreen";
-import type { CatalogArtifact } from "./catalog";
+import type { CatalogArtifact, CatalogPullStatus } from "./catalog";
 
 /** A `fetch` mock for `/api/v1/events` whose stream stays open until the
  * test pushes into it — same helper shape as JobLogDrawer.test.tsx, reused
@@ -71,20 +71,39 @@ function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
+const READY_PULL_STATUS: CatalogPullStatus = { ready: true };
+const NOT_READY_PULL_STATUS: CatalogPullStatus = {
+	ready: false,
+	not_ready_reason:
+		"Connected catalog pull is disabled until the managed tool is installed, a Software Depot ID is generated, and a matching Activation Code has been validated (see Depot & Tokens enrollment).",
+};
+
 describe("DownloadCatalogScreen", () => {
 	let originalFetch: typeof fetch;
 	let sse: ReturnType<typeof createDriveableSse>;
 	let fetchCalls: { url: string; init?: RequestInit }[];
 	let queuePostBody: unknown;
+	let pullPostCount: number;
+	let pullStatus: CatalogPullStatus;
+	let pullPostResponse: { status: number; body: unknown };
 
-	function installFetchMock(role: string) {
+	function installFetchMock(role: string, initialPullStatus: CatalogPullStatus = READY_PULL_STATUS) {
 		fetchCalls = [];
 		sse = createDriveableSse();
+		pullPostCount = 0;
+		pullStatus = initialPullStatus;
+		pullPostResponse = { status: 202, body: { run_id: "pull-run-1", job_id: "pull-job-1" } };
 		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
 			fetchCalls.push({ url, init });
 
-			if (url.startsWith("/api/v1/events")) {
+			if (url.startsWith("/api/v1/events") || /^\/api\/v1\/runs\/[^/]+\/events/.test(url)) {
+				// Two independent SSE consumers share the one driveable stream in
+				// this mock: useDownloadQueue.ts's global `/events`, and
+				// useCatalogPull.ts's per-run `/runs/{run_id}/events` (same
+				// per-run convention useCredentialTest.ts already uses) — both
+				// resolve to the same `sse` fixture so a single `deliver(...)`
+				// frame reaches whichever hook is listening for it.
 				return sse.response;
 			}
 			if (url.startsWith("/api/v1/catalog/artifacts")) {
@@ -93,6 +112,13 @@ describe("DownloadCatalogScreen", () => {
 				// see catalog.ts's fetchCatalogArtifacts doc comment (issue #468
 				// found the mismatch live). Mocking the real shape here.
 				return jsonResponse(ARTIFACTS);
+			}
+			if (url === "/api/v1/catalog/pull" && (!init || init.method === undefined || init.method === "GET")) {
+				return jsonResponse(pullStatus);
+			}
+			if (url === "/api/v1/catalog/pull" && init?.method === "POST") {
+				pullPostCount += 1;
+				return jsonResponse(pullPostResponse.body, pullPostResponse.status);
 			}
 			if (url === "/api/v1/downloads" && (!init || init.method === undefined)) {
 				return jsonResponse([]);
@@ -285,6 +311,163 @@ describe("DownloadCatalogScreen", () => {
 
 		const row = screen.getByTitle("failed — checksum mismatch").closest("tr")!;
 		expect(within(row).queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+	});
+
+	it("separates local re-index from the vendor pull action", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		expect(screen.getByText("Local re-index")).toBeInTheDocument();
+		expect(screen.getByText("Local re-index")).toHaveAttribute("title", expect.stringContaining("no Broadcom contact"));
+		expect(screen.getByText("Pull vendor catalog")).toBeInTheDocument();
+		expect(screen.getByText(/Contacts Broadcom via the installed download tool/)).toBeInTheDocument();
+	});
+
+	it("disables Pull vendor catalog with the server's not_ready_reason until the enrollment gate is satisfied", async () => {
+		installFetchMock("Admin", NOT_READY_PULL_STATUS);
+		await mount();
+
+		await waitFor(() => expect(screen.getByText(NOT_READY_PULL_STATUS.not_ready_reason!)).toBeInTheDocument());
+
+		const button = screen.getByText("Pull vendor catalog");
+		expect(button).toBeDisabled();
+		expect(button).toHaveAttribute("title", NOT_READY_PULL_STATUS.not_ready_reason);
+	});
+
+	it("disables Pull vendor catalog with a role reason below Admin even when the server reports ready", async () => {
+		installFetchMock("Operator", READY_PULL_STATUS);
+		await mount();
+
+		const button = screen.getByText("Pull vendor catalog");
+		await waitFor(() => expect(button).toBeDisabled());
+		expect(button).toHaveAttribute("title", expect.stringContaining("Requires Admin"));
+	});
+
+	it("runs a successful pull: POST, follows job.log/job.state SSE, then shows item count and last-success", async () => {
+		installFetchMock("Admin", READY_PULL_STATUS);
+		await mount();
+
+		fireEvent.click(screen.getByText("Pull vendor catalog"));
+
+		await waitFor(() => expect(pullPostCount).toBe(1));
+		expect(screen.getByText("Pulling…")).toBeInTheDocument();
+
+		await deliver(
+			frame({
+				seq: 1,
+				ts: "2026-08-24T12:00:00Z",
+				type: "job.log",
+				job_id: "pull-job-1",
+				run_id: "pull-run-1",
+				data: { line: "Downloading productVersionCatalog.json…" },
+			}),
+		);
+		await waitFor(() => expect(screen.getByText("Downloading productVersionCatalog.json…")).toBeInTheDocument());
+
+		pullStatus = {
+			ready: true,
+			last_attempt_at: "2026-08-24T12:00:30Z",
+			last_outcome: "succeeded",
+			last_success_at: "2026-08-24T12:00:30Z",
+			last_success_item_count: 42,
+		};
+
+		await deliver(
+			frame({
+				seq: 2,
+				ts: "2026-08-24T12:00:30Z",
+				type: "job.state",
+				job_id: "pull-job-1",
+				run_id: "pull-run-1",
+				data: { to: "done", note: "Indexed 42 artifact(s)." },
+			}),
+		);
+
+		await waitFor(() => expect(screen.getByText("Last pull succeeded — indexed 42 item(s).")).toBeInTheDocument());
+		expect(screen.queryByText("Pulling…")).not.toBeInTheDocument();
+	});
+
+	it("reports a genuine zero-item success honestly, not as a silent no-op", async () => {
+		installFetchMock("Admin", READY_PULL_STATUS);
+		await mount();
+
+		fireEvent.click(screen.getByText("Pull vendor catalog"));
+		await waitFor(() => expect(pullPostCount).toBe(1));
+
+		pullStatus = {
+			ready: true,
+			last_attempt_at: "2026-08-24T12:00:30Z",
+			last_outcome: "succeeded",
+			last_success_at: "2026-08-24T12:00:30Z",
+			last_success_item_count: 0,
+		};
+
+		await deliver(
+			frame({
+				seq: 1,
+				ts: "2026-08-24T12:00:30Z",
+				type: "job.state",
+				job_id: "pull-job-1",
+				run_id: "pull-run-1",
+				data: { to: "done" },
+			}),
+		);
+
+		await waitFor(() =>
+			expect(screen.getByText("Last pull succeeded — the vendor catalog reported 0 items.")).toBeInTheDocument(),
+		);
+	});
+
+	it("surfaces a failed pull's reason and allows retry via the same action", async () => {
+		installFetchMock("Admin", READY_PULL_STATUS);
+		await mount();
+
+		fireEvent.click(screen.getByText("Pull vendor catalog"));
+		await waitFor(() => expect(pullPostCount).toBe(1));
+
+		pullStatus = {
+			ready: true,
+			last_attempt_at: "2026-08-24T12:00:30Z",
+			last_outcome: "failed",
+			last_failure_reason: "metadata download exited nonzero",
+		};
+
+		await deliver(
+			frame({
+				seq: 1,
+				ts: "2026-08-24T12:00:30Z",
+				type: "job.state",
+				job_id: "pull-job-1",
+				run_id: "pull-run-1",
+				data: { to: "failed", note: "metadata download exited nonzero" },
+			}),
+		);
+
+		await waitFor(() =>
+			expect(screen.getByText("Last pull failed: metadata download exited nonzero")).toBeInTheDocument(),
+		);
+
+		// Retry is simply clicking the same action again.
+		pullStatus = { ready: true };
+		fireEvent.click(screen.getByText("Pull vendor catalog"));
+		await waitFor(() => expect(pullPostCount).toBe(2));
+	});
+
+	it("surfaces a 409 catalog_pull_not_ready if the readiness gate is raced between load and click", async () => {
+		installFetchMock("Admin", READY_PULL_STATUS);
+		await mount();
+
+		pullPostResponse = {
+			status: 409,
+			body: { error: { code: "catalog_pull_not_ready", message: "Connected catalog pull is disabled until enrollment is validated." } },
+		};
+
+		fireEvent.click(screen.getByText("Pull vendor catalog"));
+
+		await waitFor(() =>
+			expect(screen.getByText("Connected catalog pull is disabled until enrollment is validated.")).toBeInTheDocument(),
+		);
+		expect(screen.queryByText("Pulling…")).not.toBeInTheDocument();
 	});
 
 	it("updates status live from download.progress SSE events, no polling", async () => {
