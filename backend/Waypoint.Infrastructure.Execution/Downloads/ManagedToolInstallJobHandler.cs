@@ -26,8 +26,8 @@ namespace Waypoint.Infrastructure.Downloads;
 /// <summary>
 /// The <c>tool-install</c> <see cref="Waypoint.Core.Jobs.JobShape.Simple"/> job handler
 /// (issue #39, ADR-0015 decision 3): places a candidate <c>vcf-download-tool</c>
-/// artifact into the managed-tool volume once its detached signature verifies against
-/// the Broadcom release key, and appends the outcome (installed, rejected, or failed) to
+/// artifact into the managed-tool volume once its source-specific verification passes,
+/// and appends the outcome (installed, rejected, or failed) to
 /// the append-only <c>managed_tool_installs</c> ledger regardless of which way it goes.
 ///
 /// Implements all three ADR-0015 install paths:
@@ -292,8 +292,8 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 
 	/// <summary>
 	/// The shared tail every install path funnels through once it has a candidate
-	/// artifact + signature pair sitting on disk: hash, verify, and either record a
-	/// <c>rejected</c> ledger row (bad signature) or atomically activate and record
+	/// artifact sitting on disk: hash, apply its source-specific verifier, and either
+	/// record a <c>rejected</c> ledger row or atomically activate and record
 	/// <c>installed</c>/<c>failed</c>.
 	/// </summary>
 	private async Task<JobExecutionOutcome> VerifyAndActivateAsync(
@@ -314,9 +314,17 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 		else
 		{
 			sha256 = await ComputeSha256Async(artifactPath, cancellationToken).ConfigureAwait(false);
-			ManagedToolSignatureResult verification = await _verifier
-				.VerifyAsync(artifactPath, signaturePath, cancellationToken).ConfigureAwait(false);
-			failureReason = verification.Valid ? null : verification.FailureReason;
+			if (source == ManagedToolInstallSources.Upload)
+			{
+				failureReason = await VerifyUploadChecksumsAsync(
+					artifactPath, sha256, context.Job.Payload, cancellationToken).ConfigureAwait(false);
+			}
+			else
+			{
+				ManagedToolSignatureResult verification = await _verifier
+					.VerifyAsync(artifactPath, signaturePath, cancellationToken).ConfigureAwait(false);
+				failureReason = verification.Valid ? null : verification.FailureReason;
+			}
 		}
 
 		if (failureReason is not null)
@@ -391,6 +399,34 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 		return Convert.ToHexString(hash).ToLowerInvariant();
 	}
 
+	private static async Task<string?> VerifyUploadChecksumsAsync(
+		string path, string actualSha256, string payloadJson, CancellationToken cancellationToken)
+	{
+		ToolInstallPayload? payload = JsonSerializer.Deserialize<ToolInstallPayload>(payloadJson, PayloadOptions);
+		if (payload is null || (payload.ExpectedSha256 is null && payload.ExpectedMd5 is null))
+		{
+			return "Upload requires a published SHA-256 or legacy MD5 checksum.";
+		}
+		if (payload.ExpectedSha256 is not null && !string.Equals(payload.ExpectedSha256, actualSha256, StringComparison.OrdinalIgnoreCase))
+		{
+			return $"SHA-256 mismatch: expected {payload.ExpectedSha256}, actual {actualSha256}.";
+		}
+		if (payload.ExpectedMd5 is not null)
+		{
+			await using FileStream stream = File.OpenRead(path);
+			// Broadcom still publishes MD5 for legacy integrity comparison. It is never
+			// treated as authentication, and SHA-256 remains the preferred input.
+#pragma warning disable CA5351
+			string actualMd5 = Convert.ToHexString(await MD5.HashDataAsync(stream, cancellationToken).ConfigureAwait(false)).ToLowerInvariant();
+#pragma warning restore CA5351
+			if (!string.Equals(payload.ExpectedMd5, actualMd5, StringComparison.OrdinalIgnoreCase))
+			{
+				return $"Legacy MD5 mismatch: expected {payload.ExpectedMd5}, actual {actualMd5}.";
+			}
+		}
+		return null;
+	}
+
 	private static void TrySetExecutable(string path)
 	{
 		if (OperatingSystem.IsWindows())
@@ -404,5 +440,7 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 			UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 	}
 
-	private sealed record ToolInstallPayload(string? Source, string? SourcePath, string? Version, string? InitiatedBy);
+	private sealed record ToolInstallPayload(
+		string? Source, string? SourcePath, string? Version, string? InitiatedBy,
+		string? ExpectedSha256, string? ExpectedMd5);
 }
