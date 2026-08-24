@@ -398,3 +398,54 @@ public sealed record AppliedAttestationResponse(
 
 	[property: JsonPropertyName("expired")]
 	bool Expired);
+
+/// <summary>
+/// Request body for <c>POST /api/v1/runs/{id}/purge</c> (issue #594, epic #577).
+/// <see cref="Confirmation"/> mirrors <c>RunsController.RemediateConfirmation</c>'s
+/// explicit step-up pattern -- purge is destructive and irreversible, so it is never
+/// implicit.
+/// </summary>
+public sealed record RunPurgeRequest(
+	[property: JsonPropertyName("confirmation")]
+	string? Confirmation);
+
+/// <summary>
+/// Response body for both <c>POST /api/v1/runs/{id}/purge</c> and
+/// <c>GET /api/v1/runs/{id}/purge</c> -- the same durable status shape either way, so
+/// the frontend can poll the GET endpoint with the exact response the POST returned.
+/// <see cref="ArtifactsPhase"/>/<see cref="LastError"/> are what a retry affordance
+/// keys off: <c>"failed"</c> means retryable by calling <c>POST</c> again.
+/// </summary>
+public sealed record RunPurgeStatusResponse(
+	[property: JsonPropertyName("run_id")]
+	string RunId,
+
+	[property: JsonPropertyName("outcome")]
+	string Outcome,
+
+	[property: JsonPropertyName("requested_by")]
+	string RequestedBy,
+
+	[property: JsonPropertyName("requested_at")]
+	string RequestedAt,
+
+	[property: JsonPropertyName("prior_state")]
+	string PriorState,
+
+	[property: JsonPropertyName("db_phase_done")]
+	bool DbPhaseDone,
+
+	[property: JsonPropertyName("artifacts_phase")]
+	string ArtifactsPhase,
+
+	[property: JsonPropertyName("artifacts_total")]
+	int ArtifactsTotal,
+
+	[property: JsonPropertyName("artifacts_deleted")]
+	int ArtifactsDeleted,
+
+	[property: JsonPropertyName("last_error")]
+	string? LastError,
+
+	[property: JsonPropertyName("completed_at")]
+	string? CompletedAt);

@@ -23,6 +23,7 @@ using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.Runs;
 using Waypoint.Infrastructure.Secrets;
 using Waypoint.Infrastructure.Sites;
 using Xunit;
@@ -627,6 +628,151 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		JobSummary? job = await runnerRepository.GetJobAsync(jobId, CancellationToken.None);
 		Assert.NotNull(job);
 		Assert.Equal("svc@example.internal", job!.CredentialUsername);
+	}
+
+	/// <summary>
+	/// Issue #594 (migration 0042): <c>PurgeJobHandler</c> reports its own outcome back
+	/// into <c>run_purges</c> (<c>artifacts_phase</c>, <c>artifacts_total</c>,
+	/// <c>artifacts_deleted</c>, <c>last_error</c>, <c>completed_at</c>) as the real
+	/// compliance-runner role -- proves the narrow column-scoped UPDATE grant migration
+	/// 0042 adds actually covers <see cref="RunPurgeRepository.ReportArtifactOutcomeAsync"/>
+	/// and the reverse <see cref="RunPurgeRepository.FindRunIdByArtifactJobIdAsync"/>
+	/// lookup the handler uses to resolve which run its own job id belongs to, written
+	/// at authoring time per this file's own "a new runner-executed table without a
+	/// role-contract test ships grant drift silently" lesson (see 0036's companion
+	/// test) rather than after a live 42501.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_ReportsPurgeArtifactOutcome_WithoutPermissionDenied()
+	{
+		Guid runId = await SeedRunAsync();
+		Guid purgeJobId = await SeedJobAsync(runId);
+
+		RunPurgeRepository ownerPurges = new(_fixture.ConnectionString);
+		await ownerPurges.CreateAsync(runId, "admin-tester", "completed", CancellationToken.None);
+		await ownerPurges.MarkArtifactJobEnqueuedAsync(runId, purgeJobId, artifactsTotal: 3, CancellationToken.None);
+
+		RunPurgeRepository runnerPurges = new(_complianceRunnerConnectionString);
+
+		Guid? resolvedRunId = await runnerPurges.FindRunIdByArtifactJobIdAsync(purgeJobId, CancellationToken.None);
+		Assert.Equal(runId, resolvedRunId);
+
+		await runnerPurges.ReportArtifactOutcomeAsync(runId, succeeded: true, artifactsDeleted: 3, lastError: null, CancellationToken.None);
+
+		Waypoint.Core.Runs.RunPurgeStatus? status = await ownerPurges.GetStatusAsync(runId, CancellationToken.None);
+		Assert.NotNull(status);
+		Assert.Equal("done", status!.ArtifactsPhase);
+		Assert.Equal(3, status.ArtifactsDeleted);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check for <c>run_purges</c>: the compliance-runner role
+	/// gets SELECT plus the five narrow reporting columns' UPDATE, never INSERT/DELETE
+	/// (those stay API-only -- <see cref="Waypoint.Infrastructure.Runs.RunPurgeService"/>
+	/// creates and completes/removes the row) and never <c>requested_by</c>/
+	/// <c>prior_state</c>/<c>db_phase_done</c> (API-owned columns) via UPDATE.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotInsertOrDeleteRunPurges()
+	{
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO run_purges (run_id, requested_by, prior_state) VALUES ($1, 'x', 'completed')", connection);
+		insert.Parameters.AddWithValue(Guid.NewGuid());
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
+	/// Second least-privilege boundary check for <c>run_purges</c>: <c>db_phase_done</c>
+	/// is API-owned (RunPurgeService's own database-phase completion), never written by
+	/// the runner-executed artifact job -- an UPDATE naming it must still fail 42501
+	/// even though the role now has SOME UPDATE privilege on this table.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotUpdateDbPhaseDone()
+	{
+		Guid runId = await SeedRunAsync();
+		RunPurgeRepository ownerPurges = new(_fixture.ConnectionString);
+		await ownerPurges.CreateAsync(runId, "admin-tester", "completed", CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new("UPDATE run_purges SET db_phase_done = true WHERE run_id = $1", connection);
+		update.Parameters.AddWithValue(runId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
+	/// Issue #594: proves 0042's carve-out trigger on <c>attestation_snapshots</c>
+	/// works through <see cref="AttestationSnapshotRepository.DeleteForRunAsync"/> as
+	/// the OWNER connection (RunPurgeService always runs the database phase through
+	/// its own API-side connection, never as a runner role -- see that service's doc
+	/// comment) -- included in this file because it is the other structural
+	/// DB-permission change 0042 makes (a trigger carve-out, not a GRANT) and belongs
+	/// alongside this file's other "prove the migration's access-control claim against
+	/// real Postgres" cases rather than only in RunPurgeServiceTests' higher-level flow.
+	/// </summary>
+	[Fact]
+	public async Task OwnerConnection_CanDeleteAttestationSnapshotsForARun_ViaPurgeCarveOut()
+	{
+		Guid runId = await SeedRunAsync();
+		Guid jobId = await SeedJobAsync(runId);
+
+		await using (NpgsqlConnection owner = new(_fixture.ConnectionString))
+		{
+			await owner.OpenAsync();
+			await using NpgsqlCommand insert = new(
+				"""
+				INSERT INTO attestation_snapshots (run_id, job_id, target_id, profile, scope, applied, expired)
+				VALUES ($1, $2, $3, 'vsphere-stig', 'target', true, false)
+				""", owner);
+			insert.Parameters.AddWithValue(runId);
+			insert.Parameters.AddWithValue(jobId);
+			insert.Parameters.AddWithValue(Guid.NewGuid());
+			await insert.ExecuteNonQueryAsync();
+		}
+
+		AttestationSnapshotRepository attestationSnapshots = new(_fixture.ConnectionString);
+		int deleted = await attestationSnapshots.DeleteForRunAsync(runId, CancellationToken.None);
+
+		Assert.Equal(1, deleted);
+	}
+
+	/// <summary>
+	/// The carve-out is scoped to a matching <c>waypoint.purge_run_id</c> GUC only --
+	/// a bare DELETE with no GUC set (any caller other than
+	/// <see cref="AttestationSnapshotRepository.DeleteForRunAsync"/>) must still hit the
+	/// original 0021 append-only trigger, proving 0042 did not accidentally relax the
+	/// guarantee generally.
+	/// </summary>
+	[Fact]
+	public async Task OwnerConnection_CannotDeleteAttestationSnapshots_WithoutThePurgeGuc()
+	{
+		Guid runId = await SeedRunAsync();
+		Guid jobId = await SeedJobAsync(runId);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO attestation_snapshots (run_id, job_id, target_id, profile, scope, applied, expired)
+			VALUES ($1, $2, $3, 'vsphere-stig', 'target', true, false)
+			""", connection);
+		insert.Parameters.AddWithValue(runId);
+		insert.Parameters.AddWithValue(jobId);
+		insert.Parameters.AddWithValue(Guid.NewGuid());
+		await insert.ExecuteNonQueryAsync();
+
+		await using NpgsqlCommand delete = new("DELETE FROM attestation_snapshots WHERE run_id = $1", connection);
+		delete.Parameters.AddWithValue(runId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Contains("append-only", exception.Message, StringComparison.Ordinal);
 	}
 
 	private async Task ResetCapacityTablesAsync()

@@ -24,10 +24,12 @@ namespace Waypoint.Infrastructure.ConfigDocs;
 /// no ORM -- the same convention <see cref="ConfigDocRepository"/> establishes for this
 /// layer.
 ///
-/// This type only ever INSERTs: the table is append-only by DB trigger (0021), and
-/// nothing here issues UPDATE/DELETE, matching the discipline
-/// <see cref="ConfigDocRepository.SaveVersionAsync"/>'s doc comment describes for
-/// <c>config_versions</c>.
+/// This type only ever INSERTs, with one narrow exception:
+/// <see cref="DeleteForRunAsync"/> (issue #594, migration 0042). The table is
+/// append-only by DB trigger (0021) and stays that way for every other caller --
+/// matching the discipline <see cref="ConfigDocRepository.SaveVersionAsync"/>'s doc
+/// comment describes for <c>config_versions</c> -- but purge is a documented, narrowly
+/// scoped exception the trigger itself recognizes (see 0042's carve-out comment).
 /// </summary>
 public sealed class AttestationSnapshotRepository
 {
@@ -110,6 +112,38 @@ public sealed class AttestationSnapshotRepository
 		}
 
 		return items;
+	}
+
+	/// <summary>
+	/// Issue #594 (migration 0042): deletes every snapshot row for a purged run. Sets
+	/// the <c>waypoint.purge_run_id</c> session-local GUC the append-only trigger's
+	/// carve-out checks, via <c>SET LOCAL</c> inside the same transaction as the
+	/// DELETE, so the exception cannot outlive this one statement or leak onto a
+	/// pooled connection's next use. Returns the number of rows removed (0 is the
+	/// common case for a discover/credential-test-only run that never reached the
+	/// attest stage).
+	/// </summary>
+	public async Task<int> DeleteForRunAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		await using (NpgsqlCommand setGuc = new("SELECT set_config('waypoint.purge_run_id', $1, true)", connection, transaction))
+		{
+			setGuc.Parameters.AddWithValue(runId.ToString());
+			await setGuc.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		int deleted;
+		await using (NpgsqlCommand delete = new("DELETE FROM attestation_snapshots WHERE run_id = $1", connection, transaction))
+		{
+			delete.Parameters.AddWithValue(runId);
+			deleted = await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		return deleted;
 	}
 
 	private static AttestationSnapshot Map(NpgsqlDataReader reader)

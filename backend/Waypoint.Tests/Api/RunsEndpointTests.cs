@@ -19,6 +19,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Runs;
 using Waypoint.Tests.Support;
 
 namespace Waypoint.Tests.Api;
@@ -130,6 +131,102 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		Assert.Equal("remediate", _factory.Repository.LastCreateRun!.Value.RunType);
+	}
+
+	// -- issue #594 (epic #577): run purge -----------------------------------
+
+	[Theory]
+	[InlineData(null)]
+	[InlineData("purge")]
+	[InlineData("yes")]
+	public async Task PurgeRun_WithoutExactConfirmation_Returns400(string? confirmation)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{Guid.NewGuid()}/purge");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData("Viewer")]
+	[InlineData("Cyber")]
+	[InlineData("Operator")]
+	public async Task PurgeRun_BelowAdmin_Returns403(string role)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{Guid.NewGuid()}/purge");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation = "PURGE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		// [RequireAdminRole] rejects before the controller action's own confirmation
+		// check ever runs -- proves the role gate is the floor, not just the body
+		// validation.
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task PurgeRun_UnknownRun_Returns404()
+	{
+		// FakeJobQueueRepository's underlying RunPurgeService resolves the real run
+		// lookup through IJobControlRepository (the fake) -- an id never registered
+		// via SetRun means GetRunAsync returns null, so RunPurgeService reports
+		// RunNotFound and the controller maps that to 404, proving the confirmation
+		// gate and the not-found mapping compose correctly end to end.
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{Guid.NewGuid()}/purge");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation = "PURGE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task PurgeRun_NonTerminalRun_Returns409()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{runId}/purge");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation = "PURGE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		Assert.Contains("run_not_terminal", body, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task GetPurgeStatus_NeverRequested_Returns404()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/purge");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 	}
 
 	[Fact]
@@ -662,8 +759,24 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 			}
 			services.AddSingleton<IJobControlRepository>(Repository);
 			services.AddSingleton<IJobRunnerRepository>(Repository);
+
+			// Issue #594: RunPurgeService (resolved through RunsController) depends on
+			// IRunPurgeRepository -- the real Npgsql implementation would otherwise try
+			// to connect to the unreachable "postgres" host baked into
+			// appsettings.json's default ConnectionStrings:Waypoint, turning every
+			// purge-endpoint test into a 500 rather than exercising the controller's
+			// own outcome-to-status-code mapping. Same fake-repository swap pattern as
+			// IJobControlRepository/IJobRunnerRepository above.
+			var purgeRepositoryDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(Waypoint.Core.Runs.IRunPurgeRepository));
+			if (purgeRepositoryDescriptor != null)
+			{
+				services.Remove(purgeRepositoryDescriptor);
+			}
+			services.AddSingleton<Waypoint.Core.Runs.IRunPurgeRepository>(PurgeRepository);
 		});
 	}
+
+	public FakeRunPurgeRepository PurgeRepository { get; } = new();
 }
 
 /// <summary>
@@ -883,5 +996,64 @@ public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRe
 	{
 		_ = (jobId, uploadStatus, detail, cancellationToken);
 		return Task.CompletedTask;
+	}
+}
+
+/// <summary>
+/// Issue #594: minimal in-memory fake for <see cref="IRunPurgeRepository"/>, mirroring
+/// <see cref="FakeJobQueueRepository"/>'s "track state per run GUID" shape. No test in
+/// this file exercises the in-progress/retry/completion flow (that is
+/// <c>RunPurgeServiceTests</c>' job, against real Postgres) -- this fake only needs to
+/// avoid a live connection attempt so the controller's role/confirmation/not-found/
+/// not-terminal mapping can be exercised without Postgres.
+/// </summary>
+public sealed class FakeRunPurgeRepository : IRunPurgeRepository
+{
+	public Task<RunPurgeStatus?> GetStatusAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		_ = (runId, cancellationToken);
+		return Task.FromResult<RunPurgeStatus?>(null);
+	}
+
+	public Task<RunPurgeTombstone?> GetTombstoneAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		_ = (runId, cancellationToken);
+		return Task.FromResult<RunPurgeTombstone?>(null);
+	}
+
+	public Task<Guid?> FindRunIdByArtifactJobIdAsync(Guid artifactJobId, CancellationToken cancellationToken)
+	{
+		_ = (artifactJobId, cancellationToken);
+		return Task.FromResult<Guid?>(null);
+	}
+
+	public Task<RunPurgeStatus> CreateAsync(Guid runId, string requestedBy, string priorState, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult(new RunPurgeStatus(runId, requestedBy, DateTimeOffset.UtcNow, priorState, false, "pending", 0, 0, null, null));
+	}
+
+	public Task MarkDbPhaseDoneAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		_ = (runId, cancellationToken);
+		return Task.CompletedTask;
+	}
+
+	public Task MarkArtifactJobEnqueuedAsync(Guid runId, Guid jobId, int artifactsTotal, CancellationToken cancellationToken)
+	{
+		_ = (runId, jobId, artifactsTotal, cancellationToken);
+		return Task.CompletedTask;
+	}
+
+	public Task ReportArtifactOutcomeAsync(Guid runId, bool succeeded, int artifactsDeleted, string? lastError, CancellationToken cancellationToken)
+	{
+		_ = (runId, succeeded, artifactsDeleted, lastError, cancellationToken);
+		return Task.CompletedTask;
+	}
+
+	public Task<RunPurgeTombstone> CompleteAsync(Guid runId, string runType, string actor, string priorState, int artifactsDeleted, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult(new RunPurgeTombstone(Guid.NewGuid(), runId, runType, priorState, actor, "completed", "{}", DateTimeOffset.UtcNow));
 	}
 }
