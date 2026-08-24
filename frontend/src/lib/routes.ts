@@ -12,6 +12,7 @@ import { roleAtLeast } from "./roles";
  */
 export type ScreenKey =
 	| "dashboard"
+	| "live-jobs"
 	| "live-run"
 	| "start-scan"
 	| "results"
@@ -37,6 +38,17 @@ export interface RouteDef {
 
 export const ROUTES: RouteDef[] = [
 	{ key: "dashboard", path: "/", title: "Dashboard", requiredRole: "Viewer" },
+	// Top-level (ADR-0019 decision 1 / issue #590): Live Jobs is a global
+	// operational projection, not scoped to Compliance — it sits above the
+	// COMPLIANCE nav group in LeftRail.tsx's NAV_GROUPS, not inside it.
+	{ key: "live-jobs", path: "/live-jobs", title: "Live Jobs", requiredRole: "Viewer" },
+	// Deep-link compat only (issue #590 AC "old scan Live Run route
+	// redirects... for deep-link compat"): no nav entry, no ROUTES-driven
+	// screen render — App.tsx's LiveRunRedirect rewrites this path (and its
+	// `?run=` query) to /live-jobs before anything mounts. Kept in ROUTES so
+	// `routeForPath("/live-run")` still resolves (role/mode guard needs a
+	// real RouteDef to evaluate) rather than falling through to 404-like
+	// DEFAULT_ROUTE handling.
 	{ key: "live-run", path: "/live-run", title: "Live Run", requiredRole: "Viewer" },
 	{ key: "start-scan", path: "/scan/new", title: "Start a Scan", requiredRole: "Cyber" },
 	{ key: "results", path: "/results", title: "Results & History", requiredRole: "Viewer" },

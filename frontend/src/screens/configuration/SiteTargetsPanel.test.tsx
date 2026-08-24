@@ -549,7 +549,7 @@ describe("SiteTargetsPanel Refresh Inventory action (issue #557)", () => {
 
 		await waitFor(() => expect(within(row).getByText("Retry")).toBeInTheDocument(), { timeout: 6000 });
 		const link = within(row).getByText("View run details") as HTMLAnchorElement;
-		expect(link.getAttribute("href")).toBe("/live-run?run=run-1");
+		expect(link.getAttribute("href")).toBe("/live-jobs?run=run-1");
 		expect(within(row).getByText("Retry")).not.toBeDisabled();
 	}, 10000);
 

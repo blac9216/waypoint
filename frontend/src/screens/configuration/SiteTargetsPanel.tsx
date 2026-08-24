@@ -484,7 +484,7 @@ function TargetRow({
 					{discoveryState?.outcome === "failed" && (
 						<div className="config-table__discovery-detail">
 							Discovery failed.{" "}
-							<a href={`/live-run?run=${discoveryState.runId}`} className="config-table__discovery-link">
+							<a href={`/live-jobs?run=${discoveryState.runId}`} className="config-table__discovery-link">
 								View run details
 							</a>
 						</div>

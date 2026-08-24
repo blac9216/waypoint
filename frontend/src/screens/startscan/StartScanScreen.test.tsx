@@ -244,7 +244,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587)", (
 		expect(screen.getByText("Start scan")).not.toBeDisabled();
 
 		fireEvent.click(screen.getByText("Start scan"));
-		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
+		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-jobs?run=run-123"));
 
 		const call = fetchCalls.find((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")!;
 		const body = JSON.parse(call.init!.body as string) as Record<string, unknown>;
@@ -294,7 +294,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587)", (
 		expect(screen.getByText("Start scan")).not.toBeDisabled();
 
 		fireEvent.click(screen.getByText("Start scan"));
-		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
+		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-jobs?run=run-123"));
 
 		const call = fetchCalls.find((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")!;
 		const body = JSON.parse(call.init!.body as string) as { credential_overrides?: { target_id: string; purpose: string; credential_id: string }[] };
@@ -333,7 +333,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587)", (
 		expect(screen.queryByText("invented-wizard-secret-abc")).not.toBeInTheDocument();
 
 		fireEvent.click(screen.getByText("Start scan"));
-		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
+		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-jobs?run=run-123"));
 
 		const call = fetchCalls.find((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")!;
 		const body = JSON.parse(call.init!.body as string) as {
@@ -483,7 +483,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587)", (
 		fireEvent.click(button);
 		fireEvent.click(button);
 
-		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
+		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-jobs?run=run-123"));
 		expect(fetchCalls.filter((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")).toHaveLength(1);
 	});
 

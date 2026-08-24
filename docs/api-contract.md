@@ -352,7 +352,7 @@ execution flows through the job queue), so a progress emitter always has a
 would need a contract change plus a `job_events_scope_check` relaxation, decided
 here to be rejected rather than left open (#116).
 
-### Live Jobs and historical log queries (ADR-0019; #581 implemented, #590 planned)
+### Live Jobs and historical log queries (ADR-0019; #581 and #590 implemented)
 
 SSE remains the live transport, but it is not the historical paging API. Issue #581
 implemented `GET /runs/{id}/events/history?job_id=...&kind=...&level=...&cursor=...&limit=...`
@@ -367,10 +367,14 @@ sweep has removed) is not yet defined — deferred to whatever issue introduces
 `job_events` retention, since nothing in this codebase deletes `job_events` rows today
 (they are append-only-by-trigger; even `/runs/{id}/purge` leaves them in place).
 
-The global `GET /runs?state=<active|terminal>&run_type=<type>&cursor=...` list-level
-read contract remains planned by #590 (the Live Jobs workspace) and is not yet
-implemented; today's `/runs` list (documented above) uses `?limit/offset` +
-`X-Total-Count`, not a cursor.
+The global `GET /runs?state=<active|terminal>&run_type=<type>&cursor=...` filtered/
+cursor list-level read contract remains planned; it was NOT added by #590. The Live
+Jobs workspace (#590) ships against today's `/runs` list (documented above —
+`?limit/offset` + `X-Total-Count`, not a cursor): it fetches the newest page, narrows
+to non-terminal runs client-side, and fans out `GET /runs/{id}/jobs` per active run —
+additive-only, no backend change. `#590` also adds the first frontend consumer of
+`GET /runs/{id}/events/history` (`frontend/src/api/jobEventHistory.ts`), used for the
+historical log view of a selected terminal job.
 
 Queue-halt observability (#147): tripping the consecutive-auth-failure halt emits
 `queue.state` for each newly-blocked run and one `system.notice` — including when

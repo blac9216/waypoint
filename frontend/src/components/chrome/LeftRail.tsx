@@ -20,9 +20,13 @@ import {
 } from "./icons";
 import "./LeftRail.css";
 
-const ICONS: Record<ScreenKey, ComponentType> = {
+// `live-run` intentionally has no entry here (issue #590, ADR-0019 decision
+// 1): the old scan-only Live Run route still exists in ROUTES for deep-link
+// redirect compat (see routes.ts), but it is not a navigable destination —
+// Live Jobs replaces it as the global "what's happening now" nav entry.
+const ICONS: Record<Exclude<ScreenKey, "live-run">, ComponentType> = {
 	dashboard: DashboardIcon,
-	"live-run": LiveRunIcon,
+	"live-jobs": LiveRunIcon,
 	"start-scan": ScanIcon,
 	results: ResultsIcon,
 	benchmarks: BenchmarksIcon,
@@ -35,12 +39,15 @@ const ICONS: Record<ScreenKey, ComponentType> = {
 
 interface NavGroup {
 	label: string | null;
-	items: ScreenKey[];
+	items: Exclude<ScreenKey, "live-run">[];
 }
 
 const NAV_GROUPS: NavGroup[] = [
-	{ label: null, items: ["dashboard"] },
-	{ label: "COMPLIANCE", items: ["live-run", "start-scan", "results", "benchmarks"] },
+	// Live Jobs sits with Dashboard, above every domain group — ADR-0019
+	// decision 1: "Live Jobs is top-level and cross-domain," not owned by
+	// Compliance the way the old Live Run route was.
+	{ label: null, items: ["dashboard", "live-jobs"] },
+	{ label: "COMPLIANCE", items: ["start-scan", "results", "benchmarks"] },
 	{ label: "CONTENT", items: ["catalog", "library", "transfer"] },
 	{ label: "CONFIGURE", items: ["configuration", "audit"] },
 ];
@@ -68,8 +75,8 @@ export function LeftRail({ open, onToggle, badges }: LeftRailProps) {
 		<nav className={`left-rail ${open ? "is-open" : "is-collapsed"}`} aria-label="Primary">
 			{NAV_GROUPS.map((group, groupIndex) => {
 				const visibleItems = group.items
-					.map((key) => ROUTES.find((r) => r.key === key)!)
-					.filter((r) => !(r.connectedOnly && mode !== "connected"));
+					.map((key) => ({ key, route: ROUTES.find((r) => r.key === key)! }))
+					.filter(({ route }) => !(route.connectedOnly && mode !== "connected"));
 				if (visibleItems.length === 0) {
 					return null;
 				}
@@ -82,8 +89,8 @@ export function LeftRail({ open, onToggle, badges }: LeftRailProps) {
 							) : (
 								<div className="left-rail__group-spacer" />
 							))}
-						{visibleItems.map((r) => {
-							const NavIcon = ICONS[r.key];
+						{visibleItems.map(({ key, route: r }) => {
+							const NavIcon = ICONS[key];
 							const active = activeRoute?.key === r.key;
 							const allowed = roleAtLeast(user.role, r.requiredRole);
 							const badge = badges?.[r.key];

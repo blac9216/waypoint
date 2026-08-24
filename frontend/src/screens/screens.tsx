@@ -5,7 +5,7 @@ import { DownloadCatalogScreen } from "./catalog/DownloadCatalogScreen";
 import { ConfigurationScreen as SitesTargetsConfigurationScreen } from "./configuration/ConfigurationScreen";
 import { DashboardScreen as DashboardAggregateScreen } from "./dashboard/DashboardScreen";
 import { LibraryScreen as RepositoryLibraryScreen } from "./library/LibraryScreen";
-import { LiveRunRoute } from "./liverun/LiveRunScreen";
+import { LiveJobsRoute } from "./livejobs/LiveJobsScreen";
 import { ResultsScreen as ResultsHistoryScreen } from "./results/ResultsScreen";
 import { StartScanScreen as StartScanWizardScreen } from "./startscan/StartScanScreen";
 
@@ -13,8 +13,8 @@ export function DashboardScreen() {
 	return <DashboardAggregateScreen />;
 }
 
-export function LiveRunScreen() {
-	return <LiveRunRoute />;
+export function LiveJobsScreen() {
+	return <LiveJobsRoute />;
 }
 
 export function StartScanScreen() {
