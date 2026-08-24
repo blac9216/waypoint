@@ -224,6 +224,171 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		}
 	}
 
+	/// <summary>
+	/// Issue #637: a transient fault on a heartbeat tick (DB blip, timeout) must not
+	/// kill the loop for the rest of a long-running job. This injects faults on the
+	/// first two ticks (below <see cref="JobDispatcherHostedService.MaxConsecutiveHeartbeatTickFailures"/>)
+	/// then lets ticks succeed again, and proves both halves of the regression: (1)
+	/// lease renewal kept the job alive well past its short lease duration despite the
+	/// faults, and (2) after the faults stop, a per-job cancel request is still
+	/// observed and honored on a later tick -- abort/cancel observation was not
+	/// permanently disabled by the earlier faults.
+	/// </summary>
+	[Fact]
+	public async Task HeartbeatTransientFault_LogsAndRetries_RenewalAndCancelObservationSurvive()
+	{
+		Guid jobId = await SeedQueuedJobAsync("download");
+		TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		FakeJobHandler handler = new("download", async (_, ct) =>
+		{
+			entered.SetResult();
+			await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+			return JobExecutionOutcome.Succeeded();
+		});
+
+		FaultingFirstNTicksRepository faultingRepository = new(_repository, faultCount: 2);
+
+		JobEngineOptions options = new()
+		{
+			Enabled = true,
+			PollInterval = TimeSpan.FromMilliseconds(50),
+			LeaseDuration = TimeSpan.FromSeconds(1),
+			HeartbeatInterval = TimeSpan.FromMilliseconds(150)
+		};
+		JobDispatcherHostedService dispatcher = new(
+			faultingRepository, _repository, _events, new JobHandlerRegistry([handler]),
+			Options.Create(options), _dispatcherLogger);
+
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await entered.Task.WaitAsync(PollTimeout);
+
+			// Outlive the 1s lease by a comfortable margin -- if the faulted ticks had
+			// killed the loop (pre-#637 behavior), the lease would expire and
+			// lease-recovery would reclaim the job.
+			await Task.Delay(TimeSpan.FromSeconds(3));
+			Assert.Equal(JobStates.Running, await GetJobStateAsync(jobId));
+			Assert.True(faultingRepository.FaultsInjected >= 2, "the injected transient faults never fired -- test did not exercise the bug");
+
+			// Cancellation is still observed on a later (post-recovery) tick.
+			JobCancelOutcome outcome = await _repository.CancelJobAsync(jobId, CancellationToken.None);
+			Assert.Equal(JobCancelOutcome.CancelRequested, outcome);
+
+			await PollUntilAsync(() => GetJobStateAsync(jobId), state => state == JobStates.Cancelled);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal(JobStates.Cancelled, await GetJobStateAsync(jobId));
+	}
+
+	/// <summary>
+	/// Issue #637: proves the bounded-escalation half of the fix -- once consecutive
+	/// tick faults reach <see cref="JobDispatcherHostedService.MaxConsecutiveHeartbeatTickFailures"/>,
+	/// the loop gives up (persistent fault, not a blip) rather than retrying forever,
+	/// so a genuinely dead database does not heartbeat into the void indefinitely.
+	/// </summary>
+	[Fact]
+	public async Task HeartbeatPersistentFault_GivesUpAfterConsecutiveThreshold()
+	{
+		Guid jobId = await SeedQueuedJobAsync("download");
+		TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		FakeJobHandler handler = new("download", async (_, ct) =>
+		{
+			entered.SetResult();
+			await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+			return JobExecutionOutcome.Succeeded();
+		});
+
+		FaultingFirstNTicksRepository faultingRepository = new(_repository, faultCount: int.MaxValue);
+
+		JobEngineOptions options = new()
+		{
+			Enabled = true,
+			PollInterval = TimeSpan.FromMilliseconds(50),
+			LeaseDuration = TimeSpan.FromSeconds(60),
+			HeartbeatInterval = TimeSpan.FromMilliseconds(100)
+		};
+		JobDispatcherHostedService dispatcher = new(
+			faultingRepository, _repository, _events, new JobHandlerRegistry([handler]),
+			Options.Create(options), _dispatcherLogger);
+
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await entered.Task.WaitAsync(PollTimeout);
+
+			// Every tick faults; the loop must stop retrying once it hits the bound
+			// rather than continuing to call RenewLeaseAsync forever.
+			using CancellationTokenSource timeout = new(PollTimeout);
+			while (Volatile.Read(ref faultingRepository.FaultsInjectedField) < JobDispatcherHostedService.MaxConsecutiveHeartbeatTickFailures)
+			{
+				timeout.Token.ThrowIfCancellationRequested();
+				await Task.Delay(TimeSpan.FromMilliseconds(50));
+			}
+
+			int faultsAtBound = faultingRepository.FaultsInjected;
+
+			// Give the loop time to have given up; the fault count must not keep
+			// climbing past the bound.
+			await Task.Delay(TimeSpan.FromMilliseconds(500));
+			Assert.Equal(faultsAtBound, faultingRepository.FaultsInjected);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+	}
+
+	/// <summary>Delegates every call to the real repository except <see cref="RenewLeaseAsync"/>, which throws a transient DB-shaped exception for its first <c>faultCount</c> calls.</summary>
+	private sealed class FaultingFirstNTicksRepository(IJobRunnerRepository inner, int faultCount) : IJobRunnerRepository
+	{
+		private int _renewCalls;
+
+		public int FaultsInjectedField;
+
+		public int FaultsInjected => Volatile.Read(ref FaultsInjectedField);
+
+		public Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
+		{
+			int call = Interlocked.Increment(ref _renewCalls);
+			if (call <= faultCount)
+			{
+				Interlocked.Increment(ref FaultsInjectedField);
+				throw new InvalidOperationException("Injected transient heartbeat DB fault (issue #637 repro).");
+			}
+
+			return inner.RenewLeaseAsync(jobId, workerId, leaseDuration, cancellationToken);
+		}
+
+		public Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, IReadOnlySet<string> allowedJobTypes, CancellationToken cancellationToken) =>
+			inner.ClaimJobAsync(workerId, leaseDuration, allowedJobTypes, cancellationToken);
+
+		public Task<bool> IsCancelRequestedAsync(Guid jobId, CancellationToken cancellationToken) => inner.IsCancelRequestedAsync(jobId, cancellationToken);
+
+		public Task<bool> AdvanceStateAsync(Guid jobId, string workerId, string expectedFromState, string toState, string? note, bool clearLease, CancellationToken cancellationToken) =>
+			inner.AdvanceStateAsync(jobId, workerId, expectedFromState, toState, note, clearLease, cancellationToken);
+
+		public Task<bool> RequeueAtStageAsync(Guid jobId, string workerId, string expectedFromState, string stage, string? note, CancellationToken cancellationToken) =>
+			inner.RequeueAtStageAsync(jobId, workerId, expectedFromState, stage, note, cancellationToken);
+
+		public Task<IReadOnlyList<RecoveredJob>> RecoverExpiredLeasesAsync(int batchSize, CancellationToken cancellationToken) => inner.RecoverExpiredLeasesAsync(batchSize, cancellationToken);
+
+		public Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken) => inner.GetRunQueueStateAsync(runId, cancellationToken);
+
+		public Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken) => inner.ReleaseClaimAsync(jobId, workerId, cancellationToken);
+
+		public Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken) =>
+			inner.CheckConsecutiveAuthFailuresAsync(credentialId, threshold, cancellationToken);
+
+		public Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken) => inner.SetUploadStatusAsync(jobId, uploadStatus, detail, cancellationToken);
+
+		public Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken) => inner.GetJobCredentialBindingsAsync(jobId, cancellationToken);
+	}
+
 	[Fact]
 	public async Task PausedRun_ReleasesClaimsUntilResume_ThenExecutes()
 	{

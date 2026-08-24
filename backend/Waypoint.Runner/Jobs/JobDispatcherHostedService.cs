@@ -17,6 +17,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Waypoint.Core.Jobs;
 using Waypoint.Runner.Resources;
 
@@ -56,6 +57,22 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	// release cycles instead of racing the transient queued->running->queued window.
 	internal static readonly TimeSpan PausedReleaseRetryDelay = TimeSpan.FromMilliseconds(200);
 	private static readonly TimeSpan ShutdownGracePeriod = TimeSpan.FromSeconds(30);
+
+	// Issue #637: bounds how many CONSECUTIVE heartbeat-tick faults are tolerated
+	// before the loop gives up on this job rather than retrying forever. 3 mirrors the
+	// same "a few misses are noise, more is a real problem" judgment call already made
+	// for ConsecutiveAuthFailureThreshold's default -- a healthy DB blip resolves in
+	// well under 3 heartbeat intervals, but a persistently unreachable database should
+	// stop pretending renewal might still succeed and let lease-recovery reclaim the
+	// job through its normal expiry path instead of heartbeating into the void forever.
+	internal const int MaxConsecutiveHeartbeatTickFailures = 3;
+
+	// Issue #654: dedicated backoff for the boot-only 42501 race, deliberately
+	// separate from JobEngineOptions.PollInterval (the steady-state empty-queue
+	// cadence) -- mirrors #634's capacity-pool registration retry shape (short initial
+	// delay, capped doubling) since this is the same "schema not applied yet" class.
+	internal static readonly TimeSpan BootClaimRetryInitialDelay = TimeSpan.FromMilliseconds(500);
+	internal static readonly TimeSpan BootClaimRetryMaxDelay = TimeSpan.FromSeconds(10);
 
 	// Issue #415: the dispatcher is today's stand-in for the future dedicated runner
 	// process (ADR-0013/0014), so it is the one caller in this codebase that
@@ -189,6 +206,13 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		object tasksLock = new();
 		List<Task> inFlightTasks = [];
 
+		// Issue #654: whether any claim attempt has ever succeeded (found a job or
+		// legitimately found none -- anything that is not the boot-race exception
+		// below). Only gates which log level/backoff the FIRST 42501 gets; every other
+		// exception, and every 42501 after the schema is known ready, is unaffected.
+		bool schemaObservedReady = false;
+		TimeSpan bootRaceRetryDelay = BootClaimRetryInitialDelay;
+
 		while (!stoppingToken.IsCancellationRequested)
 		{
 			await gate.WaitAsync(stoppingToken).ConfigureAwait(false);
@@ -203,14 +227,37 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 				// compliance-runner/download-runner passes its own narrower set the
 				// same way, through the same registry.
 				job = await _repository.ClaimJobAsync(WorkerId, options.LeaseDuration, _handlers.AllowedJobTypes, stoppingToken).ConfigureAwait(false);
+				schemaObservedReady = true;
 			}
 			catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
 			{
 				gate.Release();
 				break;
 			}
+			catch (PostgresException exception) when (!schemaObservedReady && exception.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+			{
+				// Issue #654: on a fresh stack, this runner's very first ClaimJobAsync can
+				// race the backend's migration/grant application -- the jobs table (or its
+				// runner-role grants) is not there yet, so Postgres answers 42501. Same
+				// benign startup-race class as #633 (capacity-pool registration losing the
+				// race against a not-yet-created table). The claim loop already retries
+				// unconditionally on any exception (see the catch below), so this is
+				// already self-healing with zero operator action -- what was missing is
+				// that it logged at Error every time, which reads as a real problem on a
+				// clean boot. Gated to ONLY the pre-first-success window and ONLY this
+				// specific SQLSTATE: log quietly here and back off on a short dedicated
+				// cadence (capped, doubling) instead of the general-purpose Error log +
+				// PollInterval used for every other claim failure.
+				gate.Release();
+				LogBootClaimRace(exception, bootRaceRetryDelay);
+				await DelayAsync(bootRaceRetryDelay, stoppingToken).ConfigureAwait(false);
+				TimeSpan doubled = bootRaceRetryDelay * 2;
+				bootRaceRetryDelay = doubled > BootClaimRetryMaxDelay ? BootClaimRetryMaxDelay : doubled;
+				continue;
+			}
 			catch (Exception exception)
 			{
+				schemaObservedReady = true;
 				gate.Release();
 				LogClaimFailed(exception);
 				await DelayAsync(options.PollInterval, stoppingToken).ConfigureAwait(false);
@@ -499,58 +546,121 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 
 	private async Task RunHeartbeatLoopAsync(ClaimedJob job, CancellationTokenSource jobCts, CancelReasonBox cancelReason, CancellationToken stopToken)
 	{
-		JobEngineOptions options = _options.Value;
-		using PeriodicTimer timer = new(options.HeartbeatIntervalOrDefault);
+		using PeriodicTimer timer = new(_options.Value.HeartbeatIntervalOrDefault);
+		int consecutiveTickFailures = 0;
 
 		try
 		{
 			while (await timer.WaitForNextTickAsync(stopToken).ConfigureAwait(false))
 			{
-				bool renewed = await _repository.RenewLeaseAsync(job.Id, WorkerId, options.LeaseDuration, stopToken).ConfigureAwait(false);
-				if (!renewed)
+				bool tickSucceeded;
+				try
 				{
-					LogHeartbeatLostOwnership(job.Id);
-					return;
+					tickSucceeded = await RunHeartbeatTickAsync(job, jobCts, cancelReason, stopToken).ConfigureAwait(false);
 				}
-
-				// Issue #569 (ADR-0020): the capacity lease renews on the same clock as
-				// the job lease, so a worker that stops heartbeating loses both
-				// together and the reaper's expiry semantics stay consistent with
-				// job-lease recovery. The coordinator handles lost/failed renewal
-				// itself (re-claim or log-and-retry) -- never by cancelling the job.
-				if (_capacityPool is not null)
+				catch (OperationCanceledException)
 				{
-					await _capacityPool.RenewAsync(job.Id, job.JobType, WorkerId, stopToken).ConfigureAwait(false);
+					// Expected: either the job finished (heartbeatStopCts) or the host is
+					// stopping. Rethrow so the outer catch below ends the loop the same
+					// way it always has.
+					throw;
 				}
-
-				if (job.RunId is Guid runId)
+				catch (Exception exception)
 				{
-					RunQueueState? runState = await _repository.GetRunQueueStateAsync(runId, stopToken).ConfigureAwait(false);
-					if (string.Equals(runState?.State, "aborted", StringComparison.Ordinal))
+					// Issue #637: a single transient per-tick fault (DB blip, timeout on
+					// RenewLeaseAsync/GetRunQueueStateAsync/IsCancelRequestedAsync -- the
+					// capacity coordinator already swallows its own) must not end the loop
+					// for the rest of the job. Before this fix, any such exception escaped
+					// the loop entirely: lease renewal stopped for good, the job's lease
+					// eventually expired mid-run, lease-recovery requeued the still-
+					// executing job, and a second runner could start a concurrent
+					// execution of the same (possibly non-idempotent) work. Logging and
+					// retrying on the next tick keeps renewal and abort/cancel observation
+					// alive across a blip. consecutiveTickFailures distinguishes that from
+					// a persistently unreachable database: once it reaches the bound, this
+					// is no longer "ownership might still be fine", so the loop gives up
+					// exactly like the pre-existing !renewed / lost-ownership path already
+					// did on a clean signal.
+					consecutiveTickFailures++;
+					LogHeartbeatTickFaulted(job.Id, consecutiveTickFailures, MaxConsecutiveHeartbeatTickFailures, exception);
+
+					if (consecutiveTickFailures >= MaxConsecutiveHeartbeatTickFailures)
 					{
-						LogHeartbeatObservedAbort(job.Id, runId);
-						cancelReason.Value = "Cancelled: run aborted";
-						await jobCts.CancelAsync().ConfigureAwait(false);
+						LogHeartbeatGivingUpAfterRepeatedFaults(job.Id, consecutiveTickFailures);
 						return;
 					}
+
+					continue;
 				}
 
-				// Per-job cooperative cancel (issue #234): a running job's own
-				// cancel_requested flag, set by CancelJobAsync (e.g. DELETE
-				// /downloads/{id}) independently of any run-scoped abort.
-				if (await _repository.IsCancelRequestedAsync(job.Id, stopToken).ConfigureAwait(false))
+				if (!tickSucceeded)
 				{
-					LogHeartbeatObservedCancelRequest(job.Id);
-					cancelReason.Value = "Cancelled by request";
-					await jobCts.CancelAsync().ConfigureAwait(false);
+					// A clean (non-exceptional) signal: lease ownership genuinely lost, or
+					// abort/cancel observed and already handed to jobCts. Either way the
+					// loop's job here is done.
 					return;
 				}
+
+				consecutiveTickFailures = 0;
 			}
 		}
 		catch (OperationCanceledException)
 		{
 			// Expected: either the job finished (heartbeatStopCts) or the host is stopping.
 		}
+	}
+
+	/// <summary>
+	/// One heartbeat tick's body: renew the job lease (and capacity lease), then check
+	/// run-abort and per-job cancel_requested. Returns <c>false</c> when the loop should
+	/// stop cleanly (ownership lost, or a cancel signal was just raised on
+	/// <paramref name="jobCts"/>); returns <c>true</c> to continue to the next tick. Any
+	/// exception from a per-tick call propagates to the caller, which treats it as a
+	/// transient fault (issue #637) rather than a reason to stop.
+	/// </summary>
+	private async Task<bool> RunHeartbeatTickAsync(ClaimedJob job, CancellationTokenSource jobCts, CancelReasonBox cancelReason, CancellationToken stopToken)
+	{
+		bool renewed = await _repository.RenewLeaseAsync(job.Id, WorkerId, _options.Value.LeaseDuration, stopToken).ConfigureAwait(false);
+		if (!renewed)
+		{
+			LogHeartbeatLostOwnership(job.Id);
+			return false;
+		}
+
+		// Issue #569 (ADR-0020): the capacity lease renews on the same clock as
+		// the job lease, so a worker that stops heartbeating loses both
+		// together and the reaper's expiry semantics stay consistent with
+		// job-lease recovery. The coordinator handles lost/failed renewal
+		// itself (re-claim or log-and-retry) -- never by cancelling the job.
+		if (_capacityPool is not null)
+		{
+			await _capacityPool.RenewAsync(job.Id, job.JobType, WorkerId, stopToken).ConfigureAwait(false);
+		}
+
+		if (job.RunId is Guid runId)
+		{
+			RunQueueState? runState = await _repository.GetRunQueueStateAsync(runId, stopToken).ConfigureAwait(false);
+			if (string.Equals(runState?.State, "aborted", StringComparison.Ordinal))
+			{
+				LogHeartbeatObservedAbort(job.Id, runId);
+				cancelReason.Value = "Cancelled: run aborted";
+				await jobCts.CancelAsync().ConfigureAwait(false);
+				return false;
+			}
+		}
+
+		// Per-job cooperative cancel (issue #234): a running job's own
+		// cancel_requested flag, set by CancelJobAsync (e.g. DELETE
+		// /downloads/{id}) independently of any run-scoped abort.
+		if (await _repository.IsCancelRequestedAsync(job.Id, stopToken).ConfigureAwait(false))
+		{
+			LogHeartbeatObservedCancelRequest(job.Id);
+			cancelReason.Value = "Cancelled by request";
+			await jobCts.CancelAsync().ConfigureAwait(false);
+			return false;
+		}
+
+		return true;
 	}
 
 	/// <summary>
@@ -622,6 +732,9 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 	[LoggerMessage(Level = LogLevel.Error, Message = "Claim attempt failed; backing off")]
 	private partial void LogClaimFailed(Exception exception);
 
+	[LoggerMessage(Level = LogLevel.Information, Message = "First claim attempt hit 42501 (permission denied), likely racing migration/grant application at boot; retrying in {RetryDelay}")]
+	private partial void LogBootClaimRace(Exception exception, TimeSpan retryDelay);
+
 	[LoggerMessage(Level = LogLevel.Information, Message = "Awaiting {Count} in-flight job(s) before shutdown")]
 	private partial void LogAwaitingInFlight(int count);
 
@@ -639,6 +752,12 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Job {JobId}: heartbeat could not renew lease; ownership lost (likely lease-recovered)")]
 	private partial void LogHeartbeatLostOwnership(Guid jobId);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Job {JobId}: heartbeat tick failed ({ConsecutiveFailures}/{MaxConsecutiveFailures} consecutive); retrying next tick")]
+	private partial void LogHeartbeatTickFaulted(Guid jobId, int consecutiveFailures, int maxConsecutiveFailures, Exception exception);
+
+	[LoggerMessage(Level = LogLevel.Error, Message = "Job {JobId}: heartbeat giving up after {ConsecutiveFailures} consecutive tick faults; lease renewal and abort/cancel observation stopped for this job")]
+	private partial void LogHeartbeatGivingUpAfterRepeatedFaults(Guid jobId, int consecutiveFailures);
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Job {JobId}: heartbeat loop faulted; swallowed so the terminal completion write is not skipped (issue #631)")]
 	private partial void LogHeartbeatFaulted(Guid jobId, Exception exception);
