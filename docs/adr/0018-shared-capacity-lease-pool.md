@@ -65,7 +65,7 @@ admission invariant that make a single runner's advertised budget honest; the fo
 2. **Every discovered-budget source is named and logged.** `HostResourceLimitSource`
    gains a value distinguishing host-derived capacity from an explicit cgroup limit,
    an operator cap, and the tested-conservative fallback, so the effective-budget log
-   line and `RunnerCapacityReport`/`GET /system` always show which of `CgroupLimit`,
+   line and `RunnerCapacityReport`/`GET /system` always show which of `CgroupV2`/`CgroupV1`,
    `HostDerived`, or `Fallback` produced a runner's numbers — never a number without a
    labeled source.
 3. **Startup fails readiness if any advertised job type can never be admitted.** After

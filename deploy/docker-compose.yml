@@ -503,7 +503,7 @@ services:
       # Issue #613 (live-verified): WaypointComplianceContent was never added to
       # this list, so Invoke-WaypointComplianceContentPull was undefined in the
       # runspace and content-pull/content-import always failed with "term ...
-      # is not recognized". ComplianceContentJobHandlerTests' preload-completeness
+      # is not recognized". ModulePreloadCompletenessTests' preload-completeness
       # guard (Waypoint.Tests) fails the build if a future handler's module ships
       # without an entry here.
       PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointLogging"

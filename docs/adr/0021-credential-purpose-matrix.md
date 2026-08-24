@@ -108,10 +108,12 @@ different *purposes* (different targets, different scan contexts) that happen to
 satisfiable by the same credential *type* today. A credential of type `ssh` is not
 automatically valid for both purposes at once: compatibility is per-binding (§4), so a
 VCSA SSH credential is never silently offered as a default for an unrelated SRG
-target's `srg-ssh` binding, and vice versa. `token` and `depot-token` satisfy no
+target's `srg-ssh` binding, and vice versa. `token` and the depot credential types satisfy no
 target-operation purpose in this matrix — `token` remains reserved for STIG Manager's
-OIDC client secret (out of scope, see Context), and `depot-token` is already excluded
-from every credential picker (issue #571).
+OIDC client secret (out of scope, see Context), and the well-known depot credentials
+(`depot-token`, retained as a deprecated legacy alias, plus its issue-#690 successors
+`depot-activation-code` and `legacy-download-token`) are already excluded from every
+credential picker (issues #571, #690).
 
 ### 3. Target kind × operation → required/optional purpose matrix
 

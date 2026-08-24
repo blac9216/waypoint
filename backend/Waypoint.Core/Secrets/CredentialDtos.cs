@@ -96,11 +96,11 @@ public static class CredentialHealthStates
 /// walks this type and fails the build's test run if one ever appears.
 /// </summary>
 /// <param name="LastTestedAt">
-/// Issue #560 (migration 0035): stamped by every <c>credential-test</c> job outcome,
+/// Issue #560 (migration 0034): stamped by every <c>credential-test</c> job outcome,
 /// success or failure, any credential_type -- null until the first test ever runs.
 /// </param>
 /// <param name="ExpiresAt">
-/// Issue #560 (migration 0035): null means "unknown", never "no expiry" -- this field
+/// Issue #560 (migration 0034): null means "unknown", never "no expiry" -- this field
 /// is only ever set from a real upstream-supplied date (CLAUDE.md: never invent one).
 /// Nothing in this slice writes it yet; it exists so the Depot &amp; Tokens screen can
 /// render "expiry unknown" rather than treating an unpopulated Broadcom response the

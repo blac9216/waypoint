@@ -282,7 +282,7 @@ public sealed class CredentialRepository
 		string health = succeeded ? CredentialHealthStates.Valid : CredentialHealthStates.AuthFailing;
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		// Issue #560 (migration 0035): last_tested_at is stamped on every outcome,
+		// Issue #560 (migration 0034): last_tested_at is stamped on every outcome,
 		// success or failure -- "was this ever tested, and when" is meaningful even
 		// for a failing credential, unlike rotated_at which only moves on a secret
 		// write.

@@ -57,7 +57,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 \
 	CMD ["dotnet", "Waypoint.Api.dll", "--health-check"]
 
-# Issue #621: the backend now mounts one read-write volume (managed-tool, for
+# Issue #621: the backend now mounts one read-write volume (tool-upload-staging, for
 # ManagedToolController.Upload's staging directory -- deploy/docker-compose.yml),
 # which arrives root-owned like every Compose named volume does regardless of
 # what gets chowned at build time. No plain `USER app` here anymore (that was
