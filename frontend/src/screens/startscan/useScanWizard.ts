@@ -417,7 +417,7 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 				}
 				return next;
 			});
-			navigate(`/live-run?run=${result.run_id}`);
+			navigate(`/live-jobs?run=${result.run_id}`);
 		} catch (err) {
 			if (err instanceof ApiError && err.bindingGaps && err.bindingGaps.length > 0) {
 				setBindingGapErrors(err.bindingGaps);
