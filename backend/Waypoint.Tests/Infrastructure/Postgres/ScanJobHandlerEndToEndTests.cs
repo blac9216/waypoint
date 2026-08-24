@@ -222,11 +222,11 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
 		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
 		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
-		(Guid targetId, Guid legacyColumnCredentialId) = await SeedVsphereTargetAsync("invented-legacy-column-secret");
+		(Guid targetId, Guid legacyColumnCredentialId) = await SeedVsphereTargetAsync("invented-legacy-column-secret"); // gitleaks:allow -- invented test canary
 		Guid snapshotCredentialId = (await _credentials.CreateAsync(
 			$"svc-snapshot-{Guid.NewGuid():N}@example.internal", CredentialTypes.VCenter, CredentialOwners.Shared,
 			sudoEnabled: false, CancellationToken.None, "snapshot-admin@example.internal"))!.Value;
-		await _secretStore.StoreAsync(snapshotCredentialId, System.Text.Encoding.UTF8.GetBytes("invented-snapshot-secret"), "test", CancellationToken.None);
+		await _secretStore.StoreAsync(snapshotCredentialId, System.Text.Encoding.UTF8.GetBytes("invented-snapshot-secret" /* gitleaks:allow -- invented test canary */), "test", CancellationToken.None);
 
 		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
 		string payload = JsonSerializer.Serialize(new { target_id = targetId, site_id = Guid.NewGuid() });
