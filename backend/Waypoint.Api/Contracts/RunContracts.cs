@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Waypoint.Core.Jobs;
 
@@ -507,3 +508,81 @@ public sealed record RunPurgeStatusResponse(
 
 	[property: JsonPropertyName("completed_at")]
 	string? CompletedAt);
+
+/// <summary>
+/// Query parameters for <c>GET /api/v1/runs/{id}/events/history</c> (issue #581,
+/// ADR-0019): the bounded historical counterpart to the SSE stream. All bind from the
+/// query string via <c>[FromQuery]</c>; <see cref="RunsController.MapHistoryQuery"/>
+/// validates and converts to <see cref="Waypoint.Core.Jobs.JobEventHistoryQuery"/>.
+/// </summary>
+public sealed record RunEventHistoryRequest(
+	/// <summary>Narrow to one job's events within the run. Omit for the whole run.</summary>
+	[property: JsonPropertyName("job_id")]
+	string? JobId,
+
+	/// <summary>
+	/// Comma-separated allow-list of <c>job_events.event_type</c> values (e.g.
+	/// <c>job.log,job.state</c>). Omit for every type.
+	/// </summary>
+	[property: JsonPropertyName("kind")]
+	string? Kind,
+
+	/// <summary>
+	/// Comma-separated allow-list of <c>job.log</c> payload <c>severity</c> values
+	/// (<c>information</c>/<c>warning</c>/<c>error</c>/<c>verbose</c>/<c>debug</c>).
+	/// Omit for every severity. Meaningless (but harmless) on event types that carry no
+	/// <c>severity</c> field.
+	/// </summary>
+	[property: JsonPropertyName("level")]
+	string? Level,
+
+	/// <summary>
+	/// Opaque page cursor from a previous response's <c>next_cursor</c>. Omit to start
+	/// from the beginning of the run's history.
+	/// </summary>
+	[property: JsonPropertyName("cursor")]
+	string? Cursor,
+
+	/// <summary>Page size, 1-200 (default 100) -- see <c>RunsController</c> for the clamp.</summary>
+	[property: JsonPropertyName("limit")]
+	int? Limit);
+
+/// <summary>
+/// One <c>job_events</c> row on the wire for <c>GET /api/v1/runs/{id}/events/history</c>
+/// -- deliberately the same shape as the SSE envelope (<c>EventStreamController.WriteEventAsync</c>)
+/// so a client can treat live and historical rows identically once received.
+/// <see cref="Data"/> is the already-redacted <c>payload</c> column, embedded as raw
+/// JSON exactly as SSE does -- this endpoint performs no additional transform and
+/// therefore introduces no new leak surface.
+/// </summary>
+public sealed record JobEventHistoryItemResponse(
+	[property: JsonPropertyName("seq")]
+	long Seq,
+
+	[property: JsonPropertyName("ts")]
+	string Ts,
+
+	[property: JsonPropertyName("type")]
+	string Type,
+
+	[property: JsonPropertyName("run_id")]
+	string? RunId,
+
+	[property: JsonPropertyName("job_id")]
+	string? JobId,
+
+	[property: JsonPropertyName("data")]
+	JsonElement Data);
+
+/// <summary>
+/// Response body for <c>GET /api/v1/runs/{id}/events/history</c>. <see cref="NextCursor"/>
+/// is null exactly when this page reached the end of the run's currently-persisted
+/// history -- never a silent truncation (issue #581 AC2); a non-null value must be
+/// passed back as the next request's <c>cursor</c> query parameter to continue.
+/// </summary>
+public sealed record RunEventHistoryResponse(
+	[property: JsonPropertyName("items")]
+	IReadOnlyList<JobEventHistoryItemResponse> Items,
+
+	[property: JsonPropertyName("next_cursor")]
+	string? NextCursor);

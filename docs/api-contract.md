@@ -190,6 +190,7 @@ to every selected target's default purpose) and stays mutually exclusive with bo
 | `/runs/{runId}/jobs/{jobId}/retry` | POST | Operator+ (own runs), Admin any — same ownership scope as pause/resume/abort/job-cancel, resolved off `runId` (issue #297). Moves a **`failed`** job back to `queued` with `jobs.stage` **preserved**, so the next claim resumes the pipeline at the last-reached stage instead of restarting it (ADR-0012 §5's engine-level resume primitive, now with an HTTP surface). Scoped to `failed` only — NOT `auth-failed` (use `/runs/{id}/resume-blocked`'s credential-swap-resume path instead; retrying without swapping the bad credential just re-fails) and NOT `cancelled` (a deliberate operator action — start a new run rather than silently re-queueing it). A manual retry is an explicit human override of the engine's own retry accounting: it does **not** increment `attempt_count` and is never blocked by the automatic-retry `max_attempts` cap. Records an `audit_log` entry (`event_type: "job.retried"`). 200 body: `job_id`, `state` (`"queued"`), `stage` (echoes the preserved marker, `null` if the job had not completed any stage). 409 if the job is not `failed`; 404 if the job does not exist or does not belong to `runId`. |
 | `/runs/{id}/artifacts` · `/jobs/{id}/artifacts/{kind}` | GET | Per-target rows + CKL/HDF download; `?bundle=zip` for the export button. Row CAT counts are **nullable** and gated by `counts_available` — see below. |
 | `/runs/{id}/attestations-applied` | GET | Waivers that fired: control, scope, justification, author/version, expired-skips. **Persisted at-scan-time ledger, immutable per run** — see below. |
+| `/runs/{id}/events/history` | GET | Issue #581 (ADR-0019): bounded, cursor-paged historical read over the run's persisted `job_events` — the complement to `/runs/{id}/events` SSE (below): SSE is the live/replay transport for an open connection, this is a single bounded page for a client that wants completed-run (or completed-so-far) history without holding a stream open. Viewer+, same floor as every other run read — visibility of operational history is not a domain action (ADR-0019 decision 6), so there is no ownership scoping. Query params: `job_id` (narrow to one job), `kind` (comma-separated allow-list of `job_events.event_type`, 400 on an unrecognized value), `level` (comma-separated allow-list of `job.log` payload `severity` — `information`/`warning`/`error`/`verbose`/`debug`; meaningless but harmless on event types with no `severity` field), `cursor` (opaque, from a previous response's `next_cursor`), `limit` (1–500, default 100). 404 for a run that does not exist; an existing run with no matching events (including none yet) is 200 with `items: []` and no `next_cursor` — distinct from 404, so empty history is never confused with "no such run". A garbage `cursor` or an unrecognized `kind`/`level` value or malformed `job_id` is 400 `validation_error`, never a 500. Response body: `items` (array of the same per-event envelope shape SSE sends — `seq`, `ts`, `type`, `run_id`, `job_id`, `data`; `data` is the same already-redacted `payload` column SSE streams, embedded as-is — this endpoint performs no additional transform and introduces no new leak surface) and `next_cursor` (opaque string, present only when the page was truncated by `limit` with more matching rows remaining — a page never silently truncates a large history without saying so; absent, never a bare `null`, once history is exhausted, matching every other nullable field in this API). Ordering is the same commit-order `seq` SSE uses (migration 0001/0104's `trg_job_events_assign_seq`), so a client can page history and then attach to `/runs/{id}/events` with `Last-Event-ID` set to the last `seq` it saw with no gap or duplicate at the seam. |
 
 #### `/runs/{id}/artifacts` — countability is explicit (issue #299)
 
@@ -351,16 +352,25 @@ execution flows through the job queue), so a progress emitter always has a
 would need a contract change plus a `job_events_scope_check` relaxation, decided
 here to be rejected rather than left open (#116).
 
-### Live Jobs and historical log queries (ADR-0019; planned by #581/#590)
+### Live Jobs and historical log queries (ADR-0019; #581 implemented, #590 planned)
 
-SSE remains the live transport, but it is not the historical paging API. The planned
-read contract is `GET /runs?state=<active|terminal>&run_type=<type>&cursor=...`, with
-job/type filters where applicable, plus
-`GET /runs/{id}/events/history?job_id=...&kind=...&level=...&cursor=...&limit=...`.
-History responses use stable event `seq` cursors, bounded limits, and distinguish an
-empty history from forbidden, missing, or retention-expired history. They apply the
-same authorization and redaction contract as SSE. These endpoints are normative
-design targets and are not yet implemented.
+SSE remains the live transport, but it is not the historical paging API. Issue #581
+implemented `GET /runs/{id}/events/history?job_id=...&kind=...&level=...&cursor=...&limit=...`
+(documented above, in the `/runs/{id}` table) — bounded, cursor-paged, distinguishing
+an empty history (200, `items: []`) from a missing run (404), applying the same
+Viewer+ authorization and write-time redaction as SSE, and never silently truncating
+a large history (a full page always carries a `next_cursor`). The cursor wraps
+`job_events.seq` alone: `seq` is already a total, commit-ordered key (migration
+0001/0104's `trg_job_events_assign_seq`), so no composite `(timestamp, id)` cursor was
+needed. Retention/expiry policy (a history query against records a future retention
+sweep has removed) is not yet defined — deferred to whatever issue introduces
+`job_events` retention, since nothing in this codebase deletes `job_events` rows today
+(they are append-only-by-trigger; even `/runs/{id}/purge` leaves them in place).
+
+The global `GET /runs?state=<active|terminal>&run_type=<type>&cursor=...` list-level
+read contract remains planned by #590 (the Live Jobs workspace) and is not yet
+implemented; today's `/runs` list (documented above) uses `?limit/offset` +
+`X-Total-Count`, not a cursor.
 
 Queue-halt observability (#147): tripping the consecutive-auth-failure halt emits
 `queue.state` for each newly-blocked run and one `system.notice` — including when

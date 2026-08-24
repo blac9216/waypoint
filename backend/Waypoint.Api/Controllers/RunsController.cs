@@ -14,6 +14,7 @@
 
 using System.Globalization;
 using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
@@ -53,6 +54,7 @@ public sealed class RunsController : ControllerBase
 	private readonly RunArtifactProjectionService _artifactProjection;
 	private readonly RunControlService _runControl;
 	private readonly RunPurgeService _runPurge;
+	private readonly IJobEventHistoryReader _eventHistory;
 
 	public RunsController(
 		IJobControlRepository repository,
@@ -62,7 +64,8 @@ public sealed class RunsController : ControllerBase
 		RunCreationService runCreation,
 		RunArtifactProjectionService artifactProjection,
 		RunControlService runControl,
-		RunPurgeService runPurge)
+		RunPurgeService runPurge,
+		IJobEventHistoryReader eventHistory)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(configDocs);
@@ -72,6 +75,7 @@ public sealed class RunsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(artifactProjection);
 		ArgumentNullException.ThrowIfNull(runControl);
 		ArgumentNullException.ThrowIfNull(runPurge);
+		ArgumentNullException.ThrowIfNull(eventHistory);
 		_repository = repository;
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
@@ -80,6 +84,7 @@ public sealed class RunsController : ControllerBase
 		_artifactProjection = artifactProjection;
 		_runControl = runControl;
 		_runPurge = runPurge;
+		_eventHistory = eventHistory;
 	}
 
 	/// <summary>
@@ -740,6 +745,142 @@ public sealed class RunsController : ControllerBase
 		}
 
 		return Ok(MapPurgeStatus(id, result));
+	}
+
+	/// <summary>
+	/// Bounded, cursor-paged historical read over a run's persisted <c>job_events</c>
+	/// (issue #581, ADR-0019) -- the complement to the SSE stream
+	/// (<see cref="EventStreamController.RunStream"/>): SSE is the live/replay
+	/// transport for an open connection, this is a single bounded page for a client
+	/// that wants completed-run (or completed-so-far) history without holding a stream
+	/// open. Viewer+, matching every other run read (<see cref="ListRuns"/>,
+	/// <see cref="GetRun"/>, <see cref="GetJobs"/>) -- no ownership scoping, since
+	/// reading operational history is visibility, not a domain action (ADR-0019
+	/// decision 6: "a role may observe permitted job metadata/logs without receiving
+	/// the ability to perform the job type's domain actions").
+	///
+	/// 404 for a run that does not exist. An existing run with no matching events
+	/// (including one that simply has not produced any yet) returns 200 with an empty
+	/// <c>items</c> array and a null <c>next_cursor</c> -- distinct from 404, so an
+	/// empty history is never confused with "no such run". <paramref name="job_id"/>
+	/// naming a job that is not actually part of this run is not validated separately;
+	/// it simply matches zero rows (same "narrow the range, don't guess" posture as
+	/// <see cref="EventStreamController"/>'s scope filter).
+	///
+	/// Redaction: every returned payload is the same already-redacted
+	/// <c>job_events.payload</c> column SSE streams (<see cref="JobEventPublisher"/>/
+	/// <c>BufferedJobEventWriter</c> redact at write time) -- this endpoint performs no
+	/// additional transform and adds no new leak surface.
+	/// </summary>
+	[HttpGet("{id:guid}/events/history")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(RunEventHistoryResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunEventHistoryResponse>> GetEventHistory(
+		Guid id,
+		[FromQuery(Name = "job_id")] string? jobId,
+		[FromQuery(Name = "kind")] string? kind,
+		[FromQuery(Name = "level")] string? level,
+		[FromQuery(Name = "cursor")] string? cursor,
+		[FromQuery(Name = "limit")] int? limit,
+		CancellationToken cancellationToken)
+	{
+		RunSummary? run = await _repository.GetRunAsync(id, cancellationToken).ConfigureAwait(false);
+		if (run is null)
+		{
+			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+		}
+
+		RunEventHistoryRequest query = new(jobId, kind, level, cursor, limit);
+		JobEventHistoryQuery historyQuery = MapHistoryQuery(id, query);
+		JobEventHistoryPage page = await _eventHistory.ReadHistoryAsync(historyQuery, cancellationToken).ConfigureAwait(false);
+
+		return Ok(new RunEventHistoryResponse(
+			Items: page.Items.Select(MapHistoryItem).ToArray(),
+			NextCursor: page.NextCursor is { } nextSeq ? JobEventCursor.Encode(nextSeq) : null));
+	}
+
+	/// <summary>
+	/// Validates and converts <see cref="RunEventHistoryRequest"/>'s query-string shape
+	/// into <see cref="JobEventHistoryQuery"/>. Every rejection is
+	/// <see cref="ApiException.Validation"/> (400, machine-readable <c>validation_error</c>
+	/// code) rather than a 500 -- a garbage cursor or an unknown filter value is a
+	/// malformed request, not a server fault (issue #581 AC "cursor abuse").
+	/// </summary>
+	private static JobEventHistoryQuery MapHistoryQuery(Guid runId, RunEventHistoryRequest query)
+	{
+		Guid? jobId = null;
+		if (!string.IsNullOrWhiteSpace(query.JobId))
+		{
+			if (!Guid.TryParse(query.JobId, out Guid parsedJobId))
+			{
+				throw ApiException.Validation("job_id is not a valid identifier.", $"'{query.JobId}' is not a valid GUID.");
+			}
+
+			jobId = parsedJobId;
+		}
+
+		IReadOnlyList<string>? eventTypes = ParseAllowList(query.Kind, JobEventTypes.IsValid,
+			"kind", $"valid values: {string.Join(", ", JobEventTypes.All)}.");
+		IReadOnlyList<string>? severities = ParseAllowList(query.Level, JobLogSeverities.IsValid,
+			"level", $"valid values: {string.Join(", ", JobLogSeverities.All)}.");
+
+		long? afterSeq = null;
+		if (!string.IsNullOrWhiteSpace(query.Cursor))
+		{
+			if (!JobEventCursor.TryDecode(query.Cursor, out long decoded))
+			{
+				throw ApiException.Validation("cursor is not valid.", "The 'cursor' query parameter must be an opaque value returned by a previous response's next_cursor -- it cannot be constructed by hand.");
+			}
+
+			afterSeq = decoded;
+		}
+
+		const int DefaultLimit = 100;
+		const int MaxLimit = 500;
+		int limit = query.Limit is { } requested ? Math.Clamp(requested, 1, MaxLimit) : DefaultLimit;
+
+		return new JobEventHistoryQuery(runId, jobId, eventTypes, severities, afterSeq, limit);
+	}
+
+	/// <summary>
+	/// Splits a comma-separated filter value into a de-duplicated allow-list, or null
+	/// when the query parameter was omitted. Every entry must satisfy
+	/// <paramref name="isValid"/> or the whole request 400s (issue #581 AC: filters must
+	/// page correctly, not silently drop an unrecognized value and under-report).
+	/// </summary>
+	private static string[]? ParseAllowList(string? raw, Func<string, bool> isValid, string paramName, string validValuesDetail)
+	{
+		if (string.IsNullOrWhiteSpace(raw))
+		{
+			return null;
+		}
+
+		string[] values = raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		if (values.Length == 0)
+		{
+			return null;
+		}
+
+		foreach (string value in values)
+		{
+			if (!isValid(value))
+			{
+				throw ApiException.Validation($"{paramName} contains an unknown value.", $"'{value}' is not recognized; {validValuesDetail}");
+			}
+		}
+
+		return values.Distinct(StringComparer.Ordinal).ToArray();
+	}
+
+	private static JobEventHistoryItemResponse MapHistoryItem(StreamedJobEvent row)
+	{
+		return new JobEventHistoryItemResponse(
+			Seq: row.Seq,
+			Ts: row.CreatedAt.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+			Type: row.EventType,
+			RunId: row.RunId?.ToString(),
+			JobId: row.JobId?.ToString(),
+			Data: JsonDocument.Parse(row.PayloadJson).RootElement.Clone());
 	}
 
 	// -- mapping helpers ---------------------------------------------------

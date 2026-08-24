@@ -362,6 +362,10 @@ public static class ServiceCollectionExtensions
 			serviceProvider.GetRequiredService<IOptions<JobEngineOptions>>(),
 			serviceProvider.GetRequiredService<ILogger<JobEventStreamService>>()));
 		services.AddSingleton<IJobEventFeed>(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
+		// Issue #581: the bounded historical reader shares the same singleton/table as
+		// the live feed above -- one component, two interfaces (live stream vs. bounded
+		// page), never two independent connections to the same append-only ledger.
+		services.AddSingleton<IJobEventHistoryReader>(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
 		services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<JobEventStreamService>());
 
 		return services;

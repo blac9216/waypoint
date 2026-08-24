@@ -529,6 +529,194 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
 	}
 
+	// -- issue #581: bounded historical event/log reads ----------------------
+
+	private static readonly string[] ExpectedKindFilter = ["job.log", "job.state"];
+	private static readonly string[] ExpectedLevelFilter = ["warning", "error"];
+
+	[Fact]
+	public async Task GetEventHistory_NonexistentRun_Returns404()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{Guid.NewGuid()}/events/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
+	}
+
+	[Fact]
+	public async Task GetEventHistory_BelowViewer_Returns401Unauthenticated()
+	{
+		// No X-Test-Role header at all -- TestAuthHandler treats this as unauthenticated
+		// (matches the precedent other endpoints' role-guard tests use for the
+		// "no floor met" case; Viewer is already this endpoint's floor, so there is no
+		// authenticated-but-too-low role to exercise here).
+		HttpClient client = _factory.CreateClient();
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/events/history");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetEventHistory_ExistingRunNoEvents_ReturnsEmptyPageNotNotFound()
+	{
+		HttpClient client = _factory.CreateClient();
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		_factory.EventHistory.NextPage = new JobEventHistoryPage([], null);
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/events/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Empty(doc.RootElement.GetProperty("items").EnumerateArray());
+		// WaypointJsonOptions omits null properties entirely (WhenWritingNull) -- a
+		// null next_cursor is therefore an absent key, not a JSON null, matching every
+		// other nullable field in this API (e.g. RunResponse.blocked_reason).
+		Assert.False(doc.RootElement.TryGetProperty("next_cursor", out _));
+	}
+
+	[Fact]
+	public async Task GetEventHistory_MapsJobIdKindLevelAndLimitToTheQuery()
+	{
+		HttpClient client = _factory.CreateClient();
+		Guid runId = Guid.NewGuid();
+		Guid jobId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		_factory.EventHistory.NextPage = new JobEventHistoryPage([], null);
+		HttpRequestMessage request = new(
+			HttpMethod.Get,
+			$"/api/v1/runs/{runId}/events/history?job_id={jobId}&kind=job.log,job.state&level=warning,error&limit=25");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		JobEventHistoryQuery? query = _factory.EventHistory.LastQuery;
+		Assert.NotNull(query);
+		Assert.Equal(runId, query!.RunId);
+		Assert.Equal(jobId, query.JobId);
+		Assert.Equal(ExpectedKindFilter, query.EventTypes);
+		Assert.Equal(ExpectedLevelFilter, query.Severities);
+		Assert.Equal(25, query.Limit);
+		Assert.Null(query.AfterSeq);
+	}
+
+	[Fact]
+	public async Task GetEventHistory_UnknownKind_Returns400ValidationError()
+	{
+		HttpClient client = _factory.CreateClient();
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/events/history?kind=not.a.real.kind");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task GetEventHistory_UnknownLevel_Returns400ValidationError()
+	{
+		HttpClient client = _factory.CreateClient();
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/events/history?level=catastrophic");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task GetEventHistory_MalformedJobId_Returns400ValidationError()
+	{
+		HttpClient client = _factory.CreateClient();
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/events/history?job_id=not-a-guid");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Theory]
+	[InlineData("not-base64-!!!")]
+	[InlineData("aGVsbG8=")] // valid base64, wrong prefix/content ("hello")
+	[InlineData("djE6LTE=")] // "v1:-1" -- negative seq, must be rejected not just non-numeric
+	public async Task GetEventHistory_GarbageCursor_Returns400NotServerError(string garbageCursor)
+	{
+		HttpClient client = _factory.CreateClient();
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/events/history?cursor={Uri.EscapeDataString(garbageCursor)}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task GetEventHistory_ValidCursorFromEncode_RoundTripsToAfterSeq()
+	{
+		HttpClient client = _factory.CreateClient();
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		_factory.EventHistory.NextPage = new JobEventHistoryPage([], null);
+		string cursor = Waypoint.Api.Contracts.JobEventCursor.Encode(42);
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/events/history?cursor={Uri.EscapeDataString(cursor)}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal(42, _factory.EventHistory.LastQuery?.AfterSeq);
+	}
+
+	[Fact]
+	public async Task GetEventHistory_TruncatedPage_EmitsEncodedNextCursor()
+	{
+		HttpClient client = _factory.CreateClient();
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		_factory.EventHistory.NextPage = new JobEventHistoryPage(
+			[new StreamedJobEvent(7, "job.log", null, runId, "{\"severity\":\"information\",\"line\":\"hi\"}", DateTimeOffset.UtcNow)],
+			NextCursor: 7);
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/events/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		string? nextCursor = doc.RootElement.GetProperty("next_cursor").GetString();
+		Assert.NotNull(nextCursor);
+		Assert.True(Waypoint.Api.Contracts.JobEventCursor.TryDecode(nextCursor!, out long decoded));
+		Assert.Equal(7, decoded);
+
+		JsonElement item = doc.RootElement.GetProperty("items").EnumerateArray().Single();
+		Assert.Equal(7, item.GetProperty("seq").GetInt64());
+		Assert.Equal("job.log", item.GetProperty("type").GetString());
+		Assert.Equal("information", item.GetProperty("data").GetProperty("severity").GetString());
+	}
+
 	// -- state-transition validation ----------------------------------------
 
 	[Fact]
@@ -773,10 +961,45 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 				services.Remove(purgeRepositoryDescriptor);
 			}
 			services.AddSingleton<Waypoint.Core.Runs.IRunPurgeRepository>(PurgeRepository);
+
+			// Issue #581: GetEventHistory resolves IJobEventHistoryReader through
+			// RunsController -- same fake-swap pattern as every other dependency above,
+			// so role-guard/happy-path tests never touch Postgres.
+			var eventHistoryDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IJobEventHistoryReader));
+			if (eventHistoryDescriptor != null)
+			{
+				services.Remove(eventHistoryDescriptor);
+			}
+			services.AddSingleton<IJobEventHistoryReader>(EventHistory);
 		});
 	}
 
 	public FakeRunPurgeRepository PurgeRepository { get; } = new();
+
+	public FakeJobEventHistoryReader EventHistory { get; } = new();
+}
+
+/// <summary>
+/// Minimal fake <see cref="IJobEventHistoryReader"/> for controller-level tests
+/// (role guards, 404, request-shape mapping) that don't need real Postgres paging
+/// behavior -- that correctness lives in
+/// <c>Waypoint.Tests.Infrastructure.Postgres.JobEventStreamServiceTests</c> against a
+/// real database. Records the last <see cref="JobEventHistoryQuery"/> it received so
+/// a test can assert the controller mapped query-string filters correctly, and
+/// returns a canned page (empty by default, settable via <see cref="NextPage"/>).
+/// </summary>
+public sealed class FakeJobEventHistoryReader : IJobEventHistoryReader
+{
+	public JobEventHistoryQuery? LastQuery { get; private set; }
+
+	public JobEventHistoryPage NextPage { get; set; } = new([], null);
+
+	public Task<JobEventHistoryPage> ReadHistoryAsync(JobEventHistoryQuery query, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		LastQuery = query;
+		return Task.FromResult(NextPage);
+	}
 }
 
 /// <summary>

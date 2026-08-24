@@ -41,7 +41,7 @@ namespace Waypoint.Infrastructure.Jobs;
 /// (afterSeq, S] came from the table; rows &gt; S are in the channel) and no
 /// duplicate (the two ranges are disjoint by construction).
 /// </summary>
-public sealed partial class JobEventStreamService : BackgroundService, IJobEventFeed
+public sealed partial class JobEventStreamService : BackgroundService, IJobEventFeed, IJobEventHistoryReader
 {
 	private sealed class Subscriber
 	{
@@ -312,6 +312,80 @@ public sealed partial class JobEventStreamService : BackgroundService, IJobEvent
 				reader.GetString(4),
 				reader.GetFieldValue<DateTimeOffset>(5));
 		}
+	}
+
+	/// <summary>
+	/// Issue #581 (ADR-0019): one bounded, cursor-paged read over <c>job_events</c> --
+	/// the historical counterpart to <see cref="ReadAsync"/>'s indefinitely open
+	/// stream. Ordering and identity match the SSE feed exactly (same table, same
+	/// commit-order <c>seq</c>), so a client can page history and later attach to the
+	/// live stream with <c>Last-Event-ID</c> set to the last <c>seq</c> it saw, with no
+	/// gap or duplicate at the seam.
+	///
+	/// Always reads one row more than <see cref="JobEventHistoryQuery.Limit"/> to
+	/// decide whether a <see cref="JobEventHistoryPage.NextCursor"/> exists without a
+	/// separate COUNT query -- the extra row is trimmed before returning, never handed
+	/// to the caller. This means a full page never silently claims "end of history"
+	/// when more rows actually exist (issue #581 AC2).
+	///
+	/// Index: <c>idx_job_events_run_seq (run_id, seq)</c> (migration 0001) already
+	/// covers <c>WHERE run_id = $1 AND seq &gt; $2 ORDER BY seq</c> for every call here
+	/// -- <paramref name="query"/>'s optional <c>job_id</c>/event-type/severity filters
+	/// are applied as additional predicates within that same run-scoped index range
+	/// scan (a run's event volume is bounded by its own job count and log verbosity,
+	/// not the whole table), so no new migration/index was added for this issue; see
+	/// the #581 PR description for the measurement this rests on.
+	/// </summary>
+	public async Task<JobEventHistoryPage> ReadHistoryAsync(JobEventHistoryQuery query, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(query);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		// Fetch Limit+1 to detect "more rows exist" without a second query.
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT seq, event_type, job_id, run_id, payload::text, created_at
+			FROM job_events
+			WHERE run_id = $1
+			  AND seq > $2
+			  AND ($3::uuid IS NULL OR job_id = $3)
+			  AND ($4::text[] IS NULL OR event_type = ANY($4))
+			  AND ($5::text[] IS NULL OR payload ->> 'severity' = ANY($5))
+			ORDER BY seq
+			LIMIT $6
+			""", connection);
+		command.Parameters.AddWithValue(query.RunId);
+		command.Parameters.AddWithValue(query.AfterSeq ?? 0L);
+		command.Parameters.AddWithValue((object?)query.JobId ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)query.EventTypes?.ToArray() ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)query.Severities?.ToArray() ?? DBNull.Value);
+		command.Parameters.AddWithValue(query.Limit + 1);
+
+		List<StreamedJobEvent> rows = new(query.Limit + 1);
+		await using (NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+		{
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				rows.Add(new StreamedJobEvent(
+					reader.GetInt64(0),
+					reader.GetString(1),
+					reader.IsDBNull(2) ? null : reader.GetGuid(2),
+					reader.IsDBNull(3) ? null : reader.GetGuid(3),
+					reader.GetString(4),
+					reader.GetFieldValue<DateTimeOffset>(5)));
+			}
+		}
+
+		bool hasMore = rows.Count > query.Limit;
+		if (hasMore)
+		{
+			rows.RemoveAt(rows.Count - 1);
+		}
+
+		long? nextCursor = hasMore && rows.Count > 0 ? rows[^1].Seq : null;
+		return new JobEventHistoryPage(rows, nextCursor);
 	}
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "job_events tail poll failed; retrying next tick")]
