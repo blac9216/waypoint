@@ -327,6 +327,102 @@ public sealed class ManagedToolApiTests : IAsyncLifetime
 		Assert.Equal("installed", document.RootElement[1].GetProperty("outcome").GetString());
 	}
 
+	/// <summary>
+	/// Issue #645: a permanent in-process regression proof that a real >128 MiB
+	/// multipart upload reaches <c>ManagedToolController.Upload</c> and succeeds --
+	/// not just that the <c>[RequestSizeLimit]</c>/<c>[RequestFormLimits]</c> attribute
+	/// values agree (<see cref="Waypoint.Tests.Api.ManagedToolUploadLimitsTests"/>
+	/// covers that, fast and reflection-only, but would pass even if new middleware
+	/// read <c>Request.Form</c> before MVC or the binding switched away from
+	/// <c>IFormFile</c> in a way <c>[RequestFormLimits]</c> does not govern). This
+	/// drives the real pipeline (MVC model binding, the actual
+	/// <c>[RequestSizeLimit]</c>/<c>[RequestFormLimits]</c> attributes on
+	/// <c>ManagedToolController.Upload</c>, real multipart parsing) end to end and
+	/// asserts 202, not the pre-fix "Multipart body length limit 134217728 exceeded"
+	/// 400. The artifact content is generated on the fly by
+	/// <see cref="SyntheticContentStream"/> -- a >128 MiB payload is never allocated
+	/// as one in-memory buffer, so this stays fast (~1s) despite the size.
+	/// </summary>
+	[Fact]
+	public async Task PostUpload_ArtifactOver128MiB_Returns202_NotTheMultipartBodyLengthLimitRegression()
+	{
+		const long ArtifactSize = (128L * 1024 * 1024) + (16L * 1024 * 1024); // 128 MiB default limit + 16 MiB headroom
+
+		using MultipartFormDataContent form = new();
+		using StreamContent artifact = new(new SyntheticContentStream(ArtifactSize));
+		artifact.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+		form.Add(artifact, "artifact", "vcf-download-tool-large");
+		form.Add(new StringContent(new string('a', 64)), "sha256"); // shape only -- this test proves size, not checksum enforcement
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/tool/upload") { Content = form };
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+		string body = await response.Content.ReadAsStringAsync();
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Assert.DoesNotContain("Multipart body length limit", body, StringComparison.Ordinal);
+
+		string[] stagedFiles = Directory.GetFiles(_uploadStagingPath);
+		string stagedArtifact = Assert.Single(stagedFiles);
+		Assert.Equal(ArtifactSize, new FileInfo(stagedArtifact).Length);
+	}
+
+	/// <summary>
+	/// A read-only <see cref="Stream"/> that reports and yields exactly
+	/// <paramref name="length"/> deterministic bytes without ever allocating them all
+	/// at once -- issue #645's "streamed, not allocated or checked into the repo"
+	/// acceptance criterion. Each <see cref="ReadAsync(Memory{byte},CancellationToken)"/>
+	/// call fills the caller's buffer from a small repeating pattern.
+	/// </summary>
+	private sealed class SyntheticContentStream : Stream
+	{
+		private readonly long _length;
+		private long _remaining;
+
+		public SyntheticContentStream(long length)
+		{
+			_length = length;
+			_remaining = length;
+		}
+
+		public override bool CanRead => true;
+		public override bool CanSeek => false;
+		public override bool CanWrite => false;
+		public override long Length => _length;
+
+		public override long Position
+		{
+			get => _length - _remaining;
+			set => throw new NotSupportedException();
+		}
+
+		public override int Read(byte[] buffer, int offset, int count) =>
+			ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+
+		public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+		{
+			if (_remaining <= 0)
+			{
+				return ValueTask.FromResult(0);
+			}
+
+			int toWrite = (int)Math.Min(buffer.Length, _remaining);
+			for (int i = 0; i < toWrite; i++)
+			{
+				buffer.Span[i] = (byte)(i % 251);
+			}
+
+			_remaining -= toWrite;
+			return ValueTask.FromResult(toWrite);
+		}
+
+		public override void Flush() => throw new NotSupportedException();
+		public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+		public override void SetLength(long value) => throw new NotSupportedException();
+		public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+	}
+
 	private static StringContent JsonBody(object value) =>
 		new(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json");
 }
