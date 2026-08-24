@@ -231,6 +231,18 @@ services:
       # output back to the API caller. compliance-runner and download-runner
       # (below) hold the read-write mount for the same named volume.
       - artifacts:/var/lib/waypoint/artifacts:ro
+      # Read-write (issue #621): ManagedToolController.Upload
+      # (POST /api/v1/downloads/tool/upload) stages the uploaded artifact +
+      # detached signature under ManagedToolOptions.UploadStagingPath (a
+      # subdirectory of this same mount) before queuing the tool-install job
+      # that reads it back. Shares the SAME named volume download-runner
+      # mounts above so the staged file is on a filesystem the download-runner
+      # can also read once it claims that job -- a distinct volume per service
+      # would stage a file the runner could never see. The backend's
+      # docker-entrypoint.sh chowns this mount to `app` at container start,
+      # the same pattern download-runner's own entrypoint already uses for
+      # its read-write mounts (see that script's header comment).
+      - managed-tool:/var/lib/waypoint/managed-tool
       - dev-secrets:/run/secrets:ro
       # Admin password hash file (issue #333) - operator-provided, gitignored
       # (../config/ is covered by .gitignore's anchored /config/ entry).

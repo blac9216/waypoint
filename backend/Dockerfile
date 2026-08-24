@@ -45,9 +45,6 @@ ENV Build__Version=${BUILD_VERSION} \
 	ASPNETCORE_ENVIRONMENT=Production \
 	DOTNET_EnableDiagnostics=0
 
-# Runs as the non-root user the base image already provides.
-USER app
-
 COPY --from=build /app .
 
 EXPOSE 8080
@@ -60,4 +57,16 @@ EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 \
 	CMD ["dotnet", "Waypoint.Api.dll", "--health-check"]
 
-ENTRYPOINT ["dotnet", "Waypoint.Api.dll"]
+# Issue #621: the backend now mounts one read-write volume (managed-tool, for
+# ManagedToolController.Upload's staging directory -- deploy/docker-compose.yml),
+# which arrives root-owned like every Compose named volume does regardless of
+# what gets chowned at build time. No plain `USER app` here anymore (that was
+# safe when the backend had no read-write mount at all): the container now
+# starts as root just long enough for docker-entrypoint.sh to chown that one
+# mount, then drops to `app` (uid 1654, same as both runners) before exec'ing
+# the real process -- see that script's header comment for the full mechanism.
+COPY backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["dotnet", "Waypoint.Api.dll"]
