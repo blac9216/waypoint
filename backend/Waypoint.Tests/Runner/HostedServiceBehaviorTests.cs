@@ -137,6 +137,33 @@ public sealed class HostedServiceBehaviorTests
 		Assert.Contains(logger.EntriesAt(LogLevel.Warning), entry => entry.Message.Contains("ownership lost", StringComparison.OrdinalIgnoreCase));
 	}
 
+	/// <summary>
+	/// Issue #631: a heartbeat loop that faults (transient DB error on a per-tick call)
+	/// must NOT prevent the successful handler's terminal state write. Before the fix the
+	/// faulted heartbeat Task, awaited in the completion finally, rethrew past
+	/// AdvanceStateAsync -- so no running-&gt;done Move was ever recorded and the job hung
+	/// at running until lease-recovery reclaimed it.
+	/// </summary>
+	[Fact]
+	public async Task HeartbeatFault_DoesNotSkipTerminalStateWrite()
+	{
+		FakeRepository repository = new() { NextClaim = Job(null), ThrowRenews = 1 };
+		CapturingLogger<JobDispatcherHostedService> logger = new();
+		FakeJobHandler handler = new("download", async (_, _) =>
+		{
+			// Outlast the 10ms heartbeat interval so the faulting renewal fires mid-run.
+			await Task.Delay(60, CancellationToken.None);
+			return JobExecutionOutcome.Succeeded();
+		});
+		JobDispatcherHostedService service = Dispatcher(repository, logger, handler);
+		await service.StartAsync(CancellationToken.None);
+		await WaitAsync(() => repository.Moves.Any(move => move.To == JobStates.Done));
+		await service.StopAsync(CancellationToken.None);
+
+		Assert.Contains(repository.Moves, move => move is { From: JobStates.Running, To: JobStates.Done });
+		Assert.Contains(logger.EntriesAt(LogLevel.Warning), entry => entry.Message.Contains("heartbeat loop faulted", StringComparison.OrdinalIgnoreCase));
+	}
+
 	[Theory]
 	[InlineData(JobOutcomeKind.Failed, JobStates.Failed)]
 	[InlineData(JobOutcomeKind.AuthFailed, JobStates.AuthFailed)]
@@ -267,7 +294,16 @@ public sealed class HostedServiceBehaviorTests
 
 			ClaimedJob? value = NextClaim; NextClaim = null; return value;
 		}
-		public Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken) => Task.FromResult(RenewResult);
+		public int ThrowRenews { get; set; }
+		public Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)
+		{
+			if (ThrowRenews-- > 0)
+			{
+				throw new InvalidOperationException("renew failed");
+			}
+
+			return Task.FromResult(RenewResult);
+		}
 		public Task<bool> IsCancelRequestedAsync(Guid jobId, CancellationToken cancellationToken) => Task.FromResult(false);
 		public Task<bool> AdvanceStateAsync(Guid jobId, string workerId, string expectedFromState, string toState, string? note, bool clearLease, CancellationToken cancellationToken)
 		{ Moves.Add((expectedFromState, toState)); return Task.FromResult(AdvanceResult); }

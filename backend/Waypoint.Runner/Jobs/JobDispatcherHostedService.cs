@@ -392,7 +392,27 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 			finally
 			{
 				await heartbeatStopCts.CancelAsync().ConfigureAwait(false);
-				await heartbeatTask.ConfigureAwait(false);
+
+				// Issue #631: the heartbeat is best-effort lease renewal plus abort/
+				// cancel observation -- NEVER the record of job/run state. A transient DB
+				// fault on any of its per-tick calls (RenewLeaseAsync,
+				// GetRunQueueStateAsync, IsCancelRequestedAsync -- the capacity
+				// coordinator already swallows its own) faults this Task, and awaiting a
+				// faulted Task rethrows. If that throw escaped this finally it would
+				// propagate PAST the AdvanceStateAsync completion write below, discarding
+				// the handler's real terminal outcome: the job would sit at 'running'
+				// until its (now un-renewed) lease expired and lease-recovery reclaimed
+				// and retried it -- the exact spurious-retry hang this issue reports, and
+				// dangerous for non-idempotent work like tool-install. So a faulted
+				// heartbeat is logged and swallowed here; the completion path proceeds.
+				try
+				{
+					await heartbeatTask.ConfigureAwait(false);
+				}
+				catch (Exception exception)
+				{
+					LogHeartbeatFaulted(job.Id, exception);
+				}
 			}
 
 			if (stageOutcome is not null)
@@ -619,6 +639,9 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Job {JobId}: heartbeat could not renew lease; ownership lost (likely lease-recovered)")]
 	private partial void LogHeartbeatLostOwnership(Guid jobId);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Job {JobId}: heartbeat loop faulted; swallowed so the terminal completion write is not skipped (issue #631)")]
+	private partial void LogHeartbeatFaulted(Guid jobId, Exception exception);
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Job {JobId}: heartbeat observed run {RunId} aborted; cancelling")]
 	private partial void LogHeartbeatObservedAbort(Guid jobId, Guid runId);
