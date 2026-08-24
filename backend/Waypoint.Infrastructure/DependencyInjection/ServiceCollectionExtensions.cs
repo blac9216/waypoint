@@ -246,6 +246,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Waypoint.Core.Capacity.ICapacityPoolStatusReader>(new Capacity.CapacityLeasePoolRepository(connectionString));
 			services.AddSingleton(new SiteRepository(connectionString));
 			services.AddSingleton(new TargetRepository(connectionString));
+			services.AddSingleton(new TargetCredentialBindingRepository(connectionString));
 			services.AddSingleton(new InventoryRepository(connectionString));
 			services.AddSingleton(new ConfigDocRepository(connectionString));
 			services.AddSingleton(new AttestationSnapshotRepository(connectionString));

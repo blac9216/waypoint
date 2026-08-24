@@ -168,7 +168,7 @@ public sealed class SiteTargetRepositoryTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync().ConfigureAwait(false);
 		await using NpgsqlCommand truncate = new(
-			"TRUNCATE TABLE targets, sites, downloads, credential_secrets, credentials RESTART IDENTITY CASCADE", connection);
+			"TRUNCATE TABLE target_credential_bindings, targets, sites, downloads, credential_secrets, credentials RESTART IDENTITY CASCADE", connection);
 		await truncate.ExecuteNonQueryAsync().ConfigureAwait(false);
 	}
 }

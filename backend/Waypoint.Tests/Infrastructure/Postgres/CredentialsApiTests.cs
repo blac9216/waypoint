@@ -459,6 +459,30 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		Assert.Equal(1, blockers[0].GetProperty("count").GetInt32());
 	}
 
+	/// <summary>
+	/// Issue #584 (epic #582): a live <c>target_credential_bindings</c> row is its OWN
+	/// blocking category, distinct from <c>targets</c> -- a binding can name a
+	/// credential for a non-default purpose (here, <c>vcsa-ssh</c> on a vsphere
+	/// target) that the target's legacy <c>credential_id</c> column never carried, so
+	/// deleting that credential must still be blocked and reported, not silently
+	/// allowed because the legacy column points elsewhere (or nowhere).
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_ReferencedByATargetCredentialBinding_Is409_WithTargetCredentialBindingsBlocker()
+	{
+		Guid sshCredentialId = await CreateCredentialAsync("vcsa-ssh-bound", credentialType: "ssh");
+		Guid targetId = await SeedVSphereTargetAsync();
+		await SeedTargetCredentialBindingAsync(targetId, "vcsa-ssh", sshCredentialId);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{sshCredentialId}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
+		Assert.Equal("target_credential_bindings", blockers[0].GetProperty("category").GetString());
+		Assert.Equal(1, blockers[0].GetProperty("count").GetInt32());
+	}
+
 	/// <summary>Issue #593: a live <c>schedules.credential_id</c> reference blocks deletion -- same "config, not history" reasoning as the targets case.</summary>
 	[Fact]
 	public async Task DeletingACredential_ReferencedByASchedule_Is409_WithSchedulesBlocker()
@@ -909,6 +933,43 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		insertTarget.Parameters.AddWithValue($"target-{Guid.NewGuid():N}");
 		insertTarget.Parameters.AddWithValue(credentialId);
 		await insertTarget.ExecuteNonQueryAsync();
+	}
+
+	/// <summary>Issue #584: a bare vsphere target with no credential binding -- the caller adds bindings separately via <see cref="SeedTargetCredentialBindingAsync"/>.</summary>
+	private async Task<Guid> SeedVSphereTargetAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		Guid siteId;
+		await using (NpgsqlCommand insertSite = new("INSERT INTO sites (name) VALUES ($1) RETURNING id", connection))
+		{
+			insertSite.Parameters.AddWithValue($"site-{Guid.NewGuid():N}");
+			siteId = (Guid)(await insertSite.ExecuteScalarAsync())!;
+		}
+
+		await using NpgsqlCommand insertTarget = new(
+			"""
+			INSERT INTO targets (site_id, kind, name, connection)
+			VALUES ($1, 'vsphere', $2, '{"host":"vcsa-01.example.internal"}'::jsonb)
+			RETURNING id
+			""", connection);
+		insertTarget.Parameters.AddWithValue(siteId);
+		insertTarget.Parameters.AddWithValue($"target-{Guid.NewGuid():N}");
+		return (Guid)(await insertTarget.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>Issue #584: a direct <c>target_credential_bindings</c> row, bypassing the API's compatibility validation -- used only to seed the blocker test's fixture state.</summary>
+	private async Task SeedTargetCredentialBindingAsync(Guid targetId, string purpose, Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO target_credential_bindings (target_id, purpose, credential_id) VALUES ($1, $2, $3)", connection);
+		insert.Parameters.AddWithValue(targetId);
+		insert.Parameters.AddWithValue(purpose);
+		insert.Parameters.AddWithValue(credentialId);
+		await insert.ExecuteNonQueryAsync();
 	}
 
 	private async Task SeedScheduleReferencingAsync(Guid credentialId)

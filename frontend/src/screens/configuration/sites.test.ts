@@ -159,7 +159,7 @@ describe("sites.ts data layer", () => {
 
 		const options = await fetchCredentialOptions();
 		expect(calls[0]).toEqual({ url: "/api/v1/credentials", method: "GET", body: undefined });
-		expect(options).toEqual([{ id: "cred-1", name: "Alpha vCenter" }]);
+		expect(options).toEqual([{ id: "cred-1", name: "Alpha vCenter", credential_type: "vcenter" }]);
 	});
 
 	it("fetchCredentialOptions excludes depot-token credentials (issue #571/#560 AC)", async () => {
@@ -171,7 +171,7 @@ describe("sites.ts data layer", () => {
 		) as unknown as typeof fetch;
 
 		const options = await fetchCredentialOptions();
-		expect(options).toEqual([{ id: "cred-1", name: "Alpha vCenter" }]);
+		expect(options).toEqual([{ id: "cred-1", name: "Alpha vCenter", credential_type: "vcenter" }]);
 		expect(options.some((o) => o.name === "Broadcom Support Portal")).toBe(false);
 	});
 

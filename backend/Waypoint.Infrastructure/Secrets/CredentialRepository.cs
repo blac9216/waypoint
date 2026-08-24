@@ -75,6 +75,22 @@ public static class CredentialBlockingCategories
 	/// having its credential nulled out from under it with no snapshot.
 	/// </summary>
 	public const string ActiveRuns = "active_runs";
+
+	/// <summary>
+	/// Issue #584 (epic #582): a <c>target_credential_bindings</c> row naming the
+	/// credential -- purpose-specific target binding configuration (migration 0043),
+	/// distinct from <see cref="Targets"/> (which counts only the legacy
+	/// <c>targets.credential_id</c> column). A binding can name a credential the
+	/// target's legacy column does not, e.g. a non-default purpose like
+	/// <c>vcsa-ssh</c> on a <c>vsphere</c> target -- omitting this category would let
+	/// that binding be silently orphaned (its row would remain, pointing at a deleted
+	/// credential id via the RESTRICT FK, which migration 0043 deliberately does NOT
+	/// relax to SET NULL, so in practice the DELETE would instead fail with a bare FK
+	/// violation the caller cannot render as a 409 breakdown). Counting it here
+	/// upfront keeps every blocker surfaced through the same machine-readable
+	/// category/count shape the rest of this enum already provides.
+	/// </summary>
+	public const string TargetCredentialBindings = "target_credential_bindings";
 }
 
 /// <summary>Result of <see cref="CredentialRepository.DeleteAsync"/>: <see cref="Outcome"/> plus, only for <see cref="CredentialDeleteOutcome.InUse"/>, the category/count breakdown driving the 409 body.</summary>
@@ -388,6 +404,17 @@ public sealed class CredentialRepository
 		if (targets > 0)
 		{
 			blockers.Add(new BlockingCategory(CredentialBlockingCategories.Targets, targets));
+		}
+
+		// Issue #584: target_credential_bindings is a distinct category from `targets`
+		// above -- a binding can name this credential for a non-default purpose (e.g.
+		// vcsa-ssh) that targets.credential_id never carried, so it must be counted
+		// separately rather than folded into the Targets bucket.
+		int targetCredentialBindings = await CountAsync(
+			connection, transaction, "SELECT count(*) FROM target_credential_bindings WHERE credential_id = $1", id, cancellationToken).ConfigureAwait(false);
+		if (targetCredentialBindings > 0)
+		{
+			blockers.Add(new BlockingCategory(CredentialBlockingCategories.TargetCredentialBindings, targetCredentialBindings));
 		}
 
 		int schedules = await CountAsync(connection, transaction, "SELECT count(*) FROM schedules WHERE credential_id = $1", id, cancellationToken).ConfigureAwait(false);

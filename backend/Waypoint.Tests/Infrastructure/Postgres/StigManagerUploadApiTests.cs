@@ -116,6 +116,8 @@ public sealed class StigManagerUploadApiTests : IAsyncLifetime, IDisposable
 
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
+				services.AddSingleton(new TargetCredentialBindingRepository(_connectionString));
+				services.AddSingleton(new Waypoint.Infrastructure.Secrets.CredentialRepository(_connectionString));
 
 				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{

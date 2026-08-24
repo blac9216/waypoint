@@ -16,6 +16,16 @@ const TARGETS: Target[] = [
 		last_refreshed: "2026-08-01T12:00:00Z",
 		created_at: "2026-01-01T00:00:00Z",
 		updated_at: "2026-01-01T00:00:00Z",
+		bindings: [
+			{
+				purpose: "vsphere-api",
+				credential_ref: "cred-1",
+				credential_name: "svc-stig-scan",
+				credential_type: "vcenter",
+				created_at: "2026-01-01T00:00:00Z",
+				updated_at: "2026-01-01T00:00:00Z",
+			},
+		],
 	},
 	{
 		id: "target-2",
@@ -28,10 +38,14 @@ const TARGETS: Target[] = [
 		last_refreshed: null,
 		created_at: "2026-01-01T00:00:00Z",
 		updated_at: "2026-01-01T00:00:00Z",
+		bindings: [],
 	},
 ];
 
-const CREDENTIALS = [{ id: "cred-1", name: "svc-stig-scan" }];
+const CREDENTIALS = [
+	{ id: "cred-1", name: "svc-stig-scan", credential_type: "vcenter" },
+	{ id: "cred-2", name: "svc-srg-ssh", credential_type: "ssh" },
+];
 
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(body === undefined ? null : JSON.stringify(body), {
@@ -70,9 +84,40 @@ describe("SiteTargetsPanel (issue #258 slice: targets table + Targets CRUD)", ()
 					last_refreshed: null,
 					created_at: "2026-08-08T00:00:00Z",
 					updated_at: "2026-08-08T00:00:00Z",
+					bindings: [],
 				};
 				targets = [...targets, created];
 				return jsonResponse(created, 201);
+			}
+			const bindingMatch = /^\/api\/v1\/targets\/([^/]+)\/credential-bindings\/([^/]+)$/.exec(url);
+			if (bindingMatch && method === "PUT") {
+				const [, id, purpose] = bindingMatch;
+				const body = JSON.parse(init!.body as string);
+				const credential = CREDENTIALS.find((c) => c.id === body.credential_ref);
+				targets = targets.map((t) =>
+					t.id === id
+						? {
+								...t,
+								bindings: [
+									...t.bindings.filter((b) => b.purpose !== purpose),
+									{
+										purpose,
+										credential_ref: body.credential_ref,
+										credential_name: credential?.name ?? null,
+										credential_type: credential?.credential_type ?? null,
+										created_at: "2026-08-08T00:00:00Z",
+										updated_at: "2026-08-08T00:00:00Z",
+									},
+								],
+							}
+						: t,
+				);
+				return jsonResponse(targets.find((t) => t.id === id));
+			}
+			if (bindingMatch && method === "DELETE") {
+				const [, id, purpose] = bindingMatch;
+				targets = targets.map((t) => (t.id === id ? { ...t, bindings: t.bindings.filter((b) => b.purpose !== purpose) } : t));
+				return jsonResponse(targets.find((t) => t.id === id));
 			}
 			if (url.startsWith("/api/v1/targets/") && method === "PUT") {
 				const id = url.split("/").pop()!;
@@ -180,7 +225,12 @@ describe("SiteTargetsPanel (issue #258 slice: targets table + Targets CRUD)", ()
 		const row = screen.getByText("photon-01").closest("tr")!;
 		fireEvent.click(within(row).getByText("Edit"));
 
-		const credentialSelect = screen.getByDisplayValue("No credential") as HTMLSelectElement;
+		// The target's own credential_ref picker is the TargetForm's "Credential"
+		// field — the first "No credential" select in document order. The
+		// per-purpose credential-bindings panel (issue #584) renders its own
+		// "No credential" select(s) below it, so this test disambiguates by
+		// picking the first one rather than assuming there is only one.
+		const credentialSelect = screen.getAllByDisplayValue("No credential")[0] as HTMLSelectElement;
 		fireEvent.change(credentialSelect, { target: { value: "cred-1" } });
 		fireEvent.click(screen.getByText("Save"));
 
@@ -191,6 +241,78 @@ describe("SiteTargetsPanel (issue #258 slice: targets table + Targets CRUD)", ()
 		const body = JSON.parse(call.init!.body as string);
 		expect(body.credential_ref).toBe("cred-1");
 		expect(body.clear_credential_ref).toBe(false);
+	});
+
+	it("issue #584: shows a coverage warning for a missing required purpose binding, and offers only compatible credentials", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		const row = screen.getByText("photon-01").closest("tr")!;
+		fireEvent.click(within(row).getByText("Edit"));
+
+		expect(screen.getByText("SRG SSH")).toBeInTheDocument();
+		expect(screen.getByText("Missing required binding")).toBeInTheDocument();
+
+		// srg-ssh only accepts `ssh`-type credentials — svc-stig-scan (vcenter)
+		// must not appear in this picker, only svc-srg-ssh (ssh).
+		const bindingSelect = screen.getByLabelText("SRG SSH credential") as HTMLSelectElement;
+		const labels = Array.from(bindingSelect.options).map((o) => o.text);
+		expect(labels).toEqual(["No credential", "svc-srg-ssh"]);
+	});
+
+	it("issue #584: setting a purpose binding PUTs /targets/{id}/credential-bindings/{purpose} and refreshes coverage", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		const row = screen.getByText("photon-01").closest("tr")!;
+		fireEvent.click(within(row).getByText("Edit"));
+
+		const bindingSelect = screen.getByLabelText("SRG SSH credential") as HTMLSelectElement;
+		fireEvent.change(bindingSelect, { target: { value: "cred-2" } });
+
+		await waitFor(() =>
+			expect(
+				fetchCalls.some((c) => c.url === "/api/v1/targets/target-2/credential-bindings/srg-ssh" && c.init?.method === "PUT"),
+			).toBe(true),
+		);
+		const call = fetchCalls.find(
+			(c) => c.url === "/api/v1/targets/target-2/credential-bindings/srg-ssh" && c.init?.method === "PUT",
+		)!;
+		expect(JSON.parse(call.init!.body as string)).toEqual({ credential_ref: "cred-2" });
+
+		await waitFor(() => expect(screen.queryByText("Missing required binding")).not.toBeInTheDocument());
+		await waitFor(() => expect(screen.getByText("Bound")).toBeInTheDocument());
+	});
+
+	it("issue #584: clearing a purpose binding DELETEs /targets/{id}/credential-bindings/{purpose}", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		const row = screen.getByText("vcsa-01").closest("tr")!;
+		fireEvent.click(within(row).getByText("Edit"));
+
+		const bindingSelect = screen.getByLabelText("vSphere API credential") as HTMLSelectElement;
+		expect(bindingSelect.value).toBe("cred-1");
+		fireEvent.change(bindingSelect, { target: { value: "" } });
+
+		await waitFor(() =>
+			expect(
+				fetchCalls.some(
+					(c) => c.url === "/api/v1/targets/target-1/credential-bindings/vsphere-api" && c.init?.method === "DELETE",
+				),
+			).toBe(true),
+		);
+	});
+
+	it("issue #584: a vsphere target's bindings panel shows both applicable purposes (vsphere-api, VCSA SSH)", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		const row = screen.getByText("vcsa-01").closest("tr")!;
+		fireEvent.click(within(row).getByText("Edit"));
+
+		expect(screen.getByText("vSphere API")).toBeInTheDocument();
+		expect(screen.getByText("VCSA SSH")).toBeInTheDocument();
 	});
 
 	it("Admin can delete a target via DELETE /targets/{id}", async () => {
@@ -239,7 +361,7 @@ describe("SiteTargetsPanel (issue #258 slice: targets table + Targets CRUD)", ()
 		fireEvent.click(screen.getByText("Add target"));
 		const select = screen.getByDisplayValue("No credential") as HTMLSelectElement;
 		const labels = Array.from(select.options).map((o) => o.text);
-		expect(labels).toEqual(["No credential", "svc-stig-scan"]);
+		expect(labels).toEqual(["No credential", "svc-stig-scan", "svc-srg-ssh"]);
 		// No password/secret-shaped input exists anywhere in the form.
 		expect(screen.queryByLabelText(/password|secret|token/i)).not.toBeInTheDocument();
 	});
