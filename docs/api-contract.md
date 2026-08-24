@@ -138,6 +138,15 @@ next sign-in would silently reuse the still-live Keycloak session.
 | `/targets/{id}/inventory` | GET | Cached hosts/VMs tree (cluster → host → vm), build info, maintenance_mode. |
 | `/targets/{id}/discover` | POST | 202 → `discover` job. |
 
+**Planned by #584/#585/#586** ([ADR-0021](adr/0021-credential-purpose-matrix.md)): a
+single `credential_ref` per target is not the eventual shape. #584 adds a reusable
+per-`(target, purpose)` binding surface (e.g. `/targets/{id}/credential-bindings`) so a
+`vsphere` target can carry independent `vsphere-api` and `vcsa-ssh` bindings; #585/#586
+resolve those (plus any run-time override) into immutable per-job snapshots at
+`POST /runs`. None of that exists yet — `credential_ref` above is the only contract
+today, and this note exists so a future skim of this doc doesn't mistake ADR-0021's
+purpose identifiers for a shipped field.
+
 ### Credentials (service/shared only — ADR-0011)
 | Endpoint | Methods | Notes |
 |---|---|---|
@@ -148,6 +157,16 @@ next sign-in would silently reuse the still-live Keycloak session.
 | Endpoint | Methods | Notes |
 |---|---|---|
 | `/runs` | GET, POST | POST body: `run_type`, `scope` (JSON string — a scan run's `scope.site_id` and `scope.profile_id` are both required, optional `target_ids`), `credential_id` \| inline `credential` (personal tier, ADR-0011 — never persisted), `confirmation` (remediate only). Cyber+ for scans; remediation POSTs require Admin + `confirmation: "REMEDIATE"`. 202 body: `run_id`. Issue #639: `scope.profile_id` selects which pulled compliance-content profile (`profiles.id`, `GET /profiles`) the scan executes — must reference an installed profile or the request 404s/400s (missing entirely is a 400 `validation_error`; an unknown id is a 404 `not_found`); the run persists it in `scope` so run history shows what was actually scanned. |
+
+**Planned by #585/#586** ([ADR-0021](adr/0021-credential-purpose-matrix.md)): a single
+`credential_id`/`credential` per run cannot express independent per-purpose bindings
+(e.g. `vsphere-api` vs. `vcsa-ssh` for the same target). The eventual `POST /runs` body
+resolves per-`(target, purpose)` bindings — defaults plus any compatible per-target/
+per-purpose overrides — into immutable job-scoped snapshots at creation time, and
+`run_secrets` (ADR-0016) extends from one ad hoc secret per run to one keyed by
+`(run, target, purpose)`. Today's single `credential_id \| credential` shape below is
+unchanged and is what actually ships.
+
 | `/runs/{id}` | GET | `RunResponse` (issue #494, matches shipped `RunsController`/`RunContracts.cs` exactly): `id`, `run_type`, `state`, `paused`, `blocked`, `blocked_reason`, `scope`, `credential_id`, `initiated_by`, `schedule_id` (issue #515 — the schedule that dispatched this run, null for an operator-initiated one; distinct from `schedules.last_run_id`, which only ever points at a schedule's most recent run), `created_at`/`started_at`/`completed_at`, and job counts by state (`job_count`, `job_count_queued`, `job_count_running`, `job_count_completed`, `job_count_failed`, `job_count_blocked`). No per-queue/per-benchmark breakdown and no aggregate `pass`/`fail`/`na` — those live only on `/runs/{id}/artifacts`. `blocked`/`blocked_reason` are the run's single credential-halt flag (ADR-0008), not a list of independently-blockable named queues; the frontend (`liverun.ts`) synthesizes a queue-like grouping client-side from each job's `priority` for display, it is not a server concept. |
 | `/runs/{id}/jobs` | GET | `JobResponse[]`: `id`, `run_id`, `job_type`, `target_id`, `target_name`, `state`, `stage`, `priority`, `attempt_count`, `created_at`/`started_at`/`finished_at`. No `benchmark` label and no per-job `pass`/`fail`/`na`/`note` on this endpoint — CAT counts are `/runs/{id}/artifacts`'s concern; a job's latest log line arrives only via `job.log` SSE, never a REST field. |
 | `/runs/{id}/pause` · `/resume` · `/abort` | POST | Operator+ (own runs), Admin any. Runs with no recorded initiator (system/scheduled runs) are Admin-only. |

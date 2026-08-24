@@ -39,6 +39,40 @@ A scannable/manageable endpoint within a site. Kinds (from the existing catalog/
 Each target references a **service credential** (`credentialRef`, as today). Discovered
 ESXi hosts and VMs are cached inventory under a `vsphere` target, not standalone targets.
 
+**Credential purposes (design; not yet persisted — [ADR-0021](adr/0021-credential-purpose-matrix.md), issue #583).**
+A single `credentialRef` per target is not enough: `vsphere` targets need a distinct
+vSphere API credential and VCSA SSH credential, satisfiable independently. ADR-0021
+defines four named purposes (never generic numbered slots) and which operations need
+which:
+
+| Purpose | Satisfying credential type | Meaning |
+|---|---|---|
+| `vsphere-api` | `vcenter` | vSphere SSO session (vCenter/ESXi/VM API access) |
+| `vcsa-ssh` | `ssh` | VCSA appliance root SSH (VCSA OS-level components only) |
+| `nsx-api` | `nsx` | NSX Manager REST API session |
+| `srg-ssh` | `ssh` | SRG product SSH login (Photon/Aria Operations/Aria Lifecycle/vIDM), sudo-capable |
+
+Target kind × operation → required/optional purposes:
+
+| Target kind | Operation / component | Required | Optional |
+|---|---|---|---|
+| `vsphere` | discovery | `vsphere-api` | — |
+| `vsphere` | credential-test (vCenter API) | `vsphere-api` | — |
+| `vsphere` | credential-test (VCSA SSH) | `vcsa-ssh` | — |
+| `vsphere` | scan: vCenter / ESXi / VM | `vsphere-api` | — |
+| `vsphere` | scan: VCSA component(s) | `vsphere-api`, `vcsa-ssh` | — |
+| `vsphere` | remediation-ready planning | `vsphere-api` | `vcsa-ssh` (required if plan includes a VCSA component) |
+| `nsx-api` | credential-test, scan, remediation-ready planning | `nsx-api` | — |
+| `ssh` (SRG) | credential-test, scan, remediation-ready planning | `srg-ssh` | — |
+
+Discovery requires only `vsphere-api`, never `vcsa-ssh` (issue #580/PR #606 fixed a bug
+where discovery and vSphere-API credential testing incorrectly prompted for a VCSA
+credential). `nsx-api` and `ssh` targets have no discovery operation at all today (only
+`vsphere` is inventory-capable). See ADR-0021 for defaulting, override, snapshot,
+audit, missing-binding, and scheduling behavior. **This is a design-and-contracts
+slice only** — #584 adds persistence, #585/#586 wire it into execution, #587 updates the
+wizard UI; nothing consumes this matrix at runtime yet.
+
 ### Credential
 Two tiers ([ADR-0011](adr/0011-credential-tiers.md)):
 
