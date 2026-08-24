@@ -110,6 +110,26 @@
 --                                                    sliding-expiry write (issue #469),
 --                                                    which lands in every successful
 --                                                    decrypt, not just cleanup/delete.
+--                                                  -- CORRECTION (migration 0040, issue
+--                                                    #642): this row was reasoned about
+--                                                    as compliance-only ("ad hoc 'my
+--                                                    credentials' decrypt, ADR-0011
+--                                                    personal tier"), but
+--                                                    DeleteRunSecretIfPresentAsync runs
+--                                                    unconditionally inside the SHARED
+--                                                    completion transaction
+--                                                    (JobQueueRepository.TryCompleteRunAsync,
+--                                                    reached from both AdvanceStateAsync
+--                                                    and RecoverExpiredLeasesAsync) for
+--                                                    every job of EITHER runner domain --
+--                                                    not just jobs that registered a run
+--                                                    secret. Without this grant, no
+--                                                    download-runner job could reach any
+--                                                    terminal state at all (root cause of
+--                                                    #640's duplicate-ledger requeue
+--                                                    loop). waypoint_download_runner now
+--                                                    gets the identical SELECT, DELETE,
+--                                                    UPDATE (expires_at) grant.
 --
 --   download-runner only (catalog-index/download -- ADR-0014 SS7 "download runner:
 --   managed tool/depot/content write access" is the filesystem-mount statement; the
