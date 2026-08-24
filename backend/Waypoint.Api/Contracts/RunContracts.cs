@@ -141,7 +141,21 @@ public sealed record RunResponse(
 
 	/// <summary>Jobs blocked by credential halt.</summary>
 	[property: JsonPropertyName("job_count_blocked")]
-	int JobCountBlocked);
+	int JobCountBlocked,
+
+	/// <summary>
+	/// Issue #593: non-secret attribution snapshotted when this run's credential was
+	/// a terminal-only reference at deletion time -- null while <see cref="CredentialId"/>
+	/// still names a live credential, and null forever for a run that never had one.
+	/// </summary>
+	[property: JsonPropertyName("credential_name")]
+	string? CredentialName = null,
+
+	[property: JsonPropertyName("credential_type")]
+	string? CredentialType = null,
+
+	[property: JsonPropertyName("credential_username")]
+	string? CredentialUsername = null);
 
 /// <summary>Single job row for <c>GET /api/v1/runs/{id}/jobs</c>.</summary>
 public sealed record JobResponse(
@@ -179,7 +193,17 @@ public sealed record JobResponse(
 	string? StartedAt,
 
 	[property: JsonPropertyName("finished_at")]
-	string? FinishedAt);
+	string? FinishedAt,
+
+	/// <summary>Issue #593: see <see cref="RunResponse.CredentialName"/> -- same snapshot, job-scoped.</summary>
+	[property: JsonPropertyName("credential_name")]
+	string? CredentialName = null,
+
+	[property: JsonPropertyName("credential_type")]
+	string? CredentialType = null,
+
+	[property: JsonPropertyName("credential_username")]
+	string? CredentialUsername = null);
 
 /// <summary>Response body for <c>POST /api/v1/runs</c> (202 Accepted).</summary>
 public sealed record RunCreatedResponse(

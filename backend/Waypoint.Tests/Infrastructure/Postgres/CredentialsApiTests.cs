@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
@@ -332,18 +333,27 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		}
 	}
 
-	/// <summary>PR #187 round 1, finding 1: a credential still referenced by jobs/runs
-	/// is 409, not 500 -- job history keeps its attribution (the auth-halt window
-	/// depends on it), and the pre-written deletion audit rolls back with it.</summary>
+	/// <summary>PR #187 round 1, finding 1: a credential still referenced by a
+	/// non-terminal job is 409, not 500 -- job history keeps its attribution (the
+	/// auth-halt window depends on it), and the pre-written deletion audit rolls
+	/// back with it. Issue #593: the 409 body now enumerates the machine-readable
+	/// <c>active_jobs</c> blocking category and its count.</summary>
 	[Fact]
-	public async Task DeletingAnInUseCredential_Is409_AndNothingIsAudited()
+	public async Task DeletingAnInUseCredential_Is409_WithActiveJobsBlocker_AndNothingIsAudited()
 	{
 		Guid id = await CreateCredentialAsync("in-use");
 		await SeedJobAsync(id);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
 		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-		Assert.Contains("credential_in_use", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+		string body = await response.Content.ReadAsStringAsync();
+		Assert.Contains("credential_in_use", body, StringComparison.Ordinal);
+
+		using JsonDocument document = JsonDocument.Parse(body);
+		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
+		Assert.Equal(1, blockers.GetArrayLength());
+		Assert.Equal("active_jobs", blockers[0].GetProperty("category").GetString());
+		Assert.Equal(1, blockers[0].GetProperty("count").GetInt32());
 
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
@@ -351,6 +361,165 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 			"SELECT count(*) FROM audit_log WHERE event_type = 'credential.deleted' AND credential_id = $1", connection);
 		audited.Parameters.AddWithValue(id);
 		Assert.Equal(0L, (long)(await audited.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// Issue #593 (epic #577): the core new behavior -- a credential referenced ONLY
+	/// by a terminal job/run is deletable. The job's non-secret attribution
+	/// (name/type/username) survives on the jobs row, credential_id is nulled, and
+	/// the credential + its secret blob are actually gone.
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_ReferencedOnlyByTerminalHistory_Succeeds_AndSnapshotsAttribution()
+	{
+		Guid id = await CreateCredentialAsync("terminal-only", "invented-terminal-blob", credentialType: "ssh");
+		await SendAsync(HttpMethod.Put, $"/api/v1/credentials/{id}", new { username = "svc-terminal@example.internal" });
+		string fullName = (await GetFieldAsync(id, "name"))!;
+
+		(Guid runId, Guid jobId) = await SeedTerminalRunAndJobAsync(id, jobState: "done", runState: "completed");
+
+		HttpResponseMessage deleted = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using (NpgsqlCommand credentialGone = new("SELECT count(*) FROM credentials WHERE id = $1", connection))
+		{
+			credentialGone.Parameters.AddWithValue(id);
+			Assert.Equal(0L, (long)(await credentialGone.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand secretGone = new("SELECT count(*) FROM credential_secrets WHERE credential_id = $1", connection))
+		{
+			secretGone.Parameters.AddWithValue(id);
+			Assert.Equal(0L, (long)(await secretGone.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand jobRow = new(
+			"SELECT credential_id, credential_name, credential_type, credential_username FROM jobs WHERE id = $1", connection))
+		{
+			jobRow.Parameters.AddWithValue(jobId);
+			await using NpgsqlDataReader reader = await jobRow.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync());
+			Assert.True(reader.IsDBNull(0), "expected jobs.credential_id nulled after detach");
+			Assert.Equal(fullName, reader.GetString(1));
+			Assert.Equal("ssh", reader.GetString(2));
+			Assert.Equal("svc-terminal@example.internal", reader.GetString(3));
+		}
+
+		await using (NpgsqlCommand runRow = new(
+			"SELECT credential_id, credential_name, credential_type, credential_username FROM runs WHERE id = $1", connection))
+		{
+			runRow.Parameters.AddWithValue(runId);
+			await using NpgsqlDataReader reader = await runRow.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync());
+			Assert.True(reader.IsDBNull(0), "expected runs.credential_id nulled after detach");
+			Assert.Equal("ssh", reader.GetString(2));
+			Assert.Equal("svc-terminal@example.internal", reader.GetString(3));
+		}
+
+		// The wire-facing GET /runs/{id}/jobs and GET /runs/{id} surfaces still show
+		// the snapshot after the credential is gone -- proving "historical displays
+		// retain a non-secret credential name/identifier snapshot" (epic #577 AC),
+		// not just that the DB columns happen to hold a value.
+		HttpResponseMessage runResponse = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}", body: null);
+		using JsonDocument runDocument = JsonDocument.Parse(await runResponse.Content.ReadAsStringAsync());
+		Assert.Equal("ssh", runDocument.RootElement.GetProperty("credential_type").GetString());
+		Assert.Equal("svc-terminal@example.internal", runDocument.RootElement.GetProperty("credential_username").GetString());
+		// credential_id is a nullable field the serializer omits when null (same
+		// DefaultIgnoreCondition.WhenWritingNull convention CredentialResponse uses) --
+		// absent, not present-and-null, is what "detached" looks like on the wire.
+		Assert.False(runDocument.RootElement.TryGetProperty("credential_id", out _));
+
+		HttpResponseMessage jobsResponse = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/jobs", body: null);
+		using JsonDocument jobsDocument = JsonDocument.Parse(await jobsResponse.Content.ReadAsStringAsync());
+		JsonElement jobElement = jobsDocument.RootElement[0];
+		Assert.Equal("ssh", jobElement.GetProperty("credential_type").GetString());
+		Assert.Equal("svc-terminal@example.internal", jobElement.GetProperty("credential_username").GetString());
+	}
+
+	/// <summary>
+	/// Issue #593: a live <c>targets.credential_id</c> reference blocks deletion even
+	/// when every job/run reference is terminal -- config/connection wiring is not
+	/// history, and never becomes deletable just because past scans succeeded.
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_ReferencedByATarget_Is409_WithTargetsBlocker()
+	{
+		Guid id = await CreateCredentialAsync("target-bound");
+		await SeedTargetReferencingAsync(id);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
+		Assert.Equal("targets", blockers[0].GetProperty("category").GetString());
+		Assert.Equal(1, blockers[0].GetProperty("count").GetInt32());
+	}
+
+	/// <summary>Issue #593: a live <c>schedules.credential_id</c> reference blocks deletion -- same "config, not history" reasoning as the targets case.</summary>
+	[Fact]
+	public async Task DeletingACredential_ReferencedByASchedule_Is409_WithSchedulesBlocker()
+	{
+		Guid id = await CreateCredentialAsync("schedule-bound");
+		await SeedScheduleReferencingAsync(id);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
+		Assert.Equal("schedules", blockers[0].GetProperty("category").GetString());
+	}
+
+	/// <summary>Issue #593: the singleton STIG Manager global connection is "configuration" -- distinct from targets/schedules, still a live binding, not history.</summary>
+	[Fact]
+	public async Task DeletingACredential_ReferencedByStigManagerConfig_Is409_WithConfigurationBlocker()
+	{
+		Guid id = await CreateCredentialAsync("stigman-bound", credentialType: "token");
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand insert = new(
+				"""
+				INSERT INTO stigman_connections (id, endpoint, authority, collection, client_id, credential_id)
+				VALUES (1, 'https://stigman.example.internal/api', 'https://idp.example.internal', 'demo', 'waypoint', $1)
+				ON CONFLICT (id) DO UPDATE SET credential_id = EXCLUDED.credential_id
+				""", connection);
+			insert.Parameters.AddWithValue(id);
+			await insert.ExecuteNonQueryAsync();
+		}
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
+		Assert.Equal("configuration", blockers[0].GetProperty("category").GetString());
+	}
+
+	/// <summary>
+	/// Issue #593: every category can be reported at once, in the fixed
+	/// targets/schedules/configuration/active_jobs order -- an operator sees the
+	/// FULL picture, not just the first blocker the repository happens to check.
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_WithMultipleBlockers_ReportsEveryCategory()
+	{
+		Guid id = await CreateCredentialAsync("multi-blocked");
+		await SeedTargetReferencingAsync(id);
+		await SeedScheduleReferencingAsync(id);
+		await SeedJobAsync(id);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
+		string[] categories = [.. blockers.EnumerateArray().Select(e => e.GetProperty("category").GetString()!)];
+		Assert.Equal(["targets", "schedules", "active_jobs"], categories);
 	}
 
 	/// <summary>Issue #20: credential_type is validated against the closed
@@ -550,6 +719,71 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 			"INSERT INTO jobs (job_type, priority, state, credential_id) VALUES ('download', 1, 'queued', $1) RETURNING id", connection);
 		insert.Parameters.AddWithValue(credentialId);
 		return (Guid)(await insert.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>A run plus its one job, both landed directly on the given terminal states -- used to exercise the terminal-only detach path without running a real job through the dispatcher.</summary>
+	private async Task<(Guid RunId, Guid JobId)> SeedTerminalRunAndJobAsync(Guid credentialId, string jobState, string runState)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		Guid runId;
+		await using (NpgsqlCommand insertRun = new(
+			"INSERT INTO runs (run_type, scope, state, credential_id) VALUES ('scan', '{}', $1, $2) RETURNING id", connection))
+		{
+			insertRun.Parameters.AddWithValue(runState);
+			insertRun.Parameters.AddWithValue(credentialId);
+			runId = (Guid)(await insertRun.ExecuteScalarAsync())!;
+		}
+
+		Guid jobId;
+		await using (NpgsqlCommand insertJob = new(
+			"INSERT INTO jobs (run_id, job_type, priority, state, credential_id) VALUES ($1, 'scan', 1, $2, $3) RETURNING id", connection))
+		{
+			insertJob.Parameters.AddWithValue(runId);
+			insertJob.Parameters.AddWithValue(jobState);
+			insertJob.Parameters.AddWithValue(credentialId);
+			jobId = (Guid)(await insertJob.ExecuteScalarAsync())!;
+		}
+
+		return (runId, jobId);
+	}
+
+	private async Task SeedTargetReferencingAsync(Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		Guid siteId;
+		await using (NpgsqlCommand insertSite = new("INSERT INTO sites (name) VALUES ($1) RETURNING id", connection))
+		{
+			insertSite.Parameters.AddWithValue($"site-{Guid.NewGuid():N}");
+			siteId = (Guid)(await insertSite.ExecuteScalarAsync())!;
+		}
+
+		await using NpgsqlCommand insertTarget = new(
+			"""
+			INSERT INTO targets (site_id, kind, name, connection, credential_id)
+			VALUES ($1, 'vsphere', $2, '{"host":"vcsa-01.example.internal"}'::jsonb, $3)
+			""", connection);
+		insertTarget.Parameters.AddWithValue(siteId);
+		insertTarget.Parameters.AddWithValue($"target-{Guid.NewGuid():N}");
+		insertTarget.Parameters.AddWithValue(credentialId);
+		await insertTarget.ExecuteNonQueryAsync();
+	}
+
+	private async Task SeedScheduleReferencingAsync(Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO schedules (name, job_type, cron_expression, credential_id, created_by)
+			VALUES ($1, 'scan', '0 0 * * *', $2, 'tester')
+			""", connection);
+		insert.Parameters.AddWithValue($"schedule-{Guid.NewGuid():N}");
+		insert.Parameters.AddWithValue(credentialId);
+		await insert.ExecuteNonQueryAsync();
 	}
 
 	private Task<string> LoginAsAdminAsync() => LoginAsAdminAsync(_client);

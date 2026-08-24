@@ -23,12 +23,13 @@ namespace Waypoint.Core.Errors;
 /// </summary>
 public class ApiException : Exception
 {
-	public ApiException(HttpStatusCode statusCode, string code, string message, string? detail = null)
+	public ApiException(HttpStatusCode statusCode, string code, string message, string? detail = null, IReadOnlyList<BlockingCategory>? blockers = null)
 		: base(message)
 	{
 		StatusCode = statusCode;
 		Code = code;
 		Detail = detail;
+		Blockers = blockers;
 	}
 
 	public HttpStatusCode StatusCode { get; }
@@ -37,9 +38,12 @@ public class ApiException : Exception
 
 	public string? Detail { get; }
 
+	/// <summary>Issue #593: optional structured breakdown -- see <see cref="ErrorDetail.Blockers"/>.</summary>
+	public IReadOnlyList<BlockingCategory>? Blockers { get; }
+
 	public ErrorDetail ToErrorDetail()
 	{
-		return new ErrorDetail(Code, Message, Detail);
+		return new ErrorDetail(Code, Message, Detail, Blockers);
 	}
 
 	public static ApiException Unauthorized(string message = "Authentication is required.", string? detail = null)

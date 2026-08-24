@@ -13,6 +13,8 @@
 // limitations under the License.
 
 using Npgsql;
+using Waypoint.Core.Errors;
+using Waypoint.Core.Jobs;
 using Waypoint.Core.Secrets;
 
 namespace Waypoint.Infrastructure.Secrets;
@@ -36,9 +38,34 @@ public enum CredentialDeleteOutcome
 	Deleted,
 	NotFound,
 
-	/// <summary>Jobs or runs still reference the credential; deletion would erase execution history's attribution.</summary>
+	/// <summary>
+	/// Issue #593: at least one BLOCKING reference remains -- a target, a
+	/// schedule/config binding, or a non-terminal job/run. Terminal-only
+	/// runs/jobs are no longer a blocker (see <see cref="DeleteAsync"/>); this
+	/// outcome now always carries a non-empty <see cref="CredentialDeleteResult.Blockers"/>
+	/// list the caller maps to the documented 409 category breakdown.
+	/// </summary>
 	InUse,
 }
+
+/// <summary>Issue #593: the closed set of machine-readable <c>credential_in_use</c> categories <see cref="CredentialRepository.DeleteAsync"/> can report. Stable wire strings -- the frontend branches on these, not on <see cref="ErrorDetail.Message"/> prose.</summary>
+public static class CredentialBlockingCategories
+{
+	/// <summary>A <c>targets.credential_id</c> row -- live connection configuration, not history.</summary>
+	public const string Targets = "targets";
+
+	/// <summary>A <c>schedules.credential_id</c> row -- a scheduled job definition, not history.</summary>
+	public const string Schedules = "schedules";
+
+	/// <summary>The singleton <c>stigman_connections.credential_id</c> row -- global config, not history.</summary>
+	public const string Configuration = "configuration";
+
+	/// <summary>A <c>jobs.credential_id</c> row whose job has not reached a <see cref="JobTerminalStates"/> state -- active work, not history.</summary>
+	public const string ActiveJobs = "active_jobs";
+}
+
+/// <summary>Result of <see cref="CredentialRepository.DeleteAsync"/>: <see cref="Outcome"/> plus, only for <see cref="CredentialDeleteOutcome.InUse"/>, the category/count breakdown driving the 409 body.</summary>
+public sealed record CredentialDeleteResult(CredentialDeleteOutcome Outcome, IReadOnlyList<BlockingCategory>? Blockers = null);
 
 public sealed class CredentialRepository
 {
@@ -240,29 +267,64 @@ public sealed class CredentialRepository
 	}
 
 	/// <summary>
-	/// Deletes the credential; <c>credential_secrets</c> follows via ON DELETE CASCADE,
-	/// and existing audit rows survive with their <c>credential_id</c> nulled
-	/// (migration 0006). The deletion itself is audited first, in the same
-	/// transaction, with the identity captured in detail JSON -- after the FK nulls
-	/// out, that JSON is the surviving attribution.
+	/// Issue #593 (epic #577): deletes the credential IF every reference to it is
+	/// either absent or terminal history. Order of operations, all in one
+	/// transaction:
+	///
+	///   1. Count each blocking category (<see cref="CredentialBlockingCategories"/>):
+	///      targets, schedules, the stigman_connections singleton, and non-terminal
+	///      jobs (<see cref="JobTerminalStates"/> defines terminal). Any non-zero
+	///      category rolls the transaction back and returns <see cref="CredentialDeleteOutcome.InUse"/>
+	///      with the full breakdown -- a run is never counted directly (its own
+	///      state doesn't gate anything by itself), but a run reachable only through
+	///      terminal jobs is, by construction, itself terminal history.
+	///   2. Otherwise, every terminal run/job row still naming this credential gets
+	///      its non-secret attribution (name, credential_type, username --
+	///      deliberately NOT the credential's purpose/binding, per epic #577's
+	///      trajectory note that #582 will redesign bindings) snapshotted onto the
+	///      new 0041 columns, then credential_id is nulled on those same rows. This
+	///      is an explicit UPDATE, not reliance on the FK's ON DELETE SET NULL action
+	///      -- the snapshot must land before the row loses its only link to the
+	///      credential's display fields.
+	///   3. The deletion audit row is written (as before), then the credential row
+	///      itself is deleted; <c>credential_secrets</c> follows via ON DELETE
+	///      CASCADE. audit_log's own credential_id survives nulled (migration 0006).
 	/// </summary>
-	public async Task<CredentialDeleteOutcome> DeleteAsync(Guid id, string actor, CancellationToken cancellationToken)
+	public async Task<CredentialDeleteResult> DeleteAsync(Guid id, string actor, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
 		string? name;
-		await using (NpgsqlCommand read = new("SELECT name FROM credentials WHERE id = $1", connection, transaction))
+		string? credentialType;
+		string? username;
+		await using (NpgsqlCommand read = new(
+			"SELECT name, credential_type, username FROM credentials WHERE id = $1 FOR UPDATE", connection, transaction))
 		{
 			read.Parameters.AddWithValue(id);
-			name = await read.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+			await using NpgsqlDataReader reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				return new CredentialDeleteResult(CredentialDeleteOutcome.NotFound);
+			}
+
+			name = reader.GetString(0);
+			credentialType = reader.GetString(1);
+			username = reader.IsDBNull(2) ? null : reader.GetString(2);
 		}
 
-		if (name is null)
+		List<BlockingCategory> blockers = await CountBlockersAsync(connection, transaction, id, cancellationToken).ConfigureAwait(false);
+		if (blockers.Count > 0)
 		{
-			return CredentialDeleteOutcome.NotFound;
+			// No writes have happened yet (the read above is FOR UPDATE only) --
+			// rolling back here is a formality, but stays consistent with every
+			// other early-return path in this class using an owned transaction.
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return new CredentialDeleteResult(CredentialDeleteOutcome.InUse, blockers);
 		}
+
+		await DetachTerminalHistoryAsync(connection, transaction, id, name, credentialType, username, cancellationToken).ConfigureAwait(false);
 
 		await using (NpgsqlCommand audit = new(
 			"INSERT INTO audit_log (event_type, actor, credential_id, detail) VALUES ('credential.deleted', $1, $2, $3::jsonb)",
@@ -274,24 +336,111 @@ public sealed class CredentialRepository
 			await audit.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
-		try
+		await using (NpgsqlCommand delete = new("DELETE FROM credentials WHERE id = $1", connection, transaction))
 		{
-			await using NpgsqlCommand delete = new("DELETE FROM credentials WHERE id = $1", connection, transaction);
 			delete.Parameters.AddWithValue(id);
 			await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
-		catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.ForeignKeyViolation)
-		{
-			// PR #187 round 1, finding 1: jobs/runs keep plain RESTRICT FKs on
-			// purpose -- nulling job history would erode the auth-halt window and
-			// run attribution. A referenced credential is therefore not deletable;
-			// the caller maps this to 409 credential_in_use. The transaction rolls
-			// back, taking the pre-written audit row with it.
-			return CredentialDeleteOutcome.InUse;
-		}
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-		return CredentialDeleteOutcome.Deleted;
+		return new CredentialDeleteResult(CredentialDeleteOutcome.Deleted);
+	}
+
+	/// <summary>
+	/// One row per non-empty <see cref="CredentialBlockingCategories"/> bucket, in a
+	/// fixed, deterministic order (targets, schedules, configuration, active_jobs) so
+	/// the 409 body's category list is stable across calls. <c>runs</c> is
+	/// deliberately not its own category -- a run is only ever reachable through its
+	/// jobs, and a run whose jobs are all terminal is itself terminal history (no
+	/// separate "active run" state exists outside its jobs' states).
+	/// </summary>
+	private static async Task<List<BlockingCategory>> CountBlockersAsync(
+		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid id, CancellationToken cancellationToken)
+	{
+		List<BlockingCategory> blockers = [];
+
+		int targets = await CountAsync(connection, transaction, "SELECT count(*) FROM targets WHERE credential_id = $1", id, cancellationToken).ConfigureAwait(false);
+		if (targets > 0)
+		{
+			blockers.Add(new BlockingCategory(CredentialBlockingCategories.Targets, targets));
+		}
+
+		int schedules = await CountAsync(connection, transaction, "SELECT count(*) FROM schedules WHERE credential_id = $1", id, cancellationToken).ConfigureAwait(false);
+		if (schedules > 0)
+		{
+			blockers.Add(new BlockingCategory(CredentialBlockingCategories.Schedules, schedules));
+		}
+
+		int configuration = await CountAsync(connection, transaction, "SELECT count(*) FROM stigman_connections WHERE credential_id = $1", id, cancellationToken).ConfigureAwait(false);
+		if (configuration > 0)
+		{
+			blockers.Add(new BlockingCategory(CredentialBlockingCategories.Configuration, configuration));
+		}
+
+		int activeJobs = await CountAsync(
+			connection, transaction,
+			"SELECT count(*) FROM jobs WHERE credential_id = $1 AND state NOT IN ('uploaded', 'done', 'failed', 'auth-failed', 'cancelled')",
+			id, cancellationToken).ConfigureAwait(false);
+		if (activeJobs > 0)
+		{
+			blockers.Add(new BlockingCategory(CredentialBlockingCategories.ActiveJobs, activeJobs));
+		}
+
+		return blockers;
+	}
+
+	private static async Task<int> CountAsync(
+		NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, Guid id, CancellationToken cancellationToken)
+	{
+		await using NpgsqlCommand command = new(sql, connection, transaction);
+		command.Parameters.AddWithValue(id);
+		return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), System.Globalization.CultureInfo.InvariantCulture);
+	}
+
+	/// <summary>
+	/// Snapshots non-secret attribution onto every terminal run/job still naming
+	/// <paramref name="id"/>, then nulls their credential_id. Only reachable after
+	/// <see cref="CountBlockersAsync"/> has already proven zero non-terminal jobs
+	/// reference the credential, so every jobs row this touches is terminal by
+	/// construction; the WHERE clause repeats the terminal check anyway rather than
+	/// trusting that invariant blindly (defense in depth against the two drifting
+	/// out of sync).
+	/// </summary>
+	private static async Task DetachTerminalHistoryAsync(
+		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid id, string name, string credentialType, string? username,
+		CancellationToken cancellationToken)
+	{
+		await using (NpgsqlCommand jobs = new(
+			"""
+			UPDATE jobs
+			SET credential_name = $2, credential_type = $3, credential_username = $4, credential_id = NULL
+			WHERE credential_id = $1 AND state IN ('uploaded', 'done', 'failed', 'auth-failed', 'cancelled')
+			""", connection, transaction))
+		{
+			jobs.Parameters.AddWithValue(id);
+			jobs.Parameters.AddWithValue(name);
+			jobs.Parameters.AddWithValue(credentialType);
+			jobs.Parameters.AddWithValue((object?)username ?? DBNull.Value);
+			await jobs.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// A run's own credential_id (docs/api-contract.md: the credential a scan/
+		// remediate run was initiated with) is independent of its jobs' -- detach it
+		// whenever the run itself is no longer 'running'/'pending' (its own terminal
+		// states, RunStates in api-contract.md), regardless of the jobs UPDATE above.
+		await using (NpgsqlCommand runs = new(
+			"""
+			UPDATE runs
+			SET credential_name = $2, credential_type = $3, credential_username = $4, credential_id = NULL
+			WHERE credential_id = $1 AND state NOT IN ('pending', 'running')
+			""", connection, transaction))
+		{
+			runs.Parameters.AddWithValue(id);
+			runs.Parameters.AddWithValue(name);
+			runs.Parameters.AddWithValue(credentialType);
+			runs.Parameters.AddWithValue((object?)username ?? DBNull.Value);
+			await runs.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
 	}
 
 	private static CredentialResponse Map(NpgsqlDataReader reader)

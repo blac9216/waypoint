@@ -38,4 +38,14 @@ public sealed record RunSummary(
 	int JobCountRunning,
 	int JobCountCompleted,
 	int JobCountFailed,
-	int JobCountBlocked);
+	int JobCountBlocked,
+	/// <summary>
+	/// Issue #593 (migration 0041): non-secret attribution snapshotted onto this row
+	/// when a terminal run's credential was detached and deleted -- null until then,
+	/// and null forever for a run whose credential still exists (<see cref="CredentialId"/>
+	/// is the live reference in that case). Display fields only, deliberately NOT the
+	/// credential's purpose/binding (epic #577's trajectory note).
+	/// </summary>
+	string? CredentialName = null,
+	string? CredentialType = null,
+	string? CredentialUsername = null);

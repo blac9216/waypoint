@@ -29,7 +29,7 @@
  * `health` (issue #323).
  */
 
-import { apiDelete, apiGet, apiPost, apiPut } from "../../lib/api";
+import { apiDelete, apiGet, apiPost, apiPut, type ApiErrorBlocker } from "../../lib/api";
 
 /**
  * The full backend closed set (`Waypoint.Core.Secrets.CredentialTypes.All`,
@@ -163,4 +163,46 @@ export function formatTimestamp(iso: string | null | undefined): string {
 		return "—";
 	}
 	return date.toISOString().slice(0, 16).replace("T", " ") + "Z";
+}
+
+/**
+ * Issue #593: one clause per `409 credential_in_use` blocking category
+ * (`Waypoint.Core.Errors.BlockingCategory` on the wire, via `ApiErrorBlocker`).
+ * Deliberately a closed switch, not a passthrough of the category string --
+ * an unrecognized future category still renders (the `default` clause), but
+ * every category this endpoint documents today gets accurate, count-aware
+ * phrasing rather than a raw wire token like `active_jobs` in the UI.
+ */
+export function describeCredentialBlocker(blocker: ApiErrorBlocker): string {
+	const { category, count } = blocker;
+	const plural = count === 1 ? "" : "s";
+	switch (category) {
+		case "targets":
+			return `${count} target${plural}`;
+		case "schedules":
+			return `${count} schedule${plural}`;
+		case "configuration":
+			return "the STIG Manager connection";
+		case "active_jobs":
+			return `${count} active job${plural}`;
+		default:
+			return `${count} ${category.replace(/_/g, " ")}`;
+	}
+}
+
+/**
+ * Issue #593 (epic #577): renders the `409 credential_in_use` body's
+ * machine-readable `blockers` into the guidance the delete confirmation/error
+ * surfaces — naming exactly what still references the credential (targets,
+ * schedules, the STIG Manager connection, active jobs) instead of the old
+ * blanket "history must be removed" text, which was actively wrong once
+ * terminal history stopped blocking deletion. `blockers` is optional only
+ * because an older/unpatched API build might omit it; the fallback keeps the
+ * error non-crashing, not accurate.
+ */
+export function describeCredentialInUse(name: string, blockers: ApiErrorBlocker[] | undefined): string {
+	if (!blockers || blockers.length === 0) {
+		return `"${name}" is still referenced by live configuration or active work and cannot be deleted yet.`;
+	}
+	return `"${name}" is still referenced by ${blockers.map(describeCredentialBlocker).join(", ")} and cannot be deleted until those references are removed. Completed run/job history is not a blocker.`;
 }

@@ -819,7 +819,8 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'running'),
 			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'done'),
 			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ('failed', 'auth-failed')),
-			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'blocked')
+			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'blocked'),
+			r.credential_name, r.credential_type, r.credential_username
 		FROM runs r
 		LEFT JOIN jobs j ON j.run_id = r.id
 		""";
@@ -844,7 +845,10 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		JobCountRunning: reader.GetInt32(15),
 		JobCountCompleted: reader.GetInt32(16),
 		JobCountFailed: reader.GetInt32(17),
-		JobCountBlocked: reader.GetInt32(18));
+		JobCountBlocked: reader.GetInt32(18),
+		CredentialName: reader.IsDBNull(19) ? null : reader.GetString(19),
+		CredentialType: reader.IsDBNull(20) ? null : reader.GetString(20),
+		CredentialUsername: reader.IsDBNull(21) ? null : reader.GetString(21));
 
 	public async Task<RunSummary?> GetRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
@@ -898,7 +902,8 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 				id, run_id, job_type, target_id, target_name,
 				state, stage, priority, attempt_count,
 				created_at::text, started_at::text, finished_at::text,
-				upload_status, upload_detail
+				upload_status, upload_detail,
+				credential_name, credential_type, credential_username
 			FROM jobs
 			WHERE run_id = $1
 			ORDER BY priority, created_at
@@ -929,7 +934,10 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 				StartedAt: reader.IsDBNull(10) ? null : reader.GetString(10),
 				FinishedAt: reader.IsDBNull(11) ? null : reader.GetString(11),
 				UploadStatus: reader.IsDBNull(12) ? null : reader.GetString(12),
-				UploadDetail: reader.IsDBNull(13) ? null : reader.GetString(13)));
+				UploadDetail: reader.IsDBNull(13) ? null : reader.GetString(13),
+				CredentialName: reader.IsDBNull(14) ? null : reader.GetString(14),
+				CredentialType: reader.IsDBNull(15) ? null : reader.GetString(15),
+				CredentialUsername: reader.IsDBNull(16) ? null : reader.GetString(16)));
 		}
 
 		return jobs;
@@ -945,7 +953,8 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 				id, run_id, job_type, target_id, target_name,
 				state, stage, priority, attempt_count,
 				created_at::text, started_at::text, finished_at::text,
-				upload_status, upload_detail
+				upload_status, upload_detail,
+				credential_name, credential_type, credential_username
 			FROM jobs
 			WHERE id = $1
 			""", connection);
@@ -970,7 +979,10 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			StartedAt: reader.IsDBNull(10) ? null : reader.GetString(10),
 			FinishedAt: reader.IsDBNull(11) ? null : reader.GetString(11),
 			UploadStatus: reader.IsDBNull(12) ? null : reader.GetString(12),
-			UploadDetail: reader.IsDBNull(13) ? null : reader.GetString(13));
+			UploadDetail: reader.IsDBNull(13) ? null : reader.GetString(13),
+			CredentialName: reader.IsDBNull(14) ? null : reader.GetString(14),
+			CredentialType: reader.IsDBNull(15) ? null : reader.GetString(15),
+			CredentialUsername: reader.IsDBNull(16) ? null : reader.GetString(16));
 	}
 
 	public async Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken)

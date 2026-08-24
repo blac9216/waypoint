@@ -188,7 +188,16 @@ describe("CredentialsTab (issue #247)", () => {
 				const id = url.split("/").pop()!;
 				if (id === "cred-1") {
 					return jsonResponse(
-						{ error: { code: "credential_in_use", message: "Jobs or runs still reference this credential." } },
+						{
+							error: {
+								code: "credential_in_use",
+								message: "This credential is still referenced by live configuration or active work.",
+								blockers: [
+									{ category: "targets", count: 2 },
+									{ category: "active_jobs", count: 1 },
+								],
+							},
+						},
 						409,
 					);
 				}
@@ -554,7 +563,15 @@ describe("CredentialsTab (issue #247)", () => {
 		await waitFor(() => expect(within(row).queryByText("Testing…")).not.toBeInTheDocument());
 	});
 
-	it("Delete surfaces the 409 credential_in_use error clearly", async () => {
+	/**
+	 * Issue #593: the delete guidance now names the ACTUAL machine-readable
+	 * blocking categories from the 409 body (`blockers`) instead of a blanket
+	 * "history must be removed" message -- which would be actively wrong once
+	 * terminal run/job history stopped blocking deletion. The mock's cred-1
+	 * 409 carries `targets` (2) and `active_jobs` (1); both must appear, and
+	 * the message must reassure that completed history is not the blocker.
+	 */
+	it("Delete surfaces the 409 credential_in_use error with the actual blocking categories, not a generic history warning", async () => {
 		installFetchMock("Admin");
 		vi.spyOn(window, "confirm").mockReturnValue(true);
 		await mount();
@@ -562,7 +579,9 @@ describe("CredentialsTab (issue #247)", () => {
 		const row = screen.getByText("Alpha vCenter service account").closest("tr")!;
 		fireEvent.click(within(row).getByText("Delete"));
 
-		await waitFor(() => expect(screen.getByText(/still referenced by jobs or runs/i)).toBeInTheDocument());
+		await waitFor(() => expect(screen.getByText(/2 targets/i)).toBeInTheDocument());
+		expect(screen.getByText(/1 active job/i)).toBeInTheDocument();
+		expect(screen.getByText(/completed run\/job history is not a blocker/i)).toBeInTheDocument();
 		// The credential is still present — the 409 did not silently remove it.
 		expect(screen.getByText("Alpha vCenter service account")).toBeInTheDocument();
 	});
