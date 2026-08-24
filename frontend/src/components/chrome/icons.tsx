@@ -42,6 +42,25 @@ export function LiveRunIcon(props: SVGProps<SVGSVGElement>) {
 	);
 }
 
+/**
+ * Issue #708: generic jobs/activity glyph (a checklist) for the renamed
+ * "Jobs" nav entry (formerly "Live Jobs", `LiveRunIcon`'s live-pulse
+ * waveform) — the workspace now shows active AND historical work, so its
+ * icon should not imply "only live", matching the title rename.
+ */
+export function JobsIcon(props: SVGProps<SVGSVGElement>) {
+	return (
+		<Icon {...props}>
+			<line x1="5.5" y1="3.5" x2="14.5" y2="3.5" />
+			<line x1="5.5" y1="8" x2="14.5" y2="8" />
+			<line x1="5.5" y1="12.5" x2="14.5" y2="12.5" />
+			<polyline points="1,3.5 1.75,4.25 3,2.5" />
+			<polyline points="1,8 1.75,8.75 3,7" />
+			<polyline points="1,12.5 1.75,13.25 3,11.5" />
+		</Icon>
+	);
+}
+
 export function ScanIcon(props: SVGProps<SVGSVGElement>) {
 	return (
 		<Icon {...props}>

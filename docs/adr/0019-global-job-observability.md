@@ -67,10 +67,39 @@ silently destroying appliance content or compliance evidence.
   state and artifacts.
 - Existing runner ownership, lease, stage, and shared-capacity decisions are not
   superseded.
+- Owner review of the epic #588 outcome (2026-08-24, epic #706) found that a pure
+  global surface with no domain console lost operationally load-bearing detail the
+  deleted scan-only Live Run screen had (priority queues, stage board, per-target
+  rows, finding counters, blocked banner — issues #704/#705) and that terminal work
+  vanishing from the global list (only active runs were queryable) left no in-app way
+  to browse completed work. Neither gap contradicts decision 1 or 4 above — decision 1
+  never claimed the global workspace was the ONLY place a run's detail could be
+  presented, and decision 4 already says durable domain output "link[s] to those
+  resources rather than reproducing their management actions," which is exactly what
+  a restored, dedicated compliance console (linked from the global surface, not
+  duplicating it) does. The learned shape: the global workspace (renamed **Jobs**,
+  issue #708 — its title no longer said "Live" once it also showed terminal history;
+  `key`/route stay `live-jobs`/`/live-jobs`) gained a History mode (filtered,
+  cursor-paged `GET /runs/history`, issue #689/#708) reusing decision 2's renderer
+  registry and decision 3's historical-events query, bidirectionally linked to a
+  restored dedicated compliance Live Run console (issue #707) that is not itself
+  superseded or replaced by the global surface — the two are complementary
+  projections, one cross-domain and operational, one domain-deep for compliance scan
+  monitoring and controls.
+- Roll-off (issue #708): an operator-configurable, disabled-by-default periodic sweep
+  applies decision 5's existing lifecycle-deletion operation (`RunHistoryDeletionService`,
+  issue #592) unattended to terminal runs whose generic-deletion gate is already
+  `None` (docs/domain-model.md's classification table). It does not create a new
+  deletion mechanism or loosen decision 5's compliance-purge gate — `scan`/`remediate`
+  runs are excluded from the sweep's candidate query outright, never auto-deleted; the
+  History mode's default view instead windows them out by time/type filter, which is
+  a presentation default, not a deletion.
 
 ## Delivery
 
 Tracked by [Epic #588](https://github.com/blac9216/waypoint/issues/588). Historical
 log access is #581, the concurrent Live Jobs workspace is #590, type-specific details
 and domain routing are #591, and lifecycle separation is #592. Credential deletion
-and compliance-result purge are decomposed under #577.
+and compliance-result purge are decomposed under #577. History mode + gate-respecting
+roll-off is #708/#689; the restored compliance Live Run console is #707 — both
+decomposed under [epic #706](https://github.com/blac9216/waypoint/issues/706).

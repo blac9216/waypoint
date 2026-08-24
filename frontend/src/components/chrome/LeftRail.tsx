@@ -12,8 +12,8 @@ import {
 	ChevronIcon,
 	ConfigurationIcon,
 	DashboardIcon,
+	JobsIcon,
 	LibraryIcon,
-	LiveRunIcon,
 	ResultsIcon,
 	ScanIcon,
 	TransferIcon,
@@ -23,10 +23,12 @@ import "./LeftRail.css";
 // `live-run` intentionally has no entry here (issue #590, ADR-0019 decision
 // 1): the old scan-only Live Run route still exists in ROUTES for deep-link
 // redirect compat (see routes.ts), but it is not a navigable destination —
-// Live Jobs replaces it as the global "what's happening now" nav entry.
+// Jobs (formerly "Live Jobs", renamed by issue #708 once it gained a History
+// mode — title-only, same route key/path) replaces it as the global "what's
+// happening now" nav entry.
 const ICONS: Record<Exclude<ScreenKey, "live-run">, ComponentType> = {
 	dashboard: DashboardIcon,
-	"live-jobs": LiveRunIcon,
+	"live-jobs": JobsIcon,
 	"start-scan": ScanIcon,
 	results: ResultsIcon,
 	benchmarks: BenchmarksIcon,
@@ -43,9 +45,10 @@ interface NavGroup {
 }
 
 const NAV_GROUPS: NavGroup[] = [
-	// Live Jobs sits with Dashboard, above every domain group — ADR-0019
-	// decision 1: "Live Jobs is top-level and cross-domain," not owned by
-	// Compliance the way the old Live Run route was.
+	// Jobs sits with Dashboard, above every domain group — ADR-0019 decision 1:
+	// "Live Jobs is top-level and cross-domain," not owned by Compliance the
+	// way the old Live Run route was. Renamed from "Live Jobs" by issue #708
+	// once it gained a History mode alongside active work.
 	{ label: null, items: ["dashboard", "live-jobs"] },
 	{ label: "COMPLIANCE", items: ["start-scan", "results", "benchmarks"] },
 	{ label: "CONTENT", items: ["catalog", "library", "transfer"] },

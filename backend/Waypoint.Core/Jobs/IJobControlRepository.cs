@@ -59,6 +59,16 @@ public interface IJobControlRepository
 	Task<RunListResult> ListRunsAsync(int limit, int offset, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Filtered, keyset-cursor-paged run summaries for <c>GET /runs/history</c> (issue
+	/// #708/#689) -- the terminal-run browsing surface for the global Jobs History
+	/// mode. Newest-first (<c>ORDER BY created_at DESC, id DESC</c>), same tie-break as
+	/// <see cref="ListRunsAsync"/> and the same ordering <c>RunHistoryCursor</c>
+	/// (Waypoint.Api.Contracts) wraps. Unlike <see cref="ListRunsAsync"/>'s offset paging, this never re-derives a
+	/// full-table <c>COUNT(*)</c> -- see <see cref="RunHistoryPage.HasMore"/>.
+	/// </summary>
+	Task<RunHistoryPage> ListRunHistoryAsync(RunHistoryQuery query, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// All jobs belonging to a run, ordered by priority then created_at.
 	/// </summary>
 	Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken);
@@ -227,6 +237,31 @@ public enum JobRetryOutcome
 
 /// <summary>A page of run summaries plus the full collection's total row count (for <c>X-Total-Count</c>).</summary>
 public sealed record RunListResult(IReadOnlyList<RunSummary> Items, int TotalCount);
+
+/// <summary>
+/// Filters + keyset cursor for <see cref="IJobControlRepository.ListRunHistoryAsync"/>
+/// (issue #708/#689). All filters are optional allow-lists (null/empty means "no
+/// filter"); <see cref="AfterCreatedAt"/>/<see cref="AfterId"/> is the decoded
+/// <c>RunHistoryCursor</c> (Waypoint.Api.Contracts) keyset (both null for the first
+/// page). <see cref="Since"/>/<see cref="Until"/> bound <c>created_at</c> inclusively.
+/// </summary>
+public sealed record RunHistoryQuery(
+	IReadOnlyList<string>? States,
+	IReadOnlyList<string>? RunTypes,
+	DateTimeOffset? Since,
+	DateTimeOffset? Until,
+	DateTimeOffset? AfterCreatedAt,
+	Guid? AfterId,
+	int Limit);
+
+/// <summary>
+/// A page of <see cref="RunHistoryQuery"/> results. <see cref="HasMore"/> is true when
+/// more matching rows exist past this page -- the repository fetches <c>Limit + 1</c>
+/// rows to detect this without a second COUNT query (mirrors
+/// <see cref="Waypoint.Core.Jobs.IJobEventHistoryReader"/>'s "never silently truncate"
+/// contract).
+/// </summary>
+public sealed record RunHistoryPage(IReadOnlyList<RunSummary> Items, bool HasMore);
 
 /// <summary>
 /// The database effects of a consecutive-auth-failure check. <see cref="HaltTripped"/>

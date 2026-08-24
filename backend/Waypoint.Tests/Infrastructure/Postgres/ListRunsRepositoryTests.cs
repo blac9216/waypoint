@@ -344,4 +344,103 @@ public sealed class ListRunsRepositoryTests : IAsyncLifetime
 			""", connection);
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
+
+	// -- issue #708/#689: ListRunHistoryAsync ---------------------------------------
+
+	private async Task SetStateAsync(Guid runId, string state)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("UPDATE runs SET state = $1 WHERE id = $2", connection);
+		command.Parameters.AddWithValue(state);
+		command.Parameters.AddWithValue(runId);
+		await command.ExecuteNonQueryAsync();
+	}
+
+	[Fact]
+	public async Task ListRunHistoryAsync_NoFilters_OrdersNewestFirst_AndPagesByCursor()
+	{
+		DateTimeOffset baseline = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+		Guid oldest = await _repository.CreateRunAsync("discover", "{}", null, "tester", CancellationToken.None);
+		await SetCreatedAtAsync(oldest, baseline);
+		Guid middle = await _repository.CreateRunAsync("discover", "{}", null, "tester", CancellationToken.None);
+		await SetCreatedAtAsync(middle, baseline.AddMinutes(5));
+		Guid newest = await _repository.CreateRunAsync("discover", "{}", null, "tester", CancellationToken.None);
+		await SetCreatedAtAsync(newest, baseline.AddMinutes(10));
+
+		RunHistoryPage all = await _repository.ListRunHistoryAsync(new RunHistoryQuery(null, null, null, null, null, null, 50), CancellationToken.None);
+		Assert.False(all.HasMore);
+		Assert.Equal([newest, middle, oldest], all.Items.Select(r => r.Id).ToArray());
+
+		// Page 1: limit 1 -- must report HasMore and the item must be the newest row.
+		RunHistoryPage page1 = await _repository.ListRunHistoryAsync(new RunHistoryQuery(null, null, null, null, null, null, 1), CancellationToken.None);
+		Assert.True(page1.HasMore);
+		Assert.Equal([newest], page1.Items.Select(r => r.Id).ToArray());
+
+		// Page 2: cursor from page1's last item.
+		RunSummary last1 = page1.Items[^1];
+		RunHistoryPage page2 = await _repository.ListRunHistoryAsync(
+			new RunHistoryQuery(null, null, null, null, DateTimeOffset.Parse(last1.CreatedAt!, System.Globalization.CultureInfo.InvariantCulture), last1.Id, 1), CancellationToken.None);
+		Assert.True(page2.HasMore);
+		Assert.Equal([middle], page2.Items.Select(r => r.Id).ToArray());
+
+		// Page 3: cursor from page2's last item -- reaches the end (HasMore false).
+		RunSummary last2 = page2.Items[^1];
+		RunHistoryPage page3 = await _repository.ListRunHistoryAsync(
+			new RunHistoryQuery(null, null, null, null, DateTimeOffset.Parse(last2.CreatedAt!, System.Globalization.CultureInfo.InvariantCulture), last2.Id, 1), CancellationToken.None);
+		Assert.False(page3.HasMore);
+		Assert.Equal([oldest], page3.Items.Select(r => r.Id).ToArray());
+	}
+
+	[Fact]
+	public async Task ListRunHistoryAsync_StateFilter_NarrowsToMatchingRunsOnly()
+	{
+		Guid completed = await _repository.CreateRunAsync("discover", "{}", null, "tester", CancellationToken.None);
+		await SetStateAsync(completed, "completed");
+		Guid aborted = await _repository.CreateRunAsync("discover", "{}", null, "tester", CancellationToken.None);
+		await SetStateAsync(aborted, "aborted");
+		Guid pending = await _repository.CreateRunAsync("discover", "{}", null, "tester", CancellationToken.None);
+		// pending stays at its default state.
+
+		RunHistoryPage result = await _repository.ListRunHistoryAsync(
+			new RunHistoryQuery(["completed", "aborted"], null, null, null, null, null, 50), CancellationToken.None);
+
+		Assert.Equal(2, result.Items.Count);
+		Assert.Contains(result.Items, r => r.Id == completed);
+		Assert.Contains(result.Items, r => r.Id == aborted);
+		Assert.DoesNotContain(result.Items, r => r.Id == pending);
+	}
+
+	[Fact]
+	public async Task ListRunHistoryAsync_RunTypeFilter_NarrowsToMatchingRunsOnly()
+	{
+		Guid scan = await _repository.CreateRunAsync("scan", "{}", null, "tester", CancellationToken.None);
+		Guid download = await _repository.CreateRunAsync("download", "{}", null, "tester", CancellationToken.None);
+
+		RunHistoryPage result = await _repository.ListRunHistoryAsync(
+			new RunHistoryQuery(null, ["download"], null, null, null, null, 50), CancellationToken.None);
+
+		Assert.Single(result.Items);
+		Assert.Equal(download, result.Items[0].Id);
+		Assert.DoesNotContain(result.Items, r => r.Id == scan);
+	}
+
+	[Fact]
+	public async Task ListRunHistoryAsync_SinceUntilFilter_BoundsCreatedAtInclusively()
+	{
+		DateTimeOffset baseline = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+		Guid tooOld = await _repository.CreateRunAsync("discover", "{}", null, "tester", CancellationToken.None);
+		await SetCreatedAtAsync(tooOld, baseline);
+		Guid inWindow = await _repository.CreateRunAsync("discover", "{}", null, "tester", CancellationToken.None);
+		await SetCreatedAtAsync(inWindow, baseline.AddDays(5));
+		Guid tooNew = await _repository.CreateRunAsync("discover", "{}", null, "tester", CancellationToken.None);
+		await SetCreatedAtAsync(tooNew, baseline.AddDays(10));
+
+		RunHistoryPage result = await _repository.ListRunHistoryAsync(
+			new RunHistoryQuery(null, null, baseline.AddDays(1), baseline.AddDays(9), null, null, 50), CancellationToken.None);
+
+		Assert.Single(result.Items);
+		Assert.Equal(inWindow, result.Items[0].Id);
+	}
 }

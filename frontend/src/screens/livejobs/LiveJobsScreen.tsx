@@ -1,25 +1,35 @@
 /**
- * Live Jobs — the global concurrent operational workspace (issue #590,
- * ADR-0019, epic #588). Replaced the old scan-only Live Run screen (removed
- * by issue #693 once #591 gave scan/remediate jobs a type-specific renderer
- * here) as the top-level "what is happening right now" surface: every
- * active run, grouped, with jobs selectable among concurrent work — never
- * implying only one run/job can be active.
+ * Jobs — the global concurrent operational workspace (issue #590, ADR-0019,
+ * epic #588; renamed from "Live Jobs" to "Jobs" by issue #708/epic #706 once
+ * it gained a History mode alongside active work — title-only, same
+ * `live-jobs` route key/path per `lib/routes.ts`'s doc comment). Replaced
+ * the old scan-only Live Run screen (removed by issue #693 once #591 gave
+ * scan/remediate jobs a type-specific renderer here) as the top-level "what
+ * is happening" surface: every active run grouped with jobs selectable
+ * among concurrent work in Active mode (never implying only one run/job can
+ * be active), plus a History mode (issue #708) browsing terminal runs via
+ * the filtered/cursor-paged `GET /runs/history`.
  *
  * Composition mirrors the Live Run screen's own decomposition: this file is
- * the orchestrator only. `useLiveJobs.ts` owns the REST seed + global SSE
- * subscription; `useSelectionFromQuery.ts` owns deep-link URL state;
+ * the orchestrator only (now also owning the Active/History mode toggle).
+ * `useLiveJobs.ts` owns the REST seed + global SSE subscription for Active
+ * mode; `HistoryPanel.tsx` owns History mode's own paging/detail (issue
+ * #708); `useSelectionFromQuery.ts` owns Active mode's deep-link URL state;
  * `livejobs.ts` is the pure view-model/reducer; `detailRenderers.registry.ts`
  * is the renderer-registry seam #591 populates with type-specific detail
- * views (`detailRenderers.tsx` keeps only the generic fallback component).
+ * views (`detailRenderers.tsx` keeps only the generic fallback component) —
+ * reused by both modes.
  */
-import { useEffect, useMemo, useRef, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useAuth } from "../../lib/auth-context";
 import { resolveJobDetailRenderer } from "./detailRenderers.registry";
+import { HistoryPanel } from "./HistoryPanel";
 import { isActiveGroup, isTerminalJobState, waitReasonForJob, type LiveJobRow, type LiveRunGroup } from "./livejobs";
 import { useLiveJobs } from "./useLiveJobs";
 import { useSelectionFromQuery } from "./useSelectionFromQuery";
 import "./LiveJobsScreen.css";
+
+type JobsMode = "active" | "history";
 
 /** Flattened (group, job) pair — the unit keyboard navigation moves between. */
 interface SelectableRow {
@@ -68,6 +78,10 @@ export function LiveJobsRoute() {
 
 export function LiveJobsScreen() {
 	const { user } = useAuth();
+	// Issue #708: Active/History mode toggle. Active is the default (unchanged
+	// behavior for every existing deep link into `/live-jobs`); `?mode=history`
+	// opens directly into History mode for a shareable/bookmarkable link.
+	const [mode, setMode] = useState<JobsMode>(() => (new URLSearchParams(window.location.search).get("mode") === "history" ? "history" : "active"));
 	const { snapshot, loading, loadError, connectionState } = useLiveJobs();
 	const { runId, jobId, select } = useSelectionFromQuery();
 	const listRef = useRef<HTMLDivElement>(null);
@@ -127,9 +141,43 @@ export function LiveJobsScreen() {
 		select({ runId: next.group.run_id, jobId: next.job?.job_id });
 	};
 
+	const ModeToggle = (
+		<div className="live-jobs__mode-toggle" role="tablist" aria-label="Jobs view">
+			<button type="button" role="tab" aria-selected={mode === "active"} className={mode === "active" ? "is-active" : ""} onClick={() => setMode("active")}>
+				Active
+			</button>
+			<button
+				type="button"
+				role="tab"
+				aria-selected={mode === "history"}
+				className={mode === "history" ? "is-active" : ""}
+				onClick={() => setMode("history")}
+			>
+				History
+			</button>
+		</div>
+	);
+
+	if (mode === "history") {
+		return (
+			<div className="live-jobs-screen">
+				<div className="live-jobs__toolbar">
+					<h1 className="live-jobs__title">Jobs</h1>
+					{ModeToggle}
+				</div>
+				<HistoryPanel />
+				{user && <p className="live-jobs__role-note mono">viewing as {user.role}</p>}
+			</div>
+		);
+	}
+
 	if (loading && !snapshot) {
 		return (
 			<div className="live-jobs-screen">
+				<div className="live-jobs__toolbar">
+					<h1 className="live-jobs__title">Jobs</h1>
+					{ModeToggle}
+				</div>
 				<div className="live-jobs__empty">Loading active work…</div>
 			</div>
 		);
@@ -138,6 +186,10 @@ export function LiveJobsScreen() {
 	if (loadError && !snapshot) {
 		return (
 			<div className="live-jobs-screen">
+				<div className="live-jobs__toolbar">
+					<h1 className="live-jobs__title">Jobs</h1>
+					{ModeToggle}
+				</div>
 				<div className="live-jobs__empty live-jobs__empty--error">{loadError}</div>
 			</div>
 		);
@@ -148,7 +200,8 @@ export function LiveJobsScreen() {
 	return (
 		<div className="live-jobs-screen">
 			<div className="live-jobs__toolbar">
-				<h1 className="live-jobs__title">Live Jobs</h1>
+				<h1 className="live-jobs__title">Jobs</h1>
+				{ModeToggle}
 				<span className="live-jobs__count mono">{groups.length} active run{groups.length === 1 ? "" : "s"}</span>
 				<span className="live-jobs__spacer" />
 				{connectionState !== "open" && <span className="live-jobs__connection-note mono">stream {connectionState}…</span>}

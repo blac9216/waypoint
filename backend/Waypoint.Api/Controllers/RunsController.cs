@@ -396,6 +396,109 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
+	/// Filtered, keyset-cursor-paged run history (issue #708, implements #689) -- the
+	/// global Jobs workspace's History mode browses terminal runs through this endpoint
+	/// rather than <see cref="ListRuns"/>'s offset paging, which the active-work
+	/// workspace (#590) already owns. Viewer+, same floor as every other run read
+	/// (ADR-0019 decision 6: observing operational history is not a domain action) --
+	/// no ownership scoping.
+	///
+	/// A route distinct from <c>GET /runs</c> (rather than overloading it) so #590's
+	/// existing <c>?limit/offset</c> callers (<c>useLiveJobs.ts</c>) are untouched --
+	/// this is purely additive.
+	///
+	/// Filters: <c>state</c> and <c>run_type</c> are comma-separated allow-lists
+	/// against the closed <c>runs.state</c>/<c>runs.run_type</c> CHECK-constraint
+	/// vocabularies (400 <c>validation_error</c> on an unrecognized value, never a
+	/// silent drop); <c>since</c>/<c>until</c> bound <c>created_at</c> inclusively (400
+	/// on an unparseable timestamp). No filter is applied by default -- including no
+	/// implicit "terminal only" filter -- callers browsing "all history" pass
+	/// <c>state=completed,completed_with_failures,aborted</c> explicitly, matching how
+	/// every other filter on this endpoint works (nothing here is implied).
+	///
+	/// Cursor: <c>RunHistoryCursor</c> wraps <c>(created_at, id)</c> -- unlike
+	/// <c>JobEventCursor</c>'s single-column <c>seq</c>, <c>runs.created_at</c> is not
+	/// unique, so the tie-break column travels in the cursor too (see that type's doc
+	/// comment). A garbage cursor is 400 <c>validation_error</c>, never a 500 (same
+	/// "cursor abuse" contract #581 established).
+	/// </summary>
+	[HttpGet("history")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(RunHistoryListResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunHistoryListResponse>> ListRunHistory(
+		[FromQuery(Name = "state")] string? state,
+		[FromQuery(Name = "run_type")] string? runType,
+		[FromQuery(Name = "since")] string? since,
+		[FromQuery(Name = "until")] string? until,
+		[FromQuery(Name = "cursor")] string? cursor,
+		[FromQuery(Name = "limit")] int? limit,
+		CancellationToken cancellationToken)
+	{
+		RunHistoryListRequest query = new(state, runType, since, until, cursor, limit);
+		RunHistoryQuery historyQuery = MapHistoryListQuery(query);
+		RunHistoryPage page = await _repository.ListRunHistoryAsync(historyQuery, cancellationToken).ConfigureAwait(false);
+
+		string? nextCursor = null;
+		if (page.HasMore && page.Items.Count > 0)
+		{
+			RunSummary last = page.Items[^1];
+			nextCursor = RunHistoryCursor.Encode(DateTimeOffset.Parse(last.CreatedAt!, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal), last.Id);
+		}
+
+		return Ok(new RunHistoryListResponse(page.Items.Select(MapRun).ToArray(), nextCursor));
+	}
+
+	/// <summary>
+	/// Validates and converts <see cref="RunHistoryListRequest"/>'s query-string shape
+	/// into <see cref="RunHistoryQuery"/> -- mirrors <see cref="MapHistoryQuery"/>'s
+	/// "every rejection is 400, never a 500" posture.
+	/// </summary>
+	private static RunHistoryQuery MapHistoryListQuery(RunHistoryListRequest query)
+	{
+		IReadOnlyList<string>? states = ParseAllowList(query.State, RunStates.IsValid,
+			"state", $"valid values: {string.Join(", ", RunStates.All)}.");
+		IReadOnlyList<string>? runTypes = ParseAllowList(query.RunType, RunTypes.IsValid,
+			"run_type", $"valid values: {string.Join(", ", RunTypes.All)}.");
+
+		DateTimeOffset? since = ParseTimestamp(query.Since, "since");
+		DateTimeOffset? until = ParseTimestamp(query.Until, "until");
+
+		DateTimeOffset? afterCreatedAt = null;
+		Guid? afterId = null;
+		if (!string.IsNullOrWhiteSpace(query.Cursor))
+		{
+			if (!RunHistoryCursor.TryDecode(query.Cursor, out DateTimeOffset decodedCreatedAt, out Guid decodedId))
+			{
+				throw ApiException.Validation("cursor is not valid.", "The 'cursor' query parameter must be an opaque value returned by a previous response's next_cursor -- it cannot be constructed by hand.");
+			}
+
+			afterCreatedAt = decodedCreatedAt;
+			afterId = decodedId;
+		}
+
+		const int DefaultLimit = 50;
+		const int MaxLimit = 200;
+		int limit = query.Limit is { } requested ? Math.Clamp(requested, 1, MaxLimit) : DefaultLimit;
+
+		return new RunHistoryQuery(states, runTypes, since, until, afterCreatedAt, afterId, limit);
+	}
+
+	private static DateTimeOffset? ParseTimestamp(string? raw, string paramName)
+	{
+		if (string.IsNullOrWhiteSpace(raw))
+		{
+			return null;
+		}
+
+		if (!DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset parsed))
+		{
+			throw ApiException.Validation($"{paramName} is not a valid timestamp.", $"'{raw}' could not be parsed as an ISO-8601 timestamp.");
+		}
+
+		return parsed;
+	}
+
+	/// <summary>
 	/// Get run detail with job counts. Viewer+ — any authenticated user can inspect
 	/// runs.
 	/// </summary>

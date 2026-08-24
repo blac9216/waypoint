@@ -189,6 +189,20 @@ that is structural, not a policy choice. An append-only `run_history_deletion_to
 row records actor/time/prior-state/outcome, mirroring `run_purge_tombstones`'s shape as
 a deliberate sibling (not a shared table — see that migration for why).
 
+**Roll-off (issue #708, epic #706)** is a configurable, disabled-by-default periodic
+sweep (`RunHistoryRolloffHostedService`) that calls `RunHistoryDeletionService.DeleteHistoryAsync`
+— the exact operation described above, unmodified — for terminal runs older than a
+configured age whose generic deletion gate is already `None` in the table below. It
+reuses this classification table's gate column as its own eligibility rule rather than
+defining a second one: `scan`/`remediate` are excluded from the sweep's candidate query
+outright (not merely deferred like the interactive endpoint's 409), because epic #706's
+design is that compliance-run history is *windowed out of default views, never
+auto-deleted* — windowing (a frontend default-view time filter) and deletion remain
+independent operations for that gate; an Admin's explicit `DELETE /runs/{id}/history`
+call after purge is unaffected. Every other type in the table below (`None` gate) is
+eligible once terminal and aged, identically to what an Admin could already do by hand
+via the same endpoint.
+
 ### STIG configuration documents
 SAF attestation YAML, InSpec input YAML, remediation input files — stored as **documents
 in Postgres** (not parsed into forms; the schemas belong to Broadcom/MITRE and change

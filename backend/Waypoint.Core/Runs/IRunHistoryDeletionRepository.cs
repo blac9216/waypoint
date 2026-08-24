@@ -49,4 +49,17 @@ public interface IRunHistoryDeletionRepository
 	/// </summary>
 	Task<RunHistoryDeletionTombstone> CompleteAsync(
 		Guid runId, string runType, string actor, string priorState, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Candidate run ids for the roll-off sweep (issue #708): terminal, not yet
+	/// history-deleted, NOT a compliance-owned type (<c>scan</c>/<c>remediate</c> are
+	/// excluded at the query level -- the sweep never even considers them, rather than
+	/// relying solely on <see cref="Waypoint.Infrastructure.Runs.RunHistoryDeletionService"/>'s
+	/// runtime gate to reject them one at a time), and whose terminal timestamp
+	/// (<c>completed_at</c>, falling back to <c>created_at</c> for a terminal row with
+	/// none) is older than <paramref name="olderThan"/>. Capped at
+	/// <paramref name="limit"/> rows, oldest first, so one sweep pass never attempts an
+	/// unbounded batch.
+	/// </summary>
+	Task<IReadOnlyList<Guid>> FindRolloffCandidatesAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken);
 }
