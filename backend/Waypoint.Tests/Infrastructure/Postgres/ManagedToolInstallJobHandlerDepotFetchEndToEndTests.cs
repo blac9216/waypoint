@@ -103,13 +103,18 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 			UploadStagingPath = _stagingRoot,
 			ToolStatePath = _toolStateRoot,
 			ExecutableName = "vcf-download-tool",
+			ExecutableRelativePath = "bin/vcf-download-tool",
+			LibraryRelativePath = "lib",
+			SmokeTestTimeout = TimeSpan.FromSeconds(10),
 		};
 		CatalogOptions catalogOptions = new() { DepotTokenCredentialType = "depot-token" };
 
 		_handler = new ManagedToolInstallJobHandler(
 			_verifier, new FakeManagedToolCatalogVerifier(), _installs, Options.Create(toolOptions), _fetcher, _secretStore, _credentials, _applianceState,
-			Options.Create(catalogOptions));
+			Options.Create(catalogOptions), new ManagedToolDistributionInstaller(Options.Create(toolOptions)));
 	}
+
+	private string ActiveExecutablePath => Path.Combine(_toolStateRoot, "active", "bin", "vcf-download-tool");
 
 	private sealed class FakeManagedToolCatalogVerifier : IManagedToolCatalogVerifier
 	{
@@ -157,7 +162,7 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 			Directory.CreateDirectory(destinationDirectory);
 			string artifactPath = Path.Combine(destinationDirectory, $"{Guid.NewGuid():N}-artifact");
 			string signaturePath = artifactPath + ".sig";
-			File.WriteAllBytes(artifactPath, [7, 8, 9]);
+			Waypoint.Tests.Support.ManagedToolDistributionFixture.WriteHappyPathArchive(artifactPath);
 			File.WriteAllBytes(signaturePath, [1]);
 			return Task.FromResult(ManagedToolDepotFetchResult.Success(artifactPath, signaturePath));
 		}
@@ -171,8 +176,7 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 		Guid jobId = await RunDepotFetchOnceAsync();
 
 		Assert.Equal("done", await GetJobFieldAsync(jobId, "state"));
-		Assert.True(File.Exists(Path.Combine(_toolStateRoot, "vcf-download-tool")));
-		Assert.Equal([7, 8, 9], File.ReadAllBytes(Path.Combine(_toolStateRoot, "vcf-download-tool")));
+		Assert.True(File.Exists(ActiveExecutablePath));
 		Assert.Equal(Token, _fetcher.LastTokenSeen);
 
 		IReadOnlyList<ManagedToolInstall> ledger = await _installs.ListAsync(10, CancellationToken.None);
@@ -193,7 +197,7 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 		Guid jobId = await RunDepotFetchOnceAsync(expectSuccess: false);
 
 		Assert.Equal("failed", await GetJobFieldAsync(jobId, "state"));
-		Assert.False(File.Exists(Path.Combine(_toolStateRoot, "vcf-download-tool")));
+		Assert.False(File.Exists(ActiveExecutablePath));
 
 		ManagedToolInstall recorded = Assert.Single(await _installs.ListAsync(10, CancellationToken.None));
 		Assert.Equal(ManagedToolInstallOutcomes.Rejected, recorded.Outcome);

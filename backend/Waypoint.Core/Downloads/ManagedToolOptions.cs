@@ -35,13 +35,80 @@ public sealed class ManagedToolOptions
 	public string ToolStatePath { get; set; } = "/var/lib/waypoint/managed-tool";
 
 	/// <summary>
-	/// File name of the installed <c>vcf-download-tool</c> executable expected directly
-	/// under <see cref="ToolStatePath"/>. The issue #39 install flow (<c>ManagedToolInstallJobHandler</c>)
-	/// is responsible for placing it there under this exact name once a candidate
-	/// artifact passes signature verification; this option also names where the
+	/// File name of the installed <c>vcf-download-tool</c> executable, resolved under
+	/// <see cref="ExecutableRelativePath"/> inside the active installation directory
+	/// (<see cref="ToolStatePath"/>/<see cref="ActiveDirectoryName"/>). The issue #686
+	/// install flow (<c>ManagedToolInstallJobHandler</c> /
+	/// <c>ManagedToolDistributionInstaller</c>) is responsible for placing it there once
+	/// a candidate distribution archive passes verification, safe extraction, layout
+	/// validation, and a smoke-test execution; this option also names where the
 	/// tool-presence gate looks.
 	/// </summary>
 	public string ExecutableName { get; set; } = "vcf-download-tool";
+
+	/// <summary>
+	/// Path, relative to the active installation directory, at which
+	/// <see cref="ExecutableName"/> is expected -- matches the sibling
+	/// <c>../vcf-docker-download/Dockerfile</c> layout, which extracts the vendor
+	/// archive to a root and exposes <c>&lt;root&gt;/bin</c> on <c>PATH</c>.
+	/// </summary>
+	public string ExecutableRelativePath { get; set; } = "bin/vcf-download-tool";
+
+	/// <summary>
+	/// Directory, relative to the active installation directory, containing the shared
+	/// libraries the executable needs at runtime -- matches the sibling Dockerfile's
+	/// <c>&lt;root&gt;/lib</c>, exposed there through <c>LD_LIBRARY_PATH</c>. Required to
+	/// exist (may be empty) for a distribution to activate.
+	/// </summary>
+	public string LibraryRelativePath { get; set; } = "lib";
+
+	/// <summary>
+	/// Name of the subdirectory under <see cref="ToolStatePath"/> that holds the
+	/// currently active extracted distribution. Activation replaces this directory
+	/// atomically (directory rename over the prior one, same filesystem) so a download
+	/// job never observes a partially extracted installation, and the prior-good
+	/// installation is preserved until the new one has passed every check.
+	/// </summary>
+	public string ActiveDirectoryName { get; set; } = "active";
+
+	/// <summary>
+	/// Name of the subdirectory under <see cref="ToolStatePath"/> used as same-volume
+	/// scratch space for extracting and smoke-testing a candidate distribution before
+	/// atomic activation. Always same-volume as <see cref="ActiveDirectoryName"/> so the
+	/// final activation step is a same-filesystem directory rename, not a copy.
+	/// </summary>
+	public string StagingDirectoryName { get; set; } = "staging";
+
+	/// <summary>
+	/// Hard cap on the number of entries a candidate distribution archive may contain --
+	/// part of the issue #686 "unbounded expansion" guard alongside
+	/// <see cref="MaxExtractedTotalBytes"/>.
+	/// </summary>
+	public int MaxArchiveEntries { get; set; } = 20_000;
+
+	/// <summary>
+	/// Hard cap on the total decompressed size (sum of all entries) a candidate
+	/// distribution archive may expand to -- a tar/gzip "bomb" guard, independent of the
+	/// compressed upload/depot-fetch size caps that already apply before extraction
+	/// starts.
+	/// </summary>
+	public long MaxExtractedTotalBytes { get; set; } = 2L * 1024 * 1024 * 1024;
+
+	/// <summary>
+	/// Wall-clock budget for the bounded noninteractive smoke-test execution of the
+	/// extracted candidate executable, run before atomic activation -- an archive whose
+	/// "executable" is not really runnable (issue #686's <c>Exec format error</c>
+	/// regression) or that hangs waiting on input must fail fast rather than block the
+	/// install job indefinitely.
+	/// </summary>
+	public TimeSpan SmokeTestTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+	/// <summary>
+	/// Argument passed to the extracted executable for the bounded smoke-test
+	/// invocation. <c>--help</c> is universally supported by well-behaved CLI tools,
+	/// requires no credentials or network access, and never prompts interactively.
+	/// </summary>
+	public string SmokeTestArgument { get; set; } = "--help";
 
 	/// <summary>
 	/// Root directory of the operator-provisioned local indexed repository the "install

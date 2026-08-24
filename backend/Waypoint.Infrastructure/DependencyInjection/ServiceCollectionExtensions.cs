@@ -169,6 +169,11 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolSignatureVerifier, Downloads.RsaManagedToolSignatureVerifier>();
 		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolCatalogVerifier, Downloads.BroadcomManagedToolCatalogVerifier>();
 
+		// Issue #686: safe extraction/layout-validation/smoke-test/atomic activation of
+		// a verified distribution archive -- same filesystem-only, unconditional shape
+		// as the checker/verifiers above.
+		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolDistributionInstaller, Downloads.ManagedToolDistributionInstaller>();
+
 		// ADR-0005 crypto core (epic #8 slice 1). Registered unconditionally: the
 		// provider is lazy and fail-closed, so a host without a mounted key boots
 		// fine and refuses secret operations with an operator-actionable error.
