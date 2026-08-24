@@ -987,6 +987,49 @@ through the encrypted credential store (`POST /api/v1/credentials`), not
 through a filesystem mount at all — that part of the convention was never
 about `backend`'s mounts and is unaffected by this issue.
 
+### Connected depot-fetch metadata URL contract (issue #671)
+
+The connected (online) `tool-install` source (`{"source": "depot"}`, gated to
+`appliance_state.mode = 'connected'`) fetches the `vcf-download-tool`
+distribution archive from an authenticated depot rather than reading it off
+`/vcf`. Broadcom does not publish a per-artifact `.sig` file — this path never
+requests `<artifact URL>.sig`. Instead it fetches three separately configured
+authenticated locations, all with the same bearer credential, and hands the
+result to the identical Broadcom catalog verifier the local-repository path
+uses (issue #669) — there is no connected-mode-specific verification logic:
+
+- `ManagedTool:DepotFetchUrlTemplate` — the `vcf-download-tool` distribution
+  archive. `{version}` is substituted with the job payload's requested version
+  when present; leaving the placeholder out always resolves to the depot's
+  "latest" endpoint.
+- `ManagedTool:DepotCatalogUrl` — Broadcom's signed product-version catalog
+  (the connected equivalent of the local-repository path's
+  `LocalRepositoryPath`/`ProductVersionCatalogPath`, e.g.
+  `PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json`).
+- `ManagedTool:DepotCatalogSignatureUrl` — the detached signature envelope
+  over that catalog's exact bytes (the connected equivalent of
+  `ProductVersionCatalogSignaturePath`).
+
+All three are `null`/blank by default (the project ships no depot URL,
+ADR-0015) — the depot-fetch path fails closed with an actionable message
+before any network attempt until an operator configures all three. Each leg
+is fetched with the stored `depot-activation-code` credential (never the
+legacy `legacy-download-token`, issue #690) as a bearer `Authorization`
+header, bounded by `ManagedTool:DepotFetchTimeout` (all three legs combined)
+and `ManagedTool:DepotFetchMaxBytes` (each leg independently, enforced on
+actual bytes read rather than a trusted `Content-Length`). The fetched
+catalog and its signature are staged into a temporary directory shaped like a
+local repository root so `IManagedToolCatalogVerifier` can authenticate them
+exactly as it would a `/vcf`-mounted repository; the fetched artifact is
+verified against that authenticated catalog's byte size and SHA-256 before
+`ManagedToolDistributionInstaller` extracts and activates it. Every temporary
+file this path writes — the artifact and the staged catalog/signature
+directory — is removed after the job completes, on both success and failure;
+none of it is ever active before verification passes. Auth rejection,
+timeout, oversize, and missing-configuration failures are bounded, produce an
+actionable job note, and never place the credential value in a log line, job
+note, or ledger row.
+
 ### Edge hardening baseline (DISA/CIS nginx guidance, issue #52)
 
 `deploy/nginx/conf.d/default.conf` carries a hardening baseline applied on

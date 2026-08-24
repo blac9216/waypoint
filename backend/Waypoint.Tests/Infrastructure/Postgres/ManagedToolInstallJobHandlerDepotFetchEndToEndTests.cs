@@ -63,6 +63,7 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 	private ApplianceStateRepository _applianceState = null!;
 	private ManagedToolInstallRepository _installs = null!;
 	private FakeManagedToolSignatureVerifier _verifier = null!;
+	private FakeManagedToolCatalogVerifier _catalogVerifier = null!;
 	private FakeManagedToolDepotFetcher _fetcher = null!;
 	private ManagedToolInstallJobHandler _handler = null!;
 
@@ -95,6 +96,7 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 		_applianceState = new ApplianceStateRepository(_fixture.ConnectionString);
 		_installs = new ManagedToolInstallRepository(_fixture.ConnectionString);
 		_verifier = new FakeManagedToolSignatureVerifier(valid: true);
+		_catalogVerifier = new FakeManagedToolCatalogVerifier();
 		_fetcher = new FakeManagedToolDepotFetcher();
 
 		ManagedToolOptions toolOptions = new()
@@ -110,16 +112,28 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 		CatalogOptions catalogOptions = new() { DepotActivationCodeCredentialType = "depot-activation-code" };
 
 		_handler = new ManagedToolInstallJobHandler(
-			_verifier, new FakeManagedToolCatalogVerifier(), _installs, Options.Create(toolOptions), _fetcher, _secretStore, _credentials, _applianceState,
+			_verifier, _catalogVerifier, _installs, Options.Create(toolOptions), _fetcher, _secretStore, _credentials, _applianceState,
 			Options.Create(catalogOptions), new ManagedToolDistributionInstaller(Options.Create(toolOptions)));
 	}
 
 	private string ActiveExecutablePath => Path.Combine(_toolStateRoot, "active", "bin", "vcf-download-tool");
 
+	/// <summary>Stands in for the real Broadcom catalog verifier (issue #669) -- lets this file prove the depot-fetch path delegates to the SAME verifier the local-repository path uses, without a real signed catalog. Scriptable to <c>Valid = false</c> so "bad catalog verification" can be exercised without a real HTTP boundary.</summary>
 	private sealed class FakeManagedToolCatalogVerifier : IManagedToolCatalogVerifier
 	{
-		public Task<ManagedToolCatalogVerificationResult> VerifyAsync(string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken) =>
-			Task.FromResult(ManagedToolCatalogVerificationResult.Ok("fake-sha256"));
+		public bool Valid { get; set; } = true;
+
+		public string? Reason { get; set; }
+
+		public string? LastRepositoryRootSeen { get; private set; }
+
+		public Task<ManagedToolCatalogVerificationResult> VerifyAsync(string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken)
+		{
+			LastRepositoryRootSeen = repositoryRoot;
+			return Task.FromResult(Valid
+				? ManagedToolCatalogVerificationResult.Ok("fake-sha256")
+				: ManagedToolCatalogVerificationResult.Fail(Reason ?? "catalog verification failed"));
+		}
 	}
 
 	public async Task DisposeAsync()
@@ -161,10 +175,15 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 
 			Directory.CreateDirectory(destinationDirectory);
 			string artifactPath = Path.Combine(destinationDirectory, $"{Guid.NewGuid():N}-artifact");
-			string signaturePath = artifactPath + ".sig";
+			string repositoryRoot = Path.Combine(destinationDirectory, $"{Guid.NewGuid():N}-repo");
+			Directory.CreateDirectory(repositoryRoot);
 			Waypoint.Tests.Support.ManagedToolDistributionFixture.WriteHappyPathArchive(artifactPath);
-			File.WriteAllBytes(signaturePath, [1]);
-			return Task.FromResult(ManagedToolDepotFetchResult.Success(artifactPath, signaturePath));
+			// The handler's depot path hands this root straight to
+			// IManagedToolCatalogVerifier (FakeManagedToolCatalogVerifier below always
+			// returns Ok in this file), so the catalog/signature contents themselves
+			// are not exercised here -- HttpManagedToolDepotFetcherTests covers the real
+			// fetch shape, this file covers the handler's decisions around it.
+			return Task.FromResult(ManagedToolDepotFetchResult.Success(artifactPath, repositoryRoot));
 		}
 	}
 
@@ -188,11 +207,16 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 	}
 
 	[Fact]
-	public async Task DepotFetch_BadSignature_RejectedAndRecorded_ArtifactNeverActivated()
+	public async Task DepotFetch_BadCatalogVerification_RejectedAndRecorded_ArtifactNeverActivated()
 	{
+		// Issue #671: the depot-fetch path delegates verification to the SAME
+		// IManagedToolCatalogVerifier the local-repository path uses (issue #669) --
+		// it no longer has its own RSA-detached-signature check. Proves a catalog
+		// rejection (bad trust chain, size/SHA-256 mismatch, etc.) is treated
+		// identically to the local-repository path's rejection.
 		await SeedDepotActivationCodeCredentialAsync(Token);
-		_verifier.Valid = false;
-		_verifier.Reason = "signature does not match the Broadcom release key";
+		_catalogVerifier.Valid = false;
+		_catalogVerifier.Reason = "Artifact SHA-256 mismatch: catalog expects a, actual file is b.";
 
 		Guid jobId = await RunDepotFetchOnceAsync(expectSuccess: false);
 
@@ -201,7 +225,33 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 
 		ManagedToolInstall recorded = Assert.Single(await _installs.ListAsync(10, CancellationToken.None));
 		Assert.Equal(ManagedToolInstallOutcomes.Rejected, recorded.Outcome);
-		Assert.Equal("signature does not match the Broadcom release key", recorded.RejectedReason);
+		Assert.Equal("Artifact SHA-256 mismatch: catalog expects a, actual file is b.", recorded.RejectedReason);
+	}
+
+	[Fact]
+	public async Task DepotFetch_CatalogVerifier_ReceivesTheFetchedRepositoryRoot_NotTheConfiguredLocalRepositoryPath()
+	{
+		// Issue #671 AC: the connected fetch's staged catalog/signature -- not the
+		// unrelated local-repository install path's configured root -- is what gets
+		// authenticated.
+		await SeedDepotActivationCodeCredentialAsync(Token);
+
+		await RunDepotFetchOnceAsync();
+
+		Assert.NotNull(_catalogVerifier.LastRepositoryRootSeen);
+		Assert.StartsWith(_stagingRoot, _catalogVerifier.LastRepositoryRootSeen, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task DepotFetch_Success_StagedRepositoryRootIsRemovedAfterActivation()
+	{
+		await SeedDepotActivationCodeCredentialAsync(Token);
+
+		await RunDepotFetchOnceAsync();
+
+		string? repositoryRoot = _catalogVerifier.LastRepositoryRootSeen;
+		Assert.NotNull(repositoryRoot);
+		Assert.False(Directory.Exists(repositoryRoot));
 	}
 
 	[Fact]
