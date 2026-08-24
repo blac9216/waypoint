@@ -47,6 +47,10 @@ public sealed class RunnerEgressTopologyTests
 
 	private static readonly string[] Runners = ["compliance-runner", "download-runner"];
 
+	// Only the download-runner may mount the managed-tool tool store
+	// (ADR-0014 §7 / #442 AC5 / #570); the backend must not.
+	private static readonly string[] ManagedToolMounters = ["download-runner"];
+
 	private static readonly YamlMappingNode Compose = LoadCompose();
 	private static readonly YamlMappingNode Services = Child(Compose, "services");
 	private static readonly YamlMappingNode Networks = Child(Compose, "networks");
@@ -104,7 +108,72 @@ public sealed class RunnerEgressTopologyTests
 			$"network '{EgressNetwork}' must be declared in-file, not external (external: {external})");
 	}
 
+	// --- Managed-tool store boundary (issue #621 / #630 review) -----------
+
+	/// <summary>
+	/// ADR-0014 §7 / issue #442 AC5 / #570: the API-facing backend must never
+	/// mount the <c>managed-tool</c> tool store (the verified vcf-download-tool
+	/// binary and the RSA release-key trust anchor). Manual uploads go to the
+	/// separate <c>tool-upload-staging</c> volume instead. Guard so a future edit
+	/// can't silently re-attach the store to the backend.
+	/// </summary>
+	[Fact]
+	public void Backend_does_not_mount_managed_tool_volume()
+	{
+		Assert.DoesNotContain(
+			"managed-tool",
+			ServiceNamedVolumeSources("backend"));
+	}
+
+	/// <summary>
+	/// The staging handoff only works if backend (writes) and download-runner
+	/// (reads) mount the SAME dedicated staging volume.
+	/// </summary>
+	[Theory]
+	[InlineData("backend")]
+	[InlineData("download-runner")]
+	public void Service_mounts_tool_upload_staging_volume(string service)
+	{
+		Assert.Contains(
+			"tool-upload-staging",
+			ServiceNamedVolumeSources(service));
+	}
+
+	/// <summary>Only download-runner mounts the managed-tool tool store.</summary>
+	[Fact]
+	public void Only_download_runner_mounts_managed_tool_volume()
+	{
+		List<string> mounters = Services.Children.Keys
+			.OfType<YamlScalarNode>()
+			.Select(n => n.Value!)
+			.Where(svc => ServiceNamedVolumeSources(svc).Contains("managed-tool"))
+			.ToList();
+
+		Assert.Equal(ManagedToolMounters, mounters.ToArray());
+	}
+
 	// --- YAML helpers -----------------------------------------------------
+
+	/// <summary>
+	/// The named-volume sources a service mounts (the part left of the ':' in the
+	/// short <c>name:/path</c> form; bind mounts and long-form entries are ignored
+	/// since named volumes always use the short form here).
+	/// </summary>
+	private static List<string> ServiceNamedVolumeSources(string service)
+	{
+		YamlMappingNode svc = (YamlMappingNode)Services.Children[new YamlScalarNode(service)];
+		if (!svc.Children.TryGetValue(new YamlScalarNode("volumes"), out YamlNode? vols)
+			|| vols is not YamlSequenceNode seq)
+		{
+			return [];
+		}
+
+		return seq.Children.OfType<YamlScalarNode>()
+			.Select(n => n.Value!)
+			.Where(v => v.Contains(':') && !v.StartsWith('/') && !v.StartsWith('.'))
+			.Select(v => v.Split(':', 2)[0])
+			.ToList();
+	}
 
 	private static List<string> ServiceNetworks(string service)
 	{

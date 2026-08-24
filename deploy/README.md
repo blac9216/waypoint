@@ -953,12 +953,24 @@ provisioning UI):
   one root). A scan job fails closed with a clear "not mounted" readiness
   problem (`ComplianceReadinessCheck`) until this is populated; the stack
   still comes up healthy without it.
-- **`managed-tool`** (mounted read-write into `download-runner` at
+- **`managed-tool`** (mounted read-write into `download-runner` **only** at
   `/var/lib/waypoint/managed-tool`) — the account-gated `vcf-download-tool`
-  executable (ADR-0015 decision 3: operator-installed through the appliance,
-  never baked into the image). A `download` job fails closed with a clear
-  "tool not installed" error until this is populated; the stack still comes
-  up healthy without it.
+  executable and the RSA release-key trust anchor (ADR-0015 decision 3:
+  operator-installed through the appliance, never baked into the image). A
+  `download` job fails closed with a clear "tool not installed" error until
+  this is populated; the stack still comes up healthy without it. The
+  `backend` deliberately does **not** mount this volume, so the API-facing
+  process never has write access to the verified binary or the
+  signature-verification key (ADR-0014 §7, issue #442 AC5, #570).
+- **`tool-upload-staging`** (mounted read-write into **both** `backend` and
+  `download-runner` at `/var/lib/waypoint/tool-upload-staging`, issue #621) —
+  a dedicated, staging-only volume. `ManagedToolController.Upload`
+  (`POST /api/v1/downloads/tool/upload`) stages the uploaded artifact +
+  detached signature here (`ManagedToolOptions.UploadStagingPath`); the
+  `tool-install` job reads them back when it claims the install job, then
+  activates the verified binary onto `managed-tool`. Separate from
+  `managed-tool` so the backend gets a writable staging path without any
+  access to the tool store or release key.
 - **`depot`** (mounted read-write into `download-runner` at `/vcf`) — the
   offline depot share `catalog-index` indexes (`CatalogOptions.DepotPath`).
 

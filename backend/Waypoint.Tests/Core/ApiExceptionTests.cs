@@ -29,6 +29,22 @@ public sealed class ApiExceptionTests
 	}
 
 	[Fact]
+	public void Unavailable_UsesDocumented503ServiceUnavailableWithServiceUnavailableCode()
+	{
+		ApiException exception = ApiException.Unavailable(
+			"The upload-staging location is not writable on this appliance.",
+			"Confirm the tool-upload-staging volume is mounted and writable by the backend service.");
+
+		Assert.Equal(HttpStatusCode.ServiceUnavailable, exception.StatusCode);
+		Assert.Equal("service_unavailable", exception.Code);
+		Assert.Equal("The upload-staging location is not writable on this appliance.", exception.Message);
+
+		ErrorDetail detail = exception.ToErrorDetail();
+		Assert.Equal("service_unavailable", detail.Code);
+		Assert.Equal("Confirm the tool-upload-staging volume is mounted and writable by the backend service.", detail.Detail);
+	}
+
+	[Fact]
 	public void ToErrorDetail_CarriesCodeMessageAndDetail()
 	{
 		ApiException exception = new(HttpStatusCode.BadRequest, "validation_error", "Invalid input.", "field 'name' is required");

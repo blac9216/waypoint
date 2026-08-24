@@ -117,13 +117,16 @@ public sealed class ManagedToolController : ControllerBase
 
 		ManagedToolOptions options = _options.Value;
 
-		// Issue #621: the backend's UploadStagingPath must be a writable mounted
-		// volume shared with the download-runner (deploy/docker-compose.yml's
-		// managed-tool volume, chowned by that image's entrypoint the same way the
-		// runner's is -- see backend/docker-entrypoint.sh) so the tool-install job
-		// can later read what this request stages. A missing mount or an ownership
-		// mismatch surfaces here as UnauthorizedAccessException/IOException; map it
-		// to a clean 503 instead of letting it fall through as an unhandled 500 that
+		// Issue #621 (re-scoped per #630 review): the backend's UploadStagingPath
+		// must be a writable mounted volume shared with the download-runner
+		// (deploy/docker-compose.yml's dedicated `tool-upload-staging` volume,
+		// chowned by this image's entrypoint -- see backend/docker-entrypoint.sh)
+		// so the tool-install job can later read what this request stages. This is
+		// deliberately NOT the `managed-tool` tool store: the backend never mounts
+		// that, keeping the API off the verified tool binary and the release-key
+		// trust anchor (ADR-0014 §7). A missing mount or an ownership mismatch
+		// surfaces here as UnauthorizedAccessException/IOException; map it to a
+		// clean 503 instead of letting it fall through as an unhandled 500 that
 		// leaks a stack trace.
 		try
 		{
@@ -133,7 +136,7 @@ public sealed class ManagedToolController : ControllerBase
 		{
 			throw ApiException.Unavailable(
 				"The upload-staging location is not writable on this appliance.",
-				"Confirm the managed-tool volume is mounted and writable by the backend service (see deploy/docker-compose.yml and deploy/README.md).");
+				"Confirm the tool-upload-staging volume is mounted and writable by the backend service (see deploy/docker-compose.yml and deploy/README.md).");
 		}
 
 		string stagedName = $"{Guid.NewGuid():N}-{Path.GetFileName(artifact.FileName)}";
@@ -156,7 +159,7 @@ public sealed class ManagedToolController : ControllerBase
 		{
 			throw ApiException.Unavailable(
 				"The upload-staging location is not writable on this appliance.",
-				"Confirm the managed-tool volume is mounted and writable by the backend service (see deploy/docker-compose.yml and deploy/README.md).");
+				"Confirm the tool-upload-staging volume is mounted and writable by the backend service (see deploy/docker-compose.yml and deploy/README.md).");
 		}
 
 		return await QueueInstallAsync(ManagedToolInstallSources.Upload, stagedName, version, cancellationToken).ConfigureAwait(false);
