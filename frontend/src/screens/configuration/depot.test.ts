@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	acceptActivationCode,
+	fetchDepotEnrollment,
 	fetchDownloadReadiness,
 	fetchManagedToolInstalls,
 	formatManagedToolOutcome,
 	formatSource,
 	formatTimestamp,
+	generateDepotId,
 	installManagedToolFromLocalRepository,
+	resetDepotEnrollment,
 	uploadManagedTool,
+	validateActivationCode,
 } from "./depot";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -104,5 +109,38 @@ describe("depot.ts data layer (issue #571/#39/#560)", () => {
 		expect(formatTimestamp(undefined)).toBe("—");
 		expect(formatTimestamp("not-a-date")).toBe("—");
 		expect(formatTimestamp("2026-08-08T00:00:00Z")).toBe("2026-08-08 00:00Z");
+	});
+
+	describe("depot enrollment (issue #691)", () => {
+		it("fetchDepotEnrollment issues GET /downloads/enrollment", async () => {
+			await fetchDepotEnrollment();
+			expect(calls[0]).toEqual({ url: "/api/v1/downloads/enrollment", method: "GET", body: undefined, init: calls[0].init });
+		});
+
+		it("generateDepotId issues POST /downloads/enrollment/depot-id with no body", async () => {
+			await generateDepotId();
+			expect(calls[0].url).toBe("/api/v1/downloads/enrollment/depot-id");
+			expect(calls[0].method).toBe("POST");
+		});
+
+		it("acceptActivationCode issues POST /downloads/enrollment/activation-code carrying only activation_code", async () => {
+			await acceptActivationCode("c29tZS1jb2Rl");
+			expect(calls[0].url).toBe("/api/v1/downloads/enrollment/activation-code");
+			expect(calls[0].method).toBe("POST");
+			expect(calls[0].body).toEqual({ activation_code: "c29tZS1jb2Rl" });
+		});
+
+		it("validateActivationCode issues POST /downloads/enrollment/validate", async () => {
+			await validateActivationCode();
+			expect(calls[0].url).toBe("/api/v1/downloads/enrollment/validate");
+			expect(calls[0].method).toBe("POST");
+		});
+
+		it("resetDepotEnrollment always sends an explicit confirm:true body", async () => {
+			await resetDepotEnrollment();
+			expect(calls[0].url).toBe("/api/v1/downloads/enrollment/reset");
+			expect(calls[0].method).toBe("POST");
+			expect(calls[0].body).toEqual({ confirm: true });
+		});
 	});
 });
