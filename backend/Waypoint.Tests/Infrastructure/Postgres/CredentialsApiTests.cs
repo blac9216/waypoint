@@ -522,6 +522,133 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 		Assert.Equal(["targets", "schedules", "active_jobs"], categories);
 	}
 
+	/// <summary>
+	/// Issue #593 round 2 (reviewer Finding 1): a live (<c>pending</c>/<c>running</c>)
+	/// run referencing the credential blocks deletion even with NO co-referencing
+	/// non-terminal job -- the create-&gt;fan-out window / stuck-pending case. Without
+	/// the <c>active_runs</c> blocker the relaxed <c>ON DELETE SET NULL</c> FK would
+	/// null the live run's credential_id and destroy the secret out from under
+	/// in-flight work. Asserts 409 with the <c>active_runs</c> category and that the
+	/// credential + secret survive.
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_ReferencedByALiveRunWithNoJob_Is409_WithActiveRunsBlocker()
+	{
+		Guid id = await CreateCredentialAsync("live-run-no-job", "invented-live-blob");
+		Guid runId = await SeedRunAsync(id, runState: "pending");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
+		Assert.Equal(1, blockers.GetArrayLength());
+		Assert.Equal("active_runs", blockers[0].GetProperty("category").GetString());
+		Assert.Equal(1, blockers[0].GetProperty("count").GetInt32());
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using (NpgsqlCommand credentialSurvives = new("SELECT count(*) FROM credentials WHERE id = $1", connection))
+		{
+			credentialSurvives.Parameters.AddWithValue(id);
+			Assert.Equal(1L, (long)(await credentialSurvives.ExecuteScalarAsync())!);
+		}
+
+		// The live run keeps its credential_id -- it was NOT nulled by a SET NULL that
+		// should never have fired.
+		await using (NpgsqlCommand runStillLinked = new("SELECT credential_id FROM runs WHERE id = $1", connection))
+		{
+			runStillLinked.Parameters.AddWithValue(runId);
+			Assert.Equal(id, (Guid)(await runStillLinked.ExecuteScalarAsync())!);
+		}
+	}
+
+	/// <summary>
+	/// Issue #593 round 2: the run-secret ("my credentials", ADR-0011) shape -- the
+	/// live run carries <c>credential_id</c> but its fanned-out jobs deliberately carry
+	/// NONE (<c>RunCreationService</c> keeps the secret in <c>run_secrets</c>, keyed by
+	/// run id). A jobs-only blocker count would miss this entirely; the
+	/// <c>active_runs</c> category is what stops the delete.
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_ReferencedByALiveRunSecretRun_Is409_WithActiveRunsBlocker()
+	{
+		Guid id = await CreateCredentialAsync("live-run-secret", "invented-run-secret-blob");
+		Guid runId = await SeedRunAsync(id, runState: "running");
+
+		// A job on the run with NO credential_id, mirroring the run-secret fan-out --
+		// proves the block comes from the run, not a co-referencing job.
+		await using (NpgsqlConnection seed = new(_fixture.ConnectionString))
+		{
+			await seed.OpenAsync();
+			await using NpgsqlCommand insertJob = new(
+				"INSERT INTO jobs (run_id, job_type, priority, state, has_run_secret) VALUES ($1, 'scan', 1, 'queued', true)", seed);
+			insertJob.Parameters.AddWithValue(runId);
+			await insertJob.ExecuteNonQueryAsync();
+		}
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement blockers = document.RootElement.GetProperty("error").GetProperty("blockers");
+		string[] categories = [.. blockers.EnumerateArray().Select(e => e.GetProperty("category").GetString()!)];
+		Assert.Contains("active_runs", categories);
+		Assert.DoesNotContain("active_jobs", categories);
+	}
+
+	/// <summary>
+	/// Issue #593 round 2: once the previously-live run reaches a terminal state, the
+	/// same credential becomes deletable -- the <c>active_runs</c> blocker clears, the
+	/// run is snapshotted and detached, and the credential + secret are gone. Closes
+	/// the loop on the live-run guard: it blocks in-flight work, not history.
+	/// </summary>
+	[Fact]
+	public async Task DeletingACredential_AfterItsLiveRunReachesTerminalState_Succeeds_AndDetaches()
+	{
+		Guid id = await CreateCredentialAsync("run-then-terminal", "invented-terminal-run-blob", credentialType: "ssh");
+		await SendAsync(HttpMethod.Put, $"/api/v1/credentials/{id}", new { username = "svc-run@example.internal" });
+		string fullName = (await GetFieldAsync(id, "name"))!;
+
+		Guid runId = await SeedRunAsync(id, runState: "pending");
+
+		// While live, the delete is blocked.
+		HttpResponseMessage blocked = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.Conflict, blocked.StatusCode);
+
+		// Drive the run to a terminal state.
+		await using (NpgsqlConnection advance = new(_fixture.ConnectionString))
+		{
+			await advance.OpenAsync();
+			await using NpgsqlCommand update = new("UPDATE runs SET state = 'completed' WHERE id = $1", advance);
+			update.Parameters.AddWithValue(runId);
+			await update.ExecuteNonQueryAsync();
+		}
+
+		HttpResponseMessage deleted = await SendAsync(HttpMethod.Delete, $"/api/v1/credentials/{id}", body: null);
+		Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using (NpgsqlCommand credentialGone = new("SELECT count(*) FROM credentials WHERE id = $1", connection))
+		{
+			credentialGone.Parameters.AddWithValue(id);
+			Assert.Equal(0L, (long)(await credentialGone.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand runRow = new(
+			"SELECT credential_id, credential_name, credential_type, credential_username FROM runs WHERE id = $1", connection))
+		{
+			runRow.Parameters.AddWithValue(runId);
+			await using NpgsqlDataReader reader = await runRow.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync());
+			Assert.True(reader.IsDBNull(0), "expected runs.credential_id nulled after detach");
+			Assert.Equal(fullName, reader.GetString(1));
+			Assert.Equal("ssh", reader.GetString(2));
+			Assert.Equal("svc-run@example.internal", reader.GetString(3));
+		}
+	}
+
 	/// <summary>Issue #20: credential_type is validated against the closed
 	/// <c>CredentialTypes</c> set at the API layer (docs/domain-model.md's four types).</summary>
 	[Fact]
@@ -719,6 +846,18 @@ public sealed class CredentialsApiTests : IAsyncLifetime, IDisposable
 			"INSERT INTO jobs (job_type, priority, state, credential_id) VALUES ('download', 1, 'queued', $1) RETURNING id", connection);
 		insert.Parameters.AddWithValue(credentialId);
 		return (Guid)(await insert.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>Issue #593 round 2: a bare run in the given state referencing the credential, with NO job -- exercises the live-run blocker (create-&gt;fan-out window, run-secret runs) where jobs carry no credential_id.</summary>
+	private async Task<Guid> SeedRunAsync(Guid credentialId, string runState)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insertRun = new(
+			"INSERT INTO runs (run_type, scope, state, credential_id) VALUES ('scan', '{}', $1, $2) RETURNING id", connection);
+		insertRun.Parameters.AddWithValue(runState);
+		insertRun.Parameters.AddWithValue(credentialId);
+		return (Guid)(await insertRun.ExecuteScalarAsync())!;
 	}
 
 	/// <summary>A run plus its one job, both landed directly on the given terminal states -- used to exercise the terminal-only detach path without running a real job through the dispatcher.</summary>

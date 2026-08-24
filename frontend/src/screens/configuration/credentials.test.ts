@@ -146,6 +146,8 @@ describe("describeCredentialBlocker (issue #593)", () => {
 		expect(describeCredentialBlocker({ category: "targets", count: 2 })).toBe("2 targets");
 		expect(describeCredentialBlocker({ category: "schedules", count: 1 })).toBe("1 schedule");
 		expect(describeCredentialBlocker({ category: "active_jobs", count: 3 })).toBe("3 active jobs");
+		expect(describeCredentialBlocker({ category: "active_runs", count: 1 })).toBe("1 active run");
+		expect(describeCredentialBlocker({ category: "active_runs", count: 2 })).toBe("2 active runs");
 	});
 
 	it("names the STIG Manager connection for the configuration category, without an implied count", () => {

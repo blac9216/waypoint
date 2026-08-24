@@ -185,6 +185,8 @@ export function describeCredentialBlocker(blocker: ApiErrorBlocker): string {
 			return "the STIG Manager connection";
 		case "active_jobs":
 			return `${count} active job${plural}`;
+		case "active_runs":
+			return `${count} active run${plural}`;
 		default:
 			return `${count} ${category.replace(/_/g, " ")}`;
 	}
@@ -194,7 +196,7 @@ export function describeCredentialBlocker(blocker: ApiErrorBlocker): string {
  * Issue #593 (epic #577): renders the `409 credential_in_use` body's
  * machine-readable `blockers` into the guidance the delete confirmation/error
  * surfaces — naming exactly what still references the credential (targets,
- * schedules, the STIG Manager connection, active jobs) instead of the old
+ * schedules, the STIG Manager connection, active jobs, active runs) instead of the old
  * blanket "history must be removed" text, which was actively wrong once
  * terminal history stopped blocking deletion. `blockers` is optional only
  * because an older/unpatched API build might omit it; the fallback keeps the

@@ -62,6 +62,19 @@ public static class CredentialBlockingCategories
 
 	/// <summary>A <c>jobs.credential_id</c> row whose job has not reached a <see cref="JobTerminalStates"/> state -- active work, not history.</summary>
 	public const string ActiveJobs = "active_jobs";
+
+	/// <summary>
+	/// A <c>runs.credential_id</c> row whose run is still <c>pending</c> or
+	/// <c>running</c> -- an in-flight scan/remediate run actively using (or about to
+	/// use) the secret. Issue #593 round 2: a run row's own credential_id is
+	/// independent of its jobs' -- a live run can reference a credential with NO
+	/// co-referencing non-terminal job (the create-&gt;fan-out window; a run stuck
+	/// pending because fan-out never ran; a run-secret "my credentials" scan whose
+	/// jobs deliberately carry no credential_id). Counting it here re-adds the guard
+	/// the old RESTRICT FK gave for free, so a live run blocks deletion instead of
+	/// having its credential nulled out from under it with no snapshot.
+	/// </summary>
+	public const string ActiveRuns = "active_runs";
 }
 
 /// <summary>Result of <see cref="CredentialRepository.DeleteAsync"/>: <see cref="Outcome"/> plus, only for <see cref="CredentialDeleteOutcome.InUse"/>, the category/count breakdown driving the 409 body.</summary>
@@ -272,12 +285,21 @@ public sealed class CredentialRepository
 	/// transaction:
 	///
 	///   1. Count each blocking category (<see cref="CredentialBlockingCategories"/>):
-	///      targets, schedules, the stigman_connections singleton, and non-terminal
-	///      jobs (<see cref="JobTerminalStates"/> defines terminal). Any non-zero
-	///      category rolls the transaction back and returns <see cref="CredentialDeleteOutcome.InUse"/>
-	///      with the full breakdown -- a run is never counted directly (its own
-	///      state doesn't gate anything by itself), but a run reachable only through
-	///      terminal jobs is, by construction, itself terminal history.
+	///      targets, schedules, the stigman_connections singleton, non-terminal
+	///      jobs (<see cref="JobTerminalStates"/> defines terminal), and non-terminal
+	///      (<c>pending</c>/<c>running</c>) runs. Any non-zero category rolls the
+	///      transaction back and returns <see cref="CredentialDeleteOutcome.InUse"/>
+	///      with the full breakdown. A live run is its own blocker (issue #593 round 2):
+	///      its credential_id is independent of its jobs', so a run can be live while
+	///      referencing a credential with no non-terminal job (the create-&gt;fan-out
+	///      window, a stuck-pending run, or a run-secret scan whose jobs carry no
+	///      credential_id) -- counting only jobs would let the delete null a live run's
+	///      credential with no snapshot. The initial <c>SELECT ... FOR UPDATE</c> on
+	///      the credentials row also serializes this against run/job creation: an
+	///      INSERT referencing this credential takes a <c>FOR KEY SHARE</c> FK lock on
+	///      the same row, which blocks behind (or before) this transaction's
+	///      <c>FOR UPDATE</c>, so a run created concurrently cannot slip its reference
+	///      in between the count and the DELETE.
 	///   2. Otherwise, every terminal run/job row still naming this credential gets
 	///      its non-secret attribution (name, credential_type, username --
 	///      deliberately NOT the credential's purpose/binding, per epic #577's
@@ -348,11 +370,14 @@ public sealed class CredentialRepository
 
 	/// <summary>
 	/// One row per non-empty <see cref="CredentialBlockingCategories"/> bucket, in a
-	/// fixed, deterministic order (targets, schedules, configuration, active_jobs) so
-	/// the 409 body's category list is stable across calls. <c>runs</c> is
-	/// deliberately not its own category -- a run is only ever reachable through its
-	/// jobs, and a run whose jobs are all terminal is itself terminal history (no
-	/// separate "active run" state exists outside its jobs' states).
+	/// fixed, deterministic order (targets, schedules, configuration, active_jobs,
+	/// active_runs) so the 409 body's category list is stable across calls. A run's
+	/// own credential_id is a first-class blocker (issue #593 round 2): a
+	/// <c>pending</c>/<c>running</c> run can reference a credential with no
+	/// co-referencing non-terminal job (the create-&gt;fan-out window; a run stuck
+	/// pending; a run-secret scan whose jobs carry no credential_id), so counting only
+	/// jobs would let a live run's credential be deleted+nulled with no snapshot -- the
+	/// exact hole the old RESTRICT FK closed for free.
 	/// </summary>
 	private static async Task<List<BlockingCategory>> CountBlockersAsync(
 		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid id, CancellationToken cancellationToken)
@@ -384,6 +409,15 @@ public sealed class CredentialRepository
 		if (activeJobs > 0)
 		{
 			blockers.Add(new BlockingCategory(CredentialBlockingCategories.ActiveJobs, activeJobs));
+		}
+
+		int activeRuns = await CountAsync(
+			connection, transaction,
+			"SELECT count(*) FROM runs WHERE credential_id = $1 AND state IN ('pending', 'running')",
+			id, cancellationToken).ConfigureAwait(false);
+		if (activeRuns > 0)
+		{
+			blockers.Add(new BlockingCategory(CredentialBlockingCategories.ActiveRuns, activeRuns));
 		}
 
 		return blockers;
