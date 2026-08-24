@@ -62,6 +62,7 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 	};
 
 	private readonly IManagedToolSignatureVerifier _verifier;
+	private readonly IManagedToolCatalogVerifier _catalogVerifier;
 	private readonly IManagedToolInstallRepository _installs;
 	private readonly IOptions<ManagedToolOptions> _options;
 	private readonly IManagedToolDepotFetcher _depotFetcher;
@@ -72,6 +73,7 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 
 	public ManagedToolInstallJobHandler(
 		IManagedToolSignatureVerifier verifier,
+		IManagedToolCatalogVerifier catalogVerifier,
 		IManagedToolInstallRepository installs,
 		IOptions<ManagedToolOptions> options,
 		IManagedToolDepotFetcher depotFetcher,
@@ -89,6 +91,7 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(applianceState);
 		ArgumentNullException.ThrowIfNull(catalogOptions);
 		_verifier = verifier;
+		_catalogVerifier = catalogVerifier ?? throw new ArgumentNullException(nameof(catalogVerifier));
 		_installs = installs;
 		_options = options;
 		_depotFetcher = depotFetcher;
@@ -299,21 +302,32 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 	{
 		ManagedToolOptions options = _options.Value;
 
-		string sha256 = await ComputeSha256Async(artifactPath, cancellationToken).ConfigureAwait(false);
+		string? sha256;
+		string? failureReason;
+		if (source == ManagedToolInstallSources.LocalRepository)
+		{
+			ManagedToolCatalogVerificationResult verification = await _catalogVerifier
+				.VerifyAsync(options.LocalRepositoryPath, artifactPath, version, cancellationToken).ConfigureAwait(false);
+			sha256 = verification.ActualSha256;
+			failureReason = verification.Valid ? null : verification.FailureReason;
+		}
+		else
+		{
+			sha256 = await ComputeSha256Async(artifactPath, cancellationToken).ConfigureAwait(false);
+			ManagedToolSignatureResult verification = await _verifier
+				.VerifyAsync(artifactPath, signaturePath, cancellationToken).ConfigureAwait(false);
+			failureReason = verification.Valid ? null : verification.FailureReason;
+		}
 
-		ManagedToolSignatureResult verification = await _verifier
-			.VerifyAsync(artifactPath, signaturePath, cancellationToken)
-			.ConfigureAwait(false);
-
-		if (!verification.Valid)
+		if (failureReason is not null)
 		{
 			await _installs.RecordAsync(
 				new ManagedToolInstallAttempt(
 					source, sourcePath, version, sha256,
-					ManagedToolInstallOutcomes.Rejected, verification.FailureReason, initiatedBy, context.Job.Id),
+					ManagedToolInstallOutcomes.Rejected, failureReason, initiatedBy, context.Job.Id),
 				cancellationToken).ConfigureAwait(false);
 
-			return JobExecutionOutcome.Failed($"Signature verification failed, install rejected: {verification.FailureReason}");
+			return JobExecutionOutcome.Failed($"Artifact verification failed, install rejected: {failureReason}");
 		}
 
 		try
