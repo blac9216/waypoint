@@ -1,11 +1,13 @@
 /**
  * Config → Depot & Tokens data layer (issue #571, completing #560/#39's
- * frontend half against the backend landed in PR #570 and PR #602).
+ * frontend half against the backend landed in PR #570 and PR #602; issue #690
+ * split the single depot-token concept into two independent credentials).
  *
  * Three backend surfaces feed this one tab:
  *
- *   GET/POST       /credentials              — depot-token is a real
- *                                               `credential_type` (excluded
+ *   GET/POST       /credentials              — depot-activation-code and
+ *                                               legacy-download-token are real
+ *                                               `credential_type`s (excluded
  *                                               from the *creatable* dropdown
  *                                               in credentials.ts, not from
  *                                               the wire type) so this module
@@ -13,8 +15,9 @@
  *                                               create/update/test/list
  *                                               functions directly rather
  *                                               than re-implementing them.
- *   GET            /downloads/readiness       — combined tool+token readiness
- *                                               (PR #570).
+ *   GET            /downloads/readiness       — combined tool+credential
+ *                                               readiness, reported per
+ *                                               credential (PR #570, #690).
  *   POST           /downloads/tool/install    — local-repository install path
  *   POST           /downloads/tool/upload     — manual upload (multipart +
  *                                               published checksum)
@@ -32,21 +35,25 @@
  * `T | undefined`, not `T | null`, and why this module never treats "absent"
  * and "false" as the same thing: `tool_installed` absent means "no
  * download-runner has ever reported," `false` means a real negative, `true`
- * means installed. Same shape for `depot_token_health` (absent means "no
- * depot-token credential row exists at all," not "unhealthy").
+ * means installed. Same shape for `activation_code_health`/
+ * `legacy_download_token_health` (absent means "no such credential row exists
+ * at all," not "unhealthy").
  */
 
 import { apiGet, apiPost, apiPostForm } from "../../lib/api";
 
-/** `GET /downloads/readiness` (`DownloadReadinessResponse`, PR #570). */
+/** `GET /downloads/readiness` (`DownloadReadinessResponse`, PR #570, extended by issue #690). */
 export interface DownloadReadiness {
 	ready: boolean;
-	depot_token_configured: boolean;
-	/** Omitted when no depot-token credential exists at all — distinct from "unknown"/"valid"/"auth_failing", which are real values once a credential exists. */
-	depot_token_health?: "unknown" | "valid" | "auth_failing" | string;
+	activation_code_configured: boolean;
+	/** Omitted when no depot-activation-code credential exists at all — distinct from "unknown"/"valid"/"auth_failing", which are real values once a credential exists. */
+	activation_code_health?: "unknown" | "valid" | "auth_failing" | string;
+	legacy_download_token_configured: boolean;
+	/** Omitted when no legacy-download-token credential exists at all. Never gates `ready` — reported for visibility only (issue #690). */
+	legacy_download_token_health?: "unknown" | "valid" | "auth_failing" | string;
 	/** Omitted (not `false`) when no download-runner heartbeat has ever reported tool presence — genuinely unknown, never inferred. */
 	tool_installed?: boolean;
-	/** `"depot_token"` | `"depot_token_auth_failing"` (mutually exclusive) | `"tool_not_installed"`. */
+	/** `"activation_code"` | `"activation_code_auth_failing"` (mutually exclusive) | `"tool_not_installed"`. */
 	missing_prerequisites: string[];
 }
 

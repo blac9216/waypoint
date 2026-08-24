@@ -1,23 +1,30 @@
 /**
  * Config → Depot & Tokens tab (issue #571, completing #560's frontend half +
  * #39's screen — backend landed in PR #570 `GET /downloads/readiness` +
- * credential last_tested_at/expires_at, and PR #602 the tool-install paths).
- * docs/ui/prototype README "Depot & Tokens": Broadcom Support Portal token
- * (account, masked, Replace, expiry warning, Test), the download-tool binary
- * with its three install paths, and combined readiness.
+ * credential last_tested_at/expires_at, and PR #602 the tool-install paths;
+ * issue #690 splits the single depot-token concept into two independent,
+ * non-interchangeable credentials). docs/ui/prototype README "Depot &
+ * Tokens", updated per #690's design: the VCF 9.1 Software Depot Activation
+ * Code (authenticates `vcf-download-tool` commands) and the legacy Broadcom
+ * Download Token (UMDS/older `dl.broadcom.com` URL-template flows only) are
+ * presented as two clearly distinct credentials — never one shared "depot
+ * token" concept — each with its own account/masked/Replace/expiry/Test UI.
  *
- * Three panels:
- *   1. DEPOT CREDENTIAL — write-only depot-token create/replace (reuses
- *      useDepotToken.ts, which itself reuses credentials.ts's generic CRUD
- *      and the step-up/SSE-test machinery credentials already has). No
- *      secret ever renders after entry — the wire has no field to render.
- *   2. READINESS — GET /downloads/readiness, explaining exactly which
- *      prerequisite (token / tool / both) is missing, never inventing detail
- *      the backend didn't supply.
- *   3. DOWNLOAD TOOL — installed/verified state, install-from-local-repo
+ * Four panels:
+ *   1. ACTIVATION CODE — write-only create/replace for the VCF 9.1 credential
+ *      that actually authenticates the download tool (reuses
+ *      useDepotToken.ts's shared factory). No secret ever renders after
+ *      entry — the wire has no field to render.
+ *   2. LEGACY DOWNLOAD TOKEN — the deprecated UMDS/older-flow credential,
+ *      labeled as legacy guidance, never presented as interchangeable with
+ *      the Activation Code.
+ *   3. READINESS — GET /downloads/readiness, explaining exactly which
+ *      prerequisite (activation code / tool / both) is missing, never
+ *      inventing detail the backend didn't supply.
+ *   4. DOWNLOAD TOOL — installed/verified state, install-from-local-repo
  *      form (Operator+), manual upload form (artifact + mandatory .sig,
- *      Operator+), a disabled depot-fetch action (backend path deferred to
- *      #39's remainder), and install history including rejected attempts.
+ *      Operator+), a depot-fetch action gated on the Activation Code (not
+ *      the legacy token), and install history including rejected attempts.
  *
  * Role floors mirror the real backend guards, not a UI guess: credential
  * create/update/test/delete is Admin-only (CredentialsController), matching
@@ -39,7 +46,14 @@ import {
 	type DownloadReadiness,
 	type ManagedToolInstall,
 } from "./depot";
-import { EMPTY_DEPOT_TOKEN_FORM, toDepotTokenFormState, useDepotToken, type DepotTokenFormState } from "./useDepotToken";
+import {
+	EMPTY_DEPOT_TOKEN_FORM,
+	toDepotTokenFormState,
+	useDepotActivationCode,
+	useLegacyDownloadToken,
+	type DepotTokenFormState,
+	type UseDepotTokenResult,
+} from "./useDepotToken";
 import { useManagedToolInstall } from "./useManagedToolInstall";
 import "./ConfigurationScreen.css";
 import "./DepotTokensTab.css";
@@ -55,7 +69,8 @@ export function DepotTokensTab() {
 		: { disabled: true };
 	const canWriteCredential = user ? roleAtLeast(user.role, "Admin") : false;
 
-	const depotToken = useDepotToken();
+	const activationCode = useDepotActivationCode();
+	const legacyToken = useLegacyDownloadToken();
 
 	const [readiness, setReadiness] = useState<DownloadReadiness | null>(null);
 	const [readinessError, setReadinessError] = useState<string | null>(null);
@@ -82,8 +97,9 @@ export function DepotTokensTab() {
 
 	const onInstallSettled = useCallback(() => {
 		loadReadinessAndHistory();
-		depotToken.reload();
-	}, [loadReadinessAndHistory, depotToken]);
+		activationCode.reload();
+		legacyToken.reload();
+	}, [loadReadinessAndHistory, activationCode, legacyToken]);
 
 	const { install, installError, inFlight, installFromLocalRepository, uploadTool, fetchFromDepot } = useManagedToolInstall(onInstallSettled);
 
@@ -91,10 +107,26 @@ export function DepotTokensTab() {
 		<div className="config-tab config-tab--depot">
 			<div className="config-tab__grid">
 				<DepotCredentialPanel
+					title="ACTIVATION CODE"
+					addLabel="Add Activation Code"
+					emptyCopy="No VCF 9.1 Software Depot Activation Code is configured yet. The Activation Code (paired to a Software Depot ID) authenticates every vcf-download-tool metadata/binary command."
+					secretLabel="Activation Code"
 					canWrite={canWriteCredential}
 					writeGate={adminGate}
-					depotToken={depotToken}
+					depotToken={activationCode}
 				/>
+				<DepotCredentialPanel
+					title="LEGACY DOWNLOAD TOKEN"
+					addLabel="Add legacy token"
+					emptyCopy="No legacy Broadcom Download Token is configured. Deprecated: replaced by the Activation Code for VCF 9.1 (dl.broadcom.com replaced Download Tokens with Activation Codes). Configure this only for UMDS or other pre-9.1 URL-template flows — it cannot authenticate vcf-download-tool commands."
+					secretLabel="Download Token"
+					deprecated
+					canWrite={canWriteCredential}
+					writeGate={adminGate}
+					depotToken={legacyToken}
+				/>
+			</div>
+			<div className="config-tab__grid" style={{ marginTop: 14 }}>
 				<ReadinessPanel readiness={readiness} error={readinessError} />
 			</div>
 			<div className="config-panel" style={{ marginTop: 14 }}>
@@ -118,13 +150,23 @@ export function DepotTokensTab() {
 }
 
 function DepotCredentialPanel({
+	title,
+	addLabel,
+	emptyCopy,
+	secretLabel,
+	deprecated = false,
 	canWrite,
 	writeGate,
 	depotToken,
 }: {
+	title: string;
+	addLabel: string;
+	emptyCopy: string;
+	secretLabel: string;
+	deprecated?: boolean;
 	canWrite: boolean;
 	writeGate: { disabled: boolean; style?: { opacity: number }; title?: string };
-	depotToken: ReturnType<typeof useDepotToken>;
+	depotToken: UseDepotTokenResult;
 }) {
 	const { credential, loading, loadError, editing, setEditing, form, setForm, saving, formError, submit, testing, testMessage, doTest } =
 		depotToken;
@@ -139,7 +181,10 @@ function DepotCredentialPanel({
 	return (
 		<div className="config-panel">
 			<div className="config-panel__header">
-				<div className="config-panel__title">DEPOT CREDENTIAL</div>
+				<div className="config-panel__title">
+					{title}
+					{deprecated && <span className="depot-tab__deprecated-badge"> — DEPRECATED</span>}
+				</div>
 				<div className="config-panel__spacer" />
 				{!loading && !editing && (
 					<button
@@ -150,7 +195,7 @@ function DepotCredentialPanel({
 							setForm(credential ? toDepotTokenFormState(credential) : EMPTY_DEPOT_TOKEN_FORM);
 						}}
 					>
-						{credential ? "Replace" : "Add depot token"}
+						{credential ? "Replace" : addLabel}
 					</button>
 				)}
 			</div>
@@ -160,12 +205,7 @@ function DepotCredentialPanel({
 
 			{loading && <div className="config-panel__empty">Loading…</div>}
 
-			{!loading && !editing && !credential && (
-				<div className="config-panel__empty">
-					No Broadcom Support Portal depot token is configured yet. An account/token pair is required for depot-backed
-					downloads and catalog authentication.
-				</div>
-			)}
+			{!loading && !editing && !credential && <div className="config-panel__empty">{emptyCopy}</div>}
 
 			{!loading && !editing && credential && (
 				<div className="depot-tab__field-list">
@@ -203,7 +243,8 @@ function DepotCredentialPanel({
 
 			{!loading && editing && canWrite && (
 				<DepotTokenForm
-					title={credential ? "Replace depot token" : "New depot token"}
+					title={credential ? `Replace ${secretLabel}` : `New ${secretLabel}`}
+					secretLabel={secretLabel}
 					form={form}
 					setForm={setForm}
 					saving={saving}
@@ -252,6 +293,7 @@ function Field({ label, value, children }: { label: string; value?: string; chil
 
 function DepotTokenForm({
 	title,
+	secretLabel,
 	form,
 	setForm,
 	saving,
@@ -259,6 +301,7 @@ function DepotTokenForm({
 	onSubmit,
 }: {
 	title: string;
+	secretLabel: string;
 	form: DepotTokenFormState;
 	setForm: (f: DepotTokenFormState) => void;
 	saving: boolean;
@@ -291,7 +334,7 @@ function DepotTokenForm({
 					/>
 				</label>
 				<label className="config-form__field">
-					<span>Token</span>
+					<span>{secretLabel}</span>
 					<input
 						type="password"
 						value={form.secret}
@@ -330,8 +373,11 @@ function ReadinessPanel({ readiness, error }: { readiness: DownloadReadiness | n
 					<div className={`depot-tab__readiness depot-tab__readiness--${readiness.ready ? "ok" : "bad"}`} aria-live="polite">
 						{readiness.ready ? "Ready — depot downloads can run." : "Not ready — see missing prerequisites below."}
 					</div>
-					<Field label="Depot token">
-						<ReadinessDetail readiness={readiness} kind="token" />
+					<Field label="Activation Code">
+						<ReadinessDetail readiness={readiness} kind="activation_code" />
+					</Field>
+					<Field label="Legacy Download Token">
+						<ReadinessDetail readiness={readiness} kind="legacy_token" />
 					</Field>
 					<Field label="Download tool">
 						<ReadinessDetail readiness={readiness} kind="tool" />
@@ -342,15 +388,23 @@ function ReadinessPanel({ readiness, error }: { readiness: DownloadReadiness | n
 	);
 }
 
-function ReadinessDetail({ readiness, kind }: { readiness: DownloadReadiness; kind: "token" | "tool" }) {
-	if (kind === "token") {
-		if (readiness.missing_prerequisites.includes("depot_token")) {
+function ReadinessDetail({ readiness, kind }: { readiness: DownloadReadiness; kind: "activation_code" | "legacy_token" | "tool" }) {
+	if (kind === "activation_code") {
+		if (readiness.missing_prerequisites.includes("activation_code")) {
 			return <span className="depot-tab__readiness-missing">not configured</span>;
 		}
-		if (readiness.missing_prerequisites.includes("depot_token_auth_failing")) {
+		if (readiness.missing_prerequisites.includes("activation_code_auth_failing")) {
 			return <span className="depot-tab__readiness-missing">configured, but authentication is failing</span>;
 		}
-		return <span className="depot-tab__readiness-ok">{formatHealth(readiness.depot_token_health ?? "unknown")}</span>;
+		return <span className="depot-tab__readiness-ok">{formatHealth(readiness.activation_code_health ?? "unknown")}</span>;
+	}
+	if (kind === "legacy_token") {
+		// Never gates readiness (issue #690) -- reported for visibility only, so this
+		// never renders "missing"/"blocking" language, just the raw configured state.
+		if (!readiness.legacy_download_token_configured) {
+			return <span className="depot-tab__expiry-unknown">not configured (optional, legacy UMDS flows only)</span>;
+		}
+		return <span className="depot-tab__readiness-ok">{formatHealth(readiness.legacy_download_token_health ?? "unknown")}</span>;
 	}
 	if (readiness.tool_installed === undefined) {
 		return <span className="depot-tab__expiry-unknown">unknown — no runner has reported yet</span>;
@@ -390,22 +444,23 @@ function ManagedToolPanel({
 	const [uploadVersion, setUploadVersion] = useState("");
 	const [depotVersion, setDepotVersion] = useState("");
 
-	// The depot-fetch action needs BOTH connected mode and a healthy depot
-	// credential (issue #39 remainder) -- readiness already reports both, and
-	// this mirrors exactly what the backend itself enforces (409
-	// mode_unavailable when disconnected; the job fails cleanly with an
-	// actionable reason if the credential is missing/auth-failing), so the UI
-	// gate is never stricter or looser than the server's own rule.
-	const depotCredentialHealthy = readiness?.depot_token_health === "valid";
-	const depotFetchDisabled = writeGate.disabled || inFlight || disconnected || !depotCredentialHealthy;
+	// The depot-fetch action needs BOTH connected mode and a healthy Activation
+	// Code credential (issue #39 remainder, #690: never the legacy Download
+	// Token -- it cannot authenticate vcf-download-tool commands) -- readiness
+	// already reports both, and this mirrors exactly what the backend itself
+	// enforces (409 mode_unavailable when disconnected; the job fails cleanly
+	// with an actionable reason if the credential is missing/auth-failing), so
+	// the UI gate is never stricter or looser than the server's own rule.
+	const activationCodeHealthy = readiness?.activation_code_health === "valid";
+	const depotFetchDisabled = writeGate.disabled || inFlight || disconnected || !activationCodeHealthy;
 	const depotFetchTitle = writeGate.disabled
 		? writeGate.title
 		: inFlight
 			? "An install is already queued or running"
 			: disconnected
 				? "Requires connected mode"
-				: !depotCredentialHealthy
-					? "Requires a configured, healthy depot credential (see DEPOT CREDENTIAL above)"
+				: !activationCodeHealthy
+					? "Requires a configured, healthy Activation Code credential (see ACTIVATION CODE above)"
 					: undefined;
 
 	const toolInstalled = readiness?.tool_installed;
@@ -563,7 +618,7 @@ function ManagedToolPanel({
 					}}
 				>
 					<div className="config-form__title">Fetch from depot</div>
-					<div className="depot-tab__depot-fetch-note">Requires connected mode and a valid depot credential.</div>
+					<div className="depot-tab__depot-fetch-note">Requires connected mode and a valid Activation Code credential.</div>
 					<div className="config-form__grid config-form__grid--single">
 						<label className="config-form__field">
 							<span>Version (optional)</span>

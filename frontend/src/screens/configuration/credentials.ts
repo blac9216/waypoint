@@ -33,22 +33,24 @@ import { apiDelete, apiGet, apiPost, apiPut, type ApiErrorBlocker } from "../../
 
 /**
  * The full backend closed set (`Waypoint.Core.Secrets.CredentialTypes.All`,
- * migration 0022's DB CHECK) — includes `depot-token` so a fetched depot-token
- * credential (see `CREDENTIAL_TYPES` below) renders correctly in the list/type
- * column instead of falling through as an unrecognized type.
+ * migration 0022's DB CHECK, extended by migration 0047/issue #690) — includes
+ * the three Broadcom depot types so a fetched depot credential (see
+ * `CREDENTIAL_TYPES` below) renders correctly in the list/type column instead
+ * of falling through as an unrecognized type. `depot-token` is the deprecated
+ * pre-#690 well-known type, retained (never dropped) so a pre-existing row
+ * stays a recognized, visibly-legacy type — see `DepotTokensTab.tsx`.
  */
-export type CredentialType = "vcenter" | "nsx" | "ssh" | "token" | "depot-token";
+export type CredentialType = "vcenter" | "nsx" | "ssh" | "token" | "depot-token" | "depot-activation-code" | "legacy-download-token";
 
 /**
  * The CREATABLE subset, rendered in this tab's "Type" dropdown. Deliberately
- * excludes `depot-token`: per `CredentialTypes`' backend doc comment (#252/#383),
- * depot-token is the single well-known row `CatalogIndexJobHandler` resolves by
- * type to authenticate catalog-index runs to the Broadcom depot — it is not one
- * of domain-model.md's four user-facing connection types. It stays out of
- * this dropdown so an operator can't half-configure it here (no dialable
- * host, no username in the normal sense); depot-token creation/replacement
+ * excludes all three depot types: per `CredentialTypes`' backend doc comment
+ * (#252/#383/#690), they are well-known rows resolved by type, not one of
+ * domain-model.md's four user-facing connection types. They stay out of this
+ * dropdown so an operator can't half-configure them here (no dialable host,
+ * no username in the normal sense); depot credential creation/replacement
  * lives in its own dedicated flow — the Config → Depot & Tokens tab
- * (`DepotTokensTab.tsx`, issue #571) — not this connection-credential list.
+ * (`DepotTokensTab.tsx`, issue #571/#690) — not this connection-credential list.
  */
 export const CREDENTIAL_TYPES: { value: CredentialType; label: string }[] = [
 	{ value: "vcenter", label: "vCenter" },
