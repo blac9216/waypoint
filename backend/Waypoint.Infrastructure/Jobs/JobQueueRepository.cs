@@ -830,20 +830,22 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	}
 
 	/// <summary>
-	/// Shared SELECT/FROM/JOIN for the <see cref="RunSummary"/> projection used by both
-	/// <see cref="GetRunAsync"/> and <see cref="ListRunsAsync"/>. Keeping one copy of
-	/// the 19-column ordinal list means a column added here cannot silently drift out
-	/// of sync with <see cref="ReadRunSummary"/>.
+	/// Shared SELECT/FROM/JOIN for the <see cref="RunSummary"/> projection used by
+	/// <see cref="GetRunAsync"/>, <see cref="ListRunsAsync"/>, and
+	/// <see cref="ListRunHistoryAsync"/>. Keeping one copy of the 19-column ordinal
+	/// list means a column added here cannot silently drift out of sync with
+	/// <see cref="ReadRunSummary"/>.
 	///
 	/// IMPORTANT: a C# raw string literal excludes the newline immediately before its
 	/// closing <c>"""</c> delimiter, so this constant's text ends flush at
 	/// <c>...j.run_id = r.id</c> with no trailing whitespace. Every call site MUST
-	/// start its own appended clause with an explicit <c>"\n"</c> (as both call sites
-	/// below do) -- concatenating a bare <c>"WHERE ..."</c>/<c>"GROUP BY ..."</c>
+	/// start its own appended clause with an explicit <c>"\n"</c> (as every call site
+	/// below does) -- concatenating a bare <c>"WHERE ..."</c>/<c>"GROUP BY ..."</c>
 	/// string directly fuses the last identifier with the next keyword (e.g.
 	/// <c>r.idWHERE</c>) and produces invalid SQL that only a real Postgres round trip
-	/// catches, not a fake-repository test. See the Postgres integration tests for both
-	/// <see cref="GetRunAsync"/> and <see cref="ListRunsAsync"/>, which pin this.
+	/// catches, not a fake-repository test. See the Postgres integration tests for
+	/// <see cref="GetRunAsync"/>, <see cref="ListRunsAsync"/>, and
+	/// <see cref="ListRunHistoryAsync"/>, which pin this.
 	/// </summary>
 	private const string RunSummaryProjectionSql = """
 		SELECT
@@ -927,6 +929,89 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		}
 
 		return new RunListResult(runs, totalCount);
+	}
+
+	public async Task<RunHistoryPage> ListRunHistoryAsync(RunHistoryQuery query, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(query);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		List<string> clauses = [];
+		List<object> parameters = [];
+
+		if (query.States is { Count: > 0 })
+		{
+			clauses.Add($"r.state = ANY(${parameters.Count + 1})");
+			parameters.Add(query.States.ToArray());
+		}
+
+		if (query.RunTypes is { Count: > 0 })
+		{
+			clauses.Add($"r.run_type = ANY(${parameters.Count + 1})");
+			parameters.Add(query.RunTypes.ToArray());
+		}
+
+		if (query.Since is { } since)
+		{
+			clauses.Add($"r.created_at >= ${parameters.Count + 1}");
+			parameters.Add(since);
+		}
+
+		if (query.Until is { } until)
+		{
+			clauses.Add($"r.created_at <= ${parameters.Count + 1}");
+			parameters.Add(until);
+		}
+
+		if (query.AfterCreatedAt is { } afterCreatedAt && query.AfterId is { } afterId)
+		{
+			// Keyset predicate matching the ORDER BY created_at DESC, id DESC tie-break:
+			// "strictly after" in that composite order means either an earlier created_at,
+			// or the same created_at with a strictly smaller id (see RunHistoryCursor's
+			// doc comment for why created_at alone is not unique enough to page on).
+			int p1 = parameters.Count + 1;
+			int p2 = parameters.Count + 2;
+			clauses.Add($"(r.created_at < ${p1} OR (r.created_at = ${p1} AND r.id < ${p2}))");
+			parameters.Add(afterCreatedAt);
+			parameters.Add(afterId);
+		}
+
+		string whereSql = clauses.Count > 0 ? "WHERE " + string.Join(" AND ", clauses) : string.Empty;
+
+		// Fetch Limit + 1 to detect "more rows exist" without a second COUNT query --
+		// same idiom IJobEventHistoryReader.ReadHistoryAsync uses (issue #581/PR #684).
+		int fetchLimit = query.Limit + 1;
+		int limitParamIndex = parameters.Count + 1;
+		parameters.Add(fetchLimit);
+
+		string sql = RunSummaryProjectionSql + "\n" + whereSql + "\n" + $"""
+			GROUP BY r.id
+			ORDER BY r.created_at DESC, r.id DESC
+			LIMIT ${limitParamIndex}
+			""";
+
+		await using NpgsqlCommand command = new(sql, connection);
+		foreach (object parameter in parameters)
+		{
+			command.Parameters.AddWithValue(parameter);
+		}
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		List<RunSummary> runs = [];
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			runs.Add(ReadRunSummary(reader));
+		}
+
+		bool hasMore = runs.Count > query.Limit;
+		if (hasMore)
+		{
+			runs.RemoveAt(runs.Count - 1);
+		}
+
+		return new RunHistoryPage(runs, hasMore);
 	}
 
 	public async Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken)

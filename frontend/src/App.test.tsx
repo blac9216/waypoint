@@ -262,10 +262,11 @@ describe("App", () => {
 		expect(screen.getByText("DoD VCF Toolkit")).toBeInTheDocument();
 		expect(screen.getAllByText("Dashboard").length).toBeGreaterThan(0);
 
-		// Left rail: nav groups are present with their items. Live Jobs is
-		// top-level (issue #590, ADR-0019) — it renders above COMPLIANCE, not
-		// inside it; the old scan-only Live Run route no longer has a nav entry.
-		expect(screen.getByText("Live Jobs")).toBeInTheDocument();
+		// Left rail: nav groups are present with their items. Jobs (renamed from
+		// "Live Jobs" by issue #708 once it gained a History mode) is top-level
+		// (issue #590, ADR-0019) — it renders above COMPLIANCE, not inside it;
+		// the old scan-only Live Run route no longer has a nav entry.
+		expect(screen.getByText("Jobs")).toBeInTheDocument();
 		expect(screen.getByText("COMPLIANCE")).toBeInTheDocument();
 		expect(screen.getByText("Configuration")).toBeInTheDocument();
 

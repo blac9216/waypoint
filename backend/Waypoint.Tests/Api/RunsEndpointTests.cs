@@ -902,6 +902,185 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		Assert.Equal("information", item.GetProperty("data").GetProperty("severity").GetString());
 	}
 
+	// -- issue #708/#689: GET /runs/history -----------------------------------
+
+	[Fact]
+	public async Task ListRunHistory_BelowViewer_Returns401Unauthenticated()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs/history");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task ListRunHistory_NoFilters_MapsToDefaultQuery()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		RunHistoryQuery? query = _factory.Repository.LastRunHistoryQuery;
+		Assert.NotNull(query);
+		Assert.Null(query!.States);
+		Assert.Null(query.RunTypes);
+		Assert.Null(query.Since);
+		Assert.Null(query.Until);
+		Assert.Null(query.AfterCreatedAt);
+		Assert.Null(query.AfterId);
+		Assert.Equal(50, query.Limit);
+	}
+
+	[Fact]
+	public async Task ListRunHistory_MapsStateRunTypeSinceUntilAndLimit()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(
+			HttpMethod.Get,
+			"/api/v1/runs/history?state=completed,aborted&run_type=discover,download&since=2026-01-01T00:00:00Z&until=2026-06-01T00:00:00Z&limit=25");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		RunHistoryQuery? query = _factory.Repository.LastRunHistoryQuery;
+		Assert.NotNull(query);
+		Assert.Equal(["completed", "aborted"], query!.States);
+		Assert.Equal(["discover", "download"], query.RunTypes);
+		Assert.Equal(DateTimeOffset.Parse("2026-01-01T00:00:00Z", System.Globalization.CultureInfo.InvariantCulture), query.Since);
+		Assert.Equal(DateTimeOffset.Parse("2026-06-01T00:00:00Z", System.Globalization.CultureInfo.InvariantCulture), query.Until);
+		Assert.Equal(25, query.Limit);
+	}
+
+	[Fact]
+	public async Task ListRunHistory_LimitAboveMax_IsClampedTo200()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs/history?limit=99999");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal(200, _factory.Repository.LastRunHistoryQuery?.Limit);
+	}
+
+	[Fact]
+	public async Task ListRunHistory_UnknownState_Returns400ValidationError()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs/history?state=not-a-real-state");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task ListRunHistory_UnknownRunType_Returns400ValidationError()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs/history?run_type=not-a-real-type");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task ListRunHistory_UnparseableSince_Returns400ValidationError()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs/history?since=not-a-timestamp");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Theory]
+	[InlineData("not-base64-!!!")]
+	[InlineData("aGVsbG8=")] // valid base64, wrong prefix/content ("hello")
+	public async Task ListRunHistory_GarbageCursor_Returns400NotServerError(string garbageCursor)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/history?cursor={Uri.EscapeDataString(garbageCursor)}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task ListRunHistory_ValidCursorFromEncode_RoundTripsToKeyset()
+	{
+		HttpClient client = _factory.CreateClient();
+		DateTimeOffset createdAt = DateTimeOffset.Parse("2026-03-01T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
+		Guid id = Guid.NewGuid();
+		string cursor = Waypoint.Api.Contracts.RunHistoryCursor.Encode(createdAt, id);
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/history?cursor={Uri.EscapeDataString(cursor)}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal(createdAt, _factory.Repository.LastRunHistoryQuery?.AfterCreatedAt);
+		Assert.Equal(id, _factory.Repository.LastRunHistoryQuery?.AfterId);
+	}
+
+	[Fact]
+	public async Task ListRunHistory_TruncatedPage_EmitsEncodedNextCursor()
+	{
+		HttpClient client = _factory.CreateClient();
+		RunSummary item = new(
+			Id: Guid.NewGuid(), RunType: "discover", State: "completed", Paused: false, Blocked: false,
+			BlockedReason: null, ScopeJson: "{}", CredentialId: null, InitiatedBy: "tester", ScheduleId: null,
+			CreatedAt: "2026-03-01T12:00:00Z", StartedAt: null, CompletedAt: null,
+			JobCount: 0, JobCountQueued: 0, JobCountRunning: 0, JobCountCompleted: 0, JobCountFailed: 0, JobCountBlocked: 0);
+		_factory.Repository.SetRunHistoryPage(new RunHistoryPage([item], HasMore: true));
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		string? nextCursor = doc.RootElement.GetProperty("next_cursor").GetString();
+		Assert.NotNull(nextCursor);
+		Assert.True(Waypoint.Api.Contracts.RunHistoryCursor.TryDecode(nextCursor!, out DateTimeOffset decodedCreatedAt, out Guid decodedId));
+		Assert.Equal(item.Id, decodedId);
+		Assert.Equal(DateTimeOffset.Parse(item.CreatedAt!, System.Globalization.CultureInfo.InvariantCulture), decodedCreatedAt);
+
+		JsonElement returned = doc.RootElement.GetProperty("items").EnumerateArray().Single();
+		Assert.Equal(item.Id.ToString(), returned.GetProperty("id").GetString());
+	}
+
+	[Fact]
+	public async Task ListRunHistory_NotTruncated_OmitsNextCursor()
+	{
+		HttpClient client = _factory.CreateClient();
+		_factory.Repository.SetRunHistoryPage(new RunHistoryPage([], HasMore: false));
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/runs/history");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.False(doc.RootElement.TryGetProperty("next_cursor", out _));
+	}
+
 	// -- state-transition validation ----------------------------------------
 
 	[Fact]
@@ -1277,6 +1456,23 @@ public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRe
 		return Task.FromResult(new RunListResult(ListRunsItems, ListRunsTotalCount));
 	}
 
+	/// <summary>The last <see cref="RunHistoryQuery"/> the controller passed through, for
+	/// asserting query-string -> query mapping (filters, cursor, limit clamp).</summary>
+	public RunHistoryQuery? LastRunHistoryQuery { get; private set; }
+
+	/// <summary>Canned page <see cref="ListRunHistoryAsync"/> returns -- set via
+	/// <see cref="SetRunHistoryPage"/>; defaults to an empty, no-more page.</summary>
+	private RunHistoryPage _runHistoryPage = new([], false);
+
+	public void SetRunHistoryPage(RunHistoryPage page) => _runHistoryPage = page;
+
+	public Task<RunHistoryPage> ListRunHistoryAsync(RunHistoryQuery query, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		LastRunHistoryQuery = query;
+		return Task.FromResult(_runHistoryPage);
+	}
+
 	public Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		_ = (runId, cancellationToken);
@@ -1532,5 +1728,18 @@ public sealed class FakeRunHistoryDeletionRepository : IRunHistoryDeletionReposi
 		RunHistoryDeletionTombstone tombstone = new(Guid.NewGuid(), runId, runType, priorState, actor, "completed", "{}", DateTimeOffset.UtcNow);
 		_tombstones[runId] = tombstone;
 		return Task.FromResult(tombstone);
+	}
+
+	/// <summary>Issue #708: candidates <see cref="FindRolloffCandidatesAsync"/> returns, set by test setup.</summary>
+	public IReadOnlyList<Guid> RolloffCandidates { get; set; } = [];
+
+	/// <summary>The last <c>(olderThan, limit)</c> arguments the sweep passed, for asserting it derives the cutoff from options correctly.</summary>
+	public (DateTimeOffset OlderThan, int Limit)? LastRolloffQuery { get; private set; }
+
+	public Task<IReadOnlyList<Guid>> FindRolloffCandidatesAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		LastRolloffQuery = (olderThan, limit);
+		return Task.FromResult(RolloffCandidates);
 	}
 }

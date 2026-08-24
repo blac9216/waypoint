@@ -38,17 +38,21 @@ export interface RouteDef {
 
 export const ROUTES: RouteDef[] = [
 	{ key: "dashboard", path: "/", title: "Dashboard", requiredRole: "Viewer" },
-	// Top-level (ADR-0019 decision 1 / issue #590): Live Jobs is a global
+	// Top-level (ADR-0019 decision 1 / issue #590): Jobs is a global
 	// operational projection, not scoped to Compliance — it sits above the
 	// COMPLIANCE nav group in LeftRail.tsx's NAV_GROUPS, not inside it.
-	{ key: "live-jobs", path: "/live-jobs", title: "Live Jobs", requiredRole: "Viewer" },
+	// Renamed from "Live Jobs" to "Jobs" by issue #708 once it gained a
+	// History mode (browsing terminal work alongside active work) -- the
+	// same title-only-rename precedent issue #591 set for `results` below:
+	// `key`/`path` stay `live-jobs`/`/live-jobs` for deep-link stability.
+	{ key: "live-jobs", path: "/live-jobs", title: "Jobs", requiredRole: "Viewer" },
 	// Restored by issue #707 (epic #706): the dedicated compliance scan/
 	// remediate monitoring console (three layouts, stage board, run
 	// controls). Issue #693 had reduced this to a redirect to /live-jobs on
 	// the premise that #591's generic renderer covered scan detail — #704/
 	// #705 found that premise wrong (no controls, no board, no layouts). No
-	// nav entry (same as before): reached via Start-a-Scan, the global Live
-	// Jobs workspace's scan/remediate rows, and old bookmarked `?run=` links.
+	// nav entry (same as before): reached via Start-a-Scan, the global Jobs
+	// workspace's scan/remediate rows, and old bookmarked `?run=` links.
 	{ key: "live-run", path: "/live-run", title: "Live Run", requiredRole: "Viewer" },
 	{ key: "start-scan", path: "/scan/new", title: "Start a Scan", requiredRole: "Cyber" },
 	// Renamed from "Results & History" (issue #591): the screen is filtered to

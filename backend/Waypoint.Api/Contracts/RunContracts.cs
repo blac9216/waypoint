@@ -620,3 +620,51 @@ public sealed record RunEventHistoryResponse(
 
 	[property: JsonPropertyName("next_cursor")]
 	string? NextCursor);
+
+/// <summary>
+/// Query parameters for <c>GET /api/v1/runs/history</c> (issue #708/#689): the global
+/// Jobs History mode's filtered, keyset-cursor-paged terminal-run browsing surface.
+/// <c>RunsController.ListRunHistory</c> binds each query-string value individually via
+/// its own <c>[FromQuery(Name = "...")]</c> parameter (the same idiom
+/// <see cref="RunsController.GetEventHistory"/> uses for <see cref="RunEventHistoryRequest"/>'s
+/// shape, rather than binding this whole record directly as one complex
+/// <c>[FromQuery]</c> parameter) and constructs this record itself, which
+/// <c>RunsController.MapHistoryListQuery</c> then validates and converts to
+/// <see cref="Waypoint.Core.Jobs.RunHistoryQuery"/>.
+/// </summary>
+public sealed record RunHistoryListRequest(
+	/// <summary>Comma-separated allow-list of <c>runs.state</c> values. Omit for every state.</summary>
+	[property: JsonPropertyName("state")]
+	string? State,
+
+	/// <summary>Comma-separated allow-list of <c>runs.run_type</c> values. Omit for every type.</summary>
+	[property: JsonPropertyName("run_type")]
+	string? RunType,
+
+	/// <summary>Inclusive lower bound on <c>created_at</c> (ISO-8601). Omit for no lower bound.</summary>
+	[property: JsonPropertyName("since")]
+	string? Since,
+
+	/// <summary>Inclusive upper bound on <c>created_at</c> (ISO-8601). Omit for no upper bound.</summary>
+	[property: JsonPropertyName("until")]
+	string? Until,
+
+	/// <summary>Opaque page cursor from a previous response's <c>next_cursor</c>. Omit to start from the newest run.</summary>
+	[property: JsonPropertyName("cursor")]
+	string? Cursor,
+
+	/// <summary>Page size, 1-200 (default 50) -- see <c>RunsController</c> for the clamp.</summary>
+	[property: JsonPropertyName("limit")]
+	int? Limit);
+
+/// <summary>
+/// Response body for <c>GET /api/v1/runs/history</c>. <see cref="NextCursor"/> is null
+/// exactly when this page reached the end of matching history -- never a silent
+/// truncation, same idiom as <see cref="RunEventHistoryResponse.NextCursor"/>.
+/// </summary>
+public sealed record RunHistoryListResponse(
+	[property: JsonPropertyName("items")]
+	IReadOnlyList<RunResponse> Items,
+
+	[property: JsonPropertyName("next_cursor")]
+	string? NextCursor);

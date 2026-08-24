@@ -243,3 +243,92 @@
 	white-space: pre-wrap;
 	word-break: break-word;
 }
+
+/* Issue #708: Active/History mode toggle + History mode's own list/detail
+ * chrome. Deliberately reuses the existing .live-jobs__list/.live-jobs__body/
+ * .live-jobs-detail__facts classes above rather than a parallel class set --
+ * History mode's shell is structurally the same list+detail split. */
+
+.live-jobs__mode-toggle {
+	display: inline-flex;
+	border: 1px solid var(--line);
+	border-radius: 4px;
+	overflow: hidden;
+}
+
+.live-jobs__mode-toggle button {
+	background: none;
+	border: none;
+	padding: 5px 12px;
+	font-size: 12px;
+	color: var(--txt3);
+	cursor: pointer;
+}
+
+.live-jobs__mode-toggle button + button {
+	border-left: 1px solid var(--line);
+}
+
+.live-jobs__mode-toggle button.is-active {
+	background: var(--panel2);
+	color: var(--txt);
+	font-weight: 600;
+}
+
+.live-jobs__toolbar--history {
+	gap: 14px;
+}
+
+.live-jobs__history-filter {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--txt3);
+	cursor: pointer;
+}
+
+.live-jobs__history-state {
+	font-size: 11px;
+	color: var(--txt3);
+}
+
+.live-jobs__history-completed {
+	font-size: 11px;
+	color: var(--txt3);
+}
+
+.live-jobs__load-more {
+	display: block;
+	width: 100%;
+	padding: 8px;
+	background: none;
+	border: none;
+	border-top: 1px solid var(--line);
+	color: var(--acc);
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.live-jobs__load-more:disabled {
+	color: var(--txt3);
+	cursor: default;
+}
+
+.live-jobs-detail--history .live-jobs__list--nested {
+	width: 100%;
+	max-width: none;
+	min-width: 0;
+	border-right: none;
+	border: 1px solid var(--line);
+	border-radius: 4px;
+	max-height: 40vh;
+}
+
+.live-jobs__job-row-container {
+	border-bottom: 1px solid var(--line);
+}
+
+.live-jobs__job-row-container:last-child {
+	border-bottom: none;
+}

@@ -188,6 +188,9 @@ public sealed class EndpointRoleMatrixTests
 		// same wider-blast-radius gate as purge above.
 		["RunsController.DeleteRunHistory"] = WaypointRole.Admin,
 		["RunsController.GetRunHistoryDeletionStatus"] = WaypointRole.Viewer,
+		// Issue #708/#689: filtered, cursor-paged run history list -- Viewer+, same
+		// floor as every other run read (ADR-0019 decision 6).
+		["RunsController.ListRunHistory"] = WaypointRole.Viewer,
 
 		// SchedulesController -- reads Viewer+; writes are Cyber+ at the attribute floor
 		// (the coarse "lowest schedulable role"), refined per-job_type in-action by

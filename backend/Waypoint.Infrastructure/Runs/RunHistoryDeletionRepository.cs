@@ -134,6 +134,42 @@ public sealed class RunHistoryDeletionRepository : IRunHistoryDeletionRepository
 			$"run_history_deletion_tombstones row for run '{runId}' vanished between the conflicting INSERT and the immediate re-read.");
 	}
 
+	/// <summary>
+	/// Compliance-owned run types excluded from roll-off consideration at the query
+	/// level -- kept as a local literal (rather than importing
+	/// <c>Waypoint.Core.Jobs.RunTypes</c>'s full closed set) because only these two
+	/// values are structurally relevant here: everything else in that set is eligible
+	/// by construction once terminal+aged, so spelling out the other nine would just
+	/// restate "not scan, not remediate" less directly.
+	/// </summary>
+	public async Task<IReadOnlyList<Guid>> FindRolloffCandidatesAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT id
+			FROM runs
+			WHERE state IN ('completed', 'completed_with_failures', 'aborted')
+			  AND history_deleted_at IS NULL
+			  AND run_type NOT IN ('scan', 'remediate')
+			  AND COALESCE(completed_at, created_at) < $1
+			ORDER BY COALESCE(completed_at, created_at) ASC
+			LIMIT $2
+			""", connection);
+		command.Parameters.AddWithValue(olderThan);
+		command.Parameters.AddWithValue(limit);
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		List<Guid> ids = [];
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			ids.Add(reader.GetGuid(0));
+		}
+
+		return ids;
+	}
+
 	private static RunHistoryDeletionTombstone ReadTombstone(NpgsqlDataReader reader) => new(
 		Id: reader.GetGuid(0),
 		RunId: reader.GetGuid(1),

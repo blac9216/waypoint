@@ -362,6 +362,12 @@ public sealed class CatalogFakeJobQueueRepository : IJobControlRepository, IJobR
 		return Task.FromResult(new RunListResult([], 0));
 	}
 
+	public Task<RunHistoryPage> ListRunHistoryAsync(RunHistoryQuery query, CancellationToken cancellationToken)
+	{
+		_ = (query, cancellationToken);
+		return Task.FromResult(new RunHistoryPage([], false));
+	}
+
 	public Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken)
 	{
 		_ = (jobId, uploadStatus, detail, cancellationToken);

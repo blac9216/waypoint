@@ -130,6 +130,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<Waypoint.Core.Secrets.RunSecretOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.Secrets.RunSecretOptions.SectionName));
 
+		services.AddOptions<Waypoint.Core.Runs.RunHistoryRolloffOptions>()
+			.Bind(configuration.GetSection(Waypoint.Core.Runs.RunHistoryRolloffOptions.SectionName));
+
 		services.AddOptions<Waypoint.Core.SystemState.WorkerRegistryOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.SystemState.WorkerRegistryOptions.SectionName));
 
@@ -358,6 +361,17 @@ public static class ServiceCollectionExtensions
 		}
 
 		services.AddHostedService<Secrets.RunSecretCleanupHostedService>();
+
+		// Issue #708 (epic #706): configurable, gate-respecting roll-off sweep for
+		// generic operational history. API-surface only, same reasoning as
+		// RunSecretCleanupHostedService above -- it calls RunHistoryDeletionService,
+		// which is itself only registered in the connection-string-gated block of
+		// AddWaypointInfrastructure, so this is safe to register unconditionally here
+		// (that method already returned early above if no connection string is
+		// configured). Disabled by default (RunHistoryRolloffOptions.Enabled); the
+		// hosted service itself no-ops immediately when disabled rather than this call
+		// site needing to know that.
+		services.AddHostedService<Runs.RunHistoryRolloffHostedService>();
 
 		// Issue #31: control-plane schedule dispatch. API-surface only -- see this
 		// method's own doc comment for why a runner host (which also calls

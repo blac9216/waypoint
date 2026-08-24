@@ -168,6 +168,7 @@ assigned credentials is #587.
 ### Runs & jobs
 | Endpoint | Methods | Notes |
 |---|---|---|
+| `/runs/history` | GET | Issue #708/#689 (epic #706): filtered, keyset-cursor-paged run list — the global Jobs workspace's History mode. Viewer+, same floor as every other run read (ADR-0019 decision 6). Query params: `state` (comma-separated allow-list of `runs.state`), `run_type` (comma-separated allow-list of `runs.run_type`), `since`/`until` (ISO-8601, inclusive bounds on `created_at`), `cursor` (opaque, from a previous response's `next_cursor`), `limit` (1–200, default 50). No filter is applied by default — including no implicit "terminal only" filter; a caller browsing "history" passes `state=completed,completed_with_failures,aborted` explicitly, same as every other filter here. An unrecognized `state`/`run_type` value or an unparseable `since`/`until` or garbage `cursor` is 400 `validation_error`, never a 500. Response body: `items` (`RunResponse[]`, same shape `GET /runs` and `GET /runs/{id}` return) and `next_cursor` (opaque, present only when the page was truncated by `limit` with more matching rows remaining — never a silent truncation). Cursor wraps `(created_at, id)` — unlike `/runs/{id}/events/history`'s single-column `job_events.seq` cursor, `runs.created_at` is not unique, so the tie-break column (matching `ORDER BY created_at DESC, id DESC`) travels in the cursor too. A route distinct from `GET /runs` (rather than overloading its `?limit/offset` contract) so the Live Jobs workspace's existing active-work list (#590) is untouched. |
 | `/runs` | GET, POST | POST body: `run_type`, `scope` (JSON string — a scan run's `scope.site_id` and `scope.profile_id` are both required, optional `target_ids`), `credential_id` \| inline `credential` (personal tier, ADR-0011 — never persisted), `confirmation` (remediate only). Cyber+ for scans; remediation POSTs require Admin + `confirmation: "REMEDIATE"`. 202 body: `run_id`. Issue #639: `scope.profile_id` selects which pulled compliance-content profile (`profiles.id`, `GET /profiles`) the scan executes — must reference an installed profile or the request 404s/400s (missing entirely is a 400 `validation_error`; an unknown id is a 404 `not_found`); the run persists it in `scope` so run history shows what was actually scanned. Issue #585 (ADR-0021): optional `credential_overrides` (scan runs only, mutually exclusive with inline `credential`): `[{ target_id, purpose, credential_id }]`, each substituting a stored credential for exactly one (target, purpose) pair. Issue #586 (ADR-0021): optional `ad_hoc_credentials` (scan runs only, Operator+, mutually exclusive with inline `credential`): `[{ target_id, purpose, username, secret }]`, each an inline personal credential for exactly one (target, purpose) pair — encrypted at rest as its own `run_secrets` row keyed by `(run, target, purpose)`, never a stored `credentials` row. Ad hoc takes precedence over `credential_overrides` for the same pair; naming the same `(target_id, purpose)` in both, or twice within `ad_hoc_credentials` itself, is a 400. At creation the API resolves every purpose each selected target's scan requires (shared `CredentialPurposeMatrix`) from `ad_hoc_credentials` first, then `credential_overrides`, then the target's own `credential-bindings`, then the legacy run-level `credential_id` (now reinterpreted as a type-checked override of each target's default purpose) — then snapshots the result as immutable per-job `job_credential_bindings` rows (later target/binding edits never change an in-flight run; an ad hoc-resolved purpose sets `is_run_secret: true` on its snapshot row instead of a `credential_id`). Any missing/incompatible/out-of-scope pair rejects the whole request with a 400 `credential_binding_gaps` whose `error.binding_gaps` array enumerates every `{ target_id, target_name, purpose, reason, credential_id? }` (`reason` ∈ `missing_binding`, `incompatible_credential_type`, `credential_not_found`, `target_not_in_scope`, `purpose_not_applicable`, `duplicate_override`) before any run/job row exists. |
 
 **Shipped by #585/#586** ([ADR-0021](adr/0021-credential-purpose-matrix.md)):
@@ -368,14 +369,20 @@ sweep has removed) is not yet defined — deferred to whatever issue introduces
 `job_events` retention, since nothing in this codebase deletes `job_events` rows today
 (they are append-only-by-trigger; even `/runs/{id}/purge` leaves them in place).
 
-The global `GET /runs?state=<active|terminal>&run_type=<type>&cursor=...` filtered/
-cursor list-level read contract remains planned; it was NOT added by #590. The Live
-Jobs workspace (#590) ships against today's `/runs` list (documented above —
+The Live Jobs workspace (#590) ships against `/runs`'s plain list (documented above —
 `?limit/offset` + `X-Total-Count`, not a cursor): it fetches the newest page, narrows
-to non-terminal runs client-side, and fans out `GET /runs/{id}/jobs` per active run —
-additive-only, no backend change. `#590` also adds the first frontend consumer of
-`GET /runs/{id}/events/history` (`frontend/src/api/jobEventHistory.ts`), used for the
-historical log view of a selected terminal job.
+to non-terminal runs client-side, and fans out `GET /runs/{id}/jobs` per active run.
+`#590` also adds the first frontend consumer of `GET /runs/{id}/events/history`
+(`frontend/src/api/jobEventHistory.ts`), used for the historical log view of a
+selected terminal job.
+
+Issue #708/#689 (epic #706) implemented the separately-planned global filtered/cursor
+list read as its own route, `GET /runs/history?state=&run_type=&since=&until=&cursor=&limit=`
+(documented in the `/runs` table above) — additive, does not change `GET /runs`'s
+existing `?limit/offset` contract that `useLiveJobs.ts` depends on. It backs the
+global Jobs workspace's History mode: browsing terminal (and, via explicit filters,
+any) runs with server-side filtering and keyset paging, independent of the active-work
+list's pagination.
 
 Queue-halt observability (#147): tripping the consecutive-auth-failure halt emits
 `queue.state` for each newly-blocked run and one `system.notice` — including when
