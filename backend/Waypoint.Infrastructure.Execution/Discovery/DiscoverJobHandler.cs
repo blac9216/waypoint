@@ -206,7 +206,26 @@ public sealed class DiscoverJobHandler : IJobHandler
 			return isAuthFailure ? JobExecutionOutcome.AuthFailed(note) : JobExecutionOutcome.Failed(note);
 		}
 
-		IReadOnlyList<DiscoveredInventoryItem> items = ParseDiscoveredItems(result.Output);
+		DiscoveryParseOutcome parseOutcome = ParseDiscoveredItems(result.Output);
+		if (parseOutcome.MalformedCount > 0)
+		{
+			// Issue #618: a row the module emitted but this handler could not parse
+			// (missing/empty Type-MoRef-Name, or not even a PSObject -- e.g. the
+			// executor's output-capture path losing a pscustomobject's NoteProperties)
+			// must never read as a quiet "0 items" success. A target that legitimately
+			// has zero inventory still succeeds below (MalformedCount is 0 for a
+			// genuinely empty raw output); only rows that WERE returned but could not be
+			// understood fail the job, with a note that names the shape mismatch instead
+			// of the redacted-credential text a connection failure would produce.
+			await _targets.SetDiscoveryStatusAsync(targetId, TargetDiscoveryStatuses.Failed, stampLastRefreshed: false, cancellationToken)
+				.ConfigureAwait(false);
+			return JobExecutionOutcome.Failed(
+				$"discover invoked successfully but {parseOutcome.MalformedCount} of {result.Output.Count} returned row(s) could not be parsed " +
+				"(missing Type/MoRef/Name, or not a structured object) -- treating this as a failure rather than a silent zero-item success. " +
+				"This usually means the PowerShell output-capture path lost the module's object properties; check the compliance-runner logs.");
+		}
+
+		IReadOnlyList<DiscoveredInventoryItem> items = parseOutcome.Items;
 		InventoryUpsertOutcome outcome = await _inventory.UpsertDiscoveryResultsAsync(targetId, items, cancellationToken).ConfigureAwait(false);
 
 		string progressPayload = JsonSerializer.Serialize(new { upserted = outcome.Upserted, removed = outcome.Removed });
@@ -220,9 +239,19 @@ public sealed class DiscoverJobHandler : IJobHandler
 		return JobExecutionOutcome.Succeeded($"Discovered {outcome.Upserted} item(s), marked {outcome.Removed} removed.");
 	}
 
-	private static List<DiscoveredInventoryItem> ParseDiscoveredItems(IReadOnlyList<object?> output)
+	/// <summary>
+	/// Parses every row the module returned. Issue #618: a row that came back is
+	/// either a valid item or a MALFORMED one -- there is no longer a silent third
+	/// option where an unparseable row just vanishes from the count. A raw output of
+	/// zero rows (a target the vCenter genuinely has no inventory for) still yields
+	/// zero malformed rows and succeeds; a raw output where even one row fails to
+	/// parse is surfaced to the caller so it can fail the job instead of reporting a
+	/// clean "0 items" success over data that was actually lost or malformed.
+	/// </summary>
+	private static DiscoveryParseOutcome ParseDiscoveredItems(IReadOnlyList<object?> output)
 	{
 		List<DiscoveredInventoryItem> items = [];
+		int malformedCount = 0;
 		foreach (object? item in output)
 		{
 			DiscoveredInventoryItem? parsed = TryParseItem(item);
@@ -230,10 +259,16 @@ public sealed class DiscoverJobHandler : IJobHandler
 			{
 				items.Add(parsed);
 			}
+			else
+			{
+				malformedCount++;
+			}
 		}
 
-		return items;
+		return new DiscoveryParseOutcome(items, malformedCount);
 	}
+
+	private sealed record DiscoveryParseOutcome(IReadOnlyList<DiscoveredInventoryItem> Items, int MalformedCount);
 
 	private static DiscoveredInventoryItem? TryParseItem(object? item)
 	{
@@ -247,9 +282,14 @@ public sealed class DiscoverJobHandler : IJobHandler
 		string? name = GetProperty<string>(psObject, "Name");
 		if (!InventoryItemTypes.IsValid(type) || string.IsNullOrWhiteSpace(moRef) || string.IsNullOrWhiteSpace(name))
 		{
-			// One malformed row must not fail the whole discovery pass -- same
-			// "individual failures don't halt the batch" principle
-			// CatalogIndexJobHandler.TryParseArtifact applies.
+			// Issue #618: unlike CatalogIndexJobHandler.TryParseArtifact's "one bad row
+			// does not halt the batch" tolerance, a malformed discovery row is NOT
+			// silently dropped here -- ParseDiscoveredItems counts it and the caller
+			// fails the whole job rather than reporting a clean "Discovered 0 item(s)"
+			// success over data that came back but could not be understood (the exact
+			// silent-success shape the live vCenter reproduction exposed: the executor's
+			// output-capture path returned 535 rows with their NoteProperties stripped,
+			// every row failed this check, and the job still reported success).
 			return null;
 		}
 

@@ -244,6 +244,74 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		Assert.Equal(TargetDiscoveryStatuses.NeverDiscovered, (await _targets.GetAsync(targetId, CancellationToken.None))!.DiscoveryStatus);
 	}
 
+	/// <summary>
+	/// Issue #618's "genuinely empty vCenter" acceptance criterion: the module
+	/// connecting successfully and reporting zero rows is a legitimate, clean success
+	/// (0 upserted, 0 removed) -- the malformed-row fail-closed check below must not
+	/// punish a target that really has no inventory.
+	/// </summary>
+	[Fact]
+	public async Task TargetWithNoInventory_StillSucceeds_WithZeroItems()
+	{
+		Guid targetId = (await SeedVsphereTargetAsync("invented-empty-vcenter-canary")).TargetId;
+
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "empty");
+		Guid runId = await RunDiscoverOnceAsync(targetId);
+
+		Guid jobId = await GetJobIdForRunAsync(runId);
+		Assert.Equal("done", await GetJobFieldAsync(jobId, "state"));
+		await AssertInventoryCountAsync(targetId, expectedActive: 0);
+		Assert.Equal(TargetDiscoveryStatuses.Discovered, (await _targets.GetAsync(targetId, CancellationToken.None))!.DiscoveryStatus);
+		string note = await GetJobNoteAsync(jobId);
+		Assert.Contains("Discovered 0 item(s)", note, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #618's core acceptance criterion: rows the module DID return but this
+	/// handler cannot parse (the executor-output-capture-loses-NoteProperties shape
+	/// the live vCenter reproduction hit) must fail the job with an actionable note --
+	/// never read as a clean "Discovered 0 item(s)" success, and never leave inventory
+	/// silently unpopulated without a visible error.
+	/// </summary>
+	[Fact]
+	public async Task MalformedDiscoveryRows_FailTheJob_InsteadOfSilentlySucceedingWithZeroItems()
+	{
+		Guid targetId = (await SeedVsphereTargetAsync("invented-malformed-canary")).TargetId;
+
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "malformed");
+		Guid runId = await _repository.CreateRunAsync("discover", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("discover", 4, TargetId: targetId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+		string note = await GetJobNoteAsync(jobIds[0]);
+		Assert.Contains("could not be parsed", note, StringComparison.Ordinal);
+		Assert.DoesNotContain("Discovered 0 item(s)", note, StringComparison.Ordinal);
+		await AssertInventoryCountAsync(targetId, expectedActive: 0);
+		Assert.Equal(TargetDiscoveryStatuses.Failed, (await _targets.GetAsync(targetId, CancellationToken.None))!.DiscoveryStatus);
+	}
+
+	private async Task<Guid> GetJobIdForRunAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new("SELECT id FROM jobs WHERE run_id = $1 LIMIT 1", connection);
+		query.Parameters.AddWithValue(runId);
+		return (Guid)(await query.ExecuteScalarAsync())!;
+	}
+
 	private async Task<Guid> RunDiscoverOnceAsync(Guid targetId)
 	{
 		Guid runId = await _repository.CreateRunAsync("discover", "{}", credentialId: null, "tester", CancellationToken.None);
