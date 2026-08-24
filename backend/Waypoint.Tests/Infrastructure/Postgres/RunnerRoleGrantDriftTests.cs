@@ -51,6 +51,7 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	private readonly PostgresFixture _fixture;
 	private readonly string _keyDirectory = Directory.CreateTempSubdirectory("wp-runner-role-grant-drift-test").FullName;
 	private string _complianceRunnerConnectionString = string.Empty;
+	private string _downloadRunnerConnectionString = string.Empty;
 	private InPlaySecretRedactor _redactor = null!;
 
 	public RunnerRoleGrantDriftTests(PostgresFixture fixture)
@@ -73,6 +74,13 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 			Password = "waypoint_test",
 		};
 		_complianceRunnerConnectionString = builder.ConnectionString;
+
+		NpgsqlConnectionStringBuilder downloadBuilder = new(_fixture.ConnectionString)
+		{
+			Username = "waypoint_download_runner",
+			Password = "waypoint_test",
+		};
+		_downloadRunnerConnectionString = downloadBuilder.ConnectionString;
 
 		_redactor = new InPlaySecretRedactor();
 	}
@@ -299,6 +307,76 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #622: the third instance of the #556 grant-drift class, this time against
+	/// waypoint_download_runner. <see cref="CredentialRepository.FindByTypeAsync"/> --
+	/// called by both <c>CatalogIndexJobHandler</c> (catalog-index) and
+	/// <c>ManagedToolInstallJobHandler</c>'s depot-fetch path (tool-install) to resolve
+	/// the stored depot-token credential -- shares <c>ProjectionSql</c> with
+	/// <see cref="CredentialRepository.GetAsync"/>, which migration 0034 extended to
+	/// select <c>last_tested_at, expires_at</c>. Migration 0035 granted those two
+	/// columns to waypoint_compliance_runner only; the download-runner role was never
+	/// updated, so this call hit 42501 the moment a real download-runner claimed a
+	/// catalog-index or depot-fetch tool-install job. Migration 0039 closes it.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_FindByTypeAsync_ResolvesDepotTokenWithoutPermissionDenied()
+	{
+		await SeedCredentialOfTypeAsync("depot-token");
+
+		CredentialRepository runnerCredentials = new(_downloadRunnerConnectionString);
+		CredentialResponse? resolved = await runnerCredentials.FindByTypeAsync("depot-token", CancellationToken.None);
+
+		Assert.NotNull(resolved);
+		Assert.Null(resolved!.LastTestedAt);
+		Assert.Null(resolved.ExpiresAt);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check for the download-runner's 0039 grant: it is
+	/// SELECT-only on <c>last_tested_at</c>/<c>expires_at</c> -- neither
+	/// <c>CatalogIndexJobHandler</c> nor <c>ManagedToolInstallJobHandler</c> ever calls
+	/// <see cref="CredentialRepository.MarkTestOutcomeAsync"/> (that stays a
+	/// compliance-runner-only write, migration 0035), so an UPDATE attempt as the
+	/// download-runner role must still fail 42501.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotUpdateCredentialLastTestedAt()
+	{
+		Guid credentialId = await SeedCredentialOfTypeAsync("depot-token");
+
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new(
+			"UPDATE credentials SET last_tested_at = now() WHERE id = $1", connection);
+		update.Parameters.AddWithValue(credentialId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
+	/// Second least-privilege boundary check for the download-runner role: 0039 adds
+	/// SELECT only, never UPDATE, on <c>expires_at</c> (never fabricated by a runner --
+	/// an upstream-supplied expiry is an API-side write, same rule 0035 already applies
+	/// to the compliance-runner role). An UPDATE attempt as the download-runner role
+	/// must still fail 42501, proving 0039 did not accidentally grant a write.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotUpdateCredentialExpiresAt()
+	{
+		Guid credentialId = await SeedCredentialOfTypeAsync("depot-token");
+
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new(
+			"UPDATE credentials SET expires_at = now() + interval '30 days' WHERE id = $1", connection);
+		update.Parameters.AddWithValue(credentialId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
 	/// Issue #569 (migration 0036), added at authoring time rather than after a live
 	/// 42501 -- the lesson of this file's own header (and of 0033/0034 before it) is
 	/// that a new runner-executed table without a role-contract test ships grant drift
@@ -403,6 +481,17 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		await using NpgsqlCommand command = new(
 			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'token') RETURNING id", connection);
 		command.Parameters.AddWithValue($"role-grant-drift-cred-{Guid.NewGuid():N}");
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private async Task<Guid> SeedCredentialOfTypeAsync(string credentialType)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, $2) RETURNING id", connection);
+		command.Parameters.AddWithValue($"role-grant-drift-cred-{Guid.NewGuid():N}");
+		command.Parameters.AddWithValue(credentialType);
 		return (Guid)(await command.ExecuteScalarAsync())!;
 	}
 
