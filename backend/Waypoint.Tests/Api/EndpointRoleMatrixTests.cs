@@ -148,6 +148,19 @@ public sealed class EndpointRoleMatrixTests
 		["ManagedToolController.Fetch"] = WaypointRole.Operator,
 		["ManagedToolController.ListInstalls"] = WaypointRole.Viewer,
 
+		// DepotEnrollmentController -- issue #691. Read is Viewer+ (operational chrome,
+		// same floor as GetReadiness above). Every state-changing action (generate,
+		// accept-code, validate, reset) is Admin-only: this flow's terminal effect is
+		// always a write to the Activation Code credential CredentialsController
+		// already gates Admin-only, so the enrollment entry points carry the same
+		// floor rather than a looser one that would let an Operator indirectly rotate
+		// a credential CredentialsController itself would refuse them.
+		["DepotEnrollmentController.Get"] = WaypointRole.Viewer,
+		["DepotEnrollmentController.GenerateDepotId"] = WaypointRole.Admin,
+		["DepotEnrollmentController.AcceptActivationCode"] = WaypointRole.Admin,
+		["DepotEnrollmentController.Validate"] = WaypointRole.Admin,
+		["DepotEnrollmentController.Reset"] = WaypointRole.Admin,
+
 		// EventStreamController -- SSE reads, Viewer+.
 		["EventStreamController.GlobalStream"] = WaypointRole.Viewer,
 		["EventStreamController.RunStream"] = WaypointRole.Viewer,
