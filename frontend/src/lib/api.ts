@@ -19,20 +19,41 @@ export interface ApiErrorBlocker {
 	count: number;
 }
 
+/**
+ * One machine-readable per-target/per-purpose credential-resolution failure
+ * (issue #585, ADR-0021 §6) — `Waypoint.Core.Errors.CredentialBindingGap` on
+ * the wire, the credential-resolution counterpart of `ApiErrorBlocker`.
+ * `reason` is the closed set `missing_binding` / `incompatible_credential_type`
+ * / `credential_not_found` / `target_not_in_scope` / `purpose_not_applicable`
+ * / `duplicate_override` — never free text. `credential_id` names the
+ * offending credential for override-shaped reasons, undefined for
+ * `missing_binding`-shaped ones. Identity only — never secret material.
+ */
+export interface CredentialBindingGap {
+	target_id: string;
+	target_name: string | null;
+	purpose: string;
+	reason: string;
+	credential_id?: string;
+}
+
 export class ApiError extends Error {
 	code: string;
 	detail?: unknown;
 	status: number;
 	/** Issue #593: optional structured breakdown for a `409` with more than one enumerable blocking category — undefined for every other error and for a single-cause `409`. See `ApiErrorBlocker`. */
 	blockers?: ApiErrorBlocker[];
+	/** Issue #585/#587: optional per-target/per-purpose credential-resolution gaps on a 400 `credential_binding_gaps` from `POST /runs` — undefined for every other error. See `CredentialBindingGap`. */
+	bindingGaps?: CredentialBindingGap[];
 
-	constructor(status: number, code: string, message: string, detail?: unknown, blockers?: ApiErrorBlocker[]) {
+	constructor(status: number, code: string, message: string, detail?: unknown, blockers?: ApiErrorBlocker[], bindingGaps?: CredentialBindingGap[]) {
 		super(message);
 		this.name = "ApiError";
 		this.status = status;
 		this.code = code;
 		this.detail = detail;
 		this.blockers = blockers;
+		this.bindingGaps = bindingGaps;
 	}
 }
 
@@ -106,20 +127,26 @@ async function parseErrorBody(response: Response): Promise<ApiError> {
 	let message = `Request failed with status ${response.status}`;
 	let detail: unknown;
 	let blockers: ApiErrorBlocker[] | undefined;
+	let bindingGaps: CredentialBindingGap[] | undefined;
 	try {
 		const body = await response.json();
 		if (body && typeof body === "object" && "error" in body) {
-			const envelope = (body as { error?: { code?: string; message?: string; detail?: unknown; blockers?: ApiErrorBlocker[] } }).error;
+			const envelope = (
+				body as {
+					error?: { code?: string; message?: string; detail?: unknown; blockers?: ApiErrorBlocker[]; binding_gaps?: CredentialBindingGap[] };
+				}
+			).error;
 			code = envelope?.code ?? code;
 			message = envelope?.message ?? message;
 			detail = envelope?.detail;
 			blockers = envelope?.blockers;
+			bindingGaps = envelope?.binding_gaps;
 		}
 	} catch {
 		// Non-JSON error body (e.g. an nginx-level 502) — fall back to the status text.
 		message = response.statusText || message;
 	}
-	return new ApiError(response.status, code, message, detail, blockers);
+	return new ApiError(response.status, code, message, detail, blockers, bindingGaps);
 }
 
 function timeoutError(timeoutMs: number | undefined, cause?: unknown): ApiError {

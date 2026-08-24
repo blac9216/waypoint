@@ -208,6 +208,67 @@
 	font-size: 12px;
 }
 
+.start-scan-screen__field-title {
+	font-size: 12px;
+	font-weight: 600;
+	margin: 14px 0 6px;
+}
+
+.start-scan-screen__error-text {
+	color: var(--bad);
+	font-size: 11px;
+}
+
+.start-scan-screen__coverage {
+	margin-bottom: 14px;
+}
+
+.start-scan-screen__coverage-table {
+	width: 100%;
+	max-width: 640px;
+	border-collapse: collapse;
+	font-size: 11.5px;
+	margin: 8px 0 12px;
+}
+
+.start-scan-screen__coverage-table th {
+	text-align: left;
+	color: var(--txt3);
+	font-weight: 550;
+	padding: 4px 8px 4px 0;
+	border-bottom: 1px solid var(--line);
+}
+
+.start-scan-screen__coverage-table td {
+	padding: 6px 8px 6px 0;
+	border-bottom: 1px solid var(--line);
+	vertical-align: top;
+}
+
+.start-scan-screen__adhoc-fields {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 6px;
+}
+
+.start-scan-screen__adhoc-fields label {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	font-size: 10.5px;
+	color: var(--txt2);
+}
+
+.start-scan-screen__adhoc-fields input {
+	background: var(--bg);
+	border: 1px solid var(--line);
+	border-radius: 3px;
+	padding: 4px 6px;
+	color: var(--txt);
+	font-size: 11.5px;
+}
+
 .start-scan-screen__submit {
 	background: var(--accd);
 	border: 1px solid var(--acc);

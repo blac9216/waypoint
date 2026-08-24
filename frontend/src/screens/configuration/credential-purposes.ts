@@ -71,3 +71,78 @@ export const CREDENTIAL_PURPOSE_MATRIX: readonly CredentialPurposeMatrixEntry[] 
 	{ kind: "ssh", operation: "scan", component: null, requiredPurposes: ["srg-ssh"], optionalPurposes: [] },
 	{ kind: "ssh", operation: "remediation-ready-planning", component: null, requiredPurposes: ["srg-ssh"], optionalPurposes: [] },
 ];
+
+/**
+ * Every purpose applicable to a target kind (issue #584), across every
+ * operation row for that kind (required or optional). Hoisted here from
+ * SiteTargetsPanel.tsx (its original, pre-#587 home) so the Start-a-Scan
+ * wizard (#587) can share the exact same derivation instead of re-deriving a
+ * second copy of the same matrix walk.
+ */
+export function applicablePurposes(kind: TargetKind | string): CredentialPurpose[] {
+	const purposes = new Set<CredentialPurpose>();
+	for (const entry of CREDENTIAL_PURPOSE_MATRIX) {
+		if (entry.kind === kind) {
+			entry.requiredPurposes.forEach((p) => purposes.add(p));
+			entry.optionalPurposes.forEach((p) => purposes.add(p));
+		}
+	}
+	return CREDENTIAL_PURPOSES.map((p) => p.value).filter((p) => purposes.has(p));
+}
+
+/** Every purpose REQUIRED (not merely optional) by at least one operation row for the kind — drives the "missing required binding" coverage warning. */
+export function requiredPurposes(kind: TargetKind | string): CredentialPurpose[] {
+	const purposes = new Set<CredentialPurpose>();
+	for (const entry of CREDENTIAL_PURPOSE_MATRIX) {
+		if (entry.kind === kind) {
+			entry.requiredPurposes.forEach((p) => purposes.add(p));
+		}
+	}
+	return CREDENTIAL_PURPOSES.map((p) => p.value).filter((p) => purposes.has(p));
+}
+
+/**
+ * Issue #587: the purposes a SCAN of `kind` unconditionally requires —
+ * mirrors the backend's `CredentialPurposeMatrix.RequiredScanPurposes`
+ * (`backend/Waypoint.Core/Secrets/CredentialPurposes.cs`): the intersection
+ * of every `scan`-operation row's `requiredPurposes` for the kind. Purposes
+ * required by only SOME scan components (e.g. `vcsa-ssh` for vsphere's VCSA
+ * component) are `conditionalScanPurposes` instead — until scan-component
+ * selection exists on the wire, they resolve opportunistically and never
+ * block submission on their own.
+ */
+export function requiredScanPurposes(kind: TargetKind | string): CredentialPurpose[] {
+	const scanEntries = CREDENTIAL_PURPOSE_MATRIX.filter((e) => e.kind === kind && e.operation === "scan");
+	if (scanEntries.length === 0) {
+		return [];
+	}
+	const intersection = scanEntries.reduce<Set<CredentialPurpose>>((acc, entry, index) => {
+		if (index === 0) {
+			return new Set(entry.requiredPurposes);
+		}
+		const entryPurposes = new Set(entry.requiredPurposes);
+		return new Set([...acc].filter((p) => entryPurposes.has(p)));
+	}, new Set());
+	return CREDENTIAL_PURPOSES.map((p) => p.value).filter((p) => intersection.has(p));
+}
+
+/**
+ * Issue #587: purposes required by SOME but not ALL scan components of
+ * `kind` (mirrors the backend's `ConditionalScanPurposes`) — resolve
+ * opportunistically when bound/overridden, never a hard coverage gap by
+ * themselves.
+ */
+export function conditionalScanPurposes(kind: TargetKind | string): CredentialPurpose[] {
+	const required = new Set(requiredScanPurposes(kind));
+	const scanEntries = CREDENTIAL_PURPOSE_MATRIX.filter((e) => e.kind === kind && e.operation === "scan");
+	const all = new Set<CredentialPurpose>();
+	for (const entry of scanEntries) {
+		entry.requiredPurposes.forEach((p) => all.add(p));
+		entry.optionalPurposes.forEach((p) => all.add(p));
+	}
+	return CREDENTIAL_PURPOSES.map((p) => p.value).filter((p) => all.has(p) && !required.has(p));
+}
+
+export function purposeLabel(purpose: CredentialPurpose): string {
+	return CREDENTIAL_PURPOSES.find((p) => p.value === purpose)?.label ?? purpose;
+}

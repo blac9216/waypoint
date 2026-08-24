@@ -86,16 +86,19 @@ export function StartScanScreen() {
 						<CredentialStep
 							mode={wizard.credentialMode}
 							onModeChange={wizard.setCredentialMode}
-							canUsePersonal={wizard.canUsePersonal}
-							personalGate={wizard.personalGate}
+							targets={wizard.selections.filter((s) => wizard.selectedTargetIds.includes(s.target.id)).map((s) => s.target)}
+							coverage={wizard.coverage}
+							missingCoverage={wizard.missingCoverage}
+							bindingGapErrors={wizard.bindingGapErrors}
+							overrides={wizard.overrides}
+							onSetSavedOverride={wizard.setSavedOverride}
+							onSetAdHocOverride={wizard.setAdHocOverride}
+							onClearOverride={wizard.clearOverride}
+							onBulkApplySaved={wizard.bulkApplySaved}
+							canUseAdHoc={wizard.canUseAdHoc}
+							adHocGate={wizard.adHocGate}
 							credentialOptions={wizard.credentialOptions}
 							credentialOptionsError={wizard.credentialOptionsError}
-							serviceCredentialId={wizard.serviceCredentialId}
-							onServiceCredentialChange={wizard.setServiceCredentialId}
-							personalUsername={wizard.personalUsername}
-							onPersonalUsernameChange={wizard.setPersonalUsername}
-							personalSecret={wizard.personalSecret}
-							onPersonalSecretChange={wizard.setPersonalSecret}
 						/>
 					)}
 
@@ -107,8 +110,7 @@ export function StartScanScreen() {
 							targetCount={wizard.selectedTargetIds.length || wizard.selections.length}
 							totalTargets={wizard.selections.length}
 							profileName={wizard.selectedProfileName}
-							credentialMode={wizard.credentialMode}
-							credentialName={wizard.selectedCredentialName}
+							credentialSummary={wizard.selectedCredentialSummary}
 							canConfirm={wizard.canConfirm}
 							submitting={wizard.submitting}
 							error={wizard.submitError}

@@ -4,9 +4,12 @@
  * change). Each step is a pure presentation component driven by props from
  * useScanWizard; StartScanScreen.tsx wires them together.
  */
+import { useState } from "react";
+import type { CredentialBindingGap } from "../../lib/api";
+import { CREDENTIAL_PURPOSE_SATISFYING_TYPES, purposeLabel, requiredScanPurposes, type CredentialPurpose } from "../configuration/credential-purposes";
 import type { CredentialOption, Site } from "../configuration/sites";
 import type { InventoryItem, ProfileOption } from "./startscan";
-import type { CredentialMode, TargetSelection } from "./useScanWizard";
+import { overrideKey, type CoverageRow, type CredentialMode, type OverrideEntry, type TargetSelection } from "./useScanWizard";
 
 export function SiteStep({
 	sites,
@@ -157,97 +160,319 @@ function InventoryNode({
 	);
 }
 
+/**
+ * Issue #587 (epic #582): Credential step. Defaults to "Use credentials
+ * assigned to each target" — the coverage table reads straight off the
+ * selected targets' own `bindings` (already on the wire, issue #661), no
+ * extra request. Switching to "Customize per target/purpose" reveals one row
+ * per (target, purpose) the scan cares about, each with its own saved/ad-hoc
+ * picker plus a bulk-apply control per purpose column (compatible credential
+ * types only, per the shared matrix). `bindingGapErrors` (a 400
+ * `credential_binding_gaps` from the last submit attempt) are mapped onto the
+ * matching row instead of rendered as a generic toast (issue #587 AC).
+ */
 export function CredentialStep({
 	mode,
 	onModeChange,
-	canUsePersonal,
-	personalGate,
+	targets,
+	coverage,
+	missingCoverage,
+	bindingGapErrors,
+	overrides,
+	onSetSavedOverride,
+	onSetAdHocOverride,
+	onClearOverride,
+	onBulkApplySaved,
+	canUseAdHoc,
+	adHocGate,
 	credentialOptions,
 	credentialOptionsError,
-	serviceCredentialId,
-	onServiceCredentialChange,
-	personalUsername,
-	onPersonalUsernameChange,
-	personalSecret,
-	onPersonalSecretChange,
 }: {
 	mode: CredentialMode;
 	onModeChange: (m: CredentialMode) => void;
-	canUsePersonal: boolean;
-	personalGate: { disabled: boolean; style?: { opacity: number }; title?: string };
+	targets: { id: string; name: string; kind: string }[];
+	coverage: CoverageRow[];
+	missingCoverage: CoverageRow[];
+	bindingGapErrors: CredentialBindingGap[];
+	overrides: Map<string, OverrideEntry>;
+	onSetSavedOverride: (targetId: string, purpose: CredentialPurpose, credentialId: string) => void;
+	onSetAdHocOverride: (targetId: string, purpose: CredentialPurpose, username: string, secret: string) => void;
+	onClearOverride: (targetId: string, purpose: CredentialPurpose) => void;
+	onBulkApplySaved: (purpose: CredentialPurpose, credentialId: string) => void;
+	canUseAdHoc: boolean;
+	adHocGate: { disabled: boolean; style?: { opacity: number }; title?: string };
 	credentialOptions: CredentialOption[];
 	credentialOptionsError: string | null;
-	serviceCredentialId: string;
-	onServiceCredentialChange: (id: string) => void;
-	personalUsername: string;
-	onPersonalUsernameChange: (v: string) => void;
-	personalSecret: string;
-	onPersonalSecretChange: (v: string) => void;
 }) {
+	// One row per (target, purpose) any selected target's scan cares about —
+	// drives both the "Customize" table and the bulk-apply purpose columns.
+	const purposesInScope = Array.from(new Set(targets.flatMap((t) => requiredScanPurposes(t.kind)))) as CredentialPurpose[];
+
+	const gapsByKey = new Map<string, CredentialBindingGap[]>();
+	for (const gap of bindingGapErrors) {
+		const key = overrideKey(gap.target_id, gap.purpose as CredentialPurpose);
+		const list = gapsByKey.get(key) ?? [];
+		list.push(gap);
+		gapsByKey.set(key, list);
+	}
+
 	return (
 		<div className="start-scan-screen__panel">
 			<div className="start-scan-screen__panel-title">Credential</div>
 			<div className="start-scan-screen__credential-cards">
 				<label className="start-scan-screen__credential-card">
-					<input type="radio" name="credential-mode" checked={mode === "service"} onChange={() => onModeChange("service")} />
+					<input type="radio" name="credential-mode" checked={mode === "assigned"} onChange={() => onModeChange("assigned")} />
 					<div>
-						<div className="start-scan-screen__credential-card-title">Service credential</div>
-						<div className="start-scan-screen__note">A shared credential stored in Configuration.</div>
+						<div className="start-scan-screen__credential-card-title">Use credentials assigned to each target</div>
+						<div className="start-scan-screen__note">Default. Each target's own credential bindings are used.</div>
 					</div>
 				</label>
-				<label className="start-scan-screen__credential-card" title={personalGate.title}>
-					<input
-						type="radio"
-						name="credential-mode"
-						checked={mode === "personal"}
-						disabled={!canUsePersonal}
-						onChange={() => onModeChange("personal")}
-					/>
-					<div style={personalGate.style}>
-						<div className="start-scan-screen__credential-card-title">My credentials</div>
-						<div className="start-scan-screen__note">
-							Enter your own username/password now. Never stored — write-only for this run only.
-						</div>
+				<label className="start-scan-screen__credential-card">
+					<input type="radio" name="credential-mode" checked={mode === "override"} onChange={() => onModeChange("override")} />
+					<div>
+						<div className="start-scan-screen__credential-card-title">Customize per target/purpose</div>
+						<div className="start-scan-screen__note">Override specific targets/purposes with a saved or ad hoc credential.</div>
 					</div>
 				</label>
 			</div>
 
-			{mode === "service" && (
-				<div className="start-scan-screen__field">
-					{credentialOptionsError && <div className="start-scan-screen__error">{credentialOptionsError}</div>}
-					<label>
-						<span>Credential</span>
-						<select value={serviceCredentialId} onChange={(e) => onServiceCredentialChange(e.target.value)}>
-							<option value="">Select a credential…</option>
-							{credentialOptions.map((c) => (
-								<option key={c.id} value={c.id}>
-									{c.name}
-								</option>
-							))}
-						</select>
-					</label>
-				</div>
-			)}
+			{credentialOptionsError && <div className="start-scan-screen__error">{credentialOptionsError}</div>}
 
-			{mode === "personal" && canUsePersonal && (
+			{/* Coverage summary — issue #587 AC: shown before submission, never a
+			 * generic toast, aria-live so a change while customizing announces. */}
+			<div aria-live="polite" className="start-scan-screen__coverage">
+				<div className="start-scan-screen__field-title">Coverage</div>
+				{coverage.length === 0 && <div className="start-scan-screen__note">Select targets in Scope to see required credentials.</div>}
+				{coverage.length > 0 && (
+					<table className="start-scan-screen__coverage-table">
+						<thead>
+							<tr>
+								<th>Target</th>
+								<th>Purpose</th>
+								<th>Source</th>
+							</tr>
+						</thead>
+						<tbody>
+							{coverage.map((row) => {
+								const key = overrideKey(row.targetId, row.purpose);
+								const gaps = gapsByKey.get(key) ?? [];
+								return (
+									<tr key={key}>
+										<td className="mono">{row.targetName}</td>
+										<td>{purposeLabel(row.purpose)}</td>
+										<td>
+											{row.source === "missing" ? (
+												<span className="start-scan-screen__error-text">
+													Missing required binding —{" "}
+													<a href="/config">bind a credential for this target</a>
+												</span>
+											) : row.source === "override" ? (
+												`Override: ${row.credentialName ?? "—"}`
+											) : (
+												`Assigned: ${row.credentialName ?? "—"}`
+											)}
+											{gaps.map((gap, i) => (
+												<div key={i} className="start-scan-screen__error-text">
+													{bindingGapMessage(gap)}
+												</div>
+											))}
+										</td>
+									</tr>
+								);
+							})}
+						</tbody>
+					</table>
+				)}
+				{missingCoverage.length > 0 && (
+					<div className="start-scan-screen__error" role="status">
+						{missingCoverage.length} required credential{missingCoverage.length === 1 ? "" : "s"} missing — resolve before starting the scan.
+					</div>
+				)}
+			</div>
+
+			{mode === "override" && (
 				<div className="start-scan-screen__field">
-					<label>
-						<span>Username</span>
-						<input value={personalUsername} onChange={(e) => onPersonalUsernameChange(e.target.value)} autoComplete="off" />
-					</label>
-					<label>
-						<span>Secret</span>
-						<input
-							type="password"
-							value={personalSecret}
-							onChange={(e) => onPersonalSecretChange(e.target.value)}
-							autoComplete="new-password"
-							placeholder="never stored — used for this run only"
-						/>
-					</label>
+					<div className="start-scan-screen__field-title">Bulk apply a saved credential</div>
+					{purposesInScope.map((purpose) => {
+						const compatibleTypes = CREDENTIAL_PURPOSE_SATISFYING_TYPES[purpose];
+						const compatibleCredentials = credentialOptions.filter((c) => compatibleTypes.includes(c.credential_type as never));
+						return (
+							<label key={purpose}>
+								<span>{purposeLabel(purpose)} (applies to every compatible selected target)</span>
+								<select
+									aria-label={`Bulk apply ${purposeLabel(purpose)} credential`}
+									defaultValue=""
+									onChange={(e) => {
+										if (e.target.value) {
+											onBulkApplySaved(purpose, e.target.value);
+											e.target.value = "";
+										}
+									}}
+								>
+									<option value="">Select a credential…</option>
+									{compatibleCredentials.map((c) => (
+										<option key={c.id} value={c.id}>
+											{c.name}
+										</option>
+									))}
+								</select>
+							</label>
+						);
+					})}
+
+					<div className="start-scan-screen__field-title">Per-target overrides</div>
+					<table className="start-scan-screen__coverage-table">
+						<thead>
+							<tr>
+								<th>Target</th>
+								<th>Purpose</th>
+								<th>Override</th>
+							</tr>
+						</thead>
+						<tbody>
+							{targets.flatMap((target) =>
+								requiredScanPurposes(target.kind).map((purpose) => {
+									const key = overrideKey(target.id, purpose);
+									const override = overrides.get(key);
+									const compatibleTypes = CREDENTIAL_PURPOSE_SATISFYING_TYPES[purpose];
+									const compatibleCredentials = credentialOptions.filter((c) => compatibleTypes.includes(c.credential_type as never));
+									return (
+										<tr key={key}>
+											<td className="mono">{target.name}</td>
+											<td>{purposeLabel(purpose)}</td>
+											<td>
+												<select
+													aria-label={`${target.name} ${purposeLabel(purpose)} saved credential`}
+													value={override?.kind === "saved" ? override.credentialId : ""}
+													onChange={(e) => {
+														if (e.target.value) {
+															onSetSavedOverride(target.id, purpose, e.target.value);
+														} else if (override?.kind === "saved") {
+															onClearOverride(target.id, purpose);
+														}
+													}}
+												>
+													<option value="">Use assigned binding</option>
+													{compatibleCredentials.map((c) => (
+														<option key={c.id} value={c.id}>
+															{c.name}
+														</option>
+													))}
+												</select>
+
+												{canUseAdHoc && (
+													<AdHocOverrideFields
+														targetId={target.id}
+														purpose={purpose}
+														active={override?.kind === "adhoc"}
+														onSet={onSetAdHocOverride}
+														onClear={onClearOverride}
+													/>
+												)}
+												{!canUseAdHoc && (
+													<span className="start-scan-screen__note" title={adHocGate.title}>
+														Ad hoc credentials require Operator or higher.
+													</span>
+												)}
+											</td>
+										</tr>
+									);
+								}),
+							)}
+						</tbody>
+					</table>
 				</div>
 			)}
 		</div>
+	);
+}
+
+function bindingGapMessage(gap: CredentialBindingGap): string {
+	switch (gap.reason) {
+		case "missing_binding":
+			return "No credential bound for this purpose.";
+		case "incompatible_credential_type":
+			return "The selected credential's type is not compatible with this purpose.";
+		case "credential_not_found":
+			return "The selected credential no longer exists.";
+		case "target_not_in_scope":
+			return "This target is not part of the current scan scope.";
+		case "purpose_not_applicable":
+			return "This purpose does not apply to this target's kind.";
+		case "duplicate_override":
+			return "This target/purpose was overridden more than once.";
+		default:
+			return gap.reason;
+	}
+}
+
+/**
+ * One (target, purpose) row's ad hoc entry — local draft state so a
+ * partially-typed username/secret does not commit to the shared override map
+ * (and therefore the request body) until both fields are non-empty; clearing
+ * either field back to empty clears the override entirely. This component's
+ * own `username`/`secret` state is the only place either value lives besides
+ * the parent's override map — both are wiped the instant a field goes empty
+ * or the wizard's `useScanWizard.submit` clears every ad hoc entry after a
+ * successful POST, mirroring the retired personal-credential tier's
+ * write-only discipline.
+ */
+function AdHocOverrideFields({
+	targetId,
+	purpose,
+	active,
+	onSet,
+	onClear,
+}: {
+	targetId: string;
+	purpose: CredentialPurpose;
+	active: boolean;
+	onSet: (targetId: string, purpose: CredentialPurpose, username: string, secret: string) => void;
+	onClear: (targetId: string, purpose: CredentialPurpose) => void;
+}) {
+	const [username, setUsername] = useState("");
+	const [secret, setSecret] = useState("");
+
+	const commit = (nextUsername: string, nextSecret: string) => {
+		if (nextUsername === "" || nextSecret === "") {
+			if (active) {
+				onClear(targetId, purpose);
+			}
+			return;
+		}
+		onSet(targetId, purpose, nextUsername, nextSecret);
+	};
+
+	return (
+		<span className="start-scan-screen__adhoc-fields">
+			<label>
+				<span>Ad hoc username</span>
+				<input
+					aria-label={`${purpose} ad hoc username for this target`}
+					autoComplete="off"
+					value={username}
+					onChange={(e) => {
+						setUsername(e.target.value);
+						commit(e.target.value, secret);
+					}}
+				/>
+			</label>
+			<label>
+				<span>Ad hoc secret</span>
+				<input
+					type="password"
+					aria-label={`${purpose} ad hoc secret for this target`}
+					autoComplete="new-password"
+					placeholder="never stored — used for this run only"
+					value={secret}
+					onChange={(e) => {
+						setSecret(e.target.value);
+						commit(username, e.target.value);
+					}}
+				/>
+			</label>
+			{active && <span className="start-scan-screen__note">Ad hoc credential set for this pair.</span>}
+		</span>
 	);
 }
 
@@ -282,8 +507,7 @@ export function ConfirmStep({
 	targetCount,
 	totalTargets,
 	profileName,
-	credentialMode,
-	credentialName,
+	credentialSummary,
 	canConfirm,
 	submitting,
 	error,
@@ -293,8 +517,7 @@ export function ConfirmStep({
 	targetCount: number;
 	totalTargets: number;
 	profileName: string;
-	credentialMode: CredentialMode;
-	credentialName: string;
+	credentialSummary: string;
 	canConfirm: boolean;
 	submitting: boolean;
 	error: string | null;
@@ -312,12 +535,12 @@ export function ConfirmStep({
 				</dd>
 				<dt>Profile</dt>
 				<dd className="mono">{profileName || "—"}</dd>
-				<dt>Credential</dt>
-				<dd className="mono">{credentialMode === "service" ? credentialName || "—" : credentialName}</dd>
+				<dt>Credentials</dt>
+				<dd className="mono">{credentialSummary}</dd>
 				<dt>Run</dt>
 				<dd className="mono">Run now</dd>
 			</dl>
-			{error && <div className="start-scan-screen__error">{error}</div>}
+			<div aria-live="polite">{error && <div className="start-scan-screen__error">{error}</div>}</div>
 			<button type="button" className="start-scan-screen__submit" disabled={!canConfirm || submitting} onClick={onConfirm}>
 				{submitting ? "Starting…" : "Start scan"}
 			</button>
