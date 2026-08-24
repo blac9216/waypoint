@@ -70,6 +70,7 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
 	private readonly IApplianceStateRepository _applianceState;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
+	private readonly IManagedToolDistributionInstaller _distributionInstaller;
 
 	public ManagedToolInstallJobHandler(
 		IManagedToolSignatureVerifier verifier,
@@ -80,7 +81,8 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 		ICredentialSecretStore secrets,
 		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
 		IApplianceStateRepository applianceState,
-		IOptions<CatalogOptions> catalogOptions)
+		IOptions<CatalogOptions> catalogOptions,
+		IManagedToolDistributionInstaller distributionInstaller)
 	{
 		ArgumentNullException.ThrowIfNull(verifier);
 		ArgumentNullException.ThrowIfNull(installs);
@@ -90,6 +92,7 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(applianceState);
 		ArgumentNullException.ThrowIfNull(catalogOptions);
+		ArgumentNullException.ThrowIfNull(distributionInstaller);
 		_verifier = verifier;
 		_catalogVerifier = catalogVerifier ?? throw new ArgumentNullException(nameof(catalogVerifier));
 		_installs = installs;
@@ -99,6 +102,7 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 		_credentials = credentials;
 		_applianceState = applianceState;
 		_catalogOptions = catalogOptions;
+		_distributionInstaller = distributionInstaller;
 	}
 
 	public string JobType => "tool-install";
@@ -338,19 +342,15 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed($"Artifact verification failed, install rejected: {failureReason}");
 		}
 
+		// The verified candidate is a vendor distribution archive, never the executable
+		// itself (issue #686's Exec format error regression) -- safely extract, validate
+		// the bin/lib layout, smoke-test the real executable, and atomically activate.
+		// Preserves the prior-good installation on any rejection/failure and cleans up
+		// staging on every path (ManagedToolDistributionInstaller's own contract).
+		ManagedToolDistributionInstallResult installResult;
 		try
 		{
-			Directory.CreateDirectory(options.ToolStatePath);
-			string destinationPath = Path.Combine(options.ToolStatePath, options.ExecutableName);
-			string stagingPath = destinationPath + ".staging";
-
-			// Copy to a same-volume staging name first, then atomically rename into
-			// place (File.Move with overwrite is atomic on the same filesystem on both
-			// Linux and Windows) -- a download job's tool-presence check must never
-			// observe a partially-written executable.
-			File.Copy(artifactPath, stagingPath, overwrite: true);
-			File.Move(stagingPath, destinationPath, overwrite: true);
-			TrySetExecutable(destinationPath);
+			installResult = await _distributionInstaller.InstallAsync(artifactPath, cancellationToken).ConfigureAwait(false);
 		}
 		catch (IOException exception)
 		{
@@ -361,6 +361,23 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 				cancellationToken).ConfigureAwait(false);
 
 			return JobExecutionOutcome.Failed($"Verified artifact could not be activated: {exception.Message}");
+		}
+
+		if (!installResult.Succeeded)
+		{
+			// A distribution that fails safe extraction, layout validation, or the
+			// smoke-test is an actionable rejection (bad content), not a job-infra
+			// failure -- recorded the same way a checksum/signature rejection is, with
+			// the specific rejection kind folded into the reason text so the ledger
+			// stays human-actionable.
+			string reason = $"{installResult.RejectionKind}: {installResult.FailureReason}";
+			await _installs.RecordAsync(
+				new ManagedToolInstallAttempt(
+					source, sourcePath, version, sha256,
+					ManagedToolInstallOutcomes.Rejected, reason, initiatedBy, context.Job.Id),
+				cancellationToken).ConfigureAwait(false);
+
+			return JobExecutionOutcome.Failed($"Distribution install rejected: {reason}");
 		}
 
 		await _installs.RecordAsync(
@@ -425,19 +442,6 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 			}
 		}
 		return null;
-	}
-
-	private static void TrySetExecutable(string path)
-	{
-		if (OperatingSystem.IsWindows())
-		{
-			return;
-		}
-
-		File.SetUnixFileMode(path,
-			UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-			UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-			UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 	}
 
 	private sealed record ToolInstallPayload(

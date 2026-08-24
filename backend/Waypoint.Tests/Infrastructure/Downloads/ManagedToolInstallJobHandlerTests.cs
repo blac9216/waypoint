@@ -22,6 +22,7 @@ using Waypoint.Core.SystemState;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Secrets;
+using Waypoint.Tests.Support;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.Downloads;
@@ -131,6 +132,9 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 			UploadStagingPath = _uploadRoot,
 			ToolStatePath = _toolStateRoot,
 			ExecutableName = "vcf-download-tool",
+			ExecutableRelativePath = "bin/vcf-download-tool",
+			LibraryRelativePath = "lib",
+			SmokeTestTimeout = TimeSpan.FromSeconds(10),
 		};
 		return new ManagedToolInstallJobHandler(
 			verifier,
@@ -149,8 +153,11 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 				NullLogger<CredentialSecretStore>.Instance),
 			new CredentialRepository("Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x"),
 			new FakeApplianceStateRepository(applianceMode),
-			Options.Create(new CatalogOptions()));
+			Options.Create(new CatalogOptions()),
+			new ManagedToolDistributionInstaller(Options.Create(options)));
 	}
+
+	private string ActiveExecutablePath => Path.Combine(_toolStateRoot, "active", "bin", "vcf-download-tool");
 
 	[Fact]
 	public void JobType_IsToolInstall()
@@ -160,9 +167,10 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 	}
 
 	[Fact]
-	public async Task ValidCatalog_LocalRepository_ActivatesTheArtifactAndRecordsInstalled()
+	public async Task ValidCatalog_LocalRepository_ExtractsAndActivatesTheDistributionAndRecordsInstalled()
 	{
-		File.WriteAllBytes(Path.Combine(_repositoryRoot, "vcf-download-tool-1.2.3"), [1, 2, 3]);
+		string archivePath = Path.Combine(_repositoryRoot, "vcf-download-tool-1.2.3");
+		ManagedToolDistributionFixture.WriteHappyPathArchive(archivePath);
 
 		FakeManagedToolInstallRepository installs = new();
 		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
@@ -171,8 +179,8 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(payload), CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-		Assert.True(File.Exists(Path.Combine(_toolStateRoot, "vcf-download-tool")));
-		Assert.Equal([1, 2, 3], File.ReadAllBytes(Path.Combine(_toolStateRoot, "vcf-download-tool")));
+		Assert.True(File.Exists(ActiveExecutablePath));
+		Assert.True(Directory.Exists(Path.Combine(_toolStateRoot, "active", "lib")));
 
 		ManagedToolInstallAttempt recorded = Assert.Single(installs.Recorded);
 		Assert.Equal(ManagedToolInstallOutcomes.Installed, recorded.Outcome);
@@ -185,7 +193,8 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 	[Fact]
 	public async Task BadCatalog_IsRejectedAndRecorded_ArtifactNeverActivated()
 	{
-		File.WriteAllBytes(Path.Combine(_repositoryRoot, "vcf-download-tool-bad"), [1, 2, 3]);
+		string archivePath = Path.Combine(_repositoryRoot, "vcf-download-tool-bad");
+		ManagedToolDistributionFixture.WriteHappyPathArchive(archivePath);
 
 		FakeManagedToolInstallRepository installs = new();
 		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs,
@@ -196,7 +205,7 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
 		Assert.Contains("catalog checksum mismatch", outcome.Note, StringComparison.Ordinal);
-		Assert.False(File.Exists(Path.Combine(_toolStateRoot, "vcf-download-tool")));
+		Assert.False(File.Exists(ActiveExecutablePath));
 
 		ManagedToolInstallAttempt recorded = Assert.Single(installs.Recorded);
 		Assert.Equal(ManagedToolInstallOutcomes.Rejected, recorded.Outcome);
@@ -204,24 +213,28 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 	}
 
 	[Fact]
-	public async Task ValidPublishedSha256_UploadSource_Activates()
+	public async Task ValidPublishedSha256_UploadSource_ExtractsAndActivates()
 	{
-		File.WriteAllBytes(Path.Combine(_uploadRoot, "staged-abc"), [4, 5, 6]);
+		string archivePath = Path.Combine(_uploadRoot, "staged-abc");
+		ManagedToolDistributionFixture.WriteHappyPathArchive(archivePath);
+		string expectedSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath))).ToLowerInvariant();
 
 		FakeManagedToolInstallRepository installs = new();
 		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
 
-		string payload = """{"source":"upload","source_path":"staged-abc","expected_sha256":"787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472","initiated_by":"tester"}""";
+		string payload = $$"""{"source":"upload","source_path":"staged-abc","expected_sha256":"{{expectedSha256}}","initiated_by":"tester"}""";
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(payload), CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.True(File.Exists(ActiveExecutablePath));
 		Assert.Equal(ManagedToolInstallSources.Upload, Assert.Single(installs.Recorded).Source);
 	}
 
 	[Fact]
 	public async Task WrongUploadChecksum_IsRejectedWithoutActivation()
 	{
-		File.WriteAllBytes(Path.Combine(_uploadRoot, "staged-bad"), [4, 5, 6]);
+		string archivePath = Path.Combine(_uploadRoot, "staged-bad");
+		ManagedToolDistributionFixture.WriteHappyPathArchive(archivePath);
 		FakeManagedToolInstallRepository installs = new();
 		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
 		string payload = """{"source":"upload","source_path":"staged-bad","expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","initiated_by":"tester"}""";
@@ -230,22 +243,45 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
 		Assert.Contains("SHA-256 mismatch", outcome.Note, StringComparison.Ordinal);
-		Assert.False(File.Exists(Path.Combine(_toolStateRoot, "vcf-download-tool")));
+		Assert.False(File.Exists(ActiveExecutablePath));
 		Assert.Equal(ManagedToolInstallOutcomes.Rejected, Assert.Single(installs.Recorded).Outcome);
 	}
 
 	[Fact]
-	public async Task PublishedLegacyMd5_UploadSource_Activates()
+	public async Task PublishedLegacyMd5_UploadSource_ExtractsAndActivates()
 	{
-		File.WriteAllBytes(Path.Combine(_uploadRoot, "staged-md5"), [4, 5, 6]);
+		string archivePath = Path.Combine(_uploadRoot, "staged-md5");
+		ManagedToolDistributionFixture.WriteHappyPathArchive(archivePath);
+#pragma warning disable CA5351
+		string expectedMd5 = Convert.ToHexString(System.Security.Cryptography.MD5.HashData(File.ReadAllBytes(archivePath))).ToLowerInvariant();
+#pragma warning restore CA5351
 		FakeManagedToolInstallRepository installs = new();
 		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
-		string payload = """{"source":"upload","source_path":"staged-md5","expected_md5":"b4a3ba90641372b4e4eaa841a5a400ec","initiated_by":"tester"}""";
+		string payload = $$"""{"source":"upload","source_path":"staged-md5","expected_md5":"{{expectedMd5}}","initiated_by":"tester"}""";
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(payload), CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
 		Assert.Equal(ManagedToolInstallOutcomes.Installed, Assert.Single(installs.Recorded).Outcome);
+	}
+
+	[Fact]
+	public async Task ArchiveAsExecutable_Regression_IsRejectedAndRecorded_NeverActivated()
+	{
+		string archivePath = Path.Combine(_uploadRoot, "staged-archive-as-exe");
+		ManagedToolDistributionFixture.WriteArchiveAsExecutableArchive(archivePath);
+		string expectedSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath))).ToLowerInvariant();
+
+		FakeManagedToolInstallRepository installs = new();
+		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
+
+		string payload = $$"""{"source":"upload","source_path":"staged-archive-as-exe","expected_sha256":"{{expectedSha256}}","initiated_by":"tester"}""";
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(payload), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("SmokeTestFailed", outcome.Note, StringComparison.Ordinal);
+		Assert.False(File.Exists(ActiveExecutablePath));
+		Assert.Equal(ManagedToolInstallOutcomes.Rejected, Assert.Single(installs.Recorded).Outcome);
 	}
 
 	[Fact]

@@ -19,9 +19,12 @@ namespace Waypoint.Infrastructure.Downloads;
 
 /// <inheritdoc cref="IManagedToolPresenceChecker"/>
 /// <remarks>
-/// A plain file existence check against <see cref="ManagedToolOptions.ToolStatePath"/>
-/// (issue #441). No version/signature validation here -- that belongs to the future
-/// install flow (ADR-0015) that places the file; this checker only answers "is
+/// A plain file existence check against the active installation's
+/// <see cref="ManagedToolOptions.ExecutableRelativePath"/> (issue #441, path updated by
+/// issue #686 to the extracted <c>bin/vcf-download-tool</c> layout rather than a
+/// single-file assumption directly under <see cref="ManagedToolOptions.ToolStatePath"/>).
+/// No version/signature/smoke-test validation here -- that already happened at install
+/// time (<c>ManagedToolDistributionInstaller</c>); this checker only answers "is
 /// anything installed at all", which is what distinguishes a clear tool-absent job
 /// failure from an ordinary invocation failure.
 /// </remarks>
@@ -42,6 +45,6 @@ public sealed class ManagedToolPresenceChecker : IManagedToolPresenceChecker
 	private string ExecutablePath()
 	{
 		ManagedToolOptions options = _options.Value;
-		return Path.Combine(options.ToolStatePath, options.ExecutableName);
+		return Path.Combine(options.ToolStatePath, options.ActiveDirectoryName, options.ExecutableRelativePath);
 	}
 }

@@ -32,8 +32,13 @@ public sealed class ManagedToolPresenceCheckerTests : IDisposable
 		}
 	}
 
-	private ManagedToolPresenceChecker CreateChecker(string executableName = "vcf-download-tool") =>
-		new(Options.Create(new ManagedToolOptions { ToolStatePath = _tempDirectory, ExecutableName = executableName }));
+	private ManagedToolPresenceChecker CreateChecker(string executableRelativePath = "bin/vcf-download-tool") =>
+		new(Options.Create(new ManagedToolOptions
+		{
+			ToolStatePath = _tempDirectory,
+			ActiveDirectoryName = "active",
+			ExecutableRelativePath = executableRelativePath,
+		}));
 
 	[Fact]
 	public void NoFile_IsNotPresent()
@@ -44,22 +49,26 @@ public sealed class ManagedToolPresenceCheckerTests : IDisposable
 	[Fact]
 	public void FileAtExpectedPath_IsPresent()
 	{
-		File.WriteAllBytes(Path.Combine(_tempDirectory, "vcf-download-tool"), [1, 2, 3]);
+		string binDirectory = Path.Combine(_tempDirectory, "active", "bin");
+		Directory.CreateDirectory(binDirectory);
+		File.WriteAllBytes(Path.Combine(binDirectory, "vcf-download-tool"), [1, 2, 3]);
 		Assert.True(CreateChecker().IsPresent());
 	}
 
 	[Fact]
-	public void DescribeExpectedLocation_JoinsStatePathAndExecutableName()
+	public void DescribeExpectedLocation_JoinsStatePathActiveDirectoryAndExecutableRelativePath()
 	{
-		string description = CreateChecker("vcf-download-tool").DescribeExpectedLocation();
-		Assert.Equal(Path.Combine(_tempDirectory, "vcf-download-tool"), description);
+		string description = CreateChecker("bin/vcf-download-tool").DescribeExpectedLocation();
+		Assert.Equal(Path.Combine(_tempDirectory, "active", "bin", "vcf-download-tool"), description);
 	}
 
 	[Fact]
-	public void DifferentExecutableName_IsHonoured()
+	public void DifferentExecutableRelativePath_IsHonoured()
 	{
-		File.WriteAllBytes(Path.Combine(_tempDirectory, "custom-tool.bin"), [1]);
-		Assert.False(CreateChecker("vcf-download-tool").IsPresent());
+		string activeDirectory = Path.Combine(_tempDirectory, "active");
+		Directory.CreateDirectory(activeDirectory);
+		File.WriteAllBytes(Path.Combine(activeDirectory, "custom-tool.bin"), [1]);
+		Assert.False(CreateChecker("bin/vcf-download-tool").IsPresent());
 		Assert.True(CreateChecker("custom-tool.bin").IsPresent());
 	}
 }
