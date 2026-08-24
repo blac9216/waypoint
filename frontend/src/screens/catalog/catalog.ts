@@ -86,6 +86,41 @@ export function syncCatalog(): Promise<CatalogSyncResponse> {
 	return apiPost<CatalogSyncResponse>("/catalog/sync");
 }
 
+/**
+ * `GET /catalog/pull` (issue #687): connected vendor catalog-pull readiness
+ * plus the most recent attempt/success facts. Distinct from `catalog-index`
+ * (`syncCatalog` above) — this contacts Broadcom via the installed managed
+ * tool and the stored Activation Code; `not_ready_reason` names exactly which
+ * #691 enrollment prerequisite is unmet, so the screen never has to guess a
+ * reason on its own. Nullable fields are omitted on the wire, not `null`
+ * (`CatalogPullStatusResponse.FromDomain`), hence optional here.
+ */
+export interface CatalogPullStatus {
+	ready: boolean;
+	not_ready_reason?: string;
+	last_attempt_at?: string;
+	last_outcome?: "succeeded" | "failed" | "auth_failed";
+	last_failure_reason?: string;
+	last_success_at?: string;
+	last_success_item_count?: number;
+}
+
+export function fetchCatalogPullStatus(): Promise<CatalogPullStatus> {
+	return apiGet<CatalogPullStatus>("/catalog/pull");
+}
+
+export interface CatalogPullStartedResponse {
+	run_id: string;
+	job_id: string;
+}
+
+/** `POST /catalog/pull` (Admin) — 202 `{run_id, job_id}` to follow via SSE
+ * (see useCatalogPull.ts), or 409 `catalog_pull_not_ready` if raced against
+ * the enrollment gate (surfaced via the thrown `ApiError`'s `message`). */
+export function pullCatalog(): Promise<CatalogPullStartedResponse> {
+	return apiPost<CatalogPullStartedResponse>("/catalog/pull");
+}
+
 export interface DownloadQueueItem {
 	id: string;
 	artifact_id: string;
