@@ -125,23 +125,16 @@ written before posting it. Do not duplicate the recipe here — it drifts; go re
 
 ### Labels are a closed set — never invent one
 
-`scripts/provision-labels.sh` is the **only** source of valid labels, and it has
-already been run. Applying a label outside it does **not** fail: GitHub silently
-creates it, colourless and undescribed, and the taxonomy quietly rots. This has
-already happened (`concern:correctness`, `concern:accessibility` — see issue #95).
-
-| Group | Labels |
-|---|---|
-| Type | `bug` · `enhancement` · `documentation` · `chore` · `epic` |
-| State | `backlog` · `blocked` · `deferred` · `help` |
-| Priority | `priority:high` · `priority:medium` · `priority:low` |
-| Severity | `severity:critical` · `severity:major` · `severity:minor` |
-| Concern | `concern:security` · `concern:tests` · `concern:perf` · `concern:refactor` · `concern:lint` · `concern:style` |
+The **Issue Labels** catalog in the `github-workflow` skill is the only source of
+valid project labels, including their names, colours, descriptions, and usage rules.
+Applying a label outside that catalog does **not** fail: GitHub silently creates it,
+colourless and undescribed, and the taxonomy quietly rots. This has already happened
+(`concern:correctness`, `concern:accessibility` — see issue #95).
 
 At most one `concern:*` per item. If none fits, pick the closest and explain in the
 body — do **not** coin a new one. If a genuinely new dimension is needed, propose it
-in an issue and add it to the script first: the script is the change, the label is
-the consequence.
+in an issue and update the skill's catalog first: the catalog change is authoritative,
+and provisioning the GitHub label is its consequence.
 
 ## License & Borrowing Policy
 
