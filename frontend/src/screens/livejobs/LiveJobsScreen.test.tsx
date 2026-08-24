@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
+import { RouterProvider } from "../../lib/router";
 import { LiveJobsScreen } from "./LiveJobsScreen";
 
 /**
@@ -188,7 +189,9 @@ function renderWithAuth(role: "Viewer" | "Cyber" | "Operator" | "Admin" = "Admin
 	);
 	return render(
 		<AuthProvider>
-			<LiveJobsScreen />
+			<RouterProvider>
+				<LiveJobsScreen />
+			</RouterProvider>
 		</AuthProvider>,
 	);
 }
@@ -333,7 +336,7 @@ describe("LiveJobsScreen (issue #590)", () => {
 		expect(screen.getAllByText("esxi-01.example.internal")).toHaveLength(1);
 	});
 
-	it("shows a generic detail renderer for every job type (renderer-registry seam, no #591 renderers registered yet)", async () => {
+	it("resolves the registered type-specific renderer for a known job_type (issue #591: download -> DownloadJobDetail, not the generic fallback)", async () => {
 		installFetchMock({});
 		renderWithAuth();
 
@@ -341,7 +344,26 @@ describe("LiveJobsScreen (issue #590)", () => {
 		fireEvent.click(screen.getByText("vcf-artifact-bundle"));
 
 		await waitFor(() => expect(screen.getByRole("region", { name: /Job detail/ })).toBeInTheDocument());
+		// DownloadJobDetail's kicker + domain link — GenericJobDetail alone
+		// would render neither.
+		expect(screen.getByText("Download")).toBeInTheDocument();
+		expect(screen.getByRole("link", { name: "View Library →" })).toBeInTheDocument();
+		// Still keeps the generic lifecycle facts underneath (never regresses them).
 		expect(screen.getAllByText("download").length).toBeGreaterThan(0);
+	});
+
+	it("falls through to the generic renderer for a job_type with no registered entry (explicit fallback, issue #591 AC)", async () => {
+		const unknownJob = { ...RUN_1_JOBS[0], id: "job-unknown", job_type: "some-future-type" };
+		installFetchMock({ jobsByRun: { "run-1": [unknownJob], "run-2": RUN_2_JOBS } });
+		renderWithAuth();
+
+		await waitFor(() => expect(screen.getByText("esxi-01.example.internal")).toBeInTheDocument());
+		fireEvent.click(screen.getByText("esxi-01.example.internal"));
+
+		await waitFor(() => expect(screen.getByRole("region", { name: /Job detail/ })).toBeInTheDocument());
+		// The generic fallback's own facts list (Type row), no domain kicker/link.
+		expect(screen.getByText("some-future-type")).toBeInTheDocument();
+		expect(screen.queryByRole("link")).not.toBeInTheDocument();
 	});
 
 	it("renders for a Viewer (role floor for observing operational history — ADR-0019 decision 6)", async () => {

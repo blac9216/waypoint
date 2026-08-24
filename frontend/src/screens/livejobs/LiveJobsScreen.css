@@ -173,6 +173,25 @@
 	color: var(--txt3);
 }
 
+.live-jobs-detail__kicker {
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--txt3);
+	margin: 0 0 10px;
+}
+
+.live-jobs-detail__note {
+	font-size: 12px;
+	color: var(--txt3);
+	margin: 0 0 12px;
+}
+
+.live-jobs-detail__domain-link {
+	margin: 0 0 16px;
+	font-size: 12px;
+}
+
 .live-jobs-detail__facts {
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

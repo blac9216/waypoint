@@ -1,5 +1,7 @@
 /**
- * Results & History data layer (issue #27) — docs/ui/prototype/README.md
+ * Compliance Scan Results data layer (issue #27; renamed from "Results &
+ * History" and filtered to compliance-owned run types by issue #591 — see
+ * `useRunList.ts`'s `COMPLIANCE_RUN_TYPES`) — docs/ui/prototype/README.md
  * screen 4, against docs/api-contract.md's "Runs & jobs" and "Config
  * documents" rows. Two sub-surfaces:
  *

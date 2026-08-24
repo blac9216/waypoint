@@ -1,9 +1,13 @@
 /**
- * Results & History — docs/ui/prototype/README.md screen 4, the last screen
- * of milestone M2 (issue #27, part of epic #13). Two panes: a searchable run
- * history list (left rail) and a run detail pane (KPI tiles, per-target
- * artifacts table, attestations-applied + upload-status sidebar, export and
- * Remediate actions).
+ * Compliance Scan Results — docs/ui/prototype/README.md screen 4, the last
+ * screen of milestone M2 (issue #27, part of epic #13). Renamed from
+ * "Results & History" and filtered to compliance-owned run types only
+ * (issue #591, ADR-0019: non-compliance run types route to their own domain
+ * screens via the Live Jobs type renderers) — `useRunList.ts`'s
+ * `COMPLIANCE_RUN_TYPES` is the filter. Two panes: a searchable run history
+ * list (left rail, scan/remediate runs only) and a run detail pane (KPI
+ * tiles, per-target artifacts table, attestations-applied + upload-status
+ * sidebar, export and Remediate actions).
  *
  * This component is the orchestrator only (issue #416 decomposition — no
  * behavior change): run-list/search/selection state lives in `useRunList`,
