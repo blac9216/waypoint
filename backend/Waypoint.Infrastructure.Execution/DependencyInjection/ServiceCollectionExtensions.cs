@@ -112,6 +112,12 @@ public static class ServiceCollectionExtensions
 		// same presence gate a download job is.
 		services.AddSingleton<IJobHandler, Downloads.ManagedToolInstallJobHandler>();
 
+		// Issue #691: assisted Software Depot enrollment (Depot ID generation +
+		// Activation Code validation) -- a download-runner job type, since it invokes
+		// the same managed vcf-download-tool binary tool-install/depot-fetch already
+		// require to be mounted (ADR-0015), never compliance-runner.
+		services.AddSingleton<IJobHandler, Downloads.DepotEnrollmentJobHandler>();
+
 		services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
 		services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
 		services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();

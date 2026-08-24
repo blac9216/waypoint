@@ -232,7 +232,10 @@ public sealed class ExecutionCompositionTests
 
 		HashSet<string> jobTypes = [.. provider.GetServices<IJobHandler>().Select(handler => handler.JobType)];
 		Assert.Equal(
-			new HashSet<string> { "catalog-index", "download", "tool-install", "discover", "scan", "credential-test", "content-pull", "purge" },
+			new HashSet<string>
+			{
+				"catalog-index", "download", "tool-install", "depot-enrollment", "discover", "scan", "credential-test", "content-pull", "purge",
+			},
 			jobTypes);
 	}
 

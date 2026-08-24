@@ -78,7 +78,8 @@ public static class JobCapabilities
 		"bundle-import",
 		"content-library-sync",
 		"update",
-		"tool-install"
+		"tool-install",
+		"depot-enrollment"
 	};
 
 	/// <summary>

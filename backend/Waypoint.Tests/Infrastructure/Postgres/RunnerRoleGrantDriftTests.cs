@@ -438,6 +438,54 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #691 (migration 0048), added at authoring time per this file's own
+	/// standing convention (a new runner-executed table without a role-contract test
+	/// ships grant drift silently -- see this file's header). The <c>depot-enrollment</c>
+	/// job handler both reads and writes <c>depot_enrollment</c> as the real
+	/// <c>waypoint_download_runner</c> role -- proves the migration's SELECT+UPDATE
+	/// grant actually lands, not just that the GRANT statement ran without error.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CanSelectAndUpdateDepotEnrollmentWithoutPermissionDenied()
+	{
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand select = new("SELECT state, depot_id FROM depot_enrollment WHERE id = 1", connection);
+		await using NpgsqlDataReader reader = await select.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		await reader.DisposeAsync();
+
+		await using NpgsqlCommand update = new(
+			"UPDATE depot_enrollment SET depot_id = $1, depot_id_generated_at = now(), state = 'awaiting_portal_registration' WHERE id = 1",
+			connection);
+		update.Parameters.AddWithValue("invented-e2e-depot-id-canary"); // gitleaks:allow — invented test fixture, not a real depot id
+		int affected = await update.ExecuteNonQueryAsync();
+		Assert.Equal(1, affected);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check mirroring this file's other role-boundary
+	/// pairs: <c>waypoint_download_runner</c> gets no INSERT/DELETE on
+	/// <c>depot_enrollment</c> -- the singleton row is seeded once by migration 0048
+	/// and never created or removed by any runner.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_CannotInsertOrDeleteDepotEnrollmentRows()
+	{
+		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand insert = new("INSERT INTO depot_enrollment (id, state) VALUES (2, 'tool_unavailable')", connection);
+		PostgresException insertException = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, insertException.SqlState);
+
+		await using NpgsqlCommand delete = new("DELETE FROM depot_enrollment WHERE id = 1", connection);
+		PostgresException deleteException = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, deleteException.SqlState);
+	}
+
+	/// <summary>
 	/// Issue #569 (migration 0036), added at authoring time rather than after a live
 	/// 42501 -- the lesson of this file's own header (and of 0033/0034 before it) is
 	/// that a new runner-executed table without a role-contract test ships grant drift

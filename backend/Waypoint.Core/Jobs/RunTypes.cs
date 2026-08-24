@@ -16,9 +16,10 @@ namespace Waypoint.Core.Jobs;
 
 /// <summary>
 /// The exact string values of <c>runs.run_type</c>, matching the authoritative
-/// <c>runs_run_type_check</c> as of <c>0042_run_purge.sql</c> (the latest migration to
-/// touch it -- 0001 declared 11 values, 0042 added <c>credential-test</c>,
-/// <c>tool-install</c>, and <c>purge</c>) verbatim -- this is the closed set. Issue
+/// <c>runs_run_type_check</c> as of <c>0048_depot_enrollment_state.sql</c> (the latest
+/// migration to touch it -- 0001 declared 11 values, 0042 added <c>credential-test</c>,
+/// <c>tool-install</c>, and <c>purge</c>, 0048 added <c>depot-enrollment</c>) verbatim --
+/// this is the closed set. Issue
 /// #708's <c>GET /runs/history</c> validates its <c>run_type</c> filter against this set
 /// (400 on an unknown value, same "never silently match zero rows and look like empty
 /// history" posture <see cref="JobEventTypes"/>'s <c>kind</c> filter established).
@@ -41,11 +42,12 @@ public static class RunTypes
 	public const string CredentialTest = "credential-test";
 	public const string ToolInstall = "tool-install";
 	public const string Purge = "purge";
+	public const string DepotEnrollment = "depot-enrollment";
 
 	public static readonly IReadOnlyList<string> All =
 	[
 		Scan, Remediate, Discover, Download, CatalogIndex, BundleExport, BundleImport,
-		ContentLibrarySync, ContentPull, ContentImport, Update, CredentialTest, ToolInstall, Purge,
+		ContentLibrarySync, ContentPull, ContentImport, Update, CredentialTest, ToolInstall, Purge, DepotEnrollment,
 	];
 
 	public static bool IsValid(string runType) => All.Contains(runType, StringComparer.Ordinal);

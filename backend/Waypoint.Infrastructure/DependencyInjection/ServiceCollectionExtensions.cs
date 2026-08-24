@@ -174,6 +174,12 @@ public static class ServiceCollectionExtensions
 		// as the checker/verifiers above.
 		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolDistributionInstaller, Downloads.ManagedToolDistributionInstaller>();
 
+		// Issue #691: the assisted-enrollment tool invocation is a pure process/
+		// filesystem operation like the checker/installer above (no connection string
+		// dependency of its own) -- it depends only on the presence checker registered
+		// just above it.
+		services.AddSingleton<Waypoint.Core.Downloads.IDepotIdentityTool, Downloads.DepotIdentityTool>();
+
 		// ADR-0005 crypto core (epic #8 slice 1). Registered unconditionally: the
 		// provider is lazy and fail-closed, so a host without a mounted key boots
 		// fine and refuses secret operations with an operator-actionable error.
@@ -242,6 +248,7 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<IDownloadRepository>(new DownloadRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IManagedToolInstallRepository>(new Downloads.ManagedToolInstallRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.SystemState.IApplianceStateRepository>(new ApplianceStateRepository(connectionString));
+			services.AddSingleton<Waypoint.Core.Downloads.IDepotEnrollmentRepository>(new Downloads.DepotEnrollmentRepository(connectionString));
 
 			// Issue #241: depot-sync status is derived from the existing runs table
 			// (no dedicated appliance_state column), so this reads through the same
