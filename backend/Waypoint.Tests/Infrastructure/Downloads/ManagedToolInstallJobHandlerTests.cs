@@ -70,6 +70,12 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 		}
 	}
 
+	private sealed class FakeManagedToolCatalogVerifier(bool valid = true, string? reason = null) : IManagedToolCatalogVerifier
+	{
+		public Task<ManagedToolCatalogVerificationResult> VerifyAsync(string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken) =>
+			Task.FromResult(valid ? ManagedToolCatalogVerificationResult.Ok("fake-sha256") : ManagedToolCatalogVerificationResult.Fail(reason ?? "invalid catalog"));
+	}
+
 	private sealed class FakeManagedToolInstallRepository : IManagedToolInstallRepository
 	{
 		public List<ManagedToolInstallAttempt> Recorded { get; } = [];
@@ -116,7 +122,8 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 	}
 
 	private ManagedToolInstallJobHandler CreateHandler(
-		FakeManagedToolSignatureVerifier verifier, FakeManagedToolInstallRepository installs, string applianceMode = "disconnected")
+		FakeManagedToolSignatureVerifier verifier, FakeManagedToolInstallRepository installs, string applianceMode = "disconnected",
+		FakeManagedToolCatalogVerifier? catalogVerifier = null)
 	{
 		ManagedToolOptions options = new()
 		{
@@ -127,6 +134,7 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 		};
 		return new ManagedToolInstallJobHandler(
 			verifier,
+			catalogVerifier ?? new FakeManagedToolCatalogVerifier(),
 			installs,
 			Options.Create(options),
 			new FakeManagedToolDepotFetcher(),
@@ -152,10 +160,9 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 	}
 
 	[Fact]
-	public async Task ValidSignature_LocalRepository_ActivatesTheArtifactAndRecordsInstalled()
+	public async Task ValidCatalog_LocalRepository_ActivatesTheArtifactAndRecordsInstalled()
 	{
 		File.WriteAllBytes(Path.Combine(_repositoryRoot, "vcf-download-tool-1.2.3"), [1, 2, 3]);
-		File.WriteAllBytes(Path.Combine(_repositoryRoot, "vcf-download-tool-1.2.3.sig"), [9]);
 
 		FakeManagedToolInstallRepository installs = new();
 		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
@@ -176,24 +183,24 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 	}
 
 	[Fact]
-	public async Task BadSignature_IsRejectedAndRecorded_ArtifactNeverActivated()
+	public async Task BadCatalog_IsRejectedAndRecorded_ArtifactNeverActivated()
 	{
 		File.WriteAllBytes(Path.Combine(_repositoryRoot, "vcf-download-tool-bad"), [1, 2, 3]);
-		File.WriteAllBytes(Path.Combine(_repositoryRoot, "vcf-download-tool-bad.sig"), [9]);
 
 		FakeManagedToolInstallRepository installs = new();
-		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(false, "signature mismatch"), installs);
+		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs,
+			catalogVerifier: new FakeManagedToolCatalogVerifier(false, "catalog checksum mismatch"));
 
 		string payload = """{"source":"local-repository","source_path":"vcf-download-tool-bad","initiated_by":"tester"}""";
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(payload), CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
-		Assert.Contains("signature mismatch", outcome.Note, StringComparison.Ordinal);
+		Assert.Contains("catalog checksum mismatch", outcome.Note, StringComparison.Ordinal);
 		Assert.False(File.Exists(Path.Combine(_toolStateRoot, "vcf-download-tool")));
 
 		ManagedToolInstallAttempt recorded = Assert.Single(installs.Recorded);
 		Assert.Equal(ManagedToolInstallOutcomes.Rejected, recorded.Outcome);
-		Assert.Equal("signature mismatch", recorded.RejectedReason);
+		Assert.Equal("catalog checksum mismatch", recorded.RejectedReason);
 	}
 
 	[Fact]
