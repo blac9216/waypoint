@@ -33,6 +33,12 @@
 #     weaken that path, so a regression that drops the switch from either wrapper
 #     is caught the same way a real noninteractive host would catch it (loudly,
 #     not silently).
+#
+# Issue #579: Connect-StigVIServer also calls Get-LogSplat/Write-Log exactly like the
+# real transport does (see below) -- these tests only pass today because the shared
+# WaypointLogging adapter module is preloaded ahead of this fake; a missing or broken
+# adapter fails every test in this fixture with a missing-command error, the same
+# failure mode #579 fixes for real discovery runs.
 #   - A blank -VSphereCredential Username (this fake's signal for "simulate no
 #     vSphere API credential supplied") makes Connect-VIServer throw an actionable,
 #     precise configuration error instead of connecting -- pinning the "missing
@@ -91,6 +97,16 @@ function Connect-StigVIServer {
 
 	$DisconnectAtCleanup = $false
 
+	# Issue #579 regression coverage: the real Connect-StigVIServer calls
+	# Get-LogSplat/Write-Log exactly like this (build a -Source splat once, then
+	# splat it into every Write-Log call) -- if the shared WaypointLogging adapter
+	# were missing or broken, these two lines would throw "the term ... is not
+	# recognized" the same way the real transport does, failing every test in this
+	# fixture loudly instead of silently passing without ever exercising the
+	# contract.
+	$WriteLogParams = Get-LogSplat $Source
+	Write-Log "Connecting to vCenter '$VCenter' and all linked vCenters..." -Severity 'Info' @WriteLogParams
+
 	if (@($Global:DefaultVIServers | Where-Object { $_.Name -eq $VCenter }).Count -gt 0) {
 		$VISessions = $Global:DefaultVIServers
 	} else {
@@ -107,6 +123,8 @@ function Connect-StigVIServer {
 		$VISessions = Connect-VIServer -Server $VCenter -AllLinked -Credential $VSphereCredential -Protocol https
 		$DisconnectAtCleanup = $true
 	}
+
+	Write-Log "Successfully connected to '$VCenter'" -Severity 'Success' @WriteLogParams
 
 	return [PSCustomObject]@{
 		Sessions            = $VISessions

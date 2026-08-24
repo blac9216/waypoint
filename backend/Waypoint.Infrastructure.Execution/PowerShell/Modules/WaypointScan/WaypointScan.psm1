@@ -399,44 +399,12 @@ function Set-WaypointCklBenchmarkMetadata {
 	$Xml.Save($CklPath)
 }
 
-# A minimal Waypoint-owned logging shim so the sibling repo's unmodified
-# Get-NsxSessionToken (module.transport.nsxapi.ps1) runs as-is when dot-sourced below. That function's
-# only dependencies beyond Invoke-WebRequest are Get-LogSplat (returns a splat hashtable)
-# and one Write-Log Debug line; the sibling repo defines both in module.logging.ps1, which
-# in turn pulls in that repo's whole parallel-engine logging stack (LogQueue thread,
-# Write-LogDirect, Format-LogLine) -- machinery this single-target invocation neither has
-# nor needs. Rather than copy the sibling repo's function body (its Invoke-WebRequest call,
-# header loop, throw strings, and JSESSIONID regex are the sibling repo's expressive code,
-# and that repo carries no LICENSE -- CLAUDE.md's Borrowing Policy bars unlicensed code),
-# Waypoint provides these two tiny, generic helpers so the function itself can be
-# dot-sourced unmodified as project-owned sibling-repository code (the #298 shim pattern, exactly as
-# module.common.ps1 is already dot-sourced for Invoke-ExternalCommand). These shims are
-# only defined if the dot-sourced sibling-repository code has not already brought its own into scope,
-# so if a future common.ps1 provides the real ones they win.
-if (-not (Get-Command -Name 'Get-LogSplat' -ErrorAction SilentlyContinue)) {
-	function Get-LogSplat {
-		[CmdletBinding()]
-		param([Parameter(Position = 0)][AllowNull()][AllowEmptyString()][string]$Source)
-		if ($Source) { return @{ Source = $Source } }
-		return @{}
-	}
-}
-if (-not (Get-Command -Name 'Write-Log' -ErrorAction SilentlyContinue)) {
-	# No-op-to-the-runspace sink: routes the sibling function's Debug line to Write-Verbose (never
-	# a stream Waypoint watches/persists, never the token). Get-NsxSessionToken
-	# never logs the token or credential -- only "Obtained NSX session token for <manager>".
-	function Write-Log {
-		[CmdletBinding()]
-		param(
-			[Parameter(Mandatory, Position = 0)][string]$Message,
-			[Parameter()][string]$Severity = 'Info',
-			[Parameter()][object]$LogQueue = $null,
-			[Parameter()][string]$Source,
-			[Parameter()][datetime]$Timestamp = (Get-Date)
-		)
-		Write-Verbose $Message
-	}
-}
+# Get-LogSplat/Write-Log for the sibling repo's unmodified Get-NsxSessionToken
+# (module.transport.nsxapi.ps1, dot-sourced below) are provided by the shared
+# WaypointLogging adapter module (issue #579), preloaded into every compliance
+# runspace ahead of any imported transport module -- see
+# Modules/WaypointLogging/WaypointLogging.psm1 for the full rationale. This module
+# no longer carries its own stand-ins.
 
 # NSX transport (issue #308, first sub-issue of the #24 split). NSX InSpec profiles run
 # with the `local` transport and make NSX Manager REST calls via the InSpec http()
@@ -445,7 +413,7 @@ if (-not (Get-Command -Name 'Write-Log' -ErrorAction SilentlyContinue)) {
 # dot-sourced at runtime from WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH the same way
 # module.common.ps1 is dot-sourced for Invoke-ExternalCommand (the #298 shim pattern) --
 # no function body from that sibling-repository file is duplicated here; the two Get-LogSplat/Write-Log
-# helpers it needs are provided as generic Waypoint shims above.
+# helpers it needs are provided by the shared WaypointLogging adapter (issue #579).
 #
 # The session token and cookie are secret material for as long as they are valid (they
 # grant NSX Manager API access) -- they are held only in local variables for the
@@ -534,9 +502,9 @@ function Invoke-WaypointNsxScan {
 
 	# Dot-source the unmodified sibling-repository scripts: module.common.ps1 brings Invoke-ExternalCommand
 	# into scope (same helper the vSphere path reuses), and module.transport.nsxapi.ps1 brings
-	# the sibling repo's Get-NsxSessionToken into scope unmodified (the #298 shim pattern -- see the
-	# region comment above this function; the Get-LogSplat/Write-Log helpers that function
-	# needs are provided as Waypoint shims above).
+	# the sibling repo's Get-NsxSessionToken into scope unmodified (the #298 shim pattern); the
+	# Get-LogSplat/Write-Log helpers that function needs are provided by the shared
+	# WaypointLogging adapter module (issue #579), preloaded ahead of this module.
 	. $VmwareStigDockerCommonPath
 	. $VmwareStigDockerNsxApiPath
 

@@ -41,6 +41,9 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 	private static readonly string WrapperModulesDirectory = Path.Combine(
 		AppContext.BaseDirectory, "..", "..", "..", "..", "Waypoint.Infrastructure.Execution", "PowerShell", "Modules");
 
+	private static readonly string LoggingModulePath = Path.GetFullPath(
+		Path.Combine(WrapperModulesDirectory, "WaypointLogging", "WaypointLogging.psm1"));
+
 	private static readonly string DiscoveryModulePath = Path.GetFullPath(
 		Path.Combine(WrapperModulesDirectory, "WaypointDiscovery", "WaypointDiscovery.psm1"));
 
@@ -57,6 +60,7 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 
 	public VsphereApiOnlyNoninteractiveTests()
 	{
+		Assert.True(File.Exists(LoggingModulePath), $"expected the shared logging adapter at '{LoggingModulePath}'");
 		Assert.True(File.Exists(DiscoveryModulePath), $"expected the real wrapper at '{DiscoveryModulePath}'");
 		Assert.True(File.Exists(CredentialTestModulePath), $"expected the real wrapper at '{CredentialTestModulePath}'");
 		Assert.True(File.Exists(FakeTransportPath), $"expected the fake transport at '{FakeTransportPath}'");
@@ -75,23 +79,45 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 
 	private PowerShellExecutor CreateExecutor()
 	{
+		return CreateExecutor(out _);
+	}
+
+	private PowerShellExecutor CreateExecutor(out RecordingLogBuffer logBuffer)
+	{
 		PowerShellOptions options = new() { MaxRunspaces = 1, DefaultInvocationTimeout = TimeSpan.FromSeconds(30) };
+		options.ModulePreloadPaths.Add(LoggingModulePath);
 		options.ModulePreloadPaths.Add(DiscoveryModulePath);
 		options.ModulePreloadPaths.Add(CredentialTestModulePath);
 		IOptions<PowerShellOptions> wrapped = Options.Create(options);
 		_pool = new WaypointRunspacePool(wrapped, NullLogger<WaypointRunspacePool>.Instance);
-		return new PowerShellExecutor(_pool, new NullLogBuffer(), wrapped, NullLogger<PowerShellExecutor>.Instance);
+		logBuffer = new RecordingLogBuffer();
+		return new PowerShellExecutor(_pool, logBuffer, wrapped, NullLogger<PowerShellExecutor>.Instance);
 	}
 
-	private sealed class NullLogBuffer : Waypoint.Core.Jobs.IJobLogBuffer
+	/// <summary>Records every enqueued job.log payload so tests can assert on captured content.</summary>
+	private sealed class RecordingLogBuffer : Waypoint.Core.Jobs.IJobLogBuffer
 	{
-		public bool TryEnqueue(string eventType, Guid? jobId, Guid? runId, string payloadJson) => true;
+		public List<string> Payloads { get; } = [];
+
+		public bool TryEnqueue(string eventType, Guid? jobId, Guid? runId, string payloadJson)
+		{
+			Payloads.Add(payloadJson);
+			return true;
+		}
 	}
 
+	/// <summary>
+	/// Issue #579: WaypointDiscovery.psm1 dot-sources the imported transport, which
+	/// calls Get-LogSplat/Write-Log (see the fake transport's Connect-StigVIServer).
+	/// Before the shared WaypointLogging adapter existed, discovery had neither
+	/// function preloaded, and every one of those calls threw a missing-command
+	/// error -- this pins that discovery now succeeds AND that the Write-Log calls
+	/// actually reach job.log (not merely that they fail to throw).
+	/// </summary>
 	[Fact]
 	public async Task Discovery_WithAnApiCredential_SucceedsWithoutPrompting()
 	{
-		PowerShellExecutor executor = CreateExecutor();
+		PowerShellExecutor executor = CreateExecutor(out RecordingLogBuffer logBuffer);
 		PowerShellExecutionResult result = await executor.ExecuteAsync(
 			new PowerShellRequest(
 				"Invoke-WaypointDiscovery",
@@ -104,6 +130,14 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 			CancellationToken.None);
 
 		Assert.True(result.Succeeded, result.FailureReason);
+		Assert.DoesNotContain(
+			logBuffer.Payloads, payload => payload.Contains("is not recognized", StringComparison.OrdinalIgnoreCase));
+		Assert.Contains(
+			logBuffer.Payloads,
+			payload => payload.Contains("Connecting to vCenter", StringComparison.Ordinal));
+		Assert.Contains(
+			logBuffer.Payloads,
+			payload => payload.Contains("Successfully connected to", StringComparison.Ordinal));
 	}
 
 	[Fact]
