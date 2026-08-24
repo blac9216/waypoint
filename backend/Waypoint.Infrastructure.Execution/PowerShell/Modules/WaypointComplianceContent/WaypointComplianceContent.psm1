@@ -60,6 +60,15 @@ function Invoke-WaypointComplianceContentPull {
 		[Parameter(Mandatory)][string]$ContentPath
 	)
 
+	# Issue #615 (live-verified): with no `git` on PATH, `& git` below fails to
+	# launch the process at all and $LASTEXITCODE is left empty/stale, so the
+	# thrown message ends in "exit code " with nothing after it -- a
+	# non-actionable failure that reads like a transient clone error rather
+	# than "git is missing". Fail fast with an unambiguous message instead.
+	if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+		throw "git executable not found on PATH -- the compliance-runner image must install the git package"
+	}
+
 	$gitDir = Join-Path $ContentPath '.git'
 	if (-not (Test-Path $gitDir)) {
 		New-Item -ItemType Directory -Path $ContentPath -Force | Out-Null
