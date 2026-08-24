@@ -72,3 +72,54 @@ public sealed record CatalogArtifactResponse(
 public sealed record CatalogSyncStartedResponse(
 	[property: JsonPropertyName("run_id")]
 	string RunId);
+
+/// <summary>Response body for <c>POST /api/v1/catalog/pull</c> (202 Accepted, issue #687).</summary>
+public sealed record CatalogPullStartedResponse(
+	[property: JsonPropertyName("run_id")]
+	string RunId,
+
+	[property: JsonPropertyName("job_id")]
+	string JobId);
+
+/// <summary>
+/// Response body for <c>GET /api/v1/catalog/pull</c> (issue #687): the connected
+/// vendor catalog-pull's readiness (gated on the #691 <c>depot_enrollment</c> state
+/// being <c>validated</c>) plus the most recent attempt/success facts from
+/// <c>catalog_pull_state</c> (migration 0049). <see cref="LastSuccessAt"/>/
+/// <see cref="LastSuccessItemCount"/> report only a genuinely successful, authenticated
+/// remote refresh -- never advanced by a local <c>catalog-index</c> re-index.
+/// </summary>
+public sealed record CatalogPullStatusResponse(
+	[property: JsonPropertyName("ready")]
+	bool Ready,
+
+	[property: JsonPropertyName("not_ready_reason")]
+	string? NotReadyReason,
+
+	[property: JsonPropertyName("last_attempt_at")]
+	DateTimeOffset? LastAttemptAt,
+
+	[property: JsonPropertyName("last_outcome")]
+	string? LastOutcome,
+
+	[property: JsonPropertyName("last_failure_reason")]
+	string? LastFailureReason,
+
+	[property: JsonPropertyName("last_success_at")]
+	DateTimeOffset? LastSuccessAt,
+
+	[property: JsonPropertyName("last_success_item_count")]
+	int? LastSuccessItemCount)
+{
+	public static CatalogPullStatusResponse FromDomain(CatalogPullState? state, bool ready, string? notReadyReason)
+	{
+		return new CatalogPullStatusResponse(
+			ready,
+			notReadyReason,
+			state?.LastAttemptAt,
+			state?.LastOutcome,
+			state?.LastFailureReason,
+			state?.LastSuccessAt,
+			state?.LastSuccessItemCount);
+	}
+}

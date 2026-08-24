@@ -248,7 +248,9 @@ work once one exists.
 | Endpoint | Methods | Notes |
 |---|---|---|
 | `/catalog/artifacts` | GET | Indexed depot: artifact, sha256, product, version, size, status (incl. `downloading` w/ progress). Browsable without the tool installed. |
-| `/catalog/sync` | POST | 202 → `catalog-index` job. |
+| `/catalog/sync` | POST | Local, credential-free re-index of the offline depot share only (issue #690 AC). 202 → `catalog-index` job. |
+| `/catalog/pull` | GET | Issue #687: connected vendor catalog-pull readiness (gated on `/downloads/enrollment` state `validated`) plus last attempt/success facts (`last_outcome`, `last_failure_reason`, `last_success_at`, `last_success_item_count`) (Viewer+). Null-valued fields are omitted, not `null`. |
+| `/catalog/pull` | POST | Distinct from `/catalog/sync`: runs the installed managed tool's `metadata download` with the stored Activation Code, authenticates and atomically promotes the result, then indexes it (Admin-only). 202 → `catalog-pull` job; 409 `catalog_pull_not_ready` if the enrollment gate is not satisfied. A zero-item result is only reported success when the authenticated vendor catalog is genuinely empty. |
 | `/downloads` | GET, POST | POST: artifact ids → queued `download` jobs (Operator+). Queue view: rate, ETA, retries. |
 | `/downloads/{id}` | DELETE | Cancel. |
 | `/downloads/readiness` | GET | Issue #560, extended by #690: combined Activation Code health + legacy Download Token health (reported independently; the legacy token never gates readiness) + managed-tool-installed state (Viewer+). `tool_installed` is `null` until a download-runner has heartbeated at least once. |
@@ -440,7 +442,9 @@ halt; a successful resolved outcome still breaks the consecutive sequence.
 · `job_events` (append-only; seq, type, payload jsonb — SSE replay source) ·
 `config_docs` (kind, profile, layer_type, layer_ref) · `config_versions` (doc_id, vN,
 author, ts, body) · `profiles` · `benchmarks` · `profile_mappings` ·
-`stigman_connections` · `depot_artifacts` (jsonb metadata, status) · `downloads` ·
+`stigman_connections` · `depot_artifacts` (jsonb metadata, status) ·
+`catalog_pull_state` (singleton: last attempt/outcome/failure, last genuine success +
+item count — issue #687) · `downloads` ·
 `library_items` · `content_library_items` · `bundles` (direction, manifest jsonb,
 signature, applied_at/where) · `compliance_content` (singleton: ref, commit, pulled_by)
 · `schedules` · `users` (oidc_sub, role, site_scope) · `audit_log` (append-only) ·
