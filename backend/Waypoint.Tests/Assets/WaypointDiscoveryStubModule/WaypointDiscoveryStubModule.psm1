@@ -22,6 +22,16 @@
 # passes with different results (a removal-detection scenario: pass 2 omits an item
 # pass 1 reported) by setting $env:WAYPOINT_DISCOVERY_STUB_PASS before each
 # invocation -- '1' (default) or '2'.
+#
+# Issue #618 adds two more passes for the fail-closed-on-malformed-output contract:
+#   'empty'     -- a vCenter with genuinely zero inventory: emits nothing at all.
+#                  This must still be a clean success (0 items, 0 removed), the
+#                  legitimate case ParseDiscoveredItems' malformed-row check must not
+#                  punish.
+#   'malformed' -- simulates the executor's output-capture path losing a
+#                  pscustomobject's NoteProperties (the live-vCenter reproduction in
+#                  #618): emits PSObjects with no Type/MoRef/Name at all. This must
+#                  fail the job instead of reporting "Discovered 0 item(s)".
 
 function Invoke-WaypointDiscovery {
 	[CmdletBinding()]
@@ -50,6 +60,22 @@ function Invoke-WaypointDiscovery {
 
 	$Pass = $env:WAYPOINT_DISCOVERY_STUB_PASS
 	if (-not $Pass) { $Pass = '1' }
+
+	if ($Pass -eq 'empty') {
+		Write-Information 'Discovery complete.'
+		return
+	}
+
+	if ($Pass -eq 'malformed') {
+		# Stands in for the executor losing a pscustomobject's NoteProperties: these
+		# rows arrive as PSObjects but read back with none of Type/MoRef/Name set, the
+		# exact shape DiscoverJobHandler.TryParseItem must reject as unparseable rather
+		# than silently drop.
+		[pscustomobject]@{}
+		[pscustomobject]@{}
+		Write-Information 'Discovery complete.'
+		return
+	}
 
 	[pscustomobject]@{
 		Type = 'cluster'; MoRef = 'domain-c1'; Name = 'stub-cluster-01'
