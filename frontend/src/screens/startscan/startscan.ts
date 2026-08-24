@@ -52,6 +52,25 @@ export interface ScanScope {
 	/** Omitted (not empty array) for "every target under the site" — matches
 	 * the backend's `TargetIds is null || Count == 0` full-site-scan check. */
 	target_ids?: string[];
+	/** Issue #639: which pulled compliance-content profile (`GET /profiles`
+	 * `id`) this scan executes against — required by the backend
+	 * (`RunCreationService.CreateScanRunAsync` 400s without it, 404s on an
+	 * unknown id). */
+	profile_id: string;
+}
+
+/** `GET /profiles` — issue #639's Start-a-Scan profile picker only ever needs
+ * enough to label the option and identify it; the fuller `ProfileResponse`
+ * (version/commit/state/updated_at) is Benchmarks' concern, not this wizard's. */
+export interface ProfileOption {
+	id: string;
+	profile_key: string;
+	name: string;
+	version: string | null;
+}
+
+export function fetchProfileOptions(): Promise<ProfileOption[]> {
+	return apiGet<ProfileOption[]>("/profiles");
 }
 
 export interface EphemeralCredentialInput {

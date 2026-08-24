@@ -5,7 +5,7 @@
  * useScanWizard; StartScanScreen.tsx wires them together.
  */
 import type { CredentialOption, Site } from "../configuration/sites";
-import type { InventoryItem } from "./startscan";
+import type { InventoryItem, ProfileOption } from "./startscan";
 import type { CredentialMode, TargetSelection } from "./useScanWizard";
 
 export function SiteStep({
@@ -46,16 +46,55 @@ export function ScopeStep({
 	error,
 	onToggleTarget,
 	onToggleItem,
+	profiles,
+	profilesLoading,
+	profilesError,
+	profileId,
+	onProfileChange,
 }: {
 	selections: TargetSelection[];
 	loading: boolean;
 	error: string | null;
 	onToggleTarget: (targetId: string, on: boolean) => void;
 	onToggleItem: (targetId: string, itemId: string, on: boolean) => void;
+	profiles: ProfileOption[];
+	profilesLoading: boolean;
+	profilesError: string | null;
+	profileId: string;
+	onProfileChange: (id: string) => void;
 }) {
 	return (
 		<div className="start-scan-screen__panel">
 			<div className="start-scan-screen__panel-title">Scope — inventory</div>
+
+			{/* Issue #639: profile selection — which pulled compliance-content
+			 * profile (GET /profiles) this scan executes against. Required
+			 * before the wizard can advance to Confirm (useScanWizard's
+			 * canConfirm). */}
+			<div className="start-scan-screen__field">
+				{profilesLoading && <div className="start-scan-screen__note">Loading profiles…</div>}
+				{profilesError && <div className="start-scan-screen__error">{profilesError}</div>}
+				{!profilesLoading && !profilesError && profiles.length === 0 && (
+					<div className="start-scan-screen__note">
+						No compliance content pulled yet — pull content from Compliance Content before starting a scan.
+					</div>
+				)}
+				{!profilesLoading && !profilesError && profiles.length > 0 && (
+					<label>
+						<span>Profile</span>
+						<select value={profileId} onChange={(e) => onProfileChange(e.target.value)}>
+							<option value="">Select a profile…</option>
+							{profiles.map((p) => (
+								<option key={p.id} value={p.id}>
+									{p.name}
+									{p.version ? ` (${p.version})` : ""}
+								</option>
+							))}
+						</select>
+					</label>
+				)}
+			</div>
+
 			{loading && <div className="start-scan-screen__note">Loading targets…</div>}
 			{error && <div className="start-scan-screen__error">{error}</div>}
 			{!loading && !error && selections.length === 0 && <div className="start-scan-screen__note">This site has no targets.</div>}
@@ -242,6 +281,7 @@ export function ConfirmStep({
 	siteName,
 	targetCount,
 	totalTargets,
+	profileName,
 	credentialMode,
 	credentialName,
 	canConfirm,
@@ -252,6 +292,7 @@ export function ConfirmStep({
 	siteName: string;
 	targetCount: number;
 	totalTargets: number;
+	profileName: string;
 	credentialMode: CredentialMode;
 	credentialName: string;
 	canConfirm: boolean;
@@ -269,6 +310,8 @@ export function ConfirmStep({
 				<dd className="mono">
 					{targetCount} / {totalTargets}
 				</dd>
+				<dt>Profile</dt>
+				<dd className="mono">{profileName || "—"}</dd>
 				<dt>Credential</dt>
 				<dd className="mono">{credentialMode === "service" ? credentialName || "—" : credentialName}</dd>
 				<dt>Run</dt>

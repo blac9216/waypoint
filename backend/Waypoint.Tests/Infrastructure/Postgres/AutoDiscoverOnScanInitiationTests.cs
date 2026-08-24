@@ -14,6 +14,7 @@
 
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -27,12 +28,14 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Discovery;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.PowerShell;
 using Waypoint.Core.Sites;
 using Waypoint.Core.StigManager;
+using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Discovery;
 using Waypoint.Infrastructure.Jobs;
@@ -135,6 +138,14 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
 
+				// Issue #639: same fixture-pointed override as Site/TargetRepository above
+				// -- RunCreationService.CreateScanRunAsync now resolves scope.profile_id
+				// through IProfileRepository, which otherwise resolves against
+				// appsettings.json's base connection string (a different database than the
+				// fixture) and every scan-run POST 500s.
+				services.AddSingleton<Waypoint.Core.ComplianceContent.IProfileRepository>(
+					new Waypoint.Infrastructure.ComplianceContent.ProfileRepository(_connectionString));
+
 				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{
 					var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
@@ -164,6 +175,9 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 	private WaypointRunspacePool _pool = null!;
 	private TargetRepository _targets = null!;
 
+	/// <summary>Issue #639: every scan run now requires scope.profile_id -- seeded once here like the other fixtures.</summary>
+	private Guid _profileId;
+
 	public AutoDiscoverOnScanInitiationTests(PostgresFixture fixture)
 	{
 		_fixture = fixture;
@@ -180,6 +194,12 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 
 		_repository = new JobQueueRepository(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
 		_targets = new TargetRepository(_fixture.ConnectionString);
+
+		ProfileRepository profiles = new(_fixture.ConnectionString);
+		await profiles.ReplaceAllAsync(
+			[new ProfileUpsert("vsphere-autodiscover-profile", "vSphere Auto-Discover Test Profile", "1.0.0", "invented-commit-autodiscover", ProfileStates.Current)],
+			CancellationToken.None);
+		_profileId = (await profiles.ListAsync(CancellationToken.None)).Single().Id;
 
 		JobEngineOptions engineOptions = new() { EventFlushInterval = TimeSpan.FromMilliseconds(50) };
 		_logBuffer = new BufferedJobEventWriter(
@@ -222,9 +242,10 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		ScanUploadCoordinator uploadCoordinator = new(
 			stigman, new NeverCalledStigManagerUploadClient(), secretStore, _repository, _redactor);
 
+		ComplianceContentOptions complianceContentOptions = new() { ContentPath = Directory.CreateTempSubdirectory("wp-autodiscover-content").FullName };
 		_scanHandler = new Waypoint.Infrastructure.Scans.ScanJobHandler(
 			executor, secretStore, credentials, _targets, runSecrets, _repository, _redactor, wrappedPsOptions,
-			Options.Create(scanOptions), configDocs, attestationSnapshots, uploadCoordinator);
+			Options.Create(scanOptions), Options.Create(complianceContentOptions), configDocs, attestationSnapshots, uploadCoordinator);
 
 		_credentials = credentials;
 		_secretStore = secretStore;
@@ -298,7 +319,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Assert.Null((await _targets.GetAsync(targetId!.Value, CancellationToken.None))!.LastRefreshed);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
-			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) });
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId }, profile_id = _profileId }) });
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
@@ -360,7 +381,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		await _targets.SetDiscoveryStatusAsync(targetId!.Value, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, CancellationToken.None);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
-			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) });
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId }, profile_id = _profileId }) });
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
@@ -400,7 +421,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Assert.True(seeded.LastRefreshed!.Value < DateTimeOffset.UtcNow.AddMinutes(-60));
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
-			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) });
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId }, profile_id = _profileId }) });
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
@@ -445,7 +466,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
-			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) });
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId }, profile_id = _profileId }) });
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
@@ -486,7 +507,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		await StampLastRefreshedAsync(targetId.Value, DateTimeOffset.UtcNow.AddMinutes(-10));
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
-			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) }, client);
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId }, profile_id = _profileId }) }, client);
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
@@ -518,7 +539,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		await StampLastRefreshedAsync(targetId.Value, DateTimeOffset.UtcNow.AddMinutes(-10));
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
-			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) }, client);
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId }, profile_id = _profileId }) }, client);
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
@@ -566,7 +587,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		await StampLastRefreshedAsync(targetId.Value, justInsideEdge);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
-			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) }, client);
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId }, profile_id = _profileId }) }, client);
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
@@ -603,7 +624,7 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		await StampLastRefreshedAsync(targetId.Value, justOutsideEdge);
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber",
-			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId } }) }, client);
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { targetId }, profile_id = _profileId }) }, client);
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();

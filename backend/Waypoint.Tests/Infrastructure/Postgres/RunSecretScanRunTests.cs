@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -21,8 +22,10 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Secrets;
+using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Secrets;
@@ -82,6 +85,14 @@ public sealed class RunSecretScanRunTests : IAsyncLifetime
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
 
+				// Issue #639: same fixture-pointed override as Site/TargetRepository above
+				// -- RunCreationService.CreateScanRunAsync now resolves scope.profile_id
+				// through IProfileRepository, which otherwise resolves against
+				// appsettings.json's base connection string (a different database than the
+				// fixture) and every scan-run POST 500s.
+				services.AddSingleton<Waypoint.Core.ComplianceContent.IProfileRepository>(
+					new Waypoint.Infrastructure.ComplianceContent.ProfileRepository(_connectionString));
+
 				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{
 					var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
@@ -126,6 +137,9 @@ public sealed class RunSecretScanRunTests : IAsyncLifetime
 	private RunSecretApiFactory _factory = null!;
 	private HttpClient _client = null!;
 
+	/// <summary>Issue #639: every scan run now requires scope.profile_id -- seeded once here like the other fixtures.</summary>
+	private Guid _profileId;
+
 	public RunSecretScanRunTests(PostgresFixture fixture)
 	{
 		_fixture = fixture;
@@ -142,6 +156,12 @@ public sealed class RunSecretScanRunTests : IAsyncLifetime
 
 		_factory = new RunSecretApiFactory(_fixture.ConnectionString, keyPath);
 		_client = _factory.CreateClient();
+
+		ProfileRepository profiles = new(_fixture.ConnectionString);
+		await profiles.ReplaceAllAsync(
+			[new ProfileUpsert("vsphere-runsecret-profile", "vSphere Run-Secret Test Profile", "1.0.0", "invented-commit-runsecret", ProfileStates.Current)],
+			CancellationToken.None);
+		_profileId = (await profiles.ListAsync(CancellationToken.None)).Single().Id;
 	}
 
 	public Task DisposeAsync()
@@ -181,7 +201,7 @@ public sealed class RunSecretScanRunTests : IAsyncLifetime
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Operator", new
 		{
 			run_type = "scan",
-			scope = JsonSerializer.Serialize(new { site_id = siteId }),
+			scope = JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId }),
 			credential = new { kind = "personal", username = canaryUsername, secret = canarySecret },
 		});
 
@@ -303,7 +323,7 @@ public sealed class RunSecretScanRunTests : IAsyncLifetime
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Cyber", new
 		{
 			run_type = "scan",
-			scope = JsonSerializer.Serialize(new { site_id = siteId }),
+			scope = JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId }),
 			credential = new { kind = "personal", username = "someone@example.internal", secret = "not-a-real-secret-value" },
 		});
 
@@ -324,7 +344,7 @@ public sealed class RunSecretScanRunTests : IAsyncLifetime
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Operator", new
 		{
 			run_type = "scan",
-			scope = JsonSerializer.Serialize(new { site_id = siteId }),
+			scope = JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId }),
 			credential_id = Guid.NewGuid(),
 			credential = new { kind = "personal", username = "someone@example.internal", secret = "not-a-real-secret-value" },
 		});
@@ -342,7 +362,7 @@ public sealed class RunSecretScanRunTests : IAsyncLifetime
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Operator", new
 		{
 			run_type = "scan",
-			scope = JsonSerializer.Serialize(new { site_id = siteId }),
+			scope = JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId }),
 			credential = new { kind = "vault-wrapped", username = "someone@example.internal", secret = "not-a-real-secret-value" },
 		});
 

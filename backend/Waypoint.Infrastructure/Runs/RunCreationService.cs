@@ -14,6 +14,7 @@
 
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Discovery;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
@@ -66,6 +67,7 @@ public sealed class RunCreationService
 	private readonly IJobControlRepository _repository;
 	private readonly SiteRepository _sites;
 	private readonly TargetRepository _targets;
+	private readonly IProfileRepository _profiles;
 	private readonly IRunSecretStore _runSecrets;
 	private readonly IOptions<DiscoveryOptions> _discoveryOptions;
 	private readonly IOptions<RunSecretOptions> _runSecretOptions;
@@ -74,6 +76,7 @@ public sealed class RunCreationService
 		IJobControlRepository repository,
 		SiteRepository sites,
 		TargetRepository targets,
+		IProfileRepository profiles,
 		IRunSecretStore runSecrets,
 		IOptions<DiscoveryOptions> discoveryOptions,
 		IOptions<RunSecretOptions> runSecretOptions)
@@ -81,12 +84,14 @@ public sealed class RunCreationService
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(sites);
 		ArgumentNullException.ThrowIfNull(targets);
+		ArgumentNullException.ThrowIfNull(profiles);
 		ArgumentNullException.ThrowIfNull(runSecrets);
 		ArgumentNullException.ThrowIfNull(discoveryOptions);
 		ArgumentNullException.ThrowIfNull(runSecretOptions);
 		_repository = repository;
 		_sites = sites;
 		_targets = targets;
+		_profiles = profiles;
 		_runSecrets = runSecrets;
 		_discoveryOptions = discoveryOptions;
 		_runSecretOptions = runSecretOptions;
@@ -143,10 +148,29 @@ public sealed class RunCreationService
 				"Set \"scope\": { \"site_id\": \"<uuid>\" } (optionally with \"target_ids\") in the request body.");
 		}
 
+		if (scope.ProfileId is not { } profileId)
+		{
+			throw ApiException.Validation(
+				"scope.profile_id is required for a scan run.",
+				"Set \"scope\": { \"profile_id\": \"<uuid>\" } to the id of a profile from GET /profiles (issue #639: a scan must select which pulled compliance-content profile to execute).");
+		}
+
 		Site? site = await _sites.GetAsync(siteId, cancellationToken).ConfigureAwait(false);
 		if (site is null)
 		{
 			throw ApiException.NotFound("Site not found.", $"Site '{siteId}' does not exist.");
+		}
+
+		// The profile must be an installed row in the pulled-content inventory (issue
+		// #639 AC "profile must exist in the inventory, or actionable 4xx") -- resolved
+		// once here to the on-disk-directory-name profile_key, carried on every fanned-
+		// out job's payload instead of a re-lookup per job/target.
+		Profile? profile = await _profiles.GetAsync(profileId, cancellationToken).ConfigureAwait(false);
+		if (profile is null)
+		{
+			throw ApiException.NotFound(
+				"Profile not found.",
+				$"Profile '{profileId}' does not exist; pick one from GET /profiles (pull compliance content first via POST /compliance-content/pull if the list is empty).");
 		}
 
 		IReadOnlyList<Target> targets = await ResolveScanTargetsAsync(siteId, scope.TargetIds, cancellationToken).ConfigureAwait(false);
@@ -165,8 +189,12 @@ public sealed class RunCreationService
 			// target_kind is the shape-routing signal JobShapes.ForJob reads (issue #309):
 			// every scan fans out as job_type = 'scan' regardless of kind, so the payload
 			// is the only place the dispatcher can learn "this is an ssh (SRG) target"
-			// before a handler ever resolves the target row.
-			string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId, target_kind = target.Kind });
+			// before a handler ever resolves the target row. profile_key (issue #639) is
+			// the content-store-relative directory name ScanJobHandler resolves under
+			// ComplianceContentOptions.ContentPath -- carried per-job (not re-derived from
+			// scope) so a job replayed after a later content-pull still scans the exact
+			// profile the operator picked at run-creation time.
+			string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId, target_kind = target.Kind, profile_key = profile.ProfileKey });
 			if (useRunSecret)
 			{
 				// No credential_id at all for an ad hoc job -- the secret lives only in

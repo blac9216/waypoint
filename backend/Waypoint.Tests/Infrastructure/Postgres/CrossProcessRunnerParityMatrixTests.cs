@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -22,9 +23,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
+using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Secrets;
@@ -89,6 +92,14 @@ public sealed class CrossProcessRunnerParityMatrixTests : IAsyncLifetime
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
 
+				// Issue #639: same fixture-pointed override as Site/TargetRepository above
+				// -- RunCreationService.CreateScanRunAsync now resolves scope.profile_id
+				// through IProfileRepository, which otherwise resolves against
+				// appsettings.json's base connection string (a different database than the
+				// fixture) and every scan-run POST 500s.
+				services.AddSingleton<Waypoint.Core.ComplianceContent.IProfileRepository>(
+					new Waypoint.Infrastructure.ComplianceContent.ProfileRepository(_connectionString));
+
 				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{
 					var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
@@ -131,6 +142,9 @@ public sealed class CrossProcessRunnerParityMatrixTests : IAsyncLifetime
 	private MatrixApiFactory _factory = null!;
 	private HttpClient _client = null!;
 
+	/// <summary>Issue #639: every scan run now requires scope.profile_id -- seeded once here like the other fixtures.</summary>
+	private Guid _profileId;
+
 	public CrossProcessRunnerParityMatrixTests(PostgresFixture fixture)
 	{
 		_fixture = fixture;
@@ -147,6 +161,12 @@ public sealed class CrossProcessRunnerParityMatrixTests : IAsyncLifetime
 
 		_factory = new MatrixApiFactory(_fixture.ConnectionString, _keyPath);
 		_client = _factory.CreateClient();
+
+		ProfileRepository profiles = new(_fixture.ConnectionString);
+		await profiles.ReplaceAllAsync(
+			[new ProfileUpsert("vsphere-matrix-profile", "vSphere Matrix Test Profile", "1.0.0", "invented-commit-matrix", ProfileStates.Current)],
+			CancellationToken.None);
+		_profileId = (await profiles.ListAsync(CancellationToken.None)).Single().Id;
 	}
 
 	public Task DisposeAsync()
@@ -176,7 +196,7 @@ public sealed class CrossProcessRunnerParityMatrixTests : IAsyncLifetime
 		// so the compliance allowlist claims exactly the one scan job below.
 		Guid target = await CreateTargetAsync(siteId, "ssh", "photon-01", """{"host":"photon-01.example.internal"}""");
 
-		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = new[] { target } });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = new[] { target }, profile_id = _profileId });
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 
 		// Simulates the compliance-runner process: its own repository instance, its own
@@ -225,7 +245,7 @@ public sealed class CrossProcessRunnerParityMatrixTests : IAsyncLifetime
 		HttpResponseMessage runResponse = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Operator", new
 		{
 			run_type = "scan",
-			scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { target } }),
+			scope = JsonSerializer.Serialize(new { site_id = siteId, target_ids = new[] { target }, profile_id = _profileId }),
 			credential = new { kind = "personal", username = "adhoc-operator@example.internal", secret = "invented-restart-canary" }
 		});
 		Assert.Equal(HttpStatusCode.Accepted, runResponse.StatusCode);
@@ -281,7 +301,7 @@ public sealed class CrossProcessRunnerParityMatrixTests : IAsyncLifetime
 	{
 		Guid siteId = await CreateSiteAsync("runner-restart-site");
 		Guid target = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
-		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = new[] { target } });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = new[] { target }, profile_id = _profileId });
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 
 		JobQueueRepository crashedWorker = new(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
@@ -332,7 +352,7 @@ public sealed class CrossProcessRunnerParityMatrixTests : IAsyncLifetime
 			await CreateTargetAsync(siteId, "vsphere", "vcsa-04", """{"host":"vcsa-04.example.internal"}"""),
 		];
 
-		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = targets });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = targets, profile_id = _profileId });
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 
 		JobQueueRepository replicaOne = new(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
@@ -381,7 +401,7 @@ public sealed class CrossProcessRunnerParityMatrixTests : IAsyncLifetime
 	{
 		Guid siteId = await CreateSiteAsync("domain-isolation-site");
 		Guid target = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
-		HttpResponseMessage scanResponse = await PostRunAsync(new { site_id = siteId, target_ids = new[] { target } });
+		HttpResponseMessage scanResponse = await PostRunAsync(new { site_id = siteId, target_ids = new[] { target }, profile_id = _profileId });
 		Assert.Equal(HttpStatusCode.Accepted, scanResponse.StatusCode);
 
 		Guid downloadJobId = await SeedDownloadJobAsync();

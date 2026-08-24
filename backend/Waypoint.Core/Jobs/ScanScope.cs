@@ -23,14 +23,22 @@ namespace Waypoint.Core.Jobs;
 /// + inventory selection)..."). <see cref="TargetIds"/> null or empty means "every
 /// target under the site" -- the common case for a full-site scan; a non-empty list
 /// scopes the fan-out to exactly those targets (the Start-a-Scan checkbox tree, #23's
-/// later slice, populates this from cached inventory). Profile/product filtering is
-/// out of scope for this slice (#273): it constrains *what a scan job does*, not
-/// *which targets get a job row*, and nothing here reads it yet -- carried on the raw
-/// <see cref="RunSummary.ScopeJson"/> field for the execution slice (#274) to parse.
+/// later slice, populates this from cached inventory).
+///
+/// <see cref="ProfileId"/> is the pulled compliance-content profile (<c>profiles.id</c>,
+/// <c>GET /profiles</c>) this scan executes against -- issue #639: previously a scan
+/// always ran InSpec against a fixed, empty <c>ScanOptions.ProfilePath</c>, with no
+/// wiring at all to the managed content store <c>content-pull</c> actually populates.
+/// <see cref="Waypoint.Infrastructure.Runs.RunCreationService.CreateScanRunAsync"/>
+/// requires it (must reference an installed profile, or the run is rejected 4xx) and
+/// resolves it once at run-creation time to the profile's <c>profile_key</c>, carried
+/// -- not the id -- on every fanned-out <c>scan</c> job's payload: the job handler
+/// needs a content-store-relative directory name, not a database surrogate key.
 /// </summary>
 public sealed record ScanScope(
 	[property: JsonPropertyName("site_id")] Guid? SiteId,
-	[property: JsonPropertyName("target_ids")] IReadOnlyList<Guid>? TargetIds);
+	[property: JsonPropertyName("target_ids")] IReadOnlyList<Guid>? TargetIds,
+	[property: JsonPropertyName("profile_id")] Guid? ProfileId = null);
 
 /// <summary>Parses and validates a scan run's <c>scope</c> JSON.</summary>
 public static class ScanScopeParser
@@ -56,6 +64,6 @@ public static class ScanScopeParser
 			throw new FormatException($"scope is not valid JSON: {exception.Message}", exception);
 		}
 
-		return scope ?? new ScanScope(null, null);
+		return scope ?? new ScanScope(null, null, null);
 	}
 }

@@ -50,3 +50,17 @@ content-library/bundle/update types (ADR-0013 §2 otherwise unchanged).
 - `docs/domain-model.md`, `docs/architecture.md`, and `docs/api-contract.md` prose
   describing runner job-type assignment must read "compliance-runner: discover,
   credential-test, scan, remediate, content-pull, content-import" going forward.
+- Issue #639: `scan` reading from the compliance-content working tree was originally
+  designed but never actually wired -- a scan ran InSpec against a separate, fixed,
+  always-empty path (`ScanOptions.ProfilePath`) with no linkage to the tree
+  `content-pull` populates. Fixed by having `ScanJobHandler` resolve a selected
+  profile's directory under `ComplianceContentOptions.ContentPath` directly. Because
+  `content-pull`/`content-import` (writers) and `scan` (reader) both execute in the
+  same compliance-runner process, the container-level mount for this volume is
+  necessarily read-write (issue #616) -- there is no separate process boundary to hang
+  a read-only bind mount off of the way `compliance-profiles` had for the old fixed
+  path. "Read-only to scan" (this ADR's Decision paragraph) is therefore enforced at
+  the execution level, not the mount level: nothing on the InSpec/scan code path ever
+  opens a file under `ContentPath` for writing. A future change that gives `scan` a
+  literal write need anywhere in that tree should be treated as a violation of this
+  ADR's intent, not a routine code change.

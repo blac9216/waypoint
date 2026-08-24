@@ -74,6 +74,11 @@ export function StartScanScreen() {
 							error={wizard.scopeError}
 							onToggleTarget={wizard.toggleTarget}
 							onToggleItem={wizard.toggleInventoryItem}
+							profiles={wizard.profiles}
+							profilesLoading={wizard.profilesLoading}
+							profilesError={wizard.profilesError}
+							profileId={wizard.profileId}
+							onProfileChange={wizard.setProfileId}
 						/>
 					)}
 
@@ -101,6 +106,7 @@ export function StartScanScreen() {
 							siteName={wizard.siteName}
 							targetCount={wizard.selectedTargetIds.length || wizard.selections.length}
 							totalTargets={wizard.selections.length}
+							profileName={wizard.selectedProfileName}
 							credentialMode={wizard.credentialMode}
 							credentialName={wizard.selectedCredentialName}
 							canConfirm={wizard.canConfirm}

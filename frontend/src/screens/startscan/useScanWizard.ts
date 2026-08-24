@@ -10,7 +10,7 @@ import { ApiError } from "../../lib/api";
 import { roleAtLeast, roleGateProps, type Role } from "../../lib/roles";
 import { fetchSites, fetchTargets, type Site, type Target } from "../configuration/sites";
 import { fetchCredentialOptions, type CredentialOption } from "../configuration/sites";
-import { createScanRun, fetchTargetInventory, flattenInventory, type InventoryItem } from "./startscan";
+import { createScanRun, fetchProfileOptions, fetchTargetInventory, flattenInventory, type InventoryItem, type ProfileOption } from "./startscan";
 
 export type StepKey = "site" | "scope" | "credential" | "schedule" | "confirm";
 
@@ -70,6 +70,29 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 	const [selections, setSelections] = useState<TargetSelection[]>([]);
 	const [scopeLoading, setScopeLoading] = useState(false);
 	const [scopeError, setScopeError] = useState<string | null>(null);
+
+	// Issue #639: the InSpec profile a scan executes against, fed by GET
+	// /profiles (docs/ui/prototype/README.md screen 3 step 2: "the list of
+	// InSpec profiles that will apply"). Fetched once the wizard becomes
+	// usable, same lazy-on-relevant-step convention the credential step below
+	// uses for fetchCredentialOptions — loaded here (not gated to the scope
+	// step) since profile choice belongs to the same step and the operator
+	// may open the picker before scope finishes loading.
+	const [profiles, setProfiles] = useState<ProfileOption[]>([]);
+	const [profilesLoading, setProfilesLoading] = useState(true);
+	const [profilesError, setProfilesError] = useState<string | null>(null);
+	const [profileId, setProfileId] = useState<string>("");
+
+	useEffect(() => {
+		if (!allowed) {
+			return;
+		}
+		setProfilesLoading(true);
+		fetchProfileOptions()
+			.then(setProfiles)
+			.catch((err: unknown) => setProfilesError(err instanceof ApiError ? err.message : "Could not load profiles."))
+			.finally(() => setProfilesLoading(false));
+	}, [allowed]);
 
 	const loadScope = useCallback((site: string) => {
 		setScopeLoading(true);
@@ -195,15 +218,16 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 	const [submitting, setSubmitting] = useState(false);
 	const [submitError, setSubmitError] = useState<string | null>(null);
 
-	const canConfirm = siteId !== "" && (credentialMode === "service" ? serviceCredentialId !== "" : personalUsername !== "" && personalSecret !== "");
+	const canConfirm =
+		siteId !== "" && profileId !== "" && (credentialMode === "service" ? serviceCredentialId !== "" : personalUsername !== "" && personalSecret !== "");
 
 	const submit = useCallback(async () => {
 		setSubmitting(true);
 		setSubmitError(null);
 		try {
 			const scope = selectedTargetIds.length > 0 && selectedTargetIds.length < selections.length
-				? { site_id: siteId, target_ids: selectedTargetIds }
-				: { site_id: siteId };
+				? { site_id: siteId, target_ids: selectedTargetIds, profile_id: profileId }
+				: { site_id: siteId, profile_id: profileId };
 			const result = await createScanRun({
 				scope,
 				credential_id: credentialMode === "service" ? serviceCredentialId : undefined,
@@ -216,7 +240,7 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 		} finally {
 			setSubmitting(false);
 		}
-	}, [selectedTargetIds, selections.length, siteId, credentialMode, serviceCredentialId, personalUsername, personalSecret, clearPersonalSecret, navigate]);
+	}, [selectedTargetIds, selections.length, siteId, profileId, credentialMode, serviceCredentialId, personalUsername, personalSecret, clearPersonalSecret, navigate]);
 
 	const stepIndex = STEPS.findIndex((s) => s.key === step);
 	const canAdvance = useCallback(
@@ -230,6 +254,7 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 	);
 
 	const siteName = sites.find((s) => s.id === siteId)?.name ?? "";
+	const selectedProfileName = profiles.find((p) => p.id === profileId)?.name ?? "";
 	const selectedCredentialName =
 		credentialMode === "service" ? (credentialOptions.find((c) => c.id === serviceCredentialId)?.name ?? "") : `${personalUsername} (personal, not stored)`;
 
@@ -254,6 +279,13 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 		toggleTarget,
 		toggleInventoryItem,
 		selectedTargetIds,
+
+		profiles,
+		profilesLoading,
+		profilesError,
+		profileId,
+		setProfileId,
+		selectedProfileName,
 
 		credentialMode,
 		setCredentialMode,
