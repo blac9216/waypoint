@@ -14,6 +14,7 @@
 
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -84,6 +85,7 @@ public sealed class ScanJobHandler : IJobHandler
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
 	private readonly IOptions<ScanOptions> _scanOptions;
+	private readonly IOptions<ComplianceContentOptions> _complianceContentOptions;
 	private readonly ConfigDocRepository _configDocs;
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
 	private readonly ScanUploadCoordinator _upload;
@@ -98,6 +100,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ISecretRedactor redactor,
 		IOptions<PowerShellOptions> powerShellOptions,
 		IOptions<ScanOptions> scanOptions,
+		IOptions<ComplianceContentOptions> complianceContentOptions,
 		ConfigDocRepository configDocs,
 		AttestationSnapshotRepository attestationSnapshots,
 		ScanUploadCoordinator upload)
@@ -111,6 +114,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(redactor);
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
 		ArgumentNullException.ThrowIfNull(scanOptions);
+		ArgumentNullException.ThrowIfNull(complianceContentOptions);
 		ArgumentNullException.ThrowIfNull(configDocs);
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
 		ArgumentNullException.ThrowIfNull(upload);
@@ -124,6 +128,7 @@ public sealed class ScanJobHandler : IJobHandler
 		_redactor = redactor;
 		_powerShellOptions = powerShellOptions;
 		_scanOptions = scanOptions;
+		_complianceContentOptions = complianceContentOptions;
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
 		_upload = upload;
@@ -201,6 +206,9 @@ public sealed class ScanJobHandler : IJobHandler
 		bool isNsx = string.Equals(target.Kind, TargetKinds.NsxApi, StringComparison.Ordinal);
 		bool isSrg = string.Equals(target.Kind, TargetKinds.Ssh, StringComparison.Ordinal);
 
+		string legacyFallbackPath = isNsx ? _scanOptions.Value.NsxProfilePath : isSrg ? _scanOptions.Value.SrgProfilePath : _scanOptions.Value.ProfilePath;
+		string profilePath = ResolveProfilePath(payload.ProfileKey, legacyFallbackPath);
+
 		PowerShellExecutionResult result;
 		try
 		{
@@ -232,7 +240,7 @@ public sealed class ScanJobHandler : IJobHandler
 					["Manager"] = host,
 					["Username"] = resolved.Username,
 					["Password"] = resolved.Secret,
-					["ProfilePath"] = _scanOptions.Value.NsxProfilePath,
+					["ProfilePath"] = profilePath,
 					["ReportPath"] = reportPath,
 					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
 				};
@@ -245,7 +253,7 @@ public sealed class ScanJobHandler : IJobHandler
 					["SshHost"] = host,
 					["Username"] = resolved.Username,
 					["Password"] = resolved.Secret,
-					["ProfilePath"] = _scanOptions.Value.SrgProfilePath,
+					["ProfilePath"] = profilePath,
 					["ReportPath"] = reportPath,
 					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
 					["Sudo"] = resolved.SudoEnabled,
@@ -260,7 +268,7 @@ public sealed class ScanJobHandler : IJobHandler
 					["VCenter"] = host,
 					["Username"] = resolved.Username,
 					["Password"] = resolved.Secret,
-					["ProfilePath"] = _scanOptions.Value.ProfilePath,
+					["ProfilePath"] = profilePath,
 					["ReportPath"] = reportPath,
 					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
 				};
@@ -754,6 +762,31 @@ public sealed class ScanJobHandler : IJobHandler
 			: null;
 	}
 
+	/// <summary>
+	/// Issue #639: resolves the InSpec profile directory a scan actually runs against.
+	/// <paramref name="profileKey"/> non-null (the normal path, set by
+	/// <see cref="Waypoint.Infrastructure.Runs.RunCreationService.CreateScanRunAsync"/>
+	/// after validating the profile is installed) resolves to
+	/// <c>{ComplianceContentOptions.ContentPath}/{profile_key}</c> -- the SAME working
+	/// tree <c>content-pull</c> clones into (ADR-0017), read-only from this handler's
+	/// perspective: nothing on the InSpec/scan execution path ever writes into
+	/// <see cref="ComplianceContentOptions.ContentPath"/>, only <c>content-pull</c>/
+	/// <c>content-import</c> execution does, so co-locating both job types' mount in
+	/// one compliance-runner-owned volume (necessarily read-write at the container
+	/// level, since both job types run in this same process) does not weaken that
+	/// boundary -- it is enforced here, not by the mount's ro/rw bit.
+	///
+	/// <paramref name="profileKey"/> null falls back to the legacy fixed
+	/// <see cref="ScanOptions.ProfilePath"/>/<see cref="ScanOptions.NsxProfilePath"/>/
+	/// <see cref="ScanOptions.SrgProfilePath"/> -- a transitional path for a job row
+	/// fanned out before this change (or a future non-portal caller with no profile
+	/// selection), not a second long-term way to scan. Every fan-out through
+	/// <c>RunCreationService.CreateScanRunAsync</c> going forward always supplies
+	/// <see cref="ScanPayload.ProfileKey"/>, so this fallback should see decreasing use.
+	/// </summary>
+	private string ResolveProfilePath(string? profileKey, string legacyFallbackPath) =>
+		profileKey is null ? legacyFallbackPath : Path.Combine(_complianceContentOptions.Value.ContentPath, profileKey);
+
 	/// <summary>Parses Invoke-WaypointScan's returned [pscustomobject] the same way DownloadJobHandler.TryParseOutput reads its own module's result -- the executor's own Succeeded only reflects the transport, not what the function body itself reported.</summary>
 	private static ScanInvocationOutput? TryParseOutput(IReadOnlyList<object?> output)
 	{
@@ -809,10 +842,19 @@ public sealed class ScanJobHandler : IJobHandler
 			throw new ArgumentException("payload requires a GUID string 'target_id' property");
 		}
 
-		return new ScanPayload(targetId);
+		// profile_key (issue #639) is optional on the wire only for backward
+		// compatibility with a job row fanned out before this change (or a future
+		// caller that legitimately has no profile selection yet, e.g. a not-yet-ported
+		// scheduled scan) -- RunCreationService.CreateScanRunAsync always sets it going
+		// forward, having already validated the profile exists at run-creation time.
+		string? profileKey = root.TryGetProperty("profile_key", out JsonElement profileKeyElement) && profileKeyElement.ValueKind == JsonValueKind.String
+			? profileKeyElement.GetString()
+			: null;
+
+		return new ScanPayload(targetId, string.IsNullOrWhiteSpace(profileKey) ? null : profileKey);
 	}
 
-	private sealed record ScanPayload(Guid TargetId);
+	private sealed record ScanPayload(Guid TargetId, string? ProfileKey);
 
 	private sealed record ResolvedCredential(string Username, string Secret, bool SudoEnabled, Action Release);
 

@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Discovery;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Scheduling;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
 using Waypoint.Core.SystemState;
+using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Runs;
@@ -55,6 +58,10 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 	private ScheduleDispatchService _dispatch = null!;
 	private SiteRepository _sites = null!;
 	private TargetRepository _targets = null!;
+	private ProfileRepository _profiles = null!;
+
+	/// <summary>Issue #639: scan schedules now require scope.profile_id -- seeded once per test (like the site/target rows) rather than per scan-schedule test.</summary>
+	private Guid _profileId;
 
 	public ScheduleDispatchServiceTests(PostgresFixture fixture)
 	{
@@ -79,8 +86,14 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 
 		_sites = new SiteRepository(_fixture.ConnectionString);
 		_targets = new TargetRepository(_fixture.ConnectionString);
+		_profiles = new ProfileRepository(_fixture.ConnectionString);
+		await _profiles.ReplaceAllAsync(
+			[new ProfileUpsert("vsphere-schedule-profile", "vSphere Schedule Test Profile", "1.0.0", "invented-commit-schedule", ProfileStates.Current)],
+			CancellationToken.None);
+		_profileId = (await _profiles.ListAsync(CancellationToken.None)).Single().Id;
+
 		RunCreationService runCreation = new(
-			jobs, _sites, _targets,
+			jobs, _sites, _targets, _profiles,
 			runSecrets, Options.Create(new DiscoveryOptions()), Options.Create(new RunSecretOptions()));
 
 		IApplianceStateRepository applianceState = new ApplianceStateRepository(_fixture.ConnectionString);
@@ -155,7 +168,7 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 		Assert.NotNull(targetId);
 
-		string scopeJson = System.Text.Json.JsonSerializer.Serialize(new { site_id = siteId });
+		string scopeJson = System.Text.Json.JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId });
 		Guid id = (await _schedules.CreateAsync(
 			$"sweep-scan-schedid-{Guid.NewGuid():N}", "scan", "* * * * *", scopeJson, null,
 			DateTimeOffset.UtcNow.AddMinutes(-1), "alice", CancellationToken.None))!.Value;
@@ -193,7 +206,7 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 		Assert.NotNull(targetId);
 
-		string scopeJson = System.Text.Json.JsonSerializer.Serialize(new { site_id = siteId });
+		string scopeJson = System.Text.Json.JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId });
 		Guid id = (await _schedules.CreateAsync(
 			$"sweep-scan-e2e-{Guid.NewGuid():N}", "scan", "* * * * *", scopeJson, null,
 			DateTimeOffset.UtcNow.AddMinutes(-1), "bob", CancellationToken.None))!.Value;

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -21,8 +22,10 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Sites;
+using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Sites;
@@ -77,6 +80,14 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 				services.AddSingleton(new SiteRepository(_connectionString));
 				services.AddSingleton(new TargetRepository(_connectionString));
 
+				// Issue #639: RunCreationService.CreateScanRunAsync now resolves
+				// scope.profile_id through IProfileRepository -- same "point the real
+				// repository at the fixture container" pattern as Site/TargetRepository
+				// above, otherwise it resolves against appsettings.json's base connection
+				// string (a different database than the fixture) and every scan-run POST 500s.
+				services.AddSingleton<Waypoint.Core.ComplianceContent.IProfileRepository>(
+					new Waypoint.Infrastructure.ComplianceContent.ProfileRepository(_connectionString));
+
 				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{
 					var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
@@ -97,6 +108,15 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 	private readonly PostgresFixture _fixture;
 	private ScanRunApiFactory _factory = null!;
 	private HttpClient _client = null!;
+	private ProfileRepository _profiles = null!;
+
+	/// <summary>
+	/// Issue #639: every scan run now requires <c>scope.profile_id</c> to reference an
+	/// installed profile, so each test seeds exactly one via <see cref="IProfileRepository.ReplaceAllAsync"/>
+	/// (the same upsert content-pull uses) and reads its surrogate id back through
+	/// <see cref="_profiles"/> rather than duplicating a raw INSERT.
+	/// </summary>
+	private Guid _profileId;
 
 	public ScanRunFanOutTests(PostgresFixture fixture)
 	{
@@ -111,6 +131,12 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 
 		_factory = new ScanRunApiFactory(_fixture.ConnectionString);
 		_client = _factory.CreateClient();
+
+		_profiles = new ProfileRepository(_fixture.ConnectionString);
+		await _profiles.ReplaceAllAsync(
+			[new ProfileUpsert("vsphere-fanout-profile", "vSphere Fan-out Test Profile", "1.0.0", "invented-commit-fanout", ProfileStates.Current)],
+			CancellationToken.None);
+		_profileId = (await _profiles.ListAsync(CancellationToken.None)).Single().Id;
 	}
 
 	public Task DisposeAsync()
@@ -130,7 +156,7 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		Guid vcsa = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
 		Guid ssh = await CreateTargetAsync(siteId, "ssh", "photon-01", """{"host":"photon-01.example.internal"}""");
 
-		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, profile_id = _profileId });
 
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
@@ -183,7 +209,7 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 			Assert.NotNull(id);
 		}
 
-		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, profile_id = _profileId });
 
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
@@ -205,7 +231,7 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		Guid included = await CreateTargetAsync(siteId, "vsphere", "vcsa-included", """{"host":"vcsa-01.example.internal"}""");
 		await CreateTargetAsync(siteId, "nsx-api", "nsx-excluded", """{"host":"nsx-01.example.internal"}""");
 
-		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = new[] { included } });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = new[] { included }, profile_id = _profileId });
 
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
@@ -237,10 +263,34 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 	[Fact]
 	public async Task CreateScanRun_UnknownSiteId_Returns404()
 	{
-		HttpResponseMessage response = await PostRunAsync(new { site_id = Guid.NewGuid() });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = Guid.NewGuid(), profile_id = _profileId });
 
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
+	}
+
+	[Fact]
+	public async Task CreateScanRun_UnknownProfileId_Returns404()
+	{
+		Guid siteId = await CreateSiteAsync("unknown-profile-site");
+		await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, profile_id = Guid.NewGuid() });
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
+	}
+
+	[Fact]
+	public async Task CreateScanRun_MissingProfileId_Returns400()
+	{
+		Guid siteId = await CreateSiteAsync("missing-profile-site");
+		await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
 	}
 
 	[Fact]
@@ -249,7 +299,7 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		Guid siteId = await CreateSiteAsync("bad-target-site");
 		Guid bogus = Guid.NewGuid();
 
-		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = new[] { bogus } });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, target_ids = new[] { bogus }, profile_id = _profileId });
 
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
@@ -266,7 +316,7 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		Guid siteB = await CreateSiteAsync("site-b");
 		Guid targetInB = await CreateTargetAsync(siteB, "vsphere", "vcsa-b", """{"host":"vcsa-b.example.internal"}""");
 
-		HttpResponseMessage response = await PostRunAsync(new { site_id = siteA, target_ids = new[] { targetInB } });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteA, target_ids = new[] { targetInB }, profile_id = _profileId });
 
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 	}
@@ -276,7 +326,7 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 	{
 		Guid siteId = await CreateSiteAsync("empty-site");
 
-		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, profile_id = _profileId });
 
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
@@ -289,7 +339,7 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
 
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs", "Viewer",
-			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId }) });
+			new { run_type = "scan", scope = JsonSerializer.Serialize(new { site_id = siteId, profile_id = _profileId }) });
 
 		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
 	}
@@ -304,7 +354,7 @@ public sealed class ScanRunFanOutTests : IAsyncLifetime
 		await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
 		await CreateTargetAsync(siteId, "vsphere", "vcsa-02", """{"host":"vcsa-02.example.internal"}""");
 
-		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId });
+		HttpResponseMessage response = await PostRunAsync(new { site_id = siteId, profile_id = _profileId });
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
 

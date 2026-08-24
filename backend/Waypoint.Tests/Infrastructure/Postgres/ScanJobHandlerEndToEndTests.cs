@@ -59,6 +59,8 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	private readonly PostgresFixture _fixture;
 	private readonly string _keyDirectory = Directory.CreateTempSubdirectory("wp-scan-key").FullName;
 	private readonly string _artifactDirectory = Directory.CreateTempSubdirectory("wp-scan-artifacts").FullName;
+	/// <summary>Issue #639: stands in for ComplianceContentOptions.ContentPath -- the content-pull working tree ScanJobHandler now resolves a selected profile's directory under.</summary>
+	private readonly string _contentDirectory = Directory.CreateTempSubdirectory("wp-scan-content").FullName;
 	private readonly InPlaySecretRedactor _redactor = new();
 
 	private JobQueueRepository _repository = null!;
@@ -119,6 +121,8 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			AttestationProfile = "invented-vsphere-stig",
 			SafTimeoutSeconds = 30,
 		});
+		IOptions<Waypoint.Core.ComplianceContent.ComplianceContentOptions> complianceContentOptions =
+			Options.Create(new Waypoint.Core.ComplianceContent.ComplianceContentOptions { ContentPath = _contentDirectory });
 
 		// Issue #311: no STIG Manager connection is ever configured in this suite (no
 		// row written to stigman_connections), so ScanUploadCoordinator.UploadAsync
@@ -131,8 +135,8 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			stigman, new StubStigManagerUploadClient(), _secretStore, _repository, _redactor);
 
 		_handler = new ScanJobHandler(
-			executor, _secretStore, _credentials, _targets, _runSecrets, _repository, _redactor, wrappedPsOptions, scanOptions, _configDocs,
-			_attestationSnapshots, uploadCoordinator);
+			executor, _secretStore, _credentials, _targets, _runSecrets, _repository, _redactor, wrappedPsOptions, scanOptions,
+			complianceContentOptions, _configDocs, _attestationSnapshots, uploadCoordinator);
 	}
 
 	public async Task DisposeAsync()
@@ -145,6 +149,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	{
 		Directory.Delete(_keyDirectory, recursive: true);
 		Directory.Delete(_artifactDirectory, recursive: true);
+		Directory.Delete(_contentDirectory, recursive: true);
 	}
 
 	private JobDispatcherHostedService CreateDispatcher()
@@ -200,6 +205,103 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		Assert.True(File.Exists(hdfPath), $"expected HDF report at '{hdfPath}'.");
 
 		await AssertCanaryNeverLeakedAsync(canary, credentialId);
+	}
+
+	/// <summary>
+	/// Issue #639's core fix: a job payload carrying <c>profile_key</c> (set by
+	/// <see cref="Waypoint.Infrastructure.Runs.RunCreationService.CreateScanRunAsync"/>
+	/// after validating the profile is installed) makes the handler resolve
+	/// <c>ComplianceContentOptions.ContentPath/{profile_key}</c> -- the SAME working
+	/// tree <c>content-pull</c> populates -- as the InSpec profile directory, NOT the
+	/// legacy fixed <see cref="ScanOptions.ProfilePath"/>. Proven the same way
+	/// <see cref="SrgTarget_SudoEnabledCredential_PassesSudoThroughToInvocation"/>
+	/// proves sudo passthrough: the stub module echoes its resolved <c>ProfilePath</c>
+	/// parameter onto the Information stream, captured as a job.log event.
+	/// </summary>
+	[Fact]
+	public async Task ScanPayload_WithProfileKey_ResolvesContentStorePath_NotLegacyFixedPath()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-profile-key-canary");
+
+		const string profileKey = "vmware/vsphere/vsphere8-vcenter-stig-baseline";
+		string expectedProfilePath = Path.Combine(_contentDirectory, profileKey);
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId, profile_key = profileKey });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand resolvedQuery = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' AND payload::text LIKE '%' || $2 || '%'", connection);
+		resolvedQuery.Parameters.AddWithValue(jobIds[0]);
+		resolvedQuery.Parameters.AddWithValue(expectedProfilePath);
+		Assert.True(
+			(long)(await resolvedQuery.ExecuteScalarAsync())! >= 1,
+			$"expected the stub's Information line to echo the resolved content-store path '{expectedProfilePath}'.");
+
+		await using NpgsqlCommand legacyQuery = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' AND payload::text LIKE '%/invented/profile/path%'", connection);
+		legacyQuery.Parameters.AddWithValue(jobIds[0]);
+		Assert.Equal(0L, (long)(await legacyQuery.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// The transitional fallback half of issue #639: a job payload with NO
+	/// <c>profile_key</c> (a row fanned out before this change, or any future caller
+	/// that legitimately has none yet) still resolves to the legacy fixed
+	/// <see cref="ScanOptions.ProfilePath"/> rather than failing outright -- see
+	/// <c>ScanJobHandler.ResolveProfilePath</c>'s doc comment.
+	/// </summary>
+	[Fact]
+	public async Task ScanPayload_WithoutProfileKey_FallsBackToLegacyFixedPath()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-no-profile-key-canary");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' AND payload::text LIKE '%/invented/profile/path%'", connection);
+		query.Parameters.AddWithValue(jobIds[0]);
+		Assert.True((long)(await query.ExecuteScalarAsync())! >= 1, "expected the stub's Information line to echo the legacy fixed ProfilePath.");
 	}
 
 	/// <summary>Predecessor constraint: InSpec exit code 100 is a completed scan, not a tool failure.</summary>

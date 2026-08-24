@@ -529,11 +529,14 @@ services:
       WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH: "/powershell/module.transport.nsxapi.ps1"
       WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH: "/powershell/module.common.ps1"
     volumes:
-      # Compliance content (InSpec profiles) - read-only (ADR-0014 §7: "compliance
-      # runner: compliance-content read access"). Operator-provided; a
-      # provisioning UI is future work, so this is a plain named volume an
-      # operator populates directly for now (matches ScanOptions' ProfilePath/
-      # NsxProfilePath/SrgProfilePath defaults, all under this one root).
+      # DEPRECATED (issue #639): compliance-profiles/ScanOptions' fixed ProfilePath/
+      # NsxProfilePath/SrgProfilePath were the ORIGINAL (never actually wired) profile
+      # source -- a scan now resolves its InSpec profile directory under the
+      # compliance-content volume below (the same working tree content-pull
+      # populates), selected per run via scope.profile_id. This mount stays only as
+      # ScanJobHandler's transitional fallback for a job payload with no profile_key
+      # (see that handler's ResolveProfilePath doc comment) -- read-only (ADR-0014 §7).
+      # Remove once nothing legitimately needs the fallback path.
       - compliance-profiles:/opt/waypoint/profiles:ro
       - dev-secrets:/run/secrets:ro
       # Scan artifacts (HDF/CKL) - read-write (ADR-0014 §7: "scan-artifact write

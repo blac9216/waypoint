@@ -83,6 +83,10 @@ const INVENTORY_EMPTY = {
 
 const CREDENTIAL_OPTIONS = [{ id: "cred-1", name: "Alpha vCenter service account" }];
 
+const PROFILE_OPTIONS = [
+	{ id: "profile-1", profile_key: "vmware/vsphere/vsphere8-vcenter-stig-baseline", name: "VMware vSphere 8.0 vCenter STIG", version: "1.1.0" },
+];
+
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(body === undefined ? null : JSON.stringify(body), {
 		status,
@@ -120,6 +124,9 @@ describe("StartScanScreen (issue #284)", () => {
 			}
 			if (url === "/api/v1/credentials" && method === "GET") {
 				return jsonResponse(CREDENTIAL_OPTIONS);
+			}
+			if (url === "/api/v1/profiles" && method === "GET") {
+				return jsonResponse(PROFILE_OPTIONS);
 			}
 			if (url === "/api/v1/runs" && method === "POST") {
 				if (runPostStatus !== 202) {
@@ -168,6 +175,12 @@ describe("StartScanScreen (issue #284)", () => {
 		fireEvent.click(screen.getByText("Next"));
 		await waitFor(() => expect(screen.getByText("Scope — inventory")).toBeInTheDocument());
 		await waitFor(() => expect(screen.queryByText("Loading inventory…")).not.toBeInTheDocument());
+
+		// Issue #639: profile selection lives on the scope step (GET /profiles) and
+		// is required before Confirm can submit — every downstream test flow must
+		// pick one here.
+		await waitFor(() => expect(screen.getByText("VMware vSphere 8.0 vCenter STIG (1.1.0)")).toBeInTheDocument());
+		fireEvent.change(screen.getByRole("combobox"), { target: { value: "profile-1" } });
 	}
 
 	it("walks all five steps with a service credential and lands the run on confirm", async () => {
@@ -197,6 +210,31 @@ describe("StartScanScreen (issue #284)", () => {
 		expect(body.run_type).toBe("scan");
 		expect(body.credential_id).toBe("cred-1");
 		expect(body.credential).toBeUndefined();
+
+		// Issue #639: the chosen profile id travels in scope, not as a top-level field.
+		const scope = JSON.parse(body.scope as string) as { site_id: string; profile_id: string };
+		expect(scope.profile_id).toBe("profile-1");
+	});
+
+	it("Confirm's Start scan button stays disabled until a profile is selected", async () => {
+		installFetchMock("Cyber");
+		await mount();
+
+		fireEvent.click(screen.getByText("Alpha Enclave"));
+		await waitFor(() => expect(screen.getByText("Next")).not.toBeDisabled());
+		fireEvent.click(screen.getByText("Next")); // -> scope
+		await waitFor(() => expect(screen.getByText("Scope — inventory")).toBeInTheDocument());
+		await waitFor(() => expect(screen.getByText("VMware vSphere 8.0 vCenter STIG (1.1.0)")).toBeInTheDocument());
+		// Deliberately no profile selection here.
+
+		fireEvent.click(screen.getByText("Next")); // -> credential
+		await waitFor(() => expect(screen.getByText("Alpha vCenter service account")).toBeInTheDocument());
+		fireEvent.change(screen.getByRole("combobox"), { target: { value: "cred-1" } });
+		fireEvent.click(screen.getByText("Next")); // -> schedule
+		fireEvent.click(screen.getByText("Next")); // -> confirm
+		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+
+		expect(screen.getByText("Start scan")).toBeDisabled();
 	});
 
 	it("scope tree falls back to a target-level checkbox when inventory is empty", async () => {
