@@ -18,7 +18,7 @@ import { TARGET_KINDS } from "./sites";
  * together -- the same convention this file's sibling contracts already use
  * (sites.ts/credentials.ts doc comments naming their backend counterparts).
  */
-const EXPECTED_BACKEND_PURPOSES = ["vsphere-api", "vcsa-ssh", "nsx-api", "srg-ssh"];
+const EXPECTED_BACKEND_PURPOSES: readonly CredentialPurpose[] = ["vsphere-api", "vcsa-ssh", "nsx-api", "srg-ssh"];
 
 describe("CREDENTIAL_PURPOSES (backend Waypoint.Core.Secrets.CredentialPurposes.All parity)", () => {
 	it("has exactly the wire values CredentialPurposes.All defines on the backend", () => {
@@ -44,7 +44,7 @@ describe("CREDENTIAL_PURPOSE_SATISFYING_TYPES", () => {
 	});
 
 	it("gives every purpose at least one satisfying credential type", () => {
-		for (const purpose of EXPECTED_BACKEND_PURPOSES as CredentialPurpose[]) {
+		for (const purpose of EXPECTED_BACKEND_PURPOSES) {
 			expect(CREDENTIAL_PURPOSE_SATISFYING_TYPES[purpose].length).toBeGreaterThan(0);
 		}
 	});
