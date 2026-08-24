@@ -14,6 +14,7 @@
 
 using System.Security.Claims;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Waypoint.Api.Contracts;
@@ -102,10 +103,9 @@ public sealed class ManagedToolController : ControllerBase
 	/// <see cref="ManagedToolOptions.UploadStagingPath"/> with a generated, collision-free
 	/// name (never the client-supplied file name verbatim -- avoids path-traversal or
 	/// overwrite-another-upload surprises) and queues the same <c>tool-install</c> job
-	/// type the local-repository path uses, with <c>source: "upload"</c>. Signature
-	/// verification happens in the job, identically to every other path -- an upload is
-	/// not activated just because an operator has Operator role; it still must carry a
-	/// valid Broadcom signature.
+	/// type the local-repository path uses, with <c>source: "upload"</c>. The operator
+	/// supplies SHA-256 or legacy MD5 copied from the authenticated Broadcom support
+	/// record; the runner verifies every supplied value before activation.
 	/// </summary>
 	[HttpPost("upload")]
 	[RequireOperatorRole]
@@ -121,16 +121,19 @@ public sealed class ManagedToolController : ControllerBase
 	[RequestFormLimits(MultipartBodyLengthLimit = MaxUploadBytes)]
 	[ProducesResponseType(typeof(ManagedToolInstallQueuedResponse), StatusCodes.Status202Accepted)]
 	public async Task<ActionResult<ManagedToolInstallQueuedResponse>> Upload(
-		IFormFile? artifact, IFormFile? signature, [FromForm] string? version, CancellationToken cancellationToken)
+		IFormFile? artifact, [FromForm] string? sha256, [FromForm] string? md5,
+		[FromForm] string? version, CancellationToken cancellationToken)
 	{
 		if (artifact is null || artifact.Length == 0)
 		{
 			throw ApiException.Validation("An 'artifact' file is required.");
 		}
 
-		if (signature is null || signature.Length == 0)
+		sha256 = NormalizeChecksum(sha256, 64, "sha256");
+		md5 = NormalizeChecksum(md5, 32, "md5");
+		if (sha256 is null && md5 is null)
 		{
-			throw ApiException.Validation("A detached 'signature' file is required -- an unsigned upload is never accepted, even before verification runs.");
+			throw ApiException.Validation("A published 'sha256' or legacy 'md5' checksum is required.");
 		}
 
 		ManagedToolOptions options = _options.Value;
@@ -159,7 +162,6 @@ public sealed class ManagedToolController : ControllerBase
 
 		string stagedName = $"{Guid.NewGuid():N}-{Path.GetFileName(artifact.FileName)}";
 		string stagedArtifactPath = Path.Combine(options.UploadStagingPath, stagedName);
-		string stagedSignaturePath = stagedArtifactPath + ".sig";
 
 		try
 		{
@@ -168,10 +170,6 @@ public sealed class ManagedToolController : ControllerBase
 				await artifact.CopyToAsync(artifactStream, cancellationToken).ConfigureAwait(false);
 			}
 
-			await using (FileStream signatureStream = System.IO.File.Create(stagedSignaturePath))
-			{
-				await signature.CopyToAsync(signatureStream, cancellationToken).ConfigureAwait(false);
-			}
 		}
 		catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
 		{
@@ -180,7 +178,7 @@ public sealed class ManagedToolController : ControllerBase
 				"Confirm the tool-upload-staging volume is mounted and writable by the backend service (see deploy/docker-compose.yml and deploy/README.md).");
 		}
 
-		return await QueueInstallAsync(ManagedToolInstallSources.Upload, stagedName, version, cancellationToken).ConfigureAwait(false);
+		return await QueueInstallAsync(ManagedToolInstallSources.Upload, stagedName, version, cancellationToken, sha256, md5).ConfigureAwait(false);
 	}
 
 	/// <summary>
@@ -221,7 +219,8 @@ public sealed class ManagedToolController : ControllerBase
 	}
 
 	private async Task<ActionResult<ManagedToolInstallQueuedResponse>> QueueInstallAsync(
-		string source, string sourcePath, string? version, CancellationToken cancellationToken)
+		string source, string sourcePath, string? version, CancellationToken cancellationToken,
+		string? expectedSha256 = null, string? expectedMd5 = null)
 	{
 		string initiatedBy = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
 
@@ -232,6 +231,8 @@ public sealed class ManagedToolController : ControllerBase
 			source,
 			source_path = sourcePath,
 			version,
+			expected_sha256 = expectedSha256,
+			expected_md5 = expectedMd5,
 			initiated_by = initiatedBy,
 		});
 
@@ -239,5 +240,19 @@ public sealed class ManagedToolController : ControllerBase
 		IReadOnlyList<Guid> jobIds = await _jobs.FanOutJobsAsync(runId, [spec], initiatedBy, cancellationToken).ConfigureAwait(false);
 
 		return Accepted(new ManagedToolInstallQueuedResponse(runId.ToString(), jobIds[0].ToString()));
+	}
+
+	private static string? NormalizeChecksum(string? value, int length, string field)
+	{
+		if (string.IsNullOrWhiteSpace(value))
+		{
+			return null;
+		}
+		string normalized = value.Trim().ToLowerInvariant();
+		if (normalized.Length != length || !Regex.IsMatch(normalized, "\\A[0-9a-f]+\\z", RegexOptions.CultureInvariant))
+		{
+			throw ApiException.Validation($"'{field}' must be exactly {length} hexadecimal characters.");
+		}
+		return normalized;
 	}
 }

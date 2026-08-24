@@ -28,7 +28,7 @@ namespace Waypoint.Tests.Infrastructure.Downloads;
 
 /// <summary>
 /// The <c>tool-install</c> job handler (issue #39): local-repository and upload paths,
-/// signature-gated activation, and append-only ledger recording on every outcome
+/// source-appropriate verification, activation, and append-only ledger recording
 /// (installed, rejected, failed), plus the depot-fetch path's disconnected-mode
 /// refusal and misconfiguration guard (its full connected-mode/decrypt/HTTP behavior
 /// is covered end to end against real Postgres by
@@ -204,19 +204,48 @@ public sealed class ManagedToolInstallJobHandlerTests : IDisposable
 	}
 
 	[Fact]
-	public async Task ValidSignature_UploadSource_Activates()
+	public async Task ValidPublishedSha256_UploadSource_Activates()
 	{
 		File.WriteAllBytes(Path.Combine(_uploadRoot, "staged-abc"), [4, 5, 6]);
-		File.WriteAllBytes(Path.Combine(_uploadRoot, "staged-abc.sig"), [9]);
 
 		FakeManagedToolInstallRepository installs = new();
 		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
 
-		string payload = """{"source":"upload","source_path":"staged-abc","initiated_by":"tester"}""";
+		string payload = """{"source":"upload","source_path":"staged-abc","expected_sha256":"787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472","initiated_by":"tester"}""";
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(payload), CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
 		Assert.Equal(ManagedToolInstallSources.Upload, Assert.Single(installs.Recorded).Source);
+	}
+
+	[Fact]
+	public async Task WrongUploadChecksum_IsRejectedWithoutActivation()
+	{
+		File.WriteAllBytes(Path.Combine(_uploadRoot, "staged-bad"), [4, 5, 6]);
+		FakeManagedToolInstallRepository installs = new();
+		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
+		string payload = """{"source":"upload","source_path":"staged-bad","expected_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","initiated_by":"tester"}""";
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(payload), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("SHA-256 mismatch", outcome.Note, StringComparison.Ordinal);
+		Assert.False(File.Exists(Path.Combine(_toolStateRoot, "vcf-download-tool")));
+		Assert.Equal(ManagedToolInstallOutcomes.Rejected, Assert.Single(installs.Recorded).Outcome);
+	}
+
+	[Fact]
+	public async Task PublishedLegacyMd5_UploadSource_Activates()
+	{
+		File.WriteAllBytes(Path.Combine(_uploadRoot, "staged-md5"), [4, 5, 6]);
+		FakeManagedToolInstallRepository installs = new();
+		ManagedToolInstallJobHandler handler = CreateHandler(new FakeManagedToolSignatureVerifier(true), installs);
+		string payload = """{"source":"upload","source_path":"staged-md5","expected_md5":"b4a3ba90641372b4e4eaa841a5a400ec","initiated_by":"tester"}""";
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(payload), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.Equal(ManagedToolInstallOutcomes.Installed, Assert.Single(installs.Recorded).Outcome);
 	}
 
 	[Fact]

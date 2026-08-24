@@ -37,7 +37,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <summary>
 /// Issue #39 end to end against real Postgres: the <c>/downloads/tool</c> REST surface
 /// -- role gates, that POST install/upload each queue exactly one <c>tool-install</c>
-/// job in its own run, upload staging (artifact + detached signature land in the
+/// job in its own run, upload staging (artifact plus published checksum land in the
 /// staging directory, never directly in the tool-state path), and the install-history
 /// read. Handler dispatch is not started here (same pattern as
 /// <see cref="DownloadsApiTests"/>); the claim-through-activate loop is covered by
@@ -182,15 +182,13 @@ public sealed class ManagedToolApiTests : IAsyncLifetime
 	}
 
 	[Fact]
-	public async Task PostUpload_WithOperatorRole_StagesBothFilesAndQueuesAnUploadSourcedJob()
+	public async Task PostUpload_WithOperatorRole_StagesArtifactAndQueuesChecksummedUploadJob()
 	{
 		using MultipartFormDataContent form = new();
 		ByteArrayContent artifact = new([1, 2, 3, 4]);
 		artifact.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
 		form.Add(artifact, "artifact", "vcf-download-tool");
-		ByteArrayContent signature = new([9, 9]);
-		signature.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-		form.Add(signature, "signature", "vcf-download-tool.sig");
+		form.Add(new StringContent("9F64A747E1B97F131FABB6B447296C9B6F0201E79FB3C5356E6C77E89B6A806A"), "sha256");
 
 		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/tool/upload") { Content = form };
 		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
@@ -201,13 +199,10 @@ public sealed class ManagedToolApiTests : IAsyncLifetime
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		Guid jobId = Guid.Parse(document.RootElement.GetProperty("job_id").GetString()!);
 
-		// Both the artifact and its detached signature were staged (as a generated name
-		// plus that name + ".sig"), and the queued payload points at the staged name
-		// with source "upload".
+		// Only the artifact is staged; the normalized published checksum travels in the
+		// immutable queued payload for the download runner to verify.
 		string[] stagedFiles = Directory.GetFiles(_uploadStagingPath);
-		Assert.Equal(2, stagedFiles.Length);
-		string stagedArtifact = stagedFiles.Single(file => !file.EndsWith(".sig", StringComparison.Ordinal));
-		Assert.Equal(stagedArtifact + ".sig", stagedFiles.Single(file => file.EndsWith(".sig", StringComparison.Ordinal)));
+		string stagedArtifact = Assert.Single(stagedFiles);
 
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
@@ -216,10 +211,11 @@ public sealed class ManagedToolApiTests : IAsyncLifetime
 		string payload = (string)(await payloadQuery.ExecuteScalarAsync())!;
 		Assert.Contains("\"upload\"", payload, StringComparison.Ordinal);
 		Assert.Contains(Path.GetFileName(stagedArtifact), payload, StringComparison.Ordinal);
+		Assert.Contains("9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a", payload, StringComparison.Ordinal);
 	}
 
 	[Fact]
-	public async Task PostUpload_MissingSignature_Returns400()
+	public async Task PostUpload_MissingChecksum_Returns400()
 	{
 		using MultipartFormDataContent form = new();
 		ByteArrayContent artifact = new([1, 2, 3, 4]);
