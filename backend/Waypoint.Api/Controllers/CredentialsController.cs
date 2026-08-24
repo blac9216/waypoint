@@ -256,18 +256,30 @@ public sealed class CredentialsController : ControllerBase
 		return Accepted(new CredentialTestQueuedResponse(runId, jobIds[0]));
 	}
 
+	/// <summary>
+	/// Issue #593: terminal-only history (a completed/aborted run, a job in one of
+	/// <see cref="Waypoint.Core.Jobs.JobTerminalStates"/>) no longer blocks deletion --
+	/// <see cref="CredentialRepository.DeleteAsync"/> snapshots its non-secret
+	/// attribution and detaches it in the same transaction that deletes the
+	/// credential. A live target, a schedule/config binding, or a non-terminal job
+	/// still blocks, and now returns the machine-readable
+	/// <see cref="ErrorDetail.Blockers"/> category/count breakdown (epic #577's
+	/// acceptance criteria) instead of a single opaque 409.
+	/// </summary>
 	[HttpDelete("{id:guid}")]
 	[RequireAdminRole]
 	[ProducesResponseType(StatusCodes.Status204NoContent)]
 	public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
 	{
 		string actor = User.GetRequiredUsername();
-		return await _credentials.DeleteAsync(id, actor, cancellationToken) switch
+		CredentialDeleteResult result = await _credentials.DeleteAsync(id, actor, cancellationToken);
+		return result.Outcome switch
 		{
 			CredentialDeleteOutcome.Deleted => NoContent(),
 			CredentialDeleteOutcome.InUse => throw new ApiException(
 				HttpStatusCode.Conflict, "credential_in_use",
-				"Jobs or runs still reference this credential; their history must be removed before it can be deleted."),
+				"This credential is still referenced by live configuration or active work; it cannot be deleted until those references are removed.",
+				blockers: result.Blockers),
 			_ => throw NotFoundError(id),
 		};
 	}

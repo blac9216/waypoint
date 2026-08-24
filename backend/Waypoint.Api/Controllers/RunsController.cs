@@ -559,7 +559,10 @@ public sealed class RunsController : ControllerBase
 			JobCountRunning: run.JobCountRunning,
 			JobCountCompleted: run.JobCountCompleted,
 			JobCountFailed: run.JobCountFailed,
-			JobCountBlocked: run.JobCountBlocked);
+			JobCountBlocked: run.JobCountBlocked,
+			CredentialName: run.CredentialName,
+			CredentialType: run.CredentialType,
+			CredentialUsername: run.CredentialUsername);
 	}
 
 	/// <summary>
@@ -626,6 +629,9 @@ public sealed class RunsController : ControllerBase
 			AttemptCount: job.AttemptCount,
 			CreatedAt: job.CreatedAt!,
 			StartedAt: job.StartedAt,
-			FinishedAt: job.FinishedAt);
+			FinishedAt: job.FinishedAt,
+			CredentialName: job.CredentialName,
+			CredentialType: job.CredentialType,
+			CredentialUsername: job.CredentialUsername);
 	}
 }

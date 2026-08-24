@@ -36,4 +36,8 @@ public sealed record JobSummary(
 	string? StartedAt,
 	string? FinishedAt,
 	string? UploadStatus = null,
-	string? UploadDetail = null);
+	string? UploadDetail = null,
+	/// <summary>Issue #593 (migration 0041): see <see cref="RunSummary.CredentialName"/> -- same snapshot, job-scoped.</summary>
+	string? CredentialName = null,
+	string? CredentialType = null,
+	string? CredentialUsername = null);

@@ -584,6 +584,51 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.Equal("V-9001", control.ControlId);
 	}
 
+	/// <summary>
+	/// Issue #593 (migration 0041): proves the new runs/jobs credential attribution
+	/// snapshot columns did NOT silently need a new grant -- migration 0025 already
+	/// grants both runner roles whole-table (not column-scoped) SELECT on runs and
+	/// SELECT/UPDATE on jobs, so JobQueueRepository.GetRunAsync/GetJobAsync (which
+	/// now select credential_name/credential_type/credential_username) must keep
+	/// working unchanged as either runner role. Written at authoring time, same
+	/// discipline as <see cref="ComplianceRunnerRole_CapacityPoolProtocol_FullLifecycleWithoutPermissionDenied"/>'s
+	/// doc comment -- this migration's own header claims no grant change was needed;
+	/// this is what proves that claim rather than asserting it in a comment only.
+	/// </summary>
+	[Theory]
+	[InlineData("waypoint_compliance_runner")]
+	[InlineData("waypoint_download_runner")]
+	public async Task RunnerRole_ReadsCredentialAttributionSnapshotColumns_WithoutPermissionDenied(string role)
+	{
+		Guid runId = await SeedRunAsync();
+		Guid jobId = await SeedJobAsync(runId);
+
+		await using (NpgsqlConnection owner = new(_fixture.ConnectionString))
+		{
+			await owner.OpenAsync();
+			await using NpgsqlCommand snapshotRun = new(
+				"UPDATE runs SET credential_name = 'role-grant-drift-cred', credential_type = 'token', credential_username = 'svc@example.internal' WHERE id = $1", owner);
+			snapshotRun.Parameters.AddWithValue(runId);
+			await snapshotRun.ExecuteNonQueryAsync();
+
+			await using NpgsqlCommand snapshotJob = new(
+				"UPDATE jobs SET credential_name = 'role-grant-drift-cred', credential_type = 'token', credential_username = 'svc@example.internal' WHERE id = $1", owner);
+			snapshotJob.Parameters.AddWithValue(jobId);
+			await snapshotJob.ExecuteNonQueryAsync();
+		}
+
+		string connectionString = role == "waypoint_compliance_runner" ? _complianceRunnerConnectionString : _downloadRunnerConnectionString;
+		JobQueueRepository runnerRepository = new(connectionString, NullLogger<JobQueueRepository>.Instance);
+
+		RunSummary? run = await runnerRepository.GetRunAsync(runId, CancellationToken.None);
+		Assert.NotNull(run);
+		Assert.Equal("role-grant-drift-cred", run!.CredentialName);
+
+		JobSummary? job = await runnerRepository.GetJobAsync(jobId, CancellationToken.None);
+		Assert.NotNull(job);
+		Assert.Equal("svc@example.internal", job!.CredentialUsername);
+	}
+
 	private async Task ResetCapacityTablesAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

@@ -13,6 +13,7 @@ import { clearStepUpRetry, consumeStepUpRetry, stashStepUpRetry } from "../../li
 import {
 	createCredential,
 	deleteCredential,
+	describeCredentialInUse,
 	fetchCredentials,
 	updateCredential,
 	type Credential,
@@ -229,6 +230,11 @@ export function useCredentialForms(): UseCredentialFormsResult {
 
 	const doDelete = useCallback(
 		async (id: string, name: string) => {
+			// Issue #593: completed run/job history is no longer a reason deletion
+			// is refused (the API detaches it), so the confirmation no longer warns
+			// about erasing history -- only an actual 409 (live config/active work)
+			// does, and with accurate, category-specific guidance (see the catch
+			// block below).
 			if (!window.confirm(`Delete credential "${name}"? This cannot be undone.`)) {
 				return;
 			}
@@ -238,7 +244,7 @@ export function useCredentialForms(): UseCredentialFormsResult {
 				load();
 			} catch (err) {
 				if (err instanceof ApiError && err.code === "credential_in_use") {
-					setFormError(`"${name}" is still referenced by jobs or runs and cannot be deleted until that history is removed.`);
+					setFormError(describeCredentialInUse(name, err.blockers));
 				} else {
 					setFormError(err instanceof ApiError ? err.message : "Could not delete the credential.");
 				}

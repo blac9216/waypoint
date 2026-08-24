@@ -13,17 +13,26 @@
  *   (lib/events.ts) per the contract's explicit "not polling" rule.
  */
 
+/** One machine-readable reason a `409`'s request is blocked, plus how many rows are responsible — `Waypoint.Core.Errors.BlockingCategory` on the wire (issue #593). `category` is a stable, per-endpoint closed set (e.g. credential deletion's `targets`/`schedules`/`configuration`/`active_jobs`); never free text. */
+export interface ApiErrorBlocker {
+	category: string;
+	count: number;
+}
+
 export class ApiError extends Error {
 	code: string;
 	detail?: unknown;
 	status: number;
+	/** Issue #593: optional structured breakdown for a `409` with more than one enumerable blocking category — undefined for every other error and for a single-cause `409`. See `ApiErrorBlocker`. */
+	blockers?: ApiErrorBlocker[];
 
-	constructor(status: number, code: string, message: string, detail?: unknown) {
+	constructor(status: number, code: string, message: string, detail?: unknown, blockers?: ApiErrorBlocker[]) {
 		super(message);
 		this.name = "ApiError";
 		this.status = status;
 		this.code = code;
 		this.detail = detail;
+		this.blockers = blockers;
 	}
 }
 
@@ -96,19 +105,21 @@ async function parseErrorBody(response: Response): Promise<ApiError> {
 	let code = "unknown_error";
 	let message = `Request failed with status ${response.status}`;
 	let detail: unknown;
+	let blockers: ApiErrorBlocker[] | undefined;
 	try {
 		const body = await response.json();
 		if (body && typeof body === "object" && "error" in body) {
-			const envelope = (body as { error?: { code?: string; message?: string; detail?: unknown } }).error;
+			const envelope = (body as { error?: { code?: string; message?: string; detail?: unknown; blockers?: ApiErrorBlocker[] } }).error;
 			code = envelope?.code ?? code;
 			message = envelope?.message ?? message;
 			detail = envelope?.detail;
+			blockers = envelope?.blockers;
 		}
 	} catch {
 		// Non-JSON error body (e.g. an nginx-level 502) — fall back to the status text.
 		message = response.statusText || message;
 	}
-	return new ApiError(response.status, code, message, detail);
+	return new ApiError(response.status, code, message, detail, blockers);
 }
 
 function timeoutError(timeoutMs: number | undefined, cause?: unknown): ApiError {
