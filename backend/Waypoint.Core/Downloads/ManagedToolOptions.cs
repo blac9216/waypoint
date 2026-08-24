@@ -51,7 +51,7 @@ public sealed class ManagedToolOptions
 	/// depot share): this is wherever the operator has staged the vcf-download-tool
 	/// distribution and Broadcom's signed product-version catalog for offline install.
 	/// </summary>
-	public string LocalRepositoryPath { get; set; } = "/vcf";
+	public string LocalRepositoryPath { get; set; } = "/vcf/tool";
 
 	/// <summary>Catalog path, relative to <see cref="LocalRepositoryPath"/>.</summary>
 	public string ProductVersionCatalogPath { get; set; } = "PROD/metadata/productVersionCatalog/v1/productVersionCatalog.json";
