@@ -79,13 +79,44 @@ export interface EphemeralCredentialInput {
 	secret: string;
 }
 
+/**
+ * Issue #587 (epic #582): one saved-credential override for a specific
+ * (target, purpose) pair — mirrors `RunCredentialOverrideRequest` (PR #663).
+ */
+export interface CredentialOverrideInput {
+	target_id: string;
+	purpose: string;
+	credential_id: string;
+}
+
+/**
+ * Issue #587 (epic #582): one inline ad hoc credential for a specific
+ * (target, purpose) pair — mirrors `RunAdHocCredentialRequest` (PR #666).
+ * Never logged, never echoed; the wizard clears the `username`/`secret`
+ * fields from its own component state immediately after a successful POST.
+ */
+export interface AdHocCredentialInput {
+	target_id: string;
+	purpose: string;
+	username: string;
+	secret: string;
+}
+
 export interface CreateScanRunInput {
 	scope: ScanScope;
-	/** Stored service credential id — mutually exclusive with `credential`. */
+	/** Stored service credential id — mutually exclusive with `credential`.
+	 * Legacy run-level tier (issue #587 retired it from the wizard's default
+	 * path; still accepted by the backend for API compatibility). */
 	credential_id?: string;
 	/** Ad hoc "my credentials" — mutually exclusive with `credential_id`,
-	 * Operator+ (server-enforced; see RunsController.ValidateEphemeralCredentialRequest). */
+	 * Operator+ (server-enforced; see RunsController.ValidateEphemeralCredentialRequest).
+	 * Legacy run-level tier (issue #587 retired it from the wizard's default
+	 * path; still accepted by the backend for API compatibility). */
 	credential?: EphemeralCredentialInput;
+	/** Issue #587: per-target/per-purpose saved-credential overrides. */
+	credential_overrides?: CredentialOverrideInput[];
+	/** Issue #587: per-target/per-purpose ad hoc credential overrides. */
+	ad_hoc_credentials?: AdHocCredentialInput[];
 }
 
 export interface RunCreatedResponse {
@@ -98,6 +129,8 @@ export function createScanRun(input: CreateScanRunInput): Promise<RunCreatedResp
 		scope: JSON.stringify(input.scope),
 		credential_id: input.credential_id || undefined,
 		credential: input.credential,
+		credential_overrides: input.credential_overrides && input.credential_overrides.length > 0 ? input.credential_overrides : undefined,
+		ad_hoc_credentials: input.ad_hoc_credentials && input.ad_hoc_credentials.length > 0 ? input.ad_hoc_credentials : undefined,
 	});
 }
 

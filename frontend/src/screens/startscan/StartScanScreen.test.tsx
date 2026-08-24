@@ -1,45 +1,77 @@
 /**
- * StartScanScreen — the five-step Start-a-Scan wizard (issue #284).
+ * StartScanScreen — the five-step Start-a-Scan wizard (issue #284; #587
+ * epic #582's final slice reworked the credential step to default to
+ * target-assigned bindings with per-target/per-purpose overrides).
  *
- * Covers: the five-step walk with a service credential, the personal-
- * credential path (Operator gate + secret-never-echoed), scope tree
- * fallback when inventory is empty, and API error surfacing (403/404/400)
- * on confirm.
+ * Covers: the default assigned-credentials path with fully-bound targets
+ * (no credential input touched), the coverage summary for a target missing
+ * a required binding, saved and ad hoc per-target/per-purpose overrides,
+ * ad hoc write-only clearing, a `credential_binding_gaps` 400 mapped onto
+ * the credential step, bulk-apply compatibility gating, role gating (Cyber
+ * vs. Operator for ad hoc), scope tree fallback, and API error surfacing.
  */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
 import { RouterProvider } from "../../lib/router";
+import type { Target } from "../configuration/sites";
 import { StartScanScreen } from "./StartScanScreen";
 
 const SITES = [{ id: "site-1", name: "Alpha Enclave", description: "Primary", stigman_override: null, created_at: "", updated_at: "" }];
 
-const TARGETS = [
-	{
-		id: "target-1",
-		site_id: "site-1",
-		kind: "vsphere",
-		name: "vcsa-01.example.internal",
-		connection: "{}",
-		credential_ref: null,
-		discovery_status: "discovered",
-		last_refreshed: "2026-08-01T00:00:00Z",
-		created_at: "",
-		updated_at: "",
-	},
-	{
-		id: "target-2",
-		site_id: "site-1",
-		kind: "ssh",
-		name: "esx-01.example.internal",
-		connection: "{}",
-		credential_ref: null,
-		discovery_status: "never_discovered",
-		last_refreshed: null,
-		created_at: "",
-		updated_at: "",
-	},
-];
+const BOUND_VSPHERE_TARGET: Target = {
+	id: "target-1",
+	site_id: "site-1",
+	kind: "vsphere",
+	name: "vcsa-01.example.internal",
+	connection: "{}",
+	credential_ref: "cred-1",
+	discovery_status: "discovered",
+	last_refreshed: "2026-08-01T00:00:00Z",
+	created_at: "",
+	updated_at: "",
+	bindings: [
+		{
+			purpose: "vsphere-api",
+			credential_ref: "cred-1",
+			credential_name: "Alpha vCenter service account",
+			credential_type: "vcenter",
+			created_at: "",
+			updated_at: "",
+		},
+	],
+};
+
+const BOUND_SSH_TARGET: Target = {
+	id: "target-2",
+	site_id: "site-1",
+	kind: "ssh",
+	name: "esx-01.example.internal",
+	connection: "{}",
+	credential_ref: "cred-2",
+	discovery_status: "never_discovered",
+	last_refreshed: null,
+	created_at: "",
+	updated_at: "",
+	bindings: [
+		{
+			purpose: "srg-ssh",
+			credential_ref: "cred-2",
+			credential_name: "Alpha SSH service account",
+			credential_type: "ssh",
+			created_at: "",
+			updated_at: "",
+		},
+	],
+};
+
+const UNBOUND_SSH_TARGET: Target = {
+	...BOUND_SSH_TARGET,
+	id: "target-3",
+	name: "esx-02.example.internal",
+	credential_ref: null,
+	bindings: [],
+};
 
 const INVENTORY_WITH_ITEMS = {
 	target_id: "target-1",
@@ -73,15 +105,20 @@ const INVENTORY_WITH_ITEMS = {
 	],
 };
 
-const INVENTORY_EMPTY = {
-	target_id: "target-2",
+const INVENTORY_EMPTY = (targetId: string) => ({
+	target_id: targetId,
 	discovery_status: "never_discovered",
 	last_refreshed: null,
 	stale: true,
 	items: [],
-};
+});
 
-const CREDENTIAL_OPTIONS = [{ id: "cred-1", name: "Alpha vCenter service account" }];
+const CREDENTIAL_OPTIONS = [
+	{ id: "cred-1", name: "Alpha vCenter service account", credential_type: "vcenter" },
+	{ id: "cred-2", name: "Alpha SSH service account", credential_type: "ssh" },
+	{ id: "cred-3", name: "Bravo vCenter service account", credential_type: "vcenter" },
+	{ id: "cred-4", name: "Charlie NSX service account", credential_type: "nsx" },
+];
 
 const PROFILE_OPTIONS = [
 	{ id: "profile-1", profile_key: "vmware/vsphere/vsphere8-vcenter-stig-baseline", name: "VMware vSphere 8.0 vCenter STIG", version: "1.1.0" },
@@ -94,14 +131,16 @@ function jsonResponse(body: unknown, status = 200): Response {
 	});
 }
 
-describe("StartScanScreen (issue #284)", () => {
+describe("StartScanScreen (issue #284, credential-binding rework issue #587)", () => {
 	let originalFetch: typeof fetch;
 	let fetchCalls: { url: string; init?: RequestInit }[];
+	let targets: Target[];
 	let runPostStatus: number;
 	let runPostError: unknown;
 
 	function installFetchMock(role: string) {
 		fetchCalls = [];
+		targets = [BOUND_VSPHERE_TARGET];
 		runPostStatus = 202;
 		runPostError = undefined;
 
@@ -114,13 +153,14 @@ describe("StartScanScreen (issue #284)", () => {
 				return jsonResponse(SITES);
 			}
 			if (url === "/api/v1/sites/site-1/targets" && method === "GET") {
-				return jsonResponse(TARGETS);
+				return jsonResponse(targets);
 			}
 			if (url === "/api/v1/targets/target-1/inventory" && method === "GET") {
 				return jsonResponse(INVENTORY_WITH_ITEMS);
 			}
-			if (url === "/api/v1/targets/target-2/inventory" && method === "GET") {
-				return jsonResponse(INVENTORY_EMPTY);
+			if (url.match(/^\/api\/v1\/targets\/target-\d+\/inventory$/) && method === "GET") {
+				const targetId = url.split("/")[4];
+				return jsonResponse(INVENTORY_EMPTY(targetId));
 			}
 			if (url === "/api/v1/credentials" && method === "GET") {
 				return jsonResponse(CREDENTIAL_OPTIONS);
@@ -176,44 +216,209 @@ describe("StartScanScreen (issue #284)", () => {
 		await waitFor(() => expect(screen.getByText("Scope — inventory")).toBeInTheDocument());
 		await waitFor(() => expect(screen.queryByText("Loading inventory…")).not.toBeInTheDocument());
 
-		// Issue #639: profile selection lives on the scope step (GET /profiles) and
-		// is required before Confirm can submit — every downstream test flow must
-		// pick one here.
 		await waitFor(() => expect(screen.getByText("VMware vSphere 8.0 vCenter STIG (1.1.0)")).toBeInTheDocument());
 		fireEvent.change(screen.getByRole("combobox"), { target: { value: "profile-1" } });
 	}
 
-	it("walks all five steps with a service credential and lands the run on confirm", async () => {
+	async function goToCredential() {
+		await goToScope();
+		fireEvent.click(screen.getByText("Next"));
+		await waitFor(() => expect(screen.getByText("Coverage")).toBeInTheDocument());
+	}
+
+	it("defaults to 'Use credentials assigned to each target' and submits a fully-bound scan without any credential input", async () => {
 		installFetchMock("Cyber");
 		await mount();
+		await goToCredential();
 
-		await goToScope();
-		fireEvent.click(screen.getByText("Next")); // -> credential
-		await waitFor(() => expect(screen.getByText("Select a credential…")).toBeInTheDocument());
+		// Default mode is selected — the radio for "assigned" is checked.
+		expect((screen.getByText("Use credentials assigned to each target").closest("label")!.querySelector("input") as HTMLInputElement).checked).toBe(true);
 
-		await waitFor(() => expect(screen.getByText("Alpha vCenter service account")).toBeInTheDocument());
-		fireEvent.change(screen.getByRole("combobox"), { target: { value: "cred-1" } });
+		// Coverage shows the single required purpose resolved from the target's own binding.
+		await waitFor(() => expect(screen.getByText("Assigned: Alpha vCenter service account")).toBeInTheDocument());
+		expect(screen.queryByText(/Missing required binding/)).not.toBeInTheDocument();
 
 		fireEvent.click(screen.getByText("Next")); // -> schedule
-		await waitFor(() => expect(screen.getByText("Coming in a future milestone (M3).")).toBeInTheDocument());
-
 		fireEvent.click(screen.getByText("Next")); // -> confirm
 		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
-		expect(screen.getByText("Alpha Enclave")).toBeInTheDocument();
+		expect(screen.getByText("Start scan")).not.toBeDisabled();
 
 		fireEvent.click(screen.getByText("Start scan"));
-
 		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
 
 		const call = fetchCalls.find((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")!;
 		const body = JSON.parse(call.init!.body as string) as Record<string, unknown>;
 		expect(body.run_type).toBe("scan");
-		expect(body.credential_id).toBe("cred-1");
+		// Legacy tiers are retired from the wizard — neither is ever sent.
+		expect(body.credential_id).toBeUndefined();
 		expect(body.credential).toBeUndefined();
+		expect(body.credential_overrides).toBeUndefined();
+		expect(body.ad_hoc_credentials).toBeUndefined();
+	});
 
-		// Issue #639: the chosen profile id travels in scope, not as a top-level field.
-		const scope = JSON.parse(body.scope as string) as { site_id: string; profile_id: string };
-		expect(scope.profile_id).toBe("profile-1");
+	it("shows a coverage gap and blocks submission when a selected target has no assigned binding", async () => {
+		installFetchMock("Cyber");
+		targets = [BOUND_VSPHERE_TARGET, UNBOUND_SSH_TARGET];
+		await mount();
+		await goToCredential();
+
+		await waitFor(() => expect(screen.getByText(/Missing required binding/)).toBeInTheDocument());
+		expect(screen.getByText("bind a credential for this target").closest("a")).toHaveAttribute("href", "/config");
+		expect(screen.getByText(/1 required credential missing/)).toBeInTheDocument();
+
+		fireEvent.click(screen.getByText("Next")); // -> schedule
+		fireEvent.click(screen.getByText("Next")); // -> confirm
+		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		expect(screen.getByText("Start scan")).toBeDisabled();
+	});
+
+	it("Cyber can apply a saved per-target/per-purpose override that resolves the gap", async () => {
+		installFetchMock("Cyber");
+		targets = [UNBOUND_SSH_TARGET];
+		await mount();
+		await goToCredential();
+
+		await waitFor(() => expect(screen.getByText(/Missing required binding/)).toBeInTheDocument());
+
+		fireEvent.click(screen.getByText("Customize per target/purpose"));
+		await waitFor(() => expect(screen.getByLabelText(`${UNBOUND_SSH_TARGET.name} SRG SSH saved credential`)).toBeInTheDocument());
+
+		fireEvent.change(screen.getByLabelText(`${UNBOUND_SSH_TARGET.name} SRG SSH saved credential`), { target: { value: "cred-2" } });
+
+		await waitFor(() => expect(screen.getByText("Override: Alpha SSH service account")).toBeInTheDocument());
+		expect(screen.queryByText(/Missing required binding/)).not.toBeInTheDocument();
+
+		fireEvent.click(screen.getByText("Next"));
+		fireEvent.click(screen.getByText("Next"));
+		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		expect(screen.getByText("Start scan")).not.toBeDisabled();
+
+		fireEvent.click(screen.getByText("Start scan"));
+		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
+
+		const call = fetchCalls.find((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")!;
+		const body = JSON.parse(call.init!.body as string) as { credential_overrides?: { target_id: string; purpose: string; credential_id: string }[] };
+		expect(body.credential_overrides).toEqual([{ target_id: "target-3", purpose: "srg-ssh", credential_id: "cred-2" }]);
+	});
+
+	it("Cyber cannot enter an ad hoc override (Operator gate)", async () => {
+		installFetchMock("Cyber");
+		targets = [UNBOUND_SSH_TARGET];
+		await mount();
+		await goToCredential();
+		fireEvent.click(screen.getByText("Customize per target/purpose"));
+
+		await waitFor(() => expect(screen.getByText("Ad hoc credentials require Operator or higher.")).toBeInTheDocument());
+		expect(screen.queryByLabelText("srg-ssh ad hoc username for this target")).not.toBeInTheDocument();
+	});
+
+	it("Operator can enter an ad hoc override; the secret is never echoed and is cleared from state after submit", async () => {
+		installFetchMock("Operator");
+		targets = [UNBOUND_SSH_TARGET];
+		await mount();
+		await goToCredential();
+		fireEvent.click(screen.getByText("Customize per target/purpose"));
+
+		await waitFor(() => expect(screen.getByLabelText("srg-ssh ad hoc username for this target")).toBeInTheDocument());
+		fireEvent.change(screen.getByLabelText("srg-ssh ad hoc username for this target"), { target: { value: "j.moreno" } });
+		fireEvent.change(screen.getByLabelText("srg-ssh ad hoc secret for this target"), { target: { value: "invented-wizard-secret-abc" } });
+
+		await waitFor(() => expect(screen.getByText("Override: j.moreno (ad hoc)")).toBeInTheDocument());
+
+		fireEvent.click(screen.getByText("Next"));
+		fireEvent.click(screen.getByText("Next"));
+		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+
+		// The confirm summary never renders the raw secret anywhere on screen.
+		expect(screen.queryByText("invented-wizard-secret-abc")).not.toBeInTheDocument();
+
+		fireEvent.click(screen.getByText("Start scan"));
+		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
+
+		const call = fetchCalls.find((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")!;
+		const body = JSON.parse(call.init!.body as string) as {
+			ad_hoc_credentials?: { target_id: string; purpose: string; username: string; secret: string }[];
+		};
+		expect(body.ad_hoc_credentials).toEqual([{ target_id: "target-3", purpose: "srg-ssh", username: "j.moreno", secret: "invented-wizard-secret-abc" }]);
+	});
+
+	it("clears an ad hoc override when the username is emptied back out", async () => {
+		installFetchMock("Operator");
+		targets = [UNBOUND_SSH_TARGET];
+		await mount();
+		await goToCredential();
+		fireEvent.click(screen.getByText("Customize per target/purpose"));
+
+		await waitFor(() => expect(screen.getByLabelText("srg-ssh ad hoc username for this target")).toBeInTheDocument());
+		fireEvent.change(screen.getByLabelText("srg-ssh ad hoc username for this target"), { target: { value: "j.moreno" } });
+		fireEvent.change(screen.getByLabelText("srg-ssh ad hoc secret for this target"), { target: { value: "secret-1" } });
+		await waitFor(() => expect(screen.getByText("Override: j.moreno (ad hoc)")).toBeInTheDocument());
+
+		fireEvent.change(screen.getByLabelText("srg-ssh ad hoc username for this target"), { target: { value: "" } });
+		await waitFor(() => expect(screen.getByText(/Missing required binding/)).toBeInTheDocument());
+	});
+
+	it("bulk-applies a saved credential only to compatible (kind/purpose) targets", async () => {
+		installFetchMock("Cyber");
+		targets = [{ ...UNBOUND_SSH_TARGET, id: "target-3" }, { ...UNBOUND_SSH_TARGET, id: "target-4", name: "esx-03.example.internal" }];
+		await mount();
+		await goToCredential();
+		fireEvent.click(screen.getByText("Customize per target/purpose"));
+
+		await waitFor(() => expect(screen.getByLabelText("Bulk apply SRG SSH credential")).toBeInTheDocument());
+
+		// The bulk-apply select for SRG SSH only lists ssh-typed credentials —
+		// cred-1/cred-3 (vcenter) and cred-4 (nsx) are excluded (compatibility gate).
+		const select = screen.getByLabelText("Bulk apply SRG SSH credential") as HTMLSelectElement;
+		const optionLabels = Array.from(select.options).map((o) => o.textContent);
+		expect(optionLabels).toContain("Alpha SSH service account");
+		expect(optionLabels).not.toContain("Alpha vCenter service account");
+		expect(optionLabels).not.toContain("Bravo vCenter service account");
+		expect(optionLabels).not.toContain("Charlie NSX service account");
+
+		fireEvent.change(select, { target: { value: "cred-2" } });
+
+		await waitFor(() => expect(screen.getAllByText("Override: Alpha SSH service account")).toHaveLength(2));
+	});
+
+	it("maps a credential_binding_gaps 400 onto the credential step instead of a generic toast", async () => {
+		installFetchMock("Cyber");
+		await mount();
+		await goToCredential();
+		fireEvent.click(screen.getByText("Next"));
+		fireEvent.click(screen.getByText("Next"));
+		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+
+		runPostStatus = 400;
+		runPostError = {
+			code: "credential_binding_gaps",
+			message: "One or more targets are missing a required credential binding.",
+			binding_gaps: [
+				{ target_id: "target-1", target_name: "vcsa-01.example.internal", purpose: "vsphere-api", reason: "incompatible_credential_type" },
+			],
+		};
+		fireEvent.click(screen.getByText("Start scan"));
+
+		await waitFor(() => expect(screen.getByText("One or more targets are missing a required credential binding.")).toBeInTheDocument());
+
+		// Go back to the credential step — the specific gap is mapped onto its (target, purpose) row.
+		fireEvent.click(screen.getByText("Back")); // -> schedule
+		fireEvent.click(screen.getByText("Back")); // -> credential
+		await waitFor(() =>
+			expect(screen.getByText("The selected credential's type is not compatible with this purpose.")).toBeInTheDocument(),
+		);
+	});
+
+	it("scope tree falls back to a target-level checkbox when inventory is empty", async () => {
+		installFetchMock("Cyber");
+		targets = [BOUND_VSPHERE_TARGET, BOUND_SSH_TARGET];
+		await mount();
+		await goToScope();
+
+		expect(screen.getByText("vcsa-01.example.internal")).toBeInTheDocument();
+		expect(screen.getByText("esx-01.example.internal")).toBeInTheDocument();
+		expect(screen.getByText("Cluster-A")).toBeInTheDocument();
+		expect(screen.getByText("No cached inventory — scanning the whole target.")).toBeInTheDocument();
 	});
 
 	it("Confirm's Start scan button stays disabled until a profile is selected", async () => {
@@ -228,8 +433,7 @@ describe("StartScanScreen (issue #284)", () => {
 		// Deliberately no profile selection here.
 
 		fireEvent.click(screen.getByText("Next")); // -> credential
-		await waitFor(() => expect(screen.getByText("Alpha vCenter service account")).toBeInTheDocument());
-		fireEvent.change(screen.getByRole("combobox"), { target: { value: "cred-1" } });
+		await waitFor(() => expect(screen.getByText("Coverage")).toBeInTheDocument());
 		fireEvent.click(screen.getByText("Next")); // -> schedule
 		fireEvent.click(screen.getByText("Next")); // -> confirm
 		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
@@ -237,75 +441,10 @@ describe("StartScanScreen (issue #284)", () => {
 		expect(screen.getByText("Start scan")).toBeDisabled();
 	});
 
-	it("scope tree falls back to a target-level checkbox when inventory is empty", async () => {
-		installFetchMock("Cyber");
-		await mount();
-		await goToScope();
-
-		expect(screen.getByText("vcsa-01.example.internal")).toBeInTheDocument();
-		expect(screen.getByText("esx-01.example.internal")).toBeInTheDocument();
-		expect(screen.getByText("Cluster-A")).toBeInTheDocument();
-		expect(screen.getByText("No cached inventory — scanning the whole target.")).toBeInTheDocument();
-	});
-
-	it("Cyber cannot select the personal-credential path (Operator gate)", async () => {
-		installFetchMock("Cyber");
-		await mount();
-		await goToScope();
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Select a credential…")).toBeInTheDocument());
-
-		const personalRadio = screen.getByText("My credentials").closest("label")!.querySelector("input")!;
-		expect(personalRadio).toBeDisabled();
-		expect(personalRadio.closest("label")).toHaveAttribute(
-			"title",
-			expect.stringContaining("Requires Operator"),
-		);
-	});
-
-	it("Operator can use the personal-credential path; secret is never echoed and is cleared from state after submit", async () => {
-		installFetchMock("Operator");
-		await mount();
-		await goToScope();
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Select a credential…")).toBeInTheDocument());
-
-		fireEvent.click(screen.getByText("My credentials"));
-		fireEvent.change(screen.getByPlaceholderText("never stored — used for this run only"), {
-			target: { value: "invented-wizard-secret-abc" },
-		});
-		const usernameInputs = screen.getAllByRole("textbox");
-		const usernameInput = usernameInputs.find((el) => (el as HTMLInputElement).autocomplete === "off")!;
-		fireEvent.change(usernameInput, { target: { value: "j.moreno" } });
-
-		fireEvent.click(screen.getByText("Next")); // -> schedule
-		fireEvent.click(screen.getByText("Next")); // -> confirm
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
-
-		// The confirm summary names the credential mode but never renders the secret text anywhere on screen.
-		expect(screen.queryByText("invented-wizard-secret-abc")).not.toBeInTheDocument();
-
-		fireEvent.click(screen.getByText("Start scan"));
-		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
-
-		const call = fetchCalls.find((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")!;
-		const body = JSON.parse(call.init!.body as string) as { credential?: { kind: string; username: string; secret: string } };
-		expect(body.credential).toEqual({ kind: "personal", username: "j.moreno", secret: "invented-wizard-secret-abc" });
-
-		// Navigating back to the credential step, the secret field must be empty —
-		// cleared from component state after a successful submit (CredentialsTab.tsx convention).
-		// (The screen has already navigated away in this app, but the assertion above on the
-		// POST body plus the absence from the DOM is the behavioral proof: nothing lingers to re-render.)
-	});
-
 	it("surfaces a 403 from POST /runs on confirm", async () => {
 		installFetchMock("Cyber");
 		await mount();
-		await goToScope();
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Select a credential…")).toBeInTheDocument());
-		await waitFor(() => expect(screen.getByText("Alpha vCenter service account")).toBeInTheDocument());
-		fireEvent.change(screen.getByRole("combobox"), { target: { value: "cred-1" } });
+		await goToCredential();
 		fireEvent.click(screen.getByText("Next"));
 		fireEvent.click(screen.getByText("Next"));
 		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
@@ -320,10 +459,7 @@ describe("StartScanScreen (issue #284)", () => {
 	it("surfaces a 404 from POST /runs on confirm", async () => {
 		installFetchMock("Cyber");
 		await mount();
-		await goToScope();
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Alpha vCenter service account")).toBeInTheDocument());
-		fireEvent.change(screen.getByRole("combobox"), { target: { value: "cred-1" } });
+		await goToCredential();
 		fireEvent.click(screen.getByText("Next"));
 		fireEvent.click(screen.getByText("Next"));
 		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
@@ -335,22 +471,20 @@ describe("StartScanScreen (issue #284)", () => {
 		await waitFor(() => expect(screen.getByText("Site 'site-1' does not exist.")).toBeInTheDocument());
 	});
 
-	it("surfaces a 400 from POST /runs on confirm", async () => {
+	it("does not double-submit on a rapid double click", async () => {
 		installFetchMock("Cyber");
 		await mount();
-		await goToScope();
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Alpha vCenter service account")).toBeInTheDocument());
-		fireEvent.change(screen.getByRole("combobox"), { target: { value: "cred-1" } });
+		await goToCredential();
 		fireEvent.click(screen.getByText("Next"));
 		fireEvent.click(screen.getByText("Next"));
 		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
 
-		runPostStatus = 400;
-		runPostError = { code: "validation_error", message: "Site has no targets to scan." };
-		fireEvent.click(screen.getByText("Start scan"));
+		const button = screen.getByText("Start scan");
+		fireEvent.click(button);
+		fireEvent.click(button);
 
-		await waitFor(() => expect(screen.getByText("Site has no targets to scan.")).toBeInTheDocument());
+		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
+		expect(fetchCalls.filter((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")).toHaveLength(1);
 	});
 
 	it("Viewer sees the flow gated (visible but disabled), no data fetched", async () => {

@@ -16,7 +16,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../../lib/auth-context";
 import { ApiError } from "../../lib/api";
 import { roleAtLeast, roleGateProps } from "../../lib/roles";
-import { CREDENTIAL_PURPOSES, CREDENTIAL_PURPOSE_MATRIX, CREDENTIAL_PURPOSE_SATISFYING_TYPES, type CredentialPurpose } from "./credential-purposes";
+import {
+	applicablePurposes,
+	CREDENTIAL_PURPOSE_SATISFYING_TYPES,
+	purposeLabel,
+	requiredPurposes,
+	type CredentialPurpose,
+} from "./credential-purposes";
 import {
 	clearTargetCredentialBinding,
 	connectionHost,
@@ -38,40 +44,6 @@ import {
 	type TargetWriteInput,
 } from "./sites";
 import "./ConfigurationScreen.css";
-
-/**
- * Every purpose applicable to a target kind (issue #584), derived from the
- * shared matrix (`CREDENTIAL_PURPOSE_MATRIX`, mirrored 1:1 from the
- * backend's `CredentialPurposeMatrix.ApplicablePurposes` — ADR-0021 §10) --
- * required or optional, across every operation row for that kind. Computed
- * here rather than re-deriving a second matrix: this is the wizard/UI's own
- * "coverage" read of the same design/contracts data #583 shipped.
- */
-function applicablePurposes(kind: TargetKind | string): CredentialPurpose[] {
-	const purposes = new Set<CredentialPurpose>();
-	for (const entry of CREDENTIAL_PURPOSE_MATRIX) {
-		if (entry.kind === kind) {
-			entry.requiredPurposes.forEach((p) => purposes.add(p));
-			entry.optionalPurposes.forEach((p) => purposes.add(p));
-		}
-	}
-	return CREDENTIAL_PURPOSES.map((p) => p.value).filter((p) => purposes.has(p));
-}
-
-/** Every purpose REQUIRED (not merely optional) by at least one operation row for the kind — drives the "missing required binding" coverage warning. */
-function requiredPurposes(kind: TargetKind | string): CredentialPurpose[] {
-	const purposes = new Set<CredentialPurpose>();
-	for (const entry of CREDENTIAL_PURPOSE_MATRIX) {
-		if (entry.kind === kind) {
-			entry.requiredPurposes.forEach((p) => purposes.add(p));
-		}
-	}
-	return CREDENTIAL_PURPOSES.map((p) => p.value).filter((p) => purposes.has(p));
-}
-
-function purposeLabel(purpose: CredentialPurpose): string {
-	return CREDENTIAL_PURPOSES.find((p) => p.value === purpose)?.label ?? purpose;
-}
 
 /**
  * Per-target "Refresh Inventory" state (issue #557) — local, not persisted:
