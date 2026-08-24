@@ -140,8 +140,8 @@ public sealed class CredentialRepository
 	}
 
 	/// <summary>
-	/// The single credential of a well-known type (e.g. the depot token --
-	/// <see cref="Waypoint.Core.Catalog.CatalogOptions.DepotTokenCredentialType"/>) that
+	/// The single credential of a well-known type (e.g. the depot Activation Code --
+	/// <see cref="Waypoint.Core.Catalog.CatalogOptions.DepotActivationCodeCredentialType"/>) that
 	/// a job type resolves by type rather than by an id carried on the job row. Returns
 	/// null when none is configured; ambiguous when more than one row shares the type
 	/// (oldest wins, deterministic rather than arbitrary -- an operator who created a

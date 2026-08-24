@@ -15,17 +15,29 @@
 namespace Waypoint.Core.Secrets;
 
 /// <summary>
-/// The closed set of credential types (docs/domain-model.md "Credential", plus
-/// <see cref="DepotToken"/>). Migration 0022 (issue #252) adds a DB CHECK mirroring
-/// this set -- same split <c>Waypoint.Core.Sites.TargetKinds</c>/<c>targets.kind</c>
-/// uses: API-layer validation here in <c>CredentialsController</c>, backed by a DB
-/// CHECK for defense-in-depth. <see cref="DepotToken"/> is not one of
-/// domain-model.md's four user-facing connection types -- it is the single
-/// well-known row <c>CatalogIndexJobHandler</c> resolves via
-/// <c>FindByTypeAsync(CatalogOptions.DepotTokenCredentialType)</c> to authenticate
-/// catalog-index runs to the Broadcom depot (docs/roadmap.md), so it belongs in the
-/// closed set even though it isn't created through the same connection-credential UI
-/// flow as the other four.
+/// The closed set of credential types (docs/domain-model.md "Credential", plus the
+/// Broadcom depot types). Migration 0022 (issue #252) added a DB CHECK mirroring this
+/// set; migration 0047 (issue #690) extends it with <see cref="DepotActivationCode"/>
+/// and <see cref="LegacyDownloadToken"/> -- same split
+/// <c>Waypoint.Core.Sites.TargetKinds</c>/<c>targets.kind</c> uses: API-layer
+/// validation here in <c>CredentialsController</c>, backed by a DB CHECK for
+/// defense-in-depth. None of the three depot types is one of domain-model.md's four
+/// user-facing connection types -- they are well-known rows resolved by type, not
+/// created through the same connection-credential UI flow as the other four.
+///
+/// <see cref="DepotActivationCode"/> and <see cref="LegacyDownloadToken"/> (issue
+/// #690, epic #667) are the two non-interchangeable VCF 9.1 credentials the sibling
+/// <c>vcf-docker-download</c> reference provisions separately
+/// (<c>softwareDepotActivationCode.txt</c> vs <c>downloadToken.txt</c>): the
+/// Activation Code authenticates <c>vcf-download-tool</c> metadata/binary commands
+/// (<c>--depot-download-activation-code-file</c>); the legacy Download Token is
+/// substituted into <c>dl.broadcom.com</c> URL templates for UMDS/older flows and
+/// cannot replace an Activation Code. <see cref="DepotToken"/> is RETAINED (not
+/// removed) as an explicit legacy alias for any pre-#690 row that predates this
+/// split -- it is never silently reclassified as either new type (no code path
+/// decrypts a <see cref="DepotToken"/> row for either new purpose); an operator must
+/// re-enter/reclassify it, or it stays visible as a deprecated, non-authenticating
+/// row (see <c>DownloadsController.GetReadiness</c> and <c>DepotTokensTab.tsx</c>).
 /// </summary>
 public static class CredentialTypes
 {
@@ -33,9 +45,17 @@ public static class CredentialTypes
 	public const string Nsx = "nsx";
 	public const string Ssh = "ssh";
 	public const string Token = "token";
+
+	/// <summary>Deprecated (issue #690): the pre-split well-known type. Retained only so existing rows keep a valid, visibly-legacy classification -- never created going forward (excluded from <c>CredentialsController</c>'s creatable set the same way it always was) and never resolved by any purpose-specific handler.</summary>
 	public const string DepotToken = "depot-token";
 
-	public static readonly IReadOnlyCollection<string> All = [VCenter, Nsx, Ssh, Token, DepotToken];
+	/// <summary>VCF 9.1 Software Depot Activation Code (issue #690): authenticates <c>vcf-download-tool</c> metadata/binary commands. Paired to a Software Depot ID (issue #691's enrollment flow); never interchangeable with <see cref="LegacyDownloadToken"/>.</summary>
+	public const string DepotActivationCode = "depot-activation-code";
+
+	/// <summary>Legacy Broadcom Download Token (issue #690): substituted into <c>dl.broadcom.com</c> URL templates for UMDS/older VCF download workflows. Cannot authenticate VCF 9.1 <c>vcf-download-tool</c> commands.</summary>
+	public const string LegacyDownloadToken = "legacy-download-token";
+
+	public static readonly IReadOnlyCollection<string> All = [VCenter, Nsx, Ssh, Token, DepotToken, DepotActivationCode, LegacyDownloadToken];
 
 	public static bool IsValid(string? credentialType) => credentialType is not null && All.Contains(credentialType);
 }

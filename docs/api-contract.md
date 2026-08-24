@@ -251,7 +251,7 @@ work once one exists.
 | `/catalog/sync` | POST | 202 → `catalog-index` job. |
 | `/downloads` | GET, POST | POST: artifact ids → queued `download` jobs (Operator+). Queue view: rate, ETA, retries. |
 | `/downloads/{id}` | DELETE | Cancel. |
-| `/downloads/readiness` | GET | Issue #560: combined depot-token health + managed-tool-installed state (Viewer+). `tool_installed` is `null` until a download-runner has heartbeated at least once. |
+| `/downloads/readiness` | GET | Issue #560, extended by #690: combined Activation Code health + legacy Download Token health (reported independently; the legacy token never gates readiness) + managed-tool-installed state (Viewer+). `tool_installed` is `null` until a download-runner has heartbeated at least once. |
 
 ### Library & content library
 | Endpoint | Methods | Notes |

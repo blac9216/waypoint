@@ -630,9 +630,74 @@ PLACEHOLDER_MARKERS = (
 	"dev-only", "dev_only", "fake", "your-", "<", "todo", "invented",
 )
 
+# This repo's closed-set credential *type* strings (the RHS of the well-known
+# type constants in Waypoint.Core/Secrets/CredentialTypes-style declarations —
+# `DepotActivationCode = "depot-activation-code"`, etc.). These are fixed
+# domain vocabulary that this codebase names in source on purpose; they are the
+# NAME of a credential kind, never a credential's secret value. The
+# depot-keyword regex necessarily fires on such a declaration (the keyword
+# "activation-code" sits next to a quoted `"depot-activation-code"`), so those
+# lines are structural false positives.
+#
+# Kept as an EXACT closed set, not a substring/prefix rule: a real leak whose
+# value merely CONTAINED one of these words (e.g. a token that happened to end
+# in "-depot-token") must still fail. Membership is exact-match only, so the
+# suppression cannot be widened by an attacker appending real secret material.
+KNOWN_CREDENTIAL_TYPE_LITERALS = frozenset({
+	"depot-token",
+	"depot-activation-code",
+	"legacy-download-token",
+	"entitlement-id",
+	"support-contract",
+	"broadcom-token",
+})
+
+# A bare program identifier: one unbroken run of ASCII letters with NO digits
+# and NONE of the `+ / = _ -` separators that base64/opaque-token material
+# carries. `useDepotActivationCode`, `UseDepotTokenResult` and similar
+# camelCase/PascalCase names match; a real depot activation code or download
+# token does not, because Broadcom's are alphanumeric blobs that carry digits
+# (and often `-`/`=`) for entropy — the property `_looks_like_code_identifier`
+# leans on below and the negative tests pin.
+_CODE_IDENTIFIER_RE = re.compile(r"^[A-Za-z]+$")
+
+
+def _looks_like_code_identifier(value: str) -> bool:
+	"""True if `value` is a multi-word camelCase/PascalCase code identifier.
+
+	NARROW BY CONSTRUCTION — this is a security gate and must not be blunted:
+
+	  * all-alphabetic only (`_CODE_IDENTIFIER_RE`): a digit or any of
+	    `+ / = _ -` in the value takes it straight back to the flagged path,
+	    which is why a genuine `activationCode=<real-looking-secret>` (real
+	    tokens carry digits/symbols) STILL fails. Pinned by
+	    test_a_real_looking_secret_after_the_keyword_still_fails.
+	  * a lower->upper case transition somewhere inside it, so the value is a
+	    concatenation of words (a code identifier) rather than a single opaque
+	    lowercase or uppercase run. A single word is left to the flagged path.
+
+	It does NOT look at length or entropy — those are fuzzy thresholds a real
+	secret can be tuned to slip under. The structural "no digits, no token
+	separators, camelCase words" shape is what distinguishes a source-level
+	identifier reference from secret material.
+	"""
+	if not _CODE_IDENTIFIER_RE.match(value):
+		return False
+	return any(a.islower() and b.isupper() for a, b in zip(value, value[1:]))
+
 
 def is_placeholder_token(value: str) -> bool:
 	lowered = value.lower()
+	if lowered in KNOWN_CREDENTIAL_TYPE_LITERALS:
+		# The keyword-adjacent "value" is one of this repo's own credential-TYPE
+		# strings, i.e. the name of a credential kind declared in source, not a
+		# secret. See KNOWN_CREDENTIAL_TYPE_LITERALS.
+		return True
+	if _looks_like_code_identifier(value):
+		# A bare camelCase/PascalCase identifier (a variable/type/hook name),
+		# not secret material. See _looks_like_code_identifier for why this
+		# cannot swallow a real token.
+		return True
 	return any(marker in lowered for marker in PLACEHOLDER_MARKERS)
 
 

@@ -18,7 +18,6 @@ using Waypoint.Core.Catalog;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.PowerShell;
-using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.PowerShell;
 
 namespace Waypoint.Infrastructure.Catalog;
@@ -32,57 +31,46 @@ namespace Waypoint.Infrastructure.Catalog;
 /// Unlike <see cref="Waypoint.Infrastructure.PowerShell.PowerShellJobHandler"/>, this
 /// handler is not payload-driven -- <c>POST /catalog/sync</c> fans the job out with an
 /// empty <c>{}</c> payload (see <c>CatalogController.Sync</c>), so everything this
-/// handler needs (the depot path, which credential holds the depot token, which
-/// PowerShell function to invoke) is either configuration
-/// (<see cref="CatalogOptions"/>) or resolved at execution time, not carried on the
-/// job row.
+/// handler needs (the depot path, which PowerShell function to invoke) is either
+/// configuration (<see cref="CatalogOptions"/>) or resolved at execution time, not
+/// carried on the job row.
 ///
-/// Depot token flow (security.md controls 1/2, reusing the epic #6/#8 canary
-/// machinery): <see cref="ICredentialSecretStore.DecryptAsync"/> returns a
-/// <see cref="DecryptedSecret"/> that has already registered the value with the
-/// redactor (holding the handle IS being redacted); the value is passed to
-/// <c>Invoke-WaypointCatalogIndex</c> as a bound <see cref="PowerShellRequest.Parameters"/>
-/// entry -- never interpolated into command/script text, never logged, never placed on
-/// argv. The handle is disposed (ending the in-play window) as soon as the PowerShell
-/// invocation returns, in a <c>finally</c>, whether it succeeded or not.
+/// Issue #690 AC: local catalog re-index resolves and decrypts NO credential at all.
+/// The offline indexing walk (<c>Invoke-WaypointCatalogIndex</c> -&gt;
+/// <c>Get-FileManifest</c>, docs/domain-model.md open question 4) is a pure
+/// filesystem read of files already present on the offline depot share -- it never
+/// authenticated to anything, so there is no purpose-specific credential (Activation
+/// Code or legacy Download Token) for this handler to declare or consume. The
+/// PowerShell module's <c>-DepotToken</c> parameter is left unbound here (it stays
+/// optional on the module signature for forward compatibility with a future
+/// vendor-catalog-refresh addition that would consume it -- see the module's own doc
+/// comment).
 /// </summary>
 public sealed class CatalogIndexJobHandler : IJobHandler
 {
 	private const string InvocationCommand = "Invoke-WaypointCatalogIndex";
 
 	private readonly IPowerShellExecutor _executor;
-	private readonly ICredentialSecretStore _secrets;
-	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
 	private readonly IDepotArtifactRepository _artifacts;
-	private readonly IJobRunnerRepository _jobs;
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<CatalogOptions> _catalogOptions;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
 
 	public CatalogIndexJobHandler(
 		IPowerShellExecutor executor,
-		ICredentialSecretStore secrets,
-		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
 		IDepotArtifactRepository artifacts,
-		IJobRunnerRepository jobs,
 		ISecretRedactor redactor,
 		IOptions<CatalogOptions> catalogOptions,
 		IOptions<PowerShellOptions> powerShellOptions)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
-		ArgumentNullException.ThrowIfNull(secrets);
-		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(artifacts);
-		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(redactor);
 		ArgumentNullException.ThrowIfNull(catalogOptions);
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
 
 		_executor = executor;
-		_secrets = secrets;
-		_credentials = credentials;
 		_artifacts = artifacts;
-		_jobs = jobs;
 		_redactor = redactor;
 		_catalogOptions = catalogOptions;
 		_powerShellOptions = powerShellOptions;
@@ -95,59 +83,20 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(context);
 
 		CatalogOptions options = _catalogOptions.Value;
-		string actor = await ResolveActorAsync(context.Job.RunId, cancellationToken).ConfigureAwait(false);
 
-		CredentialResponse? depotTokenCredential = await _credentials
-			.FindByTypeAsync(options.DepotTokenCredentialType, cancellationToken)
-			.ConfigureAwait(false);
-		if (depotTokenCredential is null)
+		Dictionary<string, object?> parameters = new(StringComparer.Ordinal)
 		{
-			return JobExecutionOutcome.Failed(
-				$"No credential of type '{options.DepotTokenCredentialType}' is configured for the depot token.");
-		}
+			["DepotPath"] = options.DepotPath,
+		};
 
-		PowerShellExecutionResult result;
-		DecryptedSecret? decrypted = null;
-		try
-		{
-			// security.md control 4 / #8's fail-closed decrypt audit: this call writes
-			// the secret.decrypted audit row (credential, job, run, actor, timestamp)
-			// in the same transaction as the ciphertext read, before any plaintext
-			// reaches this method -- attribution is durable even if this handler
-			// crashes on the next line.
-			decrypted = await _secrets
-				.DecryptAsync(depotTokenCredential.Id, actor, context.Job.Id, context.Job.RunId, cancellationToken)
-				.ConfigureAwait(false);
+		PowerShellRequest request = new(
+			InvocationCommand,
+			PowerShellRequestKind.Command,
+			parameters,
+			context.Job.Id,
+			context.Job.RunId);
 
-			Dictionary<string, object?> parameters = new(StringComparer.Ordinal)
-			{
-				["DepotPath"] = options.DepotPath,
-				["DepotToken"] = decrypted.Value,
-			};
-
-			PowerShellRequest request = new(
-				InvocationCommand,
-				PowerShellRequestKind.Command,
-				parameters,
-				context.Job.Id,
-				context.Job.RunId);
-
-			result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
-		}
-		catch (CredentialSecretNotFoundException exception)
-		{
-			return JobExecutionOutcome.Failed($"Depot token credential has no stored secret: {exception.Message}");
-		}
-		catch (MasterKeyUnavailableException exception)
-		{
-			return JobExecutionOutcome.Failed($"Depot token could not be decrypted: {exception.Message}");
-		}
-		finally
-		{
-			// Ends the in-play redaction window as soon as the invocation is done --
-			// the value must not still be "in play" once this method has returned.
-			decrypted?.Dispose();
-		}
+		PowerShellExecutionResult result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
 
 		if (!result.Succeeded)
 		{
@@ -249,22 +198,5 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 		where T : class
 	{
 		return psObject.Properties[name]?.Value as T;
-	}
-
-	/// <summary>
-	/// Attribution for the decrypt audit row (security.md control 4): the run's
-	/// initiator when recorded (issue #208's derive-from-identity pattern), falling
-	/// back to a fixed system marker for a scheduled/unattributed run so the audit row
-	/// is never written with a null/empty actor.
-	/// </summary>
-	private async Task<string> ResolveActorAsync(Guid? runId, CancellationToken cancellationToken)
-	{
-		if (runId is null)
-		{
-			return "system";
-		}
-
-		RunQueueState? state = await _jobs.GetRunQueueStateAsync(runId.Value, cancellationToken).ConfigureAwait(false);
-		return string.IsNullOrWhiteSpace(state?.InitiatedBy) ? "system" : state!.InitiatedBy!;
 	}
 }

@@ -162,17 +162,21 @@ describe("sites.ts data layer", () => {
 		expect(options).toEqual([{ id: "cred-1", name: "Alpha vCenter", credential_type: "vcenter" }]);
 	});
 
-	it("fetchCredentialOptions excludes depot-token credentials (issue #571/#560 AC)", async () => {
+	it("fetchCredentialOptions excludes every Broadcom depot credential type, including the two issue #690 split types (issue #571/#560 AC)", async () => {
 		globalThis.fetch = vi.fn(async () =>
 			jsonResponse([
 				{ id: "cred-1", name: "Alpha vCenter", credential_type: "vcenter" },
-				{ id: "cred-2", name: "Broadcom Support Portal", credential_type: "depot-token" },
+				{ id: "cred-2", name: "Broadcom Support Portal (legacy)", credential_type: "depot-token" },
+				{ id: "cred-3", name: "VCF 9.1 Activation Code", credential_type: "depot-activation-code" },
+				{ id: "cred-4", name: "UMDS Download Token", credential_type: "legacy-download-token" },
 			]),
 		) as unknown as typeof fetch;
 
 		const options = await fetchCredentialOptions();
 		expect(options).toEqual([{ id: "cred-1", name: "Alpha vCenter", credential_type: "vcenter" }]);
-		expect(options.some((o) => o.name === "Broadcom Support Portal")).toBe(false);
+		expect(options.some((o) => o.name === "Broadcom Support Portal (legacy)")).toBe(false);
+		expect(options.some((o) => o.name === "VCF 9.1 Activation Code")).toBe(false);
+		expect(options.some((o) => o.name === "UMDS Download Token")).toBe(false);
 	});
 
 	it("queueDiscover issues POST /targets/{id}/discover with no body", async () => {

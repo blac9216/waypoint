@@ -1784,6 +1784,94 @@ class LegitimateConventionTests(unittest.TestCase):
 		self.assertEqual(scanner.scan_text("f.md", "depot_token: abc123"), [])
 
 
+class DepotIdentifierFalsePositiveTests(unittest.TestCase):
+	"""The depot detector must not fire on credential-TYPE vocabulary or on
+
+	bare code identifiers, but must STILL fire on real secret material sitting
+	after the same keyword (PR #722 finding #1). The three exact source-line
+	shapes below are the real false positives the round-1 review reproduced;
+	they are pinned verbatim so a regression in the suppression re-breaks the
+	sanitize hard gate here first, and the negative proof (a real-looking
+	secret still caught) is required alongside them so the suppression can
+	never be widened into a bypass.
+	"""
+
+	def test_credential_type_literal_declaration_is_not_flagged(self) -> None:
+		"""`DepotActivationCode = "depot-activation-code"` (CredentialDtos.cs:53).
+
+		The captured "value" is one of this repo's own credential-TYPE strings,
+		not a secret.
+		"""
+		line = 'public const string DepotActivationCode = "depot-activation-code";'
+		self.assertEqual(scanner.scan_text("CredentialDtos.cs", line), [])
+
+	def test_camelcase_hook_call_identifier_is_not_flagged(self) -> None:
+		"""`const activationCode = useDepotActivationCode()` (DepotTokensTab.tsx:72)."""
+		line = "const activationCode = useDepotActivationCode();"
+		self.assertEqual(scanner.scan_text("DepotTokensTab.tsx", line), [])
+
+	def test_pascalcase_type_reference_identifier_is_not_flagged(self) -> None:
+		"""`depotToken: UseDepotTokenResult;` (DepotTokensTab.tsx:169)."""
+		line = "\tdepotToken: UseDepotTokenResult;"
+		self.assertEqual(scanner.scan_text("DepotTokensTab.tsx", line), [])
+
+	def test_every_known_credential_type_literal_is_suppressed(self) -> None:
+		"""Each closed-set type string, next to the keyword, is not a finding."""
+		for literal in scanner.KNOWN_CREDENTIAL_TYPE_LITERALS:
+			with self.subTest(literal=literal):
+				self.assertEqual(
+					scanner.scan_text("f.cs", f'Type = "{literal}"'), []
+				)
+
+	# --- Negative proof: the suppression must NOT blunt the gate -----------
+
+	def test_a_real_looking_secret_after_the_keyword_still_fails(self) -> None:
+		"""`activationCode=<real-looking-secret>` MUST still be flagged.
+
+		A genuine token carries digits (and often `+ / = -`), so it is neither a
+		known type literal nor an all-alphabetic camelCase identifier — it takes
+		the flagged path exactly as before. This is the required negative proof:
+		the exception excludes identifiers, never secret material.
+		"""
+		secret = opaque_token()
+		findings = scanner.scan_text("f.ts", f"const activationCode = {secret};")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn("possible depot/entitlement token", findings[0])
+		self.assertNotIn(secret, findings[0])
+
+	def test_identifier_shape_with_a_digit_still_fails(self) -> None:
+		"""A single digit disqualifies the identifier suppression.
+
+		Guards the boundary: the moment token-shaped material (a digit) appears,
+		the value is no longer a bare code identifier and must be flagged, so a
+		secret cannot masquerade as `useV2TokenAbc...` to slip through.
+		"""
+		value = "useDepotTokenValue0" + "abcdef0123456789"
+		findings = scanner.scan_text("f.ts", f"depot_token = {value}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn("possible depot/entitlement token", findings[0])
+
+	def test_base64_material_after_keyword_is_not_treated_as_identifier(self) -> None:
+		"""`+ / =` separators are token material, never identifier characters."""
+		value = "SGVsbG8gd29ybGQK+/=abcdefgh"
+		findings = scanner.scan_text("f.ts", f"activation_code = {value}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn("possible depot/entitlement token", findings[0])
+
+	def test_a_type_literal_with_appended_secret_still_fails(self) -> None:
+		"""Membership is EXACT: `depot-activation-code`+secret is not the literal.
+
+		Proves the closed-set check cannot be widened by appending real secret
+		material to a known type string. The value is placed after the keyword's
+		own `:` so the detector fires and the suppression is the only thing that
+		could (wrongly) waive it.
+		"""
+		value = "depot-activation-code" + opaque_token()
+		findings = scanner.scan_text("f.cs", f"activation_code: {value}")
+		self.assertEqual(len(findings), 1, findings)
+		self.assertIn("possible depot/entitlement token", findings[0])
+
+
 class VersionStringTests(unittest.TestCase):
 	"""Four-part product versions are not IP addresses (issue #89)."""
 

@@ -32,6 +32,13 @@
 	font-size: 11px;
 }
 
+.depot-tab__deprecated-badge {
+	color: var(--warn);
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+}
+
 .depot-tab__expiry-unknown {
 	color: var(--txt3);
 	font-family: var(--mono);

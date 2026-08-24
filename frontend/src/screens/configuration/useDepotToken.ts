@@ -1,21 +1,27 @@
 /**
- * Depot-token credential lifecycle for the Config → Depot & Tokens tab (issue
- * #571, completing #560's frontend half). Deliberately reuses
- * credentials.ts's generic create/update/delete/test functions rather than a
- * parallel depot-specific REST surface — the backend has exactly one
- * `depot-token` credential type (`CredentialTypes.DepotToken`,
- * `CatalogOptions.DepotTokenCredentialType`), resolved by
+ * Depot credential lifecycle for the Config → Depot & Tokens tab (issue #571,
+ * completing #560's frontend half; issue #690 splits the single depot-token
+ * concept into two independent, non-interchangeable credentials). Deliberately
+ * reuses credentials.ts's generic create/update/delete/test functions rather
+ * than a parallel depot-specific REST surface — the backend has exactly one
+ * well-known credential row per depot type (`CredentialTypes.DepotActivationCode`
+ * / `CredentialTypes.LegacyDownloadToken`), resolved by
  * `CredentialRepository.FindByTypeAsync` server-side, so this hook's job is
  * only to find that one row (if any) among `GET /credentials`'s full list and
- * present create-vs-replace accordingly.
+ * present create-vs-replace accordingly. `useDepotActivationCode` and
+ * `useLegacyDownloadToken` are thin, independently-typed wrappers around one
+ * shared factory (`useDepotCredential`) parameterized by credential_type — the
+ * two credentials share this lifecycle shape exactly but must never be
+ * conflated (issue #690 AC: cross-purpose values are never selected).
  *
- * Step-up: a depot-token replace is a secret-overwrite PUT exactly like any
- * other credential edit, so it goes through the same
+ * Step-up: a replace is a secret-overwrite PUT exactly like any other
+ * credential edit, so it goes through the same
  * `stashStepUpRetry`/`consumeStepUpRetry` machinery as
- * `useCredentialForms.ts`, under its own retry `kind` so an unrelated pending
- * credential-edit retry is never misapplied to the depot token or vice versa.
- * The plaintext secret is never stashed, matching that hook's Finding-1
- * fix — the operator re-enters it after the re-auth redirect.
+ * `useCredentialForms.ts`, under its own retry `kind` per credential type so
+ * an unrelated pending credential-edit retry (or the other depot credential's
+ * retry) is never misapplied. The plaintext secret is never stashed, matching
+ * that hook's Finding-1 fix — the operator re-enters it after the re-auth
+ * redirect.
  *
  * Test: identical SSE-follow contract to `useCredentialTest.ts` (`202 +
  * {run_id, job_id}`, followed via `lib/events.ts` to a terminal `job.state`,
@@ -27,11 +33,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError } from "../../lib/api";
 import { useAuth } from "../../lib/auth-context";
 import { clearStepUpRetry, consumeStepUpRetry, stashStepUpRetry } from "../../lib/stepUpRetry";
-import { createCredential, fetchCredentials, updateCredential, type Credential } from "./credentials";
+import { createCredential, fetchCredentials, updateCredential, type Credential, type CredentialType } from "./credentials";
 import { useCredentialTest } from "./useCredentialTest";
-
-const DEPOT_TOKEN_TYPE = "depot-token";
-const STEP_UP_RETRY_KIND = "depot-token-replace";
 
 export interface DepotTokenFormState {
 	name: string;
@@ -69,7 +72,14 @@ export interface UseDepotTokenResult {
 	doTest: () => Promise<void>;
 }
 
-export function useDepotToken(): UseDepotTokenResult {
+/**
+ * Shared factory (issue #690): `credentialType` pins which of the two closed,
+ * non-interchangeable depot credential rows this instance finds/creates/tests
+ * — a caller can never accidentally cross the two, since each hook instance
+ * is bound to exactly one `credential_type` for its whole lifetime.
+ */
+function useDepotCredential(credentialType: CredentialType, notFoundLabel: string): UseDepotTokenResult {
+	const stepUpRetryKind = `${credentialType}-replace`;
 	const { stepUpOidcLogin } = useAuth();
 	const [credentials, setCredentials] = useState<Credential[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -80,16 +90,16 @@ export function useDepotToken(): UseDepotTokenResult {
 	const [saving, setSaving] = useState(false);
 	const [formError, setFormError] = useState<string | null>(null);
 
-	const credential = useMemo(() => credentials.find((c) => c.credential_type === DEPOT_TOKEN_TYPE) ?? null, [credentials]);
+	const credential = useMemo(() => credentials.find((c) => c.credential_type === credentialType) ?? null, [credentials, credentialType]);
 
 	const load = useCallback(() => {
 		setLoading(true);
 		setLoadError(null);
 		fetchCredentials()
 			.then(setCredentials)
-			.catch((err: unknown) => setLoadError(err instanceof ApiError ? err.message : "Could not load the depot-token credential."))
+			.catch((err: unknown) => setLoadError(err instanceof ApiError ? err.message : `Could not load the ${notFoundLabel} credential.`))
 			.finally(() => setLoading(false));
-	}, []);
+	}, [notFoundLabel]);
 
 	useEffect(() => {
 		load();
@@ -98,7 +108,7 @@ export function useDepotToken(): UseDepotTokenResult {
 	// Resume a replace that 403'd step_up_required before the OIDC redirect —
 	// mirrors useCredentialForms.ts's identical mount-effect resume.
 	useEffect(() => {
-		const pending = consumeStepUpRetry<DepotTokenRetryPayload>(STEP_UP_RETRY_KIND);
+		const pending = consumeStepUpRetry<DepotTokenRetryPayload>(stepUpRetryKind);
 		if (!pending) {
 			return;
 		}
@@ -114,7 +124,7 @@ export function useDepotToken(): UseDepotTokenResult {
 			if (credential) {
 				await updateCredential(credential.id, {
 					name: form.name,
-					credential_type: DEPOT_TOKEN_TYPE as never,
+					credential_type: credentialType,
 					username: form.username,
 					sudo_enabled: false,
 					secret: form.secret,
@@ -122,7 +132,7 @@ export function useDepotToken(): UseDepotTokenResult {
 			} else {
 				await createCredential({
 					name: form.name,
-					credential_type: DEPOT_TOKEN_TYPE as never,
+					credential_type: credentialType,
 					username: form.username,
 					sudo_enabled: false,
 					secret: form.secret,
@@ -134,7 +144,7 @@ export function useDepotToken(): UseDepotTokenResult {
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 403 && err.code === "step_up_required") {
 				const { secret: _secret, ...formWithoutSecret } = form;
-				stashStepUpRetry<DepotTokenRetryPayload>({ kind: STEP_UP_RETRY_KIND, payload: formWithoutSecret });
+				stashStepUpRetry<DepotTokenRetryPayload>({ kind: stepUpRetryKind, payload: formWithoutSecret });
 				setSaving(false);
 				try {
 					await stepUpOidcLogin();
@@ -144,11 +154,11 @@ export function useDepotToken(): UseDepotTokenResult {
 				}
 				return;
 			}
-			setFormError(err instanceof ApiError ? err.message : "Could not save the depot-token credential.");
+			setFormError(err instanceof ApiError ? err.message : `Could not save the ${notFoundLabel} credential.`);
 		} finally {
 			setSaving(false);
 		}
-	}, [credential, form, load, stepUpOidcLogin]);
+	}, [credential, credentialType, form, load, notFoundLabel, stepUpOidcLogin, stepUpRetryKind]);
 
 	const { testing: testingIds, testMessage: rowTestMessage, doTest: doTestById } = useCredentialTest(setCredentials);
 
@@ -178,6 +188,16 @@ export function useDepotToken(): UseDepotTokenResult {
 		testMessage: testMessage ? { succeeded: testMessage.succeeded, message: testMessage.message } : null,
 		doTest,
 	};
+}
+
+/** VCF 9.1 Software Depot Activation Code (issue #690): authenticates `vcf-download-tool` metadata/binary commands. */
+export function useDepotActivationCode(): UseDepotTokenResult {
+	return useDepotCredential("depot-activation-code", "depot Activation Code");
+}
+
+/** Legacy Broadcom Download Token (issue #690): substituted into `dl.broadcom.com` URL templates for UMDS/older flows. Cannot authenticate VCF 9.1 `vcf-download-tool` commands. */
+export function useLegacyDownloadToken(): UseDepotTokenResult {
+	return useDepotCredential("legacy-download-token", "legacy Download Token");
 }
 
 export { toFormState as toDepotTokenFormState };

@@ -68,8 +68,8 @@ public sealed class SchemaMigrationTests
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #584 (... 0042 adds run_purges + run_purge_tombstones -- the durable retryable purge lifecycle and append-only audit tombstone for the admin-only terminal-compliance-run purge, plus runs.purged_at, 'purge' in jobs_job_type_check/runs_run_type_check, relaxes schedules.last_run_id from RESTRICT to ON DELETE SET NULL, and the compliance-runner's run_purges progress-reporting grant, issue #594, 0043 adds target_credential_bindings -- the normalized purpose-specific credential binding table (ADR-0021), backfills existing targets.credential_id references into the kind-appropriate default-purpose binding, and documents the dual-write contract keeping targets.credential_id and the default-purpose binding consistent until #585 removes the legacy column -- no new runner grants, issue #584, 0044 adds job_credential_bindings -- the immutable per-job per-purpose credential snapshot ledger (ADR-0021 SS5) RunCreationService's scan fan-out populates, with the compliance-runner SELECT-only grant and the jobs.credential_id dual-write/fallback contract documented in the migration header, issue #585, 0045 re-keys run_secrets from one row per run to one row per (run, target, purpose) -- additive columns/indexes only, the unconditional per-terminal-completion DELETE stays run_id-scoped so it covers both shapes with no code change, plus job_credential_bindings.is_run_secret so a job's per-purpose snapshot can name an ad hoc (run_secrets-backed) source instead of a stored credential_id, issue #586, 0046 adds runs.history_deleted_at + run_history_deletion_tombstones -- generic operational-history deletion for TERMINAL runs, structurally separate from run_purges/run_purge_tombstones (a deliberate sibling table, not a shared one) and deferring to that domain purge for scan/remediate runs, entirely API-side with no new runner grants, issue #592) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 46;
+	/// <summary>Embedded migration count as of issue #584 (... 0042 adds run_purges + run_purge_tombstones -- the durable retryable purge lifecycle and append-only audit tombstone for the admin-only terminal-compliance-run purge, plus runs.purged_at, 'purge' in jobs_job_type_check/runs_run_type_check, relaxes schedules.last_run_id from RESTRICT to ON DELETE SET NULL, and the compliance-runner's run_purges progress-reporting grant, issue #594, 0043 adds target_credential_bindings -- the normalized purpose-specific credential binding table (ADR-0021), backfills existing targets.credential_id references into the kind-appropriate default-purpose binding, and documents the dual-write contract keeping targets.credential_id and the default-purpose binding consistent until #585 removes the legacy column -- no new runner grants, issue #584, 0044 adds job_credential_bindings -- the immutable per-job per-purpose credential snapshot ledger (ADR-0021 SS5) RunCreationService's scan fan-out populates, with the compliance-runner SELECT-only grant and the jobs.credential_id dual-write/fallback contract documented in the migration header, issue #585, 0045 re-keys run_secrets from one row per run to one row per (run, target, purpose) -- additive columns/indexes only, the unconditional per-terminal-completion DELETE stays run_id-scoped so it covers both shapes with no code change, plus job_credential_bindings.is_run_secret so a job's per-purpose snapshot can name an ad hoc (run_secrets-backed) source instead of a stored credential_id, issue #586, 0046 adds runs.history_deleted_at + run_history_deletion_tombstones -- generic operational-history deletion for TERMINAL runs, structurally separate from run_purges/run_purge_tombstones (a deliberate sibling table, not a shared one) and deferring to that domain purge for scan/remediate runs, entirely API-side with no new runner grants, issue #592, 0047 extends credentials_credential_type_check with 'depot-activation-code' and 'legacy-download-token' (issue #690's non-destructive split of the ambiguous 'depot-token' well-known type -- 'depot-token' itself is RETAINED, not dropped, so pre-existing rows stay valid and visibly legacy; no data rewritten, no new runner grants) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 47;
 
 	private readonly PostgresFixture _fixture;
 
@@ -547,10 +547,11 @@ public sealed class SchemaMigrationTests
 	}
 
 	/// <summary>
-	/// Issue #252: every value in the closed <c>CredentialTypes.All</c> set -- including
-	/// <c>depot-token</c>, resolved into the set from a real production consumer
-	/// (<c>CatalogIndexJobHandler</c>), not a placeholder -- must still insert cleanly
-	/// under the new CHECK.
+	/// Issue #252, extended by issue #690 (migration 0047): every value in the closed
+	/// <c>CredentialTypes.All</c> set -- including the deprecated legacy
+	/// <c>depot-token</c> alias (retained, non-destructively, for pre-#690 rows) and its
+	/// two replacements <c>depot-activation-code</c>/<c>legacy-download-token</c> --
+	/// must still insert cleanly under the CHECK.
 	/// </summary>
 	[Theory]
 	[InlineData("vcenter")]
@@ -558,6 +559,8 @@ public sealed class SchemaMigrationTests
 	[InlineData("ssh")]
 	[InlineData("token")]
 	[InlineData("depot-token")]
+	[InlineData("depot-activation-code")]
+	[InlineData("legacy-download-token")]
 	public async Task Migrations_Credentials_AcceptsEveryClosedSetCredentialType(string credentialType)
 	{
 		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
@@ -573,6 +576,18 @@ public sealed class SchemaMigrationTests
 
 		object? id = await insert.ExecuteScalarAsync();
 		Assert.NotNull(id);
+
+		// Clean up: a row of a type introduced by a LATER migration than 0022 (e.g.
+		// 'depot-activation-code'/'legacy-download-token', issue #690's 0047) must not
+		// linger in the shared PostgresFixture database for
+		// Migrations_ApplyFreshThenReapplyAllViaRunnerAndRawSql_AreAllIdempotent's raw,
+		// in-order SQL replay to trip over -- that test re-executes 0022's own (older,
+		// narrower) DROP+ADD CONSTRAINT verbatim, which would otherwise reject on a row
+		// only the LATER 0047 CHECK permits, purely due to shared-fixture test-method
+		// ordering rather than any real migration defect.
+		await using NpgsqlCommand delete = new("DELETE FROM credentials WHERE id = $1", connection);
+		delete.Parameters.AddWithValue((Guid)id!);
+		await delete.ExecuteNonQueryAsync();
 	}
 
 	/// <summary>

@@ -1,5 +1,7 @@
 /**
- * DepotTokensTab tests (issue #571, completing #560/#39's frontend half).
+ * DepotTokensTab tests (issue #571, completing #560/#39's frontend half;
+ * issue #690 splits the single depot-token concept into two independent
+ * credentials — Activation Code and legacy Download Token).
  * Fixture/mock shape mirrors CredentialsTab.test.tsx (SSE test fixture,
  * step-up 403 stash) and ComplianceContentTab.test.tsx (queued-run polling,
  * duplicate-submission guard) — this tab reuses both hooks' underlying
@@ -55,26 +57,29 @@ function sseResponse(frames: string, signal: AbortSignal | null | undefined): Re
 	return { ok: true, status: 200, body } as unknown as Response;
 }
 
-const NO_TOKEN_READINESS: DownloadReadiness = {
+const NOTHING_CONFIGURED_READINESS: DownloadReadiness = {
 	ready: false,
-	depot_token_configured: false,
-	missing_prerequisites: ["depot_token", "tool_not_installed"],
+	activation_code_configured: false,
+	legacy_download_token_configured: false,
+	missing_prerequisites: ["activation_code", "tool_not_installed"],
 };
 
 const READY_READINESS: DownloadReadiness = {
 	ready: true,
-	depot_token_configured: true,
-	depot_token_health: "valid",
+	activation_code_configured: true,
+	activation_code_health: "valid",
+	legacy_download_token_configured: false,
 	tool_installed: true,
 	missing_prerequisites: [],
 };
 
 const AUTH_FAILING_READINESS: DownloadReadiness = {
 	ready: false,
-	depot_token_configured: true,
-	depot_token_health: "auth_failing",
+	activation_code_configured: true,
+	activation_code_health: "auth_failing",
+	legacy_download_token_configured: false,
 	tool_installed: false,
-	missing_prerequisites: ["depot_token_auth_failing", "tool_not_installed"],
+	missing_prerequisites: ["activation_code_auth_failing", "tool_not_installed"],
 };
 
 const INSTALLS: ManagedToolInstall[] = [
@@ -99,7 +104,7 @@ const INSTALLS: ManagedToolInstall[] = [
 	},
 ];
 
-describe("DepotTokensTab (issue #571)", () => {
+describe("DepotTokensTab (issue #571/#690)", () => {
 	let originalFetch: typeof fetch;
 	let fetchCalls: { url: string; init?: RequestInit }[];
 	let credentials: Credential[];
@@ -118,7 +123,7 @@ describe("DepotTokensTab (issue #571)", () => {
 	) {
 		fetchCalls = [];
 		credentials = opts.credentials ?? [];
-		readiness = opts.readiness ?? NO_TOKEN_READINESS;
+		readiness = opts.readiness ?? NOTHING_CONFIGURED_READINESS;
 		installs = opts.installs ?? INSTALLS;
 		installRunState = { state: "completed", job_count_failed: 0, job_count_blocked: 0 };
 
@@ -142,9 +147,9 @@ describe("DepotTokensTab (issue #571)", () => {
 			if (url === "/api/v1/credentials" && method === "POST") {
 				const body = JSON.parse(init!.body as string);
 				const created: Credential = {
-					id: "cred-depot-new",
+					id: `cred-${body.credential_type}-new`,
 					name: body.name,
-					credential_type: "depot-token",
+					credential_type: body.credential_type,
 					owner: "shared",
 					health: "unknown",
 					sudo_enabled: false,
@@ -231,27 +236,37 @@ describe("DepotTokensTab (issue #571)", () => {
 				</SystemProvider>
 			</AuthProvider>,
 		);
-		await waitFor(() => expect(screen.getByText("DEPOT CREDENTIAL")).toBeInTheDocument());
+		await waitFor(() => expect(screen.getByText("ACTIVATION CODE")).toBeInTheDocument());
+		await waitFor(() => expect(screen.getByText(/LEGACY DOWNLOAD TOKEN/)).toBeInTheDocument());
 		await waitFor(() => expect(screen.getByText("DOWNLOAD READINESS")).toBeInTheDocument());
 	}
 
-	it("no depot token configured: never invents secret material, shows an empty-state and an Add action", async () => {
+	it("no credentials configured: never invents secret material, shows empty-states and Add actions for both credentials", async () => {
 		installFetchMock("Admin");
 		await mount();
 
-		expect(screen.getByText(/No Broadcom Support Portal depot token is configured yet/)).toBeInTheDocument();
-		expect(screen.getByText("Add depot token")).toBeInTheDocument();
+		expect(screen.getByText(/No VCF 9.1 Software Depot Activation Code is configured yet/)).toBeInTheDocument();
+		expect(screen.getByText(/No legacy Broadcom Download Token is configured/)).toBeInTheDocument();
+		expect(screen.getByText("Add Activation Code")).toBeInTheDocument();
+		expect(screen.getByText("Add legacy token")).toBeInTheDocument();
 		// Nothing resembling a secret value is ever present on the page.
 		expect(document.body.textContent).not.toMatch(/s3cr3t|token-value/);
 	});
 
-	it("a configured depot token never displays the secret: masked metadata, health, last-tested/rotated only", async () => {
+	it("the legacy token panel is visibly labeled deprecated, distinct from the Activation Code panel", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		expect(screen.getByText(/DEPRECATED/)).toBeInTheDocument();
+	});
+
+	it("a configured Activation Code never displays the secret: masked metadata, health, last-tested/rotated only", async () => {
 		installFetchMock("Admin", {
 			credentials: [
 				{
 					id: "cred-depot-1",
 					name: "Broadcom Support Portal",
-					credential_type: "depot-token",
+					credential_type: "depot-activation-code",
 					owner: "shared",
 					health: "valid",
 					sudo_enabled: false,
@@ -282,7 +297,7 @@ describe("DepotTokensTab (issue #571)", () => {
 				{
 					id: "cred-depot-1",
 					name: "Broadcom Support Portal",
-					credential_type: "depot-token",
+					credential_type: "depot-activation-code",
 					owner: "shared",
 					health: "valid",
 					sudo_enabled: false,
@@ -295,7 +310,7 @@ describe("DepotTokensTab (issue #571)", () => {
 		});
 		await mount();
 
-		expect(screen.getByText("expiry unknown")).toBeInTheDocument();
+		expect(screen.getAllByText("expiry unknown").length).toBeGreaterThan(0);
 	});
 
 	it("expiry renders the real date with a warning when a real expires_at is present and near", async () => {
@@ -305,7 +320,7 @@ describe("DepotTokensTab (issue #571)", () => {
 				{
 					id: "cred-depot-1",
 					name: "Broadcom Support Portal",
-					credential_type: "depot-token",
+					credential_type: "depot-activation-code",
 					owner: "shared",
 					health: "valid",
 					sudo_enabled: false,
@@ -322,24 +337,40 @@ describe("DepotTokensTab (issue #571)", () => {
 		expect(screen.getByText(/expires soon/)).toBeInTheDocument();
 	});
 
-	it("Admin can create the depot token; the request never round-trips a rendered secret", async () => {
+	it("Admin can create the Activation Code; the request never round-trips a rendered secret", async () => {
 		installFetchMock("Admin");
 		await mount();
 
-		fireEvent.click(screen.getByText("Add depot token"));
-		fireEvent.change(screen.getByPlaceholderText("e.g. svc-depot@example.internal"), { target: { value: "svc-depot@example.internal" } });
-		fireEvent.change(screen.getByPlaceholderText("required — never displayed again after saving"), { target: { value: "top-secret-token" } });
+		fireEvent.click(screen.getByText("Add Activation Code"));
+		fireEvent.change(screen.getAllByPlaceholderText("e.g. svc-depot@example.internal")[0], { target: { value: "svc-depot@example.internal" } });
+		fireEvent.change(screen.getAllByPlaceholderText("required — never displayed again after saving")[0], { target: { value: "top-secret-code" } });
 		fireEvent.click(screen.getByText("Save"));
 
 		await waitFor(() => expect(fetchCalls.some((c) => c.url === "/api/v1/credentials" && c.init?.method === "POST")).toBe(true));
 		const call = fetchCalls.find((c) => c.url === "/api/v1/credentials" && c.init?.method === "POST")!;
 		const body = JSON.parse(call.init!.body as string);
-		expect(body.secret).toBe("top-secret-token");
-		expect(body.credential_type).toBe("depot-token");
+		expect(body.secret).toBe("top-secret-code");
+		expect(body.credential_type).toBe("depot-activation-code");
 
 		// After the successful save, the just-typed secret is never rendered anywhere.
-		await waitFor(() => expect(screen.queryByText("Add depot token")).not.toBeInTheDocument());
-		expect(document.body.textContent).not.toContain("top-secret-token");
+		await waitFor(() => expect(screen.queryByText("Add Activation Code")).not.toBeInTheDocument());
+		expect(document.body.textContent).not.toContain("top-secret-code");
+	});
+
+	it("Admin can create the legacy Download Token independently of the Activation Code", async () => {
+		installFetchMock("Admin");
+		await mount();
+
+		fireEvent.click(screen.getByText("Add legacy token"));
+		fireEvent.change(screen.getAllByPlaceholderText("required — never displayed again after saving")[0], { target: { value: "legacy-secret" } });
+		fireEvent.click(screen.getByText("Save"));
+
+		await waitFor(() => expect(fetchCalls.some((c) => c.url === "/api/v1/credentials" && c.init?.method === "POST")).toBe(true));
+		const call = fetchCalls.find((c) => c.url === "/api/v1/credentials" && c.init?.method === "POST")!;
+		const body = JSON.parse(call.init!.body as string);
+		expect(body.credential_type).toBe("legacy-download-token");
+		// The Activation Code panel's empty state is untouched -- the two credentials never conflate.
+		expect(screen.getByText("Add Activation Code")).toBeInTheDocument();
 	});
 
 	it("a step_up_required replace redirects for fresh auth instead of showing a generic error, and never stashes the plaintext secret", async () => {
@@ -348,7 +379,7 @@ describe("DepotTokensTab (issue #571)", () => {
 				{
 					id: "cred-depot-1",
 					name: "Broadcom Support Portal",
-					credential_type: "depot-token",
+					credential_type: "depot-activation-code",
 					owner: "shared",
 					health: "valid",
 					sudo_enabled: false,
@@ -393,7 +424,7 @@ describe("DepotTokensTab (issue #571)", () => {
 
 		try {
 			fireEvent.click(screen.getByText("Replace"));
-			fireEvent.change(screen.getByPlaceholderText("required — never displayed again after saving"), {
+			fireEvent.change(screen.getAllByPlaceholderText("required — never displayed again after saving")[0], {
 				target: { value: "rotated-secret-value" },
 			});
 			fireEvent.click(screen.getByText("Save"));
@@ -405,7 +436,7 @@ describe("DepotTokensTab (issue #571)", () => {
 			const rawStash = window.sessionStorage.getItem("waypoint.stepup.retry") as string;
 			expect(rawStash).not.toContain("rotated-secret-value");
 			const stashed = JSON.parse(rawStash);
-			expect(stashed.kind).toBe("depot-token-replace");
+			expect(stashed.kind).toBe("depot-activation-code-replace");
 			expect(stashed.payload).not.toHaveProperty("secret");
 		} finally {
 			Object.defineProperty(window, "location", { configurable: true, value: { ...window.location, assign: originalAssign } });
@@ -418,7 +449,7 @@ describe("DepotTokensTab (issue #571)", () => {
 				{
 					id: "cred-depot-1",
 					name: "Broadcom Support Portal",
-					credential_type: "depot-token",
+					credential_type: "depot-activation-code",
 					owner: "shared",
 					health: "unknown",
 					sudo_enabled: false,
@@ -431,29 +462,33 @@ describe("DepotTokensTab (issue #571)", () => {
 		});
 		await mount();
 
-		fireEvent.click(screen.getByText("Test"));
+		fireEvent.click(screen.getAllByText("Test")[0]);
 		await waitFor(() => expect(screen.getByText("Connection opened and closed successfully.")).toBeInTheDocument());
 	});
 
-	it("Viewer sees the credential panel read-only: Replace/Add and Test are disabled with an Admin-required reason", async () => {
+	it("Viewer sees both credential panels read-only: Replace/Add and Test are disabled with an Admin-required reason", async () => {
 		installFetchMock("Viewer");
 		await mount();
 
-		const addButton = screen.getByText("Add depot token") as HTMLButtonElement;
+		const addButton = screen.getByText("Add Activation Code") as HTMLButtonElement;
 		expect(addButton.disabled).toBe(true);
 		expect(addButton.title).toMatch(/Requires Admin/);
+
+		const addLegacyButton = screen.getByText("Add legacy token") as HTMLButtonElement;
+		expect(addLegacyButton.disabled).toBe(true);
 	});
 
-	it("readiness: nothing configured reports both prerequisites missing with a plain-language reason for each", async () => {
-		installFetchMock("Admin", { readiness: NO_TOKEN_READINESS });
+	it("readiness: nothing configured reports the activation-code and tool prerequisites missing with a plain-language reason for each", async () => {
+		installFetchMock("Admin", { readiness: NOTHING_CONFIGURED_READINESS });
 		await mount();
 
 		expect(screen.getByText("Not ready — see missing prerequisites below.")).toBeInTheDocument();
 		expect(screen.getByText("not configured")).toBeInTheDocument();
 		expect(screen.getByText(/unknown — no runner has reported yet/)).toBeInTheDocument();
+		expect(screen.getByText(/not configured \(optional, legacy UMDS flows only\)/)).toBeInTheDocument();
 	});
 
-	it("readiness: token auth-failing is reported distinctly from 'not configured'", async () => {
+	it("readiness: activation code auth-failing is reported distinctly from 'not configured'", async () => {
 		installFetchMock("Admin", { readiness: AUTH_FAILING_READINESS });
 		await mount();
 
@@ -463,14 +498,19 @@ describe("DepotTokensTab (issue #571)", () => {
 
 	it("readiness: tool_installed omitted (unknown) renders distinctly from a real false", async () => {
 		installFetchMock("Admin", {
-			readiness: { ready: false, depot_token_configured: false, missing_prerequisites: ["depot_token", "tool_not_installed"] },
+			readiness: {
+				ready: false,
+				activation_code_configured: false,
+				legacy_download_token_configured: false,
+				missing_prerequisites: ["activation_code", "tool_not_installed"],
+			},
 		});
 		await mount();
 
 		expect(screen.getByText(/unknown — no runner has reported yet/)).toBeInTheDocument();
 	});
 
-	it("readiness: fully ready reports both prerequisites satisfied", async () => {
+	it("readiness: fully ready reports the activation code and tool prerequisites satisfied, legacy token never gates readiness", async () => {
 		installFetchMock("Admin", { readiness: READY_READINESS });
 		await mount();
 
@@ -547,25 +587,44 @@ describe("DepotTokensTab (issue #571)", () => {
 		expect(depotFetchButton.title).toMatch(/connected mode/);
 	});
 
-	it("depot-fetch action is disabled with a credential reason when connected but no depot token is configured", async () => {
-		installFetchMock("Operator", { mode: "connected", readiness: NO_TOKEN_READINESS });
+	it("depot-fetch action is disabled with a credential reason when connected but no Activation Code is configured", async () => {
+		installFetchMock("Operator", { mode: "connected", readiness: NOTHING_CONFIGURED_READINESS });
 		await mount();
 
 		const depotFetchButton = screen.getByRole("button", { name: "Fetch from depot" }) as HTMLButtonElement;
 		expect(depotFetchButton.disabled).toBe(true);
-		expect(depotFetchButton.title).toMatch(/depot credential/);
+		expect(depotFetchButton.title).toMatch(/Activation Code credential/);
 	});
 
-	it("depot-fetch action is disabled when the depot token is configured but auth-failing", async () => {
+	it("depot-fetch action is disabled when the Activation Code is configured but auth-failing", async () => {
 		installFetchMock("Operator", { mode: "connected", readiness: AUTH_FAILING_READINESS });
 		await mount();
 
 		const depotFetchButton = screen.getByRole("button", { name: "Fetch from depot" }) as HTMLButtonElement;
 		expect(depotFetchButton.disabled).toBe(true);
-		expect(depotFetchButton.title).toMatch(/depot credential/);
+		expect(depotFetchButton.title).toMatch(/Activation Code credential/);
 	});
 
-	it("depot-fetch action is enabled when connected with a healthy depot credential, and queues a depot-sourced install", async () => {
+	it("depot-fetch action stays disabled even when only the legacy Download Token is healthy (never a substitute for the Activation Code)", async () => {
+		installFetchMock("Operator", {
+			mode: "connected",
+			readiness: {
+				ready: false,
+				activation_code_configured: false,
+				legacy_download_token_configured: true,
+				legacy_download_token_health: "valid",
+				tool_installed: true,
+				missing_prerequisites: ["activation_code"],
+			},
+		});
+		await mount();
+
+		const depotFetchButton = screen.getByRole("button", { name: "Fetch from depot" }) as HTMLButtonElement;
+		expect(depotFetchButton.disabled).toBe(true);
+		expect(depotFetchButton.title).toMatch(/Activation Code credential/);
+	});
+
+	it("depot-fetch action is enabled when connected with a healthy Activation Code, and queues a depot-sourced install", async () => {
 		installFetchMock("Operator", { mode: "connected", readiness: READY_READINESS });
 		await mount();
 

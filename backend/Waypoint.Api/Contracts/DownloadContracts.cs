@@ -115,25 +115,38 @@ public sealed record DownloadCancelledResponse(
 	string State);
 
 /// <summary>
-/// Response body for <c>GET /api/v1/downloads/readiness</c> (issue #560): combines the
-/// depot-token credential's health with the managed <c>vcf-download-tool</c>'s installed
-/// state (ADR-0015, #39) into the one "can a download actually run" answer the Depot &amp;
-/// Tokens screen needs, without this slice implementing #39's install flow itself.
+/// Response body for <c>GET /api/v1/downloads/readiness</c> (issue #560, extended by
+/// issue #690): reports the VCF 9.1 Activation Code and the legacy Download Token as
+/// two INDEPENDENT prerequisites, plus the managed <c>vcf-download-tool</c>'s installed
+/// state (ADR-0015, #39), into the one "can a download actually run" answer the Depot
+/// &amp; Tokens screen needs. <see cref="Ready"/> depends only on the Activation Code
+/// (the credential <c>vcf-download-tool</c> commands actually authenticate with) and
+/// the tool -- the legacy Download Token is reported for visibility but never gates
+/// readiness, since nothing in this codebase's connected-fetch path consumes it.
 /// </summary>
 public sealed record DownloadReadinessResponse(
 	[property: JsonPropertyName("ready")]
 	bool Ready,
 
-	[property: JsonPropertyName("depot_token_configured")]
-	bool DepotTokenConfigured,
+	[property: JsonPropertyName("activation_code_configured")]
+	bool ActivationCodeConfigured,
 
-	// Named DepotCredentialHealth (not "...TokenHealth") on purpose: it is a health
-	// enum string ("valid"/"auth_failing"/"unknown"), never the token material
-	// itself, but AllControllersResponseShapeTests' name heuristic flags any
-	// string property containing "token" regardless -- renaming avoids adding
-	// another allowlist entry for a field that was never going to carry a secret.
-	[property: JsonPropertyName("depot_token_health")]
-	string? DepotCredentialHealth,
+	// Named ActivationCodeHealth (not "...CodeToken...") on purpose -- a health enum
+	// string ("valid"/"auth_failing"/"unknown"), never the code material itself, but
+	// AllControllersResponseShapeTests' name heuristic flags any string property
+	// containing "token" regardless -- avoiding that substring avoids adding another
+	// allowlist entry for a field that was never going to carry a secret.
+	[property: JsonPropertyName("activation_code_health")]
+	string? ActivationCodeHealth,
+
+	[property: JsonPropertyName("legacy_download_token_configured")]
+	bool LegacyDownloadTokenConfigured,
+
+	// Named LegacyCredentialHealth (not "...TokenHealth") for the identical reason
+	// ActivationCodeHealth avoids "...CodeToken..." above -- a health enum string,
+	// never the token material itself.
+	[property: JsonPropertyName("legacy_download_token_health")]
+	string? LegacyCredentialHealth,
 
 	[property: JsonPropertyName("tool_installed")]
 	bool? ToolInstalled,

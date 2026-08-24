@@ -50,7 +50,9 @@ namespace Waypoint.Infrastructure.Credentials;
 /// (rather than leaving the old synchronous 200) so the health-flip source is uniform,
 /// it just never invokes PowerShell or looks up a target.
 ///
-/// <see cref="CredentialTypes.DepotToken"/> (issue #252/#383, revisited #560) gets the
+/// <see cref="CredentialTypes.DepotToken"/> (deprecated legacy alias, issue #252/#383,
+/// revisited #560/#690), <see cref="CredentialTypes.DepotActivationCode"/>, and
+/// <see cref="CredentialTypes.LegacyDownloadToken"/> (both issue #690) all get the
 /// same decrypt-only treatment as <see cref="CredentialTypes.Token"/>, for a related
 /// but distinct reason: the only thing in this codebase that actually authenticates to
 /// the Broadcom Support Portal is the operator-installed, account-gated
@@ -58,14 +60,14 @@ namespace Waypoint.Infrastructure.Credentials;
 /// managed-tool volume it lives on, is mounted only into <c>download-runner</c>
 /// (deploy/docker-compose.yml), never into <c>compliance-runner</c>, which is where
 /// <c>credential-test</c> is architecturally pinned to run (<c>JobCapabilities.Compliance</c>).
-/// <c>CatalogIndexJobHandler</c> (which does run on download-runner) does not
-/// authenticate either -- its indexing walk is a pure filesystem read
-/// (domain-model.md open question 4) that accepts the decrypted token but never uses
-/// it. There is therefore no real depot-auth code path anywhere yet to invoke honestly
-/// from here; wiring one is a job-routing change (moving depot-token's test to
+/// <c>CatalogIndexJobHandler</c> (which does run on download-runner) resolves no
+/// credential at all post-#690 -- its indexing walk is a pure filesystem read
+/// (domain-model.md open question 4) that never authenticated to anything. There is
+/// therefore no real depot-auth code path anywhere yet to invoke honestly from here;
+/// wiring one is a job-routing change (moving the depot types' test to
 /// download-runner) plus a #39 dependency (the tool must be installed to have anything
 /// to invoke), tracked as a follow-up rather than built out in this slice. This handler
-/// still proves the one thing it safely can: the stored token decrypts under the
+/// still proves the one thing it safely can: the stored value decrypts under the
 /// appliance master key, through the same audited path every other credential type's
 /// decrypt-only test already uses.
 /// </summary>
@@ -128,7 +130,8 @@ public sealed class CredentialTestJobHandler : IJobHandler
 
 		string actor = await ResolveActorAsync(context.Job.RunId, cancellationToken).ConfigureAwait(false);
 
-		if (credential.CredentialType is CredentialTypes.Token or CredentialTypes.DepotToken)
+		if (credential.CredentialType is CredentialTypes.Token or CredentialTypes.DepotToken
+			or CredentialTypes.DepotActivationCode or CredentialTypes.LegacyDownloadToken)
 		{
 			return await RunDecryptOnlyAsync(credentialId, actor, context, cancellationToken).ConfigureAwait(false);
 		}
@@ -202,11 +205,13 @@ public sealed class CredentialTestJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// <see cref="CredentialTypes.Token"/> and <see cref="CredentialTypes.DepotToken"/>
-	/// have no endpoint to dial in this slice -- the same decrypt-liveness check issue
-	/// #20's synchronous handler ran, now driven through the job/audit path so the
-	/// health flip has one uniform source (<see cref="CredentialRepository.MarkTestOutcomeAsync"/>
-	/// from a job outcome, never from the controller directly).
+	/// <see cref="CredentialTypes.Token"/>, <see cref="CredentialTypes.DepotToken"/>,
+	/// <see cref="CredentialTypes.DepotActivationCode"/>, and
+	/// <see cref="CredentialTypes.LegacyDownloadToken"/> have no endpoint to dial in
+	/// this slice -- the same decrypt-liveness check issue #20's synchronous handler
+	/// ran, now driven through the job/audit path so the health flip has one uniform
+	/// source (<see cref="CredentialRepository.MarkTestOutcomeAsync"/> from a job
+	/// outcome, never from the controller directly).
 	/// </summary>
 	private async Task<JobExecutionOutcome> RunDecryptOnlyAsync(
 		Guid credentialId, string actor, JobExecutionContext context, CancellationToken cancellationToken)

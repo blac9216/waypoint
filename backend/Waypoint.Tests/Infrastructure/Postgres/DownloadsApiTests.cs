@@ -419,9 +419,12 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 	}
 
 	/// <summary>
-	/// Issue #560: no depot-token credential configured and no download-runner has
-	/// ever heartbeated -- both prerequisites report missing, tool_installed stays
-	/// null (unknown, not "false") because nothing has weighed in.
+	/// Issue #560/#690: no Activation Code credential configured and no
+	/// download-runner has ever heartbeated -- both prerequisites report missing,
+	/// tool_installed stays null (unknown, not "false") because nothing has weighed
+	/// in. The legacy Download Token is reported as unconfigured too, but never
+	/// contributes a missing_prerequisites entry (issue #690 AC: it never gates
+	/// readiness).
 	/// </summary>
 	[Fact]
 	public async Task GetReadiness_NothingConfigured_ReportsBothPrerequisitesMissing_ToolUnknown()
@@ -435,25 +438,28 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		JsonElement root = document.RootElement;
 		Assert.False(root.GetProperty("ready").GetBoolean());
-		Assert.False(root.GetProperty("depot_token_configured").GetBoolean());
+		Assert.False(root.GetProperty("activation_code_configured").GetBoolean());
+		Assert.False(root.GetProperty("legacy_download_token_configured").GetBoolean());
 		// WaypointJsonOptions.Default (WhenWritingNull) omits a null optional field
 		// entirely rather than emitting a JSON null -- same convention rotated_at/
 		// username already use -- so "unknown" reads as the property being absent.
-		Assert.False(root.TryGetProperty("depot_token_health", out _));
+		Assert.False(root.TryGetProperty("activation_code_health", out _));
+		Assert.False(root.TryGetProperty("legacy_download_token_health", out _));
 		Assert.False(root.TryGetProperty("tool_installed", out _));
 		string[] missing = root.GetProperty("missing_prerequisites").EnumerateArray().Select(e => e.GetString()!).ToArray();
-		Assert.Contains("depot_token", missing);
+		Assert.Contains("activation_code", missing);
 		Assert.Contains("tool_not_installed", missing);
 	}
 
 	/// <summary>
-	/// A valid depot-token credential plus a download-runner heartbeat reporting the
-	/// tool present combine into ready:true and an empty missing-prerequisites list.
+	/// A valid Activation Code credential plus a download-runner heartbeat reporting
+	/// the tool present combine into ready:true and an empty missing-prerequisites
+	/// list -- with no legacy Download Token configured at all.
 	/// </summary>
 	[Fact]
-	public async Task GetReadiness_TokenValidAndToolPresent_ReportsReady()
+	public async Task GetReadiness_ActivationCodeValidAndToolPresent_ReportsReady()
 	{
-		Guid credentialId = await SeedDepotTokenCredentialAsync();
+		Guid credentialId = await SeedDepotCredentialAsync("depot-activation-code");
 		await MarkCredentialHealthAsync(credentialId, "valid");
 		await SeedDownloadRunnerHeartbeatAsync(toolPresent: true);
 
@@ -465,17 +471,18 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		JsonElement root = document.RootElement;
 
 		Assert.True(root.GetProperty("ready").GetBoolean());
-		Assert.True(root.GetProperty("depot_token_configured").GetBoolean());
-		Assert.Equal("valid", root.GetProperty("depot_token_health").GetString());
+		Assert.True(root.GetProperty("activation_code_configured").GetBoolean());
+		Assert.Equal("valid", root.GetProperty("activation_code_health").GetString());
+		Assert.False(root.GetProperty("legacy_download_token_configured").GetBoolean());
 		Assert.True(root.GetProperty("tool_installed").GetBoolean());
 		Assert.Empty(root.GetProperty("missing_prerequisites").EnumerateArray());
 	}
 
-	/// <summary>An auth-failing depot token is reported as its own distinct missing prerequisite, not conflated with "not configured".</summary>
+	/// <summary>An auth-failing Activation Code is reported as its own distinct missing prerequisite, not conflated with "not configured".</summary>
 	[Fact]
-	public async Task GetReadiness_TokenAuthFailing_ReportsDistinctFromMissing()
+	public async Task GetReadiness_ActivationCodeAuthFailing_ReportsDistinctFromMissing()
 	{
-		Guid credentialId = await SeedDepotTokenCredentialAsync();
+		Guid credentialId = await SeedDepotCredentialAsync("depot-activation-code");
 		await MarkCredentialHealthAsync(credentialId, "auth_failing");
 		await SeedDownloadRunnerHeartbeatAsync(toolPresent: true);
 
@@ -487,11 +494,39 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		JsonElement root = document.RootElement;
 
 		Assert.False(root.GetProperty("ready").GetBoolean());
-		Assert.True(root.GetProperty("depot_token_configured").GetBoolean());
+		Assert.True(root.GetProperty("activation_code_configured").GetBoolean());
 		string[] missing = root.GetProperty("missing_prerequisites").EnumerateArray().Select(e => e.GetString()!).ToArray();
-		Assert.Contains("depot_token_auth_failing", missing);
-		Assert.DoesNotContain("depot_token", missing);
+		Assert.Contains("activation_code_auth_failing", missing);
+		Assert.DoesNotContain("activation_code", missing);
 		Assert.DoesNotContain("tool_not_installed", missing);
+	}
+
+	/// <summary>
+	/// Issue #690 AC: a healthy legacy Download Token alone (no Activation Code
+	/// configured) is reported for visibility but never satisfies readiness or
+	/// removes the "activation_code" missing-prerequisite entry -- the two
+	/// credentials are never treated as interchangeable.
+	/// </summary>
+	[Fact]
+	public async Task GetReadiness_OnlyLegacyTokenConfigured_NeverGatesReadiness()
+	{
+		Guid legacyId = await SeedDepotCredentialAsync("legacy-download-token");
+		await MarkCredentialHealthAsync(legacyId, "valid");
+		await SeedDownloadRunnerHeartbeatAsync(toolPresent: true);
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/downloads/readiness");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = document.RootElement;
+
+		Assert.False(root.GetProperty("ready").GetBoolean());
+		Assert.False(root.GetProperty("activation_code_configured").GetBoolean());
+		Assert.True(root.GetProperty("legacy_download_token_configured").GetBoolean());
+		Assert.Equal("valid", root.GetProperty("legacy_download_token_health").GetString());
+		string[] missing = root.GetProperty("missing_prerequisites").EnumerateArray().Select(e => e.GetString()!).ToArray();
+		Assert.Contains("activation_code", missing);
 	}
 
 	[Fact]
@@ -501,13 +536,14 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
 	}
 
-	private async Task<Guid> SeedDepotTokenCredentialAsync()
+	private async Task<Guid> SeedDepotCredentialAsync(string credentialType)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync().ConfigureAwait(false);
 		await using NpgsqlCommand insert = new(
-			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'depot-token') RETURNING id", connection);
-		insert.Parameters.AddWithValue($"depot-token-{Guid.NewGuid():N}");
+			"INSERT INTO credentials (name, credential_type) VALUES ($1, $2) RETURNING id", connection);
+		insert.Parameters.AddWithValue($"{credentialType}-{Guid.NewGuid():N}");
+		insert.Parameters.AddWithValue(credentialType);
 		Guid id = (Guid)(await insert.ExecuteScalarAsync())!;
 
 		// has_secret is derived from credential_secrets, not a credentials column --

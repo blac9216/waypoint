@@ -13,8 +13,6 @@
 // limitations under the License.
 
 using System.Diagnostics;
-using System.Security.Cryptography;
-using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -23,12 +21,10 @@ using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Pagination;
 using Waypoint.Core.PowerShell;
-using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.PowerShell;
-using Waypoint.Infrastructure.Secrets;
 using Waypoint.Runner.Jobs;
 using Xunit;
 
@@ -37,11 +33,14 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <summary>
 /// Issue #194 (epic #9 slice 2) full-loop acceptance, through the REAL loop: a
 /// <c>catalog-index</c> job is fanned out, the dispatcher claims it, the real
-/// <see cref="CatalogIndexJobHandler"/> resolves the depot-token credential, decrypts
-/// it under job attribution (the #8 store), invokes the stub
-/// <c>Invoke-WaypointCatalogIndex</c> module in-process, and the parsed rows land in
-/// <c>depot_artifacts</c> via the slice-1 repository's idempotent upsert -- while the
-/// token canary never reaches <c>job_events</c>, <c>jobs.note</c>, or argv.
+/// <see cref="CatalogIndexJobHandler"/> invokes the stub <c>Invoke-WaypointCatalogIndex</c>
+/// module in-process, and the parsed rows land in <c>depot_artifacts</c> via the
+/// slice-1 repository's idempotent upsert.
+///
+/// Issue #690 AC: this handler resolves and decrypts NO credential at all -- unlike
+/// the pre-#690 shape, there is no depot-token/activation-code/legacy-token seeding
+/// here, and <see cref="NoCredentialConfigured_StillSucceeds"/> proves a job runs to
+/// completion with zero credential rows in the database.
 /// </summary>
 [Collection("Postgres")]
 #pragma warning disable CA1001 // xUnit owns the lifecycle: DisposeAsync stops the buffer/pool and removes the key dir.
@@ -58,8 +57,6 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 	private JobQueueRepository _repository = null!;
 	private BufferedJobEventWriter _logBuffer = null!;
 	private WaypointRunspacePool _pool = null!;
-	private CredentialRepository _credentials = null!;
-	private CredentialSecretStore _secretStore = null!;
 	private CatalogIndexJobHandler _handler = null!;
 	private DepotArtifactRepository _artifacts = null!;
 
@@ -87,19 +84,10 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 		_pool = new WaypointRunspacePool(wrappedPsOptions, NullLogger<WaypointRunspacePool>.Instance);
 		PowerShellExecutor executor = new(_pool, _logBuffer, wrappedPsOptions, NullLogger<PowerShellExecutor>.Instance);
 
-		string keyPath = Path.Combine(_keyDirectory, "master.key");
-		File.WriteAllBytes(keyPath, RandomNumberGenerator.GetBytes(32));
-		FileMasterKeyProvider keyProvider = new(keyPath);
-		AesGcmEnvelopeCipher cipher = new(keyProvider);
-
-		_credentials = new CredentialRepository(_fixture.ConnectionString);
-		_secretStore = new CredentialSecretStore(_fixture.ConnectionString, cipher, _redactor, NullLogger<CredentialSecretStore>.Instance);
 		_artifacts = new DepotArtifactRepository(_fixture.ConnectionString);
 
-		CatalogOptions catalogOptions = new() { DepotPath = "/invented/depot", DepotTokenCredentialType = "depot-token" };
-		_handler = new CatalogIndexJobHandler(
-			executor, _secretStore, _credentials, _artifacts, _repository, _redactor,
-			Options.Create(catalogOptions), wrappedPsOptions);
+		CatalogOptions catalogOptions = new() { DepotPath = "/invented/depot" };
+		_handler = new CatalogIndexJobHandler(executor, _artifacts, _redactor, Options.Create(catalogOptions), wrappedPsOptions);
 	}
 
 	public async Task DisposeAsync()
@@ -127,19 +115,15 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 
 	/// <summary>
 	/// The full loop: fan out a <c>catalog-index</c> job (matching
-	/// <c>CatalogController.Sync</c>'s <c>CredentialId: null</c> shape -- the handler
-	/// must resolve the depot-token credential by type, not by a job-carried id) ->
-	/// dispatcher claims it -> the real handler decrypts the token, invokes the stub
-	/// module, upserts every row -> <c>depot_artifacts</c> has the rows and
-	/// <c>run.progress</c> was emitted -> re-running the same job type again (a second
-	/// sync) is idempotent (#193's acceptance criterion, proven through this handler).
+	/// <c>CatalogController.Sync</c>'s <c>CredentialId: null</c> shape) -> dispatcher
+	/// claims it -> the real handler invokes the stub module, upserts every row ->
+	/// <c>depot_artifacts</c> has the rows and <c>run.progress</c> was emitted ->
+	/// re-running the same job type again (a second sync) is idempotent (#193's
+	/// acceptance criterion, proven through this handler).
 	/// </summary>
 	[Fact]
 	public async Task SyncToDispatchToHandler_PopulatesArtifacts_EmitsProgress_AndIsIdempotentOnRerun()
 	{
-		const string canary = "invented-catalog-e2e-canary-b7c9";
-		Guid credentialId = await SeedDepotTokenCredentialAsync(canary);
-
 		Guid firstRunId = await RunCatalogIndexOnceAsync();
 		await AssertArtifactRowCountAsync(3);
 		Assert.True(await EventTypeExistsAsync(JobEventTypes.RunProgress, firstRunId));
@@ -147,31 +131,20 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 		// Re-sync: same three external ids upsert in place rather than duplicating.
 		await RunCatalogIndexOnceAsync();
 		await AssertArtifactRowCountAsync(3);
-
-		await AssertCanaryNeverLeakedAsync(canary, credentialId);
 	}
 
+	/// <summary>
+	/// Issue #690 AC: local catalog re-index no longer requires or decrypts any
+	/// credential. Runs the full loop with zero rows in <c>credentials</c> and asserts
+	/// the job still reaches <c>done</c> -- the pre-#690 shape of this handler would
+	/// have failed this exact scenario with "No credential of type 'depot-token' is
+	/// configured".
+	/// </summary>
 	[Fact]
-	public async Task NoDepotTokenCredentialConfigured_FailsCleanly_WithoutThrowing()
+	public async Task NoCredentialConfigured_StillSucceeds()
 	{
-		Guid runId = await _repository.CreateRunAsync("catalog-index", "{}", credentialId: null, "tester", CancellationToken.None);
-		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
-			runId, [new JobSpec("catalog-index", 1, TargetName: "depot")], "tester", CancellationToken.None);
-
-		JobDispatcherHostedService dispatcher = CreateDispatcher();
-		await dispatcher.StartAsync(CancellationToken.None);
-		try
-		{
-			await PollUntilTerminalAsync(jobIds[0]);
-		}
-		finally
-		{
-			await dispatcher.StopAsync(CancellationToken.None);
-		}
-
-		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
-		string note = await GetJobNoteAsync(jobIds[0]);
-		Assert.Contains("depot-token", note, StringComparison.Ordinal);
+		await RunCatalogIndexOnceAsync();
+		await AssertArtifactRowCountAsync(3);
 	}
 
 	private async Task<Guid> RunCatalogIndexOnceAsync()
@@ -195,63 +168,12 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 		return runId;
 	}
 
-	private async Task<Guid> SeedDepotTokenCredentialAsync(string secretValue)
-	{
-		Guid? credentialId = await _credentials.CreateAsync($"depot-token-{Guid.NewGuid():N}", "depot-token", "shared", sudoEnabled: false, CancellationToken.None);
-		Assert.NotNull(credentialId);
-		await _secretStore.StoreAsync(credentialId!.Value, System.Text.Encoding.UTF8.GetBytes(secretValue), "test", CancellationToken.None);
-		return credentialId.Value;
-	}
-
 	private async Task AssertArtifactRowCountAsync(int expected)
 	{
 		(IReadOnlyList<DepotArtifact> items, long total) = await _artifacts.ListAsync(
 			new DepotArtifactFilter(null, null, null), new PageRequest(), CancellationToken.None);
 		Assert.Equal(expected, total);
 		Assert.Equal(expected, items.Count);
-	}
-
-	/// <summary>
-	/// security.md control 1/4 + the epic #6/#8 canary machinery, proven through THIS
-	/// handler: the token never reaches job_events payloads or jobs.note, and the #8
-	/// decrypt audit row carries this job's attribution.
-	/// </summary>
-	private async Task AssertCanaryNeverLeakedAsync(string canary, Guid credentialId)
-	{
-		await Task.Delay(TimeSpan.FromMilliseconds(300));
-		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
-		await connection.OpenAsync();
-
-		await using (NpgsqlCommand leaked = new(
-			"SELECT count(*) FROM job_events WHERE payload::text LIKE '%' || $1 || '%'", connection))
-		{
-			leaked.Parameters.AddWithValue(canary);
-			Assert.Equal(0L, (long)(await leaked.ExecuteScalarAsync())!);
-		}
-
-		await using (NpgsqlCommand notes = new(
-			"SELECT count(*) FROM jobs WHERE note LIKE '%' || $1 || '%'", connection))
-		{
-			notes.Parameters.AddWithValue(canary);
-			Assert.Equal(0L, (long)(await notes.ExecuteScalarAsync())!);
-		}
-
-		await using (NpgsqlCommand artifacts = new(
-			"SELECT count(*) FROM depot_artifacts WHERE metadata::text LIKE '%' || $1 || '%'", connection))
-		{
-			artifacts.Parameters.AddWithValue(canary);
-			Assert.Equal(0L, (long)(await artifacts.ExecuteScalarAsync())!);
-		}
-
-		// The #8 audit trail: at least one secret.decrypted row for this credential,
-		// attributed to a job (job_id NOT NULL) -- proven through this handler, not
-		// just at the secrets-store unit level.
-		await using (NpgsqlCommand audited = new(
-			"SELECT count(*) FROM audit_log WHERE event_type = 'secret.decrypted' AND credential_id = $1 AND job_id IS NOT NULL", connection))
-		{
-			audited.Parameters.AddWithValue(credentialId);
-			Assert.True((long)(await audited.ExecuteScalarAsync())! >= 1);
-		}
 	}
 
 	private async Task<bool> EventTypeExistsAsync(string eventType, Guid runId)
@@ -270,15 +192,6 @@ public sealed class CatalogIndexJobHandlerEndToEndTests : IAsyncLifetime, IDispo
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand query = new($"SELECT {field}::text FROM jobs WHERE id = $1", connection);
-		query.Parameters.AddWithValue(jobId);
-		return (string)(await query.ExecuteScalarAsync())!;
-	}
-
-	private async Task<string> GetJobNoteAsync(Guid jobId)
-	{
-		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
-		await connection.OpenAsync();
-		await using NpgsqlCommand query = new("SELECT COALESCE(note, '') FROM jobs WHERE id = $1", connection);
 		query.Parameters.AddWithValue(jobId);
 		return (string)(await query.ExecuteScalarAsync())!;
 	}
