@@ -17,33 +17,19 @@ import {
 	DashboardScreen,
 	LibraryScreen,
 	LiveJobsScreen,
+	LiveRunScreen,
 	ResultsScreen,
 	StartScanScreen,
 	TransferScreen,
 } from "./screens/screens";
 
-/**
- * Deep-link compat for the old scan-only Live Run route (issue #590 AC1):
- * `/live-run` (and its `?run=<id>` query) redirects to `/live-jobs`,
- * carrying the run id forward as `?run=<id>` — `useSelectionFromQuery.ts`
- * reads the same param name, so an old bookmarked/shared Live Run link
- * lands directly on that run's group in the new workspace. A bare
- * `/live-run` (no query) redirects to a bare `/live-jobs`. Rendered instead
- * of a screen component (never both) — see `SCREENS["live-run"]` below.
- */
-function LiveRunRedirect() {
-	const { navigate } = useRouter();
-	useEffect(() => {
-		const runId = new URLSearchParams(window.location.search).get("run");
-		navigate(runId ? `/live-jobs?run=${encodeURIComponent(runId)}` : "/live-jobs");
-	}, [navigate]);
-	return null;
-}
-
 const SCREENS: Record<string, ComponentType> = {
 	dashboard: DashboardScreen,
 	"live-jobs": LiveJobsScreen,
-	"live-run": LiveRunRedirect,
+	// Restored by issue #707 (epic #706): the real console again, not a
+	// redirect to /live-jobs — see routes.ts's `live-run` entry doc comment
+	// for why issue #693's redirect-only treatment was a regression.
+	"live-run": LiveRunScreen,
 	"start-scan": StartScanScreen,
 	results: ResultsScreen,
 	benchmarks: BenchmarksScreen,

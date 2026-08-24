@@ -1,0 +1,606 @@
+.live-run-screen {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	min-height: 0;
+}
+
+.live-run__empty {
+	padding: 40px 20px;
+	color: var(--txt3);
+	font-size: 12px;
+}
+
+.live-run__empty--error {
+	color: var(--bad);
+}
+
+/* --- Header --- */
+
+.live-run__header {
+	flex: 0 0 auto;
+	padding: 13px 20px 0;
+	background: var(--panel);
+	border-bottom: 1px solid var(--line);
+}
+
+.live-run__header-top {
+	display: flex;
+	align-items: flex-start;
+	gap: 18px;
+	flex-wrap: wrap;
+}
+
+.live-run__title-block {
+	flex: 1;
+	min-width: 0;
+}
+
+.live-run__breadcrumb {
+	margin-bottom: 6px;
+	font-size: 12px;
+}
+
+.live-run__title-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.live-run__results-link {
+	margin-left: auto;
+	font-size: 12px;
+	white-space: nowrap;
+}
+
+.live-run__pulse-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--acc);
+	animation: live-run-blip 1.4s ease-in-out infinite;
+	flex: 0 0 7px;
+}
+
+.live-run__run-id {
+	font-size: 13px;
+	font-weight: 600;
+	white-space: nowrap;
+	flex: 0 0 auto;
+}
+
+.live-run__mode-pill {
+	font-size: 11px;
+	padding: 1px 7px;
+	border-radius: var(--radius-pill);
+	border: 1px solid var(--accd);
+	background: var(--accd);
+	color: var(--acc);
+	letter-spacing: 0.06em;
+	white-space: nowrap;
+	flex: 0 0 auto;
+}
+
+.live-run__desc {
+	font-size: 12px;
+	color: var(--txt2);
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.live-run__progress-row {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	margin-top: 11px;
+}
+
+.live-run__progress-bar {
+	flex: 1;
+	min-width: 60px;
+	height: 6px;
+	background: var(--soft);
+	border-radius: var(--radius-btn);
+	overflow: hidden;
+}
+
+.live-run__progress-fill {
+	height: 100%;
+	background: var(--acc);
+	transition: width 400ms linear;
+}
+
+.live-run__progress-readout {
+	font-size: 12px;
+	color: var(--txt2);
+	white-space: nowrap;
+	flex: 0 0 auto;
+	text-align: right;
+}
+
+.live-run__counters {
+	display: flex;
+	gap: 20px;
+	padding-top: 2px;
+	flex-wrap: wrap;
+	align-items: flex-start;
+}
+
+.live-run__counter {
+	text-align: right;
+}
+
+.live-run__counter-value {
+	font-size: 22px;
+	font-weight: 300;
+	line-height: 1;
+}
+
+.live-run__counter-label {
+	font-size: 9.5px;
+	letter-spacing: 0.1em;
+	color: var(--txt3);
+	margin-top: 4px;
+}
+
+.live-run__counter-divider {
+	width: 1px;
+	background: var(--line);
+	align-self: stretch;
+}
+
+.live-run__controls {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	flex: 0 0 auto;
+}
+
+.live-run__controls button {
+	background: var(--panel2);
+	border: 1px solid var(--line);
+	color: var(--txt);
+	padding: 5px 13px;
+	border-radius: var(--radius-btn);
+	font-size: 11.5px;
+	white-space: nowrap;
+}
+
+.live-run__controls button.live-run__abort {
+	background: transparent;
+	border-color: var(--badd);
+	color: var(--bad);
+}
+
+.live-run__layout-row {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	margin-top: 13px;
+	flex-wrap: wrap;
+	padding-bottom: 12px;
+}
+
+.live-run__layout-label {
+	font-size: 10px;
+	letter-spacing: 0.1em;
+	color: var(--txt3);
+	margin-right: 9px;
+	font-weight: 650;
+}
+
+.live-run__layout-switcher button {
+	padding: 6px 13px;
+	font-size: 11.5px;
+	border: 1px solid var(--line);
+	border-right: 0;
+	background: transparent;
+	color: var(--txt3);
+	white-space: nowrap;
+}
+
+.live-run__layout-switcher button:first-child {
+	border-radius: var(--radius-btn) 0 0 var(--radius-btn);
+}
+
+.live-run__layout-switcher button:last-child {
+	border-right: 1px solid var(--line);
+	border-radius: 0 var(--radius-btn) var(--radius-btn) 0;
+}
+
+.live-run__layout-switcher button.is-active {
+	background: var(--panel2);
+	color: var(--txt);
+}
+
+.live-run__spacer {
+	flex: 1;
+}
+
+.live-run__connection-note {
+	font-size: 10.5px;
+	color: var(--warn);
+}
+
+.live-run__blocked-banner {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	padding: 5px 11px;
+	background: var(--badd);
+	border: 1px solid var(--bad);
+	border-radius: var(--radius-btn);
+	flex-wrap: wrap;
+	font-size: 11.5px;
+	color: var(--bad);
+	margin-bottom: 12px;
+}
+
+.live-run__blocked-dot {
+	width: 6px;
+	height: 6px;
+	background: var(--bad);
+	border-radius: 50%;
+	flex: 0 0 6px;
+}
+
+.live-run__blocked-banner button {
+	background: transparent;
+	border: 1px solid var(--bad);
+	color: var(--bad);
+	padding: 2px 8px;
+	border-radius: var(--radius-pill);
+	font-size: 10.5px;
+	white-space: nowrap;
+}
+
+.live-run__credential-select {
+	background: var(--panel);
+	border: 1px solid var(--bad);
+	color: var(--txt);
+	padding: 2px 6px;
+	border-radius: var(--radius-btn);
+	font-size: 10.5px;
+}
+
+.live-run__action-error {
+	margin-bottom: 10px;
+	padding: 5px 11px;
+	background: var(--badd);
+	border: 1px solid var(--bad);
+	border-radius: var(--radius-btn);
+	color: var(--bad);
+	font-size: 11.5px;
+}
+
+/* --- Body / layouts --- */
+
+.live-run__body {
+	flex: 1;
+	overflow: auto;
+	min-height: 0;
+}
+
+/* Priority queues */
+
+.live-run__queue-header {
+	display: flex;
+	align-items: center;
+	gap: 11px;
+	padding: 8px 20px;
+	background: var(--panel2);
+	border-bottom: 1px solid var(--line);
+	position: sticky;
+	top: 0;
+	z-index: 2;
+}
+
+.live-run__queue-pri {
+	font-size: 10px;
+	color: var(--txt3);
+	border: 1px solid var(--line);
+	padding: 1px 5px;
+	border-radius: var(--radius-pill);
+}
+
+.live-run__queue-name {
+	font-size: 12px;
+	font-weight: 650;
+	letter-spacing: 0.04em;
+	white-space: nowrap;
+}
+
+.live-run__queue-bench {
+	font-size: 11px;
+	color: var(--txt3);
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.live-run__table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+	table-layout: fixed;
+}
+
+.live-run__row {
+	border-bottom: 1px solid var(--soft);
+}
+
+.live-run__cell {
+	padding: var(--rowpad) 8px;
+	overflow: hidden;
+}
+
+.live-run__cell--target {
+	padding-left: 20px;
+	width: auto;
+}
+
+.live-run__cell--target > span:first-child {
+	display: inline-flex;
+}
+
+.live-run__cell--state {
+	width: 104px;
+	white-space: nowrap;
+}
+
+.live-run__cell--progress {
+	width: 110px;
+}
+
+.live-run__cell--controls {
+	width: 62px;
+	text-align: center;
+}
+
+.live-run__job-cancel {
+	background: transparent;
+	border: 1px solid var(--line);
+	color: var(--txt3);
+	width: 22px;
+	height: 22px;
+	line-height: 1;
+	border-radius: var(--radius-btn);
+	font-size: 11px;
+}
+
+.live-run__job-cancel:not(:disabled):hover {
+	border-color: var(--bad);
+	color: var(--bad);
+}
+
+.live-run__cell--pass,
+.live-run__cell--fail,
+.live-run__cell--na {
+	text-align: right;
+	white-space: nowrap;
+}
+
+.live-run__cell--pass {
+	width: 46px;
+	color: var(--ok);
+}
+
+.live-run__cell--fail {
+	width: 38px;
+	color: var(--bad);
+}
+
+.live-run__cell--na {
+	width: 38px;
+	color: var(--na);
+}
+
+.live-run__cell--note {
+	width: 148px;
+	padding-right: 20px;
+	text-align: right;
+	color: var(--txt3);
+	font-size: 11px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.live-run__cell--target {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	min-width: 0;
+}
+
+.live-run__dot {
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	flex: 0 0 5px;
+}
+
+.live-run__dot--pulse {
+	animation: live-run-blip 1.4s ease-in-out infinite;
+}
+
+.live-run__target-name {
+	font-size: 11.5px;
+	color: var(--txt);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.live-run__state-pill {
+	font-size: 10.5px;
+	background: transparent;
+	border: 1px solid;
+	padding: 1px 6px;
+	border-radius: var(--radius-pill);
+}
+
+.live-run__bar {
+	height: 4px;
+	background: var(--soft);
+	border-radius: var(--radius-pill);
+	overflow: hidden;
+}
+
+.live-run__bar-fill {
+	height: 100%;
+	transition: width 400ms linear;
+}
+
+/* State board */
+
+.live-run__board {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+	gap: 11px;
+	align-items: start;
+	padding: 14px 20px;
+}
+
+.live-run__board-col {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-card);
+	min-height: 120px;
+	min-width: 0;
+}
+
+.live-run__board-col-header {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 9px 11px;
+	border-bottom: 1px solid var(--line);
+}
+
+.live-run__board-col-label {
+	font-size: 10.5px;
+	letter-spacing: 0.09em;
+	font-weight: 650;
+	color: var(--txt2);
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.live-run__board-col-body {
+	padding: 7px;
+}
+
+.live-run__board-chip {
+	padding: 6px 8px;
+	border: 1px solid var(--soft);
+	border-left: 2px solid;
+	border-radius: var(--radius-btn);
+	margin-bottom: 5px;
+	background: var(--panel2);
+}
+
+.live-run__board-chip-name {
+	font-size: 10.5px;
+	color: var(--txt);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.live-run__board-chip-meta {
+	font-size: 9.5px;
+	color: var(--txt3);
+	margin-top: 3px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Log-first */
+
+.live-run__log-first {
+	display: flex;
+	height: 100%;
+	min-height: 0;
+}
+
+.live-run__log-first-targets {
+	flex: 0 0 380px;
+	width: 380px;
+	overflow-y: auto;
+	border-right: 1px solid var(--line);
+	background: var(--panel);
+}
+
+.live-run__log-first-target {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	padding: var(--rowpad) 14px;
+	border-bottom: 1px solid var(--soft);
+	min-width: 0;
+}
+
+.live-run__log-first-target-name {
+	font-size: 11.5px;
+	color: var(--txt);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+}
+
+.live-run__log-first-log {
+	flex: 1;
+	min-width: 0;
+	overflow-y: auto;
+	padding: 8px 20px;
+	font-family: var(--mono);
+	font-size: 11.5px;
+	line-height: 1.6;
+	background: var(--bg);
+}
+
+.live-run__log-first-empty {
+	color: var(--txt3);
+}
+
+.live-run__log-first-line {
+	display: flex;
+	gap: 9px;
+	white-space: pre-wrap;
+}
+
+.live-run__log-first-ts {
+	color: var(--txt3);
+	flex: 0 0 auto;
+}
+
+.live-run__log-first-target-tag {
+	color: var(--acc);
+	flex: 0 0 auto;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 160px;
+}
+
+.live-run__log-first-msg {
+	color: var(--txt2);
+}
+
+@keyframes live-run-blip {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.3;
+	}
+}

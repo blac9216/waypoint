@@ -417,7 +417,11 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 				}
 				return next;
 			});
-			navigate(`/live-jobs?run=${result.run_id}`);
+			// Issue #707 (epic #706): lands on the restored Live Run console again
+			// (not the global Live Jobs workspace) — this is the compliance
+			// scan/remediate monitoring screen Start-a-Scan has always targeted;
+			// #688 pointed it at /live-jobs while the console was deleted (#693).
+			navigate(`/live-run?run=${result.run_id}`);
 		} catch (err) {
 			if (err instanceof ApiError && err.bindingGaps && err.bindingGaps.length > 0) {
 				setBindingGapErrors(err.bindingGaps);

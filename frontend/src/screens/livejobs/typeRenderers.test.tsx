@@ -73,20 +73,25 @@ function renderRenderer(Renderer: (props: JobDetailProps) => React.ReactElement,
 }
 
 describe("Compliance renderers (issue #591)", () => {
-	it("ScanJobDetail shows a compliance kicker, run-progress fact, and a link to Compliance Scan Results", () => {
+	it("ScanJobDetail shows a compliance kicker, run-progress fact, a Live Run console link, and a link to Compliance Scan Results", () => {
 		renderRenderer(ScanJobDetail, {
 			job: job({ job_type: "scan", stage: "attesting" }),
 			group: group({ job_count: 4, job_count_completed: 2, job_count_failed: 1 }),
 		});
 		expect(screen.getByText("Compliance scan")).toBeInTheDocument();
 		expect(screen.getByText("2/4 targets complete, 1 failed")).toBeInTheDocument();
+		// Issue #707: the console link is the prominent one — it must exist
+		// alongside (not instead of) the Results link.
+		const consoleLink = screen.getByRole("link", { name: "Open Live Run console →" });
+		expect(consoleLink).toHaveAttribute("href", "/live-run?run=run-1");
 		const link = screen.getByRole("link", { name: "View in Compliance Scan Results →" });
 		expect(link).toHaveAttribute("href", "/results?run=run-1");
 	});
 
-	it("RemediateJobDetail shows a remediation kicker and links to Compliance Scan Results, never implying scheduling", () => {
+	it("RemediateJobDetail shows a remediation kicker and links to both the Live Run console and Compliance Scan Results, never implying scheduling", () => {
 		renderRenderer(RemediateJobDetail, { job: job({ job_type: "remediate" }), group: group({ run_type: "remediate" }) });
 		expect(screen.getByText("Remediation")).toBeInTheDocument();
+		expect(screen.getByRole("link", { name: "Open Live Run console →" })).toHaveAttribute("href", "/live-run?run=run-1");
 		expect(screen.getByRole("link", { name: "View in Compliance Scan Results →" })).toBeInTheDocument();
 	});
 
