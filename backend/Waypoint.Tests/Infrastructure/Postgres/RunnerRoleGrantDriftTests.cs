@@ -347,22 +347,45 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	/// <summary>
 	/// Issue #622: the third instance of the #556 grant-drift class, this time against
 	/// waypoint_download_runner. <see cref="CredentialRepository.FindByTypeAsync"/> --
-	/// called by both <c>CatalogIndexJobHandler</c> (catalog-index) and
-	/// <c>ManagedToolInstallJobHandler</c>'s depot-fetch path (tool-install) to resolve
-	/// the stored depot-token credential -- shares <c>ProjectionSql</c> with
-	/// <see cref="CredentialRepository.GetAsync"/>, which migration 0034 extended to
-	/// select <c>last_tested_at, expires_at</c>. Migration 0035 granted those two
-	/// columns to waypoint_compliance_runner only; the download-runner role was never
-	/// updated, so this call hit 42501 the moment a real download-runner claimed a
-	/// catalog-index or depot-fetch tool-install job. Migration 0039 closes it.
+	/// called by <c>ManagedToolInstallJobHandler</c>'s depot-fetch path (tool-install)
+	/// and by the depot-enrollment handler to resolve the stored Activation Code
+	/// credential -- shares <c>ProjectionSql</c> with <see cref="CredentialRepository.GetAsync"/>,
+	/// which migration 0034 extended to select <c>last_tested_at, expires_at</c>.
+	/// Migration 0035 granted those two columns to waypoint_compliance_runner only; the
+	/// download-runner role was never updated, so this call hit 42501 the moment a real
+	/// download-runner claimed a catalog-index or depot-fetch tool-install job.
+	/// Migration 0039 closes it. Issue #724: reseeded from the retired <c>depot-token</c>
+	/// literal to the two types production code actually resolves post-#690
+	/// (<c>CatalogIndexJobHandler</c> no longer resolves any credential at all) -- the
+	/// grant itself is column-level, not type-scoped, so both types prove the same role
+	/// boundary.
 	/// </summary>
 	[Fact]
-	public async Task DownloadRunnerRole_FindByTypeAsync_ResolvesDepotTokenWithoutPermissionDenied()
+	public async Task DownloadRunnerRole_FindByTypeAsync_ResolvesDepotActivationCodeWithoutPermissionDenied()
 	{
-		await SeedCredentialOfTypeAsync("depot-token");
+		await SeedCredentialOfTypeAsync("depot-activation-code");
 
 		CredentialRepository runnerCredentials = new(_downloadRunnerConnectionString);
-		CredentialResponse? resolved = await runnerCredentials.FindByTypeAsync("depot-token", CancellationToken.None);
+		CredentialResponse? resolved = await runnerCredentials.FindByTypeAsync("depot-activation-code", CancellationToken.None);
+
+		Assert.NotNull(resolved);
+		Assert.Null(resolved!.LastTestedAt);
+		Assert.Null(resolved.ExpiresAt);
+	}
+
+	/// <summary>
+	/// Issue #724 rider: the legacy Download Token (issue #690) is a distinct credential
+	/// type the same download-runner role must also be able to resolve without hitting
+	/// the pre-0039 permission gap -- proves the column-level grant is not accidentally
+	/// scoped to just the Activation Code type.
+	/// </summary>
+	[Fact]
+	public async Task DownloadRunnerRole_FindByTypeAsync_ResolvesLegacyDownloadTokenWithoutPermissionDenied()
+	{
+		await SeedCredentialOfTypeAsync("legacy-download-token");
+
+		CredentialRepository runnerCredentials = new(_downloadRunnerConnectionString);
+		CredentialResponse? resolved = await runnerCredentials.FindByTypeAsync("legacy-download-token", CancellationToken.None);
 
 		Assert.NotNull(resolved);
 		Assert.Null(resolved!.LastTestedAt);
@@ -380,7 +403,7 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	[Fact]
 	public async Task DownloadRunnerRole_CannotUpdateCredentialLastTestedAt()
 	{
-		Guid credentialId = await SeedCredentialOfTypeAsync("depot-token");
+		Guid credentialId = await SeedCredentialOfTypeAsync("depot-activation-code");
 
 		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
 		await connection.OpenAsync();
@@ -402,7 +425,7 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	[Fact]
 	public async Task DownloadRunnerRole_CannotUpdateCredentialExpiresAt()
 	{
-		Guid credentialId = await SeedCredentialOfTypeAsync("depot-token");
+		Guid credentialId = await SeedCredentialOfTypeAsync("depot-activation-code");
 
 		await using NpgsqlConnection connection = new(_downloadRunnerConnectionString);
 		await connection.OpenAsync();
