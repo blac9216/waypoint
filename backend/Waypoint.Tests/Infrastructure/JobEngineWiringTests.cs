@@ -16,6 +16,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.SystemState;
 using Waypoint.Infrastructure.DependencyInjection;
@@ -237,6 +238,31 @@ public sealed class ExecutionCompositionTests
 				"catalog-index", "catalog-pull", "download", "tool-install", "depot-enrollment", "discover", "scan", "credential-test", "content-pull", "purge",
 			},
 			jobTypes);
+	}
+
+	/// <summary>
+	/// PR #763 class-killing guard (issue #687 review round 1): the production container
+	/// must be able to construct <c>CatalogPullJobHandler</c> with the REAL
+	/// <see cref="IManagedToolCatalogVerifier"/> satisfying its catalog-only
+	/// <see cref="IManagedToolCatalogVerifier.AuthenticateCatalogAsync"/> abstraction --
+	/// resolving the handler forces its constructor to run, so a future change that (say)
+	/// drops the verifier registration, or a signature change that leaves the handler
+	/// depending on a type the container cannot supply, breaks HERE and loudly rather than
+	/// only at runtime on a real pull. This is the cheap guard the reviewer asked for after
+	/// the fake-verifier E2E hid the dead production authentication path (Finding 1/2). The
+	/// bound verifier is asserted to be the concrete production type so the guard cannot be
+	/// satisfied by an accidentally-registered test double.
+	/// </summary>
+	[Fact]
+	public void ResolvesCatalogPullHandlerWithTheRealCatalogVerifier()
+	{
+		using ServiceProvider provider = BuildProvider();
+
+		IJobHandler handler = Assert.Single(provider.GetServices<IJobHandler>().Where(h => h.JobType == "catalog-pull"));
+		Assert.IsType<Waypoint.Infrastructure.Catalog.CatalogPullJobHandler>(handler);
+
+		IManagedToolCatalogVerifier verifier = provider.GetRequiredService<IManagedToolCatalogVerifier>();
+		Assert.IsType<BroadcomManagedToolCatalogVerifier>(verifier);
 	}
 
 	/// <summary>

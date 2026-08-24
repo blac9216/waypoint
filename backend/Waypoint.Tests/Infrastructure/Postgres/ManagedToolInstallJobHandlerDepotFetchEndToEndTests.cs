@@ -127,6 +127,10 @@ public sealed class ManagedToolInstallJobHandlerDepotFetchEndToEndTests : IAsync
 
 		public string? LastRepositoryRootSeen { get; private set; }
 
+		// Install path exercises VerifyAsync only; catalog-only auth is the catalog-pull path.
+		public Task<ManagedToolCatalogAuthenticationResult> AuthenticateCatalogAsync(string repositoryRoot, CancellationToken cancellationToken) =>
+			throw new NotSupportedException("The install path uses VerifyAsync, not the catalog-only AuthenticateCatalogAsync.");
+
 		public Task<ManagedToolCatalogVerificationResult> VerifyAsync(string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken)
 		{
 			LastRepositoryRootSeen = repositoryRoot;

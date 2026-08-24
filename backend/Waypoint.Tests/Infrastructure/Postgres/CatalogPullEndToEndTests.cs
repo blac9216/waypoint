@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -38,12 +39,17 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// <c>ICredentialSecretStore</c> (Postgres-only), so its Activation Code
 /// decrypt-for-one-call cannot be exercised by a pure in-memory unit test -- mirrors
 /// <c>DepotEnrollmentValidateEndToEndTests</c>'s own split for the identical reason.
-/// A <see cref="FakeMetadataPuller"/> and <see cref="FakeCatalogVerifier"/> stand in
-/// for the real process invocation and cryptographic signature check (each covered on
-/// their own elsewhere), so this file's focus is the handler's own decrypt/stage/
-/// promote/index/cleanup/classify decisions and the honesty guarantees issue #687's
-/// acceptance criteria name: zero-item results, prior-good preservation on failure,
-/// and redaction.
+/// A <see cref="FakeMetadataPuller"/> stands in for the real <c>vcf-download-tool</c>
+/// process invocation (covered on its own elsewhere). The catalog authentication step,
+/// however, is driven through the REAL <see cref="BroadcomManagedToolCatalogVerifier"/>
+/// wired exactly as production DI wires it -- see <see cref="CreateRealVerifier"/> and
+/// the signed-catalog fixture in <see cref="StageSignedCatalog"/> -- so a green success
+/// test cannot hide a broken production authentication path (PR #763 round-1 Finding 2:
+/// the prior fake-verifier E2E kept the suite green while the real path failed on every
+/// pull). A <see cref="FakeCatalogVerifier"/> is retained only for the handler failure-
+/// plumbing tests whose failure a real signed fixture cannot cheaply produce (a
+/// mid-stream promotion IO error, a genuinely malformed-but-authenticated body); each
+/// such test says so at its call site.
 /// </summary>
 [Collection("Postgres")]
 #pragma warning disable CA1001 // xUnit owns the lifecycle: DisposeAsync stops the buffer and removes the state dir.
@@ -80,6 +86,8 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	private readonly string _keyDirectory = Directory.CreateTempSubdirectory("wp-catalog-pull-key").FullName;
 	private readonly string _toolStatePath = Directory.CreateTempSubdirectory("wp-catalog-pull-tool-state").FullName;
 	private readonly string _depotPath = Directory.CreateTempSubdirectory("wp-catalog-pull-depot").FullName;
+	private readonly string _trustCertPath = Path.Combine(Directory.CreateTempSubdirectory("wp-catalog-pull-trust").FullName, "catalog-trust.cert");
+	private readonly RSA _signingKey = RSA.Create(2048);
 	private readonly InPlaySecretRedactor _redactor = new();
 
 	private JobQueueRepository _repository = null!;
@@ -123,9 +131,11 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 	public void Dispose()
 	{
+		_signingKey.Dispose();
 		Directory.Delete(_keyDirectory, recursive: true);
 		Directory.Delete(_toolStatePath, recursive: true);
 		Directory.Delete(_depotPath, recursive: true);
+		Directory.Delete(Path.GetDirectoryName(_trustCertPath)!, recursive: true);
 	}
 
 	private async Task ResetEnrollmentAsync()
@@ -172,7 +182,21 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		await truncate.ExecuteNonQueryAsync();
 	}
 
-	private sealed class FakeMetadataPuller(CatalogPullResult result, string catalogJsonToWrite = "") : IManagedToolMetadataPuller
+	/// <summary>
+	/// Stands in for the real <c>vcf-download-tool metadata download</c> process: writes
+	/// the staged <c>productVersionCatalog.json</c> into the depot path the handler hands
+	/// it. When <paramref name="signWith"/> is supplied it ALSO writes a real
+	/// signature-envelope <c>.sig</c> over the catalog's exact bytes (following the
+	/// <c>BroadcomManagedToolCatalogVerifierTests</c> fixture convention) so the handler's
+	/// REAL verifier authenticates it -- and when <paramref name="tamperAfterSigning"/> is
+	/// set, mutates the catalog after signing so the real verifier rejects it (negative
+	/// proof). The signing key is invented per test run; nothing here is a real credential.
+	/// </summary>
+	private sealed class FakeMetadataPuller(
+		CatalogPullResult result,
+		string catalogJsonToWrite = "",
+		CatalogSigner? signWith = null,
+		bool tamperAfterSigning = false) : IManagedToolMetadataPuller
 	{
 		public List<string> DepotPaths { get; } = [];
 		public List<string> StagedContents { get; } = [];
@@ -184,19 +208,71 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 			if (result.Succeeded && !string.IsNullOrEmpty(catalogJsonToWrite))
 			{
-				string catalogFilePath = Path.Combine(depotPath, "PROD", "metadata", "productVersionCatalog", "v1", "productVersionCatalog.json");
-				Directory.CreateDirectory(Path.GetDirectoryName(catalogFilePath)!);
-				File.WriteAllText(catalogFilePath, catalogJsonToWrite);
+				string metadataDir = Path.Combine(depotPath, "PROD", "metadata", "productVersionCatalog", "v1");
+				Directory.CreateDirectory(metadataDir);
+				string catalogFilePath = Path.Combine(metadataDir, "productVersionCatalog.json");
+				byte[] catalogBytes = Encoding.UTF8.GetBytes(catalogJsonToWrite);
+				File.WriteAllBytes(catalogFilePath, catalogBytes);
+
+				if (signWith is not null)
+				{
+					File.WriteAllText(Path.Combine(metadataDir, "productVersionCatalog.sig"), signWith.EnvelopeFor(catalogBytes));
+
+					if (tamperAfterSigning)
+					{
+						File.AppendAllText(catalogFilePath, " ");
+					}
+				}
 			}
 
 			return Task.FromResult(result);
 		}
 	}
 
-	private sealed class FakeCatalogVerifier(ManagedToolCatalogVerificationResult result) : IManagedToolCatalogVerifier
+	/// <summary>
+	/// Invented trust chain: one self-signed certificate over a per-run key. The SAME
+	/// certificate bytes are provisioned as the verifier's trust anchor (via
+	/// <see cref="ProvisionTrustCert"/>) and embedded in every signature envelope, so the
+	/// real verifier's fixed-time cert-equality check matches -- exactly the
+	/// <c>BroadcomManagedToolCatalogVerifierTests</c> fixture shape. Nothing real.
+	/// </summary>
+	private sealed class CatalogSigner
 	{
+		private readonly RSA _key;
+		private readonly string _certificatePem;
+
+		public CatalogSigner(RSA key)
+		{
+			_key = key;
+			CertificateRequest request = new("CN=Invented Catalog Signer", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+			using X509Certificate2 certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+			_certificatePem = certificate.ExportCertificatePem();
+		}
+
+		public string CertificatePem => _certificatePem;
+
+		public string EnvelopeFor(byte[] catalogBytes)
+		{
+			byte[] signature = _key.SignData(catalogBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+			return $"SHA256(2f431d2654aeecbc058dd054d0dbb7ce)= {Convert.ToHexString(signature).ToLowerInvariant()}\n{_certificatePem}";
+		}
+	}
+
+	/// <summary>
+	/// Retained ONLY for the handler failure-plumbing tests whose failure the real
+	/// verifier cannot cheaply produce from a signed fixture -- e.g. asserting the
+	/// handler classifies an authentication failure and preserves the prior-good
+	/// catalog. The success and zero-item paths use the REAL verifier
+	/// (<see cref="CreateRealVerifier"/>). This fake canned an <c>Ok</c> for the
+	/// authenticate step; PR #763 Finding 2 was that no test drove the real one.
+	/// </summary>
+	private sealed class FakeCatalogVerifier(ManagedToolCatalogAuthenticationResult authResult) : IManagedToolCatalogVerifier
+	{
+		public Task<ManagedToolCatalogAuthenticationResult> AuthenticateCatalogAsync(string repositoryRoot, CancellationToken cancellationToken) =>
+			Task.FromResult(authResult);
+
 		public Task<ManagedToolCatalogVerificationResult> VerifyAsync(string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken) =>
-			Task.FromResult(result);
+			throw new NotSupportedException("catalog-pull only uses AuthenticateCatalogAsync.");
 	}
 
 	/// <summary>Plain wrapper so this file does not need a full DepotArtifactRepository re-implementation -- delegates to the real Postgres-backed one.</summary>
@@ -238,18 +314,40 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 
 	private CatalogPullJobHandler CreateHandler(IManagedToolMetadataPuller puller, IManagedToolCatalogVerifier verifier)
 	{
-		ManagedToolOptions toolOptions = new() { ToolStatePath = _toolStatePath };
+		ManagedToolOptions toolOptions = new() { ToolStatePath = _toolStatePath, CatalogTrustCertificatePath = _trustCertPath };
 		CatalogOptions catalogOptions = new() { DepotPath = _depotPath };
 		return new CatalogPullJobHandler(
 			_enrollment, puller, verifier, _artifacts, _pullState, _secretStore, _credentials, _redactor,
 			Options.Create(catalogOptions), Options.Create(toolOptions));
 	}
 
+	/// <summary>
+	/// The REAL production verifier (the exact concrete type production DI binds
+	/// <c>IManagedToolCatalogVerifier</c> to), pointed at the invented trust certificate
+	/// that <see cref="ProvisionTrustCertFor"/> derives from the per-run signing key.
+	/// </summary>
+	private BroadcomManagedToolCatalogVerifier CreateRealVerifier() =>
+		new(Options.Create(new ManagedToolOptions
+		{
+			ToolStatePath = _toolStatePath,
+			CatalogTrustCertificatePath = _trustCertPath,
+		}));
+
+	/// <summary>
+	/// Provisions the independently trusted certificate (the signer's own cert bytes) as
+	/// the verifier's trust anchor, so the real verifier's fixed-time cert-equality check
+	/// matches the cert the puller embeds in the <c>.sig</c> envelope.
+	/// </summary>
+	private void ProvisionTrustCert(CatalogSigner signer) =>
+		File.WriteAllText(_trustCertPath, signer.CertificatePem);
+
 	[Fact]
 	public async Task NoActivationCodeConfigured_FailsCleanly_NeverCallsThePuller()
 	{
+		// Fails at the credential gate before the verifier is ever consulted, so the fake
+		// verifier here is inert (its AuthenticateCatalogAsync is never called).
 		FakeMetadataPuller puller = new(CatalogPullResult.Ok());
-		CatalogPullJobHandler handler = CreateHandler(puller, new FakeCatalogVerifier(ManagedToolCatalogVerificationResult.Ok("unused")));
+		CatalogPullJobHandler handler = CreateHandler(puller, new FakeCatalogVerifier(ManagedToolCatalogAuthenticationResult.Ok()));
 		ClaimedJob job = await EnqueuePullJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -262,9 +360,13 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	[Fact]
 	public async Task ToolSucceeds_CatalogAuthenticates_PromotesAndIndexes_CleansUpStaging()
 	{
+		// Drives the handler through the REAL BroadcomManagedToolCatalogVerifier wired as
+		// production DI wires it, against an invented signed catalog fixture (Finding 2).
 		await SeedActivationCodeCredentialAsync(InventedCode);
-		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson);
-		CatalogPullJobHandler handler = CreateHandler(puller, new FakeCatalogVerifier(ManagedToolCatalogVerificationResult.Ok("aa11")));
+		CatalogSigner signer = new(_signingKey);
+		ProvisionTrustCert(signer);
+		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson, signWith: signer);
+		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -303,10 +405,14 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	[Fact]
 	public async Task ZeroItemAuthenticatedCatalog_IsRecordedAsAGenuineSuccess()
 	{
+		// Real verifier + invented signed empty catalog (Finding 2): proves the zero-item
+		// "genuine success" path is reachable only AFTER real authentication passes.
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		const string emptyCatalog = """{"patches": {"VCENTER": []}}""";
-		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), emptyCatalog);
-		CatalogPullJobHandler handler = CreateHandler(puller, new FakeCatalogVerifier(ManagedToolCatalogVerificationResult.Ok("unused")));
+		CatalogSigner signer = new(_signingKey);
+		ProvisionTrustCert(signer);
+		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), emptyCatalog, signWith: signer);
+		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -320,9 +426,11 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	[Fact]
 	public async Task ToolRejectsActivationCode_RecordsAuthFailure_NeverPromotesAnything_NeverLeaksTheCode()
 	{
+		// The metadata-download (tool) call fails before authentication, so the verifier is
+		// never consulted -- the fake is inert here.
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		FakeMetadataPuller puller = new(CatalogPullResult.AuthFailed("Activation Code rejected: expired or revoked."));
-		CatalogPullJobHandler handler = CreateHandler(puller, new FakeCatalogVerifier(ManagedToolCatalogVerificationResult.Ok("unused")));
+		CatalogPullJobHandler handler = CreateHandler(puller, new FakeCatalogVerifier(ManagedToolCatalogAuthenticationResult.Ok()));
 		ClaimedJob job = await EnqueuePullJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -339,23 +447,30 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	[Fact]
-	public async Task CatalogFailsAuthentication_FailsClosed_PriorGoodCatalogUntouched()
+	public async Task TamperedCatalog_FailsAuthenticationThroughTheRealVerifier_FailsClosed_PriorGoodCatalogUntouched()
 	{
+		// NEGATIVE PROOF (Finding 1): a pull whose staged catalog is mutated AFTER signing
+		// is rejected by the REAL BroadcomManagedToolCatalogVerifier (signature no longer
+		// matches the bytes), so nothing is promoted or indexed -- the same real-verifier
+		// path the success test exercises, driven to a genuine authentication failure.
 		await SeedActivationCodeCredentialAsync(InventedCode);
+		CatalogSigner signer = new(_signingKey);
+		ProvisionTrustCert(signer);
 
 		// Seed a prior-good catalog on the active depot path.
 		string activeCatalogPath = Path.Combine(_depotPath, "PROD", "metadata", "productVersionCatalog", "v1", "productVersionCatalog.json");
 		Directory.CreateDirectory(Path.GetDirectoryName(activeCatalogPath)!);
 		File.WriteAllText(activeCatalogPath, "prior-good-catalog-contents");
 
-		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson);
-		CatalogPullJobHandler handler = CreateHandler(puller, new FakeCatalogVerifier(ManagedToolCatalogVerificationResult.Fail("signature invalid")));
+		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson, signWith: signer, tamperAfterSigning: true);
+		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
 		Assert.Contains("authentication", outcome.Note);
+		Assert.Contains("signature is invalid", outcome.Note, StringComparison.OrdinalIgnoreCase);
 
 		// Prior-good catalog on disk is untouched.
 		Assert.Equal("prior-good-catalog-contents", File.ReadAllText(activeCatalogPath));
@@ -366,11 +481,38 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	[Fact]
+	public async Task UnsignedCatalog_IsRejectedByTheRealVerifier_FailsClosed()
+	{
+		// NEGATIVE PROOF (Finding 1), companion to the tampered case: a pull whose staged
+		// catalog has no signature envelope at all (signWith: null) is rejected by the real
+		// verifier for a missing signature, never promoted or indexed.
+		await SeedActivationCodeCredentialAsync(InventedCode);
+		CatalogSigner signer = new(_signingKey);
+		ProvisionTrustCert(signer);
+		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), SampleCatalogJson);
+		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
+		ClaimedJob job = await EnqueuePullJobAsync();
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Contains("authentication", outcome.Note);
+
+		(IReadOnlyList<DepotArtifact> items, long total) = await _artifacts.ListAsync(
+			new DepotArtifactFilter(null, null, null), new Waypoint.Core.Pagination.PageRequest(), CancellationToken.None);
+		Assert.Equal(0, total);
+	}
+
+	[Fact]
 	public async Task MalformedAuthenticatedCatalog_FailsClosed()
 	{
+		// Real verifier: the catalog IS validly signed (authenticates), but its body is not
+		// valid JSON, so the parser -- downstream of authentication -- fails it closed.
 		await SeedActivationCodeCredentialAsync(InventedCode);
-		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), "{not-valid-json");
-		CatalogPullJobHandler handler = CreateHandler(puller, new FakeCatalogVerifier(ManagedToolCatalogVerificationResult.Ok("unused")));
+		CatalogSigner signer = new(_signingKey);
+		ProvisionTrustCert(signer);
+		FakeMetadataPuller puller = new(CatalogPullResult.Ok(), "{not-valid-json", signWith: signer);
+		CatalogPullJobHandler handler = CreateHandler(puller, CreateRealVerifier());
 		ClaimedJob job = await EnqueuePullJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
@@ -382,9 +524,10 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	[Fact]
 	public async Task ToolCallItselfFails_ReportsOrdinaryFailure_NotAuthFailure()
 	{
+		// The tool call itself fails before authentication; the verifier is never consulted.
 		await SeedActivationCodeCredentialAsync(InventedCode);
 		FakeMetadataPuller puller = new(CatalogPullResult.Failed("vcf-download-tool is not installed."));
-		CatalogPullJobHandler handler = CreateHandler(puller, new FakeCatalogVerifier(ManagedToolCatalogVerificationResult.Ok("unused")));
+		CatalogPullJobHandler handler = CreateHandler(puller, new FakeCatalogVerifier(ManagedToolCatalogAuthenticationResult.Ok()));
 		ClaimedJob job = await EnqueuePullJobAsync();
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);

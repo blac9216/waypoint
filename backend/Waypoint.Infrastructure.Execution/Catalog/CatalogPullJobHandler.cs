@@ -168,12 +168,12 @@ public sealed class CatalogPullJobHandler : IJobHandler
 
 			await EmitProgressAsync(context, "Vendor metadata downloaded; authenticating catalog.", cancellationToken).ConfigureAwait(false);
 
-			ManagedToolCatalogVerificationResult verification;
+			ManagedToolCatalogAuthenticationResult verification;
 			string stagedCatalogPath;
 			try
 			{
 				stagedCatalogPath = ResolveConfigured(metadataDepotPath, toolOptions.ProductVersionCatalogPath);
-				verification = await AuthenticateCatalogAsync(metadataDepotPath, toolOptions, cancellationToken).ConfigureAwait(false);
+				verification = await _catalogVerifier.AuthenticateCatalogAsync(metadataDepotPath, cancellationToken).ConfigureAwait(false);
 			}
 			catch (InvalidOperationException exception)
 			{
@@ -240,18 +240,6 @@ public sealed class CatalogPullJobHandler : IJobHandler
 		{
 			TryDeleteDirectory(stagingRoot);
 		}
-	}
-
-	private Task<ManagedToolCatalogVerificationResult> AuthenticateCatalogAsync(
-		string repositoryRoot, ManagedToolOptions toolOptions, CancellationToken cancellationToken)
-	{
-		// IManagedToolCatalogVerifier.VerifyAsync also checks a named artifact's
-		// size/sha within the catalog; here there is no single "artifact" being
-		// installed -- only the catalog document's own signature matters, so an
-		// empty artifact path/version is not something the verifier's candidate
-		// search needs to match against. Reuse is limited to the signature-envelope
-		// authentication path this call exercises via the catalog/signature files.
-		return _catalogVerifier.VerifyAsync(repositoryRoot, artifactPath: Path.Combine(repositoryRoot, "unused"), version: null, cancellationToken);
 	}
 
 	private async Task<JobExecutionOutcome> RecordFailureAsync(bool isAuthFailure, string reason, CancellationToken cancellationToken)

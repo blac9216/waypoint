@@ -55,6 +55,9 @@ public sealed class CatalogPullJobHandlerTests
 
 	private sealed class UnreachableCatalogVerifier : IManagedToolCatalogVerifier
 	{
+		public Task<ManagedToolCatalogAuthenticationResult> AuthenticateCatalogAsync(string repositoryRoot, CancellationToken cancellationToken) =>
+			throw new InvalidOperationException("Not expected to be called when the enrollment gate rejects the job first.");
+
 		public Task<ManagedToolCatalogVerificationResult> VerifyAsync(string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken) =>
 			throw new InvalidOperationException("Not expected to be called when the enrollment gate rejects the job first.");
 	}

@@ -29,25 +29,67 @@ public sealed partial class BroadcomManagedToolCatalogVerifier(IOptions<ManagedT
 	[GeneratedRegex(@"\ASHA256\([0-9a-fA-F]+\)=\s*([0-9a-fA-F]{512})\s*\r?\n(-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----)\s*\z", RegexOptions.CultureInvariant)]
 	private static partial Regex EnvelopeRegex();
 
-	public async Task<ManagedToolCatalogVerificationResult> VerifyAsync(
-		string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken)
+	/// <summary>
+	/// Upper bound on the authenticated catalog document's size (issue #687 catalog-only
+	/// path). The real productVersionCatalog.json is a few MB; this caps a signed-but-
+	/// absurd document before the connected pull parses/indexes it, and is generous
+	/// enough never to reject a genuine vendor catalog.
+	/// </summary>
+	private const long MaxCatalogBytes = 256L * 1024 * 1024;
+
+	private readonly record struct AuthenticatedCatalog(byte[]? Bytes, string? FailureReason)
+	{
+		public bool Valid => FailureReason is null;
+		public static AuthenticatedCatalog Ok(byte[] bytes) => new(bytes, null);
+		public static AuthenticatedCatalog Fail(string reason) => new(null, reason);
+	}
+
+	/// <summary>
+	/// Catalog-only authentication (issue #687 connected <c>catalog-pull</c>): trust
+	/// chain + detached-signature-envelope check over the catalog's exact bytes + a
+	/// size bound, with NO per-artifact size/SHA match. Uses the SAME publisher trust
+	/// anchor and envelope convention as the install-time <see cref="VerifyAsync"/>
+	/// (they both funnel through <see cref="AuthenticateCatalogDocumentAsync"/>).
+	/// </summary>
+	public async Task<ManagedToolCatalogAuthenticationResult> AuthenticateCatalogAsync(
+		string repositoryRoot, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
-		ArgumentException.ThrowIfNullOrWhiteSpace(artifactPath);
+		AuthenticatedCatalog authenticated = await AuthenticateCatalogDocumentAsync(repositoryRoot, cancellationToken).ConfigureAwait(false);
+		return authenticated.Valid
+			? ManagedToolCatalogAuthenticationResult.Ok()
+			: ManagedToolCatalogAuthenticationResult.Fail(authenticated.FailureReason!);
+	}
+
+	/// <summary>
+	/// Shared authentication of the catalog document itself -- the only trust check the
+	/// connected <c>catalog-pull</c> path needs, and the prefix of the install-time
+	/// per-artifact verification. Returns the authenticated catalog bytes on success so
+	/// <see cref="VerifyAsync"/> can then match a named candidate against them.
+	/// </summary>
+	private async Task<AuthenticatedCatalog> AuthenticateCatalogDocumentAsync(
+		string repositoryRoot, CancellationToken cancellationToken)
+	{
 		ManagedToolOptions configured = _options.Value;
 		string catalogPath = ResolveConfigured(repositoryRoot, configured.ProductVersionCatalogPath);
 		string signaturePath = ResolveConfigured(repositoryRoot, configured.ProductVersionCatalogSignaturePath);
 		if (!File.Exists(catalogPath))
 		{
-			return ManagedToolCatalogVerificationResult.Fail($"Broadcom product-version catalog not found at '{catalogPath}'.");
+			return AuthenticatedCatalog.Fail($"Broadcom product-version catalog not found at '{catalogPath}'.");
 		}
 		if (!File.Exists(signaturePath))
 		{
-			return ManagedToolCatalogVerificationResult.Fail($"Broadcom product-version catalog signature not found at '{signaturePath}'.");
+			return AuthenticatedCatalog.Fail($"Broadcom product-version catalog signature not found at '{signaturePath}'.");
 		}
 		if (!File.Exists(configured.CatalogTrustCertificatePath))
 		{
-			return ManagedToolCatalogVerificationResult.Fail($"Broadcom catalog trust certificate is not provisioned at '{configured.CatalogTrustCertificatePath}'.");
+			return AuthenticatedCatalog.Fail($"Broadcom catalog trust certificate is not provisioned at '{configured.CatalogTrustCertificatePath}'.");
+		}
+
+		long catalogFileSize = new FileInfo(catalogPath).Length;
+		if (catalogFileSize > MaxCatalogBytes)
+		{
+			return AuthenticatedCatalog.Fail($"Broadcom product-version catalog is implausibly large ({catalogFileSize} bytes exceeds the {MaxCatalogBytes}-byte bound).");
 		}
 
 		byte[] catalogBytes = await File.ReadAllBytesAsync(catalogPath, cancellationToken).ConfigureAwait(false);
@@ -55,7 +97,7 @@ public sealed partial class BroadcomManagedToolCatalogVerifier(IOptions<ManagedT
 		Match match = EnvelopeRegex().Match(envelope);
 		if (!match.Success)
 		{
-			return ManagedToolCatalogVerificationResult.Fail("Broadcom product-version catalog signature envelope is malformed.");
+			return AuthenticatedCatalog.Fail("Broadcom product-version catalog signature envelope is malformed.");
 		}
 
 		try
@@ -65,19 +107,34 @@ public sealed partial class BroadcomManagedToolCatalogVerifier(IOptions<ManagedT
 				await File.ReadAllTextAsync(configured.CatalogTrustCertificatePath, cancellationToken).ConfigureAwait(false));
 			if (!CryptographicOperations.FixedTimeEquals(embedded.RawData, trusted.RawData))
 			{
-				return ManagedToolCatalogVerificationResult.Fail("Catalog signature certificate does not match the independently provisioned Broadcom trust certificate.");
+				return AuthenticatedCatalog.Fail("Catalog signature certificate does not match the independently provisioned Broadcom trust certificate.");
 			}
 			using RSA? rsa = embedded.GetRSAPublicKey();
 			if (rsa is null || !rsa.VerifyData(catalogBytes, Convert.FromHexString(match.Groups[1].Value), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1))
 			{
-				return ManagedToolCatalogVerificationResult.Fail("Broadcom product-version catalog signature is invalid.");
+				return AuthenticatedCatalog.Fail("Broadcom product-version catalog signature is invalid.");
 			}
 		}
 		catch (Exception exception) when (exception is CryptographicException or FormatException)
 		{
-			return ManagedToolCatalogVerificationResult.Fail($"Broadcom catalog trust material could not be parsed: {exception.Message}");
+			return AuthenticatedCatalog.Fail($"Broadcom catalog trust material could not be parsed: {exception.Message}");
 		}
 
+		return AuthenticatedCatalog.Ok(catalogBytes);
+	}
+
+	public async Task<ManagedToolCatalogVerificationResult> VerifyAsync(
+		string repositoryRoot, string artifactPath, string? version, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
+		ArgumentException.ThrowIfNullOrWhiteSpace(artifactPath);
+		AuthenticatedCatalog authenticated = await AuthenticateCatalogDocumentAsync(repositoryRoot, cancellationToken).ConfigureAwait(false);
+		if (!authenticated.Valid)
+		{
+			return ManagedToolCatalogVerificationResult.Fail(authenticated.FailureReason!);
+		}
+
+		byte[] catalogBytes = authenticated.Bytes!;
 		CatalogCandidate[] candidates;
 		try
 		{
