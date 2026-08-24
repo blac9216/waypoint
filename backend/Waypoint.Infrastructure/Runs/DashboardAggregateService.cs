@@ -73,6 +73,23 @@ public sealed class DashboardAggregateService
 	private const int RecentRunsScanned = 20;
 	private const int RecentRunsReturned = 8;
 
+	/// <summary>
+	/// The RECENT RUNS card is a compliance summary (docs/ui/prototype/README.md screen
+	/// 2) and every row deep-links into Results, which itself shows only these
+	/// compliance-owned <c>run_type</c> values (frontend <c>useRunList.ts</c>'s
+	/// <c>COMPLIANCE_RUN_TYPES</c>). Issue #717: filter to these BEFORE the cap so the
+	/// returned list is always the N most recent COMPLIANCE runs -- capping an
+	/// unfiltered fetch let a burst of operational runs (discover/credential-test/
+	/// content-pull/tool-install/etc.) push every scan/remediate row past the cap,
+	/// permanently under-displaying compliance activity that still exists.
+	/// <see cref="RunTypes.Scan"/>/<see cref="RunTypes.Remediate"/> is the authoritative
+	/// closed set (byte-identical to the CHECK constraint via
+	/// <c>RunTypesConstraintDriftTests</c>); the frontend twin is bound to it by
+	/// <c>runTypes.test.ts</c>/<c>dashboard.runTypes.test.ts</c>.
+	/// </summary>
+	private static readonly IReadOnlyList<string> ComplianceRunTypes =
+		[RunTypes.Scan, RunTypes.Remediate];
+
 	private readonly IJobControlRepository _jobs;
 	private readonly SiteRepository _sites;
 	private readonly TargetRepository _targets;
@@ -103,6 +120,22 @@ public sealed class DashboardAggregateService
 	{
 		(IReadOnlyList<Site> sites, _) = await _sites.ListAsync(new PageRequest { Limit = 200 }, cancellationToken).ConfigureAwait(false);
 		RunListResult runList = await _jobs.ListRunsAsync(RecentRunsScanned, 0, cancellationToken).ConfigureAwait(false);
+
+		// RECENT RUNS is a compliance-only, DB-filtered fetch (issue #717) so operational
+		// runs can never starve scan/remediate rows out of the capped list. Reuses the
+		// keyset-paged history query's run_type allow-list rather than filtering the
+		// unfiltered 20-run window above (which drives the per-site scan rollup only).
+		RunHistoryPage recentCompliancePage = await _jobs.ListRunHistoryAsync(
+			new RunHistoryQuery(
+				States: null,
+				RunTypes: ComplianceRunTypes,
+				Since: null,
+				Until: null,
+				AfterCreatedAt: null,
+				AfterId: null,
+				Limit: RecentRunsReturned),
+			cancellationToken).ConfigureAwait(false);
+
 		IReadOnlyList<Target> allTargets = await ListAllTargetsAsync(sites, cancellationToken).ConfigureAwait(false);
 
 		// One most-recent-completed scan run per site, newest-first since runList already is.
@@ -159,7 +192,7 @@ public sealed class DashboardAggregateService
 			FindingsCatIIOpen: fleetCatII,
 			FindingsCatIIIOpen: fleetCatIII,
 			Sites: siteRows,
-			RecentRuns: [.. runList.Items.Take(RecentRunsReturned)],
+			RecentRuns: recentCompliancePage.Items,
 			Attention: attention);
 	}
 

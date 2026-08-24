@@ -65,12 +65,18 @@ export interface DashboardData {
  * `COMPLIANCE_RUN_TYPES` filters the Results screen to (issue #591). RECENT
  * RUNS is a compliance summary per the prototype (docs/ui/prototype/README.md
  * screen 2: kind pills are scan/remediate) and every row links into Results,
- * so it must apply the same domain-ownership filter Results does (issue
- * #717) — the backend aggregate returns every `run_type` unfiltered, mixing
- * in operational rows (discover/credential-test/content-pull/catalog-index/
- * tool-install/etc.) that Results silently drops, leaving the row's
- * destination looking empty. Operational activity remains reachable via
- * Jobs/history, which is not scoped by this filter. */
+ * so it must show the same domain-ownership set Results does (issue #717).
+ *
+ * The AUTHORITATIVE filter is now server-side: `DashboardAggregateService`
+ * fetches the N most recent runs already filtered to
+ * `RunTypes.{Scan,Remediate}` (DB-level, so operational runs can never starve
+ * compliance rows out of the capped list). This client set is belt-and-braces —
+ * a type-guard so a future/loosened backend can't silently re-mix operational
+ * rows into a card whose every row deep-links into a Results view that would
+ * drop them. `dashboard.runTypes.test.ts` binds this set to `useRunList.ts`'s
+ * exported `COMPLIANCE_RUN_TYPES` so the two cannot silently diverge (mirroring
+ * `livejobs/runTypes.test.ts`'s backend-parity precedent). Operational activity
+ * remains reachable via Jobs/history, which is not scoped by this filter. */
 const COMPLIANCE_RUN_TYPES: ReadonlySet<string> = new Set(["scan", "remediate"]);
 
 export function isComplianceRun(runType: string): boolean {
