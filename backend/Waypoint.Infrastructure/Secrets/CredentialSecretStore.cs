@@ -135,8 +135,35 @@ public sealed partial class CredentialSecretStore : ICredentialSecretStore
 				(byte[])reader[0], (byte[])reader[1], reader.GetString(2), reader.GetString(3));
 		}
 
+		// Identity attribution (issue #718): the audit row already carries
+		// credential_id in its own column, but an auditor reading `detail` (or any UI
+		// built on it) needs the human-facing name/type without a second lookup. Best
+		// effort -- a credential whose metadata row was deleted between the two reads
+		// (or never existed, for a caller that only checks credential_secrets) still
+		// gets its decrypt audited with name/credential_type simply absent; the id
+		// column always identifies it precisely regardless. NEVER the secret value or
+		// any derivative -- this is metadata only.
+		string? credentialName = null;
+		string? credentialType = null;
+		await using (NpgsqlCommand metadata = new(
+			"SELECT name, credential_type FROM credentials WHERE id = $1", connection, transaction))
+		{
+			metadata.Parameters.AddWithValue(credentialId);
+			await using NpgsqlDataReader reader = await metadata.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				credentialName = reader.GetString(0);
+				credentialType = reader.GetString(1);
+			}
+		}
+
 		await WriteAuditAsync(connection, transaction, "secret.decrypted", actor, credentialId, jobId, runId,
-			System.Text.Json.JsonSerializer.Serialize(new { master_key_id = envelope.MasterKeyId }), cancellationToken).ConfigureAwait(false);
+			System.Text.Json.JsonSerializer.Serialize(new
+			{
+				master_key_id = envelope.MasterKeyId,
+				credential_name = credentialName,
+				credential_type = credentialType,
+			}), cancellationToken).ConfigureAwait(false);
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
 		byte[] plaintext = _cipher.Decrypt(envelope, ContextFor(credentialId));

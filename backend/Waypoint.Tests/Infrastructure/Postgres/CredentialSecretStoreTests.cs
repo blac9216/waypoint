@@ -14,6 +14,7 @@
 
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Logging;
@@ -37,6 +38,7 @@ public sealed class CredentialSecretStoreTests : IAsyncLifetime, IDisposable
 	private InPlaySecretRedactor _redactor = null!;
 	private CredentialSecretStore _store = null!;
 	private Guid _credentialId;
+	private string _credentialName = null!;
 
 	public CredentialSecretStoreTests(PostgresFixture fixture)
 	{
@@ -51,7 +53,7 @@ public sealed class CredentialSecretStoreTests : IAsyncLifetime, IDisposable
 
 		_redactor = new InPlaySecretRedactor();
 		_store = CreateStore(WriteKeyFile());
-		_credentialId = await SeedCredentialAsync();
+		(_credentialId, _credentialName) = await SeedCredentialAsync();
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
@@ -188,14 +190,16 @@ public sealed class CredentialSecretStoreTests : IAsyncLifetime, IDisposable
 		Assert.Contains("empty secret", error.Message, StringComparison.Ordinal);
 	}
 
-	private async Task<Guid> SeedCredentialAsync()
+	private async Task<(Guid Id, string Name)> SeedCredentialAsync()
 	{
+		string name = $"cred-{Guid.NewGuid():N}";
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand insert = new(
 			"INSERT INTO credentials (name, credential_type) VALUES ($1, 'token') RETURNING id", connection);
-		insert.Parameters.AddWithValue($"cred-{Guid.NewGuid():N}");
-		return (Guid)(await insert.ExecuteScalarAsync())!;
+		insert.Parameters.AddWithValue(name);
+		Guid id = (Guid)(await insert.ExecuteScalarAsync())!;
+		return (id, name);
 	}
 
 	private async Task<Guid> SeedJobAsync()
@@ -227,5 +231,43 @@ public sealed class CredentialSecretStoreTests : IAsyncLifetime, IDisposable
 		query.Parameters.AddWithValue(credentialId);
 		object? result = await query.ExecuteScalarAsync();
 		return result is Guid guid ? guid : null;
+	}
+
+	private async Task<string> GetLatestAuditDetailAsync(string eventType, Guid credentialId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"""
+			SELECT detail::text FROM audit_log
+			WHERE event_type = $1 AND credential_id = $2
+			ORDER BY occurred_at DESC LIMIT 1
+			""", connection);
+		query.Parameters.AddWithValue(eventType);
+		query.Parameters.AddWithValue(credentialId);
+		return (string)(await query.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>
+	/// Issue #718 AC: an auditor reading `secret.decrypted`'s detail must be able to
+	/// tell WHICH credential was decrypted (name + type) without a second lookup, and
+	/// the recorded detail must never carry the secret value or any derivative of it.
+	/// </summary>
+	[Fact]
+	public async Task Decrypt_AuditDetail_CarriesCredentialIdentity_NeverTheSecret()
+	{
+		const string secretValue = "invented-depot-token-identity-check";
+		await _store.StoreAsync(_credentialId, Encoding.UTF8.GetBytes(secretValue), "tester", CancellationToken.None);
+
+		using (await _store.DecryptAsync(_credentialId, "engine", null, null, CancellationToken.None))
+		{
+		}
+
+		string detailJson = await GetLatestAuditDetailAsync("secret.decrypted", _credentialId);
+		using JsonDocument detail = JsonDocument.Parse(detailJson);
+
+		Assert.Equal(_credentialName, detail.RootElement.GetProperty("credential_name").GetString());
+		Assert.Equal("token", detail.RootElement.GetProperty("credential_type").GetString());
+		Assert.DoesNotContain(secretValue, detailJson, StringComparison.Ordinal);
 	}
 }

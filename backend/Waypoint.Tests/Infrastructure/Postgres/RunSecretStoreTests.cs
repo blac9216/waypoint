@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Security.Cryptography;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Logging;
@@ -575,5 +576,46 @@ public sealed class RunSecretStoreTests : IAsyncLifetime, IDisposable
 		count.Parameters.AddWithValue(eventType);
 		count.Parameters.AddWithValue(runId);
 		return (long)(await count.ExecuteScalarAsync())!;
+	}
+
+	private async Task<string> GetLatestAuditDetailAsync(string eventType, Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"""
+			SELECT detail::text FROM audit_log
+			WHERE event_type = $1 AND run_id = $2
+			ORDER BY occurred_at DESC LIMIT 1
+			""", connection);
+		query.Parameters.AddWithValue(eventType);
+		query.Parameters.AddWithValue(runId);
+		return (string)(await query.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>
+	/// Issue #718 AC: run secrets have no reusable credential row, so `username` (never
+	/// secret material -- it never goes through the cipher) is the identity an auditor
+	/// needs to tell WHICH ad hoc credential a job decrypted. Proves it lands in
+	/// `secret.run_decrypted`'s detail alongside the pre-existing target/purpose
+	/// attribution, and that the secret value itself never does.
+	/// </summary>
+	[Fact]
+	public async Task Decrypt_AuditDetail_CarriesUsernameIdentity_NeverTheSecret()
+	{
+		const string secretValue = "invented-adhoc-token-identity-check";
+		const string username = "identity-check-user@example.internal";
+		await _store.StoreAsync(_runId, new RunSecretCredential(username, secretValue), "tester", TimeSpan.FromHours(1), CancellationToken.None);
+
+		Guid jobId = await SeedJobAsync(_runId);
+		using (await _store.DecryptAsync(_runId, jobId, "engine", CancellationToken.None))
+		{
+		}
+
+		string detailJson = await GetLatestAuditDetailAsync("secret.run_decrypted", _runId);
+		using JsonDocument detail = JsonDocument.Parse(detailJson);
+
+		Assert.Equal(username, detail.RootElement.GetProperty("username").GetString());
+		Assert.DoesNotContain(secretValue, detailJson, StringComparison.Ordinal);
 	}
 }
