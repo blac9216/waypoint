@@ -29,7 +29,7 @@ namespace Waypoint.Core.SystemState;
 /// was starved.
 /// </param>
 /// <param name="ToolPresent">
-/// Issue #560 (migration 0035): the download-runner's <c>ManagedToolPresenceChecker</c>
+/// Issue #560 (migration 0034): the download-runner's <c>ManagedToolPresenceChecker</c>
 /// result as of its last heartbeat -- null for a compliance-runner row, which has
 /// nothing to report here. Feeds <c>GET /downloads/readiness</c>'s combined
 /// tool-installed + depot-token-valid answer without duplicating #39's future

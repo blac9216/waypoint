@@ -10,7 +10,7 @@
 -- rotated_at, created_by, created_at, updated_at, sudo_enabled, username,
 -- queue_halted, queue_halted_reason, queue_halted_at. Migration 0034 added
 -- credentials.last_tested_at/expires_at to CredentialRepository.ProjectionSql (the
--- query FindByTypeAsync and GetAsync both build on), and migration 0035 (issue #560)
+-- query FindByTypeAsync and GetAsync both build on), and migration 0034 (issue #560)
 -- extended the runner SELECT/UPDATE grant for those two columns -- but only to
 -- waypoint_compliance_runner, because at that time the only known caller was
 -- CredentialTestJobHandler (compliance-only, JobCapabilities.Compliance). Nobody

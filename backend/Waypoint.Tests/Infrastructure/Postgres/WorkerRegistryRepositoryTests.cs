@@ -133,7 +133,7 @@ public sealed class WorkerRegistryRepositoryTests : IAsyncLifetime
 	}
 
 	/// <summary>
-	/// Issue #560 (migration 0035): tool_present round-trips true/false for a
+	/// Issue #560 (migration 0034): tool_present round-trips true/false for a
 	/// download-runner-style heartbeat, and stays null when the caller never supplies
 	/// it (the default every non-download caller uses) -- GET /downloads/readiness
 	/// relies on that null meaning "no download-runner has reported," not "installed"
