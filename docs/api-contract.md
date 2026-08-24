@@ -252,6 +252,11 @@ work once one exists.
 | `/downloads` | GET, POST | POST: artifact ids → queued `download` jobs (Operator+). Queue view: rate, ETA, retries. |
 | `/downloads/{id}` | DELETE | Cancel. |
 | `/downloads/readiness` | GET | Issue #560, extended by #690: combined Activation Code health + legacy Download Token health (reported independently; the legacy token never gates readiness) + managed-tool-installed state (Viewer+). `tool_installed` is `null` until a download-runner has heartbeated at least once. |
+| `/downloads/enrollment` | GET | Issue #691: assisted VCF 9.1 Software Depot enrollment state machine (`tool_unavailable`→`depot_id_unavailable`→`awaiting_portal_registration`→`activation_code_stored`→`validated`/`auth_failing`), the non-secret Depot ID/pairing timestamps, and the corrected `.com` registration URL (Viewer+). The Activation Code value never appears in this or any other response. |
+| `/downloads/enrollment/depot-id` | POST | 202 → `depot-enrollment` job (`generate-depot-id`): invokes the installed tool noninteractively for the Software Depot ID (Admin-only, same floor as the credential this flow produces). |
+| `/downloads/enrollment/activation-code` | POST | Accepts an existing-or-portal-issued code; 409 if its decoded `asset_id` does not match the generated Depot ID, else stores it encrypted as the `depot-activation-code` credential (Admin-only). |
+| `/downloads/enrollment/validate` | POST | 202 → `depot-enrollment` job (`validate-code`): bounded noninteractive tool validation of the stored code (Admin-only). |
+| `/downloads/enrollment/reset` | POST | Explicit confirmed identity reset (`{"confirm": true}` required); clears the Depot ID/pairing without touching the stored credential or any legacy Download Token (Admin-only). |
 
 ### Library & content library
 | Endpoint | Methods | Notes |

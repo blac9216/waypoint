@@ -207,4 +207,19 @@ public sealed class ManagedToolOptions
 	/// than adding two more knobs for objects that are already bounded well under it.
 	/// </summary>
 	public long DepotFetchMaxBytes { get; set; } = 512L * 1024 * 1024;
+
+	/// <summary>
+	/// Directory, under <see cref="ToolStatePath"/> (the same persistent volume, so it
+	/// survives container rebuilds -- issue #691 AC), that the assisted enrollment job
+	/// uses as the invoked tool's <c>HOME</c>/<c>XDG_DATA_HOME</c>. This is where
+	/// <c>vcf-download-tool</c> persists its own identity state (the sibling reference
+	/// writes <c>~/.local/share/vmware/vdt/machine_id</c>) -- isolating it here means
+	/// the Depot ID stays stable across restarts/rebuilds while never touching a
+	/// container-global root home the way the sibling Dockerfile's build-time seeding
+	/// does.
+	/// </summary>
+	public string IdentityStatePath { get; set; } = "identity";
+
+	/// <summary>Wall-clock budget for a bounded noninteractive <c>vcf-download-tool</c> enrollment call (Depot ID generation or Activation Code validation) -- neither call may prompt interactively or hang the job indefinitely.</summary>
+	public TimeSpan EnrollmentCommandTimeout { get; set; } = TimeSpan.FromSeconds(30);
 }

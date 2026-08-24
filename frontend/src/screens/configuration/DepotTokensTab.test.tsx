@@ -14,7 +14,7 @@ import { AuthProvider, __resetAuthConfigCacheForTests } from "../../lib/auth";
 import { SystemProvider } from "../../lib/system";
 import { DepotTokensTab } from "./DepotTokensTab";
 import type { Credential } from "./credentials";
-import type { DownloadReadiness, ManagedToolInstall } from "./depot";
+import type { DepotEnrollment, DownloadReadiness, ManagedToolInstall } from "./depot";
 
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(body === undefined ? null : JSON.stringify(body), {
@@ -82,6 +82,12 @@ const AUTH_FAILING_READINESS: DownloadReadiness = {
 	missing_prerequisites: ["activation_code_auth_failing", "tool_not_installed"],
 };
 
+const NO_ENROLLMENT: DepotEnrollment = {
+	state: "depot_id_unavailable",
+	activation_code_configured: false,
+	registration_url: "https://vcf.broadcom.com",
+};
+
 const INSTALLS: ManagedToolInstall[] = [
 	{
 		id: "install-2",
@@ -111,6 +117,8 @@ describe("DepotTokensTab (issue #571/#690)", () => {
 	let readiness: DownloadReadiness;
 	let installs: ManagedToolInstall[];
 	let installRunState: { state: string; job_count_failed: number; job_count_blocked: number };
+	let enrollment: DepotEnrollment;
+	let enrollmentRunState: { state: string; job_count_failed: number; job_count_blocked: number };
 
 	function installFetchMock(
 		role: string,
@@ -119,6 +127,7 @@ describe("DepotTokensTab (issue #571/#690)", () => {
 			credentials?: Credential[];
 			readiness?: DownloadReadiness;
 			installs?: ManagedToolInstall[];
+			enrollment?: DepotEnrollment;
 		} = {},
 	) {
 		fetchCalls = [];
@@ -126,6 +135,8 @@ describe("DepotTokensTab (issue #571/#690)", () => {
 		readiness = opts.readiness ?? NOTHING_CONFIGURED_READINESS;
 		installs = opts.installs ?? INSTALLS;
 		installRunState = { state: "completed", job_count_failed: 0, job_count_blocked: 0 };
+		enrollment = opts.enrollment ?? NO_ENROLLMENT;
+		enrollmentRunState = { state: "completed", job_count_failed: 0, job_count_blocked: 0 };
 
 		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
@@ -203,6 +214,35 @@ describe("DepotTokensTab (issue #571/#690)", () => {
 			if (url === "/api/v1/runs/run-fetch-1" && method === "GET") {
 				return jsonResponse({ id: "run-fetch-1", ...installRunState });
 			}
+			if (url === "/api/v1/downloads/enrollment" && method === "GET") {
+				return jsonResponse(enrollment);
+			}
+			if (url === "/api/v1/downloads/enrollment/depot-id" && method === "POST") {
+				return jsonResponse({ run_id: "run-enroll-depot-id", job_id: "job-enroll-depot-id" }, 202);
+			}
+			if (url === "/api/v1/downloads/enrollment/validate" && method === "POST") {
+				return jsonResponse({ run_id: "run-enroll-validate", job_id: "job-enroll-validate" }, 202);
+			}
+			if (url === "/api/v1/downloads/enrollment/activation-code" && method === "POST") {
+				const body = JSON.parse(init!.body as string);
+				enrollment = {
+					...enrollment,
+					state: "activation_code_stored",
+					activation_code_configured: true,
+					paired_at: "2026-08-08T00:00:00Z",
+				};
+				return body.activation_code ? jsonResponse(enrollment) : jsonResponse({ error: { code: "validation_failed" } }, 400);
+			}
+			if (url === "/api/v1/downloads/enrollment/reset" && method === "POST") {
+				enrollment = { ...NO_ENROLLMENT };
+				return jsonResponse(enrollment);
+			}
+			if (url === "/api/v1/runs/run-enroll-depot-id" && method === "GET") {
+				return jsonResponse({ id: "run-enroll-depot-id", ...enrollmentRunState });
+			}
+			if (url === "/api/v1/runs/run-enroll-validate" && method === "GET") {
+				return jsonResponse({ id: "run-enroll-validate", ...enrollmentRunState });
+			}
 			throw new Error(`unexpected fetch: ${method} ${url}`);
 		}) as unknown as typeof fetch;
 
@@ -239,6 +279,7 @@ describe("DepotTokensTab (issue #571/#690)", () => {
 		await waitFor(() => expect(screen.getByText("ACTIVATION CODE")).toBeInTheDocument());
 		await waitFor(() => expect(screen.getByText(/LEGACY DOWNLOAD TOKEN/)).toBeInTheDocument());
 		await waitFor(() => expect(screen.getByText("DOWNLOAD READINESS")).toBeInTheDocument());
+		await waitFor(() => expect(screen.getByText("DEPOT ENROLLMENT")).toBeInTheDocument());
 	}
 
 	it("no credentials configured: never invents secret material, shows empty-states and Add actions for both credentials", async () => {
@@ -666,5 +707,105 @@ describe("DepotTokensTab (issue #571/#690)", () => {
 
 		fireEvent.change(within(form).getByLabelText("SHA-256 (preferred)"), { target: { value: "a".repeat(64) } });
 		expect(uploadButton.disabled).toBe(false);
+	});
+
+	describe("depot enrollment (issue #691)", () => {
+		it("no Depot ID yet: shows the generate action and no code-entry form", async () => {
+			installFetchMock("Admin");
+			await mount();
+
+			expect(screen.getByText("not yet generated")).toBeInTheDocument();
+			expect(screen.getByText("Generate Software Depot ID")).toBeInTheDocument();
+			expect(screen.queryByPlaceholderText(/paste an existing or portal-issued Activation Code/)).not.toBeInTheDocument();
+		});
+
+		it("Admin generates a Depot ID and then sees the corrected .com registration link plus the code-entry form", async () => {
+			installFetchMock("Admin");
+			await mount();
+
+			enrollment = {
+				state: "awaiting_portal_registration",
+				depot_id: "WPT-0001-DEPOT-ID",
+				depot_id_generated_at: "2026-08-08T00:00:00Z",
+				activation_code_configured: false,
+				registration_url: "https://vcf.broadcom.com",
+			};
+			enrollmentRunState = { state: "completed", job_count_failed: 0, job_count_blocked: 0 };
+
+			fireEvent.click(screen.getByText("Generate Software Depot ID"));
+
+			await waitFor(() => expect(screen.getByText("WPT-0001-DEPOT-ID")).toBeInTheDocument());
+			const link = screen.getByRole("link", { name: "https://vcf.broadcom.com" }) as HTMLAnchorElement;
+			expect(link.href).toBe("https://vcf.broadcom.com/");
+			expect(screen.getByPlaceholderText(/paste an existing or portal-issued Activation Code/)).toBeInTheDocument();
+		});
+
+		it("submitting an Activation Code posts it and never renders the pasted value afterward", async () => {
+			installFetchMock("Admin", {
+				enrollment: {
+					state: "awaiting_portal_registration",
+					depot_id: "WPT-0001-DEPOT-ID",
+					activation_code_configured: false,
+					registration_url: "https://vcf.broadcom.com",
+				},
+			});
+			await mount();
+
+			const input = screen.getByPlaceholderText(/paste an existing or portal-issued Activation Code/);
+			fireEvent.change(input, { target: { value: "eyJhc3NldF9pZCI6IldQVC0wMDAxLURFUE9ULUlEIn0=-invented-fixture" } });
+			fireEvent.click(screen.getByText("Store Activation Code"));
+
+			await waitFor(() =>
+				expect(fetchCalls.some((c) => c.url === "/api/v1/downloads/enrollment/activation-code" && c.init?.method === "POST")).toBe(true),
+			);
+			const call = fetchCalls.find((c) => c.url === "/api/v1/downloads/enrollment/activation-code")!;
+			expect(JSON.parse(call.init!.body as string)).toEqual({ activation_code: "eyJhc3NldF9pZCI6IldQVC0wMDAxLURFUE9ULUlEIn0=-invented-fixture" });
+			expect(document.body.textContent).not.toContain("eyJhc3NldF9pZCI6IldQVC0wMDAxLURFUE9ULUlEIn0=-invented-fixture");
+			await waitFor(() => expect(screen.getByText("Validate stored Activation Code")).toBeInTheDocument());
+		});
+
+		it("reset requires an explicit confirmation click before it fires", async () => {
+			installFetchMock("Admin", {
+				enrollment: {
+					state: "validated",
+					depot_id: "WPT-0001-DEPOT-ID",
+					activation_code_configured: true,
+					registration_url: "https://vcf.broadcom.com",
+				},
+			});
+			await mount();
+
+			fireEvent.click(screen.getByText("Reset identity…"));
+			expect(fetchCalls.some((c) => c.url === "/api/v1/downloads/enrollment/reset")).toBe(false);
+
+			fireEvent.click(screen.getByText("Confirm reset"));
+			await waitFor(() => expect(fetchCalls.some((c) => c.url === "/api/v1/downloads/enrollment/reset")).toBe(true));
+			const call = fetchCalls.find((c) => c.url === "/api/v1/downloads/enrollment/reset")!;
+			expect(JSON.parse(call.init!.body as string)).toEqual({ confirm: true });
+		});
+
+		it("auth_failing state surfaces the last validation failure text", async () => {
+			installFetchMock("Admin", {
+				enrollment: {
+					state: "auth_failing",
+					depot_id: "WPT-0001-DEPOT-ID",
+					activation_code_configured: true,
+					last_validation_failure: "Activation Code rejected by the tool.",
+					registration_url: "https://vcf.broadcom.com",
+				},
+			});
+			await mount();
+
+			expect(screen.getByText("Activation Code rejected by the tool.")).toBeInTheDocument();
+		});
+
+		it("Viewer sees the enrollment panel read-only", async () => {
+			installFetchMock("Viewer");
+			await mount();
+
+			const generateButton = screen.getByText("Generate Software Depot ID") as HTMLButtonElement;
+			expect(generateButton.disabled).toBe(true);
+			expect(generateButton.title).toMatch(/Requires Admin/);
+		});
 	});
 });

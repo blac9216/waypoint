@@ -54,6 +54,7 @@ import {
 	type DepotTokenFormState,
 	type UseDepotTokenResult,
 } from "./useDepotToken";
+import { useDepotEnrollment, type UseDepotEnrollmentResult } from "./useDepotEnrollment";
 import { useManagedToolInstall } from "./useManagedToolInstall";
 import "./ConfigurationScreen.css";
 import "./DepotTokensTab.css";
@@ -71,6 +72,7 @@ export function DepotTokensTab() {
 
 	const activationCode = useDepotActivationCode();
 	const legacyToken = useLegacyDownloadToken();
+	const enrollment = useDepotEnrollment();
 
 	const [readiness, setReadiness] = useState<DownloadReadiness | null>(null);
 	const [readinessError, setReadinessError] = useState<string | null>(null);
@@ -99,12 +101,16 @@ export function DepotTokensTab() {
 		loadReadinessAndHistory();
 		activationCode.reload();
 		legacyToken.reload();
-	}, [loadReadinessAndHistory, activationCode, legacyToken]);
+		enrollment.reload();
+	}, [loadReadinessAndHistory, activationCode, legacyToken, enrollment]);
 
 	const { install, installError, inFlight, installFromLocalRepository, uploadTool, fetchFromDepot } = useManagedToolInstall(onInstallSettled);
 
 	return (
 		<div className="config-tab config-tab--depot">
+			<div className="config-panel" style={{ marginBottom: 14 }}>
+				<EnrollmentPanel writeGate={adminGate} enrollment={enrollment} />
+			</div>
 			<div className="config-tab__grid">
 				<DepotCredentialPanel
 					title="ACTIVATION CODE"
@@ -255,6 +261,198 @@ function DepotCredentialPanel({
 					onSubmit={submit}
 				/>
 			)}
+		</div>
+	);
+}
+
+/**
+ * The issue #691 assisted enrollment panel: state machine display, the two
+ * entry paths ("use existing code" vs "I need a code"), and an explicit
+ * confirmed identity reset. The Activation Code value is never rendered here
+ * or anywhere else in this tab — only the non-secret Depot ID and enrollment
+ * state. The registration link is always the server-supplied
+ * `registration_url` (issue #691: the VCFDT 9.1 `.net` typo corrected to
+ * `.com`), never a hardcoded/guessed URL.
+ */
+function EnrollmentPanel({
+	writeGate,
+	enrollment,
+}: {
+	writeGate: { disabled: boolean; style?: { opacity: number }; title?: string };
+	enrollment: UseDepotEnrollmentResult;
+}) {
+	const { enrollment: state, loading, loadError, busy, actionError, doGenerateDepotId, doAcceptActivationCode, doValidate, doReset } = enrollment;
+	const [codeInput, setCodeInput] = useState("");
+	const [resetConfirming, setResetConfirming] = useState(false);
+
+	if (loading) {
+		return (
+			<div>
+				<div className="config-panel__header">
+					<div className="config-panel__title">DEPOT ENROLLMENT</div>
+				</div>
+				<div className="config-panel__empty">Loading…</div>
+			</div>
+		);
+	}
+
+	if (loadError || !state) {
+		return (
+			<div>
+				<div className="config-panel__header">
+					<div className="config-panel__title">DEPOT ENROLLMENT</div>
+				</div>
+				<div className="config-panel__error">{loadError ?? "Could not load depot enrollment status."}</div>
+			</div>
+		);
+	}
+
+	const stateLabel: Record<string, string> = {
+		tool_unavailable: "Download tool not installed",
+		depot_id_unavailable: "Software Depot ID not yet generated",
+		awaiting_portal_registration: "Awaiting Broadcom portal registration",
+		activation_code_stored: "Activation Code stored — not yet validated",
+		validated: "Validated — ready",
+		auth_failing: "Activation Code rejected",
+	};
+
+	const submitCode = async () => {
+		const trimmed = codeInput.trim();
+		if (!trimmed) {
+			return;
+		}
+		const ok = await doAcceptActivationCode(trimmed);
+		if (ok) {
+			setCodeInput("");
+		}
+	};
+
+	return (
+		<div>
+			<div className="config-panel__header" style={{ padding: 0, border: 0, marginBottom: 10 }}>
+				<div className="config-panel__title">DEPOT ENROLLMENT</div>
+				<div className="config-panel__spacer" />
+				<span
+					className={`depot-tab__tool-state ${state.state === "validated" ? "depot-tab__tool-state--ok" : "depot-tab__tool-state--amber"}`}
+					aria-live="polite"
+				>
+					{stateLabel[state.state] ?? state.state}
+				</span>
+			</div>
+
+			{actionError && <div className="config-panel__error">{actionError}</div>}
+			{state.state === "auth_failing" && state.last_validation_failure && (
+				<div className="config-panel__error">{state.last_validation_failure}</div>
+			)}
+
+			<div className="depot-tab__field-list">
+				<Field label="Software Depot ID">
+					{state.depot_id ? (
+						<span className="mono">
+							{state.depot_id}{" "}
+							<button
+								type="button"
+								onClick={() => void navigator.clipboard?.writeText(state.depot_id ?? "")}
+								style={{ marginLeft: 8 }}
+							>
+								Copy
+							</button>
+						</span>
+					) : (
+						<span className="depot-tab__expiry-unknown">not yet generated</span>
+					)}
+				</Field>
+
+				{!state.depot_id && (
+					<div className="content-tab__actions">
+						<div className="content-tab__actions-spacer" />
+						<button type="button" {...writeGate} onClick={() => void doGenerateDepotId()} disabled={writeGate.disabled || busy}>
+							{busy ? "Generating…" : "Generate Software Depot ID"}
+						</button>
+					</div>
+				)}
+
+				{state.depot_id && !state.activation_code_configured && (
+					<div className="depot-tab__depot-fetch-note">
+						Register this exact Software Depot ID at{" "}
+						<a href={state.registration_url} target="_blank" rel="noreferrer">
+							{state.registration_url}
+						</a>{" "}
+						(Software Depot Registrations → New Registration) to receive a paired Activation Code, or paste an
+						existing compatible code below. Waypoint never issues this code itself.
+					</div>
+				)}
+
+				{state.depot_id && (
+					<div className="config-form" style={{ padding: "10px 0 0" }}>
+						<div className="config-form__grid config-form__grid--single">
+							<label className="config-form__field">
+								<span>Activation Code</span>
+								<input
+									type="password"
+									value={codeInput}
+									onChange={(e) => setCodeInput(e.target.value)}
+									placeholder="paste an existing or portal-issued Activation Code"
+									autoComplete="off"
+									disabled={writeGate.disabled || busy}
+								/>
+							</label>
+						</div>
+						<div className="config-form__actions">
+							<button
+								type="button"
+								className="config-form__submit"
+								onClick={() => void submitCode()}
+								disabled={writeGate.disabled || busy || !codeInput.trim()}
+								title={writeGate.title}
+							>
+								{busy ? "Saving…" : "Store Activation Code"}
+							</button>
+						</div>
+					</div>
+				)}
+
+				{state.activation_code_configured && (
+					<div className="content-tab__actions">
+						<div className="content-tab__actions-spacer" />
+						<button type="button" {...writeGate} onClick={() => void doValidate()} disabled={writeGate.disabled || busy}>
+							{busy ? "Validating…" : "Validate stored Activation Code"}
+						</button>
+					</div>
+				)}
+
+				{state.depot_id && (
+					<div className="content-tab__actions" style={{ marginTop: 10 }}>
+						<div className="content-tab__actions-spacer" />
+						{!resetConfirming ? (
+							<button type="button" {...writeGate} onClick={() => setResetConfirming(true)} disabled={writeGate.disabled || busy}>
+								Reset identity…
+							</button>
+						) : (
+							<>
+								<span className="depot-tab__expiry-soon" style={{ marginRight: 8 }}>
+									This invalidates the current Depot ID/Activation Code pairing. Confirm?
+								</span>
+								<button type="button" onClick={() => setResetConfirming(false)} disabled={busy}>
+									Cancel
+								</button>
+								<button
+									type="button"
+									{...writeGate}
+									onClick={() => {
+										setResetConfirming(false);
+										void doReset();
+									}}
+									disabled={writeGate.disabled || busy}
+									style={{ marginLeft: 8 }}
+								>
+									Confirm reset
+								</button>
+							</>
+						)}
+					</div>
+				)}
+			</div>
 		</div>
 	);
 }

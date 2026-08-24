@@ -143,6 +143,61 @@ export function formatSource(source: string): string {
 	}
 }
 
+/**
+ * `GET/POST /downloads/enrollment/*` (issue #691): the assisted VCF 9.1
+ * Software Depot enrollment state machine. The Activation Code VALUE never
+ * appears anywhere on this surface -- only `activation_code_configured`
+ * (whether one is stored) and the non-secret `depot_id`/`state`.
+ */
+export type DepotEnrollmentState =
+	| "tool_unavailable"
+	| "depot_id_unavailable"
+	| "awaiting_portal_registration"
+	| "activation_code_stored"
+	| "validated"
+	| "auth_failing"
+	| string;
+
+export interface DepotEnrollment {
+	state: DepotEnrollmentState;
+	depot_id?: string;
+	depot_id_generated_at?: string;
+	paired_at?: string;
+	activation_code_configured: boolean;
+	last_validation_failure?: string;
+	reset_at?: string;
+	registration_url: string;
+}
+
+export interface DepotEnrollmentJobQueued {
+	run_id: string;
+	job_id: string;
+}
+
+export function fetchDepotEnrollment(): Promise<DepotEnrollment> {
+	return apiGet<DepotEnrollment>("/downloads/enrollment");
+}
+
+/** Queues the noninteractive tool call that generates/reads the Software Depot ID. */
+export function generateDepotId(): Promise<DepotEnrollmentJobQueued> {
+	return apiPost<DepotEnrollmentJobQueued>("/downloads/enrollment/depot-id");
+}
+
+/** Accepts an existing-or-portal-issued Activation Code; the backend rejects it (409) if its embedded asset_id does not match the generated Depot ID. */
+export function acceptActivationCode(activationCode: string): Promise<DepotEnrollment> {
+	return apiPost<DepotEnrollment>("/downloads/enrollment/activation-code", { activation_code: activationCode });
+}
+
+/** Queues the bounded noninteractive validation of the already-stored Activation Code. */
+export function validateActivationCode(): Promise<DepotEnrollmentJobQueued> {
+	return apiPost<DepotEnrollmentJobQueued>("/downloads/enrollment/validate");
+}
+
+/** Explicit confirmed identity reset -- MUST be a deliberate operator action, never a default/derived call. */
+export function resetDepotEnrollment(): Promise<DepotEnrollment> {
+	return apiPost<DepotEnrollment>("/downloads/enrollment/reset", { confirm: true });
+}
+
 export function formatTimestamp(iso: string | null | undefined): string {
 	if (!iso) {
 		return "—";
