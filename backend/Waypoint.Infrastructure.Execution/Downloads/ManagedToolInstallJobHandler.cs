@@ -267,20 +267,20 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 		{
 			return await VerifyAndActivateAsync(
 				ManagedToolInstallSources.Depot, ArtifactDescription(payload.Version), payload.Version,
-				fetchResult.ArtifactPath!, fetchResult.SignaturePath!, initiatedBy, context, cancellationToken)
+				fetchResult.ArtifactPath!, fetchResult.RepositoryRoot!, initiatedBy, context, cancellationToken)
 				.ConfigureAwait(false);
 		}
 		finally
 		{
-			DeleteIfDifferent(fetchResult.ArtifactPath!, fetchResult.SignaturePath!);
+			DeleteFetchedStaging(fetchResult.ArtifactPath!, fetchResult.RepositoryRoot!);
 		}
 	}
 
 	private static string ArtifactDescription(string? version) =>
 		string.IsNullOrWhiteSpace(version) ? "depot:latest" : $"depot:{version}";
 
-	/// <summary>Removes the transient depot-fetch staging files once verification/activation has run its course -- unlike upload's staging path, a depot-fetched candidate has no independent lifecycle worth preserving after this one job.</summary>
-	private static void DeleteIfDifferent(string artifactPath, string signaturePath)
+	/// <summary>Removes the transient depot-fetch staging (artifact file and the staged catalog/signature repository-root directory) once verification/activation has run its course -- unlike upload's staging path, a depot-fetched candidate has no independent lifecycle worth preserving after this one job.</summary>
+	private static void DeleteFetchedStaging(string artifactPath, string repositoryRoot)
 	{
 		try
 		{
@@ -289,15 +289,15 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 				File.Delete(artifactPath);
 			}
 
-			if (signaturePath != artifactPath && File.Exists(signaturePath))
+			if (Directory.Exists(repositoryRoot))
 			{
-				File.Delete(signaturePath);
+				Directory.Delete(repositoryRoot, recursive: true);
 			}
 		}
 		catch (IOException)
 		{
-			// Best-effort cleanup only -- a stray staging file is not a correctness
-			// issue for a job that has already recorded its ledger outcome.
+			// Best-effort cleanup only -- a stray staging file/directory is not a
+			// correctness issue for a job that has already recorded its ledger outcome.
 		}
 	}
 
@@ -307,35 +307,39 @@ public sealed class ManagedToolInstallJobHandler : IJobHandler
 	/// record a <c>rejected</c> ledger row or atomically activate and record
 	/// <c>installed</c>/<c>failed</c>.
 	/// </summary>
+	/// <param name="signaturePathOrCatalogRoot">
+	/// For <see cref="ManagedToolInstallSources.Upload"/>: unused. For
+	/// <see cref="ManagedToolInstallSources.LocalRepository"/>: unused (that path
+	/// verifies against <see cref="ManagedToolOptions.LocalRepositoryPath"/> directly).
+	/// For <see cref="ManagedToolInstallSources.Depot"/> (issue #671): the staged
+	/// repository-root directory <see cref="IManagedToolDepotFetcher"/> fetched the
+	/// catalog and catalog signature into, handed to the same
+	/// <see cref="IManagedToolCatalogVerifier"/> the local-repository path uses --
+	/// there is no source-specific verification logic for the connected path.
+	/// </param>
 	private async Task<JobExecutionOutcome> VerifyAndActivateAsync(
-		string source, string sourcePath, string? version, string artifactPath, string signaturePath,
+		string source, string sourcePath, string? version, string artifactPath, string signaturePathOrCatalogRoot,
 		string initiatedBy, JobExecutionContext context, CancellationToken cancellationToken)
 	{
 		ManagedToolOptions options = _options.Value;
 
 		string? sha256;
 		string? failureReason;
-		if (source == ManagedToolInstallSources.LocalRepository)
+		if (source == ManagedToolInstallSources.LocalRepository || source == ManagedToolInstallSources.Depot)
 		{
+			string repositoryRoot = source == ManagedToolInstallSources.LocalRepository
+				? options.LocalRepositoryPath
+				: signaturePathOrCatalogRoot;
 			ManagedToolCatalogVerificationResult verification = await _catalogVerifier
-				.VerifyAsync(options.LocalRepositoryPath, artifactPath, version, cancellationToken).ConfigureAwait(false);
+				.VerifyAsync(repositoryRoot, artifactPath, version, cancellationToken).ConfigureAwait(false);
 			sha256 = verification.ActualSha256;
 			failureReason = verification.Valid ? null : verification.FailureReason;
 		}
 		else
 		{
 			sha256 = await ComputeSha256Async(artifactPath, cancellationToken).ConfigureAwait(false);
-			if (source == ManagedToolInstallSources.Upload)
-			{
-				failureReason = await VerifyUploadChecksumsAsync(
-					artifactPath, sha256, context.Job.Payload, cancellationToken).ConfigureAwait(false);
-			}
-			else
-			{
-				ManagedToolSignatureResult verification = await _verifier
-					.VerifyAsync(artifactPath, signaturePath, cancellationToken).ConfigureAwait(false);
-				failureReason = verification.Valid ? null : verification.FailureReason;
-			}
+			failureReason = await VerifyUploadChecksumsAsync(
+				artifactPath, sha256, context.Job.Payload, cancellationToken).ConfigureAwait(false);
 		}
 
 		if (failureReason is not null)

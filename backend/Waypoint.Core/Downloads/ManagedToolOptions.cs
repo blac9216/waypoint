@@ -159,31 +159,52 @@ public sealed class ManagedToolOptions
 	public string ReleasePublicKeyPath { get; set; } = "/var/lib/waypoint/managed-tool/release-public-key.pem";
 
 	/// <summary>
-	/// Depot-fetch install path (issue #39, ADR-0015 decision 3's "fetch from its
+	/// Depot-fetch install path (issue #39/#671, ADR-0015 decision 3's "fetch from its
 	/// authorized upstream repository using operator-supplied credentials"),
 	/// connected-mode only. An operator-provisioned URL template for the
 	/// <c>vcf-download-tool</c> artifact; <c>{version}</c> is substituted with the
 	/// payload's requested version when present (an empty/omitted placeholder means
-	/// the URL always resolves to the depot's "latest" endpoint). The detached
-	/// signature is always fetched from the same URL with <c>.sig</c> appended,
-	/// mirroring every other install path's artifact/signature pairing. Null/blank
+	/// the URL always resolves to the depot's "latest" endpoint). Null/blank
 	/// (the default -- the project ships no depot URL, ADR-0015) fails the depot-fetch
 	/// path cleanly rather than attempting a request with nothing configured.
 	/// </summary>
 	public string? DepotFetchUrlTemplate { get; set; }
 
 	/// <summary>
-	/// Wall-clock budget for the depot-fetch HTTP path (artifact + signature GET,
-	/// combined) -- an unreachable or hanging depot must fail the job rather than
-	/// block the download-runner's job slot indefinitely.
+	/// Issue #671: operator-provisioned URL for Broadcom's signed product-version
+	/// catalog (the same document <see cref="ProductVersionCatalogPath"/> names for
+	/// the local-repository install path), fetched over the connected depot-fetch
+	/// path with the same bearer Activation Code as <see cref="DepotFetchUrlTemplate"/>.
+	/// The real vendor no longer publishes a per-artifact <c>.sig</c> -- verification
+	/// authenticates this catalog instead (issue #669's
+	/// <see cref="IManagedToolCatalogVerifier"/>). Null/blank (the default) fails the
+	/// depot-fetch path cleanly before any network attempt.
+	/// </summary>
+	public string? DepotCatalogUrl { get; set; }
+
+	/// <summary>
+	/// Issue #671: operator-provisioned URL for the detached signature envelope over
+	/// <see cref="DepotCatalogUrl"/>'s exact bytes (the connected equivalent of
+	/// <see cref="ProductVersionCatalogSignaturePath"/>). Fetched with the same bearer
+	/// Activation Code. Null/blank (the default) fails the depot-fetch path cleanly
+	/// before any network attempt.
+	/// </summary>
+	public string? DepotCatalogSignatureUrl { get; set; }
+
+	/// <summary>
+	/// Wall-clock budget for the depot-fetch HTTP path (artifact + catalog + catalog
+	/// signature GETs, combined) -- an unreachable or hanging depot must fail the job
+	/// rather than block the download-runner's job slot indefinitely.
 	/// </summary>
 	public TimeSpan DepotFetchTimeout { get; set; } = TimeSpan.FromMinutes(10);
 
 	/// <summary>
-	/// Hard cap on the depot-fetched artifact's size, matching
-	/// <c>ManagedToolController</c>'s manual-upload cap
-	/// (<c>MaxUploadBytes</c> = 512 MiB) -- the same ceiling applies regardless of which
-	/// path delivered the candidate.
+	/// Hard cap on each depot-fetched object's size (artifact, catalog, or catalog
+	/// signature), matching <c>ManagedToolController</c>'s manual-upload cap
+	/// (<c>MaxUploadBytes</c> = 512 MiB) for the artifact leg -- the same ceiling
+	/// applies regardless of which path delivered the candidate. The catalog and its
+	/// signature are ordinarily far smaller than this but share the one cap rather
+	/// than adding two more knobs for objects that are already bounded well under it.
 	/// </summary>
 	public long DepotFetchMaxBytes { get; set; } = 512L * 1024 * 1024;
 }

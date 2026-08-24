@@ -21,24 +21,34 @@ using Waypoint.Core.Downloads;
 namespace Waypoint.Infrastructure.Downloads;
 
 /// <summary>
-/// Real network implementation of <see cref="IManagedToolDepotFetcher"/> (issue #39
-/// depot-fetch install path): a bearer-token GET of the configured
-/// <see cref="ManagedToolOptions.DepotFetchUrlTemplate"/> for the artifact, and the
-/// same URL with <c>.sig</c> appended for its detached signature -- mirroring every
-/// other install path's artifact/signature pairing
-/// (<c>ManagedToolInstallJobHandler</c>'s local-repository and upload paths both
-/// expect a sibling <c>.sig</c> file next to the artifact).
+/// Real network implementation of <see cref="IManagedToolDepotFetcher"/> (issue #671
+/// depot-fetch install path): a bearer-credential GET of three separately configured
+/// authenticated locations -- the <c>vcf-download-tool</c> artifact
+/// (<see cref="ManagedToolOptions.DepotFetchUrlTemplate"/>), Broadcom's signed
+/// product-version catalog (<see cref="ManagedToolOptions.DepotCatalogUrl"/>), and the
+/// catalog's detached signature (<see cref="ManagedToolOptions.DepotCatalogSignatureUrl"/>).
+/// The vendor does not publish a per-artifact <c>.sig</c> (issue #671's root cause in
+/// the prior <c>&lt;artifact&gt;.sig</c>-guessing implementation) -- this type never
+/// guesses a URL by string-appending onto the artifact URL.
+///
+/// The catalog and its signature are written into a staging subdirectory shaped like
+/// a local repository root (<see cref="ManagedToolOptions.ProductVersionCatalogPath"/>
+/// / <see cref="ManagedToolOptions.ProductVersionCatalogSignaturePath"/> relative to
+/// it) so the caller can hand that root straight to
+/// <see cref="IManagedToolCatalogVerifier.VerifyAsync"/> -- the exact verifier issue
+/// #669 wired in for the local-repository install path -- with no separate
+/// connected-mode verification logic.
 ///
 /// Bounded like <see cref="Waypoint.Infrastructure.StigManager.HttpStigManagerUploadClient"/>:
-/// a per-call linked <see cref="CancellationTokenSource"/> caps the whole fetch
-/// (both legs) at <see cref="ManagedToolOptions.DepotFetchTimeout"/>, and the
+/// a per-call linked <see cref="CancellationTokenSource"/> caps the whole fetch (all
+/// three legs) at <see cref="ManagedToolOptions.DepotFetchTimeout"/>, and each
 /// response body is copied to disk with an explicit running-byte-count check against
 /// <see cref="ManagedToolOptions.DepotFetchMaxBytes"/> -- <c>Content-Length</c> is
 /// untrusted (a depot could omit it or lie), so the cap is enforced on the actual
 /// bytes read, not the declared header.
 ///
-/// Token handling: <paramref name="depotToken"/> arrives already decrypted by the
-/// caller (<c>ManagedToolInstallJobHandler</c>, via <c>ICredentialSecretStore</c>,
+/// Credential handling: <paramref name="depotToken"/> arrives already decrypted by
+/// the caller (<c>ManagedToolInstallJobHandler</c>, via <c>ICredentialSecretStore</c>,
 /// which has already registered it with <c>ISecretRedactor</c> for the duration of
 /// the call) -- this type only ever places it in the <c>Authorization</c> header,
 /// never in a URL, a log line, or a <see cref="ManagedToolDepotFetchResult.FailureReason"/>.
@@ -70,26 +80,34 @@ public sealed partial class HttpManagedToolDepotFetcher : IManagedToolDepotFetch
 		ArgumentException.ThrowIfNullOrWhiteSpace(destinationDirectory);
 
 		ManagedToolOptions options = _options.Value;
-		string? urlTemplate = options.DepotFetchUrlTemplate;
-		if (string.IsNullOrWhiteSpace(urlTemplate))
+
+		if (string.IsNullOrWhiteSpace(options.DepotFetchUrlTemplate)
+			|| string.IsNullOrWhiteSpace(options.DepotCatalogUrl)
+			|| string.IsNullOrWhiteSpace(options.DepotCatalogSignatureUrl))
 		{
 			return ManagedToolDepotFetchResult.Failure(
 				ManagedToolDepotFetchFailureKind.Other,
-				"No depot-fetch URL is configured for this appliance (ManagedTool:DepotFetchUrlTemplate). An operator must configure it before the depot-fetch install path can run.");
+				"Connected depot-fetch metadata is not fully configured for this appliance (ManagedTool:DepotFetchUrlTemplate, ManagedTool:DepotCatalogUrl, ManagedTool:DepotCatalogSignatureUrl are all required). An operator must configure all three before the depot-fetch install path can run.");
 		}
 
-		string artifactUrl = version is null ? urlTemplate : urlTemplate.Replace("{version}", version, StringComparison.Ordinal);
-		if (!Uri.TryCreate(artifactUrl, UriKind.Absolute, out Uri? artifactUri))
+		string artifactUrl = version is null
+			? options.DepotFetchUrlTemplate
+			: options.DepotFetchUrlTemplate.Replace("{version}", version, StringComparison.Ordinal);
+
+		if (!Uri.TryCreate(artifactUrl, UriKind.Absolute, out Uri? artifactUri)
+			|| !Uri.TryCreate(options.DepotCatalogUrl, UriKind.Absolute, out Uri? catalogUri)
+			|| !Uri.TryCreate(options.DepotCatalogSignatureUrl, UriKind.Absolute, out Uri? catalogSignatureUri))
 		{
 			return ManagedToolDepotFetchResult.Failure(
-				ManagedToolDepotFetchFailureKind.Other, "The configured depot-fetch URL is not a valid absolute URI.");
+				ManagedToolDepotFetchFailureKind.Other, "One of the configured depot-fetch metadata URLs is not a valid absolute URI.");
 		}
 
-		Uri signatureUri = new(artifactUri.ToString() + ".sig");
-
 		Directory.CreateDirectory(destinationDirectory);
-		string artifactPath = Path.Combine(destinationDirectory, $"{Guid.NewGuid():N}-vcf-download-tool");
-		string signaturePath = artifactPath + ".sig";
+		string requestId = Guid.NewGuid().ToString("N");
+		string artifactPath = Path.Combine(destinationDirectory, $"{requestId}-vcf-download-tool");
+		string repositoryRoot = Path.Combine(destinationDirectory, $"{requestId}-repo");
+		string catalogPath = Path.Combine(repositoryRoot, options.ProductVersionCatalogPath.Replace('/', Path.DirectorySeparatorChar));
+		string catalogSignaturePath = Path.Combine(repositoryRoot, options.ProductVersionCatalogSignaturePath.Replace('/', Path.DirectorySeparatorChar));
 
 		using CancellationTokenSource callTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 		callTimeout.CancelAfter(options.DepotFetchTimeout);
@@ -100,19 +118,29 @@ public sealed partial class HttpManagedToolDepotFetcher : IManagedToolDepotFetch
 			client, artifactUri, depotToken, artifactPath, options.DepotFetchMaxBytes, cancellationToken, callTimeout.Token).ConfigureAwait(false);
 		if (!artifactResult.Succeeded)
 		{
-			CleanUp(artifactPath, signaturePath);
+			CleanUp(artifactPath, repositoryRoot);
 			return artifactResult;
 		}
 
+		Directory.CreateDirectory(Path.GetDirectoryName(catalogPath)!);
+		ManagedToolDepotFetchResult catalogResult = await DownloadOneAsync(
+			client, catalogUri, depotToken, catalogPath, options.DepotFetchMaxBytes, cancellationToken, callTimeout.Token).ConfigureAwait(false);
+		if (!catalogResult.Succeeded)
+		{
+			CleanUp(artifactPath, repositoryRoot);
+			return catalogResult;
+		}
+
+		Directory.CreateDirectory(Path.GetDirectoryName(catalogSignaturePath)!);
 		ManagedToolDepotFetchResult signatureResult = await DownloadOneAsync(
-			client, signatureUri, depotToken, signaturePath, options.DepotFetchMaxBytes, cancellationToken, callTimeout.Token).ConfigureAwait(false);
+			client, catalogSignatureUri, depotToken, catalogSignaturePath, options.DepotFetchMaxBytes, cancellationToken, callTimeout.Token).ConfigureAwait(false);
 		if (!signatureResult.Succeeded)
 		{
-			CleanUp(artifactPath, signaturePath);
+			CleanUp(artifactPath, repositoryRoot);
 			return signatureResult;
 		}
 
-		return ManagedToolDepotFetchResult.Success(artifactPath, signaturePath);
+		return ManagedToolDepotFetchResult.Success(artifactPath, repositoryRoot);
 	}
 
 	private async Task<ManagedToolDepotFetchResult> DownloadOneAsync(
@@ -179,7 +207,7 @@ public sealed partial class HttpManagedToolDepotFetcher : IManagedToolDepotFetch
 		}
 	}
 
-	private static void CleanUp(string artifactPath, string signaturePath)
+	private static void CleanUp(string artifactPath, string repositoryRoot)
 	{
 		try
 		{
@@ -188,16 +216,16 @@ public sealed partial class HttpManagedToolDepotFetcher : IManagedToolDepotFetch
 				File.Delete(artifactPath);
 			}
 
-			if (File.Exists(signaturePath))
+			if (Directory.Exists(repositoryRoot))
 			{
-				File.Delete(signaturePath);
+				Directory.Delete(repositoryRoot, recursive: true);
 			}
 		}
 		catch (IOException)
 		{
-			// Best-effort cleanup of a partial download; a stray temp file under the
-			// staging directory is not a correctness issue (never activated, never
-			// referenced from the ledger row this attempt fails without writing).
+			// Best-effort cleanup of a partial download; a stray temp file/directory
+			// under the staging directory is not a correctness issue (never activated,
+			// never referenced from the ledger row this attempt fails without writing).
 		}
 	}
 }
