@@ -23,8 +23,10 @@ rules remain authoritative. Read `AGENTS.md` before any repository action.
 | Reviewer | Follow `github-pr-review`; independently test, decide, and merge when clean | Reuse prior parent context or author fixes |
 | Validator | Exercise the integrated system and file sanitized findings | Change implementation, close issues, or merge |
 
-Use the inherited model and reasoning settings unless the user or repository
-instructions explicitly require an override. Never assign model tiers by habit.
+Use the inherited model and reasoning settings unless the user, applicable
+repository instructions, or applicable skill instructions explicitly require an
+override. When overriding either setting, dispatch with `fork_turns: "none"` or a
+positive recent-turn count, never `"all"`. Never assign model tiers by habit.
 
 ## Dispatch safely
 
@@ -35,8 +37,9 @@ instructions explicitly require an override. Never assign model tiers by habit.
 - Every prompt forbids further delegation, identifies the owned worktree and
   branch, points to the public-repository sanitization rules, and supplies exact
   test/lint commands. Use the templates in [references/templates/](references/templates/).
-- A fresh contextless reviewer handles every review round. The implementer and fix
-  agent never review or merge their own PR.
+- A fresh contextless reviewer handles every review round. Spawn every such
+  reviewer with `fork_turns: "none"`, carrying all required review context in its
+  prompt. The implementer and fix agent never review or merge their own PR.
 - Treat reports as unverified. Check GitHub state, branch state, test evidence,
   labels, and sanitization before advancing the workflow.
 - Reserve migration identifiers before parallel database work. With concurrent

@@ -1,7 +1,9 @@
 # Review dispatch
 
 Start from `github-workflow/references/templates/review-handoff.md`, then add the
-following context. Use a fresh agent with no parent history for every round.
+following context. Spawn a fresh agent with `fork_turns: "none"` for every round;
+the completed prompt must carry all required review context because no parent
+history is inherited.
 
 ```text
 Run the github-pr-review skill for PR #<N> in <owner>/<repo> as review round <R>.
