@@ -85,6 +85,27 @@ public sealed class DepotEnrollmentRepository : IDepotEnrollmentRepository
 		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
 
+	public async Task AdoptExistingCodeAsync(string assetId, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(assetId);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE depot_enrollment
+			SET depot_id = COALESCE(depot_id, $1),
+			    depot_id_generated_at = COALESCE(depot_id_generated_at, now()),
+			    paired_asset_id = $1,
+			    paired_at = now(),
+			    state = CASE WHEN state = 'validated' THEN state ELSE 'activation_code_stored' END,
+			    last_validation_failure = NULL
+			WHERE id = 1
+			""", connection);
+		command.Parameters.AddWithValue(assetId);
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
 	public async Task SetValidationOutcomeAsync(bool succeeded, string? failureNote, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

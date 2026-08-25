@@ -48,6 +48,17 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 {
 	private const string InventedCode = "invented-validate-e2e-canary-9c31"; // gitleaks:allow — invented test canary, asserted absent from every persistence surface
 
+	/// <summary>Invented asset_id embedded in <see cref="InventedRealShapeCode"/> -- never a real Broadcom value.</summary>
+	private const string InventedAssetId = "wpt-787-e2e-asset-0002";
+
+	/// <summary>
+	/// An invented Activation Code in the real shape the codec decodes (issue #787):
+	/// base64 of a JSON object carrying an <c>asset_id</c>. Structurally faithful to the
+	/// sibling contract, values entirely fabricated. gitleaks:allow.
+	/// </summary>
+	private static readonly string InventedRealShapeCode =
+		Convert.ToBase64String(Encoding.UTF8.GetBytes($$"""{"asset_id":"{{InventedAssetId}}","issued":"2026-01-01"}"""));
+
 	private readonly PostgresFixture _fixture;
 	private readonly string _keyDirectory = Directory.CreateTempSubdirectory("wp-enrollment-validate-key").FullName;
 	private readonly InPlaySecretRedactor _redactor = new();
@@ -104,6 +115,25 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 		await command.ExecuteNonQueryAsync();
 	}
 
+	/// <summary>
+	/// The credential-panel path the owner actually used (issue #787): a code was stored
+	/// directly, with NO prior enrollment interaction -- no Depot ID generated, no
+	/// pairing recorded, identity home empty. Adopt-on-validate must recover this.
+	/// </summary>
+	private async Task SetEmptyPairingStateAsync()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"""
+			UPDATE depot_enrollment
+			SET state = 'depot_id_unavailable', depot_id = NULL, depot_id_generated_at = NULL,
+			    paired_asset_id = NULL, paired_at = NULL, last_validation_failure = NULL, reset_at = NULL
+			WHERE id = 1
+			""", connection);
+		await command.ExecuteNonQueryAsync();
+	}
+
 	private sealed class FakeDepotIdentityTool : IDepotIdentityTool
 	{
 		private readonly DepotValidationResult _result;
@@ -115,14 +145,23 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 
 		public List<string> StagedPaths { get; } = [];
 		public List<string> StagedContents { get; } = [];
+		public List<string> SeededAssetIds { get; } = [];
+		public List<string?> ValidatedAssetIds { get; } = [];
 
 		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) =>
 			throw new InvalidOperationException("Not expected to be called by this file's validate-code scenarios.");
 
-		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken)
+		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken)
+		{
+			SeededAssetIds.Add(assetId);
+			return Task.CompletedTask;
+		}
+
+		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string? expectedAssetId, CancellationToken cancellationToken)
 		{
 			StagedPaths.Add(activationCodePath);
 			StagedContents.Add(File.Exists(activationCodePath) ? File.ReadAllText(activationCodePath) : "<missing>");
+			ValidatedAssetIds.Add(expectedAssetId);
 			return Task.FromResult(_result);
 		}
 	}
@@ -224,5 +263,76 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 		// (activation_code_stored), not auth_failing.
 		DepotEnrollment? enrollment = await _enrollment.GetAsync(CancellationToken.None);
 		Assert.Equal(DepotEnrollmentStates.ActivationCodeStored, enrollment!.State);
+	}
+
+	[Fact]
+	public async Task ValidateCode_ExistingPairing_SeedsMachineIdFromStoredPairing_BeforeInvoking()
+	{
+		// Generate-first (or already-adopted): a pairing is already recorded. Validation
+		// re-seeds the identity file from that stored pairing -- the rebuild-survivability
+		// path -- and never re-derives it from the code, preserving existing semantics.
+		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
+		FakeDepotIdentityTool tool = new(DepotValidationResult.Ok());
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		ClaimedJob job = await EnqueueValidateJobAsync();
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		// The stored pairing (WPT-0001-DEPOT-ID, seeded by ResetEnrollmentAsync) is what
+		// gets seeded and validated against -- not the code's own asset_id.
+		Assert.Equal(new[] { "WPT-0001-DEPOT-ID" }, tool.SeededAssetIds);
+		Assert.Equal(new string?[] { "WPT-0001-DEPOT-ID" }, tool.ValidatedAssetIds);
+	}
+
+	[Fact]
+	public async Task ValidateCode_NoPriorPairing_AdoptsStoredCodeIdentity_RecoversAndRecordsAdoption()
+	{
+		// Issue #787 AC: the credential-panel path -- code stored with no prior
+		// enrollment interaction, empty identity home. Adopt-on-validate decodes the
+		// code's asset_id, adopts it as the managed Depot ID + pairing, seeds machine_id,
+		// and reaches validated WITHOUT the operator re-entering the code.
+		await SetEmptyPairingStateAsync();
+		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
+		FakeDepotIdentityTool tool = new(DepotValidationResult.Ok());
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		ClaimedJob job = await EnqueueValidateJobAsync();
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+
+		// machine_id was seeded from the decoded asset_id, and the tool validated against it.
+		Assert.Equal(new[] { InventedAssetId }, tool.SeededAssetIds);
+		Assert.Equal(new string?[] { InventedAssetId }, tool.ValidatedAssetIds);
+
+		// The adoption is durable and visible: depot_id + pairing both record the asset_id.
+		DepotEnrollment? enrollment = await _enrollment.GetAsync(CancellationToken.None);
+		Assert.Equal(DepotEnrollmentStates.Validated, enrollment!.State);
+		Assert.Equal(InventedAssetId, enrollment.DepotId);
+		Assert.Equal(InventedAssetId, enrollment.PairedAssetId);
+		Assert.NotNull(enrollment.DepotIdGeneratedAt);
+	}
+
+	[Fact]
+	public async Task ValidateCode_AdoptedIdentity_NeverLeaksCodeValueIntoEnrollmentOrNote()
+	{
+		// The raw code (its base64 body) must never appear on any persistence surface,
+		// even on the adopt path that decodes it. Only the non-secret asset_id is stored.
+		await SetEmptyPairingStateAsync();
+		await SeedActivationCodeCredentialAsync(InventedRealShapeCode);
+		FakeDepotIdentityTool tool = new(DepotValidationResult.Ok());
+		DepotEnrollmentJobHandler handler = new(tool, _enrollment, _secretStore, _credentials, _redactor);
+		ClaimedJob job = await EnqueueValidateJobAsync();
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(job), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.DoesNotContain(InventedRealShapeCode, outcome.Note ?? string.Empty, StringComparison.Ordinal);
+
+		DepotEnrollment? enrollment = await _enrollment.GetAsync(CancellationToken.None);
+		Assert.DoesNotContain(InventedRealShapeCode, enrollment!.DepotId ?? string.Empty, StringComparison.Ordinal);
+		Assert.DoesNotContain(InventedRealShapeCode, enrollment.PairedAssetId ?? string.Empty, StringComparison.Ordinal);
+		Assert.False(File.Exists(tool.StagedPaths[0]));
 	}
 }

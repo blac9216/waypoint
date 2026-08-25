@@ -47,7 +47,10 @@ public sealed class DepotEnrollmentJobHandlerTests
 
 		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) => Task.FromResult(_result);
 
-		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken)
+		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken) =>
+			throw new InvalidOperationException("Not expected to be called by this file's generate-depot-id scenarios.");
+
+		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string? expectedAssetId, CancellationToken cancellationToken)
 		{
 			ValidateCalls.Add(activationCodePath);
 			throw new InvalidOperationException("Not expected to be called by this file's generate-depot-id scenarios.");
@@ -71,6 +74,9 @@ public sealed class DepotEnrollmentJobHandlerTests
 		}
 
 		public Task SetPairedAsync(string assetId, CancellationToken cancellationToken) =>
+			throw new InvalidOperationException("Not expected to be called by this file's generate-depot-id scenarios.");
+
+		public Task AdoptExistingCodeAsync(string assetId, CancellationToken cancellationToken) =>
 			throw new InvalidOperationException("Not expected to be called by this file's generate-depot-id scenarios.");
 
 		public Task SetValidationOutcomeAsync(bool succeeded, string? failureNote, CancellationToken cancellationToken) =>

@@ -33,13 +33,29 @@ public interface IDepotIdentityTool
 	Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Seeds the isolated identity home's <c>machine_id</c> from a code's decoded
+	/// <paramref name="assetId"/> (issue #787) so the tool accepts an existing/portal-issued
+	/// Activation Code, matching the sibling reference's
+	/// <c>~/.local/share/vmware/vdt/machine_id</c> contract. Atomic and restrictive
+	/// (write-temp-then-rename, 0600); no-op when a <c>machine_id</c> already exists
+	/// (read-first / never silently rotate an identity the tool already established --
+	/// issue #778). The code value itself is never touched -- only its non-secret
+	/// <paramref name="assetId"/> is written.
+	/// </summary>
+	Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Runs the bounded noninteractive validation of <paramref name="activationCodePath"/>
 	/// (a job-scoped temp file containing the decrypted code, never the code value
-	/// itself) against the tool's current identity. A non-auth-failure error (tool
-	/// missing, timeout) is distinguished from a real portal/auth rejection so callers
-	/// never misclassify a runner problem as "the code is bad."
+	/// itself) against the tool's current identity. When <paramref name="expectedAssetId"/>
+	/// is supplied the local <c>machine_id</c> is ensured present and equal to it first
+	/// (issue #787: re-seeding a container-rebuild-emptied identity home from the stored
+	/// pairing), so a genuine code is not rejected merely because the identity file was
+	/// missing. A non-auth-failure error (tool missing, timeout) is distinguished from a
+	/// real portal/auth rejection so callers never misclassify a runner problem as "the
+	/// code is bad."
 	/// </summary>
-	Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken);
+	Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string? expectedAssetId, CancellationToken cancellationToken);
 }
 
 /// <summary>Outcome of <see cref="IDepotIdentityTool.GetDepotIdAsync"/>. <see cref="DepotId"/> is non-secret and safe to display/copy/log.</summary>

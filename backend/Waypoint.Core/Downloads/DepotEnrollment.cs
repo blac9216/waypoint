@@ -75,6 +75,17 @@ public interface IDepotEnrollmentRepository
 	/// <summary>Records a successfully paired+stored Activation Code (asset_id already validated by the caller) and advances state to <see cref="DepotEnrollmentStates.ActivationCodeStored"/>.</summary>
 	Task SetPairedAsync(string assetId, CancellationToken cancellationToken);
 
+	/// <summary>
+	/// Adopts an existing Activation Code's decoded <paramref name="assetId"/> as the
+	/// managed Depot ID when no ID was ever generated (issue #787 -- the credential-panel
+	/// path where a code is stored with no prior enrollment interaction): sets both
+	/// <c>depot_id</c> and <c>paired_asset_id</c> to the asset_id and advances state to
+	/// <see cref="DepotEnrollmentStates.ActivationCodeStored"/>. Only fills a Depot ID
+	/// that is currently NULL -- never overwrites an explicitly generated ID, preserving
+	/// generate-first mismatch semantics.
+	/// </summary>
+	Task AdoptExistingCodeAsync(string assetId, CancellationToken cancellationToken);
+
 	/// <summary>Records the outcome of a bounded noninteractive validation call: <see cref="DepotEnrollmentStates.Validated"/> on success, <see cref="DepotEnrollmentStates.AuthFailing"/> (with a redaction-safe failure note) on rejection.</summary>
 	Task SetValidationOutcomeAsync(bool succeeded, string? failureNote, CancellationToken cancellationToken);
 

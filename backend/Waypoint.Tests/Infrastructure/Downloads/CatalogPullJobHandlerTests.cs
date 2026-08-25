@@ -43,6 +43,7 @@ public sealed class CatalogPullJobHandlerTests
 		public Task<DepotEnrollment?> GetAsync(CancellationToken cancellationToken) => Task.FromResult(enrollment);
 		public Task SetDepotIdAsync(string depotId, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task SetPairedAsync(string assetId, CancellationToken cancellationToken) => throw new InvalidOperationException();
+		public Task AdoptExistingCodeAsync(string assetId, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task SetValidationOutcomeAsync(bool succeeded, string? failureNote, CancellationToken cancellationToken) => throw new InvalidOperationException();
 		public Task ResetAsync(CancellationToken cancellationToken) => throw new InvalidOperationException();
 	}
