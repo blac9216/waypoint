@@ -14,6 +14,7 @@
 
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Downloads;
 
@@ -23,17 +24,42 @@ namespace Waypoint.Infrastructure.Downloads;
 /// <remarks>
 /// Mirrors <c>ManagedToolDistributionInstaller.SmokeTestAsync</c>'s bounded
 /// noninteractive process pattern: stdin closed immediately, a linked
-/// timeout/cancellation token, and a hard kill on timeout. The Broadcom-documented
-/// command is <c>vcf-download-tool configuration get --software-depot-id</c> (issue
-/// #691's cited guidance); validation reuses the sibling
-/// <c>--depot-download-activation-code-file</c> convention against the tool's own
-/// <c>configuration get --software-depot-id</c> call once the code file is staged --
-/// the tool itself refuses a mismatched/invalid code, so a nonzero exit or its stderr
-/// classifying as an auth failure is the validation signal.
+/// timeout/cancellation token, and a hard kill on timeout.
+///
+/// Issue #772: live validation against the real tool proved <c>configuration get
+/// --software-depot-id</c> exits 0 even when no identity has been generated yet --
+/// it prints a human banner telling the operator to run <c>configuration generate</c>
+/// instead, and exit code 0 alone is NOT proof an ID was produced. So this reads
+/// first (<c>configuration get</c>, cheap and idempotent -- never regenerates/rotates
+/// an existing ID), and only runs <c>configuration generate --software-depot-id</c>
+/// when the read comes back as the "nothing generated yet" banner rather than a real
+/// ID. Either call's stdout is strictly parsed for a single plausible ID token
+/// (<see cref="TryParseDepotId"/>) rather than trusted verbatim -- a banner, an error
+/// blob, or multi-line prose is rejected as a typed failure, never stored as an
+/// identity.
 /// </remarks>
 public sealed class DepotIdentityTool : IDepotIdentityTool
 {
-	private const string SoftwareDepotIdArgument = "configuration get --software-depot-id";
+	private const string GetArgument = "configuration get --software-depot-id";
+	private const string GenerateArgument = "configuration generate --software-depot-id";
+
+	/// <summary>Distinguishing phrase from the real tool's "nothing generated yet" banner (issue #772) -- never treated as a parsed ID.</summary>
+	private const string NotGeneratedPhrase = "No Software depot ID generated";
+
+	/// <summary>
+	/// A plausible Software Depot ID token: printable, no internal whitespace, no
+	/// quotes, bounded length, and carrying at least one digit or hyphen so a plain
+	/// English word out of surrounding prose ("Software", "Depot") never qualifies --
+	/// deliberately loose on the rest since Broadcom does not publish a fixed format,
+	/// but tight enough to reject banner/prose/log-path lines.
+	/// </summary>
+	private static readonly Regex DepotIdTokenPattern =
+		new(@"^(?=[A-Za-z0-9._:-]*[0-9-])[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$", RegexOptions.Compiled);
+
+	/// <summary>Same shape as <see cref="DepotIdTokenPattern"/>, un-anchored, for locating a single candidate token embedded inside a prose line.</summary>
+	private static readonly Regex EmbeddedTokenPattern =
+		new(@"(?=[A-Za-z0-9._:-]*[0-9-])[A-Za-z0-9][A-Za-z0-9._:-]{5,127}", RegexOptions.Compiled);
+
 	private readonly IOptions<ManagedToolOptions> _options;
 	private readonly IManagedToolPresenceChecker _presenceChecker;
 
@@ -56,24 +82,133 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		ManagedToolOptions options = _options.Value;
 		string identityHome = PrepareIdentityHome(options);
 
+		DepotIdentityResult read = await InvokeAndParseAsync(GetArgument, identityHome, options, "Depot ID query", cancellationToken)
+			.ConfigureAwait(false);
+		if (read.Succeeded)
+		{
+			// An ID already exists -- idempotent read, never regenerate/rotate silently.
+			return read;
+		}
+
+		// The read failed. If it failed specifically because no identity has been
+		// generated yet, generate one now; any other failure (tool missing mid-call,
+		// timeout, unparseable garbage) is returned as-is rather than papered over by
+		// a generate attempt that would only fail the same way.
+		if (!read.FailureReason?.Contains(NotGeneratedPhrase, StringComparison.OrdinalIgnoreCase) ?? true)
+		{
+			return read;
+		}
+
+		return await InvokeAndParseAsync(GenerateArgument, identityHome, options, "Depot ID generation", cancellationToken)
+			.ConfigureAwait(false);
+	}
+
+	private static async Task<DepotIdentityResult> InvokeAndParseAsync(
+		string argument, string identityHome, ManagedToolOptions options, string operationLabel, CancellationToken cancellationToken)
+	{
 		(bool succeeded, int exitCode, string stdout, string stderr) = await RunAsync(
-			ExecutablePath(options), SoftwareDepotIdArgument, identityHome, options, cancellationToken).ConfigureAwait(false);
+			ExecutablePath(options), argument, identityHome, options, cancellationToken).ConfigureAwait(false);
 
 		if (!succeeded)
 		{
-			return DepotIdentityResult.Failed($"Depot ID query could not be started or timed out: {stderr}");
+			return DepotIdentityResult.Failed($"{operationLabel} could not be started or timed out: {stderr}");
 		}
 
+		// Exit code 0 is NOT success proof by itself (issue #772) -- it is necessary
+		// but the parsed stdout is what actually decides the outcome.
 		if (exitCode != 0)
 		{
-			return DepotIdentityResult.Failed($"Depot ID query exited with code {exitCode}: {Truncate(stderr)}");
+			return DepotIdentityResult.Failed($"{operationLabel} exited with code {exitCode}: {Truncate(stderr)}");
 		}
 
-		string depotId = stdout.Trim();
-		return string.IsNullOrEmpty(depotId)
-			? DepotIdentityResult.Failed("Depot ID query succeeded but produced no output.")
-			: DepotIdentityResult.Ok(depotId);
+		return TryParseDepotId(stdout, out string? depotId, out string? rejectionReason)
+			? DepotIdentityResult.Ok(depotId!)
+			: DepotIdentityResult.Failed($"{operationLabel} succeeded but produced no usable Depot ID: {rejectionReason}");
 	}
+
+	/// <summary>
+	/// Extracts a Depot ID from the tool's stdout, rejecting anything that is not a
+	/// single plausible ID token. The real tool's output is a banner (a
+	/// <c>*Welcome...*</c> line), a <c>Version:</c> line, a <c>Log file:</c> line, and
+	/// -- on success -- either a bare ID line or a prose sentence containing one; on
+	/// the "nothing generated yet" path, a sentence containing
+	/// <see cref="NotGeneratedPhrase"/> instead. Banner/version/log-file lines are
+	/// always stripped before a candidate is considered, so neither can be mistaken
+	/// for an ID no matter which call produced them.
+	/// </summary>
+	internal static bool TryParseDepotId(string stdout, out string? depotId, out string? rejectionReason)
+	{
+		depotId = null;
+		rejectionReason = null;
+
+		if (string.IsNullOrWhiteSpace(stdout))
+		{
+			rejectionReason = "no output was produced.";
+			return false;
+		}
+
+		string[] lines = stdout.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+		List<string> candidates = [];
+		foreach (string rawLine in lines)
+		{
+			string line = rawLine.Trim();
+			if (line.Length == 0 || IsBannerLine(line))
+			{
+				continue;
+			}
+
+			if (line.Contains(NotGeneratedPhrase, StringComparison.OrdinalIgnoreCase))
+			{
+				rejectionReason = $"the tool reported '{NotGeneratedPhrase}' -- no identity exists yet.";
+				return false;
+			}
+
+			candidates.Add(line);
+		}
+
+		if (candidates.Count == 0)
+		{
+			rejectionReason = "no non-banner output line was found.";
+			return false;
+		}
+
+		// A bare ID line (the common case) matches the token pattern outright. A
+		// prose line ("Your Software Depot ID is: WPT-...") is searched for exactly
+		// one embedded token instead of trusting the whole sentence -- if the line
+		// carries zero or more than one plausible token, it is rejected rather than
+		// guessed at.
+		List<string> tokens = [];
+		foreach (string candidate in candidates)
+		{
+			if (DepotIdTokenPattern.IsMatch(candidate))
+			{
+				tokens.Add(candidate);
+				continue;
+			}
+
+			MatchCollection embedded = EmbeddedTokenPattern.Matches(candidate);
+			if (embedded.Count == 1)
+			{
+				tokens.Add(embedded[0].Value);
+			}
+		}
+
+		if (tokens.Count != 1)
+		{
+			rejectionReason = tokens.Count == 0
+				? $"output did not contain a recognisable ID token: {Truncate(stdout)}"
+				: $"output contained multiple candidate ID tokens: {Truncate(stdout)}";
+			return false;
+		}
+
+		depotId = tokens[0];
+		return true;
+	}
+
+	private static bool IsBannerLine(string line) =>
+		line.StartsWith('*') // "*Welcome to VCF Download Tool*"
+		|| line.StartsWith("Version:", StringComparison.OrdinalIgnoreCase)
+		|| line.StartsWith("Log file:", StringComparison.OrdinalIgnoreCase);
 
 	public async Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken)
 	{
