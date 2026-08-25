@@ -138,15 +138,101 @@ artifacts stay in Compliance Results, inventory stays with Targets, downloads st
 Catalog/Library, profiles stay in Compliance Content, and bundles stay in Transfer.
 Deletion follows the same boundary ([ADR-0019](adr/0019-global-job-observability.md)).
 
-## Discovery is a job type
+## Compliance inventory, discovery, and planning
 
-✅ **Built** (M2, issue #21): the `discover` job type and inventory cache below are
-live.
+🚧 **In transition** (planned by epic
+[#726](https://github.com/blac9216/waypoint/issues/726)). M2 shipped a manual,
+vSphere-only `discover` job and a cache of cluster/host/VM rows keyed by vCenter
+managed-object reference. It does not yet schedule discovery, refresh at scan start,
+materialize every catalog component, or compile the immutable plans below.
 
-Host/VM inventory is discovered from each vCenter (AllLinked connect, as today) and
-**snapshotted into Postgres**, so the UI can render checkbox target-selection without a
-live vCenter connection. The UI shows last-refreshed time; scans trigger an automatic
-refresh before running; operators can refresh on demand.
+### Configured targets and discovered components
+
+An Admin-configured **top-level target** is a durable connection and policy boundary:
+a vCenter, NSX Manager, or directly addressed appliance. It is not automatically one
+scan item. A **component** is the stable, concrete subject matched to one catalog
+component: a discovered vCenter, ESXi host, or VM; a catalog-declared VCSA/NSX/VCF
+service beneath its parent; or the component represented by a directly configured
+appliance.
+
+Component identity is `(top-level target, catalog component key, authoritative vendor
+object identity)`. Discovery uses upstream stable identifiers such as managed-object
+references or product-native IDs. It never joins by hostname, address, display name,
+inventory position, or sibling filesystem/profile names. A catalog-declared component
+that has no separately discoverable object uses its configured parent identity plus
+the catalog component key. Exact product version and other configured or observed
+facts retain value, source, observation time, and conflicts; Waypoint does not guess
+which source is correct. Maintenance mode is an observed fact, not an exclusion:
+compatible selected components remain eligible and ordinary reachability rules apply.
+
+The selectable cache is refreshed on an appliance-wide Admin-configured schedule,
+initially daily. Each top-level target may have an Admin-configured override, which
+wins; manual refresh remains available. Sources report independently. A failed or
+partial pass records exactly which source boundaries completed, preserves prior rows
+as unverified rather than falsely absent, and raises an operational alert. Successful
+boundaries reconcile their own observations without claiming the whole refresh was
+authoritative.
+
+Every scan performs discovery again as a mandatory planning barrier, regardless of
+cache age or recurring schedule. An explicit selection must be observed with the same
+identity and be reachable; otherwise that selection fails before any scan component
+job starts. An `all` selection expands against every successfully refreshed applicable
+boundary and includes newly discovered compatible components. If any required boundary
+failed, the planner refuses to call the expansion complete. It never substitutes the
+stale cache or silently narrows `all`. The plan records refresh coverage and every
+omission/conflict so later run status cannot imply full coverage.
+
+### Inventory lifecycle and scope
+
+Not observing a component on a successful authoritative boundary marks it `absent`;
+configuration remains attached to its stable identity and rediscovery restores the
+same component. After one appliance-wide Admin-configurable period, initially seven
+continuous days, it becomes `retired` and leaves normal active selection. An Admin may
+explicitly purge a retired component; purge is audited and removes its retained
+component configuration, but never historical plan references. Partial or failed
+refreshes do not start or advance absence time.
+
+A scan stores both **requested scope** and **resolved scope**. Requested scope is
+either top-level `all` expansion or an explicit set of stable component identities;
+the modes cannot be blended into a silent widening rule. When configured and observed
+exact versions conflict, any Cyber-or-higher interactive initiator chooses one for
+this run after seeing both provenances; the choice changes neither source. A scheduled
+run cannot choose: it skips that component visibly, continues independent work, and
+re-evaluates next dispatch without disabling the schedule. Each component is ready
+only when its chosen exact version has one matching catalog entry and exactly one
+active, approved baseline under ADR-0022. Unsupported, ambiguous, absent, retired,
+purged, unreachable, refresh-unverified, or baseline-unready entries remain named
+coverage omissions, not dropped rows. A scope containing only unsupported items still
+produces an honest zero-execution plan; it never widens to find runnable work.
+
+### Immutable component plans
+
+Only after refresh, scope resolution, compatibility, and readiness validation does the
+planner freeze a run plan. Each immutable planned item records the component's stable
+identity and parent, requested/resolved-scope provenance, configured and discovered
+facts with conflicts, exact catalog and active baseline identities, content and
+dependency digests, selector/transport/output/priority, and references to the resolved
+configuration snapshot/digest and access inputs owned by later decisions. It also
+records discovery boundary/observation provenance and any coverage omission. Plans are
+append-only:
+content activation, rediscovery, target edits, or retirement cannot rewrite them.
+Retries reuse the original item; using current inventory or configuration creates a
+new plan and run. #807 defines the contents and precedence of access/configuration
+snapshots, not whether they are frozen; trust/evidence is #808 and wire authorization
+is #785.
+
+### Legacy disposition
+
+The shipped profile picker and payload `scope.profile_id` are transitional, not a
+second scan model. Planned scans derive exact baselines from component identity and
+never accept a caller-selected profile. [#651](https://github.com/blac9216/waypoint/issues/651)
+is therefore superseded as a profile-picker enhancement and will be reconciled by the
+UI work in #786. [#653](https://github.com/blac9216/waypoint/issues/653) remains valid
+for operator-visible schedule failure, but legacy `profile_id` validation is replaced
+by immutable requested-scope planning. [#649](https://github.com/blac9216/waypoint/issues/649)
+is resolved architecturally as **allow concurrent plans**: stable identity prevents
+accidental substitution, while each run remains independently immutable; no
+target-wide rejection or implicit serialization is introduced.
 
 ## Identity & authorization
 
