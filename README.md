@@ -47,6 +47,8 @@ recent runs, read-only schedules, appliance health, and actionable warnings toge
 
 ![Prototype placeholder showing the Waypoint operations dashboard](docs/images/readme-placeholder-dashboard.png)
 
+### Compliance
+
 #### Follow live work by priority queue
 
 Live Jobs presents runner-owned progress, priority queues, per-target state, failures,
@@ -67,8 +69,6 @@ The log-first view keeps target state beside a full-height, color-coded executio
 so operators can correlate failures with the runner events that produced them.
 
 ![Prototype placeholder showing the Live Jobs log-first view](docs/images/readme-placeholder-live-jobs-log-first.png)
-
-### Compliance
 
 #### Plan repeatable scans from cached infrastructure inventory
 
