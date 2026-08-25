@@ -34,6 +34,54 @@ function detailSummary(detail: string): string {
 	return detail.length > 120 ? `${detail.slice(0, 120)}…` : detail;
 }
 
+/**
+ * Issue #718: `secret.decrypted`'s `detail` JSON (PR #775) carries
+ * `credential_name` alongside the pre-existing top-level `credential_id`.
+ * Best-effort parse only — `detail` is opaque per-event JSON the backend
+ * never guarantees a shape for beyond "valid JSON", so any parse failure or
+ * missing/non-string field just falls back to no name. NEVER reads or
+ * renders anything secret-shaped (ciphertext, key material) — only the
+ * credential's own non-secret name, which is all PR #775 ever added here.
+ */
+function credentialNameFromDetail(detail: string): string | null {
+	try {
+		const parsed: unknown = JSON.parse(detail);
+		if (parsed && typeof parsed === "object" && "credential_name" in parsed) {
+			const name = (parsed as { credential_name?: unknown }).credential_name;
+			return typeof name === "string" && name.length > 0 ? name : null;
+		}
+	} catch {
+		// detail isn't parseable JSON for this event kind — no name to show.
+	}
+	return null;
+}
+
+/**
+ * Renders the CREDENTIAL column per issue #718's acceptance surface: name
+ * plus stable id when a name is resolvable, id alone otherwise, empty for
+ * events with no credential attribution at all. The id always rides in the
+ * accessible `title` tooltip even when the name is the visible text, so the
+ * stable identifier is never lost behind a friendlier label.
+ */
+function CredentialCell({ entry }: { entry: { credential_id: string | null; detail: string } }) {
+	if (!entry.credential_id) {
+		return <td className="mono config-table__truncate">—</td>;
+	}
+	const name = credentialNameFromDetail(entry.detail);
+	if (name) {
+		return (
+			<td className="config-table__truncate" title={`id: ${entry.credential_id}`}>
+				{name}
+			</td>
+		);
+	}
+	return (
+		<td className="mono config-table__truncate" title={entry.credential_id}>
+			{entry.credential_id}
+		</td>
+	);
+}
+
 export function AuditScreen() {
 	const { token } = useAuth();
 	const { entries, totalCount, loading, loadError, filter, setFilter, offset, setOffset } = useAuditLog();
@@ -121,12 +169,13 @@ export function AuditScreen() {
 
 					<table className="config-table">
 						<colgroup>
-							<col style={{ width: "14%" }} />
-							<col style={{ width: "18%" }} />
-							<col style={{ width: "14%" }} />
+							<col style={{ width: "13%" }} />
+							<col style={{ width: "16%" }} />
 							<col style={{ width: "12%" }} />
-							<col style={{ width: "12%" }} />
-							<col style={{ width: "30%" }} />
+							<col style={{ width: "11%" }} />
+							<col style={{ width: "11%" }} />
+							<col style={{ width: "13%" }} />
+							<col style={{ width: "24%" }} />
 						</colgroup>
 						<thead>
 							<tr>
@@ -135,20 +184,21 @@ export function AuditScreen() {
 								<th>ACTOR</th>
 								<th>RUN</th>
 								<th>JOB</th>
+								<th>CREDENTIAL</th>
 								<th>DETAIL</th>
 							</tr>
 						</thead>
 						<tbody>
 							{loading && (
 								<tr>
-									<td colSpan={6} className="config-table__empty">
+									<td colSpan={7} className="config-table__empty">
 										Loading audit log…
 									</td>
 								</tr>
 							)}
 							{!loading && entries.length === 0 && (
 								<tr>
-									<td colSpan={6} className="config-table__empty">
+									<td colSpan={7} className="config-table__empty">
 										No audit entries match this filter.
 									</td>
 								</tr>
@@ -163,6 +213,7 @@ export function AuditScreen() {
 										<td className="config-table__truncate">{entry.actor}</td>
 										<td className="mono config-table__truncate">{entry.run_id ?? "—"}</td>
 										<td className="mono config-table__truncate">{entry.job_id ?? "—"}</td>
+										<CredentialCell entry={entry} />
 										<td className="config-table__truncate" title={entry.detail}>
 											{detailSummary(entry.detail)}
 										</td>

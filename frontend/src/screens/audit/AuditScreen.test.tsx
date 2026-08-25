@@ -26,6 +26,35 @@ const ENTRIES = [
 	},
 ];
 
+// Issue #718: `secret.decrypted`'s `detail` carries `credential_name`
+// (PR #775) alongside the pre-existing top-level `credential_id` — name
+// resolvable, so the CREDENTIAL column should show the name with the id in
+// the accessible tooltip.
+const NAMED_CREDENTIAL_ENTRY = {
+	id: "audit-3",
+	event_type: "secret.decrypted",
+	actor: "j.moreno",
+	credential_id: "cred-named-1",
+	job_id: "job-2",
+	run_id: "run-2",
+	detail: '{"master_key_id":"mk-1","credential_name":"vcenter-svc-account","credential_type":"vsphere"}',
+	occurred_at: "2026-08-19T08:00:00Z",
+};
+
+// A decrypt event whose credential row was deleted between the two reads
+// (PR #775's "best-effort" note) — `credential_name` absent, so the column
+// must fall back to the bare id.
+const UNNAMED_CREDENTIAL_ENTRY = {
+	id: "audit-4",
+	event_type: "secret.decrypted",
+	actor: "j.moreno",
+	credential_id: "cred-orphan-1",
+	job_id: "job-3",
+	run_id: "run-3",
+	detail: '{"master_key_id":"mk-2"}',
+	occurred_at: "2026-08-19T09:00:00Z",
+};
+
 function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
 	return new Response(JSON.stringify(body), {
 		status,
@@ -37,9 +66,10 @@ describe("AuditScreen (issue #531)", () => {
 	let originalFetch: typeof fetch;
 	let fetchCalls: { url: string }[];
 
-	function installFetchMock(options: { total?: number; csvBody?: string } = {}) {
+	function installFetchMock(options: { total?: number; csvBody?: string; entries?: typeof ENTRIES } = {}) {
 		fetchCalls = [];
-		const total = options.total ?? ENTRIES.length;
+		const entries = options.entries ?? ENTRIES;
+		const total = options.total ?? entries.length;
 
 		globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
 			const url = typeof input === "string" ? input : input.toString();
@@ -52,7 +82,7 @@ describe("AuditScreen (issue #531)", () => {
 						headers: { "Content-Type": "text/csv" },
 					});
 				}
-				return jsonResponse(ENTRIES, 200, { "X-Total-Count": String(total) });
+				return jsonResponse(entries, 200, { "X-Total-Count": String(total) });
 			}
 			throw new Error(`unexpected fetch: ${url}`);
 		}) as unknown as typeof fetch;
@@ -161,5 +191,76 @@ describe("AuditScreen (issue #531)", () => {
 			),
 		);
 		await waitFor(() => expect(createObjectURL).toHaveBeenCalled());
+	});
+
+	it("shows the credential name with the stable id in an accessible tooltip when resolvable (issue #718)", async () => {
+		installFetchMock({ entries: [NAMED_CREDENTIAL_ENTRY, ENTRIES[1]] });
+		await mount();
+
+		const nameCell = await screen.findByText("vcenter-svc-account");
+		expect(nameCell).toBeInTheDocument();
+		expect(nameCell).toHaveAttribute("title", "id: cred-named-1");
+		// The bare id must not also be rendered as visible text once a name resolves.
+		expect(screen.queryByText("cred-named-1")).not.toBeInTheDocument();
+	});
+
+	it("falls back to the bare stable id when no credential name is resolvable (issue #718)", async () => {
+		installFetchMock({ entries: [UNNAMED_CREDENTIAL_ENTRY, ENTRIES[1]] });
+		await mount();
+
+		const idCell = await screen.findByText("cred-orphan-1");
+		expect(idCell).toBeInTheDocument();
+		expect(idCell).toHaveAttribute("title", "cred-orphan-1");
+	});
+
+	it("renders no credential attribution for events with no credential_id (issue #718)", async () => {
+		installFetchMock();
+		await mount();
+
+		const row = screen.getByText("credential.deleted").closest("tr");
+		expect(row).not.toBeNull();
+		// credential_id is null on this fixture; the CREDENTIAL cell renders the
+		// same empty-value marker the RUN/JOB columns use, nothing else.
+		const cells = row!.querySelectorAll("td");
+		const credentialCell = cells[5];
+		expect(credentialCell.textContent).toBe("—");
+	});
+
+	it("never renders secret-looking material in the credential column, even if detail carries decoy fields (issue #718)", async () => {
+		// Fixture invented for this test only: `detail` deliberately includes
+		// ciphertext/key-shaped decoy fields the real backend (PR #775) never
+		// emits, to prove the renderer only ever reads `credential_name` and
+		// never surfaces anything else from the JSON blob.
+		const decoyEntry = {
+			id: "audit-5",
+			event_type: "secret.decrypted",
+			actor: "j.moreno",
+			credential_id: "cred-decoy-1",
+			job_id: "job-4",
+			run_id: "run-4",
+			detail: JSON.stringify({
+				master_key_id: "mk-3",
+				credential_name: "prod-esxi-root",
+				ciphertext: "SGVsbG8gc2VjcmV0IGRhdGE=",
+				secret_value: "hunter2-super-secret",
+				private_key: "-----BEGIN PRIVATE KEY-----abc123-----END PRIVATE KEY-----",
+			}),
+			occurred_at: "2026-08-19T10:00:00Z",
+		};
+		installFetchMock({ entries: [decoyEntry, ENTRIES[1]] });
+		await mount();
+
+		// Scoped to the CREDENTIAL cell specifically: the pre-existing DETAIL
+		// column already renders the raw `detail` JSON verbatim (unrelated to
+		// this issue), so a page-wide assertion would false-fail on that
+		// column. The CREDENTIAL cell must only ever surface `credential_name`
+		// (or the bare id) — never any other field from the blob.
+		const nameCell = await screen.findByText("prod-esxi-root");
+		expect(nameCell).toBeInTheDocument();
+		expect(nameCell.textContent).toBe("prod-esxi-root");
+		expect(nameCell.getAttribute("title")).toBe("id: cred-decoy-1");
+		expect(nameCell.innerHTML).not.toContain("hunter2-super-secret");
+		expect(nameCell.innerHTML).not.toContain("SGVsbG8gc2VjcmV0IGRhdGE=");
+		expect(nameCell.innerHTML).not.toContain("BEGIN PRIVATE KEY");
 	});
 });
