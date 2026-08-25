@@ -59,6 +59,10 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 	private static readonly string InventedRealShapeCode =
 		Convert.ToBase64String(Encoding.UTF8.GetBytes($$"""{"asset_id":"{{InventedAssetId}}","issued":"2026-01-01"}"""));
 
+	// Hoisted to satisfy CA1861 (constant array arguments must not be allocated per call).
+	private static readonly string[] StoredPairingSeededAssetIds = ["WPT-0001-DEPOT-ID"];
+	private static readonly string?[] StoredPairingValidatedAssetIds = ["WPT-0001-DEPOT-ID"];
+
 	private readonly PostgresFixture _fixture;
 	private readonly string _keyDirectory = Directory.CreateTempSubdirectory("wp-enrollment-validate-key").FullName;
 	private readonly InPlaySecretRedactor _redactor = new();
@@ -281,8 +285,8 @@ public sealed class DepotEnrollmentValidateEndToEndTests : IAsyncLifetime, IDisp
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
 		// The stored pairing (WPT-0001-DEPOT-ID, seeded by ResetEnrollmentAsync) is what
 		// gets seeded and validated against -- not the code's own asset_id.
-		Assert.Equal(new[] { "WPT-0001-DEPOT-ID" }, tool.SeededAssetIds);
-		Assert.Equal(new string?[] { "WPT-0001-DEPOT-ID" }, tool.ValidatedAssetIds);
+		Assert.Equal(StoredPairingSeededAssetIds, tool.SeededAssetIds);
+		Assert.Equal(StoredPairingValidatedAssetIds, tool.ValidatedAssetIds);
 	}
 
 	[Fact]
