@@ -142,7 +142,11 @@ public sealed class HostedServiceBehaviorTests
 	/// must NOT prevent the successful handler's terminal state write. Before the fix the
 	/// faulted heartbeat Task, awaited in the completion finally, rethrew past
 	/// AdvanceStateAsync -- so no running-&gt;done Move was ever recorded and the job hung
-	/// at running until lease-recovery reclaimed it.
+	/// at running until lease-recovery reclaimed it. Issue #637 strengthened this
+	/// further: a single transient tick fault no longer faults the heartbeat Task at
+	/// all -- it is logged per-tick ("heartbeat tick failed") and retried on the next
+	/// tick, so renewal and abort/cancel observation continue. The terminal-write
+	/// guarantee this test pins is unchanged; only the expected log line moved.
 	/// </summary>
 	[Fact]
 	public async Task HeartbeatFault_DoesNotSkipTerminalStateWrite()
@@ -161,7 +165,7 @@ public sealed class HostedServiceBehaviorTests
 		await service.StopAsync(CancellationToken.None);
 
 		Assert.Contains(repository.Moves, move => move is { From: JobStates.Running, To: JobStates.Done });
-		Assert.Contains(logger.EntriesAt(LogLevel.Warning), entry => entry.Message.Contains("heartbeat loop faulted", StringComparison.OrdinalIgnoreCase));
+		Assert.Contains(logger.EntriesAt(LogLevel.Warning), entry => entry.Message.Contains("heartbeat tick failed", StringComparison.OrdinalIgnoreCase));
 	}
 
 	[Theory]
