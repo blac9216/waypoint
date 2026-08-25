@@ -4,11 +4,6 @@
 [![Frontend](https://github.com/blac9216/waypoint/actions/workflows/frontend.yml/badge.svg?branch=main)](https://github.com/blac9216/waypoint/actions/workflows/frontend.yml)
 [![Deployment](https://github.com/blac9216/waypoint/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/blac9216/waypoint/actions/workflows/deploy.yml)
 [![Sanitization](https://github.com/blac9216/waypoint/actions/workflows/sanitize.yml/badge.svg?branch=main)](https://github.com/blac9216/waypoint/actions/workflows/sanitize.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4.svg)](https://dotnet.microsoft.com/)
-[![React](https://img.shields.io/badge/React-TypeScript-149ECA.svg)](https://react.dev/)
-[![Docker Compose](https://img.shields.io/badge/deployment-Docker%20Compose-2496ED.svg)](https://docs.docker.com/compose/)
-[![Air-gapped](https://img.shields.io/badge/runtime-air--gapped-success.svg)](docs/architecture.md)
 
 A self-hosted appliance for managing VMware Cloud Foundation compliance, software,
 and cross-enclave operations from one web interface.
@@ -34,6 +29,71 @@ their own accounts, and move the resulting capabilities into disconnected enclav
   from intentional remediation or update application.
 - **Deploys as one appliance** — an ASP.NET control plane coordinates dedicated
   compliance and download runners through a durable PostgreSQL job and event boundary.
+
+## Feature tour
+
+> **Prototype placeholders:** The screenshots below come from Waypoint's high-fidelity
+> design prototype and use fictional data. They illustrate the intended product
+> experience, not the exact state of the production UI, and will be replaced with
+> production captures as those screens are finalized. See the [roadmap](docs/roadmap.md)
+> for the authoritative built-versus-planned status of each capability.
+
+### See posture, activity, schedules, and attention items at a glance
+
+The operations dashboard brings fleet compliance, findings, repository capacity,
+recent runs, read-only schedules, appliance health, and actionable warnings together.
+
+![Prototype placeholder showing the Waypoint operations dashboard](docs/images/readme-placeholder-dashboard.png)
+
+### Follow concurrent compliance work from one live workspace
+
+Live Jobs presents runner-owned progress, priority queues, per-target state, failures,
+controls, and persisted logs without allowing one failed target to stop the run.
+
+![Prototype placeholder showing a live compliance run](docs/images/readme-placeholder-live-jobs.png)
+
+### Plan repeatable scans from cached infrastructure inventory
+
+Operators select sites, products, discovered targets, profiles, credentials, and a
+run-now or scheduled path before submitting a read-only scan.
+
+![Prototype placeholder showing scan scope planning](docs/images/readme-placeholder-scan-planning.png)
+
+### Preserve findings, evidence, attestations, and export status
+
+Compliance results connect run history to per-target artifacts, severity counts,
+applied attestations, STIG Manager uploads, and explicitly authorized remediation.
+
+![Prototype placeholder showing compliance results and evidence](docs/images/readme-placeholder-compliance-results.png)
+
+### Manage benchmark inputs and auditor-facing decisions
+
+The benchmark workspace maps profiles to XCCDF content and resolves versioned inputs,
+attestations, and remediation configuration from global to site to target scope.
+
+![Prototype placeholder showing the benchmark workspace](docs/images/readme-placeholder-benchmarks.png)
+
+### Index, download, verify, and organize entitled software
+
+Connected appliances browse the indexed depot, queue downloads, verify checksums,
+track local storage, and manage the content needed by VCF environments.
+
+![Prototype placeholder showing the download catalog](docs/images/readme-placeholder-download-catalog.png)
+
+### Move signed content across an air gap
+
+The planned transfer workflow builds signed bundles on a connected appliance, then
+validates signatures, checksums, schema, and local-state differences before import on
+a disconnected appliance.
+
+![Prototype placeholder showing air-gapped bundle validation](docs/images/readme-placeholder-air-gap-transfer.png)
+
+### Enforce centralized identity and role boundaries
+
+Keycloak OIDC, four application roles, site scopes, audit history, encrypted
+credentials, and step-up authentication keep sensitive actions explicit and traceable.
+
+![Prototype placeholder showing users and role assignments](docs/images/readme-placeholder-administration-rbac.png)
 
 ## Documentation
 
