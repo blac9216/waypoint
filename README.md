@@ -38,49 +38,69 @@ their own accounts, and move the resulting capabilities into disconnected enclav
 > production captures as those screens are finalized. See the [roadmap](docs/roadmap.md)
 > for the authoritative built-versus-planned status of each capability.
 
-### See posture, activity, schedules, and attention items at a glance
+### Global
+
+#### See posture, activity, schedules, and attention items at a glance
 
 The operations dashboard brings fleet compliance, findings, repository capacity,
 recent runs, read-only schedules, appliance health, and actionable warnings together.
 
 ![Prototype placeholder showing the Waypoint operations dashboard](docs/images/readme-placeholder-dashboard.png)
 
-### Follow concurrent compliance work from one live workspace
+#### Follow live work by priority queue
 
 Live Jobs presents runner-owned progress, priority queues, per-target state, failures,
 controls, and persisted logs without allowing one failed target to stop the run.
 
 ![Prototype placeholder showing a live compliance run](docs/images/readme-placeholder-live-jobs.png)
 
-### Plan repeatable scans from cached infrastructure inventory
+#### Compare every target by execution state
+
+The status board reorganizes the same live run into queued, running, attesting,
+converting, uploaded, and failed or blocked columns for fast operational triage.
+
+![Prototype placeholder showing the Live Jobs status board](docs/images/readme-placeholder-live-jobs-status-board.png)
+
+#### Investigate a run from its logs
+
+The log-first view keeps target state beside a full-height, color-coded execution log
+so operators can correlate failures with the runner events that produced them.
+
+![Prototype placeholder showing the Live Jobs log-first view](docs/images/readme-placeholder-live-jobs-log-first.png)
+
+### Compliance
+
+#### Plan repeatable scans from cached infrastructure inventory
 
 Operators select sites, products, discovered targets, profiles, credentials, and a
 run-now or scheduled path before submitting a read-only scan.
 
 ![Prototype placeholder showing scan scope planning](docs/images/readme-placeholder-scan-planning.png)
 
-### Preserve findings, evidence, attestations, and export status
+#### Preserve findings, evidence, attestations, and export status
 
 Compliance results connect run history to per-target artifacts, severity counts,
 applied attestations, STIG Manager uploads, and explicitly authorized remediation.
 
 ![Prototype placeholder showing compliance results and evidence](docs/images/readme-placeholder-compliance-results.png)
 
-### Manage benchmark inputs and auditor-facing decisions
+#### Manage benchmark inputs and auditor-facing decisions
 
 The benchmark workspace maps profiles to XCCDF content and resolves versioned inputs,
 attestations, and remediation configuration from global to site to target scope.
 
 ![Prototype placeholder showing the benchmark workspace](docs/images/readme-placeholder-benchmarks.png)
 
-### Index, download, verify, and organize entitled software
+### Content
+
+#### Index, download, verify, and organize entitled software
 
 Connected appliances browse the indexed depot, queue downloads, verify checksums,
 track local storage, and manage the content needed by VCF environments.
 
 ![Prototype placeholder showing the download catalog](docs/images/readme-placeholder-download-catalog.png)
 
-### Move signed content across an air gap
+#### Move signed content across an air gap
 
 The planned transfer workflow builds signed bundles on a connected appliance, then
 validates signatures, checksums, schema, and local-state differences before import on
@@ -88,7 +108,9 @@ a disconnected appliance.
 
 ![Prototype placeholder showing air-gapped bundle validation](docs/images/readme-placeholder-air-gap-transfer.png)
 
-### Enforce centralized identity and role boundaries
+### Configuration
+
+#### Enforce centralized identity and role boundaries
 
 Keycloak OIDC, four application roles, site scopes, audit history, encrypted
 credentials, and step-up authentication keep sensitive actions explicit and traceable.
