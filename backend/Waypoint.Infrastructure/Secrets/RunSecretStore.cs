@@ -148,7 +148,7 @@ public sealed partial class RunSecretStore : IRunSecretStore
 		}
 
 		await WriteAuditAsync(connection, transaction, "secret.run_registered", actor, runId, null, key,
-			System.Text.Json.JsonSerializer.Serialize(new { master_key_id = envelope.MasterKeyId }), cancellationToken).ConfigureAwait(false);
+			System.Text.Json.JsonSerializer.Serialize(new { master_key_id = envelope.MasterKeyId, username = credential.Username }), cancellationToken).ConfigureAwait(false);
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 		LogSecretStored(runId, actor, envelope.MasterKeyId);
@@ -229,8 +229,13 @@ public sealed partial class RunSecretStore : IRunSecretStore
 			await slide.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
+		// Identity attribution (issue #718): run secrets have no credential_id (they
+		// are ad hoc, keyed by run/target/purpose rather than a reusable credentials
+		// row), so the non-secret username already read above is the closest analog
+		// to "which credential" -- carried in detail alongside the target_id/purpose
+		// WriteAuditAsync already merges in. Never the secret value itself.
 		await WriteAuditAsync(connection, transaction, "secret.run_decrypted", actor, runId, jobId, key,
-			System.Text.Json.JsonSerializer.Serialize(new { master_key_id = envelope.MasterKeyId }), cancellationToken).ConfigureAwait(false);
+			System.Text.Json.JsonSerializer.Serialize(new { master_key_id = envelope.MasterKeyId, username = storedUsername }), cancellationToken).ConfigureAwait(false);
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 
 		byte[] plaintext = _cipher.Decrypt(envelope, ContextFor(runId, key));
@@ -271,22 +276,23 @@ public sealed partial class RunSecretStore : IRunSecretStore
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-		List<(Guid? TargetId, string Purpose)> deletedKeys = [];
+		List<(Guid? TargetId, string Purpose, string Username)> deletedKeys = [];
 		await using (NpgsqlCommand delete = new(
-			"DELETE FROM run_secrets WHERE run_id = $1 RETURNING target_id, purpose", connection, transaction))
+			"DELETE FROM run_secrets WHERE run_id = $1 RETURNING target_id, purpose, username", connection, transaction))
 		{
 			delete.Parameters.AddWithValue(runId);
 			await using NpgsqlDataReader reader = await delete.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
 			{
-				deletedKeys.Add((reader.IsDBNull(0) ? null : reader.GetGuid(0), reader.GetString(1)));
+				deletedKeys.Add((reader.IsDBNull(0) ? null : reader.GetGuid(0), reader.GetString(1), reader.GetString(2)));
 			}
 		}
 
-		foreach ((Guid? targetId, string purpose) in deletedKeys)
+		foreach ((Guid? targetId, string purpose, string username) in deletedKeys)
 		{
 			RunSecretKey key = targetId is { } t ? RunSecretKey.For(t, purpose) : RunSecretKey.Legacy;
-			await WriteAuditAsync(connection, transaction, "secret.run_deleted", actor, runId, null, key, "{}", cancellationToken).ConfigureAwait(false);
+			await WriteAuditAsync(connection, transaction, "secret.run_deleted", actor, runId, null, key,
+				System.Text.Json.JsonSerializer.Serialize(new { username }), cancellationToken).ConfigureAwait(false);
 		}
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -336,15 +342,15 @@ public sealed partial class RunSecretStore : IRunSecretStore
 		// only when THAT row is decrypted) -- id is the row's own surrogate key
 		// (migration 0045), the unit FOR UPDATE SKIP LOCKED and the subsequent DELETE
 		// both operate on.
-		List<(Guid Id, Guid RunId, Guid? TargetId, string Purpose)> expiredRows = [];
+		List<(Guid Id, Guid RunId, Guid? TargetId, string Purpose, string Username)> expiredRows = [];
 		await using (NpgsqlCommand select = new(
-			"SELECT id, run_id, target_id, purpose FROM run_secrets WHERE expires_at <= now() FOR UPDATE SKIP LOCKED",
+			"SELECT id, run_id, target_id, purpose, username FROM run_secrets WHERE expires_at <= now() FOR UPDATE SKIP LOCKED",
 			connection, transaction))
 		{
 			await using NpgsqlDataReader reader = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
 			{
-				expiredRows.Add((reader.GetGuid(0), reader.GetGuid(1), reader.IsDBNull(2) ? null : reader.GetGuid(2), reader.GetString(3)));
+				expiredRows.Add((reader.GetGuid(0), reader.GetGuid(1), reader.IsDBNull(2) ? null : reader.GetGuid(2), reader.GetString(3), reader.GetString(4)));
 			}
 		}
 
@@ -362,10 +368,11 @@ public sealed partial class RunSecretStore : IRunSecretStore
 			deleted = await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
-		foreach ((Guid _, Guid runId, Guid? targetId, string purpose) in expiredRows)
+		foreach ((Guid _, Guid runId, Guid? targetId, string purpose, string username) in expiredRows)
 		{
 			RunSecretKey key = targetId is { } t ? RunSecretKey.For(t, purpose) : RunSecretKey.Legacy;
-			await WriteAuditAsync(connection, transaction, "secret.run_expired", "system:run-secret-cleanup", runId, null, key, "{}", cancellationToken).ConfigureAwait(false);
+			await WriteAuditAsync(connection, transaction, "secret.run_expired", "system:run-secret-cleanup", runId, null, key,
+				System.Text.Json.JsonSerializer.Serialize(new { username }), cancellationToken).ConfigureAwait(false);
 		}
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
