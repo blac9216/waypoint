@@ -60,6 +60,20 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 	private static readonly Regex EmbeddedTokenPattern =
 		new(@"(?=[A-Za-z0-9._:-]*[0-9-])[A-Za-z0-9][A-Za-z0-9._:-]{5,127}", RegexOptions.Compiled);
 
+	/// <summary>
+	/// A canonical 8-4-4-4-12 UUID, matched with word-boundary anchoring so a trailing
+	/// '.' or '/' from surrounding URL/prose punctuation is NOT captured. The real
+	/// vcf-download-tool 9.1.0.0400 success line (issue #781) is one prose sentence that
+	/// carries the generated Software Depot ID as a UUID twice -- once as the
+	/// <c>serviceId=</c> query parameter of a register URL and once after the
+	/// <c>Software depot ID:</c> label -- plus a hyphenated URL path word
+	/// (<c>download-manager</c>). A UUID shape collapses that to the single genuine
+	/// identity: the two UUID occurrences are byte-identical (deduped to one) and the
+	/// hyphenated dictionary word is not a UUID so it is ignored.
+	/// </summary>
+	private static readonly Regex UuidTokenPattern =
+		new(@"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", RegexOptions.Compiled);
+
 	private readonly IOptions<ManagedToolOptions> _options;
 	private readonly IManagedToolPresenceChecker _presenceChecker;
 
@@ -172,11 +186,39 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 			return false;
 		}
 
-		// A bare ID line (the common case) matches the token pattern outright. A
-		// prose line ("Your Software Depot ID is: WPT-...") is searched for exactly
-		// one embedded token instead of trusting the whole sentence -- if the line
-		// carries zero or more than one plausible token, it is rejected rather than
-		// guessed at.
+		// The real tool (issue #781) emits the ID as a UUID inside one prose sentence
+		// that also contains the same UUID a second time and a hyphenated URL word, so a
+		// naive "exactly one embedded token" rule rejects it. Prefer UUID-shaped tokens:
+		// scan every candidate line, collect all UUID matches, and DEDUPE identical
+		// values. A UUID regex naturally excludes non-ID prose (dictionary words, URL
+		// path segments), and the two byte-identical UUID occurrences collapse to one.
+		// Two DISTINCT UUIDs remains genuine ambiguity and is still fatal.
+		HashSet<string> distinctUuids = new(StringComparer.OrdinalIgnoreCase);
+		foreach (string candidate in candidates)
+		{
+			foreach (Match match in UuidTokenPattern.Matches(candidate))
+			{
+				distinctUuids.Add(match.Value);
+			}
+		}
+
+		if (distinctUuids.Count == 1)
+		{
+			depotId = distinctUuids.First();
+			return true;
+		}
+
+		if (distinctUuids.Count > 1)
+		{
+			rejectionReason = $"output contained multiple distinct Depot ID candidates: {Truncate(stdout)}";
+			return false;
+		}
+
+		// No UUID present -- fall back to the general token rule for tools that emit a
+		// non-UUID ID. A bare ID line (the common case) matches the token pattern
+		// outright; a prose line is searched for exactly one embedded token instead of
+		// trusting the whole sentence. If the line carries zero or more than one
+		// plausible token it is rejected rather than guessed at.
 		List<string> tokens = [];
 		foreach (string candidate in candidates)
 		{

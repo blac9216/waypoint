@@ -321,4 +321,72 @@ public sealed class DepotIdentityToolTests : IDisposable
 		Assert.True(parsed);
 		Assert.Equal("WPT-0001-DEPOT-ID", id);
 	}
+
+	// Issue #781 (regression found in epic #667 re-validation): the real
+	// vcf-download-tool 9.1.0.0400 success line is one prose sentence that carries the
+	// generated Software Depot ID as a UUID TWICE -- once as the serviceId= query
+	// parameter of a register URL (with a trailing '.') and once after the
+	// "Software depot ID:" label -- plus a hyphenated URL path word ("download-manager").
+	// The #778 parser saw three embedded tokens on that line, matched none of them
+	// (count != 1), and rejected valid output. The UUID and hosts below are INVENTED but
+	// mirror the real success line's structure exactly.
+	private const string RealShapeUuid = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
+
+	private static string RealShapeSuccessLine(string uuid) =>
+		"Use this link to register https://depot.example.invalid/vcf/clm/download-manager/register?serviceId="
+		+ uuid + ". Alternatively login at https://portal.example.invalid, select Software depot Registration "
+		+ "and use this Software depot ID: " + uuid;
+
+	[Fact]
+	public void TryParseDepotId_RealToolProseWithDuplicateUuidAndHyphenatedUrlWord_ExtractsTheUuid()
+	{
+		string stdout = BannerPreamble + RealShapeSuccessLine(RealShapeUuid) + "\nLog file: /x/log/vdt.log\n";
+		bool parsed = DepotIdentityTool.TryParseDepotId(stdout, out string? id, out _);
+		Assert.True(parsed);
+		Assert.Equal(RealShapeUuid, id);
+	}
+
+	[Fact]
+	public void TryParseDepotId_MultipleDistinctUuids_IsRejectedAsAmbiguous()
+	{
+		string stdout = BannerPreamble
+			+ "Software depot ID: " + RealShapeUuid + "\n"
+			+ "Software depot ID: f6e5d4c3-b2a1-4098-8765-4321fedcba09\n";
+		bool parsed = DepotIdentityTool.TryParseDepotId(stdout, out string? id, out string? reason);
+		Assert.False(parsed);
+		Assert.Null(id);
+		Assert.NotNull(reason);
+	}
+
+	[Fact]
+	public async Task RealToolProseSuccessLine_EndToEnd_GeneratesAndParsesUuid()
+	{
+		string script = Script(
+			$"""
+			echo "$*" >> "{Path.Combine(_root, "calls.log")}"
+			case "$*" in
+			  *generate*)
+			    cat <<'EOF'
+			*Welcome to VCF Download Tool*
+			Version: 9.1.0.0400
+
+			{RealShapeSuccessLine(RealShapeUuid)}
+			Log file: /var/lib/waypoint/managed-tool/identity/log/vdt.log
+			EOF
+			    ;;
+			  *)
+			    cat <<'EOF'
+			{NotGeneratedBlock()}
+			EOF
+			    ;;
+			esac
+			exit 0
+			""");
+		DepotIdentityTool tool = CreateTool(script, out _);
+
+		DepotIdentityResult result = await tool.GetDepotIdAsync(CancellationToken.None);
+
+		Assert.True(result.Succeeded);
+		Assert.Equal(RealShapeUuid, result.DepotId);
+	}
 }
