@@ -47,6 +47,14 @@ public sealed class CatalogPullJobHandlerTests
 		public Task ResetAsync(CancellationToken cancellationToken) => throw new InvalidOperationException();
 	}
 
+	private sealed class UnreachableIdentityTool : IDepotIdentityTool
+	{
+		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) => throw new InvalidOperationException();
+		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken) =>
+			throw new InvalidOperationException("Not expected to be called when the enrollment gate rejects the job first.");
+		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken) => throw new InvalidOperationException();
+	}
+
 	private sealed class UnreachablePuller : IManagedToolMetadataPuller
 	{
 		public Task<CatalogPullResult> PullAsync(string depotPath, string activationCodePath, CancellationToken cancellationToken) =>
@@ -116,6 +124,7 @@ public sealed class CatalogPullJobHandlerTests
 		FakePullStateRepository pullState = new();
 		CatalogPullJobHandler handler = new(
 			new FakeEnrollmentRepository(enrollment),
+			new UnreachableIdentityTool(),
 			new UnreachablePuller(),
 			new UnreachableCatalogVerifier(),
 			new UnreachableArtifactRepository(),

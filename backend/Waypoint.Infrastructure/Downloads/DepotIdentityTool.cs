@@ -43,6 +43,17 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 	private const string GetArgument = "configuration get --software-depot-id";
 	private const string GenerateArgument = "configuration generate --software-depot-id";
 
+	/// <summary>
+	/// Path, relative to the isolated identity home's <c>XDG_DATA_HOME</c>
+	/// (<c>&lt;identity&gt;/.local/share</c>), of the file the real tool checks an
+	/// Activation Code against: it accepts a code only when the local <c>machine_id</c>
+	/// equals the <c>asset_id</c> the code was issued against. The sibling reference
+	/// (<c>../vcf-docker-download/Dockerfile</c>) writes exactly
+	/// <c>~/.local/share/vmware/vdt/machine_id</c>; Waypoint mirrors that layout under
+	/// the managed volume's identity home rather than a container-global root home.
+	/// </summary>
+	private static readonly string[] MachineIdRelativeSegments = ["vmware", "vdt", "machine_id"];
+
 	/// <summary>Distinguishing phrase from the real tool's "nothing generated yet" banner (issue #772) -- never treated as a parsed ID.</summary>
 	private const string NotGeneratedPhrase = "No Software depot ID generated";
 
@@ -252,6 +263,14 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		|| line.StartsWith("Version:", StringComparison.OrdinalIgnoreCase)
 		|| line.StartsWith("Log file:", StringComparison.OrdinalIgnoreCase);
 
+	public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(assetId);
+		string identityHome = PrepareIdentityHome(_options.Value);
+		SeedMachineId(identityHome, assetId);
+		return Task.CompletedTask;
+	}
+
 	public async Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(activationCodePath);
@@ -264,6 +283,11 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 
 		ManagedToolOptions options = _options.Value;
 		string identityHome = PrepareIdentityHome(options);
+
+		// Issue #787 (owner decision 2026-08-25): identity follows the code. The caller has
+		// already seeded machine_id from THIS code's own decoded asset_id via
+		// SeedMachineIdentityAsync immediately before this call, so the tool is simply asked
+		// whether it accepts the code -- no pairing/identity reconciliation happens here.
 		string argument = $"configuration get --software-depot-id --depot-download-activation-code-file \"{activationCodePath}\"";
 
 		(bool succeeded, int exitCode, string stdout, string stderr) = await RunAsync(
@@ -301,6 +325,55 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		string identityHome = Path.Combine(options.ToolStatePath, options.IdentityStatePath);
 		Directory.CreateDirectory(identityHome);
 		return identityHome;
+	}
+
+	/// <summary>
+	/// Atomically seeds <c>&lt;identity&gt;/.local/share/vmware/vdt/machine_id</c> with a
+	/// code's decoded <c>asset_id</c> (issue #787). <c>machine_id</c> is DERIVED state, not
+	/// a durable identity: this OVERWRITES whatever is currently there so identity always
+	/// follows the code the current run is using (owner decision 2026-08-25 -- swapping in
+	/// a different working code just works, no reset ceremony). Uses the #760 atomic
+	/// pattern: write a same-directory temp file with restrictive (0600) permissions, then
+	/// atomically rename it over any existing file, so a concurrent reader never observes a
+	/// partially written identity. Content is exactly the asset_id, no trailing newline
+	/// (byte-for-byte what the sibling Dockerfile's WriteAllText produces).
+	/// </summary>
+	private static void SeedMachineId(string identityHome, string assetId)
+	{
+		string vdtDirectory = Path.Combine(
+			new[] { identityHome, ".local", "share" }.Concat(MachineIdRelativeSegments[..^1]).ToArray());
+		string machineIdPath = Path.Combine(vdtDirectory, MachineIdRelativeSegments[^1]);
+
+		Directory.CreateDirectory(vdtDirectory);
+		string tempPath = Path.Combine(vdtDirectory, $".machine_id.{Guid.NewGuid():N}.tmp");
+		try
+		{
+			// FileMode.CreateNew + restrictive mode: the plaintext identity is written
+			// through a 0600 handle from the outset, never a default-umask file later
+			// tightened.
+			using (FileStream stream = new(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+			{
+				if (!OperatingSystem.IsWindows())
+				{
+					File.SetUnixFileMode(tempPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+				}
+
+				byte[] bytes = System.Text.Encoding.UTF8.GetBytes(assetId);
+				stream.Write(bytes, 0, bytes.Length);
+				stream.Flush(flushToDisk: true);
+			}
+
+			// Atomic rename on the managed volume (same directory), overwriting any prior
+			// identity -- machine_id follows the code, so the current run's asset_id wins.
+			File.Move(tempPath, machineIdPath, overwrite: true);
+		}
+		finally
+		{
+			if (File.Exists(tempPath))
+			{
+				File.Delete(tempPath);
+			}
+		}
 	}
 
 	private static string ExecutablePath(ManagedToolOptions options) =>

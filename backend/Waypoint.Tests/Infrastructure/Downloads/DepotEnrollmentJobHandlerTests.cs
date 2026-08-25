@@ -47,6 +47,9 @@ public sealed class DepotEnrollmentJobHandlerTests
 
 		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) => Task.FromResult(_result);
 
+		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken) =>
+			throw new InvalidOperationException("Not expected to be called by this file's generate-depot-id scenarios.");
+
 		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken)
 		{
 			ValidateCalls.Add(activationCodePath);

@@ -115,7 +115,7 @@ export function DepotTokensTab() {
 				<DepotCredentialPanel
 					title="ACTIVATION CODE"
 					addLabel="Add Activation Code"
-					emptyCopy="No VCF 9.1 Software Depot Activation Code is configured yet. The Activation Code (paired to a Software Depot ID) authenticates every vcf-download-tool metadata/binary command."
+					emptyCopy="No VCF 9.1 Software Depot Activation Code is configured yet. The Activation Code authenticates every vcf-download-tool metadata/binary command; the tool's identity is seeded from the code itself on each run."
 					secretLabel="Activation Code"
 					canWrite={canWriteCredential}
 					writeGate={adminGate}
@@ -372,18 +372,20 @@ function EnrollmentPanel({
 					</div>
 				)}
 
-				{state.depot_id && !state.activation_code_configured && (
+				{!state.activation_code_configured && (
 					<div className="depot-tab__depot-fetch-note">
-						Register this exact Software Depot ID at{" "}
+						Already have an Activation Code? Paste it below — the tool's identity is seeded from the code itself,
+						so it does not have to match any Depot ID. No code yet?{" "}
+						{state.depot_id ? "Register this " : "Generate a Software Depot ID above, then register it at "}
 						<a href={state.registration_url} target="_blank" rel="noreferrer">
 							{state.registration_url}
 						</a>{" "}
-						(Software Depot Registrations → New Registration) to receive a paired Activation Code, or paste an
-						existing compatible code below. Waypoint never issues this code itself.
+						(Software Depot Registrations → New Registration) to receive one. The Depot ID is only a
+						portal-registration assist; Waypoint never issues the code itself.
 					</div>
 				)}
 
-				{state.depot_id && (
+				{(state.depot_id || !state.activation_code_configured) && (
 					<div className="config-form" style={{ padding: "10px 0 0" }}>
 						<div className="config-form__grid config-form__grid--single">
 							<label className="config-form__field">
@@ -431,7 +433,7 @@ function EnrollmentPanel({
 						) : (
 							<>
 								<span className="depot-tab__expiry-soon" style={{ marginRight: 8 }}>
-									This invalidates the current Depot ID/Activation Code pairing. Confirm?
+									This clears the disposable Software Depot ID. Your stored Activation Code is untouched. Confirm?
 								</span>
 								<button type="button" onClick={() => setResetConfirming(false)} disabled={busy}>
 									Cancel

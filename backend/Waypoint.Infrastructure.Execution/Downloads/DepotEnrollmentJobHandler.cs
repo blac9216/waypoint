@@ -118,6 +118,7 @@ public sealed class DepotEnrollmentJobHandler : IJobHandler
 
 		string actor = "system";
 		string stagingPath = Path.Combine(Path.GetTempPath(), $"depot-activation-code-{Guid.NewGuid():N}.txt");
+		string? assetId;
 		DecryptedSecret? decrypted = null;
 		try
 		{
@@ -133,6 +134,12 @@ public sealed class DepotEnrollmentJobHandler : IJobHandler
 			// finally below regardless of outcome.
 			await File.WriteAllTextAsync(stagingPath, decrypted.Value, cancellationToken).ConfigureAwait(false);
 			TryRestrictPermissions(stagingPath);
+
+			// Issue #787 (owner decision 2026-08-25): identity follows the code. Derive the
+			// non-secret asset_id from THIS code and seed machine_id from it, overwriting
+			// whatever is there, immediately before invoking the tool. The raw code value is
+			// never used beyond decoding this field.
+			assetId = DepotActivationCodeCodec.TryExtractAssetId(decrypted.Value);
 		}
 		catch (CredentialSecretNotFoundException exception)
 		{
@@ -147,8 +154,18 @@ public sealed class DepotEnrollmentJobHandler : IJobHandler
 			decrypted?.Dispose();
 		}
 
+		if (string.IsNullOrWhiteSpace(assetId))
+		{
+			// A stored code that no longer decodes to an asset_id cannot seed an identity --
+			// report it by class only, never echoing the code, and clean up the staging file.
+			TryDelete(stagingPath);
+			return JobExecutionOutcome.Failed(
+				"The stored Activation Code could not be decoded to an asset_id; store a structurally valid code before validating.");
+		}
+
 		try
 		{
+			await _tool.SeedMachineIdentityAsync(assetId, cancellationToken).ConfigureAwait(false);
 			DepotValidationResult result = await _tool.ValidateActivationCodeAsync(stagingPath, cancellationToken).ConfigureAwait(false);
 
 			if (result.Succeeded)

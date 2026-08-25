@@ -192,6 +192,26 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 	/// set, mutates the catalog after signing so the real verifier rejects it (negative
 	/// proof). The signing key is invented per test run; nothing here is a real credential.
 	/// </summary>
+	/// <summary>
+	/// Records machine_id seeding (issue #787: every consumer seeds independently from the
+	/// code it decrypts, before invoking the tool) without touching the filesystem. Never
+	/// invokes the real tool -- the pull itself is faked by <see cref="FakeMetadataPuller"/>.
+	/// </summary>
+	private sealed class RecordingIdentityTool : IDepotIdentityTool
+	{
+		public List<string> SeededAssetIds { get; } = [];
+
+		public Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken) => throw new InvalidOperationException();
+
+		public Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken)
+		{
+			SeededAssetIds.Add(assetId);
+			return Task.CompletedTask;
+		}
+
+		public Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken) => throw new InvalidOperationException();
+	}
+
 	private sealed class FakeMetadataPuller(
 		CatalogPullResult result,
 		string catalogJsonToWrite = "",
@@ -317,7 +337,7 @@ public sealed class CatalogPullEndToEndTests : IAsyncLifetime, IDisposable
 		ManagedToolOptions toolOptions = new() { ToolStatePath = _toolStatePath, CatalogTrustCertificatePath = _trustCertPath };
 		CatalogOptions catalogOptions = new() { DepotPath = _depotPath };
 		return new CatalogPullJobHandler(
-			_enrollment, puller, verifier, _artifacts, _pullState, _secretStore, _credentials, _redactor,
+			_enrollment, new RecordingIdentityTool(), puller, verifier, _artifacts, _pullState, _secretStore, _credentials, _redactor,
 			Options.Create(catalogOptions), Options.Create(toolOptions));
 	}
 

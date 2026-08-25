@@ -33,11 +33,26 @@ public interface IDepotIdentityTool
 	Task<DepotIdentityResult> GetDepotIdAsync(CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Seeds the isolated identity home's <c>machine_id</c> from the decoded
+	/// <paramref name="assetId"/> of the Activation Code a run is about to use (issue #787).
+	/// <c>machine_id</c> is DERIVED state, not a durable managed identity: every run that
+	/// uses the code re-derives it from that code and OVERWRITES whatever is there, so
+	/// swapping in a different working code just works with no reset ceremony (owner
+	/// decision 2026-08-25 -- "identity follows the code"). Atomic and restrictive
+	/// (write-temp-then-rename, 0600). The code value itself is never touched -- only its
+	/// non-secret <paramref name="assetId"/> is written.
+	/// </summary>
+	Task SeedMachineIdentityAsync(string assetId, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Runs the bounded noninteractive validation of <paramref name="activationCodePath"/>
-	/// (a job-scoped temp file containing the decrypted code, never the code value
-	/// itself) against the tool's current identity. A non-auth-failure error (tool
-	/// missing, timeout) is distinguished from a real portal/auth rejection so callers
-	/// never misclassify a runner problem as "the code is bad."
+	/// (a job-scoped temp file containing the decrypted code, never the code value itself)
+	/// against the tool's current <c>machine_id</c>. Validation means only "the tool
+	/// accepts this code"; the caller seeds <c>machine_id</c> from the code's own decoded
+	/// asset_id via <see cref="SeedMachineIdentityAsync"/> immediately before this call, so
+	/// any structurally valid code is asked as-is. A non-auth-failure error (tool missing,
+	/// timeout) is distinguished from a real portal/auth rejection so callers never
+	/// misclassify a runner problem as "the code is bad."
 	/// </summary>
 	Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken);
 }

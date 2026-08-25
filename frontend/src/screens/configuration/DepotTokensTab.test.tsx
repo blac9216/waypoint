@@ -710,13 +710,16 @@ describe("DepotTokensTab (issue #571/#690)", () => {
 	});
 
 	describe("depot enrollment (issue #691)", () => {
-		it("no Depot ID yet: shows the generate action and no code-entry form", async () => {
+		it("no Depot ID yet: shows both the generate action AND the code-entry form (identity follows the code)", async () => {
+			// Owner decision 2026-08-25: an operator who already holds a working code can
+			// paste it without first generating a Depot ID -- the Depot ID is only the
+			// disposable portal-registration assist, never a precondition for storing a code.
 			installFetchMock("Admin");
 			await mount();
 
 			expect(screen.getByText("not yet generated")).toBeInTheDocument();
 			expect(screen.getByText("Generate Software Depot ID")).toBeInTheDocument();
-			expect(screen.queryByPlaceholderText(/paste an existing or portal-issued Activation Code/)).not.toBeInTheDocument();
+			expect(screen.getByPlaceholderText(/paste an existing or portal-issued Activation Code/)).toBeInTheDocument();
 		});
 
 		it("Admin generates a Depot ID and then sees the corrected .com registration link plus the code-entry form", async () => {
