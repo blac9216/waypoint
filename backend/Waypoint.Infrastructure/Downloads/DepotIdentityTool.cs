@@ -132,7 +132,7 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		string argument, string identityHome, ManagedToolOptions options, string operationLabel, CancellationToken cancellationToken)
 	{
 		(bool succeeded, int exitCode, string stdout, string stderr) = await RunAsync(
-			ExecutablePath(options), argument, identityHome, options, cancellationToken).ConfigureAwait(false);
+			ExecutablePath(options), argument, identityHome, options, options.EnrollmentCommandTimeout, cancellationToken).ConfigureAwait(false);
 
 		if (!succeeded)
 		{
@@ -284,33 +284,105 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		ManagedToolOptions options = _options.Value;
 		string identityHome = PrepareIdentityHome(options);
 
-		// Issue #787 (owner decision 2026-08-25): identity follows the code. The caller has
+		// Issue #791: the real 9.1.0.0400 tool has no lightweight "check code" subcommand --
+		// `configuration get` does NOT accept --depot-download-activation-code-file and exits
+		// 2 with usage when handed one, so the prior validate command failed EVERY code
+		// regardless of validity. The only authenticated operation the tool documents is
+		// `metadata download --depot-store=<dir> --depot-download-activation-code-file=<file>`
+		// (verified against the live `metadata download --help`), so validation is
+		// validation-by-use: run a bounded metadata download against a throwaway scratch
+		// depot-store. Exit 0 means Broadcom accepted the code; the scratch is discarded.
+		//
+		// Issue #787 (owner decision 2026-08-25): identity follows the code -- the caller has
 		// already seeded machine_id from THIS code's own decoded asset_id via
 		// SeedMachineIdentityAsync immediately before this call, so the tool is simply asked
-		// whether it accepts the code -- no pairing/identity reconciliation happens here.
-		string argument = $"configuration get --software-depot-id --depot-download-activation-code-file \"{activationCodePath}\"";
+		// whether it accepts the code.
+		string scratchDepotStore = Path.Combine(
+			options.ToolStatePath, options.ActivationCodeValidationScratchDirectoryName, Guid.NewGuid().ToString("N"));
 
-		(bool succeeded, int exitCode, string stdout, string stderr) = await RunAsync(
-			ExecutablePath(options), argument, identityHome, options, cancellationToken).ConfigureAwait(false);
-
-		if (!succeeded)
+		try
 		{
-			// The invocation itself never completed (missing binary, timeout) -- never
-			// classified as a code rejection.
-			return DepotValidationResult.Failed($"Activation Code validation could not be completed: {stderr}");
-		}
+			// Fresh, job-scoped, empty depot-store -- created here, removed in finally on
+			// every path so a failed/partial validation never leaves scratch bytes behind.
+			Directory.CreateDirectory(scratchDepotStore);
 
-		if (exitCode == 0)
+			string argument =
+				$"metadata download --depot-store=\"{scratchDepotStore}\" \"--depot-download-activation-code-file={activationCodePath}\" --ceip=DISABLE";
+
+			(bool succeeded, int exitCode, string stdout, string stderr) = await RunAsync(
+				ExecutablePath(options), argument, identityHome, options, options.ActivationCodeValidationTimeout, cancellationToken)
+				.ConfigureAwait(false);
+
+			if (!succeeded)
+			{
+				// The invocation itself never completed (missing binary, timeout/kill) -- a
+				// runner/network problem, NEVER a code rejection. A WAN metadata download that
+				// times out is unreachable-Broadcom, not a bad code.
+				return DepotValidationResult.Failed($"Activation Code validation could not be completed: {stderr}");
+			}
+
+			if (exitCode == 0)
+			{
+				return DepotValidationResult.Ok();
+			}
+
+			// The tool ran and exited nonzero. Classify honestly (issue #791): only signals
+			// that genuinely indicate the credential was rejected are auth_failing; anything
+			// pointing at unreachable/unresolvable/refused connectivity is a network problem
+			// that must produce network-classified guidance, never auth_failing. When the tool
+			// does not clearly differentiate, we classify conservatively as a (non-auth)
+			// validation failure with the tool's own message surfaced.
+			string toolMessage = stdout.Length > 0 ? stdout : stderr;
+			return ClassifyNonZeroExit(toolMessage);
+		}
+		finally
 		{
-			return DepotValidationResult.Ok();
+			TryDeleteDirectory(scratchDepotStore);
 		}
+	}
 
-		// A nonzero exit with the tool actually running IS the auth-failure signal
-		// (bad/expired/revoked code, or a portal-role problem) -- issue #691 AC: "Missing
-		// Broadcom portal roles are surfaced as external enrollment guidance, not
-		// retried as a runner failure," so this is classified as an auth failure, not an
-		// ordinary job failure that a retry policy might act on.
-		return DepotValidationResult.AuthFailed(Truncate(stdout.Length > 0 ? stdout : stderr));
+	/// <summary>
+	/// Distinguished failure classification for a completed-but-nonzero validation-by-use
+	/// (issue #791) via the shared <see cref="DownloadToolFailureClassifier"/>. Network
+	/// signals map to a non-auth <see cref="DepotValidationResult.Failed"/> so the operator
+	/// gets connectivity guidance, not "your code is bad." Explicit credential-rejection
+	/// signals map to <see cref="DepotValidationResult.AuthFailed"/>. An ambiguous exit is
+	/// conservative: a non-auth failure carrying the tool's own message, never a claimed
+	/// rejection.
+	/// </summary>
+	internal static DepotValidationResult ClassifyNonZeroExit(string toolMessage)
+	{
+		string summary = Truncate(string.IsNullOrWhiteSpace(toolMessage)
+			? "the tool exited nonzero with no output."
+			: toolMessage);
+
+		return DownloadToolFailureClassifier.Classify(toolMessage) switch
+		{
+			DownloadToolFailureClassifier.FailureClass.Network => DepotValidationResult.Failed(
+				$"Activation Code validation could not reach Broadcom (network/connectivity): {summary}"),
+			DownloadToolFailureClassifier.FailureClass.Auth => DepotValidationResult.AuthFailed(summary),
+			_ => DepotValidationResult.Failed($"Activation Code validation failed: {summary}"),
+		};
+	}
+
+	private static void TryDeleteDirectory(string path)
+	{
+		try
+		{
+			if (Directory.Exists(path))
+			{
+				Directory.Delete(path, recursive: true);
+			}
+		}
+		catch (IOException)
+		{
+			// Best-effort scratch cleanup: a stray empty validate-scratch subdir on the
+			// managed volume is not a correctness issue once the outcome is recorded.
+		}
+		catch (UnauthorizedAccessException)
+		{
+			// Same -- never let cleanup failure mask the validation result.
+		}
 	}
 
 	/// <summary>
@@ -380,7 +452,7 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		Path.Combine(options.ToolStatePath, options.ActiveDirectoryName, options.ExecutableRelativePath);
 
 	private static async Task<(bool Succeeded, int ExitCode, string Stdout, string Stderr)> RunAsync(
-		string executablePath, string arguments, string identityHome, ManagedToolOptions options, CancellationToken cancellationToken)
+		string executablePath, string arguments, string identityHome, ManagedToolOptions options, TimeSpan timeout, CancellationToken cancellationToken)
 	{
 		string libraryPath = Path.Combine(options.ToolStatePath, options.ActiveDirectoryName, options.LibraryRelativePath);
 
@@ -404,7 +476,7 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		startInfo.Environment["HOME"] = identityHome;
 		startInfo.Environment["XDG_DATA_HOME"] = Path.Combine(identityHome, ".local", "share");
 
-		using CancellationTokenSource timeoutSource = new(options.EnrollmentCommandTimeout);
+		using CancellationTokenSource timeoutSource = new(timeout);
 		using CancellationTokenSource linkedSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
 
 		Process process;
@@ -430,7 +502,7 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 				TryKill(process);
 				bool timedOut = timeoutSource.IsCancellationRequested;
 				return (false, -1, string.Empty,
-					timedOut ? $"did not complete within {options.EnrollmentCommandTimeout}" : "cancelled");
+					timedOut ? $"did not complete within {timeout}" : "cancelled");
 			}
 
 			string stdout = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);

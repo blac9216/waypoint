@@ -52,7 +52,14 @@ public sealed class ManagedToolMetadataPuller : IManagedToolMetadataPuller
 
 		ManagedToolOptions options = _options.Value;
 		string identityHome = PrepareIdentityHome(options);
-		string arguments = $"metadata download -d \"{depotPath}\" \"--depot-download-activation-code-file={activationCodePath}\" --ceip=DISABLE";
+
+		// Issue #791: the real 9.1.0.0400 `metadata download --help` documents
+		// `-d, --depot-store=<dir>`, `--depot-download-activation-code-file=<file>`, and
+		// `--ceip=<ENABLE|DISABLE>` -- audited against the live tool. Use the long
+		// `--depot-store=` spelling (the shorthand `-d` is accepted but the long form is
+		// what the validate path also uses, so both invocations read identically).
+		string arguments =
+			$"metadata download --depot-store=\"{depotPath}\" \"--depot-download-activation-code-file={activationCodePath}\" --ceip=DISABLE";
 
 		(bool succeeded, int exitCode, string stdout, string stderr) = await RunAsync(
 			ExecutablePath(options), arguments, identityHome, options, cancellationToken).ConfigureAwait(false);
@@ -67,12 +74,21 @@ public sealed class ManagedToolMetadataPuller : IManagedToolMetadataPuller
 			return CatalogPullResult.Ok();
 		}
 
-		// Same convention DepotIdentityTool.ValidateActivationCodeAsync uses: once the
-		// tool actually ran, a nonzero exit here is Broadcom's own auth/authorization
-		// rejection of the Activation Code (bad/expired/revoked/insufficient portal
-		// role), not a runner problem -- issue #687 AC: "auth rejection ... [is]
-		// visible and fail closed," classified distinctly from a runner-side failure.
-		return CatalogPullResult.AuthFailed(Truncate(stdout.Length > 0 ? stdout : stderr));
+		// Issue #791: a completed nonzero exit is classified honestly, not blanket
+		// auth-failed. A network-unreachable environment (unresolvable/refused/timed-out
+		// Broadcom) must produce network guidance, never auth_failing; only a genuine
+		// credential-rejection signal is AuthFailed (issue #687 AC: "auth rejection ...
+		// visible and fail closed"). An ambiguous exit stays non-auth with the tool's own
+		// message, so a bad code is never claimed on evidence the tool did not give.
+		string toolMessage = stdout.Length > 0 ? stdout : stderr;
+		string summary = Truncate(string.IsNullOrWhiteSpace(toolMessage) ? "the tool exited nonzero with no output." : toolMessage);
+		return DownloadToolFailureClassifier.Classify(toolMessage) switch
+		{
+			DownloadToolFailureClassifier.FailureClass.Network => CatalogPullResult.Failed(
+				$"metadata download could not reach Broadcom (network/connectivity): {summary}"),
+			DownloadToolFailureClassifier.FailureClass.Auth => CatalogPullResult.AuthFailed(summary),
+			_ => CatalogPullResult.Failed($"metadata download failed: {summary}"),
+		};
 	}
 
 	private static string PrepareIdentityHome(ManagedToolOptions options)

@@ -220,8 +220,31 @@ public sealed class ManagedToolOptions
 	/// </summary>
 	public string IdentityStatePath { get; set; } = "identity";
 
-	/// <summary>Wall-clock budget for a bounded noninteractive <c>vcf-download-tool</c> enrollment call (Depot ID generation or Activation Code validation) -- neither call may prompt interactively or hang the job indefinitely.</summary>
+	/// <summary>Wall-clock budget for a bounded noninteractive <c>vcf-download-tool</c> Depot ID query/generation call -- neither may prompt interactively or hang the job indefinitely. Activation-code validation uses <see cref="ActivationCodeValidationTimeout"/> instead, since it is a real WAN metadata fetch.</summary>
 	public TimeSpan EnrollmentCommandTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+	/// <summary>
+	/// Wall-clock budget for the bounded validation-by-use <c>metadata download</c>
+	/// invocation (issue #791). The real 9.1.0.0400 tool has no lightweight "check code"
+	/// subcommand, so a genuine code is validated by running <c>metadata download</c>
+	/// against a throwaway scratch depot-store; that reaches out to Broadcom over the WAN
+	/// and is meaningfully slower than the local <see cref="EnrollmentCommandTimeout"/>
+	/// identity calls, so it gets a pull-class budget rather than the short enrollment one.
+	/// A timeout is classified as a network problem, never an Activation Code rejection.
+	/// </summary>
+	public TimeSpan ActivationCodeValidationTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
+	/// <summary>
+	/// Name of the throwaway scratch depot-store subdirectory, under
+	/// <see cref="ToolStatePath"/> (same persistent volume, so the tool's own atomic
+	/// rename/temp behaviour stays same-filesystem), that the validation-by-use
+	/// <c>metadata download</c> writes into (issue #791). A fresh per-validation
+	/// subdirectory is created under this and removed on every path in <c>finally</c> --
+	/// nothing the validation fetches is ever promoted into the operator-facing depot; it
+	/// exists only so <c>metadata download</c> has a <c>--depot-store</c> to point at while
+	/// the tool authenticates the code.
+	/// </summary>
+	public string ActivationCodeValidationScratchDirectoryName { get; set; } = "validate-scratch";
 
 	/// <summary>
 	/// Wall-clock budget for the connected <c>catalog-pull</c> job's <c>metadata

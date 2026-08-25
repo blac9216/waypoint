@@ -357,6 +357,60 @@ states), **derive the axis from the thing under test** rather than hand-listing 
 a hand-written list is a monoculture with extra steps, and it silently stops covering
 the code the moment the code grows a case the list never heard of.
 
+## VCF Download Tool: CI stubs vs live-lab validation
+
+The Broadcom VCF Download Tool (`vcf-download-tool`, "VCFDT") is an account-gated,
+licensed vendor binary. Two rules govern how it is tested, and they pull in opposite
+directions on purpose — one legal, one correctness.
+
+1. **HARD RULE — no real VCFDT bytes, ever.** For licensing/legal reasons (not merely
+   sanitization), no real-tool bytes enter this repo, its test fixtures, or CI in
+   **any** form: not the binary, not an archive, not an extracted fragment, and not
+   captured proprietary output beyond the short **public** CLI usage text the tool
+   prints for `--help`. The tool is never bundled, committed, downloaded by CI, or
+   otherwise made present. It is **operator-provided at runtime** on an isolated stack.
+   Real-tool execution is therefore **never a CI test** — do not add one.
+
+2. **Stub ARGUMENT CONTRACT is faithful; stub CONTENT stays invented.** CI and unit
+   tests drive **invented stub tools** (throwaway `sh` scripts) whose *argument
+   contract* mirrors the tool's **publicly documented** CLI — the subcommands, the
+   flags, and the real rejection shape: an unknown flag or an unsupported flag/
+   subcommand combination prints usage and exits **2**, exactly as the real tool does.
+   The `--help` text is public documentation, so mirroring the flag grammar is allowed
+   and is **load-bearing**. Two real bugs shipped green precisely because the stubs
+   accepted whatever arguments they were handed:
+   - **#781** — the parser rejected the real tool's genuine success line (parse-vs-real-
+     output).
+   - **#791** — validation invoked an invalid command line (`configuration get` with
+     `--depot-download-activation-code-file`, which the real tool exits-2 + usage on);
+     every code failed regardless of validity, misreported as `auth_failing`.
+
+   So the stub's *grammar* must be exact enough that an invalid production command line
+   fails the test (`DepotIdentityToolTests`'s `RealContractStub` rejects undocumented
+   flags with exit-2 + usage, and directly asserts the pre-#791 command is rejected).
+   Everything the stub *emits* — IDs, catalogs, banners beyond the minimal matched
+   phrase — stays **invented** and must never resemble captured real output.
+
+3. **The real-tool invocation surface requires a live-lab validation pass.** Any change
+   touching the code that shells out to the real tool — `DepotIdentityTool`,
+   `ManagedToolMetadataPuller`, `ManagedToolDistributionInstaller`'s smoke-test step,
+   `DepotEnrollmentJobHandler`, `CatalogPullJobHandler` — is **not done** until it has
+   been validated live against the **real** tool on an isolated stack, with the real
+   distribution supplied by the operator at runtime. This is a **live-lab integration
+   step performed by a human operator or a dispatched validation agent**, never CI.
+   Connected operations (`metadata download`, depot-fetch) additionally require outbound
+   Broadcom reachability, so a network-unreachable lab exercises only the offline paths
+   and the network-classified failure branch. Never name lab hosts or paths here or in
+   a PR — the distribution and the stack are operator-provided.
+
+Validation-by-use (issue #791): the real 9.1.0.0400 tool has no lightweight "check
+code" subcommand, so a genuine Activation Code is proven by running a bounded
+`metadata download --depot-store=<throwaway scratch> --depot-download-activation-code-file=<staged file> --ceip=DISABLE`
+against a fresh job-scoped scratch depot-store (removed on every path). Exit 0 means
+Broadcom accepted the code. A nonzero exit is classified honestly: only genuine
+credential-rejection signals mark `auth_failing`; unreachable/unresolvable/refused/
+timed-out connectivity is a **network** failure, never `auth_failing`.
+
 ## Honest verification
 
 Two standing rules for anything you claim in a PR body or review:
@@ -1158,9 +1212,12 @@ and *why* without reading a runner container's logs.
   real tool-shape guidance in a public repo, and was not automated here — the
   absence path (`ToolGatedDownloadJobHandler`'s clear failure) is proven live and
   in unit tests, but no test asserts a populated volume flips a `download` job to
-  success. A follow-up issue can add a throwaway stub (clearly marked invented,
-  never resembling `vcf-download-tool`'s real invocation contract) to
-  `deploy/scripts/fresh-stack-smoke-test.sh` if this gap needs closing.
+  success. A follow-up issue can add a throwaway stub to
+  `deploy/scripts/fresh-stack-smoke-test.sh` if this gap needs closing — per
+  "VCF Download Tool: CI stubs vs live-lab validation" above, such a stub keeps
+  invented **content** (IDs/catalogs/banners) but a **faithful argument contract**
+  (the publicly documented subcommands/flags, exit-2 + usage on unknown flags), so an
+  invalid command line fails; it must never carry real-tool bytes.
 - **Frontend/Playwright live-stack checks — closed by issue #468.** A Node 22
   toolchain (`nvm install 22`, matching `frontend/package.json`'s
   `"node": ">=22.19.0"` floor) plus `frontend/e2e/` (Playwright, a

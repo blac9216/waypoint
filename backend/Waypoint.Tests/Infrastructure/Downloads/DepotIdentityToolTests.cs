@@ -77,6 +77,8 @@ public sealed class DepotIdentityToolTests : IDisposable
 			LibraryRelativePath = "lib",
 			IdentityStatePath = "identity",
 			EnrollmentCommandTimeout = TimeSpan.FromSeconds(5),
+			ActivationCodeValidationTimeout = TimeSpan.FromSeconds(10),
+			ActivationCodeValidationScratchDirectoryName = "validate-scratch",
 		};
 		return new DepotIdentityTool(Options.Create(options), new AlwaysPresent());
 	}
@@ -112,6 +114,62 @@ public sealed class DepotIdentityToolTests : IDisposable
 		"Log file: /var/lib/waypoint/managed-tool/identity/log/vdt.log\n";
 
 	private static string Script(string body) => "#!/bin/sh\n" + body;
+
+	/// <summary>
+	/// A stub <c>vcf-download-tool</c> that models the REAL 9.1.0.0400 command contract
+	/// (issue #791, AC4 -- the fixture-vs-real-contract class-killer). It parses argv the
+	/// way the real tool documents and REJECTS undocumented flag combinations with usage +
+	/// <c>exit 2</c>, exactly as the live tool does, so an invalid command line (e.g. the old
+	/// <c>configuration get --software-depot-id --depot-download-activation-code-file</c>)
+	/// can never silently pass a test again. The only authenticated operation it accepts is
+	/// <c>metadata download --depot-store=&lt;dir&gt; --depot-download-activation-code-file=&lt;file&gt;</c>
+	/// (with an optional <c>--ceip=</c>); on a well-formed invocation it exits
+	/// <paramref name="metadataDownloadExit"/> after emitting <paramref name="metadataDownloadStdout"/>.
+	/// Every call is appended to calls.log for order/shape assertions.
+	/// </summary>
+	private string RealContractStub(int metadataDownloadExit = 0, string metadataDownloadStdout = "")
+	{
+		string logAppend = $"echo \"$*\" >> \"{Path.Combine(_root, "calls.log")}\"";
+		string usage =
+			"Usage: vcf-download-tool metadata download [--ceip=<ceip>] -d=<depotStore> --depot-download-activation-code-file=<file>";
+
+		// POSIX sh: walk argv, recognise ONLY the documented tokens per subcommand. Anything
+		// else -> usage on stderr + exit 2 (the real tool's rejection shape).
+		return Script(
+			$$"""
+			{{logAppend}}
+			sub1="$1"; sub2="$2"
+			shift 2 2>/dev/null || true
+			if [ "$sub1" != "metadata" ] || [ "$sub2" != "download" ]; then
+			  echo "{{usage}}" 1>&2
+			  exit 2
+			fi
+			have_depot_store=0
+			have_code_file=0
+			for arg in "$@"; do
+			  case "$arg" in
+			    --depot-store=*|-d=*) have_depot_store=1 ;;
+			    -d) have_depot_store=1 ;;
+			    --depot-download-activation-code-file=*) have_code_file=1 ;;
+			    --ceip=ENABLE|--ceip=DISABLE) : ;;
+			    *)
+			      echo "Unknown option: $arg" 1>&2
+			      echo "{{usage}}" 1>&2
+			      exit 2
+			      ;;
+			  esac
+			done
+			if [ "$have_depot_store" -ne 1 ] || [ "$have_code_file" -ne 1 ]; then
+			  echo "Missing required option" 1>&2
+			  echo "{{usage}}" 1>&2
+			  exit 2
+			fi
+			cat <<'STDOUT_EOF'
+			{{metadataDownloadStdout}}
+			STDOUT_EOF
+			exit {{metadataDownloadExit}}
+			""");
+	}
 
 	[Fact]
 	public async Task FreshIdentity_GetReportsNotGenerated_GenerateProducesAndParsesId()
@@ -417,8 +475,10 @@ public sealed class DepotIdentityToolTests : IDisposable
 	{
 		// Owner decision 2026-08-25: validation means only "the tool accepts this code."
 		// The caller seeds machine_id from the code's own asset_id BEFORE this call, so
-		// ValidateActivationCodeAsync no longer touches the identity file itself.
-		DepotIdentityTool tool = CreateTool(Script("exit 0\n"), out _);
+		// ValidateActivationCodeAsync no longer touches the identity file itself. The stub
+		// models the REAL contract (issue #791), so a green result here also proves the
+		// validate command line is the accepted metadata-download shape.
+		DepotIdentityTool tool = CreateTool(RealContractStub(metadataDownloadExit: 0), out _);
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "irrelevant-code-body");
 
@@ -426,6 +486,136 @@ public sealed class DepotIdentityToolTests : IDisposable
 
 		Assert.True(result.Succeeded);
 		Assert.False(File.Exists(MachineIdPath()));
+	}
+
+	// ---- Issue #791: validation-by-use against the real metadata-download contract ----
+
+	[Fact]
+	public async Task ValidateActivationCode_RunsMetadataDownloadWithDepotStoreAndCodeFile_AgainstRealContractStub()
+	{
+		// AC4 class-killer: the stub REJECTS undocumented flags (exit 2 + usage). If
+		// ValidateActivationCodeAsync ever regressed to the old
+		// `configuration get ... --depot-download-activation-code-file` shape (or any other
+		// invalid command line), this stub would exit 2 and the result would NOT be Ok.
+		DepotIdentityTool tool = CreateTool(RealContractStub(metadataDownloadExit: 0), out string callLogPath);
+		string codeFile = Path.Combine(_root, "code.txt");
+		File.WriteAllText(codeFile, "a-code");
+
+		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, CancellationToken.None);
+
+		Assert.True(result.Succeeded);
+		string invocation = File.ReadAllText(callLogPath);
+		Assert.Contains("metadata download", invocation, StringComparison.Ordinal);
+		Assert.Contains("--depot-store=", invocation, StringComparison.Ordinal);
+		Assert.Contains("--depot-download-activation-code-file=", invocation, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task ValidateActivationCode_ScratchDepotStore_IsCreatedFreshAndRemovedOnEveryPath()
+	{
+		// The scratch depot-store lives under ToolStatePath/<scratch dir name> and must be
+		// gone once validation returns, on both success and failure.
+		string scratchRoot = Path.Combine(_root, "validate-scratch");
+
+		DepotIdentityTool okTool = CreateTool(RealContractStub(metadataDownloadExit: 0), out _);
+		string codeFile = Path.Combine(_root, "code.txt");
+		File.WriteAllText(codeFile, "a-code");
+		Assert.True((await okTool.ValidateActivationCodeAsync(codeFile, CancellationToken.None)).Succeeded);
+		Assert.Empty(Directory.Exists(scratchRoot) ? Directory.GetDirectories(scratchRoot) : []);
+
+		DepotIdentityTool failTool = CreateTool(
+			RealContractStub(metadataDownloadExit: 4, metadataDownloadStdout: "Activation Code rejected: expired."), out _);
+		Assert.False((await failTool.ValidateActivationCodeAsync(codeFile, CancellationToken.None)).Succeeded);
+		Assert.Empty(Directory.Exists(scratchRoot) ? Directory.GetDirectories(scratchRoot) : []);
+	}
+
+	[Fact]
+	public async Task ValidateActivationCode_ToolRejectsCode_IsAuthFailure()
+	{
+		DepotIdentityTool tool = CreateTool(
+			RealContractStub(metadataDownloadExit: 3, metadataDownloadStdout: "Authentication failed: activation code is expired or revoked."),
+			out _);
+		string codeFile = Path.Combine(_root, "code.txt");
+		File.WriteAllText(codeFile, "a-code");
+
+		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.True(result.IsAuthFailure);
+	}
+
+	[Fact]
+	public async Task ValidateActivationCode_NetworkUnreachable_IsNotAuthFailure()
+	{
+		// AC1: a network-unreachable environment must produce network-classified guidance,
+		// never auth_failing -- even though the invocation completed with a nonzero exit.
+		DepotIdentityTool tool = CreateTool(
+			RealContractStub(metadataDownloadExit: 5, metadataDownloadStdout: "Could not resolve host: depot.example.invalid: connection timed out."),
+			out _);
+		string codeFile = Path.Combine(_root, "code.txt");
+		File.WriteAllText(codeFile, "a-code");
+
+		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.False(result.IsAuthFailure);
+		Assert.Contains("network", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
+	}
+
+	[Fact]
+	public async Task ValidateActivationCode_AmbiguousNonzero_IsConservativeNonAuthFailure()
+	{
+		DepotIdentityTool tool = CreateTool(
+			RealContractStub(metadataDownloadExit: 9, metadataDownloadStdout: "internal error: something unexpected went wrong."),
+			out _);
+		string codeFile = Path.Combine(_root, "code.txt");
+		File.WriteAllText(codeFile, "a-code");
+
+		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, CancellationToken.None);
+
+		Assert.False(result.Succeeded);
+		Assert.False(result.IsAuthFailure);
+	}
+
+	[Fact]
+	public void RealContractStub_RejectsTheOldInvalidValidateCommand_WithUsageAndExit2()
+	{
+		// Regression (issue #791, AC4): prove the class-killer stub actually rejects the old
+		// invalid command line the way the real tool does. Invoking the stub directly with
+		// the pre-fix `configuration get --software-depot-id --depot-download-activation-code-file`
+		// combination must exit 2 with usage -- so if the production code ever emits it again,
+		// the validate tests above go red.
+		string binDir = Path.Combine(_root, "active", "bin");
+		Directory.CreateDirectory(binDir);
+		string executablePath = Path.Combine(binDir, "vcf-download-tool");
+		File.WriteAllText(executablePath, RealContractStub());
+		MakeExecutable(executablePath);
+
+		(int exitCode, string stderr) = RunStubDirectly(
+			executablePath, "configuration", "get", "--software-depot-id", "--depot-download-activation-code-file=/tmp/code.txt");
+
+		Assert.Equal(2, exitCode);
+		Assert.Contains("Usage", stderr, StringComparison.OrdinalIgnoreCase);
+	}
+
+	private static (int ExitCode, string Stderr) RunStubDirectly(string executablePath, params string[] args)
+	{
+		System.Diagnostics.ProcessStartInfo startInfo = new(executablePath)
+		{
+			RedirectStandardOutput = true,
+			RedirectStandardError = true,
+			UseShellExecute = false,
+		};
+		foreach (string arg in args)
+		{
+			startInfo.ArgumentList.Add(arg);
+		}
+
+		using System.Diagnostics.Process process = System.Diagnostics.Process.Start(startInfo)!;
+		string stderr = process.StandardError.ReadToEnd();
+		process.StandardOutput.ReadToEnd();
+		process.WaitForExit();
+		return (process.ExitCode, stderr);
 	}
 
 	[Fact]
