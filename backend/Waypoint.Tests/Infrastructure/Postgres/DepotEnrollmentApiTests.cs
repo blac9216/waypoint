@@ -37,8 +37,9 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 
 /// <summary>
 /// Issue #691's assisted enrollment API end to end against real Postgres: state
-/// machine transitions, pairing validation (asset_id mismatch rejected), the code
-/// value never appearing in any response, and role floors -- role coverage uses
+/// machine transitions, structurally valid codes accepted regardless of the disposable
+/// Depot ID (owner decision 2026-08-25: identity follows the code), the code value
+/// never appearing in any response, and role floors -- role coverage uses
 /// <see cref="TestAuthHandler"/>'s <c>X-Test-Role</c> header exactly like
 /// <c>DownloadsApiTests</c>, rather than the local-auth login path (which always
 /// issues an Admin token and cannot exercise a lower role's 403). No job dispatcher
@@ -225,14 +226,18 @@ public sealed class DepotEnrollmentApiTests : IAsyncLifetime, IDisposable
 	}
 
 	[Fact]
-	public async Task AcceptActivationCode_BeforeDepotIdGenerated_Returns409()
+	public async Task AcceptActivationCode_BeforeDepotIdGenerated_IsAccepted()
 	{
+		// Owner decision 2026-08-25: identity follows the code. A structurally valid code
+		// may be stored with NO prior Depot ID -- the Depot ID is the disposable
+		// portal-registration assist, not a precondition for storing a code.
 		HttpResponseMessage response = await SendAsync(
 			"Admin", HttpMethod.Post, "/api/v1/downloads/enrollment/activation-code", new { activation_code = InventedCode });
 
-		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-		string body = await response.Content.ReadAsStringAsync();
-		Assert.Contains("depot_id_unavailable", body, StringComparison.Ordinal);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("activation_code_stored", document.RootElement.GetProperty("state").GetString());
+		Assert.True(document.RootElement.GetProperty("activation_code_configured").GetBoolean());
 	}
 
 	[Fact]
@@ -251,25 +256,28 @@ public sealed class DepotEnrollmentApiTests : IAsyncLifetime, IDisposable
 	}
 
 	[Fact]
-	public async Task AcceptActivationCode_AssetIdMismatch_Returns409_AndNeverStoresTheCredential()
+	public async Task AcceptActivationCode_AssetIdDiffersFromDepotId_IsStillAccepted_IdentityFollowsTheCode()
 	{
+		// Owner decision 2026-08-25: the accept-time asset_id-vs-Depot-ID mismatch rejection
+		// is removed. A code whose asset_id differs from a previously generated (disposable)
+		// Depot ID is stored as-is -- swapping in a different working code just works.
 		await SetDepotIdAsync("A-DIFFERENT-DEPOT-ID");
 
 		HttpResponseMessage response = await SendAsync(
 			"Admin", HttpMethod.Post, "/api/v1/downloads/enrollment/activation-code", new { activation_code = InventedCode });
 
-		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-		string body = await response.Content.ReadAsStringAsync();
-		Assert.Contains("activation_code_asset_mismatch", body, StringComparison.Ordinal);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("activation_code_stored", document.RootElement.GetProperty("state").GetString());
 
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand command = new("SELECT count(*) FROM credentials WHERE credential_type = 'depot-activation-code'", connection);
-		Assert.Equal(0L, (long)(await command.ExecuteScalarAsync())!);
+		Assert.Equal(1L, (long)(await command.ExecuteScalarAsync())!);
 	}
 
 	[Fact]
-	public async Task AcceptActivationCode_MatchingAssetId_StoresEncryptedAndAdvancesState_AndNeverReturnsTheCodeValue()
+	public async Task AcceptActivationCode_StoresEncryptedAndAdvancesState_AndNeverReturnsTheCodeValue()
 	{
 		await SetDepotIdAsync("WPT-0001-DEPOT-ID");
 

@@ -34,10 +34,10 @@ public static class DepotEnrollmentStates
 	/// <summary>The Depot ID is known and displayable; the operator has not yet stored a paired Activation Code.</summary>
 	public const string AwaitingPortalRegistration = "awaiting_portal_registration";
 
-	/// <summary>An Activation Code whose embedded <c>asset_id</c> matches the Depot ID has been encrypted and stored, but not yet validated against the tool.</summary>
+	/// <summary>A structurally valid Activation Code has been encrypted and stored, but not yet validated against the tool. No asset_id-vs-Depot-ID match is required (owner decision 2026-08-25: identity follows the code).</summary>
 	public const string ActivationCodeStored = "activation_code_stored";
 
-	/// <summary>The stored code was validated by a bounded noninteractive tool operation and accepted.</summary>
+	/// <summary>The last validation succeeded: the tool accepted the stored code (identity was seeded from that code's own asset_id first).</summary>
 	public const string Validated = "validated";
 
 	/// <summary>The stored code was validated and REJECTED by the tool (bad/expired/revoked) -- distinct from <see cref="ActivationCodeStored"/> so the UI never claims "pending" once a real auth failure is known.</summary>
@@ -50,8 +50,10 @@ public static class DepotEnrollmentStates
 /// <summary>
 /// The <c>depot_enrollment</c> singleton row (migration 0048). Never carries the
 /// Activation Code itself -- <see cref="DepotId"/> and <see cref="PairedAssetId"/> are
-/// both non-secret (the Depot ID is operator-facing portal-registration information;
-/// the paired asset id is compared against it, never displayed as a credential).
+/// both non-secret. The Depot ID is the disposable portal-registration assist for an
+/// operator who has no code yet; <see cref="PairedAssetId"/> is now purely informational
+/// (the asset_id last stored with a code) and is no longer enforced against the Depot ID
+/// (owner decision 2026-08-25: identity follows the code).
 /// </summary>
 public sealed record DepotEnrollment(
 	string State,
@@ -69,22 +71,11 @@ public interface IDepotEnrollmentRepository
 	/// <summary>Reads the singleton row. Migration 0048 seeds it unconditionally (<c>id = 1</c>); a null return means the row was deleted out of band.</summary>
 	Task<DepotEnrollment?> GetAsync(CancellationToken cancellationToken);
 
-	/// <summary>Records a freshly generated/observed Depot ID and advances state to <see cref="DepotEnrollmentStates.AwaitingPortalRegistration"/> (unless already further along, e.g. re-running generation while already validated is a no-op state-wise).</summary>
+	/// <summary>Records a freshly generated/observed Depot ID and advances state to <see cref="DepotEnrollmentStates.AwaitingPortalRegistration"/> (unless already further along, e.g. re-running generation while already validated is a no-op state-wise). The Depot ID is the disposable portal-registration assist only.</summary>
 	Task SetDepotIdAsync(string depotId, CancellationToken cancellationToken);
 
-	/// <summary>Records a successfully paired+stored Activation Code (asset_id already validated by the caller) and advances state to <see cref="DepotEnrollmentStates.ActivationCodeStored"/>.</summary>
+	/// <summary>Records a stored Activation Code's decoded (informational) <paramref name="assetId"/> and advances state to <see cref="DepotEnrollmentStates.ActivationCodeStored"/>. No asset_id-vs-Depot-ID match is required (owner decision 2026-08-25: identity follows the code) -- any structurally valid code may be stored.</summary>
 	Task SetPairedAsync(string assetId, CancellationToken cancellationToken);
-
-	/// <summary>
-	/// Adopts an existing Activation Code's decoded <paramref name="assetId"/> as the
-	/// managed Depot ID when no ID was ever generated (issue #787 -- the credential-panel
-	/// path where a code is stored with no prior enrollment interaction): sets both
-	/// <c>depot_id</c> and <c>paired_asset_id</c> to the asset_id and advances state to
-	/// <see cref="DepotEnrollmentStates.ActivationCodeStored"/>. Only fills a Depot ID
-	/// that is currently NULL -- never overwrites an explicitly generated ID, preserving
-	/// generate-first mismatch semantics.
-	/// </summary>
-	Task AdoptExistingCodeAsync(string assetId, CancellationToken cancellationToken);
 
 	/// <summary>Records the outcome of a bounded noninteractive validation call: <see cref="DepotEnrollmentStates.Validated"/> on success, <see cref="DepotEnrollmentStates.AuthFailing"/> (with a redaction-safe failure note) on rejection.</summary>
 	Task SetValidationOutcomeAsync(bool succeeded, string? failureNote, CancellationToken cancellationToken);

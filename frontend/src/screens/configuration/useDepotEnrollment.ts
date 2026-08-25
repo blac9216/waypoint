@@ -3,9 +3,10 @@
  * `GET/POST /downloads/enrollment/*` for the Depot & Tokens tab's two entry
  * states -- an operator generating a fresh Software Depot ID ("I need a
  * code") or pasting one they already hold ("use existing code"). Both paths
- * converge on the same `acceptActivationCode` call server-side, which
- * rejects a structurally invalid or mismatched-asset_id code (409) before it
- * is ever stored.
+ * converge on the same `acceptActivationCode` call server-side. Identity
+ * follows the code (owner decision 2026-08-25): any structurally valid code is
+ * stored as-is -- no match against the disposable Depot ID is required -- and
+ * validation seeds the tool's identity from that code before asking it.
  *
  * `generateDepotId`/`validateActivationCode` are queued jobs (202 +
  * run_id/job_id) -- this hook polls the run to a terminal state via the same

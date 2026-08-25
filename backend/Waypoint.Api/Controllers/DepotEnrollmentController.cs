@@ -28,11 +28,12 @@ namespace Waypoint.Api.Controllers;
 
 /// <summary>
 /// The issue #691 assisted VCF 9.1 Software Depot enrollment surface: generate/read
-/// the non-secret Software Depot ID, accept and pairing-validate an Activation Code
-/// (existing or portal-issued), and explicit confirmed identity reset. The Activation
-/// Code value itself NEVER appears in any response this controller returns -- only its
-/// non-secret decoded <c>asset_id</c> (for pairing feedback) and the enrollment state
-/// machine. Authorization mirrors <see cref="CredentialsController"/>: read is
+/// the disposable non-secret Software Depot ID (portal-registration assist), accept and
+/// store an Activation Code (existing or portal-issued), validate it against the tool,
+/// and explicit confirmed identity reset. Identity follows the code (owner decision
+/// 2026-08-25): a stored code is not required to match the generated Depot ID. The
+/// Activation Code value itself NEVER appears in any response this controller returns --
+/// only its non-secret decoded <c>asset_id</c> and the enrollment state machine. Authorization mirrors <see cref="CredentialsController"/>: read is
 /// Viewer+, every state-changing action (generate, accept, reset) is Admin-only,
 /// matching the Admin-only floor every credential write already has (the Activation
 /// Code this flow ultimately stores is exactly that credential).
@@ -102,14 +103,14 @@ public sealed class DepotEnrollmentController : ControllerBase
 
 	/// <summary>
 	/// Accepts an Activation Code -- either an existing one the operator already holds,
-	/// or a freshly portal-issued one -- decodes its structure, requires the embedded
-	/// <c>asset_id</c> to match the currently generated Depot ID (issue #691 AC), and
-	/// only then stores it encrypted as the <see cref="CredentialTypes.DepotActivationCode"/>
-	/// credential. The raw code is never echoed back, logged, or included in any
-	/// exception detail -- a structural or pairing rejection reports only the reason
-	/// class, never the value. Requires a Depot ID to already be recorded
-	/// (<see cref="GenerateDepotId"/> first) since there is nothing to pair against
-	/// otherwise.
+	/// or a freshly portal-issued one -- decodes its structure to confirm it carries an
+	/// <c>asset_id</c>, and stores it encrypted as the
+	/// <see cref="CredentialTypes.DepotActivationCode"/> credential. Identity follows the
+	/// code (owner decision 2026-08-25): any structurally valid code is accepted, no match
+	/// against the disposable Software Depot ID is required, and no prior Depot ID is
+	/// needed -- swapping in a different working code just works. The raw code is never
+	/// echoed back, logged, or included in any exception detail; a structural rejection
+	/// reports only the reason class, never the value.
 	/// </summary>
 	[HttpPost("activation-code")]
 	[RequireAdminRole]
@@ -123,14 +124,6 @@ public sealed class DepotEnrollmentController : ControllerBase
 			throw ApiException.Validation("'activation_code' is required.");
 		}
 
-		DepotEnrollment? enrollment = await _enrollment.GetAsync(cancellationToken).ConfigureAwait(false);
-		if (string.IsNullOrWhiteSpace(enrollment?.DepotId))
-		{
-			throw new ApiException(
-				HttpStatusCode.Conflict, "depot_id_unavailable",
-				"Generate the Software Depot ID before pairing an Activation Code (POST /downloads/enrollment/depot-id).");
-		}
-
 		string? assetId = DepotActivationCodeCodec.TryExtractAssetId(request.ActivationCode);
 		if (assetId is null)
 		{
@@ -139,14 +132,6 @@ public sealed class DepotEnrollmentController : ControllerBase
 			throw new ApiException(
 				HttpStatusCode.BadRequest, "invalid_activation_code",
 				"The Activation Code could not be decoded, or its decoded structure has no 'asset_id' field.");
-		}
-
-		if (!string.Equals(assetId, enrollment.DepotId, StringComparison.Ordinal))
-		{
-			throw new ApiException(
-				HttpStatusCode.Conflict, "activation_code_asset_mismatch",
-				"The Activation Code's embedded asset_id does not match this appliance's Software Depot ID. " +
-				"Register this exact Depot ID at https://vcf.broadcom.com (Software Depot Registrations > New Registration) to receive a matching code.");
 		}
 
 		byte[] secretBytes = Encoding.UTF8.GetBytes(request.ActivationCode);

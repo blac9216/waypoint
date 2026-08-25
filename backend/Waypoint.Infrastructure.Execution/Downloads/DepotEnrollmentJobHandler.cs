@@ -118,7 +118,7 @@ public sealed class DepotEnrollmentJobHandler : IJobHandler
 
 		string actor = "system";
 		string stagingPath = Path.Combine(Path.GetTempPath(), $"depot-activation-code-{Guid.NewGuid():N}.txt");
-		string? pairedAssetId;
+		string? assetId;
 		DecryptedSecret? decrypted = null;
 		try
 		{
@@ -135,11 +135,11 @@ public sealed class DepotEnrollmentJobHandler : IJobHandler
 			await File.WriteAllTextAsync(stagingPath, decrypted.Value, cancellationToken).ConfigureAwait(false);
 			TryRestrictPermissions(stagingPath);
 
-			// Issue #787: establish (or confirm) the identity the tool checks the code
-			// against BEFORE invoking it. The decoded asset_id is non-secret; the raw code
-			// value is never used here beyond decoding this pairing field.
-			pairedAssetId = await EnsureMachineIdentityAsync(
-				DepotActivationCodeCodec.TryExtractAssetId(decrypted.Value), cancellationToken).ConfigureAwait(false);
+			// Issue #787 (owner decision 2026-08-25): identity follows the code. Derive the
+			// non-secret asset_id from THIS code and seed machine_id from it, overwriting
+			// whatever is there, immediately before invoking the tool. The raw code value is
+			// never used beyond decoding this field.
+			assetId = DepotActivationCodeCodec.TryExtractAssetId(decrypted.Value);
 		}
 		catch (CredentialSecretNotFoundException exception)
 		{
@@ -154,9 +154,19 @@ public sealed class DepotEnrollmentJobHandler : IJobHandler
 			decrypted?.Dispose();
 		}
 
+		if (string.IsNullOrWhiteSpace(assetId))
+		{
+			// A stored code that no longer decodes to an asset_id cannot seed an identity --
+			// report it by class only, never echoing the code, and clean up the staging file.
+			TryDelete(stagingPath);
+			return JobExecutionOutcome.Failed(
+				"The stored Activation Code could not be decoded to an asset_id; store a structurally valid code before validating.");
+		}
+
 		try
 		{
-			DepotValidationResult result = await _tool.ValidateActivationCodeAsync(stagingPath, pairedAssetId, cancellationToken).ConfigureAwait(false);
+			await _tool.SeedMachineIdentityAsync(assetId, cancellationToken).ConfigureAwait(false);
+			DepotValidationResult result = await _tool.ValidateActivationCodeAsync(stagingPath, cancellationToken).ConfigureAwait(false);
 
 			if (result.Succeeded)
 			{
@@ -188,52 +198,6 @@ public sealed class DepotEnrollmentJobHandler : IJobHandler
 		{
 			TryDelete(stagingPath);
 		}
-	}
-
-	/// <summary>
-	/// Ensures the tool's <c>machine_id</c> identity is in place before validation, and
-	/// returns the asset_id the tool must match (issue #787). Two paths converge here:
-	/// <list type="bullet">
-	/// <item>A pairing already exists (generate-first, or a prior adopt): re-seed the
-	/// identity file from that stored pairing -- a no-op unless a container rebuild
-	/// emptied the identity home -- and validate against it. The generated-first
-	/// mismatch branch is untouched: a foreign code was already rejected at
-	/// accept-time, so a stored pairing is always the code's own asset_id.</item>
-	/// <item>No pairing exists but a code is stored (the credential-panel path the owner
-	/// used): adopt the code's decoded asset_id as the managed Depot ID, seed the
-	/// identity, and record the adoption in enrollment state so the recovery is durable
-	/// and visible.</item>
-	/// </list>
-	/// Returns <c>null</c> only when neither a stored pairing nor a decodable code
-	/// asset_id is available, in which case validation proceeds against whatever identity
-	/// the tool already holds (and will fail closed if none).
-	/// </summary>
-	private async Task<string?> EnsureMachineIdentityAsync(string? decodedAssetId, CancellationToken cancellationToken)
-	{
-		DepotEnrollment? enrollment = await _enrollment.GetAsync(cancellationToken).ConfigureAwait(false);
-		string? storedPairing = enrollment?.PairedAssetId;
-
-		if (!string.IsNullOrWhiteSpace(storedPairing))
-		{
-			// Existing pairing (generate-first or already-adopted): re-seed from it so a
-			// rebuilt/empty identity home recovers without re-entering the code.
-			await _tool.SeedMachineIdentityAsync(storedPairing, cancellationToken).ConfigureAwait(false);
-			return storedPairing;
-		}
-
-		if (string.IsNullOrWhiteSpace(decodedAssetId))
-		{
-			// No pairing and an undecodable code -- let the tool fail closed against its
-			// own (absent) identity rather than fabricate one.
-			return null;
-		}
-
-		// Adopt-on-validate: the credential-panel path with no prior enrollment. Persist
-		// the adopted identity first so the recovery survives even if the tool call is
-		// interrupted, then seed the identity file the tool checks the code against.
-		await _enrollment.AdoptExistingCodeAsync(decodedAssetId, cancellationToken).ConfigureAwait(false);
-		await _tool.SeedMachineIdentityAsync(decodedAssetId, cancellationToken).ConfigureAwait(false);
-		return decodedAssetId;
 	}
 
 	private static void TryRestrictPermissions(string path)

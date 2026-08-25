@@ -271,7 +271,7 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		return Task.CompletedTask;
 	}
 
-	public async Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, string? expectedAssetId, CancellationToken cancellationToken)
+	public async Task<DepotValidationResult> ValidateActivationCodeAsync(string activationCodePath, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(activationCodePath);
 
@@ -284,16 +284,10 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		ManagedToolOptions options = _options.Value;
 		string identityHome = PrepareIdentityHome(options);
 
-		// Issue #787: the tool only accepts a code when the local machine_id equals the
-		// code's asset_id. When a pairing is known, ensure that identity file exists
-		// before invoking -- this re-seeds a container-rebuild-emptied identity home from
-		// the stored pairing (SeedMachineId is a no-op if machine_id already exists, so a
-		// tool-generated identity is never silently rotated).
-		if (!string.IsNullOrWhiteSpace(expectedAssetId))
-		{
-			SeedMachineId(identityHome, expectedAssetId);
-		}
-
+		// Issue #787 (owner decision 2026-08-25): identity follows the code. The caller has
+		// already seeded machine_id from THIS code's own decoded asset_id via
+		// SeedMachineIdentityAsync immediately before this call, so the tool is simply asked
+		// whether it accepts the code -- no pairing/identity reconciliation happens here.
 		string argument = $"configuration get --software-depot-id --depot-download-activation-code-file \"{activationCodePath}\"";
 
 		(bool succeeded, int exitCode, string stdout, string stderr) = await RunAsync(
@@ -335,23 +329,20 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 
 	/// <summary>
 	/// Atomically seeds <c>&lt;identity&gt;/.local/share/vmware/vdt/machine_id</c> with a
-	/// code's decoded <c>asset_id</c> (issue #787). Read-first: an already-present
-	/// <c>machine_id</c> (a tool-generated identity) is never overwritten -- the sibling
-	/// contract only requires the file to exist and equal the asset_id, and silently
-	/// rotating an established identity would violate #778's no-regenerate invariant.
-	/// Uses the #760 atomic pattern: write a same-directory temp file with restrictive
-	/// (0600) permissions, then rename it into place, so a concurrent reader never
-	/// observes a partially written identity.
+	/// code's decoded <c>asset_id</c> (issue #787). <c>machine_id</c> is DERIVED state, not
+	/// a durable identity: this OVERWRITES whatever is currently there so identity always
+	/// follows the code the current run is using (owner decision 2026-08-25 -- swapping in
+	/// a different working code just works, no reset ceremony). Uses the #760 atomic
+	/// pattern: write a same-directory temp file with restrictive (0600) permissions, then
+	/// atomically rename it over any existing file, so a concurrent reader never observes a
+	/// partially written identity. Content is exactly the asset_id, no trailing newline
+	/// (byte-for-byte what the sibling Dockerfile's WriteAllText produces).
 	/// </summary>
 	private static void SeedMachineId(string identityHome, string assetId)
 	{
 		string vdtDirectory = Path.Combine(
 			new[] { identityHome, ".local", "share" }.Concat(MachineIdRelativeSegments[..^1]).ToArray());
 		string machineIdPath = Path.Combine(vdtDirectory, MachineIdRelativeSegments[^1]);
-		if (File.Exists(machineIdPath))
-		{
-			return;
-		}
 
 		Directory.CreateDirectory(vdtDirectory);
 		string tempPath = Path.Combine(vdtDirectory, $".machine_id.{Guid.NewGuid():N}.tmp");
@@ -359,8 +350,7 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 		{
 			// FileMode.CreateNew + restrictive mode: the plaintext identity is written
 			// through a 0600 handle from the outset, never a default-umask file later
-			// tightened. Content is exactly the asset_id, no trailing newline (byte-for-byte
-			// what the sibling Dockerfile's WriteAllText produces).
+			// tightened.
 			using (FileStream stream = new(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
 			{
 				if (!OperatingSystem.IsWindows())
@@ -373,14 +363,9 @@ public sealed class DepotIdentityTool : IDepotIdentityTool
 				stream.Flush(flushToDisk: true);
 			}
 
-			// Atomic on the managed volume (same directory). If another writer won the
-			// race and created machine_id in the meantime, keep theirs (identity is
-			// content-identical for a given pairing) rather than clobbering.
-			File.Move(tempPath, machineIdPath, overwrite: false);
-		}
-		catch (IOException) when (File.Exists(machineIdPath))
-		{
-			// Lost the create race -- the identity now exists, which is the goal.
+			// Atomic rename on the managed volume (same directory), overwriting any prior
+			// identity -- machine_id follows the code, so the current run's asset_id wins.
+			File.Move(tempPath, machineIdPath, overwrite: true);
 		}
 		finally
 		{

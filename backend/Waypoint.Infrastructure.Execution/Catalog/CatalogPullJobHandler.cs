@@ -48,6 +48,7 @@ namespace Waypoint.Infrastructure.Catalog;
 public sealed class CatalogPullJobHandler : IJobHandler
 {
 	private readonly IDepotEnrollmentRepository _enrollment;
+	private readonly IDepotIdentityTool _identityTool;
 	private readonly IManagedToolMetadataPuller _puller;
 	private readonly IManagedToolCatalogVerifier _catalogVerifier;
 	private readonly IDepotArtifactRepository _artifacts;
@@ -60,6 +61,7 @@ public sealed class CatalogPullJobHandler : IJobHandler
 
 	public CatalogPullJobHandler(
 		IDepotEnrollmentRepository enrollment,
+		IDepotIdentityTool identityTool,
 		IManagedToolMetadataPuller puller,
 		IManagedToolCatalogVerifier catalogVerifier,
 		IDepotArtifactRepository artifacts,
@@ -71,6 +73,7 @@ public sealed class CatalogPullJobHandler : IJobHandler
 		IOptions<ManagedToolOptions> toolOptions)
 	{
 		ArgumentNullException.ThrowIfNull(enrollment);
+		ArgumentNullException.ThrowIfNull(identityTool);
 		ArgumentNullException.ThrowIfNull(puller);
 		ArgumentNullException.ThrowIfNull(catalogVerifier);
 		ArgumentNullException.ThrowIfNull(artifacts);
@@ -82,6 +85,7 @@ public sealed class CatalogPullJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(toolOptions);
 
 		_enrollment = enrollment;
+		_identityTool = identityTool;
 		_puller = puller;
 		_catalogVerifier = catalogVerifier;
 		_artifacts = artifacts;
@@ -129,6 +133,7 @@ public sealed class CatalogPullJobHandler : IJobHandler
 		string activationCodePath = Path.Combine(stagingRoot, "activation-code.txt");
 		string metadataDepotPath = Path.Combine(stagingRoot, "depot");
 
+		string? assetId;
 		DecryptedSecret? decrypted = null;
 		try
 		{
@@ -139,6 +144,13 @@ public sealed class CatalogPullJobHandler : IJobHandler
 				.DecryptAsync(activationCode.Id, "system", context.Job.Id, context.Job.RunId, cancellationToken)
 				.ConfigureAwait(false);
 			await WriteRestrictedFileAsync(activationCodePath, decrypted.Value, cancellationToken).ConfigureAwait(false);
+
+			// Issue #787 (owner decision 2026-08-25): every consumer seeds independently --
+			// identity follows the code. Derive the non-secret asset_id from THIS code and
+			// seed machine_id from it before invoking the tool, so a connected pull uses the
+			// same code-derived identity the validate path proved, per run. The raw code
+			// value is never used beyond decoding this field.
+			assetId = DepotActivationCodeCodec.TryExtractAssetId(decrypted.Value);
 		}
 		catch (CredentialSecretNotFoundException exception)
 		{
@@ -155,6 +167,12 @@ public sealed class CatalogPullJobHandler : IJobHandler
 
 		try
 		{
+			if (!string.IsNullOrWhiteSpace(assetId))
+			{
+				await _identityTool.SeedMachineIdentityAsync(assetId, cancellationToken).ConfigureAwait(false);
+			}
+
+
 			CatalogPullResult pullResult = await _puller
 				.PullAsync(metadataDepotPath, activationCodePath, cancellationToken).ConfigureAwait(false);
 

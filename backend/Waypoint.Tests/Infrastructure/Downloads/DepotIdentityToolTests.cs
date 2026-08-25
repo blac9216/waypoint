@@ -390,50 +390,39 @@ public sealed class DepotIdentityToolTests : IDisposable
 	}
 
 	[Fact]
-	public async Task SeedMachineIdentity_WhenMachineIdAlreadyExists_NeverOverwritesIt()
+	public async Task SeedMachineIdentity_WhenMachineIdAlreadyExists_OverwritesItWithTheNewAssetId()
 	{
 		DepotIdentityTool tool = CreateTool(Script("exit 0\n"), out _);
 		string path = MachineIdPath();
 		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-		File.WriteAllText(path, "tool-generated-identity");
+		File.WriteAllText(path, "stale-identity-from-a-previous-code");
 
-		// Read-first / no silent rotation (#778): an established identity is left intact.
+		// Owner decision 2026-08-25: machine_id is DERIVED state -- identity follows the
+		// code, so seeding overwrites whatever is there with the current code's asset_id
+		// (swapping in a different working code just works, no reset ceremony).
 		await tool.SeedMachineIdentityAsync(InventedAssetId, CancellationToken.None);
 
-		Assert.Equal("tool-generated-identity", File.ReadAllText(path));
+		Assert.Equal(InventedAssetId, File.ReadAllText(path));
+		if (!OperatingSystem.IsWindows())
+		{
+			Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+		}
+
+		// No stray temp files were left behind by the overwrite.
+		Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(path)!, ".machine_id.*"));
 	}
 
 	[Fact]
-	public async Task ValidateActivationCode_WithExpectedAssetId_SeedsMachineIdBeforeInvokingTool()
+	public async Task ValidateActivationCode_DoesNotSeedMachineId_TheCallerSeedsIt()
 	{
-		// The stub tool reads machine_id and echoes it, letting the test assert the file
-		// the tool checks the code against was seeded to the pairing asset_id first --
-		// this is the rebuild-survivability case: identity home starts empty.
-		string script = Script(
-			$"""
-			id="$(cat "$XDG_DATA_HOME/vmware/vdt/machine_id" 2>/dev/null)"
-			echo "$id" >> "{Path.Combine(_root, "seen-machine-id.log")}"
-			exit 0
-			""");
-		DepotIdentityTool tool = CreateTool(script, out _);
-		string codeFile = Path.Combine(_root, "code.txt");
-		File.WriteAllText(codeFile, "irrelevant-code-body");
-
-		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, InventedAssetId, CancellationToken.None);
-
-		Assert.True(result.Succeeded);
-		Assert.Equal(InventedAssetId, File.ReadAllText(MachineIdPath()));
-		Assert.Equal(InventedAssetId, File.ReadAllText(Path.Combine(_root, "seen-machine-id.log")).Trim());
-	}
-
-	[Fact]
-	public async Task ValidateActivationCode_WithNoExpectedAssetId_DoesNotSeedMachineId()
-	{
+		// Owner decision 2026-08-25: validation means only "the tool accepts this code."
+		// The caller seeds machine_id from the code's own asset_id BEFORE this call, so
+		// ValidateActivationCodeAsync no longer touches the identity file itself.
 		DepotIdentityTool tool = CreateTool(Script("exit 0\n"), out _);
 		string codeFile = Path.Combine(_root, "code.txt");
 		File.WriteAllText(codeFile, "irrelevant-code-body");
 
-		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, expectedAssetId: null, CancellationToken.None);
+		DepotValidationResult result = await tool.ValidateActivationCodeAsync(codeFile, CancellationToken.None);
 
 		Assert.True(result.Succeeded);
 		Assert.False(File.Exists(MachineIdPath()));
