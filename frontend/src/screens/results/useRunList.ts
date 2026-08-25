@@ -25,7 +25,7 @@ import { fetchRunList, scopeSiteId, type RunListItem } from "./results";
  * scan/remediate; the rest of that set — discover/credential-test/
  * content-pull/content-import/purge — has no results/artifacts presentation
  * and is not a "result" in this screen's sense). */
-const COMPLIANCE_RUN_TYPES: ReadonlySet<string> = new Set(["scan", "remediate"]);
+export const COMPLIANCE_RUN_TYPES: ReadonlySet<string> = new Set(["scan", "remediate"]);
 
 function readRunIdFromQuery(): string | undefined {
 	return new URLSearchParams(window.location.search).get("run") ?? undefined;

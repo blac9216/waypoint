@@ -171,6 +171,71 @@ describe("DashboardScreen", () => {
 		await waitFor(() => expect(screen.getByText("RUN-2026-0819-0412")).toBeInTheDocument());
 	});
 
+	it("excludes operational run types from RECENT RUNS (issue #717)", async () => {
+		installFetchMock({
+			dashboard: {
+				...DASHBOARD_DATA,
+				recent_runs: [
+					...DASHBOARD_DATA.recent_runs,
+					{
+						id: "RUN-2026-0820-0100",
+						run_type: "credential-test",
+						state: "completed",
+						scope: JSON.stringify({ site_id: "Alpha Enclave" }),
+						job_count: 1,
+						created_at: "2026-08-20T01:00:00Z",
+					},
+					{
+						id: "RUN-2026-0820-0200",
+						run_type: "catalog-index",
+						state: "completed",
+						scope: "{}",
+						job_count: 1,
+						created_at: "2026-08-20T02:00:00Z",
+					},
+				],
+			},
+		});
+		renderWithProviders();
+
+		await waitFor(() => expect(screen.getByText("RUN-2026-0819-0412")).toBeInTheDocument());
+		expect(screen.queryByText("RUN-2026-0820-0100")).not.toBeInTheDocument();
+		expect(screen.queryByText("RUN-2026-0820-0200")).not.toBeInTheDocument();
+	});
+
+	it("renders the RECENT RUNS empty state when only operational runs exist", async () => {
+		installFetchMock({
+			dashboard: {
+				...DASHBOARD_DATA,
+				recent_runs: [
+					{
+						id: "RUN-2026-0820-0100",
+						run_type: "discover",
+						state: "completed",
+						scope: "{}",
+						job_count: 1,
+						created_at: "2026-08-20T01:00:00Z",
+					},
+				],
+			},
+		});
+		renderWithProviders();
+
+		await waitFor(() => expect(screen.getByText("No scan or remediation runs yet.")).toBeInTheDocument());
+		expect(screen.queryByText("RUN-2026-0820-0100")).not.toBeInTheDocument();
+	});
+
+	it("deep-links a RECENT RUNS row into Results with ?run=<id>", async () => {
+		installFetchMock();
+		renderWithProviders();
+
+		await waitFor(() => expect(screen.getByText("RUN-2026-0819-0412")).toBeInTheDocument());
+		screen.getByText("RUN-2026-0819-0412").closest("button")?.click();
+
+		await waitFor(() => expect(window.location.pathname).toBe("/results"));
+		expect(window.location.search).toBe("?run=RUN-2026-0819-0412");
+	});
+
 	it("renders the SCHEDULES card empty state when no schedules exist", async () => {
 		installFetchMock({ schedules: [] });
 		renderWithProviders();

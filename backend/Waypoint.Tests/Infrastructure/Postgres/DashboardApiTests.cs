@@ -103,6 +103,8 @@ public sealed class DashboardApiTests : IAsyncLifetime, IDisposable
 		}
 	}
 
+	private static readonly string[] ComplianceRunTypesForAssertion = ["scan", "remediate"];
+
 	private readonly PostgresFixture _fixture;
 	private readonly string _artifactStorePath = Directory.CreateTempSubdirectory("wp-dashboard-api").FullName;
 	private DashboardApiFactory _factory = null!;
@@ -182,6 +184,34 @@ public sealed class DashboardApiTests : IAsyncLifetime, IDisposable
 		JsonElement run = root.GetProperty("recent_runs").EnumerateArray().Single();
 		Assert.Equal(runId.ToString(), run.GetProperty("id").GetString());
 		Assert.Equal("completed", run.GetProperty("state").GetString());
+	}
+
+	[Fact]
+	public async Task Get_WithOperationalRunsNewerThanCompliance_StillReturnsComplianceRuns()
+	{
+		// Issue #717 starvation regression: a burst of operational runs newer than the
+		// compliance runs must NOT push scan/remediate off the capped RECENT RUNS list.
+		// Older compliance runs first, then a wall of newer operational runs that would
+		// have filled every one of the 8 returned slots under the old unfiltered cap.
+		DateTimeOffset baseTime = DateTimeOffset.UtcNow.AddHours(-2);
+		Guid scanRunId = await CreateRunAtAsync("scan", baseTime);
+		Guid remediateRunId = await CreateRunAtAsync("remediate", baseTime.AddMinutes(1));
+		for (int i = 0; i < 15; i++)
+		{
+			string operationalType = i % 2 == 0 ? "discover" : "credential-test";
+			await CreateRunAtAsync(operationalType, baseTime.AddMinutes(10 + i));
+		}
+
+		JsonElement root = await GetDashboardAsync();
+
+		List<string> ids = [.. root.GetProperty("recent_runs").EnumerateArray().Select(r => r.GetProperty("id").GetString()!)];
+		List<string> runTypes = [.. root.GetProperty("recent_runs").EnumerateArray().Select(r => r.GetProperty("run_type").GetString()!)];
+
+		Assert.Contains(scanRunId.ToString(), ids);
+		Assert.Contains(remediateRunId.ToString(), ids);
+		Assert.All(runTypes, t => Assert.Contains(t, ComplianceRunTypesForAssertion));
+		Assert.DoesNotContain("discover", runTypes);
+		Assert.DoesNotContain("credential-test", runTypes);
 	}
 
 	[Fact]
@@ -327,6 +357,25 @@ public sealed class DashboardApiTests : IAsyncLifetime, IDisposable
 			RETURNING id
 			""", connection);
 		insert.Parameters.AddWithValue(JsonSerializer.Serialize(new { site_id = siteId }));
+		return (Guid)(await insert.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>
+	/// Seeds a run with an explicit <c>created_at</c> so a starvation-regression test can
+	/// interleave operational and compliance runs on a known timeline (issue #717).
+	/// </summary>
+	private async Task<Guid> CreateRunAtAsync(string runType, DateTimeOffset createdAt)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO runs (run_type, scope, state, initiated_by, created_at, started_at, completed_at)
+			VALUES ($1, '{}'::jsonb, 'completed', 'tester', $2, $2, $2)
+			RETURNING id
+			""", connection);
+		insert.Parameters.AddWithValue(runType);
+		insert.Parameters.AddWithValue(createdAt);
 		return (Guid)(await insert.ExecuteScalarAsync())!;
 	}
 
