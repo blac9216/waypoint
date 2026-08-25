@@ -29,6 +29,16 @@ compatible component has at most one active baseline, selected deterministically
 the catalog; scan callers do not select profiles. The normalized initial coverage is
 the [parity contract](../compliance-parity.md).
 
+Sibling product-family keys and paths are retained only as source provenance. They
+are not product versions, catalog compatibility claims, baseline candidates, or
+activation identities, and Waypoint never expands them into exact versions by
+inference. Before any component executes, discovery or Admin configuration must
+supply an exact product version, the Waypoint-owned catalog must contain an exact
+entry for that same version, and an exact approved baseline for that entry must be
+active. STIG execution additionally requires the exact approved compatible XCCDF
+baseline. A missing, ambiguous, or mismatched exact identity fails closed as
+unsupported coverage.
+
 ### Additive acquisition and provenance
 
 Content acquisition will be strictly additive. Connected instances synchronize
