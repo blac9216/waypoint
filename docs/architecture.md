@@ -291,11 +291,62 @@ An applicable non-automatable control without a valid attestation remains
 are not applied. Applicable controls that fail to execute likewise remain
 `Not_Reviewed`, never `Not_Applicable` or omitted.
 
+### Trust and temporary access-state cleanup
+
+📋 **Planned** ([ADR-0025](adr/0025-compliance-trust-cleanup-and-evidence.md)). TLS
+verification is the default for every HTTPS target/service. Admin-uploaded CA chains
+form validated, versioned managed trust bundles selected at the connection boundary.
+An Admin may explicitly authorize bypass for one target/service connection only, with
+actor/time/reason, version, audit, and prominent readiness/evidence warnings. Planning
+freezes the trust-policy reference. Runners build a per-client/session trust context;
+they never mutate process-global certificate policy shared by concurrent jobs.
+
+The default scan policy does not change SSH state. A target-specific Admin opt-in may
+temporarily enable it only when the exact catalog entry supplies a reviewed inspect/
+enable/restore provider and an authorized management credential purpose. Before
+mutation the runner durably records observed state and a cleanup obligation.
+Restoration is mandatory and idempotently retryable across every terminal path,
+cancellation, restart, and lease recovery; an originally enabled service is never
+disabled. Unresolved restoration is a prominent persistent security/operational
+failure, not a successful cleanup or an erasable scan note.
+
+This is the only planned exception to scans being read-only in effect: compliance
+checks do not remediate, and the separately authorized access mutation must restore
+the observed original state. Unavailable SSH isolates only dependent components and
+remains explicit incomplete coverage; independent work continues.
+
+### Compliance evidence, upload, and retention
+
+📋 **Planned** (ADR-0025). Compliance Results owns one connected evidence graph from
+run and requested/resolved scope through coverage omissions, planned items, jobs,
+ordered attempts, redacted logs/events, findings, attestations, cleanup, HDF/CKL, and
+STIG Manager upload attempts/receipts. A compliance failure is a valid noncompliant
+finding; an execution error is not. Every applicable exact-baseline control occurs
+exactly once. An unexecutable or unattested applicable control is `Not_Reviewed` with
+safe evidence, never `Not_Applicable` or omitted.
+
+STIG components produce complete HDF and CKL from the same exact active profile/XCCDF
+baseline. SRG components produce HDF only. The producing job uploads eligible CKLs
+directly through the configured STIG Manager API and persists destination, benchmark,
+artifact/attempt attribution, response/status, and receipt. There is no watched
+directory. Upload failure preserves the CKL; authorized retry uses that retained
+artifact and frozen destination policy without a rescan.
+
+One appliance-wide Admin-configurable retention period, default six months, applies
+to the entire graph. Prospective policy changes are versioned/audited and visible
+before purge. Automatic cleanup retains the complete graph or leaves a durable
+tombstone after graph-wide purge; partial surviving evidence and orphan artifacts are
+prohibited. Optional Admin holds remain #784 and, if delivered, protect the same unit.
+
 ### Legacy disposition
 
 The shipped profile picker and payload `scope.profile_id` are transitional, not a
 second scan model. Planned scans derive exact baselines from component identity and
-never accept a caller-selected profile. [#651](https://github.com/blac9216/waypoint/issues/651)
+never accept a caller-selected profile. Existing runs remain readable as legacy
+evidence while new creation migrates once to requested scope, catalog resolution, and
+immutable component plans. After legacy in-flight work drains, creation/fallback is
+removed; adapters cannot dual-write both representations and no permanent second scan
+model remains. [#651](https://github.com/blac9216/waypoint/issues/651)
 is therefore superseded as a profile-picker enhancement and will be reconciled by the
 UI work in #786. [#653](https://github.com/blac9216/waypoint/issues/653) remains valid
 for operator-visible schedule failure, but legacy `profile_id` validation is replaced
@@ -312,6 +363,9 @@ advisory log flag from becoming job outcome. #664 becomes binding-aware halt/swa
 delivery for every component-purpose pair. #665 and #678 remain transitional
 wire-test/UI cleanup for #785/#786. #721 and #757 remain the required pagination,
 streaming, virtualization, and five-digit-job scale implementation.
+#514 can consume normalized control severity/findings but retains its dashboard query;
+#652 retains its path-containment implementation during migration and as defense in
+depth; #784 remains the optional graph-wide hold.
 
 ## Identity & authorization
 

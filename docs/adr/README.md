@@ -49,3 +49,4 @@ An append to Consequences must:
 | [0022](0022-compliance-catalog-and-content-lifecycle.md) | Closed compliance catalog and atomic content lifecycle | Accepted (planned) |
 | [0023](0023-compliance-inventory-and-immutable-plans.md) | Stable compliance inventory and immutable component plans | Accepted (planned) |
 | [0024](0024-compliance-execution-attempts-credentials-and-settings.md) | Compliance execution items, attempts, credentials, and control settings | Accepted (planned); supersedes parts of 0021 |
+| [0025](0025-compliance-trust-cleanup-and-evidence.md) | Compliance trust, temporary access cleanup, and evidence lifecycle | Accepted (planned) |
