@@ -363,6 +363,26 @@ public sealed class ContentPullJobHandlerTests
 		public Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<JobCredentialBinding>>([]);
 	}
 
+	/// <summary>
+	/// Issue #731: a no-filesystem fake so these handler-level tests stay pure --
+	/// staging's real filesystem behavior is covered by
+	/// <c>Infrastructure/Postgres/ContentRevisionStagerTests</c> (real temp
+	/// directories) and <c>BaselineRepositoryTests</c> (real Postgres). This fake just
+	/// proves the handler calls staging with the report's digest and surfaces
+	/// whatever <see cref="ContentRevision"/> the stager returns.
+	/// </summary>
+	private sealed class FakeContentRevisionStager : IContentRevisionStager
+	{
+		public List<(string ContentPath, string SourceCommit, string ContentDigest)> Calls { get; } = [];
+
+		public Task<ContentRevision> StageAsync(string contentPath, string sourceCommit, string contentDigest, CancellationToken cancellationToken)
+		{
+			Calls.Add((contentPath, sourceCommit, contentDigest));
+			return Task.FromResult(new ContentRevision(
+				Guid.NewGuid(), sourceCommit, contentDigest, Path.Combine("revisions", contentDigest), ContentRevisionStatuses.Staged, GcEligible: false, DateTimeOffset.UtcNow));
+		}
+	}
+
 	private sealed class RecordingEventPublisher : IJobEventPublisher
 	{
 		public List<(string EventType, Guid? JobId, Guid? RunId, string Payload)> Events { get; } = [];
@@ -394,7 +414,7 @@ public sealed class ContentPullJobHandlerTests
 		FakeJobRunnerRepository jobs = new(initiatedBy);
 		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions { ContentPath = ContentPath });
 
-		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options);
+		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options, new FakeContentRevisionStager());
 
 		Guid jobId = Guid.NewGuid();
 		Guid runId = Guid.NewGuid();
@@ -775,7 +795,7 @@ public sealed class ContentPullJobHandlerTests
 		FakeCatalogRepository catalog = new();
 		FakeJobRunnerRepository jobs = new("admin@example.internal");
 		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions { ContentPath = ContentPath });
-		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options);
+		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options, new FakeContentRevisionStager());
 
 		ClaimedJob job = new(Guid.NewGuid(), Guid.NewGuid(), "content-pull", null, null, null, 5, "{}", 0, 1);
 		RecordingEventPublisher events = new();
@@ -813,7 +833,7 @@ public sealed class ContentPullJobHandlerTests
 		FakeCatalogRepository catalog = new();
 		FakeJobRunnerRepository jobs = new("admin@example.internal");
 		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions { ContentPath = ContentPath });
-		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options);
+		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options, new FakeContentRevisionStager());
 
 		// A job with no run id: ResolveActorAsync short-circuits to "system" without a run-state read.
 		ClaimedJob job = new(Guid.NewGuid(), RunId: null, "content-pull", null, null, null, 5, "{}", 0, 1);

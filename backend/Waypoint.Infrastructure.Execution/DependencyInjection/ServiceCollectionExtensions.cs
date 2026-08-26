@@ -130,6 +130,13 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
 		services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();
 
+		// Issue #731: stages content-pull's checked-out working tree into an immutable
+		// digest-addressed revision directory -- depends only on the IBaselineRepository
+		// AddWaypointInfrastructure already registered (the runner's own connection
+		// string, granted SELECT/INSERT on content_revisions by migration 0055, never
+		// UPDATE on baselines).
+		services.AddSingleton<Waypoint.Core.ComplianceContent.IContentRevisionStager, ComplianceContent.ContentRevisionStager>();
+
 		// Issue #40 (ADR-0017): content-pull is a compliance-runner job type -- see
 		// JobCapabilities.Compliance.
 		services.AddSingleton<IJobHandler, ComplianceContent.ContentPullJobHandler>();

@@ -87,6 +87,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 	private readonly ICatalogRepository _catalog;
 	private readonly IJobRunnerRepository _jobs;
 	private readonly IOptions<ComplianceContentOptions> _options;
+	private readonly IContentRevisionStager _revisionStager;
 
 	public ContentPullJobHandler(
 		IPowerShellExecutor executor,
@@ -95,7 +96,8 @@ public sealed class ContentPullJobHandler : IJobHandler
 		IProfileControlRepository profileControls,
 		ICatalogRepository catalog,
 		IJobRunnerRepository jobs,
-		IOptions<ComplianceContentOptions> options)
+		IOptions<ComplianceContentOptions> options,
+		IContentRevisionStager revisionStager)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(content);
@@ -104,6 +106,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(catalog);
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(options);
+		ArgumentNullException.ThrowIfNull(revisionStager);
 
 		_executor = executor;
 		_content = content;
@@ -112,6 +115,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 		_catalog = catalog;
 		_jobs = jobs;
 		_options = options;
+		_revisionStager = revisionStager;
 	}
 
 	public string JobType => "content-pull";
@@ -177,18 +181,37 @@ public sealed class ContentPullJobHandler : IJobHandler
 			}
 		}
 
-		int promotedCount = await RunSemanticImportAsync(commit, contentEntries, cancellationToken).ConfigureAwait(false);
+		(int promotedCount, string contentDigest) = await RunSemanticImportAsync(commit, contentEntries, cancellationToken).ConfigureAwait(false);
+
+		// Issue #731: stage an immutable digest-addressed snapshot of the working tree
+		// content-pull just checked out. This happens AFTER every prior step (git
+		// checkout, profile/control replace, semantic import/promotion) succeeded, and
+		// staging itself never touches any existing active baseline -- a failure in any
+		// EARLIER step already returned Failed above without reaching here, and this
+		// step's own failure (e.g. a filesystem error) throws out of ExecuteAsync
+		// entirely rather than recording a success, so neither path can leave a
+		// partially-staged revision recorded as staged.
+		ContentRevision revision = await _revisionStager
+			.StageAsync(_options.Value.ContentPath, commit, contentDigest, cancellationToken)
+			.ConfigureAwait(false);
 
 		await _content.RecordPullAsync(
 			context.Job.Id, config.RefType, config.RefValue, commit,
 			ComplianceContentPullStatuses.Succeeded, note: null, actor, cancellationToken).ConfigureAwait(false);
 
-		string progressPayload = JsonSerializer.Serialize(new { commit, profile_count = discoveredProfiles.Count, catalog_promoted_count = promotedCount });
+		string progressPayload = JsonSerializer.Serialize(new
+		{
+			commit,
+			profile_count = discoveredProfiles.Count,
+			catalog_promoted_count = promotedCount,
+			staged_revision_id = revision.Id,
+		});
 		await context.Events
 			.EmitAsync(JobEventTypes.RunProgress, null, context.Job.RunId, progressPayload, cancellationToken)
 			.ConfigureAwait(false);
 
-		return JobExecutionOutcome.Succeeded($"Pulled '{config.RefValue}' at {commit}; {discoveredProfiles.Count} profile(s) found; {promotedCount} catalog execution profile(s) promoted.");
+		return JobExecutionOutcome.Succeeded(
+			$"Pulled '{config.RefValue}' at {commit}; {discoveredProfiles.Count} profile(s) found; {promotedCount} catalog execution profile(s) promoted; staged revision {revision.Id}.");
 	}
 
 	/// <summary>
@@ -197,12 +220,16 @@ public sealed class ContentPullJobHandler : IJobHandler
 	/// <see cref="SemanticImportReconciler"/>) over this pull's content entries,
 	/// persists the resulting <see cref="SemanticImportReport"/> (migration 0051), and
 	/// promotes every accepted executable-leaf candidate into the catalog. Returns the
-	/// number of candidates successfully promoted. Never throws for a bad INPUT --
-	/// interpretation/reconciliation already quarantine malformed entries into the
-	/// report's own rejected list (issue #729's whole design point); this method's job
-	/// is purely to persist that report and act on its accepted list.
+	/// number of candidates successfully promoted plus the report's deterministic
+	/// <see cref="SemanticImportReport.SourceDigest"/> (issue #731 reuses this same
+	/// digest as the staged <see cref="ContentRevision.ContentDigest"/> -- one
+	/// deterministic whole-import digest, not two independently-computed ones that
+	/// could silently diverge). Never throws for a bad INPUT -- interpretation/
+	/// reconciliation already quarantine malformed entries into the report's own
+	/// rejected list (issue #729's whole design point); this method's job is purely to
+	/// persist that report and act on its accepted list.
 	/// </summary>
-	private async Task<int> RunSemanticImportAsync(string sourceCommit, IReadOnlyList<VendorContentEntry> contentEntries, CancellationToken cancellationToken)
+	private async Task<(int PromotedCount, string ContentDigest)> RunSemanticImportAsync(string sourceCommit, IReadOnlyList<VendorContentEntry> contentEntries, CancellationToken cancellationToken)
 	{
 		VendorHierarchyInterpretation interpretation = VendorHierarchyInterpreter.Interpret(contentEntries);
 		SemanticImportReport report = SemanticImportReconciler.Reconcile(sourceCommit, interpretation, contentEntries);
@@ -287,7 +314,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 				persistedReport.Id, CatalogImportEntryDispositions.Rejected, rejected.ProfileKey, rejected.Reason, executionProfileId: null, cancellationToken).ConfigureAwait(false);
 		}
 
-		return promotedCount;
+		return (promotedCount, report.SourceDigest);
 	}
 
 	/// <summary>
