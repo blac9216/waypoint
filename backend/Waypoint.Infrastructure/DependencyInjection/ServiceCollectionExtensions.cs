@@ -281,6 +281,10 @@ public static class ServiceCollectionExtensions
 				new Waypoint.Infrastructure.ComplianceContent.ProfileControlRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.ComplianceContent.ICatalogRepository>(
 				new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(connectionString));
+			// Issue #730: immutable XCCDF/STIG benchmark revisions, rules, and the
+			// component-to-benchmark-revision mapping/audit history (migration 0052).
+			services.AddSingleton<Waypoint.Core.ComplianceContent.IBenchmarkRepository>(
+				new Waypoint.Infrastructure.ComplianceContent.BenchmarkRepository(connectionString));
 			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
 			services.AddSingleton<IUserDirectory>(new UserRepository(connectionString));
 			services.AddSingleton<IAuditRepository>(new AuditRepository(connectionString));
