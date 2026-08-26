@@ -872,6 +872,112 @@ describe("AuthProvider OIDC callback (issue #534 — mint a session from token c
 		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
 	});
 
+	it("accepts a role claim shaped as a single-element array (issue #872 — Keycloak's group-membership mapper)", async () => {
+		mockCallbackFetch({
+			access_token: fakeAccessToken({ role: ["Admin"], preferred_username: "opuser", exp: 1893456000 }),
+			expires_in: 3600,
+			token_type: "Bearer",
+		});
+		landOnCallback();
+
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByText(/signed in as opuser \(Admin\)/)).toBeInTheDocument());
+	});
+
+	it("takes the most privileged recognized role when the array carries more than one", async () => {
+		mockCallbackFetch({
+			access_token: fakeAccessToken({ role: ["Viewer", "Operator"], preferred_username: "opuser", exp: 1893456000 }),
+			expires_in: 3600,
+			token_type: "Bearer",
+		});
+		landOnCallback();
+
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByText(/signed in as opuser \(Operator\)/)).toBeInTheDocument());
+	});
+
+	it("refuses the callback when the role array is empty (no mapped group membership)", async () => {
+		mockCallbackFetch({
+			access_token: fakeAccessToken({ role: [], preferred_username: "opuser", exp: 1893456000 }),
+			expires_in: 3600,
+			token_type: "Bearer",
+		});
+		landOnCallback();
+
+		function ErrorProbe() {
+			const { error, status } = useAuth();
+			return <div data-testid="err">{status === "restoring" ? "restoring" : (error ?? "none")}</div>;
+		}
+
+		render(
+			<AuthProvider>
+				<ErrorProbe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByTestId("err")).not.toHaveTextContent("none"));
+		expect(screen.getByTestId("err").textContent).toContain("Keycloak access token");
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	});
+
+	it("refuses the callback when the role array holds only unrecognized group names", async () => {
+		mockCallbackFetch({
+			access_token: fakeAccessToken({ role: ["Everyone", "some-other-group"], preferred_username: "opuser", exp: 1893456000 }),
+			expires_in: 3600,
+			token_type: "Bearer",
+		});
+		landOnCallback();
+
+		function ErrorProbe() {
+			const { error, status } = useAuth();
+			return <div data-testid="err">{status === "restoring" ? "restoring" : (error ?? "none")}</div>;
+		}
+
+		render(
+			<AuthProvider>
+				<ErrorProbe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByTestId("err")).not.toHaveTextContent("none"));
+		expect(screen.getByTestId("err").textContent).toContain("Keycloak access token");
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	});
+
+	it("refuses the callback when the role claim is missing entirely", async () => {
+		mockCallbackFetch({
+			access_token: fakeAccessToken({ preferred_username: "opuser", exp: 1893456000 }),
+			expires_in: 3600,
+			token_type: "Bearer",
+		});
+		landOnCallback();
+
+		function ErrorProbe() {
+			const { error, status } = useAuth();
+			return <div data-testid="err">{status === "restoring" ? "restoring" : (error ?? "none")}</div>;
+		}
+
+		render(
+			<AuthProvider>
+				<ErrorProbe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByTestId("err")).not.toHaveTextContent("none"));
+		expect(screen.getByTestId("err").textContent).toContain("Keycloak access token");
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	});
+
 	it("surfaces an error when the issued access token cannot be decoded into claims", async () => {
 		mockCallbackFetch({
 			access_token: "not-a-jwt", // one segment — decodeJwtPayload returns null
