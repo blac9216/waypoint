@@ -13,9 +13,12 @@
 // limitations under the License.
 
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Data;
 using Xunit;
 
@@ -67,11 +70,21 @@ public sealed class SchemaMigrationTests
 		"run_history_deletion_tombstones",
 		"depot_enrollment",
 		"catalog_pull_state",
+		"catalog_source_revisions",
+		"catalog_products",
+		"catalog_product_versions",
+		"catalog_content_releases",
+		"catalog_components",
+		"catalog_report_groups",
+		"catalog_execution_profiles",
+		"catalog_credential_requirements",
+		"catalog_benchmark_references",
+		"catalog_remediation_definitions",
 		"schema_migrations"
 	];
 
-	/// <summary>Embedded migration count as of issue #584 (... 0042 adds run_purges + run_purge_tombstones -- the durable retryable purge lifecycle and append-only audit tombstone for the admin-only terminal-compliance-run purge, plus runs.purged_at, 'purge' in jobs_job_type_check/runs_run_type_check, relaxes schedules.last_run_id from RESTRICT to ON DELETE SET NULL, and the compliance-runner's run_purges progress-reporting grant, issue #594, 0043 adds target_credential_bindings -- the normalized purpose-specific credential binding table (ADR-0021), backfills existing targets.credential_id references into the kind-appropriate default-purpose binding, and documents the dual-write contract keeping targets.credential_id and the default-purpose binding consistent until #585 removes the legacy column -- no new runner grants, issue #584, 0044 adds job_credential_bindings -- the immutable per-job per-purpose credential snapshot ledger (ADR-0021 SS5) RunCreationService's scan fan-out populates, with the compliance-runner SELECT-only grant and the jobs.credential_id dual-write/fallback contract documented in the migration header, issue #585, 0045 re-keys run_secrets from one row per run to one row per (run, target, purpose) -- additive columns/indexes only, the unconditional per-terminal-completion DELETE stays run_id-scoped so it covers both shapes with no code change, plus job_credential_bindings.is_run_secret so a job's per-purpose snapshot can name an ad hoc (run_secrets-backed) source instead of a stored credential_id, issue #586, 0046 adds runs.history_deleted_at + run_history_deletion_tombstones -- generic operational-history deletion for TERMINAL runs, structurally separate from run_purges/run_purge_tombstones (a deliberate sibling table, not a shared one) and deferring to that domain purge for scan/remediate runs, entirely API-side with no new runner grants, issue #592, 0047 extends credentials_credential_type_check with 'depot-activation-code' and 'legacy-download-token' (issue #690's non-destructive split of the ambiguous 'depot-token' well-known type -- 'depot-token' itself is RETAINED, not dropped, so pre-existing rows stay valid and visibly legacy; no data rewritten, no new runner grants), issue #691, 0048 adds depot_enrollment -- the singleton (mirrors appliance_state) non-secret Software Depot ID + assisted-enrollment state-machine table, adds 'depot-enrollment' to jobs_job_type_check/runs_run_type_check for the noninteractive tool-invocation job, and grants waypoint_download_runner SELECT/UPDATE on the new table, issue #687, 0049 adds catalog_pull_state -- the singleton (mirrors depot_enrollment) connected-catalog-pull attempt/success tracking table, adds 'catalog-pull' to jobs_job_type_check/runs_run_type_check for the distinct connected vendor-catalog-pull job (separate from the local credential-free catalog-index re-index), and grants waypoint_download_runner SELECT/INSERT/UPDATE on the new table -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 49;
+	/// <summary>Embedded migration count as of issue #584 (... 0042 adds run_purges + run_purge_tombstones -- the durable retryable purge lifecycle and append-only audit tombstone for the admin-only terminal-compliance-run purge, plus runs.purged_at, 'purge' in jobs_job_type_check/runs_run_type_check, relaxes schedules.last_run_id from RESTRICT to ON DELETE SET NULL, and the compliance-runner's run_purges progress-reporting grant, issue #594, 0043 adds target_credential_bindings -- the normalized purpose-specific credential binding table (ADR-0021), backfills existing targets.credential_id references into the kind-appropriate default-purpose binding, and documents the dual-write contract keeping targets.credential_id and the default-purpose binding consistent until #585 removes the legacy column -- no new runner grants, issue #584, 0044 adds job_credential_bindings -- the immutable per-job per-purpose credential snapshot ledger (ADR-0021 SS5) RunCreationService's scan fan-out populates, with the compliance-runner SELECT-only grant and the jobs.credential_id dual-write/fallback contract documented in the migration header, issue #585, 0045 re-keys run_secrets from one row per run to one row per (run, target, purpose) -- additive columns/indexes only, the unconditional per-terminal-completion DELETE stays run_id-scoped so it covers both shapes with no code change, plus job_credential_bindings.is_run_secret so a job's per-purpose snapshot can name an ad hoc (run_secrets-backed) source instead of a stored credential_id, issue #586, 0046 adds runs.history_deleted_at + run_history_deletion_tombstones -- generic operational-history deletion for TERMINAL runs, structurally separate from run_purges/run_purge_tombstones (a deliberate sibling table, not a shared one) and deferring to that domain purge for scan/remediate runs, entirely API-side with no new runner grants, issue #592, 0047 extends credentials_credential_type_check with 'depot-activation-code' and 'legacy-download-token' (issue #690's non-destructive split of the ambiguous 'depot-token' well-known type -- 'depot-token' itself is RETAINED, not dropped, so pre-existing rows stay valid and visibly legacy; no data rewritten, no new runner grants), issue #691, 0048 adds depot_enrollment -- the singleton (mirrors appliance_state) non-secret Software Depot ID + assisted-enrollment state-machine table, adds 'depot-enrollment' to jobs_job_type_check/runs_run_type_check for the noninteractive tool-invocation job, and grants waypoint_download_runner SELECT/UPDATE on the new table, issue #687, 0049 adds catalog_pull_state -- the singleton (mirrors depot_enrollment) connected-catalog-pull attempt/success tracking table, adds 'catalog-pull' to jobs_job_type_check/runs_run_type_check for the distinct connected vendor-catalog-pull job (separate from the local credential-free catalog-index re-index), and grants waypoint_download_runner SELECT/INSERT/UPDATE on the new table, issue #687, 0050 adds the normalized compliance catalog (issue #728, ADR-0022): catalog_source_revisions, catalog_products, catalog_product_versions, catalog_content_releases, catalog_components, catalog_report_groups, catalog_execution_profiles, catalog_credential_requirements, catalog_benchmark_references, and catalog_remediation_definitions -- the versioned identity tree and closed capability vocabulary for STIG/SRG execution profiles, all FKs ON DELETE RESTRICT so a plan-referenced historical revision cannot be deleted, no new runner grants (every row is catalog-authored, appliance-shipped data) -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 50;
 
 	private readonly PostgresFixture _fixture;
 
@@ -706,6 +719,67 @@ public sealed class SchemaMigrationTests
 		await using NpgsqlCommand verify = new("SELECT schedule_id FROM runs WHERE id = $1", connection);
 		verify.Parameters.AddWithValue(runId);
 		Assert.Equal(DBNull.Value, await verify.ExecuteScalarAsync());
+	}
+
+	/// <summary>
+	/// Issue #728, finding 3: the closed capability vocabulary lives in two hand-maintained
+	/// copies -- the C# <c>Catalog*</c>/<c>CredentialPurposes</c> constants and migration
+	/// 0050's CHECK constraint value lists. This repo's convention is a class-killing drift
+	/// guard (cf. <see cref="Migrations_Credentials_AcceptsEveryClosedSetCredentialType"/>
+	/// mirroring <c>CredentialTypes</c>, and docs/testing.md's "read it off the detector"
+	/// derivation). This parses each closed set's value list OUT OF the authoritative 0050
+	/// migration text (embedded resource) and asserts set-equality with the C# constants, so
+	/// adding/removing a value on either side without the other fails here -- drift in either
+	/// direction, not just additions.
+	/// </summary>
+	[Fact]
+	public async Task Migration0050_CheckConstraintValueLists_MatchTheCSharpClosedVocabulary()
+	{
+		string migration = await ReadMigration0050SqlAsync();
+
+		Assert.Equal(
+			CatalogKinds.All.OrderBy(v => v, StringComparer.Ordinal),
+			ParseCheckInList(migration, "catalog_content_releases_kind_check"));
+		Assert.Equal(
+			CatalogTransports.All.OrderBy(v => v, StringComparer.Ordinal),
+			ParseCheckInList(migration, "catalog_components_transport_check"));
+		Assert.Equal(
+			CatalogSelectorKinds.All.OrderBy(v => v, StringComparer.Ordinal),
+			ParseCheckInList(migration, "catalog_components_selector_kind_check"));
+		Assert.Equal(
+			CatalogOutputKinds.All.OrderBy(v => v, StringComparer.Ordinal),
+			ParseCheckInList(migration, "catalog_execution_profiles_output_kind_check"));
+		Assert.Equal(
+			CredentialPurposes.All.OrderBy(v => v, StringComparer.Ordinal),
+			ParseCheckInList(migration, "catalog_credential_requirements_purpose_check"));
+	}
+
+	/// <summary>The raw text of the 0050 migration embedded resource (authoritative CHECK source).</summary>
+	private static async Task<string> ReadMigration0050SqlAsync()
+	{
+		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
+		string resourceName = Assert.Single(
+			assembly.GetManifestResourceNames().Where(name => name.EndsWith("0050_compliance_catalog.sql", StringComparison.Ordinal)));
+		await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+		using StreamReader reader = new(stream);
+		return await reader.ReadToEndAsync();
+	}
+
+	/// <summary>
+	/// Extracts the single-quoted value list of a named <c>... CHECK (col IN ('a', 'b', ...))</c>
+	/// constraint from migration SQL, returned ordinal-sorted for order-independent set equality.
+	/// </summary>
+	private static IEnumerable<string> ParseCheckInList(string sql, string constraintName)
+	{
+		Match constraint = Regex.Match(
+			sql,
+			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\([^)]*\bIN\s*\(([^)]*)\)",
+			RegexOptions.IgnoreCase);
+		Assert.True(constraint.Success, $"Could not locate an IN-list CHECK named '{constraintName}' in the 0050 migration.");
+
+		MatchCollection values = Regex.Matches(constraint.Groups[1].Value, "'([^']*)'");
+		Assert.NotEmpty(values);
+		return values.Select(m => m.Groups[1].Value).OrderBy(v => v, StringComparer.Ordinal);
 	}
 
 	/// <summary>
