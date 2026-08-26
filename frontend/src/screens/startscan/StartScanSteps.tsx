@@ -5,10 +5,10 @@
  * useScanWizard; StartScanScreen.tsx wires them together.
  */
 import { useEffect, useRef, useState } from "react";
-import type { CredentialBindingGap, ScopeOmission } from "../../lib/api";
+import type { CredentialBindingGap, ScanPlanItem, ScanPlanSkip, ScopeOmission } from "../../lib/api";
 import { CREDENTIAL_PURPOSE_SATISFYING_TYPES, purposeLabel, requiredScanPurposes, type CredentialPurpose } from "../configuration/credential-purposes";
 import type { CredentialOption, Site } from "../configuration/sites";
-import { isSelectableComponent, type ComponentTreeNode, type ProfileOption } from "./startscan";
+import { isSelectableComponent, type ComponentTreeNode, type PlanPreviewResponse, type ProfileOption } from "./startscan";
 import { overrideKey, type CoverageRow, type CredentialMode, type OverrideEntry, type TargetSelection } from "./useScanWizard";
 
 export function SiteStep({
@@ -575,6 +575,132 @@ function AdHocOverrideFields({
 	);
 }
 
+/** Issue #733 remainder: groups accepted `ScanPlanItem`s by component for display — one row per component, since a scan plan item is already 1:1 with a component. */
+function groupPlanItems(items: ScanPlanItem[]): ScanPlanItem[] {
+	return [...items].sort((a, b) => a.report_group_key.localeCompare(b.report_group_key) || a.priority - b.priority);
+}
+
+/**
+ * Issue #733 remainder (PR #874): the plan-preview step. Renders the honest
+ * would-be plan for the scope/credential selections made so far — accepted
+ * items (grouped, with transport/priority/benchmark), skips with reasons,
+ * scope omissions, and credential gaps — before the operator commits to
+ * creating the run. A zero-item plan is preview's own honest empty state
+ * (distinct from #856's "intentionally empty explicit selection" note on the
+ * Scope step, though both describe the same "nothing will run" outcome from
+ * two different points in the flow) — preview is always 200 here, never the
+ * `no_runnable_component` 400 `POST /runs` returns for an identical scope, so
+ * the copy says "preview warns, create blocks" rather than presenting this as
+ * a failure.
+ */
+export function PreviewStep({
+	preview,
+	loading,
+	error,
+	onRetry,
+}: {
+	preview: PlanPreviewResponse | null;
+	loading: boolean;
+	error: string | null;
+	onRetry: () => void;
+}) {
+	return (
+		<div className="start-scan-screen__panel">
+			<div className="start-scan-screen__panel-title">Preview — would-be plan</div>
+
+			{loading && <div className="start-scan-screen__note">Previewing the plan…</div>}
+			{error && (
+				<div className="start-scan-screen__error" role="alert">
+					<div>{error}</div>
+					<button type="button" onClick={onRetry}>
+						Retry preview
+					</button>
+				</div>
+			)}
+
+			{!loading && !error && preview && (
+				<>
+					{preview.scope_omissions.length > 0 && (
+						<div className="start-scan-screen__error" role="alert">
+							<div>Some requested items were left out of the resolved scope:</div>
+							<ul>
+								{preview.scope_omissions.map((omission, i) => (
+									<li key={i}>{scopeOmissionMessage(omission)}</li>
+								))}
+							</ul>
+						</div>
+					)}
+
+					{preview.credential_gaps.length > 0 && (
+						<div className="start-scan-screen__error" role="alert">
+							<div>Credential gaps found for this scope:</div>
+							<ul>
+								{preview.credential_gaps.map((gap, i) => (
+									<li key={i}>
+										{gap.target_name ?? gap.target_id} — {purposeLabel(gap.purpose as CredentialPurpose)}: {bindingGapMessage(gap)}
+									</li>
+								))}
+							</ul>
+						</div>
+					)}
+
+					{preview.is_runnable ? (
+						<div className="start-scan-screen__preview-groups">
+							<div className="start-scan-screen__preview-group-title">
+								{preview.items.length} accepted item{preview.items.length === 1 ? "" : "s"}
+							</div>
+							<table className="start-scan-screen__coverage-table">
+								<thead>
+									<tr>
+										<th>Component</th>
+										<th>Transport</th>
+										<th>Priority</th>
+										<th>Benchmark</th>
+										<th>Credential purposes</th>
+									</tr>
+								</thead>
+								<tbody>
+									{groupPlanItems(preview.items).map((item) => (
+										<tr key={item.component_id}>
+											<td className="mono">{item.component_id}</td>
+											<td>{item.transport}</td>
+											<td>{item.priority}</td>
+											<td className="mono">{item.benchmark_revision_id ?? "SRG (no benchmark)"}</td>
+											<td>{item.required_purposes.map((p) => purposeLabel(p as CredentialPurpose)).join(", ") || "—"}</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
+					) : (
+						<div className="start-scan-screen__note" role="status">
+							No component in this scope is currently runnable. Starting the scan now would create an honest empty plan — review
+							the omissions/skips above before confirming.
+						</div>
+					)}
+
+					{preview.skips.length > 0 && (
+						<div className="start-scan-screen__preview-groups">
+							<div className="start-scan-screen__preview-group-title">
+								{preview.skips.length} skipped component{preview.skips.length === 1 ? "" : "s"}
+							</div>
+							<ul>
+								{preview.skips.map((skip: ScanPlanSkip) => (
+									<li key={skip.component_id} className="start-scan-screen__note">
+										<span className="mono">{skip.component_id}</span> — {skip.detail || skip.reason}
+									</li>
+								))}
+							</ul>
+						</div>
+					)}
+
+					<div className="start-scan-screen__digest">Plan digest: {preview.plan_digest}</div>
+				</>
+			)}
+		</div>
+	);
+}
+
 export function ScheduleStep() {
 	return (
 		<div className="start-scan-screen__panel">
@@ -607,6 +733,7 @@ export function ConfirmStep({
 	totalTargets,
 	profileName,
 	credentialSummary,
+	previewDigest,
 	canConfirm,
 	submitting,
 	error,
@@ -617,6 +744,8 @@ export function ConfirmStep({
 	totalTargets: number;
 	profileName: string;
 	credentialSummary: string;
+	/** Issue #733 remainder: the last Preview step's `plan_digest` (display-only) — echoed here so an operator/run history can correlate "this is the plan I previewed" against the created run's own digest (issue #734 AC-4: preview and create produce byte-identical digests for the same inputs). Undefined when Preview has not been run yet or last failed — the field is simply omitted, never a placeholder implying a run was already previewed. */
+	previewDigest?: string;
 	canConfirm: boolean;
 	submitting: boolean;
 	error: string | null;
@@ -638,6 +767,12 @@ export function ConfirmStep({
 				<dd className="mono">{credentialSummary}</dd>
 				<dt>Run</dt>
 				<dd className="mono">Run now</dd>
+				{previewDigest && (
+					<>
+						<dt>Previewed plan</dt>
+						<dd className="start-scan-screen__digest">{previewDigest}</dd>
+					</>
+				)}
 			</dl>
 			<div aria-live="polite">{error && <div className="start-scan-screen__error">{error}</div>}</div>
 			<button type="button" className="start-scan-screen__submit" disabled={!canConfirm || submitting} onClick={onConfirm}>

@@ -55,6 +55,39 @@ export interface ScopeOmission {
 	detail: string;
 }
 
+/**
+ * One accepted execution item in a `CompliancePlan` (`Waypoint.Core.Scans.ScanPlanItem`
+ * on the wire) — returned identically by `POST /runs/plan-preview` and (future)
+ * `GET /runs/{id}/plan` (issue #734 AC-4: preview/create share the same planner and
+ * digest). Every field is resolved once at plan-compile time; the wizard renders this
+ * verbatim rather than re-deriving readiness client-side.
+ */
+export interface ScanPlanItem {
+	component_id: string;
+	catalog_execution_profile_id: string;
+	baseline_id: string | null;
+	benchmark_revision_id: string | null;
+	transport: string;
+	selector_kind: string;
+	selector_name: string | null;
+	report_group_key: string;
+	priority: number;
+	output_kind: string;
+	required_purposes: string[];
+	declared_input_names: string[];
+}
+
+/**
+ * One candidate component that did not become an accepted `ScanPlanItem`
+ * (`Waypoint.Core.Scans.ScanPlanSkip` on the wire) — `reason` is the closed
+ * `unsupported` / `no_active_baseline` / `unmapped_benchmark` set, never free text.
+ */
+export interface ScanPlanSkip {
+	component_id: string;
+	reason: string;
+	detail: string;
+}
+
 export class ApiError extends Error {
 	code: string;
 	detail?: unknown;

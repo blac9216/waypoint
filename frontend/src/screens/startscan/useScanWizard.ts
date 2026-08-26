@@ -18,21 +18,25 @@ import {
 	fetchTargetComponents,
 	flattenComponentTree,
 	isSelectableComponent,
+	previewScanRun,
 	resolveTargetScope,
+	toPreviewScope,
 	type AdHocCredentialInput,
 	type ComponentTreeNode,
 	type CredentialOverrideInput,
+	type PlanPreviewResponse,
 	type ProfileOption,
 	type TargetScopeInput,
 } from "./startscan";
 
-export type StepKey = "site" | "scope" | "credential" | "schedule" | "confirm";
+export type StepKey = "site" | "scope" | "credential" | "schedule" | "preview" | "confirm";
 
 export const STEPS: { key: StepKey; label: string }[] = [
 	{ key: "site", label: "Site" },
 	{ key: "scope", label: "Scope" },
 	{ key: "credential", label: "Credential" },
 	{ key: "schedule", label: "Schedule" },
+	{ key: "preview", label: "Preview" },
 	{ key: "confirm", label: "Confirm" },
 ];
 
@@ -470,7 +474,69 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 		[credentialOptions, selectedTargets],
 	);
 
-	// -- step 5: confirm ---------------------------------------------------
+	// -- step 4b: preview ---------------------------------------------------
+	// Issue #733 remainder (epic #726 Wave 2, PR #874): `scope` below is the
+	// SINGLE assembly point for the wizard's `ScanScope` — both `runPreview`
+	// (via `toPreviewScope`, which only drops `profile_id`) and `submit` build
+	// their request from this exact object, never a separate re-derivation
+	// that could drift between what was previewed and what gets created.
+	const scope = useMemo(
+		() => ({
+			site_id: siteId,
+			profile_id: profileId,
+			...(selectedTargetIds.length > 0 && selectedTargetIds.length < selections.length ? { target_ids: selectedTargetIds } : {}),
+			...(targetScope ? { target_scope: targetScope } : {}),
+		}),
+		[siteId, profileId, selectedTargetIds, selections.length, targetScope],
+	);
+
+	/** Same (target_id, purpose) override map, reshaped into the wire arrays both preview and create send — one place, so preview and create never disagree about which overrides were requested. */
+	const credentialRequestPayload = useMemo(() => {
+		const credentialOverrides: CredentialOverrideInput[] = [];
+		const adHocCredentials: AdHocCredentialInput[] = [];
+		for (const [key, entry] of overrides) {
+			const [targetId, purpose] = key.split("::");
+			if (entry.kind === "saved") {
+				credentialOverrides.push({ target_id: targetId, purpose, credential_id: entry.credentialId });
+			} else {
+				adHocCredentials.push({ target_id: targetId, purpose, username: entry.username, secret: entry.secret });
+			}
+		}
+		return { credentialOverrides, adHocCredentials };
+	}, [overrides]);
+
+	const [preview, setPreview] = useState<PlanPreviewResponse | null>(null);
+	const [previewLoading, setPreviewLoading] = useState(false);
+	const [previewError, setPreviewError] = useState<string | null>(null);
+
+	/**
+	 * Issue #733 remainder: calls `POST /runs/plan-preview` with the identical
+	 * `scope`/override payload `submit` below would send to `POST /runs` (minus
+	 * `profile_id`, which preview rejects — ADR-0022 §7). Preview errors (400s —
+	 * malformed scope, not the zero-runnable case, which is a 200 honest empty
+	 * plan) render via the same `ApiError.message` idiom the rest of the wizard
+	 * uses, distinct from `submitError` so a stale preview failure never bleeds
+	 * into the confirm step's own error slot.
+	 */
+	const runPreview = useCallback(async () => {
+		setPreviewLoading(true);
+		setPreviewError(null);
+		try {
+			const result = await previewScanRun({
+				scope: toPreviewScope(scope),
+				credential_overrides: credentialRequestPayload.credentialOverrides.length > 0 ? credentialRequestPayload.credentialOverrides : undefined,
+				ad_hoc_credentials: credentialRequestPayload.adHocCredentials.length > 0 ? credentialRequestPayload.adHocCredentials : undefined,
+			});
+			setPreview(result);
+		} catch (err) {
+			setPreview(null);
+			setPreviewError(err instanceof ApiError ? err.message : "Could not preview the plan.");
+		} finally {
+			setPreviewLoading(false);
+		}
+	}, [scope, credentialRequestPayload]);
+
+	// -- step 6: confirm ---------------------------------------------------
 	const [submitting, setSubmitting] = useState(false);
 	const [submitError, setSubmitError] = useState<string | null>(null);
 	// House pattern: guard against a double-fire (double click / double Enter)
@@ -495,23 +561,7 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 		setBindingGapErrors([]);
 		setScopeOmissionErrors([]);
 		try {
-			const scope = {
-				site_id: siteId,
-				profile_id: profileId,
-				...(selectedTargetIds.length > 0 && selectedTargetIds.length < selections.length ? { target_ids: selectedTargetIds } : {}),
-				...(targetScope ? { target_scope: targetScope } : {}),
-			};
-
-			const credentialOverrides: CredentialOverrideInput[] = [];
-			const adHocCredentials: AdHocCredentialInput[] = [];
-			for (const [key, entry] of overrides) {
-				const [targetId, purpose] = key.split("::");
-				if (entry.kind === "saved") {
-					credentialOverrides.push({ target_id: targetId, purpose, credential_id: entry.credentialId });
-				} else {
-					adHocCredentials.push({ target_id: targetId, purpose, username: entry.username, secret: entry.secret });
-				}
-			}
+			const { credentialOverrides, adHocCredentials } = credentialRequestPayload;
 
 			const result = await createScanRun({
 				scope,
@@ -552,18 +602,34 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 			setSubmitting(false);
 			submitGuardRef.current = false;
 		}
-	}, [selectedTargetIds, selections.length, siteId, profileId, targetScope, overrides, navigate]);
+	}, [scope, credentialRequestPayload, navigate]);
 
 	const stepIndex = STEPS.findIndex((s) => s.key === step);
 	const canAdvance = useCallback(
 		(key: StepKey): boolean => {
-			if (key === "scope" || key === "credential" || key === "schedule" || key === "confirm") {
+			if (key === "scope" || key === "credential" || key === "schedule" || key === "preview" || key === "confirm") {
 				return siteId !== "";
 			}
 			return true;
 		},
 		[siteId],
 	);
+
+	// Issue #733 remainder: entering the Preview step (or re-entering it after
+	// a scope/credential edit invalidated the last preview) fetches a fresh
+	// plan preview automatically — the wizard never shows a stale preview next
+	// to a changed selection. `preview`/`previewError` are cleared whenever the
+	// step is left so returning to Preview always re-fetches rather than
+	// flashing last time's (possibly stale) result before the new one arrives.
+	useEffect(() => {
+		if (step !== "preview" || !allowed) {
+			return;
+		}
+		setPreview(null);
+		setPreviewError(null);
+		void runPreview();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [step, allowed]);
 
 	const siteName = sites.find((s) => s.id === siteId)?.name ?? "";
 	const selectedProfileName = profiles.find((p) => p.id === profileId)?.name ?? "";
@@ -626,6 +692,11 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 		missingCoverage,
 		bindingGapErrors,
 		selectedCredentialSummary,
+
+		preview,
+		previewLoading,
+		previewError,
+		runPreview,
 
 		submitting,
 		submitError,
