@@ -48,6 +48,16 @@ dev/local/
 *.key
 *.pfx
 *.p12
+# Issue #844 renamed the dev nginx pair from dev-cert.pem/dev-key.pem to the
+# generic tls.crt/tls.key names deploy/nginx/conf.d/default.conf now uses (so
+# one config serves either the dev-generated pair or an operator's real
+# certs). `tls.key` is still covered by *.key above, but nothing above
+# matches a .crt -- and a bare `*.crt` would be too broad for a repo that may
+# one day carry a legitimately-committed trust anchor (e.g. a test CA
+# fixture). Anchored to the single generated location instead:
+# deploy/nginx/certs/generate-dev-certs.sh's output, and nothing else.
+# Operator TLS at deploy/config/tls/ is already covered by /deploy/config/.
+/deploy/nginx/certs/tls.crt
 
 # Build output
 # Audited #362 (follow-up to #254, which anchored config/ -> /config/ after

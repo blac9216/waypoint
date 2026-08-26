@@ -359,8 +359,11 @@ services:
       # scripts, not the base image) but follow the same naming shape for
       # consistency. Every path here is a Compose `secrets:`-mounted file
       # (see the top-level `secrets:` block below) - a missing host file
-      # fails `docker compose up`/`config` before any container starts, and
-      # each initdb script also refuses an empty one (defence in depth).
+      # makes `docker compose up` fail at container creation (the daemon
+      # rejects the bind), and deploy/postgres/docker-entrypoint-wrapper.sh
+      # rejects an empty/unreadable one BEFORE the stock entrypoint can run
+      # initdb, so a bad file can never leave a half-initialized data
+      # directory behind. See that script's header comment.
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres-owner-password
       # Issue #442 (ADR-0014 §7): passwords for the two dedicated runner DB
       # roles postgres/initdb/01-runner-roles.sh creates on first init. Table
@@ -392,11 +395,28 @@ services:
     networks:
       - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-waypoint} -d ${POSTGRES_DB:-waypoint}"]
+      # Issue #844: deliberately NOT a bare `pg_isready`. A half-initialized
+      # cluster (initdb ran, docker-entrypoint-initdb.d aborted) accepts
+      # connections and would pass pg_isready while having none of the roles
+      # or the `keycloak` database the rest of the stack depends on -- so
+      # this also asserts both initdb scripts completed. See
+      # deploy/postgres/healthcheck.sh.
+      test: ["CMD", "/usr/local/bin/waypoint-postgres-healthcheck.sh"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 5
-      start_period: 5s
+      # Longer than the old bare-pg_isready start_period (5s) on purpose: a
+      # socket-only temp server is already pg_isready-positive part way
+      # through `initdb`, so the old check could go green BEFORE
+      # docker-entrypoint-initdb.d had run at all. This one deliberately
+      # cannot pass until 01-runner-roles.sh and 02-keycloak-db.sh have both
+      # finished, which on a loaded host (a full `up --build` starting six
+      # other services at once) takes appreciably longer than the pg_isready
+      # window did -- live-observed exceeding a 15s start_period during a
+      # fresh-stack-smoke-test.sh run. Failures inside start_period do not
+      # count toward `retries`, so this only widens the first-boot grace
+      # period; a genuinely broken cluster still goes unhealthy 50s later.
+      start_period: 120s
     restart: unless-stopped
 
   # Keycloak (issue #28, ADR-0004): the IdP. The backend and frontend remain
@@ -848,17 +868,37 @@ networks:
     driver: bridge
 
 # Issue #844: Compose's own file-secret mechanism (NOT Swarm secrets -- this
-# also works for plain `docker compose up`). Each `file:` source is resolved
-# by the Compose CLIENT before any container is created, so a missing file
-# fails `docker compose up`/`config` immediately, with no service ever
-# starting -- the strongest available fail-closed behaviour, ahead of even
-# the initdb/entrypoint-wrapper `[ -s ...]` checks those scripts also carry
-# for an empty (but present) file. Each is mounted read-only, mode 0444, at
-# /run/secrets/<name> by default -- world-readable inside the container
-# regardless of which uid a given service's process runs as, so there is no
-# ownership/chmod dance the way the commented-out master-key bind mounts
-# above require. Paths are relative to this file's directory (`deploy/`),
-# matching every other relative source in this file (`./postgres`, etc.).
+# also works for plain `docker compose up`).
+#
+# Fail-closed behaviour, stated precisely (live-verified; an earlier version
+# of this comment overstated it and the PR #860 review caught that):
+# `docker compose config` does NOT fail on a missing `file:` source -- it
+# renders and exits 0, which is exactly why CI can validate this file
+# without any deploy/config/ present. On `docker compose up`, the Compose
+# client emits a warning ("secret file ... does not exist") and then the
+# DAEMON rejects the bind at container-create time, so no service ever
+# starts. Net effect is still fail-closed, but the enforcement point is the
+# daemon at create time, not the client at parse time.
+#
+# A file that exists but is empty/unreadable gets past that layer entirely,
+# so each consumer validates its own before doing anything destructive:
+# deploy/postgres/docker-entrypoint-wrapper.sh (before the stock entrypoint
+# can run initdb -- see its header for the poisoned-volume failure that
+# forced it) and deploy/keycloak/docker-entrypoint-wrapper.sh (before
+# handing off to kc.sh).
+#
+# Each appears at /run/secrets/<name> inside the consuming container. NOTE
+# (live-verified, and NOT what the Swarm-secrets documentation implies): a
+# `file:` source is bind-mounted VERBATIM -- the container sees the host
+# file's ownership and mode, there is no 0444 re-materialization. Postgres's
+# initdb scripts run as the in-container `postgres` user, so a host file
+# only the operator's own uid can read is unreadable there; 0644 is the
+# convention this repo uses for mounted secret material (same as the
+# commented-out master-key bind mounts above). postgres's entrypoint wrapper
+# checks readability AS that user and fails closed before initdb rather than
+# discovering it half way through. Paths are relative to this file's
+# directory (`deploy/`), matching every other relative source in this file
+# (`./postgres`, etc.).
 #
 # Create these six files under deploy/config/secrets/ (gitignored -- see
 # .gitignore's /deploy/config/ entry) before a fresh bring-up; #847 will add

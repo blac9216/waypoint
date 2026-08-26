@@ -23,13 +23,18 @@
 # POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE / POSTGRES_DOWNLOAD_RUNNER_PASSWORD_FILE
 # on the postgres service in docker-compose.yml, each pointing at a Compose
 # `secrets:`-mounted file under deploy/config/secrets/ (gitignored -- see
-# .gitignore's /deploy/config/ entry). Compose resolves `secrets:` file
-# sources itself, before any container starts, so a missing file fails the
-# whole `docker compose up`/`config` invocation immediately -- this script's
-# own `[ -s ... ]` check below is the second, defence-in-depth layer for the
-# case a file exists but was left empty. Never echoed, never logged -- psql
-# -v substitution keeps the value out of this script's own output and out of
-# shell history inside the container, same as before.
+# .gitignore's /deploy/config/ entry). A MISSING file is caught by the Docker
+# daemon at container-create time (`docker compose config` renders fine and
+# exits 0 -- the enforcement point is create, not parse); an EMPTY or
+# unreadable one is caught by deploy/postgres/docker-entrypoint-wrapper.sh
+# BEFORE the stock entrypoint runs initdb, so this script never even gets the
+# chance to run against a bad file. The `[ -s ... ]` check below is a
+# last-ditch defence-in-depth layer only -- by the time it could fire, the
+# data directory would already exist, which is precisely the poisoned-volume
+# failure the wrapper exists to prevent (see its header comment). Never
+# echoed, never logged -- psql -v substitution keeps the value out of this
+# script's own output and out of shell history inside the container, same as
+# before.
 set -eu
 
 : "${POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE:?POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE must be set}"

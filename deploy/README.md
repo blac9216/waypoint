@@ -87,9 +87,17 @@ volume is initialized (Postgres's own `docker-entrypoint-initdb.d` convention �
 it does **not** re-run against an existing volume), and creates two
 `NOSUPERUSER NOCREATEDB NOCREATEROLE` login roles: `waypoint_compliance_runner`
 and `waypoint_download_runner`. Their passwords come from mounted files
-(issue #844 — see "File-backed secrets" below), not `deploy/.env`; postgres
-now refuses to start at all if any of the four password files it needs is
-missing or empty.
+(issue #844 — see "File-backed secrets" below), not `deploy/.env`.
+`postgres/docker-entrypoint-wrapper.sh` validates all four password files
+before the stock entrypoint runs, so a missing/empty/unreadable one aborts
+the container before `initdb` creates the data directory — the service
+restart-loops on a clean error and never reports healthy. The healthcheck
+(`postgres/healthcheck.sh`) additionally asserts that both init scripts
+actually completed (both runner roles, the `keycloak` role, the `keycloak`
+database), so a half-initialized cluster can never satisfy another service's
+`depends_on: service_healthy`. An operator whose `pgdata` volume predates
+issues #442/#28 will see that healthcheck report unhealthy until those roles
+are created by hand — deliberately visible rather than silently broken.
 
 Table-level `GRANT`s for those two roles live in a versioned backend migration —
 `backend/Waypoint.Infrastructure/Data/Migrations/0025_runner_db_roles.sql` —
@@ -129,11 +137,27 @@ printf '%s\n' 'CHANGE-ME-backend-client-secret'         > config/secrets/keycloa
 ```
 
 Each file's whole content (minus a trailing newline) is the raw value — no
-quoting, no `key=value` shape. A missing file fails `docker compose up`
-before any container is created (Compose resolves `secrets:` sources itself);
-an empty-but-present file is caught a layer deeper, by the initdb scripts
-(`postgres/initdb/01-runner-roles.sh`, `02-keycloak-db.sh`) or Keycloak's own
-`docker-entrypoint-wrapper.sh` — neither ever prints the value it rejected.
+quoting, no `key=value` shape. Leave them mode `0644`: a Compose `file:`
+secret is bind-mounted **verbatim** (the container sees the host file's
+ownership and mode — there is no `0444` re-materialization the way Swarm
+secrets do it), and `postgres`'s init scripts read them as the in-container
+`postgres` user, which is neither `root` nor your uid. A `0600` file is
+rejected, by design, by `postgres/docker-entrypoint-wrapper.sh` before
+anything is initialized. Host-side confidentiality comes from
+`deploy/config/` being gitignored and operator-owned, not from the file mode.
+
+What happens when one is wrong, precisely:
+
+| Case | Where it fails | Effect |
+| --- | --- | --- |
+| File missing | `docker compose up`, at **container creation** — the Compose client warns (`secret file ... does not exist`) and the Docker **daemon** then rejects the bind | No container starts. Note `docker compose config` still renders and exits **0** — it does not validate `file:` sources, which is why CI can lint this compose file with no `deploy/config/` present. |
+| File present but empty/unreadable | The service's own entrypoint wrapper — `postgres/docker-entrypoint-wrapper.sh` and `keycloak/docker-entrypoint-wrapper.sh` — **before** anything irreversible happens | The container exits non-zero and restart-loops on a clean error. Postgres in particular never reaches `initdb`, so the `pgdata` volume is left untouched: fix the file and the next restart initializes that same volume correctly, no `down -v` required. |
+
+Neither wrapper ever prints the value it rejected. The `[ -s ... ]` checks
+still present inside `postgres/initdb/01-runner-roles.sh` and
+`02-keycloak-db.sh` are a last-ditch defence-in-depth layer behind the
+Postgres wrapper, not the primary gate — by the time an initdb script runs,
+the data directory already exists.
 
 nginx TLS follows the same shape but stays optional: `deploy/nginx/conf.d/default.conf`
 now references generic `tls.crt`/`tls.key` names (renamed from

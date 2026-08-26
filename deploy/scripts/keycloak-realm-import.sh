@@ -86,11 +86,42 @@ mkdir -p "$SCRATCH_DIR"
 trap 'rm -rf "$SCRATCH_DIR"' EXIT
 
 SCRATCH_FILE="$SCRATCH_DIR/waypoint-realm.json"
-# `|` delimiter (not `/`) so a secret value containing a slash doesn't break
-# the substitution (issue #844 rename from the old __..__ placeholder made
-# this worth tightening at the same time).
-sed "s|\${WAYPOINT_BACKEND_CLIENT_SECRET}|${KEYCLOAK_BACKEND_CLIENT_SECRET}|" \
-	"$REALM_FILE" > "$SCRATCH_FILE"
+# Deliberately NOT sed (PR #860 review, finding 5): sed's REPLACEMENT side
+# has its own metacharacters -- `&` expands to the whole match, `\` escapes,
+# and any delimiter appearing in the value ends the expression early -- so a
+# generated secret containing those characters was silently mangled or made
+# the script fail. A literal, non-regex replacement done in python3 has no
+# metacharacters at all. It also JSON-escapes the value, which sed could not:
+# the placeholder sits inside a JSON string in the realm file, so a secret
+# containing `"` or `\` has to be escaped there to keep the file parseable.
+#
+# The secret is passed through the ENVIRONMENT, never argv -- argv is visible
+# in `ps`/`/proc/<pid>/cmdline` to anything else on the host, which is the
+# exact leak this whole issue (#844) exists to close.
+command -v python3 >/dev/null 2>&1 || {
+	echo "error: python3 is required for the realm placeholder substitution." >&2
+	exit 1
+}
+# shellcheck disable=SC2016 # the python3 -c body below is python source, not shell -- must stay unexpanded
+KEYCLOAK_BACKEND_CLIENT_SECRET="$KEYCLOAK_BACKEND_CLIENT_SECRET" \
+	WAYPOINT_REALM_SRC="$REALM_FILE" WAYPOINT_REALM_DST="$SCRATCH_FILE" \
+	python3 -c '
+import json, os
+
+src = os.environ["WAYPOINT_REALM_SRC"]
+dst = os.environ["WAYPOINT_REALM_DST"]
+# json.dumps(...)[1:-1] yields the JSON-escaped BODY of the string, without
+# the surrounding quotes -- the placeholder is already inside quotes.
+value = json.dumps(os.environ["KEYCLOAK_BACKEND_CLIENT_SECRET"])[1:-1]
+
+with open(src, encoding="utf-8") as fh:
+    content = fh.read()
+placeholder = "${WAYPOINT_BACKEND_CLIENT_SECRET}"
+if placeholder not in content:
+    raise SystemExit("error: %s contains no %s placeholder" % (src, placeholder))
+with open(dst, "w", encoding="utf-8") as fh:
+    fh.write(content.replace(placeholder, value))
+'
 
 # Translate SCRATCH_DIR to its HOST-side path before using it as a raw
 # `docker run -v` source below (docs/testing.md "Devcontainer bind mounts").

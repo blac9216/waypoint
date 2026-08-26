@@ -20,7 +20,12 @@
 # docker-compose.yml, points at the SAME Compose `secrets:`-mounted file
 # (deploy/config/secrets/postgres-keycloak-password, gitignored) the
 # `keycloak` service itself reads via KC_DB_PASSWORD_FILE -- one file, one
-# password, both sides of the same login. Never echoed, never logged --
+# password, both sides of the same login. A missing file is rejected by the
+# Docker daemon at container-create time and an empty/unreadable one by
+# deploy/postgres/docker-entrypoint-wrapper.sh before initdb runs at all --
+# see 01-runner-roles.sh's header for the precise enforcement points and why
+# the `[ -s ... ]` check below is only a last-ditch layer. Never echoed,
+# never logged --
 # psql -v substitution keeps the value out of this script's own output and
 # out of shell history inside the container (same technique
 # 01-runner-roles.sh uses; see that file's header comment for why a
