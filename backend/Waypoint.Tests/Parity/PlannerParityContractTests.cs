@@ -75,7 +75,12 @@ public sealed class PlannerParityContractTests : IAsyncLifetime
 		_benchmarks = new BenchmarkRepository(_fixture.ConnectionString);
 		_targets = new TargetRepository(_fixture.ConnectionString);
 		_sites = new SiteRepository(_fixture.ConnectionString);
-		_planner = new ScanPlannerService(_components, _catalog, _baselines);
+		// Issue #735: ScanPlannerService now also resolves each item's config-doc
+		// snapshot -- mechanical constructor-signature update only, matching every
+		// other ScanPlannerService call site; no change to this file's own assertions.
+		_planner = new ScanPlannerService(
+			_components, _catalog, _baselines, _targets,
+			new Waypoint.Infrastructure.ConfigDocs.PlanConfigResolutionService(new Waypoint.Infrastructure.ConfigDocs.ConfigDocRepository(_fixture.ConnectionString)));
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
