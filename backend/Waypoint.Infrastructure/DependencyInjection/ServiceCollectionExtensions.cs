@@ -290,6 +290,13 @@ public static class ServiceCollectionExtensions
 			// component-to-benchmark-revision mapping/audit history (migration 0052).
 			services.AddSingleton<Waypoint.Core.ComplianceContent.IBenchmarkRepository>(
 				new Waypoint.Infrastructure.ComplianceContent.BenchmarkRepository(connectionString));
+			// Issue #731: immutable staged content revisions and baseline activation state
+			// (migration 0055). Activation/rollback run through the owner connection
+			// string (this repository), never a runner role -- ADR-0022 "the activation
+			// boundary is exclusive."
+			services.AddSingleton<Waypoint.Core.ComplianceContent.IBaselineRepository>(
+				new Waypoint.Infrastructure.ComplianceContent.BaselineRepository(connectionString));
+			services.AddSingleton<Waypoint.Infrastructure.ComplianceContent.BaselineActivationService>();
 			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
 			services.AddSingleton<IUserDirectory>(new UserRepository(connectionString));
 			services.AddSingleton<IAuditRepository>(new AuditRepository(connectionString));

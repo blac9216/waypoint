@@ -88,6 +88,8 @@ public sealed class SchemaMigrationTests
 		"catalog_declared_inputs",
 		"components",
 		"component_observations",
+		"content_revisions",
+		"baselines",
 		"schema_migrations"
 	];
 
@@ -97,8 +99,18 @@ public sealed class SchemaMigrationTests
 	/// fact_conflict readiness signal, active/absent/retired lifecycle (rediscovery
 	/// reconnects, continuous absence is application-policy-timed retirement), and
 	/// append-only observation provenance -- no new runner grants (this slice's write
-	/// path is API-side only; discovery-job wiring is deferred), issue #732 -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 54;
+	/// path is API-side only; discovery-job wiring is deferred), issue #732, 0055 adds content_revisions + baselines (issue #731, ADR-0022 capstone
+	/// "Stage, diff, activate, and retain compliance content revisions atomically"):
+	/// content_revisions is one immutable digest-addressed staged filesystem snapshot
+	/// per (source_commit, content_digest), and baselines is one atomically-activatable
+	/// coherent set (content revision + catalog execution profile + optional benchmark
+	/// revision) with a partial unique index enforcing at most one active baseline per
+	/// execution profile -- the activation boundary ADR-0022 requires to be exclusive.
+	/// Grants waypoint_compliance_runner SELECT/INSERT plus column-scoped
+	/// UPDATE (source_commit) on content_revisions (ContentRevisionStager's idempotent
+	/// ON CONFLICT DO UPDATE write path) and SELECT on baselines; activation/rollback
+	/// never run as a runner role, issue #731 -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 55;
 
 	private readonly PostgresFixture _fixture;
 

@@ -1241,6 +1241,124 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
 	}
 
+	/// <summary>
+	/// Issue #731 (migration 0055), added at authoring time per this file's own
+	/// standing convention. <c>ContentRevisionStager</c> records one staged content
+	/// revision from the compliance-runner process -- proves the SELECT/INSERT grant on
+	/// <c>content_revisions</c> actually lands, not just that the migration's GRANT
+	/// statement ran without error.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CanRecordStagedRevision_WithoutPermissionDenied()
+	{
+		string suffix = Guid.NewGuid().ToString("N")[..8];
+		Waypoint.Infrastructure.ComplianceContent.BaselineRepository runnerBaselines = new(_complianceRunnerConnectionString);
+
+		ContentRevision revision = await runnerBaselines.RecordStagedRevisionAsync(
+			$"commit-{suffix}", $"digest-{suffix}", $"revisions/digest-{suffix}", CancellationToken.None);
+
+		Assert.Equal(ContentRevisionStatuses.Staged, revision.Status);
+
+		ContentRevision? reread = await runnerBaselines.GetRevisionAsync(revision.Id, CancellationToken.None);
+		Assert.NotNull(reread);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check for the 0055 content_revisions grant: the
+	/// runner's UPDATE is column-scoped to <c>source_commit</c> only (the ON CONFLICT
+	/// DO UPDATE no-op touch RecordStagedRevisionAsync's idempotent write requires) --
+	/// flipping <c>status</c> (staged/activated/superseded/rejected lifecycle) stays
+	/// owner-only, so a runner-role UPDATE naming it must still fail 42501 even though
+	/// the role now has SOME UPDATE privilege on this table.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotUpdateContentRevisionStatus()
+	{
+		string suffix = Guid.NewGuid().ToString("N")[..8];
+		Waypoint.Infrastructure.ComplianceContent.BaselineRepository ownerBaselines = new(_fixture.ConnectionString);
+		ContentRevision revision = await ownerBaselines.RecordStagedRevisionAsync(
+			$"commit-{suffix}", $"digest-{suffix}", $"revisions/digest-{suffix}", CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new(
+			"UPDATE content_revisions SET status = 'activated' WHERE id = $1", connection);
+		update.Parameters.AddWithValue(revision.Id);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check for migration 0055: the compliance runner never
+	/// activates/rolls back a baseline (ADR-0022 "the activation boundary is
+	/// exclusive") -- it gets SELECT only on <c>baselines</c>, so an INSERT as the
+	/// runner role must still fail 42501 even though it can read the table.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotInsertBaselines()
+	{
+		string suffix = Guid.NewGuid().ToString("N")[..8];
+		Waypoint.Infrastructure.ComplianceContent.BaselineRepository ownerBaselines = new(_fixture.ConnectionString);
+		ContentRevision revision = await ownerBaselines.RecordStagedRevisionAsync(
+			$"commit-{suffix}", $"digest-{suffix}", $"revisions/digest-{suffix}", CancellationToken.None);
+		Guid executionProfileId = await SeedCatalogExecutionProfileAsync(suffix);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO baselines (content_revision_id, catalog_execution_profile_id, status) VALUES ($1, $2, 'staged')", connection);
+		insert.Parameters.AddWithValue(revision.Id);
+		insert.Parameters.AddWithValue(executionProfileId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
+	/// Second least-privilege boundary check for migration 0055: even an UPDATE
+	/// attempting to flip an existing baseline to 'active' must fail 42501 as the
+	/// runner role -- activation is exclusively an owner-connection (Admin API)
+	/// operation.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotActivateBaselines()
+	{
+		string suffix = Guid.NewGuid().ToString("N")[..8];
+		Waypoint.Infrastructure.ComplianceContent.BaselineRepository ownerBaselines = new(_fixture.ConnectionString);
+		ContentRevision revision = await ownerBaselines.RecordStagedRevisionAsync(
+			$"commit-{suffix}", $"digest-{suffix}", $"revisions/digest-{suffix}", CancellationToken.None);
+		Guid executionProfileId = await SeedCatalogExecutionProfileAsync(suffix);
+		Baseline baseline = await ownerBaselines.CreateStagedBaselineAsync(revision.Id, executionProfileId, null, CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand update = new(
+			"UPDATE baselines SET status = 'active', activated_at = now(), activated_by = 'runner' WHERE id = $1", connection);
+		update.Parameters.AddWithValue(baseline.Id);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>Seeds a minimal catalog execution profile (full 0050 identity tree) for baseline tests that only need a valid FK target, not the catalog's own semantics.</summary>
+	private async Task<Guid> SeedCatalogExecutionProfileAsync(string suffix)
+	{
+		Waypoint.Infrastructure.ComplianceContent.CatalogRepository catalog = new(_fixture.ConnectionString);
+		CatalogSourceRevision sourceRevision = await catalog.UpsertSourceRevisionAsync($"role-grant-drift-source-{suffix}", null, CancellationToken.None);
+		CatalogProduct product = await catalog.UpsertProductAsync(sourceRevision.Id, "VMware vSphere", $"vsphere-{suffix}", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion productVersion = await catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "vSphere 8.0 Update 3", CancellationToken.None);
+		CatalogComponent component = await catalog.UpsertComponentAsync(
+			productVersion.Id,
+			new CatalogComponentDefinition($"vcenter-{suffix}", "vCenter Server", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null),
+			CancellationToken.None);
+		CatalogContentRelease contentRelease = await catalog.UpsertContentReleaseAsync(sourceRevision.Id, CatalogKinds.Stig, $"v2r3-stig-{suffix}", "STIG V2R3", CancellationToken.None);
+		CatalogReportGroup reportGroup = await catalog.UpsertReportGroupAsync($"vcenter-stig-{suffix}", "vCenter STIG", 3, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await catalog.CreateExecutionProfileAsync(
+			component.Id, contentRelease.Id, reportGroup.Id, "2.3.0", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		return executionProfile.Id;
+	}
+
 	private async Task SeedJobCredentialBindingAsync(Guid jobId, Guid credentialId)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
