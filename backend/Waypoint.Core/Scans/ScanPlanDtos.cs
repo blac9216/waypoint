@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Net;
+using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Errors;
 
 namespace Waypoint.Core.Scans;
@@ -126,6 +127,18 @@ public sealed record ScanPlanSkip(Guid ComponentId, string Reason, string Detail
 /// active baseline (a STIG profile lacking either is a <see cref="ScanPlanSkip"/>, not
 /// a partially-populated item -- see <see cref="ScanPlannerService"/>).
 /// </summary>
+/// <summary>
+/// <see cref="InputResolutions"/> and <see cref="AttestationResolution"/> are the
+/// issue #735/ADR-0024 config-resolution snapshot: resolved once at plan-compile time
+/// by <see cref="Waypoint.Infrastructure.ConfigDocs.PlanConfigResolutionService"/> from
+/// the Global -> Site -> Target config-doc stack keyed to
+/// <see cref="CatalogExecutionProfileId"/>, and frozen here alongside every other
+/// plan-item field -- reused by every attempt, never re-derived (ADR-0024 "The
+/// immutable snapshot is part of the planned item's compliance definition"). Both
+/// default to "no resolution attempted" (empty list / null) so a <see cref="ScanPlanItem"/>
+/// built without going through the resolver (e.g. an existing unit test fixture
+/// predating this issue) remains a valid, fully-constructible record.
+/// </summary>
 public sealed record ScanPlanItem(
 	Guid ComponentId,
 	Guid CatalogExecutionProfileId,
@@ -138,7 +151,13 @@ public sealed record ScanPlanItem(
 	int Priority,
 	string OutputKind,
 	IReadOnlyList<string> RequiredPurposes,
-	IReadOnlyList<string> DeclaredInputNames);
+	IReadOnlyList<string> DeclaredInputNames,
+	IReadOnlyList<PlanInputResolution>? InputResolutions = null,
+	PlanAttestationResolution? AttestationResolution = null)
+{
+	/// <summary>Never-null convenience accessor -- callers iterate this instead of null-checking <see cref="InputResolutions"/> everywhere.</summary>
+	public IReadOnlyList<PlanInputResolution> InputResolutionsOrEmpty => InputResolutions ?? [];
+}
 
 /// <summary>
 /// The complete, immutable, digest-addressed plan for one run (migration 0057's

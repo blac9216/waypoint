@@ -29,7 +29,7 @@ namespace Waypoint.Infrastructure.ConfigDocs;
 public sealed class ConfigDocRepository
 {
 	private const string DocProjectionSql = """
-		SELECT id, kind, profile, layer_type, layer_ref, current_version, created_at, updated_at
+		SELECT id, kind, profile, layer_type, layer_ref, current_version, created_at, updated_at, catalog_execution_profile_id
 		FROM config_docs
 		""";
 
@@ -122,6 +122,48 @@ public sealed class ConfigDocRepository
 
 		ConfigDoc? doc = await GetAsync(docId.Value, cancellationToken).ConfigureAwait(false);
 		ConfigDocVersion? latest = await GetLatestVersionAsync(docId.Value, cancellationToken).ConfigureAwait(false);
+		return doc is null || latest is null ? null : new ConfigDocWithLatestVersion(doc, latest);
+	}
+
+	/// <summary>
+	/// Issue #735/ADR-0024: the catalog-identity counterpart of
+	/// <see cref="FindWithLatestVersionAsync"/> -- looks a (kind, layer) slot up by the
+	/// stable <c>catalog_execution_profile_id</c> (migration 0060) instead of the
+	/// free-text <c>profile</c> name, for the planning-time resolver
+	/// (<see cref="PlanConfigResolutionService"/>) that connects a config document to the
+	/// exact execution item that consumes it. A doc never keyed to a catalog execution
+	/// profile (every doc created before this issue, or created after it without using
+	/// the catalog-keyed save path -- a deferred authoring-UI remainder) is invisible to
+	/// this lookup and resolves as <see cref="Waypoint.Core.ConfigDocs.ConfigResolutionStates.Missing"/>;
+	/// it does not fall back to matching on any profile name.
+	/// </summary>
+	public async Task<ConfigDocWithLatestVersion?> FindWithLatestVersionByCatalogExecutionProfileAsync(
+		string kind, Guid catalogExecutionProfileId, string layerType, Guid? layerRef, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		await using NpgsqlCommand find = new(
+			layerType == ConfigDocLayers.Global
+				? "SELECT id FROM config_docs WHERE kind = $1 AND catalog_execution_profile_id = $2 AND layer_type = 'global'"
+				: "SELECT id FROM config_docs WHERE kind = $1 AND catalog_execution_profile_id = $2 AND layer_type = $3 AND layer_ref = $4",
+			connection);
+		find.Parameters.AddWithValue(kind);
+		find.Parameters.AddWithValue(catalogExecutionProfileId);
+		if (layerType != ConfigDocLayers.Global)
+		{
+			find.Parameters.AddWithValue(layerType);
+			find.Parameters.AddWithValue(layerRef!.Value);
+		}
+
+		object? found = await find.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		if (found is not Guid docId)
+		{
+			return null;
+		}
+
+		ConfigDoc? doc = await GetAsync(docId, cancellationToken).ConfigureAwait(false);
+		ConfigDocVersion? latest = await GetLatestVersionAsync(docId, cancellationToken).ConfigureAwait(false);
 		return doc is null || latest is null ? null : new ConfigDocWithLatestVersion(doc, latest);
 	}
 
@@ -279,7 +321,8 @@ public sealed class ConfigDocRepository
 	/// the caller (the API layer checks the referenced site/target exists) before this runs.
 	/// </summary>
 	public async Task<(ConfigDocSaveOutcome Outcome, ConfigDoc? Doc, ConfigDocVersion? Version)> SaveAsync(
-		Guid id, string kind, string profile, string layerType, Guid? layerRef, string author, string bodyYaml, CancellationToken cancellationToken)
+		Guid id, string kind, string profile, string layerType, Guid? layerRef, string author, string bodyYaml, CancellationToken cancellationToken,
+		Guid? catalogExecutionProfileId = null)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(kind);
 		ArgumentException.ThrowIfNullOrWhiteSpace(profile);
@@ -305,7 +348,7 @@ public sealed class ConfigDocRepository
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-		Guid docId = await FindOrCreateDocAsync(connection, transaction, id, kind, profile, layerType, layerRef, cancellationToken).ConfigureAwait(false);
+		Guid docId = await FindOrCreateDocAsync(connection, transaction, id, kind, profile, layerType, layerRef, catalogExecutionProfileId, cancellationToken).ConfigureAwait(false);
 		ConfigDocVersion version = (await SaveVersionAsync(connection, transaction, docId, author, bodyYaml, cancellationToken).ConfigureAwait(false))!;
 
 		await using NpgsqlCommand select = new($"{DocProjectionSql} WHERE id = $1", connection, transaction);
@@ -341,7 +384,8 @@ public sealed class ConfigDocRepository
 	/// already did earlier in the transaction) and re-read.
 	/// </summary>
 	private static async Task<Guid> FindOrCreateDocAsync(
-		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid id, string kind, string profile, string layerType, Guid? layerRef, CancellationToken cancellationToken)
+		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid id, string kind, string profile, string layerType, Guid? layerRef,
+		Guid? catalogExecutionProfileId, CancellationToken cancellationToken)
 	{
 		Guid? existing = await FindDocIdAsync(connection, transaction, kind, profile, layerType, layerRef, cancellationToken).ConfigureAwait(false);
 		if (existing.HasValue)
@@ -353,12 +397,13 @@ public sealed class ConfigDocRepository
 		await transaction.SaveAsync(SavepointName, cancellationToken).ConfigureAwait(false);
 
 		await using NpgsqlCommand insert = new(
-			"INSERT INTO config_docs (id, kind, profile, layer_type, layer_ref) VALUES ($1, $2, $3, $4, $5) RETURNING id", connection, transaction);
+			"INSERT INTO config_docs (id, kind, profile, layer_type, layer_ref, catalog_execution_profile_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", connection, transaction);
 		insert.Parameters.AddWithValue(id);
 		insert.Parameters.AddWithValue(kind);
 		insert.Parameters.AddWithValue(profile);
 		insert.Parameters.AddWithValue(layerType);
 		insert.Parameters.AddWithValue((object?)layerRef ?? DBNull.Value);
+		insert.Parameters.AddWithValue((object?)catalogExecutionProfileId ?? DBNull.Value);
 
 		try
 		{
@@ -420,7 +465,8 @@ public sealed class ConfigDocRepository
 			reader.IsDBNull(4) ? null : reader.GetGuid(4),
 			reader.GetInt32(5),
 			reader.GetFieldValue<DateTimeOffset>(6),
-			reader.GetFieldValue<DateTimeOffset>(7));
+			reader.GetFieldValue<DateTimeOffset>(7),
+			reader.IsDBNull(8) ? null : reader.GetGuid(8));
 	}
 
 	private static ConfigDocVersion MapVersion(NpgsqlDataReader reader)

@@ -82,6 +82,38 @@ public static class ScanPlanDigest
 				builder.Append(inputName).Append(',');
 			}
 
+			// Issue #735/ADR-0024: fold the resolved config snapshot into the digest too --
+			// a re-plan against the same catalog/baseline state but a DIFFERENT resolved
+			// config-doc (an operator edited/added an Input or Attestation between two
+			// otherwise-identical plan compiles) must not silently collide on the same
+			// digest. Sorted by input name (never by insertion order) so the digest stays
+			// independent of PlanConfigResolutionService's own declared-input iteration
+			// order, matching every other list in this builder.
+			builder.Append('|');
+			foreach (Waypoint.Core.ConfigDocs.PlanInputResolution input in item.InputResolutionsOrEmpty.OrderBy(r => r.InputName, StringComparer.Ordinal))
+			{
+				builder
+					.Append(input.InputName).Append(':')
+					.Append(input.State).Append(':')
+					.Append(input.DocId?.ToString() ?? "-").Append(':')
+					.Append(input.DocVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "-").Append(',');
+			}
+
+			builder.Append('|');
+			if (item.AttestationResolution is { } attestation)
+			{
+				builder
+					.Append(attestation.State).Append(':')
+					.Append(attestation.DocId?.ToString() ?? "-").Append(':')
+					.Append(attestation.DocVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "-").Append(':')
+					.Append(attestation.Applied).Append(':')
+					.Append(attestation.Expired);
+			}
+			else
+			{
+				builder.Append('-');
+			}
+
 			builder.Append(']');
 		}
 

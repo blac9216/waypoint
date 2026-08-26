@@ -354,6 +354,12 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Runs.ScopeResolutionService>();
 			services.AddSingleton<IRunScopeSnapshotRepository>(new Runs.RunScopeSnapshotRepository(connectionString));
 
+			// Issue #735 (epic #726 Wave 2, ADR-0024): resolves each plan item's
+			// Input/Attestation config-doc snapshot against the stable catalog
+			// execution-profile identity (migration 0060) -- a dependency of
+			// ScanPlannerService below, not called directly by any controller.
+			services.AddSingleton<ConfigDocs.PlanConfigResolutionService>();
+
 			// Issue #734 (epic #726 Wave 2, ADR-0023/0024): compiles a resolved
 			// component scope into the immutable, digest-addressed execution plan
 			// (migration 0057) -- the join-and-validate step above scope resolution,

@@ -15,6 +15,9 @@
 using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Components;
 using Waypoint.Core.Scans;
+using Waypoint.Core.Sites;
+using Waypoint.Infrastructure.ConfigDocs;
+using Waypoint.Infrastructure.Sites;
 
 namespace Waypoint.Infrastructure.Runs;
 
@@ -80,15 +83,26 @@ public sealed class ScanPlannerService
 	private readonly IComponentRepository _components;
 	private readonly ICatalogRepository _catalog;
 	private readonly IBaselineRepository _baselines;
+	private readonly TargetRepository _targets;
+	private readonly PlanConfigResolutionService _configResolution;
 
-	public ScanPlannerService(IComponentRepository components, ICatalogRepository catalog, IBaselineRepository baselines)
+	public ScanPlannerService(
+		IComponentRepository components,
+		ICatalogRepository catalog,
+		IBaselineRepository baselines,
+		TargetRepository targets,
+		PlanConfigResolutionService configResolution)
 	{
 		ArgumentNullException.ThrowIfNull(components);
 		ArgumentNullException.ThrowIfNull(catalog);
 		ArgumentNullException.ThrowIfNull(baselines);
+		ArgumentNullException.ThrowIfNull(targets);
+		ArgumentNullException.ThrowIfNull(configResolution);
 		_components = components;
 		_catalog = catalog;
 		_baselines = baselines;
+		_targets = targets;
+		_configResolution = configResolution;
 	}
 
 	/// <summary>
@@ -207,6 +221,26 @@ public sealed class ScanPlannerService
 				.Select(i => i.Name)
 				.OrderBy(n => n, StringComparer.Ordinal)];
 
+			// Issue #735/ADR-0024: resolve this item's Input/Attestation config-doc
+			// snapshot NOW, at plan-compile time, from the target's own site -- the same
+			// "resolve once, freeze forever" discipline this method already applies to
+			// baseline/benchmark identity above. A component with no resolvable target
+			// (should not happen -- ON DELETE RESTRICT from components.parent_target_id
+			// -- defensive only) skips config resolution rather than failing the whole
+			// plan; the item still plans with an empty snapshot, matching
+			// ScanPlanItem's "no resolution attempted" default.
+			Target? target = await _targets.GetAsync(component.ParentTargetId, cancellationToken).ConfigureAwait(false);
+			IReadOnlyList<Waypoint.Core.ConfigDocs.PlanInputResolution>? inputResolutions = null;
+			Waypoint.Core.ConfigDocs.PlanAttestationResolution? attestationResolution = null;
+			if (target is not null)
+			{
+				PlanConfigResolution configResolution = await _configResolution.ResolveAsync(
+					profile.ExecutionProfile.Id, target.SiteId, componentId, declaredInputs, DateTimeOffset.UtcNow, cancellationToken)
+					.ConfigureAwait(false);
+				inputResolutions = configResolution.Inputs;
+				attestationResolution = configResolution.Attestation;
+			}
+
 			ScanPlanItem item = new(
 				ComponentId: componentId,
 				CatalogExecutionProfileId: profile.ExecutionProfile.Id,
@@ -219,7 +253,9 @@ public sealed class ScanPlannerService
 				Priority: profile.ReportGroup.Priority,
 				OutputKind: profile.ExecutionProfile.OutputKind,
 				RequiredPurposes: purposes,
-				DeclaredInputNames: declaredInputs);
+				DeclaredInputNames: declaredInputs,
+				InputResolutions: inputResolutions,
+				AttestationResolution: attestationResolution);
 
 			return (item, null);
 		}
