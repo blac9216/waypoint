@@ -32,6 +32,16 @@
 #                  pscustomobject's NoteProperties (the live-vCenter reproduction in
 #                  #618): emits PSObjects with no Type/MoRef/Name at all. This must
 #                  fail the job instead of reporting "Discovered 0 item(s)".
+#
+# Issue #865 adds the trailing discovery-meta completeness marker every pass now
+# emits (mirroring the real Invoke-WaypointDiscovery's new output contract), plus a
+# dedicated 'partial' pass:
+#   'partial'   -- simulates a non-terminating per-subtree PowerCLI error (an
+#                  unreachable ESXi host): reports only cluster + host-11 + vm-101
+#                  (host-12 is dropped, as if its subtree failed) and a
+#                  discovery-meta marker with Complete = $false and a fabricated
+#                  error message. DiscoverJobHandler must upsert/refresh the seen
+#                  objects but NOT mark host-12 removed/absent.
 
 function Invoke-WaypointDiscovery {
 	[CmdletBinding()]
@@ -63,6 +73,7 @@ function Invoke-WaypointDiscovery {
 
 	if ($Pass -eq 'empty') {
 		Write-Information 'Discovery complete.'
+		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
 		return
 	}
 
@@ -74,6 +85,7 @@ function Invoke-WaypointDiscovery {
 		[pscustomobject]@{}
 		[pscustomobject]@{}
 		Write-Information 'Discovery complete.'
+		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
 		return
 	}
 
@@ -90,16 +102,33 @@ function Invoke-WaypointDiscovery {
 		ParentMoRef = 'host-11'; Build = '12345'; MaintenanceMode = $null
 	}
 
-	if ($Pass -eq '1') {
-		# Only present on pass 1 -- pass 2 omitting it is what the removal-detection
-		# test asserts gets marked removed_at.
-		[pscustomobject]@{
-			Type = 'host'; MoRef = 'host-12'; Name = 'esxi-02.example.internal'
-			ParentMoRef = 'domain-c1'; Build = '99.0.12345678'; MaintenanceMode = $true
+	if ($Pass -eq '1' -or $Pass -eq 'partial') {
+		# Present on pass 1 and (see below) reported as PRESENT going into a 'partial'
+		# pass's prior state -- pass 2 (and 'partial' itself) omitting it from THIS
+		# pass's own output is what the removal/absence-detection tests assert on: pass
+		# 2 must mark it removed/absent (complete pass), 'partial' must NOT (incomplete
+		# pass, ADR-0023 unverified cache).
+		if ($Pass -eq '1') {
+			[pscustomobject]@{
+				Type = 'host'; MoRef = 'host-12'; Name = 'esxi-02.example.internal'
+				ParentMoRef = 'domain-c1'; Build = '99.0.12345678'; MaintenanceMode = $true
+			}
 		}
 	}
 
 	Write-Information 'Discovery complete.'
+
+	if ($Pass -eq 'partial') {
+		# Issue #865: host-12's subtree "failed" (never enumerated this pass) --
+		# Complete = $false is the explicit signal DiscoverJobHandler gates absence on.
+		[pscustomobject]@{
+			Type     = 'discovery-meta'
+			Complete = $false
+			Errors   = @("Host enumeration failed under cluster 'stub-cluster-01': invented-unreachable-esxi-02-error")
+		}
+	} else {
+		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
+	}
 }
 
 Export-ModuleMember -Function Invoke-WaypointDiscovery

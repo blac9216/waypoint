@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Diagnostics;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -236,6 +237,75 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		// The prior successful pass's 4 active components must be entirely unchanged --
 		// no new absence, no reconnect, no mutation of any kind from the failed pass.
 		await AssertComponentCountAsync(targetId, expectedActive: 4);
+	}
+
+	/// <summary>
+	/// Issue #865 (ADR-0023 completeness gap): a partial vSphere enumeration -- the
+	/// stub's 'partial' pass, standing in for a non-terminating per-subtree PowerCLI
+	/// error (unreachable ESXi/permission-denied cluster) -- still reports
+	/// <c>succeeded == true</c> with only the objects it COULD enumerate (host-12's
+	/// subtree dropped) but must NOT mass-mark host-12 removed/absent on either the
+	/// inventory or component path. The job itself still reaches 'done' (a partial
+	/// boundary is not a hard failure per ADR-0023 -- it retains earlier rows as
+	/// unverified cache and raises a diagnostic, it does not fail the job), and the
+	/// diagnostic must land in job.log.
+	/// </summary>
+	[Fact]
+	public async Task PartialEnumeration_RefreshesSeenObjects_ButNeverAdvancesAbsence_OnEitherPath()
+	{
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-partial-canary");
+
+		// Pass 1: full inventory (cluster + host-11 + vm-101 + host-12) -- establishes
+		// host-12 as a previously-seen, currently-active row/component.
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1");
+		await RunDiscoverOnceAsync(targetId);
+		await AssertInventoryCountAsync(targetId, expectedActive: 4);
+		await AssertComponentCountAsync(targetId, expectedActive: 4);
+
+		// Pass 2: 'partial' -- host-12 is not reported (its subtree "failed"), and the
+		// module's discovery-meta marker says Complete = $false.
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "partial");
+		Guid partialRunId = await RunDiscoverOnceAsync(targetId);
+		Guid partialJobId = await GetJobIdForRunAsync(partialRunId);
+
+		// The job still reaches 'done' -- a partial boundary is not a hard failure.
+		Assert.Equal("done", await GetJobFieldAsync(partialJobId, "state"));
+
+		// host-12 must still be active/not-removed on BOTH paths -- absence was not
+		// advanced despite this pass not reporting it.
+		await AssertInventoryCountAsync(targetId, expectedActive: 4);
+		InventoryItem host12AfterPartial = (await GetItemByMorefAsync(targetId, "host-12"))!;
+		Assert.Null(host12AfterPartial.RemovedAt);
+		await AssertComponentCountAsync(targetId, expectedActive: 4);
+		IReadOnlyList<Waypoint.Core.Components.Component> componentsAfterPartial =
+			await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		Waypoint.Core.Components.Component host12Component = componentsAfterPartial.Single(c => c.VendorIdentity == "host-12");
+		Assert.Equal(Waypoint.Core.Components.ComponentLifecycleStates.Active, host12Component.Lifecycle);
+		Assert.Null(host12Component.ContinuousAbsenceSince);
+
+		// The cluster/vm-101/host-11 objects the partial pass DID see are still
+		// refreshed (upserted), not merely left alone -- last_seen_at moved forward.
+		InventoryItem host11AfterPartial = (await GetItemByMorefAsync(targetId, "host-11"))!;
+		Assert.True(host11AfterPartial.LastSeenAt > host11AfterPartial.CreatedAt || host11AfterPartial.LastSeenAt == host11AfterPartial.UpdatedAt);
+
+		// The partial-failure diagnostic reached job.log (issue #865's alert path).
+		string jobLogText = await GetJobLogTextAsync(partialJobId);
+		Assert.Contains("partial vSphere enumeration", jobLogText, StringComparison.Ordinal);
+		Assert.Contains("invented-unreachable-esxi-02-error", jobLogText, StringComparison.Ordinal);
+
+		// The job's own note also names the partial pass (visible in job history without
+		// digging into job_events).
+		string note = await GetJobNoteAsync(partialJobId);
+		Assert.Contains("PARTIAL enumeration", note, StringComparison.Ordinal);
+
+		// Immediately after: a genuinely COMPLETE pass (back to '2') must still be able
+		// to advance absence normally -- the gate is per-pass, not sticky.
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "2");
+		await RunDiscoverOnceAsync(targetId);
+		await AssertInventoryCountAsync(targetId, expectedActive: 3);
+		await AssertItemRemovedAsync(targetId, "host-12");
+		await AssertComponentCountAsync(targetId, expectedActive: 3);
+		await AssertComponentAbsentAsync(targetId, "host-12");
 	}
 
 	[Fact]
@@ -523,6 +593,20 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		await using NpgsqlCommand query = new($"SELECT {field}::text FROM jobs WHERE id = $1", connection);
 		query.Parameters.AddWithValue(jobId);
 		return (string)(await query.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>Concatenates every job.log event's payload for a job (issue #865: asserting the partial-enumeration warning line landed there).</summary>
+	private async Task<string> GetJobLogTextAsync(Guid jobId)
+	{
+		await Task.Delay(TimeSpan.FromMilliseconds(300)); // BufferedJobEventWriter flush window.
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"SELECT string_agg(payload::text, ' | ') FROM job_events WHERE job_id = $1 AND event_type = $2", connection);
+		query.Parameters.AddWithValue(jobId);
+		query.Parameters.AddWithValue(JobEventTypes.JobLog);
+		object? result = await query.ExecuteScalarAsync();
+		return result as string ?? string.Empty;
 	}
 
 	private async Task<string> GetJobNoteAsync(Guid jobId)

@@ -76,7 +76,7 @@ public sealed class ComponentRepository : IComponentRepository
 	}
 
 	public async Task<ComponentUpsertOutcome> UpsertDiscoveredAsync(
-		Guid targetId, IReadOnlyList<DiscoveredComponent> items, CancellationToken cancellationToken)
+		Guid targetId, IReadOnlyList<DiscoveredComponent> items, CancellationToken cancellationToken, bool advanceAbsence = true)
 	{
 		ArgumentNullException.ThrowIfNull(items);
 
@@ -243,11 +243,18 @@ public sealed class ComponentRepository : IComponentRepository
 		// only setting continuous_absence_since when it is currently NULL) and was not
 		// reported this pass. Retired components are left retired (ADR-0023: retirement
 		// is not re-derived every pass).
+		//
+		// Issue #865: skipped entirely when advanceAbsence is false -- a partial
+		// discovery boundary (some subtree failed to enumerate) upserts what it DID see
+		// above (unverified-cache refresh) but must not read its incomplete view as
+		// proof that anything else is gone (ADR-0023 "neither claims completeness nor
+		// advances absence").
 		int markedAbsent = 0;
-		await using (NpgsqlCommand loadCandidates = new(
-			"SELECT id, vendor_identity, catalog_component_key, parent_component_id FROM components WHERE parent_target_id = $1 AND lifecycle <> 'retired'",
-			connection, transaction))
+		if (advanceAbsence)
 		{
+			await using NpgsqlCommand loadCandidates = new(
+				"SELECT id, vendor_identity, catalog_component_key, parent_component_id FROM components WHERE parent_target_id = $1 AND lifecycle <> 'retired'",
+				connection, transaction);
 			loadCandidates.Parameters.AddWithValue(targetId);
 			List<(Guid Id, string? VendorIdentity, string CatalogKey, Guid? ParentComponentId)> candidates = [];
 			await using (NpgsqlDataReader reader = await loadCandidates.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
