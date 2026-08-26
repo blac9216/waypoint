@@ -93,14 +93,19 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 			CancellationToken.None);
 		_profileId = (await _profiles.ListAsync(CancellationToken.None)).Single().Id;
 
+		Waypoint.Infrastructure.Components.ComponentRepository componentRepository = new(_fixture.ConnectionString);
+		CatalogRepository catalogRepository = new(_fixture.ConnectionString);
+		BaselineRepository baselineRepository = new(_fixture.ConnectionString);
 		RunCreationService runCreation = new(
 			jobs, _sites, _targets,
 			new TargetCredentialBindingRepository(_fixture.ConnectionString),
 			new Waypoint.Infrastructure.Secrets.CredentialRepository(_fixture.ConnectionString),
 			_profiles,
 			runSecrets, Options.Create(new DiscoveryOptions()), Options.Create(new RunSecretOptions()),
-			new ScopeResolutionService(_targets, new Waypoint.Infrastructure.Components.ComponentRepository(_fixture.ConnectionString), new CatalogRepository(_fixture.ConnectionString)),
-			new RunScopeSnapshotRepository(_fixture.ConnectionString));
+			new ScopeResolutionService(_targets, componentRepository, catalogRepository),
+			new RunScopeSnapshotRepository(_fixture.ConnectionString),
+			new ScanPlannerService(componentRepository, catalogRepository, baselineRepository),
+			new ScanPlanRepository(_fixture.ConnectionString));
 
 		IApplianceStateRepository applianceState = new ApplianceStateRepository(_fixture.ConnectionString);
 		_dispatch = new ScheduleDispatchService(_schedules, jobs, applianceState, runCreation, NullLogger<ScheduleDispatchService>.Instance);

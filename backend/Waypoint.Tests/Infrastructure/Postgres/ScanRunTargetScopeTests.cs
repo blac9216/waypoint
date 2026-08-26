@@ -88,6 +88,15 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 				services.AddSingleton<ScopeResolutionService>();
 				services.AddSingleton<IRunScopeSnapshotRepository>(new RunScopeSnapshotRepository(_connectionString));
 
+				// Issue #734: RunCreationService now also depends on the plan
+				// compiler/repository -- registered here for the same reason every
+				// other RunCreationService dependency is re-registered against this
+				// factory's own connection string rather than inheriting Program.cs's
+				// composition.
+				services.AddSingleton<Waypoint.Core.ComplianceContent.IBaselineRepository>(new BaselineRepository(_connectionString));
+				services.AddSingleton<ScanPlannerService>();
+				services.AddSingleton<Waypoint.Core.Scans.IScanPlanRepository>(new ScanPlanRepository(_connectionString));
+
 				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{
 					var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
@@ -211,18 +220,34 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		Assert.Empty(snapshot.Omissions);
 	}
 
-	/// <summary>Seeds one complete compatible catalog chain -- mirrors <see cref="ScopeResolutionServiceTests.SeedCompatibleCatalogComponentAsync"/> for this HTTP-level suite.</summary>
+	/// <summary>
+	/// Seeds one complete compatible catalog chain WITH an active SRG baseline --
+	/// mirrors <see cref="ScopeResolutionServiceTests.SeedCompatibleCatalogComponentAsync"/>
+	/// for this HTTP-level suite, plus the issue #734 planner's own requirement (a
+	/// scope-resolved-runnable component must also have an active baseline to become
+	/// an accepted plan item, or run creation now rejects it with
+	/// <c>no_plannable_component</c>). SRG (no benchmark reference) keeps this fixture
+	/// minimal; the STIG/benchmark-mapping paths are covered by
+	/// <c>ScanPlannerServiceTests</c>.
+	/// </summary>
 	private async Task<Guid> SeedCompatibleCatalogComponentAsync()
 	{
 		CatalogRepository catalog = new(_fixture.ConnectionString);
+		BaselineRepository baselines = new(_fixture.ConnectionString);
 		CatalogSourceRevision source = await catalog.UpsertSourceRevisionAsync($"rev-{Guid.NewGuid():N}", null, CancellationToken.None);
 		CatalogProduct product = await catalog.UpsertProductAsync(source.Id, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
 		CatalogProductVersion productVersion = await catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
 		CatalogComponent catalogComponent = await catalog.UpsertComponentAsync(
 			productVersion.Id, new CatalogComponentDefinition("esxi", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
-		CatalogContentRelease release = await catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Stig, $"release-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
+		CatalogContentRelease release = await catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Srg, $"release-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
 		CatalogReportGroup reportGroup = await catalog.UpsertReportGroupAsync($"group-{Guid.NewGuid():N}", "Test Group", 1, CancellationToken.None);
-		await catalog.CreateExecutionProfileAsync(catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await catalog.CreateExecutionProfileAsync(
+			catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+
+		ContentRevision revision = await baselines.RecordStagedRevisionAsync(
+			$"commit-{Guid.NewGuid():N}", $"digest-{Guid.NewGuid():N}", $"revisions/{Guid.NewGuid():N}", CancellationToken.None);
+		Baseline staged = await baselines.CreateStagedBaselineAsync(revision.Id, executionProfile.Id, benchmarkRevisionId: null, CancellationToken.None);
+		await baselines.ActivateAsync(staged.Id, "test-fixture", CancellationToken.None);
 
 		return catalogComponent.Id;
 	}
@@ -249,6 +274,82 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		HttpResponseMessage listResponse = await SendAsync(HttpMethod.Get, "/api/v1/runs", "Viewer", body: null);
 		using JsonDocument list = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync());
 		Assert.Empty(list.RootElement.EnumerateArray());
+	}
+
+	[Fact]
+	public async Task CreateScanRun_WhenPlanCompileHitsAnIntegrityViolation_FailsClosed_NoRunOrJobRowsPersisted()
+	{
+		// Round-2 review of PR #857 (finding 2), the taxonomy split's negative proof at
+		// the HTTP boundary: a resolved-runnable component whose active baseline is
+		// internally inconsistent (an SRG execution profile whose active baseline carries
+		// a benchmark revision -- corrupt catalog state) must fail the WHOLE run creation
+		// closed with a distinct plan_integrity_failure diagnostic, NOT silently drop the
+		// component as a skip. Because RunCreationService compiles the plan BEFORE
+		// creating the run row, zero run/job rows are persisted.
+		Guid siteId = await CreateSiteAsync("integrity-fail-site");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		Guid catalogComponentId = await SeedCorruptSrgCatalogComponentAsync();
+		await _components.UpsertDiscoveredAsync(
+			targetId, [new DiscoveredComponent("esxi", "host-integrity-9001", "esxi-integrity.example.internal", null, catalogComponentId, "8.0.3")], CancellationToken.None);
+		Component seeded = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None)).Single();
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			profile_id = _profileId,
+			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
+		});
+
+		Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "plan_integrity_failure");
+
+		// Fail-closed: no run row (and therefore no job/plan/snapshot rows) was created.
+		HttpResponseMessage listResponse = await SendAsync(HttpMethod.Get, "/api/v1/runs", "Viewer", body: null);
+		using JsonDocument list = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync());
+		Assert.Empty(list.RootElement.EnumerateArray());
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand jobCount = new("SELECT COUNT(*) FROM jobs", connection);
+		Assert.Equal(0L, (long)(await jobCount.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// Seeds one complete SRG catalog chain whose active baseline is deliberately corrupt:
+	/// it carries a benchmark revision an SRG profile can never legitimately have (ADR-0022,
+	/// no XCCDF benchmark concept for SRG). Restores nothing -- the corruption is the point
+	/// -- so the planner's integrity guard fires. Mirror of
+	/// <see cref="SeedCompatibleCatalogComponentAsync"/> with the one poisoned field.
+	/// </summary>
+	private async Task<Guid> SeedCorruptSrgCatalogComponentAsync()
+	{
+		CatalogRepository catalog = new(_fixture.ConnectionString);
+		BaselineRepository baselines = new(_fixture.ConnectionString);
+		BenchmarkRepository benchmarks = new(_fixture.ConnectionString);
+		CatalogSourceRevision source = await catalog.UpsertSourceRevisionAsync($"rev-{Guid.NewGuid():N}", null, CancellationToken.None);
+		CatalogProduct product = await catalog.UpsertProductAsync(source.Id, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion productVersion = await catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
+		CatalogComponent catalogComponent = await catalog.UpsertComponentAsync(
+			productVersion.Id, new CatalogComponentDefinition("esxi", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
+		// SRG content release => execution profile has NO benchmark reference (SRG).
+		CatalogContentRelease release = await catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Srg, $"release-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await catalog.UpsertReportGroupAsync($"group-{Guid.NewGuid():N}", "Test Group", 1, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await catalog.CreateExecutionProfileAsync(
+			catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+
+		Waypoint.Core.ComplianceContent.Xccdf.BenchmarkImportCandidate candidate = new(
+			$"invented-stray-{Guid.NewGuid():N}", "Stray Benchmark", "V1", "R1", $"digest-{Guid.NewGuid():N}", []);
+		Waypoint.Core.ComplianceContent.Xccdf.BenchmarkRevision strayBenchmark = await benchmarks.ImportRevisionAsync(
+			candidate, Waypoint.Core.ComplianceContent.Xccdf.BenchmarkSources.ManualUpload, CancellationToken.None);
+
+		ContentRevision revision = await baselines.RecordStagedRevisionAsync(
+			$"commit-{Guid.NewGuid():N}", $"digest-{Guid.NewGuid():N}", $"revisions/{Guid.NewGuid():N}", CancellationToken.None);
+		// The poison: an SRG profile's active baseline staged WITH a benchmark revision.
+		Baseline staged = await baselines.CreateStagedBaselineAsync(revision.Id, executionProfile.Id, benchmarkRevisionId: strayBenchmark.Id, CancellationToken.None);
+		await baselines.ActivateAsync(staged.Id, "test-fixture", CancellationToken.None);
+
+		return catalogComponent.Id;
 	}
 
 	[Fact]
@@ -355,7 +456,8 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 		await using NpgsqlCommand truncate = new(
-			"TRUNCATE TABLE run_scope_snapshots, component_observations, components, jobs, runs, targets, sites, " +
+			"TRUNCATE TABLE scan_plan_items, scan_plans, run_scope_snapshots, component_observations, components, jobs, runs, targets, sites, " +
+			"baselines, content_revisions, benchmark_component_mappings, benchmark_rules, benchmark_revisions, " +
 			"catalog_execution_profiles, catalog_report_groups, catalog_content_releases, catalog_components, " +
 			"catalog_product_versions, catalog_products, catalog_source_revisions RESTART IDENTITY CASCADE", connection);
 		await truncate.ExecuteNonQueryAsync();
