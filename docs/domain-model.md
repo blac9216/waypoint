@@ -19,6 +19,10 @@ erDiagram
     RUN ||--|| COMPLIANCE_PLAN : "planned scan"
     COMPLIANCE_PLAN ||--o{ PLANNED_COMPONENT_ITEM : freezes
     PLANNED_COMPONENT_ITEM }o--|| COMPONENT : references
+    RUN ||--|| EVIDENCE_GRAPH : owns
+    EVIDENCE_GRAPH ||--o{ FINDING : records
+    EVIDENCE_GRAPH ||--o{ ARTIFACT : retains
+    ARTIFACT ||--o{ UPLOAD_ATTEMPT : uploads
     JOB }o--|| TARGET : against
     RUN }o--|| SITE : scopes
     RUN }o--|| USER : "initiated by"
@@ -134,6 +138,80 @@ Plans/items and omissions are append-only. Later discovery, configuration, activ
 retirement, or purge cannot rewrite them. Retry uses the same planned item; resolving
 current state creates a new run. Jobs and ordered attempts are separate execution
 records defined by #807 rather than mutable plan fields.
+
+### Trust policy and temporary SSH obligation (planned)
+
+`ManagedTrustBundle` is versioned Admin-managed public CA material. A
+`ConnectionTrustPolicy` selects a bundle or an explicit scoped verification bypass
+for exactly one target/service connection. Bypass records actor/time/reason, version,
+and warning state. `PlannedComponentItem` freezes its policy reference; materialized
+trust is job-local and never changes process-global validation.
+
+`PlannedComponentItem` freezes planning-time SSH availability and observation
+provenance, temporary-enablement authorization/policy version, exact catalog
+capability/provider identity and version, and management-credential purpose.
+`TemporarySshObligation` exists only for that frozen opted-in decision and provider.
+Immediately before mutation the runner re-observes the service and durably records
+planned item/attempt, provider, management purpose, original runtime state/provenance,
+intent, and the cleanup obligation before changing state. It also records mutation
+time, restore state/attempts, and last safe error.
+`not_required | pending_enable | enabled | restore_pending | restored | cleanup_failed`
+is durable across leases and restarts. `cleanup_failed` is prominent and retryable;
+new scan attempts cannot erase it. An unresolved restore blocks another temporary
+mutation of that same service until reconciled or safely re-observed and re-established
+under the existing obligation; it does not block independent siblings and never forks
+into sibling obligations. Only an originally disabled service is restored to disabled;
+an originally enabled service is never disabled. This obligation is the audited
+access-state exception to otherwise read-only scan effects, not remediation execution.
+
+### Compliance evidence graph (planned)
+
+`ComplianceEvidenceGraph` is the retention and integrity root for one run. It owns or
+immutably references:
+
+- requested/resolved scope, coverage ledger and omissions, plan/items, jobs and all
+  attempts with redacted events/logs and cleanup outcomes;
+- one complete current control ledger/artifact projection for every planned exact-
+  baseline component, with one `ControlFinding` per applicable control, plus distinctly
+  historical prior-attempt findings and applied `AttestationSnapshot` provenance;
+- exact-baseline HDF, STIG-only CKL, and artifact digests/provenance; and
+- direct `StigManagerUploadAttempt` records and receipts.
+
+`ControlFinding` keeps compliance disposition separate from execution status. A
+completed check may be compliant or noncompliant. Readiness that fails before job
+creation and a job with zero attempts still synthesize the complete current exact-
+baseline projection without inventing a job or attempt. Every applicable unexecuted
+check, or non-automatable control without valid attestation, occurs exactly once as
+`Not_Reviewed` with a safe reason. It is never
+omitted, duplicated, or converted to `Not_Applicable`. `CoverageOmission` represents
+component/boundary work that never became executable and is aggregated separately.
+Historical attempt findings remain immutable and do not count as duplicate rows in
+the explicitly identified current projection.
+
+Every STIG artifact binds the same exact profile, XCCDF benchmark/mapping, and control
+set in both HDF and CKL. An SRG binds its exact profile closure in HDF only. Uploads
+reference the immutable CKL plus frozen destination/collection and retain request
+attempt, safe status/error class, actor, conflict/idempotency outcome, and only bounded
+allowlisted sanitized response metadata/body fields and receipt identifiers. Secret/
+identifier redaction is fail-closed; authorization/session headers and unbounded raw
+responses are never retained. The allowed evidence remains sufficient for retry,
+conflict/idempotency audit, and diagnosis; #785 owns exact wire fields. Failure leaves
+the artifact retryable without a scan; there is no watched-directory lifecycle.
+
+`ComplianceRetentionPolicy` is one appliance-wide Admin setting, default six months.
+Changes are prospective, versioned, audited, and visible before processing. A run and
+every graph member become eligible and purge as one logical unit; cleanup is retryable
+but readers never observe retained rows pointing to missing graph members. A durable
+`CompliancePurgeTombstone` records identity, policy version, trigger/actor, time, and
+outcome. Optional `RetentionHold` remains #784 and, if implemented, covers this entire
+root rather than fragments.
+
+The one legacy transition preserves historical runs as legacy evidence and includes
+configured schedules/saved intent. It deterministically translates one only when its
+exact requested scope is preserved; otherwise it disables or blocks the record as
+action-required and audits that disposition before legacy fallback removal. Scope is
+never silently widened or narrowed. #785 owns endpoint, RBAC, and transition wire
+shapes; no permanent adapter or dual representation remains.
 
 **Credential purposes and bindings (end state planned —
 [ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
@@ -277,8 +355,9 @@ state, timing, and redacted event/log diagnostics. Durable outputs belong to dom
 Live Jobs and generic history may link to these objects but do not duplicate their
 management actions. Removing operational history cannot implicitly delete a domain
 object; destructive domain cleanup is separately authorized, audited, and retryable
-([ADR-0019](adr/0019-global-job-observability.md)). Retention duration for both layers
-remains an operator-policy decision.
+([ADR-0019](adr/0019-global-job-observability.md)). For planned compliance scans,
+ADR-0025 sets the graph-wide six-month default above. Other job families retain their
+existing domain ownership and generic-history rules.
 
 #### Operational vs. domain retention ownership (issue #592, epic #588's last child)
 
@@ -343,6 +422,11 @@ call after purge is unaffected. Every other type in the table below (`None` gate
 eligible once terminal and aged, identically to what an Admin could already do by hand
 via the same endpoint.
 
+ADR-0025's planned compliance retention supersedes the shipped exclusion from
+automatic compliance cleanup: implementation adds graph-wide eligibility and
+tombstoning without reusing generic history deletion as a fragmentary purge. This is
+one migration of existing compliance records, not a parallel retention model.
+
 ### Per-control compliance settings
 
 📋 **Planned** (ADR-0024). The shipped profile-wide configuration-document shortcut is
@@ -393,7 +477,8 @@ explicit Admin action. See [ADR-0015](adr/0015-source-build-and-operator-export.
 
 ### STIG Manager connection
 Global default connection, optional per-site override (different enclaves may report to
-different STIG Manager instances).
+different STIG Manager instances). Eligible CKL upload is job-owned and direct; its
+attempts and receipts belong to the evidence graph and remain retryable while retained.
 
 ## Roles
 
@@ -406,9 +491,10 @@ different STIG Manager instances).
 
 Rationale notes:
 
-- Scans are read-only *in effect* (InSpec does log into systems and run commands, but
-  changes nothing), which is why Cyber may initiate them with service credentials and
-  why they are schedulable.
+- Scans are read-only *in effect* except for ADR-0025's Admin-configured,
+  catalog-gated temporary SSH access mutation with mandatory restoration. Checks do
+  not remediate; the narrow mutation is separately audited and cleanup-owned. This is
+  why scans remain schedulable.
 - **Remediation is Admin-only in v1** (decided 2026-08-02 at design reconciliation;
   revisit only if it creates real workflow friction). It is never schedulable and
   always requires typed confirmation (`REMEDIATE`, as today).
@@ -426,10 +512,9 @@ design, not by configuration.
 
 ## Open questions (to resolve before build)
 
-1. **Cyber scan scope**: can Cyber scope a scan to arbitrary host/VM subsets, or only
-   run site/product-level scans as configured?
-2. **Retention**: how long do run logs/results live in Postgres before pruning/archival
-   (CKL/HDF artifacts may also live on disk under `/reports` as today)?
+The earlier Cyber-scope and compliance-retention questions are resolved by ADRs 0023
+and 0025. Remaining implementation policy is tracked by its owning issues, including
+#649 for duplicate/concurrent scans; it is not an alternative scan model.
 
 Resolved:
 
