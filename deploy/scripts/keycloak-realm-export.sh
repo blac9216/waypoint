@@ -89,6 +89,6 @@ echo "Exported to $OUT_FILE"
 echo
 echo "REMINDER before committing any change based on this export:"
 echo "  - Replace the live client 'secret' value with the literal placeholder"
-echo "    __WAYPOINT_BACKEND_CLIENT_SECRET__ (see deploy/keycloak/README.md)."
+echo "    \${WAYPOINT_BACKEND_CLIENT_SECRET} (see deploy/keycloak/README.md)."
 echo "  - Diff against deploy/keycloak/realm/waypoint-realm.json and confirm no"
 echo "    real hostname, IP, or credential was introduced (CLAUDE.md)."

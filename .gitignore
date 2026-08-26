@@ -26,6 +26,13 @@ secrets*.yml
 # source files from `git status`/`git add`. See issue #254. Do not remove
 # the leading slash.
 /config/
+# Issue #844: the epic's (#841) persistent local-state location for
+# file-backed secrets (deploy/config/secrets/) and operator TLS
+# (deploy/config/tls/) -- deliberately a SEPARATE anchored entry from the
+# legacy /config/ rule above, not a rename of it. Removing the legacy
+# /config/ rule/convention is #845's job, not this one's -- both stay
+# ignored side by side until that migration lands.
+/deploy/config/
 dev/local/
 *.local.json
 *.local.yml

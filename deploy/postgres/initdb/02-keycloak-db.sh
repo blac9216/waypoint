@@ -15,16 +15,31 @@
 # Keycloak and there should never be one: Keycloak's schema is Keycloak's to
 # manage.
 #
-# Password source: POSTGRES_KEYCLOAK_PASSWORD, set on the postgres service in
-# docker-compose.yml and sourced from deploy/.env (gitignored) -- same
-# dev-only-default convention POSTGRES_PASSWORD and the two runner passwords
-# already use. Never echoed, never logged -- psql -v substitution keeps the
-# value out of this script's own output and out of shell history inside the
-# container (same technique 01-runner-roles.sh uses; see that file's header
-# comment for why a DO $$ ... $$ block doesn't work for this).
+# Password source (issue #844): file-backed, not an inline env var --
+# POSTGRES_KEYCLOAK_PASSWORD_FILE, set on the postgres service in
+# docker-compose.yml, points at the SAME Compose `secrets:`-mounted file
+# (deploy/config/secrets/postgres-keycloak-password, gitignored) the
+# `keycloak` service itself reads via KC_DB_PASSWORD_FILE -- one file, one
+# password, both sides of the same login. Never echoed, never logged --
+# psql -v substitution keeps the value out of this script's own output and
+# out of shell history inside the container (same technique
+# 01-runner-roles.sh uses; see that file's header comment for why a
+# DO $$ ... $$ block doesn't work for this).
 set -eu
 
-: "${POSTGRES_KEYCLOAK_PASSWORD:?POSTGRES_KEYCLOAK_PASSWORD must be set}"
+: "${POSTGRES_KEYCLOAK_PASSWORD_FILE:?POSTGRES_KEYCLOAK_PASSWORD_FILE must be set}"
+
+# $1 = human label for the error message only -- never prints file content.
+# $2 = path to the mounted secret file.
+read_secret_file() {
+	if [ ! -s "$2" ]; then
+		echo "waypoint: missing or empty secret file for $1: $2" >&2
+		exit 1
+	fi
+	cat "$2"
+}
+
+POSTGRES_KEYCLOAK_PASSWORD="$(read_secret_file 'keycloak DB password' "$POSTGRES_KEYCLOAK_PASSWORD_FILE")"
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
   -v keycloak_pw="$POSTGRES_KEYCLOAK_PASSWORD" <<-'EOSQL'

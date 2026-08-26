@@ -66,7 +66,7 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "clientAuthenticatorType": "client-secret",
-      "secret": "__WAYPOINT_BACKEND_CLIENT_SECRET__",
+      "secret": "${WAYPOINT_BACKEND_CLIENT_SECRET}",
       "rootUrl": "${WAYPOINT_PUBLIC_URL}",
       "redirectUris": [
         "${WAYPOINT_PUBLIC_URL}/*"

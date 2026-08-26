@@ -19,17 +19,34 @@
 # migration alone still grants a role created by hand or by a future one-time
 # admin step, and a truly fresh stack gets both automatically.
 #
-# Password source: environment variables set on the postgres service in
-# docker-compose.yml (POSTGRES_COMPLIANCE_RUNNER_PASSWORD /
-# POSTGRES_DOWNLOAD_RUNNER_PASSWORD), themselves sourced from deploy/.env
-# (gitignored) with the same dev-only fallback convention POSTGRES_PASSWORD
-# already uses. Never echoed, never logged -- psql -v substitution keeps the
-# value out of this script's own output and out of shell history inside the
-# container.
+# Password source (issue #844): file-backed, not an inline env var --
+# POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE / POSTGRES_DOWNLOAD_RUNNER_PASSWORD_FILE
+# on the postgres service in docker-compose.yml, each pointing at a Compose
+# `secrets:`-mounted file under deploy/config/secrets/ (gitignored -- see
+# .gitignore's /deploy/config/ entry). Compose resolves `secrets:` file
+# sources itself, before any container starts, so a missing file fails the
+# whole `docker compose up`/`config` invocation immediately -- this script's
+# own `[ -s ... ]` check below is the second, defence-in-depth layer for the
+# case a file exists but was left empty. Never echoed, never logged -- psql
+# -v substitution keeps the value out of this script's own output and out of
+# shell history inside the container, same as before.
 set -eu
 
-: "${POSTGRES_COMPLIANCE_RUNNER_PASSWORD:?POSTGRES_COMPLIANCE_RUNNER_PASSWORD must be set}"
-: "${POSTGRES_DOWNLOAD_RUNNER_PASSWORD:?POSTGRES_DOWNLOAD_RUNNER_PASSWORD must be set}"
+: "${POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE:?POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE must be set}"
+: "${POSTGRES_DOWNLOAD_RUNNER_PASSWORD_FILE:?POSTGRES_DOWNLOAD_RUNNER_PASSWORD_FILE must be set}"
+
+# $1 = human label for the error message only -- never prints file content.
+# $2 = path to the mounted secret file.
+read_secret_file() {
+	if [ ! -s "$2" ]; then
+		echo "waypoint: missing or empty secret file for $1: $2" >&2
+		exit 1
+	fi
+	cat "$2"
+}
+
+POSTGRES_COMPLIANCE_RUNNER_PASSWORD="$(read_secret_file 'compliance-runner DB password' "$POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE")"
+POSTGRES_DOWNLOAD_RUNNER_PASSWORD="$(read_secret_file 'download-runner DB password' "$POSTGRES_DOWNLOAD_RUNNER_PASSWORD_FILE")"
 
 # NOTE: psql's `:'var'` client-side substitution does not expand inside a
 # dollar-quoted PL/pgSQL body (`DO $$ ... $$`) -- verified empirically: psql

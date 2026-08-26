@@ -40,11 +40,17 @@ would otherwise be a secret is templated.
   `/auth/realms/waypoint` — a same-origin relative path, since an air-gapped
   appliance has no fixed public hostname to bake in) through the anonymous
   `GET /api/v1/auth/config` endpoint, so the SPA never hardcodes either value.
-- The client's `secret` field is the literal placeholder `__WAYPOINT_BACKEND_CLIENT_SECRET__` —
-  never a real value. `deploy/scripts/keycloak-realm-import.sh` substitutes the real
-  secret from `KEYCLOAK_BACKEND_CLIENT_SECRET` (`deploy/.env`, gitignored) into a
-  throwaway copy at import time; the templated file in this repo is never edited
-  in place.
+- The client's `secret` field is the placeholder `${WAYPOINT_BACKEND_CLIENT_SECRET}` —
+  never a real value, and using Keycloak's own `keycloak.migration.replace-placeholders`
+  syntax (the same mechanism `rootUrl`/`redirectUris`/`webOrigins` below already use
+  for `WAYPOINT_PUBLIC_URL`). On a normal compose bring-up (issue #844) the `keycloak`
+  service's `docker-entrypoint-wrapper.sh` reads a mounted file
+  (`WAYPOINT_BACKEND_CLIENT_SECRET_FILE`, `deploy/config/secrets/keycloak-backend-client-secret`,
+  gitignored) and exports it as `WAYPOINT_BACKEND_CLIENT_SECRET` before Keycloak's own
+  `--import-realm` boot substitutes it in. `deploy/scripts/keycloak-realm-import.sh` is
+  a separate, local-only round-trip path that substitutes the same placeholder itself,
+  from `KEYCLOAK_BACKEND_CLIENT_SECRET` (shell env, not a file), into a throwaway copy —
+  the templated file in this repo is never edited in place either way.
 
 ## Operator identity: `rootUrl`/`redirectUris`/`webOrigins` (issue #842)
 
@@ -146,7 +152,7 @@ export/import path works; they do not produce anything this repository ships.
   container against the same database as your compose stack's `keycloak` service and
   copies the result out to a local path you choose. Use this to capture a backup, or
   to refresh `deploy/keycloak/realm/waypoint-realm.json` after an admin-console change
-  (re-add the `__WAYPOINT_BACKEND_CLIENT_SECRET__` placeholder and strip any real
+  (re-add the `${WAYPOINT_BACKEND_CLIENT_SECRET}` placeholder and strip any real
   secret before committing — see that script's own output for the reminder).
 - `deploy/scripts/keycloak-realm-import.sh` — substitutes a real client secret into a
   throwaway copy of a realm export, deletes the existing `waypoint` realm via the

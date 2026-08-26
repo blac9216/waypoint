@@ -9,8 +9,14 @@
 # for why -- ADR-0015 excludes Keycloak from any packaged bundle).
 #
 # This never edits deploy/keycloak/realm/waypoint-realm.json in place -- the
-# committed file keeps its __WAYPOINT_BACKEND_CLIENT_SECRET__ placeholder
-# forever. Substitution happens into a gitignored scratch copy.
+# committed file keeps its ${WAYPOINT_BACKEND_CLIENT_SECRET} placeholder
+# forever (issue #844 renamed this from the older __WAYPOINT_BACKEND_CLIENT_SECRET__
+# double-underscore form so the SAME string also resolves via Keycloak's own
+# `keycloak.migration.replace-placeholders` substitution on the compose-managed
+# boot path -- see deploy/keycloak/docker-entrypoint-wrapper.sh). Substitution
+# happens into a gitignored scratch copy here, by this script's own sed, not
+# Keycloak's substitution engine (the throwaway container below does not set
+# JAVA_OPTS_APPEND).
 #
 # Mechanism, and why it is NOT `kc.sh import` (verified empirically, issue
 # #28): Keycloak 25's standalone `import --override true` CLI logs
@@ -49,7 +55,8 @@ REALM_FILE="${2:-$DEPLOY_DIR/keycloak/realm/waypoint-realm.json}"
 
 : "${KEYCLOAK_BACKEND_CLIENT_SECRET:?Set KEYCLOAK_BACKEND_CLIENT_SECRET (never the placeholder) before running this script.}"
 
-if [ "$KEYCLOAK_BACKEND_CLIENT_SECRET" = "__WAYPOINT_BACKEND_CLIENT_SECRET__" ]; then
+# shellcheck disable=SC2016 # deliberately literal -- comparing against the placeholder string, not expanding it
+if [ "$KEYCLOAK_BACKEND_CLIENT_SECRET" = '${WAYPOINT_BACKEND_CLIENT_SECRET}' ]; then
 	echo "KEYCLOAK_BACKEND_CLIENT_SECRET must not be the literal template placeholder." >&2
 	exit 1
 fi
@@ -79,7 +86,10 @@ mkdir -p "$SCRATCH_DIR"
 trap 'rm -rf "$SCRATCH_DIR"' EXIT
 
 SCRATCH_FILE="$SCRATCH_DIR/waypoint-realm.json"
-sed "s/__WAYPOINT_BACKEND_CLIENT_SECRET__/${KEYCLOAK_BACKEND_CLIENT_SECRET}/" \
+# `|` delimiter (not `/`) so a secret value containing a slash doesn't break
+# the substitution (issue #844 rename from the old __..__ placeholder made
+# this worth tightening at the same time).
+sed "s|\${WAYPOINT_BACKEND_CLIENT_SECRET}|${KEYCLOAK_BACKEND_CLIENT_SECRET}|" \
 	"$REALM_FILE" > "$SCRATCH_FILE"
 
 # Translate SCRATCH_DIR to its HOST-side path before using it as a raw
