@@ -6,6 +6,9 @@ design
 [ADR-0014](adr/0014-runner-job-ownership.md)) does and
 does not protect, and lists the implementation requirements that keep secrets from
 leaking. These are requirements, not suggestions — several have CI enforcement.
+Sections marked 📋 **Planned** extend this contract for epic
+[#726](https://github.com/blac9216/waypoint/issues/726) (compliance feature parity,
+ADRs 0022–0025) and remain design intent until their referenced issues land.
 
 ## Threat model
 
@@ -283,6 +286,197 @@ audit tombstone ([ADR-0019](adr/0019-global-job-observability.md)). Credential d
 is a separate lifecycle operation and never requires erasing history merely to remove
 encrypted secret material.
 
+## Compliance managed trust and scoped TLS bypass (planned, epic #726, ADR-0025)
+
+TLS verification is enabled by default for every HTTPS target/service connection
+this feature touches. There is no process-global or appliance-wide implicit bypass,
+and never will be — a connection either verifies against a managed trust bundle or
+carries an explicit, narrowly scoped bypass, and both states are visible.
+
+- **Managed CA trust is public material, not a secret.** Admin-uploaded CA
+  certificates/chains (`/trust/bundles`, `docs/api-contract.md`) are versioned and
+  validated (format, size, chain, duplicates, expiry, safe storage paths) at
+  ingestion and fail closed on any defect. They are stored and transferred
+  separately from encrypted credentials — a trust bundle leaking is not a
+  credential-disclosure event, and this document's threat model for secret material
+  does not apply to it.
+- **Scoped bypass is Admin-only, reasoned, versioned, and audited.** An Admin may
+  authorize certificate-verification bypass for exactly one named target/service
+  connection (`PUT /connections/{id}/trust-policy`, `mode: "bypass"`). The API
+  rejects a bypass request with no `bypass_reason`. Every bypass is recorded with
+  actor/time/version and produces a **prominent** warning everywhere that
+  connection's readiness or evidence is displayed — in the plan preview, the frozen
+  plan, the run detail, and the resulting evidence graph. It is never inherited by
+  another connection and never becomes a default.
+- **Planning freezes the policy identity/version, not live state.** A
+  `PlannedComponentItem` references the trust-policy identity/version in effect at
+  plan time (`docs/api-contract.md`'s `/runs/{id}/plan`). A later trust-policy edit
+  never silently changes an in-flight or already-created run's behavior — this is
+  the same "later target edits cannot change an in-flight run" property ADR-0021 §5
+  already established for credentials, extended to trust.
+- **A runner never mutates process-global trust.** The compliance-runner
+  materializes a policy decision as a per-client/session verification context for
+  the one connection it is servicing. It must never install a process-wide
+  certificate validation callback or otherwise change verification behavior for a
+  concurrent job's unrelated connection — a bug here would let one target's
+  Admin-authorized bypass silently leak into a sibling target's supposedly-verified
+  connection in the same runner process. This is a fail-closed isolation
+  requirement, not an optimization.
+- **Certificate failure is isolated.** A verification failure on a managed-trust
+  connection is a component/connection-scoped readiness failure (`docs/domain-model.md`
+  coverage-omission model), never a whole-run halt.
+
+## Temporary SSH enablement cleanup obligations (planned, epic #726, ADR-0025)
+
+Scans are read-only by default. The one narrow, deliberate exception is Admin-opted
+temporary SSH enablement for a catalog-declared capability, and its security
+obligation is unconditional restoration:
+
+- **Opt-in requires both policy and capability.** An Admin must explicitly enable
+  this per target (`PUT /components/{id}/ssh-enablement`), and the exact catalog
+  product/version must declare a reviewed inspect/enable/restore capability
+  provider reachable through an already-authorized management path. Absent either,
+  disabled SSH is a named coverage failure for only the dependent components — it is
+  never silently worked around by a generic shell fallback, and there is no
+  appliance-wide switch.
+- **Original state is captured immediately before mutation, durably, before
+  changing anything.** The runner re-observes the service's actual current state at
+  mutation time (not the plan-time observation, which can be stale) and durably
+  records that original state, its provenance, and the cleanup obligation *before*
+  issuing the enable call. An originally enabled service is never disabled by this
+  mechanism; only an originally disabled service is restored to disabled.
+- **Restoration is mandatory, durable, idempotent, and retryable across every
+  terminal path** — success, failure, cancellation, timeout, runner restart, and
+  lease recovery all must reach restoration or leave the obligation openly
+  `cleanup_failed`, never silently dropped. An attempt is not cleanly terminal until
+  restoration succeeds or that failure state is durably recorded.
+- **`cleanup_failed` is a security alert, not a scan note.** It raises a prominent,
+  persistent alert (`ssh_cleanup_failed`, `docs/api-contract.md` Alerts) that remains
+  visible and actionable until reconciled — starting a new scan attempt against that
+  service never clears or supersedes it. Before another attempt may mutate the same
+  service, the unresolved obligation must be explicitly reconciled or the service
+  safely re-observed and re-established under the existing obligation
+  (`POST /components/{id}/ssh-enablement/reconcile`). The gate is scoped to that one
+  service — it does not block independent sibling services or components, and
+  restore ownership never forks into independent sibling obligations that could each
+  be partially resolved while the union stays inconsistent.
+- **This is the sole exception to the read-only claim.** Every other scan behavior —
+  checks, attestation resolution, HDF/CKL generation — remains strictly read-only.
+  The SSH-enablement mutation is separately authorized, separately audited, and
+  bounded to the execution window; it is not a remediation capability and does not
+  authorize any other configuration change.
+
+## Secret boundaries for content, candidate, and credential flows (planned, epic #726)
+
+The additive content-ingestion pipeline (ADR-0022) and per-component credential
+resolution (ADR-0024) introduce new data that must not become a secret-leakage
+surface even though neither carries traditional infrastructure credentials:
+
+- **Content artifacts (vendor profiles, XCCDF, mappings) are not secrets** and are
+  stored/transferred as reviewed, versioned, content-addressed data — the write-only
+  and containment controls above do not apply to them. They do, however, carry
+  **provenance** that must remain trustworthy: source, digest, and acquisition
+  identity are immutable once staged, so a compromised sync source cannot
+  retroactively rewrite what an approver actually reviewed.
+- **Candidate-execution evidence is scoped like production scan evidence.**
+  Admin-only candidate test runs (`POST /candidate-content/{id}/test-run`,
+  `docs/api-contract.md`) resolve credentials through the exact same purpose/binding
+  mechanism as a production scan (ADR-0024) — there is no separate, looser
+  credential path "because it's just a test." A candidate run against a production
+  target uses that target's real bindings and is subject to the same decrypt-audit
+  trail as any other job.
+- **Per-control settings values follow the credential secrecy model when marked
+  secret.** An Input setting flagged as secret is stored the same way a credential
+  is (envelope-encrypted, write-only through the API) and is referenced from a
+  `PlannedComponentItem`'s frozen snapshot by digest/reference — never by embedding
+  the plaintext value in the plan, a log line, or a diagnostic. A non-secret Input
+  (e.g. a numeric threshold) is not gated by this rule; the API and UI distinguish
+  the two at the settings-schema level, not by convention.
+- **Credential repair audits both sides of the swap.** An audited credential repair
+  (`POST /jobs/{id}/repair-credential`) records old/new credential *attribution*
+  (which named credential or "an ad hoc secret was used by user X"), never the
+  secret values themselves, alongside actor/time/reason — the same non-secret
+  audit-trail shape ADR-0014/ADR-0016 already require for every decrypt.
+- **Readiness diagnostics for a missing/incompatible credential or input name the
+  component and purpose, never the secret.** This extends the existing "no secret
+  value enters errors, events, logs, or results" rule (`docs/architecture.md`) to
+  the new per-component readiness-failure surface — a `readiness_failed` job's
+  safe reason is always shaped like "vcsa-ssh binding missing for component X," never
+  an echo of a submitted (and rejected) credential value.
+
+## Audit and immutable provenance for compliance decisions (planned, epic #726)
+
+Every gated decision in the catalog/content/execution lifecycle produces a durable,
+non-secret audit record — this generalizes the existing decrypt-audit-trail
+principle (control 4, above) to the new class of *content and access decisions*
+epic #726 introduces, none of which existed when that control was first written:
+
+| Decision | Audited fact |
+|---|---|
+| Content conflict resolution (`/candidate-content/{id}/conflicts/{id}/resolve`) | selected artifact, actor, time, reason |
+| Control approval / test waiver (`/candidate-content/{id}/controls/{id}/approve`) | control, closure/baseline identity, test-run reference or waiver reason, actor, time |
+| Baseline activation / rollback | baseline identity, prior active baseline, actor, time |
+| Trust-policy bypass authorization | connection, reason, version, actor, time |
+| SSH temporary-enablement authorization and every cleanup outcome | component, provider, original/restored state, actor/system, time |
+| Credential repair | component, purpose, old/new attribution (non-secret), actor, time, reason |
+| Retention policy change / graph purge | policy version or run identity, actor/system trigger, time, outcome |
+| Alert acknowledgement | alert identity, actor, time |
+
+Every row above is append-only, attributable to a real actor (human or a named
+system trigger such as a schedule or retention sweep — never an anonymous "system"),
+and readable by Cyber+ through `/audit` (`docs/api-contract.md`) alongside the
+existing decrypt/config-version/run-initiation events. None of these records contain
+secret material; several (trust bypass, SSH cleanup failure) additionally surface as
+persistent in-app alerts because they represent an ongoing risk posture, not merely
+a historical fact.
+
+## RBAC reconciliation (epic #726)
+
+`docs/domain-model.md`'s Roles table and `docs/api-contract.md`'s RBAC summary are
+the wire-facing source of truth; this section states the security rationale for
+where epic #726 narrows or clarifies existing role boundaries. It widens nothing
+beyond what those two documents already specify.
+
+- **Viewer remains strictly read-only** across every new resource this epic
+  introduces (catalog, content sources, candidates, baselines, components,
+  discovery refreshes, plans, attempts, alerts, trust policy, retention status).
+  Read access to a resource's existence and history is not itself a sensitive
+  action; every value that would be sensitive (secret Input references, credential
+  material) is redacted at the same serialization layer that already protects
+  stored credentials.
+- **Cyber+ gets a scan-specific interactive subset, not a general job-control
+  grant.** A Cyber-or-higher user may initiate an arbitrary interactive scan subset
+  and control (pause/resume/abort/cancel/retry/request credential repair) only the
+  scans **they personally initiated**; Admin retains control of any scan regardless
+  of initiator. This rule is deliberately narrow: it grants nothing toward
+  `download`, `bundle-import`, `update`, or any other job family's control
+  actions — the existing ownership-scoped checks on those endpoints
+  (`docs/api-contract.md`) are unchanged. Cyber+ also gets review authority over
+  content diffs and control approval (a review action, not an activation action),
+  matching ADR-0022's "Cyber-level approval" for changed/unknown controls.
+- **Admin-only actions are exactly the destructive, appliance-wide, or
+  trust-affecting ones**: recurring scan schedule management, content
+  activation/rollback, target/component persistent configuration (including
+  `configured_fact` writes and retired-component purge), trust bundle management and
+  scoped TLS bypass authorization, temporary SSH enablement authorization and
+  reconciliation, retention policy changes and graph purge, and alert
+  acknowledgement. None of these were previously ambiguous under the shipped
+  domain-model Roles table (they fall under "Admin: everything: sites, targets,
+  shared credentials... remediation, updates, transfer"); epic #726 makes each one
+  an explicit named permission rather than leaving it implied by "everything else."
+- **Alert acknowledgement is deliberately Admin-only and deliberately inert.**
+  Acknowledging an alert records awareness for audit purposes; it never resolves,
+  clears, or hides the underlying condition (a `cleanup_failed` SSH obligation, an
+  active trust bypass, a failed discovery boundary). This prevents acknowledgement
+  from being used as an informal "dismiss" action that could reduce visibility into
+  an unresolved risk — a distinction worth stating explicitly because a naive
+  reading of "acknowledge" elsewhere in the industry often means "resolve."
+- **No two-person rule for content approval/activation.** ADR-0022 explicitly
+  allows Admin to inherit Cyber's approval authority and both approve and activate
+  the same baseline as separate audited events. This is a deliberate scope decision
+  (single-appliance operational reality, not a large approval bureaucracy), not an
+  oversight — flagged here so a reviewer does not mistake its absence for a gap.
+
 ## Residual risks (accepted, documented)
 
 - Full compromise of the API or an authorized runner can expose service credentials
@@ -294,3 +488,15 @@ encrypted secret material.
   run's secret is already deleted, and absent users (no ad hoc run in flight) are safe.
 - Memory-scraping a live, privileged API or runner process yields in-flight plaintext —
   out of scope; host compromise defeats any self-hosted design.
+- **(Planned, epic #726) An Admin-authorized scoped TLS bypass is an accepted,
+  narrow, audited risk for one connection** — it is not eliminable without removing
+  the feature entirely (some lab/legacy endpoints genuinely cannot present a
+  verifiable chain), so the compensating controls are visibility (prominent
+  warnings everywhere that connection's evidence appears) and non-inheritance
+  (scoped to exactly one connection, never a default).
+- **(Planned, epic #726) A `cleanup_failed` SSH-restoration obligation is a real,
+  disclosed residual state**, not a false "success" — the design accepts that
+  restoration can fail (runner crash mid-mutation, target becomes unreachable) and
+  compensates with mandatory alerting and a retryable reconciliation path rather
+  than pretending failure cannot happen or silently leaving the target's access
+  state undocumented.
