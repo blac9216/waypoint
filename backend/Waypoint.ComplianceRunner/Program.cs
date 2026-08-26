@@ -62,6 +62,9 @@ HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
 // down) ever read it -- see DatabaseConnectionStringResolver's doc comment for why one
 // call site upstream of every reader is what makes the queue components, the readiness
 // reporter, and the worker-registry writer all receive the identical resolved value.
+// Nothing below may add a configuration source: the resolved value is written into
+// the provider chain as it stands here, and adding a source rebuilds that chain and
+// silently discards the write (see ResolveAndApply's doc comment).
 DatabaseConnectionStringResolver.ResolveAndApply(builder.Configuration);
 
 builder.Services.AddWaypointInfrastructure(builder.Configuration);

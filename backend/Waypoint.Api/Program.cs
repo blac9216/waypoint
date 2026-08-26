@@ -90,6 +90,9 @@ try
 	// value. Throws with an operator-actionable message (never the password) on a
 	// missing/empty/unreadable file, caught by this method's own top-level
 	// catch (Exception) below like any other fatal startup failure.
+	// Nothing below may add a configuration source: the resolved value is written into
+	// the provider chain as it stands here, and adding a source rebuilds that chain and
+	// silently discards the write (see ResolveAndApply's doc comment).
 	DatabaseConnectionStringResolver.ResolveAndApply(builder.Configuration);
 
 	builder.Services.AddWaypointInfrastructure(builder.Configuration);

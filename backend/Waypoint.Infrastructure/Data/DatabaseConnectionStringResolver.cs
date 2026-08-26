@@ -59,6 +59,14 @@ public static class DatabaseConnectionStringResolver
 	/// connection string -- see the type doc comment for why one call site upstream of
 	/// every reader is what makes them all receive the identical resolved value,
 	/// without a single downstream consumer needing to change.
+	///
+	/// CONSTRAINT -- no configuration source may be added (or reloaded) after this call.
+	/// The indexer writes into the configuration's in-memory chain as it exists right now;
+	/// <c>ConfigurationManager</c> rebuilds its provider list whenever a source is added,
+	/// which silently discards this write. The failure mode would be the host quietly
+	/// connecting with the unresolved base connection string (wrong/absent password), not
+	/// an error -- so every host must finish composing its configuration sources BEFORE
+	/// calling this, and none of the three does otherwise today.
 	/// </summary>
 	public static void ResolveAndApply(IConfiguration configuration)
 	{

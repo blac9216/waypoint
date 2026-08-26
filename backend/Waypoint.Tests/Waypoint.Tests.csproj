@@ -46,6 +46,19 @@
       <_Parameter1>WaypointApiEntryAssembly</_Parameter1>
       <_Parameter2>$(MSBuildThisFileDirectory)../Waypoint.Api/bin/$(Configuration)/$(TargetFramework)/Waypoint.Api.dll</_Parameter2>
     </AssemblyAttribute>
+    <!--
+      Same rationale for the two dedicated runner hosts (issue #843): neither has a
+      top-level catch, so "fails closed on a bad password file" is an exit code plus a
+      stderr message, observable only from outside the process.
+    -->
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>WaypointComplianceRunnerEntryAssembly</_Parameter1>
+      <_Parameter2>$(MSBuildThisFileDirectory)../Waypoint.ComplianceRunner/bin/$(Configuration)/$(TargetFramework)/Waypoint.ComplianceRunner.dll</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>WaypointDownloadRunnerEntryAssembly</_Parameter1>
+      <_Parameter2>$(MSBuildThisFileDirectory)../Waypoint.DownloadRunner/bin/$(Configuration)/$(TargetFramework)/Waypoint.DownloadRunner.dll</_Parameter2>
+    </AssemblyAttribute>
   </ItemGroup>
 
   <ItemGroup>
