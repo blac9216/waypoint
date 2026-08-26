@@ -87,6 +87,12 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 				services.AddSingleton<IRunScopeSnapshotRepository>(new RunScopeSnapshotRepository(_connectionString));
 
 				services.AddSingleton<Waypoint.Core.ComplianceContent.IBaselineRepository>(new BaselineRepository(_connectionString));
+				// Issue #735: ScanPlannerService now folds a config-doc snapshot, so the
+				// config resolver + its repository must point at the SAME fixture database as
+				// every other repo above (otherwise resolution hits the default host DB and
+				// the compile throws -> 500). Register both against the fixture connection.
+				services.AddSingleton(new Waypoint.Infrastructure.ConfigDocs.ConfigDocRepository(_connectionString));
+				services.AddSingleton<Waypoint.Infrastructure.ConfigDocs.PlanConfigResolutionService>();
 				services.AddSingleton<ScanPlannerService>();
 				services.AddSingleton<Waypoint.Core.Scans.IScanPlanRepository>(new ScanPlanRepository(_connectionString));
 				services.AddSingleton<RunPlanPreviewService>();
@@ -266,6 +272,60 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 	}
 
 	[Fact]
+	public async Task Preview_ThenCreate_WithResolvedConfigDoc_FoldsIdenticalConfigSnapshotIntoBothDigests()
+	{
+		// Issue #735 preview-parity: the config-resolution fold (Input/Attestation snapshot)
+		// must go through the SAME ScanPlannerService chokepoint for preview and create, so
+		// identical config docs yield identical digests. The base parity test seeds no
+		// declared inputs, so its digest never exercises the config fold; this one does --
+		// a declared (optional) input plus a resolvable Global Input doc, asserting both the
+		// digest parity AND that the persisted item actually carries the resolved snapshot.
+		Guid siteId = await CreateSiteAsync("preview-config-parity-site");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		(Guid catalogComponentId, Guid executionProfileId) = await SeedCompatibleCatalogComponentWithDeclaredInputAsync();
+		await SaveInputConfigDocAsync(executionProfileId, "target_ip: 192.0.2.77\n");
+
+		await _components.UpsertDiscoveredAsync(
+			targetId, [new DiscoveredComponent("esxi", "host-9100", "esxi-preview-cfg.example.internal", null, catalogComponentId, "8.0.3")], CancellationToken.None);
+		Component seeded = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None)).Single();
+
+		object scopeBody = new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
+		};
+
+		HttpResponseMessage previewResponse = await PreviewAsync(scopeBody);
+		Assert.Equal(HttpStatusCode.OK, previewResponse.StatusCode);
+		using JsonDocument previewBody = JsonDocument.Parse(await previewResponse.Content.ReadAsStringAsync());
+		string previewDigest = previewBody.RootElement.GetProperty("plan_digest").GetString()!;
+
+		HttpResponseMessage createResponse = await PostRunAsync(new
+		{
+			site_id = siteId,
+			profile_id = _profileId,
+			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
+		});
+		Assert.Equal(HttpStatusCode.Accepted, createResponse.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		ScanPlanRepository plans = new(_fixture.ConnectionString);
+		Waypoint.Core.Scans.ScanPlan? persistedPlan = await plans.GetForRunAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(persistedPlan);
+		Assert.Equal(previewDigest, persistedPlan!.PlanDigest);
+
+		// The digest parity is only meaningful if a config snapshot was actually folded:
+		// the persisted item must carry the resolved Input.
+		Waypoint.Core.Scans.ScanPlanItem item = Assert.Single(persistedPlan.Items);
+		Waypoint.Core.ConfigDocs.PlanInputResolution input = Assert.Single(item.InputResolutionsOrEmpty);
+		Assert.Equal("target_ip", input.InputName);
+		Assert.Equal(Waypoint.Core.ConfigDocs.ConfigResolutionStates.Resolved, input.State);
+	}
+
+	[Fact]
 	public async Task Preview_WithOnlyUnresolvableComponents_Returns200_AsHonestEmptyPlan()
 	{
 		// Docs/api-contract.md: "Zero-runnable-component previews are still 200 (an
@@ -422,6 +482,45 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 		await baselines.ActivateAsync(staged.Id, "test-fixture", CancellationToken.None);
 
 		return catalogComponent.Id;
+	}
+
+	/// <summary>
+	/// Same SRG chain as <see cref="SeedCompatibleCatalogComponentAsync"/> but the profile
+	/// declares one optional Input (<c>target_ip</c>), so a resolvable config doc produces a
+	/// non-empty config snapshot the digest folds -- and, being optional, it never trips the
+	/// missing-required-input skip when the doc is present anyway. Returns both the catalog
+	/// component id and the execution profile id the config doc keys against (issue #735).
+	/// </summary>
+	private async Task<(Guid CatalogComponentId, Guid ExecutionProfileId)> SeedCompatibleCatalogComponentWithDeclaredInputAsync()
+	{
+		CatalogRepository catalog = new(_fixture.ConnectionString);
+		BaselineRepository baselines = new(_fixture.ConnectionString);
+		CatalogSourceRevision source = await catalog.UpsertSourceRevisionAsync($"rev-{Guid.NewGuid():N}", null, CancellationToken.None);
+		CatalogProduct product = await catalog.UpsertProductAsync(source.Id, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion productVersion = await catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
+		CatalogComponent catalogComponent = await catalog.UpsertComponentAsync(
+			productVersion.Id, new CatalogComponentDefinition("esxi", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
+		CatalogContentRelease release = await catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Srg, $"release-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await catalog.UpsertReportGroupAsync($"group-{Guid.NewGuid():N}", "Test Group", 1, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await catalog.CreateExecutionProfileAsync(
+			catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		await catalog.UpsertDeclaredInputAsync(executionProfile.Id, "target_ip", "string", isRequired: false, CancellationToken.None);
+
+		ContentRevision revision = await baselines.RecordStagedRevisionAsync(
+			$"commit-{Guid.NewGuid():N}", $"digest-{Guid.NewGuid():N}", $"revisions/{Guid.NewGuid():N}", CancellationToken.None);
+		Baseline staged = await baselines.CreateStagedBaselineAsync(revision.Id, executionProfile.Id, benchmarkRevisionId: null, CancellationToken.None);
+		await baselines.ActivateAsync(staged.Id, "test-fixture", CancellationToken.None);
+
+		return (catalogComponent.Id, executionProfile.Id);
+	}
+
+	private async Task SaveInputConfigDocAsync(Guid executionProfileId, string bodyYaml)
+	{
+		Waypoint.Infrastructure.ConfigDocs.ConfigDocRepository configDocs = new(_fixture.ConnectionString);
+		(Waypoint.Core.ConfigDocs.ConfigDocSaveOutcome outcome, _, _) = await configDocs.SaveAsync(
+			Guid.NewGuid(), Waypoint.Core.ConfigDocs.ConfigDocKinds.Input, $"unused-profile-name-{Guid.NewGuid():N}",
+			Waypoint.Core.ConfigDocs.ConfigDocLayers.Global, null, "admin", bodyYaml, CancellationToken.None, executionProfileId);
+		Assert.Equal(Waypoint.Core.ConfigDocs.ConfigDocSaveOutcome.Ok, outcome);
 	}
 
 	private static async Task<long> CountAsync(NpgsqlConnection connection, string table)

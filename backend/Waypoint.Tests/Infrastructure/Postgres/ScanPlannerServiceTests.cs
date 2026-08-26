@@ -145,7 +145,11 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(
 			component.Id, contentRelease.Id, reportGroup.Id, "1.0.0", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
 		await _catalog.AddCredentialRequirementAsync(executionProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
-		await _catalog.UpsertDeclaredInputAsync(executionProfile.Id, "target_ip", "string", isRequired: true, CancellationToken.None);
+		// Declared OPTIONAL so these planner-shape tests (accepted-item / digest / skip-reason
+		// coverage) exercise config resolution without tripping issue #735's missing-required-
+		// input skip -- they seed no config doc. The dedicated required-input skip behavior has
+		// its own coverage in PlanConfigResolutionServiceTests.
+		await _catalog.UpsertDeclaredInputAsync(executionProfile.Id, "target_ip", "string", isRequired: false, CancellationToken.None);
 
 		if (withBenchmark is not null)
 		{

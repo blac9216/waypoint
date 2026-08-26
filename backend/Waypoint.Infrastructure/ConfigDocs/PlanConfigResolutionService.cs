@@ -63,11 +63,11 @@ public sealed class PlanConfigResolutionService
 		Guid catalogExecutionProfileId,
 		Guid siteId,
 		Guid targetId,
-		IReadOnlyList<string> declaredInputNames,
+		IReadOnlyList<PlanDeclaredInput> declaredInputs,
 		DateTimeOffset now,
 		CancellationToken cancellationToken)
 	{
-		ArgumentNullException.ThrowIfNull(declaredInputNames);
+		ArgumentNullException.ThrowIfNull(declaredInputs);
 
 		(ConfigDocResolution resolution, ConfigDocWithLatestVersion? global, ConfigDocWithLatestVersion? site, ConfigDocWithLatestVersion? target) =
 			await ResolveKindAsync(ConfigDocKinds.Input, catalogExecutionProfileId, siteId, targetId, now, cancellationToken).ConfigureAwait(false);
@@ -77,10 +77,10 @@ public sealed class PlanConfigResolutionService
 			? ConfigResolutionStates.Resolved
 			: ConfigResolutionStates.Missing;
 
-		List<PlanInputResolution> inputs = [.. declaredInputNames
-			.OrderBy(n => n, StringComparer.Ordinal)
-			.Select(name => new PlanInputResolution(
-				name, inputState, resolution.Layer, resolution.DocId, resolution.Version, resolution.Author, resolution.UpdatedAt))];
+		List<PlanInputResolution> inputs = [.. declaredInputs
+			.OrderBy(i => i.Name, StringComparer.Ordinal)
+			.Select(i => new PlanInputResolution(
+				i.Name, inputState, resolution.Layer, resolution.DocId, resolution.Version, resolution.Author, resolution.UpdatedAt, i.IsRequired))];
 
 		(ConfigDocResolution attestationResolution, _, _, _) = await ResolveKindAsync(
 			ConfigDocKinds.Attestation, catalogExecutionProfileId, siteId, targetId, now, cancellationToken).ConfigureAwait(false);
@@ -135,3 +135,11 @@ public sealed class PlanConfigResolutionService
 
 /// <summary>One plan item's fully resolved config snapshot -- see <see cref="PlanConfigResolutionService"/>.</summary>
 public sealed record PlanConfigResolution(IReadOnlyList<PlanInputResolution> Inputs, PlanAttestationResolution Attestation);
+
+/// <summary>
+/// A declared Input the resolver must resolve for one plan item, carrying the catalog's
+/// required/optional flag through from <see cref="Waypoint.Core.ComplianceContent.CatalogDeclaredInput"/>
+/// so a missing REQUIRED input can gate planning (issue #735) rather than being flattened
+/// to a bare name. <see cref="Name"/> is the non-secret catalog input identifier.
+/// </summary>
+public sealed record PlanDeclaredInput(string Name, bool IsRequired);

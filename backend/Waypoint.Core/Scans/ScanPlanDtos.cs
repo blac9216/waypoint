@@ -103,7 +103,19 @@ public static class ScanPlanSkipReasons
 	/// <summary>A STIG execution profile's benchmark reference has no corresponding imported <c>benchmark_revisions</c> row, or no current component-to-benchmark-revision mapping exists (ADR-0022/#730).</summary>
 	public const string UnmappedBenchmark = "unmapped_benchmark";
 
-	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, UnmappedBenchmark];
+	/// <summary>
+	/// A declared Input marked required (<c>catalog_declared_inputs.is_required</c>)
+	/// resolved to no config document at any layer (Global/Site/Target) for the plan
+	/// item's execution profile (issue #735, ADR-0024 "A missing required Input leaves
+	/// the affected component job visibly skipped without an execution attempt and with a
+	/// safe readiness reason"). The component is skipped -- never executed without its
+	/// required environmental input -- while siblings with satisfied inputs still plan.
+	/// The skip <see cref="ScanPlanSkip.Detail"/> names the input definition (a
+	/// non-secret catalog identifier, not a resolved value) and remediation path.
+	/// </summary>
+	public const string MissingRequiredInput = "missing_required_input";
+
+	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, UnmappedBenchmark, MissingRequiredInput];
 }
 
 /// <summary>

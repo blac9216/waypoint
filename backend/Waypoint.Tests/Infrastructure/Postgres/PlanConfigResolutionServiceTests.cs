@@ -115,7 +115,10 @@ public sealed class PlanConfigResolutionServiceTests : IAsyncLifetime
 		return seeded.Id;
 	}
 
-	private async Task<Guid> SeedExecutionProfileAsync(string suffix, string exactVersion)
+	private Task<Guid> SeedExecutionProfileAsync(string suffix, string exactVersion) =>
+		SeedExecutionProfileAsync(suffix, exactVersion, inputRequired: true);
+
+	private async Task<Guid> SeedExecutionProfileAsync(string suffix, string exactVersion, bool inputRequired)
 	{
 		CatalogSourceRevision sourceRevision = await _catalog.UpsertSourceRevisionAsync($"source-{suffix}", null, CancellationToken.None);
 		CatalogProduct product = await _catalog.UpsertProductAsync(sourceRevision.Id, "VMware", $"vsphere-{suffix}", "VMware vSphere", CancellationToken.None);
@@ -130,7 +133,7 @@ public sealed class PlanConfigResolutionServiceTests : IAsyncLifetime
 		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(
 			component.Id, contentRelease.Id, reportGroup.Id, "1.0.0", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
 		await _catalog.AddCredentialRequirementAsync(executionProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
-		await _catalog.UpsertDeclaredInputAsync(executionProfile.Id, "target_ip", "string", isRequired: true, CancellationToken.None);
+		await _catalog.UpsertDeclaredInputAsync(executionProfile.Id, "target_ip", "string", isRequired: inputRequired, CancellationToken.None);
 		return executionProfile.Id;
 	}
 
@@ -214,20 +217,79 @@ public sealed class PlanConfigResolutionServiceTests : IAsyncLifetime
 	}
 
 	[Fact]
-	public async Task CompileAsync_NoInputDocAnywhere_ReportsMissingNotResolved()
+	public async Task CompileAsync_MissingRequiredInput_SkipsComponentNamingInput_NotAcceptedItem()
 	{
+		// Issue #735 owner decision "missing input isolation" + ADR-0024 line 114: a
+		// declared REQUIRED input that resolves to no doc at any layer must skip the
+		// component (no execution attempt), NOT produce an accepted, executable item.
 		(Guid targetId, _) = await SeedSiteAndTargetAsync();
-		Guid executionProfileId = await SeedExecutionProfileAsync("missing-input", "8.0.3");
-		await ActivateBaselineAsync(executionProfileId, "missing-input");
+		Guid executionProfileId = await SeedExecutionProfileAsync("missing-required-input", "8.0.3", inputRequired: true);
+		await ActivateBaselineAsync(executionProfileId, "missing-required-input");
 		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
 		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-cfg-4001");
 
 		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
 
+		Assert.Empty(plan.Items);
+		ScanPlanSkip skip = Assert.Single(plan.Skips);
+		Assert.Equal(componentId, skip.ComponentId);
+		Assert.Equal(ScanPlanSkipReasons.MissingRequiredInput, skip.Reason);
+		Assert.Contains(ScanPlanSkipReasons.MissingRequiredInput, ScanPlanSkipReasons.All);
+		// Diagnostic names the input definition (non-secret catalog identifier) but no value.
+		Assert.Contains("target_ip", skip.Detail);
+	}
+
+	[Fact]
+	public async Task CompileAsync_MissingOptionalInput_StillPlans_WithMissingProvenance()
+	{
+		// Optional (IsRequired=false) inputs resolving missing stay provenance-recorded on
+		// an ACCEPTED item -- they do not gate planning (issue #735 requirement 3).
+		(Guid targetId, _) = await SeedSiteAndTargetAsync();
+		Guid executionProfileId = await SeedExecutionProfileAsync("missing-optional-input", "8.0.3", inputRequired: false);
+		await ActivateBaselineAsync(executionProfileId, "missing-optional-input");
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-cfg-4101");
+
+		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+
+		Assert.Empty(plan.Skips);
 		PlanInputResolution input = Assert.Single(Assert.Single(plan.Items).InputResolutionsOrEmpty);
+		Assert.Equal("target_ip", input.InputName);
 		Assert.Equal(ConfigResolutionStates.Missing, input.State);
+		Assert.False(input.IsRequired);
 		Assert.Null(input.Layer);
 		Assert.Null(input.DocId);
+	}
+
+	[Fact]
+	public async Task CompileAsync_OneComponentMissingRequiredInput_SiblingWithSatisfiedInputPlansNormally()
+	{
+		// Siblings-continue: one component missing its required input is skipped while a
+		// sibling whose required input resolves plans normally (per-component isolation).
+		(Guid targetId, _) = await SeedSiteAndTargetAsync();
+
+		Guid missingProfile = await SeedExecutionProfileAsync("sib-missing", "8.0.3", inputRequired: true);
+		await ActivateBaselineAsync(missingProfile, "sib-missing");
+		Guid missingCatalogComponent = (await _catalog.GetExecutionProfileAsync(missingProfile, CancellationToken.None))!.Component.Id;
+		Guid missingComponent = await SeedComponentLinkedToAsync(targetId, missingCatalogComponent, "8.0.3", "host-cfg-4201");
+
+		Guid satisfiedProfile = await SeedExecutionProfileAsync("sib-satisfied", "8.0.3", inputRequired: true);
+		await ActivateBaselineAsync(satisfiedProfile, "sib-satisfied");
+		Guid satisfiedCatalogComponent = (await _catalog.GetExecutionProfileAsync(satisfiedProfile, CancellationToken.None))!.Component.Id;
+		Guid satisfiedComponent = await SeedComponentLinkedToAsync(targetId, satisfiedCatalogComponent, "8.0.3", "host-cfg-4202");
+		await SaveConfigDocAsync(ConfigDocKinds.Input, satisfiedProfile, ConfigDocLayers.Global, null, "target_ip: 192.0.2.60\n");
+
+		ScanPlan plan = await _planner.CompileAsync(null, [missingComponent, satisfiedComponent], CancellationToken.None);
+
+		ScanPlanSkip skip = Assert.Single(plan.Skips);
+		Assert.Equal(missingComponent, skip.ComponentId);
+		Assert.Equal(ScanPlanSkipReasons.MissingRequiredInput, skip.Reason);
+
+		ScanPlanItem item = Assert.Single(plan.Items);
+		Assert.Equal(satisfiedComponent, item.ComponentId);
+		PlanInputResolution input = Assert.Single(item.InputResolutionsOrEmpty);
+		Assert.Equal(ConfigResolutionStates.Resolved, input.State);
+		Assert.True(input.IsRequired);
 	}
 
 	[Fact]
@@ -237,12 +299,12 @@ public sealed class PlanConfigResolutionServiceTests : IAsyncLifetime
 		// not one fixed application-wide name -- two different execution profiles each
 		// get their own attestation doc, and each plan item resolves only its own.
 		(Guid targetId, _) = await SeedSiteAndTargetAsync();
-		Guid profileA = await SeedExecutionProfileAsync("attest-a", "8.0.3");
+		Guid profileA = await SeedExecutionProfileAsync("attest-a", "8.0.3", inputRequired: false);
 		await ActivateBaselineAsync(profileA, "attest-a");
 		Guid catalogComponentA = (await _catalog.GetExecutionProfileAsync(profileA, CancellationToken.None))!.Component.Id;
 		Guid componentA = await SeedComponentLinkedToAsync(targetId, catalogComponentA, "8.0.3", "host-cfg-5001");
 
-		Guid profileB = await SeedExecutionProfileAsync("attest-b", "8.0.3");
+		Guid profileB = await SeedExecutionProfileAsync("attest-b", "8.0.3", inputRequired: false);
 		await ActivateBaselineAsync(profileB, "attest-b");
 		Guid catalogComponentB = (await _catalog.GetExecutionProfileAsync(profileB, CancellationToken.None))!.Component.Id;
 		Guid componentB = await SeedComponentLinkedToAsync(targetId, catalogComponentB, "8.0.3", "host-cfg-5002");
@@ -267,7 +329,7 @@ public sealed class PlanConfigResolutionServiceTests : IAsyncLifetime
 	public async Task CompileAsync_ExpiredAttestation_ReportsExpiredStateAndExpiryProvenance_NeverApplied()
 	{
 		(Guid targetId, _) = await SeedSiteAndTargetAsync();
-		Guid executionProfileId = await SeedExecutionProfileAsync("attest-expired", "8.0.3");
+		Guid executionProfileId = await SeedExecutionProfileAsync("attest-expired", "8.0.3", inputRequired: false);
 		await ActivateBaselineAsync(executionProfileId, "attest-expired");
 		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
 		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-cfg-6001");
@@ -293,7 +355,7 @@ public sealed class PlanConfigResolutionServiceTests : IAsyncLifetime
 		// Input document, must produce a DIFFERENT digest -- otherwise two materially
 		// different runs would be indistinguishable by their recorded digest.
 		(Guid targetId, _) = await SeedSiteAndTargetAsync();
-		Guid executionProfileId = await SeedExecutionProfileAsync("digest-shift", "8.0.3");
+		Guid executionProfileId = await SeedExecutionProfileAsync("digest-shift", "8.0.3", inputRequired: false);
 		await ActivateBaselineAsync(executionProfileId, "digest-shift");
 		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
 		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-cfg-7001");

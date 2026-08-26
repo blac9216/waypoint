@@ -43,14 +43,26 @@ public static class ConfigResolutionStates
 /// existing <see cref="ConfigDocResolver"/> shortcut ADR-0024 explicitly supersedes
 /// only for a FUTURE per-control catalog that does not exist yet) -- every declared
 /// input name for a given plan item shares the same resolved Input document, so
-/// <see cref="DocId"/>/<see cref="Version"/>/<see cref="Layer"/> repeat across the
+/// <see cref="DocId"/>/<see cref="DocVersion"/>/<see cref="Layer"/> repeat across the
 /// item's <see cref="ScanPlanItem.InputResolutions"/> entries when more than one
 /// input name is declared. <see cref="State"/> is <see cref="ConfigResolutionStates.Missing"/>
 /// (never <see cref="ConfigResolutionStates.Expired"/> -- expiry is an attestation-only
-/// concept) when no Input document exists at any layer for this profile; a missing
-/// REQUIRED input is what <see cref="Waypoint.Core.Scans.ScanPlanSkipReasons"/>'s future
-/// missing-input reason (deferred to #737, this issue's own scope note) will block
-/// planning on -- this record only reports the fact, it does not itself gate planning.
+/// concept) when no Input document exists at any layer for this profile.
+///
+/// <see cref="IsRequired"/> carries the catalog's <c>catalog_declared_inputs.is_required</c>
+/// flag (<see cref="Waypoint.Core.ComplianceContent.CatalogDeclaredInput.IsRequired"/>)
+/// through to the snapshot so required-vs-optional survives resolution. A missing
+/// <b>REQUIRED</b> input does NOT produce an accepted item: per ADR-0024 ("A missing
+/// required Input leaves the affected component job visibly skipped without an execution
+/// attempt and with a safe readiness reason") and issue #735's owner decision "missing
+/// input isolation", <see cref="Waypoint.Infrastructure.Runs.ScanPlannerService"/> emits
+/// a component-scoped <see cref="Waypoint.Core.Scans.ScanPlanSkip"/> with reason
+/// <see cref="Waypoint.Core.Scans.ScanPlanSkipReasons.MissingRequiredInput"/> naming the
+/// input definition; siblings still plan. A missing <b>OPTIONAL</b> input
+/// (<see cref="IsRequired"/> false) is provenance-recorded here on an accepted item and
+/// does not gate planning. This record only reports the fact; the gate lives in the
+/// planner so the skip carries the same partition-the-candidate-set discipline every
+/// other per-component gap does.
 /// </summary>
 public sealed record PlanInputResolution(
 	string InputName,
@@ -59,7 +71,8 @@ public sealed record PlanInputResolution(
 	Guid? DocId,
 	int? DocVersion,
 	string? DocAuthor,
-	DateTimeOffset? DocVersionCreatedAt);
+	DateTimeOffset? DocVersionCreatedAt,
+	bool IsRequired = false);
 
 /// <summary>
 /// The resolved Attestation document for one plan item (ADR-0024: "Attestations
