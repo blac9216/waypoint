@@ -605,20 +605,24 @@ describe("App", () => {
 	/**
 	 * Issue #707 (epic #706): `/live-run` is the restored console again, not a
 	 * redirect to `/live-jobs` (issue #693's regression — see #704/#705). A
-	 * bare `/live-run` (no `?run=`) renders the console's own "No run
-	 * selected" empty state rather than bouncing anywhere; `?run=<id>` mounts
+	 * bare `/live-run` (no `?run=`) renders the console's own no-runId default
+	 * state (issue #711: an active-run picker, not the old bare "No run
+	 * selected." dead end) rather than bouncing anywhere; `?run=<id>` mounts
 	 * the console against that run. Old bookmarked/shared `/live-run?run=`
 	 * links therefore keep working natively, without ever touching
 	 * `/live-jobs`.
 	 */
 	describe("/live-run route (issue #707: restored console, no longer a redirect)", () => {
-		it("renders the console's empty state for a bare /live-run, without redirecting", async () => {
+		it("renders the console's no-runId picker state for a bare /live-run, without redirecting", async () => {
 			window.history.pushState(null, "", "/live-run");
 			installChromeFetchMock("Admin");
 			render(<App />);
 			await signIn();
 
-			await waitFor(() => expect(screen.getByText("No run selected.")).toBeInTheDocument());
+			// installChromeFetchMock 404s GET /runs (unhandled in test), so the
+			// picker's error branch renders — still not the old bare dead end.
+			await waitFor(() => expect(screen.getByText("unhandled in test")).toBeInTheDocument());
+			expect(screen.queryByText("No run selected.")).not.toBeInTheDocument();
 			expect(window.location.pathname).toBe("/live-run");
 			expect(window.location.search).toBe("");
 		});

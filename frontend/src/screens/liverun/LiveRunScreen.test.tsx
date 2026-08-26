@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
 import { RouterProvider } from "../../lib/router";
+import type { RunListItem } from "../results/results";
 import { LiveRunScreen } from "./LiveRunScreen";
 
 /**
@@ -944,5 +945,145 @@ describe("LiveRunScreen (issue #283)", () => {
 			// (the target name now appears twice: the list row and the log line's tag).
 			expect(screen.getAllByText("esxi-01.example.internal").length).toBeGreaterThanOrEqual(2);
 		});
+	});
+
+	/**
+	 * Issue #711 (regression against #714): making `/live-run` a permanent
+	 * top-level nav entry means the screen is reachable with no `?run=` at
+	 * all. `LiveRunScreen({ runId: undefined })` must present a useful
+	 * default — an active-run picker backed by the same `GET /runs` list
+	 * `results/useRunList.ts` already fetches — never the old bare "No run
+	 * selected." dead end.
+	 */
+	describe("no-runId default state (#711)", () => {
+		const ACTIVE_RUN: RunListItem = {
+			id: "run-0826-0900Z",
+			run_type: "scan",
+			state: "running",
+			scope: '{"site_id":"33333333-3333-3333-3333-333333333333"}',
+			initiated_by: "j.moreno",
+			created_at: "2026-08-26T09:00:00Z",
+			started_at: "2026-08-26T09:00:00Z",
+			completed_at: null,
+			job_count: 4,
+			job_count_queued: 4,
+			job_count_running: 0,
+			job_count_completed: 0,
+			job_count_failed: 0,
+			job_count_blocked: 0,
+		};
+
+		const COMPLETED_RUN: RunListItem = {
+			...ACTIVE_RUN,
+			id: "run-0825-0100Z",
+			state: "completed",
+			completed_at: "2026-08-25T02:00:00Z",
+		};
+
+		const DOWNLOAD_RUN: RunListItem = {
+			...ACTIVE_RUN,
+			id: "run-download-01",
+			run_type: "download",
+			state: "running",
+		};
+
+		function installRunListFetchMock(runList: RunListItem[]) {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url.startsWith("/api/v1/runs?")) {
+					return new Response(JSON.stringify(runList), { status: 200 });
+				}
+				if (url === "/api/v1/auth/me") {
+					return new Response(JSON.stringify({ username: "j.moreno", role: "Admin" }), { status: 200 });
+				}
+				throw new Error(`Unhandled fetch in test: ${url}`);
+			}) as unknown as typeof fetch;
+		}
+
+		function renderNoRunId(role: "Viewer" | "Cyber" | "Operator" | "Admin" = "Admin") {
+			sessionStorage.setItem(
+				"waypoint.session",
+				JSON.stringify({
+					token: "tok",
+					username: "j.moreno",
+					role,
+					expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+				}),
+			);
+			return render(
+				<AuthProvider>
+					<RouterProvider>
+						<LiveRunScreen runId={undefined} />
+					</RouterProvider>
+				</AuthProvider>,
+			);
+		}
+
+		it("shows an empty-state explanation with a Start a Scan link when no compliance run is active", async () => {
+			installRunListFetchMock([COMPLETED_RUN, DOWNLOAD_RUN]);
+			renderNoRunId();
+
+			await waitFor(() => expect(screen.getByText(/No compliance run is currently active/)).toBeInTheDocument());
+			expect(screen.queryByText("No run selected.")).not.toBeInTheDocument();
+
+			const startLink = screen.getByRole("link", { name: "Start a Scan" });
+			expect(startLink).toHaveAttribute("href", "/scan/new");
+			const jobsLink = screen.getByRole("link", { name: "Jobs" });
+			expect(jobsLink).toHaveAttribute("href", "/live-jobs");
+		});
+
+		it("lists active compliance runs (excluding completed and non-compliance run types) as selectable rows", async () => {
+			installRunListFetchMock([ACTIVE_RUN, COMPLETED_RUN, DOWNLOAD_RUN]);
+			renderNoRunId();
+
+			await waitFor(() => expect(screen.getByText(ACTIVE_RUN.id)).toBeInTheDocument());
+			expect(screen.queryByText(COMPLETED_RUN.id)).not.toBeInTheDocument();
+			expect(screen.queryByText(DOWNLOAD_RUN.id)).not.toBeInTheDocument();
+			expect(screen.queryByText("No run selected.")).not.toBeInTheDocument();
+			expect(screen.queryByText(/No compliance run is currently active/)).not.toBeInTheDocument();
+		});
+
+		it("selecting a listed run navigates to /live-run?run=<id>", async () => {
+			installRunListFetchMock([ACTIVE_RUN]);
+			renderNoRunId();
+
+			const row = await screen.findByRole("link", { name: new RegExp(ACTIVE_RUN.id) });
+			expect(row).toHaveAttribute("href", `/live-run?run=${ACTIVE_RUN.id}`);
+
+			row.click();
+			await waitFor(() => expect(window.location.pathname + window.location.search).toBe(`/live-run?run=${ACTIVE_RUN.id}`));
+			window.history.pushState(null, "", "/live-run");
+		});
+
+		it("shows a load error instead of the bare dead end when GET /runs fails", async () => {
+			globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url.startsWith("/api/v1/runs?")) {
+					return new Response(JSON.stringify({ error: { code: "internal_error", message: "Could not load compliance runs." } }), {
+						status: 500,
+					});
+				}
+				if (url === "/api/v1/auth/me") {
+					return new Response(JSON.stringify({ username: "j.moreno", role: "Admin" }), { status: 200 });
+				}
+				throw new Error(`Unhandled fetch in test: ${url}`);
+			}) as unknown as typeof fetch;
+			renderNoRunId();
+
+			await waitFor(() => expect(screen.getByText("Could not load compliance runs.")).toBeInTheDocument());
+			expect(screen.queryByText("No run selected.")).not.toBeInTheDocument();
+		});
+	});
+
+	/** with-`?run=` behavior is unchanged by #711 — same board render as
+	 * every other test in this suite above; this is just an explicit
+	 * regression pin that supplying a runId never renders the new picker. */
+	it("with a runId supplied, renders the run board directly and never the picker (#711 regression pin)", async () => {
+		installFetchMock(() => ({ frames: [] }));
+		renderWithAuth("run-0808-0100Z");
+
+		await waitFor(() => expect(screen.getByText("run-0808-0100Z")).toBeInTheDocument());
+		expect(screen.queryByText(/No compliance run is currently active/)).not.toBeInTheDocument();
+		expect(document.querySelector(".live-run__picker")).not.toBeInTheDocument();
 	});
 });
