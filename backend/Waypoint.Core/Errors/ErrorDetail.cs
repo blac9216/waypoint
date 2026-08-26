@@ -39,12 +39,21 @@ namespace Waypoint.Core.Errors;
 /// needs to point the operator at the exact gap. Omitted for every error whose cause is
 /// not a binding-resolution failure.
 /// </param>
+/// <param name="ScopeOmissions">
+/// Issue #733 (epic #726 Wave 2, ADR-0023): an optional machine-readable enumeration of
+/// every requested target/component that could not be validated as part of a scan's
+/// resolved scope -- the component-scope counterpart of <paramref name="BindingGaps"/>,
+/// carrying the (component_id?, target_id?, reason, detail) a caller (the Start-a-Scan
+/// wizard) needs to point the operator at exactly what to refresh/re-select. Omitted for
+/// every error whose cause is not a scope-resolution failure.
+/// </param>
 public sealed record ErrorDetail(
 	string Code,
 	string Message,
 	string? Detail = null,
 	IReadOnlyList<BlockingCategory>? Blockers = null,
-	IReadOnlyList<CredentialBindingGap>? BindingGaps = null);
+	IReadOnlyList<CredentialBindingGap>? BindingGaps = null,
+	IReadOnlyList<Waypoint.Core.Components.ScopeOmission>? ScopeOmissions = null);
 
 /// <summary>
 /// One machine-readable per-target/per-purpose credential-resolution failure (issue

@@ -285,6 +285,30 @@ families that still halt at the run/queue level.
 | `/runs/history` | GET | Issue #708/#689 (epic #706): filtered, keyset-cursor-paged run list — the global Jobs workspace's History mode. Viewer+, same floor as every other run read (ADR-0019 decision 6). Query params: `state` (comma-separated allow-list of `runs.state`), `run_type` (comma-separated allow-list of `runs.run_type`), `since`/`until` (ISO-8601, inclusive bounds on `created_at`), `cursor` (opaque, from a previous response's `next_cursor`), `limit` (1–200, default 50). No filter is applied by default — including no implicit "terminal only" filter; a caller browsing "history" passes `state=completed,completed_with_failures,aborted` explicitly, same as every other filter here. An unrecognized `state`/`run_type` value or an unparseable `since`/`until` or garbage `cursor` is 400 `validation_error`, never a 500. Response body: `items` (`RunResponse[]`, same shape `GET /runs` and `GET /runs/{id}` return) and `next_cursor` (opaque, present only when the page was truncated by `limit` with more matching rows remaining — never a silent truncation). Cursor wraps `(created_at, id)` — unlike `/runs/{id}/events/history`'s single-column `job_events.seq` cursor, `runs.created_at` is not unique, so the tie-break column (matching `ORDER BY created_at DESC, id DESC`) travels in the cursor too. A route distinct from `GET /runs` (rather than overloading its `?limit/offset` contract) so the Live Jobs workspace's existing active-work list (#590) is untouched. |
 | `/runs` | GET, POST | POST body: `run_type`, `scope` (JSON string — a scan run's `scope.site_id` and `scope.profile_id` are both required, optional `target_ids`), `credential_id` \| inline `credential` (personal tier, ADR-0011 — never persisted), `confirmation` (remediate only). Cyber+ for scans; remediation POSTs require Admin + `confirmation: "REMEDIATE"`. 202 body: `run_id`. Issue #639: `scope.profile_id` selects which pulled compliance-content profile (`profiles.id`, `GET /profiles`) the scan executes — must reference an installed profile or the request 404s/400s (missing entirely is a 400 `validation_error`; an unknown id is a 404 `not_found`); the run persists it in `scope` so run history shows what was actually scanned. Issue #585 (ADR-0021): optional `credential_overrides` (scan runs only, mutually exclusive with inline `credential`): `[{ target_id, purpose, credential_id }]`, each substituting a stored credential for exactly one (target, purpose) pair. Issue #586 (ADR-0021): optional `ad_hoc_credentials` (scan runs only, Operator+, mutually exclusive with inline `credential`): `[{ target_id, purpose, username, secret }]`, each an inline personal credential for exactly one (target, purpose) pair — encrypted at rest as its own `run_secrets` row keyed by `(run, target, purpose)`, never a stored `credentials` row. Ad hoc takes precedence over `credential_overrides` for the same pair; naming the same `(target_id, purpose)` in both, or twice within `ad_hoc_credentials` itself, is a 400. At creation the API resolves every purpose each selected target's scan requires (shared `CredentialPurposeMatrix`) from `ad_hoc_credentials` first, then `credential_overrides`, then the target's own `credential-bindings`, then the legacy run-level `credential_id` (now reinterpreted as a type-checked override of each target's default purpose) — then snapshots the result as immutable per-job `job_credential_bindings` rows (later target/binding edits never change an in-flight run; an ad hoc-resolved purpose sets `is_run_secret: true` on its snapshot row instead of a `credential_id`). Any missing/incompatible/out-of-scope pair rejects the whole request with a 400 `credential_binding_gaps` whose `error.binding_gaps` array enumerates every `{ target_id, target_name, purpose, reason, credential_id? }` (`reason` ∈ `missing_binding`, `incompatible_credential_type`, `credential_not_found`, `target_not_in_scope`, `purpose_not_applicable`, `duplicate_override`) before any run/job row exists. |
 
+**Interim additive `scope.target_scope` (issue #733, epic #726 Wave 2, ADR-0023) —
+NOT yet the end-state contract below.** A scan-run POST may additionally set
+`scope.target_scope`: `{ "mode": "all" | "explicit", "target_ids"?: [...],
+"component_ids"?: [...] }`, resolved against the merged stable-component model (PR
+#839) exactly as the end-state `target_scope` below describes — tri-state parent
+resolution into explicit stable identities, ownership/lifecycle/fact-conflict/catalog-
+compatibility validation, and an empty `explicit` selection resolves to zero
+components rather than widening to the whole site. An invalid `mode` is 400
+`validation_error`; a non-empty request that resolves to zero runnable components is
+400 `no_runnable_component` with `error.scope_omissions` (`[{ component_id?,
+target_id?, reason, detail }]`, `reason` ∈ `component_not_found`,
+`component_not_in_scope`, `component_absent`, `component_retired`, `fact_conflict`,
+`catalog_incompatible`, `target_not_found`) enumerating why. The requested
+`target_scope` and its resolved component set/omissions are frozen into
+`run_scope_snapshots` (migration 0056) the instant the run row is created, readable
+per run for history/audit — the "requested versus resolved scope" AC this issue
+closes. **Deliberately NOT yet wired in this slice:** `target_scope` does not replace
+`target_ids`/`profile_id` (both shapes coexist; job fan-out itself is still the shipped
+target-granular path until #735–#737's component-job layer lands), it is not exposed
+by the Start-a-Scan wizard yet (frontend remainder), and it does not integrate with
+`/runs/plan-preview`'s mandatory discovery refresh (also a stated remainder — an
+interactive `fact_conflict` is always an omission in this slice, never resolved, since
+there is no plan-preview step yet for a Cyber+ initiator to choose from).
+
 🚧 **Superseded scan-creation contract (epic #726, ADRs 0022–0024).** The `/runs` POST
 row above — `scope.profile_id` selecting an installed profile, and target-granular
 `job_credential_bindings` — describes the shipped M2/M3 scan model. It is retained on

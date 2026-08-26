@@ -25,7 +25,8 @@ public class ApiException : Exception
 {
 	public ApiException(
 		HttpStatusCode statusCode, string code, string message, string? detail = null,
-		IReadOnlyList<BlockingCategory>? blockers = null, IReadOnlyList<CredentialBindingGap>? bindingGaps = null)
+		IReadOnlyList<BlockingCategory>? blockers = null, IReadOnlyList<CredentialBindingGap>? bindingGaps = null,
+		IReadOnlyList<Waypoint.Core.Components.ScopeOmission>? scopeOmissions = null)
 		: base(message)
 	{
 		StatusCode = statusCode;
@@ -33,6 +34,7 @@ public class ApiException : Exception
 		Detail = detail;
 		Blockers = blockers;
 		BindingGaps = bindingGaps;
+		ScopeOmissions = scopeOmissions;
 	}
 
 	public HttpStatusCode StatusCode { get; }
@@ -47,9 +49,12 @@ public class ApiException : Exception
 	/// <summary>Issue #585: optional per-target/per-purpose credential-resolution gaps -- see <see cref="ErrorDetail.BindingGaps"/>.</summary>
 	public IReadOnlyList<CredentialBindingGap>? BindingGaps { get; }
 
+	/// <summary>Issue #733: optional per-target/per-component scope-resolution omissions -- see <see cref="ErrorDetail.ScopeOmissions"/>.</summary>
+	public IReadOnlyList<Waypoint.Core.Components.ScopeOmission>? ScopeOmissions { get; }
+
 	public ErrorDetail ToErrorDetail()
 	{
-		return new ErrorDetail(Code, Message, Detail, Blockers, BindingGaps);
+		return new ErrorDetail(Code, Message, Detail, Blockers, BindingGaps, ScopeOmissions);
 	}
 
 	public static ApiException Unauthorized(string message = "Authentication is required.", string? detail = null)
