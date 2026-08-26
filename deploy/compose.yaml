@@ -873,7 +873,9 @@ networks:
 #
 # Create these six files under deploy/config/secrets/ (gitignored -- see
 # .gitignore's /deploy/config/ entry) before bringing THIS base file up on
-# its own; #847 will add a generator, but does not exist yet.
+# its own -- deploy/scripts/init-config.sh (production) or
+# deploy/scripts/generate-dev-stack.sh --mode persistent (issue #847)
+# generate them for you, idempotently, and never overwrite an existing one.
 # compose.override.example.yaml's dev-bootstrap service generates its own
 # separate dev-only secrets instead -- see that file. Each file's entire
 # content (minus a trailing newline) is the raw password/secret value -- no

@@ -50,14 +50,13 @@ REPO_ROOT="$(cd -- "${DEPLOY_DIR}/.." &>/dev/null && pwd)"
 SLUG="${1:-smoke-$(date +%s)-$$}"
 PORT="${2:-19443}"
 PROJECT="wp-${SLUG}"
-# WAYPOINT_SMOKE_OVERRIDE_FILE: optional, uncommitted compose override (e.g.
-# a scratch file overriding the `edge` network's pinned subnet, per
-# docs/testing.md, when 192.168.240.0/24 collides with a concurrent stack on
-# this host). Never commit an override file -- it exists purely to route
-# around a shared-host collision, and the shipped compose file's pinned
-# subnet is correct on a real appliance host with no concurrent stacks. `DC`
-# is finalized further down, after the devcontainer bind-mount translation
-# block below (which may itself set WAYPOINT_SMOKE_OVERRIDE_FILE).
+# WAYPOINT_SMOKE_OVERRIDE_FILE: rare manual escape hatch, an uncommitted extra
+# compose override layered on top of everything deploy/scripts/generate-dev-
+# stack.sh --mode agent already generates below. WAYPOINT_SMOKE_SUBNET (also
+# below) is the normal way to route around an `edge`-subnet collision with a
+# concurrent stack on this host (docs/testing.md) -- prefer it; never commit a
+# run with either set. `DC` is finalized further down, after the generator
+# call.
 # In-network base -- the helper container below reaches nginx by its Compose
 # service name (Docker's embedded DNS, same resolver mechanism
 # deploy/README.md "Networking" describes for nginx's own upstream lookups),
@@ -74,17 +73,6 @@ FAIL_COUNT=0
 FAILURES=()
 ADMIN_TOKEN=""
 
-# Issue #844: secret files this run generated (see the "File-backed secrets"
-# block below) -- tracked so cleanup removes exactly those and never an
-# operator's own.
-GENERATED_SECRET_FILES=()
-SECRET_LABEL="smoke"
-
-# Issue #845: same treatment for the throwaway TLS pair this run stages at
-# deploy/config/tls/ (see the prerequisites block below) -- an operator's
-# own pair, if one is already there, is used as-is and never removed.
-GENERATED_TLS_FILES=()
-
 log() { printf '\n=== %s ===\n' "$*"; }
 ok()  { PASS_COUNT=$((PASS_COUNT + 1)); printf '[PASS] %s\n' "$*"; }
 bad() { FAIL_COUNT=$((FAIL_COUNT + 1)); FAILURES+=("$*"); printf '[FAIL] %s\n' "$*"; }
@@ -95,14 +83,14 @@ cleanup() {
 	if [[ -n "${HELPER_STARTED}" ]]; then
 		docker rm -f "${HELPER_NAME}" >/dev/null 2>&1 || true
 	fi
-	(cd "${DEPLOY_DIR}" && ${DC} down -v) || true
-	rm -f "${SCRATCH_KEY_DIR:-/nonexistent}"/* 2>/dev/null || true
-	if [[ ${#GENERATED_SECRET_FILES[@]} -gt 0 ]]; then
-		rm -f "${GENERATED_SECRET_FILES[@]}" 2>/dev/null || true
+	if [[ -n "${DC:-}" ]]; then
+		(cd "${DEPLOY_DIR}" && ${DC} down -v) || true
 	fi
-	if [[ ${#GENERATED_TLS_FILES[@]} -gt 0 ]]; then
-		rm -f "${GENERATED_TLS_FILES[@]}" 2>/dev/null || true
-	fi
+	# Issue #847: everything the generator wrote for this run -- secrets,
+	# TLS, the admin-password hash, the override/env files -- lives ONLY
+	# under this one slug-scoped directory, so a full run's throwaway state
+	# is exactly this one `rm -rf`.
+	rm -rf "${DEPLOY_DIR}/.generated/${SLUG}"
 	rm -f "${CATALOG_ARTIFACTS_FILE:-/nonexistent}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -115,29 +103,13 @@ docker ps --format '{{.Names}}' | grep -v "^${PROJECT}-" || echo "  (none curren
 
 cd "${DEPLOY_DIR}"
 
-# Issue #845: compose.yaml (the production base this script now runs on its
-# own) mounts nginx's TLS material PER FILE from deploy/config/tls/tls.crt
-# and deploy/config/tls/tls.key with `bind: {create_host_path: false}`, so
-# `up` dies at container creation when that pair is missing -- and a
-# directory-level /etc/nginx/certs mount does NOT replace per-file mounts
-# (Compose merges volumes by target), it coexists with them. So stage the
-# throwaway pair at exactly the location the base mandates -- gitignored
-# under /deploy/config/, the same convention as the config/secrets/ files
-# below -- rather than at deploy/nginx/certs/, which the base never mounts.
-# Issue #844 renamed the pair to the generic tls.crt/tls.key names
-# deploy/nginx/conf.d/default.conf references; #847 replaces this
-# hand-rolled staging with a first-class generator.
-TLS_DIR="${DEPLOY_DIR}/config/tls"
-mkdir -p "${TLS_DIR}"
-if [[ ! -s "${TLS_DIR}/tls.crt" || ! -s "${TLS_DIR}/tls.key" ]]; then
-	log "Staging dev TLS pair into ${TLS_DIR}"
-	nginx/certs/generate-dev-certs.sh
-	cp nginx/certs/tls.crt "${TLS_DIR}/tls.crt"
-	cp nginx/certs/tls.key "${TLS_DIR}/tls.key"
-	chmod 644 "${TLS_DIR}/tls.crt"
-	chmod 600 "${TLS_DIR}/tls.key"
-	GENERATED_TLS_FILES+=("${TLS_DIR}/tls.crt" "${TLS_DIR}/tls.key")
-fi
+# Issue #847: no TLS staging here -- deploy/scripts/generate-dev-stack.sh
+# --mode agent generates its own SAN-correct self-signed pair under
+# deploy/.generated/${SLUG}/tls/ and binds it directly at compose.yaml's
+# per-file targets (/etc/nginx/certs/tls.{crt,key}), replacing the base's
+# mandatory-but-missing deploy/config/tls/ mounts -- see the generator call
+# below. deploy/config/tls/ (the production/persistent-mode location) is
+# never touched by an agent-mode run.
 
 if [[ ! -f "${REPO_ROOT}/frontend/dist/index.html" ]]; then
 	log "frontend/dist missing (Node 22 required, sandbox has Node ${NODE_VER:-unknown}) -- writing an accepted placeholder per docs/testing.md's disclosed workaround"
@@ -148,133 +120,23 @@ if [[ ! -f "${REPO_ROOT}/frontend/dist/index.html" ]]; then
 	EOF
 fi
 
-# docs/testing.md "Devcontainer bind mounts": when this script itself runs
-# from inside the devcontainer, the Docker daemon resolves every bind-mount
-# SOURCE against the HOST filesystem, not this container's. A relative source
-# in compose.yaml (frontend/dist, postgres/initdb) is silently mounted
-# as an empty directory instead of erroring, which then makes nginx serve a
-# bare 403 and/or postgres silently skip 01-runner-roles.sh (both hit and
-# fixed while first authoring this script -- see docs/testing.md and the PR
-# body for #444). Resolve the host-absolute prefix for this repo checkout
-# once here (used both for the compose sources below and for the master-key
-# mount further down, which hits the identical trap) -- on a real appliance
-# host (no devcontainer indirection) HOST_PREFIX just equals REPO_ROOT and
-# every block below is a no-op translation.
-HOST_PREFIX="${REPO_ROOT}"
-if [[ -S /var/run/docker.sock ]]; then
-	SELF_MOUNTS="$(docker inspect "$(hostname)" --format '{{range .Mounts}}{{.Source}}|{{.Destination}}{{"\n"}}{{end}}' 2>/dev/null || true)"
-	while IFS='|' read -r src dst; do
-		if [[ "${dst}" == "${REPO_ROOT}" || "${REPO_ROOT}" == "${dst}"/* ]]; then
-			HOST_PREFIX="${src}${REPO_ROOT#"${dst}"}"
-			break
-		fi
-	done <<< "${SELF_MOUNTS}"
-fi
-
-# Generated whenever the devcontainer indirection is detected, even if the
-# operator also passed WAYPOINT_SMOKE_OVERRIDE_FILE: that variable exists to
-# route around a shared-host subnet collision, and suppressing the host-path
-# translation because of it would break the run for an unrelated reason
-# (issue #845).
-if [[ "${HOST_PREFIX}" != "${REPO_ROOT}" ]]; then
-	log "devcontainer bind-mount translation: this container's ${REPO_ROOT} is the host's ${HOST_PREFIX} -- generating a scratch override"
-	GENERATED_OVERRIDE="$(mktemp)"
-	cat > "${GENERATED_OVERRIDE}" <<-EOF
-	services:
-	  nginx:
-	    volumes:
-	      - type: bind
-	        source: ${HOST_PREFIX}/deploy/nginx/conf.d
-	        target: /etc/nginx/conf.d
-	        read_only: true
-	      - type: bind
-	        source: ${HOST_PREFIX}/deploy/config/tls/tls.crt
-	        target: /etc/nginx/certs/tls.crt
-	        read_only: true
-	        bind:
-	          create_host_path: false
-	      - type: bind
-	        source: ${HOST_PREFIX}/deploy/config/tls/tls.key
-	        target: /etc/nginx/certs/tls.key
-	        read_only: true
-	        bind:
-	          create_host_path: false
-	      - type: bind
-	        source: ${HOST_PREFIX}/frontend/dist
-	        target: /usr/share/nginx/html
-	        read_only: true
-	        bind:
-	          create_host_path: false
-	  postgres:
-	    volumes:
-	      - ${HOST_PREFIX}/deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
-	secrets:
-	  postgres-owner-password:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-owner-password
-	  postgres-compliance-runner-password:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-compliance-runner-password
-	  postgres-download-runner-password:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-download-runner-password
-	  postgres-keycloak-password:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-keycloak-password
-	  keycloak-bootstrap-admin-password:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/keycloak-bootstrap-admin-password
-	  keycloak-backend-client-secret:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/keycloak-backend-client-secret
-	EOF
-	WAYPOINT_SMOKE_OVERRIDE_FILE="${WAYPOINT_SMOKE_OVERRIDE_FILE:+${WAYPOINT_SMOKE_OVERRIDE_FILE} }${GENERATED_OVERRIDE}"
-fi
-
-# --- File-backed secrets (issue #844) ----------------------------------
-#
-# The stack's Postgres bootstrap/runner/Keycloak passwords and the
-# waypoint-backend realm client secret are Compose `secrets:` file sources
-# under deploy/config/secrets/ (gitignored). They are MANDATORY: with them
-# absent, `docker compose up` dies at container creation ("bind source path
-# does not exist") -- `docker compose config` still exits 0, so nothing
-# warns earlier. Generate obviously-invented, per-run values for any that
-# are not already there; an operator's own real files (if any) are left
-# untouched, and only files this run created are removed on teardown.
-#
-# #847 replaces this plumbing with a first-class generator; until then each
-# bring-up script grows its own minimal copy.
-SECRETS_DIR="${DEPLOY_DIR}/config/secrets"
-mkdir -p "${SECRETS_DIR}"
-for secret_name in postgres-owner-password postgres-compliance-runner-password \
-	postgres-download-runner-password postgres-keycloak-password \
-	keycloak-bootstrap-admin-password keycloak-backend-client-secret; do
-	if [[ ! -s "${SECRETS_DIR}/${secret_name}" ]]; then
-		printf 'invented-%s-%s-%s\n' "${SECRET_LABEL}" "${secret_name}" "$(openssl rand -hex 6)" \
-			> "${SECRETS_DIR}/${secret_name}"
-		# 0644, not 0600: Compose bind-mounts a `file:` secret source
-		# verbatim (host uid/mode preserved -- no 0444 re-materialization),
-		# and postgres's initdb scripts read it as the in-container
-		# `postgres` user, which is neither root nor this script's uid. A
-		# 0600 file here fails closed in postgres's entrypoint wrapper --
-		# correct, but not what this script wants. Same 0644 convention the
-		# master-key file above already uses.
-		chmod 644 "${SECRETS_DIR}/${secret_name}"
-		GENERATED_SECRET_FILES+=("${SECRETS_DIR}/${secret_name}")
-	fi
-done
-log "File-backed secrets: ${#GENERATED_SECRET_FILES[@]} generated in ${SECRETS_DIR} (pre-existing files left alone)"
-
-SCRATCH_KEY_DIR="$(mktemp -d)"
-openssl rand -hex 32 > "${SCRATCH_KEY_DIR}/master.key"
-chmod 644 "${SCRATCH_KEY_DIR}/master.key"
-
-# Issue #845: deploy/config/ (anchored under deploy/, matching the
-# already-established file-backed-secrets convention issue #844 introduced
-# for postgres/keycloak), not the legacy repo-root config/ this replaces.
-CONFIG_DIR="${DEPLOY_DIR}/config"
-mkdir -p "${CONFIG_DIR}/secrets" "${CONFIG_DIR}/local-auth"
-cp "${SCRATCH_KEY_DIR}/master.key" "${CONFIG_DIR}/secrets/master.key"
-chmod 644 "${CONFIG_DIR}/secrets/master.key"
+# Issue #847: deploy/scripts/generate-dev-stack.sh --mode agent replaces this
+# script's former hand-rolled secret/TLS/override construction (devcontainer
+# bind-mount host-path translation, the six base secrets, the master key, and
+# the LocalAuth__*/RunnerResources__Fallback* override) with one generator
+# call. It writes everything under deploy/.generated/${SLUG}/ only, detects
+# port/subnet/project collisions before creating anything, and validates the
+# merged config itself -- this script only still owns computing the
+# admin-password hash (a backend-specific step the generator deliberately
+# does not do) and handing it in via --local-auth-admin-hash-file.
+GENERATED_STATE_DIR="${DEPLOY_DIR}/.generated/${SLUG}"
+LOCAL_AUTH_DIR="${GENERATED_STATE_DIR}/local-auth"
+mkdir -p "${LOCAL_AUTH_DIR}"
 
 # Admin password: fixed dev-only value, hashed via the backend's own CLI so
 # the hash format always matches what LocalAuthOptionsPostConfigure expects.
-# Computed here (before the compose override below) because that override
-# needs the resulting file to exist as a mount source.
+# Computed here (before the generator call) because the generator only wires
+# up a hash file it is handed -- it never computes one itself.
 ADMIN_PASSWORD="invented-smoke-test-password-$(openssl rand -hex 4)"
 log "Computing admin password hash via backend --hash-password"
 (
@@ -282,96 +144,37 @@ log "Computing admin password hash via backend --hash-password"
 	if command -v dotnet >/dev/null 2>&1; then
 		dotnet build Waypoint.Api >/dev/null
 		printf '%s\n' "${ADMIN_PASSWORD}" | dotnet run --project Waypoint.Api --no-launch-profile --no-build -- --hash-password \
-			| tail -1 > "${SCRATCH_KEY_DIR}/admin-hash"
+			| tail -1 > "${LOCAL_AUTH_DIR}/admin-password-hash"
 	fi
 )
-if [[ -s "${SCRATCH_KEY_DIR}/admin-hash" ]]; then
-	cp "${SCRATCH_KEY_DIR}/admin-hash" "${CONFIG_DIR}/local-auth/admin-password-hash"
+LOCAL_AUTH_ARGS=()
+if [[ -s "${LOCAL_AUTH_DIR}/admin-password-hash" ]]; then
+	LOCAL_AUTH_ARGS=(--local-auth-admin-hash-file "${LOCAL_AUTH_DIR}/admin-password-hash")
 else
 	echo "warning: could not compute admin password hash locally; login-gated steps will be skipped" >&2
 	ADMIN_PASSWORD=""
 fi
 
-# deploy/README.md "Bring-up" steps 3-4: both the master-key AND the
-# admin-password-hash bind mounts are commented out by default (an
-# unconfigured stack still starts healthy, but every login/secret-bearing
-# path fails closed until an operator uncomments them) -- discovered by this
-# script's own fresh-stack run, see the PR body for #444. This smoke test
-# needs both (login gates nearly every step below; the master key covers
-# personal/service-credential scan jobs, the secret canary step, and
-# compliance-runner's own readiness check), so it always layers a mount
-# override for both, translated through the same HOST_PREFIX the
-# devcontainer block above resolved. The admin-hash mount is conditional --
-# skip it if the hash could not be computed, so backend still starts (with
-# every login failing closed, as documented) rather than compose refusing to
-# come up on a missing bind source.
-MASTER_KEY_HOST_PATH="${HOST_PREFIX}/deploy/config/secrets/master.key"
-ADMIN_HASH_HOST_PATH="${HOST_PREFIX}/deploy/config/local-auth/admin-password-hash"
-MASTER_KEY_OVERRIDE="$(mktemp)"
-{
-	echo "services:"
-	echo "  backend:"
-	echo "    environment:"
-	# Issue #845: compose.yaml's base carries no LocalAuth__* keys at all
-	# (Keycloak-only auth) -- this smoke test's login step needs the
-	# local-auth dev flag explicitly turned on, which the base's now-removed
-	# `${LOCAL_AUTH_ENABLED:-true}` default used to supply implicitly.
-	echo "      LocalAuth__Enabled: \"true\""
-	if [[ -n "${ADMIN_PASSWORD}" ]]; then
-		# Also removed from the base for the same reason -- without this key
-		# the mounted hash file below is never read.
-		echo "      LocalAuth__AdminPasswordHashFile: \"/run/secrets/local-auth-admin-password-hash\""
-	fi
-	echo "    volumes:"
-	echo "      - type: bind"
-	echo "        source: ${MASTER_KEY_HOST_PATH}"
-	echo "        target: /run/secrets/waypoint-master-key"
-	echo "        read_only: true"
-	if [[ -n "${ADMIN_PASSWORD}" ]]; then
-		echo "      - type: bind"
-		echo "        source: ${ADMIN_HASH_HOST_PATH}"
-		echo "        target: /run/secrets/local-auth-admin-password-hash"
-		echo "        read_only: true"
-	fi
-	echo "  compliance-runner:"
-	echo "    volumes:"
-	echo "      - type: bind"
-	echo "        source: ${MASTER_KEY_HOST_PATH}"
-	echo "        target: /run/secrets/waypoint-master-key"
-	echo "        read_only: true"
-	echo "    environment:"
-	# Discovered running this script (see the PR body for #444): in a sandbox
-	# where cgroup CPU/memory limits are unreadable (CgroupResourceDiscovery
-	# logs "No usable cgroup CPU/memory limits found"), ResourceAdmissionController
-	# falls back to a conservative 1 CPU core -- below scan's own 2.0-core
-	# JobResourceProfiles weight, so a scan job is claimed, denied admission,
-	# and silently released back to `queued` FOREVER (the denial only logs at
-	# Debug, invisible at the default Information level -- a real, separately
-	# disclosed operator-visibility gap, not something this env override
-	# papers over). Raising the fallback here is the same knob an operator
-	# would set via RunnerResources:FallbackCpuCores/FallbackMemoryBytes on a
-	# host whose cgroups are similarly unreadable; it does not touch the
-	# runner image or any product code.
-	echo "      RunnerResources__FallbackCpuCores: \"4\""
-	echo "      RunnerResources__FallbackMemoryBytes: \"4294967296\""
-	echo "  download-runner:"
-	echo "    volumes:"
-	echo "      - type: bind"
-	echo "        source: ${MASTER_KEY_HOST_PATH}"
-	echo "        target: /run/secrets/waypoint-master-key"
-	echo "        read_only: true"
-} > "${MASTER_KEY_OVERRIDE}"
-
-COMPOSE_FILES="-f compose.yaml"
-if [[ -n "${WAYPOINT_SMOKE_OVERRIDE_FILE:-}" ]]; then
-	# May carry more than one path (space-separated): an operator-supplied
-	# override plus the generated devcontainer translation above.
-	for f in ${WAYPOINT_SMOKE_OVERRIDE_FILE}; do
-		COMPOSE_FILES="${COMPOSE_FILES} -f ${f}"
-	done
+# WAYPOINT_SMOKE_SUBNET: optional, mirrors e2e-playwright.sh's
+# WAYPOINT_E2E_SUBNET -- override the generated stack's `edge` subnet when
+# the agent-mode default (203.0.113.0/24) collides with a concurrent stack on
+# this host (docs/testing.md). Never commit a run with this set.
+GENERATE_ARGS=(--mode agent --slug "${SLUG}" --public-url "https://localhost:${PORT}" --port "${PORT}" "${LOCAL_AUTH_ARGS[@]}")
+if [[ -n "${WAYPOINT_SMOKE_SUBNET:-}" ]]; then
+	log "WAYPOINT_SMOKE_SUBNET=${WAYPOINT_SMOKE_SUBNET} -- overriding the generated edge subnet"
+	GENERATE_ARGS+=(--subnet "${WAYPOINT_SMOKE_SUBNET}")
 fi
-COMPOSE_FILES="${COMPOSE_FILES} -f ${MASTER_KEY_OVERRIDE}"
-DC="docker compose -p ${PROJECT} ${COMPOSE_FILES}"
+
+log "Generating isolated dev stack (deploy/scripts/generate-dev-stack.sh --mode agent --slug ${SLUG})"
+"${SCRIPT_DIR}/generate-dev-stack.sh" "${GENERATE_ARGS[@]}"
+
+DC="docker compose -p ${PROJECT} -f compose.yaml -f ${GENERATED_STATE_DIR}/override.yaml --env-file ${GENERATED_STATE_DIR}/.env"
+if [[ -n "${WAYPOINT_SMOKE_OVERRIDE_FILE:-}" ]]; then
+	# Rare manual escape hatch (e.g. a one-off scratch override this script's
+	# generated stack does not otherwise need) -- layered LAST so it can
+	# override anything the generator wrote.
+	DC="${DC} -f ${WAYPOINT_SMOKE_OVERRIDE_FILE}"
+fi
 
 # compliance-runner's own readiness check (ComplianceReadinessCheck) requires
 # Scans:ProfilePath/NsxProfilePath/SrgProfilePath to exist as readable
