@@ -265,7 +265,7 @@ public sealed class RunPlanPreviewService
 	private static ScanPlan DemoteForCredentialGaps(
 		ScanPlan plan,
 		IReadOnlyDictionary<Guid, PlanTargetRequirement> requirementsByTarget,
-		IReadOnlyList<CredentialBindingGap> gaps)
+		List<CredentialBindingGap> gaps)
 	{
 		if (gaps.Count == 0)
 		{
