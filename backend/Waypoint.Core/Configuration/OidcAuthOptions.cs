@@ -43,6 +43,16 @@ public sealed class OidcAuthOptions
 	public string? Authority { get; set; }
 
 	/// <summary>
+	/// The single browser-visible HTTPS origin for this appliance, for example
+	/// <c>https://waypoint.example.internal</c> or
+	/// <c>https://waypoint.example.internal:8443</c>. It must not contain user info,
+	/// a path, query, fragment, or trailing slash. When set, the token issuer is
+	/// derived as <c>{PublicUrl}/auth/realms/waypoint</c>; callers must not maintain a
+	/// second copy of that public identity in <see cref="ValidIssuer"/>.
+	/// </summary>
+	public string? PublicUrl { get; set; }
+
+	/// <summary>
 	/// The single canonical issuer string a real token's <c>iss</c> claim must match
 	/// (issue #536). Distinct from <see cref="Authority"/>: that address is the
 	/// backend's internal, container-network view of Keycloak, used only to fetch the
@@ -118,4 +128,29 @@ public sealed class OidcAuthOptions
 	/// this backend's existing <see cref="Audience"/> check needs no change.
 	/// </summary>
 	public string PublicClientId { get; set; } = "waypoint-frontend";
+
+	/// <summary>Returns the issuer derived from <see cref="PublicUrl"/>, or null when
+	/// the canonical URL has not been configured.</summary>
+	public string? DerivedIssuer => string.IsNullOrWhiteSpace(PublicUrl)
+		? null
+		: $"{PublicUrl}/auth/realms/waypoint";
+
+	/// <summary>Validates the canonical public URL without resolving DNS or making a
+	/// network request.</summary>
+	public static bool IsValidPublicUrl(string? value)
+	{
+		if (string.IsNullOrWhiteSpace(value)
+			|| value.EndsWith('/')
+			|| !Uri.TryCreate(value, UriKind.Absolute, out Uri? uri))
+		{
+			return false;
+		}
+
+		return uri.Scheme == Uri.UriSchemeHttps
+			&& !string.IsNullOrWhiteSpace(uri.Host)
+			&& string.IsNullOrEmpty(uri.UserInfo)
+			&& uri.AbsolutePath == "/"
+			&& string.IsNullOrEmpty(uri.Query)
+			&& string.IsNullOrEmpty(uri.Fragment);
+	}
 }

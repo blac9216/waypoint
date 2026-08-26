@@ -67,11 +67,12 @@
       "serviceAccountsEnabled": false,
       "clientAuthenticatorType": "client-secret",
       "secret": "__WAYPOINT_BACKEND_CLIENT_SECRET__",
+      "rootUrl": "${WAYPOINT_PUBLIC_URL}",
       "redirectUris": [
-        "https://localhost:8443/*"
+        "${WAYPOINT_PUBLIC_URL}/*"
       ],
       "webOrigins": [
-        "https://localhost:8443"
+        "${WAYPOINT_PUBLIC_URL}"
       ],
       "fullScopeAllowed": false,
       "defaultClientScopes": [
@@ -121,11 +122,12 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
+      "rootUrl": "${WAYPOINT_PUBLIC_URL}",
       "redirectUris": [
-        "https://localhost:8443/oidc/callback"
+        "${WAYPOINT_PUBLIC_URL}/oidc/callback"
       ],
       "webOrigins": [
-        "https://localhost:8443"
+        "${WAYPOINT_PUBLIC_URL}"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256"

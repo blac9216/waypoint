@@ -64,12 +64,25 @@ public static class OidcJwtBearerOptionsFactory
 	public static void ApplyIssuerValidation(OidcAuthOptions options, JwtBearerOptions jwtBearerOptions)
 	{
 		List<string> validIssuers = new();
-		if (!string.IsNullOrWhiteSpace(options.ValidIssuer))
+		if (!string.IsNullOrWhiteSpace(options.PublicUrl))
+		{
+			if (!OidcAuthOptions.IsValidPublicUrl(options.PublicUrl))
+			{
+				throw new InvalidOperationException(
+					"Oidc:PublicUrl must be an absolute HTTPS origin without a path, query, fragment, user info, or trailing slash.");
+			}
+
+			validIssuers.Add(options.DerivedIssuer!);
+		}
+		else if (!string.IsNullOrWhiteSpace(options.ValidIssuer))
 		{
 			validIssuers.Add(options.ValidIssuer);
 		}
 
-		validIssuers.AddRange(options.ValidIssuers.Where(issuer => !string.IsNullOrWhiteSpace(issuer)));
+		if (string.IsNullOrWhiteSpace(options.PublicUrl))
+		{
+			validIssuers.AddRange(options.ValidIssuers.Where(issuer => !string.IsNullOrWhiteSpace(issuer)));
+		}
 
 		jwtBearerOptions.TokenValidationParameters.ValidateIssuer = true;
 		if (validIssuers.Count == 1)
