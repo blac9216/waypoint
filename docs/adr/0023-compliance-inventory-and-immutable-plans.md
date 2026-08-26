@@ -48,11 +48,16 @@ configuration; historical plan references survive.
 ### Scope, readiness, and conflicts
 
 Requested scope is immutable and is either top-level `all` expansion or an explicit
-stable-component set. Pre-scan refresh resolves it to a concrete immutable set. `all`
-includes newly discovered compatible components on every successful boundary; any
-required incomplete boundary prevents a complete expansion. Explicit scope never
-widens and every selected identity must still exist and be reachable before any scan
-component job starts.
+stable-component set. Pre-scan refresh resolves every positively validated reachable
+component from each successful boundary to a concrete immutable set. `all` includes
+newly discovered compatible components on those boundaries; explicit scope never
+widens. For either mode, requested identities or boundaries that refresh cannot
+validate become explicit coverage omissions. The confirmed independent subset runs,
+the run is marked incomplete with a prominent warning, and the planner never fills a
+gap from stale cache or presents the smaller resolved set as complete coverage. Scan
+initiation fails only when refresh validates no runnable component and therefore no
+honest runnable plan can exist; readiness omissions after successful validation can
+still produce the honest zero-execution plan described below.
 
 When configured and discovered exact versions conflict, any Cyber-or-higher
 interactive initiator chooses one for this run after seeing both provenances; the
@@ -94,17 +99,19 @@ The profile picker and `scope.profile_id` are transitional and have no end-state
 #651 is architecturally superseded by catalog-derived baseline selection. #653 retains
 its requirement that invalid schedule dispatch be operator-visible, but validation
 becomes immutable scope/readiness resolution rather than legacy profile presence.
-#649 is decided as allowing concurrent scans of the same stable component: independent
-immutable plans avoid substitution and no target-wide lock or implicit serialization
-is imposed. Existing issues remain open until their implementation/UI cleanup is
-reconciled by the owning work.
+#649 remains a distinct unresolved duplicate/concurrent-scan policy and implementation
+issue. Immutable plans preserve each run's intent but do not decide duplicate intent,
+simultaneous endpoint load, credential lockout/rate-limit risk, or whether overlapping
+runs should reject, queue, or warn. Existing issues remain open until their policy or
+implementation/UI cleanup is reconciled by the owning work.
 
 ## Consequences
 
 - Issues #732–#734 implement component identity, requested/resolved scope, and plan
   compilation. All behavior in this ADR remains planned until those changes land.
-- Discovery can add scan-start latency and `all` can fail because one boundary is
-  incomplete; correctness and honest coverage take priority.
+- Discovery can add scan-start latency. Partial explicit and `all` scopes run every
+  confirmed independent component while prominently reporting incomplete coverage;
+  only the absence of any honest runnable refresh result fails initiation.
 - Inventory and plan storage grow because identity, provenance, omissions, and
   historical references are retained. Purging live inventory never purges history.
 - Callers select assets, not profiles. Exact baselines are deterministic catalog
@@ -118,5 +125,3 @@ reconciled by the owning work.
   the wrong subject or baseline.
 - Rewrite plan rows on rediscovery/content change: retries and audit would cease to be
   reproducible.
-- Reject or serialize all concurrent scans per target: independent read-only plans do
-  not require a global target lock.

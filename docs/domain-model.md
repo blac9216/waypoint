@@ -97,11 +97,16 @@ automatic exclusion.
 
 `ResolvedScope` is the concrete identity set produced by that refresh plus resolution
 time and provenance. `all` includes newly discovered compatible components; explicit
-scope never widens. Missing, absent, retired, unreachable, unsupported, version-
-conflicted, or baseline-unready selections are recorded as `CoverageOmission` with
-identity, stage, and reason. An incomplete refresh boundary makes `all` unresolved;
-it cannot masquerade as a smaller successful scan. Explicit selections must be
-observed and reachable before any component job begins.
+scope never widens. Both modes resolve every positively validated reachable component
+from successful boundaries. Requested identities or boundaries that cannot be
+validated, plus missing, absent, retired, unreachable, unsupported, version-conflicted,
+or baseline-unready selections, are recorded as `CoverageOmission` with identity or
+boundary, stage, and reason. Confirmed independent items execute; partial coverage
+marks the run incomplete and produces a prominent warning. Neither mode substitutes
+stale cache or lets its smaller resolved set masquerade as complete. Initiation fails
+only when refresh confirms no runnable component and no honest runnable plan can be
+formed; readiness omissions after successful validation may still yield the honest
+zero-execution plan below.
 
 When configured and discovered exact versions conflict, a Cyber-or-higher interactive
 initiator chooses one for only that run; both values/provenance and the choice are

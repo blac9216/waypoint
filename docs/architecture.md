@@ -174,13 +174,17 @@ boundaries reconcile their own observations without claiming the whole refresh w
 authoritative.
 
 Every scan performs discovery again as a mandatory planning barrier, regardless of
-cache age or recurring schedule. An explicit selection must be observed with the same
-identity and be reachable; otherwise that selection fails before any scan component
-job starts. An `all` selection expands against every successfully refreshed applicable
-boundary and includes newly discovered compatible components. If any required boundary
-failed, the planner refuses to call the expansion complete. It never substitutes the
-stale cache or silently narrows `all`. The plan records refresh coverage and every
-omission/conflict so later run status cannot imply full coverage.
+cache age or recurring schedule. For explicit and `all` requests alike, the planner
+resolves every positively validated reachable component from successfully refreshed
+applicable boundaries. `all` also includes newly discovered compatible components on
+those boundaries; explicit selection never widens. A requested identity or boundary
+that cannot be validated becomes a named coverage omission. Confirmed independent
+components still run, while the run is marked incomplete and carries a prominent
+coverage warning. The planner never substitutes stale cache, silently narrows the
+request, or calls a partial expansion complete. Initiation fails only when refresh
+validates no runnable component and no honest runnable plan can exist; components
+validated successfully but later found unsupported or otherwise unready can still
+produce the honest zero-execution plan below.
 
 ### Inventory lifecycle and scope
 
@@ -230,9 +234,10 @@ is therefore superseded as a profile-picker enhancement and will be reconciled b
 UI work in #786. [#653](https://github.com/blac9216/waypoint/issues/653) remains valid
 for operator-visible schedule failure, but legacy `profile_id` validation is replaced
 by immutable requested-scope planning. [#649](https://github.com/blac9216/waypoint/issues/649)
-is resolved architecturally as **allow concurrent plans**: stable identity prevents
-accidental substitution, while each run remains independently immutable; no
-target-wide rejection or implicit serialization is introduced.
+remains open as a distinct duplicate/concurrent-scan policy and implementation issue.
+Immutable plans preserve each run's exact intent, but do not decide duplicate operator
+intent, simultaneous load on the same endpoint, credential lockout/rate-limit risk,
+or whether overlapping runs should reject, queue, or warn.
 
 ## Identity & authorization
 
