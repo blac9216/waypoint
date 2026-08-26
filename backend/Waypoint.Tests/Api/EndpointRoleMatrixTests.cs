@@ -83,6 +83,11 @@ public sealed class EndpointRoleMatrixTests
 		["CatalogController.Sync"] = WaypointRole.Admin,
 		["CatalogController.PullStatus"] = WaypointRole.Viewer,
 		["CatalogController.Pull"] = WaypointRole.Admin,
+		// Issue #728: the execution-catalog read surface (GET /catalog/products[/{id}])
+		// is Viewer+ per docs/api-contract.md -- read-only reflection of the reviewed
+		// catalog; no write endpoint exists (ADR-0022), so no Admin rows here.
+		["CatalogController.ListProducts"] = WaypointRole.Viewer,
+		["CatalogController.GetProduct"] = WaypointRole.Viewer,
 
 		// LibraryController -- issue #36. Both read the depot catalog re-presented as
 		// mode-aware presence; same Viewer+ floor as CatalogController.ListArtifacts

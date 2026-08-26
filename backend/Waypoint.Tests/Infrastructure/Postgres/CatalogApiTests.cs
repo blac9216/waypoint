@@ -21,9 +21,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Catalog;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Infrastructure.Catalog;
+using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Downloads;
 using Waypoint.Infrastructure.Jobs;
@@ -39,6 +41,11 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// plus exactly one queued catalog-index job (no handler registered yet is correct
 /// for this slice; <c>JobDispatcherHostedServiceTests.NoHandlerRegistered_...</c>
 /// already proves that job fails with a clear note once dispatched).
+///
+/// Issue #728 (epic #726 Wave 1 remainder) adds the unrelated <c>GET
+/// /catalog/products</c> / <c>GET /catalog/products/{id}</c> execution-catalog read
+/// surface to this same controller/route prefix -- see the fixtures/tests below
+/// prefixed <c>GetProducts_</c>/<c>GetProduct_</c>.
 /// </summary>
 [Collection("Postgres")]
 #pragma warning disable CA1001 // xUnit owns the lifecycle: DisposeAsync tears down client/factory.
@@ -78,6 +85,11 @@ public sealed class CatalogApiTests : IAsyncLifetime
 				// resolves to" override this factory already does for the others.
 				services.AddSingleton<ICatalogPullStateRepository>(new CatalogPullStateRepository(_connectionString));
 				services.AddSingleton<IDepotEnrollmentRepository>(new DepotEnrollmentRepository(_connectionString));
+				// Issue #728: the unrelated normalized compliance execution-catalog
+				// read surface (GET /catalog/products) added to this same controller --
+				// same "point every repository at the real fixture connection string"
+				// override this factory already applies to the others above.
+				services.AddSingleton<ICatalogRepository>(new CatalogRepository(_connectionString));
 				// Issue #415: one JobQueueRepository instance satisfies both focused
 				// interfaces CatalogController (control) and the runner path resolve.
 				JobQueueRepository jobs = new(_connectionString, NullLogger<JobQueueRepository>.Instance);
@@ -284,6 +296,106 @@ public sealed class CatalogApiTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
 	}
 
+	/// <summary>
+	/// Issue #728 (epic #726 Wave 1 remainder): the execution-catalog read surface.
+	/// Fixture is INVENTED and shaped only like docs/compliance-parity.md's sibling
+	/// provenance-matrix rows -- not exported from any real system (CLAUDE.md
+	/// sanitization policy). Covers the queryable-fields AC (transport, selector,
+	/// required purposes, priority/report group, benchmark, remediation capability).
+	/// </summary>
+	[Fact]
+	public async Task GetProducts_ReturnsQueryableFields_ForSeededExecutionProfile()
+	{
+		Guid executionProfileId = await SeedOneExecutionProfileAsync();
+
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/catalog/products");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement row = document.RootElement.EnumerateArray()
+			.Single(item => item.GetProperty("execution_profile_id").GetString() == executionProfileId.ToString());
+
+		Assert.Equal("vmware", row.GetProperty("component").GetProperty("transport").GetString());
+		Assert.Equal("vcenter", row.GetProperty("component").GetProperty("selector_kind").GetString());
+		Assert.Equal("vsphere", row.GetProperty("product").GetProperty("product_key").GetString());
+		Assert.Equal("8.0.3", row.GetProperty("product_version").GetProperty("version_key").GetString());
+		Assert.Equal("stig", row.GetProperty("content_release").GetProperty("kind").GetString());
+		Assert.Equal(3, row.GetProperty("report_group").GetProperty("priority").GetInt32());
+		Assert.Equal("vsphere-api", row.GetProperty("credential_requirements").EnumerateArray().Single().GetProperty("purpose").GetString());
+		Assert.Equal("VMW_vSphere_8-0_vCenter_STIG", row.GetProperty("benchmark").GetProperty("benchmark_key").GetString());
+		Assert.True(row.GetProperty("remediation").GetProperty("is_supported").GetBoolean());
+	}
+
+	[Fact]
+	public async Task GetProducts_WithoutAuth_Returns401()
+	{
+		HttpResponseMessage response = await _client.GetAsync("/api/v1/catalog/products");
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetProduct_ById_ReturnsSameJoinedShapeAsListRow()
+	{
+		Guid executionProfileId = await SeedOneExecutionProfileAsync();
+
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/catalog/products/{executionProfileId}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal(executionProfileId.ToString(), document.RootElement.GetProperty("execution_profile_id").GetString());
+		Assert.Equal("vmware", document.RootElement.GetProperty("component").GetProperty("transport").GetString());
+	}
+
+	[Fact]
+	public async Task GetProduct_UnknownId_Returns404()
+	{
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/catalog/products/{Guid.NewGuid()}");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetProduct_WithoutAuth_Returns401()
+	{
+		HttpResponseMessage response = await _client.GetAsync($"/api/v1/catalog/products/{Guid.NewGuid()}");
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Invented fixture: one vSphere 8.0 STIG vCenter execution profile, shaped like
+	/// docs/compliance-parity.md's "vSphere 8-0 / STIG" row (vmware-transport,
+	/// vcenter-selector component). Not exported from any real system.
+	/// </summary>
+	private async Task<Guid> SeedOneExecutionProfileAsync()
+	{
+		CatalogRepository repository = new(_fixture.ConnectionString);
+		Guid sourceRevisionId = (await repository.UpsertSourceRevisionAsync("test-revision-api-1", "invented fixture revision", CancellationToken.None)).Id;
+		CatalogProduct product = await repository.UpsertProductAsync(sourceRevisionId, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion version = await repository.UpsertProductVersionAsync(product.Id, "8.0.3", "vSphere 8.0 Update 3", CancellationToken.None);
+		CatalogContentRelease release = await repository.UpsertContentReleaseAsync(
+			sourceRevisionId, CatalogKinds.Stig, "v2r3-stig", "VMware vSphere 8.0 STIG v2r3", CancellationToken.None);
+		CatalogReportGroup reportGroup = await repository.UpsertReportGroupAsync("vcenter-stig", "vCenter STIG", 3, CancellationToken.None);
+		CatalogComponent component = await repository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition("vcenter", "vCenter Server", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null), CancellationToken.None);
+
+		CatalogExecutionProfile executionProfile = await repository.CreateExecutionProfileAsync(
+			component.Id, release.Id, reportGroup.Id, "v2r3", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		await repository.AddCredentialRequirementAsync(executionProfile.Id, "vsphere-api", true, CancellationToken.None);
+		await repository.SetBenchmarkReferenceAsync(executionProfile.Id, "VMW_vSphere_8-0_vCenter_STIG", "v2r3", CancellationToken.None);
+		await repository.SetRemediationDefinitionAsync(executionProfile.Id, true, "PowerCLI remediation script", CancellationToken.None);
+
+		return executionProfile.Id;
+	}
+
 	private async Task SetEnrollmentValidatedAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
@@ -304,6 +416,19 @@ public sealed class CatalogApiTests : IAsyncLifetime
 		await connection.OpenAsync().ConfigureAwait(false);
 		await using NpgsqlCommand truncate = new("TRUNCATE TABLE downloads, depot_artifacts RESTART IDENTITY CASCADE", connection);
 		await truncate.ExecuteNonQueryAsync().ConfigureAwait(false);
+
+		// Issue #728: the unrelated execution-catalog tables (migration 0050) share
+		// this fixture's Postgres instance but not its identity/reset lifecycle above --
+		// truncate them independently so GetProducts_* tests below start from empty.
+		await using NpgsqlCommand truncateCatalog = new(
+			"""
+			TRUNCATE TABLE
+				catalog_remediation_definitions, catalog_benchmark_references, catalog_credential_requirements,
+				catalog_execution_profiles, catalog_report_groups, catalog_components, catalog_content_releases,
+				catalog_product_versions, catalog_products, catalog_source_revisions
+			RESTART IDENTITY CASCADE
+			""", connection);
+		await truncateCatalog.ExecuteNonQueryAsync().ConfigureAwait(false);
 
 		await using NpgsqlCommand resetEnrollment = new(
 			"""

@@ -19,6 +19,7 @@ using Microsoft.AspNetCore.Mvc;
 using Waypoint.Api.Contracts;
 using Waypoint.Core.Authorization;
 using Waypoint.Core.Catalog;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Downloads;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
@@ -35,6 +36,17 @@ namespace Waypoint.Api.Controllers;
 /// <c>catalog-pull</c> job). A connected pull is disabled (409) until issue #691's
 /// <c>depot_enrollment</c> state is <c>validated</c> -- tool installed, Depot ID
 /// generated, and a matching Activation Code accepted and proven against the tool.
+///
+/// Issue #728 (epic #726 Wave 1 remainder) adds the unrelated normalized compliance
+/// *execution* catalog read surface, <c>GET /catalog/products</c> and <c>GET
+/// /catalog/products/{id}</c> -- the closed, versioned execution-catalog vocabulary
+/// (products/exact versions, component transport/selector, credential purposes,
+/// priority, benchmark, remediation capability) shipped in this repository and backed
+/// by <see cref="ICatalogRepository"/> (migration 0050, PR #822). It shares this
+/// controller/route prefix with the depot-catalog surface above only because both are
+/// named "catalog" in docs/api-contract.md -- they are otherwise unrelated resources
+/// (depot artifacts to download vs. the compliance execution-catalog vocabulary) with
+/// no shared repository or state.
 /// </summary>
 [ApiController]
 [Route("api/v1/catalog")]
@@ -52,21 +64,65 @@ public sealed class CatalogController : ControllerBase
 	private readonly IJobControlRepository _jobs;
 	private readonly ICatalogPullStateRepository _pullState;
 	private readonly IDepotEnrollmentRepository _enrollment;
+	private readonly ICatalogRepository _executionCatalog;
 
 	public CatalogController(
 		IDepotArtifactRepository artifacts,
 		IJobControlRepository jobs,
 		ICatalogPullStateRepository pullState,
-		IDepotEnrollmentRepository enrollment)
+		IDepotEnrollmentRepository enrollment,
+		ICatalogRepository executionCatalog)
 	{
 		ArgumentNullException.ThrowIfNull(artifacts);
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(pullState);
 		ArgumentNullException.ThrowIfNull(enrollment);
+		ArgumentNullException.ThrowIfNull(executionCatalog);
 		_artifacts = artifacts;
 		_jobs = jobs;
 		_pullState = pullState;
 		_enrollment = enrollment;
+		_executionCatalog = executionCatalog;
+	}
+
+	/// <summary>
+	/// Issue #728: the full closed, versioned execution-catalog vocabulary, one row per
+	/// execution profile (component bound to one exact content release), fully joined
+	/// with its owning product/version/component/content-release/report-group identity
+	/// plus credential requirements, benchmark reference, and remediation capability.
+	/// Viewer+ -- read-only reflection of the reviewed catalog shipped in this
+	/// repository (ADR-0022: "Operators cannot upload executable plugins, scripts, or
+	/// catalog mappings"); there is no write endpoint.
+	/// </summary>
+	[HttpGet("products")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(CatalogProductResponse[]), StatusCodes.Status200OK)]
+	public async Task<ActionResult<IReadOnlyList<CatalogProductResponse>>> ListProducts(CancellationToken cancellationToken)
+	{
+		IReadOnlyList<CatalogExecutionProfileDetail> details = await _executionCatalog
+			.ListAllExecutionProfilesAsync(cancellationToken)
+			.ConfigureAwait(false);
+		return Ok(details.Select(CatalogProductResponse.FromDomain).ToArray());
+	}
+
+	/// <summary>
+	/// Issue #728: single execution-profile detail by id -- same joined shape as
+	/// <see cref="ListProducts"/>'s rows. Viewer+. 404 when the id does not name a
+	/// known execution profile.
+	/// </summary>
+	[HttpGet("products/{id:guid}")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(CatalogProductResponse), StatusCodes.Status200OK)]
+	[ProducesResponseType(StatusCodes.Status404NotFound)]
+	public async Task<ActionResult<CatalogProductResponse>> GetProduct(Guid id, CancellationToken cancellationToken)
+	{
+		CatalogExecutionProfileDetail? detail = await _executionCatalog.GetExecutionProfileAsync(id, cancellationToken).ConfigureAwait(false);
+		if (detail is null)
+		{
+			throw new ApiException(HttpStatusCode.NotFound, "not_found", $"No catalog execution profile exists with id '{id}'.");
+		}
+
+		return Ok(CatalogProductResponse.FromDomain(detail));
 	}
 
 	/// <summary>
