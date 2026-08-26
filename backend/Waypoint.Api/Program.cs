@@ -169,7 +169,7 @@ try
 			OidcJwtBearerOptionsFactory.ApplyIssuerValidation(oidcOptions, options);
 
 			// Issue #536 (live-verified): setting MetadataAddress above is not enough
-			// on its own once KC_HOSTNAME (deploy/docker-compose.yml's keycloak
+			// on its own once KC_HOSTNAME (deploy/compose.yaml's keycloak
 			// service) pins Keycloak's canonical public identity -- Keycloak then
 			// renders the discovery document's OWN jwks_uri as that same
 			// browser-facing address too, and the framework's default
@@ -261,7 +261,7 @@ try
 	// this, every request looks like plain HTTP from the proxy container -- useless
 	// for the audit trail's initiating-identity record (security.md control 4) and
 	// wrong for any scheme-dependent logic. Trust is restricted to the configured
-	// known networks (ForwardedHeaders:KnownNetworks, CIDR list). deploy/docker-compose.yml
+	// known networks (ForwardedHeaders:KnownNetworks, CIDR list). deploy/compose.yaml
 	// pins the `edge` network nginx and the backend share to a fixed subnet
 	// (192.168.240.0/24) and sets ForwardedHeaders__KnownNetworks__0 to exactly that
 	// subnet (#191), so the real compose deployment trusts only nginx's network, not

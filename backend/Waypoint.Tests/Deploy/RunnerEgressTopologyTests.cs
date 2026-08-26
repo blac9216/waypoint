@@ -29,14 +29,14 @@ namespace Waypoint.Tests.Deploy;
 /// giving anything a path IN to them, and WITHOUT exposing Postgres on that
 /// network. Manual <c>docker inspect</c> proved that true the day it landed;
 /// these tests are the guard that a future edit to
-/// <c>deploy/docker-compose.yml</c> can't silently undo it — e.g. detach a
+/// <c>deploy/compose.yaml</c> can't silently undo it — e.g. detach a
 /// runner from runner-egress, attach postgres to it, drop
 /// <c>internal: true</c>, publish a runner port, or convert runner-egress to an
 /// <c>external:</c> network (which would let concurrent <c>-p</c> stacks collide
 /// and could be pre-created with arbitrary options — see the compose file's own
 /// warning comment).
 ///
-/// It parses <c>deploy/docker-compose.yml</c> directly with YamlDotNet (already
+/// It parses <c>deploy/compose.yaml</c> directly with YamlDotNet (already
 /// a Waypoint.Core dependency), so it needs no Docker daemon and runs in the
 /// backend <c>dotnet test</c> lane locally and in CI identically.
 /// </summary>
@@ -99,7 +99,7 @@ public sealed class RunnerEgressTopologyTests
 	{
 		Assert.True(
 			Networks.Children.ContainsKey(new YamlScalarNode(EgressNetwork)),
-			$"network '{EgressNetwork}' must be declared in deploy/docker-compose.yml");
+			$"network '{EgressNetwork}' must be declared in deploy/compose.yaml");
 
 		YamlMappingNode net = (YamlMappingNode)Networks.Children[new YamlScalarNode(EgressNetwork)];
 		string? external = Scalar(net, "external");
@@ -217,7 +217,7 @@ public sealed class RunnerEgressTopologyTests
 		return (YamlMappingNode)yaml.Documents[0].RootNode;
 	}
 
-	// Walk up from the test assembly's location until deploy/docker-compose.yml
+	// Walk up from the test assembly's location until deploy/compose.yaml
 	// is found. Robust to the bin/<config>/<tfm>/ build layout locally and in
 	// CI alike, and independent of the process working directory.
 	private static string ResolveComposePath()
@@ -225,7 +225,7 @@ public sealed class RunnerEgressTopologyTests
 		DirectoryInfo? dir = new(AppContext.BaseDirectory);
 		while (dir is not null)
 		{
-			string candidate = Path.Combine(dir.FullName, "deploy", "docker-compose.yml");
+			string candidate = Path.Combine(dir.FullName, "deploy", "compose.yaml");
 			if (File.Exists(candidate))
 			{
 				return candidate;
@@ -235,7 +235,7 @@ public sealed class RunnerEgressTopologyTests
 		}
 
 		throw new FileNotFoundException(
-			"Could not locate deploy/docker-compose.yml by walking up from "
+			"Could not locate deploy/compose.yaml by walking up from "
 			+ AppContext.BaseDirectory);
 	}
 }

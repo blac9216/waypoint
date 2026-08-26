@@ -127,7 +127,7 @@ a checklist:
    container-side workspace prefix in any bind-mount source you construct — by hand,
    or with a small `sed`/shell substitution keyed off the mapping you just looked up.
 
-**The shipped defaults are correct on a real appliance host.** `deploy/docker-compose.yml`'s
+**The shipped defaults are correct on a real appliance host.** `deploy/compose.yaml`'s
 relative bind-mount sources work as-is when Compose runs directly on the appliance
 host (no devcontainer, no mounted-socket indirection — the daemon and the compose
 invocation share one filesystem). This trap is specific to running the deploy compose
@@ -145,14 +145,14 @@ around it.
 
 ## The rule
 
-**Never run `deploy/docker-compose.yml` without isolating it.** Not "usually", not
+**Never run `deploy/compose.yaml` without isolating it.** Not "usually", not
 "unless you're quick". Every bring-up gets its own project name and its own host
 port.
 
 ## Why `-p` alone used to not work — and now does
 
 The natural assumption — `docker compose -p my-name up` gives me my own stack — used
-to be **wrong here**, and it was a trap: `deploy/docker-compose.yml` used to set
+to be **wrong here**, and it was a trap: `deploy/compose.yaml` used to set
 explicit `container_name:` values (`waypoint-nginx`, `waypoint-backend`,
 `waypoint-postgres`). Explicit container names are **not namespaced by the Compose
 project**. Networks and named volumes are (`<project>_edge`, `<project>_pgdata`), so
@@ -165,7 +165,7 @@ Someone else recreates the backend mid-run and you record a failure that is not
 yours. Both look exactly like evidence. This happened for real between two agents —
 issue [#68](https://github.com/blac9216/waypoint/issues/68).
 
-**#68 is fixed: `deploy/docker-compose.yml` no longer sets `container_name:` on any
+**#68 is fixed: `deploy/compose.yaml` no longer sets `container_name:` on any
 service.** Without it, Compose derives container names from the project
 (`<project>-<service>-<n>`, e.g. `wp-issue3-fix-nginx-1`), which **is** namespaced by
 `-p`. `-p` alone now isolates containers, networks, and volumes together — the

@@ -101,7 +101,7 @@ public sealed class DownloadsController : ControllerBase
 	/// <c>worker_registry.tool_present</c> column (any row reporting a non-null value;
 	/// several download-runner replicas would all report the same shared managed-tool
 	/// volume) rather than a direct filesystem check -- the API process never mounts
-	/// that volume (deploy/docker-compose.yml), only the download-runner does. A stale
+	/// that volume (deploy/compose.yaml), only the download-runner does. A stale
 	/// or absent heartbeat (no download-runner has ever reported) reads as
 	/// <c>tool_installed: null</c> -- "unknown," not "installed" or "missing" -- so the
 	/// UI can distinguish "no runner has weighed in yet" from a real negative.

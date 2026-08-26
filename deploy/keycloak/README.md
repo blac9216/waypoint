@@ -58,7 +58,7 @@ Both clients' `rootUrl`, `redirectUris`, and `webOrigins` in `waypoint-realm.jso
 the literal placeholder `${WAYPOINT_PUBLIC_URL}` — templated, never a real hostname.
 Keycloak's realm-import placeholder substitution (`keycloak.migration.replace-placeholders`,
 turned on via the `JAVA_OPTS_APPEND` set on the `keycloak` service in
-`deploy/docker-compose.yml`) substitutes the compose-level `WAYPOINT_PUBLIC_URL`
+`deploy/compose.yaml`) substitutes the compose-level `WAYPOINT_PUBLIC_URL`
 environment variable into these fields **at import time**, so a real deployment sets
 that one variable (`deploy/README.md` "Keycloak") instead of editing this file.
 This is intentionally *not* a wildcard (a wildcard redirect/origin on a public PKCE

@@ -17,7 +17,7 @@
 #
 # Password source (issue #844): file-backed, not an inline env var --
 # POSTGRES_KEYCLOAK_PASSWORD_FILE, set on the postgres service in
-# docker-compose.yml, points at the SAME Compose `secrets:`-mounted file
+# compose.yaml, points at the SAME Compose `secrets:`-mounted file
 # (deploy/config/secrets/postgres-keycloak-password, gitignored) the
 # `keycloak` service itself reads via KC_DB_PASSWORD_FILE -- one file, one
 # password, both sides of the same login. A missing file is rejected by the

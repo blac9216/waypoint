@@ -23,7 +23,7 @@ source-build direction is recorded in [ADR-0013](../docs/adr/0013-control-plane-
 
 ## Dev compose stack (epic [#1](https://github.com/blac9216/waypoint/issues/1), runners issue [#442](https://github.com/blac9216/waypoint/issues/442))
 
-`docker-compose.yml` stands up the development topology from
+`compose.yaml` (the production base; issue #845) stands up the topology from
 [`docs/architecture.md`](../docs/architecture.md) (component view),
 [ADR-0003](../docs/adr/0003-reverse-proxy-nginx.md), and
 [ADR-0013](../docs/adr/0013-control-plane-and-runners.md)/[ADR-0014](../docs/adr/0014-runner-job-ownership.md):
@@ -121,7 +121,7 @@ Postgres bootstrap passwords, Keycloak's DB/bootstrap-admin passwords, and
 the `waypoint-backend` realm client secret are never Compose environment
 values — each is a file under `deploy/config/secrets/` (gitignored — see
 `.gitignore`'s `/deploy/config/` entry), wired in via Compose's own
-`secrets:` mechanism (`docker-compose.yml`'s top-level `secrets:` block).
+`secrets:` mechanism (`compose.yaml`'s top-level `secrets:` block).
 Create all six before a fresh bring-up (`#847` will add a generator, but does
 not exist yet):
 
@@ -159,15 +159,17 @@ still present inside `postgres/initdb/01-runner-roles.sh` and
 Postgres wrapper, not the primary gate — by the time an initdb script runs,
 the data directory already exists.
 
-nginx TLS follows the same shape but stays optional: `deploy/nginx/conf.d/default.conf`
-now references generic `tls.crt`/`tls.key` names (renamed from
-`dev-cert.pem`/`dev-key.pem`), which `dev-bootstrap` still generates
-automatically for local dev. An operator overrides them with real
-certificates by uncommenting the `nginx` service's `config/tls/tls.crt` /
-`config/tls/tls.key` bind mounts in `docker-compose.yml` and creating those
-two files — same "commented out until an operator provides real content"
-convention as the admin-password-hash and master-key mounts already in this
-file.
+nginx TLS follows the same file-backed shape, and is REQUIRED in the base
+(issue #845 — `compose.yaml` on its own has no dev-bootstrap-generated
+fallback): `deploy/nginx/conf.d/default.conf` references generic
+`tls.crt`/`tls.key` names, bind-mounted from `deploy/config/tls/tls.crt` and
+`deploy/config/tls/tls.key`. Create both with real certificate/key material
+from your internal CA before bringing `compose.yaml` up on its own — a
+missing file fails `docker compose up` closed, the same as the six secrets
+above. For a local dev loop with a throwaway self-signed pair instead, copy
+`compose.override.example.yaml` to `compose.override.yaml` — its
+`dev-bootstrap` service generates one automatically and the override
+replaces these two mounts with it (see that file's own comments).
 
 ### Keycloak (issues #28/#29, ADR-0004)
 
@@ -249,7 +251,7 @@ including the `iss` claim on every token it issues — regardless of whether
 the request that reached it came from a browser through nginx's `/auth/`
 proxy or directly from `backend` on the internal network. `KC_HOSTNAME` is
 derived as `${WAYPOINT_PUBLIC_URL}/auth` (compose-level string interpolation
-in `deploy/docker-compose.yml`, not a separate override) — the `/auth` path
+in `deploy/compose.yaml`, not a separate override) — the `/auth` path
 must be present because hostname-v2 does not automatically append
 `KC_HTTP_RELATIVE_PATH` to it the way it does the scheme/port (live-verified).
 The backend derives its own required issuer the same way, as
@@ -268,12 +270,15 @@ discovery-document/JWKS fetching, deliberately not also used for issuer
 validation the way `AddJwtBearer` defaults to (a real browser-obtained
 token's `iss` can never match that internal address).
 
-The dev-stack default is `https://localhost:8443` — this repo's own
-`WAYPOINT_HTTPS_PORT` default — so a fresh `docker compose up` gets a working
-login with **no** override needed. An operator changing the edge port or
-fronting the stack with a real hostname/FQDN overrides **one** value, in
-`deploy/.env` (never commit a real value — see this repo's sanitization
-rules):
+The base's `public-url` operator-config anchor (top of `compose.yaml`,
+issue #845) falls back to an obviously nonfunctional placeholder domain,
+never `localhost` — a real deployment MUST set `WAYPOINT_PUBLIC_URL`. For a
+local dev loop, `compose.override.example.yaml` sets the working
+`https://localhost:8443` default instead, so a fresh `docker compose up`
+against base+override gets a working login with **no** override needed. An
+operator changing the edge port or fronting the stack with a real
+hostname/FQDN overrides **one** value, in `deploy/.env` (never commit a real
+value — see this repo's sanitization rules):
 
 ```bash
 # Example: appliance reachable at https://waypoint.example.internal (no
@@ -318,9 +323,12 @@ so local auth remains their fastest path to an authenticated session for
 now. When both switch to a real OIDC flow, this flag (and the local-auth code
 path entirely) can be removed outright.
 
-To enable for a dev/test compose run: set `LocalAuth__Enabled=true` alongside
-the existing `LocalAuth__AdminPasswordHashFile`/`LocalAuth__AdminPasswordHash`
-bring-up steps above (see "Bring-up" step 3). When both OIDC and local auth
+To enable for a dev/test compose run: bring the stack up with
+`compose.override.example.yaml` copied to `compose.override.yaml` (see
+"Bring-up" step 3) — it sets `LocalAuth__Enabled=true` and automates the
+admin password hash via `dev-auth-bootstrap`. The base `compose.yaml` on its
+own carries none of these `LocalAuth__*` keys at all (issue #845). When both
+OIDC and local auth
 are enabled at once (the normal e2e/smoke-test configuration), each incoming
 bearer token is routed by shape: a Keycloak-issued JWT (three dot-separated
 segments) validates against Oidc; the dev-grade opaque hex session token
@@ -371,7 +379,7 @@ unable to resolve or reach configured vCenters/ESXi/NSX/SRG appliances/STIG
 Manager, and `download-runner` unable to reach the Broadcom depot or any
 operator repository, even in a connected deployment.
 
-`docker-compose.yml` now also declares `runner-egress`: a second, ordinary
+`compose.yaml` now also declares `runner-egress`: a second, ordinary
 (non-`internal`) bridge network with a normal Docker-assigned gateway. Both
 runners attach to it in addition to `internal`; `postgres`, `backend`,
 `keycloak`, and `nginx` are unchanged and do not touch this network — Postgres
@@ -402,7 +410,7 @@ repository, being public, cannot contain it (see `CLAUDE.md`).
 **Proxy.** If a site requires an HTTP(S) proxy for outbound reachability,
 set the standard `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` environment variables
 on the relevant runner service in `deploy/.env` or a
-`docker-compose.override.yml` — both runners' base images/.NET hosts and
+`compose.override.yaml` — both runners' base images/.NET hosts and
 PowerShell's own `Invoke-WebRequest`/`Invoke-RestMethod` honor these when set.
 
 **Disconnected/air-gapped instances.** Per `docs/architecture.md`'s
@@ -515,19 +523,24 @@ docker compose -p <project> exec nginx wget -qO- http://127.0.0.1:8081/healthz/u
 
 ### Bring-up: one command
 
-Docker Engine with Compose v2 is the only host prerequisite. From a clean checkout:
+Docker Engine with Compose v2 is the only host prerequisite. From a clean checkout
+(issue #845 — `compose.yaml` alone is the production base and expects
+operator-provided TLS/secrets under `deploy/config/`; for the one-command
+development loop below, copy the override first):
 
 ```bash
 cd deploy
+cp compose.override.example.yaml compose.override.yaml
 docker compose up -d
 ```
 
 Compose builds the frontend and application images, packages the committed nginx,
 PostgreSQL, and Keycloak bootstrap assets into those images, and runs two idempotent
-one-shot bootstrap services. Those services create a development-only TLS
-certificate, random envelope-encryption master key, local-auth password hash, and
-the empty compliance-profile directory structure in project-scoped named volumes.
-They never print key material. Long-running services wait for bootstrap to complete.
+one-shot bootstrap services declared by the override. Those services create a
+development-only TLS certificate, random envelope-encryption master key, local-auth
+password hash, and the empty compliance-profile directory structure in
+project-scoped named volumes. They never print key material. Long-running services
+wait for bootstrap to complete.
 
 Open `https://localhost:${WAYPOINT_HTTPS_PORT:-8443}` and accept the development
 self-signed certificate. Log in with:
@@ -598,7 +611,7 @@ the frontend bundle).
    ```
 
    That is deliberate. The nginx `frontend/dist` mount uses Compose's long
-   syntax with `bind: {create_host_path: false}` (see `docker-compose.yml`),
+   syntax with `bind: {create_host_path: false}` (see `compose.yaml`),
    which turns what would otherwise be a silent failure into a loud one.
    Docker's *default* behaviour for a missing bind source is to create it —
    as a **root-owned** empty directory — and the resulting stack looks fine:
@@ -625,56 +638,26 @@ the frontend bundle).
    cd frontend && npm run build
    ```
 
-3. Compute a dev admin password hash so you can log in, and (optionally)
-   override the dev Postgres credentials / published HTTPS port.
+3. `compose.yaml` (the base) ships Keycloak-only auth — no local-auth admin
+   password to compute (issue #845). If you want the local-auth dev flag
+   (`LocalAuth__Enabled`) too, copy `compose.override.example.yaml` to
+   `compose.override.yaml` (gitignored) first — its `dev-auth-bootstrap`
+   service hashes `WAYPOINT_DEV_PASSWORD` (default `waypoint-dev`; set it in
+   `deploy/.env` to change it) into the `dev-secrets` volume automatically on
+   `up`, no manual `--hash-password`/mounted-file step needed. See "Local
+   auth (dev-flag)" below for the login flow this enables and
+   `WAYPOINT_ADMIN_PASSWORD_HASH`'s own env-var fallback if you want a fixed
+   hash instead of the generated one.
 
-   ```bash
-   # Prompts for the password (input hidden) and prints a salted PBKDF2 hash to
-   # stdout (Pbkdf2PasswordHasher, issue #62). Never pass the password as an
-   # argument, and never commit the plaintext password or its hash.
-   cd ../backend && dotnet build Waypoint.Api
-   dotnet run --project Waypoint.Api --no-launch-profile --no-build -- --hash-password
-   cd -
-   ```
-
-   Deliver the hash one of two ways (issue #333 — the mounted file is
-   preferred; the env var is kept working for existing deployments):
-
-   **Preferred: mounted file.** Write the hash to the repo-root `config/`
-   directory (git-ignored — see `.gitignore`'s anchored `/config/` entry
-   and CLAUDE.md; `deploy/config/` is *not* covered, so this path matters):
-
-   ```bash
-   mkdir -p ../config/local-auth
-   # Paste the hash from the --hash-password output above. Trailing newline
-   # is fine - LocalAuthOptionsPostConfigure trims it.
-   printf '%s' 'paste-the-hash-from-above-here' > ../config/local-auth/admin-password-hash
-   ```
-
-   Then uncomment the `local-auth-admin-password-hash` bind mount on the
-   `backend` service in `docker-compose.yml`. On startup the backend reads
-   the hash from `LocalAuth__AdminPasswordHashFile`
-   (`/run/secrets/local-auth-admin-password-hash` in-container) and it takes
-   precedence over the env var below.
-
-   **Legacy fallback: env var.** Go in a git-ignored `.env` file next to
-   `docker-compose.yml` (`deploy/.env`):
+   (Optionally) override the Postgres credentials / published HTTPS port in
+   `deploy/.env`:
 
    ```bash
    # deploy/.env
-   WAYPOINT_ADMIN_PASSWORD_HASH=paste-the-hash-from-above-here
    POSTGRES_USER=waypoint
    POSTGRES_DB=waypoint
    WAYPOINT_HTTPS_PORT=8443
    ```
-
-   Only used when the mounted file above isn't present — the backend logs a
-   one-time startup WARN when it falls back to this env var, since env vars
-   leak via `/proc/<pid>/environ`, `docker inspect`, and crash dumps.
-
-   Leaving both unset is fine — the stack still comes up healthy and serves
-   `/api/v1/health`, it just refuses every login (fails closed by design;
-   see `backend/README.md` "Run locally").
 
    **Postgres/Keycloak passwords and the Keycloak client secret are no
    longer `deploy/.env` variables (issue #844) — see "File-backed secrets"
@@ -695,24 +678,23 @@ the frontend bundle).
    depends on this key.
 
    ```bash
-   mkdir -p ../config/secrets
-   openssl rand -hex 32 > ../config/secrets/master.key
+   mkdir -p config/secrets
+   openssl rand -hex 32 > config/secrets/master.key
    ```
 
-   **Never commit this file or its contents.** `../config/` is git-ignored
-   (see `.gitignore`'s anchored `/config/` entry and `CLAUDE.md`), and
+   **Never commit this file or its contents.** `deploy/config/` is
+   git-ignored (see `.gitignore`'s anchored `/deploy/config/` entry), and
    losing this key after real credentials have been encrypted with it makes
    those credentials permanently unrecoverable — back it up somewhere
    outside the repo if the stack's credential data matters to you.
 
    Then uncomment the `waypoint-master-key` bind mount **on all three
    trusted services** — `backend`, `compliance-runner`, and
-   `download-runner` — in `docker-compose.yml` (issue #442: every service
+   `download-runner` — in `compose.yaml` (issue #442: every service
    that decrypts a credential needs the same key). Each reads it from
    `WAYPOINT_MASTER_KEY_FILE`
-   (`/run/secrets/waypoint-master-key` in-container) — unlike the admin
-   password hash above, there is no environment-variable fallback; a
-   mounted file is the only delivery path.
+   (`/run/secrets/waypoint-master-key` in-container) — there is no
+   environment-variable fallback; a mounted file is the only delivery path.
 
    **The key file must be readable by each container's app user.** The
    backend image (`backend/Dockerfile`) runs as the non-root `app` user
@@ -722,16 +704,14 @@ the frontend bundle).
    Dockerfiles create at the same uid, `1654`, specifically so one file
    permission works for all three — not root and not your host user. A key
    file created with a tight `0600` and left owned by your own (or root's)
-   uid is exactly the permission trap the admin-hash mount already warns
-   about implicitly: none of the three can read it, and
-   `FileMasterKeyProvider` reports `Access denied` on first use for
-   whichever one tries first. For this dev stack, the practical fix is
-   either:
+   uid means none of the three can read it, and `FileMasterKeyProvider`
+   reports `Access denied` on first use for whichever one tries first. For
+   this dev stack, the practical fix is either:
 
    ```bash
-   chmod 644 ../config/secrets/master.key      # simplest: readable by all
+   chmod 644 config/secrets/master.key      # simplest: readable by all
    # or, if you know the in-container uid and prefer tighter perms:
-   chown 1654 ../config/secrets/master.key && chmod 600 ../config/secrets/master.key
+   chown 1654 config/secrets/master.key && chmod 600 config/secrets/master.key
    ```
 
    `644` on a gitignored, host-local path is the pragmatic default here —

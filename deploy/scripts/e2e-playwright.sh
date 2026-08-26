@@ -267,7 +267,10 @@ SCRATCH_KEY_DIR="$(mktemp -d)"
 openssl rand -hex 32 > "${SCRATCH_KEY_DIR}/master.key"
 chmod 644 "${SCRATCH_KEY_DIR}/master.key"
 
-CONFIG_DIR="${REPO_ROOT}/config"
+# Issue #845: deploy/config/ (anchored under deploy/, matching the
+# already-established file-backed-secrets convention issue #844 introduced
+# for postgres/keycloak), not the legacy repo-root config/ this replaces.
+CONFIG_DIR="${DEPLOY_DIR}/config"
 mkdir -p "${CONFIG_DIR}/secrets" "${CONFIG_DIR}/local-auth"
 cp "${SCRATCH_KEY_DIR}/master.key" "${CONFIG_DIR}/secrets/master.key"
 chmod 644 "${CONFIG_DIR}/secrets/master.key"
@@ -286,12 +289,20 @@ if [[ ! -s "${SCRATCH_KEY_DIR}/admin-hash" ]]; then
 fi
 cp "${SCRATCH_KEY_DIR}/admin-hash" "${CONFIG_DIR}/local-auth/admin-password-hash"
 
-MASTER_KEY_HOST_PATH="${HOST_PREFIX}/config/secrets/master.key"
-ADMIN_HASH_HOST_PATH="${HOST_PREFIX}/config/local-auth/admin-password-hash"
+MASTER_KEY_HOST_PATH="${HOST_PREFIX}/deploy/config/secrets/master.key"
+ADMIN_HASH_HOST_PATH="${HOST_PREFIX}/deploy/config/local-auth/admin-password-hash"
 MASTER_KEY_OVERRIDE="$(mktemp)"
 {
 	echo "services:"
 	echo "  backend:"
+	echo "    environment:"
+	# Issue #845: compose.yaml's base carries no LocalAuth__* keys at all
+	# (Keycloak-only auth) -- this Playwright login step needs the local-auth
+	# dev flag and the mounted-hash-file path explicitly turned on, which the
+	# base's now-removed `${LOCAL_AUTH_ENABLED:-true}` default and
+	# LocalAuth__AdminPasswordHashFile key used to supply implicitly.
+	echo "      LocalAuth__Enabled: \"true\""
+	echo "      LocalAuth__AdminPasswordHashFile: \"/run/secrets/local-auth-admin-password-hash\""
 	echo "    volumes:"
 	echo "      - type: bind"
 	echo "        source: ${MASTER_KEY_HOST_PATH}"
@@ -322,7 +333,7 @@ MASTER_KEY_OVERRIDE="$(mktemp)"
 	echo "        read_only: true"
 } > "${MASTER_KEY_OVERRIDE}"
 
-COMPOSE_FILES="-f docker-compose.yml"
+COMPOSE_FILES="-f compose.yaml"
 if [[ -n "${WAYPOINT_E2E_OVERRIDE_FILE}" ]]; then
 	# WAYPOINT_E2E_OVERRIDE_FILE may carry more than one path (space-separated
 	# -- the devcontainer bind-mount override and the subnet override above

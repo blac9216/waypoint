@@ -511,7 +511,7 @@ def _is_private_space_cidr(line: str, candidate: str, end: int) -> bool:
 	return after >= len(line) or not line[after].isdigit()
 
 
-# Issue #191: the deploy/docker-compose.yml `edge` network's pinned subnet,
+# Issue #191: the deploy/compose.yaml `edge` network's pinned subnet,
 # and ONLY as this exact base address + exact /24 prefix. This is NOT a range
 # widening of _PRIVATE_SPACE_CIDRS above -- it names one specific /24 this
 # repo's own compose file assigns to a bridge network, the same way a fixture

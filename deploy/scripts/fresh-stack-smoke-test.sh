@@ -126,7 +126,7 @@ fi
 # docs/testing.md "Devcontainer bind mounts": when this script itself runs
 # from inside the devcontainer, the Docker daemon resolves every bind-mount
 # SOURCE against the HOST filesystem, not this container's. A relative source
-# in docker-compose.yml (frontend/dist, postgres/initdb) is silently mounted
+# in compose.yaml (frontend/dist, postgres/initdb) is silently mounted
 # as an empty directory instead of erroring, which then makes nginx serve a
 # bare 403 and/or postgres silently skip 01-runner-roles.sh (both hit and
 # fixed while first authoring this script -- see docs/testing.md and the PR
@@ -225,7 +225,10 @@ SCRATCH_KEY_DIR="$(mktemp -d)"
 openssl rand -hex 32 > "${SCRATCH_KEY_DIR}/master.key"
 chmod 644 "${SCRATCH_KEY_DIR}/master.key"
 
-CONFIG_DIR="${REPO_ROOT}/config"
+# Issue #845: deploy/config/ (anchored under deploy/, matching the
+# already-established file-backed-secrets convention issue #844 introduced
+# for postgres/keycloak), not the legacy repo-root config/ this replaces.
+CONFIG_DIR="${DEPLOY_DIR}/config"
 mkdir -p "${CONFIG_DIR}/secrets" "${CONFIG_DIR}/local-auth"
 cp "${SCRATCH_KEY_DIR}/master.key" "${CONFIG_DIR}/secrets/master.key"
 chmod 644 "${CONFIG_DIR}/secrets/master.key"
@@ -264,12 +267,23 @@ fi
 # skip it if the hash could not be computed, so backend still starts (with
 # every login failing closed, as documented) rather than compose refusing to
 # come up on a missing bind source.
-MASTER_KEY_HOST_PATH="${HOST_PREFIX}/config/secrets/master.key"
-ADMIN_HASH_HOST_PATH="${HOST_PREFIX}/config/local-auth/admin-password-hash"
+MASTER_KEY_HOST_PATH="${HOST_PREFIX}/deploy/config/secrets/master.key"
+ADMIN_HASH_HOST_PATH="${HOST_PREFIX}/deploy/config/local-auth/admin-password-hash"
 MASTER_KEY_OVERRIDE="$(mktemp)"
 {
 	echo "services:"
 	echo "  backend:"
+	echo "    environment:"
+	# Issue #845: compose.yaml's base carries no LocalAuth__* keys at all
+	# (Keycloak-only auth) -- this smoke test's login step needs the
+	# local-auth dev flag explicitly turned on, which the base's now-removed
+	# `${LOCAL_AUTH_ENABLED:-true}` default used to supply implicitly.
+	echo "      LocalAuth__Enabled: \"true\""
+	if [[ -n "${ADMIN_PASSWORD}" ]]; then
+		# Also removed from the base for the same reason -- without this key
+		# the mounted hash file below is never read.
+		echo "      LocalAuth__AdminPasswordHashFile: \"/run/secrets/local-auth-admin-password-hash\""
+	fi
 	echo "    volumes:"
 	echo "      - type: bind"
 	echo "        source: ${MASTER_KEY_HOST_PATH}"
@@ -310,7 +324,7 @@ MASTER_KEY_OVERRIDE="$(mktemp)"
 	echo "        read_only: true"
 } > "${MASTER_KEY_OVERRIDE}"
 
-COMPOSE_FILES="-f docker-compose.yml"
+COMPOSE_FILES="-f compose.yaml"
 if [[ -n "${WAYPOINT_SMOKE_OVERRIDE_FILE:-}" ]]; then
 	COMPOSE_FILES="${COMPOSE_FILES} -f ${WAYPOINT_SMOKE_OVERRIDE_FILE}"
 fi

@@ -58,7 +58,7 @@ namespace Waypoint.Infrastructure.Credentials;
 /// the Broadcom Support Portal is the operator-installed, account-gated
 /// <c>vcf-download-tool</c> binary (ADR-0015) -- and that binary, along with the
 /// managed-tool volume it lives on, is mounted only into <c>download-runner</c>
-/// (deploy/docker-compose.yml), never into <c>compliance-runner</c>, which is where
+/// (deploy/compose.yaml), never into <c>compliance-runner</c>, which is where
 /// <c>credential-test</c> is architecturally pinned to run (<c>JobCapabilities.Compliance</c>).
 /// <c>CatalogIndexJobHandler</c> (which does run on download-runner) resolves no
 /// credential at all post-#690 -- its indexing walk is a pure filesystem read

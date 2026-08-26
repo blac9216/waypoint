@@ -29,11 +29,49 @@
 # out through this change. See deploy/README.md "Runner egress" for the
 # disconnected/air-gapped operator override.
 #
-# Bring-up: `cd deploy && docker compose up -d`. Development-only
-# bootstrap services generate persistent TLS/key/auth state in named volumes,
-# and the nginx image builds the frontend itself. See deploy/README.md.
+# Bring-up: `cd deploy && docker compose up -d`. This file is the PRODUCTION
+# base -- Keycloak-only auth, file-backed secrets (issue #844), operator-
+# provided TLS. It has no dev bootstrap services and no dev-auth fallback.
+# For a local development loop (self-signed TLS, generated secrets, the
+# local-auth dev flag, and lower resource fallbacks), Compose auto-loads
+# `compose.override.yaml` when present -- copy the committed
+# `compose.override.example.yaml` to that name to opt in. See
+# deploy/README.md.
 
 name: waypoint-dev
+
+# ── Operator-editable configuration (issue #845) ───────────────────────────
+# The handful of values a real deployment is expected to change. Edit these
+# anchors directly, or leave them as `${VAR:-default}` and set VAR in
+# deploy/.env -- either way, every service below references one of these six
+# anchors instead of repeating its own `${VAR:-default}`. Everything past
+# this block is topology and should not need to change per-deployment.
+x-operator-config:
+  # Issue #842: the ONE browser-facing HTTPS origin for this appliance. Both
+  # the backend's token issuer (Oidc__PublicUrl below) and Keycloak's own
+  # identity (WAYPOINT_PUBLIC_URL/KC_HOSTNAME below) are derived from this
+  # single anchor so they cannot drift out of sync. REQUIRED for a real
+  # deployment -- the fallback is an obviously-nonfunctional placeholder
+  # domain (RFC 2606-style, matching this repo's own sanitization
+  # convention), never `localhost`, so an unconfigured base fails OIDC
+  # discovery/login clearly instead of quietly working against a loopback
+  # origin nothing external can reach.
+  public-url: &public-url "${WAYPOINT_PUBLIC_URL:-https://waypoint.example.internal}"
+  # Host port nginx's TLS listener publishes to. 8443 is a reasonable
+  # default for both a real appliance and concurrent isolated bring-ups
+  # (docs/testing.md) alike, so it stays a default here rather than moving
+  # to the development-only override.
+  https-port: &https-port "${WAYPOINT_HTTPS_PORT:-8443}"
+  # Subnet for the `edge` network (nginx <-> backend/keycloak) -- pinned so
+  # ForwardedHeaders:KnownNetworks (backend env below) can trust exactly
+  # this network. See the `edge` network's own comment below for why this
+  # particular range was chosen.
+  edge-subnet: &edge-subnet "${WAYPOINT_EDGE_SUBNET:-192.168.240.0/24}"
+  # Operator-provided TLS certificate/key (ADR-0003) -- REQUIRED. No
+  # dev-bootstrap self-signed fallback in this file; see
+  # compose.override.example.yaml for the development-only pair.
+  tls-cert-file: &tls-cert-file ./config/tls/tls.crt
+  tls-key-file: &tls-key-file ./config/tls/tls.key
 
 x-backend-image: &backend-image
   build:
@@ -41,41 +79,6 @@ x-backend-image: &backend-image
     dockerfile: backend/Dockerfile
 
 services:
-  dev-bootstrap:
-    build:
-      context: ./dev-bootstrap
-    volumes:
-      - dev-secrets:/run/waypoint-dev-secrets
-      - dev-tls:/run/waypoint-dev-tls
-      - compliance-profiles:/opt/waypoint/profiles
-    network_mode: none
-    restart: "no"
-
-  dev-auth-bootstrap:
-    <<: *backend-image
-    depends_on:
-      dev-bootstrap:
-        condition: service_completed_successfully
-    user: "0:0"
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        if [ ! -s /run/waypoint-dev-secrets/local-auth-admin-password-hash ]; then
-          printf '%s\n' "$$WAYPOINT_DEV_PASSWORD" \
-            | dotnet Waypoint.Api.dll --hash-password \
-            > /run/waypoint-dev-secrets/local-auth-admin-password-hash.tmp
-          mv /run/waypoint-dev-secrets/local-auth-admin-password-hash.tmp \
-            /run/waypoint-dev-secrets/local-auth-admin-password-hash
-          chown 1654:1654 /run/waypoint-dev-secrets/local-auth-admin-password-hash
-          chmod 600 /run/waypoint-dev-secrets/local-auth-admin-password-hash
-        fi
-    environment:
-      WAYPOINT_DEV_PASSWORD: "${WAYPOINT_DEV_PASSWORD:-waypoint-dev}"
-    volumes:
-      - dev-secrets:/run/waypoint-dev-secrets
-    network_mode: none
-    restart: "no"
-
   nginx:
     build:
       context: ..
@@ -83,34 +86,35 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-      dev-bootstrap:
-        condition: service_completed_successfully
+    # Long syntax so `published:` can alias the https-port anchor above
+    # (a YAML alias node can't be spliced into part of a scalar string, so
+    # this can't be the short "HOST:CONTAINER" form).
     ports:
-      - "${WAYPOINT_HTTPS_PORT:-8443}:443"
+      - target: 443
+        published: *https-port
     volumes:
-      - dev-tls:/etc/nginx/certs:ro
-      # Operator-provided TLS (issue #844) -- uncomment and place real
+      # Operator-provided TLS (issue #844/#845) -- place real
       # certificate/key material at deploy/config/tls/tls.crt and
       # deploy/config/tls/tls.key (gitignored -- see .gitignore's
-      # /deploy/config/ entry) to override the dev-bootstrap-generated
-      # self-signed pair above with real certs from your internal CA. Both
-      # mount at the SAME generic names (tls.crt/tls.key,
-      # deploy/nginx/conf.d/default.conf) the dev pair already uses -- this
-      # override needs no config change, only real file content. Same
-      # nested-mount-inside-a-named-volume pattern as the backend service's
-      # commented-out admin-password-hash/master-key mounts above.
-      # - type: bind
-      #   source: ./config/tls/tls.crt
-      #   target: /etc/nginx/certs/tls.crt
-      #   read_only: true
-      #   bind:
-      #     create_host_path: false
-      # - type: bind
-      #   source: ./config/tls/tls.key
-      #   target: /etc/nginx/certs/tls.key
-      #   read_only: true
-      #   bind:
-      #     create_host_path: false
+      # /deploy/config/ entry; paths editable via the tls-cert-file/
+      # tls-key-file anchors above) before bringing this file up on its own.
+      # Both mount at the SAME generic names
+      # (tls.crt/tls.key, deploy/nginx/conf.d/default.conf) the development
+      # override's dev-bootstrap-generated self-signed pair also uses, so
+      # switching between this base and compose.override.example.yaml needs
+      # no nginx config change, only which TLS material is present.
+      - type: bind
+        source: *tls-cert-file
+        target: /etc/nginx/certs/tls.crt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: *tls-key-file
+        target: /etc/nginx/certs/tls.key
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - edge
     healthcheck:
@@ -128,47 +132,24 @@ services:
   backend:
     <<: *backend-image
     depends_on:
-      dev-auth-bootstrap:
-        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     environment:
-      # Dev-grade local auth (ADR-0004 rollout note; backend/README.md "Run
-      # locally"). Empty by default so an unconfigured stack still fails
-      # every login closed instead of shipping a guessable credential (see
-      # Waypoint.Core.Configuration.LocalAuthOptions and
-      # InMemoryLocalAuthenticationService).
+      # Issue #845: this base ships Keycloak-only auth -- no LocalAuth__*
+      # keys here at all, so LocalAuthOptions binds its own compiled-in
+      # default (Enabled=false, AuthController.Login 404s outright). See
+      # compose.override.example.yaml for the local-auth dev flag
+      # (Waypoint.Core.Configuration.LocalAuthOptions, issue #29/#333/#62,
+      # deploy/README.md "Local auth (dev-flag)").
       #
-      # Preferred delivery (issue #333): a mounted file, bind-mounted below
-      # from ../config/local-auth/admin-password-hash (gitignored - see
-      # .gitignore's /config/ entry and CLAUDE.md). This env var names the
-      # in-container path; LocalAuthOptionsPostConfigure reads the hash from
-      # it at startup and, when the file exists and is non-empty, it wins
-      # over LocalAuth__AdminPasswordHash below. See deploy/README.md
-      # "Bring-up" for how to generate the file's contents.
-      LocalAuth__AdminPasswordHashFile: "/run/secrets/local-auth-admin-password-hash"
-      # Legacy fallback (issue #62): only used when the mounted file above is
-      # absent or empty (see LocalAuthOptionsPostConfigure). Env vars leak
-      # via /proc/<pid>/environ, `docker inspect`, and crash dumps, so new
-      # deployments should prefer the file above - this is kept working so
-      # existing WAYPOINT_ADMIN_PASSWORD_HASH deployments' admin login does
-      # not break. Set it to a salted PBKDF2 hash (Pbkdf2PasswordHasher,
-      # issue #62) of a password of your choosing. Never commit a real hash
-      # (or the plaintext password it hashes) to this repo.
-      LocalAuth__AdminPasswordHash: "${WAYPOINT_ADMIN_PASSWORD_HASH:-}"
-      # Off by default (issue #29) -- see deploy/README.md "Local auth
-      # (dev-flag)". Set to "true" to re-enable the dev-grade local-session
-      # scheme above alongside real OIDC; never set this on a production
-      # deployment.
-      LocalAuth__Enabled: "${LOCAL_AUTH_ENABLED:-true}"
       # Issue #29, ADR-0004: the backend validates Keycloak-issued bearer
       # tokens as a plain OIDC relying party. Authority drives DISCOVERY ONLY
       # (issue #842 -- see Oidc__PublicUrl below for issuer derivation) and
       # is this compose stack's own Keycloak service, reachable from
-      # `backend` over the shared `internal` network (Keycloak's dev
+      # `backend` over the shared `internal` network (Keycloak's own
       # listener is plain HTTP inside the compose network -- TLS is
       # terminated once, at nginx, same split as backend's own listener) --
-      # RequireHttpsMetadata is false for exactly that reason in this dev
+      # RequireHttpsMetadata is false for exactly that reason in this
       # stack; a real deployment behind its own TLS-terminated Keycloak
       # should override both. Includes the /auth prefix
       # (KC_HTTP_RELATIVE_PATH below) because that prefix shifts EVERY URL
@@ -190,8 +171,11 @@ services:
       # this one variable; see deploy/README.md "Keycloak" for the exact
       # operator override steps. Must be an absolute HTTPS origin with no
       # path/query/fragment/trailing slash (OidcAuthOptions.IsValidPublicUrl)
-      # -- startup fails clearly (ValidateOnStart) otherwise.
-      Oidc__PublicUrl: "${WAYPOINT_PUBLIC_URL:-https://localhost:8443}"
+      # -- startup fails clearly (ValidateOnStart) otherwise. Sourced from
+      # the public-url operator-config anchor at the top of this file --
+      # REQUIRED for a real deployment; the anchor's fallback is a
+      # deliberately nonfunctional placeholder domain, never `localhost`.
+      Oidc__PublicUrl: *public-url
       Oidc__Audience: "${OIDC_AUDIENCE:-waypoint-backend}"
       Oidc__RequireHttpsMetadata: "${OIDC_REQUIRE_HTTPS_METADATA:-false}"
       # Issue #534: the BROWSER-facing authority + public client id, handed to
@@ -241,19 +225,20 @@ services:
       # subnet (see the `edge` network's ipam config below) - the only network
       # nginx and the backend share, and the only source X-Forwarded-For/
       # X-Forwarded-Proto should ever be trusted from in this deployment.
-      ForwardedHeaders__KnownNetworks__0: "${WAYPOINT_EDGE_SUBNET:-192.168.240.0/24}"
+      ForwardedHeaders__KnownNetworks__0: *edge-subnet
       # Secrets master key (issue #405; ADR-0005, AWX-pattern envelope
       # encryption). Preferred and only delivery path is a mounted file,
-      # bind-mounted below from ../config/secrets/master.key (gitignored -
-      # see .gitignore's /config/ entry and CLAUDE.md; same convention as
-      # the admin-password-hash mount above). This env var names the
+      # bind-mounted below from ./config/secrets/master.key (gitignored -
+      # see .gitignore's /deploy/config/ entry; issue #845 migrated this off
+      # the legacy repo-root /config/ convention onto the same
+      # deploy/config/ location #844 already used for the Compose
+      # `secrets:`-backed files below). This env var names the
       # in-container path; FileMasterKeyProvider reads the key from it
       # lazily, on the first secret-store operation, not at startup - so an
       # unconfigured stack still comes up healthy and only a credential
       # write fails, with FileMasterKeyProvider's own
       # "No master key is configured..." error. There is no env-var
-      # fallback here (unlike LocalAuth__AdminPasswordHash above):
-      # FileMasterKeyProvider only ever reads a file, by design, since env
+      # fallback here: FileMasterKeyProvider only ever reads a file, by design, since env
       # vars leak via /proc/<pid>/environ, `docker inspect`, and crash
       # dumps. See deploy/README.md "Bring-up" for how to generate the
       # key file's contents.
@@ -284,36 +269,19 @@ services:
       # backend's docker-entrypoint.sh chowns ONLY this staging mount to `app` at
       # container start (the same root-then-drop pattern download-runner uses).
       - tool-upload-staging:/var/lib/waypoint/tool-upload-staging
-      - dev-secrets:/run/secrets:ro
-      # Admin password hash file (issue #333) - operator-provided, gitignored
-      # (../config/ is covered by .gitignore's anchored /config/ entry).
-      # Commented out by default so an unconfigured stack does not fail to
-      # start on a missing bind source (unlike the frontend/dist mount above,
-      # this one is optional: LocalAuthOptionsPostConfigure falls back to
-      # LocalAuth__AdminPasswordHash, or to fail-closed local auth, when it's
-      # absent). Uncomment and create
-      # ../config/local-auth/admin-password-hash (see deploy/README.md
-      # "Bring-up" step 3) to use the mounted-file delivery path instead of
-      # the env var:
-      # - type: bind
-      #   source: ../config/local-auth/admin-password-hash
-      #   target: /run/secrets/local-auth-admin-password-hash
-      #   read_only: true
-      #   bind:
-      #     create_host_path: false
       # Secrets master key file (issue #405) - operator-provided, gitignored
-      # (../config/ is covered by .gitignore's anchored /config/ entry).
-      # Commented out by default so an unconfigured stack does not fail to
-      # start on a missing bind source: FileMasterKeyProvider only loads the
-      # key lazily on first use (see the WAYPOINT_MASTER_KEY_FILE comment
-      # above), so a stack without this mount still starts and reports
-      # healthy - only a credential write (or anything else that touches
-      # the secret store) fails, with FileMasterKeyProvider's own clean
-      # fail-closed error. Uncomment and create
-      # ../config/secrets/master.key (see deploy/README.md "Bring-up") to
+      # (deploy/config/ is covered by .gitignore's anchored /deploy/config/
+      # entry). Commented out by default so an unconfigured stack does not
+      # fail to start on a missing bind source: FileMasterKeyProvider only
+      # loads the key lazily on first use (see the WAYPOINT_MASTER_KEY_FILE
+      # comment above), so a stack without this mount still starts and
+      # reports healthy - only a credential write (or anything else that
+      # touches the secret store) fails, with FileMasterKeyProvider's own
+      # clean fail-closed error. Uncomment and create
+      # ./config/secrets/master.key (see deploy/README.md "Bring-up") to
       # enable the credential store:
       # - type: bind
-      #   source: ../config/secrets/master.key
+      #   source: ./config/secrets/master.key
       #   target: /run/secrets/waypoint-master-key
       #   read_only: true
       #   bind:
@@ -322,11 +290,12 @@ services:
     # deploy/config/secrets/postgres-owner-password read-only at
     # /run/db-secret/postgres-owner-password, the path Database__PasswordFile
     # above reads. A DELIBERATELY different target than the default
-    # /run/secrets/<name> (live-verified necessary): backend already mounts
-    # the read-only `dev-secrets` NAMED VOLUME at /run/secrets below, and a
-    # read-only mount's directory tree cannot host a new nested mountpoint --
-    # `docker compose up` fails closed with "read-only file system" if this
-    # target collides with that one.
+    # /run/secrets/<name>: the development override (issue #845,
+    # compose.override.example.yaml) mounts a read-only `dev-secrets` named
+    # volume at /run/secrets on this service, and a read-only mount's
+    # directory tree cannot host a new nested mountpoint -- `docker compose
+    # up` fails closed with "read-only file system" under that override if
+    # this target collides with that one, so both files use this path.
     secrets:
       - source: postgres-owner-password
         target: /run/db-secret/postgres-owner-password
@@ -493,7 +462,7 @@ services:
       # placeholders (rootUrl/redirectUris/webOrigins on both clients) are
       # substituted into the imported realm at boot -- see
       # JAVA_OPTS_APPEND below, which is what turns that substitution on.
-      WAYPOINT_PUBLIC_URL: "${WAYPOINT_PUBLIC_URL:-https://localhost:8443}"
+      WAYPOINT_PUBLIC_URL: *public-url
       # Keycloak's realm-import placeholder substitution
       # (`${WAYPOINT_PUBLIC_URL}` in waypoint-realm.json) is OFF by default;
       # this system property turns it on for the `--import-realm` boot path
@@ -523,7 +492,12 @@ services:
       # WAYPOINT_PUBLIC_URL above (issue #842) instead of its own independent
       # KC_HOSTNAME override -- one variable now drives both the backend's
       # issuer and Keycloak's own identity, so they cannot drift out of sync.
-      KC_HOSTNAME: "${WAYPOINT_PUBLIC_URL:-https://localhost:8443}/auth"
+      # Can't alias *public-url here: a YAML alias node can't be spliced
+      # into part of a scalar string, and this value needs the /auth suffix
+      # appended. Kept as the same literal expression as the public-url
+      # anchor above -- same underlying WAYPOINT_PUBLIC_URL variable and
+      # placeholder fallback, just not expressible as an alias.
+      KC_HOSTNAME: "${WAYPOINT_PUBLIC_URL:-https://waypoint.example.internal}/auth"
       # Issue #534 (live-verified): without this, Keycloak has no idea it is
       # reverse-proxied under nginx's /auth/ prefix (deploy/nginx/conf.d
       # default.conf's `location /auth/`) and renders every self-referential
@@ -589,8 +563,6 @@ services:
       context: ..
       dockerfile: runners/compliance-runner/Dockerfile
     depends_on:
-      dev-bootstrap:
-        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     environment:
@@ -611,8 +583,10 @@ services:
       # mount below (issue #405/ADR-0005) - every trusted service reads the same
       # key material, never an env var carrying the key itself.
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
-      RunnerResources__FallbackCpuCores: "${RUNNER_FALLBACK_CPU_CORES:-4}"
-      RunnerResources__FallbackMemoryBytes: "${RUNNER_FALLBACK_MEMORY_BYTES:-4294967296}"
+      # No RunnerResources__Fallback* keys here (issue #845): the base ships
+      # no dev-picked resource-fallback default -- RunnerResourceOptions'
+      # own compiled-in default applies unless compose.override.example.yaml
+      # (or an operator's own override) sets one.
       # Shim modules baked into the image at /app/PowerShell/Modules (Waypoint.
       # Infrastructure.csproj's CopyToPublishDirectory - see the Dockerfile).
       # Preload order matches the mapping deploy/README.md previously documented
@@ -658,7 +632,6 @@ services:
       # (see that handler's ResolveProfilePath doc comment) -- read-only (ADR-0014 §7).
       # Remove once nothing legitimately needs the fallback path.
       - compliance-profiles:/opt/waypoint/profiles:ro
-      - dev-secrets:/run/secrets:ro
       # Scan artifacts (HDF/CKL) - read-write (ADR-0014 §7: "scan-artifact write
       # access"). Same named volume the backend mounts read-only above, so the
       # API can serve already-written results without itself being able to
@@ -673,26 +646,27 @@ services:
       # shape as the download-runner's managed-tool volume).
       - compliance-content:/var/lib/waypoint/compliance-content
       # Secrets master key file (issue #405/#442) - operator-provided, gitignored
-      # (../config/ is covered by .gitignore's anchored /config/ entry). Same
-      # file, same in-container path, and the same optional/fail-closed
-      # behavior as the backend's own mount above: discover/credential-test/
-      # scan all decrypt a credential before doing anything else (ADR-0014 §6),
-      # so a runner that cannot reach this key still starts and reports
-      # healthy, but every job it claims fails until the key is mounted. See
-      # deploy/README.md "Bring-up" step 4 - the same uid/permission note
-      # applies (this image's app user is also uid 1654; see the Dockerfile).
-      # Uncomment and create ../config/secrets/master.key to enable:
+      # (deploy/config/ is covered by .gitignore's anchored /deploy/config/
+      # entry). Same file, same in-container path, and the same
+      # optional/fail-closed behavior as the backend's own mount above:
+      # discover/credential-test/scan all decrypt a credential before doing
+      # anything else (ADR-0014 §6), so a runner that cannot reach this key
+      # still starts and reports healthy, but every job it claims fails
+      # until the key is mounted. See deploy/README.md "Bring-up" step 4 -
+      # the same uid/permission note applies (this image's app user is also
+      # uid 1654; see the Dockerfile).
+      # Uncomment and create ./config/secrets/master.key to enable:
       # - type: bind
-      #   source: ../config/secrets/master.key
+      #   source: ./config/secrets/master.key
       #   target: /run/secrets/waypoint-master-key
       #   read_only: true
       #   bind:
       #     create_host_path: false
-    # Different target than the default /run/secrets/<name> (issue #844,
-    # live-verified) -- this service also mounts the read-only `dev-secrets`
-    # volume at /run/secrets below, and a read-only mount cannot host a new
-    # nested mountpoint. See the backend service's own comment on the same
-    # collision.
+    # Different target than the default /run/secrets/<name> -- the
+    # development override (compose.override.example.yaml) also mounts a
+    # read-only `dev-secrets` volume at /run/secrets on this service, and a
+    # read-only mount cannot host a new nested mountpoint. See the backend
+    # service's own comment on the same collision.
     secrets:
       - source: postgres-compliance-runner-password
         target: /run/db-secret/postgres-compliance-runner-password
@@ -731,8 +705,6 @@ services:
       context: ..
       dockerfile: runners/download-runner/Dockerfile
     depends_on:
-      dev-bootstrap:
-        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     environment:
@@ -790,21 +762,20 @@ services:
       # never needs write access to the tool store or the release-key trust
       # anchor (ADR-0014 §7 / issue #442 AC5 / #570).
       - tool-upload-staging:/var/lib/waypoint/tool-upload-staging
-      - dev-secrets:/run/secrets:ro
       # Secrets master key file (issue #405/#442) - same convention as
       # compliance-runner's own mount above; catalog-index resolves the depot
       # token credential and download resolves the target credential, both
       # through this key (ADR-0014 §6). Uncomment and create
-      # ../config/secrets/master.key to enable:
+      # ./config/secrets/master.key to enable:
       # - type: bind
-      #   source: ../config/secrets/master.key
+      #   source: ./config/secrets/master.key
       #   target: /run/secrets/waypoint-master-key
       #   read_only: true
       #   bind:
       #     create_host_path: false
-    # Different target than the default /run/secrets/<name> (issue #844,
-    # live-verified) -- same read-only `dev-secrets`-volume collision as the
-    # backend and compliance-runner services above.
+    # Different target than the default /run/secrets/<name> -- same
+    # development-override `dev-secrets`-volume collision as the backend and
+    # compliance-runner services above.
     secrets:
       - source: postgres-download-runner-password
         target: /run/db-secret/postgres-download-runner-password
@@ -839,7 +810,7 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: "${WAYPOINT_EDGE_SUBNET:-192.168.240.0/24}"
+        - subnet: *edge-subnet
   # backend, compliance-runner, download-runner <-> postgres. internal: true
   # means Docker gives this network no route out (no host access, no
   # default-gateway/internet); only containers attached to it can reach each
@@ -862,7 +833,7 @@ networks:
   # `internal` as before). An operator running a disconnected/air-gapped
   # instance who wants to physically remove even this egress path (e.g. no
   # download-runner internet route at all) can override this network's driver
-  # options or detach download-runner from it in a docker-compose.override.yml
+  # options or detach download-runner from it in a compose.override.yaml
   # -- see deploy/README.md "Runner egress".
   runner-egress:
     driver: bridge
@@ -901,11 +872,13 @@ networks:
 # (`./postgres`, etc.).
 #
 # Create these six files under deploy/config/secrets/ (gitignored -- see
-# .gitignore's /deploy/config/ entry) before a fresh bring-up; #847 will add
-# a generator, but does not exist yet. Each file's entire content (minus a
-# trailing newline) is the raw password/secret value -- no quoting, no
-# key=value shape. Example, using an obviously-invented placeholder value
-# (never reuse this literal):
+# .gitignore's /deploy/config/ entry) before bringing THIS base file up on
+# its own; #847 will add a generator, but does not exist yet.
+# compose.override.example.yaml's dev-bootstrap service generates its own
+# separate dev-only secrets instead -- see that file. Each file's entire
+# content (minus a trailing newline) is the raw password/secret value -- no
+# quoting, no key=value shape. Example, using an obviously-invented
+# placeholder value (never reuse this literal):
 #
 #   mkdir -p config/secrets
 #   printf 'correct-horse-battery-staple-EXAMPLE-1\n' > config/secrets/postgres-owner-password  # gitleaks:allow
@@ -924,11 +897,9 @@ secrets:
     file: ./config/secrets/keycloak-backend-client-secret
 
 volumes:
-  # Generated development-only master key and local-auth hash. Persistent so
-  # encrypted credentials survive ordinary down/up cycles; `down -v` resets it.
-  dev-secrets:
-  # Generated development-only self-signed nginx certificate and key.
-  dev-tls:
+  # No dev-secrets/dev-tls volumes in this base (issue #845) -- both are
+  # development-only, generated by compose.override.example.yaml's
+  # dev-bootstrap service, and declared there instead.
   # Postgres data directory.
   pgdata:
   # Scan (compliance-runner) and download (download-runner) artifact output.

@@ -29,7 +29,7 @@ public sealed class ManagedToolOptions
 
 	/// <summary>
 	/// Root directory of the managed-tool state volume. Matches
-	/// <c>deploy/docker-compose.yml</c>'s eventual <c>managed-tool</c> volume mount
+	/// <c>deploy/compose.yaml</c>'s eventual <c>managed-tool</c> volume mount
 	/// (wired by #442); tests point this at a temp directory.
 	/// </summary>
 	public string ToolStatePath { get; set; } = "/var/lib/waypoint/managed-tool";
@@ -136,7 +136,7 @@ public sealed class ManagedToolOptions
 	/// Directory manual uploads (issue #39's third install path) are staged into by
 	/// <c>POST /downloads/tool/upload</c> before the <c>tool-install</c> job picks them
 	/// up. Lives on its OWN dedicated volume (<c>tool-upload-staging</c> in
-	/// <c>deploy/docker-compose.yml</c>), NOT under <see cref="ToolStatePath"/>: the
+	/// <c>deploy/compose.yaml</c>), NOT under <see cref="ToolStatePath"/>: the
 	/// backend mounts only this staging volume read-write and never the
 	/// <c>managed-tool</c> tool store, so the API-facing process cannot write the
 	/// verified tool binary or the <see cref="ReleasePublicKeyPath"/> trust anchor
