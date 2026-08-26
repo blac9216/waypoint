@@ -105,7 +105,8 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 			new ScopeResolutionService(_targets, componentRepository, catalogRepository),
 			new RunScopeSnapshotRepository(_fixture.ConnectionString),
 			new ScanPlannerService(componentRepository, catalogRepository, baselineRepository),
-			new ScanPlanRepository(_fixture.ConnectionString));
+			new ScanPlanRepository(_fixture.ConnectionString),
+			componentRepository);
 
 		IApplianceStateRepository applianceState = new ApplianceStateRepository(_fixture.ConnectionString);
 		_dispatch = new ScheduleDispatchService(_schedules, jobs, applianceState, runCreation, NullLogger<ScheduleDispatchService>.Instance);
