@@ -8,7 +8,7 @@ import {
 	endSessionUrl,
 	startLogin,
 } from "./oidc";
-import { ROLE_ORDER, type Role } from "./roles";
+import { ROLE_ORDER, roleRank, type Role } from "./roles";
 import { AuthContext, type AuthContextValue } from "./auth-context";
 
 /**
@@ -163,20 +163,55 @@ function isNonBlankString(value: unknown): value is string {
 }
 
 /**
+ * Recognized `Role` values found in a wire `role` claim, in whatever shape it
+ * arrived. Local-auth (`POST /auth/login`, `GET /auth/me`) sends a flat
+ * string. Keycloak's `waypoint-role` mapper is an
+ * `oidc-group-membership-mapper` (`deploy/keycloak/realm/waypoint-realm.json`),
+ * which **always** emits a JSON array of group names — `["Admin"]` even for a
+ * single group — never a scalar (issue #872). Both shapes are legitimate wire
+ * contracts from different issuers, not one right shape and one malformed
+ * one, so both are accepted here; unrecognized elements (a group name that
+ * isn't one of the four `Role`s) are silently dropped rather than treated as
+ * a parse failure, since the mapper may surface groups Waypoint doesn't map
+ * to a role at all.
+ */
+function recognizedRoles(value: unknown): Role[] {
+	if (typeof value === "string") {
+		return isRole(value) ? [value] : [];
+	}
+	if (Array.isArray(value)) {
+		return value.filter(isRole);
+	}
+	return [];
+}
+
+/**
  * Narrow a `role` that arrived over the network to the closed `Role` set, or
- * refuse the sign-in. The same `isRole()` predicate that guards the
- * `sessionStorage` restore path — applied to the path that actually faces
- * the network.
+ * refuse the sign-in. Accepts both wire shapes `recognizedRoles()` knows
+ * about — a bare string (local-auth) or a string array (Keycloak's
+ * group-membership mapper, issue #872).
  *
- * **Fails closed**, consistent with how the rest of the role model already
- * behaves: every comparison routes through `roleAtLeast` → `roleRank` →
- * `ROLE_ORDER.indexOf`, an unrecognized role yields `-1`, and `-1 >= 0` is
- * false, so it is denied everywhere. Signing in *anyway* on an out-of-domain
- * role is the worst of the options — it produces exactly the half-accepted
- * state issue #64 exists to close: `login()` reports success, every guard
- * denies (blank nav, Configuration silently redirecting to Dashboard), and
- * the next page refresh signs the user out because `readStoredSession()`
- * correctly rejects what `login()` just wrote.
+ * When more than one recognized role comes back (a user in more than one
+ * mapped group), the **most privileged** one wins. This is a presentation
+ * choice only — `roles.ts`'s header note applies here too: the server
+ * enforces every guard for real, the SPA's role only drives disabled/hidden
+ * styling. Picking the highest of several roles the server has actually
+ * granted the user shows them the UI that matches what they can do; picking
+ * the lowest would hide controls the server would honor if they clicked
+ * them, which is a worse failure mode than the reverse (a disabled-with-reason
+ * control is always the fallback the server-side check still guards).
+ *
+ * **Fails closed** when nothing recognized comes back, consistent with how
+ * the rest of the role model already behaves: every comparison routes
+ * through `roleAtLeast` → `roleRank` → `ROLE_ORDER.indexOf`, an unrecognized
+ * role yields `-1`, and `-1 >= 0` is false, so it is denied everywhere.
+ * Signing in *anyway* on an out-of-domain role is the worst of the options —
+ * it produces exactly the half-accepted state issue #64 exists to close:
+ * `login()` reports success, every guard denies (blank nav, Configuration
+ * silently redirecting to Dashboard), and the next page refresh signs the
+ * user out because `readStoredSession()` correctly rejects what `login()`
+ * just wrote. An empty array (group membership mapper with no mapped groups)
+ * fails closed the same way as a missing claim or an unrecognized string.
  *
  * The offending value goes in `detail`, never in `message`: `message` is
  * rendered on the login screen, and this is server-controlled text of
@@ -187,7 +222,8 @@ function isNonBlankString(value: unknown): value is string {
  * synthetic 5xx here would misdescribe what happened on the wire.
  */
 function toRole(value: unknown, source: string): Role {
-	if (!isRole(value)) {
+	const recognized = recognizedRoles(value);
+	if (recognized.length === 0) {
 		throw new ApiError(
 			200,
 			"invalid_role",
@@ -195,7 +231,7 @@ function toRole(value: unknown, source: string): Role {
 			{ source, received: value, expected: ROLE_ORDER },
 		);
 	}
-	return value;
+	return recognized.reduce((best, role) => (roleRank(role) > roleRank(best) ? role : best));
 }
 
 /**
