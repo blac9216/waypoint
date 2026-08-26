@@ -12,7 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Net;
+using Waypoint.Core.Errors;
+
 namespace Waypoint.Core.Scans;
+
+/// <summary>
+/// Thrown when <see cref="ScanPlannerService"/> encounters corrupt/inconsistent catalog
+/// state it cannot validate (a "should-never-happen" data-integrity violation, e.g. an
+/// SRG execution profile whose active baseline unexpectedly carries a benchmark
+/// revision) while compiling a plan. This is NOT an operator-fixable per-component gap
+/// (those are <see cref="ScanPlanSkip"/> rows -- see <see cref="ScanPlanSkipReasons"/>);
+/// epic #726 §3/§5 never sanctions silently dropping a component on a data-integrity
+/// violation while its siblings proceed, so this fails the WHOLE plan compilation closed.
+///
+/// It is an <see cref="ApiException"/> so the API layer's error middleware surfaces it
+/// as a documented <c>plan_integrity_failure</c> response (a 500-class error -- corrupt
+/// catalog state is a system-integrity fault an operator cannot fix by adjusting the
+/// request, distinct from the 400-class request-shape rejections this path otherwise
+/// raises) rather than an unmapped 500 that leaks a stack trace. Raised strictly BEFORE
+/// any run/plan/job row is created (<see cref="Waypoint.Infrastructure.Runs.RunCreationService"/>
+/// compiles the plan as a pre-creation validation step), so the plan fails closed with
+/// no partial persistence.
+/// </summary>
+public sealed class ScanPlanIntegrityException : ApiException
+{
+	public const string ErrorCode = "plan_integrity_failure";
+
+	public ScanPlanIntegrityException(Guid componentId, string detail)
+		: base(
+			HttpStatusCode.InternalServerError,
+			ErrorCode,
+			"The scan plan could not be compiled because of inconsistent catalog state.",
+			detail)
+	{
+		ComponentId = componentId;
+	}
+
+	/// <summary>The component whose catalog/baseline state was found inconsistent.</summary>
+	public Guid ComponentId { get; }
+}
 
 /// <summary>
 /// The current plan schema version this codebase writes and accepts (issue #734 AC
@@ -31,12 +70,26 @@ public static class ScanPlanSchema
 /// <summary>
 /// The closed set of reasons an execution item candidate never becomes an accepted
 /// <see cref="ScanPlanItem"/> (issue #734 AC "Validation reports every incompatible
-/// endpoint/profile/transport/credential/input/benchmark gap"). Every value is an
-/// explicit, independent skip (ADR-0023 "Missing facts/baselines skip only the
-/// affected component"; ADR-0024 "A missing, incompatible, or ambiguous credential
-/// affects only components requiring that purpose... The run is incomplete, not
-/// rejected wholesale") -- see <see cref="ScanPlannerService"/>'s doc comment for the
-/// full skip-vs-fail reconciliation this planner applies.
+/// endpoint/profile/transport/credential/input/benchmark gap").
+///
+/// <b>Every value in this set is "architecturally skippable per epic #726 §3/§5":</b> an
+/// operator-fixable gap in an otherwise-consistent catalog (an unsupported capability, a
+/// component with no active baseline yet, an unmapped benchmark, a missing
+/// input/credential). ADR-0023 ("Missing facts/baselines skip only the affected
+/// component") and ADR-0024 ("A missing, incompatible, or ambiguous credential affects
+/// only components requiring that purpose... The run is incomplete, not rejected
+/// wholesale") sanction skip-and-continue for exactly these states: the affected
+/// component is recorded as a skip and its siblings still plan.
+///
+/// A <b>planner-integrity failure</b> -- corrupt/inconsistent catalog state that the
+/// planner could not validate (e.g. an SRG execution profile whose active baseline
+/// unexpectedly carries a benchmark revision) -- is deliberately NOT in this set. Epic
+/// §3/§5 never sanctions silently dropping a component on a data-integrity violation
+/// while its siblings proceed; doing so would silently narrow a run's coverage instead
+/// of surfacing corruption. Such a state fails the WHOLE plan compilation closed via
+/// <see cref="ScanPlanIntegrityException"/> (no run/plan/job rows persisted) rather than
+/// becoming a skip row. See <see cref="ScanPlannerService"/>'s doc comment for the full
+/// skip-vs-fail reconciliation.
 /// </summary>
 public static class ScanPlanSkipReasons
 {
@@ -49,10 +102,7 @@ public static class ScanPlanSkipReasons
 	/// <summary>A STIG execution profile's benchmark reference has no corresponding imported <c>benchmark_revisions</c> row, or no current component-to-benchmark-revision mapping exists (ADR-0022/#730).</summary>
 	public const string UnmappedBenchmark = "unmapped_benchmark";
 
-	/// <summary>The active baseline's own referenced content/benchmark identity is internally inconsistent (e.g. references a revision that no longer resolves) -- a data-integrity guard, not an expected steady-state path.</summary>
-	public const string InvalidBaseline = "invalid_baseline";
-
-	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, UnmappedBenchmark, InvalidBaseline];
+	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, UnmappedBenchmark];
 }
 
 /// <summary>

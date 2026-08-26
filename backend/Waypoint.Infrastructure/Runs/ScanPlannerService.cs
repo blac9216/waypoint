@@ -53,6 +53,22 @@ namespace Waypoint.Infrastructure.Runs;
 /// the two lists partition the candidate set completely (issue #734 AC "enumerate all
 /// gaps", not just the first).
 ///
+/// <b>Skip vs. integrity-failure (the second, distinct axis):</b> the skip path above is
+/// only for the ARCHITECTURALLY SKIPPABLE states epic #726 §3/§5 enumerate -- an
+/// operator-fixable gap in an otherwise-consistent catalog (unsupported capability, no
+/// active baseline yet, unmapped benchmark; #736/#753 add missing input/credential).
+/// A PLANNER-INTEGRITY failure -- corrupt/inconsistent catalog state the planner cannot
+/// validate, e.g. an SRG execution profile whose active baseline unexpectedly carries a
+/// benchmark revision -- is NOT a skip. Epic §3/§5 never sanction silently dropping a
+/// component on a data-integrity violation while its siblings proceed; that would narrow
+/// a run's coverage on corruption instead of surfacing it. Such a state throws
+/// <see cref="ScanPlanIntegrityException"/> from <see cref="CompileOneAsync"/>, which
+/// propagates out of <see cref="CompileAsync"/> and fails the WHOLE plan compilation
+/// closed -- because the caller compiles the plan as a pre-creation validation step
+/// (<see cref="Waypoint.Infrastructure.Runs.RunCreationService"/>), no run/plan/job row
+/// is ever persisted, and the API surfaces a distinct <c>plan_integrity_failure</c>
+/// diagnostic rather than a silent skip row.
+///
 /// Deterministic: for the same persisted catalog/baseline/component state, planning the
 /// same resolved scope twice always yields the same accepted-item set and therefore the
 /// same <see cref="ScanPlanDigest"/> (issue #734 AC-4) -- no wall-clock or random
@@ -109,9 +125,14 @@ public sealed class ScanPlannerService
 	}
 
 	/// <summary>
-	/// Plans one already-eligible component. Every catalog/baseline lookup failure is
-	/// an explicit <see cref="ScanPlanSkip"/>, never an exception -- this method never
-	/// throws for a data gap, only for a caller programming error (null argument).
+	/// Plans one already-eligible component. An operator-fixable per-component gap
+	/// (unsupported / no-active-baseline / unmapped-benchmark -- the architecturally
+	/// skippable states epic #726 §3/§5 sanction) is an explicit <see cref="ScanPlanSkip"/>,
+	/// never an exception, so its siblings still plan. This method throws only for a
+	/// caller programming error (null argument) or a data-integrity violation the planner
+	/// cannot validate (<see cref="ScanPlanIntegrityException"/>, e.g. an SRG profile
+	/// whose active baseline carries a benchmark revision) -- corrupt catalog state that
+	/// must fail the whole plan closed rather than silently narrow coverage via a skip row.
 	/// </summary>
 	private async Task<(ScanPlanItem? Item, ScanPlanSkip? Skip)> CompileOneAsync(Guid componentId, CancellationToken cancellationToken)
 	{
@@ -159,8 +180,22 @@ public sealed class ScanPlannerService
 
 			if (!isStig && active.BenchmarkRevisionId is not null)
 			{
-				return (null, new ScanPlanSkip(componentId, ScanPlanSkipReasons.InvalidBaseline,
-					$"Component '{componentId}' resolves to an SRG execution profile ('{profile.ExecutionProfile.Id}') whose active baseline unexpectedly carries a benchmark revision."));
+				// Data-integrity violation, NOT an operator-fixable skip: an SRG execution
+				// profile has no XCCDF benchmark concept (ADR-0022), so an active baseline
+				// carrying a benchmark revision means the catalog is internally
+				// inconsistent (corrupt/inconsistent state, a should-never-happen). Epic
+				// #726 §3/§5 sanction skip-and-continue only for the enumerated
+				// architecturally-skippable gaps (unsupported / no-active-baseline /
+				// unmapped-benchmark); silently dropping this component while its siblings
+				// proceed would narrow the run's coverage on corruption rather than
+				// surface it. Fail the WHOLE plan compilation closed instead -- this throws
+				// before RunCreationService persists any run/plan/job row.
+				throw new ScanPlanIntegrityException(
+					componentId,
+					$"Component '{componentId}' resolves to an SRG execution profile ('{profile.ExecutionProfile.Id}') whose active baseline "
+						+ $"('{active.Id}') unexpectedly carries a benchmark revision ('{active.BenchmarkRevisionId}'). "
+						+ "An SRG profile has no benchmark concept; this indicates inconsistent catalog/baseline state. "
+						+ "No run was created. Investigate the baseline's content-import provenance before retrying.");
 			}
 
 			List<string> purposes = [.. profile.CredentialRequirements
@@ -193,7 +228,7 @@ public sealed class ScanPlannerService
 			$"Component '{componentId}' has a catalog-compatible execution profile but no active baseline; an Admin must activate one (ADR-0022)."));
 	}
 
-	private static string BuildExplanation(int candidateCount, int acceptedCount, IReadOnlyList<ScanPlanSkip> skips)
+	private static string BuildExplanation(int candidateCount, int acceptedCount, List<ScanPlanSkip> skips)
 	{
 		if (candidateCount == 0)
 		{

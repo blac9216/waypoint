@@ -38,7 +38,11 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// SRG), no-active-baseline skip, unmapped-benchmark skip, unsupported (no catalog
 /// link) skip, the "some skip, siblings still plan" isolation ADR-0023/0024 require,
 /// the all-skip => unrunnable-plan case, and determinism/digest-parity across repeated
-/// compiles of the same resolved set.
+/// compiles of the same resolved set. Also covers the skip-vs-integrity-failure split
+/// (round-2 review of PR #857): the enumerated architecturally-skippable reasons
+/// skip-and-continue, but a data-integrity violation (an SRG profile whose active
+/// baseline carries a benchmark revision) throws <see cref="ScanPlanIntegrityException"/>
+/// and fails the whole plan closed rather than silently dropping the component.
 /// </summary>
 [Collection("Postgres")]
 public sealed class ScanPlannerServiceTests : IAsyncLifetime
@@ -297,6 +301,92 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 
 		Assert.Equal(first.PlanDigest, second.PlanDigest);
 		Assert.Equal(2, first.Items.Count);
+	}
+
+	[Fact]
+	public async Task CompileAsync_SrgProfileWhoseActiveBaselineCarriesABenchmarkRevision_FailsPlanClosedAsIntegrityViolation()
+	{
+		// Round-2 review of PR #857 (finding 2): an SRG execution profile has no XCCDF
+		// benchmark concept (ADR-0022), so an active baseline carrying a benchmark
+		// revision is corrupt/inconsistent catalog state -- a data-integrity violation
+		// epic #726 §3/§5 never sanction skipping. It must fail the WHOLE plan closed
+		// (distinct plan_integrity_failure diagnostic), never a silent skip row that
+		// narrows the run's coverage.
+		Guid targetId = await SeedSiteAndTargetAsync();
+		Guid executionProfileId = await SeedExecutionProfileAsync("corrupt-srg", "8.0.3", withBenchmark: null);
+
+		// Force the integrity violation: an SRG profile's active baseline is staged WITH
+		// a benchmark revision id it should never carry. The benchmark_revisions row
+		// itself is a real (invented-key) import so the baseline FK is satisfiable --
+		// the corruption is purely the SRG/benchmark mismatch the planner guards.
+		Waypoint.Core.ComplianceContent.Xccdf.BenchmarkRevision strayBenchmark = await ImportBenchmarkAsync("invented-stray-srg-benchmark");
+		await ActivateBaselineAsync(executionProfileId, "corrupt-srg", benchmarkRevisionId: strayBenchmark.Id);
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-8001");
+
+		ScanPlanIntegrityException failure = await Assert.ThrowsAsync<ScanPlanIntegrityException>(
+			() => _planner.CompileAsync(null, [componentId], CancellationToken.None));
+
+		// Fails closed: the planner threw before returning any ScanPlan at all -- there
+		// is no plan object with a silent skip row, and RunCreationService (which
+		// compiles before persisting) therefore never writes a run/plan/job. The
+		// diagnostic is actionable (names the component + baseline, a distinct 500-class
+		// integrity code, not one of the operator-fixable skip reasons).
+		Assert.Equal(ScanPlanIntegrityException.ErrorCode, failure.Code);
+		Assert.Equal(System.Net.HttpStatusCode.InternalServerError, failure.StatusCode);
+		Assert.Equal(componentId, failure.ComponentId);
+		Assert.Contains(componentId.ToString(), failure.Detail!, StringComparison.Ordinal);
+		Assert.DoesNotContain(failure.Code, ScanPlanSkipReasons.All);
+	}
+
+	[Fact]
+	public async Task CompileAsync_EveryLegitimateSkipReason_SkipsAndContinuesWithoutFailingThePlan()
+	{
+		// The counterpart pin to the integrity-failure test above: the enumerated
+		// architecturally-skippable reasons (unsupported, no_active_baseline,
+		// unmapped_benchmark -- the closed ScanPlanSkipReasons.All set after #857 round 2
+		// removed invalid_baseline) must ALL skip-and-continue, never fail the plan,
+		// alongside a healthy sibling that still plans (ADR-0023/0024 per-component
+		// isolation). One candidate per reason, plus one good component.
+		Guid targetId = await SeedSiteAndTargetAsync();
+
+		// Good sibling (SRG, active baseline) -> accepted item.
+		Guid goodProfileId = await SeedExecutionProfileAsync("legit-good", "8.0.3", withBenchmark: null);
+		await ActivateBaselineAsync(goodProfileId, "legit-good", benchmarkRevisionId: null);
+		Guid goodCatalogComponentId = (await _catalog.GetExecutionProfileAsync(goodProfileId, CancellationToken.None))!.Component.Id;
+		Guid goodComponent = await SeedComponentLinkedToAsync(targetId, goodCatalogComponentId, "8.0.3", "host-legit-good");
+
+		// unsupported: no catalog link.
+		Guid unsupportedComponent = await SeedUnsupportedComponentAsync(targetId, "host-legit-unsupported");
+
+		// no_active_baseline: compatible profile, no baseline activated.
+		Guid noBaselineProfileId = await SeedExecutionProfileAsync("legit-nobaseline", "8.0.3", withBenchmark: null);
+		Guid noBaselineCatalogComponentId = (await _catalog.GetExecutionProfileAsync(noBaselineProfileId, CancellationToken.None))!.Component.Id;
+		Guid noBaselineComponent = await SeedComponentLinkedToAsync(targetId, noBaselineCatalogComponentId, "8.0.3", "host-legit-nobaseline");
+
+		// unmapped_benchmark: STIG profile, active baseline with no benchmark revision.
+		Guid unmappedProfileId = await SeedExecutionProfileAsync("legit-unmapped", "8.0.3", withBenchmark: "invented-legit-unmapped-stig");
+		await ActivateBaselineAsync(unmappedProfileId, "legit-unmapped", benchmarkRevisionId: null);
+		Guid unmappedCatalogComponentId = (await _catalog.GetExecutionProfileAsync(unmappedProfileId, CancellationToken.None))!.Component.Id;
+		Guid unmappedComponent = await SeedComponentLinkedToAsync(targetId, unmappedCatalogComponentId, "8.0.3", "host-legit-unmapped");
+
+		ScanPlan plan = await _planner.CompileAsync(
+			null, [goodComponent, unsupportedComponent, noBaselineComponent, unmappedComponent], CancellationToken.None);
+
+		// The plan compiled (did not throw): the good sibling planned, every skippable
+		// reason produced a skip row and its siblings still proceeded.
+		Assert.True(plan.IsRunnable);
+		ScanPlanItem accepted = Assert.Single(plan.Items);
+		Assert.Equal(goodComponent, accepted.ComponentId);
+
+		Assert.Equal(3, plan.Skips.Count);
+		Assert.Contains(plan.Skips, s => s.ComponentId == unsupportedComponent && s.Reason == ScanPlanSkipReasons.Unsupported);
+		Assert.Contains(plan.Skips, s => s.ComponentId == noBaselineComponent && s.Reason == ScanPlanSkipReasons.NoActiveBaseline);
+		Assert.Contains(plan.Skips, s => s.ComponentId == unmappedComponent && s.Reason == ScanPlanSkipReasons.UnmappedBenchmark);
+
+		// Every skip reason emitted here is a member of the closed skippable set; none is
+		// the integrity code (that path throws, proven separately above).
+		Assert.All(plan.Skips, s => Assert.Contains(s.Reason, ScanPlanSkipReasons.All));
 	}
 
 	private async Task<Waypoint.Core.ComplianceContent.Xccdf.BenchmarkRevision> ImportBenchmarkAsync(string benchmarkKey)
