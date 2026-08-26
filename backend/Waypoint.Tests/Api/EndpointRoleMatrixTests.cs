@@ -215,6 +215,10 @@ public sealed class EndpointRoleMatrixTests
 		// Operator+ (own runs), Admin any (EnforceRunOwnership, in-action);
 		// resume-blocked (credential-swap-resume) is Admin.
 		["RunsController.CreateRun"] = WaypointRole.Cyber,
+		// Issues #733/#734 remainder: POST /runs/plan-preview shares CreateRun's Cyber+
+		// floor exactly (docs/api-contract.md's planned `/runs/plan-preview` row) -- it
+		// is the same "may initiate a scan" capability, just without committing yet.
+		["RunsController.PreviewPlan"] = WaypointRole.Cyber,
 		["RunsController.ListRuns"] = WaypointRole.Viewer,
 		["RunsController.GetRun"] = WaypointRole.Viewer,
 		["RunsController.GetJobs"] = WaypointRole.Viewer,

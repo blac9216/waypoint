@@ -269,6 +269,70 @@ public sealed record RunCreatedResponse(
 	[property: JsonPropertyName("run_id")]
 	string RunId);
 
+/// <summary>
+/// Request body for <c>POST /api/v1/runs/plan-preview</c> (issues #733/#734 remainder,
+/// docs/api-contract.md's planned <c>/runs/plan-preview</c>): the same <c>scope</c>
+/// shape <c>POST /runs</c> accepts for a scan, restricted at this endpoint to the
+/// <c>target_scope</c> form -- preview never selects a profile (ADR-0022 §7), so
+/// <c>scope.profile_id</c> is rejected here rather than silently ignored.
+/// <see cref="CredentialOverrides"/>/<see cref="AdHocCredentials"/> are optional and,
+/// when supplied, are evaluated read-only against the resolved plan's per-component
+/// required purposes -- exactly the coverage <c>POST /runs</c> would resolve for the
+/// same inputs -- so the wizard can show a gap before the caller commits to creating the
+/// run.
+/// </summary>
+public sealed record RunPlanPreviewRequest(
+	[property: JsonPropertyName("scope")]
+	string Scope,
+
+	[property: JsonPropertyName("credential_overrides")]
+	IReadOnlyList<RunCredentialOverrideRequest>? CredentialOverrides = null,
+
+	[property: JsonPropertyName("ad_hoc_credentials")]
+	IReadOnlyList<RunAdHocCredentialRequest>? AdHocCredentials = null);
+
+/// <summary>
+/// Response body for <c>POST /api/v1/runs/plan-preview</c>: the resolved component scope
+/// (requested-vs-resolved, every <see cref="Waypoint.Core.Components.ScopeOmission"/>),
+/// the would-be plan (accepted items and skips, post credential-gap demotion), and every
+/// credential gap found. <see cref="PlanDigest"/> is byte-for-byte identical to a
+/// subsequent <c>POST /runs</c> create's digest for the same inputs (issue #734 AC-4) --
+/// this is the field a caller can use to detect "nothing changed since I previewed" before
+/// committing. Mirrors <c>GET /runs/{id}/plan</c>'s planned response shape (not yet
+/// implemented -- that endpoint is a distinct remainder), minus <c>run_id</c>, which does
+/// not exist yet for a preview.
+/// </summary>
+public sealed record RunPlanPreviewResponse(
+	[property: JsonPropertyName("requested_mode")]
+	string RequestedMode,
+
+	[property: JsonPropertyName("resolved_component_ids")]
+	IReadOnlyList<Guid> ResolvedComponentIds,
+
+	[property: JsonPropertyName("scope_omissions")]
+	IReadOnlyList<Waypoint.Core.Components.ScopeOmission> ScopeOmissions,
+
+	[property: JsonPropertyName("plan_schema_version")]
+	int PlanSchemaVersion,
+
+	[property: JsonPropertyName("items")]
+	IReadOnlyList<Waypoint.Core.Scans.ScanPlanItem> Items,
+
+	[property: JsonPropertyName("skips")]
+	IReadOnlyList<Waypoint.Core.Scans.ScanPlanSkip> Skips,
+
+	[property: JsonPropertyName("plan_digest")]
+	string PlanDigest,
+
+	[property: JsonPropertyName("explanation")]
+	string Explanation,
+
+	[property: JsonPropertyName("is_runnable")]
+	bool IsRunnable,
+
+	[property: JsonPropertyName("credential_gaps")]
+	IReadOnlyList<Waypoint.Core.Errors.CredentialBindingGap> CredentialGaps);
+
 /// <summary>Response body for <c>POST /api/v1/runs/{id}/pause|resume|abort</c>.</summary>
 public sealed record RunActionResponse(
 	[property: JsonPropertyName("run_id")]
