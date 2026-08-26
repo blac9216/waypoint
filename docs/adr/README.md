@@ -47,3 +47,4 @@ An append to Consequences must:
 | [0020](0020-capacity-lease-pool-protocol.md) | Capacity lease pool protocol, recovery, and fairness policy | Accepted |
 | [0021](0021-credential-purpose-matrix.md) | Credential-purpose matrix — explicit purposes, not numbered slots | Accepted |
 | [0022](0022-compliance-catalog-and-content-lifecycle.md) | Closed compliance catalog and atomic content lifecycle | Accepted (planned) |
+| [0023](0023-compliance-inventory-and-immutable-plans.md) | Stable compliance inventory and immutable component plans | Accepted (planned) |

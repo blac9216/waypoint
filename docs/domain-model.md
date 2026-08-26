@@ -12,8 +12,13 @@ erDiagram
     TARGET ||--o{ STIG_CONFIG_DOC : "per-target overrides"
     TARGET }o--|| CREDENTIAL : "service credentialRef"
     TARGET ||--o{ INVENTORY_ITEM : "discovered hosts/VMs"
+    TARGET ||--o{ COMPONENT : "planned stable subjects"
+    COMPONENT ||--o{ COMPONENT_OBSERVATION : "discovery provenance"
     USER ||--o{ CREDENTIAL : "personal credentials"
     RUN ||--o{ JOB : "fans out to"
+    RUN ||--|| COMPLIANCE_PLAN : "planned scan"
+    COMPLIANCE_PLAN ||--o{ PLANNED_COMPONENT_ITEM : freezes
+    PLANNED_COMPONENT_ITEM }o--|| COMPONENT : references
     JOB }o--|| TARGET : against
     RUN }o--|| SITE : scopes
     RUN }o--|| USER : "initiated by"
@@ -28,7 +33,8 @@ specific wins (see STIG configuration documents below). Maps closely to today's
 `site.json` schema 2.0 rows.
 
 ### Target
-A scannable/manageable endpoint within a site. Kinds (from the existing catalog/router):
+An Admin-configured connection and policy boundary within a site. The shipped M2 slice
+also treats it as the scannable endpoint. Kinds (from the existing catalog/router):
 
 | Kind | Examples | Notes |
 |---|---|---|
@@ -38,6 +44,96 @@ A scannable/manageable endpoint within a site. Kinds (from the existing catalog/
 
 Each target references a **service credential** (`credentialRef`, as today). Discovered
 ESXi hosts and VMs are cached inventory under a `vsphere` target, not standalone targets.
+
+🚧 **Planned compliance inventory model (epic #726).** The paragraph above
+describes the shipped M2 shortcut. In the planned model, `Target` remains the
+Admin-configured connection/policy boundary; execution resolves stable `Component`
+records beneath it. A directly configured appliance still has a component distinct
+from its connection record.
+
+### Compliance component and observation (planned)
+
+`Component` is a durable inventory entity with:
+
+- `target_id`, Waypoint catalog component key, and authoritative vendor identity;
+- configured and discovered exact-version/capability facts, never a guessed merge;
+- lifecycle `active | absent | retired`, first/last-seen and continuous-absence times;
+- component-specific configuration retained across temporary absence; and
+- immutable links from historical planned items, including after component purge.
+
+The identity tuple is unique within its top-level target. Vendor managed-object or
+product-native IDs are authoritative for discovery-backed objects. A component that
+exists by catalog declaration rather than as its own upstream object uses the parent
+target's durable identity plus catalog component key. Hostname, IP address, display
+name, tree position, profile leaf/path, and sibling family key are never identity.
+
+`ComponentObservation` is immutable provenance from one discovery boundary/pass:
+source target/connection, upstream identity, observed exact version/build and other
+catalog-declared facts, observed time, outcome, and raw-evidence digest/reference.
+`ConfiguredComponentFact` records an Admin-supplied exact value with actor/time. Facts
+may agree, be missing, or conflict; conflict is a first-class readiness failure, not a
+precedence rule. Unknown components/facts remain visible but unsupported.
+
+`DiscoveryRefresh` records trigger (`scheduled | pre-scan | manual`), target boundary,
+start/end, success/failure, and completeness. The global Admin schedule defaults to
+daily; a per-top-level-target Admin override wins. Each boundary reconciles only on a
+complete success. Partial/failure preserves old observations as unverified and cannot
+mark rows absent. On a complete boundary, a missing identity becomes `absent` while
+retaining configuration. Continuous absence reaching the global Admin-configured
+threshold (default seven days) becomes `retired`. Rediscovery before purge restores
+the same record. Admin-only audited purge removes retired configuration but not
+historical plan identity.
+
+Maintenance mode is informational. It neither changes requested scope nor creates an
+automatic exclusion.
+
+### Compliance scope and plan (planned)
+
+`RequestedScope` is immutable intent in exactly one mode:
+
+- `all`: expand all compatible components beneath named top-level targets after the
+  mandatory refresh; or
+- `explicit`: the exact set of selected stable component identities.
+
+`ResolvedScope` is the concrete identity set produced by that refresh plus resolution
+time and provenance. `all` includes newly discovered compatible components; explicit
+scope never widens. Both modes resolve every positively validated reachable component
+from successful boundaries. Requested identities or boundaries that cannot be
+validated, plus missing, absent, retired, unreachable, unsupported, version-conflicted,
+or baseline-unready selections, are recorded as `CoverageOmission` with identity or
+boundary, stage, and reason. Confirmed independent items execute; partial coverage
+marks the run incomplete and produces a prominent warning. Neither mode substitutes
+stale cache or lets its smaller resolved set masquerade as complete. Initiation fails
+only when refresh confirms no runnable component and no honest runnable plan can be
+formed; readiness omissions after successful validation may still yield the honest
+zero-execution plan below.
+
+When configured and discovered exact versions conflict, a Cyber-or-higher interactive
+initiator chooses one for only that run; both values/provenance and the choice are
+frozen without mutating either source. A scheduled run cannot choose: it records that
+component as a version-conflict omission, continues independent items, remains
+enabled, and tries current facts at its next dispatch. Readiness requires one exact
+catalog product-version match and exactly one active, approved compatible baseline.
+Missing facts or baseline skip only that component; even an all-unsupported explicit
+scope produces an honest zero-execution plan. There is no range, nearest-version,
+family-key, or caller-profile fallback.
+
+`CompliancePlan` freezes requested scope, resolved scope, refresh coverage, creator or
+schedule provenance, and its `PlannedComponentItem` collection. Each item freezes:
+
+- stable component/parent identity and configured/discovered fact provenance;
+- exact catalog revision, product version, active baseline, profile/XCCDF/mapping and
+  complete-dependency-closure identities/digests;
+- catalog selector, transport, priority, output semantics, and compatibility result;
+- the exact resolved-configuration snapshot identity/digest and references to
+  credential, trust, and capability decisions whose contents are owned by #807/#808;
+  and
+- zero or more coverage omissions/readiness failures.
+
+Plans/items and omissions are append-only. Later discovery, configuration, activation,
+retirement, or purge cannot rewrite them. Retry uses the same planned item; resolving
+current state creates a new run. Jobs and ordered attempts are separate execution
+records defined by #807 rather than mutable plan fields.
 
 **Credential purposes (design; not yet persisted — [ADR-0021](adr/0021-credential-purpose-matrix.md), issue #583).**
 A single `credentialRef` per target is not enough: `vsphere` targets need a distinct
