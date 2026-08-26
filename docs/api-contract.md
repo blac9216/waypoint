@@ -476,6 +476,14 @@ a range or scan-time picker.
 | `/baselines` | GET | Viewer+. Every baseline (active, superseded, and staged-not-yet-active), each an exact `(product_version, profile_version, xccdf_version?, mapping_version)` tuple with `status` (`active`\|`superseded`\|`staged`) and `activated_at`/`activated_by`. |
 | `/baselines/{id}/rollback` | POST | Admin-only. Body: `{ confirmation: "ROLLBACK" }`. Atomically reactivates a retained, previously-approved, still integrity/capability-compatible baseline. History and the rollback candidate itself are never overwritten in place — this creates a new activation event pointing at the old artifact set. |
 
+**Internal-only mechanics.** 🚧 Not part of the public API contract: catalog
+compilation, content digesting, deduplication, functional-equivalence computation, and
+candidate/production runner execution are internal implementation concerns with no
+request/response surface of their own (ADR-0022). Callers observe only their durable
+outputs above — `digest`, `diff_summary`, per-control equivalence results, and
+`run_id`/`test_run_id` — never a mechanism to invoke or configure the underlying
+compilation, digesting, deduplication, or equivalence algorithm directly.
+
 ### Profiles & benchmarks
 | Endpoint | Methods | Notes |
 |---|---|---|
