@@ -270,6 +270,19 @@ public sealed class EndpointRoleMatrixTests
 		// SystemController -- read-only appliance/mode info, Viewer+.
 		["SystemController.Get"] = WaypointRole.Viewer,
 
+		// TrustController (issue #753, ADR-0025) -- reads Viewer+; every write Admin
+		// (trust bundle management and scoped TLS bypass authorization are explicitly
+		// named Admin-only trust-affecting actions, docs/security.md RBAC
+		// reconciliation).
+		["TrustController.ListBundles"] = WaypointRole.Viewer,
+		["TrustController.GetBundle"] = WaypointRole.Viewer,
+		["TrustController.Upload"] = WaypointRole.Admin,
+		["TrustController.Replace"] = WaypointRole.Admin,
+		["TrustController.DeleteBundle"] = WaypointRole.Admin,
+		["TrustController.ListPolicies"] = WaypointRole.Viewer,
+		["TrustController.GetPolicy"] = WaypointRole.Viewer,
+		["TrustController.SetPolicy"] = WaypointRole.Admin,
+
 		// TargetsController -- reads Viewer+; every write Admin (same as Sites).
 		// Issue #584: the credential-binding CRUD surface is Admin-only too, same
 		// gate as every other target write (SetBinding/ClearBinding write a

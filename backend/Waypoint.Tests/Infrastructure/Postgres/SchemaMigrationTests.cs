@@ -93,6 +93,8 @@ public sealed class SchemaMigrationTests
 		"run_scope_snapshots",
 		"scan_plans",
 		"scan_plan_items",
+		"trust_bundles",
+		"trust_policies",
 		"schema_migrations"
 	];
 
@@ -142,9 +144,20 @@ public sealed class SchemaMigrationTests
 	/// against migration 0054's two existing unique indexes -- no new schema needed)
 	/// after its existing InventoryRepository write, so a real discovery pass
 	/// materializes `components` rows instead of only repository-seeded test rows,
-	/// issue #732 / #840 --
+	/// issue #732 / #840,
+	/// 0059 adds trust_bundles + trust_policies (issue #753, epic #726, ADR-0025
+	/// "Connection-scoped trust"): trust_bundles is one immutable Admin-uploaded CA
+	/// certificate/chain (public material, never a secret) with subject/issuer/
+	/// fingerprint/validity metadata parsed at upload time and immutable supersede-not-
+	/// mutate replacement, and trust_policies is one scoped (scope_type, scope_id)
+	/// binding to either a trust_bundle or an explicit, reasoned, audited
+	/// skip-verification bypass, never a process-global default -- partial unique
+	/// indexes enforce at most one ACTIVE bundle per fingerprint and at most one
+	/// CURRENT policy per scope, mirroring migrations 0052/0055's "one current row"
+	/// idiom. No new runner grants (this slice is Admin-only API CRUD; runtime
+	/// consumption is this issue's stated remainder), issue #753 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 58;
+	private const int ExpectedMigrationCount = 59;
 
 	private readonly PostgresFixture _fixture;
 
