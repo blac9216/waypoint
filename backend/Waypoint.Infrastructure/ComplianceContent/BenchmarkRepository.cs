@@ -300,6 +300,15 @@ public sealed class BenchmarkRepository : IBenchmarkRepository
 		return mappings;
 	}
 
+	public async Task<bool> ComponentExistsAsync(Guid catalogComponentId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new("SELECT 1 FROM catalog_components WHERE id = $1", connection);
+		command.Parameters.AddWithValue(catalogComponentId);
+		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		return result is not null;
+	}
+
 	private static async Task<BenchmarkRevision?> FindByDigestAsync(
 		NpgsqlConnection connection, NpgsqlTransaction transaction, string benchmarkKey, string contentDigest, CancellationToken cancellationToken)
 	{

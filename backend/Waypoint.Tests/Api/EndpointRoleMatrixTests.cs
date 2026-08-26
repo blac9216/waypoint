@@ -89,6 +89,21 @@ public sealed class EndpointRoleMatrixTests
 		["CatalogController.ListProducts"] = WaypointRole.Viewer,
 		["CatalogController.GetProduct"] = WaypointRole.Viewer,
 
+		// BenchmarksController -- issue #730 remainder (epic #726 Wave 1, migration
+		// 0052's benchmark revisions/rules/mappings, PR #828). Every read (revisions,
+		// rules, mapping/coverage, mapping history) is Viewer+, matching
+		// CatalogController's read floor above; the explicit Admin mapping/override
+		// write (issue #730 AC "mapping changes are Admin-only, versioned, and
+		// audited") is the only Admin row.
+		["BenchmarksController.ListBenchmarkKeys"] = WaypointRole.Viewer,
+		["BenchmarksController.ListRevisionsByKey"] = WaypointRole.Viewer,
+		["BenchmarksController.GetRevision"] = WaypointRole.Viewer,
+		["BenchmarksController.ListRules"] = WaypointRole.Viewer,
+		["BenchmarksController.ListMappingCoverage"] = WaypointRole.Viewer,
+		["BenchmarksController.GetCurrentMapping"] = WaypointRole.Viewer,
+		["BenchmarksController.GetMappingHistory"] = WaypointRole.Viewer,
+		["BenchmarksController.SetMapping"] = WaypointRole.Admin,
+
 		// LibraryController -- issue #36. Both read the depot catalog re-presented as
 		// mode-aware presence; same Viewer+ floor as CatalogController.ListArtifacts
 		// (the Library tab is browsable by anyone who can see the appliance).

@@ -77,4 +77,14 @@ public interface IBenchmarkRepository
 	/// AC "coverage and ambiguity diagnostics").
 	/// </summary>
 	Task<IReadOnlyList<BenchmarkComponentMapping>> ListCurrentMappingsAsync(CancellationToken cancellationToken);
+
+	/// <summary>
+	/// True when <paramref name="catalogComponentId"/> names a real row in migration
+	/// 0050's <c>catalog_components</c> table. Exists so the mapping-write HTTP surface
+	/// (issue #730 remainder) can 404 an unknown component before recording a mapping
+	/// decision against it, without this repository depending on
+	/// <c>ICatalogRepository</c>'s write-oriented surface -- a read-only existence check
+	/// against a table this repository's own FKs already reference.
+	/// </summary>
+	Task<bool> ComponentExistsAsync(Guid catalogComponentId, CancellationToken cancellationToken);
 }
