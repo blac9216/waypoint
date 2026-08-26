@@ -88,6 +88,15 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 				services.AddSingleton<ScopeResolutionService>();
 				services.AddSingleton<IRunScopeSnapshotRepository>(new RunScopeSnapshotRepository(_connectionString));
 
+				// Issue #734: RunCreationService now also depends on the plan
+				// compiler/repository -- registered here for the same reason every
+				// other RunCreationService dependency is re-registered against this
+				// factory's own connection string rather than inheriting Program.cs's
+				// composition.
+				services.AddSingleton<Waypoint.Core.ComplianceContent.IBaselineRepository>(new BaselineRepository(_connectionString));
+				services.AddSingleton<ScanPlannerService>();
+				services.AddSingleton<Waypoint.Core.Scans.IScanPlanRepository>(new ScanPlanRepository(_connectionString));
+
 				foreach (Type serviceType in new[] { typeof(IJobControlRepository), typeof(IJobRunnerRepository) })
 				{
 					var jobsDescriptor = services.FirstOrDefault(d => d.ServiceType == serviceType);
@@ -211,18 +220,34 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		Assert.Empty(snapshot.Omissions);
 	}
 
-	/// <summary>Seeds one complete compatible catalog chain -- mirrors <see cref="ScopeResolutionServiceTests.SeedCompatibleCatalogComponentAsync"/> for this HTTP-level suite.</summary>
+	/// <summary>
+	/// Seeds one complete compatible catalog chain WITH an active SRG baseline --
+	/// mirrors <see cref="ScopeResolutionServiceTests.SeedCompatibleCatalogComponentAsync"/>
+	/// for this HTTP-level suite, plus the issue #734 planner's own requirement (a
+	/// scope-resolved-runnable component must also have an active baseline to become
+	/// an accepted plan item, or run creation now rejects it with
+	/// <c>no_plannable_component</c>). SRG (no benchmark reference) keeps this fixture
+	/// minimal; the STIG/benchmark-mapping paths are covered by
+	/// <c>ScanPlannerServiceTests</c>.
+	/// </summary>
 	private async Task<Guid> SeedCompatibleCatalogComponentAsync()
 	{
 		CatalogRepository catalog = new(_fixture.ConnectionString);
+		BaselineRepository baselines = new(_fixture.ConnectionString);
 		CatalogSourceRevision source = await catalog.UpsertSourceRevisionAsync($"rev-{Guid.NewGuid():N}", null, CancellationToken.None);
 		CatalogProduct product = await catalog.UpsertProductAsync(source.Id, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
 		CatalogProductVersion productVersion = await catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
 		CatalogComponent catalogComponent = await catalog.UpsertComponentAsync(
 			productVersion.Id, new CatalogComponentDefinition("esxi", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
-		CatalogContentRelease release = await catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Stig, $"release-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
+		CatalogContentRelease release = await catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Srg, $"release-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
 		CatalogReportGroup reportGroup = await catalog.UpsertReportGroupAsync($"group-{Guid.NewGuid():N}", "Test Group", 1, CancellationToken.None);
-		await catalog.CreateExecutionProfileAsync(catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await catalog.CreateExecutionProfileAsync(
+			catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+
+		ContentRevision revision = await baselines.RecordStagedRevisionAsync(
+			$"commit-{Guid.NewGuid():N}", $"digest-{Guid.NewGuid():N}", $"revisions/{Guid.NewGuid():N}", CancellationToken.None);
+		Baseline staged = await baselines.CreateStagedBaselineAsync(revision.Id, executionProfile.Id, benchmarkRevisionId: null, CancellationToken.None);
+		await baselines.ActivateAsync(staged.Id, "test-fixture", CancellationToken.None);
 
 		return catalogComponent.Id;
 	}

@@ -91,6 +91,8 @@ public sealed class SchemaMigrationTests
 		"content_revisions",
 		"baselines",
 		"run_scope_snapshots",
+		"scan_plans",
+		"scan_plan_items",
 		"schema_migrations"
 	];
 
@@ -117,9 +119,24 @@ public sealed class SchemaMigrationTests
 	/// requested-versus-resolved audit freeze `RunCreationService.CreateScanRunAsync`
 	/// writes via the new `ScopeResolutionService`/`RunScopeSnapshotRepository`, ON
 	/// DELETE CASCADE off `runs.id` (matching job_credential_bindings' convention),
-	/// no new runner grants (API-side only, mirroring migration 0054), issue #733 --
+	/// no new runner grants (API-side only, mirroring migration 0054), issue #733,
+	/// 0057 adds scan_plans + scan_plan_items (issue #734, epic #726 Wave 2, ADR-0023/
+	/// 0024): the immutable, digest-addressed execution plan compiled from a run's
+	/// resolved component scope -- one scan_plans header row per run (plan schema
+	/// version, a link to migration 0056's run_scope_snapshots row, the deterministic
+	/// plan_digest, a human-readable explanation, and skips_json for every candidate
+	/// component that did not become an accepted item) plus one scan_plan_items row
+	/// per ACCEPTED execution item (exact catalog execution profile/baseline/benchmark-
+	/// revision identity, transport/selector, report group/priority, required
+	/// credential purposes, and declared input names) -- written once by
+	/// `RunCreationService.CreateScanRunAsync` via the new `ScanPlannerService`/
+	/// `ScanPlanRepository`, every plan-item FK ON DELETE RESTRICT (a frozen plan must
+	/// never be invalidated by later catalog/baseline changes) except `scan_plan_id`
+	/// itself which cascades off its owning plan/run, no new runner grants (API-side
+	/// only, mirroring migrations 0054/0056; #735-#737 own the runner-consumed
+	/// component-job layer built on top of this), issue #734 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 56;
+	private const int ExpectedMigrationCount = 57;
 
 	private readonly PostgresFixture _fixture;
 

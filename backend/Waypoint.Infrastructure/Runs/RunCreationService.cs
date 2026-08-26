@@ -76,6 +76,8 @@ public sealed class RunCreationService
 	private readonly IOptions<RunSecretOptions> _runSecretOptions;
 	private readonly ScopeResolutionService _scopeResolution;
 	private readonly IRunScopeSnapshotRepository _scopeSnapshots;
+	private readonly ScanPlannerService _planner;
+	private readonly Waypoint.Core.Scans.IScanPlanRepository _plans;
 
 	public RunCreationService(
 		IJobControlRepository repository,
@@ -88,7 +90,9 @@ public sealed class RunCreationService
 		IOptions<DiscoveryOptions> discoveryOptions,
 		IOptions<RunSecretOptions> runSecretOptions,
 		ScopeResolutionService scopeResolution,
-		IRunScopeSnapshotRepository scopeSnapshots)
+		IRunScopeSnapshotRepository scopeSnapshots,
+		ScanPlannerService planner,
+		Waypoint.Core.Scans.IScanPlanRepository plans)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(sites);
@@ -101,6 +105,8 @@ public sealed class RunCreationService
 		ArgumentNullException.ThrowIfNull(runSecretOptions);
 		ArgumentNullException.ThrowIfNull(scopeResolution);
 		ArgumentNullException.ThrowIfNull(scopeSnapshots);
+		ArgumentNullException.ThrowIfNull(planner);
+		ArgumentNullException.ThrowIfNull(plans);
 		_repository = repository;
 		_sites = sites;
 		_targets = targets;
@@ -112,6 +118,8 @@ public sealed class RunCreationService
 		_runSecretOptions = runSecretOptions;
 		_scopeResolution = scopeResolution;
 		_scopeSnapshots = scopeSnapshots;
+		_planner = planner;
+		_plans = plans;
 	}
 
 	/// <summary>
@@ -244,6 +252,34 @@ public sealed class RunCreationService
 			}
 		}
 
+		// Issue #734 (epic #726 Wave 2, ADR-0023/0024): compile the resolved component
+		// scope into the immutable execution plan BEFORE the run row is created --
+		// same pre-creation validation discipline as scope resolution above. A
+		// candidate component that individually fails to plan (no active baseline, no
+		// mapped benchmark, unsupported) is an explicit ScanPlanSkip and its siblings
+		// still plan (ADR-0023/0024's per-component isolation -- see
+		// ScanPlannerService's doc comment for the full skip-vs-fail reconciliation);
+		// only a plan with ZERO accepted items for a non-empty resolved scope is
+		// rejected outright, mirroring HasAnyResolvedComponent's gate immediately
+		// above. Component-granular job/attempt rows are NOT created from this plan in
+		// this slice (ADR-0024: #735-#737) -- the plan is recorded for provenance/
+		// digest/history only; job fan-out below remains the existing target-granular
+		// path.
+		Waypoint.Core.Scans.ScanPlan? plan = null;
+		if (resolvedTargetScope is not null)
+		{
+			plan = await _planner.CompileAsync(null, resolvedTargetScope.ResolvedComponentIds, cancellationToken).ConfigureAwait(false);
+			if (!plan.IsRunnable && resolvedTargetScope.ResolvedComponentIds.Count > 0)
+			{
+				throw new ApiException(
+					System.Net.HttpStatusCode.BadRequest,
+					"no_plannable_component",
+					"No component in the resolved scope could be compiled into a runnable plan.",
+					"Every resolved component was missing an active baseline, an unmapped benchmark, or otherwise failed planning. "
+						+ $"{plan.Explanation} Activate a compatible baseline or resolve the reported gaps before starting this scan.");
+			}
+		}
+
 		bool useRunSecret = credential is not null;
 		if (useRunSecret && credentialOverrides is { Count: > 0 })
 		{
@@ -367,6 +403,7 @@ public sealed class RunCreationService
 		// supplied target_scope; a legacy target_ids/profile_id-only request leaves
 		// no snapshot row (IRunScopeSnapshotRepository.GetForRunAsync documents the
 		// null case).
+		Guid? runScopeSnapshotId = null;
 		if (scope.TargetScope is { } recordedTargetScope && resolvedTargetScope is not null)
 		{
 			await _scopeSnapshots.RecordAsync(
@@ -376,6 +413,24 @@ public sealed class RunCreationService
 				resolvedTargetScope.ResolvedComponentIds,
 				resolvedTargetScope.Omissions,
 				cancellationToken).ConfigureAwait(false);
+
+			// IRunScopeSnapshotRepository.RecordAsync returns void (issue #733's shape) --
+			// re-read the row we just wrote to learn its id for scan_plans'
+			// run_scope_snapshot_id FK, one extra read on an already-uncommon
+			// (target_scope-bearing) request path rather than widening #733's contract.
+			runScopeSnapshotId = (await _scopeSnapshots.GetForRunAsync(runId, cancellationToken).ConfigureAwait(false))?.Id;
+		}
+
+		// Issue #734: persist the plan compiled above against the now-real run id, in
+		// the same "commit before anything that could be claimed" position as the
+		// scope snapshot immediately above -- a job claimed the instant it is queued
+		// must already be able to find its run's plan. Only written when a plan was
+		// actually compiled (i.e. the caller supplied target_scope); a legacy
+		// target_ids/profile_id-only request has no plan, matching IScanPlanRepository.GetForRunAsync's
+		// documented null case.
+		if (plan is not null)
+		{
+			await _plans.RecordAsync(runId, runScopeSnapshotId, plan, cancellationToken).ConfigureAwait(false);
 		}
 
 		if (useRunSecret)

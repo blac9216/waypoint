@@ -348,6 +348,14 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Runs.ScopeResolutionService>();
 			services.AddSingleton<IRunScopeSnapshotRepository>(new Runs.RunScopeSnapshotRepository(connectionString));
 
+			// Issue #734 (epic #726 Wave 2, ADR-0023/0024): compiles a resolved
+			// component scope into the immutable, digest-addressed execution plan
+			// (migration 0057) -- the join-and-validate step above scope resolution,
+			// below job fan-out. API-side only, no runner grant in this slice (see
+			// that migration's header).
+			services.AddSingleton<Runs.ScanPlannerService>();
+			services.AddSingleton<Waypoint.Core.Scans.IScanPlanRepository>(new Runs.ScanPlanRepository(connectionString));
+
 			// Issue #513: dashboard aggregate service, reusing RunArtifactProjectionService's
 			// HDF-derived CAT counting rather than a second implementation.
 			services.AddSingleton<Runs.DashboardAggregateService>();
