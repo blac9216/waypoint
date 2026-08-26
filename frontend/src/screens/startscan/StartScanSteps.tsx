@@ -4,11 +4,11 @@
  * change). Each step is a pure presentation component driven by props from
  * useScanWizard; StartScanScreen.tsx wires them together.
  */
-import { useState } from "react";
-import type { CredentialBindingGap } from "../../lib/api";
+import { useEffect, useRef, useState } from "react";
+import type { CredentialBindingGap, ScopeOmission } from "../../lib/api";
 import { CREDENTIAL_PURPOSE_SATISFYING_TYPES, purposeLabel, requiredScanPurposes, type CredentialPurpose } from "../configuration/credential-purposes";
 import type { CredentialOption, Site } from "../configuration/sites";
-import type { InventoryItem, ProfileOption } from "./startscan";
+import { isSelectableComponent, type ComponentTreeNode, type ProfileOption } from "./startscan";
 import { overrideKey, type CoverageRow, type CredentialMode, type OverrideEntry, type TargetSelection } from "./useScanWizard";
 
 export function SiteStep({
@@ -43,6 +43,73 @@ export function SiteStep({
 	);
 }
 
+/** Issue #733: reasons a `ScopeOmission.reason` maps to guidance text — the checkbox-tree counterpart of `bindingGapMessage` below. Never free text on the wire; this is the one place the closed set is translated for the operator. */
+function scopeOmissionMessage(omission: ScopeOmission): string {
+	switch (omission.reason) {
+		case "component_not_found":
+			return "This component no longer exists — refresh the scope and reselect.";
+		case "component_not_in_scope":
+			return "This component is not part of the named target — refresh the scope and reselect.";
+		case "component_absent":
+			return "This component was not seen on the last discovery pass — refresh the scope before selecting it.";
+		case "component_retired":
+			return "This component has been retired and can no longer be scanned — remove it from the selection.";
+		case "fact_conflict":
+			return "This component has an unresolved configured/discovered version conflict — resolve it before scanning.";
+		case "catalog_incompatible":
+			return "This component has no compatible catalog baseline and cannot be scanned.";
+		case "target_not_found":
+			return "This target no longer exists — refresh the scope and reselect.";
+		default:
+			return omission.detail || omission.reason;
+	}
+}
+
+/** Issue #733 AC: "Stale or removed selections fail with actionable refresh guidance rather than silently widening scope" — a `400 no_runnable_component`'s `scope_omissions`, rendered above the tree so the operator can refresh and reselect instead of guessing why submission failed. */
+function ScopeOmissionBanner({ omissions }: { omissions: ScopeOmission[] }) {
+	if (omissions.length === 0) {
+		return null;
+	}
+	return (
+		<div className="start-scan-screen__error" role="alert">
+			<div>The selected scope has no runnable component. Refresh this target&apos;s scope and reselect:</div>
+			<ul>
+				{omissions.map((omission, i) => (
+					<li key={i}>{scopeOmissionMessage(omission)}</li>
+				))}
+			</ul>
+		</div>
+	);
+}
+
+/** One node's tri-state checkbox render state, derived purely from its own selectable descendants (never stored — see `useScanWizard.toggleInventoryItem`'s doc comment). A leaf with no selectable descendants of its own reports its own membership in `selectedIds`. */
+function componentCheckState(node: ComponentTreeNode, selectedIds: Set<string>): { checked: boolean; indeterminate: boolean } {
+	const selectableDescendants = collectSelectable(node);
+	if (selectableDescendants.length === 0) {
+		return { checked: false, indeterminate: false };
+	}
+	const selectedCount = selectableDescendants.filter((id) => selectedIds.has(id)).length;
+	if (selectedCount === 0) {
+		return { checked: false, indeterminate: false };
+	}
+	if (selectedCount === selectableDescendants.length) {
+		return { checked: true, indeterminate: false };
+	}
+	return { checked: false, indeterminate: true };
+}
+
+/** Every selectable (active) id in `node`'s own subtree, including itself. */
+function collectSelectable(node: ComponentTreeNode): string[] {
+	const out: string[] = [];
+	if (isSelectableComponent(node)) {
+		out.push(node.id);
+	}
+	for (const child of node.children) {
+		out.push(...collectSelectable(child));
+	}
+	return out;
+}
+
 export function ScopeStep({
 	selections,
 	loading,
@@ -54,6 +121,8 @@ export function ScopeStep({
 	profilesError,
 	profileId,
 	onProfileChange,
+	scopeOmissionErrors,
+	hasEmptyExplicitSelection,
 }: {
 	selections: TargetSelection[];
 	loading: boolean;
@@ -65,10 +134,12 @@ export function ScopeStep({
 	profilesError: string | null;
 	profileId: string;
 	onProfileChange: (id: string) => void;
+	scopeOmissionErrors: ScopeOmission[];
+	hasEmptyExplicitSelection: boolean;
 }) {
 	return (
 		<div className="start-scan-screen__panel">
-			<div className="start-scan-screen__panel-title">Scope — inventory</div>
+			<div className="start-scan-screen__panel-title">Scope — components</div>
 
 			{/* Issue #639: profile selection — which pulled compliance-content
 			 * profile (GET /profiles) this scan executes against. Required
@@ -98,6 +169,8 @@ export function ScopeStep({
 				)}
 			</div>
 
+			<ScopeOmissionBanner omissions={scopeOmissionErrors} />
+
 			{loading && <div className="start-scan-screen__note">Loading targets…</div>}
 			{error && <div className="start-scan-screen__error">{error}</div>}
 			{!loading && !error && selections.length === 0 && <div className="start-scan-screen__note">This site has no targets.</div>}
@@ -109,50 +182,76 @@ export function ScopeStep({
 							<span className="mono">{sel.target.name}</span>
 							<span className="start-scan-screen__tree-kind">{sel.target.kind}</span>
 						</label>
-						{sel.loadingInventory && <div className="start-scan-screen__note start-scan-screen__tree-indent">Loading inventory…</div>}
-						{!sel.loadingInventory && (sel.inventory === null || sel.inventory.length === 0) && (
+						{sel.loadingInventory && <div className="start-scan-screen__note start-scan-screen__tree-indent">Loading components…</div>}
+						{!sel.loadingInventory && (sel.componentTree === null || sel.componentTree.length === 0) && (
 							<div className="start-scan-screen__note start-scan-screen__tree-indent">
-								No cached inventory — scanning the whole target.
+								No cached components — scanning the whole target.
 							</div>
 						)}
-						{!sel.loadingInventory && sel.inventory !== null && sel.inventory.length > 0 && (
+						{!sel.loadingInventory && sel.componentTree !== null && sel.componentTree.length > 0 && (
 							<div className="start-scan-screen__tree-indent">
-								{sel.inventory.map((item) => (
-									<InventoryNode key={item.id} item={item} targetId={sel.target.id} selectedIds={sel.selectedItemIds} onToggle={onToggleItem} />
+								{sel.componentTree.map((node) => (
+									<ComponentNode key={node.id} node={node} targetId={sel.target.id} selectedIds={sel.selectedItemIds} onToggle={onToggleItem} />
 								))}
 							</div>
 						)}
 					</div>
 				))}
 			</div>
+
+			{/* Issue #733 AC: "An empty explicit selection is presented honestly" —
+			 * warns, never blocks Next/Confirm and never silently widens back to
+			 * the whole site (the backend honors a deliberately empty explicit
+			 * selection as an intentional empty plan). */}
+			{hasEmptyExplicitSelection && (
+				<div className="start-scan-screen__note" role="status">
+					No components are selected for at least one target with known components. The scan will run with an intentionally empty
+					plan for that target — it will not fall back to scanning everything.
+				</div>
+			)}
 		</div>
 	);
 }
 
-function InventoryNode({
-	item,
+function ComponentNode({
+	node,
 	targetId,
 	selectedIds,
 	onToggle,
 }: {
-	item: InventoryItem;
+	node: ComponentTreeNode;
 	targetId: string;
 	selectedIds: Set<string>;
 	onToggle: (targetId: string, itemId: string, on: boolean) => void;
 }) {
-	const checked = selectedIds.has(item.id);
+	const { checked, indeterminate } = componentCheckState(node, selectedIds);
+	const selectable = isSelectableComponent(node);
+	const checkboxRef = useRef<HTMLInputElement>(null);
+	useEffect(() => {
+		if (checkboxRef.current) {
+			checkboxRef.current.indeterminate = indeterminate;
+		}
+	}, [indeterminate]);
+
 	return (
 		<div className="start-scan-screen__tree-node">
-			<label className="start-scan-screen__tree-row">
-				<input type="checkbox" checked={checked} onChange={(e) => onToggle(targetId, item.id, e.target.checked)} />
-				<span className="mono">{item.name}</span>
-				{item.build && <span className="start-scan-screen__tree-build">{item.build}</span>}
-				{item.maintenance_mode && <span className="start-scan-screen__tree-maint">maintenance mode</span>}
+			<label className="start-scan-screen__tree-row" title={selectable ? undefined : `${node.lifecycle} — not selectable`}>
+				<input
+					ref={checkboxRef}
+					type="checkbox"
+					checked={checked}
+					disabled={!selectable}
+					onChange={(e) => onToggle(targetId, node.id, e.target.checked)}
+				/>
+				<span className="mono">{node.display_name}</span>
+				<span className="start-scan-screen__tree-kind">{node.catalog_component_key}</span>
+				{node.lifecycle !== "active" && <span className="start-scan-screen__tree-maint">{node.lifecycle}</span>}
+				{node.fact_conflict && <span className="start-scan-screen__tree-maint">version conflict</span>}
 			</label>
-			{item.children.length > 0 && (
+			{node.children.length > 0 && (
 				<div className="start-scan-screen__tree-indent">
-					{item.children.map((child) => (
-						<InventoryNode key={child.id} item={child} targetId={targetId} selectedIds={selectedIds} onToggle={onToggle} />
+					{node.children.map((child) => (
+						<ComponentNode key={child.id} node={child} targetId={targetId} selectedIds={selectedIds} onToggle={onToggle} />
 					))}
 				</div>
 			)}

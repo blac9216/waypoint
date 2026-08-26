@@ -1,14 +1,21 @@
 /**
  * StartScanScreen — the five-step Start-a-Scan wizard (issue #284; #587
  * epic #582's final slice reworked the credential step to default to
- * target-assigned bindings with per-target/per-purpose overrides).
+ * target-assigned bindings with per-target/per-purpose overrides; issue
+ * #733, epic #726 Wave 2, rewired the scope step from the legacy
+ * `inventory_items` tree onto the stable `components` model and wires the
+ * operator's actual tri-state selection onto `POST /runs`'s
+ * `scope.target_scope`).
  *
  * Covers: the default assigned-credentials path with fully-bound targets
  * (no credential input touched), the coverage summary for a target missing
  * a required binding, saved and ad hoc per-target/per-purpose overrides,
  * ad hoc write-only clearing, a `credential_binding_gaps` 400 mapped onto
  * the credential step, bulk-apply compatibility gating, role gating (Cyber
- * vs. Operator for ad hoc), scope tree fallback, and API error surfacing.
+ * vs. Operator for ad hoc), scope tree fallback, API error surfacing, and
+ * (issue #733) tri-state determinism, `target_scope` wiring, a
+ * `no_runnable_component`/`scope_omissions` 400, and an honestly-empty
+ * explicit selection.
  */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +23,7 @@ import { AuthProvider } from "../../lib/auth";
 import { RouterProvider } from "../../lib/router";
 import type { Target } from "../configuration/sites";
 import { StartScanScreen } from "./StartScanScreen";
+import { buildComponentTree, flattenComponentTree, isSelectableComponent, resolveTargetScope, type ComponentNode } from "./startscan";
 
 const SITES = [{ id: "site-1", name: "Alpha Enclave", description: "Primary", stigman_override: null, created_at: "", updated_at: "" }];
 
@@ -73,45 +81,28 @@ const UNBOUND_SSH_TARGET: Target = {
 	bindings: [],
 };
 
-const INVENTORY_WITH_ITEMS = {
-	target_id: "target-1",
-	discovery_status: "discovered",
-	last_refreshed: "2026-08-01T00:00:00Z",
-	stale: false,
-	items: [
-		{
-			id: "cluster-1",
-			type: "cluster",
-			moref: "domain-c1",
-			name: "Cluster-A",
-			build: null,
-			maintenance_mode: null,
-			last_seen_at: "2026-08-01T00:00:00Z",
-			removed: false,
-			children: [
-				{
-					id: "host-1",
-					type: "host",
-					moref: "host-1",
-					name: "esx-01a.example.internal",
-					build: "23000000",
-					maintenance_mode: false,
-					last_seen_at: "2026-08-01T00:00:00Z",
-					removed: false,
-					children: [],
-				},
-			],
-		},
-	],
-};
+function component(overrides: Partial<ComponentNode> & Pick<ComponentNode, "id" | "display_name">): ComponentNode {
+	return {
+		parent_target_id: "target-1",
+		parent_component_id: null,
+		catalog_component_id: "catalog-1",
+		catalog_component_key: "vsphere.esxi",
+		vendor_identity: overrides.id,
+		lifecycle: "active",
+		fact_conflict: false,
+		retired_at: null,
+		...overrides,
+	};
+}
 
-const INVENTORY_EMPTY = (targetId: string) => ({
-	target_id: targetId,
-	discovery_status: "never_discovered",
-	last_refreshed: null,
-	stale: true,
-	items: [],
-});
+// Cluster-A (host-1) beneath target-1 — mirrors the checkbox tree the old
+// inventory fixture exercised, now as stable `components` rows.
+const COMPONENTS_WITH_ITEMS: ComponentNode[] = [
+	component({ id: "cluster-1", display_name: "Cluster-A", catalog_component_key: "vsphere.cluster" }),
+	component({ id: "host-1", display_name: "esx-01a.example.internal", parent_component_id: "cluster-1", catalog_component_key: "vsphere.esxi" }),
+];
+
+const COMPONENTS_EMPTY: ComponentNode[] = [];
 
 const CREDENTIAL_OPTIONS = [
 	{ id: "cred-1", name: "Alpha vCenter service account", credential_type: "vcenter" },
@@ -131,16 +122,18 @@ function jsonResponse(body: unknown, status = 200): Response {
 	});
 }
 
-describe("StartScanScreen (issue #284, credential-binding rework issue #587)", () => {
+describe("StartScanScreen (issue #284, credential-binding rework issue #587, scope wiring issue #733)", () => {
 	let originalFetch: typeof fetch;
 	let fetchCalls: { url: string; init?: RequestInit }[];
 	let targets: Target[];
+	let componentsByTarget: Record<string, ComponentNode[]>;
 	let runPostStatus: number;
 	let runPostError: unknown;
 
 	function installFetchMock(role: string) {
 		fetchCalls = [];
 		targets = [BOUND_VSPHERE_TARGET];
+		componentsByTarget = { "target-1": COMPONENTS_WITH_ITEMS };
 		runPostStatus = 202;
 		runPostError = undefined;
 
@@ -155,12 +148,10 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587)", (
 			if (url === "/api/v1/sites/site-1/targets" && method === "GET") {
 				return jsonResponse(targets);
 			}
-			if (url === "/api/v1/targets/target-1/inventory" && method === "GET") {
-				return jsonResponse(INVENTORY_WITH_ITEMS);
-			}
-			if (url.match(/^\/api\/v1\/targets\/target-\d+\/inventory$/) && method === "GET") {
-				const targetId = url.split("/")[4];
-				return jsonResponse(INVENTORY_EMPTY(targetId));
+			const componentsMatch = url.match(/^\/api\/v1\/targets\/(target-\d+)\/components\?includeRetired=true$/);
+			if (componentsMatch && method === "GET") {
+				const targetId = componentsMatch[1];
+				return jsonResponse(componentsByTarget[targetId] ?? COMPONENTS_EMPTY);
 			}
 			if (url === "/api/v1/credentials" && method === "GET") {
 				return jsonResponse(CREDENTIAL_OPTIONS);
@@ -213,8 +204,8 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587)", (
 		fireEvent.click(screen.getByText("Alpha Enclave"));
 		await waitFor(() => expect(screen.getByText("Next")).not.toBeDisabled());
 		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Scope — inventory")).toBeInTheDocument());
-		await waitFor(() => expect(screen.queryByText("Loading inventory…")).not.toBeInTheDocument());
+		await waitFor(() => expect(screen.getByText("Scope — components")).toBeInTheDocument());
+		await waitFor(() => expect(screen.queryByText("Loading components…")).not.toBeInTheDocument());
 
 		await waitFor(() => expect(screen.getByText("VMware vSphere 8.0 vCenter STIG (1.1.0)")).toBeInTheDocument());
 		fireEvent.change(screen.getByRole("combobox"), { target: { value: "profile-1" } });
@@ -254,6 +245,11 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587)", (
 		expect(body.credential).toBeUndefined();
 		expect(body.credential_overrides).toBeUndefined();
 		expect(body.ad_hoc_credentials).toBeUndefined();
+
+		// Issue #733: with every component left checked, the resolved scope is
+		// "all", not a frozen explicit list — never widened, never guessed.
+		const scope = JSON.parse((body.scope as string) ?? "{}") as { target_scope?: { mode: string } };
+		expect(scope.target_scope).toEqual({ mode: "all", target_ids: ["target-1"] });
 	});
 
 	it("shows a coverage gap and blocks submission when a selected target has no assigned binding", async () => {
@@ -409,16 +405,107 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587)", (
 		);
 	});
 
-	it("scope tree falls back to a target-level checkbox when inventory is empty", async () => {
+	it("scope tree falls back to a target-level checkbox when no components are cached", async () => {
 		installFetchMock("Cyber");
 		targets = [BOUND_VSPHERE_TARGET, BOUND_SSH_TARGET];
+		componentsByTarget = { "target-1": COMPONENTS_WITH_ITEMS, "target-2": COMPONENTS_EMPTY };
 		await mount();
 		await goToScope();
 
 		expect(screen.getByText("vcsa-01.example.internal")).toBeInTheDocument();
 		expect(screen.getByText("esx-01.example.internal")).toBeInTheDocument();
 		expect(screen.getByText("Cluster-A")).toBeInTheDocument();
-		expect(screen.getByText("No cached inventory — scanning the whole target.")).toBeInTheDocument();
+		expect(screen.getByText("No cached components — scanning the whole target.")).toBeInTheDocument();
+	});
+
+	it("issue #733: unchecking one child component sends an explicit component_ids scope, never widened to 'all'", async () => {
+		installFetchMock("Cyber");
+		await mount();
+		await goToScope();
+
+		// COMPONENTS_WITH_ITEMS: Cluster-A (parent) -> esx-01a.example.internal (child).
+		fireEvent.click(screen.getByText("esx-01a.example.internal").closest("label")!.querySelector("input")!);
+
+		fireEvent.click(screen.getByText("Next")); // -> credential
+		await waitFor(() => expect(screen.getByText("Coverage")).toBeInTheDocument());
+		fireEvent.click(screen.getByText("Next")); // -> schedule
+		fireEvent.click(screen.getByText("Next")); // -> confirm
+		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		fireEvent.click(screen.getByText("Start scan"));
+		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
+
+		const call = fetchCalls.find((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")!;
+		const body = JSON.parse(call.init!.body as string) as Record<string, unknown>;
+		const scope = JSON.parse(body.scope as string) as { target_scope?: { mode: string; component_ids?: string[] } };
+		// Only the cluster (parent) remains selected — the host was explicitly
+		// unchecked, so this never widens back to "all".
+		expect(scope.target_scope).toEqual({ mode: "explicit", component_ids: ["cluster-1"] });
+	});
+
+	it("issue #733: unchecking a parent clears every selectable descendant (deterministic cascade)", async () => {
+		installFetchMock("Cyber");
+		await mount();
+		await goToScope();
+
+		const clusterCheckbox = screen.getByText("Cluster-A").closest("label")!.querySelector("input") as HTMLInputElement;
+		fireEvent.click(clusterCheckbox);
+
+		const hostCheckbox = screen.getByText("esx-01a.example.internal").closest("label")!.querySelector("input") as HTMLInputElement;
+		expect(hostCheckbox.checked).toBe(false);
+
+		fireEvent.click(screen.getByText("Next")); // -> credential
+		await waitFor(() => expect(screen.getByText("Coverage")).toBeInTheDocument());
+		fireEvent.click(screen.getByText("Next")); // -> schedule
+		fireEvent.click(screen.getByText("Next")); // -> confirm
+		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		fireEvent.click(screen.getByText("Start scan"));
+		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
+
+		const call = fetchCalls.find((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")!;
+		const body = JSON.parse(call.init!.body as string) as Record<string, unknown>;
+		const scope = JSON.parse(body.scope as string) as { target_scope?: { mode: string; component_ids?: string[] } };
+		expect(scope.target_scope).toEqual({ mode: "explicit", component_ids: [] });
+	});
+
+	it("issue #733 AC: an empty explicit selection warns but does not block or widen the scan", async () => {
+		installFetchMock("Cyber");
+		await mount();
+		await goToScope();
+
+		fireEvent.click(screen.getByText("Cluster-A").closest("label")!.querySelector("input")!);
+
+		await waitFor(() => expect(screen.getByText(/intentionally empty plan/)).toBeInTheDocument());
+		expect(screen.getByText("Next")).not.toBeDisabled();
+	});
+
+	it("issue #733: a 400 no_runnable_component maps scope_omissions onto the scope step with refresh guidance", async () => {
+		installFetchMock("Cyber");
+		await mount();
+		await goToCredential();
+		fireEvent.click(screen.getByText("Next")); // -> schedule
+		fireEvent.click(screen.getByText("Next")); // -> confirm
+		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+
+		runPostStatus = 400;
+		runPostError = {
+			code: "no_runnable_component",
+			message: "The requested scope has no runnable component.",
+			scope_omissions: [
+				{ component_id: "host-1", reason: "component_retired", detail: "esx-01a.example.internal was retired." },
+			],
+		};
+		fireEvent.click(screen.getByText("Start scan"));
+
+		await waitFor(() => expect(screen.getByText("The requested scope has no runnable component.")).toBeInTheDocument());
+
+		// Go back to the scope step — the omission is rendered with actionable
+		// refresh guidance, not the raw machine-readable reason.
+		fireEvent.click(screen.getByText("Back")); // -> schedule
+		fireEvent.click(screen.getByText("Back")); // -> credential
+		fireEvent.click(screen.getByText("Back")); // -> scope
+		await waitFor(() =>
+			expect(screen.getByText("This component has been retired and can no longer be scanned — remove it from the selection.")).toBeInTheDocument(),
+		);
 	});
 
 	it("Confirm's Start scan button stays disabled until a profile is selected", async () => {
@@ -428,7 +515,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587)", (
 		fireEvent.click(screen.getByText("Alpha Enclave"));
 		await waitFor(() => expect(screen.getByText("Next")).not.toBeDisabled());
 		fireEvent.click(screen.getByText("Next")); // -> scope
-		await waitFor(() => expect(screen.getByText("Scope — inventory")).toBeInTheDocument());
+		await waitFor(() => expect(screen.getByText("Scope — components")).toBeInTheDocument());
 		await waitFor(() => expect(screen.getByText("VMware vSphere 8.0 vCenter STIG (1.1.0)")).toBeInTheDocument());
 		// Deliberately no profile selection here.
 
@@ -498,5 +585,58 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587)", (
 		);
 		await waitFor(() => expect(screen.getByText(/Starting a scan requires Cyber or higher/)).toBeInTheDocument());
 		expect(fetchCalls.some((c) => c.url === "/api/v1/sites")).toBe(false);
+	});
+});
+
+describe("resolveTargetScope / buildComponentTree (issue #733: deterministic tri-state semantics)", () => {
+	const TREE: ComponentNode[] = [
+		component({ id: "cluster-1", display_name: "Cluster-A", catalog_component_key: "vsphere.cluster" }),
+		component({ id: "host-1", display_name: "esx-01a", parent_component_id: "cluster-1", catalog_component_key: "vsphere.esxi" }),
+		component({ id: "host-2", display_name: "esx-01b", parent_component_id: "cluster-1", catalog_component_key: "vsphere.esxi" }),
+	];
+
+	it("builds a parent/child tree from flat parent_component_id pointers", () => {
+		const tree = buildComponentTree(TREE);
+		expect(tree).toHaveLength(1);
+		expect(tree[0].id).toBe("cluster-1");
+		expect(tree[0].children.map((c) => c.id)).toEqual(["host-1", "host-2"]);
+	});
+
+	it("every selectable component checked resolves to mode 'all'", () => {
+		const ids = flattenComponentTree(buildComponentTree(TREE)).filter(isSelectableComponent).map((n) => n.id);
+		const result = resolveTargetScope(ids, new Set(ids));
+		expect(result).toEqual({ mode: "all" });
+	});
+
+	it("a partial selection resolves to mode 'explicit' with exactly the checked ids", () => {
+		const ids = flattenComponentTree(buildComponentTree(TREE)).filter(isSelectableComponent).map((n) => n.id);
+		const result = resolveTargetScope(ids, new Set(["host-1"]));
+		expect(result).toEqual({ mode: "explicit", component_ids: ["host-1"] });
+	});
+
+	it("a deliberately empty selection resolves to mode 'explicit' with an empty list, never falling back to 'all'", () => {
+		const ids = flattenComponentTree(buildComponentTree(TREE)).filter(isSelectableComponent).map((n) => n.id);
+		const result = resolveTargetScope(ids, new Set());
+		expect(result).toEqual({ mode: "explicit", component_ids: [] });
+	});
+
+	it("no known components resolves to null (legacy target_ids fallback, not an empty explicit scope)", () => {
+		expect(resolveTargetScope([], new Set())).toBeNull();
+	});
+
+	it("is order-independent: toggling children off then on in a different order converges to the same resolved scope", () => {
+		const ids = flattenComponentTree(buildComponentTree(TREE)).filter(isSelectableComponent).map((n) => n.id);
+		const a = resolveTargetScope(ids, new Set(["cluster-1", "host-2"]));
+		const b = resolveTargetScope(ids, new Set(["host-2", "cluster-1"]));
+		expect(a).toEqual(b);
+	});
+
+	it("a retired/absent component is excluded from the selectable id set (never auto-selected into 'all')", () => {
+		const withRetired: ComponentNode[] = [
+			...TREE,
+			component({ id: "host-3", display_name: "esx-01c (retired)", parent_component_id: "cluster-1", lifecycle: "retired" }),
+		];
+		const selectableIds = flattenComponentTree(buildComponentTree(withRetired)).filter(isSelectableComponent).map((n) => n.id);
+		expect(selectableIds).not.toContain("host-3");
 	});
 });
