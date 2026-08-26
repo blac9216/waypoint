@@ -36,6 +36,7 @@ using Waypoint.Core.PowerShell;
 using Waypoint.Core.Sites;
 using Waypoint.Core.StigManager;
 using Waypoint.Infrastructure.ComplianceContent;
+using Waypoint.Infrastructure.Components;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Discovery;
 using Waypoint.Infrastructure.Jobs;
@@ -223,9 +224,10 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		CredentialRepository credentials = new(_fixture.ConnectionString);
 		CredentialSecretStore secretStore = new(_fixture.ConnectionString, cipher, _redactor, NullLogger<CredentialSecretStore>.Instance);
 		InventoryRepository inventory = new(_fixture.ConnectionString);
+		ComponentRepository components = new(_fixture.ConnectionString);
 
 		_discoverHandler = new DiscoverJobHandler(
-			executor, secretStore, credentials, _targets, inventory, _repository, _redactor, wrappedPsOptions);
+			executor, secretStore, credentials, _targets, inventory, components, _repository, _redactor, wrappedPsOptions);
 
 		Waypoint.Core.Scans.ScanOptions scanOptions = new()
 		{

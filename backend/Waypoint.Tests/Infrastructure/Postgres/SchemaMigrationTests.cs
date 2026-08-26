@@ -134,9 +134,17 @@ public sealed class SchemaMigrationTests
 	/// never be invalidated by later catalog/baseline changes) except `scan_plan_id`
 	/// itself which cascades off its owning plan/run, no new runner grants (API-side
 	/// only, mirroring migrations 0054/0056; #735-#737 own the runner-consumed
-	/// component-job layer built on top of this), issue #734 --
+	/// component-job layer built on top of this), issue #734, 0058 grants
+	/// waypoint_compliance_runner SELECT/INSERT/UPDATE on components and INSERT on
+	/// component_observations (issue #732 discovery-wiring remainder):
+	/// DiscoverJobHandler now calls the rewritten atomic
+	/// ComponentRepository.UpsertDiscoveredAsync (issue #840's ON CONFLICT rewrite
+	/// against migration 0054's two existing unique indexes -- no new schema needed)
+	/// after its existing InventoryRepository write, so a real discovery pass
+	/// materializes `components` rows instead of only repository-seeded test rows,
+	/// issue #732 / #840 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 57;
+	private const int ExpectedMigrationCount = 58;
 
 	private readonly PostgresFixture _fixture;
 

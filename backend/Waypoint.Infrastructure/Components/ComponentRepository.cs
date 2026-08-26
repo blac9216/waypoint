@@ -113,61 +113,103 @@ public sealed class ComponentRepository : IComponentRepository
 				? null
 				: JsonSerializer.Serialize(new { exact_version = item.ExactVersion, observed_at = DateTimeOffset.UtcNow }, FactSerializerOptions);
 
-			// Check whether this exact identity already exists (including retired/absent)
-			// so we can tell an upsert-of-a-new-row apart from a reconnect for the
-			// outcome counters, and so a retired row is genuinely reconnected rather than
-			// silently left retired (rediscovery reconnects per ADR-0023).
-			Guid? existingId = await FindExistingIdAsync(connection, transaction, targetId, parentComponentId, item.CatalogComponentKey, item.VendorIdentity, cancellationToken).ConfigureAwait(false);
-			bool wasNotActive = false;
-			if (existingId is not null)
-			{
-				await using NpgsqlCommand checkLifecycle = new("SELECT lifecycle FROM components WHERE id = $1", connection, transaction);
-				checkLifecycle.Parameters.AddWithValue(existingId.Value);
-				object? lifecycleResult = await checkLifecycle.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-				wasNotActive = lifecycleResult is string lifecycle && lifecycle != Waypoint.Core.Components.ComponentLifecycleStates.Active;
-			}
-
+			// Issue #840: a single atomic statement replaces the former check-then-insert
+			// (a separate existence SELECT, a separate lifecycle SELECT, then a branch to
+			// UPDATE or INSERT) -- three round trips that raced under concurrent discovery
+			// of the same identity (two runner replicas, or a manual refresh overlapping a
+			// scheduled one, both reconciling the same target). The leading `prior` CTE
+			// captures whatever lifecycle the row had (if any) BEFORE this statement's own
+			// write touches it, in the same snapshot as the upsert itself -- giving an
+			// atomic, race-free "was this a genuine reconnect" signal without a second
+			// query. Migration 0054 backs both identity cases with a real unique
+			// constraint/index, so both branches below bind to a real ON CONFLICT target:
+			//   * vendor_identity IS NOT NULL: components_vendor_identity_unique, the
+			//     plain UNIQUE (parent_target_id, catalog_component_key, vendor_identity)
+			//     table constraint -- valid here because vendor_identity is NOT NULL, so
+			//     there is no Postgres NULL-distinctness gap for this branch.
+			//   * vendor_identity IS NULL: idx_components_no_vendor_identity_unique, the
+			//     COALESCE-sentinel partial unique index -- ON CONFLICT names the exact
+			//     indexed expression list plus a matching WHERE predicate, required for
+			//     Postgres to bind ON CONFLICT to a partial index.
 			Guid rowId;
-			if (existingId is { } id)
+			bool wasReconnect;
+			if (item.VendorIdentity is not null)
 			{
-				await using NpgsqlCommand update = new(
+				await using NpgsqlCommand upsert = new(
 					"""
-					UPDATE components
-					SET catalog_component_id = COALESCE($2, catalog_component_id),
-					    display_name = $3,
-					    lifecycle = 'active',
-					    discovered_fact = COALESCE($4::jsonb, discovered_fact),
-					    fact_conflict = CASE WHEN $4::jsonb IS NULL THEN fact_conflict
-					                          ELSE (configured_fact IS NOT NULL AND configured_fact->>'exact_version' <> $4::jsonb->>'exact_version')
-					                     END,
-					    last_seen_at = now(),
-					    continuous_absence_since = NULL
-					WHERE id = $1
-					RETURNING id
-					""", connection, transaction);
-				update.Parameters.AddWithValue(id);
-				update.Parameters.AddWithValue((object?)item.CatalogComponentId ?? DBNull.Value);
-				update.Parameters.AddWithValue(item.DisplayName);
-				update.Parameters.AddWithValue((object?)factJson ?? DBNull.Value);
-				rowId = (Guid)(await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
-			}
-			else
-			{
-				await using NpgsqlCommand insert = new(
-					"""
+					WITH prior AS (
+					    SELECT lifecycle FROM components
+					    WHERE parent_target_id = $1 AND catalog_component_key = $4 AND vendor_identity = $5
+					)
 					INSERT INTO components (parent_target_id, parent_component_id, catalog_component_id, catalog_component_key,
 					                         vendor_identity, display_name, lifecycle, discovered_fact, last_seen_at)
 					VALUES ($1, $2, $3, $4, $5, $6, 'active', $7::jsonb, now())
-					RETURNING id
+					ON CONFLICT (parent_target_id, catalog_component_key, vendor_identity) DO UPDATE SET
+					    catalog_component_id = COALESCE(EXCLUDED.catalog_component_id, components.catalog_component_id),
+					    display_name = EXCLUDED.display_name,
+					    lifecycle = 'active',
+					    discovered_fact = COALESCE(EXCLUDED.discovered_fact, components.discovered_fact),
+					    fact_conflict = CASE WHEN EXCLUDED.discovered_fact IS NULL THEN components.fact_conflict
+					                          ELSE (components.configured_fact IS NOT NULL AND components.configured_fact->>'exact_version' <> EXCLUDED.discovered_fact->>'exact_version')
+					                     END,
+					    last_seen_at = now(),
+					    continuous_absence_since = NULL
+					RETURNING id, (SELECT lifecycle FROM prior) AS prior_lifecycle
 					""", connection, transaction);
-				insert.Parameters.AddWithValue(targetId);
-				insert.Parameters.AddWithValue((object?)parentComponentId ?? DBNull.Value);
-				insert.Parameters.AddWithValue((object?)item.CatalogComponentId ?? DBNull.Value);
-				insert.Parameters.AddWithValue(item.CatalogComponentKey);
-				insert.Parameters.AddWithValue((object?)item.VendorIdentity ?? DBNull.Value);
-				insert.Parameters.AddWithValue(item.DisplayName);
-				insert.Parameters.AddWithValue((object?)factJson ?? DBNull.Value);
-				rowId = (Guid)(await insert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+				upsert.Parameters.AddWithValue(targetId);
+				upsert.Parameters.AddWithValue((object?)parentComponentId ?? DBNull.Value);
+				upsert.Parameters.AddWithValue((object?)item.CatalogComponentId ?? DBNull.Value);
+				upsert.Parameters.AddWithValue(item.CatalogComponentKey);
+				upsert.Parameters.AddWithValue(item.VendorIdentity);
+				upsert.Parameters.AddWithValue(item.DisplayName);
+				upsert.Parameters.AddWithValue((object?)factJson ?? DBNull.Value);
+
+				await using NpgsqlDataReader reader = await upsert.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+				await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+				rowId = reader.GetGuid(0);
+				string? priorLifecycle = reader.IsDBNull(1) ? null : reader.GetString(1);
+				wasReconnect = priorLifecycle is not null && priorLifecycle != Waypoint.Core.Components.ComponentLifecycleStates.Active;
+			}
+			else
+			{
+				await using NpgsqlCommand upsert = new(
+					"""
+					WITH prior AS (
+					    SELECT lifecycle FROM components
+					    WHERE parent_target_id = $1
+					      AND COALESCE(parent_component_id, '00000000-0000-0000-0000-000000000000'::uuid) = COALESCE($2, '00000000-0000-0000-0000-000000000000'::uuid)
+					      AND catalog_component_key = $3
+					      AND vendor_identity IS NULL
+					)
+					INSERT INTO components (parent_target_id, parent_component_id, catalog_component_id, catalog_component_key,
+					                         vendor_identity, display_name, lifecycle, discovered_fact, last_seen_at)
+					VALUES ($1, $2, $6, $3, NULL, $4, 'active', $5::jsonb, now())
+					ON CONFLICT (parent_target_id, COALESCE(parent_component_id, '00000000-0000-0000-0000-000000000000'::uuid), catalog_component_key)
+					    WHERE vendor_identity IS NULL
+					    DO UPDATE SET
+					        catalog_component_id = COALESCE(EXCLUDED.catalog_component_id, components.catalog_component_id),
+					        display_name = EXCLUDED.display_name,
+					        lifecycle = 'active',
+					        discovered_fact = COALESCE(EXCLUDED.discovered_fact, components.discovered_fact),
+					        fact_conflict = CASE WHEN EXCLUDED.discovered_fact IS NULL THEN components.fact_conflict
+					                              ELSE (components.configured_fact IS NOT NULL AND components.configured_fact->>'exact_version' <> EXCLUDED.discovered_fact->>'exact_version')
+					                         END,
+					        last_seen_at = now(),
+					        continuous_absence_since = NULL
+					RETURNING id, (SELECT lifecycle FROM prior) AS prior_lifecycle
+					""", connection, transaction);
+				upsert.Parameters.AddWithValue(targetId);
+				upsert.Parameters.AddWithValue((object?)parentComponentId ?? DBNull.Value);
+				upsert.Parameters.AddWithValue(item.CatalogComponentKey);
+				upsert.Parameters.AddWithValue(item.DisplayName);
+				upsert.Parameters.AddWithValue((object?)factJson ?? DBNull.Value);
+				upsert.Parameters.AddWithValue((object?)item.CatalogComponentId ?? DBNull.Value);
+
+				await using NpgsqlDataReader reader = await upsert.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+				await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+				rowId = reader.GetGuid(0);
+				string? priorLifecycle = reader.IsDBNull(1) ? null : reader.GetString(1);
+				wasReconnect = priorLifecycle is not null && priorLifecycle != Waypoint.Core.Components.ComponentLifecycleStates.Active;
 			}
 
 			if (factJson is not null)
@@ -186,11 +228,7 @@ public sealed class ComponentRepository : IComponentRepository
 			idByVendorIdentity[identityKey] = rowId;
 			seen.Add((item.VendorIdentity, item.CatalogComponentKey, parentComponentId));
 
-			if (existingId is null)
-			{
-				upserted++;
-			}
-			else if (wasNotActive)
+			if (wasReconnect)
 			{
 				reconnected++;
 			}
@@ -358,34 +396,6 @@ public sealed class ComponentRepository : IComponentRepository
 		}
 
 		return items;
-	}
-
-	private static async Task<Guid?> FindExistingIdAsync(
-		NpgsqlConnection connection, NpgsqlTransaction transaction, Guid targetId, Guid? parentComponentId, string catalogComponentKey, string? vendorIdentity, CancellationToken cancellationToken)
-	{
-		if (vendorIdentity is not null)
-		{
-			await using NpgsqlCommand command = new(
-				"SELECT id FROM components WHERE parent_target_id = $1 AND catalog_component_key = $2 AND vendor_identity = $3",
-				connection, transaction);
-			command.Parameters.AddWithValue(targetId);
-			command.Parameters.AddWithValue(catalogComponentKey);
-			command.Parameters.AddWithValue(vendorIdentity);
-			return (Guid?)await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-		}
-
-		await using NpgsqlCommand noVendorCommand = new(
-			"""
-			SELECT id FROM components
-			WHERE parent_target_id = $1
-			  AND COALESCE(parent_component_id, '00000000-0000-0000-0000-000000000000'::uuid) = COALESCE($2, '00000000-0000-0000-0000-000000000000'::uuid)
-			  AND catalog_component_key = $3
-			  AND vendor_identity IS NULL
-			""", connection, transaction);
-		noVendorCommand.Parameters.AddWithValue(targetId);
-		noVendorCommand.Parameters.AddWithValue((object?)parentComponentId ?? DBNull.Value);
-		noVendorCommand.Parameters.AddWithValue(catalogComponentKey);
-		return (Guid?)await noVendorCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	private static Component Map(NpgsqlDataReader reader)

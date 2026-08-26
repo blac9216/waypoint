@@ -239,4 +239,71 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 		Assert.Equal(ComponentWriteOutcome.Ok, await _repository.PurgeRetiredAsync(active.Id, CancellationToken.None));
 		Assert.Null(await _repository.GetAsync(active.Id, CancellationToken.None));
 	}
+
+	[Fact]
+	public async Task UpsertDiscoveredAsync_ConcurrentIdenticalVendorIdentityPasses_DedupesToOneRowNoDeadlockOrError()
+	{
+		// Issue #840: two "replicas" (here, two concurrent calls against the same
+		// target/connection pool) discovering the exact same vendor-identity component
+		// at once must dedupe to exactly one row via the atomic ON CONFLICT upsert --
+		// never throw a duplicate-key violation and never race to two sibling rows,
+		// which the prior check-then-insert implementation could not guarantee.
+		Guid target = await SeedTargetAsync("vcenter-concurrent-vendor-identity");
+		DiscoveredComponent[] items = [new("esxi", "host-7001", "esxi-01.example.internal", null, null, "8.0.3")];
+
+		Task<ComponentUpsertOutcome> first = _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		Task<ComponentUpsertOutcome> second = _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		await Task.WhenAll(first, second);
+
+		IReadOnlyList<Component> all = await _repository.ListForTargetAsync(target, includeRetired: true, CancellationToken.None);
+		Component only = Assert.Single(all);
+		Assert.Equal("host-7001", only.VendorIdentity);
+		Assert.Equal(ComponentLifecycleStates.Active, only.Lifecycle);
+	}
+
+	[Fact]
+	public async Task UpsertDiscoveredAsync_ConcurrentIdenticalNoVendorIdentityPasses_DedupesToOneRowNoDeadlockOrError()
+	{
+		// Same race, for the OTHER identity branch migration 0054 backs: the
+		// no-vendor-identity partial-index case (a named service with no independent
+		// upstream object) -- issue #840 explicitly calls out that this case could not
+		// previously share one atomic conflict target with the vendor-identity case.
+		Guid target = await SeedTargetAsync("vcenter-concurrent-no-vendor-identity");
+		DiscoveredComponent[] parent = [new("vcsa", "vim.VirtualMachine:vm-301", "vcsa-03.example.internal", null, null, "8.0.3")];
+		await _repository.UpsertDiscoveredAsync(target, parent, CancellationToken.None);
+
+		DiscoveredComponent[] items =
+		[
+			.. parent,
+			new("eam", null, "EAM Service", "vim.VirtualMachine:vm-301", null, null),
+		];
+
+		Task<ComponentUpsertOutcome> first = _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		Task<ComponentUpsertOutcome> second = _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		await Task.WhenAll(first, second);
+
+		IReadOnlyList<Component> all = await _repository.ListForTargetAsync(target, includeRetired: true, CancellationToken.None);
+		Component eam = Assert.Single(all, c => c.CatalogComponentKey == "eam");
+		Assert.Null(eam.VendorIdentity);
+		Assert.Equal(ComponentLifecycleStates.Active, eam.Lifecycle);
+	}
+
+	[Fact]
+	public async Task UpsertDiscoveredAsync_ReconnectsRetiredVendorIdentityComponent_ReportsReconnectedNotUpserted()
+	{
+		// Outcome-counter correctness after the atomic rewrite: a retired component that
+		// reappears must be counted as Reconnected (not Upserted), matching the
+		// pre-rewrite behavior this rewrite must preserve.
+		Guid target = await SeedTargetAsync("vcenter-reconnect-counter");
+		DiscoveredComponent[] items = [new("esxi", "host-8001", "esxi-01.example.internal", null, null, "8.0.3")];
+
+		await _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		await _repository.UpsertDiscoveredAsync(target, [], CancellationToken.None);
+		await _repository.RetireContinuouslyAbsentAsync(TimeSpan.Zero, CancellationToken.None);
+
+		ComponentUpsertOutcome reconnectOutcome = await _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+
+		Assert.Equal(1, reconnectOutcome.Reconnected);
+		Assert.Equal(0, reconnectOutcome.Upserted);
+	}
 }
