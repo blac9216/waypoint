@@ -297,6 +297,12 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Waypoint.Core.ComplianceContent.IBaselineRepository>(
 				new Waypoint.Infrastructure.ComplianceContent.BaselineRepository(connectionString));
 			services.AddSingleton<Waypoint.Infrastructure.ComplianceContent.BaselineActivationService>();
+			// Issue #753: managed CA trust bundles and scoped trust-policy bindings
+			// (migration 0059, ADR-0025). Admin-only writes run through the owner
+			// connection string (this repository) -- no runner grant exists yet
+			// (consumption is this issue's stated remainder).
+			services.AddSingleton<Waypoint.Core.Trust.ITrustRepository>(
+				new Waypoint.Infrastructure.Trust.TrustRepository(connectionString));
 			services.AddSingleton<IScheduleRepository>(new ScheduleRepository(connectionString));
 			services.AddSingleton<IUserDirectory>(new UserRepository(connectionString));
 			services.AddSingleton<IAuditRepository>(new AuditRepository(connectionString));
