@@ -734,8 +734,7 @@ public sealed class CatalogRepository : ICatalogRepository
 			sourceRevision.Id, candidate.Kind, $"{candidate.ProductVersionKey}:{candidate.Kind}:{candidate.ContentDigest[..12]}", request.ContentReleaseDisplayName, cancellationToken).ConfigureAwait(false);
 		CatalogReportGroup reportGroup = await UpsertReportGroupAsync(request.ReportGroupKey, request.ReportGroupDisplayName, request.ReportGroupPriority, cancellationToken).ConfigureAwait(false);
 
-		CatalogExecutionProfile? existing = await FindExecutionProfileAsync(component.Id, contentRelease.Id, cancellationToken).ConfigureAwait(false);
-		CatalogExecutionProfile executionProfile = existing ?? await CreateExecutionProfileAsync(
+		CatalogExecutionProfile executionProfile = await UpsertExecutionProfileForPromotionAsync(
 			component.Id, contentRelease.Id, reportGroup.Id, candidate.ManifestVersion ?? "unknown", request.OutputKind, cancellationToken).ConfigureAwait(false);
 
 		foreach (InspecManifestInput input in candidate.Inputs)
@@ -746,24 +745,59 @@ public sealed class CatalogRepository : ICatalogRepository
 		return new CatalogPromotionOutcome(executionProfile.Id, null);
 	}
 
-	private async Task<CatalogExecutionProfile?> FindExecutionProfileAsync(Guid componentId, Guid contentReleaseId, CancellationToken cancellationToken)
+	/// <summary>
+	/// Issue #832 fix: candidate promotion's execution-profile write is an atomic
+	/// <c>INSERT ... ON CONFLICT (component_id, content_release_id) DO UPDATE</c>
+	/// against 0050's own <c>catalog_execution_profiles_unique</c> constraint, replacing
+	/// the prior check-then-insert (<c>FindExecutionProfileAsync</c> then
+	/// <see cref="CreateExecutionProfileAsync"/>) that raced under concurrent promotion
+	/// of the same natural key -- the same defect class PR #831 fixed for the
+	/// NULL-parent <c>catalog_components</c> case, filed as its own issue (#832) because
+	/// this natural key's uniqueness gap is check-then-insert non-atomicity, not a
+	/// NULL-distinctness gap (both columns here are NOT NULL, so 0050's plain UNIQUE
+	/// constraint already provides real DB-level uniqueness -- no new index needed,
+	/// see migration 0053). The DO UPDATE clause is a no-op re-write of the immutable
+	/// identity columns (report_group_id/profile_version/output_kind) rather than a
+	/// true no-touch, matching <see cref="UpsertComponentAsync"/>'s established
+	/// "ON CONFLICT DO UPDATE that behaviorally re-asserts the same values" shape for a
+	/// natural-key upsert -- a second promotion of byte-identical content therefore
+	/// still dedupes to the SAME row id (RETURNING always returns the existing row's id
+	/// on conflict), preserving the additive-ingestion guarantee this repository's own
+	/// <see cref="PromoteCandidateAsync"/> doc comment describes. This method is
+	/// deliberately NOT exposed on <see cref="ICatalogRepository"/> --
+	/// <see cref="CreateExecutionProfileAsync"/> remains the public throw-on-duplicate
+	/// contract issue #728's tests pin (execution profiles are immutable identity to a
+	/// direct caller); only candidate promotion, which must tolerate a benign race
+	/// rather than throw, uses the upsert path.
+	/// </summary>
+	private async Task<CatalogExecutionProfile> UpsertExecutionProfileForPromotionAsync(
+		Guid componentId, Guid contentReleaseId, Guid reportGroupId, string profileVersion, string outputKind, CancellationToken cancellationToken)
 	{
+		IReadOnlyList<string> errors = CatalogVocabularyValidator.ValidateOutputKind(outputKind);
+		if (errors.Count > 0)
+		{
+			throw new ArgumentException(string.Join("; ", errors), nameof(outputKind));
+		}
+
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT id, component_id, content_release_id, report_group_id, profile_version, is_operator_override, output_kind, created_at
-			FROM catalog_execution_profiles
-			WHERE component_id = $1 AND content_release_id = $2
+			INSERT INTO catalog_execution_profiles (component_id, content_release_id, report_group_id, profile_version, output_kind)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (component_id, content_release_id) DO UPDATE SET
+				report_group_id = EXCLUDED.report_group_id,
+				profile_version = EXCLUDED.profile_version,
+				output_kind = EXCLUDED.output_kind
+			RETURNING id, component_id, content_release_id, report_group_id, profile_version, is_operator_override, output_kind, created_at
 			""", connection);
 		command.Parameters.AddWithValue(componentId);
 		command.Parameters.AddWithValue(contentReleaseId);
+		command.Parameters.AddWithValue(reportGroupId);
+		command.Parameters.AddWithValue(profileVersion);
+		command.Parameters.AddWithValue(outputKind);
 
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-		if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-		{
-			return null;
-		}
-
+		await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
 		return MapExecutionProfile(reader, 0);
 	}
 

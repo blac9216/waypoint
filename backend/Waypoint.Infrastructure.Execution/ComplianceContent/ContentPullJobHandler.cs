@@ -46,11 +46,15 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// boundary/stage-marker/lease/cancellation contract, ADR-0013/0014, is unchanged; this
 /// is additional work inside the SAME job attempt, not a new job type or stage). The
 /// resulting <see cref="SemanticImportReport"/> is persisted (migration 0051) and every
-/// accepted executable-leaf candidate is promoted into the migration 0050 catalog
-/// tables plus its declared inputs -- additive ingestion only (ADR-0022): promotion
-/// upserts by natural key and never mutates an already-active execution profile's
-/// identity. This pass never fails the overall pull outcome: a semantic-import problem
-/// is captured as a rejected/warning report entry, exactly like the pre-existing
+/// accepted executable-leaf candidate whose bounded <c>inspec check</c> genuinely ran
+/// and passed is promoted into the migration 0050 catalog tables plus its declared
+/// inputs -- additive ingestion only (ADR-0022): promotion upserts by natural key and
+/// never mutates an already-active execution profile's identity. An accepted candidate
+/// that failed (or never ran) its <c>inspec check</c> is quarantined with the check's
+/// own diagnostics instead of promoted (issue #729 remainder deliverable 3, fail
+/// closed; sibling candidates are unaffected -- per-entry containment). This pass never
+/// fails the overall pull outcome: a semantic-import or inspec-check problem is
+/// captured as a rejected/warning report entry, exactly like the pre-existing
 /// per-profile/per-control parsing tolerance below.
 /// </summary>
 public sealed class ContentPullJobHandler : IJobHandler
@@ -203,6 +207,18 @@ public sealed class ContentPullJobHandler : IJobHandler
 		VendorHierarchyInterpretation interpretation = VendorHierarchyInterpreter.Interpret(contentEntries);
 		SemanticImportReport report = SemanticImportReconciler.Reconcile(sourceCommit, interpretation, contentEntries);
 
+		// Issue #729 deliverable 3: the reconciler's structural checks are I/O-free and
+		// already ran above; the bounded `inspec check` result was computed in
+		// PowerShell (Test-WaypointInspecCheck) while the checkout's real directory
+		// still existed and is carried on each VendorContentEntry. First-writer-wins
+		// dedup mirrors SemanticImportReconciler's own defensive lookup build -- a
+		// duplicate ProfileKey in the raw entry list must not throw here either.
+		Dictionary<string, VendorContentEntry> entriesByKey = new(StringComparer.Ordinal);
+		foreach (VendorContentEntry entry in contentEntries)
+		{
+			entriesByKey.TryAdd(entry.ProfileKey, entry);
+		}
+
 		CatalogImportReport persistedReport = await _catalog.RecordImportReportAsync(
 			report.SourceCommit, report.SourceDigest, report.Accepted.Count, report.Warnings.Count, report.Rejected.Count, cancellationToken)
 			.ConfigureAwait(false);
@@ -210,15 +226,39 @@ public sealed class ContentPullJobHandler : IJobHandler
 		int promotedCount = 0;
 		foreach (SemanticImportAccepted accepted in report.Accepted)
 		{
-			// PromoteCandidateAsync itself rejects a non-executable-leaf (aggregate)
-			// candidate with an actionable reason (issue #729 AC "aggregate ...
-			// profiles cannot be selected for execution") -- called unconditionally
-			// here rather than pre-filtering on IsExecutableLeaf so that reason always
-			// lands on the persisted report entry, not just in a code comment.
-			CatalogPromotionRequest promotionRequest = BuildPromotionRequest(accepted.Candidate);
-			CatalogPromotionOutcome outcome = await _catalog.PromoteCandidateAsync(accepted.Candidate, promotionRequest, cancellationToken).ConfigureAwait(false);
-			Guid? executionProfileId = outcome.ExecutionProfileId;
-			string? rejectionReason = outcome.RejectionReason;
+			Guid? executionProfileId = null;
+			string? rejectionReason;
+
+			// Fail closed (issue #729 AC): an executable-leaf candidate is promoted only
+			// when its bounded `inspec check` genuinely ran and passed. A candidate whose
+			// check never ran (no inspec binary staged, or an aggregate that was never
+			// checked at all) or that ran and failed is quarantined here with the check's
+			// own diagnostics -- structurally valid enough to survive reconciliation, but
+			// not structurally valid enough to run. This mirrors, at the execution-boundary
+			// layer, the same "quarantine with actionable diagnostics rather than guessed"
+			// discipline reconciliation already applies at the I/O-free layer. A sibling
+			// candidate's check outcome never affects this one (per-entry containment).
+			bool hasInspecEntry = entriesByKey.TryGetValue(accepted.Candidate.ProfileKey, out VendorContentEntry? contentEntry);
+			if (accepted.Candidate.IsExecutableLeaf && (!hasInspecEntry || !contentEntry!.InspecCheckRan || !contentEntry.InspecCheckPassed))
+			{
+				string detail = hasInspecEntry && contentEntry is not null && !string.IsNullOrWhiteSpace(contentEntry.InspecCheckDetail)
+					? contentEntry.InspecCheckDetail!
+					: "inspec check did not run for this candidate";
+				rejectionReason = $"inspec check failed structure validation, quarantined rather than promoted: {Truncate(detail)}";
+			}
+			else
+			{
+				// PromoteCandidateAsync itself rejects a non-executable-leaf (aggregate)
+				// candidate with an actionable reason (issue #729 AC "aggregate ...
+				// profiles cannot be selected for execution") -- called unconditionally
+				// here rather than pre-filtering on IsExecutableLeaf so that reason always
+				// lands on the persisted report entry, not just in a code comment.
+				CatalogPromotionRequest promotionRequest = BuildPromotionRequest(accepted.Candidate);
+				CatalogPromotionOutcome outcome = await _catalog.PromoteCandidateAsync(accepted.Candidate, promotionRequest, cancellationToken).ConfigureAwait(false);
+				executionProfileId = outcome.ExecutionProfileId;
+				rejectionReason = outcome.RejectionReason;
+			}
+
 			if (executionProfileId is not null)
 			{
 				promotedCount++;
@@ -372,6 +412,9 @@ public sealed class ContentPullJobHandler : IJobHandler
 		string? rawYaml = psObject.Properties["RawYaml"]?.Value as string;
 		bool hasControlsDirectory = psObject.Properties["HasControlsDirectory"]?.Value is true;
 		bool hasFilesDirectory = psObject.Properties["HasFilesDirectory"]?.Value is true;
+		bool inspecCheckRan = psObject.Properties["InspecCheckRan"]?.Value is true;
+		bool inspecCheckPassed = psObject.Properties["InspecCheckPassed"]?.Value is true;
+		string? inspecCheckDetail = psObject.Properties["InspecCheckDetail"]?.Value as string;
 
 		List<string> controlFileNames = [];
 		if (psObject.Properties["ControlFileNames"]?.Value is System.Collections.IEnumerable rawNames)
@@ -385,7 +428,9 @@ public sealed class ContentPullJobHandler : IJobHandler
 			}
 		}
 
-		return new VendorContentEntry(profileKey, rawYaml, hasControlsDirectory, hasFilesDirectory, controlFileNames);
+		return new VendorContentEntry(
+			profileKey, rawYaml, hasControlsDirectory, hasFilesDirectory, controlFileNames,
+			inspecCheckRan, inspecCheckPassed, inspecCheckDetail);
 	}
 
 	private static ProfileUpsert? TryParseProfile(object? item, string commit, string state)
@@ -449,6 +494,14 @@ public sealed class ContentPullJobHandler : IJobHandler
 
 		return controls;
 	}
+
+	/// <summary>
+	/// Bounds a persisted rejection reason's length (issue #729 AC "bounded runner
+	/// work" extends to what gets stored, not just what gets executed) -- an
+	/// <c>inspec check</c> JSON diagnostic can be large; <see cref="CatalogImportReportEntry.Reason"/>
+	/// is an operator-facing diagnostic column, not a full artifact store.
+	/// </summary>
+	private static string Truncate(string text) => text.Length <= 1000 ? text : text[..1000] + "... [truncated]";
 
 	private async Task<string> ResolveActorAsync(Guid? runId, CancellationToken cancellationToken)
 	{
