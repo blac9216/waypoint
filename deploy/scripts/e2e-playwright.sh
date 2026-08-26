@@ -10,16 +10,20 @@
 # fresh-stack-smoke-test.sh: unique -p, unique host port, dev admin
 # password/master-key self-provisioning, devcontainer bind-mount host-path
 # translation, compliance-profiles pre-seeding, cgroup-fallback override),
-# seeds a site/target/credential via the API so the Playwright suite's
-# Start-a-Scan wizard has something to select, points Playwright's
-# E2E_BASE_URL/E2E_ADMIN_PASSWORD/E2E_SITE_NAME/E2E_CREDENTIAL_NAME at it,
-# runs `npm run test:e2e` from frontend/, and tears the stack down fully
+# ALSO provisions a persistent Keycloak-realm dev-admin user via #846's
+# keycloak-dev-admin service (issue #848), seeds a site/target/credential via
+# the local-auth API so the Playwright suite's Start-a-Scan wizard has
+# something to select, points Playwright's E2E_BASE_URL/E2E_ADMIN_USERNAME/
+# E2E_ADMIN_PASSWORD (the Keycloak dev-admin identity, for the browser's real
+# PKCE login -- issue #848)/E2E_SITE_NAME/E2E_CREDENTIAL_NAME at it, ensures
+# frontend/ has its own node_modules and a Chromium binary before running
+# `npm run test:e2e` from frontend/, and tears the stack down fully
 # (trap-based, same as the smoke script).
 #
-# Requires: docker compose v2, curl, openssl, python3, Node 22 (nvm) with
-# `frontend/node_modules/.bin/playwright` installed
-# (`cd frontend && npm ci && npx playwright install chromium` -- browser
-# binaries are never committed, per this script's own README note below).
+# Requires: docker compose v2, curl, openssl, python3, Node 22 (nvm). This
+# script ensures its own frontend/ dependencies (npm ci, playwright install
+# chromium) if missing -- browser binaries are still never committed, per
+# this script's own README note below.
 #
 # Usage:
 #   deploy/scripts/e2e-playwright.sh [slug] [port]
@@ -171,8 +175,20 @@ fi
 # WAYPOINT_E2E_SUBNET: overrides the generated stack's `edge` subnet when the
 # agent-mode default (203.0.113.0/24) collides with a concurrent stack on
 # this host (docs/testing.md). Never commit a run with this set.
+#
+# --keycloak-dev-admin (issue #848, building on #846's keycloak-dev-admin
+# service): the local-auth admin hash above still seeds the browser-facing
+# runner-parity/CRUD/scan/catalog specs that don't touch login itself and
+# still gates this script's own API seeding curl calls (both narrowly
+# in-scope local-auth uses issue #848 explicitly leaves alone) -- but the
+# LOGIN spec now drives the real Keycloak authorization-code/PKCE flow, which
+# needs a real Keycloak-realm user. This flag makes the generated override
+# provision one (deploy/keycloak-dev-admin) instead of hand-authoring that
+# wiring here a second time.
+KEYCLOAK_DEV_USERNAME="developer"
 GENERATE_ARGS=(--mode agent --slug "${SLUG}" --public-url "https://localhost:${PORT}" --port "${PORT}" \
-	--local-auth-admin-hash-file "${HASH_STAGE_DIR}/admin-password-hash")
+	--local-auth-admin-hash-file "${HASH_STAGE_DIR}/admin-password-hash" \
+	--keycloak-dev-admin --username "${KEYCLOAK_DEV_USERNAME}")
 if [[ -n "${WAYPOINT_E2E_SUBNET:-}" ]]; then
 	log "WAYPOINT_E2E_SUBNET=${WAYPOINT_E2E_SUBNET} -- overriding the generated edge subnet"
 	GENERATE_ARGS+=(--subnet "${WAYPOINT_E2E_SUBNET}")
@@ -217,6 +233,26 @@ for id in $(${DC} ps -q); do
 done
 echo "Final container health:"
 ${DC} ps
+
+# keycloak-dev-admin (issue #846) is a one-shot service with no HEALTHCHECK
+# of its own -- the generic loop above treats "no-healthcheck" as success the
+# moment the container exists, which for a `restart: "no"` provisioning
+# container means "started", not "finished provisioning the dev-admin user".
+# The real signal is its exit code, waited for explicitly here so a failed
+# provisioning run (e.g. the realm not importing, a bad secret file) fails
+# this script loudly instead of surfacing later as an inexplicable Keycloak
+# login failure.
+KEYCLOAK_DEV_ADMIN_ID="$(${DC} ps -q keycloak-dev-admin 2>/dev/null || true)"
+if [[ -n "${KEYCLOAK_DEV_ADMIN_ID}" ]]; then
+	log "Waiting for keycloak-dev-admin (issue #846) to finish provisioning the dev Keycloak user"
+	KEYCLOAK_DEV_ADMIN_EXIT="$(docker wait "${KEYCLOAK_DEV_ADMIN_ID}")"
+	if [[ "${KEYCLOAK_DEV_ADMIN_EXIT}" != "0" ]]; then
+		echo "error: keycloak-dev-admin exited ${KEYCLOAK_DEV_ADMIN_EXIT} -- Playwright's Keycloak login would fail closed. Logs:" >&2
+		docker logs "${KEYCLOAK_DEV_ADMIN_ID}" >&2 || true
+		exit 1
+	fi
+	echo "keycloak-dev-admin: provisioned the dev Keycloak user (exit 0)."
+fi
 
 # --- Helper container + API helpers (mirrors fresh-stack-smoke-test.sh) --
 
@@ -320,19 +356,66 @@ fi
 
 # --- Run Playwright against this stack -----------------------------------
 
+# Issue #848: Playwright's browser-driven login now authenticates through
+# Keycloak's real PKCE flow, not the dev-flag local-auth form -- so the
+# credential it needs is the keycloak-dev-admin (issue #846) provisioned
+# user, not ${ADMIN_PASSWORD} (which stays local-auth-only, used above only
+# for this script's own API seeding). Read straight from the generator's own
+# secret file -- never echoed, never a CLI argument.
+KEYCLOAK_DEV_ADMIN_PASSWORD_FILE="${GENERATED_STATE_DIR}/secrets/dev-admin-password"
+if [[ ! -s "${KEYCLOAK_DEV_ADMIN_PASSWORD_FILE}" ]]; then
+	echo "error: ${KEYCLOAK_DEV_ADMIN_PASSWORD_FILE} missing or empty -- Playwright's Keycloak login would fail closed" >&2
+	exit 1
+fi
+KEYCLOAK_DEV_ADMIN_PASSWORD="$(cat "${KEYCLOAK_DEV_ADMIN_PASSWORD_FILE}")"
+
 PLAYWRIGHT_JSON_OUTPUT_FILE="${GENERATED_STATE_DIR}/playwright-results.json"
 export PLAYWRIGHT_JSON_OUTPUT_FILE
 log "Running Playwright against ${PLAYWRIGHT_BASE_URL}"
+# `set -euo pipefail` (top of this script) would otherwise terminate the
+# whole script the instant the subshell below exits nonzero -- BEFORE
+# PLAYWRIGHT_EXIT could be assigned, before issue #500's own
+# zero-tests-executed guard further down, and before the final
+# `exit "${PLAYWRIGHT_EXIT}"` ever ran. A failed Playwright run was silently
+# swallowed as whatever exit code the EXIT trap's cleanup happened to
+# produce, not the suite's real result -- found while validating issue #848
+# (a genuinely failing suite never printed this script's own "Playwright
+# exit code:" log line at all). `set +e`/`set -e` bracket exactly the
+# subshell so errexit is suspended only long enough to capture its real exit
+# code into PLAYWRIGHT_EXIT.
+set +e
 (
 	use_node22
 	cd "${FRONTEND_DIR}"
+	# Issue #848 finding #2 (orchestrator comment on #847's validation): this
+	# script used to assume node_modules was already present in a fresh
+	# sandbox -- an ordering dependency on whatever other script happened to
+	# populate frontend/dist first. Ensure this script's own dependencies
+	# regardless of what ran before it.
+	if [[ ! -d node_modules ]]; then
+		log "frontend/node_modules missing -- npm ci"
+		npm ci
+	fi
+	if [[ ! -x node_modules/.bin/playwright ]]; then
+		echo "error: node_modules/.bin/playwright missing after npm ci -- @playwright/test did not install correctly" >&2
+		exit 1
+	fi
+	# Playwright's default browser cache dir (PLAYWRIGHT_BROWSERS_PATH unset)
+	# -- a simple existence check rather than shelling out to Node to ask
+	# playwright-core for its resolved executable path.
+	if ! find "${PLAYWRIGHT_BROWSERS_PATH:-${HOME}/.cache/ms-playwright}" -maxdepth 1 -iname 'chromium-*' 2>/dev/null | grep -q .; then
+		log "Chromium browser binary not found -- npx playwright install chromium"
+		npx playwright install chromium
+	fi
 	export E2E_BASE_URL="${PLAYWRIGHT_BASE_URL}"
-	export E2E_ADMIN_PASSWORD="${ADMIN_PASSWORD}"
+	export E2E_ADMIN_USERNAME="${KEYCLOAK_DEV_USERNAME}"
+	export E2E_ADMIN_PASSWORD="${KEYCLOAK_DEV_ADMIN_PASSWORD}"
 	export E2E_SITE_NAME="${SITE_NAME}"
 	export E2E_CREDENTIAL_NAME="${CREDENTIAL_NAME}"
 	npm run test:e2e
 )
 PLAYWRIGHT_EXIT=$?
+set -e
 
 # Issue #500: a bare exit code cannot distinguish "the suite ran and passed"
 # from "the suite never ran" (e.g. `tsc` failing before `playwright test`

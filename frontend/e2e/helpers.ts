@@ -1,13 +1,26 @@
 import type { Page } from "@playwright/test";
 
 /**
- * Shared helpers for the live-stack Playwright suite (issue #468).
- * `deploy/scripts/e2e-playwright.sh` provisions the admin account these
- * tests log in as — see that script for how the password is generated
- * (a fresh, invented-per-run value, never hardcoded here or committed).
+ * Shared helpers for the live-stack Playwright suite (issue #468, PKCE
+ * rewrite issue #848). `deploy/scripts/e2e-playwright.sh` brings up an
+ * isolated stack with the keycloak-dev-admin service (epic #841 issue #846)
+ * provisioning a persistent Keycloak-realm Admin user, and exports that
+ * user's username/password here as E2E_ADMIN_USERNAME/E2E_ADMIN_PASSWORD —
+ * see that script for exactly how (never hardcoded here or committed).
+ *
+ * `login()` below drives the REAL Keycloak authorization-code/PKCE flow
+ * (`src/lib/oidc.ts`, `src/components/auth/LoginScreen.tsx`) through nginx,
+ * not the dev-flag local-auth form — issue #848's whole point is that a
+ * browser suite exercising local auth cannot catch Keycloak
+ * hostname/`/auth`-prefix/callback regressions that a headless stack can
+ * still start "healthy" with. The API-seeding curl calls in
+ * e2e-playwright.sh are shell-only (never drive a browser) and may keep
+ * using local auth — that overlay's scope is unchanged by this file.
  */
 
-export const ADMIN_USERNAME = "admin";
+export function keycloakUsername(): string {
+	return process.env.E2E_ADMIN_USERNAME ?? "developer";
+}
 
 export function adminPassword(): string {
 	const pw = process.env.E2E_ADMIN_PASSWORD;
@@ -20,39 +33,80 @@ export function adminPassword(): string {
 }
 
 /**
- * Issue #503: the very first browser login against a freshly-brought-up
- * stack occasionally races a cold-start backend-readiness failure (observed
- * pre-#502 at roughly 1-in-3) even though the seed phase's own
- * `POST /auth/login` a moment earlier, with the same credentials, had
- * already succeeded — i.e. not a credential problem.
- *
- * Crucially, that race surfaces as the **exact same** alert text a genuine
- * wrong password does: if the admin hash isn't resolved/readable yet,
- * `InMemoryLocalAuthenticationService.Authenticate` fails closed and returns
- * `null` (`InMemoryLocalAuthenticationService.cs`), which `AuthController.Login`
- * maps to `401 invalid_credentials` → "Invalid username or password."
- * (`AuthController.cs`), surfaced verbatim by `lib/auth.tsx`. There is no
- * distinct 5xx path for an unresolved hash, so alert text alone cannot
- * separate the cold-start race from a real rejection.
- *
- * Because these are indistinguishable by text, `login()` treats the first
- * few login failures as a warm-up probe: it retries *any* failure with
- * bounded backoff before giving up. This covers the cold-start race while
- * still failing a genuine credential break in seconds (the retries exhaust
- * quickly). The dedicated "rejects a bad password" test inlines its own
- * flow and does not use this helper, so real-rejection coverage is
- * unaffected by the retry.
+ * The one browser-facing origin this whole run is allowed to touch — derived
+ * from Playwright's own `baseURL` (`playwright.config.ts`, itself
+ * `E2E_BASE_URL`), never hardcoded. Every origin-discipline assertion below
+ * compares against this, not a literal `localhost`/`127.0.0.1` — the
+ * configured origin legitimately varies per run (a devcontainer's own
+ * namespace sometimes cannot reach the published host port at all, so
+ * e2e-playwright.sh joins its own edge network and points Playwright at
+ * `https://nginx` instead — see that script's "Playwright base URL
+ * reachability" section). What must NEVER vary mid-flow is that this exact
+ * origin is the only one ever navigated to.
+ */
+export function configuredOrigin(): string {
+	const base = process.env.E2E_BASE_URL;
+	if (!base) {
+		throw new Error("E2E_BASE_URL is not set — run this suite via deploy/scripts/e2e-playwright.sh.");
+	}
+	return new URL(base).origin;
+}
+
+/**
+ * Issue #848's origin-discipline acceptance criterion, enforced as a single
+ * reusable check rather than duplicated ad hoc per assertion site: a URL
+ * reached anywhere in the PKCE flow (the app itself, the Keycloak login
+ * form, the `/oidc/callback` landing) must be same-origin with
+ * `configuredOrigin()`, must never resolve to a bare container service name
+ * (`keycloak:8080` — reachable only from other containers on the stack's
+ * `internal` network, never from a real browser), and any Keycloak realm
+ * path must carry nginx's `/auth` proxy prefix (`deploy/nginx/conf.d/
+ * default.conf`'s `location /auth/`) — a bare `/realms/...` means the prefix
+ * was dropped somewhere and the browser is talking to Keycloak's own root
+ * context, exactly the #534 regression this suite exists to catch.
+ */
+export function assertOnConfiguredOrigin(url: string, where: string): void {
+	const origin = configuredOrigin();
+	if (url !== origin && !url.startsWith(`${origin}/`)) {
+		throw new Error(`${where}: expected an URL on the configured origin ${origin}, got ${url}`);
+	}
+	if (/keycloak:8080/i.test(url)) {
+		throw new Error(`${where}: URL resolved to the internal container service name, not the public origin: ${url}`);
+	}
+	if (/\/realms\//.test(url) && !/\/auth\/realms\//.test(url)) {
+		throw new Error(`${where}: URL carries a bare /realms/ path missing the /auth proxy prefix: ${url}`);
+	}
+}
+
+/**
+ * Drives the real Keycloak authorization-code/PKCE flow through nginx:
+ * clicks "Sign in with Keycloak" (an EXACT name match — the bug this test
+ * suite's own validation found (#847 orchestrator comment): the previous
+ * `getByRole('button', { name: /sign in/i })` regex also matched the
+ * dev-flag local-auth form's "Sign in (local)" button, a strict-mode
+ * violation with two legitimately-different, correctly-labeled buttons on
+ * screen at once — not a duplicate-accessible-name defect in the app, just
+ * an over-broad test selector), fills the Keycloak login form via its
+ * stable default-theme selectors (`#username`/`#password`/`#kc-login` —
+ * issue #848's own risk note), and waits for the `/oidc/callback` round trip
+ * to land back on an authenticated screen.
  */
 const LOGIN_RETRY_ATTEMPTS = 4;
 const LOGIN_RETRY_DELAY_MS = 1500;
 
-export async function login(page: Page, username = ADMIN_USERNAME, password = adminPassword()): Promise<void> {
+export async function login(page: Page, username = keycloakUsername(), password = adminPassword()): Promise<void> {
 	let lastFailure = "";
 	for (let attempt = 1; attempt <= LOGIN_RETRY_ATTEMPTS; attempt++) {
 		await page.goto("/");
-		await page.getByLabel("Username").fill(username);
-		await page.getByLabel("Password").fill(password);
-		await page.getByRole("button", { name: /sign in/i }).click();
+		assertOnConfiguredOrigin(page.url(), "login() initial navigation");
+
+		await page.getByRole("button", { name: "Sign in with Keycloak", exact: true }).click();
+		await page.waitForURL(/\/auth\/realms\/waypoint\//, { timeout: 15_000 }).catch(() => {});
+		assertOnConfiguredOrigin(page.url(), "login() Keycloak redirect");
+
+		await page.locator("#username").fill(username);
+		await page.locator("#password").fill(password);
+		await page.locator("#kc-login").click();
 
 		const wordmark = page.getByText("WAYPOINT", { exact: true }).first();
 		const alert = page.getByRole("alert");
@@ -62,28 +116,49 @@ export async function login(page: Page, username = ADMIN_USERNAME, password = ad
 		]).catch(() => "neither" as const);
 
 		if (outcome === "signed-in") {
-			// Chrome only renders once auth + the initial /system fetch resolve —
-			// the brand wordmark in the top bar (present on every authenticated
-			// screen) is a stable signal that login succeeded and the SPA shell
-			// mounted, without coupling to any one screen's own content.
+			// The callback round trip (`/oidc/callback`) replaces the URL via
+			// `history.replaceState` before this resolves — same-origin proof
+			// that the whole flow stayed on the configured origin throughout.
+			assertOnConfiguredOrigin(page.url(), "login() post-callback landing");
 			return;
 		}
 
 		const alertText = outcome === "alert" ? ((await alert.textContent()) ?? "").trim() : "";
-		lastFailure = alertText
-			? `alert: "${alertText}"`
-			: "no alert shown, wordmark never appeared";
+		lastFailure = alertText ? `alert: "${alertText}"` : "no alert shown, wordmark never appeared";
 
 		if (attempt < LOGIN_RETRY_ATTEMPTS) {
-			// Any first-login failure is retried as a cold-start warm-up probe —
-			// the invalid-credentials alert cannot be told apart from the #503
-			// backend-readiness race by text, so we retry it too. A genuine
-			// credential break simply exhausts these retries in a few seconds.
+			// Same cold-start warm-up rationale issue #503 documented for the
+			// old local-auth flow: the very first request against a freshly
+			// healthy backend/Keycloak can still race readiness.
 			await page.waitForTimeout(LOGIN_RETRY_DELAY_MS);
 		}
 	}
 
 	throw new Error(`login() did not reach an authenticated screen after ${LOGIN_RETRY_ATTEMPTS} attempts (last: ${lastFailure})`);
+}
+
+/**
+ * Reads the bearer token the app itself is holding (`lib/auth.tsx`'s
+ * `sessionStorage` session, `waypoint.session`) — used to independently
+ * verify `GET /api/v1/auth/me` server-side, rather than trusting only the
+ * SPA's own rendered chrome.
+ */
+export async function currentSessionToken(page: Page): Promise<string> {
+	const token = await page.evaluate(() => {
+		const raw = window.sessionStorage.getItem("waypoint.session");
+		if (!raw) {
+			return null;
+		}
+		try {
+			return (JSON.parse(raw) as { token?: unknown }).token ?? null;
+		} catch {
+			return null;
+		}
+	});
+	if (typeof token !== "string" || token.trim() === "") {
+		throw new Error("currentSessionToken(): no usable token in sessionStorage — was login() called first?");
+	}
+	return token;
 }
 
 /** Invented, obviously-fictional hostnames — never a real lab host (CLAUDE.md). */
