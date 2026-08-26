@@ -77,9 +77,17 @@ public sealed class InventoryRepository
 	/// <see cref="DiscoveredInventoryItem"/>'s doc comment) -- each item's
 	/// <c>ParentMoref</c> is resolved against parent rows already upserted earlier in
 	/// this same pass.
+	///
+	/// <paramref name="advanceAbsence"/> gates ONLY the removal-detection block below
+	/// (issue #865, ADR-0023): the caller passes <c>false</c> for a discovery pass its
+	/// PowerShell boundary reported as incomplete (some subtree failed to enumerate),
+	/// so the items this pass DID see are still upserted/un-removed as unverified-cache
+	/// refreshes, but nothing not seen this pass is marked removed -- a partial
+	/// boundary must never be read as "the rest is confirmed gone." The per-item upsert
+	/// loop itself is unchanged either way.
 	/// </summary>
 	public async Task<InventoryUpsertOutcome> UpsertDiscoveryResultsAsync(
-		Guid targetId, IReadOnlyList<DiscoveredInventoryItem> items, CancellationToken cancellationToken)
+		Guid targetId, IReadOnlyList<DiscoveredInventoryItem> items, CancellationToken cancellationToken, bool advanceAbsence = true)
 	{
 		ArgumentNullException.ThrowIfNull(items);
 
@@ -147,14 +155,20 @@ public sealed class InventoryRepository
 		// unreachable would have failed the job before reaching here, but an
 		// empty-but-successful enumeration is possible) marks everything removed, which
 		// is the correct read: this pass genuinely saw nothing.
-		int removed;
-		await using (NpgsqlCommand removeStale = new(
-			"""
-			UPDATE inventory_items
-			SET removed_at = now()
-			WHERE target_id = $1 AND removed_at IS NULL AND NOT (moref = ANY($2))
-			""", connection, transaction))
+		//
+		// Issue #865: skipped entirely when advanceAbsence is false -- a partial pass's
+		// unseen rows keep whatever removed_at they already had (ADR-0023 unverified
+		// cache), rather than this pass's incomplete view of "who's still there" being
+		// read as authoritative.
+		int removed = 0;
+		if (advanceAbsence)
 		{
+			await using NpgsqlCommand removeStale = new(
+				"""
+				UPDATE inventory_items
+				SET removed_at = now()
+				WHERE target_id = $1 AND removed_at IS NULL AND NOT (moref = ANY($2))
+				""", connection, transaction);
 			removeStale.Parameters.AddWithValue(targetId);
 			removeStale.Parameters.AddWithValue(seenMorefs.ToArray());
 			removed = await removeStale.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);

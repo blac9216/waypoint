@@ -47,9 +47,16 @@ public interface IComponentRepository
 	/// discovered fact and one per newly-marked absence. Runs as a single transaction,
 	/// same durability contract as
 	/// <see cref="Waypoint.Core.Discovery.InventoryRepository.UpsertDiscoveryResultsAsync"/>.
+	///
+	/// <paramref name="advanceAbsence"/> (issue #865, ADR-0023) gates ONLY the
+	/// mark-absent block: the caller passes <c>false</c> for a discovery pass whose
+	/// PowerShell boundary reported incomplete enumeration (a subtree failed), so
+	/// <paramref name="items"/> this pass DID see are still upserted/reconnected as
+	/// unverified-cache refreshes, but nothing this pass didn't see is marked absent --
+	/// a partial boundary must never "neither claim completeness nor advance absence."
 	/// </summary>
 	Task<ComponentUpsertOutcome> UpsertDiscoveredAsync(
-		Guid targetId, IReadOnlyList<DiscoveredComponent> items, CancellationToken cancellationToken);
+		Guid targetId, IReadOnlyList<DiscoveredComponent> items, CancellationToken cancellationToken, bool advanceAbsence = true);
 
 	/// <summary>
 	/// Admin configured-fact write (docs/api-contract.md <c>PUT /components/{id}</c>:

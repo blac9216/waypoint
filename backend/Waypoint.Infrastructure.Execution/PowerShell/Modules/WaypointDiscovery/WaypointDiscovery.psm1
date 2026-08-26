@@ -54,6 +54,20 @@ function Invoke-WaypointDiscovery {
 	    One [pscustomobject] per discovered item: Type ('cluster'|'host'|'vm'), MoRef,
 	    Name, ParentMoRef (nullable), Build (nullable), MaintenanceMode (nullable
 	    bool). Clusters and hosts are emitted before their children.
+
+	    Issue #865 (ADR-0023 completeness gap): the default $ErrorActionPreference is
+	    'Continue', so a non-terminating PowerCLI error on one subtree (an unreachable
+	    ESXi host, a permission-denied cluster) does not stop the pipeline -- it emits
+	    whatever it COULD enumerate and returns, which used to look identical to a
+	    genuinely complete pass. This function now wraps each subtree walk (per-cluster
+	    and the standalone-host sweep) in its own try/catch with
+	    -ErrorAction Stop scoped to just that walk, so a subtree failure is caught
+	    locally (its objects are simply skipped) rather than left as an ambient
+	    non-terminating error the caller can only infer from HadErrors. The walk emits
+	    exactly one trailing completeness-marker record --
+	    Type = 'discovery-meta', Complete (bool), Errors (string[]) -- as the LAST
+	    output object, giving the C# side an explicit, structured completeness signal
+	    instead of a heuristic over HadErrors/streams.
 	#>
 	[CmdletBinding()]
 	param(
@@ -96,6 +110,13 @@ function Invoke-WaypointDiscovery {
 	# never succeed in the noninteractive compliance runner.
 	$Connection = Connect-StigVIServer -VCenter $VCenter -VSphereCredential $Credential -SkipVCSACredential -Source 'Discovery'
 
+	# Issue #865: collected per-subtree failure messages, surfaced verbatim (already
+	# PowerCLI's own text, no secrets ever flow through this path) in the trailing
+	# discovery-meta record so DiscoverJobHandler can raise them as the pass's
+	# partial-failure diagnostic rather than the caller having to re-derive "why" from
+	# HadErrors/streams alone.
+	$EnumerationErrors = [System.Collections.Generic.List[string]]::new()
+
 	try {
 		foreach ($Session in $Connection.Sessions) {
 			foreach ($Cluster in (Get-Cluster -Server $Session)) {
@@ -108,52 +129,75 @@ function Invoke-WaypointDiscovery {
 					MaintenanceMode = $null
 				}
 
-				foreach ($VMHost in (Get-VMHost -Server $Session -Location $Cluster)) {
-					[pscustomobject]@{
-						Type            = 'host'
-						MoRef           = $VMHost.ExtensionData.MoRef.Value
-						Name            = $VMHost.Name
-						ParentMoRef     = $Cluster.ExtensionData.MoRef.Value
-						Build           = $VMHost.Build
-						MaintenanceMode = ($VMHost.ConnectionState -eq 'Maintenance')
-					}
-
-					foreach ($VM in (Get-VM -Server $Session -Location $VMHost)) {
+				# Each cluster's host/VM walk is its own completeness boundary: a
+				# permission-denied or unreachable subtree under ONE cluster must not
+				# silently look identical to a fully-enumerated pass. -ErrorAction Stop
+				# turns what PowerCLI would otherwise report as a non-terminating error
+				# (pipeline keeps going, HadErrors set) into a terminating one scoped to
+				# just this try, caught here and recorded -- the rest of the vCenter is
+				# still walked.
+				try {
+					foreach ($VMHost in (Get-VMHost -Server $Session -Location $Cluster -ErrorAction Stop)) {
 						[pscustomobject]@{
-							Type            = 'vm'
-							MoRef           = $VM.ExtensionData.MoRef.Value
-							Name            = $VM.Name
-							ParentMoRef     = $VMHost.ExtensionData.MoRef.Value
-							Build           = $VM.Guest.ToolsVersion
-							MaintenanceMode = $null
+							Type            = 'host'
+							MoRef           = $VMHost.ExtensionData.MoRef.Value
+							Name            = $VMHost.Name
+							ParentMoRef     = $Cluster.ExtensionData.MoRef.Value
+							Build           = $VMHost.Build
+							MaintenanceMode = ($VMHost.ConnectionState -eq 'Maintenance')
+						}
+
+						try {
+							foreach ($VM in (Get-VM -Server $Session -Location $VMHost -ErrorAction Stop)) {
+								[pscustomobject]@{
+									Type            = 'vm'
+									MoRef           = $VM.ExtensionData.MoRef.Value
+									Name            = $VM.Name
+									ParentMoRef     = $VMHost.ExtensionData.MoRef.Value
+									Build           = $VM.Guest.ToolsVersion
+									MaintenanceMode = $null
+								}
+							}
+						} catch {
+							$EnumerationErrors.Add("VM enumeration failed under host '$($VMHost.Name)' (cluster '$($Cluster.Name)'): $($_.Exception.Message)")
 						}
 					}
+				} catch {
+					$EnumerationErrors.Add("Host enumeration failed under cluster '$($Cluster.Name)': $($_.Exception.Message)")
 				}
 			}
 
 			# Hosts with no cluster (standalone) belong directly to the datacenter --
 			# emitted with a null ParentMoRef so they appear at the tree's top level,
-			# same as a cluster does.
-			foreach ($VMHost in (Get-VMHost -Server $Session | Where-Object { -not $_.Parent -or $_.Parent -isnot [VMware.VimAutomation.ViCore.Types.V1.Inventory.Cluster] })) {
-				[pscustomobject]@{
-					Type            = 'host'
-					MoRef           = $VMHost.ExtensionData.MoRef.Value
-					Name            = $VMHost.Name
-					ParentMoRef     = $null
-					Build           = $VMHost.Build
-					MaintenanceMode = ($VMHost.ConnectionState -eq 'Maintenance')
-				}
-
-				foreach ($VM in (Get-VM -Server $Session -Location $VMHost)) {
+			# same as a cluster does. Same per-subtree completeness boundary as above.
+			try {
+				foreach ($VMHost in (Get-VMHost -Server $Session -ErrorAction Stop | Where-Object { -not $_.Parent -or $_.Parent -isnot [VMware.VimAutomation.ViCore.Types.V1.Inventory.Cluster] })) {
 					[pscustomobject]@{
-						Type            = 'vm'
-						MoRef           = $VM.ExtensionData.MoRef.Value
-						Name            = $VM.Name
-						ParentMoRef     = $VMHost.ExtensionData.MoRef.Value
-						Build           = $VM.Guest.ToolsVersion
-						MaintenanceMode = $null
+						Type            = 'host'
+						MoRef           = $VMHost.ExtensionData.MoRef.Value
+						Name            = $VMHost.Name
+						ParentMoRef     = $null
+						Build           = $VMHost.Build
+						MaintenanceMode = ($VMHost.ConnectionState -eq 'Maintenance')
+					}
+
+					try {
+						foreach ($VM in (Get-VM -Server $Session -Location $VMHost -ErrorAction Stop)) {
+							[pscustomobject]@{
+								Type            = 'vm'
+								MoRef           = $VM.ExtensionData.MoRef.Value
+								Name            = $VM.Name
+								ParentMoRef     = $VMHost.ExtensionData.MoRef.Value
+								Build           = $VM.Guest.ToolsVersion
+								MaintenanceMode = $null
+							}
+						}
+					} catch {
+						$EnumerationErrors.Add("VM enumeration failed under standalone host '$($VMHost.Name)': $($_.Exception.Message)")
 					}
 				}
+			} catch {
+				$EnumerationErrors.Add("Standalone host enumeration failed: $($_.Exception.Message)")
 			}
 		}
 	} finally {
@@ -161,6 +205,18 @@ function Invoke-WaypointDiscovery {
 			Write-Information "Disconnecting from vCenter '$VCenter' after discovery."
 			Disconnect-VIServer -Server $Connection.Sessions -Confirm:$false -ErrorAction SilentlyContinue
 		}
+	}
+
+	# Issue #865: the explicit completeness signal. Always the LAST object emitted, so
+	# DiscoverJobHandler can pull it off the end of the output list without scanning:
+	# Complete = $false whenever ANY subtree above was skipped due to a caught error --
+	# a genuinely empty vCenter (no clusters, no standalone hosts, zero errors) still
+	# reports Complete = $true, matching the "genuinely empty" success case #618
+	# already established for the item list itself.
+	[pscustomobject]@{
+		Type     = 'discovery-meta'
+		Complete = ($EnumerationErrors.Count -eq 0)
+		Errors   = $EnumerationErrors.ToArray()
 	}
 }
 

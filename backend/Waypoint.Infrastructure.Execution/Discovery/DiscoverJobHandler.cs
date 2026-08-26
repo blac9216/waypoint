@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Components;
@@ -237,7 +238,13 @@ public sealed class DiscoverJobHandler : IJobHandler
 			return isAuthFailure ? JobExecutionOutcome.AuthFailed(note) : JobExecutionOutcome.Failed(note);
 		}
 
-		DiscoveryParseOutcome parseOutcome = ParseDiscoveredItems(result.Output);
+		// Issue #865: pull the trailing discovery-meta completeness marker (if any) off
+		// the raw output BEFORE parsing inventory rows -- it is the module's own signal,
+		// never an inventory item, and must not be counted as a malformed row nor mapped
+		// into a component.
+		CompletenessMarker completeness = ExtractCompletenessMarker(result.Output, out IReadOnlyList<object?> itemOutput);
+
+		DiscoveryParseOutcome parseOutcome = ParseDiscoveredItems(itemOutput);
 		if (parseOutcome.MalformedCount > 0)
 		{
 			// Issue #618: a row the module emitted but this handler could not parse
@@ -251,29 +258,34 @@ public sealed class DiscoverJobHandler : IJobHandler
 			await _targets.SetDiscoveryStatusAsync(targetId, TargetDiscoveryStatuses.Failed, stampLastRefreshed: false, cancellationToken)
 				.ConfigureAwait(false);
 			return JobExecutionOutcome.Failed(
-				$"discover invoked successfully but {parseOutcome.MalformedCount} of {result.Output.Count} returned row(s) could not be parsed " +
+				$"discover invoked successfully but {parseOutcome.MalformedCount} of {itemOutput.Count} returned row(s) could not be parsed " +
 				"(missing Type/MoRef/Name, or not a structured object) -- treating this as a failure rather than a silent zero-item success. " +
 				"This usually means the PowerShell output-capture path lost the module's object properties; check the compliance-runner logs.");
 		}
 
+		// Issue #865 (ADR-0023 "a failed or partial boundary ... neither claims
+		// completeness nor advances absence"): a non-terminating per-subtree failure
+		// (unreachable ESXi, permission-denied cluster) reports Succeeded == true with
+		// only the objects it COULD enumerate -- completeness.IsComplete is false for
+		// exactly that case (see the module's discovery-meta marker doc comment).
+		// advanceAbsence gates ONLY the mark-removed/mark-absent block in each
+		// repository; the items this pass DID see are still upserted/un-removed below
+		// as an unverified-cache refresh, never silently dropped.
+		bool advanceAbsence = completeness.IsComplete;
+
 		IReadOnlyList<DiscoveredInventoryItem> items = parseOutcome.Items;
-		InventoryUpsertOutcome outcome = await _inventory.UpsertDiscoveryResultsAsync(targetId, items, cancellationToken).ConfigureAwait(false);
+		InventoryUpsertOutcome outcome = await _inventory
+			.UpsertDiscoveryResultsAsync(targetId, items, cancellationToken, advanceAbsence).ConfigureAwait(false);
 
 		// Issue #732 (discovery-wiring remainder): this point in the method is reached
 		// ONLY for a successful, fully-parsed enumeration -- every earlier return above
 		// (connection/auth failure, malformed row, PowerShell invocation failure) already
-		// bails out before this line, so a partial or failed discovery boundary can never
-		// reach ComponentUpsertOutcome/mass-absent components (ADR-0023 "a failed or
-		// partial boundary ... neither claims completeness nor advances absence" --
-		// enforced here by construction, not by a separate flag: the same fail-closed gate
-		// InventoryRepository's own removal detection already relies on for `items`, one
-		// call above this one). An empty-but-successful enumeration (a target that
-		// genuinely has zero inventory) still reaches here and correctly marks every
-		// previously-active component absent, matching InventoryUpsertOutcome's own
-		// documented behavior for the identical case.
+		// bails out before this line. A partial pass (advanceAbsence == false) still
+		// upserts the components it DID see, but neither repository call above/below
+		// advances absence for anything it didn't.
 		IReadOnlyList<DiscoveredComponent> componentItems = MapToComponents(items);
 		ComponentUpsertOutcome componentOutcome = await _components
-			.UpsertDiscoveredAsync(targetId, componentItems, cancellationToken).ConfigureAwait(false);
+			.UpsertDiscoveredAsync(targetId, componentItems, cancellationToken, advanceAbsence).ConfigureAwait(false);
 
 		string progressPayload = JsonSerializer.Serialize(new
 		{
@@ -282,17 +294,82 @@ public sealed class DiscoverJobHandler : IJobHandler
 			components_upserted = componentOutcome.Upserted,
 			components_absent = componentOutcome.MarkedAbsent,
 			components_reconnected = componentOutcome.Reconnected,
+			complete = completeness.IsComplete,
+			enumeration_errors = completeness.Errors,
 		});
 		await context.Events
 			.EmitAsync(JobEventTypes.DiscoverProgress, context.Job.Id, context.Job.RunId, progressPayload, cancellationToken)
 			.ConfigureAwait(false);
 
+		if (!completeness.IsComplete)
+		{
+			// Issue #865's alert path: reuse the same job.log severity idiom every other
+			// PowerShell stream record uses (PowerShellExecutor.Emit) rather than
+			// inventing a new alert channel -- a "warning" job.log line naming exactly
+			// which subtrees failed, readable from the same live log view/job history an
+			// operator already checks for a target.
+			string errorSummary = string.Join("; ", completeness.Errors);
+			string warningPayload = JsonSerializer.Serialize(new { severity = "warning", line = $"discover: partial vSphere enumeration -- absence NOT advanced this pass. {errorSummary}" });
+			await context.Events
+				.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, warningPayload, cancellationToken)
+				.ConfigureAwait(false);
+		}
+
 		await _targets.SetDiscoveryStatusAsync(targetId, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, cancellationToken)
 			.ConfigureAwait(false);
 
+		string completenessNote = completeness.IsComplete
+			? string.Empty
+			: $" PARTIAL enumeration ({completeness.Errors.Count} subtree error(s)) -- absence NOT advanced this pass, earlier rows retained as unverified cache (ADR-0023).";
 		return JobExecutionOutcome.Succeeded(
 			$"Discovered {outcome.Upserted} item(s), marked {outcome.Removed} removed. " +
-			$"Components: {componentOutcome.Upserted} upserted, {componentOutcome.Reconnected} reconnected, {componentOutcome.MarkedAbsent} marked absent.");
+			$"Components: {componentOutcome.Upserted} upserted, {componentOutcome.Reconnected} reconnected, {componentOutcome.MarkedAbsent} marked absent.{completenessNote}");
+	}
+
+	/// <summary>
+	/// Whether the discovery boundary the module ran was complete. <see cref="IsComplete"/>
+	/// defaults true for a legacy/stub module that never emits a <c>discovery-meta</c>
+	/// row at all (issue #865 ships behind the existing <c>succeeded</c> gate, not a
+	/// breaking output-shape requirement) -- only an explicit
+	/// <c>Complete = $false</c> marker gates absence off.
+	/// </summary>
+	private sealed record CompletenessMarker(bool IsComplete, IReadOnlyList<string> Errors)
+	{
+		public static readonly CompletenessMarker AssumedComplete = new(true, []);
+	}
+
+	/// <summary>
+	/// Pulls the module's trailing <c>Type = 'discovery-meta'</c> record (issue #865) off
+	/// the end of the raw output, if present, and returns the remaining rows via
+	/// <paramref name="itemOutput"/> for <see cref="ParseDiscoveredItems"/>. A module that
+	/// predates this marker (e.g. an older stub) simply never emits one --
+	/// <see cref="CompletenessMarker.AssumedComplete"/> preserves today's behavior for it.
+	/// </summary>
+	private static CompletenessMarker ExtractCompletenessMarker(IReadOnlyList<object?> output, out IReadOnlyList<object?> itemOutput)
+	{
+		if (output.Count == 0 || output[^1] is not System.Management.Automation.PSObject last ||
+			GetProperty<string>(last, "Type") != "discovery-meta")
+		{
+			itemOutput = output;
+			return CompletenessMarker.AssumedComplete;
+		}
+
+		itemOutput = output.Take(output.Count - 1).ToList();
+
+		bool isComplete = last.Properties["Complete"]?.Value is bool complete ? complete : true;
+		List<string> errors = [];
+		if (last.Properties["Errors"]?.Value is System.Collections.IEnumerable rawErrors)
+		{
+			foreach (object? entry in rawErrors)
+			{
+				if (entry is not null)
+				{
+					errors.Add(entry.ToString() ?? string.Empty);
+				}
+			}
+		}
+
+		return new CompletenessMarker(isComplete, errors);
 	}
 
 	/// <summary>
