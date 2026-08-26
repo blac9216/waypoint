@@ -1,6 +1,8 @@
 # ADR-0021: Credential-purpose matrix — explicit purposes, not numbered slots
 
-Status: Accepted
+Status: Accepted; §§4–7 target-only defaulting, whole-run missing-binding rejection,
+and schedule-carried overrides superseded by
+[ADR-0024](0024-compliance-execution-attempts-credentials-and-settings.md)
 
 Part of epic [#582](https://github.com/blac9216/waypoint/issues/582), first sub-issue
 [#583](https://github.com/blac9216/waypoint/issues/583). Does not supersede any prior

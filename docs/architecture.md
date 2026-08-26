@@ -225,6 +225,72 @@ new plan and run. #807 defines the contents and precedence of access/configurati
 snapshots, not whether they are frozen; trust/evidence is #808 and wire authorization
 is #785.
 
+### Component execution, attempts, and run projection
+
+📋 **Planned** ([ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md)).
+Every concrete planned component item maps to exactly one Postgres job. That job is
+the sole ownership, priority, lease, cancellation, and capacity-admission unit;
+readiness-failed component jobs remain visible even when they have no attempt, while
+coverage omissions outside the resolved component set remain plan/result rows without
+fake jobs. The compliance run is a domain projection over these jobs, not a family-job
+subtask engine or second scheduler.
+
+A component job retains ordered, append-only attempts. ADR-0012 stage requeue/recovery
+resumes the current attempt at its durable stage marker. Stop cooperatively cancels
+that attempt and completes its cleanup accounting; Start/retry/restart creates a new
+attempt against the same immutable planned item. It cannot substitute current
+inventory, content, settings, trust, or a same-named target. Each attempt retains its
+timing, stage/runner attribution, resolved credential attribution, redacted events and
+logs, cancellation/cleanup outcome, results, and artifact references. Only one
+attempt is active for a component job.
+
+The latest completed attempt supplies the component's current result and aggregate
+contribution. A successful retry can move the current component/run result from failed
+to successful without erasing the earlier failure, logs, or artifacts. Independent
+coverage omissions still make the run incomplete. The duplicate/concurrent policy
+between separate runs remains #649; this hierarchy does not decide it.
+
+The run-centric compliance workspace and ADR-0019 global Live Jobs are complementary
+projections over the same records. Live Jobs stays cross-domain and operational;
+compliance supplies grouped catalog-priority/state counters, bounded cursor-paged and
+searchable component rows, and selected-attempt detail. At 10,000+ jobs neither API
+nor browser loads every row/event. Bounded SSE catch-up and persisted-event pagination
+must expose continuation rather than silently truncate (#721/#757). Selection and
+grouping do not constrain execution: runners retain ADRs 0013/0014 ownership and each
+component job uses ADRs 0018/0020 capacity admission.
+
+### Credentials and per-control settings
+
+📋 **Planned** (ADR-0024, narrowing [ADR-0021](adr/0021-credential-purpose-matrix.md)).
+The catalog declares each component's required named purposes. Reusable service
+credentials resolve `component/purpose → top-level target/purpose`; the most specific
+compatible binding wins. Interactive Cyber-or-higher users may apply a compatible
+saved run override, and Operator-or-higher may use an ADR-0016 personal run secret.
+Scheduled runs resolve only configured component/target service bindings at dispatch
+and never carry interactive or ad hoc overrides. Final non-secret binding provenance
+is frozen per planned component.
+
+A missing/incompatible credential or required input is a component-job-scoped
+readiness failure. The job remains visible with no execution attempt; independent jobs
+continue and the run reports incomplete coverage with a safe component/purpose or
+input reason. No secret value enters errors, events, logs, or results. An authorized
+compatible credential swap can repair access for a later attempt, with old/new
+attribution and actor/time/reason audited, but cannot change any plan content.
+Halt/swap/query behavior therefore follows every component-purpose binding rather
+than the legacy single credential column.
+
+Input, Attestation, and future Remediation settings are independently versioned per
+stable baseline control, not profile-wide documents. Each resolves
+`Global → Site → Target`, most specific value winning. Planning snapshots the effective
+value/reference/digest, source layer/version, provenance, applicability, and
+attestation expiry for every control; all attempts reuse that immutable snapshot.
+Later edits require a new run. Remediation execution remains #15.
+
+An applicable non-automatable control without a valid attestation remains
+`Not_Reviewed`; there is no post-scan human-assessment workflow. Expired attestations
+are not applied. Applicable controls that fail to execute likewise remain
+`Not_Reviewed`, never `Not_Applicable` or omitted.
+
 ### Legacy disposition
 
 The shipped profile picker and payload `scope.profile_id` are transitional, not a
@@ -238,6 +304,14 @@ remains open as a distinct duplicate/concurrent-scan policy and implementation i
 Immutable plans preserve each run's exact intent, but do not decide duplicate operator
 intent, simultaneous load on the same endpoint, credential lockout/rate-limit risk,
 or whether overlapping runs should reject, queue, or warn.
+
+The planned model also dispositions related follow-ups without falsely closing their
+remaining work. #607 still supplies real scan-wrapper qualification; #608 still
+requires runner-wide noninteractive prompt prevention; and #612 still prevents an
+advisory log flag from becoming job outcome. #664 becomes binding-aware halt/swap/query
+delivery for every component-purpose pair. #665 and #678 remain transitional
+wire-test/UI cleanup for #785/#786. #721 and #757 remain the required pagination,
+streaming, virtualization, and five-digit-job scale implementation.
 
 ## Identity & authorization
 

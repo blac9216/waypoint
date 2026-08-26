@@ -135,11 +135,14 @@ retirement, or purge cannot rewrite them. Retry uses the same planned item; reso
 current state creates a new run. Jobs and ordered attempts are separate execution
 records defined by #807 rather than mutable plan fields.
 
-**Credential purposes (design; not yet persisted — [ADR-0021](adr/0021-credential-purpose-matrix.md), issue #583).**
+**Credential purposes and bindings (end state planned —
+[ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
 A single `credentialRef` per target is not enough: `vsphere` targets need a distinct
 vSphere API credential and VCSA SSH credential, satisfiable independently. ADR-0021
-defines four named purposes (never generic numbered slots) and which operations need
-which:
+defines named purposes (never generic numbered slots) and the compatibility matrix;
+ADR-0024 preserves that closed contract while superseding target-only defaulting,
+whole-run missing-binding rejection, and schedule overrides. Catalog-declared
+`vcf-api` work cannot execute until the catalog adds a distinct compatible purpose.
 
 | Purpose | Satisfying credential type | Meaning |
 |---|---|---|
@@ -164,27 +167,45 @@ Target kind × operation → required/optional purposes:
 Discovery requires only `vsphere-api`, never `vcsa-ssh` (issue #580/PR #606 fixed a bug
 where discovery and vSphere-API credential testing incorrectly prompted for a VCSA
 credential). `nsx-api` and `ssh` targets have no discovery operation at all today (only
-`vsphere` is inventory-capable). See ADR-0021 for defaulting, override, snapshot,
-audit, missing-binding, and scheduling behavior. **This is a design-and-contracts
-slice only** — #584 adds persistence, #585/#586 wire it into execution, #587 updates the
-wizard UI; nothing consumes this matrix at runtime yet.
+`vsphere` is inventory-capable).
+
+Reusable service bindings are keyed by `(component, purpose)` or
+`(top-level target, purpose)`. Resolution is most-specific-first:
+
+1. compatible interactive saved/ad hoc override, when allowed;
+2. compatible component/purpose service binding;
+3. compatible target/purpose service binding.
+
+Interactive overrides are run-scoped, audited, and available as saved credentials to
+Cyber-or-higher or personal credentials to Operator-or-higher. Scheduled runs omit
+layer 1 entirely: they resolve only configured component then target service bindings
+at dispatch. A schedule never carries an interactive/ad hoc override. The plan
+snapshots credential identity/tier, purpose, source layer, component/target
+attribution, and actor without copying retrievable secret material.
+
+Missing, incompatible, or ambiguous resolution creates a safe readiness failure only
+for each component job requiring that purpose. Its job remains visible with no active
+attempt while independent jobs continue and the run is incomplete. An authorized
+later attempt may use an audited, compatible credential repair for that
+component/purpose, but access repair does not rewrite any plan field.
+Credential-failure halt, swap, and queries inspect every resolved component-purpose
+binding, not the transitional `jobs.credential_id` mirror.
 
 ### Credential
 Two tiers ([ADR-0011](adr/0011-credential-tiers.md)):
 
 - **Service/shared** — stored in the encrypted store ([ADR-0005](adr/0005-secrets.md)),
   decryptable autonomously for scheduled/system runs. Targets reference these via
-  `credentialRef`. "One global service account" is just the degenerate case where
-  every target references the same credential — the model does not assume it.
+  purpose bindings; components may override the target binding. "One global service
+  account" is only the degenerate case where every binding references one credential.
 - **Personal** — **never a row in the reusable credential store**. An ad hoc run using
   "my credentials" prompts the user at run initiation; the value is envelope-encrypted
-  into a separate, run-scoped `run_secrets` row (one per run, referenced by that run's
-  jobs) so vCenter audit logs attribute actions to the human, a dedicated runner can
-  decrypt it at the point of use, and an API restart between run creation and job claim
-  does not force credential re-entry (issue #434). The row is terminal/expiry
-  bounded: the backend deletes it the moment the run reaches a terminal state
-  (completed, completed_with_failures, aborted), and a cleanup sweep removes any that
-  outlive a bounded expiry window (an abandoned/crashed run). See
+  into purpose-keyed, run-scoped `run_secrets` records referenced by planned component
+  bindings so upstream audit logs attribute actions to the human, a dedicated runner
+  can decrypt at use, and an API restart before claim does not force re-entry (issue
+  #434). Records are terminal/expiry bounded: the backend deletes them when the run is
+  terminal (`completed`, `completed_with_failures`, `aborted`), and a cleanup sweep
+  removes any that outlive a bounded expiry window (an abandoned/crashed run). See
   [security.md](security.md) for the threat model this replaces.
 
 Stored credentials are write-only through the API: overwrite or delete, never read
@@ -192,8 +213,13 @@ back. Threat model and leakage controls: [security.md](security.md).
 
 ### Run and Job
 A **Run** is what a user initiates ("scan site A, products X/Y, these 14 hosts"). The
-job engine fans it out into **Jobs** (one per target/component), each carrying priority,
-state, logs, and results. Job types: `scan`, `remediate`, `discover`, `credential-test`, `download`,
+compliance plan maps each concrete `PlannedComponentItem` to exactly one Postgres
+**Job**. A readiness-failed job may have zero attempts but stays visible. Coverage
+omissions outside the resolved component set remain planned/result rows and do not
+manufacture jobs. The job is the sole queue, priority, lease, cancellation, and
+capacity-admission unit;
+the Run is a domain projection, never a second scheduler. Other job families retain
+their own fan-out. Job types: `scan`, `remediate`, `discover`, `credential-test`, `download`,
 `catalog-index`, `bundle-export`, `bundle-import`, `content-library-sync`,
 `content-pull`, `content-import`, `update`.
 
@@ -204,15 +230,33 @@ cancellation checks, stage transitions, events, and terminal state. See
 [ADR-0013](adr/0013-control-plane-and-runners.md) and
 [ADR-0014](adr/0014-runner-job-ownership.md).
 
-Per-target scan states: `queued → running → attesting → converting → uploaded | done |
+Each compliance component job owns monotonically numbered, append-only **Attempts**.
+An attempt records start/end, runner/lease and stage transitions, credential-binding
+attribution, redacted events/logs, cancellation and cleanup state, outcome, and result/
+artifact references. ADR-0012 requeue/recovery resumes the same attempt from its
+durable stage. Stop cancels the current attempt; Start/retry/restart creates a new
+attempt over the same immutable planned item. Only one attempt is active per component
+job. Separate-run duplicate/concurrency policy remains #649.
+
+`current_result` is the latest completed attempt's result. A successful retry may
+change a component and aggregate run from failed to successful, but every prior
+attempt/result remains immutable and visible. Coverage omissions are aggregated
+separately and continue to make the run incomplete. Global Live Jobs and the
+run-centric compliance workspace query these same jobs/attempts: the former is the
+ADR-0019 cross-domain operational view; the latter uses server-side grouped counts,
+cursor-paged/searchable rows, and selected-attempt event queries. Five-digit runs must
+not load all jobs/events into API or browser memory (#721/#757).
+
+Per-component scan states: `queued → running → attesting → converting → uploaded | done |
 failed | auth-failed | blocked`.
 
-Run behaviors (from the UI prototype reconciliation, now backend requirements):
+Run behaviors (planned compliance changes remain ADR-0024 implementation work):
 
 - **Auth-failure queue halt**: N consecutive `auth-failed` results (default 3) against
-  the same credential halt that priority queue (`blocked`) instead of continuing —
-  hammering a failing service account locks it out of AD. An Admin can swap the
-  credential and resume, which re-queues the blocked targets.
+  the same resolved component-purpose credential halt affected work instead of
+  continuing — hammering a failing service account risks lockout. An authorized
+  compatible credential repair is audited and may start later attempts without
+  changing plan content. Independent credentials/components continue.
 - **Run controls**: pause queue (stop dispatching, let in-flight finish) and abort run.
 - Backend keeps the **six** catalog-declared priorities (NSX=1 … VM=5, SRG=6); the UI
   may group VM+SRG visually, but the priority column is six-valued.
@@ -299,28 +343,33 @@ call after purge is unaffected. Every other type in the table below (`None` gate
 eligible once terminal and aged, identically to what an Admin could already do by hand
 via the same endpoint.
 
-### STIG configuration documents
-SAF attestation YAML, InSpec input YAML, remediation input files — stored as **documents
-in Postgres** (not parsed into forms; the schemas belong to Broadcom/MITRE and change
-under us). Edited in a code-editor pane with validation. **Every save creates a version
-with author + timestamp** — "who changed the attestation that waived this finding" is
-an auditor question the tool must answer.
+### Per-control compliance settings
 
-Content model (refined by the UI design pass):
+📋 **Planned** (ADR-0024). The shipped profile-wide configuration-document shortcut is
+transitional. **Input**, **Attestation**, and future **Remediation** settings are three
+independently versioned kinds keyed by stable baseline control identity. Every save
+records author and timestamp. Remediation settings configure future behavior but do
+not authorize execution; remediation remains Admin-confirmed, unscheduled issue #15.
+
+Content model:
 
 - **InSpec profiles** (from the compliance-content repo) are the unit of execution. A
   profile is either **STIG-backed** (married to an XCCDF benchmark synced from STIG
   Manager or uploaded) or an **SRG** profile with no published STIG — SRG profiles
   still take inputs and attestations.
-- **Inputs** are values the scan needs to evaluate controls (syslog host, NTP list).
-  **Attestations** are waivers applied after the fact. **Remediation inputs** control
-  what a remediation run may change.
-- All three resolve through three layers — **Global → Site → Target**, most specific
-  wins. A lower layer may set a genuinely *different* value; it is not a tighten-only
-  relationship.
-- **Expired attestations are not applied**: the control reports Open, the run logs a
-  WARN, and Results lists expired attestations explicitly. A lapsed waiver must never
-  be applied silently.
+- Each kind resolves **Global → Site → Target**, most specific value winning. Absence
+  inherits; a lower layer may deliberately set a different value.
+- Planning freezes each effective value or secret reference/digest, setting/version,
+  source layer, applicability, and provenance. Attestation snapshots also include
+  actor/provenance and expiry. Every attempt reuses this snapshot; later edits require
+  a new run.
+- A missing required Input leaves only the affected component job visibly skipped
+  without an execution attempt and with a safe readiness reason. Independent work
+  continues and the run is incomplete; secret input values never appear in diagnostics.
+- An applicable non-automatable control with no valid Attestation is `Not_Reviewed`;
+  there is no post-scan human-assessment workflow. Expired attestations are not
+  applied and are reported explicitly. An applicable control that cannot execute is
+  also `Not_Reviewed`, never `Not_Applicable` or omitted.
 
 ### Compliance content (the profiles repo)
 The VMware DoD compliance-and-automation repo is managed appliance state, not a manual

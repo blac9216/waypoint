@@ -45,6 +45,7 @@ An append to Consequences must:
 | [0018](0018-shared-capacity-lease-pool.md) | Host-derived capacity discovery, startup admission invariant, shared capacity lease pool (design) | Accepted |
 | [0019](0019-global-job-observability.md) | Global Live Jobs observability with domain-owned results | Accepted |
 | [0020](0020-capacity-lease-pool-protocol.md) | Capacity lease pool protocol, recovery, and fairness policy | Accepted |
-| [0021](0021-credential-purpose-matrix.md) | Credential-purpose matrix — explicit purposes, not numbered slots | Accepted |
+| [0021](0021-credential-purpose-matrix.md) | Credential-purpose matrix — explicit purposes, not numbered slots | Accepted; §§4–7 narrowed/superseded by 0024 |
 | [0022](0022-compliance-catalog-and-content-lifecycle.md) | Closed compliance catalog and atomic content lifecycle | Accepted (planned) |
 | [0023](0023-compliance-inventory-and-immutable-plans.md) | Stable compliance inventory and immutable component plans | Accepted (planned) |
+| [0024](0024-compliance-execution-attempts-credentials-and-settings.md) | Compliance execution items, attempts, credentials, and control settings | Accepted (planned); supersedes parts of 0021 |
