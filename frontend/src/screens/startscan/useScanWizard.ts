@@ -6,20 +6,24 @@
  * components in ./StartScanSteps and renders the stepper/nav chrome.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, type CredentialBindingGap } from "../../lib/api";
+import { ApiError, type CredentialBindingGap, type ScopeOmission } from "../../lib/api";
 import { roleAtLeast, roleGateProps, type Role } from "../../lib/roles";
 import { CREDENTIAL_PURPOSE_SATISFYING_TYPES, requiredScanPurposes, type CredentialPurpose } from "../configuration/credential-purposes";
 import { fetchSites, fetchTargets, type Site, type Target, type TargetKind } from "../configuration/sites";
 import { fetchCredentialOptions, type CredentialOption } from "../configuration/sites";
 import {
+	buildComponentTree,
 	createScanRun,
 	fetchProfileOptions,
-	fetchTargetInventory,
-	flattenInventory,
+	fetchTargetComponents,
+	flattenComponentTree,
+	isSelectableComponent,
+	resolveTargetScope,
 	type AdHocCredentialInput,
+	type ComponentTreeNode,
 	type CredentialOverrideInput,
-	type InventoryItem,
 	type ProfileOption,
+	type TargetScopeInput,
 } from "./startscan";
 
 export type StepKey = "site" | "scope" | "credential" | "schedule" | "confirm";
@@ -68,16 +72,23 @@ export interface CoverageRow {
 	credentialName?: string;
 }
 
-/** One target's selection state for the scope step. `"all"` means every
- * inventory item under the target is included (also the state a target with
- * empty inventory falls back to when the whole target is toggled on),
- * `"partial"` drives the tri-state parent checkboxes, `"none"` excludes it. */
+/**
+ * One target's selection state for the scope step. Issue #733 rewired this
+ * from the legacy `inventory_items` tree onto the stable `components` model
+ * (`GET /targets/{id}/components`) — `selectedItemIds` now holds
+ * `component_id`s that are actually wired onto `POST /runs`'s
+ * `scope.target_scope`, not discarded (the bug this issue's summary names).
+ * `componentTree === null` means empty/not-yet-discovered: no components are
+ * known for this target, so the target-level checkbox is the only control
+ * and `target_scope` contributes nothing for it (legacy `target_ids`
+ * fallback, same as before #733).
+ */
 export interface TargetSelection {
 	target: Target;
-	inventory: InventoryItem[] | null;
+	componentTree: ComponentTreeNode[] | null;
 	loadingInventory: boolean;
-	/** Selected inventory item ids; ignored (target-level fallback) when
-	 * `inventory` is an empty array. */
+	/** Selected component ids; ignored (target-level fallback) when
+	 * `componentTree` is an empty array. */
 	selectedItemIds: Set<string>;
 	targetSelected: boolean;
 }
@@ -114,6 +125,8 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 	const [selections, setSelections] = useState<TargetSelection[]>([]);
 	const [scopeLoading, setScopeLoading] = useState(false);
 	const [scopeError, setScopeError] = useState<string | null>(null);
+	/** Issue #733: the last submit attempt's `scope_omissions` (400 `no_runnable_component`) — stale/removed selections that resolved to nothing runnable. Rendered on the Scope step with actionable refresh guidance (epic #726 §3: "fail with actionable refresh guidance rather than silently widening"), never auto-retried with a widened scope. Cleared on the next scope edit or submit attempt so a fixed selection never shows a stale error. */
+	const [scopeOmissionErrors, setScopeOmissionErrors] = useState<ScopeOmission[]>([]);
 
 	// Issue #639: the InSpec profile a scan executes against, fed by GET
 	// /profiles (docs/ui/prototype/README.md screen 3 step 2: "the list of
@@ -145,7 +158,7 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 			.then(async (targets) => {
 				const next: TargetSelection[] = targets.map((target) => ({
 					target,
-					inventory: null,
+					componentTree: null,
 					loadingInventory: true,
 					selectedItemIds: new Set<string>(),
 					targetSelected: true,
@@ -154,28 +167,31 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 				await Promise.all(
 					targets.map(async (target, index) => {
 						try {
-							const inv = await fetchTargetInventory(target.id);
-							const flat = flattenInventory(inv.items);
+							const items = await fetchTargetComponents(target.id);
+							const tree = buildComponentTree(items);
+							const selectableIds = flattenComponentTree(tree)
+								.filter(isSelectableComponent)
+								.map((node) => node.id);
 							setSelections((prev) => {
 								const copy = [...prev];
 								if (copy[index]?.target.id === target.id) {
 									copy[index] = {
 										...copy[index],
-										inventory: inv.items,
+										componentTree: tree,
 										loadingInventory: false,
-										selectedItemIds: new Set(flat.map((item) => item.id)),
+										selectedItemIds: new Set(selectableIds),
 									};
 								}
 								return copy;
 							});
 						} catch {
-							// Inventory fetch failure for one target falls back to the
-							// target-level checkbox, same as an empty inventory — a single
-							// target's discovery gap must not block scoping the rest.
+							// Component fetch failure for one target falls back to the
+							// target-level checkbox, same as an empty component tree — a
+							// single target's discovery gap must not block scoping the rest.
 							setSelections((prev) => {
 								const copy = [...prev];
 								if (copy[index]?.target.id === target.id) {
-									copy[index] = { ...copy[index], inventory: [], loadingInventory: false };
+									copy[index] = { ...copy[index], componentTree: [], loadingInventory: false };
 								}
 								return copy;
 							});
@@ -198,37 +214,130 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 		[loadScope],
 	);
 
+	/**
+	 * Issue #733 AC: "Parent tri-state semantics are deterministic." Toggling a
+	 * parent node (including the whole-target row) on/off always sets every
+	 * *selectable* (active) descendant to the same state — an explicit,
+	 * total function of the tree and the new state, never a partial/leave-as-is
+	 * merge. A parent's own checked/indeterminate/unchecked rendering is a pure
+	 * derivation from its children's selection at render time (`componentCheckState`
+	 * in StartScanSteps.tsx), never written into `selectedItemIds` itself, so
+	 * the same selection set always renders the same tri-state tree regardless
+	 * of the order clicks arrived in.
+	 */
 	const toggleTarget = useCallback((targetId: string, on: boolean) => {
 		setSelections((prev) =>
 			prev.map((sel) =>
 				sel.target.id === targetId
-					? { ...sel, targetSelected: on, selectedItemIds: on ? new Set(flattenInventory(sel.inventory ?? []).map((i) => i.id)) : new Set() }
+					? {
+							...sel,
+							targetSelected: on,
+							selectedItemIds: on ? new Set(flattenComponentTree(sel.componentTree ?? []).filter(isSelectableComponent).map((n) => n.id)) : new Set(),
+						}
 					: sel,
 			),
 		);
+		setScopeOmissionErrors([]);
 	}, []);
 
+	/** Sets `node` and every selectable descendant of `node` to `on` in `next` (mutates the passed `Set`). */
+	function setSubtreeSelection(node: ComponentTreeNode, on: boolean, next: Set<string>): void {
+		if (isSelectableComponent(node)) {
+			if (on) {
+				next.add(node.id);
+			} else {
+				next.delete(node.id);
+			}
+		}
+		for (const child of node.children) {
+			setSubtreeSelection(child, on, next);
+		}
+	}
+
+	function findNode(tree: ComponentTreeNode[], id: string): ComponentTreeNode | undefined {
+		for (const node of tree) {
+			if (node.id === id) {
+				return node;
+			}
+			const found = findNode(node.children, id);
+			if (found) {
+				return found;
+			}
+		}
+		return undefined;
+	}
+
+	/** Toggles one component node. Toggling a parent cascades to every selectable descendant (deterministic tri-state: "select all children" and "select this parent" are the same operation); toggling a leaf only ever changes that leaf — ancestor checked/indeterminate state is a pure read-time derivation (`componentCheckState` in StartScanSteps.tsx), never written here. */
 	const toggleInventoryItem = useCallback((targetId: string, itemId: string, on: boolean) => {
 		setSelections((prev) =>
 			prev.map((sel) => {
 				if (sel.target.id !== targetId) {
 					return sel;
 				}
+				const tree = sel.componentTree ?? [];
+				const node = findNode(tree, itemId);
 				const next = new Set(sel.selectedItemIds);
-				if (on) {
+				if (node) {
+					setSubtreeSelection(node, on, next);
+				} else if (on) {
 					next.add(itemId);
 				} else {
 					next.delete(itemId);
 				}
-				const total = flattenInventory(sel.inventory ?? []).length;
+				const total = flattenComponentTree(tree).filter(isSelectableComponent).length;
 				return { ...sel, selectedItemIds: next, targetSelected: next.size > 0 || total === 0 };
 			}),
 		);
+		setScopeOmissionErrors([]);
 	}, []);
 
 	const selectedTargetIds = useMemo(
-		() => selections.filter((s) => s.targetSelected && (s.inventory === null || s.inventory.length === 0 || s.selectedItemIds.size > 0)).map((s) => s.target.id),
+		() =>
+			selections
+				.filter((s) => s.targetSelected && (s.componentTree === null || s.componentTree.length === 0 || s.selectedItemIds.size > 0))
+				.map((s) => s.target.id),
 		[selections],
+	);
+
+	/**
+	 * Issue #733: resolves every target's tree selection into the wire's
+	 * `target_scope` shape. `all`-mode targets contribute their `target_id` to
+	 * one combined `{ mode: "all", target_ids }` request; any target with a
+	 * deliberately partial/empty selection instead contributes its resolved
+	 * component ids to one combined `{ mode: "explicit", component_ids }`
+	 * request — the two never mix within a single submitted `target_scope`
+	 * (docs/api-contract.md's `target_scope` is one mode for the whole
+	 * request). Mixed usage (some targets "all", others explicit) is resolved
+	 * conservatively to `explicit`: an `all`-mode target's *currently known*
+	 * selectable components are included by id rather than silently
+	 * broadening the explicit request back out to "all" scope wide. A target
+	 * with no known components (`componentTree` null/empty) contributes
+	 * nothing here — it still rides the legacy `target_ids` fallback.
+	 */
+	const targetScope = useMemo<TargetScopeInput | undefined>(() => {
+		const withComponents = selections.filter((s) => s.componentTree !== null && s.componentTree.length > 0);
+		if (withComponents.length === 0) {
+			return undefined;
+		}
+		const resolutions = withComponents.map((s) => ({
+			targetId: s.target.id,
+			resolved: resolveTargetScope(
+				flattenComponentTree(s.componentTree ?? []).filter(isSelectableComponent).map((n) => n.id),
+				s.selectedItemIds,
+			),
+		}));
+		const allMode = resolutions.every((r) => r.resolved?.mode === "all");
+		if (allMode) {
+			return { mode: "all", target_ids: resolutions.map((r) => r.targetId) };
+		}
+		const componentIds = resolutions.flatMap((r) => (r.resolved?.mode === "all" ? flattenComponentTree(selections.find((s) => s.target.id === r.targetId)?.componentTree ?? []).filter(isSelectableComponent).map((n) => n.id) : (r.resolved?.component_ids ?? [])));
+		return { mode: "explicit", component_ids: componentIds };
+	}, [selections]);
+
+	/** Issue #733 AC: "An empty explicit selection is presented honestly" — true when at least one target with known components resolved to an explicit selection of zero components (every component deliberately unchecked), so the wizard can warn without blocking or silently widening. */
+	const hasEmptyExplicitSelection = useMemo(
+		() => targetScope?.mode === "explicit" && targetScope.component_ids.length === 0 && selections.some((s) => s.componentTree !== null && s.componentTree.length > 0),
+		[targetScope, selections],
 	);
 
 	// -- step 3: credential ------------------------------------------------
@@ -384,10 +493,14 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 		setSubmitting(true);
 		setSubmitError(null);
 		setBindingGapErrors([]);
+		setScopeOmissionErrors([]);
 		try {
-			const scope = selectedTargetIds.length > 0 && selectedTargetIds.length < selections.length
-				? { site_id: siteId, target_ids: selectedTargetIds, profile_id: profileId }
-				: { site_id: siteId, profile_id: profileId };
+			const scope = {
+				site_id: siteId,
+				profile_id: profileId,
+				...(selectedTargetIds.length > 0 && selectedTargetIds.length < selections.length ? { target_ids: selectedTargetIds } : {}),
+				...(targetScope ? { target_scope: targetScope } : {}),
+			};
 
 			const credentialOverrides: CredentialOverrideInput[] = [];
 			const adHocCredentials: AdHocCredentialInput[] = [];
@@ -426,6 +539,12 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 			if (err instanceof ApiError && err.bindingGaps && err.bindingGaps.length > 0) {
 				setBindingGapErrors(err.bindingGaps);
 				setSubmitError(err.message);
+			} else if (err instanceof ApiError && err.code === "no_runnable_component") {
+				// Issue #733 AC: "Stale or removed selections fail with actionable
+				// refresh guidance rather than silently widening scope" — surfaced on
+				// the Scope step (scopeOmissionErrors), never auto-retried.
+				setScopeOmissionErrors(err.scopeOmissions ?? []);
+				setSubmitError(err.message);
 			} else {
 				setSubmitError(err instanceof ApiError ? err.message : "Could not start the scan.");
 			}
@@ -433,7 +552,7 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 			setSubmitting(false);
 			submitGuardRef.current = false;
 		}
-	}, [selectedTargetIds, selections.length, siteId, profileId, overrides, navigate]);
+	}, [selectedTargetIds, selections.length, siteId, profileId, targetScope, overrides, navigate]);
 
 	const stepIndex = STEPS.findIndex((s) => s.key === step);
 	const canAdvance = useCallback(
@@ -481,6 +600,9 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 		toggleTarget,
 		toggleInventoryItem,
 		selectedTargetIds,
+		targetScope,
+		hasEmptyExplicitSelection,
+		scopeOmissionErrors,
 
 		profiles,
 		profilesLoading,

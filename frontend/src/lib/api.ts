@@ -37,6 +37,24 @@ export interface CredentialBindingGap {
 	credential_id?: string;
 }
 
+/**
+ * One machine-readable reason a requested component/target did not make it
+ * into the resolved scan scope (issue #733, epic #726 Wave 2, ADR-0023) —
+ * `Waypoint.Core.Components.ScopeOmission` on the wire, carried as
+ * `error.scope_omissions` on the 400 `no_runnable_component` `POST /runs`
+ * returns when an explicit `target_scope` resolves to zero runnable
+ * components. `reason` is the closed set `component_not_found` /
+ * `component_not_in_scope` / `component_absent` / `component_retired` /
+ * `fact_conflict` / `catalog_incompatible` / `target_not_found` — never free
+ * text; `detail` is the human-readable explanation to render.
+ */
+export interface ScopeOmission {
+	component_id?: string;
+	target_id?: string;
+	reason: string;
+	detail: string;
+}
+
 export class ApiError extends Error {
 	code: string;
 	detail?: unknown;
@@ -45,8 +63,18 @@ export class ApiError extends Error {
 	blockers?: ApiErrorBlocker[];
 	/** Issue #585/#587: optional per-target/per-purpose credential-resolution gaps on a 400 `credential_binding_gaps` from `POST /runs` — undefined for every other error. See `CredentialBindingGap`. */
 	bindingGaps?: CredentialBindingGap[];
+	/** Issue #733: optional scope-resolution omissions on a 400 `no_runnable_component` from `POST /runs` — undefined for every other error. See `ScopeOmission`. */
+	scopeOmissions?: ScopeOmission[];
 
-	constructor(status: number, code: string, message: string, detail?: unknown, blockers?: ApiErrorBlocker[], bindingGaps?: CredentialBindingGap[]) {
+	constructor(
+		status: number,
+		code: string,
+		message: string,
+		detail?: unknown,
+		blockers?: ApiErrorBlocker[],
+		bindingGaps?: CredentialBindingGap[],
+		scopeOmissions?: ScopeOmission[],
+	) {
 		super(message);
 		this.name = "ApiError";
 		this.status = status;
@@ -54,6 +82,7 @@ export class ApiError extends Error {
 		this.detail = detail;
 		this.blockers = blockers;
 		this.bindingGaps = bindingGaps;
+		this.scopeOmissions = scopeOmissions;
 	}
 }
 
@@ -128,12 +157,20 @@ async function parseErrorBody(response: Response): Promise<ApiError> {
 	let detail: unknown;
 	let blockers: ApiErrorBlocker[] | undefined;
 	let bindingGaps: CredentialBindingGap[] | undefined;
+	let scopeOmissions: ScopeOmission[] | undefined;
 	try {
 		const body = await response.json();
 		if (body && typeof body === "object" && "error" in body) {
 			const envelope = (
 				body as {
-					error?: { code?: string; message?: string; detail?: unknown; blockers?: ApiErrorBlocker[]; binding_gaps?: CredentialBindingGap[] };
+					error?: {
+						code?: string;
+						message?: string;
+						detail?: unknown;
+						blockers?: ApiErrorBlocker[];
+						binding_gaps?: CredentialBindingGap[];
+						scope_omissions?: ScopeOmission[];
+					};
 				}
 			).error;
 			code = envelope?.code ?? code;
@@ -141,12 +178,13 @@ async function parseErrorBody(response: Response): Promise<ApiError> {
 			detail = envelope?.detail;
 			blockers = envelope?.blockers;
 			bindingGaps = envelope?.binding_gaps;
+			scopeOmissions = envelope?.scope_omissions;
 		}
 	} catch {
 		// Non-JSON error body (e.g. an nginx-level 502) — fall back to the status text.
 		message = response.statusText || message;
 	}
-	return new ApiError(response.status, code, message, detail, blockers, bindingGaps);
+	return new ApiError(response.status, code, message, detail, blockers, bindingGaps, scopeOmissions);
 }
 
 function timeoutError(timeoutMs: number | undefined, cause?: unknown): ApiError {

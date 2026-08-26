@@ -1,14 +1,16 @@
 /**
  * Start-a-Scan data layer (docs/ui/prototype/README.md screen 3; issue #284,
- * third sub-issue of the #26 split), against:
+ * third sub-issue of the #26 split; issue #733 rewired this module from the
+ * legacy `inventory_items` tree onto the stable `components` model), against:
  *
- *   GET  /targets/{id}/inventory   — #21 backend (DiscoveryController)
+ *   GET  /targets/{id}/components  — #732 backend (ComponentsController)
  *   POST /runs                     — #278/#281 backend (RunsController)
  *
  * Two request shapes matter here:
  *
  * - `ScanScope` mirrors `Waypoint.Core.Jobs.ScanScope` exactly (`site_id` +
- *   optional `target_ids`) — it is serialized to a JSON *string* and sent as
+ *   optional `target_ids`/`profile_id`, plus issue #733's additive
+ *   `target_scope`) — it is serialized to a JSON *string* and sent as
  *   `RunCreateRequest.Scope`, not a nested object, because the backend scope
  *   field is `string Scope` (raw JSON the server parses itself, see
  *   RunContracts.cs). Getting this wrong (sending an object) fails silently
@@ -19,33 +21,122 @@
  *   retained anywhere in this module — callers clear it from component state
  *   immediately after the POST resolves, the same convention
  *   CredentialsTab.tsx uses for its write-only secret field.
+ *
+ * Issue #733 (epic #726 Wave 2, ADR-0023, backend PR #854): the checkbox tree
+ * now walks the stable `components` model (parent + catalog component key +
+ * authoritative vendor identity) instead of the legacy `inventory_items`
+ * table `/targets/{id}/inventory` served — that endpoint has no relationship
+ * to the `component_ids` `scope.target_scope.component_ids` expects, so a
+ * tree built from it could never resolve to a real component on the wire.
+ * `/targets/{id}/components` (ComponentsController, issue #732) is the
+ * correct source: a flat `ComponentResponse[]` with `parent_component_id`
+ * pointers this module reassembles into the same cluster/host/vm-shaped tree
+ * the wizard already rendered.
  */
 
 import { apiGet, apiPost } from "../../lib/api";
 
-export interface InventoryItem {
+/** `Waypoint.Core.Components.ComponentLifecycleStates` on the wire. Only `active` components are selectable/expandable into an `all`-mode scan; `absent`/`retired` ones are rendered but disabled (issue #733 AC: stale/removed selections fail with guidance rather than silently widening or silently vanishing). */
+export type ComponentLifecycle = "active" | "absent" | "retired";
+
+/** `Waypoint.Api.Contracts.ComponentResponse` — one row of `GET /targets/{id}/components`. */
+export interface ComponentNode {
 	id: string;
-	type: "cluster" | "host" | "vm" | string;
-	moref: string;
-	name: string;
-	build: string | null;
-	maintenance_mode: boolean | null;
-	last_seen_at: string;
-	removed: boolean;
-	children: InventoryItem[];
+	parent_target_id: string;
+	parent_component_id: string | null;
+	catalog_component_id: string | null;
+	catalog_component_key: string;
+	vendor_identity: string | null;
+	display_name: string;
+	lifecycle: ComponentLifecycle | string;
+	fact_conflict: boolean;
+	retired_at: string | null;
 }
 
-export interface TargetInventory {
-	target_id: string;
-	discovery_status: string;
-	last_refreshed: string | null;
-	stale: boolean;
-	items: InventoryItem[];
+/** One node of the tree `buildComponentTree` assembles from the flat `GET /targets/{id}/components` response — `ComponentNode` plus its already-nested `children`, the shape `InventoryNode`/the tri-state resolver both walk. */
+export interface ComponentTreeNode extends ComponentNode {
+	children: ComponentTreeNode[];
 }
 
-export function fetchTargetInventory(targetId: string): Promise<TargetInventory> {
-	return apiGet<TargetInventory>(`/targets/${targetId}/inventory`);
+export function fetchTargetComponents(targetId: string): Promise<ComponentNode[]> {
+	return apiGet<ComponentNode[]>(`/targets/${targetId}/components?includeRetired=true`);
 }
+
+/** Reassembles the flat `GET /targets/{id}/components` list into a tree via `parent_component_id`, preserving arrival order at each level (deterministic — see `useScanWizard`'s tri-state tests). Orphans (a `parent_component_id` naming a row not present in `items`, which should not happen but must never crash the wizard) are hoisted to the root rather than dropped, so a rendering gap is visible instead of a silently missing component. */
+export function buildComponentTree(items: ComponentNode[]): ComponentTreeNode[] {
+	const byId = new Map<string, ComponentTreeNode>();
+	for (const item of items) {
+		byId.set(item.id, { ...item, children: [] });
+	}
+	const roots: ComponentTreeNode[] = [];
+	for (const item of items) {
+		const node = byId.get(item.id);
+		if (!node) {
+			continue;
+		}
+		const parent = item.parent_component_id ? byId.get(item.parent_component_id) : undefined;
+		if (parent) {
+			parent.children.push(node);
+		} else {
+			roots.push(node);
+		}
+	}
+	return roots;
+}
+
+/** Flattens a component tree into a single ordered list (parent before children, same order tests/selection-counting rely on). */
+export function flattenComponentTree(nodes: ComponentTreeNode[]): ComponentTreeNode[] {
+	const out: ComponentTreeNode[] = [];
+	const walk = (list: ComponentTreeNode[]) => {
+		for (const node of list) {
+			out.push(node);
+			if (node.children.length > 0) {
+				walk(node.children);
+			}
+		}
+	};
+	walk(nodes);
+	return out;
+}
+
+/** A component is eligible for `all`-mode inclusion / default-checked selection only while `active` — an `absent`/`retired` component is rendered (so the operator sees it and understands why it is excluded) but never auto-selected and never counted toward "select all". */
+export function isSelectableComponent(node: ComponentNode): boolean {
+	return node.lifecycle === "active";
+}
+
+/**
+ * Issue #733: resolves one target's tri-state selection into the wire's
+ * `target_scope` shape (docs/api-contract.md "Interim additive
+ * `scope.target_scope`"). `allComponentIds` is every *selectable* (active)
+ * leaf-or-parent id known for the target; `selectedIds` is exactly what the
+ * operator left checked.
+ *
+ * - No components known at all (empty inventory / not yet discovered) →
+ *   `null`: this target contributes nothing to `target_scope` and falls back
+ *   to the legacy whole-target `target_ids` behavior, matching today's
+ *   "no cached inventory — scanning the whole target" fallback note.
+ * - Every selectable component checked → `{ mode: "all" }` (expands against
+ *   refreshed inventory at scan time, per ADR-0023 — never freezes today's
+ *   set as an explicit list when the operator meant "everything").
+ * - Anything else, including a deliberately empty selection → `{ mode:
+ *   "explicit", component_ids: [...] }`, never widened. An empty
+ *   `selectedIds` yields `component_ids: []`, which the backend honors as an
+ *   intentional empty plan (issue #733 AC) — this function does not special
+ *   case it away.
+ */
+export function resolveTargetScope(allComponentIds: string[], selectedIds: ReadonlySet<string>): { mode: "all" } | { mode: "explicit"; component_ids: string[] } | null {
+	if (allComponentIds.length === 0) {
+		return null;
+	}
+	const allSelected = allComponentIds.length > 0 && allComponentIds.every((id) => selectedIds.has(id));
+	if (allSelected) {
+		return { mode: "all" };
+	}
+	return { mode: "explicit", component_ids: allComponentIds.filter((id) => selectedIds.has(id)) };
+}
+
+/** `Waypoint.Core.Jobs.TargetScopeRequest` on the wire — one target's resolved tri-state scope, keyed by `target_id` when the wizard sends more than one target's `target_scope` (the backend's `TargetScopeRequest` is itself target-agnostic within one site-wide request, so the wizard folds every selected target's resolution into one request per docs/api-contract.md's `{ mode, target_ids?, component_ids? }` shape: `all`-mode carries the contributing `target_ids`, `explicit`-mode carries the resolved `component_ids` across every target). */
+export type TargetScopeInput = { mode: "all"; target_ids: string[] } | { mode: "explicit"; component_ids: string[] };
 
 export interface ScanScope {
 	site_id: string;
@@ -57,6 +148,20 @@ export interface ScanScope {
 	 * (`RunCreationService.CreateScanRunAsync` 400s without it, 404s on an
 	 * unknown id). */
 	profile_id: string;
+	/** Issue #733 (epic #726 Wave 2, ADR-0023): the operator's resolved
+	 * component-tree selection, additive to `target_ids`/`profile_id` in this
+	 * interim slice (docs/api-contract.md "Interim additive
+	 * `scope.target_scope`"). Omitted when no target under this scope has any
+	 * known components yet (nothing to resolve). */
+	target_scope?: TargetScopeInput;
+}
+
+/** `Waypoint.Core.Components.ScopeOmission` on the wire — one machine-readable reason a requested component/target did not make it into the resolved scope (issue #733 AC: "actionable refresh guidance rather than silently widening"). */
+export interface ScopeOmission {
+	component_id?: string;
+	target_id?: string;
+	reason: string;
+	detail: string;
 }
 
 /** `GET /profiles` — issue #639's Start-a-Scan profile picker only ever needs
@@ -132,21 +237,4 @@ export function createScanRun(input: CreateScanRunInput): Promise<RunCreatedResp
 		credential_overrides: input.credential_overrides && input.credential_overrides.length > 0 ? input.credential_overrides : undefined,
 		ad_hoc_credentials: input.ad_hoc_credentials && input.ad_hoc_credentials.length > 0 ? input.ad_hoc_credentials : undefined,
 	});
-}
-
-/** Flattens the inventory tree into target-selectable leaf/parent ids for the
- * tri-state checkbox tree, in the same parent-before-child order the tree
- * arrives in. */
-export function flattenInventory(items: InventoryItem[]): InventoryItem[] {
-	const out: InventoryItem[] = [];
-	const walk = (nodes: InventoryItem[]) => {
-		for (const node of nodes) {
-			out.push(node);
-			if (node.children.length > 0) {
-				walk(node.children);
-			}
-		}
-	};
-	walk(items);
-	return out;
 }

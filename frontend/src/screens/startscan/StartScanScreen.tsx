@@ -79,6 +79,8 @@ export function StartScanScreen() {
 							profilesError={wizard.profilesError}
 							profileId={wizard.profileId}
 							onProfileChange={wizard.setProfileId}
+							scopeOmissionErrors={wizard.scopeOmissionErrors}
+							hasEmptyExplicitSelection={wizard.hasEmptyExplicitSelection}
 						/>
 					)}
 
