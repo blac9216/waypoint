@@ -24,9 +24,9 @@ namespace Waypoint.Api.Contracts;
 /// credential purposes, priority, output semantics"). One row is one execution
 /// profile -- a component bound to one exact content release -- fully joined with its
 /// owning product/version identity so planner/UI consumers never need a second round
-/// trip. Covers issue #728's queryable-fields AC except declared profile inputs,
-/// which are content-derived (parsed from inspec.yml by the #729 importer) and join
-/// the catalog wire shape with the #729 persistence slice.
+/// trip. Covers issue #728's queryable-fields AC in full, including declared profile
+/// inputs (content-derived, parsed from inspec.yml by the #729 importer and joined onto
+/// this wire shape by the #729 persistence slice, migration 0051).
 ///
 /// This is deliberately a read-only reflection of catalog identity/capability data,
 /// never an activation/baseline record (ADR-0022's <c>baselines</c> table, issue #731,
@@ -43,7 +43,8 @@ public sealed record CatalogProductResponse(
 	CatalogReportGroupSummary ReportGroup,
 	IReadOnlyList<CatalogCredentialRequirementSummary> CredentialRequirements,
 	CatalogBenchmarkReferenceSummary? Benchmark,
-	CatalogRemediationSummary? Remediation)
+	CatalogRemediationSummary? Remediation,
+	IReadOnlyList<CatalogDeclaredInputSummary> DeclaredInputs)
 {
 	public static CatalogProductResponse FromDomain(CatalogExecutionProfileDetail detail)
 	{
@@ -72,7 +73,10 @@ public sealed record CatalogProductResponse(
 				: new CatalogBenchmarkReferenceSummary(detail.BenchmarkReference.BenchmarkKey, detail.BenchmarkReference.BenchmarkVersion),
 			detail.RemediationDefinition is null
 				? null
-				: new CatalogRemediationSummary(detail.RemediationDefinition.IsSupported, detail.RemediationDefinition.MechanismNote));
+				: new CatalogRemediationSummary(detail.RemediationDefinition.IsSupported, detail.RemediationDefinition.MechanismNote),
+			detail.DeclaredInputs
+				.Select(input => new CatalogDeclaredInputSummary(input.Name, input.InputType, input.IsRequired))
+				.ToArray());
 	}
 }
 
@@ -103,7 +107,7 @@ public sealed record CatalogContentReleaseSummary(string Id, string Kind, string
 /// <summary>The closed priority/report-group vocabulary row -- the queryable-fields AC's "priority/report group".</summary>
 public sealed record CatalogReportGroupSummary(string Id, string GroupKey, string DisplayName, int Priority);
 
-/// <summary>One required credential purpose -- the queryable-fields AC's "required purposes". Distinct from declared profile inputs, which arrive with the #729 persistence slice.</summary>
+/// <summary>One required credential purpose -- the queryable-fields AC's "required purposes". Distinct from declared profile inputs.</summary>
 public sealed record CatalogCredentialRequirementSummary(string Purpose, bool IsRequired);
 
 /// <summary>XCCDF/benchmark identity -- STIG-only, absent for SRG (the queryable-fields AC's "benchmark").</summary>
@@ -111,3 +115,11 @@ public sealed record CatalogBenchmarkReferenceSummary(string BenchmarkKey, strin
 
 /// <summary>Remediation-capability metadata -- the queryable-fields AC's "remediation capability". Execution itself is out of scope (epic #15).</summary>
 public sealed record CatalogRemediationSummary(bool IsSupported, string? MechanismNote);
+
+/// <summary>
+/// One declared InSpec input (issue #728 AC "declared and consumed inputs ...
+/// queryable", the last field the queryable-fields AC needed -- delivered by the #729
+/// persistence slice). Content-derived from the profile's <c>inspec.yml</c>, never
+/// operator-authored (ADR-0022).
+/// </summary>
+public sealed record CatalogDeclaredInputSummary(string Name, string? InputType, bool IsRequired);

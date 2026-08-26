@@ -16,6 +16,7 @@ using System.Security.Cryptography;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.ComplianceContent.SemanticImport;
 using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -1152,6 +1153,93 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	// connection), but the database grant itself does not structurally prevent it
 	// the way run_purges' column-scoped grant does -- documented here rather than
 	// asserted by a test that would (correctly) fail against the real grant.
+
+	/// <summary>
+	/// Issue #729 (migration 0051), added at authoring time per this file's own standing
+	/// convention (a new runner-executed table without a role-contract test ships grant
+	/// drift silently). Candidate promotion now runs from the compliance-runner process:
+	/// <c>CatalogRepository.PromoteCandidateAsync</c> writes the entire 0050
+	/// identity tree (source revision -> product -> version -> component -> content
+	/// release -> report group -> execution profile) plus the new
+	/// <c>catalog_declared_inputs</c> rows. This drives that whole write path as the real
+	/// <c>waypoint_compliance_runner</c> role -- so a missing GRANT on ANY of those tables
+	/// fails here with 42501 instead of shipping green and dying live. The second
+	/// promotion of the SAME identity additionally exercises the component
+	/// INSERT ... ON CONFLICT DO UPDATE path (the NULL-parent dedup fix) as the runner
+	/// role, proving its UPDATE grant on <c>catalog_components</c> actually lands.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_PromoteCandidate_WritesFullIdentityTreeAndDeclaredInputs_WithoutPermissionDenied()
+	{
+		string suffix = Guid.NewGuid().ToString("N")[..8];
+		SemanticCandidate candidate = new(
+			$"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter-{suffix}", "vsphere", $"8.0.3-{suffix}", "stig", $"vcenter-{suffix}",
+			"vCenter Server", "vmware", "vcenter", null,
+			IsAggregate: false, Title: "vCenter STIG", ManifestVersion: "2.3.0",
+			Inputs: [new InspecManifestInput("vcenter_host", "string", true)],
+			Supports: [], Depends: [], ContentDigest: "deadbeef00000000000000000000000000000000000000000000000000000");
+		CatalogPromotionRequest request = new(
+			SourceRevisionKey: $"compliance-content-{suffix}", Vendor: "VMware vSphere", ProductDisplayName: "VMware vSphere",
+			ProductVersionDisplayName: "vSphere 8.0 Update 3", ContentReleaseDisplayName: "stig 8.0.3",
+			ReportGroupKey: $"vcenter-stig-{suffix}", ReportGroupDisplayName: "vCenter STIG", ReportGroupPriority: 3,
+			OutputKind: CatalogOutputKinds.HdfAndCkl);
+
+		Waypoint.Infrastructure.ComplianceContent.CatalogRepository runnerCatalog = new(_complianceRunnerConnectionString);
+
+		CatalogPromotionOutcome first = await runnerCatalog.PromoteCandidateAsync(candidate, request, CancellationToken.None);
+		Assert.NotNull(first.ExecutionProfileId);
+		Assert.Null(first.RejectionReason);
+
+		// Re-promote the SAME identity -> component INSERT ... ON CONFLICT DO UPDATE and
+		// declared-input upsert both run as the runner role; must dedup, not 42501.
+		CatalogPromotionOutcome second = await runnerCatalog.PromoteCandidateAsync(candidate, request, CancellationToken.None);
+		Assert.Equal(first.ExecutionProfileId, second.ExecutionProfileId);
+
+		CatalogExecutionProfileDetail? detail = await runnerCatalog.GetExecutionProfileAsync(first.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		Assert.Single(detail!.DeclaredInputs);
+		Assert.Equal("vcenter_host", detail.DeclaredInputs[0].Name);
+	}
+
+	/// <summary>
+	/// Issue #729 (migration 0051): the compliance runner persists each semantic-import
+	/// pass's report header + entries via <c>CatalogRepository.RecordImportReportAsync</c>/
+	/// <c>RecordImportReportEntryAsync</c> as the real runner role -- proves the migration's
+	/// SELECT/INSERT grant on <c>catalog_import_reports</c>/<c>_entries</c> actually lands.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_RecordsImportReportAndEntries_WithoutPermissionDenied()
+	{
+		string suffix = Guid.NewGuid().ToString("N")[..8];
+		Waypoint.Infrastructure.ComplianceContent.CatalogRepository runnerCatalog = new(_complianceRunnerConnectionString);
+
+		CatalogImportReport report = await runnerCatalog.RecordImportReportAsync($"commit-{suffix}", $"digest-{suffix}", 1, 1, 1, CancellationToken.None);
+		await runnerCatalog.RecordImportReportEntryAsync(report.Id, CatalogImportEntryDispositions.Accepted, $"profile/{suffix}/vcenter", null, null, CancellationToken.None);
+		await runnerCatalog.RecordImportReportEntryAsync(report.Id, CatalogImportEntryDispositions.Rejected, $"profile/{suffix}/unknown", "unrecognized vendor family", null, CancellationToken.None);
+
+		IReadOnlyList<CatalogImportReportEntry> entries = await runnerCatalog.ListImportReportEntriesAsync(report.Id, CancellationToken.None);
+		Assert.Equal(2, entries.Count);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check for the 0051 catalog grants: the compliance runner
+	/// gets SELECT/INSERT/UPDATE on the identity-tree tables (it upserts them during
+	/// promotion) but never DELETE -- historical retention (0050's ON DELETE RESTRICT
+	/// convention) stays an owner/migration concern, no runner ever deletes catalog
+	/// identity. A DELETE on <c>catalog_components</c> as the runner role must still fail
+	/// 42501 even though the role now has SOME write privilege on this table.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotDeleteCatalogComponents()
+	{
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand delete = new("DELETE FROM catalog_components WHERE id = $1", connection);
+		delete.Parameters.AddWithValue(Guid.NewGuid());
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
 
 	private async Task SeedJobCredentialBindingAsync(Guid jobId, Guid credentialId)
 	{

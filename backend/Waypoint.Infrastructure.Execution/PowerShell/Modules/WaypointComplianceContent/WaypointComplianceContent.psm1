@@ -108,6 +108,22 @@ function Invoke-WaypointComplianceContentPull {
 	$commit = (& git -C $ContentPath rev-parse HEAD).Trim()
 
 	$profiles = @(Get-WaypointComplianceContentProfiles -ContentPath $ContentPath -Commit $commit)
+	# Issue #729: capture the raw inspec.yml text and controls/*.rb filenames per
+	# profile BEFORE _ProfileDirectory is stripped below -- ContentPullJobHandler's
+	# semantic-import pass (VendorContentEntry) needs the untrusted manifest text and
+	# structural facts the C#-side InspecManifestParser/VendorHierarchyInterpreter
+	# reconcile against the closed catalog vocabulary; this module only reads and
+	# forwards bytes, it never interprets them.
+	$entries = @(foreach ($p in $profiles) {
+			[PSCustomObject]@{
+				ProfileKey          = $p.ProfileKey
+				RawYaml             = Get-WaypointComplianceContentRawManifest -ProfileDirectory $p._ProfileDirectory
+				HasControlsDirectory = Test-Path (Join-Path $p._ProfileDirectory 'controls')
+				HasFilesDirectory    = Test-Path (Join-Path $p._ProfileDirectory 'files')
+				ControlFileNames     = @(Get-WaypointComplianceContentControlFileNames -ProfileDirectory $p._ProfileDirectory)
+			}
+		})
+
 	foreach ($p in $profiles) {
 		# Issue #617: use the profile's real directory (carried through as
 		# _ProfileDirectory by Get-WaypointComplianceContentProfiles), not a path
@@ -119,9 +135,64 @@ function Invoke-WaypointComplianceContentPull {
 	}
 
 	[PSCustomObject]@{
-		Commit   = $commit
-		Profiles = $profiles
+		Commit          = $commit
+		Profiles        = $profiles
+		ContentEntries  = $entries
 	}
+}
+
+function Get-WaypointComplianceContentRawManifest {
+	<#
+	.SYNOPSIS
+	    Returns one profile's raw, untrusted inspec.yml text (or $null if missing/
+	    unreadable) for the C#-side InspecManifestParser -- this module never parses
+	    YAML itself (issue #729: YAML parsing is a C#/YamlDotNet concern with a size
+	    bound and no custom tag resolution).
+
+	.PARAMETER ProfileDirectory
+	    The profile's real, absolute root directory.
+	#>
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)][string]$ProfileDirectory
+	)
+
+	$manifestPath = Join-Path $ProfileDirectory 'inspec.yml'
+	if (-not (Test-Path $manifestPath)) {
+		return $null
+	}
+
+	try {
+		return Get-Content -Path $manifestPath -Raw -ErrorAction Stop
+	}
+	catch {
+		return $null
+	}
+}
+
+function Get-WaypointComplianceContentControlFileNames {
+	<#
+	.SYNOPSIS
+	    Returns the bare filenames (not full paths) of every controls/*.rb file under
+	    one profile, or an empty array if there is no controls/ directory -- the
+	    structural fact VendorContentEntry.ControlFileNames/HasControlsDirectory needs
+	    for the semantic importer's "executable leaf has no controls" rejection gate.
+
+	.PARAMETER ProfileDirectory
+	    The profile's real, absolute root directory.
+	#>
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)][string]$ProfileDirectory
+	)
+
+	$controlsDir = Join-Path $ProfileDirectory 'controls'
+	if (-not (Test-Path $controlsDir)) {
+		return @()
+	}
+
+	Get-ChildItem -Path $controlsDir -Filter '*.rb' -Recurse -File -ErrorAction SilentlyContinue |
+	ForEach-Object { $_.Name }
 }
 
 function Get-WaypointComplianceContentProfiles {
@@ -247,4 +318,4 @@ function Get-WaypointComplianceContentControls {
 	}
 }
 
-Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls
+Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls, Get-WaypointComplianceContentRawManifest, Get-WaypointComplianceContentControlFileNames
