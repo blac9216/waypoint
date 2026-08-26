@@ -34,7 +34,7 @@
  * the wizard already rendered.
  */
 
-import { apiGet, apiPost } from "../../lib/api";
+import { apiGet, apiPost, type CredentialBindingGap, type ScanPlanItem, type ScanPlanSkip } from "../../lib/api";
 
 /** `Waypoint.Core.Components.ComponentLifecycleStates` on the wire. Only `active` components are selectable/expandable into an `all`-mode scan; `absent`/`retired` ones are rendered but disabled (issue #733 AC: stale/removed selections fail with guidance rather than silently widening or silently vanishing). */
 export type ComponentLifecycle = "active" | "absent" | "retired";
@@ -234,6 +234,68 @@ export function createScanRun(input: CreateScanRunInput): Promise<RunCreatedResp
 		scope: JSON.stringify(input.scope),
 		credential_id: input.credential_id || undefined,
 		credential: input.credential,
+		credential_overrides: input.credential_overrides && input.credential_overrides.length > 0 ? input.credential_overrides : undefined,
+		ad_hoc_credentials: input.ad_hoc_credentials && input.ad_hoc_credentials.length > 0 ? input.ad_hoc_credentials : undefined,
+	});
+}
+
+/**
+ * Issue #733 remainder (epic #726 Wave 2, PR #874): `POST /api/v1/runs/plan-preview`'s
+ * request body — the SAME `scope`/`credential_overrides`/`ad_hoc_credentials` shapes
+ * `POST /runs` accepts for a scan (`Waypoint.Api.Contracts.RunPlanPreviewRequest`),
+ * restricted to the `target_scope` form: preview never selects a profile (ADR-0022 §7),
+ * so `scope.profile_id` must be absent here even though `ScanScope.profile_id` is
+ * required for create. `previewScanRun`/`toPreviewRequest` below build this from the
+ * exact same `ScanScope` object `createScanRun` sends, minus `profile_id` — never a
+ * re-derivation from wizard state that could drift from what create actually submits.
+ */
+export interface PreviewScanRunInput {
+	scope: Omit<ScanScope, "profile_id">;
+	credential_overrides?: CredentialOverrideInput[];
+	ad_hoc_credentials?: AdHocCredentialInput[];
+}
+
+/**
+ * `Waypoint.Api.Contracts.RunPlanPreviewResponse` on the wire — the honest would-be
+ * plan for a `target_scope` (issue #733/#734 remainder, PR #874). `plan_digest` is
+ * byte-for-byte identical to a subsequent `POST /runs` create's digest for the
+ * identical scope (issue #734 AC-4) — the confirm step displays it so run history can
+ * later correlate "this is the plan I previewed." `is_runnable` is false only when
+ * *zero* items were accepted; a legitimately empty explicit selection (see
+ * `hasEmptyExplicitSelection` in `useScanWizard`) is a separate, honest empty-plan
+ * case the wizard renders without treating it as a failure — preview itself is always
+ * 200 for a zero-runnable scope (never the `no_runnable_component` 400 create returns
+ * for the same inputs), so the wizard's copy must say "preview warns, create blocks."
+ */
+export interface PlanPreviewResponse {
+	requested_mode: string;
+	resolved_component_ids: string[];
+	scope_omissions: ScopeOmission[];
+	plan_schema_version: number;
+	items: ScanPlanItem[];
+	skips: ScanPlanSkip[];
+	plan_digest: string;
+	explanation: string;
+	is_runnable: boolean;
+	credential_gaps: CredentialBindingGap[];
+}
+
+/**
+ * Builds the exact `target_scope`-only scope object `POST /runs/plan-preview` accepts
+ * from the same `ScanScope` the wizard would submit to `POST /runs` — dropping only
+ * `profile_id` (preview-rejected, ADR-0022 §7). Sharing this function between the
+ * preview call and `createScanRun`'s input is what guarantees "preview-request payload
+ * equals create payload for identical selections" (issue #733 AC): there is exactly
+ * one place scope is assembled from wizard state, and preview/create both consume it.
+ */
+export function toPreviewScope(scope: ScanScope): Omit<ScanScope, "profile_id"> {
+	const { profile_id: _profileId, ...rest } = scope;
+	return rest;
+}
+
+export function previewScanRun(input: PreviewScanRunInput): Promise<PlanPreviewResponse> {
+	return apiPost<PlanPreviewResponse>("/runs/plan-preview", {
+		scope: JSON.stringify(input.scope),
 		credential_overrides: input.credential_overrides && input.credential_overrides.length > 0 ? input.credential_overrides : undefined,
 		ad_hoc_credentials: input.ad_hoc_credentials && input.ad_hoc_credentials.length > 0 ? input.ad_hoc_credentials : undefined,
 	});

@@ -16,6 +16,13 @@
  * (issue #733) tri-state determinism, `target_scope` wiring, a
  * `no_runnable_component`/`scope_omissions` 400, and an honestly-empty
  * explicit selection.
+ *
+ * Issue #733 remainder (epic #726 Wave 2, PR #874): the Preview step
+ * (`POST /runs/plan-preview`) between Schedule and Confirm. Covers: the
+ * preview request payload equaling the eventual create payload for the same
+ * selection, accepted-item/skip/scope-omission/credential-gap rendering, the
+ * honest zero-runnable empty-plan state, a preview 400 rendered via the same
+ * error idiom, and the plan digest carried into the Confirm step display.
  */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -129,6 +136,9 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 	let componentsByTarget: Record<string, ComponentNode[]>;
 	let runPostStatus: number;
 	let runPostError: unknown;
+	let previewPostStatus: number;
+	let previewPostError: unknown;
+	let previewResponse: Record<string, unknown>;
 
 	function installFetchMock(role: string) {
 		fetchCalls = [];
@@ -136,6 +146,35 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		componentsByTarget = { "target-1": COMPONENTS_WITH_ITEMS };
 		runPostStatus = 202;
 		runPostError = undefined;
+		previewPostStatus = 200;
+		previewPostError = undefined;
+		previewResponse = {
+			requested_mode: "all",
+			resolved_component_ids: ["cluster-1", "host-1"],
+			scope_omissions: [],
+			plan_schema_version: 1,
+			items: [
+				{
+					component_id: "cluster-1",
+					catalog_execution_profile_id: "profile-exec-1",
+					baseline_id: "baseline-1",
+					benchmark_revision_id: "benchmark-1",
+					transport: "vsphere-api",
+					selector_kind: "cluster",
+					selector_name: "Cluster-A",
+					report_group_key: "cluster-1",
+					priority: 1,
+					output_kind: "ckl",
+					required_purposes: ["vsphere-api"],
+					declared_input_names: [],
+				},
+			],
+			skips: [],
+			plan_digest: "sha256:invented-preview-digest-abc123",
+			explanation: "1 of 1 requested components accepted.",
+			is_runnable: true,
+			credential_gaps: [],
+		};
 
 		globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
@@ -158,6 +197,12 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 			}
 			if (url === "/api/v1/profiles" && method === "GET") {
 				return jsonResponse(PROFILE_OPTIONS);
+			}
+			if (url === "/api/v1/runs/plan-preview" && method === "POST") {
+				if (previewPostStatus !== 200) {
+					return jsonResponse({ error: previewPostError }, previewPostStatus);
+				}
+				return jsonResponse(previewResponse, 200);
 			}
 			if (url === "/api/v1/runs" && method === "POST") {
 				if (runPostStatus !== 202) {
@@ -217,6 +262,16 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		await waitFor(() => expect(screen.getByText("Coverage")).toBeInTheDocument());
 	}
 
+	/** Advances from the credential step through schedule and preview (waiting for the auto-fetched `POST /runs/plan-preview` to resolve) to confirm — issue #733 remainder's Preview step sits between Schedule and Confirm. */
+	async function goToConfirm() {
+		fireEvent.click(screen.getByText("Next")); // -> schedule
+		fireEvent.click(screen.getByText("Next")); // -> preview
+		await waitFor(() => expect(screen.getByText("Preview — would-be plan")).toBeInTheDocument());
+		await waitFor(() => expect(screen.queryByText("Previewing the plan…")).not.toBeInTheDocument());
+		fireEvent.click(screen.getByText("Next")); // -> confirm
+		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+	}
+
 	it("defaults to 'Use credentials assigned to each target' and submits a fully-bound scan without any credential input", async () => {
 		installFetchMock("Cyber");
 		await mount();
@@ -229,9 +284,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		await waitFor(() => expect(screen.getByText("Assigned: Alpha vCenter service account")).toBeInTheDocument());
 		expect(screen.queryByText(/Missing required binding/)).not.toBeInTheDocument();
 
-		fireEvent.click(screen.getByText("Next")); // -> schedule
-		fireEvent.click(screen.getByText("Next")); // -> confirm
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 		expect(screen.getByText("Start scan")).not.toBeDisabled();
 
 		fireEvent.click(screen.getByText("Start scan"));
@@ -262,9 +315,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		expect(screen.getByText("bind a credential for this target").closest("a")).toHaveAttribute("href", "/config");
 		expect(screen.getByText(/1 required credential missing/)).toBeInTheDocument();
 
-		fireEvent.click(screen.getByText("Next")); // -> schedule
-		fireEvent.click(screen.getByText("Next")); // -> confirm
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 		expect(screen.getByText("Start scan")).toBeDisabled();
 	});
 
@@ -284,9 +335,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		await waitFor(() => expect(screen.getByText("Override: Alpha SSH service account")).toBeInTheDocument());
 		expect(screen.queryByText(/Missing required binding/)).not.toBeInTheDocument();
 
-		fireEvent.click(screen.getByText("Next"));
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 		expect(screen.getByText("Start scan")).not.toBeDisabled();
 
 		fireEvent.click(screen.getByText("Start scan"));
@@ -321,9 +370,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 
 		await waitFor(() => expect(screen.getByText("Override: j.moreno (ad hoc)")).toBeInTheDocument());
 
-		fireEvent.click(screen.getByText("Next"));
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 
 		// The confirm summary never renders the raw secret anywhere on screen.
 		expect(screen.queryByText("invented-wizard-secret-abc")).not.toBeInTheDocument();
@@ -381,9 +428,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		installFetchMock("Cyber");
 		await mount();
 		await goToCredential();
-		fireEvent.click(screen.getByText("Next"));
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 
 		runPostStatus = 400;
 		runPostError = {
@@ -398,6 +443,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		await waitFor(() => expect(screen.getByText("One or more targets are missing a required credential binding.")).toBeInTheDocument());
 
 		// Go back to the credential step — the specific gap is mapped onto its (target, purpose) row.
+		fireEvent.click(screen.getByText("Back")); // -> preview
 		fireEvent.click(screen.getByText("Back")); // -> schedule
 		fireEvent.click(screen.getByText("Back")); // -> credential
 		await waitFor(() =>
@@ -428,9 +474,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 
 		fireEvent.click(screen.getByText("Next")); // -> credential
 		await waitFor(() => expect(screen.getByText("Coverage")).toBeInTheDocument());
-		fireEvent.click(screen.getByText("Next")); // -> schedule
-		fireEvent.click(screen.getByText("Next")); // -> confirm
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 		fireEvent.click(screen.getByText("Start scan"));
 		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
 
@@ -455,9 +499,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 
 		fireEvent.click(screen.getByText("Next")); // -> credential
 		await waitFor(() => expect(screen.getByText("Coverage")).toBeInTheDocument());
-		fireEvent.click(screen.getByText("Next")); // -> schedule
-		fireEvent.click(screen.getByText("Next")); // -> confirm
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 		fireEvent.click(screen.getByText("Start scan"));
 		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
 
@@ -482,9 +524,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		installFetchMock("Cyber");
 		await mount();
 		await goToCredential();
-		fireEvent.click(screen.getByText("Next")); // -> schedule
-		fireEvent.click(screen.getByText("Next")); // -> confirm
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 
 		runPostStatus = 400;
 		runPostError = {
@@ -500,6 +540,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 
 		// Go back to the scope step — the omission is rendered with actionable
 		// refresh guidance, not the raw machine-readable reason.
+		fireEvent.click(screen.getByText("Back")); // -> preview
 		fireEvent.click(screen.getByText("Back")); // -> schedule
 		fireEvent.click(screen.getByText("Back")); // -> credential
 		fireEvent.click(screen.getByText("Back")); // -> scope
@@ -521,9 +562,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 
 		fireEvent.click(screen.getByText("Next")); // -> credential
 		await waitFor(() => expect(screen.getByText("Coverage")).toBeInTheDocument());
-		fireEvent.click(screen.getByText("Next")); // -> schedule
-		fireEvent.click(screen.getByText("Next")); // -> confirm
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 
 		expect(screen.getByText("Start scan")).toBeDisabled();
 	});
@@ -532,9 +571,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		installFetchMock("Cyber");
 		await mount();
 		await goToCredential();
-		fireEvent.click(screen.getByText("Next"));
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 
 		runPostStatus = 403;
 		runPostError = { code: "forbidden", message: "Ad hoc credentials require the Operator role." };
@@ -547,9 +584,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		installFetchMock("Cyber");
 		await mount();
 		await goToCredential();
-		fireEvent.click(screen.getByText("Next"));
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 
 		runPostStatus = 404;
 		runPostError = { code: "not_found", message: "Site 'site-1' does not exist." };
@@ -562,9 +597,7 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		installFetchMock("Cyber");
 		await mount();
 		await goToCredential();
-		fireEvent.click(screen.getByText("Next"));
-		fireEvent.click(screen.getByText("Next"));
-		await waitFor(() => expect(screen.getByText("Start scan")).toBeInTheDocument());
+		await goToConfirm();
 
 		const button = screen.getByText("Start scan");
 		fireEvent.click(button);
@@ -585,6 +618,100 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		);
 		await waitFor(() => expect(screen.getByText(/Starting a scan requires Cyber or higher/)).toBeInTheDocument());
 		expect(fetchCalls.some((c) => c.url === "/api/v1/sites")).toBe(false);
+	});
+
+	// -- issue #733 remainder: plan-preview integration --------------------
+
+	it("issue #733 remainder: the preview request payload's scope equals the create payload's scope for the same selection (minus profile_id)", async () => {
+		installFetchMock("Cyber");
+		await mount();
+		await goToCredential();
+		await goToConfirm();
+
+		const previewCall = fetchCalls.find((c) => c.url === "/api/v1/runs/plan-preview" && c.init?.method === "POST")!;
+		const previewBody = JSON.parse(previewCall.init!.body as string) as Record<string, unknown>;
+		const previewScope = JSON.parse(previewBody.scope as string) as Record<string, unknown>;
+
+		fireEvent.click(screen.getByText("Start scan"));
+		await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/live-run?run=run-123"));
+
+		const createCall = fetchCalls.find((c) => c.url === "/api/v1/runs" && c.init?.method === "POST")!;
+		const createBody = JSON.parse(createCall.init!.body as string) as Record<string, unknown>;
+		const createScope = JSON.parse(createBody.scope as string) as Record<string, unknown>;
+
+		// Preview never sends profile_id (ADR-0022 §7); every other scope field
+		// — site_id, target_ids/target_scope — is identical to what create sends
+		// for the same selection, because both are built from the same `scope`
+		// object (useScanWizard's shared memo), never re-derived separately.
+		expect(previewScope.profile_id).toBeUndefined();
+		const { profile_id: _profileId, ...createScopeWithoutProfile } = createScope;
+		expect(previewScope).toEqual(createScopeWithoutProfile);
+	});
+
+	it("issue #733 remainder: renders accepted items, the plan digest, and carries the digest into Confirm", async () => {
+		installFetchMock("Cyber");
+		await mount();
+		await goToCredential();
+		fireEvent.click(screen.getByText("Next")); // -> schedule
+		fireEvent.click(screen.getByText("Next")); // -> preview
+		await waitFor(() => expect(screen.getByText("1 accepted item")).toBeInTheDocument());
+		expect(screen.getByText("vSphere API")).toBeInTheDocument();
+		expect(screen.getByText("Plan digest: sha256:invented-preview-digest-abc123")).toBeInTheDocument();
+
+		fireEvent.click(screen.getByText("Next")); // -> confirm
+		await waitFor(() => expect(screen.getByText("sha256:invented-preview-digest-abc123")).toBeInTheDocument());
+	});
+
+	it("issue #733 remainder: renders skips, scope omissions, and credential gaps from the preview response", async () => {
+		installFetchMock("Cyber");
+		previewResponse = {
+			...previewResponse,
+			scope_omissions: [{ component_id: "host-2", reason: "component_absent", detail: "esx-01b was not seen on the last discovery pass." }],
+			skips: [{ component_id: "host-3", reason: "no_active_baseline", detail: "No active baseline for this component." }],
+			credential_gaps: [{ target_id: "target-1", target_name: "vcsa-01.example.internal", purpose: "vsphere-api", reason: "missing_binding" }],
+		};
+		await mount();
+		await goToCredential();
+		fireEvent.click(screen.getByText("Next")); // -> schedule
+		fireEvent.click(screen.getByText("Next")); // -> preview
+
+		await waitFor(() =>
+			expect(screen.getByText("This component was not seen on the last discovery pass — refresh the scope before selecting it.")).toBeInTheDocument(),
+		);
+		expect(screen.getByText(/No active baseline for this component\./)).toBeInTheDocument();
+		expect(screen.getByText(/No credential bound for this purpose\./)).toBeInTheDocument();
+	});
+
+	it("issue #733 remainder: renders the honest empty-plan state when preview resolves zero runnable items (200, not blocked)", async () => {
+		installFetchMock("Cyber");
+		previewResponse = { ...previewResponse, items: [], is_runnable: false, explanation: "0 of 0 requested components accepted." };
+		await mount();
+		await goToCredential();
+		fireEvent.click(screen.getByText("Next")); // -> schedule
+		fireEvent.click(screen.getByText("Next")); // -> preview
+
+		await waitFor(() => expect(screen.getByText(/No component in this scope is currently runnable/)).toBeInTheDocument());
+		// Preview is advisory, not blocking — Next to Confirm remains available.
+		expect(screen.getByText("Next")).not.toBeDisabled();
+	});
+
+	it("issue #733 remainder: a preview 400 renders via the existing error idiom with a retry action, distinct from create's blocking 400", async () => {
+		installFetchMock("Cyber");
+		previewPostStatus = 400;
+		previewPostError = { code: "validation_error", message: "scope.target_scope is required for a preview." };
+		await mount();
+		await goToCredential();
+		fireEvent.click(screen.getByText("Next")); // -> schedule
+		fireEvent.click(screen.getByText("Next")); // -> preview
+
+		await waitFor(() => expect(screen.getByText("scope.target_scope is required for a preview.")).toBeInTheDocument());
+		expect(screen.getByText("Retry preview")).toBeInTheDocument();
+
+		// Recovering (a fixed preview) and retrying succeeds without navigating away.
+		previewPostStatus = 200;
+		previewPostError = undefined;
+		fireEvent.click(screen.getByText("Retry preview"));
+		await waitFor(() => expect(screen.getByText("1 accepted item")).toBeInTheDocument());
 	});
 });
 

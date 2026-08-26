@@ -6,8 +6,10 @@
  *
  * Steps: site -> scope (inventory checkbox tree, target-level fallback) ->
  * credential (service picker, Cyber+, or ADR-0011 enter-now personal,
- * Operator+) -> run/schedule stub (disabled; scheduling is M3) -> confirm
- * (summary + POST /runs -> navigate to Live Run with the new run id).
+ * Operator+) -> run/schedule stub (disabled; scheduling is M3) -> preview
+ * (issue #733 remainder: POST /runs/plan-preview against the same scope/
+ * credential payload confirm would send -> confirm (summary + POST /runs ->
+ * navigate to Live Run with the new run id).
  *
  * Role gate: the whole flow is Cyber+ (README "Roles & Permissions" —
  * "Cyber + initiate scans using assigned service credentials"). A Viewer
@@ -23,7 +25,7 @@
  */
 import { useAuth } from "../../lib/auth-context";
 import { useRouter } from "../../lib/router-context";
-import { CredentialStep, ConfirmStep, ScheduleStep, ScopeStep, SiteStep } from "./StartScanSteps";
+import { CredentialStep, ConfirmStep, PreviewStep, ScheduleStep, ScopeStep, SiteStep } from "./StartScanSteps";
 import { STEPS, useScanWizard, type StepKey } from "./useScanWizard";
 import "./StartScanScreen.css";
 
@@ -106,6 +108,10 @@ export function StartScanScreen() {
 
 					{step === "schedule" && <ScheduleStep />}
 
+					{step === "preview" && (
+						<PreviewStep preview={wizard.preview} loading={wizard.previewLoading} error={wizard.previewError} onRetry={wizard.runPreview} />
+					)}
+
 					{step === "confirm" && (
 						<ConfirmStep
 							siteName={wizard.siteName}
@@ -113,6 +119,7 @@ export function StartScanScreen() {
 							totalTargets={wizard.selections.length}
 							profileName={wizard.selectedProfileName}
 							credentialSummary={wizard.selectedCredentialSummary}
+							previewDigest={wizard.preview?.plan_digest}
 							canConfirm={wizard.canConfirm}
 							submitting={wizard.submitting}
 							error={wizard.submitError}

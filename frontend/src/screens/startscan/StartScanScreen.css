@@ -282,3 +282,22 @@
 	display: flex;
 	justify-content: space-between;
 }
+
+.start-scan-screen__preview-groups {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	margin-bottom: 14px;
+}
+
+.start-scan-screen__preview-group-title {
+	font-size: 12px;
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+.start-scan-screen__digest {
+	font-size: 10.5px;
+	color: var(--txt3);
+	word-break: break-all;
+}
