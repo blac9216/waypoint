@@ -90,6 +90,7 @@ public sealed class SchemaMigrationTests
 		"component_observations",
 		"content_revisions",
 		"baselines",
+		"run_scope_snapshots",
 		"schema_migrations"
 	];
 
@@ -109,8 +110,16 @@ public sealed class SchemaMigrationTests
 	/// Grants waypoint_compliance_runner SELECT/INSERT plus column-scoped
 	/// UPDATE (source_commit) on content_revisions (ContentRevisionStager's idempotent
 	/// ON CONFLICT DO UPDATE write path) and SELECT on baselines; activation/rollback
-	/// never run as a runner role, issue #731 -- bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 55;
+	/// never run as a runner role, issue #731, 0056 adds run_scope_snapshots (issue
+	/// #733, epic #726 Wave 2, ADR-0023): one immutable row per scan run recording the
+	/// requested `target_scope` (tri-state all/explicit) alongside the exact resolved
+	/// stable-component id set and every scope omission with its reason -- the
+	/// requested-versus-resolved audit freeze `RunCreationService.CreateScanRunAsync`
+	/// writes via the new `ScopeResolutionService`/`RunScopeSnapshotRepository`, ON
+	/// DELETE CASCADE off `runs.id` (matching job_credential_bindings' convention),
+	/// no new runner grants (API-side only, mirroring migration 0054), issue #733 --
+	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 56;
 
 	private readonly PostgresFixture _fixture;
 

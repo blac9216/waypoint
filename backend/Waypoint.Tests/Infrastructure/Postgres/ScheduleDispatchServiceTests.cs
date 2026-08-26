@@ -19,6 +19,7 @@ using Microsoft.Extensions.Options;
 using Npgsql;
 using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Discovery;
+using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Scheduling;
 using Waypoint.Core.Secrets;
@@ -97,7 +98,9 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 			new TargetCredentialBindingRepository(_fixture.ConnectionString),
 			new Waypoint.Infrastructure.Secrets.CredentialRepository(_fixture.ConnectionString),
 			_profiles,
-			runSecrets, Options.Create(new DiscoveryOptions()), Options.Create(new RunSecretOptions()));
+			runSecrets, Options.Create(new DiscoveryOptions()), Options.Create(new RunSecretOptions()),
+			new ScopeResolutionService(_targets, new Waypoint.Infrastructure.Components.ComponentRepository(_fixture.ConnectionString), new CatalogRepository(_fixture.ConnectionString)),
+			new RunScopeSnapshotRepository(_fixture.ConnectionString));
 
 		IApplianceStateRepository applianceState = new ApplianceStateRepository(_fixture.ConnectionString);
 		_dispatch = new ScheduleDispatchService(_schedules, jobs, applianceState, runCreation, NullLogger<ScheduleDispatchService>.Instance);

@@ -34,11 +34,25 @@ namespace Waypoint.Core.Jobs;
 /// resolves it once at run-creation time to the profile's <c>profile_key</c>, carried
 /// -- not the id -- on every fanned-out <c>scan</c> job's payload: the job handler
 /// needs a content-store-relative directory name, not a database surrogate key.
+///
+/// <see cref="TargetScope"/> is issue #733's additive component-scope field (epic
+/// #726 Wave 2, docs/api-contract.md's planned end-state <c>{ site_id, target_scope
+/// }</c> shape): when present, <see cref="Waypoint.Infrastructure.Runs.RunCreationService.CreateScanRunAsync"/>
+/// additionally resolves it via <see cref="Waypoint.Infrastructure.Runs.ScopeResolutionService"/>
+/// and freezes a <see cref="Waypoint.Core.Components.ResolvedTargetScope"/> audit
+/// snapshot (migration 0056) alongside the existing target-granular fan-out --
+/// component-granular job fan-out itself is #735-#737 (ADR-0024), so this field does
+/// not yet change which jobs a scan creates. Optional and independent of
+/// <see cref="TargetIds"/>/<see cref="ProfileId"/> in this transitional slice; the
+/// full cutover that makes <c>target_scope</c> the ONLY scope shape and rejects
+/// <see cref="ProfileId"/> is the documented legacy-migration window (ADR-0025), not
+/// this slice.
 /// </summary>
 public sealed record ScanScope(
 	[property: JsonPropertyName("site_id")] Guid? SiteId,
 	[property: JsonPropertyName("target_ids")] IReadOnlyList<Guid>? TargetIds,
-	[property: JsonPropertyName("profile_id")] Guid? ProfileId = null);
+	[property: JsonPropertyName("profile_id")] Guid? ProfileId = null,
+	[property: JsonPropertyName("target_scope")] TargetScopeRequest? TargetScope = null);
 
 /// <summary>Parses and validates a scan run's <c>scope</c> JSON.</summary>
 public static class ScanScopeParser

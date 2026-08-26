@@ -339,6 +339,15 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Runs.RunArtifactProjectionService>();
 			services.AddSingleton<Runs.RunControlService>();
 
+			// Issue #733 (epic #726 Wave 2, ADR-0023): resolves a scan run's
+			// {site_id, target_scope} tri-state request into an explicit,
+			// deterministic stable-component set, and persists the frozen
+			// requested/resolved scope (migration 0056) for run history/audit --
+			// API-side only, no runner grant in this slice (see that migration's
+			// header).
+			services.AddSingleton<Runs.ScopeResolutionService>();
+			services.AddSingleton<IRunScopeSnapshotRepository>(new Runs.RunScopeSnapshotRepository(connectionString));
+
 			// Issue #513: dashboard aggregate service, reusing RunArtifactProjectionService's
 			// HDF-derived CAT counting rather than a second implementation.
 			services.AddSingleton<Runs.DashboardAggregateService>();

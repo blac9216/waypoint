@@ -15,6 +15,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.Components;
 using Waypoint.Core.Discovery;
 using Waypoint.Core.Errors;
 using Waypoint.Core.Jobs;
@@ -73,6 +74,8 @@ public sealed class RunCreationService
 	private readonly IRunSecretStore _runSecrets;
 	private readonly IOptions<DiscoveryOptions> _discoveryOptions;
 	private readonly IOptions<RunSecretOptions> _runSecretOptions;
+	private readonly ScopeResolutionService _scopeResolution;
+	private readonly IRunScopeSnapshotRepository _scopeSnapshots;
 
 	public RunCreationService(
 		IJobControlRepository repository,
@@ -83,7 +86,9 @@ public sealed class RunCreationService
 		IProfileRepository profiles,
 		IRunSecretStore runSecrets,
 		IOptions<DiscoveryOptions> discoveryOptions,
-		IOptions<RunSecretOptions> runSecretOptions)
+		IOptions<RunSecretOptions> runSecretOptions,
+		ScopeResolutionService scopeResolution,
+		IRunScopeSnapshotRepository scopeSnapshots)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(sites);
@@ -94,6 +99,8 @@ public sealed class RunCreationService
 		ArgumentNullException.ThrowIfNull(runSecrets);
 		ArgumentNullException.ThrowIfNull(discoveryOptions);
 		ArgumentNullException.ThrowIfNull(runSecretOptions);
+		ArgumentNullException.ThrowIfNull(scopeResolution);
+		ArgumentNullException.ThrowIfNull(scopeSnapshots);
 		_repository = repository;
 		_sites = sites;
 		_targets = targets;
@@ -103,6 +110,8 @@ public sealed class RunCreationService
 		_runSecrets = runSecrets;
 		_discoveryOptions = discoveryOptions;
 		_runSecretOptions = runSecretOptions;
+		_scopeResolution = scopeResolution;
+		_scopeSnapshots = scopeSnapshots;
 	}
 
 	/// <summary>
@@ -189,6 +198,50 @@ public sealed class RunCreationService
 			throw ApiException.Validation(
 				"Site has no targets to scan.",
 				$"Site '{siteId}' has no targets; add at least one before starting a scan.");
+		}
+
+		// Issue #733 (epic #726 Wave 2, ADR-0023): additive component-scope
+		// resolution. Only runs when the caller actually supplied `target_scope` --
+		// a request that still uses only the legacy target_ids/profile_id shape is
+		// completely unaffected (see ScanScope.TargetScope's doc comment on the
+		// transitional coexistence). Resolved strictly BEFORE the run row is
+		// created, matching every other pre-creation validation in this method: an
+		// unrunnable requested scope must never leave a run/job behind.
+		ResolvedTargetScope? resolvedTargetScope = null;
+		if (scope.TargetScope is { } targetScopeRequest)
+		{
+			if (!TargetScopeModes.IsValid(targetScopeRequest.Mode))
+			{
+				throw ApiException.Validation(
+					"scope.target_scope.mode is not valid.",
+					$"\"scope.target_scope.mode\" must be one of: {string.Join(", ", new[] { TargetScopeModes.All, TargetScopeModes.Explicit })}.");
+			}
+
+			// ADR-0023 "No scan silently falls back from an empty explicit selection
+			// to the whole site" (issue #733 AC): distinguished here, before
+			// resolution, from an "all" request that happens to resolve to zero
+			// components (which is instead ADR-0023's honest empty-coverage case,
+			// evaluated below via HasAnyResolvedComponent).
+			bool isExplicitEmpty = string.Equals(targetScopeRequest.Mode, TargetScopeModes.Explicit, StringComparison.Ordinal)
+				&& (targetScopeRequest.ComponentIds is null || targetScopeRequest.ComponentIds.Count == 0);
+
+			resolvedTargetScope = await _scopeResolution.ResolveAsync(siteId, targetScopeRequest, cancellationToken).ConfigureAwait(false);
+
+			// ADR-0023 "initiation fails only when refresh validates no runnable
+			// component": a non-empty request that resolves to zero runnable
+			// components is rejected outright; a deliberately empty explicit
+			// request is instead allowed through as an honest zero-execution scope
+			// (there is nothing to widen from, so there is no conflict to report).
+			if (!resolvedTargetScope.HasAnyResolvedComponent && !isExplicitEmpty)
+			{
+				throw new ApiException(
+					System.Net.HttpStatusCode.BadRequest,
+					"no_runnable_component",
+					"No component in the requested scope could be validated as runnable.",
+					"Every requested target/component was unreachable, absent, retired, conflicted, or catalog-incompatible. "
+						+ "Refresh inventory and adjust the selection, or resolve the reported conflicts, before starting this scan.",
+					scopeOmissions: resolvedTargetScope.Omissions);
+			}
 		}
 
 		bool useRunSecret = credential is not null;
@@ -306,6 +359,24 @@ public sealed class RunCreationService
 
 		Guid runId = await _repository.CreateRunAsync(ScanRunType, scopeJson, credentialId, initiatedBy, cancellationToken, scheduleId)
 			.ConfigureAwait(false);
+
+		// Issue #733: freeze the requested-versus-resolved component scope for this
+		// run's history/audit (migration 0056) the instant the run row exists --
+		// same "commit before anything that could be claimed" discipline the run
+		// secret writes below already follow. Only written when the caller actually
+		// supplied target_scope; a legacy target_ids/profile_id-only request leaves
+		// no snapshot row (IRunScopeSnapshotRepository.GetForRunAsync documents the
+		// null case).
+		if (scope.TargetScope is { } recordedTargetScope && resolvedTargetScope is not null)
+		{
+			await _scopeSnapshots.RecordAsync(
+				runId,
+				resolvedTargetScope.Mode,
+				JsonSerializer.Serialize(recordedTargetScope),
+				resolvedTargetScope.ResolvedComponentIds,
+				resolvedTargetScope.Omissions,
+				cancellationToken).ConfigureAwait(false);
+		}
 
 		if (useRunSecret)
 		{
