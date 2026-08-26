@@ -1,0 +1,80 @@
+// Copyright 2026 Justin Black
+//
+// Licensed under the Apache License, Version 2.0 (the "License").
+// You may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using Waypoint.Core.ComplianceContent.Xccdf;
+
+namespace Waypoint.Core.ComplianceContent;
+
+/// <summary>
+/// Storage for immutable, digest-addressed DISA XCCDF/STIG benchmark revisions and
+/// rules, plus the component-to-benchmark-revision mapping and its versioned audit
+/// history (migration 0052). Issue #730 scope only -- source acquisition/sync
+/// scheduling (#729), semantic-equivalence reconciliation, and baseline activation
+/// (#731) each layer their own repositories/services on top of this read/write
+/// surface rather than extending it. The Admin-only HTTP write surface for mapping
+/// overrides is deferred to the remainder PR issue #730's body names; this interface
+/// exists so that surface (and this PR's own tests) have a supported entry point.
+/// </summary>
+public interface IBenchmarkRepository
+{
+	/// <summary>
+	/// Persists <paramref name="candidate"/> as a new <see cref="BenchmarkRevision"/> plus
+	/// its rules. Idempotent by (benchmark_key, content_digest) -- issue #730 AC "multiple
+	/// revisions ... coexist and are digest-addressed": re-importing byte-identical
+	/// content returns the EXISTING revision rather than creating a duplicate.
+	/// </summary>
+	Task<BenchmarkRevision> ImportRevisionAsync(BenchmarkImportCandidate candidate, string source, CancellationToken cancellationToken);
+
+	/// <summary>Single revision by id, or null when unknown.</summary>
+	Task<BenchmarkRevision?> GetRevisionAsync(Guid revisionId, CancellationToken cancellationToken);
+
+	/// <summary>Every revision sharing one benchmark_key, newest-imported first -- proves multiple revisions coexist (issue #730 AC).</summary>
+	Task<IReadOnlyList<BenchmarkRevision>> ListRevisionsByBenchmarkKeyAsync(string benchmarkKey, CancellationToken cancellationToken);
+
+	/// <summary>Every benchmark_key currently known, ordinal-ordered.</summary>
+	Task<IReadOnlyList<string>> ListBenchmarkKeysAsync(CancellationToken cancellationToken);
+
+	/// <summary>Every rule for one revision, ordered by rule_id.</summary>
+	Task<IReadOnlyList<BenchmarkRule>> ListRulesAsync(Guid revisionId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Records a new current mapping decision for <paramref name="catalogComponentId"/>,
+	/// superseding any prior current mapping in the same transaction (issue #730 AC
+	/// "versioned audit history" -- the prior row's is_current flips to false, it is
+	/// never deleted or overwritten in place).
+	/// </summary>
+	Task<BenchmarkComponentMapping> SetMappingAsync(
+		Guid catalogComponentId,
+		Guid? benchmarkRevisionId,
+		string status,
+		bool isSrgNoBenchmark,
+		bool isAdminOverride,
+		int ambiguousCandidateCount,
+		string? reason,
+		string? actor,
+		CancellationToken cancellationToken);
+
+	/// <summary>The current mapping for one component, or null if no mapping decision has ever been recorded for it.</summary>
+	Task<BenchmarkComponentMapping?> GetCurrentMappingAsync(Guid catalogComponentId, CancellationToken cancellationToken);
+
+	/// <summary>Full mapping history for one component, newest first -- the versioned audit trail (issue #730 AC).</summary>
+	Task<IReadOnlyList<BenchmarkComponentMapping>> GetMappingHistoryAsync(Guid catalogComponentId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Every component's CURRENT mapping (one row per component that has ever received a
+	/// mapping decision) -- the backing read for a coverage/ambiguity report (issue #730
+	/// AC "coverage and ambiguity diagnostics").
+	/// </summary>
+	Task<IReadOnlyList<BenchmarkComponentMapping>> ListCurrentMappingsAsync(CancellationToken cancellationToken);
+}
