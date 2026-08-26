@@ -147,14 +147,22 @@ for exactly one target/service connection. Bypass records actor/time/reason, ver
 and warning state. `PlannedComponentItem` freezes its policy reference; materialized
 trust is job-local and never changes process-global validation.
 
-`TemporarySshObligation` exists only for an opted-in target and catalog-supported
-provider. It records planned item/attempt, provider, management purpose, observed
-original state, intent, mutation time, restore state/attempts, and last safe error.
+`PlannedComponentItem` freezes planning-time SSH availability and observation
+provenance, temporary-enablement authorization/policy version, exact catalog
+capability/provider identity and version, and management-credential purpose.
+`TemporarySshObligation` exists only for that frozen opted-in decision and provider.
+Immediately before mutation the runner re-observes the service and durably records
+planned item/attempt, provider, management purpose, original runtime state/provenance,
+intent, and the cleanup obligation before changing state. It also records mutation
+time, restore state/attempts, and last safe error.
 `not_required | pending_enable | enabled | restore_pending | restored | cleanup_failed`
 is durable across leases and restarts. `cleanup_failed` is prominent and retryable;
-new scan attempts cannot erase it. Only an originally disabled service is restored to
-disabled. This obligation is the audited access-state exception to otherwise
-read-only scan effects, not remediation execution.
+new scan attempts cannot erase it. An unresolved restore blocks another temporary
+mutation of that same service until reconciled or safely re-observed and re-established
+under the existing obligation; it does not block independent siblings and never forks
+into sibling obligations. Only an originally disabled service is restored to disabled;
+an originally enabled service is never disabled. This obligation is the audited
+access-state exception to otherwise read-only scan effects, not remediation execution.
 
 ### Compliance evidence graph (planned)
 
@@ -163,23 +171,32 @@ immutably references:
 
 - requested/resolved scope, coverage ledger and omissions, plan/items, jobs and all
   attempts with redacted events/logs and cleanup outcomes;
-- one `ControlFinding` per applicable control in each current exact-baseline component
-  result, plus prior attempt findings and applied `AttestationSnapshot` provenance;
+- one complete current control ledger/artifact projection for every planned exact-
+  baseline component, with one `ControlFinding` per applicable control, plus distinctly
+  historical prior-attempt findings and applied `AttestationSnapshot` provenance;
 - exact-baseline HDF, STIG-only CKL, and artifact digests/provenance; and
 - direct `StigManagerUploadAttempt` records and receipts.
 
 `ControlFinding` keeps compliance disposition separate from execution status. A
-completed check may be compliant or noncompliant. An applicable check that cannot
-execute, or a non-automatable control without valid attestation, occurs exactly once
-as `Not_Reviewed` with safe execution/attestation evidence. It is never omitted,
-duplicated, or converted to `Not_Applicable`. `CoverageOmission` represents work that
-never became executable and is aggregated separately.
+completed check may be compliant or noncompliant. Readiness that fails before job
+creation and a job with zero attempts still synthesize the complete current exact-
+baseline projection without inventing a job or attempt. Every applicable unexecuted
+check, or non-automatable control without valid attestation, occurs exactly once as
+`Not_Reviewed` with a safe reason. It is never
+omitted, duplicated, or converted to `Not_Applicable`. `CoverageOmission` represents
+component/boundary work that never became executable and is aggregated separately.
+Historical attempt findings remain immutable and do not count as duplicate rows in
+the explicitly identified current projection.
 
 Every STIG artifact binds the same exact profile, XCCDF benchmark/mapping, and control
 set in both HDF and CKL. An SRG binds its exact profile closure in HDF only. Uploads
-reference the immutable CKL plus frozen destination/collection and retain attempt,
-status/response, actor, conflict/idempotency outcome, and receipt. Failure leaves the
-artifact retryable without a scan; there is no watched-directory lifecycle.
+reference the immutable CKL plus frozen destination/collection and retain request
+attempt, safe status/error class, actor, conflict/idempotency outcome, and only bounded
+allowlisted sanitized response metadata/body fields and receipt identifiers. Secret/
+identifier redaction is fail-closed; authorization/session headers and unbounded raw
+responses are never retained. The allowed evidence remains sufficient for retry,
+conflict/idempotency audit, and diagnosis; #785 owns exact wire fields. Failure leaves
+the artifact retryable without a scan; there is no watched-directory lifecycle.
 
 `ComplianceRetentionPolicy` is one appliance-wide Admin setting, default six months.
 Changes are prospective, versioned, audited, and visible before processing. A run and
@@ -188,6 +205,13 @@ but readers never observe retained rows pointing to missing graph members. A dur
 `CompliancePurgeTombstone` records identity, policy version, trigger/actor, time, and
 outcome. Optional `RetentionHold` remains #784 and, if implemented, covers this entire
 root rather than fragments.
+
+The one legacy transition preserves historical runs as legacy evidence and includes
+configured schedules/saved intent. It deterministically translates one only when its
+exact requested scope is preserved; otherwise it disables or blocks the record as
+action-required and audits that disposition before legacy fallback removal. Scope is
+never silently widened or narrowed. #785 owns endpoint, RBAC, and transition wire
+shapes; no permanent adapter or dual representation remains.
 
 **Credential purposes and bindings (end state planned —
 [ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
