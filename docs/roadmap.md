@@ -89,6 +89,49 @@ correct role claim. 12 PRs merged (#516, #517, #522, #525, #527, #529, #532, #53
 follow-ups and owner-gated items (#100, #412) are listed on the epic's closing
 comment.
 
+## Architecture realignment — compliance feature parity (epic [#726](https://github.com/blac9216/waypoint/issues/726))
+
+Supersedes the M2/M3 scan slice's shortcuts (profile picker, target-granular jobs,
+profile-wide config documents) with Waypoint-native VMware compliance parity: a
+closed catalog of exact-version baselines, stable component inventory, immutable
+plans, component jobs with ordered attempts, per-control settings, managed trust,
+and one compliance evidence graph. This is a docs-first/docs-last program — it
+does not ship a new milestone number because it realigns the M2/M3 compliance
+slice in place rather than adding a new product surface, and it gates every
+subsequent compliance implementation issue rather than sitting behind them.
+
+**Wave 0 — architectural truth (hard gate, blocks all implementation).**
+[#727](https://github.com/blac9216/waypoint/issues/727) reconciled architecture/
+domain/ADRs (merged: [ADR-0022](adr/0022-compliance-catalog-and-content-lifecycle.md),
+[ADR-0023](adr/0023-compliance-inventory-and-immutable-plans.md),
+[ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md),
+[ADR-0025](adr/0025-compliance-trust-cleanup-and-evidence.md)) →
+[#785](https://github.com/blac9216/waypoint/issues/785) reconciled the API/security/
+RBAC contracts ([api-contract.md](api-contract.md), [security.md](security.md)) →
+[#786](https://github.com/blac9216/waypoint/issues/786) (this document plus
+[`ui/design-brief.md`](ui/design-brief.md) and
+[`ui/prototype/README.md`](ui/prototype/README.md)) reconciles roadmap sequencing and
+UI/domain vocabulary. No implementation child begins before all three merge.
+
+**Waves 1–5 — implementation, dependency-ordered.** Content foundation (catalog,
+ingestion, XCCDF, lifecycle) → targeting and planning (component identity, scope,
+plan compilation) → component execution (jobs, attempts, credentials, per-control
+settings) → outputs and operations (artifacts, uploads, findings, scaled Live Run) →
+operator workflows and transfer (trust, SSH cleanup, evidence retention, legacy
+migration). Full issue-level sequencing lives on the epic, not duplicated here — this
+roadmap tracks milestone-level status, not per-issue dependencies.
+
+**Final conformance gate.** [#750](https://github.com/blac9216/waypoint/issues/750)
+audits shipped code, migrations, APIs, UI, tests, ADRs, architecture, roadmap,
+security, testing, deployment, and operator documentation against every owner
+decision before epic #726 can close.
+
+**Remediation stays out of scope.** Remediation execution and parity remain a
+separate track, epic [#15](https://github.com/blac9216/waypoint/issues/15) (M4
+below) — epic #726 defines and delivers scan/benchmark architecture only; it does
+not fold remediation into the realigned compliance model, and #15 does not block or
+gate on #726's waves.
+
 ## M4 — Remediation (epic [#15](https://github.com/blac9216/waypoint/issues/15))
 
 - Admin-gated, typed-confirmation, never-schedulable remediation via child `pwsh`
