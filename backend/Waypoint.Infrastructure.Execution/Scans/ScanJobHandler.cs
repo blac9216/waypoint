@@ -634,9 +634,9 @@ public sealed class ScanJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// Issue #585/#586 (epic #582): the job's immutable per-purpose credential snapshot
-	/// (<c>job_credential_bindings</c>, migration 0044) is the preferred source -- the
-	/// entry for the target kind's execution purpose
+	/// Issue #585/#586/#736 (epic #582/#726): the job's immutable per-purpose credential
+	/// snapshot (<c>job_credential_bindings</c>, migration 0044) is the preferred source --
+	/// the entry for the target kind's execution purpose
 	/// (<see cref="CredentialPurposeMatrix.DefaultPurposeByTargetKind"/>: the credential
 	/// the InSpec transport actually authenticates with) selects which source to decrypt,
 	/// so a later edit to the target's bindings can never change what an in-flight job
@@ -647,13 +647,18 @@ public sealed class ScanJobHandler : IJobHandler
 	/// -- least-privilege: this reads exactly the one (target, purpose) row this job's
 	/// execution purpose needs, never any sibling purpose/target row on the same run
 	/// (issue #586 AC "every decrypt is least-privilege"). A snapshotted-but-unconsumed
-	/// purpose (a vsphere job's <c>vcsa-ssh</c> row, stored or ad hoc) is deliberately NOT
-	/// decrypted here: nothing in <c>Invoke-WaypointScan</c>'s <c>inspec -t vmware://</c>
-	/// invocation consumes a VCSA SSH credential today (the VCSA component pipeline is not
-	/// yet imported from the sibling repo), and decrypting a secret no transport uses
-	/// would violate least-privilege and fabricate decrypt-audit rows (ADR-0021's own "do
-	/// not encode a credential requirement the underlying transport does not actually
-	/// use").
+	/// purpose (e.g. a vsphere job's <c>vcsa-ssh</c> row, stored or ad hoc -- now snapshotted
+	/// only when a selected VCSA component's catalog execution profile actually requires it,
+	/// issue #736, rather than opportunistically for every vsphere target) is deliberately
+	/// NOT decrypted here: nothing in <c>Invoke-WaypointScan</c>'s <c>inspec -t vmware://</c>
+	/// invocation consumes a VCSA SSH credential today (the VCSA component pipeline's own
+	/// execution wiring is component-granular job/attempt work, ADR-0024 issues #737+, not
+	/// yet built), and decrypting a secret no transport uses would violate least-privilege
+	/// and fabricate decrypt-audit rows (ADR-0021's own "do not encode a credential
+	/// requirement the underlying transport does not actually use"). This handler therefore
+	/// still decrypts exactly one purpose per job -- the target-granular execution purpose --
+	/// which remains a strict subset of (never more than) what the snapshot recorded as
+	/// consumed for this run.
 	///
 	/// A job with NO snapshot rows is a legacy row (fanned out before migration 0044)
 	/// or a LEGACY flat run-secret job (the pre-#586 one-row-per-run shape, wire-compat):

@@ -22,6 +22,7 @@ using Waypoint.Core.Jobs;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
+using Waypoint.Infrastructure.Components;
 using Waypoint.Infrastructure.Sites;
 
 namespace Waypoint.Infrastructure.Runs;
@@ -78,6 +79,7 @@ public sealed class RunCreationService
 	private readonly IRunScopeSnapshotRepository _scopeSnapshots;
 	private readonly ScanPlannerService _planner;
 	private readonly Waypoint.Core.Scans.IScanPlanRepository _plans;
+	private readonly IComponentRepository _components;
 
 	public RunCreationService(
 		IJobControlRepository repository,
@@ -92,7 +94,8 @@ public sealed class RunCreationService
 		ScopeResolutionService scopeResolution,
 		IRunScopeSnapshotRepository scopeSnapshots,
 		ScanPlannerService planner,
-		Waypoint.Core.Scans.IScanPlanRepository plans)
+		Waypoint.Core.Scans.IScanPlanRepository plans,
+		IComponentRepository components)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(sites);
@@ -107,6 +110,7 @@ public sealed class RunCreationService
 		ArgumentNullException.ThrowIfNull(scopeSnapshots);
 		ArgumentNullException.ThrowIfNull(planner);
 		ArgumentNullException.ThrowIfNull(plans);
+		ArgumentNullException.ThrowIfNull(components);
 		_repository = repository;
 		_sites = sites;
 		_targets = targets;
@@ -120,6 +124,7 @@ public sealed class RunCreationService
 		_scopeSnapshots = scopeSnapshots;
 		_planner = planner;
 		_plans = plans;
+		_components = components;
 	}
 
 	/// <summary>
@@ -266,6 +271,7 @@ public sealed class RunCreationService
 		// digest/history only; job fan-out below remains the existing target-granular
 		// path.
 		Waypoint.Core.Scans.ScanPlan? plan = null;
+		IReadOnlyDictionary<Guid, PlanTargetRequirement> planRequirementsByTarget = new Dictionary<Guid, PlanTargetRequirement>();
 		if (resolvedTargetScope is not null)
 		{
 			plan = await _planner.CompileAsync(null, resolvedTargetScope.ResolvedComponentIds, cancellationToken).ConfigureAwait(false);
@@ -278,6 +284,15 @@ public sealed class RunCreationService
 					"Every resolved component was missing an active baseline, an unmapped benchmark, or otherwise failed planning. "
 						+ $"{plan.Explanation} Activate a compatible baseline or resolve the reported gaps before starting this scan.");
 			}
+
+			// Issue #736 (epic #726 Wave 2, ADR-0024): from here on, a target that has
+			// accepted plan items resolves credentials against those items' own
+			// catalog-derived RequiredPurposes, not the coarse static
+			// CredentialPurposeMatrix -- see PlanCredentialRequirements' doc comment. A
+			// target with no plan items (a legacy target_ids/profile_id-only request, or
+			// a target whose every candidate component was itself skipped by the
+			// planner above) keeps the pre-#736 static-matrix behavior unchanged.
+			planRequirementsByTarget = await PlanCredentialRequirements.GroupByTargetAsync(plan, _components, cancellationToken).ConfigureAwait(false);
 		}
 
 		bool useRunSecret = credential is not null;
@@ -304,13 +319,34 @@ public sealed class RunCreationService
 		// per-target/per-purpose SAVED overrides, and validated per-target/per-purpose
 		// AD HOC overrides -- BEFORE any run/job row exists, so an unresolvable plan is a
 		// clean 4xx enumerating every gap, never a partial run.
+		//
+		// Issue #736: a target that HAS accepted plan items (planRequirementsByTarget)
+		// resolves against those items' own catalog-derived purposes instead of the
+		// static per-kind matrix, and -- per ADR-0024 ("A missing, incompatible, or
+		// ambiguous credential affects only components requiring that purpose... The run
+		// is incomplete, not rejected wholesale") -- an unresolved purpose there demotes
+		// only the plan item(s) that require it to an explicit ScanPlanSkip rather than
+		// failing the whole run; see DemotePlanItemsWithUnresolvedCredentialsAsync.
 		CredentialBindingResolution resolution = useRunSecret
 			? new CredentialBindingResolution(
 				new Dictionary<Guid, IReadOnlyDictionary<string, Guid>>(),
 				new Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>>())
-			: await ResolveCredentialBindingsAsync(targets, credentialId, credentialOverrides, adHocCredentials, cancellationToken).ConfigureAwait(false);
+			: await ResolveCredentialBindingsAsync(
+				targets, credentialId, credentialOverrides, adHocCredentials, planRequirementsByTarget, cancellationToken).ConfigureAwait(false);
 		IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings = resolution.SavedByTarget;
 		IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> adHocByTarget = resolution.AdHocByTarget;
+
+		// Issue #736 (ADR-0024): demote exactly the plan item(s) whose required
+		// purpose failed to resolve to an explicit ScanPlanSkip -- per-component
+		// isolation, never a whole-run rejection for a per-component credential gap.
+		// Only meaningful when a plan exists and at least one target was plan-driven;
+		// a no-plan (legacy) request is untouched (resolution.PlanDrivenGaps is empty
+		// in that case, since ResolveCredentialBindingsAsync only populates it for
+		// plan-driven targets).
+		if (plan is not null && resolution.PlanDrivenGaps is { Count: > 0 } planDrivenGaps)
+		{
+			plan = DemotePlanItemsWithUnresolvedCredentials(plan, planRequirementsByTarget, planDrivenGaps);
+		}
 
 		// Ad hoc credentials are stored under (run, target, purpose) BEFORE fan-out: a job
 		// claimed the instant it is queued must already be able to find its row. Collected
@@ -603,6 +639,7 @@ public sealed class RunCreationService
 		Guid? runCredentialId,
 		IReadOnlyList<RunCredentialOverride>? overrides,
 		IReadOnlyList<RunAdHocCredential>? adHocCredentials,
+		IReadOnlyDictionary<Guid, PlanTargetRequirement> planRequirementsByTarget,
 		CancellationToken cancellationToken)
 	{
 		Dictionary<Guid, Target> targetsById = targets.ToDictionary(t => t.Id);
@@ -719,6 +756,19 @@ public sealed class RunCreationService
 
 		Dictionary<Guid, IReadOnlyDictionary<string, Guid>> resolved = [];
 		Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> resolvedAdHoc = [];
+
+		// Issue #736 (ADR-0024): a target with accepted plan items resolves ONLY the
+		// purposes those items' catalog execution profiles actually declare
+		// (PlanTargetRequirement.RequiredPurposes -- e.g. vcsa-ssh appears here only
+		// when a selected VCSA component's execution profile requires it, never merely
+		// because the target's KIND is vsphere). A gap on one of these purposes is
+		// collected into planGaps (never thrown) -- the caller demotes exactly the
+		// plan item(s) needing that purpose to a ScanPlanSkip, per ADR-0024's
+		// per-component isolation, instead of failing the whole run. A target with no
+		// plan items (legacy target_ids/profile_id-only request, or every candidate
+		// component already skipped by the planner) keeps the pre-#736 static-matrix
+		// gap-collection-then-throw behavior below, completely unchanged.
+		List<CredentialBindingGap> planGaps = [];
 		foreach (Target target in targets)
 		{
 			Dictionary<string, Guid> purposes = new(StringComparer.Ordinal);
@@ -727,7 +777,11 @@ public sealed class RunCreationService
 				bindingsByTarget.TryGetValue(target.Id, out IReadOnlyList<TargetCredentialBinding>? found) ? found : [];
 			CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(target.Kind, out string? defaultPurpose);
 
-			foreach (string purpose in CredentialPurposeMatrix.RequiredScanPurposes(target.Kind))
+			bool isPlanDriven = planRequirementsByTarget.TryGetValue(target.Id, out PlanTargetRequirement? planRequirement);
+			List<CredentialBindingGap> gapSink = isPlanDriven ? planGaps : gaps;
+			IEnumerable<string> requiredPurposes = isPlanDriven ? planRequirement!.RequiredPurposes : CredentialPurposeMatrix.RequiredScanPurposes(target.Kind);
+
+			foreach (string purpose in requiredPurposes)
 			{
 				// Issue #586: ad hoc has the highest precedence -- checked before the saved
 				// override, the run-level default, and the target's own binding.
@@ -756,7 +810,7 @@ public sealed class RunCreationService
 					}
 					else
 					{
-						gaps.Add(new CredentialBindingGap(
+						gapSink.Add(new CredentialBindingGap(
 							target.Id, target.Name, purpose, CredentialBindingGapReasons.IncompatibleCredentialType, runLevelCredentialId));
 					}
 
@@ -767,7 +821,7 @@ public sealed class RunCreationService
 					.FirstOrDefault(b => string.Equals(b.Purpose, purpose, StringComparison.Ordinal));
 				if (binding is null)
 				{
-					gaps.Add(new CredentialBindingGap(target.Id, target.Name, purpose, CredentialBindingGapReasons.MissingBinding));
+					gapSink.Add(new CredentialBindingGap(target.Id, target.Name, purpose, CredentialBindingGapReasons.MissingBinding));
 				}
 				else
 				{
@@ -775,25 +829,33 @@ public sealed class RunCreationService
 				}
 			}
 
-			foreach (string purpose in CredentialPurposeMatrix.ConditionalScanPurposes(target.Kind))
+			// The static conditional-purpose (opportunistic) pass only applies to a
+			// non-plan-driven target -- a plan-driven target's RequiredPurposes above
+			// already IS the exact, catalog-derived set (required and conditional are
+			// no longer distinguished per-target once the catalog resolves them
+			// per-component; see ScanPlannerService).
+			if (!isPlanDriven)
 			{
-				if (acceptedAdHoc.TryGetValue((target.Id, purpose), out RunAdHocCredential? adHocCredential))
+				foreach (string purpose in CredentialPurposeMatrix.ConditionalScanPurposes(target.Kind))
 				{
-					adHocPurposes[purpose] = adHocCredential;
-					continue;
-				}
+					if (acceptedAdHoc.TryGetValue((target.Id, purpose), out RunAdHocCredential? adHocCredential))
+					{
+						adHocPurposes[purpose] = adHocCredential;
+						continue;
+					}
 
-				if (acceptedOverrides.TryGetValue((target.Id, purpose), out Guid overrideCredentialId))
-				{
-					purposes[purpose] = overrideCredentialId;
-					continue;
-				}
+					if (acceptedOverrides.TryGetValue((target.Id, purpose), out Guid overrideCredentialId))
+					{
+						purposes[purpose] = overrideCredentialId;
+						continue;
+					}
 
-				TargetCredentialBinding? binding = targetBindings
-					.FirstOrDefault(b => string.Equals(b.Purpose, purpose, StringComparison.Ordinal));
-				if (binding is not null)
-				{
-					purposes[purpose] = binding.CredentialId;
+					TargetCredentialBinding? binding = targetBindings
+						.FirstOrDefault(b => string.Equals(b.Purpose, purpose, StringComparison.Ordinal));
+					if (binding is not null)
+					{
+						purposes[purpose] = binding.CredentialId;
+					}
 				}
 			}
 
@@ -813,7 +875,81 @@ public sealed class RunCreationService
 				bindingGaps: gaps);
 		}
 
-		return new CredentialBindingResolution(resolved, resolvedAdHoc);
+		return new CredentialBindingResolution(resolved, resolvedAdHoc, planGaps);
+	}
+
+	/// <summary>
+	/// Issue #736 (ADR-0024 "A missing, incompatible, or ambiguous credential affects
+	/// only components requiring that purpose... The run is incomplete, not rejected
+	/// wholesale"): removes from <paramref name="plan"/> every accepted item that
+	/// requires a purpose named in <paramref name="planDrivenGaps"/> for that item's
+	/// owning target, and records each removal as an explicit
+	/// <see cref="ScanPlanSkipReasons"/>-style skip (using the same
+	/// <c>CredentialBindingGapReasons</c> value as the skip reason, so run history shows
+	/// exactly why the component never ran) -- its siblings, including other items on
+	/// the SAME target that need only purposes which DID resolve, are unaffected. The
+	/// plan's digest/explanation are recomputed so persisted history reflects the
+	/// post-demotion accepted/skip sets, matching <see cref="ScanPlannerService"/>'s own
+	/// determinism contract.
+	/// </summary>
+	private static Waypoint.Core.Scans.ScanPlan DemotePlanItemsWithUnresolvedCredentials(
+		Waypoint.Core.Scans.ScanPlan plan,
+		IReadOnlyDictionary<Guid, PlanTargetRequirement> planRequirementsByTarget,
+		IReadOnlyList<CredentialBindingGap> planDrivenGaps)
+	{
+		// (targetId, purpose) -> true for every gap -- a plan item on that target
+		// requiring that purpose is demoted.
+		HashSet<(Guid TargetId, string Purpose)> unresolvedPairs = [.. planDrivenGaps.Select(g => (g.TargetId, g.Purpose))];
+
+		Dictionary<Guid, Guid> targetByComponent = [];
+		foreach ((Guid targetId, PlanTargetRequirement requirement) in planRequirementsByTarget)
+		{
+			foreach (Waypoint.Core.Scans.ScanPlanItem item in requirement.Items)
+			{
+				targetByComponent[item.ComponentId] = targetId;
+			}
+		}
+
+		List<Waypoint.Core.Scans.ScanPlanItem> survivingItems = [];
+		List<Waypoint.Core.Scans.ScanPlanSkip> newSkips = [];
+		foreach (Waypoint.Core.Scans.ScanPlanItem item in plan.Items)
+		{
+			if (!targetByComponent.TryGetValue(item.ComponentId, out Guid ownerTargetId))
+			{
+				// Not a plan-driven item at all (should not happen -- every plan item
+				// came from GroupByTargetAsync's own enumeration of plan.Items -- but
+				// keep it rather than drop it silently if the invariant ever breaks).
+				survivingItems.Add(item);
+				continue;
+			}
+
+			string? unresolvedPurpose = item.RequiredPurposes
+				.FirstOrDefault(purpose => unresolvedPairs.Contains((ownerTargetId, purpose)));
+			if (unresolvedPurpose is null)
+			{
+				survivingItems.Add(item);
+				continue;
+			}
+
+			CredentialBindingGap gap = planDrivenGaps.First(g => g.TargetId == ownerTargetId && g.Purpose == unresolvedPurpose);
+			newSkips.Add(new Waypoint.Core.Scans.ScanPlanSkip(
+				item.ComponentId,
+				gap.Reason,
+				$"Component '{item.ComponentId}' requires credential purpose '{unresolvedPurpose}', which could not resolve ({gap.Reason})."));
+		}
+
+		if (newSkips.Count == 0)
+		{
+			return plan;
+		}
+
+		List<Waypoint.Core.Scans.ScanPlanSkip> allSkips = [.. plan.Skips, .. newSkips];
+		Guid[] scopeSeed = [.. plan.Items.Select(i => i.ComponentId).Concat(plan.Skips.Select(s => s.ComponentId)).Distinct()];
+		string digest = Waypoint.Core.Scans.ScanPlanDigest.Compute(plan.PlanSchemaVersion, scopeSeed, survivingItems);
+		string explanation = $"{survivingItems.Count} of {plan.Items.Count + plan.Skips.Count} requested component(s) accepted into the plan "
+			+ $"after credential resolution; {allSkips.Count} skipped (including {newSkips.Count} for an unresolved required credential).";
+
+		return plan with { Items = survivingItems, Skips = allSkips, PlanDigest = digest, Explanation = explanation };
 	}
 
 	/// <summary>
@@ -887,8 +1023,13 @@ public sealed record RunAdHocCredential(Guid TargetId, string Purpose, string Us
 /// (<see cref="AdHocByTarget"/>, issue #586) -- disjoint per (target, purpose): a purpose
 /// appears in exactly one of the two dictionaries for a given target, never both (ad hoc
 /// takes precedence at resolution time, so a purpose that resolved ad hoc is never also
-/// present in <see cref="SavedByTarget"/>).
+/// present in <see cref="SavedByTarget"/>). <see cref="PlanDrivenGaps"/> (issue #736,
+/// ADR-0024) carries the (target, purpose) resolution failures for plan-driven targets
+/// ONLY -- these never throw from <see cref="RunCreationService.ResolveCredentialBindingsAsync"/>
+/// the way a legacy (non-plan) gap does; the caller demotes exactly the plan item(s)
+/// requiring the unresolved purpose to an explicit skip instead (per-component isolation).
 /// </summary>
 public sealed record CredentialBindingResolution(
 	IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>> SavedByTarget,
-	IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> AdHocByTarget);
+	IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> AdHocByTarget,
+	IReadOnlyList<CredentialBindingGap>? PlanDrivenGaps = null);
