@@ -30,6 +30,34 @@ column.
 - Long-running operations return `202` with a `run_id`/`job_id` and progress flows
   through the event stream, not polling.
 
+### RBAC summary (reconciled, epic #726)
+
+Full rationale and residual-risk discussion lives in `security.md`'s "RBAC
+reconciliation" section; this table is the wire-facing floor per action family. It
+narrows/clarifies, never widens, the roles in `domain-model.md`'s Roles table.
+
+| Action family | Viewer | Cyber | Operator | Admin |
+|---|---|---|---|---|
+| Read dashboards/runs/results/plans/attempts | ✅ | ✅ | ✅ | ✅ |
+| Initiate an interactive scan (arbitrary subset) | — | ✅ | ✅ | ✅ |
+| Control (pause/resume/abort/cancel/retry/repair-credential) a scan **the caller initiated** | — | ✅ | ✅ | ✅ |
+| Control any scan regardless of initiator | — | — | — | ✅ |
+| Interactive saved-credential override | — | ✅ | ✅ | ✅ |
+| Interactive ad hoc (personal) credential | — | — | ✅ | ✅ |
+| Manage recurring scan schedules | — | — | — | ✅ |
+| Content: review/diff/approve changed or unknown controls | — | ✅ | ✅ | ✅ |
+| Content: activate/roll back a baseline; waive a candidate test | — | — | — | ✅ |
+| Trust bundles / scoped TLS bypass | — | — | — | ✅ |
+| Temporary SSH enablement / reconcile | — | — | — | ✅ |
+| Target/component persistent configuration (bindings, `configured_fact`, purge) | — | — | — | ✅ |
+| Retention policy / graph purge | — | — | — | ✅ |
+| Alert acknowledgement | — | — | — | ✅ |
+
+This scan-specific "Cyber+/Operator+ control what they initiated" rule is narrow: it
+does not widen any non-scan job family's authority (e.g. it grants nothing toward
+`download`/`bundle-import`/`update` control), matching ADR-0022/epic #726's explicit
+"without widening non-scan job authority."
+
 ## Resources
 
 ### Auth
@@ -138,6 +166,41 @@ next sign-in would silently reuse the still-live Keycloak session.
 | `/targets/{id}/inventory` | GET | Cached hosts/VMs tree (cluster → host → vm), build info, maintenance_mode. |
 | `/targets/{id}/discover` | POST | 202 → `discover` job. |
 
+🚧 **Planned cached component inventory (epic #726, [ADR-0023](adr/0023-compliance-inventory-and-immutable-plans.md)).**
+`/targets/{id}/inventory` supersedes the flat cluster/host/VM tree above with a
+component-identity collection once #732–#734 land. Every row is a stable
+`Component`: `component_id` (opaque, identity is `(target_id, catalog_component_key,
+authoritative vendor identity)` — never hostname/IP/display-name/tree-position),
+`catalog_component_key`, `parent_component_id?`, `lifecycle`
+(`active`\|`absent`\|`retired`), `configured_fact`/`discovered_fact` (each an
+independent, timestamped exact-version/capability observation; both present, one, or
+neither), `fact_conflict` (bool — true when configured and discovered disagree; never
+silently resolved by the API), `first_seen_at`, `last_seen_at`,
+`continuous_absence_since?`, and `baseline_ready` (bool — one exact catalog
+product-version entry plus exactly one active approved baseline under ADR-0022;
+`false` is not an error, it is a readiness fact the plan preview reads). Retired
+components remain listed (`lifecycle: "retired"`) until an explicit purge; they are
+never silently dropped from this collection, only excluded from `all`-scope
+expansion.
+
+| Endpoint | Methods | Notes |
+|---|---|---|
+| `/targets/{id}/components` | GET | Superset of `/targets/{id}/inventory`'s planned shape: every known component beneath this target regardless of lifecycle, for Configuration-screen visibility (vs. the scan-scoped view below). |
+| `/components/{id}` | GET, PUT | GET: full component record incl. observation history summary. PUT (Admin): `configured_fact` only (exact product version/capability Waypoint cannot discover) — never lifecycle or identity, which are discovery/refresh-owned. |
+| `/components/{id}/observations` | GET | `ComponentObservation[]` — immutable discovery provenance: `discovery_refresh_id`, `observed_fact`, `observed_at`, `outcome`, raw-evidence digest reference. Audit/troubleshooting read, Cyber+. |
+| `/components/{id}` | DELETE | Admin-only, audited purge. 409 `component_not_retired` unless `lifecycle == "retired"`. Removes retained configuration; historical `PlannedComponentItem` references survive unaffected (they hold a frozen identity snapshot, not a live FK the purge could cascade). |
+| `/discovery-refreshes` | GET | `DiscoveryRefresh[]`: `trigger` (`scheduled`\|`pre-scan`\|`manual`), `target_id`/boundary, `started_at`/`completed_at`, `outcome` (`complete`\|`partial`\|`failed`), boundaries reconciled. Backs the discovery-failure alert's "why" drill-down (see Alerts below). |
+| `/targets/{id}/discovery-schedule` | GET, PUT | Admin. Per-target override of the appliance-wide daily discovery schedule; `null` body reverts to inherited default. Distinct from `/schedules` (scan schedules) — this is discovery cadence only. |
+| `/system/discovery-schedule` | GET, PUT | Admin. The one appliance-wide default (initially daily) every target inherits absent its own override. |
+
+Version-conflict resolution (`fact_conflict: true`) has no dedicated write endpoint:
+an interactive Cyber+ initiator's choice is made and frozen at `POST /runs`
+plan-preview time (see Compliance plans below), never by mutating the component
+record — ADR-0023 is explicit that the choice "mutates neither source." A scheduled
+run that hits a conflicted component cannot choose; it skips that component as a
+`CoverageOmission` and the conflict remains visible here for an Admin/Cyber to
+resolve out-of-band (e.g. correcting the `configured_fact` via `PUT /components/{id}`).
+
 **Shipped by #584/#585/#586, remaining for #587** ([ADR-0021](adr/0021-credential-purpose-matrix.md)):
 #584 shipped the per-`(target, purpose)` binding surface —
 `PUT`/`DELETE /targets/{id}/credential-bindings/{purpose}` (Admin, purpose
@@ -159,6 +222,57 @@ both is a 400); the flat legacy `credential` tier (one shared secret for the who
 remains and is mutually exclusive with `ad_hoc_credentials`. The wizard UI defaulting to
 assigned credentials is #587.
 
+🚧 **Superseded precedence order (epic #726, [ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
+The paragraph above describes the shipped `(target, purpose)`-only binding model.
+ADR-0024 supersedes ADR-0021 §§4–7 (target-only defaulting, whole-run missing-binding
+rejection, schedule-carried overrides) once #735–#737 land. The end-state precedence,
+most-specific first:
+
+1. **Interactive run override** — a compatible saved `credential_overrides` entry
+   (Cyber+) or ADR-0016 personal `ad_hoc_credentials` entry (Operator+), scoped to
+   `(component, purpose)` rather than `(target, purpose)` once components exist as a
+   first-class identity.
+2. **Component/purpose service binding** — `PUT /components/{id}/credential-bindings/{purpose}`
+   (planned, mirrors the shipped target-level endpoint's shape and error codes),
+   Admin-only.
+3. **Top-level target/purpose service binding** — the shipped
+   `PUT /targets/{id}/credential-bindings/{purpose}` endpoint, unchanged.
+
+**Scheduled runs resolve only layers 2 and 3** — component then target service
+bindings — and never carry an interactive/ad hoc override; a schedule payload that
+includes `credential_overrides` or `ad_hoc_credentials` is rejected at
+`POST /schedules` (400 `validation_error`), not silently ignored at dispatch. This
+replaces the shipped "same as interactive, at fire time" schedule behavior
+(ADR-0021 §7) rather than leaving both rules standing.
+
+**Missing-binding behavior is superseded from whole-run rejection to per-component
+readiness failure.** The shipped `credential_binding_gaps` 400 (whole request
+rejected before any row exists) applies only while runs are target-granular. Once
+component jobs exist (#735–#737), a missing/incompatible/ambiguous purpose binding
+for one component affects only that component's job: it remains visible with zero
+attempts and a safe, non-secret readiness reason (naming the component and purpose,
+never credential material); independent components' jobs continue; the run
+completes as incomplete rather than being rejected outright. `POST /runs` therefore
+stops returning `credential_binding_gaps` as a whole-request 400 for scope-level
+gaps once this lands — a request-shape error (duplicate override, out-of-scope
+target) is still a 400, but a resolvable-at-plan-time credential gap becomes a
+per-component `CoverageOmission`/readiness-failed job instead.
+
+**Audited credential repair** (planned, #735–#737): `POST
+/jobs/{id}/repair-credential` (Cyber+, own runs; Admin any), body
+`{ purpose, credential_id }` or `{ purpose, ad_hoc: { username, secret } }`. Valid
+only for a component job in a readiness-failed or `auth-failed` state whose gap
+matches the named purpose. Replaces that job's failed `(component, purpose)` binding
+for its *next* attempt only — it changes access alone: it cannot alter the planned
+component, scope, baseline, closure, selector, transport, control settings, trust
+policy, or output semantics (ADR-0024). Records old/new non-secret attribution plus
+actor/time/reason in `audit_log`. 409 `job_not_repairable` if the job's readiness
+gap does not match the named purpose or the job is not in a repairable state; 400
+`incompatible_credential_type` per the shared purpose-compatibility matrix. This
+supersedes `/runs/{id}/resume-blocked`'s whole-run credential swap for compliance
+runs specifically — `resume-blocked` remains the mechanism for non-compliance job
+families that still halt at the run/queue level.
+
 ### Credentials (service/shared only — ADR-0011)
 | Endpoint | Methods | Notes |
 |---|---|---|
@@ -170,6 +284,34 @@ assigned credentials is #587.
 |---|---|---|
 | `/runs/history` | GET | Issue #708/#689 (epic #706): filtered, keyset-cursor-paged run list — the global Jobs workspace's History mode. Viewer+, same floor as every other run read (ADR-0019 decision 6). Query params: `state` (comma-separated allow-list of `runs.state`), `run_type` (comma-separated allow-list of `runs.run_type`), `since`/`until` (ISO-8601, inclusive bounds on `created_at`), `cursor` (opaque, from a previous response's `next_cursor`), `limit` (1–200, default 50). No filter is applied by default — including no implicit "terminal only" filter; a caller browsing "history" passes `state=completed,completed_with_failures,aborted` explicitly, same as every other filter here. An unrecognized `state`/`run_type` value or an unparseable `since`/`until` or garbage `cursor` is 400 `validation_error`, never a 500. Response body: `items` (`RunResponse[]`, same shape `GET /runs` and `GET /runs/{id}` return) and `next_cursor` (opaque, present only when the page was truncated by `limit` with more matching rows remaining — never a silent truncation). Cursor wraps `(created_at, id)` — unlike `/runs/{id}/events/history`'s single-column `job_events.seq` cursor, `runs.created_at` is not unique, so the tie-break column (matching `ORDER BY created_at DESC, id DESC`) travels in the cursor too. A route distinct from `GET /runs` (rather than overloading its `?limit/offset` contract) so the Live Jobs workspace's existing active-work list (#590) is untouched. |
 | `/runs` | GET, POST | POST body: `run_type`, `scope` (JSON string — a scan run's `scope.site_id` and `scope.profile_id` are both required, optional `target_ids`), `credential_id` \| inline `credential` (personal tier, ADR-0011 — never persisted), `confirmation` (remediate only). Cyber+ for scans; remediation POSTs require Admin + `confirmation: "REMEDIATE"`. 202 body: `run_id`. Issue #639: `scope.profile_id` selects which pulled compliance-content profile (`profiles.id`, `GET /profiles`) the scan executes — must reference an installed profile or the request 404s/400s (missing entirely is a 400 `validation_error`; an unknown id is a 404 `not_found`); the run persists it in `scope` so run history shows what was actually scanned. Issue #585 (ADR-0021): optional `credential_overrides` (scan runs only, mutually exclusive with inline `credential`): `[{ target_id, purpose, credential_id }]`, each substituting a stored credential for exactly one (target, purpose) pair. Issue #586 (ADR-0021): optional `ad_hoc_credentials` (scan runs only, Operator+, mutually exclusive with inline `credential`): `[{ target_id, purpose, username, secret }]`, each an inline personal credential for exactly one (target, purpose) pair — encrypted at rest as its own `run_secrets` row keyed by `(run, target, purpose)`, never a stored `credentials` row. Ad hoc takes precedence over `credential_overrides` for the same pair; naming the same `(target_id, purpose)` in both, or twice within `ad_hoc_credentials` itself, is a 400. At creation the API resolves every purpose each selected target's scan requires (shared `CredentialPurposeMatrix`) from `ad_hoc_credentials` first, then `credential_overrides`, then the target's own `credential-bindings`, then the legacy run-level `credential_id` (now reinterpreted as a type-checked override of each target's default purpose) — then snapshots the result as immutable per-job `job_credential_bindings` rows (later target/binding edits never change an in-flight run; an ad hoc-resolved purpose sets `is_run_secret: true` on its snapshot row instead of a `credential_id`). Any missing/incompatible/out-of-scope pair rejects the whole request with a 400 `credential_binding_gaps` whose `error.binding_gaps` array enumerates every `{ target_id, target_name, purpose, reason, credential_id? }` (`reason` ∈ `missing_binding`, `incompatible_credential_type`, `credential_not_found`, `target_not_in_scope`, `purpose_not_applicable`, `duplicate_override`) before any run/job row exists. |
+
+🚧 **Superseded scan-creation contract (epic #726, ADRs 0022–0024).** The `/runs` POST
+row above — `scope.profile_id` selecting an installed profile, and target-granular
+`job_credential_bindings` — describes the shipped M2/M3 scan model. It is retained on
+the wire only for the one legacy-migration window ADR-0025 describes (see Legacy
+scan migration below) and is never dual-written alongside the model that follows.
+Once #732–#737 land, a scan run's `scope` no longer accepts `profile_id`: the caller
+never selects a profile (ADR-0022, "the scan wizard never chooses profiles"). The
+end-state shape:
+
+`scope` becomes `{ site_id, target_scope }` where `target_scope` is exactly one of
+`{ "mode": "all", "target_ids": [...] }` (expand every compatible component beneath
+the named top-level targets after mandatory refresh) or
+`{ "mode": "explicit", "component_ids": [...] }` (the exact stable-component set —
+never widens). A request naming both modes, or `profile_id` at all, is 400
+`validation_error`. `POST /runs` (scan) becomes a two-step flow:
+
+| Endpoint | Methods | Notes |
+|---|---|---|
+| `/runs/plan-preview` | POST | Cyber+. Body: `{ site_id, target_scope }` plus optional `credential_overrides`/`ad_hoc_credentials` keyed by `(component_id, purpose)`. Runs the mandatory pre-scan refresh and readiness evaluation **without creating a run**; returns the would-be `CompliancePlan` preview: resolved component set, per-component readiness (`ready`\|`coverage_omission` with reason), any `fact_conflict` requiring caller resolution, and required-purpose credential coverage. This is what the Start-a-Scan wizard renders before the caller confirms — it never selects a profile, only assets (ADR-0022/§7 "Start a Scan ... never selects a profile"). Zero-runnable-component previews are still 200 (an honest empty plan), not an error; the caller decides whether to proceed. |
+| `/runs` | POST (scan) | Body: `{ run_type: "scan", scope: { site_id, target_scope }, fact_conflict_resolutions?, credential_overrides?, ad_hoc_credentials? }`. `fact_conflict_resolutions`: `[{ component_id, resolved_fact: "configured"\|"discovered" }]` — required for every component the preview reported as `fact_conflict`; omitting one is a 400 `unresolved_fact_conflict`. Re-runs refresh/readiness (the preview is advisory, not a lock) and freezes the result as an immutable `CompliancePlan`: requested scope, resolved scope, refresh coverage, every `PlannedComponentItem` (component identity, exact catalog/baseline digests, dependency closure, selector/transport/priority, resolved-configuration snapshot digest, credential/trust references), and coverage omissions. 202 → `run_id`. 400 `no_runnable_component` only when refresh validates zero runnable components across the entire requested scope (ADR-0023: "initiation fails only when refresh validates no runnable component") — an explicit scope that resolves to only unsupported/unready components still succeeds as an honest zero-execution plan when at least one boundary was validated; the distinction is refresh validation, not readiness. |
+| `/runs/{id}/plan` | GET | Viewer+. The frozen `CompliancePlan` for a run: identical shape to `/runs/plan-preview`'s response but immutable and historical — never re-resolves current inventory/content/credentials. Append-only; later component/content/credential changes never alter what this returns for an existing run. |
+
+Scheduled scans skip `/runs/plan-preview` (nothing to preview interactively) and
+skip `fact_conflict_resolutions` (schedules cannot choose — a conflicted component
+becomes a `CoverageOmission` and the schedule re-evaluates at next dispatch,
+ADR-0023). `POST /schedules` for a scan schedule stores `{ site_id, target_scope }`
+the same shape, never `profile_id`.
 
 **Shipped by #585/#586** ([ADR-0021](adr/0021-credential-purpose-matrix.md)):
 #585 landed the stored-credential half of per-purpose resolution — `credential_overrides`
@@ -183,13 +325,31 @@ to every selected target's default purpose) and stays mutually exclusive with bo
 `credential_overrides` and `ad_hoc_credentials`.
 
 | `/runs/{id}` | GET | `RunResponse` (issue #494, matches shipped `RunsController`/`RunContracts.cs` exactly): `id`, `run_type`, `state`, `paused`, `blocked`, `blocked_reason`, `scope`, `credential_id`, `initiated_by`, `schedule_id` (issue #515 — the schedule that dispatched this run, null for an operator-initiated one; distinct from `schedules.last_run_id`, which only ever points at a schedule's most recent run), `created_at`/`started_at`/`completed_at`, and job counts by state (`job_count`, `job_count_queued`, `job_count_running`, `job_count_completed`, `job_count_failed`, `job_count_blocked`). No per-queue/per-benchmark breakdown and no aggregate `pass`/`fail`/`na` — those live only on `/runs/{id}/artifacts`. `blocked`/`blocked_reason` are the run's single credential-halt flag (ADR-0008), not a list of independently-blockable named queues; the frontend (`liverun.ts`) synthesizes a queue-like grouping client-side from each job's `priority` for display, it is not a server concept. |
-| `/runs/{id}/jobs` | GET | `JobResponse[]`: `id`, `run_id`, `job_type`, `target_id`, `target_name`, `state`, `stage`, `priority`, `attempt_count`, `created_at`/`started_at`/`finished_at`. No `benchmark` label and no per-job `pass`/`fail`/`na`/`note` on this endpoint — CAT counts are `/runs/{id}/artifacts`'s concern; a job's latest log line arrives only via `job.log` SSE, never a REST field. |
+| `/runs/{id}/jobs` | GET | `JobResponse[]`: `id`, `run_id`, `job_type`, `target_id`, `target_name`, `state`, `stage`, `priority`, `attempt_count`, `created_at`/`started_at`/`finished_at`. No `benchmark` label and no per-job `pass`/`fail`/`na`/`note` on this endpoint — CAT counts are `/runs/{id}/artifacts`'s concern; a job's latest log line arrives only via `job.log` SSE, never a REST field. Compliance runs (planned, #735–#737): gains `component_id` (the `PlannedComponentItem` this job maps to 1:1), `readiness` (`ready`\|`readiness_failed` with a safe reason — never blank for a zero-attempt job), and drops nothing already listed; `attempt_count` becomes exactly the ordered-attempt count described below rather than an automatic-retry counter. At 10,000+ jobs this endpoint is server-side grouped/cursor-paged per ADR-0024 — exact query params land with #757, not fixed here. |
+| `/runs/{id}/jobs/{jobId}/attempts` | GET | 📋 Planned (#735–#737, ADR-0024). `AttemptResponse[]`, ordered oldest-first: `attempt_number` (monotonic, 1-based), `started_at`/`ended_at`, `runner_id`, `stage`, `credential_binding_attribution` (`[{ purpose, credential_id? , is_run_secret, source_layer }]`, non-secret), `outcome`, `cancellation`/`cleanup_state`, and result/artifact references. Immutable and append-only — a superseded attempt is never deleted or edited when a later one begins. Viewer+, same floor as every other run read. |
+| `/runs/{id}/jobs/{jobId}/attempts/{attemptId}/events` | GET | 📋 Planned. Bounded, cursor-paged historical events for one specific attempt — the attempt-scoped sibling of `/runs/{id}/events/history`'s job-scoped filter, needed because one job now has more than one attempt's worth of history to disambiguate. |
 | `/runs/{id}/pause` · `/resume` · `/abort` | POST | Operator+ (own runs), Admin any. Runs with no recorded initiator (system/scheduled runs) are Admin-only. |
 | `/runs/{id}/resume-blocked` | POST | Admin only. Body: `{ credential_id }` — the REPLACEMENT credential to swap onto the run's halted jobs (not the halted credential's own id; the server determines that from the run's blocked job set). Swaps `jobs.credential_id` old→new for that job set — and (issue #585) any `job_credential_bindings` snapshot rows on those jobs naming the halted credential, in the same transaction, so the per-purpose ledger and the column can never disagree about what a resumed job executes with — audits both credential identities, and re-queues (ADR-0008 halt behavior). 409 when the run has no credential halt to resume from, or when the replacement credential is itself queue-halted; 404 when the replacement credential does not exist; 400 when its `credential_type` does not match the halted credential's. |
 | `/runs/{id}/purge` | POST, GET | Issue #594 (epic #577): Admin-only, crash-safe purge of a **terminal** compliance run's owned database projections and artifact files. `POST` body: `{ confirmation: "PURGE" }` (400 otherwise — never implicit, same step-up shape as remediate's `confirmation: "REMEDIATE"`). 409 `run_not_terminal` when `state` is not `completed`/`completed_with_failures`/`aborted` (run left untouched); 404 when the run does not exist. **Design: `runs`/`jobs` rows are retained, never deleted** — job_events is append-only-by-trigger and FK'd to `jobs`, so deleting the owning row would either corrupt or require deleting that immutable SSE ledger too; instead `runs.purged_at` marks the run purged in place and a `run_purge_tombstones` row is the durable historical record. What purge actually removes: `attestation_snapshots` rows for the run (a narrow, GUC-gated exception to that table's own append-only trigger — see migration 0042), any leftover `run_secrets` row (normally already gone via the run's own terminal transition), the scan-artifact HDF/CKL files for every `scan` job in the run (deleted by a `purge` job the compliance-runner executes against its own read-write artifact mount — the API process mounts that volume read-only and cannot delete a file itself), and nulls any `schedules.last_run_id` pointing at the run. 200/202 body (`RunPurgeStatusResponse`): `run_id`, `outcome` (`Completed`\|`AlreadyPurged`\|`InProgress`\|`Failed`), `requested_by`, `requested_at`, `prior_state`, `db_phase_done`, `artifacts_phase` (`pending`\|`running`\|`done`\|`failed`), `artifacts_total`, `artifacts_deleted`, `last_error`, `completed_at`. Idempotent and retryable: calling `POST` again on an in-flight purge resumes it (the database phase is never redone; the artifact job is only re-enqueued if the prior attempt's `artifacts_phase` is `failed`), and calling it again on an already-completed purge returns `AlreadyPurged` with the original tombstone's `requested_by`/`prior_state` rather than erroring or double-writing. `GET` polls the same status shape without re-triggering anything; 404 if purge was never requested for this run. Never schedulable (`purge` is absent from the closed schedule `job_type` set, `ScheduleJobTypes.All`) — mirrors `remediate`'s exclusion. |
 | `/runs/{id}/history` | DELETE, GET | Issue #592 (epic #588, its last child): Admin-only, audited, idempotent deletion of a **terminal** run's generic *operational* history record — structurally separate from `/runs/{id}/purge` above (see docs/domain-model.md's "Operational vs. domain retention ownership" table for the full per-`run_type` classification). `DELETE` body: `{ confirmation: "DELETE" }` (400 otherwise, same step-up shape as purge's `"PURGE"`). 409 `run_not_terminal` when `state` is not `completed`/`completed_with_failures`/`aborted`. **409 `requires_domain_purge_first`** when the run is compliance-owned (`run_type` is `scan` or `remediate`) and `runs.purged_at IS NULL` — epic #588's design: generic history deletion DEFERS to the domain purge for compliance-owned artifacts rather than deleting the operational record out from under results/attestations that still exist; call `POST /runs/{id}/purge` first (no ordering requirement in the other direction — purging an already-history-deleted run, if ever needed, is unaffected). 404 when the run does not exist. **Design: `runs`/`jobs` rows and `job_events` are retained, never deleted** — the identical structural reason `/runs/{id}/purge` already established (migration 0042); `runs.history_deleted_at` marks the row deleted in place (migration 0046) and a `run_history_deletion_tombstones` row (a deliberate sibling of `run_purge_tombstones`, not a shared table) is the durable historical record. What deletion actually does: sets `runs.history_deleted_at` and nulls any `schedules.last_run_id` pointing at the run — no artifact files, no other domain table is touched for any `run_type` (inventory/content/library/transfer state is never touched by this endpoint). 200 body (`RunHistoryDeletionStatusResponse`): `run_id`, `outcome` (`Completed`\|`AlreadyDeleted`), `actor`, `prior_state`, `occurred_at`. Idempotent: calling `DELETE` again on an already-deleted run returns `AlreadyDeleted` with the original tombstone's `actor`/`prior_state` rather than erroring or double-writing. `GET` reads back the same tombstone shape without triggering anything; 404 if deletion was never requested for this run. |
 | `/jobs/{id}` | DELETE | Operator+ (own runs), Admin any — same ownership scope as pause/resume/abort (issue #294); a job's owning run with no recorded initiator is Admin-only. Cancels one job independent of its run's other jobs (issue #10/#277). 200 body distinguishes an immediate cancel (`state: "cancelled"`, queued/blocked job) from a cooperative in-flight request (`state: "cancel_requested"`, running/attesting/converting job — stops at the dispatcher's next heartbeat tick); 409 if already terminal; 404 if the job does not exist. |
 | `/runs/{runId}/jobs/{jobId}/retry` | POST | Operator+ (own runs), Admin any — same ownership scope as pause/resume/abort/job-cancel, resolved off `runId` (issue #297). Moves a **`failed`** job back to `queued` with `jobs.stage` **preserved**, so the next claim resumes the pipeline at the last-reached stage instead of restarting it (ADR-0012 §5's engine-level resume primitive, now with an HTTP surface). Scoped to `failed` only — NOT `auth-failed` (use `/runs/{id}/resume-blocked`'s credential-swap-resume path instead; retrying without swapping the bad credential just re-fails) and NOT `cancelled` (a deliberate operator action — start a new run rather than silently re-queueing it). A manual retry is an explicit human override of the engine's own retry accounting: it does **not** increment `attempt_count` and is never blocked by the automatic-retry `max_attempts` cap. Records an `audit_log` entry (`event_type: "job.retried"`). 200 body: `job_id`, `state` (`"queued"`), `stage` (echoes the preserved marker, `null` if the job had not completed any stage). 409 if the job is not `failed`; 404 if the job does not exist or does not belong to `runId`. |
+
+🚧 **Superseded retry semantics for compliance jobs (ADR-0024).** The stage-preserving
+in-place `retry` above describes the shipped single-attempt job. Once component jobs
+own ordered attempts (#735–#737), retry for a `scan`/`remediate` component job
+**creates a new attempt** against the same immutable `PlannedComponentItem` rather
+than resuming stage state in place: `attempt_number` increments, the prior attempt's
+timing/logs/outcome/artifacts remain immutable and addressable, and the new attempt
+starts its own stage progression from the top (ADR-0012 stage markers still apply
+*within* an attempt for lease-recovery resume — they do not carry across attempts).
+This endpoint's response gains `attempt_number` (the new attempt's number) alongside
+the existing `job_id`/`state`; `stage` is no longer meaningful across the retry
+boundary and is dropped for compliance job types (`echoes the preserved marker`
+remains accurate for every other job family, which keeps the shipped single-attempt
+shape). A component job may retry only when it has no currently active attempt — one
+active attempt per component job is the execution invariant (ADR-0024); this does not
+decide whether a separate run may overlap the same target, which remains #649.
 | `/runs/{id}/artifacts` · `/jobs/{id}/artifacts/{kind}` | GET | Per-target rows + CKL/HDF download; `?bundle=zip` for the export button. Row CAT counts are **nullable** and gated by `counts_available` — see below. |
 | `/runs/{id}/attestations-applied` | GET | Waivers that fired: control, scope, justification, author/version, expired-skips. **Persisted at-scan-time ledger, immutable per run** — see below. |
 | `/runs/{id}/events/history` | GET | Issue #581 (ADR-0019): bounded, cursor-paged historical read over the run's persisted `job_events` — the complement to `/runs/{id}/events` SSE (below): SSE is the live/replay transport for an open connection, this is a single bounded page for a client that wants completed-run (or completed-so-far) history without holding a stream open. Viewer+, same floor as every other run read — visibility of operational history is not a domain action (ADR-0019 decision 6), so there is no ownership scoping. Query params: `job_id` (narrow to one job), `kind` (comma-separated allow-list of `job_events.event_type`, 400 on an unrecognized value), `level` (comma-separated allow-list of `job.log` payload `severity` — `information`/`warning`/`error`/`verbose`/`debug`; meaningless but harmless on event types with no `severity` field), `cursor` (opaque, from a previous response's `next_cursor`), `limit` (1–500, default 100). 404 for a run that does not exist; an existing run with no matching events (including none yet) is 200 with `items: []` and no `next_cursor` — distinct from 404, so empty history is never confused with "no such run". A garbage `cursor` or an unrecognized `kind`/`level` value or malformed `job_id` is 400 `validation_error`, never a 500. Response body: `items` (array of the same per-event envelope shape SSE sends — `seq`, `ts`, `type`, `run_id`, `job_id`, `data`; `data` is the same already-redacted `payload` column SSE streams, embedded as-is — this endpoint performs no additional transform and introduces no new leak surface) and `next_cursor` (opaque string, present only when the page was truncated by `limit` with more matching rows remaining — a page never silently truncates a large history without saying so; absent, never a bare `null`, once history is exhausted, matching every other nullable field in this API). Ordering is the same commit-order `seq` SSE uses (migration 0001/0104's `trg_job_events_assign_seq`), so a client can page history and then attach to `/runs/{id}/events` with `Last-Event-ID` set to the last `seq` it saw with no gap or duplicate at the seam. |
@@ -203,6 +363,33 @@ case `counts_available` is `false`. A consumer MUST gate on `counts_available` b
 the counts: a corrupt HDF is reported as *uncountable* (counts absent), never as a
 compliant-looking `0/0/0`. `artifact_kinds` reflects file *presence* on disk (so a
 present-but-corrupt HDF still lists `hdf`), which is independent of *countability*.
+
+🚧 **Superseded/extended result semantics (planned, ADRs 0024–0025).** Once component
+jobs/attempts and per-control settings exist, each row additionally carries
+`component_id`, `coverage` (`executed`\|`coverage_omission` with reason — the honest
+incomplete-coverage signal ADR-0023/0025 require), and a `findings` breakdown that
+distinguishes genuine compliance status from execution status: every applicable
+control in the exact-baseline closure appears **exactly once**, disposition ∈
+`Compliant`\|`NonCompliant`\|`Not_Reviewed` — `Not_Reviewed` covers both "did not
+execute" (readiness failure, zero attempts, or execution error) and "non-automatable
+control with no valid/unexpired attestation." A `Not_Reviewed` control is never
+reported as `Not_Applicable`, duplicated, or silently omitted (ADR-0025). This
+supersedes any implication that a corrupt/absent HDF or a skipped component simply
+has no row: it has a row, with `counts_available: false` and/or explicit
+`Not_Reviewed` findings, never a blank. `CoverageOmission` rows (component/boundary
+work that never became executable) remain aggregated separately and are never mixed
+into the control-level `findings` projection, so a clean `findings` result cannot
+conceal missing coverage.
+
+`/jobs/{id}/artifacts/receipts` (planned, #744/#745, ADR-0025): direct STIG Manager
+upload receipts for an eligible CKL — `destination`/`collection`, `benchmark_revision`,
+run/component/attempt/artifact identity, `request_attempt`, `status`
+(`ok`\|`conflict`\|`error`), sanitized/allowlisted response metadata fields only
+(never authorization/session headers or unbounded raw bodies), and `actor`. Upload
+failure never alters the scan finding outcome or destroys the immutable CKL; an
+authorized retry reuses the retained artifact and frozen destination policy without
+rescanning (`POST /jobs/{id}/artifacts/retry-upload`, Admin-only — destination
+changes are a distinct future workflow, never an implicit retry mutation).
 
 #### `/runs/{id}/attestations-applied` — persisted at-scan-time ledger (issue #306)
 
@@ -221,7 +408,23 @@ Granularity is per-target, not per-control: there is no control-enumeration cata
 this codebase to join the resolved waiver against. Per-control granularity is future
 work once one exists.
 
-### Config documents (three-layer)
+🚧 **Superseded granularity (planned, ADR-0024/#785 AC).** Once the per-control
+settings model and `Component`/`PlannedComponentItem` identities exist (above), this
+endpoint's rows key by `(component_id, control_id)` instead of `target`, and each row
+carries the same `AttestationSnapshot` fields the plan/attempt already froze
+(`source_layer`, `version`, `actor`, `expiry`, `applied_at`) — this is not a new
+resolution, it is exposing the plan's own frozen snapshot per control rather than a
+whole-profile answer per target.
+
+### Config documents (three-layer) — superseded by per-control settings
+
+🚧 **Superseded (epic #726, [ADR-0024](adr/0024-compliance-execution-attempts-credentials-and-settings.md)).**
+The whole-profile config-doc shortcut below is transitional. It does not survive
+alongside the per-control model that follows — once #735–#737 land, `/config-docs`
+stops accepting `kind: "input"`/`"attestation"` scoped to a whole profile; only
+`remediation-input` (owned by future remediation work, issue #15) may still use this
+shape, since remediation settings are explicitly out of #726's scope.
+
 | Endpoint | Methods | Notes |
 |---|---|---|
 | `/config-docs` | GET | Filter by kind (`input`\|`attestation`\|`remediation-input`), profile, layer (`global`\|`site:{id}`\|`target:{id}`). |
@@ -229,14 +432,58 @@ work once one exists.
 | `/config-docs/{id}/versions` | GET | Full history — the auditor answer. |
 | `/config-docs/resolve?profile&control&target` | GET | The EFFECTIVE card: resolved value + supplying layer. |
 
+#### Per-control settings (planned end state, ADR-0024)
+
+Input, Attestation, and future Remediation are three independently versioned setting
+*kinds* keyed by **stable baseline control identity** (not a whole profile document).
+Each kind resolves `Global → Site → Target`, most specific value winning; absence at
+a lower layer inherits rather than erases the higher value.
+
+| Endpoint | Methods | Notes |
+|---|---|---|
+| `/baselines/{id}/controls/{controlId}/settings` | GET | Cyber+. `{ input: SettingResolution?, attestation: SettingResolution?, remediation: SettingResolution? }` where `SettingResolution` is `{ value_or_reference, source_layer, version, author, updated_at, applicability }` — `null` when no layer sets that kind for this control. `value_or_reference` is a secret reference/digest, never plaintext, for any Input marked secret. |
+| `/baselines/{id}/controls/{controlId}/settings/{kind}` | PUT | Admin for `global`; Admin for `site:{id}`/`target:{id}` layer writes (Cyber+ read-only at every layer — matches the "RBAC reconciliation" table in `security.md`). Body: `{ layer, value, applicability?, attestation_expiry? }` (kind ∈ `input`\|`attestation`\|`remediation`). Creates a new immutable version; never overwrites history. `attestation_expiry` is required for `kind: "attestation"` when the control is non-automatable; omitting it on that kind is a 400. |
+| `/baselines/{id}/controls/{controlId}/settings/{kind}/versions` | GET | Full version history for one (control, kind) at one layer — the per-control analogue of `/config-docs/{id}/versions`. |
+
+Planning snapshots every effective setting a control needs — source layer/version,
+value/secret reference/digest, attestation actor/provenance/expiry, and an explicit
+missing/inapplicable state — into the `PlannedComponentItem`'s frozen compliance
+definition; every attempt reuses that snapshot (`/runs/{id}/plan` surfaces it, see
+above). Later edits require a new run. A missing required Input leaves the affected
+component job visibly skipped with a safe readiness reason and no attempt; an
+applicable non-automatable control with no valid attestation remains `Not_Reviewed`
+in the result projection (see Results/Findings, Compliance evidence graph below) —
+there is no post-scan human-assessment workflow.
+
+### Catalog, content sources, and exact-version baselines
+
+📋 **Planned** (epic #726, [ADR-0022](adr/0022-compliance-catalog-and-content-lifecycle.md)).
+Supersedes the mutable-profile-directory model implied by "Compliance content"
+below: baselines bind one exact product version to one exact profile version, never
+a range or scan-time picker.
+
+| Endpoint | Methods | Notes |
+|---|---|---|
+| `/catalog/products` | GET | Viewer+. The closed, versioned execution-catalog vocabulary: supported products/exact versions, component selectors, transports, credential purposes, priority, output semantics — read-only reflection of the reviewed catalog shipped in this repository (ADR-0022: "Operators cannot upload executable plugins, scripts, or catalog mappings"). No write endpoint exists; catalog changes ship only via appliance update. |
+| `/content-sources` | GET, PUT | Admin. Configured vendor-profile/XCCDF sources: every eligible configured STIG Manager (automatic) plus manual-upload as a source of record. `PUT` sets a per-source sync-schedule override; `null` reverts to the global daily default. |
+| `/content-sources/{id}/sync` | POST | Admin. Manual sync trigger (always available alongside the schedule). 202 → `content-sync` job. Strictly additive: success stages candidates and raises a review alert; failure raises a diagnostic alert; neither mutates active content. |
+| `/candidate-content` | GET | Cyber+. Staged vendor-profile/XCCDF artifacts awaiting diff/review: `id`, `source_id`, `identity` (product/version/kind), `digest`, `staged_at`, `diff_summary` (added/removed/changed/remapped/metadata-only/unchanged counts), `conflict` (bool — same identity/version claimed by two different complete artifacts). |
+| `/candidate-content/{id}/diff` | GET | Cyber+. Per-control diff classification against the currently active baseline (or "new" if none): `added`\|`removed`\|`changed`\|`remapped`\|`severity_impacting`\|`input_impacting`\|`attestation_impacting`\|`metadata_only`\|`unchanged`, each with the versioned-equivalence-algorithm result and closure evidence reference. An `unknown` equivalence result is reported as `changed` (ADR-0022: "incomplete, dynamic, ambiguous, or unsupported analysis is `unknown` and therefore functionally changed"). |
+| `/candidate-content/{id}/conflicts/{conflictId}/resolve` | POST | Admin. Body: `{ selected_artifact_id, reason }`. Resolves a same-identity/version conflict by selecting one complete artifact; the other is retained as history, never merged or discarded. Audited (actor/time/reason). |
+| `/candidate-content/{id}/controls/{controlId}/approve` | POST | Cyber+ for `changed`/`unknown` controls (Admin inherits); body `{ test_run_id? , waive_reason? }`. Requires a successful isolated candidate-execution `test_run_id` referencing this exact control/closure/baseline UNLESS `waive_reason` is present (Admin-only waiver, audited). `metadata_only` controls are eligible for automatic approval and do not require this call. 409 `test_run_mismatch` if `test_run_id` does not reference this exact control/dependency-closure/product-version baseline. |
+| `/candidate-content/{id}/test-run` | POST | Admin-only. Body: `{ target_component_id, confirmation }` — unscheduled candidate execution against any compatible configured component, including production, requiring `confirmation: "CANDIDATE_TEST"`. 202 → `run_id` (a distinct `run_type: "candidate-test"`, never posture evidence, never CKL/upload-eligible). Evidence has no age expiry and binds to the exact control/closure/baseline. |
+| `/candidate-content/{id}/activate` | POST | Admin-only. Body: `{ confirmation: "ACTIVATE" }`. Atomically activates only when every control/mapping/dependency/approval/test-or-waiver and whole-baseline validation gate passes (ADR-0022); 409 `baseline_not_ready` with the specific unmet gate(s) otherwise. Activation is a single audited event, separate from approval; existing plans keep their original baseline reference, future dispatches resolve the new active baseline. |
+| `/baselines` | GET | Viewer+. Every baseline (active, superseded, and staged-not-yet-active), each an exact `(product_version, profile_version, xccdf_version?, mapping_version)` tuple with `status` (`active`\|`superseded`\|`staged`) and `activated_at`/`activated_by`. |
+| `/baselines/{id}/rollback` | POST | Admin-only. Body: `{ confirmation: "ROLLBACK" }`. Atomically reactivates a retained, previously-approved, still integrity/capability-compatible baseline. History and the rollback candidate itself are never overwritten in place — this creates a new activation event pointing at the old artifact set. |
+
 ### Profiles & benchmarks
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/profiles` | GET | From compliance content: name, version, STIG\|SRG, benchmark mapping, control/severity counts, inputs-set/attested/missing stats. |
-| `/profiles/{id}/controls` | GET | Control, severity, title, effective input + scope, attest status. Issue #598: `effective input`/`attest status` are the PROFILE's whole-YAML `input`/`attestation` config-doc resolution for an optional `?target=` query param, applied identically to every control row — not resolved independently per control id, since no per-control structured storage exists in the config-doc schema (domain-model.md: "stored as documents ... not parsed into forms"). Controls themselves (id/title/severity) are parsed from the profile's InSpec control files at content-pull time, not derived from config-docs. |
-| `/benchmarks` | GET, POST | POST = manual XCCDF/zip upload. |
-| `/benchmarks/sync` | POST | Admin + connected; from STIG Manager. |
-| `/profiles/{id}/mapping` | PUT | Change benchmark mapping. |
+| `/profiles` | GET | From compliance content: name, version, STIG\|SRG, benchmark mapping, control/severity counts, inputs-set/attested/missing stats. 🚧 Superseded read model: once `/baselines` (above) exists, `/profiles` becomes a read view scoped to the currently *active* baseline per product; staged/candidate profiles are `/candidate-content`'s concern, not this endpoint's. |
+| `/profiles/{id}/controls` | GET | Control, severity, title, effective input + scope, attest status. Issue #598: `effective input`/`attest status` are the PROFILE's whole-YAML `input`/`attestation` config-doc resolution for an optional `?target=` query param, applied identically to every control row — not resolved independently per control id, since no per-control structured storage exists in the config-doc schema (domain-model.md: "stored as documents ... not parsed into forms"). Controls themselves (id/title/severity) are parsed from the profile's InSpec control files at content-pull time, not derived from config-docs. 🚧 Superseded once per-control settings (above) land: `effective input`/`attest status` resolve per control id from `/baselines/{id}/controls/{controlId}/settings`, not a whole-profile document. |
+| `/benchmarks` | GET, POST | POST = manual XCCDF/zip upload. 🚧 Superseded: manual upload becomes a `/content-sources` entry using the same additive candidate/diff/approval pipeline as automatic STIG Manager sync (ADR-0022 — "Admin manual XCCDF upload uses the same pipeline"), not a direct-to-active write. |
+| `/benchmarks/sync` | POST | Admin + connected; from STIG Manager. 🚧 Superseded by `/content-sources/{id}/sync` (above) — every eligible configured STIG Manager is an automatic source, not a single manual sync action. |
+| `/profiles/{id}/mapping` | PUT | Change benchmark mapping. 🚧 Superseded: mapping changes flow through the candidate/diff/approval/activation pipeline above — a direct in-place `PUT` against active content would bypass ADR-0022's atomic-activation gate. |
 
 ### STIG Manager
 | Endpoint | Methods | Notes |
@@ -283,6 +530,46 @@ work once one exists.
 | `/compliance-content/pull` · `/check` | POST | Connected; 202 → `content-pull` job. |
 | `/compliance-content/import` | POST | Air-gapped content bundle; 202 → `content-import` job. |
 
+🚧 **Reconciled with catalog/content sources (ADR-0022).** This section's repo-pull
+model remains the *InSpec profile code* acquisition path; it is distinct from, and
+does not replace, the "Catalog, content sources, and exact-version baselines" section
+above, which governs vendor-profile/XCCDF *acquisition, review, and activation*. A
+pulled profile still enters the same candidate/diff/approval/activation lifecycle
+before it is executable — `/compliance-content/pull` stages, it does not activate.
+
+### Trust and temporary SSH cleanup
+
+📋 **Planned** (epic #726, [ADR-0025](adr/0025-compliance-trust-cleanup-and-evidence.md)).
+
+| Endpoint | Methods | Notes |
+|---|---|---|
+| `/trust/bundles` · `/trust/bundles/{id}` | GET, POST, DELETE | Admin. Uploaded CA certificate/chain bundles as versioned public trust material — separate from encrypted credentials. Ingestion validates format/size/chain/duplicates/expiry and fails closed. |
+| `/connections/{id}/trust-policy` | GET, PUT | Admin. Selects a `trust_bundle_id` (default, managed-CA verification) or an explicit scoped bypass for exactly one target/service connection: `{ mode: "managed"\|"bypass", trust_bundle_id?, bypass_reason?, bypass_version? }`. Setting `mode: "bypass"` requires `bypass_reason` (400 otherwise) and is audited with actor/time; the response and every downstream readiness/evidence view carries a prominent warning. Never a process-global or appliance-wide default — this endpoint is always scoped to one connection. |
+| `/components/{id}/ssh-enablement` | GET, PUT | Admin. `PUT` opts one target into temporary SSH enablement only when the exact catalog product/version declares a reviewed capability provider (400 `capability_not_available` otherwise). Body: `{ enabled: true, management_credential_purpose }`. `GET` returns current authorization plus the durable obligation state machine: `not_required`\|`pending_enable`\|`enabled`\|`restore_pending`\|`restored`\|`cleanup_failed`. `cleanup_failed` is a prominent, retryable, persistent state — it is never cleared by a new scan attempt starting. |
+| `/components/{id}/ssh-enablement/reconcile` | POST | Admin. Explicitly retries an unresolved restore obligation (`cleanup_failed`) or safely re-establishes original state under the existing obligation. Required before another attempt may temporarily mutate the same service; does not block independent sibling components. |
+
+Every `PlannedComponentItem` freezes its trust-policy reference and (when opted in)
+SSH-enablement authorization/capability/provider/management-purpose at plan time
+(see `/runs/{id}/plan` above); these endpoints configure durable target/component
+state, not per-run overrides. A runner materializes trust per client/session and
+never mutates process-global verification shared by concurrent jobs.
+
+### Alerts
+
+📋 **Planned** (epic #726, ADRs 0022/0023/0025). Persistent in-app + audit-only
+signals — never a blocking gate on their own; the underlying condition (discovery
+failure, staged content awaiting review, cleanup-failed SSH restore) is what actually
+blocks readiness, the alert only surfaces it.
+
+| Endpoint | Methods | Notes |
+|---|---|---|
+| `/alerts` | GET | Viewer+. `{ id, kind, severity, subject_type, subject_id, message, raised_at, acknowledged_at?, acknowledged_by? }`. `kind` ∈ `discovery_failure`\|`content_review_ready`\|`content_sync_failure`\|`ssh_cleanup_failed`\|`trust_bypass_active`\|`credential_readiness`\|`retention_purge_failed`. Query params `kind`, `acknowledged` (bool), `since`/`until`. |
+| `/alerts/{id}/acknowledge` | POST | Admin-only. Records awareness only — it never resolves, clears, or hides the underlying active condition; a re-evaluation that still finds the condition true re-raises or keeps the alert visible rather than requiring a fresh alert row. Audited (actor/time). |
+
+New staged content and failed sync/discovery each raise their own alert `kind` for
+their distinct review-vs-diagnostic purpose (ADR-0022/0023) — they are never
+collapsed into one generic "something changed" signal.
+
 ### Schedules
 | Endpoint | Methods | Notes |
 |---|---|---|
@@ -296,6 +583,27 @@ work once one exists.
 | `/users` | GET, POST, PUT | Admin; role, site scope, auth method, last seen. |
 | `/audit` | GET | Cyber+; decrypt events, config versions, run initiations, imports/updates. |
 | `/dashboard` | GET | Aggregate: KPI tiles, site posture, recent runs, attention items. |
+
+🚧 **Superseded compliance retention (planned, [ADR-0025](adr/0025-compliance-trust-cleanup-and-evidence.md)).**
+The shipped `/runs/{id}/purge` (documented above, in Runs & jobs) purges one run's
+compliance projections. ADR-0025 defines the graph-wide policy this per-run action
+composes with:
+
+| Endpoint | Methods | Notes |
+|---|---|---|
+| `/system/compliance-retention` | GET, PUT | Admin. One appliance-wide setting, `{ retention_months }`, default 6. Changes are prospective, versioned, and audited; `GET` shows current value plus effective-since/by. Never retroactively purges on save — it only changes the eligibility window a future sweep evaluates. |
+| `/compliance-retention/sweep-status` | GET | Viewer+. Last/next scheduled sweep outcome: runs evaluated, purged, failed — each failure raises `retention_purge_failed` (see Alerts). |
+
+Eligibility and purge under this policy cover the **complete evidence graph**
+atomically per run — requested/resolved scope, plan/items, jobs, every attempt,
+findings, attestation snapshots, HDF/CKL artifacts, and upload receipts — reusing the
+exact same `POST /runs/{id}/purge` mechanism the shipped endpoint already provides
+(idempotent, retryable, tombstoned) rather than a second deletion path; the sweep is
+the automatic *trigger*, not a different *operation*. Readers see retained or
+tombstoned, never a partially-missing graph. Optional per-run retention holds remain
+issue #784 and, if implemented, are a non-blocking extension that protects this same
+graph rather than a fragment of it — no endpoint for holds is specified here since
+#784 is not yet decided to ship.
 
 ## Event streams (SSE)
 
@@ -361,6 +669,18 @@ execution flows through the job queue), so a progress emitter always has a
 would need a contract change plus a `job_events_scope_check` relaxation, decided
 here to be rejected rather than left open (#116).
 
+🚧 **Planned additions (epic #726, ADRs 0023–0025).** Two new appliance-wide event
+types join `system.notice`'s tier for the alert/discovery signals above —
+`alert.raised` (`{ alert_id, kind, severity, subject_type, subject_id }`) and
+`alert.acknowledged` (`{ alert_id, acknowledged_by }`) — rather than overloading
+`system.notice`'s free-form shape, since alerts are a first-class queryable resource
+(`/alerts`) and need a stable machine-readable `kind`. `job.state`'s state-machine
+values extend per the new per-component scan job states below; attempt boundaries
+(a new attempt starting after retry) emit a distinct `job.attempt_started`
+(job-scoped, `{ attempt_number }`) rather than overloading `job.state`'s `from`/`to`
+shape, since a new attempt is not a state transition of the same execution — it is a
+new execution record.
+
 ### Live Jobs and historical log queries (ADR-0019; #581 and #590 implemented)
 
 SSE remains the live transport, but it is not the historical paging API. Issue #581
@@ -406,6 +726,24 @@ and when a later fan-out for a halted credential creates born-`blocked` work.
   `paused` and `blocked` are queue-level flags, not run states.
 - **Download**: `queued → downloading → verifying → verified | failed` (checksum
   mismatch ⇒ `failed`, artifact quarantined).
+
+🚧 **Superseded/extended per-component job state (planned, ADR-0024).** A compliance
+component job gains `readiness_failed` as a distinct pre-execution terminal-for-that-
+attempt state — reached with **zero attempts** when a required credential/input/
+baseline/trust gate fails before any attempt starts (ADR-0023/0024's "readiness-failed
+component job remains visible... may have zero attempts"). This is not the same as
+`failed` (which implies at least one attempt ran and ended badly) or `blocked` (a
+queue-wide halt); a job may move `readiness_failed → queued` only via an authorized
+credential repair (`POST /jobs/{id}/repair-credential`, above) creating a new attempt.
+The per-job attempt sub-state-machine (`queued → running → attesting → converting →
+uploaded | done` per attempt, `failed`/`cancelled` terminal per attempt) is scoped
+*within* one attempt; a new attempt after retry restarts this sub-machine from
+`queued` rather than resuming the prior attempt's position — the prior attempt's
+final state is frozen, immutable history (see `/runs/{id}/jobs/{jobId}/attempts`
+above). Cancellation remains cooperative: `Stop` requests cancellation of the
+currently active attempt and is terminal only once the runner records cleanup
+outcome (including any SSH-restore obligation, ADR-0025) — a component job is never
+considered stopped while a restore obligation remains `cleanup_failed`.
 
 The job graphs above describe handler-driven pipeline transitions. Engine actors have
 additional recovery/control edges: lease recovery or claim release may move `running →
@@ -458,15 +796,64 @@ catalog, download, and library/bundle content work. The claimant owns leases,
 cancellation, state transitions, and structured `job_events`; the API replays those
 events over SSE (ADR-0013, ADR-0014, ADR-0017).
 
+🚧 **Planned schema additions (epic #726, ADRs 0022–0025) — sketch only, not a
+migration plan.** `components` (target_id, catalog_component_key, vendor_identity,
+lifecycle, configured_fact/discovered_fact jsonb, fact_conflict, first/last_seen_at,
+continuous_absence_since) · `component_observations` (component_id,
+discovery_refresh_id, observed_fact jsonb, observed_at, outcome, evidence_digest) ·
+`discovery_refreshes` (trigger, target_id, started_at/completed_at, outcome) ·
+`content_sources`, `candidate_content` (source_id, identity, digest, diff jsonb,
+conflict) · `baselines` (product_version, profile_version, xccdf_version, status,
+activated_at/by) · `control_settings` (baseline_id, control_id, kind, layer, value_ref,
+version, author) · `compliance_plans` / `planned_component_items` (append-only;
+requested/resolved scope, component identity, catalog/baseline digests, dependency
+closure, config-snapshot digest, credential/trust references) · `component_jobs`
+(1:1 with `planned_component_items`; supersedes today's `jobs` row per compliance
+component) · `component_job_attempts` (component_job_id, attempt_number, timing,
+runner/lease, credential attribution, outcome — append-only) · `coverage_omissions`
+(plan_id, identity_or_boundary, stage, reason) · `trust_bundles`,
+`connection_trust_policies` · `ssh_enablement_obligations` (component_id, provider,
+state, original_state, cleanup_attempts) · `control_findings` (component_id,
+control_id, disposition, reason) · `upload_receipts` (artifact_id, destination,
+status, sanitized_response jsonb) · `alerts` (kind, severity, subject, raised_at,
+acknowledged_at/by) · `compliance_retention_policy` (singleton: retention_months,
+versioned) · `compliance_purge_tombstones`. These extend, and in the marked
+superseded cases replace, the `jobs`/`inventory_items`/`profiles`/`config_docs` rows
+above for compliance work specifically; every other job family's schema is
+unaffected.
+
+## Legacy scan migration (ADR-0025)
+
+The shipped `scope.profile_id` payload and target-granular `job_credential_bindings`
+are transitional, not a permanent second scan model. There is one migration, not a
+dual-write adapter:
+
+1. Existing runs remain readable via their shipped `RunResponse`/`scope` shape as
+   historical legacy evidence — `GET /runs/{id}` never rewrites a pre-migration run's
+   persisted `scope` into the new `{ site_id, target_scope }` shape.
+2. Each configured legacy schedule/saved intent is deterministically translated to
+   `{ site_id, target_scope }` only when its exact requested scope survives
+   catalog-resolved component planning unchanged. If translation would widen, narrow,
+   or ambiguously reinterpret scope, `PUT /schedules/{id}` instead sets the schedule
+   to an explicit `action_required` state (audited, with a safe reason) rather than
+   silently changing or auto-disabling it — an Admin must resolve it via `PUT
+   /schedules/{id}` before it dispatches again.
+3. Once `/runs/plan-preview` and the `{ site_id, target_scope }` shape ship, `POST
+   /runs` (scan) stops accepting `scope.profile_id` entirely — 400 `validation_error`
+   naming the field, not a silent ignore. There is no window where both payload
+   shapes are simultaneously creatable.
+4. In-flight legacy runs at the moment of cutover drain under their original
+   contract; no new legacy-shaped run is created after cutover.
+
 ## Data ledger (screen → source)
 
 | Screen | Reads | Writes / actions |
 |---|---|---|
 | Live Jobs | filtered `/runs`, `/runs/{id}/jobs`, global + run SSE, bounded event history (planned) | select concurrent work; type-authorized pause/resume/abort/retry |
 | Dashboard | `/dashboard`, global SSE | — |
-| Start a Scan | `/sites`, `/targets`, `/targets/{id}/inventory`, `/profiles`, `/credentials` (names only) | POST `/runs`, POST `/schedules`, POST discover (refresh) |
-| Compliance Results | compliance-filtered `/runs`, `/runs/{id}` + artifacts + attestations-applied | export bundle; Remediate entry → POST `/runs` (Admin); explicit compliance purge (planned) |
-| Benchmarks | `/profiles`, `/profiles/{id}/controls`, `/config-docs` + resolve, `/benchmarks` | PUT config-docs (new version), sync/upload benchmarks, change mapping |
+| Start a Scan | `/sites`, `/targets`, `/targets/{id}/components` (planned; `/targets/{id}/inventory` shipped), `/credentials` (names only) — never `/profiles` (ADR-0022: the wizard never selects a profile) | POST `/runs/plan-preview` (planned), POST `/runs`, POST `/schedules`, POST discover (refresh) |
+| Compliance Results | compliance-filtered `/runs`, `/runs/{id}` + artifacts + attestations-applied + `/runs/{id}/jobs/{jobId}/attempts` (planned) | export bundle; Remediate entry → POST `/runs` (Admin); `POST /runs/{id}/purge` and the graph-wide retention sweep (planned) |
+| Benchmarks | `/catalog/products`, `/content-sources`, `/candidate-content` + diff/approve/activate, `/baselines` (planned) — plus shipped `/profiles`, `/profiles/{id}/controls`, `/baselines/{id}/controls/{controlId}/settings` (planned, supersedes whole-profile `/config-docs`) | PUT per-control settings (new version), resolve content conflicts, approve/waive candidate controls, activate/rollback baselines |
 | Download Catalog | `/catalog/artifacts`, `/downloads`, `/system` (stores) | POST downloads, catalog sync, schedule edits |
 | Library | `/library/items`, `/content-library/items` | uploads, import-from-repo, copy-to-vcenter, request-manifest |
 | Transfer | `/bundles`, import verification detail | POST export / import / apply |
