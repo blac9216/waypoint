@@ -46,31 +46,26 @@ would otherwise be a secret is templated.
   throwaway copy at import time; the templated file in this repo is never edited
   in place.
 
-## Operator override: `waypoint-frontend` redirect/origin URIs (real hostname)
+## Operator identity: `rootUrl`/`redirectUris`/`webOrigins` (issue #842)
 
-`waypoint-frontend`'s `redirectUris` and `webOrigins` in `waypoint-realm.json` are
-pinned to `https://localhost:8443` — a **dev-seed placeholder**, kept committed as-is.
+Both clients' `rootUrl`, `redirectUris`, and `webOrigins` in `waypoint-realm.json` are
+the literal placeholder `${WAYPOINT_PUBLIC_URL}` — templated, never a real hostname.
+Keycloak's realm-import placeholder substitution (`keycloak.migration.replace-placeholders`,
+turned on via the `JAVA_OPTS_APPEND` set on the `keycloak` service in
+`deploy/docker-compose.yml`) substitutes the compose-level `WAYPOINT_PUBLIC_URL`
+environment variable into these fields **at import time**, so a real deployment sets
+that one variable (`deploy/README.md` "Keycloak") instead of editing this file.
 This is intentionally *not* a wildcard (a wildcard redirect/origin on a public PKCE
-client is the security-critical thing to avoid), so a real deployment on any other edge
-hostname must update these two lists to that hostname before SPA sign-in will work —
-Keycloak rejects an authorization request whose redirect URI or origin is not exactly
-listed. This is the same class of operator override as the backend's
-`Oidc__PublicAuthority` note in `deploy/README.md`: change it for your site, do not
-commit your real hostname here.
+client is the security-critical thing to avoid) — Keycloak rejects an authorization
+request whose redirect URI or origin is not exactly the configured origin.
 
-To change them:
-
-1. In the Keycloak admin console → Clients → `waypoint-frontend` → **Settings**, set
-   *Valid redirect URIs* to `https://<your-edge-host>/oidc/callback` and *Web origins*
-   to `https://<your-edge-host>` (replace, do not add to, the `localhost:8443`
-   placeholders). Keep the `/oidc/callback` path — it is the SPA's fixed callback route.
-2. Or edit the two lists directly in a working copy of `waypoint-realm.json` and import
-   it via `deploy/scripts/keycloak-realm-import.sh` (do **not** commit the edited file
-   with a real hostname — the committed copy stays on the `localhost:8443` placeholder,
-   same discipline as the templated client secret above).
-
-Multiple hostnames (e.g. an FQDN plus a management IP) are supported by listing each in
-both arrays; still no wildcards.
+Because substitution happens once, at import, changing `WAYPOINT_PUBLIC_URL` after
+the realm already exists in a persisted `pgdata` volume has no effect (issue #841's
+epic explicitly does not reconcile an already-persisted realm) — start from a fresh
+volume, same as any other realm-file change; see "Round-trip" below. Multiple
+simultaneous public hostnames (e.g. an FQDN plus a management IP) are out of scope
+for this single-value template; that still requires the manual admin-console/export
+edit workflow described in "Round-trip" below.
 
 ## Role groups, not realm roles, are what a user is assigned
 

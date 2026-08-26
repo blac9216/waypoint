@@ -141,7 +141,7 @@ services:
       LocalAuth__Enabled: "${LOCAL_AUTH_ENABLED:-true}"
       # Issue #29, ADR-0004: the backend validates Keycloak-issued bearer
       # tokens as a plain OIDC relying party. Authority drives DISCOVERY ONLY
-      # (issue #536 -- see Oidc__ValidIssuer below for issuer validation) and
+      # (issue #842 -- see Oidc__PublicUrl below for issuer derivation) and
       # is this compose stack's own Keycloak service, reachable from
       # `backend` over the shared `internal` network (Keycloak's dev
       # listener is plain HTTP inside the compose network -- TLS is
@@ -157,20 +157,21 @@ services:
       # the realm's `waypoint-backend` client id
       # (deploy/keycloak/realm/waypoint-realm.json).
       Oidc__Authority: "${OIDC_AUTHORITY:-http://keycloak:8080/auth/realms/waypoint}"
+      # Issue #842: the ONE browser-facing HTTPS origin for this appliance.
+      # Both the backend's token issuer (derived as
+      # {PublicUrl}/auth/realms/waypoint, see OidcAuthOptions.DerivedIssuer)
+      # and Keycloak's own KC_HOSTNAME (below) come from this single value --
+      # they used to be two independently-configured settings (Oidc__ValidIssuer
+      # + KC_HOSTNAME) that a real deployment had to keep in lockstep by hand,
+      # which is exactly the drift this issue closes. An operator who exposes
+      # a real edge hostname or overrides WAYPOINT_HTTPS_PORT need change only
+      # this one variable; see deploy/README.md "Keycloak" for the exact
+      # operator override steps. Must be an absolute HTTPS origin with no
+      # path/query/fragment/trailing slash (OidcAuthOptions.IsValidPublicUrl)
+      # -- startup fails clearly (ValidateOnStart) otherwise.
+      Oidc__PublicUrl: "${WAYPOINT_PUBLIC_URL:-https://localhost:8443}"
       Oidc__Audience: "${OIDC_AUDIENCE:-waypoint-backend}"
       Oidc__RequireHttpsMetadata: "${OIDC_REQUIRE_HTTPS_METADATA:-false}"
-      # Issue #536: the canonical issuer string every real token's `iss`
-      # claim is checked against -- deliberately NOT derived from
-      # Oidc__Authority above (ASP.NET Core's AddJwtBearer default), because
-      # a browser-minted token's iss reflects Keycloak's KC_HOSTNAME-pinned
-      # public identity (KC_HOSTNAME below), never the internal
-      # keycloak:8080 address only `backend` can reach. Default matches this
-      # dev stack's KC_HOSTNAME (localhost:8443, WAYPOINT_HTTPS_PORT's
-      # default) -- an operator who overrides WAYPOINT_HTTPS_PORT or exposes
-      # a real edge hostname MUST override this (and KC_HOSTNAME below)
-      # together; see deploy/README.md "Keycloak" for the exact operator
-      # override steps.
-      Oidc__ValidIssuer: "${OIDC_VALID_ISSUER:-https://localhost:8443/auth/realms/waypoint}"
       # Issue #534: the BROWSER-facing authority + public client id, handed to
       # the SPA anonymously via GET /api/v1/auth/config so it never hardcodes
       # either. Deliberately NOT the same value as Oidc__Authority above --
@@ -390,33 +391,45 @@ services:
       # which also listens on plain HTTP behind the edge network.
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: "xforwarded"
-      # Issue #536: pins Keycloak's hostname-v2 provider (the default since
-      # Keycloak 22, still active here) to ONE canonical public identity
-      # instead of the request-derived behavior `--hostname-strict=false`
-      # (start-dev's own implicit default) previously left in place. Without
-      # this (and --hostname-strict=true above -- live-verified required:
-      # hostname-strict=false silently keeps deriving from request headers
-      # even with KC_HOSTNAME set), Keycloak echoes back whatever
-      # Host/X-Forwarded-* header the request arrived with as its `iss`
-      # claim -- a browser request through nginx and a direct
-      # container-network request from `backend` disagree, so no single
-      # ValidIssuer string on the backend could ever match both (the actual
-      # bug this issue fixes).
+      # Issue #842: the same single public origin the backend derives its
+      # issuer from (Oidc__PublicUrl above). Two consumers read it here:
+      # (1) KC_HOSTNAME below derives Keycloak's own canonical identity from
+      # it directly in the env value (no separate KC_HOSTNAME override to
+      # keep in sync); (2) waypoint-realm.json's `${WAYPOINT_PUBLIC_URL}`
+      # placeholders (rootUrl/redirectUris/webOrigins on both clients) are
+      # substituted into the imported realm at boot -- see
+      # JAVA_OPTS_APPEND below, which is what turns that substitution on.
+      WAYPOINT_PUBLIC_URL: "${WAYPOINT_PUBLIC_URL:-https://localhost:8443}"
+      # Keycloak's realm-import placeholder substitution
+      # (`${WAYPOINT_PUBLIC_URL}` in waypoint-realm.json) is OFF by default;
+      # this system property turns it on for the `--import-realm` boot path
+      # (live-verified: KC_ env vars do not map to this JVM system property,
+      # it must go through JAVA_OPTS_APPEND). Without it Keycloak imports the
+      # literal string `${WAYPOINT_PUBLIC_URL}` as the client's redirect
+      # URI/origin instead of substituting the real value.
+      JAVA_OPTS_APPEND: "-Dkeycloak.migration.replace-placeholders=true"
+      # Issue #536/#842: pins Keycloak's hostname-v2 provider (the default
+      # since Keycloak 22, still active here) to ONE canonical public
+      # identity instead of the request-derived behavior
+      # `--hostname-strict=false` (start-dev's own implicit default)
+      # previously left in place. Without this (and --hostname-strict=true
+      # above -- live-verified required: hostname-strict=false silently
+      # keeps deriving from request headers even with KC_HOSTNAME set),
+      # Keycloak echoes back whatever Host/X-Forwarded-* header the request
+      # arrived with as its `iss` claim -- a browser request through nginx
+      # and a direct container-network request from `backend` disagree, so
+      # no single ValidIssuer string on the backend could ever match both
+      # (the actual bug this issue fixes).
       #
       # MUST include the /auth path explicitly (live-verified: hostname-v2
       # does NOT automatically append KC_HTTP_RELATIVE_PATH below to
       # KC_HOSTNAME the way it does for the port/scheme) -- without it every
       # self-referential URL, including `iss`, renders without the /auth
-      # prefix and 404s through nginx's `/auth/` proxy. Default matches this
-      # dev stack's own edge port (WAYPOINT_HTTPS_PORT's default, 8443) --
-      # an operator overriding WAYPOINT_HTTPS_PORT or fronting the stack
-      # with a real hostname MUST override this together with the backend's
-      # Oidc__ValidIssuer above (same value, plus the /realms/waypoint
-      # suffix) -- see deploy/README.md "Keycloak" for the exact override
-      # steps. This is air-gap-safe: KC_HOSTNAME names Keycloak's own
-      # identity for URL rendering, it is never dialled out to -- no
-      # external endpoint, no ACME, no phone-home.
-      KC_HOSTNAME: "${KC_HOSTNAME:-https://localhost:8443/auth}"
+      # prefix and 404s through nginx's `/auth/` proxy. Derived directly from
+      # WAYPOINT_PUBLIC_URL above (issue #842) instead of its own independent
+      # KC_HOSTNAME override -- one variable now drives both the backend's
+      # issuer and Keycloak's own identity, so they cannot drift out of sync.
+      KC_HOSTNAME: "${WAYPOINT_PUBLIC_URL:-https://localhost:8443}/auth"
       # Issue #534 (live-verified): without this, Keycloak has no idea it is
       # reverse-proxied under nginx's /auth/ prefix (deploy/nginx/conf.d
       # default.conf's `location /auth/`) and renders every self-referential

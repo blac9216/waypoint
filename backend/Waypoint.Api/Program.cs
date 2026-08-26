@@ -124,7 +124,15 @@ try
 	// IOptionsMonitor<LocalAuthOptions> live and routes every request to Oidc whenever
 	// the flag is off, so a disabled local scheme is still never reachable by a caller
 	// no matter what they present -- see that class's doc comment.
-	OidcAuthOptions oidcOptions = builder.Configuration.GetSection(OidcAuthOptions.SectionName).Get<OidcAuthOptions>()
+	IConfigurationSection oidcSection = builder.Configuration.GetSection(OidcAuthOptions.SectionName);
+	builder.Services.AddOptions<OidcAuthOptions>()
+		.Bind(oidcSection)
+		.Validate(
+			options => string.IsNullOrWhiteSpace(options.PublicUrl) || OidcAuthOptions.IsValidPublicUrl(options.PublicUrl),
+			"Oidc:PublicUrl must be an absolute HTTPS origin without a path, query, fragment, user info, or trailing slash.")
+		.ValidateOnStart();
+
+	OidcAuthOptions oidcOptions = oidcSection.Get<OidcAuthOptions>()
 		?? new OidcAuthOptions();
 
 	builder.Services

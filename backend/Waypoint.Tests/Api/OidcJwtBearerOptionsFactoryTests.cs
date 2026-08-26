@@ -70,6 +70,43 @@ public sealed class OidcJwtBearerOptionsFactoryTests
 	}
 
 	[Fact]
+	public void ApplyIssuerValidation_WithPublicUrl_DerivesTheOnlyIssuer()
+	{
+		OidcAuthOptions options = new()
+		{
+			PublicUrl = "https://waypoint.example.internal:8443",
+			ValidIssuer = "https://legacy.example.internal/realms/waypoint",
+			ValidIssuers = new[] { "https://other.example.internal/realms/waypoint" },
+		};
+		JwtBearerOptions jwtBearerOptions = new();
+
+		OidcJwtBearerOptionsFactory.ApplyIssuerValidation(options, jwtBearerOptions);
+
+		Assert.Equal(
+			"https://waypoint.example.internal:8443/auth/realms/waypoint",
+			jwtBearerOptions.TokenValidationParameters.ValidIssuer);
+		Assert.Null(jwtBearerOptions.TokenValidationParameters.ValidIssuers);
+	}
+
+	[Theory]
+	[InlineData("http://waypoint.example.internal")]
+	[InlineData("https://waypoint.example.internal/")]
+	[InlineData("https://waypoint.example.internal/path")]
+	[InlineData("https://user@waypoint.example.internal")]
+	[InlineData("https://waypoint.example.internal?query=yes")]
+	[InlineData("https://waypoint.example.internal#fragment")]
+	public void ApplyIssuerValidation_WithInvalidPublicUrl_FailsClearly(string publicUrl)
+	{
+		OidcAuthOptions options = new() { PublicUrl = publicUrl };
+		JwtBearerOptions jwtBearerOptions = new();
+
+		InvalidOperationException error = Assert.Throws<InvalidOperationException>(
+			() => OidcJwtBearerOptionsFactory.ApplyIssuerValidation(options, jwtBearerOptions));
+
+		Assert.Contains("absolute HTTPS origin", error.Message, StringComparison.Ordinal);
+	}
+
+	[Fact]
 	public void ApplyIssuerValidation_WithSingleValidIssuer_SetsValidIssuerNotTheAuthority()
 	{
 		// The core issue #536 assertion: ValidIssuer must come from the browser-facing
