@@ -141,73 +141,49 @@ public sealed class CatalogRepository : ICatalogRepository
 
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 
-		// Issue #729: migration 0050's catalog_components_unique constraint is
-		// UNIQUE (product_version_id, parent_component_id, component_key), and
-		// parent_component_id is nullable for every non-named-sub-service component
-		// (the vast majority -- vSphere object-kind, whole-appliance 'target', and
-		// aggregate parents all carry a NULL parent). Postgres treats NULL as distinct
-		// from NULL under a plain UNIQUE constraint, so `ON CONFLICT
-		// (product_version_id, parent_component_id, component_key)` never matches an
-		// existing NULL-parent row and silently inserts a duplicate on every re-import
-		// -- exactly the additive-ingestion dedup guarantee issue #729's candidate
-		// promotion depends on. Rather than reshape 0050's constraint (out of this
-		// migration's scope, and #728's schema is otherwise already reviewed/merged),
-		// look the row up first with NULL-safe equality (IS NOT DISTINCT FROM) and
-		// UPDATE it if found, INSERT only if not -- the same fix Postgres' own upsert
-		// documentation recommends for a nullable conflict-target column.
-		await using (NpgsqlCommand find = new(
-			"""
-			SELECT id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
-			FROM catalog_components
-			WHERE product_version_id = $1 AND parent_component_id IS NOT DISTINCT FROM $2 AND component_key = $3
-			""", connection))
-		{
-			find.Parameters.AddWithValue(productVersionId);
-			find.Parameters.AddWithValue((object?)definition.ParentComponentId ?? DBNull.Value);
-			find.Parameters.AddWithValue(definition.ComponentKey);
+		// Issue #729: catalog_components has two distinct uniqueness backings, so the
+		// upsert takes two atomic ON CONFLICT paths keyed on which one applies. Both are
+		// race-safe: a single INSERT ... ON CONFLICT DO UPDATE cannot lose the dedup race
+		// two concurrent compliance-runner pulls (POST /pull has no enqueue singleton
+		// guard; replicas > 1 is supported) can otherwise run into.
+		//
+		//   * Parented case (parent_component_id IS NOT NULL): 0050's
+		//     catalog_components_unique UNIQUE (product_version_id, parent_component_id,
+		//     component_key) already constrains it, so ON CONFLICT on that triple matches.
+		//   * NULL-parent case (the overwhelmingly common one -- vSphere object-kind,
+		//     whole-appliance 'target', aggregate parents): a plain UNIQUE constraint does
+		//     NOT constrain NULL parents (Postgres treats NULL as distinct from NULL), so
+		//     0050's constraint provides no uniqueness there. Migration 0051 adds the
+		//     partial unique index catalog_components_null_parent_unique
+		//     (product_version_id, component_key) WHERE parent_component_id IS NULL; the
+		//     NULL branch's ON CONFLICT binds to that index by predicate, which both backs
+		//     the dedup and makes it atomic under concurrency.
+		string conflictTarget = definition.ParentComponentId is null
+			? "(product_version_id, component_key) WHERE parent_component_id IS NULL"
+			: "(product_version_id, parent_component_id, component_key)";
 
-			await using NpgsqlDataReader findReader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-			if (await findReader.ReadAsync(cancellationToken).ConfigureAwait(false))
-			{
-				Guid existingId = findReader.GetGuid(0);
-				await findReader.DisposeAsync().ConfigureAwait(false);
-
-				await using NpgsqlCommand update = new(
-					"""
-					UPDATE catalog_components
-					SET display_name = $2, transport = $3, selector_kind = $4, selector_name = $5
-					WHERE id = $1
-					RETURNING id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
-					""", connection);
-				update.Parameters.AddWithValue(existingId);
-				update.Parameters.AddWithValue(definition.DisplayName);
-				update.Parameters.AddWithValue(definition.Transport);
-				update.Parameters.AddWithValue(definition.SelectorKind);
-				update.Parameters.AddWithValue((object?)definition.SelectorName ?? DBNull.Value);
-
-				await using NpgsqlDataReader updateReader = await update.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-				await updateReader.ReadAsync(cancellationToken).ConfigureAwait(false);
-				return MapComponent(updateReader, 0);
-			}
-		}
-
-		await using NpgsqlCommand insert = new(
-			"""
+		await using NpgsqlCommand upsert = new(
+			$"""
 			INSERT INTO catalog_components (product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT {conflictTarget} DO UPDATE SET
+				display_name = EXCLUDED.display_name,
+				transport = EXCLUDED.transport,
+				selector_kind = EXCLUDED.selector_kind,
+				selector_name = EXCLUDED.selector_name
 			RETURNING id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
 			""", connection);
-		insert.Parameters.AddWithValue(productVersionId);
-		insert.Parameters.AddWithValue((object?)definition.ParentComponentId ?? DBNull.Value);
-		insert.Parameters.AddWithValue(definition.ComponentKey);
-		insert.Parameters.AddWithValue(definition.DisplayName);
-		insert.Parameters.AddWithValue(definition.Transport);
-		insert.Parameters.AddWithValue(definition.SelectorKind);
-		insert.Parameters.AddWithValue((object?)definition.SelectorName ?? DBNull.Value);
+		upsert.Parameters.AddWithValue(productVersionId);
+		upsert.Parameters.AddWithValue((object?)definition.ParentComponentId ?? DBNull.Value);
+		upsert.Parameters.AddWithValue(definition.ComponentKey);
+		upsert.Parameters.AddWithValue(definition.DisplayName);
+		upsert.Parameters.AddWithValue(definition.Transport);
+		upsert.Parameters.AddWithValue(definition.SelectorKind);
+		upsert.Parameters.AddWithValue((object?)definition.SelectorName ?? DBNull.Value);
 
-		await using NpgsqlDataReader insertReader = await insert.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-		await insertReader.ReadAsync(cancellationToken).ConfigureAwait(false);
-		return MapComponent(insertReader, 0);
+		await using NpgsqlDataReader upsertReader = await upsert.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		await upsertReader.ReadAsync(cancellationToken).ConfigureAwait(false);
+		return MapComponent(upsertReader, 0);
 	}
 
 	public async Task<CatalogReportGroup> UpsertReportGroupAsync(string groupKey, string displayName, int priority, CancellationToken cancellationToken)

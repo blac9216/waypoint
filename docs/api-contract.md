@@ -463,8 +463,9 @@ below: baselines bind one exact product version to one exact profile version, ne
 a range or scan-time picker. ✅ **`/catalog/products` implemented** (issues #728/#729,
 epic #726 Wave 1): the read-only execution-catalog surface backed by migration 0050's
 normalized catalog tables (PR #822) plus migration 0051's declared-inputs entity
-(PR #823/persistence slice), including candidate promotion from the validated
-semantic importer wired into `content-pull` (issue #729). Every other row in this
+(this issue #729 persistence slice; the semantic importer/parser it consumes is
+PR #823), including candidate promotion from the validated semantic importer wired
+into `content-pull` (issue #729). Every other row in this
 table remains planned.
 
 | Endpoint | Methods | Notes |

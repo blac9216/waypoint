@@ -195,44 +195,6 @@ function Get-WaypointComplianceContentControlFileNames {
 	ForEach-Object { $_.Name }
 }
 
-function Test-WaypointInspecCheck {
-	<#
-	.SYNOPSIS
-	    Bounded runner work (issue #729 deliverable 3): runs `inspec check <path>
-	    --format json` against one executable-leaf profile directory and returns
-	    whether the real (or CI-stubbed) tool considers the profile structurally
-	    valid. This is a thin CLI wrapper, not a parser of InSpec's own internals --
-	    mirrors this repo's VCFDT convention (docs/testing.md "CI stubs vs live-lab
-	    validation"): CI/unit tests drive an invented stub mirroring `inspec check`'s
-	    publicly documented CLI contract (subcommand + --format json, exit 0 on a
-	    structurally valid profile, non-zero otherwise); the real, open-source `inspec`
-	    binary is used directly wherever the image provides it (InSpec is not a
-	    licensed/account-gated tool like VCFDT, so a real invocation path is fine).
-
-	.PARAMETER ProfileDirectory
-	    The profile's real, absolute root directory.
-
-	.OUTPUTS
-	    [PSCustomObject] with Ran (bool -- whether an `inspec` binary was found at all),
-	    Passed (bool), and Detail (string, stdout+stderr tail for diagnostics).
-	#>
-	[CmdletBinding()]
-	param(
-		[Parameter(Mandatory)][string]$ProfileDirectory
-	)
-
-	if (-not (Get-Command inspec -ErrorAction SilentlyContinue)) {
-		# No inspec binary on PATH (e.g. a CI image without it staged) -- this is not a
-		# profile failure, just unavailable bounded validation; the caller records this
-		# distinctly from an actual `inspec check` failure.
-		return [PSCustomObject]@{ Ran = $false; Passed = $false; Detail = 'inspec executable not found on PATH' }
-	}
-
-	$output = & inspec check $ProfileDirectory --format json 2>&1
-	$passed = $LASTEXITCODE -eq 0
-	return [PSCustomObject]@{ Ran = $true; Passed = $passed; Detail = ($output | Out-String) }
-}
-
 function Get-WaypointComplianceContentProfiles {
 	<#
 	.SYNOPSIS
@@ -356,4 +318,4 @@ function Get-WaypointComplianceContentControls {
 	}
 }
 
-Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls, Get-WaypointComplianceContentRawManifest, Get-WaypointComplianceContentControlFileNames, Test-WaypointInspecCheck
+Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls, Get-WaypointComplianceContentRawManifest, Get-WaypointComplianceContentControlFileNames

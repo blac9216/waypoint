@@ -628,6 +628,114 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 		Assert.Empty(all);
 	}
 
+	/// <summary>
+	/// Issue #729 (round-2 finding 2): re-upserting the SAME NULL-parent component key
+	/// (the overwhelmingly common shape) must UPDATE in place, never insert a second
+	/// row. Backed by migration 0051's partial unique index
+	/// catalog_components_null_parent_unique -- 0050's plain UNIQUE constraint does not
+	/// constrain NULL parents at all, so without the index this dedup silently fails.
+	/// </summary>
+	[Fact]
+	public async Task UpsertComponent_NullParent_SameKeyTwice_UpdatesInPlace_DoesNotDuplicate()
+	{
+		Guid sourceRevisionId = await SeedSourceRevisionAsync();
+		CatalogProduct product = await _repository.UpsertProductAsync(sourceRevisionId, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion version = await _repository.UpsertProductVersionAsync(product.Id, "8.0.3", "vSphere 8.0 Update 3", CancellationToken.None);
+
+		CatalogComponent first = await _repository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition("vcenter", "vCenter Server", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null), CancellationToken.None);
+		CatalogComponent second = await _repository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition("vcenter", "vCenter Server (renamed)", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null), CancellationToken.None);
+
+		Assert.Equal(first.Id, second.Id);
+		Assert.Equal("vCenter Server (renamed)", second.DisplayName);
+
+		CatalogComponent onlyRow = Assert.Single(await _repository.ListComponentsAsync(version.Id, CancellationToken.None));
+		Assert.Equal(first.Id, onlyRow.Id);
+	}
+
+	/// <summary>
+	/// Issue #729 (round-2 finding 2): the parented case is constraint-backed by 0050's
+	/// catalog_components_unique -- re-upserting the same (product_version, parent, key)
+	/// triple must also dedup to one row. Reviewer's deferred note: this path was never
+	/// the bug, but there was no dedicated test; this closes that gap.
+	/// </summary>
+	[Fact]
+	public async Task UpsertComponent_ParentedComponent_SameKeyTwice_UpdatesInPlace_DoesNotDuplicate()
+	{
+		Guid sourceRevisionId = await SeedSourceRevisionAsync();
+		CatalogProduct product = await _repository.UpsertProductAsync(sourceRevisionId, "vmware", "vcf", "VMware Cloud Foundation", CancellationToken.None);
+		CatalogProductVersion version = await _repository.UpsertProductVersionAsync(product.Id, "9.0.0", "VCF 9.0", CancellationToken.None);
+		CatalogComponent parent = await _repository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition("sddc-manager", "SDDC Manager", CatalogTransports.VcfApi, CatalogSelectorKinds.Service, "sddc-manager", null), CancellationToken.None);
+
+		CatalogComponent firstChild = await _repository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition("nginx", "SDDC Manager nginx", CatalogTransports.Ssh, CatalogSelectorKinds.Service, "nginx", parent.Id), CancellationToken.None);
+		CatalogComponent secondChild = await _repository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition("nginx", "SDDC Manager nginx (renamed)", CatalogTransports.Ssh, CatalogSelectorKinds.Service, "nginx", parent.Id), CancellationToken.None);
+
+		Assert.Equal(firstChild.Id, secondChild.Id);
+		Assert.Equal("SDDC Manager nginx (renamed)", secondChild.DisplayName);
+
+		// parent + one child = 2 rows, no duplicate child.
+		Assert.Equal(2, (await _repository.ListComponentsAsync(version.Id, CancellationToken.None)).Count);
+	}
+
+	/// <summary>
+	/// Issue #729 (round-2 finding 2), the concurrency-shaped regression: two concurrent
+	/// upserts of the SAME NULL-parent component key must yield exactly ONE row, never a
+	/// silent duplicate. Without migration 0051's partial unique index
+	/// catalog_components_null_parent_unique, two interleaved INSERTs would both find
+	/// nothing and both insert (0050's plain UNIQUE does not constrain NULL parents); with
+	/// it, the atomic INSERT ... ON CONFLICT DO UPDATE serializes them into one row --
+	/// exactly at the layer the finding names. (Scoped to the component write, not full
+	/// promotion: catalog_execution_profiles has its own check-then-insert path guarded by
+	/// its own 0050 constraint, tracked separately -- see the deferred note below.)
+	/// </summary>
+	[Fact]
+	public async Task UpsertComponent_ConcurrentSameNullParentKey_YieldsSingleRow()
+	{
+		Guid sourceRevisionId = await SeedSourceRevisionAsync();
+		CatalogProduct product = await _repository.UpsertProductAsync(sourceRevisionId, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion version = await _repository.UpsertProductVersionAsync(product.Id, "8.0.3", "vSphere 8.0 Update 3", CancellationToken.None);
+		CatalogComponentDefinition definition = new("vcenter", "vCenter Server", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null);
+
+		// Two independent repository instances (independent connections), mirroring two
+		// compliance-runner replicas upserting the same NULL-parent component at once.
+		CatalogRepository repoA = new(_fixture.ConnectionString);
+		CatalogRepository repoB = new(_fixture.ConnectionString);
+		Task<CatalogComponent> a = repoA.UpsertComponentAsync(version.Id, definition, CancellationToken.None);
+		Task<CatalogComponent> b = repoB.UpsertComponentAsync(version.Id, definition, CancellationToken.None);
+		CatalogComponent[] results = await Task.WhenAll(a, b);
+
+		// Both upserts return the SAME row id, and exactly one component row exists.
+		Assert.Equal(results[0].Id, results[1].Id);
+		CatalogComponent only = Assert.Single(await _repository.ListComponentsAsync(version.Id, CancellationToken.None));
+		Assert.Equal(results[0].Id, only.Id);
+	}
+
+	/// <summary>
+	/// Issue #729 (round-2 finding 2): asserts migration 0051's partial unique index the
+	/// NULL-parent upsert binds its ON CONFLICT to actually exists -- so a future migration
+	/// dropping it (silently re-opening the duplicate-on-concurrency hole) breaks a test.
+	/// </summary>
+	[Fact]
+	public async Task Migration0051_NullParentComponentPartialUniqueIndex_Exists()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT indexdef FROM pg_indexes
+			WHERE tablename = 'catalog_components' AND indexname = 'catalog_components_null_parent_unique'
+			""", connection);
+		string? indexDef = (string?)await command.ExecuteScalarAsync();
+
+		Assert.NotNull(indexDef);
+		Assert.Contains("UNIQUE", indexDef!, StringComparison.Ordinal);
+		Assert.Contains("parent_component_id IS NULL", indexDef, StringComparison.Ordinal);
+	}
+
 	[Fact]
 	public async Task PromoteCandidate_UnknownVocabulary_FailsClosed_WithoutPromoting()
 	{

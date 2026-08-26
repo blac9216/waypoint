@@ -103,6 +103,25 @@ CREATE TABLE IF NOT EXISTS catalog_declared_inputs (
 
 CREATE INDEX IF NOT EXISTS idx_catalog_declared_inputs_execution_profile_id ON catalog_declared_inputs (execution_profile_id);
 
+-- catalog_components NULL-parent dedup (issue #729) -------------------------------------
+-- Migration 0050's catalog_components_unique is UNIQUE (product_version_id,
+-- parent_component_id, component_key). Postgres treats NULL as distinct from NULL under
+-- a plain UNIQUE constraint, so that constraint provides NO uniqueness for the
+-- overwhelmingly common NULL-parent case (vSphere object-kind, whole-appliance 'target',
+-- and aggregate-parent components all carry a NULL parent). Candidate promotion writes
+-- from the compliance-runner process, and POST /pull has no enqueue singleton guard
+-- (compliance-runner deploy.replicas > 1 is a supported topology), so two concurrent
+-- pulls over the same content could each find nothing and each INSERT, silently
+-- duplicating a NULL-parent component -- violating the additive-ingestion dedup
+-- guarantee. This partial unique index gives the NULL-parent case real DB-level
+-- uniqueness (the parented case is already constraint-backed by 0050), which both
+-- prevents the duplicate under concurrency AND is the conflict target
+-- CatalogRepository.UpsertComponentAsync's atomic INSERT ... ON CONFLICT DO UPDATE binds
+-- to. Additive index only; 0050's constraint is untouched.
+CREATE UNIQUE INDEX IF NOT EXISTS catalog_components_null_parent_unique
+    ON catalog_components (product_version_id, component_key)
+    WHERE parent_component_id IS NULL;
+
 -- Runner grants (ADR-0017/#729: content-pull/content-import execute in
 -- compliance-runner). The compliance-runner writes import reports and promotes
 -- candidates as part of the same content-pull job that already upserts
