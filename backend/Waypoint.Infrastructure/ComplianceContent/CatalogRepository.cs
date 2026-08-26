@@ -14,6 +14,7 @@
 
 using Npgsql;
 using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.ComplianceContent.SemanticImport;
 
 namespace Waypoint.Infrastructure.ComplianceContent;
 
@@ -139,28 +140,74 @@ public sealed class CatalogRepository : ICatalogRepository
 		}
 
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new(
+
+		// Issue #729: migration 0050's catalog_components_unique constraint is
+		// UNIQUE (product_version_id, parent_component_id, component_key), and
+		// parent_component_id is nullable for every non-named-sub-service component
+		// (the vast majority -- vSphere object-kind, whole-appliance 'target', and
+		// aggregate parents all carry a NULL parent). Postgres treats NULL as distinct
+		// from NULL under a plain UNIQUE constraint, so `ON CONFLICT
+		// (product_version_id, parent_component_id, component_key)` never matches an
+		// existing NULL-parent row and silently inserts a duplicate on every re-import
+		// -- exactly the additive-ingestion dedup guarantee issue #729's candidate
+		// promotion depends on. Rather than reshape 0050's constraint (out of this
+		// migration's scope, and #728's schema is otherwise already reviewed/merged),
+		// look the row up first with NULL-safe equality (IS NOT DISTINCT FROM) and
+		// UPDATE it if found, INSERT only if not -- the same fix Postgres' own upsert
+		// documentation recommends for a nullable conflict-target column.
+		await using (NpgsqlCommand find = new(
+			"""
+			SELECT id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
+			FROM catalog_components
+			WHERE product_version_id = $1 AND parent_component_id IS NOT DISTINCT FROM $2 AND component_key = $3
+			""", connection))
+		{
+			find.Parameters.AddWithValue(productVersionId);
+			find.Parameters.AddWithValue((object?)definition.ParentComponentId ?? DBNull.Value);
+			find.Parameters.AddWithValue(definition.ComponentKey);
+
+			await using NpgsqlDataReader findReader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			if (await findReader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				Guid existingId = findReader.GetGuid(0);
+				await findReader.DisposeAsync().ConfigureAwait(false);
+
+				await using NpgsqlCommand update = new(
+					"""
+					UPDATE catalog_components
+					SET display_name = $2, transport = $3, selector_kind = $4, selector_name = $5
+					WHERE id = $1
+					RETURNING id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
+					""", connection);
+				update.Parameters.AddWithValue(existingId);
+				update.Parameters.AddWithValue(definition.DisplayName);
+				update.Parameters.AddWithValue(definition.Transport);
+				update.Parameters.AddWithValue(definition.SelectorKind);
+				update.Parameters.AddWithValue((object?)definition.SelectorName ?? DBNull.Value);
+
+				await using NpgsqlDataReader updateReader = await update.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+				await updateReader.ReadAsync(cancellationToken).ConfigureAwait(false);
+				return MapComponent(updateReader, 0);
+			}
+		}
+
+		await using NpgsqlCommand insert = new(
 			"""
 			INSERT INTO catalog_components (product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (product_version_id, parent_component_id, component_key) DO UPDATE SET
-				display_name = EXCLUDED.display_name,
-				transport = EXCLUDED.transport,
-				selector_kind = EXCLUDED.selector_kind,
-				selector_name = EXCLUDED.selector_name
 			RETURNING id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
 			""", connection);
-		command.Parameters.AddWithValue(productVersionId);
-		command.Parameters.AddWithValue((object?)definition.ParentComponentId ?? DBNull.Value);
-		command.Parameters.AddWithValue(definition.ComponentKey);
-		command.Parameters.AddWithValue(definition.DisplayName);
-		command.Parameters.AddWithValue(definition.Transport);
-		command.Parameters.AddWithValue(definition.SelectorKind);
-		command.Parameters.AddWithValue((object?)definition.SelectorName ?? DBNull.Value);
+		insert.Parameters.AddWithValue(productVersionId);
+		insert.Parameters.AddWithValue((object?)definition.ParentComponentId ?? DBNull.Value);
+		insert.Parameters.AddWithValue(definition.ComponentKey);
+		insert.Parameters.AddWithValue(definition.DisplayName);
+		insert.Parameters.AddWithValue(definition.Transport);
+		insert.Parameters.AddWithValue(definition.SelectorKind);
+		insert.Parameters.AddWithValue((object?)definition.SelectorName ?? DBNull.Value);
 
-		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-		await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-		return MapComponent(reader, 0);
+		await using NpgsqlDataReader insertReader = await insert.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		await insertReader.ReadAsync(cancellationToken).ConfigureAwait(false);
+		return MapComponent(insertReader, 0);
 	}
 
 	public async Task<CatalogReportGroup> UpsertReportGroupAsync(string groupKey, string displayName, int priority, CancellationToken cancellationToken)
@@ -498,6 +545,30 @@ public sealed class CatalogRepository : ICatalogRepository
 			}
 		}
 
+		Dictionary<Guid, List<CatalogDeclaredInput>> declaredInputsByProfile = [];
+		await using (NpgsqlCommand command = new(
+			"""
+			SELECT id, execution_profile_id, name, input_type, is_required, created_at
+			FROM catalog_declared_inputs
+			WHERE execution_profile_id = ANY($1)
+			ORDER BY name
+			""", connection))
+		{
+			command.Parameters.Add(new NpgsqlParameter { Value = ids, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Uuid });
+			await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				CatalogDeclaredInput input = MapDeclaredInput(reader, 0);
+				if (!declaredInputsByProfile.TryGetValue(input.ExecutionProfileId, out List<CatalogDeclaredInput>? list))
+				{
+					list = [];
+					declaredInputsByProfile[input.ExecutionProfileId] = list;
+				}
+
+				list.Add(input);
+			}
+		}
+
 		List<CatalogExecutionProfileDetail> details = [];
 		foreach (CatalogExecutionProfile profile in profiles)
 		{
@@ -511,10 +582,213 @@ public sealed class CatalogRepository : ICatalogRepository
 				reportGroup,
 				requirementsByProfile.TryGetValue(profile.Id, out List<CatalogCredentialRequirement>? requirements) ? requirements : [],
 				benchmarksByProfile.TryGetValue(profile.Id, out CatalogBenchmarkReference? benchmark) ? benchmark : null,
-				remediationByProfile.TryGetValue(profile.Id, out CatalogRemediationDefinition? remediation) ? remediation : null));
+				remediationByProfile.TryGetValue(profile.Id, out CatalogRemediationDefinition? remediation) ? remediation : null,
+				declaredInputsByProfile.TryGetValue(profile.Id, out List<CatalogDeclaredInput>? declaredInputs) ? declaredInputs : []));
 		}
 
 		return details;
+	}
+
+	public async Task<CatalogDeclaredInput> UpsertDeclaredInputAsync(
+		Guid executionProfileId, string name, string? inputType, bool isRequired, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO catalog_declared_inputs (execution_profile_id, name, input_type, is_required)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (execution_profile_id, name) DO UPDATE SET input_type = EXCLUDED.input_type, is_required = EXCLUDED.is_required
+			RETURNING id, execution_profile_id, name, input_type, is_required, created_at
+			""", connection);
+		command.Parameters.AddWithValue(executionProfileId);
+		command.Parameters.AddWithValue(name);
+		command.Parameters.AddWithValue((object?)inputType ?? DBNull.Value);
+		command.Parameters.AddWithValue(isRequired);
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+		return MapDeclaredInput(reader, 0);
+	}
+
+	public async Task<IReadOnlyList<CatalogDeclaredInput>> ListDeclaredInputsAsync(Guid executionProfileId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT id, execution_profile_id, name, input_type, is_required, created_at
+			FROM catalog_declared_inputs
+			WHERE execution_profile_id = $1
+			ORDER BY name
+			""", connection);
+		command.Parameters.AddWithValue(executionProfileId);
+
+		List<CatalogDeclaredInput> inputs = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			inputs.Add(MapDeclaredInput(reader, 0));
+		}
+
+		return inputs;
+	}
+
+	public async Task<CatalogImportReport> RecordImportReportAsync(
+		string sourceCommit, string sourceDigest, int acceptedCount, int warningCount, int rejectedCount, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO catalog_import_reports (source_commit, source_digest, accepted_count, warning_count, rejected_count)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id, source_commit, source_digest, accepted_count, warning_count, rejected_count, recorded_at
+			""", connection);
+		command.Parameters.AddWithValue(sourceCommit);
+		command.Parameters.AddWithValue(sourceDigest);
+		command.Parameters.AddWithValue(acceptedCount);
+		command.Parameters.AddWithValue(warningCount);
+		command.Parameters.AddWithValue(rejectedCount);
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+		return MapImportReport(reader, 0);
+	}
+
+	public async Task<CatalogImportReportEntry> RecordImportReportEntryAsync(
+		Guid reportId, string disposition, string profileKey, string? reason, Guid? executionProfileId, CancellationToken cancellationToken)
+	{
+		if (!CatalogImportEntryDispositions.IsValid(disposition))
+		{
+			throw new ArgumentException(
+				$"disposition '{disposition}' is not in the closed vocabulary ({string.Join(", ", CatalogImportEntryDispositions.All)})", nameof(disposition));
+		}
+
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO catalog_import_report_entries (report_id, disposition, profile_key, reason, execution_profile_id)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id, report_id, disposition, profile_key, reason, execution_profile_id, created_at
+			""", connection);
+		command.Parameters.AddWithValue(reportId);
+		command.Parameters.AddWithValue(disposition);
+		command.Parameters.AddWithValue(profileKey);
+		command.Parameters.AddWithValue((object?)reason ?? DBNull.Value);
+		command.Parameters.AddWithValue((object?)executionProfileId ?? DBNull.Value);
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+		return MapImportReportEntry(reader, 0);
+	}
+
+	public async Task<IReadOnlyList<CatalogImportReport>> ListImportReportsAsync(int limit, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT id, source_commit, source_digest, accepted_count, warning_count, rejected_count, recorded_at
+			FROM catalog_import_reports
+			ORDER BY recorded_at DESC
+			LIMIT $1
+			""", connection);
+		command.Parameters.AddWithValue(limit);
+
+		List<CatalogImportReport> reports = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			reports.Add(MapImportReport(reader, 0));
+		}
+
+		return reports;
+	}
+
+	public async Task<IReadOnlyList<CatalogImportReportEntry>> ListImportReportEntriesAsync(Guid reportId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT id, report_id, disposition, profile_key, reason, execution_profile_id, created_at
+			FROM catalog_import_report_entries
+			WHERE report_id = $1
+			ORDER BY profile_key
+			""", connection);
+		command.Parameters.AddWithValue(reportId);
+
+		List<CatalogImportReportEntry> entries = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			entries.Add(MapImportReportEntry(reader, 0));
+		}
+
+		return entries;
+	}
+
+	public async Task<CatalogPromotionOutcome> PromoteCandidateAsync(
+		SemanticCandidate candidate, CatalogPromotionRequest request, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(candidate);
+		ArgumentNullException.ThrowIfNull(request);
+
+		if (!candidate.IsExecutableLeaf)
+		{
+			return new CatalogPromotionOutcome(null, "candidate is an aggregate profile -- aggregate and unsupported profiles cannot be selected for execution (issue #729 AC)");
+		}
+
+		IReadOnlyList<string> vocabularyErrors = [
+			.. CatalogVocabularyValidator.ValidateComponent(candidate.Transport, candidate.SelectorKind, candidate.SelectorName),
+			.. CatalogVocabularyValidator.ValidateKind(candidate.Kind),
+		];
+		if (vocabularyErrors.Count > 0)
+		{
+			// Reconciliation already runs this same check before a candidate is ever
+			// marked accepted, so this should never actually fire in normal operation --
+			// it exists so promotion fails closed rather than throwing if a caller ever
+			// promotes a candidate that skipped reconciliation.
+			return new CatalogPromotionOutcome(null, string.Join("; ", vocabularyErrors));
+		}
+
+		CatalogSourceRevision sourceRevision = await UpsertSourceRevisionAsync(request.SourceRevisionKey, description: null, cancellationToken).ConfigureAwait(false);
+		CatalogProduct product = await UpsertProductAsync(sourceRevision.Id, request.Vendor, candidate.VendorFamily, request.ProductDisplayName, cancellationToken).ConfigureAwait(false);
+		CatalogProductVersion productVersion = await UpsertProductVersionAsync(product.Id, candidate.ProductVersionKey, request.ProductVersionDisplayName, cancellationToken).ConfigureAwait(false);
+		CatalogComponentDefinition componentDefinition = new(
+			candidate.ComponentKey, candidate.DisplayName, candidate.Transport, candidate.SelectorKind, candidate.SelectorName, ParentComponentId: null);
+		CatalogComponent component = await UpsertComponentAsync(productVersion.Id, componentDefinition, cancellationToken).ConfigureAwait(false);
+		CatalogContentRelease contentRelease = await UpsertContentReleaseAsync(
+			sourceRevision.Id, candidate.Kind, $"{candidate.ProductVersionKey}:{candidate.Kind}:{candidate.ContentDigest[..12]}", request.ContentReleaseDisplayName, cancellationToken).ConfigureAwait(false);
+		CatalogReportGroup reportGroup = await UpsertReportGroupAsync(request.ReportGroupKey, request.ReportGroupDisplayName, request.ReportGroupPriority, cancellationToken).ConfigureAwait(false);
+
+		CatalogExecutionProfile? existing = await FindExecutionProfileAsync(component.Id, contentRelease.Id, cancellationToken).ConfigureAwait(false);
+		CatalogExecutionProfile executionProfile = existing ?? await CreateExecutionProfileAsync(
+			component.Id, contentRelease.Id, reportGroup.Id, candidate.ManifestVersion ?? "unknown", request.OutputKind, cancellationToken).ConfigureAwait(false);
+
+		foreach (InspecManifestInput input in candidate.Inputs)
+		{
+			await UpsertDeclaredInputAsync(executionProfile.Id, input.Name, input.Type, input.Required, cancellationToken).ConfigureAwait(false);
+		}
+
+		return new CatalogPromotionOutcome(executionProfile.Id, null);
+	}
+
+	private async Task<CatalogExecutionProfile?> FindExecutionProfileAsync(Guid componentId, Guid contentReleaseId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT id, component_id, content_release_id, report_group_id, profile_version, is_operator_override, output_kind, created_at
+			FROM catalog_execution_profiles
+			WHERE component_id = $1 AND content_release_id = $2
+			""", connection);
+		command.Parameters.AddWithValue(componentId);
+		command.Parameters.AddWithValue(contentReleaseId);
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			return null;
+		}
+
+		return MapExecutionProfile(reader, 0);
 	}
 
 	private async Task<NpgsqlConnection> OpenAsync(CancellationToken cancellationToken)
@@ -556,4 +830,30 @@ public sealed class CatalogRepository : ICatalogRepository
 
 	private static CatalogReportGroup MapReportGroup(NpgsqlDataReader reader, int offset) => new(
 		reader.GetGuid(offset), reader.GetString(offset + 1), reader.GetString(offset + 2), reader.GetInt32(offset + 3), reader.GetFieldValue<DateTimeOffset>(offset + 4));
+
+	private static CatalogDeclaredInput MapDeclaredInput(NpgsqlDataReader reader, int offset) => new(
+		reader.GetGuid(offset),
+		reader.GetGuid(offset + 1),
+		reader.GetString(offset + 2),
+		reader.IsDBNull(offset + 3) ? null : reader.GetString(offset + 3),
+		reader.GetBoolean(offset + 4),
+		reader.GetFieldValue<DateTimeOffset>(offset + 5));
+
+	private static CatalogImportReport MapImportReport(NpgsqlDataReader reader, int offset) => new(
+		reader.GetGuid(offset),
+		reader.GetString(offset + 1),
+		reader.GetString(offset + 2),
+		reader.GetInt32(offset + 3),
+		reader.GetInt32(offset + 4),
+		reader.GetInt32(offset + 5),
+		reader.GetFieldValue<DateTimeOffset>(offset + 6));
+
+	private static CatalogImportReportEntry MapImportReportEntry(NpgsqlDataReader reader, int offset) => new(
+		reader.GetGuid(offset),
+		reader.GetGuid(offset + 1),
+		reader.GetString(offset + 2),
+		reader.GetString(offset + 3),
+		reader.IsDBNull(offset + 4) ? null : reader.GetString(offset + 4),
+		reader.IsDBNull(offset + 5) ? null : reader.GetGuid(offset + 5),
+		reader.GetFieldValue<DateTimeOffset>(offset + 6));
 }

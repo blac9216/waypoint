@@ -15,6 +15,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.ComplianceContent.SemanticImport;
 using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
 using Xunit;
@@ -67,6 +68,7 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 		await using NpgsqlCommand command = new(
 			"""
 			TRUNCATE TABLE
+				catalog_import_report_entries, catalog_import_reports, catalog_declared_inputs,
 				catalog_remediation_definitions, catalog_benchmark_references, catalog_credential_requirements,
 				catalog_execution_profiles, catalog_report_groups, catalog_components, catalog_content_releases,
 				catalog_product_versions, catalog_products, catalog_source_revisions
@@ -422,5 +424,222 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 
 		IReadOnlyList<CatalogExecutionProfileDetail> all = await _repository.ListAllExecutionProfilesAsync(CancellationToken.None);
 		Assert.Single(all);
+	}
+
+	// --- issue #729 persistence slice: declared inputs, import reports, candidate promotion ---
+
+	[Fact]
+	public async Task UpsertDeclaredInput_ThenListDeclaredInputs_RoundTrips()
+	{
+		Guid sourceRevisionId = await SeedSourceRevisionAsync();
+		CatalogProduct product = await _repository.UpsertProductAsync(sourceRevisionId, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion version = await _repository.UpsertProductVersionAsync(product.Id, "8.0.3", "vSphere 8.0 Update 3", CancellationToken.None);
+		CatalogReportGroup group = await _repository.UpsertReportGroupAsync("vcenter-stig", "vCenter STIG", 3, CancellationToken.None);
+		CatalogComponent vcenter = await _repository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition("vcenter", "vCenter Server", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null), CancellationToken.None);
+		CatalogContentRelease release = await _repository.UpsertContentReleaseAsync(sourceRevisionId, CatalogKinds.Stig, "v2r3-stig", "vSphere 8.0 STIG v2r3", CancellationToken.None);
+		CatalogExecutionProfile profile = await _repository.CreateExecutionProfileAsync(vcenter.Id, release.Id, group.Id, "v2r3", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+
+		await _repository.UpsertDeclaredInputAsync(profile.Id, "vcenter_host", "string", true, CancellationToken.None);
+		await _repository.UpsertDeclaredInputAsync(profile.Id, "vcenter_port", "numeric", false, CancellationToken.None);
+
+		IReadOnlyList<CatalogDeclaredInput> inputs = await _repository.ListDeclaredInputsAsync(profile.Id, CancellationToken.None);
+		Assert.Equal(2, inputs.Count);
+		Assert.Collection(inputs,
+			i => { Assert.Equal("vcenter_host", i.Name); Assert.Equal("string", i.InputType); Assert.True(i.IsRequired); },
+			i => { Assert.Equal("vcenter_port", i.Name); Assert.Equal("numeric", i.InputType); Assert.False(i.IsRequired); });
+
+		// Also proves through the full CatalogExecutionProfileDetail join (the wire shape's source).
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(profile.Id, CancellationToken.None);
+		Assert.Equal(2, detail!.DeclaredInputs.Count);
+	}
+
+	[Fact]
+	public async Task UpsertDeclaredInput_SameNameTwice_UpdatesInPlace_DoesNotDuplicate()
+	{
+		Guid sourceRevisionId = await SeedSourceRevisionAsync();
+		CatalogProduct product = await _repository.UpsertProductAsync(sourceRevisionId, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion version = await _repository.UpsertProductVersionAsync(product.Id, "8.0.3", "vSphere 8.0 Update 3", CancellationToken.None);
+		CatalogReportGroup group = await _repository.UpsertReportGroupAsync("vcenter-stig", "vCenter STIG", 3, CancellationToken.None);
+		CatalogComponent vcenter = await _repository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition("vcenter", "vCenter Server", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null), CancellationToken.None);
+		CatalogContentRelease release = await _repository.UpsertContentReleaseAsync(sourceRevisionId, CatalogKinds.Stig, "v2r3-stig", "vSphere 8.0 STIG v2r3", CancellationToken.None);
+		CatalogExecutionProfile profile = await _repository.CreateExecutionProfileAsync(vcenter.Id, release.Id, group.Id, "v2r3", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+
+		await _repository.UpsertDeclaredInputAsync(profile.Id, "vcenter_host", "string", true, CancellationToken.None);
+		await _repository.UpsertDeclaredInputAsync(profile.Id, "vcenter_host", "string", false, CancellationToken.None);
+
+		CatalogDeclaredInput input = Assert.Single(await _repository.ListDeclaredInputsAsync(profile.Id, CancellationToken.None));
+		Assert.False(input.IsRequired);
+	}
+
+	[Fact]
+	public async Task RecordImportReport_ThenRecordEntries_RoundTrips()
+	{
+		CatalogImportReport report = await _repository.RecordImportReportAsync("commit-a", "digest-a", 2, 1, 1, CancellationToken.None);
+		Assert.Equal("commit-a", report.SourceCommit);
+		Assert.Equal(2, report.AcceptedCount);
+
+		await _repository.RecordImportReportEntryAsync(report.Id, CatalogImportEntryDispositions.Accepted, "vsphere/8.0/v2r3-stig/inspec/baseline/vcenter", reason: null, executionProfileId: null, CancellationToken.None);
+		await _repository.RecordImportReportEntryAsync(report.Id, CatalogImportEntryDispositions.Warning, "vsphere/8.0/v2r3-stig/inspec/baseline/esxi", "no declared inputs", executionProfileId: null, CancellationToken.None);
+		await _repository.RecordImportReportEntryAsync(report.Id, CatalogImportEntryDispositions.Rejected, "unknown/1.0/v1-stig/inspec/baseline", "unrecognized vendor family", executionProfileId: null, CancellationToken.None);
+
+		IReadOnlyList<CatalogImportReportEntry> entries = await _repository.ListImportReportEntriesAsync(report.Id, CancellationToken.None);
+		Assert.Equal(3, entries.Count);
+		Assert.Contains(entries, e => e.Disposition == CatalogImportEntryDispositions.Accepted);
+		Assert.Contains(entries, e => e.Disposition == CatalogImportEntryDispositions.Warning && e.Reason == "no declared inputs");
+		Assert.Contains(entries, e => e.Disposition == CatalogImportEntryDispositions.Rejected && e.Reason == "unrecognized vendor family");
+
+		IReadOnlyList<CatalogImportReport> reports = await _repository.ListImportReportsAsync(10, CancellationToken.None);
+		Assert.Contains(reports, r => r.Id == report.Id);
+	}
+
+	[Fact]
+	public async Task RecordImportReportEntry_InvalidDisposition_ThrowsBeforeAnySql()
+	{
+		CatalogImportReport report = await _repository.RecordImportReportAsync("commit-b", "digest-b", 0, 0, 0, CancellationToken.None);
+
+		await Assert.ThrowsAsync<ArgumentException>(() => _repository.RecordImportReportEntryAsync(
+			report.Id, "bogus-disposition", "some/profile", null, null, CancellationToken.None));
+	}
+
+	/// <summary>
+	/// Two distinct pull attempts over byte-identical content are two distinct
+	/// provenance events (ADR-0022 "immutable source observations ... will be
+	/// retained") -- report headers are never deduplicated even when source_digest
+	/// repeats.
+	/// </summary>
+	[Fact]
+	public async Task RecordImportReport_SameDigestTwice_CreatesTwoDistinctReports()
+	{
+		CatalogImportReport first = await _repository.RecordImportReportAsync("commit-c", "same-digest", 1, 0, 0, CancellationToken.None);
+		CatalogImportReport second = await _repository.RecordImportReportAsync("commit-c", "same-digest", 1, 0, 0, CancellationToken.None);
+
+		Assert.NotEqual(first.Id, second.Id);
+	}
+
+	private static SemanticCandidate ExecutableLeafCandidate(
+		string profileKey = "vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter",
+		string productVersionKey = "8.0.3",
+		string kind = "stig",
+		string componentKey = "vcenter",
+		string transport = "vmware",
+		string selectorKind = "vcenter",
+		string? manifestVersion = "2.3.0",
+		IReadOnlyList<InspecManifestInput>? inputs = null) =>
+		new(
+			profileKey, "vsphere", productVersionKey, kind, componentKey, "vCenter Server", transport, selectorKind, null,
+			IsAggregate: false, Title: "vCenter STIG", ManifestVersion: manifestVersion,
+			Inputs: inputs ?? [new InspecManifestInput("vcenter_host", "string", true)],
+			Supports: [], Depends: [], ContentDigest: "deadbeef00000000000000000000000000000000000000000000000000000");
+
+	private static CatalogPromotionRequest PromotionRequest() => new(
+		SourceRevisionKey: "compliance-content",
+		Vendor: "VMware vSphere",
+		ProductDisplayName: "VMware vSphere",
+		ProductVersionDisplayName: "vSphere 8.0 Update 3",
+		ContentReleaseDisplayName: "stig 8.0.3",
+		ReportGroupKey: "vcenter-stig",
+		ReportGroupDisplayName: "vCenter STIG",
+		ReportGroupPriority: 3,
+		OutputKind: CatalogOutputKinds.HdfAndCkl);
+
+	[Fact]
+	public async Task PromoteCandidate_ExecutableLeaf_CreatesFullIdentityTreeAndDeclaredInputs()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate();
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(candidate, PromotionRequest(), CancellationToken.None);
+
+		Assert.NotNull(outcome.ExecutionProfileId);
+		Assert.Null(outcome.RejectionReason);
+
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		Assert.Equal("vsphere", detail!.Product.ProductKey);
+		Assert.Equal("8.0.3", detail.ProductVersion.VersionKey);
+		Assert.Equal("vcenter", detail.Component.ComponentKey);
+		Assert.Equal(CatalogKinds.Stig, detail.ContentRelease.Kind);
+		Assert.Equal("2.3.0", detail.ExecutionProfile.ProfileVersion);
+		Assert.Single(detail.DeclaredInputs);
+		Assert.Equal("vcenter_host", detail.DeclaredInputs[0].Name);
+	}
+
+	/// <summary>
+	/// Additive-ingestion guarantee (ADR-0022/epic #726 §2, issue #729 deliverable 4):
+	/// promoting the SAME candidate identity twice (e.g. a re-import of unchanged
+	/// content) deduplicates to the SAME execution profile row rather than creating a
+	/// sibling -- active content is never mutated, and re-promotion is a no-op at the
+	/// terminal execution-profile level.
+	/// </summary>
+	[Fact]
+	public async Task PromoteCandidate_SameIdentityTwice_DedupesToSameExecutionProfile()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate();
+		CatalogPromotionRequest request = PromotionRequest();
+
+		CatalogPromotionOutcome first = await _repository.PromoteCandidateAsync(candidate, request, CancellationToken.None);
+		CatalogPromotionOutcome second = await _repository.PromoteCandidateAsync(candidate, request, CancellationToken.None);
+
+		Assert.Equal(first.ExecutionProfileId, second.ExecutionProfileId);
+
+		IReadOnlyList<CatalogExecutionProfileDetail> all = await _repository.ListAllExecutionProfilesAsync(CancellationToken.None);
+		Assert.Single(all, d => d.Component.ComponentKey == "vcenter" && d.ContentRelease.Kind == CatalogKinds.Stig);
+	}
+
+	/// <summary>
+	/// Additive ingestion never mutates active content: promoting a second, DIFFERENT
+	/// component under the same product version leaves the first execution profile's
+	/// identity/declared inputs completely untouched.
+	/// </summary>
+	[Fact]
+	public async Task PromoteCandidate_SecondDifferentComponent_DoesNotMutateFirstProfile()
+	{
+		SemanticCandidate first = ExecutableLeafCandidate();
+		CatalogPromotionOutcome firstOutcome = await _repository.PromoteCandidateAsync(first, PromotionRequest(), CancellationToken.None);
+
+		SemanticCandidate second = ExecutableLeafCandidate(
+			profileKey: "vsphere/8.0.3/v2r3-stig/inspec/baseline/esxi", componentKey: "esxi", selectorKind: "esxi",
+			inputs: [new InspecManifestInput("esxi_host", "string", true)]);
+		await _repository.PromoteCandidateAsync(second, PromotionRequest() with { ReportGroupKey = "esxi-stig", ReportGroupDisplayName = "ESXi STIG", ReportGroupPriority = 4 }, CancellationToken.None);
+
+		CatalogExecutionProfileDetail? firstDetail = await _repository.GetExecutionProfileAsync(firstOutcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(firstDetail);
+		Assert.Equal("vcenter", firstDetail!.Component.ComponentKey);
+		Assert.Single(firstDetail.DeclaredInputs);
+		Assert.Equal("vcenter_host", firstDetail.DeclaredInputs[0].Name);
+
+		IReadOnlyList<CatalogExecutionProfileDetail> all = await _repository.ListAllExecutionProfilesAsync(CancellationToken.None);
+		Assert.Equal(2, all.Count);
+	}
+
+	[Fact]
+	public async Task PromoteCandidate_AggregateCandidate_IsRejected_NeverPromoted()
+	{
+		SemanticCandidate aggregate = ExecutableLeafCandidate() with { ComponentKey = "aggregate", IsAggregate = true };
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(aggregate, PromotionRequest(), CancellationToken.None);
+
+		Assert.Null(outcome.ExecutionProfileId);
+		Assert.NotNull(outcome.RejectionReason);
+		Assert.Contains("aggregate", outcome.RejectionReason, StringComparison.OrdinalIgnoreCase);
+
+		IReadOnlyList<CatalogExecutionProfileDetail> all = await _repository.ListAllExecutionProfilesAsync(CancellationToken.None);
+		Assert.Empty(all);
+	}
+
+	[Fact]
+	public async Task PromoteCandidate_UnknownVocabulary_FailsClosed_WithoutPromoting()
+	{
+		SemanticCandidate badTransport = ExecutableLeafCandidate() with { Transport = "bogus-transport" };
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(badTransport, PromotionRequest(), CancellationToken.None);
+
+		Assert.Null(outcome.ExecutionProfileId);
+		Assert.NotNull(outcome.RejectionReason);
+		Assert.Contains("bogus-transport", outcome.RejectionReason);
+
+		IReadOnlyList<CatalogExecutionProfileDetail> all = await _repository.ListAllExecutionProfilesAsync(CancellationToken.None);
+		Assert.Empty(all);
 	}
 }

@@ -88,4 +88,59 @@ public interface ICatalogRepository
 
 	/// <summary>Every execution profile in the catalog, fully joined -- the backing read for <c>GET /catalog/products</c> (docs/api-contract.md).</summary>
 	Task<IReadOnlyList<CatalogExecutionProfileDetail>> ListAllExecutionProfilesAsync(CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Records one declared input for an execution profile (issue #728 AC "declared and
+	/// consumed inputs ... queryable", migration 0051). Upserts by (execution_profile_id,
+	/// name) -- a re-import of the same content re-declaring the same input is a no-op,
+	/// not a duplicate row.
+	/// </summary>
+	Task<CatalogDeclaredInput> UpsertDeclaredInputAsync(
+		Guid executionProfileId, string name, string? inputType, bool isRequired, CancellationToken cancellationToken);
+
+	/// <summary>All declared inputs for one execution profile, ordered by name.</summary>
+	Task<IReadOnlyList<CatalogDeclaredInput>> ListDeclaredInputsAsync(Guid executionProfileId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Persists one <c>SemanticImportReport</c> header (issue #729 deliverable 5,
+	/// migration 0051). Always inserts a new row -- two distinct pull attempts over
+	/// byte-identical content are two distinct provenance events (ADR-0022), never
+	/// deduplicated at the report-header level.
+	/// </summary>
+	Task<CatalogImportReport> RecordImportReportAsync(
+		string sourceCommit, string sourceDigest, int acceptedCount, int warningCount, int rejectedCount, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Persists one entry (accepted/warning/rejected) of an already-recorded import
+	/// report. <paramref name="executionProfileId"/> is non-null only for an accepted
+	/// entry that promotion successfully turned into a catalog execution profile.
+	/// </summary>
+	Task<CatalogImportReportEntry> RecordImportReportEntryAsync(
+		Guid reportId, string disposition, string profileKey, string? reason, Guid? executionProfileId, CancellationToken cancellationToken);
+
+	/// <summary>Import reports, newest first, bounded by <paramref name="limit"/>.</summary>
+	Task<IReadOnlyList<CatalogImportReport>> ListImportReportsAsync(int limit, CancellationToken cancellationToken);
+
+	/// <summary>All entries of one import report, ordered by profile key.</summary>
+	Task<IReadOnlyList<CatalogImportReportEntry>> ListImportReportEntriesAsync(Guid reportId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Promotes one accepted <see cref="Waypoint.Core.ComplianceContent.SemanticImport.SemanticCandidate"/>
+	/// into the migration 0050 catalog identity tree plus its declared inputs (issue
+	/// #729 deliverable: "candidate promotion into the 0050 catalog tables"). Additive
+	/// only (ADR-0022 "additive acquisition"): every level is upserted by natural key
+	/// (source revision, product, product version, component, content release), and the
+	/// terminal execution-profile row is created only if it does not already exist for
+	/// this (component, content release) pair -- an identical re-import is deduplicated
+	/// to the SAME execution profile id rather than creating a sibling, and this method
+	/// never mutates an execution profile's already-recorded identity once created. An
+	/// aggregate candidate (<see cref="Waypoint.Core.ComplianceContent.SemanticImport.SemanticCandidate.IsExecutableLeaf"/>
+	/// false) is not promoted -- callers should not invoke this for aggregate candidates
+	/// (see <see cref="Waypoint.Core.ComplianceContent.SemanticImport.SemanticCandidate"/>
+	/// AC "aggregate and unsupported profiles cannot be selected for execution").
+	/// </summary>
+	Task<CatalogPromotionOutcome> PromoteCandidateAsync(
+		Waypoint.Core.ComplianceContent.SemanticImport.SemanticCandidate candidate,
+		CatalogPromotionRequest request,
+		CancellationToken cancellationToken);
 }

@@ -15,6 +15,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.ComplianceContent.SemanticImport;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.PowerShell;
 
@@ -35,15 +36,51 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// <see cref="IComplianceContentRepository.RecordPullAsync"/> so pull history
 /// (issue #40 AC "who/when/commit") always reflects what actually happened, including
 /// a failed run, rather than only successes.
+///
+/// Issue #729 (epic #726 Wave 1 remainder): a successful pull additionally runs the
+/// validated <see cref="VendorHierarchyInterpreter"/>/<see cref="SemanticImportReconciler"/>
+/// pipeline (PR #823) over the same checkout's <c>ContentEntries</c> (raw inspec.yml
+/// text plus controls/files structural facts, added to the PowerShell module's output
+/// alongside the pre-existing <c>Profiles</c>/<c>Controls</c> shape this handler already
+/// consumes for <c>profiles</c>/<c>profile_controls</c> -- issue #598's job-engine
+/// boundary/stage-marker/lease/cancellation contract, ADR-0013/0014, is unchanged; this
+/// is additional work inside the SAME job attempt, not a new job type or stage). The
+/// resulting <see cref="SemanticImportReport"/> is persisted (migration 0051) and every
+/// accepted executable-leaf candidate is promoted into the migration 0050 catalog
+/// tables plus its declared inputs -- additive ingestion only (ADR-0022): promotion
+/// upserts by natural key and never mutates an already-active execution profile's
+/// identity. This pass never fails the overall pull outcome: a semantic-import problem
+/// is captured as a rejected/warning report entry, exactly like the pre-existing
+/// per-profile/per-control parsing tolerance below.
 /// </summary>
 public sealed class ContentPullJobHandler : IJobHandler
 {
 	private const string InvocationCommand = "Invoke-WaypointComplianceContentPull";
 
+	/// <summary>
+	/// Classification facts issue #729's interpreter needs but the raw import evidence
+	/// cannot supply on its own (docs/compliance-parity.md's catalog-authored
+	/// vendor/kind naming) -- kept as one small closed table here (not the importer,
+	/// which only proves shape/vocabulary) exactly like <see cref="CatalogPromotionRequest"/>'s
+	/// doc comment describes.
+	/// </summary>
+	private static readonly Dictionary<string, string> VendorDisplayNames = new(StringComparer.OrdinalIgnoreCase)
+	{
+		["vsphere"] = "VMware vSphere",
+		["vcsa"] = "VMware vCenter Server Appliance",
+		["nsx"] = "VMware NSX",
+		["photon"] = "VMware Photon OS",
+		["aria-operations"] = "VMware Aria Operations",
+		["aria-automation"] = "VMware Aria Automation",
+		["aria-suite-lifecycle"] = "VMware Aria Suite Lifecycle",
+		["vidm"] = "VMware Workspace ONE Access",
+	};
+
 	private readonly IPowerShellExecutor _executor;
 	private readonly IComplianceContentRepository _content;
 	private readonly IProfileRepository _profiles;
 	private readonly IProfileControlRepository _profileControls;
+	private readonly ICatalogRepository _catalog;
 	private readonly IJobRunnerRepository _jobs;
 	private readonly IOptions<ComplianceContentOptions> _options;
 
@@ -52,6 +89,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 		IComplianceContentRepository content,
 		IProfileRepository profiles,
 		IProfileControlRepository profileControls,
+		ICatalogRepository catalog,
 		IJobRunnerRepository jobs,
 		IOptions<ComplianceContentOptions> options)
 	{
@@ -59,6 +97,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(content);
 		ArgumentNullException.ThrowIfNull(profiles);
 		ArgumentNullException.ThrowIfNull(profileControls);
+		ArgumentNullException.ThrowIfNull(catalog);
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(options);
 
@@ -66,6 +105,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 		_content = content;
 		_profiles = profiles;
 		_profileControls = profileControls;
+		_catalog = catalog;
 		_jobs = jobs;
 		_options = options;
 	}
@@ -104,7 +144,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed(note);
 		}
 
-		(string? commit, IReadOnlyList<ProfileUpsert> discoveredProfiles, IReadOnlyDictionary<string, IReadOnlyList<ProfileControlUpsert>> controlsByProfileKey) =
+		(string? commit, IReadOnlyList<ProfileUpsert> discoveredProfiles, IReadOnlyDictionary<string, IReadOnlyList<ProfileControlUpsert>> controlsByProfileKey, IReadOnlyList<VendorContentEntry> contentEntries) =
 			ParseOutput(result.Output, config);
 		if (commit is null)
 		{
@@ -133,16 +173,117 @@ public sealed class ContentPullJobHandler : IJobHandler
 			}
 		}
 
+		int promotedCount = await RunSemanticImportAsync(commit, contentEntries, cancellationToken).ConfigureAwait(false);
+
 		await _content.RecordPullAsync(
 			context.Job.Id, config.RefType, config.RefValue, commit,
 			ComplianceContentPullStatuses.Succeeded, note: null, actor, cancellationToken).ConfigureAwait(false);
 
-		string progressPayload = JsonSerializer.Serialize(new { commit, profile_count = discoveredProfiles.Count });
+		string progressPayload = JsonSerializer.Serialize(new { commit, profile_count = discoveredProfiles.Count, catalog_promoted_count = promotedCount });
 		await context.Events
 			.EmitAsync(JobEventTypes.RunProgress, null, context.Job.RunId, progressPayload, cancellationToken)
 			.ConfigureAwait(false);
 
-		return JobExecutionOutcome.Succeeded($"Pulled '{config.RefValue}' at {commit}; {discoveredProfiles.Count} profile(s) found.");
+		return JobExecutionOutcome.Succeeded($"Pulled '{config.RefValue}' at {commit}; {discoveredProfiles.Count} profile(s) found; {promotedCount} catalog execution profile(s) promoted.");
+	}
+
+	/// <summary>
+	/// Runs the semantic-import pipeline (interpretation, closed-vocabulary
+	/// reconciliation, bounded structure validation already folded into
+	/// <see cref="SemanticImportReconciler"/>) over this pull's content entries,
+	/// persists the resulting <see cref="SemanticImportReport"/> (migration 0051), and
+	/// promotes every accepted executable-leaf candidate into the catalog. Returns the
+	/// number of candidates successfully promoted. Never throws for a bad INPUT --
+	/// interpretation/reconciliation already quarantine malformed entries into the
+	/// report's own rejected list (issue #729's whole design point); this method's job
+	/// is purely to persist that report and act on its accepted list.
+	/// </summary>
+	private async Task<int> RunSemanticImportAsync(string sourceCommit, IReadOnlyList<VendorContentEntry> contentEntries, CancellationToken cancellationToken)
+	{
+		VendorHierarchyInterpretation interpretation = VendorHierarchyInterpreter.Interpret(contentEntries);
+		SemanticImportReport report = SemanticImportReconciler.Reconcile(sourceCommit, interpretation, contentEntries);
+
+		CatalogImportReport persistedReport = await _catalog.RecordImportReportAsync(
+			report.SourceCommit, report.SourceDigest, report.Accepted.Count, report.Warnings.Count, report.Rejected.Count, cancellationToken)
+			.ConfigureAwait(false);
+
+		int promotedCount = 0;
+		foreach (SemanticImportAccepted accepted in report.Accepted)
+		{
+			// PromoteCandidateAsync itself rejects a non-executable-leaf (aggregate)
+			// candidate with an actionable reason (issue #729 AC "aggregate ...
+			// profiles cannot be selected for execution") -- called unconditionally
+			// here rather than pre-filtering on IsExecutableLeaf so that reason always
+			// lands on the persisted report entry, not just in a code comment.
+			CatalogPromotionRequest promotionRequest = BuildPromotionRequest(accepted.Candidate);
+			CatalogPromotionOutcome outcome = await _catalog.PromoteCandidateAsync(accepted.Candidate, promotionRequest, cancellationToken).ConfigureAwait(false);
+			Guid? executionProfileId = outcome.ExecutionProfileId;
+			string? rejectionReason = outcome.RejectionReason;
+			if (executionProfileId is not null)
+			{
+				promotedCount++;
+			}
+
+			// The report entry's disposition stays "accepted" regardless of whether THIS
+			// candidate was itself promoted -- an aggregate candidate (never promoted,
+			// rejectionReason explains why) or a promotion-time vocabulary rejection
+			// (defence-in-depth only, should not fire in normal operation -- reconciliation
+			// already proved the vocabulary before marking this candidate accepted) are
+			// both still legitimately "this candidate passed semantic import", distinct
+			// from a candidate reconciliation itself rejected (recorded separately below).
+			await _catalog.RecordImportReportEntryAsync(
+				persistedReport.Id, CatalogImportEntryDispositions.Accepted, accepted.Candidate.ProfileKey, rejectionReason, executionProfileId, cancellationToken).ConfigureAwait(false);
+		}
+
+		foreach (SemanticImportWarning warning in report.Warnings)
+		{
+			await _catalog.RecordImportReportEntryAsync(
+				persistedReport.Id, CatalogImportEntryDispositions.Warning, warning.ProfileKey, warning.Message, executionProfileId: null, cancellationToken).ConfigureAwait(false);
+		}
+
+		foreach (SemanticImportRejected rejected in report.Rejected)
+		{
+			await _catalog.RecordImportReportEntryAsync(
+				persistedReport.Id, CatalogImportEntryDispositions.Rejected, rejected.ProfileKey, rejected.Reason, executionProfileId: null, cancellationToken).ConfigureAwait(false);
+		}
+
+		return promotedCount;
+	}
+
+	/// <summary>
+	/// Builds the catalog-authored classification facts (vendor display name, product/
+	/// content-release display names, report group, output kind) a candidate's own
+	/// evidence does not carry -- see <see cref="CatalogPromotionRequest"/>'s doc
+	/// comment. Report-group priority/key and output kind follow
+	/// docs/compliance-parity.md's documented table (NSX STIG 1 / VCSA STIG 2 / vCenter
+	/// STIG 3 / ESXi STIG 4 / VM STIG 5 / every SRG 6; STIG emits hdf_ckl, SRG emits hdf
+	/// -- SRGs are never CKL/upload-eligible, ADR-0022).
+	/// </summary>
+	private static CatalogPromotionRequest BuildPromotionRequest(SemanticCandidate candidate)
+	{
+		string vendorDisplayName = VendorDisplayNames.TryGetValue(candidate.VendorFamily, out string? name) ? name : candidate.VendorFamily;
+		bool isStig = candidate.Kind == CatalogKinds.Stig;
+
+		(string groupKey, string groupDisplayName, int priority) = (candidate.VendorFamily, candidate.SelectorKind) switch
+		{
+			("nsx", _) when isStig => ("nsx-stig", "NSX STIG", 1),
+			("vcsa", _) when isStig => ("vcsa-stig", "VCSA STIG", 2),
+			(_, CatalogSelectorKinds.VCenter) when isStig => ("vcenter-stig", "vCenter STIG", 3),
+			(_, CatalogSelectorKinds.Esxi) when isStig => ("esxi-stig", "ESXi STIG", 4),
+			(_, CatalogSelectorKinds.Vm) when isStig => ("vm-stig", "VM STIG", 5),
+			_ => ("srg", "SRG", 6),
+		};
+
+		return new CatalogPromotionRequest(
+			SourceRevisionKey: "compliance-content",
+			Vendor: vendorDisplayName,
+			ProductDisplayName: vendorDisplayName,
+			ProductVersionDisplayName: candidate.ProductVersionKey,
+			ContentReleaseDisplayName: $"{candidate.Kind} {candidate.ProductVersionKey}",
+			ReportGroupKey: groupKey,
+			ReportGroupDisplayName: groupDisplayName,
+			ReportGroupPriority: priority,
+			OutputKind: isStig ? CatalogOutputKinds.HdfAndCkl : CatalogOutputKinds.Hdf);
 	}
 
 	/// <summary>
@@ -155,7 +296,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 	/// GET /compliance-content/check (part of the same PR's API surface) computes by
 	/// diffing against upstream without mutating stored rows.
 	/// </summary>
-	private static (string? Commit, IReadOnlyList<ProfileUpsert> Profiles, IReadOnlyDictionary<string, IReadOnlyList<ProfileControlUpsert>> ControlsByProfileKey)
+	private static (string? Commit, IReadOnlyList<ProfileUpsert> Profiles, IReadOnlyDictionary<string, IReadOnlyList<ProfileControlUpsert>> ControlsByProfileKey, IReadOnlyList<VendorContentEntry> ContentEntries)
 		ParseOutput(IReadOnlyList<object?> output, ComplianceContentConfig config)
 	{
 		string state = config.RefType == ComplianceContentRefTypes.Tag ? ProfileStates.Pinned : ProfileStates.Current;
@@ -188,10 +329,63 @@ public sealed class ContentPullJobHandler : IJobHandler
 				}
 			}
 
-			return (commit, profiles, controlsByProfileKey);
+			List<VendorContentEntry> contentEntries = [];
+			if (psObject.Properties["ContentEntries"]?.Value is System.Collections.IEnumerable rawEntries)
+			{
+				foreach (object? rawEntry in rawEntries)
+				{
+					VendorContentEntry? parsed = TryParseContentEntry(rawEntry);
+					if (parsed is not null)
+					{
+						contentEntries.Add(parsed);
+					}
+				}
+			}
+
+			return (commit, profiles, controlsByProfileKey, contentEntries);
 		}
 
-		return (null, [], new Dictionary<string, IReadOnlyList<ProfileControlUpsert>>(StringComparer.Ordinal));
+		return (null, [], new Dictionary<string, IReadOnlyList<ProfileControlUpsert>>(StringComparer.Ordinal), []);
+	}
+
+	/// <summary>
+	/// Parses one <c>ContentEntries</c> row (issue #729: the module's
+	/// <c>Get-WaypointComplianceContentRawManifest</c>/<c>Get-WaypointComplianceContentControlFileNames</c>
+	/// additions) into a <see cref="VendorContentEntry"/> for the semantic importer. A
+	/// missing/blank ProfileKey drops the row rather than failing the whole pull -- same
+	/// "one malformed row must not fail the whole pull" discipline as
+	/// <see cref="TryParseProfile"/>.
+	/// </summary>
+	private static VendorContentEntry? TryParseContentEntry(object? item)
+	{
+		if (item is not System.Management.Automation.PSObject psObject)
+		{
+			return null;
+		}
+
+		string? profileKey = psObject.Properties["ProfileKey"]?.Value as string;
+		if (string.IsNullOrWhiteSpace(profileKey))
+		{
+			return null;
+		}
+
+		string? rawYaml = psObject.Properties["RawYaml"]?.Value as string;
+		bool hasControlsDirectory = psObject.Properties["HasControlsDirectory"]?.Value is true;
+		bool hasFilesDirectory = psObject.Properties["HasFilesDirectory"]?.Value is true;
+
+		List<string> controlFileNames = [];
+		if (psObject.Properties["ControlFileNames"]?.Value is System.Collections.IEnumerable rawNames)
+		{
+			foreach (object? rawName in rawNames)
+			{
+				if (rawName is string name && !string.IsNullOrWhiteSpace(name))
+				{
+					controlFileNames.Add(name);
+				}
+			}
+		}
+
+		return new VendorContentEntry(profileKey, rawYaml, hasControlsDirectory, hasFilesDirectory, controlFileNames);
 	}
 
 	private static ProfileUpsert? TryParseProfile(object? item, string commit, string state)

@@ -327,6 +327,13 @@ public sealed class CatalogApiTests : IAsyncLifetime
 		Assert.Equal("vsphere-api", row.GetProperty("credential_requirements").EnumerateArray().Single().GetProperty("purpose").GetString());
 		Assert.Equal("VMW_vSphere_8-0_vCenter_STIG", row.GetProperty("benchmark").GetProperty("benchmark_key").GetString());
 		Assert.True(row.GetProperty("remediation").GetProperty("is_supported").GetBoolean());
+
+		// Issue #728's last queryable-fields AC (delivered by the #729 persistence
+		// slice, migration 0051): declared profile inputs.
+		JsonElement declaredInput = row.GetProperty("declared_inputs").EnumerateArray().Single();
+		Assert.Equal("vcenter_host", declaredInput.GetProperty("name").GetString());
+		Assert.Equal("string", declaredInput.GetProperty("input_type").GetString());
+		Assert.True(declaredInput.GetProperty("is_required").GetBoolean());
 	}
 
 	[Fact]
@@ -392,6 +399,7 @@ public sealed class CatalogApiTests : IAsyncLifetime
 		await repository.AddCredentialRequirementAsync(executionProfile.Id, "vsphere-api", true, CancellationToken.None);
 		await repository.SetBenchmarkReferenceAsync(executionProfile.Id, "VMW_vSphere_8-0_vCenter_STIG", "v2r3", CancellationToken.None);
 		await repository.SetRemediationDefinitionAsync(executionProfile.Id, true, "PowerCLI remediation script", CancellationToken.None);
+		await repository.UpsertDeclaredInputAsync(executionProfile.Id, "vcenter_host", "string", true, CancellationToken.None);
 
 		return executionProfile.Id;
 	}
@@ -417,12 +425,15 @@ public sealed class CatalogApiTests : IAsyncLifetime
 		await using NpgsqlCommand truncate = new("TRUNCATE TABLE downloads, depot_artifacts RESTART IDENTITY CASCADE", connection);
 		await truncate.ExecuteNonQueryAsync().ConfigureAwait(false);
 
-		// Issue #728: the unrelated execution-catalog tables (migration 0050) share
-		// this fixture's Postgres instance but not its identity/reset lifecycle above --
-		// truncate them independently so GetProducts_* tests below start from empty.
+		// Issue #728/#729: the unrelated execution-catalog tables (migrations 0050/0051)
+		// share this fixture's Postgres instance but not its identity/reset lifecycle
+		// above -- truncate them independently so GetProducts_* tests below start from
+		// empty. catalog_import_report_entries/catalog_declared_inputs reference
+		// catalog_execution_profiles, so they must be included here too.
 		await using NpgsqlCommand truncateCatalog = new(
 			"""
 			TRUNCATE TABLE
+				catalog_import_report_entries, catalog_import_reports, catalog_declared_inputs,
 				catalog_remediation_definitions, catalog_benchmark_references, catalog_credential_requirements,
 				catalog_execution_profiles, catalog_report_groups, catalog_components, catalog_content_releases,
 				catalog_product_versions, catalog_products, catalog_source_revisions

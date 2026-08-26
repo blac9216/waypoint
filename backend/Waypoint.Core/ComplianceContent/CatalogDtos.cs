@@ -76,8 +76,10 @@ public sealed record CatalogRemediationDefinition(Guid Id, Guid ExecutionProfile
 /// A fully joined, read-oriented projection of one execution profile and everything a
 /// planner/UI consumer needs without a second round trip: the owning product/version/
 /// component identity, content release, credential requirements, benchmark reference
-/// (STIG only), and remediation capability. This is the shape catalog read
-/// repositories/APIs return -- not a 1:1 mirror of any single table.
+/// (STIG only), remediation capability, and declared profile inputs (issue #728 AC
+/// "declared and consumed inputs ... queryable", delivered by the #729 persistence
+/// slice/migration 0051). This is the shape catalog read repositories/APIs return --
+/// not a 1:1 mirror of any single table.
 /// </summary>
 public sealed record CatalogExecutionProfileDetail(
 	CatalogExecutionProfile ExecutionProfile,
@@ -88,7 +90,8 @@ public sealed record CatalogExecutionProfileDetail(
 	CatalogReportGroup ReportGroup,
 	IReadOnlyList<CatalogCredentialRequirement> CredentialRequirements,
 	CatalogBenchmarkReference? BenchmarkReference,
-	CatalogRemediationDefinition? RemediationDefinition);
+	CatalogRemediationDefinition? RemediationDefinition,
+	IReadOnlyList<CatalogDeclaredInput> DeclaredInputs);
 
 /// <summary>
 /// A candidate component definition to validate/insert -- the unit

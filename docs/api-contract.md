@@ -460,13 +460,16 @@ there is no post-scan human-assessment workflow.
 📋 **Planned** (epic #726, [ADR-0022](adr/0022-compliance-catalog-and-content-lifecycle.md)).
 Supersedes the mutable-profile-directory model implied by "Compliance content"
 below: baselines bind one exact product version to one exact profile version, never
-a range or scan-time picker. ✅ **`/catalog/products` implemented** (issue #728, epic
-#726 Wave 1): the read-only execution-catalog surface backed by migration 0050's
-normalized catalog tables (PR #822). Every other row in this table remains planned.
+a range or scan-time picker. ✅ **`/catalog/products` implemented** (issues #728/#729,
+epic #726 Wave 1): the read-only execution-catalog surface backed by migration 0050's
+normalized catalog tables (PR #822) plus migration 0051's declared-inputs entity
+(PR #823/persistence slice), including candidate promotion from the validated
+semantic importer wired into `content-pull` (issue #729). Every other row in this
+table remains planned.
 
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/catalog/products` | GET | ✅ Implemented (issue #728). Viewer+. The closed, versioned execution-catalog vocabulary: supported products/exact versions, component transport/selector, credential purposes, priority/report group, benchmark, remediation capability — read-only reflection of the reviewed catalog shipped in this repository (ADR-0022: "Operators cannot upload executable plugins, scripts, or catalog mappings"). No write endpoint exists; catalog changes ship only via appliance update. `GET /catalog/products/{id}` returns the same joined shape for one execution profile id (404 if unknown). |
+| `/catalog/products` | GET | ✅ Implemented (issues #728/#729). Viewer+. The closed, versioned execution-catalog vocabulary: supported products/exact versions, component transport/selector, credential purposes, priority/report group, benchmark, remediation capability, and declared profile inputs (name/type/required, content-derived from `inspec.yml`) — read-only reflection of the reviewed catalog shipped in this repository (ADR-0022: "Operators cannot upload executable plugins, scripts, or catalog mappings"). No write endpoint exists; catalog rows are populated by the `content-pull` job's semantic-import/candidate-promotion pass and by appliance updates, never by an operator-facing write. `GET /catalog/products/{id}` returns the same joined shape for one execution profile id (404 if unknown). |
 | `/content-sources` | GET, PUT | Admin. Configured vendor-profile/XCCDF sources: every eligible configured STIG Manager (automatic) plus manual-upload as a source of record. `PUT` sets a per-source sync-schedule override; `null` reverts to the global daily default. |
 | `/content-sources/{id}/sync` | POST | Admin. Manual sync trigger (always available alongside the schedule). 202 → `content-sync` job. Strictly additive: success stages candidates and raises a review alert; failure raises a diagnostic alert; neither mutates active content. |
 | `/candidate-content` | GET | Cyber+. Staged vendor-profile/XCCDF artifacts awaiting diff/review: `id`, `source_id`, `identity` (product/version/kind), `digest`, `staged_at`, `diff_summary` (added/removed/changed/remapped/metadata-only/unchanged counts), `conflict` (bool — same identity/version claimed by two different complete artifacts). |

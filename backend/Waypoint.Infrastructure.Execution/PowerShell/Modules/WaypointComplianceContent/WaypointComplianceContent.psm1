@@ -108,6 +108,22 @@ function Invoke-WaypointComplianceContentPull {
 	$commit = (& git -C $ContentPath rev-parse HEAD).Trim()
 
 	$profiles = @(Get-WaypointComplianceContentProfiles -ContentPath $ContentPath -Commit $commit)
+	# Issue #729: capture the raw inspec.yml text and controls/*.rb filenames per
+	# profile BEFORE _ProfileDirectory is stripped below -- ContentPullJobHandler's
+	# semantic-import pass (VendorContentEntry) needs the untrusted manifest text and
+	# structural facts the C#-side InspecManifestParser/VendorHierarchyInterpreter
+	# reconcile against the closed catalog vocabulary; this module only reads and
+	# forwards bytes, it never interprets them.
+	$entries = @(foreach ($p in $profiles) {
+			[PSCustomObject]@{
+				ProfileKey          = $p.ProfileKey
+				RawYaml             = Get-WaypointComplianceContentRawManifest -ProfileDirectory $p._ProfileDirectory
+				HasControlsDirectory = Test-Path (Join-Path $p._ProfileDirectory 'controls')
+				HasFilesDirectory    = Test-Path (Join-Path $p._ProfileDirectory 'files')
+				ControlFileNames     = @(Get-WaypointComplianceContentControlFileNames -ProfileDirectory $p._ProfileDirectory)
+			}
+		})
+
 	foreach ($p in $profiles) {
 		# Issue #617: use the profile's real directory (carried through as
 		# _ProfileDirectory by Get-WaypointComplianceContentProfiles), not a path
@@ -119,9 +135,102 @@ function Invoke-WaypointComplianceContentPull {
 	}
 
 	[PSCustomObject]@{
-		Commit   = $commit
-		Profiles = $profiles
+		Commit          = $commit
+		Profiles        = $profiles
+		ContentEntries  = $entries
 	}
+}
+
+function Get-WaypointComplianceContentRawManifest {
+	<#
+	.SYNOPSIS
+	    Returns one profile's raw, untrusted inspec.yml text (or $null if missing/
+	    unreadable) for the C#-side InspecManifestParser -- this module never parses
+	    YAML itself (issue #729: YAML parsing is a C#/YamlDotNet concern with a size
+	    bound and no custom tag resolution).
+
+	.PARAMETER ProfileDirectory
+	    The profile's real, absolute root directory.
+	#>
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)][string]$ProfileDirectory
+	)
+
+	$manifestPath = Join-Path $ProfileDirectory 'inspec.yml'
+	if (-not (Test-Path $manifestPath)) {
+		return $null
+	}
+
+	try {
+		return Get-Content -Path $manifestPath -Raw -ErrorAction Stop
+	}
+	catch {
+		return $null
+	}
+}
+
+function Get-WaypointComplianceContentControlFileNames {
+	<#
+	.SYNOPSIS
+	    Returns the bare filenames (not full paths) of every controls/*.rb file under
+	    one profile, or an empty array if there is no controls/ directory -- the
+	    structural fact VendorContentEntry.ControlFileNames/HasControlsDirectory needs
+	    for the semantic importer's "executable leaf has no controls" rejection gate.
+
+	.PARAMETER ProfileDirectory
+	    The profile's real, absolute root directory.
+	#>
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)][string]$ProfileDirectory
+	)
+
+	$controlsDir = Join-Path $ProfileDirectory 'controls'
+	if (-not (Test-Path $controlsDir)) {
+		return @()
+	}
+
+	Get-ChildItem -Path $controlsDir -Filter '*.rb' -Recurse -File -ErrorAction SilentlyContinue |
+	ForEach-Object { $_.Name }
+}
+
+function Test-WaypointInspecCheck {
+	<#
+	.SYNOPSIS
+	    Bounded runner work (issue #729 deliverable 3): runs `inspec check <path>
+	    --format json` against one executable-leaf profile directory and returns
+	    whether the real (or CI-stubbed) tool considers the profile structurally
+	    valid. This is a thin CLI wrapper, not a parser of InSpec's own internals --
+	    mirrors this repo's VCFDT convention (docs/testing.md "CI stubs vs live-lab
+	    validation"): CI/unit tests drive an invented stub mirroring `inspec check`'s
+	    publicly documented CLI contract (subcommand + --format json, exit 0 on a
+	    structurally valid profile, non-zero otherwise); the real, open-source `inspec`
+	    binary is used directly wherever the image provides it (InSpec is not a
+	    licensed/account-gated tool like VCFDT, so a real invocation path is fine).
+
+	.PARAMETER ProfileDirectory
+	    The profile's real, absolute root directory.
+
+	.OUTPUTS
+	    [PSCustomObject] with Ran (bool -- whether an `inspec` binary was found at all),
+	    Passed (bool), and Detail (string, stdout+stderr tail for diagnostics).
+	#>
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)][string]$ProfileDirectory
+	)
+
+	if (-not (Get-Command inspec -ErrorAction SilentlyContinue)) {
+		# No inspec binary on PATH (e.g. a CI image without it staged) -- this is not a
+		# profile failure, just unavailable bounded validation; the caller records this
+		# distinctly from an actual `inspec check` failure.
+		return [PSCustomObject]@{ Ran = $false; Passed = $false; Detail = 'inspec executable not found on PATH' }
+	}
+
+	$output = & inspec check $ProfileDirectory --format json 2>&1
+	$passed = $LASTEXITCODE -eq 0
+	return [PSCustomObject]@{ Ran = $true; Passed = $passed; Detail = ($output | Out-String) }
 }
 
 function Get-WaypointComplianceContentProfiles {
@@ -247,4 +356,4 @@ function Get-WaypointComplianceContentControls {
 	}
 }
 
-Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls
+Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls, Get-WaypointComplianceContentRawManifest, Get-WaypointComplianceContentControlFileNames, Test-WaypointInspecCheck
