@@ -23,13 +23,23 @@
  * `/live-jobs` workspace and out to `/results?run=` for the compliance
  * Results screen, mirroring the linkage the deleted screen never had a
  * reason to need (Live Jobs didn't exist yet when this shipped originally).
+ *
+ * No-`runId` default state (issue #711, a regression against #714): making
+ * this route a permanent top-level nav entry means it is now reachable with
+ * no `?run=` at all, not just via a stale/removed deep link. `LiveRunPicker`
+ * below covers that case with a small run-centric selector — reusing the
+ * same `GET /runs` list `results/useRunList.ts` already fetches, filtered to
+ * active (non-terminal) compliance runs via `useActiveRuns.ts` — rather than
+ * the previous bare "No run selected." dead end.
  */
 import { useState } from "react";
 import { useAuth } from "../../lib/auth-context";
 import { Link } from "../../lib/router";
+import { formatRunDuration, formatTimestamp, scopeSiteId } from "../results/results";
 import { BlockedBanner } from "./BlockedBanner";
 import { BoardLayout, Counter, LogFirstLayout, QueueLayout } from "./LiveRunLayouts";
 import { formatElapsed, progressPercentForState } from "./liverun";
+import { useActiveRuns } from "./useActiveRuns";
 import { useLiveRun } from "./useLiveRun";
 import { useRunControls } from "./useRunControls";
 import { useRunIdFromQuery } from "./useRunIdFromQuery";
@@ -46,6 +56,58 @@ export function LiveRunRoute() {
 	return <LiveRunScreen runId={runId} />;
 }
 
+/** No-`runId` default state: lists active (non-terminal) compliance runs a
+ * user can jump into, an empty-state explanation with a pointer to Start a
+ * Scan when none exist, and a load-error fallback — never the bare "No run
+ * selected." dead end. Selecting a row navigates to `/live-run?run=<id>`,
+ * the same URL a deep link would use, so the rest of the screen's behavior
+ * (and this component's own remount) is unaffected. */
+function LiveRunPicker() {
+	const { runs, loading, error } = useActiveRuns();
+
+	return (
+		<div className="live-run-screen">
+			<div className="live-run__picker">
+				<div className="live-run__picker-header">
+					<h2 className="live-run__picker-title">Live Run</h2>
+					<p className="live-run__picker-subtitle">Select an active compliance run to view its live console.</p>
+				</div>
+
+				{loading && <div className="live-run__empty">Loading active runs…</div>}
+
+				{!loading && error && <div className="live-run__empty live-run__empty--error">{error}</div>}
+
+				{!loading && !error && runs.length === 0 && (
+					<div className="live-run__picker-empty">
+						<p>No compliance run is currently active.</p>
+						<p>
+							<Link to="/scan/new">Start a Scan</Link> to begin one, or check <Link to="/live-jobs">Jobs</Link> for
+							appliance-wide activity.
+						</p>
+					</div>
+				)}
+
+				{!loading && !error && runs.length > 0 && (
+					<ul className="live-run__picker-list">
+						{runs.map((run) => (
+							<li key={run.id}>
+								<Link to={`/live-run?run=${encodeURIComponent(run.id)}`} className="live-run__picker-row">
+									<span className="mono live-run__picker-row-id">{run.id}</span>
+									<span className="live-run__picker-row-meta">
+										{scopeSiteId(run.scope) ?? "—"} · {run.job_count} targets · {run.run_type} · {run.state} ·{" "}
+										{formatRunDuration(run.started_at, run.completed_at)} · started{" "}
+										{run.started_at ? formatTimestamp(run.started_at) : "—"}
+									</span>
+								</Link>
+							</li>
+						))}
+					</ul>
+				)}
+			</div>
+		</div>
+	);
+}
+
 export function LiveRunScreen({ runId }: { runId?: string }) {
 	const { user } = useAuth();
 	const { snapshot, loading, loadError, connectionState } = useLiveRun(runId);
@@ -55,11 +117,7 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 		useRunControls(runId, user?.role);
 
 	if (!runId) {
-		return (
-			<div className="live-run-screen">
-				<div className="live-run__empty">No run selected.</div>
-			</div>
-		);
+		return <LiveRunPicker />;
 	}
 
 	if (loading && !snapshot) {

@@ -15,6 +15,85 @@
 	color: var(--bad);
 }
 
+/* --- No-run picker (issue #711) --- */
+
+.live-run__picker {
+	padding: 20px;
+	max-width: 720px;
+}
+
+.live-run__picker-header {
+	margin-bottom: 16px;
+}
+
+.live-run__picker-title {
+	font-size: 15px;
+	font-weight: 650;
+	margin: 0 0 4px;
+}
+
+.live-run__picker-subtitle {
+	font-size: 12px;
+	color: var(--txt3);
+	margin: 0;
+}
+
+.live-run__picker-empty {
+	padding: 16px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-card);
+	background: var(--panel);
+	font-size: 12px;
+	color: var(--txt2);
+}
+
+.live-run__picker-empty p {
+	margin: 0 0 8px;
+}
+
+.live-run__picker-empty p:last-child {
+	margin-bottom: 0;
+}
+
+.live-run__picker-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-card);
+	overflow: hidden;
+}
+
+.live-run__picker-row {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 11px 14px;
+	border-bottom: 1px solid var(--soft);
+	background: var(--panel);
+	text-decoration: none;
+	color: inherit;
+}
+
+.live-run__picker-list li:last-child .live-run__picker-row {
+	border-bottom: 0;
+}
+
+.live-run__picker-row:hover {
+	background: var(--panel2);
+}
+
+.live-run__picker-row-id {
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--txt);
+}
+
+.live-run__picker-row-meta {
+	font-size: 11px;
+	color: var(--txt3);
+}
+
 /* --- Header --- */
 
 .live-run__header {
