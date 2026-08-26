@@ -270,6 +270,11 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new TargetRepository(connectionString));
 			services.AddSingleton(new TargetCredentialBindingRepository(connectionString));
 			services.AddSingleton(new InventoryRepository(connectionString));
+			// Issue #732: stable compliance endpoint/component identity beneath a
+			// top-level target (migration 0054) -- distinct from InventoryRepository's
+			// flat cluster/host/VM cache above.
+			services.AddSingleton<Waypoint.Core.Components.IComponentRepository>(
+				new Waypoint.Infrastructure.Components.ComponentRepository(connectionString));
 			services.AddSingleton(new ConfigDocRepository(connectionString));
 			services.AddSingleton(new AttestationSnapshotRepository(connectionString));
 			services.AddSingleton(new StigManager.StigManagerRepository(connectionString));

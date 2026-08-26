@@ -104,6 +104,19 @@ public sealed class EndpointRoleMatrixTests
 		["BenchmarksController.GetMappingHistory"] = WaypointRole.Viewer,
 		["BenchmarksController.SetMapping"] = WaypointRole.Admin,
 
+		// ComponentsController -- issue #732, epic #726 Wave 2 (ADR-0023). Reads
+		// (including the derived capability read) are Viewer+, same floor as every
+		// other read surface in this table. The Admin-only configured-fact write and
+		// retired-purge match TargetsController's write floor. Observation history is
+		// Cyber+ (audit/troubleshooting read) per docs/api-contract.md, matching
+		// AuditController.List's floor for the same reason.
+		["ComponentsController.ListForTarget"] = WaypointRole.Viewer,
+		["ComponentsController.Get"] = WaypointRole.Viewer,
+		["ComponentsController.Put"] = WaypointRole.Admin,
+		["ComponentsController.Delete"] = WaypointRole.Admin,
+		["ComponentsController.ListObservations"] = WaypointRole.Cyber,
+		["ComponentsController.GetCapability"] = WaypointRole.Viewer,
+
 		// LibraryController -- issue #36. Both read the depot catalog re-presented as
 		// mode-aware presence; same Viewer+ floor as CatalogController.ListArtifacts
 		// (the Library tab is browsable by anyone who can see the appliance).
