@@ -362,6 +362,12 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<Runs.ScanPlannerService>();
 			services.AddSingleton<Waypoint.Core.Scans.IScanPlanRepository>(new Runs.ScanPlanRepository(connectionString));
 
+			// Issues #733/#734 remainder: POST /runs/plan-preview reuses the same
+			// resolve→compile pipeline as RunCreationService.CreateScanRunAsync, entirely
+			// read-only (see RunPlanPreviewService's doc comment for why it holds no write
+			// dependency at all).
+			services.AddSingleton<Runs.RunPlanPreviewService>();
+
 			// Issue #513: dashboard aggregate service, reusing RunArtifactProjectionService's
 			// HDF-derived CAT counting rather than a second implementation.
 			services.AddSingleton<Runs.DashboardAggregateService>();

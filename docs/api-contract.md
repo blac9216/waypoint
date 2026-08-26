@@ -309,6 +309,27 @@ by the Start-a-Scan wizard yet (frontend remainder), and it does not integrate w
 interactive `fact_conflict` is always an omission in this slice, never resolved, since
 there is no plan-preview step yet for a Cyber+ initiator to choose from).
 
+✅ **`POST /api/v1/runs/plan-preview` shipped (issues #733/#734 remainder).** Cyber+.
+Body: `{ scope: { site_id, target_scope } }` (`target_scope` required — preview never
+selects a profile, so a bare `profile_id` is 400 `validation_error`), plus optional
+`credential_overrides`/`ad_hoc_credentials` keyed by `(target_id, purpose)` (this slice's
+shipped per-target/per-purpose shape, not yet the end-state `(component_id, purpose)`
+keying the table row below describes). Runs the identical resolve→compile pipeline
+`POST /runs` uses (`ScopeResolutionService` then `ScanPlannerService`, both already
+side-effect-free) entirely in memory and returns the would-be plan — resolved component
+ids, scope omissions, accepted plan items, skips (including any item demoted by an
+unresolved required credential purpose), `plan_digest`, and `credential_gaps` — with
+**zero rows written**: no run, no `run_scope_snapshots`, no `scan_plans`/
+`scan_plan_items`, no `job_credential_bindings`. `plan_digest` is byte-for-byte identical
+to a subsequent `POST /runs` create's digest for the same inputs (issue #734 AC-4,
+test-proven). Zero-runnable-component previews are 200, not an error, matching the
+end-state row below. **Not yet in this slice** (tracked by the remainders the end-state
+row and paragraph above already name): preview does not itself trigger a mandatory
+discovery refresh (it plans against already-discovered inventory, same as `POST /runs`
+today), `fact_conflict` resolution (`fact_conflict_resolutions`) does not exist yet —
+a conflicted component is always an omission — and the Start-a-Scan wizard does not call
+this endpoint yet (frontend remainder).
+
 🚧 **Superseded scan-creation contract (epic #726, ADRs 0022–0024).** The `/runs` POST
 row above — `scope.profile_id` selecting an installed profile, and target-granular
 `job_credential_bindings` — describes the shipped M2/M3 scan model. It is retained on

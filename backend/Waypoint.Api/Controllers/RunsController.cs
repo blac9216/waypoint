@@ -52,6 +52,7 @@ public sealed class RunsController : ControllerBase
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
 	private readonly TargetRepository _targets;
 	private readonly RunCreationService _runCreation;
+	private readonly RunPlanPreviewService _planPreview;
 	private readonly RunArtifactProjectionService _artifactProjection;
 	private readonly RunControlService _runControl;
 	private readonly RunPurgeService _runPurge;
@@ -64,6 +65,7 @@ public sealed class RunsController : ControllerBase
 		AttestationSnapshotRepository attestationSnapshots,
 		TargetRepository targets,
 		RunCreationService runCreation,
+		RunPlanPreviewService planPreview,
 		RunArtifactProjectionService artifactProjection,
 		RunControlService runControl,
 		RunPurgeService runPurge,
@@ -75,6 +77,7 @@ public sealed class RunsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
 		ArgumentNullException.ThrowIfNull(targets);
 		ArgumentNullException.ThrowIfNull(runCreation);
+		ArgumentNullException.ThrowIfNull(planPreview);
 		ArgumentNullException.ThrowIfNull(artifactProjection);
 		ArgumentNullException.ThrowIfNull(runControl);
 		ArgumentNullException.ThrowIfNull(runPurge);
@@ -85,6 +88,7 @@ public sealed class RunsController : ControllerBase
 		_attestationSnapshots = attestationSnapshots;
 		_targets = targets;
 		_runCreation = runCreation;
+		_planPreview = planPreview;
 		_artifactProjection = artifactProjection;
 		_runControl = runControl;
 		_runPurge = runPurge;
@@ -204,6 +208,47 @@ public sealed class RunsController : ControllerBase
 			.ConfigureAwait(false);
 
 		return Accepted(new RunCreatedResponse(runId.ToString()));
+	}
+
+	/// <summary>
+	/// Issues #733/#734 remainder (docs/api-contract.md's planned <c>/runs/plan-preview</c>,
+	/// PR #819): previews the would-be plan for a scan's <c>target_scope</c> without
+	/// creating anything -- same Cyber+ floor as <c>POST /runs</c> (ADR-0023's
+	/// mandatory-refresh-before-planning UX is this endpoint's whole purpose: the
+	/// Start-a-Scan wizard calls this before the caller confirms). Zero-runnable-component
+	/// previews are still 200 (an honest empty plan, docs/api-contract.md) -- unlike
+	/// create, preview never rejects on <c>no_runnable_component</c>, since the caller has
+	/// not committed to anything yet and showing the empty result IS the point.
+	/// </summary>
+	[HttpPost("plan-preview")]
+	[RequireCyberRole]
+	[ProducesResponseType(typeof(RunPlanPreviewResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunPlanPreviewResponse>> PreviewPlan(
+		RunPlanPreviewRequest request,
+		CancellationToken cancellationToken)
+	{
+		IReadOnlyList<RunCredentialOverride>? overrides = request.CredentialOverrides is not { Count: > 0 }
+			? null
+			: [.. request.CredentialOverrides.Select(o => new RunCredentialOverride(o.TargetId, o.Purpose, o.CredentialId))];
+
+		IReadOnlyList<RunAdHocCredential>? adHocCredentials = request.AdHocCredentials is not { Count: > 0 }
+			? null
+			: [.. request.AdHocCredentials.Select(a => new RunAdHocCredential(a.TargetId, a.Purpose, a.Username, a.Secret))];
+
+		RunPlanPreviewResult result = await _planPreview.PreviewAsync(
+			request.Scope, overrides, adHocCredentials, cancellationToken).ConfigureAwait(false);
+
+		return Ok(new RunPlanPreviewResponse(
+			result.ResolvedScope.Mode,
+			result.ResolvedScope.ResolvedComponentIds,
+			result.ResolvedScope.Omissions,
+			result.Plan.PlanSchemaVersion,
+			result.Plan.Items,
+			result.Plan.Skips,
+			result.Plan.PlanDigest,
+			result.Plan.Explanation,
+			result.Plan.IsRunnable,
+			result.CredentialGaps));
 	}
 
 	/// <summary>
