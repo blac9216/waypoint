@@ -23,10 +23,23 @@ namespace Waypoint.Core.ComplianceContent.SemanticImport;
 /// <see cref="HasFilesDirectory"/> record structural facts
 /// <see cref="VendorHierarchyInterpreter"/> needs for aggregate-vs-leaf and structure
 /// validation without re-touching the filesystem.
+///
+/// <see cref="InspecCheckRan"/>/<see cref="InspecCheckPassed"/>/<see cref="InspecCheckDetail"/>
+/// carry issue #729 deliverable 3's bounded `inspec check` result, computed in
+/// PowerShell (<c>Test-WaypointInspecCheck</c>) while the checkout's real filesystem
+/// directory still exists -- interpretation/reconciliation run later, in C#, over
+/// already-detached evidence with no filesystem access. <see cref="InspecCheckRan"/>
+/// is false for an aggregate/non-leaf entry (no controls/ directory -- the check is
+/// skipped, never run against content that could never be promoted) and also false
+/// when no `inspec` binary was available to run it at all; a caller must not conflate
+/// "did not run" with "ran and passed" (issue #729 AC "fail closed").
 /// </summary>
 public sealed record VendorContentEntry(
 	string ProfileKey,
 	string? RawYaml,
 	bool HasControlsDirectory,
 	bool HasFilesDirectory,
-	IReadOnlyList<string> ControlFileNames);
+	IReadOnlyList<string> ControlFileNames,
+	bool InspecCheckRan = false,
+	bool InspecCheckPassed = false,
+	string? InspecCheckDetail = null);

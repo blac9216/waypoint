@@ -750,4 +750,64 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 		IReadOnlyList<CatalogExecutionProfileDetail> all = await _repository.ListAllExecutionProfilesAsync(CancellationToken.None);
 		Assert.Empty(all);
 	}
+
+	/// <summary>
+	/// Issue #832, the concurrency-shaped regression mirroring
+	/// <see cref="UpsertComponent_ConcurrentSameNullParentKey_YieldsSingleRow"/> at the
+	/// execution-profile layer: two concurrent full promotions of the SAME candidate
+	/// identity (two compliance-runner replicas racing the same import) must yield
+	/// exactly ONE <c>catalog_execution_profiles</c> row, never a 42P10 conflict-target
+	/// mismatch and never a lost dedup. Before the fix, promotion's check-then-insert
+	/// (<c>FindExecutionProfileAsync</c> then <c>CreateExecutionProfileAsync</c>) let
+	/// both callers observe "not found" and one throw <see cref="InvalidOperationException"/>
+	/// instead of both cleanly deduping; the atomic
+	/// <c>INSERT ... ON CONFLICT (component_id, content_release_id) DO UPDATE</c> (0050's
+	/// own constraint, no schema change needed -- see migration 0053) serializes them.
+	/// </summary>
+	[Fact]
+	public async Task PromoteCandidate_ConcurrentSameIdentity_YieldsSingleExecutionProfile()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate();
+		CatalogPromotionRequest request = PromotionRequest();
+
+		// Two independent repository instances (independent connections), mirroring two
+		// compliance-runner replicas promoting the same candidate identity at once.
+		CatalogRepository repoA = new(_fixture.ConnectionString);
+		CatalogRepository repoB = new(_fixture.ConnectionString);
+		Task<CatalogPromotionOutcome> a = repoA.PromoteCandidateAsync(candidate, request, CancellationToken.None);
+		Task<CatalogPromotionOutcome> b = repoB.PromoteCandidateAsync(candidate, request, CancellationToken.None);
+		CatalogPromotionOutcome[] results = await Task.WhenAll(a, b);
+
+		Assert.NotNull(results[0].ExecutionProfileId);
+		Assert.NotNull(results[1].ExecutionProfileId);
+		Assert.Equal(results[0].ExecutionProfileId, results[1].ExecutionProfileId);
+
+		IReadOnlyList<CatalogExecutionProfileDetail> all = await _repository.ListAllExecutionProfilesAsync(CancellationToken.None);
+		Assert.Single(all, d => d.Component.ComponentKey == "vcenter" && d.ContentRelease.Kind == CatalogKinds.Stig);
+	}
+
+	/// <summary>
+	/// Issue #832: <c>catalog_execution_profiles</c>'s natural key (component_id,
+	/// content_release_id) has no NULL-distinctness gap (both columns are NOT NULL FKs),
+	/// so 0050's plain UNIQUE constraint is itself a valid ON CONFLICT target and no new
+	/// index was needed (unlike the NULL-parent <c>catalog_components</c> case). This
+	/// pins that the constraint promotion's atomic upsert binds to still exists -- a
+	/// future migration dropping it would silently reopen the check-then-insert race
+	/// this fix closes.
+	/// </summary>
+	[Fact]
+	public async Task Migration0050_ExecutionProfileUniqueConstraint_Exists()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT 1 FROM pg_constraint
+			WHERE conname = 'catalog_execution_profiles_unique'
+			AND conrelid = 'catalog_execution_profiles'::regclass
+			""", connection);
+		object? found = await command.ExecuteScalarAsync();
+
+		Assert.NotNull(found);
+	}
 }

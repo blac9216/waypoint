@@ -427,7 +427,19 @@ public sealed class ContentPullJobHandlerTests
 		return root;
 	}
 
-	private static PSObject ContentEntryObject(string profileKey, string? rawYaml, bool hasControlsDirectory, params string[] controlFileNames)
+	/// <summary>
+	/// Issue #729 remainder: <paramref name="inspecCheckRan"/>/<paramref name="inspecCheckPassed"/>
+	/// default to a genuinely-ran, passing check -- the common fixture shape for a
+	/// content entry that is expected to promote. A test asserting the quarantine path
+	/// passes <c>inspecCheckPassed: false</c> (or <c>inspecCheckRan: false</c>)
+	/// explicitly.
+	/// </summary>
+	private static PSObject ContentEntryObject(
+		string profileKey, string? rawYaml, bool hasControlsDirectory, params string[] controlFileNames) =>
+		ContentEntryObject(profileKey, rawYaml, hasControlsDirectory, inspecCheckRan: true, inspecCheckPassed: true, controlFileNames);
+
+	private static PSObject ContentEntryObject(
+		string profileKey, string? rawYaml, bool hasControlsDirectory, bool inspecCheckRan, bool inspecCheckPassed, params string[] controlFileNames)
 	{
 		PSObject entry = new();
 		entry.Properties.Add(new PSNoteProperty("ProfileKey", profileKey));
@@ -435,6 +447,9 @@ public sealed class ContentPullJobHandlerTests
 		entry.Properties.Add(new PSNoteProperty("HasControlsDirectory", hasControlsDirectory));
 		entry.Properties.Add(new PSNoteProperty("HasFilesDirectory", false));
 		entry.Properties.Add(new PSNoteProperty("ControlFileNames", controlFileNames));
+		entry.Properties.Add(new PSNoteProperty("InspecCheckRan", inspecCheckRan));
+		entry.Properties.Add(new PSNoteProperty("InspecCheckPassed", inspecCheckPassed));
+		entry.Properties.Add(new PSNoteProperty("InspecCheckDetail", inspecCheckRan && !inspecCheckPassed ? "inspec check exited non-zero (invented fixture detail)" : null));
 		return entry;
 	}
 
@@ -881,6 +896,87 @@ public sealed class ContentPullJobHandlerTests
 		CatalogImportReportEntry rejected = Assert.Single(catalog.Entries, e => e.Disposition == CatalogImportEntryDispositions.Rejected);
 		Assert.Equal("totally-unrecognized-shape", rejected.ProfileKey);
 		Assert.NotNull(rejected.Reason);
+	}
+
+	/// <summary>
+	/// Issue #729 remainder deliverable 3, fail-closed AC: an accepted executable-leaf
+	/// candidate whose bounded <c>inspec check</c> genuinely ran and FAILED must be
+	/// quarantined -- the report entry stays disposition "accepted" (reconciliation's
+	/// structural/vocabulary checks legitimately passed) but is never promoted, and the
+	/// check's own diagnostic detail lands as the entry's rejection reason. A sibling
+	/// candidate whose check passed is unaffected (per-entry containment, same
+	/// discipline as <see cref="Execute_OneBadContentEntry_QuarantinesIt_SiblingStillPromotes"/>).
+	/// </summary>
+	[Fact]
+	public async Task Execute_AcceptedCandidateFailsInspecCheck_QuarantinedNotPromoted_SiblingStillPromotes()
+	{
+		PSObject passingProfile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", "vCenter STIG", "2.3.0");
+		PSObject failingProfile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline/esxi", "ESXi STIG", "2.3.0");
+
+		PSObject passingEntry = ContentEntryObject(
+			"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", ValidVCenterManifest, hasControlsDirectory: true,
+			inspecCheckRan: true, inspecCheckPassed: true, "vcenter_control.rb");
+		PSObject failingEntry = ContentEntryObject(
+			"vsphere/8.0.3/v2r3-stig/inspec/baseline/esxi", ValidVCenterManifest.Replace("vcenter", "esxi", StringComparison.Ordinal), hasControlsDirectory: true,
+			inspecCheckRan: true, inspecCheckPassed: false, "esxi_control.rb");
+
+		PSObject output = SuccessWithContentEntries("commitJ", [passingProfile, failingProfile], passingEntry, failingEntry);
+
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+
+		// Both candidates reconciled/accepted (2 accepted entries in the report), but
+		// only the passing one was actually promoted to an execution profile.
+		CatalogImportReport report = Assert.Single(catalog.Reports);
+		Assert.Equal(2, report.AcceptedCount);
+		Assert.Equal(0, report.RejectedCount);
+
+		CatalogImportReportEntry promoted = Assert.Single(
+			catalog.Entries, e => e.ProfileKey == "vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter");
+		Assert.Equal(CatalogImportEntryDispositions.Accepted, promoted.Disposition);
+		Assert.NotNull(promoted.ExecutionProfileId);
+		Assert.Null(promoted.Reason);
+
+		CatalogImportReportEntry quarantined = Assert.Single(
+			catalog.Entries, e => e.ProfileKey == "vsphere/8.0.3/v2r3-stig/inspec/baseline/esxi");
+		Assert.Equal(CatalogImportEntryDispositions.Accepted, quarantined.Disposition);
+		Assert.Null(quarantined.ExecutionProfileId);
+		Assert.NotNull(quarantined.Reason);
+		Assert.Contains("inspec check", quarantined.Reason, StringComparison.OrdinalIgnoreCase);
+		Assert.Contains("inspec check exited non-zero", quarantined.Reason, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #729 remainder, "did not run" fail-closed AC: a candidate whose check
+	/// never ran at all (e.g. no <c>inspec</c> binary staged in the runner image) must
+	/// be treated exactly like a failed check -- "unproven" is never conflated with
+	/// "proven valid."
+	/// </summary>
+	[Fact]
+	public async Task Execute_AcceptedCandidateInspecCheckNeverRan_QuarantinedNotPromoted()
+	{
+		PSObject profile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", "vCenter STIG", "2.3.0");
+		PSObject entry = ContentEntryObject(
+			"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", ValidVCenterManifest, hasControlsDirectory: true,
+			inspecCheckRan: false, inspecCheckPassed: false, "vcenter_control.rb");
+
+		PSObject output = SuccessWithContentEntries("commitK", [profile], entry);
+
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		CatalogImportReportEntry quarantined = Assert.Single(catalog.Entries);
+		Assert.Equal(CatalogImportEntryDispositions.Accepted, quarantined.Disposition);
+		Assert.Null(quarantined.ExecutionProfileId);
+		Assert.NotNull(quarantined.Reason);
+		Assert.Contains("did not run", quarantined.Reason, StringComparison.OrdinalIgnoreCase);
 	}
 
 	[Fact]

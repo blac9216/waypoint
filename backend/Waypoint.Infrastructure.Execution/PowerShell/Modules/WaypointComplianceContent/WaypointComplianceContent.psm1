@@ -34,6 +34,20 @@
 # this cannot parse contributes nothing rather than failing the whole pull (issue #598
 # AC "malformed control files must not fail the pull").
 #
+# Issue #729 remainder: `inspec check` bounded runner work. The compliance-runner image
+# ships cinc-auditor with an `/usr/local/bin/inspec` alias (runners/compliance-runner/
+# Dockerfile), so the REAL binary runs here in-image; InSpec/cinc-auditor is not a
+# licensed/account-gated tool like VCFDT, so there is no legal bar on real execution --
+# only a staging one (a CI image without the toolchain simply reports Ran=$false, see
+# Test-WaypointInspecCheck below). CI/unit tests instead drive an invented stub script
+# that mirrors `inspec check`'s publicly documented CLI contract (exit 0 on a
+# structurally valid profile, non-zero + JSON diagnostics otherwise), the same
+# "faithful argument contract, invented content" discipline docs/testing.md's VCFDT
+# section establishes for a different (licensed) tool. Execution is bounded: a wall-
+# clock timeout (Start-Job, hard-stopped past the limit) and a captured-output size cap
+# (issue #729 AC "bounded runner work") so one hung or pathological profile cannot stall
+# or memory-balloon the whole content-pull job attempt.
+#
 # Issue #617: the real vmware/dod-compliance-and-automation repo nests its ~385 InSpec
 # profiles many directories deep (e.g.
 # ".../vidm/3.3.x/v1r3-srg/inspec/vmware-vidm-3.3.x-stig-baseline/postgresql/inspec.yml"),
@@ -115,12 +129,29 @@ function Invoke-WaypointComplianceContentPull {
 	# reconcile against the closed catalog vocabulary; this module only reads and
 	# forwards bytes, it never interprets them.
 	$entries = @(foreach ($p in $profiles) {
+			$hasControlsDirectory = Test-Path (Join-Path $p._ProfileDirectory 'controls')
+			# Issue #729: bounded `inspec check` only runs against a profile that already
+			# looks like an executable leaf (has a controls/ directory) -- an aggregate
+			# profile (no controls/) is never a candidate for structure validation, it is
+			# quarantined/rejected by reconciliation on aggregate-vs-leaf grounds alone, so
+			# running the (real, non-trivial) inspec binary against it would be wasted
+			# bounded runner work on content that can never be promoted regardless.
+			$inspecCheck = if ($hasControlsDirectory) {
+				Test-WaypointInspecCheck -ProfileDirectory $p._ProfileDirectory
+			}
+			else {
+				[PSCustomObject]@{ Ran = $false; Passed = $false; Detail = 'no controls/ directory -- not an executable-leaf candidate, inspec check skipped' }
+			}
+
 			[PSCustomObject]@{
-				ProfileKey          = $p.ProfileKey
-				RawYaml             = Get-WaypointComplianceContentRawManifest -ProfileDirectory $p._ProfileDirectory
-				HasControlsDirectory = Test-Path (Join-Path $p._ProfileDirectory 'controls')
-				HasFilesDirectory    = Test-Path (Join-Path $p._ProfileDirectory 'files')
-				ControlFileNames     = @(Get-WaypointComplianceContentControlFileNames -ProfileDirectory $p._ProfileDirectory)
+				ProfileKey            = $p.ProfileKey
+				RawYaml               = Get-WaypointComplianceContentRawManifest -ProfileDirectory $p._ProfileDirectory
+				HasControlsDirectory  = $hasControlsDirectory
+				HasFilesDirectory     = Test-Path (Join-Path $p._ProfileDirectory 'files')
+				ControlFileNames      = @(Get-WaypointComplianceContentControlFileNames -ProfileDirectory $p._ProfileDirectory)
+				InspecCheckRan        = $inspecCheck.Ran
+				InspecCheckPassed     = $inspecCheck.Passed
+				InspecCheckDetail     = $inspecCheck.Detail
 			}
 		})
 
@@ -193,6 +224,94 @@ function Get-WaypointComplianceContentControlFileNames {
 
 	Get-ChildItem -Path $controlsDir -Filter '*.rb' -Recurse -File -ErrorAction SilentlyContinue |
 	ForEach-Object { $_.Name }
+}
+
+function Test-WaypointInspecCheck {
+	<#
+	.SYNOPSIS
+	    Bounded runner work (issue #729 deliverable 3): runs `inspec check <path>
+	    --format json` against one executable-leaf-candidate profile directory and
+	    returns whether the real (or CI-stubbed) tool considers the profile
+	    structurally valid. This is a thin CLI wrapper, not a parser of InSpec's own
+	    internals -- mirrors this repo's VCFDT stub convention (docs/testing.md "CI
+	    stubs vs live-lab validation") for the argument-contract-fidelity discipline,
+	    though InSpec/cinc-auditor itself is not a licensed/account-gated tool, so the
+	    REAL binary is used directly wherever the image provides one
+	    (runners/compliance-runner/Dockerfile ships cinc-auditor with the
+	    /usr/local/bin/inspec alias).
+
+	.PARAMETER ProfileDirectory
+	    The profile's real, absolute root directory.
+
+	.PARAMETER TimeoutSeconds
+	    Wall-clock bound on the `inspec check` invocation (issue #729 AC "bounded
+	    runner work"). A profile that cannot complete structure validation within this
+	    window is treated as a failed check (fail closed), not left to hang the whole
+	    content-pull job attempt. Defaults to 60s -- `inspec check` only walks/parses
+	    profile metadata, it never executes controls against a target, so this is a
+	    generous bound for even a large profile tree.
+
+	.PARAMETER MaxOutputBytes
+	    Hard cap on captured stdout+stderr (issue #729 AC "bounded runner work" -- an
+	    output-size cap alongside the timeout). Output beyond the cap is truncated,
+	    never buffered without bound; a profile that floods output still yields a
+	    bounded, actionable diagnostic rather than an unbounded in-memory string.
+
+	.OUTPUTS
+	    [PSCustomObject] with Ran (bool -- whether an `inspec` binary was found and the
+	    invocation completed within bounds), Passed (bool -- exit code 0), and Detail
+	    (string, size-capped stdout+stderr for diagnostics).
+	#>
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)][string]$ProfileDirectory,
+		[int]$TimeoutSeconds = 60,
+		[int]$MaxOutputBytes = 65536
+	)
+
+	if (-not (Get-Command inspec -ErrorAction SilentlyContinue)) {
+		# No inspec binary on PATH (e.g. a CI image without it staged) -- this is not a
+		# profile failure, just unavailable bounded validation; the caller (candidate
+		# promotion) must treat "did not run" distinctly from "ran and failed" and fail
+		# closed either way (issue #729: a candidate that cannot be proven valid is not
+		# promoted).
+		return [PSCustomObject]@{ Ran = $false; Passed = $false; Detail = 'inspec executable not found on PATH' }
+	}
+
+	# Bounded via Start-Job rather than the module's own thread so a hung `inspec`
+	# process (e.g. a pathological profile.yml symlink loop) cannot block the pull job
+	# attempt past TimeoutSeconds -- Wait-Job returns even if the job's own child
+	# process never exits on its own, and Remove-Job -Force below reaps it.
+	$job = Start-Job -ScriptBlock {
+		param($dir)
+		$output = & inspec check $dir --format json 2>&1 | Out-String
+		[PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+	} -ArgumentList $ProfileDirectory
+
+	$completed = Wait-Job -Job $job -Timeout $TimeoutSeconds
+	if (-not $completed) {
+		Stop-Job -Job $job -ErrorAction SilentlyContinue
+		Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+		return [PSCustomObject]@{
+			Ran     = $true
+			Passed  = $false
+			Detail  = "inspec check did not complete within ${TimeoutSeconds}s -- treated as a failed check (fail closed)"
+		}
+	}
+
+	$result = Receive-Job -Job $job
+	Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+
+	$detail = if ($result.Output) { $result.Output } else { '' }
+	if ($detail.Length -gt $MaxOutputBytes) {
+		$detail = $detail.Substring(0, $MaxOutputBytes) + "... [truncated at $MaxOutputBytes bytes]"
+	}
+
+	return [PSCustomObject]@{
+		Ran    = $true
+		Passed = ($result.ExitCode -eq 0)
+		Detail = $detail
+	}
 }
 
 function Get-WaypointComplianceContentProfiles {
@@ -318,4 +437,4 @@ function Get-WaypointComplianceContentControls {
 	}
 }
 
-Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls, Get-WaypointComplianceContentRawManifest, Get-WaypointComplianceContentControlFileNames
+Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls, Get-WaypointComplianceContentRawManifest, Get-WaypointComplianceContentControlFileNames, Test-WaypointInspecCheck
