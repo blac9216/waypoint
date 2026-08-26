@@ -1,5 +1,19 @@
 # Handoff: Waypoint — DoD VCF Toolkit (on-prem compliance & depot appliance)
 
+> **Reference status (epic #726).** This prototype and its per-screen specs below
+> remain valuable **visual and interaction reference** — tokens, density, layout
+> mechanics, and general screen shape are still good defaults. For the compliance
+> screens (Live Jobs scan detail, Start a Scan, Compliance Results, Benchmarks),
+> **domain semantics are authoritative in [`../design-brief.md`](../design-brief.md)
+> and the ADRs it links (0022–0025), not here.** Where a compliance-screen spec below
+> describes profile selection, one job per target, or a whole-profile config
+> document, that description is superseded by `../design-brief.md`'s reconciled
+> entity/action maps — this file was not rewritten line-by-line to match, since
+> doing so would turn a reference prototype into a pixel spec, which is explicitly
+> out of scope for epic #726. Visual implementation may evolve as those screens are
+> rebuilt; domain behavior may not. See "Open Questions for the Team" at the bottom
+> of this file for questions epic #726 has already answered.
+
 ## Overview
 Waypoint is the web UI for a self-hosted, on-prem appliance that unifies two existing PowerShell/Docker
 tools for VMware environments: a **STIG compliance scanner/remediator** and a **VCF software
@@ -455,6 +469,13 @@ This is deliberate — the appliance is air-gapped and must not reference anythi
    assumes yes.
 2. When mode is fixed at deploy time, does the badge become non-interactive, or is there a supported
    transition path between modes?
-3. Remediation currently has entry points only — no typed-confirmation modal is designed yet.
-4. Attestation expiry is modeled (`expires: 2027-03-01`) but there is no designed workflow for what happens
-   when one lapses mid-run.
+3. Remediation currently has entry points only — no typed-confirmation modal is designed yet. (Remains
+   open — scoped to M4 / epic #15, out of epic #726's compliance-parity scope.)
+
+Resolved by epic #726 (no longer open questions):
+
+4. ~~Attestation expiry is modeled (`expires: 2027-03-01`) but there is no designed workflow for what
+   happens when one lapses mid-run.~~ Answered by ADR-0024/ADR-0025: an expired attestation is not applied;
+   the affected control remains in the result as `Not_Reviewed` with its expiry reported, and there is no
+   post-scan human-assessment workflow to resolve it mid-run or after. See `../design-brief.md`'s
+   Compliance Results and Benchmarks entity/action maps.
