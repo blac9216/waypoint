@@ -32,4 +32,19 @@ public sealed class WaypointDatabaseOptions
 	/// to migrate against.
 	/// </summary>
 	public bool RunMigrationsOnStartup { get; set; } = true;
+
+	/// <summary>
+	/// Issue #843: path to a mounted file whose contents are the Postgres password --
+	/// the file-backed counterpart to <c>ConnectionStrings:Waypoint</c>'s inline
+	/// <c>Password=</c>. When set, every host (API and both runners) resolves the final
+	/// connection string once at startup through
+	/// <c>Waypoint.Infrastructure.Data.DatabaseConnectionStringResolver</c>, which reads
+	/// this file and appends/overrides the password on the configured
+	/// <c>ConnectionStrings:Waypoint</c> base value. Left unset (the default), the
+	/// configured connection string is used exactly as written -- this is what keeps
+	/// ordinary complete connection strings (tests, non-Compose hosts) working
+	/// unchanged. Bound from <c>Database:PasswordFile</c> (Compose env
+	/// <c>Database__PasswordFile</c>).
+	/// </summary>
+	public string? PasswordFile { get; set; }
 }

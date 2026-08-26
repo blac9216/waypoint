@@ -83,6 +83,18 @@ try
 			.WriteTo.Console(new RedactingTextFormatter(new CompactJsonFormatter(), redactor));
 	});
 
+	// Issue #843: the one point every host resolves ConnectionStrings:Waypoint from a
+	// non-secret base value plus an optional mounted password file -- run before
+	// AddWaypointInfrastructure below (and everything it registers) ever reads the
+	// connection string, so every repository/migrator gets the identical resolved
+	// value. Throws with an operator-actionable message (never the password) on a
+	// missing/empty/unreadable file, caught by this method's own top-level
+	// catch (Exception) below like any other fatal startup failure.
+	// Nothing below may add a configuration source: the resolved value is written into
+	// the provider chain as it stands here, and adding a source rebuilds that chain and
+	// silently discards the write (see ResolveAndApply's doc comment).
+	DatabaseConnectionStringResolver.ResolveAndApply(builder.Configuration);
+
 	builder.Services.AddWaypointInfrastructure(builder.Configuration);
 
 	// Issue #443: the API-only half of the control-plane composition -- SSE fan-out
