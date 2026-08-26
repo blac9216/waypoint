@@ -429,8 +429,8 @@ public sealed class CatalogRepository : ICatalogRepository
 	/// </summary>
 	private static async Task<IReadOnlyList<CatalogExecutionProfileDetail>> HydrateDetailsAsync(
 		NpgsqlConnection connection,
-		IReadOnlyList<CatalogExecutionProfile> profiles,
-		IReadOnlyDictionary<Guid, (CatalogComponent Component, CatalogProductVersion ProductVersion, CatalogProduct Product, CatalogContentRelease ContentRelease, CatalogReportGroup ReportGroup)> joined,
+		List<CatalogExecutionProfile> profiles,
+		Dictionary<Guid, (CatalogComponent Component, CatalogProductVersion ProductVersion, CatalogProduct Product, CatalogContentRelease ContentRelease, CatalogReportGroup ReportGroup)> joined,
 		CancellationToken cancellationToken)
 	{
 		if (profiles.Count == 0)

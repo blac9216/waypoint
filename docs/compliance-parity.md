@@ -19,7 +19,7 @@ never identity or support declarations.
 |---|---|
 | Kind | `stig`: exact profile/XCCDF pair, HDF + CKL; `srg`: profile closure, HDF only |
 | Transport | `vmware` (vSphere API), `ssh`, `nsx-api`, `vcf-api` |
-| Selector | `vcenter`, `esxi`, `vm`, named VCSA service, named NSX function, or named appliance service |
+| Selector | `vcenter`, `esxi`, `vm`, `target` (whole appliance -- the `ssh / target` rows, no sub-service name), or `service` (a named VCSA/NSX/appliance sub-service) |
 | Credential purpose | `vsphere-api`, `vcsa-ssh`, `nsx-api`, `srg-ssh`; `vcf-api` authentication is a catalog requirement whose final purpose is planned under #807 |
 | Configuration | declared inputs and per-control Input/Attestation; future Remediation settings remain owned by #15 |
 | Priority | NSX STIG 1; VCSA STIG 2; vCenter STIG 3; ESXi STIG 4; VM STIG 5; every SRG 6 |

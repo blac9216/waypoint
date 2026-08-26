@@ -13,9 +13,12 @@
 // limitations under the License.
 
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.Data;
 using Xunit;
 
@@ -716,6 +719,67 @@ public sealed class SchemaMigrationTests
 		await using NpgsqlCommand verify = new("SELECT schedule_id FROM runs WHERE id = $1", connection);
 		verify.Parameters.AddWithValue(runId);
 		Assert.Equal(DBNull.Value, await verify.ExecuteScalarAsync());
+	}
+
+	/// <summary>
+	/// Issue #728, finding 3: the closed capability vocabulary lives in two hand-maintained
+	/// copies -- the C# <c>Catalog*</c>/<c>CredentialPurposes</c> constants and migration
+	/// 0050's CHECK constraint value lists. This repo's convention is a class-killing drift
+	/// guard (cf. <see cref="Migrations_Credentials_AcceptsEveryClosedSetCredentialType"/>
+	/// mirroring <c>CredentialTypes</c>, and docs/testing.md's "read it off the detector"
+	/// derivation). This parses each closed set's value list OUT OF the authoritative 0050
+	/// migration text (embedded resource) and asserts set-equality with the C# constants, so
+	/// adding/removing a value on either side without the other fails here -- drift in either
+	/// direction, not just additions.
+	/// </summary>
+	[Fact]
+	public async Task Migration0050_CheckConstraintValueLists_MatchTheCSharpClosedVocabulary()
+	{
+		string migration = await ReadMigration0050SqlAsync();
+
+		Assert.Equal(
+			CatalogKinds.All.OrderBy(v => v, StringComparer.Ordinal),
+			ParseCheckInList(migration, "catalog_content_releases_kind_check"));
+		Assert.Equal(
+			CatalogTransports.All.OrderBy(v => v, StringComparer.Ordinal),
+			ParseCheckInList(migration, "catalog_components_transport_check"));
+		Assert.Equal(
+			CatalogSelectorKinds.All.OrderBy(v => v, StringComparer.Ordinal),
+			ParseCheckInList(migration, "catalog_components_selector_kind_check"));
+		Assert.Equal(
+			CatalogOutputKinds.All.OrderBy(v => v, StringComparer.Ordinal),
+			ParseCheckInList(migration, "catalog_execution_profiles_output_kind_check"));
+		Assert.Equal(
+			CredentialPurposes.All.OrderBy(v => v, StringComparer.Ordinal),
+			ParseCheckInList(migration, "catalog_credential_requirements_purpose_check"));
+	}
+
+	/// <summary>The raw text of the 0050 migration embedded resource (authoritative CHECK source).</summary>
+	private static async Task<string> ReadMigration0050SqlAsync()
+	{
+		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
+		string resourceName = Assert.Single(
+			assembly.GetManifestResourceNames().Where(name => name.EndsWith("0050_compliance_catalog.sql", StringComparison.Ordinal)));
+		await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+		using StreamReader reader = new(stream);
+		return await reader.ReadToEndAsync();
+	}
+
+	/// <summary>
+	/// Extracts the single-quoted value list of a named <c>... CHECK (col IN ('a', 'b', ...))</c>
+	/// constraint from migration SQL, returned ordinal-sorted for order-independent set equality.
+	/// </summary>
+	private static IEnumerable<string> ParseCheckInList(string sql, string constraintName)
+	{
+		Match constraint = Regex.Match(
+			sql,
+			$@"CONSTRAINT\s+{Regex.Escape(constraintName)}\s+CHECK\s*\([^)]*\bIN\s*\(([^)]*)\)",
+			RegexOptions.IgnoreCase);
+		Assert.True(constraint.Success, $"Could not locate an IN-list CHECK named '{constraintName}' in the 0050 migration.");
+
+		MatchCollection values = Regex.Matches(constraint.Groups[1].Value, "'([^']*)'");
+		Assert.NotEmpty(values);
+		return values.Select(m => m.Groups[1].Value).OrderBy(v => v, StringComparer.Ordinal);
 	}
 
 	/// <summary>

@@ -49,8 +49,12 @@ public static class CatalogTransports
 /// The closed selector-kind vocabulary (migration 0050's <c>catalog_components</c>
 /// CHECK constraint). <c>Service</c> is the named-sub-service selector (VCSA EAM,
 /// SDDC Manager nginx, NSX Manager, ...) and requires a non-null
-/// <see cref="CatalogComponent.SelectorName"/>; the other three are the generic
-/// vSphere object-kind selectors and never carry a selector name.
+/// <see cref="CatalogComponent.SelectorName"/>. <c>Target</c> is the whole-appliance
+/// selector: the component IS the appliance reached over SSH (docs/compliance-parity.md's
+/// <c>ssh / target</c> rows -- Aria Operations/Automation/Suite Lifecycle, Workspace ONE
+/// Access, Photon OS) with no fabricated sub-service identity, so it never carries a
+/// selector name. The remaining three are the generic vSphere object-kind selectors and
+/// likewise never carry a selector name -- only <c>Service</c> does.
 /// </summary>
 public static class CatalogSelectorKinds
 {
@@ -58,8 +62,9 @@ public static class CatalogSelectorKinds
 	public const string Esxi = "esxi";
 	public const string Vm = "vm";
 	public const string Service = "service";
+	public const string Target = "target";
 
-	public static readonly IReadOnlyCollection<string> All = [VCenter, Esxi, Vm, Service];
+	public static readonly IReadOnlyCollection<string> All = [VCenter, Esxi, Vm, Service, Target];
 
 	public static bool IsValid(string? selectorKind) => selectorKind is not null && All.Contains(selectorKind);
 }

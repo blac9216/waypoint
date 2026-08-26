@@ -346,7 +346,7 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 		CatalogProductVersion version = await _repository.UpsertProductVersionAsync(product.Id, "5.0.0", "Photon OS 5.0", CancellationToken.None);
 		CatalogReportGroup group = await _repository.UpsertReportGroupAsync("srg", "Every SRG", 6, CancellationToken.None);
 		CatalogComponent photon = await _repository.UpsertComponentAsync(
-			version.Id, new CatalogComponentDefinition("photon-os", "Photon OS", CatalogTransports.Ssh, CatalogSelectorKinds.Service, "photon-os", null), CancellationToken.None);
+			version.Id, new CatalogComponentDefinition("photon-os", "Photon OS", CatalogTransports.Ssh, CatalogSelectorKinds.Target, null, null), CancellationToken.None);
 		CatalogContentRelease release = await _repository.UpsertContentReleaseAsync(sourceRevisionId, CatalogKinds.Srg, "v3r3-srg", "Photon OS 5.0 SRG v3r3", CancellationToken.None);
 		CatalogExecutionProfile profile = await _repository.CreateExecutionProfileAsync(photon.Id, release.Id, group.Id, "v3r3", CatalogOutputKinds.Hdf, CancellationToken.None);
 
@@ -356,6 +356,56 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 		Assert.NotNull(detail);
 		Assert.NotNull(detail!.RemediationDefinition);
 		Assert.True(detail.RemediationDefinition!.IsSupported);
+	}
+
+	[Fact]
+	public async Task WholeApplianceTargetSelector_RoundTripsWithNullSelectorName()
+	{
+		// Invented fixture shaped like docs/compliance-parity.md's "Aria Operations 8-x /
+		// SRG / v1r4-srg" whole-appliance row (`ssh / target`): the component IS the
+		// appliance reached over SSH, with NO fabricated sub-service identity -- exactly
+		// the "no lossy target-kind inference" the migration header and issue #728 AC
+		// require. selector_kind = 'target' therefore carries a NULL selector_name (the
+		// selector_name CHECK enforces this: only 'service' may name a sub-service).
+		Guid sourceRevisionId = await SeedSourceRevisionAsync();
+		CatalogProduct product = await _repository.UpsertProductAsync(sourceRevisionId, "vmware", "aria-operations", "VMware Aria Operations", CancellationToken.None);
+		CatalogProductVersion version = await _repository.UpsertProductVersionAsync(product.Id, "8.18.0", "Aria Operations 8.18", CancellationToken.None);
+		CatalogReportGroup group = await _repository.UpsertReportGroupAsync("srg", "Every SRG", 6, CancellationToken.None);
+
+		CatalogComponent appliance = await _repository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition("aria-operations", "Aria Operations", CatalogTransports.Ssh, CatalogSelectorKinds.Target, null, null), CancellationToken.None);
+
+		Assert.Equal(CatalogSelectorKinds.Target, appliance.SelectorKind);
+		Assert.Null(appliance.SelectorName);
+
+		CatalogContentRelease release = await _repository.UpsertContentReleaseAsync(sourceRevisionId, CatalogKinds.Srg, "v1r4-srg", "Aria Operations SRG v1r4", CancellationToken.None);
+		CatalogExecutionProfile profile = await _repository.CreateExecutionProfileAsync(appliance.Id, release.Id, group.Id, "v1r4", CatalogOutputKinds.Hdf, CancellationToken.None);
+		await _repository.AddCredentialRequirementAsync(profile.Id, "srg-ssh", true, CancellationToken.None);
+
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(profile.Id, CancellationToken.None);
+		Assert.NotNull(detail);
+		Assert.Equal(CatalogTransports.Ssh, detail!.Component.Transport);
+		Assert.Equal(CatalogSelectorKinds.Target, detail.Component.SelectorKind);
+		Assert.Null(detail.Component.SelectorName);
+		Assert.Equal(CatalogKinds.Srg, detail.ContentRelease.Kind);
+		Assert.Equal(CatalogOutputKinds.Hdf, detail.ExecutionProfile.OutputKind);
+		Assert.Contains(detail.CredentialRequirements, r => r.Purpose == "srg-ssh");
+	}
+
+	[Fact]
+	public async Task TargetSelector_WithSelectorName_FailsClosed()
+	{
+		// Fidelity guard: a whole-appliance 'target' selector must never carry a
+		// sub-service name -- inventing one is the "lossy target-kind inference" the
+		// migration header and issue #728 AC forbid. Rejected before any SQL runs.
+		Guid sourceRevisionId = await SeedSourceRevisionAsync();
+		CatalogProduct product = await _repository.UpsertProductAsync(sourceRevisionId, "vmware", "photon", "VMware Photon OS", CancellationToken.None);
+		CatalogProductVersion version = await _repository.UpsertProductVersionAsync(product.Id, "5.0.0", "Photon OS 5.0", CancellationToken.None);
+
+		ArgumentException exception = await Assert.ThrowsAsync<ArgumentException>(() => _repository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition("photon-os", "Photon OS", CatalogTransports.Ssh, CatalogSelectorKinds.Target, "photon-os", null), CancellationToken.None));
+
+		Assert.Contains("must not carry a selector_name", exception.Message);
 	}
 
 	[Fact]

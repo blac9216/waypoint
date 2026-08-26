@@ -41,7 +41,8 @@
 --                                       "remediation capability are queryable")
 --
 -- Closed vocabulary enforcement: `kind` (stig|srg), `transport`
--- (vmware|ssh|nsx-api|vcf-api), and `selector_kind` (vcenter|esxi|vm|service) are
+-- (vmware|ssh|nsx-api|vcf-api), and `selector_kind`
+-- (vcenter|esxi|vm|service|target) are
 -- CHECK constraints, the same "closed set enforced at the database boundary"
 -- convention TargetKinds/InventoryItemTypes already establish in C#
 -- (Waypoint.Core.Sites.TargetKinds, Waypoint.Core.Discovery.InventoryItemTypes) --
@@ -131,7 +132,10 @@ CREATE TABLE IF NOT EXISTS catalog_content_releases (
 -- `selector_kind`/`transport` are the closed capability vocabulary
 -- (docs/compliance-parity.md table); `selector_name` carries the named-service value
 -- when selector_kind = 'service' (e.g. "eam", "lookup", "sddc-manager-nginx") and is
--- NULL for the four generic object-kind selectors.
+-- NULL for every other selector: the three generic vSphere object-kind selectors
+-- (vcenter|esxi|vm) AND the whole-appliance 'target' selector (docs/compliance-parity.md's
+-- `ssh / target` rows -- Aria Operations/Automation/Suite Lifecycle, Workspace ONE Access,
+-- Photon OS -- where the component IS the appliance and no sub-service name is invented).
 CREATE TABLE IF NOT EXISTS catalog_components (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     product_version_id UUID NOT NULL REFERENCES catalog_product_versions (id) ON DELETE RESTRICT,
@@ -143,7 +147,7 @@ CREATE TABLE IF NOT EXISTS catalog_components (
     selector_name TEXT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT catalog_components_transport_check CHECK (transport IN ('vmware', 'ssh', 'nsx-api', 'vcf-api')),
-    CONSTRAINT catalog_components_selector_kind_check CHECK (selector_kind IN ('vcenter', 'esxi', 'vm', 'service')),
+    CONSTRAINT catalog_components_selector_kind_check CHECK (selector_kind IN ('vcenter', 'esxi', 'vm', 'service', 'target')),
     CONSTRAINT catalog_components_selector_name_check CHECK (
         (selector_kind = 'service' AND selector_name IS NOT NULL) OR
         (selector_kind <> 'service' AND selector_name IS NULL)
