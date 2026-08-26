@@ -49,7 +49,16 @@ public static class SemanticImportReconciler
 		List<SemanticImportRejected> rejected = [.. interpretation.Rejections
 			.Select(r => new SemanticImportRejected(r.ProfileKey, r.Reason))];
 
-		IReadOnlyDictionary<string, VendorContentEntry> entriesByKey = entries.ToDictionary(e => e.ProfileKey, StringComparer.Ordinal);
+		// Build the lookup defensively: ToDictionary throws ArgumentException on a
+		// duplicate ProfileKey in the raw entry list (a filesystem-walk artifact, e.g. a
+		// case-collision or a re-enumerated path), which would abort the entire reconcile.
+		// First-writer-wins keeps this pass fail-soft; the interpreter's own collision
+		// guard already quarantines genuinely ambiguous component keys.
+		Dictionary<string, VendorContentEntry> entriesByKey = new(StringComparer.Ordinal);
+		foreach (VendorContentEntry sourceEntry in entries)
+		{
+			entriesByKey.TryAdd(sourceEntry.ProfileKey, sourceEntry);
+		}
 
 		// Duplicate ComponentKey detection within one (product version, kind) scope --
 		// issue #729 AC "duplicate leaf names remain distinct and deterministic": the
@@ -94,7 +103,20 @@ public static class SemanticImportReconciler
 
 			if (candidate.IsExecutableLeaf)
 			{
-				VendorContentEntry entry = entriesByKey[candidate.ProfileKey];
+				// Guard the lookup rather than indexing blindly: a candidate whose
+				// ProfileKey has no matching source entry is a structural inconsistency,
+				// not an executable leaf, so it fails closed into quarantine rather than
+				// throwing KeyNotFoundException and aborting the whole reconcile (same
+				// unguarded-indexing class as the interpreter slice crash). Under normal
+				// operation every candidate derives from an entry, so this never fires;
+				// it exists so a future upstream shape change degrades to quarantine.
+				if (!entriesByKey.TryGetValue(candidate.ProfileKey, out VendorContentEntry? entry))
+				{
+					rejected.Add(new SemanticImportRejected(candidate.ProfileKey,
+						"executable leaf candidate has no matching source content entry -- cannot validate controls/ structure, quarantined"));
+					continue;
+				}
+
 				if (!entry.HasControlsDirectory || entry.ControlFileNames.Count == 0)
 				{
 					rejected.Add(new SemanticImportRejected(candidate.ProfileKey,

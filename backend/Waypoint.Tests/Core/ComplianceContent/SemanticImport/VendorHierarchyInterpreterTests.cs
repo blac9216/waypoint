@@ -263,6 +263,90 @@ public sealed class VendorHierarchyInterpreterTests
 	}
 
 	[Fact]
+	public void NearMissShortDepthPath_ValidFamilyValidReleaseButNoBaselineDir_QuarantinesNotThrows()
+	{
+		// Round-1 blocker exact repro: a 4-segment path with a recognized family, valid
+		// version, valid -srg suffix, and an 'inspec' segment -- but NO baseline profile
+		// directory. This previously reached `segments[5..]` and threw
+		// ArgumentOutOfRangeException, aborting the whole import. It must now quarantine.
+		VendorContentEntry nearMiss = Leaf(
+			"photon/5-0/v3r3-srg/inspec",
+			Manifest("inspec"),
+			"controls/x.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([nearMiss]);
+
+		Assert.Empty(result.Candidates);
+		SemanticImportRejection rejection = Assert.Single(result.Rejections);
+		Assert.Equal("photon/5-0/v3r3-srg/inspec", rejection.ProfileKey);
+		Assert.Contains("baseline", rejection.Reason, StringComparison.Ordinal);
+	}
+
+	[Theory]
+	// Too-shallow (4 segments, no baseline dir) -> quarantine, for -stig and -srg.
+	[InlineData("photon/5-0/v3r3-srg/inspec", false)]
+	[InlineData("vsphere/8-0/v2r3-stig/inspec", false)]
+	[InlineData("vcsa/8-0/v2r3-stig/inspec", false)]
+	[InlineData("nsx/4-x/v1r2-stig/inspec", false)]
+	// Exact-minimum (5 segments, baseline dir present) -> classifies.
+	[InlineData("photon/5-0/v3r3-srg/inspec/photon-baseline", true)]
+	[InlineData("aria-operations/8-x/v1r4-srg/inspec/aria-baseline", true)]
+	[InlineData("vsphere/8-0/v2r3-stig/inspec/vsphere-baseline", true)]
+	[InlineData("vcsa/8-0/v2r3-stig/inspec/vcsa-baseline", true)]
+	[InlineData("nsx/4-x/v1r2-stig/inspec/nsx-baseline", true)]
+	// Extra-deep leaf (6 segments) -> classifies for the split families.
+	[InlineData("vsphere/8-0/v2r3-stig/inspec/vsphere-baseline/vcenter", true)]
+	[InlineData("vcsa/8-0/v2r3-stig/inspec/vcsa-baseline/eam", true)]
+	[InlineData("nsx/4-x/v1r2-stig/inspec/nsx-baseline/manager", true)]
+	// Over-deep (7 segments) -> whole-appliance treats extra nesting as aggregate
+	// (classifies), split families have no documented sub-shape that deep -> quarantine.
+	[InlineData("photon/5-0/v3r3-srg/inspec/photon-baseline/extra/deeper", true)]
+	[InlineData("vsphere/8-0/v2r3-stig/inspec/vsphere-baseline/vcenter/deeper", false)]
+	public void DepthSweep_AcrossFamilies_EitherClassifiesOrQuarantinesNeverThrows(string profileKey, bool expectClassified)
+	{
+		VendorContentEntry entry = Leaf(profileKey, Manifest("m"), "controls/x.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([entry]);
+
+		if (expectClassified)
+		{
+			Assert.Single(result.Candidates);
+			Assert.Empty(result.Rejections);
+		}
+		else
+		{
+			Assert.Empty(result.Candidates);
+			Assert.Single(result.Rejections);
+		}
+	}
+
+	[Fact]
+	public void PoisonedEntry_DoesNotAbortSiblingEntries_ContainmentPerEntry()
+	{
+		// Engineer one entry that throws an UNEXPECTED exception inside interpretation (a
+		// null ProfileKey NREs at the Split call) and surround it with two perfectly good
+		// siblings. Epic #726 invariant "one failure never stops siblings": the poisoned
+		// entry must be quarantined with its exception type/message as the diagnostic and
+		// both healthy siblings must still classify.
+		VendorContentEntry goodBefore = Leaf(
+			"aria-operations/8-x/v1r4-srg/inspec/aria-baseline", Manifest("aria-baseline"), "controls/a.rb");
+		VendorContentEntry poisoned = new(
+			ProfileKey: null!, RawYaml: Manifest("boom"), HasControlsDirectory: true, HasFilesDirectory: false,
+			ControlFileNames: ["controls/x.rb"]);
+		VendorContentEntry goodAfter = Leaf(
+			"vidm/3-3-x/v1r3-srg/inspec/vidm-baseline", Manifest("vidm-baseline"), "controls/b.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([goodBefore, poisoned, goodAfter]);
+
+		Assert.Equal(2, result.Candidates.Count);
+		Assert.Contains(result.Candidates, c => c.VendorFamily == "aria-operations");
+		Assert.Contains(result.Candidates, c => c.VendorFamily == "vidm");
+		SemanticImportRejection rejection = Assert.Single(result.Rejections);
+		Assert.Contains("unexpected error interpreting profile path", rejection.Reason, StringComparison.Ordinal);
+		Assert.Contains("NullReferenceException", rejection.Reason, StringComparison.Ordinal);
+	}
+
+	[Fact]
 	public void DuplicateLeafNames_AcrossDifferentParents_RemainDistinctProfiles()
 	{
 		// Two DIFFERENT vendor products both happen to have a leaf directory literally

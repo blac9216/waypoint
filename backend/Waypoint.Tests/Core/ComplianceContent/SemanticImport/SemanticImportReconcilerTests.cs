@@ -143,6 +143,42 @@ public sealed class SemanticImportReconcilerTests
 		Assert.Equal(SourceCommit, report.SourceCommit);
 	}
 
+	[Fact]
+	public void Reconcile_ExecutableLeafWithNoMatchingSourceEntry_QuarantinesInsteadOfThrowing()
+	{
+		// Same unguarded-indexing class as the interpreter slice crash: previously the
+		// reconciler indexed entriesByKey[candidate.ProfileKey] directly, so a candidate
+		// with no matching source entry would throw KeyNotFoundException and abort the
+		// whole reconcile. Drive that inconsistency directly: interpret a real leaf, then
+		// reconcile it against an EMPTY entry list. It must quarantine, not throw.
+		VendorContentEntry leaf = Leaf(
+			"vsphere/8-0/v2r3-stig/inspec/base/vcenter",
+			Manifest("vcenter", "vCenter STIG", "2.3.0", ["vcenter_host"]),
+			"controls/a.rb");
+		VendorHierarchyInterpretation interpretation = VendorHierarchyInterpreter.Interpret([leaf]);
+
+		SemanticImportReport report = SemanticImportReconciler.Reconcile(SourceCommit, interpretation, []);
+
+		Assert.Empty(report.Accepted);
+		SemanticImportRejected rejection = Assert.Single(report.Rejected);
+		Assert.Contains("no matching source content entry", rejection.Reason, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void Reconcile_DuplicateSourceEntryKeys_DoesNotThrow()
+	{
+		// A duplicate ProfileKey in the raw entry list (filesystem-walk artifact) once
+		// made entries.ToDictionary throw ArgumentException, aborting reconcile. It must
+		// now be tolerated (first-writer-wins) and still produce a report.
+		VendorContentEntry a = Leaf("photon/5-0/v3r3-srg/inspec/base", Manifest("base"), "controls/a.rb");
+		VendorContentEntry aDuplicateKey = Leaf("photon/5-0/v3r3-srg/inspec/base", Manifest("base"), "controls/b.rb");
+
+		VendorHierarchyInterpretation interpretation = VendorHierarchyInterpreter.Interpret([a]);
+		SemanticImportReport report = SemanticImportReconciler.Reconcile(SourceCommit, interpretation, [a, aDuplicateKey]);
+
+		Assert.NotNull(report);
+	}
+
 	private static SemanticImportReport ReconcileAll(IReadOnlyList<VendorContentEntry> entries)
 	{
 		VendorHierarchyInterpretation interpretation = VendorHierarchyInterpreter.Interpret(entries);

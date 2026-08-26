@@ -80,7 +80,23 @@ public static class VendorHierarchyInterpreter
 
 		foreach (VendorContentEntry entry in entries.OrderBy(e => e.ProfileKey, StringComparer.Ordinal))
 		{
-			InterpretOne(entry, candidates, rejections);
+			// Per-entry containment (epic #726 invariant "one failure never stops
+			// siblings"): a single malformed/near-miss directory must never abort the
+			// whole import. Any UNEXPECTED exception while interpreting one entry
+			// quarantines THAT entry with the exception type/message as its diagnostic
+			// and continues with its siblings. This is deliberately scoped per-entry, not
+			// wrapped around the whole loop, so a genuine systemic bug still surfaces as a
+			// wall of identical quarantine reasons rather than being silently swallowed.
+			try
+			{
+				InterpretOne(entry, candidates, rejections);
+			}
+			catch (Exception ex)
+			{
+				string profileKey = entry?.ProfileKey ?? "(null entry)";
+				rejections.Add(new SemanticImportRejection(profileKey,
+					$"unexpected error interpreting profile path (quarantined so sibling profiles still import): {ex.GetType().Name}: {ex.Message}"));
+			}
 		}
 
 		return new VendorHierarchyInterpretation(
@@ -91,10 +107,22 @@ public static class VendorHierarchyInterpreter
 	private static void InterpretOne(VendorContentEntry entry, List<SemanticCandidate> candidates, List<SemanticImportRejection> rejections)
 	{
 		string[] segments = entry.ProfileKey.Split('/', StringSplitOptions.RemoveEmptyEntries);
-		if (segments.Length < 4)
+
+		// Every documented family layout is <family>/<version>/<release>/inspec/<baseline>/[leaf...]
+		// -- the baseline profile directory (segments[4]) is mandatory for EVERY family
+		// (whole-appliance profiles live AT the baseline dir; split families add one more
+		// leaf segment after it). A path that stops at or before the mandatory baseline
+		// directory (< 5 segments) is a near-miss, not a leaf: it is quarantined with a
+		// diagnostic naming the missing structural level, never sliced blindly. This is
+		// the fix for the crash class where a 4-segment path
+		// (<family>/<version>/<release-stig>/inspec, no baseline dir) passed a too-loose
+		// "< 4" guard and then threw at segments[5..].
+		const int MinimumSegments = 5;
+		if (segments.Length < MinimumSegments)
 		{
 			rejections.Add(new SemanticImportRejection(entry.ProfileKey,
-				"profile path has fewer segments than any documented family layout (expected <family>/<version>/<release>/inspec/...)"));
+				$"profile path has {segments.Length} segment(s); every documented family layout requires at least {MinimumSegments} " +
+				"(<family>/<version>/<release>/inspec/<baseline-directory>[/leaf]) -- this near-miss is missing the baseline profile directory and is quarantined, never guessed"));
 			return;
 		}
 
@@ -120,7 +148,7 @@ public static class VendorHierarchyInterpreter
 			return;
 		}
 
-		if (segments.Length < 4 || !string.Equals(segments[3], "inspec", StringComparison.OrdinalIgnoreCase))
+		if (!string.Equals(segments[3], "inspec", StringComparison.OrdinalIgnoreCase))
 		{
 			rejections.Add(new SemanticImportRejection(entry.ProfileKey,
 				"expected an 'inspec' directory segment after the release directory"));
@@ -140,8 +168,11 @@ public static class VendorHierarchyInterpreter
 		// baseline directory itself (segments[4]) is never part of component identity
 		// -- it is the vendor's own top-level profile folder name, already captured by
 		// productVersionKey+releaseKey; only what comes AFTER it distinguishes
-		// aggregate-vs-leaf and (for split families) which sub-component this is.
-		string[] tail = segments[5..];
+		// aggregate-vs-leaf and (for split families) which sub-component this is. The
+		// MinimumSegments guard above guarantees segments.Length >= 5, so this slice can
+		// never be out of range; the explicit bound below is defence-in-depth against any
+		// future edit that weakens the guard (same crash class as the round-1 blocker).
+		string[] tail = segments.Length > MinimumSegments ? segments[MinimumSegments..] : [];
 
 		SemanticCandidate? candidate = family.Shape switch
 		{
