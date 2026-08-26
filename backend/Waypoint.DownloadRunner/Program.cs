@@ -20,6 +20,7 @@ using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.SystemState;
 using Waypoint.DownloadRunner;
+using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.DependencyInjection;
 using Waypoint.Infrastructure.SystemState;
 using Waypoint.Runner.Jobs;
@@ -55,6 +56,14 @@ builder.Services.AddOptions<DownloadRunnerOptions>()
 // AddWaypointExecution (Waypoint.Infrastructure.Execution, the project split #443
 // introduced) adds the PowerShell host, job dispatcher, lease recovery, and event
 // writer this runner actually executes with. Waypoint.Api calls only the first.
+// Issue #843: resolve ConnectionStrings:Waypoint from its non-secret base value plus
+// an optional mounted password file exactly once, before AddWaypointInfrastructure/
+// AddWaypointExecution below (and the workerRegistryConnectionString read further
+// down) ever read it -- see DatabaseConnectionStringResolver's doc comment for why one
+// call site upstream of every reader is what makes the queue components, the readiness
+// reporter, and the worker-registry writer all receive the identical resolved value.
+DatabaseConnectionStringResolver.ResolveAndApply(builder.Configuration);
+
 builder.Services.AddWaypointInfrastructure(builder.Configuration);
 ExecutionServiceCollectionExtensions.AddWaypointExecution(builder.Services, builder.Configuration);
 

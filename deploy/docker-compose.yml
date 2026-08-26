@@ -201,6 +201,15 @@ services:
       # port from the postgres:16-alpine image, so neither varies with the
       # operator's credential choice.
       ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=${POSTGRES_USER:-waypoint};Password=${POSTGRES_PASSWORD:-waypoint_dev_only}"
+      # Issue #843: file-backed alternative to the inline Password= above, resolved
+      # once at startup by DatabaseConnectionStringResolver (backend/Waypoint.
+      # Infrastructure/Data) -- when this names a readable file, its contents (minus
+      # exactly one trailing newline) override whatever Password= ConnectionStrings__
+      # Waypoint carries. Empty by default, so this dev stack's inline-password
+      # behavior above is unchanged; actually mounting a Postgres secret file here is
+      # #844's scope (Postgres/Keycloak/nginx secrets under deploy/config/), not this
+      # issue's.
+      Database__PasswordFile: "${WAYPOINT_DB_PASSWORD_FILE:-}"
       # #191: narrows ForwardedHeaders:KnownNetworks (Program.cs) from the
       # whole-RFC-1918-space fallback to exactly the edge network's pinned
       # subnet (see the `edge` network's ipam config below) - the only network
@@ -500,6 +509,12 @@ services:
       # backend's own ${POSTGRES_USER} owner role - see postgres service above
       # and that migration's header comment.
       ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_compliance_runner;Password=${POSTGRES_COMPLIANCE_RUNNER_PASSWORD:-waypoint_compliance_runner_dev_only}"
+      # Issue #843: same file-backed override as the backend's own Database__
+      # PasswordFile above -- a DIFFERENT variable than the backend's, since this
+      # role's password (waypoint_compliance_runner, above) is never the same
+      # secret as the backend's owner-role password. Empty by default; actual
+      # secret-file delivery is #844.
+      Database__PasswordFile: "${WAYPOINT_COMPLIANCE_DB_PASSWORD_FILE:-}"
       # Same file-delivery convention and in-container path as the backend's own
       # mount below (issue #405/ADR-0005) - every trusted service reads the same
       # key material, never an env var carrying the key itself.
@@ -625,6 +640,12 @@ services:
       # backend's own ${POSTGRES_USER} owner role - see postgres service above
       # and that migration's header comment.
       ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_download_runner;Password=${POSTGRES_DOWNLOAD_RUNNER_PASSWORD:-waypoint_download_runner_dev_only}"
+      # Issue #843: same file-backed override as the backend's own Database__
+      # PasswordFile above -- a DIFFERENT variable than the backend's and the
+      # compliance-runner's, since this role's password (waypoint_download_runner,
+      # above) is its own least-privilege secret. Empty by default; actual
+      # secret-file delivery is #844.
+      Database__PasswordFile: "${WAYPOINT_DOWNLOAD_DB_PASSWORD_FILE:-}"
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
       # Shim modules baked into the image at /app/PowerShell/Modules (Waypoint.
       # Infrastructure.csproj's CopyToPublishDirectory - see the Dockerfile).

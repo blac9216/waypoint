@@ -19,6 +19,7 @@ using Microsoft.Extensions.Options;
 using Waypoint.ComplianceRunner.Readiness;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.SystemState;
+using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.DependencyInjection;
 using Waypoint.Infrastructure.SystemState;
 using Waypoint.Runner.Jobs;
@@ -55,6 +56,14 @@ HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
 // resolves: the JobHandlerRegistry override below narrows the allowlist to
 // JobCapabilities.Compliance, so a download handler is excluded from what this
 // process can claim (see that override).
+// Issue #843: resolve ConnectionStrings:Waypoint from its non-secret base value plus
+// an optional mounted password file exactly once, before AddWaypointInfrastructure/
+// AddWaypointExecution below (and the workerRegistryConnectionString read further
+// down) ever read it -- see DatabaseConnectionStringResolver's doc comment for why one
+// call site upstream of every reader is what makes the queue components, the readiness
+// reporter, and the worker-registry writer all receive the identical resolved value.
+DatabaseConnectionStringResolver.ResolveAndApply(builder.Configuration);
+
 builder.Services.AddWaypointInfrastructure(builder.Configuration);
 ExecutionServiceCollectionExtensions.AddWaypointExecution(builder.Services, builder.Configuration);
 
