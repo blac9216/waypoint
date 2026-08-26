@@ -21,6 +21,7 @@ using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Secrets;
+using Waypoint.Infrastructure.Components;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
@@ -1435,6 +1436,103 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 			"INSERT INTO jobs (run_id, job_type, priority, state, has_run_secret) VALUES ($1, 'scan', 1, 'queued', true) RETURNING id", connection);
 		command.Parameters.AddWithValue(runId);
 		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>
+	/// Issue #732 (discovery-wiring remainder) + #840 (migration 0058), added at
+	/// authoring time per this file's own standing "a new runner-executed table
+	/// without a role-contract test ships grant drift silently" lesson: the real
+	/// compliance-runner role must be able to run the full
+	/// <see cref="ComponentRepository.UpsertDiscoveredAsync"/> protocol
+	/// <see cref="Waypoint.Infrastructure.Discovery.DiscoverJobHandler"/> now calls --
+	/// insert-path (new component), update-path (re-discovery of the same identity),
+	/// and the mark-absent UPDATE plus its component_observations INSERT -- not just
+	/// avoid throwing 42501, since every one of those statements previously ran only
+	/// through the full-privilege test-owner connection in
+	/// <see cref="Waypoint.Tests.Infrastructure.Postgres.ComponentRepositoryTests"/>.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_UpsertDiscoveredAsync_FullLifecycleWithoutPermissionDenied()
+	{
+		Guid siteId = await SeedSiteAsync();
+		Guid targetId = await SeedTargetAsync(siteId);
+
+		ComponentRepository runnerComponents = new(_complianceRunnerConnectionString);
+		Waypoint.Core.Components.DiscoveredComponent[] items =
+		[
+			new("esxi", "role-grant-drift-host-1", "esxi-01.example.internal", null, null, "8.0.3"),
+		];
+
+		Waypoint.Core.Components.ComponentUpsertOutcome insertOutcome =
+			await runnerComponents.UpsertDiscoveredAsync(targetId, items, CancellationToken.None);
+		Assert.Equal(1, insertOutcome.Upserted);
+
+		Waypoint.Core.Components.ComponentUpsertOutcome reDiscoverOutcome =
+			await runnerComponents.UpsertDiscoveredAsync(targetId, items, CancellationToken.None);
+		Assert.Equal(1, reDiscoverOutcome.Upserted);
+
+		Waypoint.Core.Components.ComponentUpsertOutcome absentOutcome =
+			await runnerComponents.UpsertDiscoveredAsync(targetId, [], CancellationToken.None);
+		Assert.Equal(1, absentOutcome.MarkedAbsent);
+
+		ComponentRepository ownerComponents = new(_fixture.ConnectionString);
+		Waypoint.Core.Components.Component onlyComponent =
+			Assert.Single(await ownerComponents.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None));
+		Assert.Equal(Waypoint.Core.Components.ComponentLifecycleStates.Absent, onlyComponent.Lifecycle);
+	}
+
+	/// <summary>
+	/// Least-privilege boundary check mirroring this file's other role-boundary pairs:
+	/// migration 0058 grants the compliance-runner role INSERT-only on
+	/// <c>component_observations</c> (never SELECT/UPDATE/DELETE -- the runner writes
+	/// observations forward-only and never reads them back; the API-side
+	/// <c>GET /components/{id}/observations</c> read always goes through the owner
+	/// connection like every other repository in this codebase).
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotReadComponentObservations()
+	{
+		Guid siteId = await SeedSiteAsync();
+		Guid targetId = await SeedTargetAsync(siteId);
+		ComponentRepository ownerComponents = new(_fixture.ConnectionString);
+		await ownerComponents.UpsertDiscoveredAsync(
+			targetId,
+			[new Waypoint.Core.Components.DiscoveredComponent("esxi", "role-grant-drift-host-2", "esxi-02.example.internal", null, null, "8.0.3")],
+			CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand select = new("SELECT id FROM component_observations LIMIT 1", connection);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => select.ExecuteScalarAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
+	}
+
+	/// <summary>
+	/// Second least-privilege boundary check for migration 0058: the compliance-runner
+	/// role gets no DELETE on <c>components</c> at all -- retirement is a lifecycle
+	/// UPDATE (<see cref="ComponentRepository.RetireContinuouslyAbsentAsync"/>, an
+	/// API/schedule-owned operation, not something the discovery job itself calls) and
+	/// purge stays Admin-only/API-side (<c>DELETE /components/{id}</c>).
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotDeleteComponents()
+	{
+		Guid siteId = await SeedSiteAsync();
+		Guid targetId = await SeedTargetAsync(siteId);
+		ComponentRepository ownerComponents = new(_fixture.ConnectionString);
+		await ownerComponents.UpsertDiscoveredAsync(
+			targetId,
+			[new Waypoint.Core.Components.DiscoveredComponent("esxi", "role-grant-drift-host-3", "esxi-03.example.internal", null, null, "8.0.3")],
+			CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand delete = new("DELETE FROM components WHERE parent_target_id = $1", connection);
+		delete.Parameters.AddWithValue(targetId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, exception.SqlState);
 	}
 
 	private async Task<Guid> SeedSiteAsync()

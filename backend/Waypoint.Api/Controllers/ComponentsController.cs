@@ -32,11 +32,12 @@ namespace Waypoint.Api.Controllers;
 /// write and retired-component purge (docs/api-contract.md: "never lifecycle or
 /// identity, which are discovery/refresh-owned").
 ///
-/// Component materialization (the discovery-job wiring that calls
-/// <see cref="IComponentRepository.UpsertDiscoveredAsync"/> from a real vSphere/NSX
-/// enumeration pass) is explicitly out of this slice's scope -- issue #732's "NOT this
-/// slice: discovery-job scheduling changes." This controller's read/capability surface
-/// is real and testable against repository-seeded rows independent of that wiring.
+/// Component materialization now runs: <see cref="IComponentRepository.UpsertDiscoveredAsync"/>
+/// is called by <see cref="Waypoint.Infrastructure.Discovery.DiscoverJobHandler"/> on
+/// every successful vSphere discovery pass (issue #732's discovery-wiring remainder),
+/// so <c>GET /targets/{id}/components</c> reflects real discovered components for any
+/// target that has completed at least one discovery boundary since. NSX and other
+/// non-vSphere sources remain future work.
 /// </summary>
 [ApiController]
 public sealed class ComponentsController : ControllerBase

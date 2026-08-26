@@ -14,6 +14,7 @@
 
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.Components;
 using Waypoint.Core.Discovery;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -54,6 +55,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 	private readonly Waypoint.Infrastructure.Secrets.CredentialRepository _credentials;
 	private readonly TargetRepository _targets;
 	private readonly InventoryRepository _inventory;
+	private readonly IComponentRepository _components;
 	private readonly IJobRunnerRepository _jobs;
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
@@ -64,6 +66,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 		Waypoint.Infrastructure.Secrets.CredentialRepository credentials,
 		TargetRepository targets,
 		InventoryRepository inventory,
+		IComponentRepository components,
 		IJobRunnerRepository jobs,
 		ISecretRedactor redactor,
 		IOptions<PowerShellOptions> powerShellOptions)
@@ -73,6 +76,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(credentials);
 		ArgumentNullException.ThrowIfNull(targets);
 		ArgumentNullException.ThrowIfNull(inventory);
+		ArgumentNullException.ThrowIfNull(components);
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(redactor);
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
@@ -82,6 +86,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 		_credentials = credentials;
 		_targets = targets;
 		_inventory = inventory;
+		_components = components;
 		_jobs = jobs;
 		_redactor = redactor;
 		_powerShellOptions = powerShellOptions;
@@ -254,7 +259,30 @@ public sealed class DiscoverJobHandler : IJobHandler
 		IReadOnlyList<DiscoveredInventoryItem> items = parseOutcome.Items;
 		InventoryUpsertOutcome outcome = await _inventory.UpsertDiscoveryResultsAsync(targetId, items, cancellationToken).ConfigureAwait(false);
 
-		string progressPayload = JsonSerializer.Serialize(new { upserted = outcome.Upserted, removed = outcome.Removed });
+		// Issue #732 (discovery-wiring remainder): this point in the method is reached
+		// ONLY for a successful, fully-parsed enumeration -- every earlier return above
+		// (connection/auth failure, malformed row, PowerShell invocation failure) already
+		// bails out before this line, so a partial or failed discovery boundary can never
+		// reach ComponentUpsertOutcome/mass-absent components (ADR-0023 "a failed or
+		// partial boundary ... neither claims completeness nor advances absence" --
+		// enforced here by construction, not by a separate flag: the same fail-closed gate
+		// InventoryRepository's own removal detection already relies on for `items`, one
+		// call above this one). An empty-but-successful enumeration (a target that
+		// genuinely has zero inventory) still reaches here and correctly marks every
+		// previously-active component absent, matching InventoryUpsertOutcome's own
+		// documented behavior for the identical case.
+		IReadOnlyList<DiscoveredComponent> componentItems = MapToComponents(items);
+		ComponentUpsertOutcome componentOutcome = await _components
+			.UpsertDiscoveredAsync(targetId, componentItems, cancellationToken).ConfigureAwait(false);
+
+		string progressPayload = JsonSerializer.Serialize(new
+		{
+			upserted = outcome.Upserted,
+			removed = outcome.Removed,
+			components_upserted = componentOutcome.Upserted,
+			components_absent = componentOutcome.MarkedAbsent,
+			components_reconnected = componentOutcome.Reconnected,
+		});
 		await context.Events
 			.EmitAsync(JobEventTypes.DiscoverProgress, context.Job.Id, context.Job.RunId, progressPayload, cancellationToken)
 			.ConfigureAwait(false);
@@ -262,7 +290,93 @@ public sealed class DiscoverJobHandler : IJobHandler
 		await _targets.SetDiscoveryStatusAsync(targetId, TargetDiscoveryStatuses.Discovered, stampLastRefreshed: true, cancellationToken)
 			.ConfigureAwait(false);
 
-		return JobExecutionOutcome.Succeeded($"Discovered {outcome.Upserted} item(s), marked {outcome.Removed} removed.");
+		return JobExecutionOutcome.Succeeded(
+			$"Discovered {outcome.Upserted} item(s), marked {outcome.Removed} removed. " +
+			$"Components: {componentOutcome.Upserted} upserted, {componentOutcome.Reconnected} reconnected, {componentOutcome.MarkedAbsent} marked absent.");
+	}
+
+	/// <summary>
+	/// Maps this pass's flat cluster/host/VM inventory result onto
+	/// <see cref="Waypoint.Core.Components.IComponentRepository.UpsertDiscoveredAsync"/>'s
+	/// stable-identity input shape (issue #732's remainder: "wire discovery to
+	/// component materialization ... for real targets"). Only `esxi`/`vm` inventory
+	/// rows become components -- `cluster` is a vSphere grouping construct with no
+	/// catalog-declared component analogue (<see cref="Waypoint.Core.ComplianceContent.CatalogSelectorKinds"/>
+	/// has no "cluster" selector kind) and is never itself an executable compliance
+	/// subject, so it is deliberately dropped rather than materialized.
+	///
+	/// Every mapped component hangs directly off one synthetic per-target `vcenter`
+	/// root component (<see cref="Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter"/>,
+	/// <c>VendorIdentity: null</c> -- this discovery boundary's PowerShell module
+	/// (<c>Invoke-WaypointDiscovery</c>) enumerates only cluster/host/VM objects, never
+	/// a distinct vCenter ServiceInstance MoRef, so there is no independent upstream
+	/// object to key the root on; identity instead falls to the no-vendor-identity
+	/// partial-index case migration 0054 already defines for exactly this shape),
+	/// never through an intermediate cluster component -- a host's or VM's
+	/// <see cref="DiscoveredInventoryItem.ParentMoref"/> may point at a cluster
+	/// (dropped, no component) rather than another host, so component parentage is
+	/// deliberately flattened to (root vcenter) -&gt; (esxi | vm) rather than trying to
+	/// preserve the cluster tier as a component tier that does not exist in the catalog
+	/// vocabulary.
+	///
+	/// Non-inventory catalog-defined expansion (named VCSA services, NSX functional
+	/// components, whole-appliance SSH component sets -- ADR-0023's "component
+	/// families with no independent upstream object") is explicitly NOT built in this
+	/// slice: it requires resolving this target's active catalog product/version to
+	/// read the catalog's declared expected-component set, which no discovery-job code
+	/// path does today (<see cref="Waypoint.Core.Components.ComponentCapabilityMatcher"/>
+	/// consumes a resolved fact, it does not supply one). Tracked as a deferred finding
+	/// in this PR's own report rather than guessed at here.
+	/// </summary>
+	internal static IReadOnlyList<DiscoveredComponent> MapToComponents(IReadOnlyList<DiscoveredInventoryItem> items)
+	{
+		List<DiscoveredComponent> components = [];
+
+		// The synthetic root has no independent vendor identity (see doc comment above)
+		// and therefore no ParentVendorIdentity of its own -- it is always a top-level
+		// component under the target.
+		components.Add(new DiscoveredComponent(
+			CatalogComponentKey: Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter,
+			VendorIdentity: null,
+			DisplayName: "vCenter Server",
+			ParentVendorIdentity: null,
+			CatalogComponentId: null,
+			ExactVersion: null));
+
+		foreach (DiscoveredInventoryItem item in items)
+		{
+			string? catalogComponentKey = item.Type switch
+			{
+				InventoryItemTypes.Host => Waypoint.Core.ComplianceContent.CatalogSelectorKinds.Esxi,
+				InventoryItemTypes.Vm => Waypoint.Core.ComplianceContent.CatalogSelectorKinds.Vm,
+				_ => null, // InventoryItemTypes.Cluster and anything else: no component analogue.
+			};
+
+			if (catalogComponentKey is null)
+			{
+				continue;
+			}
+
+			components.Add(new DiscoveredComponent(
+				CatalogComponentKey: catalogComponentKey,
+				VendorIdentity: item.Moref,
+				DisplayName: item.Name,
+				// Flattened parentage (see doc comment): every esxi/vm component's parent
+				// is the synthetic root, never the (possibly cluster, possibly another
+				// host) inventory parent -- both this root and every esxi/vm row have
+				// ParentVendorIdentity null, so both land as top-level (ParentComponentId
+				// null) components under the target, matching the root's own top-level
+				// position. Build is captured as the component's discovered fact only for
+				// a host -- a VM's Build carries VMware Tools version in this module's
+				// output, which is not a product-version fact for the VM itself, so it is
+				// intentionally NOT passed as ExactVersion here (that would misrepresent a
+				// guest property as the component's own compliance-relevant version).
+				ParentVendorIdentity: null,
+				CatalogComponentId: null,
+				ExactVersion: item.Type == InventoryItemTypes.Host ? item.Build : null));
+		}
+
+		return components;
 	}
 
 	/// <summary>

@@ -18,11 +18,12 @@ namespace Waypoint.Core.Components;
 /// Storage for <c>components</c>/<c>component_observations</c> (migration 0054, issue
 /// #732, ADR-0023). Distinct from <see cref="Waypoint.Core.Discovery.InventoryItem"/>'s
 /// flat cluster/host/VM cache -- this is the stable-identity layer #732 introduces
-/// beneath a top-level <see cref="Waypoint.Core.Sites.Target"/>. Discovery-job wiring
-/// that calls <see cref="UpsertDiscoveredAsync"/> from a real vSphere/NSX enumeration
-/// pass is explicitly out of this slice's scope (issue #732 "NOT this slice: discovery-
-/// job scheduling changes"); this interface exists so the identity/lifecycle/capability
-/// model is real and testable independent of that wiring.
+/// beneath a top-level <see cref="Waypoint.Core.Sites.Target"/>. Issue #732's
+/// discovery-wiring remainder now calls <see cref="UpsertDiscoveredAsync"/> from
+/// <see cref="Waypoint.Infrastructure.Discovery.DiscoverJobHandler"/>'s real vSphere
+/// enumeration pass (esxi/vm inventory rows -> components, per that handler's own
+/// <c>MapToComponents</c> doc comment); NSX and other non-vSphere discovery sources
+/// remain future work.
 /// </summary>
 public interface IComponentRepository
 {

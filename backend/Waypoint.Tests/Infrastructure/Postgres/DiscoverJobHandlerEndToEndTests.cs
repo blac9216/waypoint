@@ -24,6 +24,7 @@ using Waypoint.Core.Logging;
 using Waypoint.Core.PowerShell;
 using Waypoint.Core.Secrets;
 using Waypoint.Core.Sites;
+using Waypoint.Infrastructure.Components;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Discovery;
 using Waypoint.Infrastructure.Jobs;
@@ -65,6 +66,7 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 	private SiteRepository _sites = null!;
 	private TargetRepository _targets = null!;
 	private InventoryRepository _inventory = null!;
+	private ComponentRepository _components = null!;
 	private DiscoverJobHandler _handler = null!;
 
 	public DiscoverJobHandlerEndToEndTests(PostgresFixture fixture)
@@ -102,9 +104,10 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		_sites = new SiteRepository(_fixture.ConnectionString);
 		_targets = new TargetRepository(_fixture.ConnectionString);
 		_inventory = new InventoryRepository(_fixture.ConnectionString);
+		_components = new ComponentRepository(_fixture.ConnectionString);
 
 		_handler = new DiscoverJobHandler(
-			executor, _secretStore, _credentials, _targets, _inventory, _repository, _redactor, wrappedPsOptions);
+			executor, _secretStore, _credentials, _targets, _inventory, _components, _repository, _redactor, wrappedPsOptions);
 	}
 
 	public async Task DisposeAsync()
@@ -151,19 +154,33 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		Assert.Equal(TargetDiscoveryStatuses.Discovered, (await _targets.GetAsync(targetId, CancellationToken.None))!.DiscoveryStatus);
 		Assert.NotNull((await _targets.GetAsync(targetId, CancellationToken.None))!.LastRefreshed);
 
-		// Re-discover with the SAME pass: same morefs upsert in place, not duplicated.
+		// Issue #732 (discovery-wiring remainder): the same successful pass must also
+		// materialize `components` rows -- the synthetic vcenter root plus one component
+		// per esxi/vm, never one for the vSphere-grouping-only `cluster` type (no
+		// catalog component analogue). Pass 1's stub inventory is cluster/host-11/vm-101/
+		// host-12 -- 4 components expected: root + host-11 + host-12 + vm-101 (cluster
+		// dropped; see this handler's own MapToComponents doc comment for the mapping
+		// rule).
+		await AssertComponentCountAsync(targetId, expectedActive: 4);
+
+		// Re-discover with the SAME pass: same identities upsert in place, not duplicated.
 		await RunDiscoverOnceAsync(targetId);
 		await AssertInventoryCountAsync(targetId, expectedActive: 4);
+		await AssertComponentCountAsync(targetId, expectedActive: 4);
 
 		// Pass 2: host-12 is no longer reported -- removal detection marks it (and its
 		// child, cascaded by ON DELETE CASCADE semantics N/A here since this is a soft
 		// delete -- host-12 itself carries no children in this fixture) removed_at, and
 		// EXCLUDES it from the active listing, without deleting the surviving 3 rows.
+		// The parallel components pass must mark the host-12 COMPONENT absent too --
+		// the same fail-closed absence rule as inventory, proven independently.
 		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "2");
 		await RunDiscoverOnceAsync(targetId);
 		await AssertInventoryCountAsync(targetId, expectedActive: 3);
 		await AssertItemRemovedAsync(targetId, "host-12");
 		Guid removedHostId = (await GetItemByMorefAsync(targetId, "host-12"))!.Id;
+		await AssertComponentCountAsync(targetId, expectedActive: 3); // root + host-11 + vm-101
+		await AssertComponentAbsentAsync(targetId, "host-12");
 
 		// Reappear-after-removal: host-12 is reported again in a later discovery. The
 		// moref-keyed upsert must UN-delete the existing row (removed_at -> NULL) rather
@@ -174,8 +191,51 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		InventoryItem revived = (await GetItemByMorefAsync(targetId, "host-12"))!;
 		Assert.Equal(removedHostId, revived.Id); // no duplicate -- same row un-deleted
 		Assert.Null(revived.RemovedAt);
+		await AssertComponentCountAsync(targetId, expectedActive: 4);
+		await AssertComponentReconnectedAsync(targetId, "host-12");
 
 		await AssertCanaryNeverLeakedAsync(canary, credentialId);
+	}
+
+	/// <summary>
+	/// Issue #732's fail-closed requirement (ADR-0023: "a failed or partial boundary...
+	/// neither claims completeness nor advances absence"): a malformed discovery result
+	/// must fail the job BEFORE either inventory or component materialization runs --
+	/// proven here by asserting zero components exist afterward, not merely that the
+	/// job failed (which <see cref="MalformedDiscoveryRows_FailTheJob_InsteadOfSilentlySucceedingWithZeroItems"/>
+	/// already covers for inventory).
+	/// </summary>
+	[Fact]
+	public async Task MalformedDiscoveryRows_NeverMaterializeOrAbsentAnyComponent()
+	{
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-malformed-component-canary");
+
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1");
+		await RunDiscoverOnceAsync(targetId);
+		await AssertComponentCountAsync(targetId, expectedActive: 4);
+
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "malformed");
+		Guid failedRunId = await _repository.CreateRunAsync("discover", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			failedRunId, [new JobSpec("discover", 4, TargetId: targetId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+
+		// The prior successful pass's 4 active components must be entirely unchanged --
+		// no new absence, no reconnect, no mutation of any kind from the failed pass.
+		await AssertComponentCountAsync(targetId, expectedActive: 4);
 	}
 
 	[Fact]
@@ -367,6 +427,39 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 	{
 		IReadOnlyList<InventoryItem> all = await _inventory.ListAsync(targetId, includeRemoved: true, CancellationToken.None);
 		return all.FirstOrDefault(i => i.Moref == moref);
+	}
+
+	/// <summary>
+	/// Counts components whose lifecycle is <c>active</c> specifically (not merely
+	/// "not retired" -- <see cref="Waypoint.Core.Components.IComponentRepository.ListForTargetAsync"/>'s
+	/// <c>includeRetired: false</c> still returns <c>absent</c> rows, since absence
+	/// retains identity per ADR-0023).
+	/// </summary>
+	private async Task AssertComponentCountAsync(Guid targetId, int expectedActive)
+	{
+		IReadOnlyList<Waypoint.Core.Components.Component> all =
+			await _components.ListForTargetAsync(targetId, includeRetired: false, CancellationToken.None);
+		int active = all.Count(c => c.Lifecycle == Waypoint.Core.Components.ComponentLifecycleStates.Active);
+		Assert.Equal(expectedActive, active);
+	}
+
+	private async Task AssertComponentAbsentAsync(Guid targetId, string vendorIdentity)
+	{
+		IReadOnlyList<Waypoint.Core.Components.Component> all =
+			await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		Waypoint.Core.Components.Component? component = all.FirstOrDefault(c => c.VendorIdentity == vendorIdentity);
+		Assert.NotNull(component);
+		Assert.Equal(Waypoint.Core.Components.ComponentLifecycleStates.Absent, component!.Lifecycle);
+	}
+
+	private async Task AssertComponentReconnectedAsync(Guid targetId, string vendorIdentity)
+	{
+		IReadOnlyList<Waypoint.Core.Components.Component> all =
+			await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		Waypoint.Core.Components.Component? component = all.FirstOrDefault(c => c.VendorIdentity == vendorIdentity);
+		Assert.NotNull(component);
+		Assert.Equal(Waypoint.Core.Components.ComponentLifecycleStates.Active, component!.Lifecycle);
+		Assert.Null(component.ContinuousAbsenceSince);
 	}
 
 	/// <summary>
