@@ -1349,11 +1349,15 @@ unique `WAYPOINT_HTTPS_PORT`) and tears its own project down (`down -v`) on exit
 including on failure. It also self-provisions what `deploy/README.md`'s manual
 "Bring-up" steps 3/4 otherwise require by hand (a dev admin password + hash, a
 generated secrets master key, mounted into all three trusted services) so a fresh
-run needs no pre-existing `../config/` state, and auto-detects the devcontainer
-bind-mount host-path trap described earlier in this document (translating
-`frontend/dist`, `nginx/conf.d`, `nginx/certs`, `postgres/initdb`, and the
-generated master-key/admin-hash sources to their host-absolute paths when it
-detects it is itself running inside a mounted container).
+run needs no pre-existing `deploy/config/` state. It also stages a throwaway TLS
+pair at `deploy/config/tls/tls.{crt,key}`, the per-file location
+`deploy/compose.yaml` mandates (the base fails closed at container creation
+without it), and auto-detects the devcontainer bind-mount host-path trap
+described earlier in this document (translating `frontend/dist`,
+`nginx/conf.d`, the two `config/tls` certificate files, `postgres/initdb`, the
+six `secrets:` file sources, and the generated master-key/admin-hash sources to
+their host-absolute paths when it detects it is itself running inside a mounted
+container).
 
 If the shipped `edge` network's pinned `192.168.240.0/24`
 collides with a concurrent stack on a shared host, pass an uncommitted override file
@@ -1361,6 +1365,7 @@ via `WAYPOINT_SMOKE_OVERRIDE_FILE` (a scratch compose file overriding both the `
 subnet and the backend's `ForwardedHeaders__KnownNetworks__0` to match — the two must
 move together, since the backend only trusts forwarded headers from that exact
 subnet). Never commit an override file; the shipped subnet is correct on a real
-appliance host with no concurrent stacks. The same variable can carry the
-devcontainer path-translation override too (the script generates one automatically
-when unset and needed); passing your own file skips the auto-detection.
+appliance host with no concurrent stacks. The variable may name more than one file
+(space-separated), and passing it no longer suppresses the devcontainer
+path-translation override — the script still generates that one automatically
+whenever it detects the indirection, and layers it after yours.

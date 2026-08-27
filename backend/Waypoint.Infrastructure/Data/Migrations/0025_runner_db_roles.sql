@@ -1,5 +1,5 @@
 -- Issue #442 (ADR-0014 SS7, ADR-0013 SS1): least-privilege database grants for the
--- two dedicated runner services now wired into deploy/docker-compose.yml, distinct
+-- two dedicated runner services now wired into deploy/compose.yaml, distinct
 -- from the control-plane (Waypoint.Api) connection this migration itself runs
 -- under. The roles this migration grants to (waypoint_compliance_runner,
 -- waypoint_download_runner) are created separately by

@@ -20,10 +20,10 @@ secrets*.json
 secrets*.yml
 # Issue #844/#845: the epic's (#841) persistent local-state location for
 # file-backed secrets (deploy/config/secrets/) and operator TLS
-# (deploy/config/tls/). Anchored (leading slash, matching #254/#254's own
-# root-config/ reasoning below) so this only ignores the one directory under
-# deploy/, never something coincidentally named config/ elsewhere in the
-# tree (e.g. frontend/src/screens/config/). Issue #845 removed the legacy
+# (deploy/config/tls/). Anchored (leading slash) for the same reason #254
+# anchored the old root-level config/ rule: so this ignores the one
+# directory under deploy/ and never something coincidentally named config/
+# elsewhere in the tree (e.g. frontend/src/screens/config/). Issue #845 removed the legacy
 # repo-root /config/ convention this superseded -- compose.yaml no longer
 # references anything under ../config/ (relative to deploy/), only
 # ./config/ (this entry). No compatibility migration needed (epic #841).

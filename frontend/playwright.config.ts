@@ -5,7 +5,7 @@ import { defineConfig, devices } from "@playwright/test";
  * docs/testing.md's "Fresh-stack M1/M2 parity matrix", issue #444). These
  * tests do NOT start their own server — they assume a fully brought-up
  * Waypoint stack (nginx + backend + both runners + postgres, per
- * deploy/docker-compose.yml) is already reachable at `E2E_BASE_URL`.
+ * deploy/compose.yaml) is already reachable at `E2E_BASE_URL`.
  * `deploy/scripts/e2e-playwright.sh` brings that stack up in isolation,
  * seeds it, runs this suite, and tears it down — see that script and
  * docs/testing.md before running these tests directly.

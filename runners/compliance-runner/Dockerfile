@@ -116,7 +116,7 @@ RUN apt-get install -y --no-install-recommends aspnetcore-runtime-8.0 && \
 
 # Project-owned PowerShell imported from the sibling vmware-stig-docker repo (see
 # powershell/README.md for provenance and exactly which files/functions this M2 slice
-# needs). Mounted at /vmware-stig-docker-scripts by deploy/docker-compose.yml so the
+# needs). Mounted at /vmware-stig-docker-scripts by deploy/compose.yaml so the
 # WAYPOINT_VMWARE_STIG_DOCKER_*_PATH env vars below match; also copied here under
 # /powershell/ so the image is self-verifying in isolation (`docker build` alone,
 # no compose) for the toolchain-provenance check this file has always run.
@@ -127,14 +127,14 @@ COPY runners/compliance-runner/powershell/ /powershell/
 # modules Waypoint.Infrastructure.csproj copies into the publish output
 # (PowerShell/Modules/Waypoint{Discovery,Scan,CredentialTest}/*.psm1) -- those dot-
 # source the project-owned .ps1 files under /vmware-stig-docker-scripts at runtime (see the
-# WAYPOINT_VMWARE_STIG_DOCKER_*_PATH env vars deploy/docker-compose.yml sets).
+# WAYPOINT_VMWARE_STIG_DOCKER_*_PATH env vars deploy/compose.yaml sets).
 COPY --from=dotnet-build /app /app
 
 WORKDIR /app
 
 # Non-root: create a dedicated app user rather than relying on a base-image default
 # (ubuntu:20.04 has none), matching backend/Dockerfile's non-root posture. The master
-# key mount (deploy/docker-compose.yml) must be readable by this uid -- see
+# key mount (deploy/compose.yaml) must be readable by this uid -- see
 # deploy/README.md's master-key file-permission note, extended to all three trusted
 # services by this issue.
 RUN useradd --system --create-home --shell /usr/sbin/nologin --uid 1654 waypoint && \
@@ -153,7 +153,7 @@ ENV DOTNET_EnableDiagnostics=0
 
 # The host reports its own readiness via a file sentinel, not a loopback HTTP call
 # (ADR-0013 decision 1: a runner has no REST/SSE surface) -- see RunnerHealthReportingHostedService
-# and RunnerHealthCheckProbe's doc comments. deploy/docker-compose.yml invokes this
+# and RunnerHealthCheckProbe's doc comments. deploy/compose.yaml invokes this
 # exact command as the service's Compose healthcheck. Runs as root (no USER switch
 # for HEALTHCHECK), which can always read the report file the `waypoint`-owned
 # process writes.
