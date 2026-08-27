@@ -1383,10 +1383,14 @@ joins the network directly instead and disconnects in its own cleanup trap),
 and finally runs `npm run test:e2e` from `frontend/` with `E2E_BASE_URL`/
 `E2E_ADMIN_USERNAME`/`E2E_ADMIN_PASSWORD`/`E2E_SITE_NAME`/`E2E_CREDENTIAL_NAME`
 set — ensuring `frontend/node_modules` and a locally installed Chromium exist
-first (`npm ci`/`npx playwright install chromium` if either is missing;
-browser binaries are a devDependency-managed local install, never committed
-and never fetched at appliance runtime — `npm run build`'s external-asset
-guard never scans `frontend/e2e/`).
+first (`npm ci` if `node_modules` is missing *or* stale — issue #906: staleness
+is detected by comparing `package-lock.json`'s hash against a stamp file
+written after the last successful `npm ci`, not by the lockfile's mere
+presence, so a pre-existing `node_modules` that predates a devDependency
+addition still triggers a reinstall; `npx playwright install chromium` if the
+Chromium binary is missing; browser binaries are a devDependency-managed
+local install, never committed and never fetched at appliance runtime —
+`npm run build`'s external-asset guard never scans `frontend/e2e/`).
 
 Issue #847: the stack itself, and everything it needs (secrets, TLS,
 devcontainer bind-mount host-path translation, the master key, the

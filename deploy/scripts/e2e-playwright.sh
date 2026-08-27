@@ -418,12 +418,40 @@ set +e
 	# sandbox -- an ordering dependency on whatever other script happened to
 	# populate frontend/dist first. Ensure this script's own dependencies
 	# regardless of what ran before it.
+	#
+	# Issue #906: `[[ ! -d node_modules ]]` only tests whether the directory
+	# exists, not whether it matches what package-lock.json currently
+	# declares. A checkout whose node_modules predates a devDependency
+	# addition (this repo's own history: @playwright/test landing after an
+	# older install) satisfies that guard, skips npm ci entirely, and then
+	# trips the executable check below with an error message that asserts
+	# "after npm ci" even though npm ci never ran. Track install
+	# correctness with a stamp file written only on a successful npm ci,
+	# containing package-lock.json's hash -- cheap (one sha256sum, no
+	# network, no `npm ls`/`npm ci --dry-run` version-dependent behavior)
+	# and reliable (any change to the lockfile since the last successful
+	# install, including "the file predates this devDependency", changes
+	# the hash).
+	NPM_CI_STAMP="node_modules/.waypoint-npm-ci-stamp"
+	LOCKFILE_HASH="$(sha256sum package-lock.json | awk '{print $1}')"
+	NEED_NPM_CI=0
 	if [[ ! -d node_modules ]]; then
 		log "frontend/node_modules missing -- npm ci"
+		NEED_NPM_CI=1
+	elif [[ ! -f "${NPM_CI_STAMP}" ]] || [[ "$(cat "${NPM_CI_STAMP}")" != "${LOCKFILE_HASH}" ]]; then
+		log "frontend/node_modules stale (package-lock.json does not match the last successful npm ci) -- npm ci"
+		NEED_NPM_CI=1
+	fi
+	if [[ "${NEED_NPM_CI}" -eq 1 ]]; then
 		npm ci
+		echo "${LOCKFILE_HASH}" >"${NPM_CI_STAMP}"
 	fi
 	if [[ ! -x node_modules/.bin/playwright ]]; then
-		echo "error: node_modules/.bin/playwright missing after npm ci -- @playwright/test did not install correctly" >&2
+		if [[ "${NEED_NPM_CI}" -eq 1 ]]; then
+			echo "error: node_modules/.bin/playwright missing after npm ci -- @playwright/test did not install correctly" >&2
+		else
+			echo "error: node_modules/.bin/playwright missing, but frontend/node_modules already matched package-lock.json (npm ci was NOT re-run) -- @playwright/test is not declared as a dependency of the installed tree; check frontend/package.json and frontend/package-lock.json, or remove ${NPM_CI_STAMP} to force a reinstall" >&2
+		fi
 		exit 1
 	fi
 	# Playwright's default browser cache dir (PLAYWRIGHT_BROWSERS_PATH unset)
