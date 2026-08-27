@@ -241,7 +241,7 @@ services:
       ForwardedHeaders__KnownNetworks__0: *edge-subnet
       # Secrets master key (issue #405; ADR-0005, AWX-pattern envelope
       # encryption). Preferred and only delivery path is a mounted file,
-      # bind-mounted below from ./config/secrets/waypoint-master-key (gitignored -
+      # mounted via an operator compose.override.yaml from ./config/secrets/waypoint-master-key (gitignored -
       # see .gitignore's /deploy/config/ entry; issue #845 migrated this off
       # the legacy repo-root /config/ convention onto the same
       # deploy/config/ location #844 already used for the Compose
