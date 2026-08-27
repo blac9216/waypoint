@@ -31,9 +31,11 @@ Rules of thumb:
 - When in doubt, leave it out and ask.
 - **Local testing**: dev depot tokens and depot configuration are borrowed at runtime
   from the private sibling repo (`vcf-docker-download`) via gitignored paths
-  (`dev/local/`, `.env`, `config/` — see `.gitignore`). They are used for testing
-  only and are NEVER copied into this repository, echoed into committed fixtures,
-  or pasted into logs/docs. Seed data and test fixtures stay invented.
+  (`dev/local/`, `deploy/config/`, `deploy/.generated/<slug>/` — see `.gitignore`;
+  there is no root-level `config/` — that legacy convention was removed in issue
+  #845). They are used for testing only and are NEVER copied into this repository,
+  echoed into committed fixtures, or pasted into logs/docs. Seed data and test
+  fixtures stay invented.
 
 ## Project Overview
 

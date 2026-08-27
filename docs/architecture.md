@@ -392,9 +392,11 @@ depth; #784 remains the optional graph-wide hold.
 Postgres database with a scripted realm bootstrap (four role groups, example LDAP
 federation config, CAC/PIV x.509 flow documented for site enablement). The backend is
 a plain OIDC relying party: JWT bearer validation with canonical-issuer pinning
-(`Oidc:ValidIssuer`, decoupled from the internal discovery address so a real
-browser-minted token validates correctly behind nginx's `/auth/` proxy) and fail-closed
-role-claim mapping. The SPA runs a hand-rolled authorization-code + PKCE login flow (no
+derived from one operator-set `Oidc:PublicUrl` (`OidcAuthOptions.DerivedIssuer`,
+issue #842 — decoupled from `Oidc:Authority`'s internal discovery address so a real
+browser-minted token validates correctly behind nginx's `/auth/` proxy; the legacy
+`Oidc:ValidIssuer`/`ValidIssuers` settings are read only when `PublicUrl` is unset)
+and fail-closed role-claim mapping. The SPA runs a hand-rolled authorization-code + PKCE login flow (no
 external OIDC libraries), replacing the M1 local-auth form; local auth survives only as
 an off-by-default dev-flag (`LocalAuth:Enabled`) for e2e/smoke-test paths, not a
 supported deployment configuration. Live-verified end to end: a real browser-path PKCE
