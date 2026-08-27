@@ -1,31 +1,20 @@
 #!/usr/bin/env bash
 #
-# Issue #847 (epic #841): idempotent production-config initializer.
+# Idempotent production-config initializer: creates the six file-backed
+# secrets deploy/compose.yaml requires under deploy/config/secrets/, and
+# validates operator-provided TLS if already present at deploy/config/tls/.
 #
-# Creates the six file-backed secrets `deploy/compose.yaml` requires (issue
-# #844's Compose `secrets:` block) under `deploy/config/secrets/` (gitignored
-# -- see `.gitignore`'s anchored `/deploy/config/` entry), and validates
-# operator-provided TLS if it is already present at `deploy/config/tls/`.
-#
-# NEVER starts containers, NEVER overwrites an existing secret, and NEVER
-# prints a secret value to stdout/stderr. Safe to re-run: every secret file
-# already present is left byte-for-byte untouched and reported as "reused".
+# Never starts containers, never overwrites an existing secret, never prints
+# a secret value. Safe to re-run: existing secret files are reused as-is.
 #
 # Usage:
 #   deploy/scripts/init-config.sh [--config-dir DIR] [--public-url URL]
 #
-#   --config-dir DIR   Where secrets/TLS live. Default: deploy/config
-#                       (relative to this script's own deploy/ directory).
-#   --public-url URL   The appliance's WAYPOINT_PUBLIC_URL. When given AND
-#                       config-dir/tls/tls.crt already exists, the
-#                       certificate's subjectAltName is checked for that
-#                       URL's hostname -- a mismatch fails closed (an
-#                       operator-supplied cert that does not cover the
-#                       configured hostname is a production misconfiguration
-#                       worth catching before bring-up, not after).
+#   --config-dir DIR   Where secrets/TLS live. Default: deploy/config.
+#   --public-url URL   Checks an existing tls.crt's subjectAltName covers
+#                       this URL's hostname; fails closed on a mismatch.
 #
-# Requires: openssl. python3 only used for the --public-url hostname parse
-# (stdlib urllib, no network access).
+# Requires: openssl. python3 only for the --public-url hostname parse.
 
 set -euo pipefail
 
@@ -36,7 +25,7 @@ CONFIG_DIR="${DEPLOY_DIR}/config"
 PUBLIC_URL=""
 
 usage() {
-	sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -69,8 +58,7 @@ fi
 SECRETS_DIR="${CONFIG_DIR}/secrets"
 mkdir -p "${SECRETS_DIR}"
 
-# The six file-backed secrets deploy/compose.yaml's top-level `secrets:`
-# block declares (issue #844). Order matches that block's own listing.
+# Matches deploy/compose.yaml's top-level `secrets:` block.
 SECRET_NAMES=(
 	postgres-owner-password
 	postgres-compliance-runner-password
@@ -88,19 +76,11 @@ for name in "${SECRET_NAMES[@]}"; do
 		REUSED=$((REUSED + 1))
 		continue
 	fi
-	# 32 random bytes, hex-encoded -- same shape fresh-stack-smoke-test.sh
-	# and e2e-playwright.sh already generate ad hoc; this script is what
-	# #847 replaces that duplicated plumbing with.
 	umask 077
 	tmp="$(mktemp "${SECRETS_DIR}/.${name}.XXXXXX")"
 	openssl rand -hex 32 >"${tmp}"
 	mv "${tmp}" "${target}"
-	# 0644, not 0600: Compose bind-mounts a `file:` secret source verbatim
-	# (host uid/mode preserved, no re-materialization -- see compose.yaml's
-	# own `secrets:` block comment), and postgres's initdb scripts read
-	# their three files as the in-container `postgres` user, neither root
-	# nor this script's uid. 0644 is the convention this repo already uses
-	# for every mounted secret file.
+	# why: docs/rationale/deploy.md#initcfg-secret-file-mode-0644
 	chmod 644 "${target}"
 	GENERATED=$((GENERATED + 1))
 done

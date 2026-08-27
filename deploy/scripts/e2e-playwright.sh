@@ -1,29 +1,16 @@
 #!/usr/bin/env bash
 #
-# Issue #468 -- Playwright live-stack coverage for the operator-visible
-# M1/M2 parity items (docs/testing.md "Fresh-stack M1/M2 parity matrix"
-# disclosed this as a gap: the API-level smoke test in
-# fresh-stack-smoke-test.sh proves the same backend behavior the UI calls
-# into, but no browser-driven check existed).
+# Playwright live-stack browser coverage: brings up an isolated `docker
+# compose` project (same recipe as fresh-stack-smoke-test.sh), also
+# provisions a persistent Keycloak-realm dev-admin user, seeds a
+# site/target/credential via the local-auth API, points Playwright's
+# E2E_BASE_URL/E2E_ADMIN_USERNAME/E2E_ADMIN_PASSWORD/E2E_SITE_NAME/
+# E2E_CREDENTIAL_NAME at it, ensures frontend/ deps + Chromium are present,
+# runs `npm run test:e2e`, and tears the stack down fully.
 #
-# Brings up an ISOLATED `docker compose` project (same bring-up recipe as
-# fresh-stack-smoke-test.sh: unique -p, unique host port, dev admin
-# password/master-key self-provisioning, devcontainer bind-mount host-path
-# translation, compliance-profiles pre-seeding, cgroup-fallback override),
-# ALSO provisions a persistent Keycloak-realm dev-admin user via #846's
-# keycloak-dev-admin service (issue #848), seeds a site/target/credential via
-# the local-auth API so the Playwright suite's Start-a-Scan wizard has
-# something to select, points Playwright's E2E_BASE_URL/E2E_ADMIN_USERNAME/
-# E2E_ADMIN_PASSWORD (the Keycloak dev-admin identity, for the browser's real
-# PKCE login -- issue #848)/E2E_SITE_NAME/E2E_CREDENTIAL_NAME at it, ensures
-# frontend/ has its own node_modules and a Chromium binary before running
-# `npm run test:e2e` from frontend/, and tears the stack down fully
-# (trap-based, same as the smoke script).
-#
-# Requires: docker compose v2, curl, openssl, python3, Node 22 (nvm). This
-# script ensures its own frontend/ dependencies (npm ci, playwright install
-# chromium) if missing -- browser binaries are still never committed, per
-# this script's own README note below.
+# Requires: docker compose v2, curl, openssl, python3, Node 22 (nvm).
+# Ensures its own frontend/ dependencies if missing; browser binaries are
+# never committed.
 #
 # Usage:
 #   deploy/scripts/e2e-playwright.sh [slug] [port]
@@ -44,31 +31,9 @@ use_node22() {
 	fi
 }
 
-# Issue #848 finding #2 (orchestrator comment on #847's validation): this
-# script used to assume node_modules was already present in a fresh sandbox --
-# an ordering dependency on whatever other script happened to populate
-# frontend/dist first. Ensure this script's own dependencies regardless of what
-# ran before it.
-#
-# Issue #906: `[[ ! -d node_modules ]]` only tests whether the directory
-# exists, not whether it matches what package-lock.json currently declares. A
-# checkout whose node_modules predates a devDependency addition (this repo's
-# own history: @playwright/test landing after an older install) satisfies that
-# guard, skips npm ci entirely, and then trips the executable check below with
-# an error message that asserts "after npm ci" even though npm ci never ran.
-# Track install correctness with a stamp file written only on a successful
-# npm ci, containing package-lock.json's hash -- cheap (one sha256sum, no
-# network, no `npm ls`/`npm ci --dry-run` version-dependent behavior) and
-# reliable (any change to the lockfile since the last successful install,
-# including "the file predates this devDependency", changes the hash).
-#
-# Round-2 review of #906: this is the SINGLE install site. Both callers (the
-# frontend/dist build below and the Playwright dependency prep) route through
-# here, so a fresh checkout installs exactly once instead of once per site.
+# why: docs/rationale/deploy.md#e2e-npm-ci-stamp
 # Caller must be cd'd into ${FRONTEND_DIR} with Node 22 selected. Sets
-# NPM_CI_RAN=1 when an install actually ran (the caller's error messages
-# distinguish "missing after npm ci" from "missing without npm ci"); returns
-# nonzero when the install failed.
+# NPM_CI_RAN=1 when an install actually ran; returns nonzero on failure.
 NPM_CI_STAMP="node_modules/.waypoint-npm-ci-stamp"
 NPM_CI_RAN=0
 frontend_npm_ci_if_needed() {
@@ -83,14 +48,8 @@ frontend_npm_ci_if_needed() {
 		return 0
 	fi
 	NPM_CI_RAN=1
-	# Remove any pre-existing stamp BEFORE installing so an interrupted run
-	# cannot leave an old-but-matching stamp behind, and check `npm ci`'s
-	# exit status explicitly rather than relying on errexit: round-1 review
-	# of #906 found that the Playwright block below deliberately runs with
-	# `set +e` (issue #848's PLAYWRIGHT_EXIT capture) and shell options are
-	# inherited by subshells, so a failed install used to be stamped as
-	# successful -- permanently poisoning the fast path and re-introducing
-	# exactly the confident-but-wrong diagnosis issue #906 exists to remove.
+	# Remove any pre-existing stamp before installing so an interrupted run
+	# cannot leave a stale-but-matching stamp behind.
 	rm -f "${NPM_CI_STAMP}"
 	if ! npm ci; then
 		echo "error: npm ci failed in ${FRONTEND_DIR} -- frontend dependencies are NOT installed (no stamp written; the next run will retry the install). Fix the install itself (registry/network reachability, disk space, or package-lock.json) and re-run." >&2
@@ -111,18 +70,11 @@ BASE="https://127.0.0.1:${PORT}"
 NET_BASE="https://nginx"
 HELPER_NAME="${PROJECT}-e2e-helper"
 HELPER_STARTED=""
-# Set once the reachability-probe helper container (below) is actually
-# running, so cleanup() can always reap it -- see PROBE_NAME below (issue
-# #904: this used to be removed only by an explicit `docker rm -f` a few
-# lines after `docker run`, with no trap coverage in between; a `set -euo
-# pipefail` abort in that window left a never-exiting `nc -lk` container
-# behind under a deterministic name, blocking a re-run with the same slug).
+# Set once the reachability-probe helper container is running, so cleanup()
+# can always reap it even on early failure.
 PROBE_STARTED=""
-# Set below if this script's own process needs to join the stack's `edge`
-# network directly to reach it (devcontainer/remote-daemon environment where
-# the published host port is unreachable from this namespace -- see the
-# "Playwright base URL reachability" section below). Recorded here so
-# cleanup can always disconnect it, even on early failure.
+# Set if this process joins the stack's `edge` network directly (see
+# "Playwright base URL reachability" below); lets cleanup always disconnect it.
 SELF_JOINED_EDGE_NETWORK=""
 
 log() { printf '\n=== %s ===\n' "$*"; }
@@ -140,10 +92,6 @@ cleanup() {
 		docker network disconnect "${SELF_JOINED_EDGE_NETWORK}" "$(hostname)" >/dev/null 2>&1 || true
 	fi
 	(cd "${DEPLOY_DIR}" && ${DC:-docker compose -p "${PROJECT}"} down -v) || true
-	# Issue #847: everything the generator wrote for this run -- secrets,
-	# TLS, the admin-password hash, the override/env files -- lives ONLY
-	# under this one slug-scoped directory, so a full run's throwaway state
-	# is exactly this one `rm -rf`.
 	rm -rf "${DEPLOY_DIR}/.generated/${SLUG}" "${DEPLOY_DIR}/.generated/${SLUG}.hash-stage"
 }
 trap cleanup EXIT
@@ -153,13 +101,8 @@ echo "docker ps (containers NOT belonging to this run -- do not touch them):"
 docker ps --format '{{.Names}}' | grep -v "^${PROJECT}-" || echo "  (none currently running)"
 
 # --- Prerequisites -----------------------------------------------------
-#
-# Issue #500: these used to be soft (e.g. a `command -v dotnet` guard around
-# the admin-hash step) -- missing a prerequisite silently skipped work
-# further down and the script still exited 0, reporting a false "verified".
-# Fail fast, before any stack comes up, so a missing tool is loud and cheap
-# to diagnose instead of surfacing as a confusing downstream failure (or no
-# failure at all).
+# Fail fast, before any stack comes up, rather than a confusing downstream
+# failure or a false "verified" exit 0.
 
 missing=()
 command -v docker >/dev/null 2>&1 || missing+=("docker")
@@ -186,13 +129,8 @@ fi
 
 cd "${DEPLOY_DIR}"
 
-# Issue #847: no TLS staging here -- deploy/scripts/generate-dev-stack.sh
-# --mode agent generates its own SAN-correct self-signed pair under
-# deploy/.generated/${SLUG}/tls/ and binds it directly at compose.yaml's
-# per-file targets (/etc/nginx/certs/tls.{crt,key}), replacing the base's
-# mandatory-but-missing deploy/config/tls/ mounts -- see the generator call
-# below. deploy/config/tls/ (the production/persistent-mode location) is
-# never touched by an agent-mode run.
+# TLS is generated by generate-dev-stack.sh --mode agent below, not staged
+# here; deploy/config/tls/ (the persistent-mode location) is never touched.
 
 if [[ ! -f "${FRONTEND_DIR}/dist/index.html" ]]; then
 	log "frontend/dist missing -- building it first (Node 22 required)"
@@ -204,23 +142,11 @@ if [[ ! -f "${FRONTEND_DIR}/dist/index.html" ]]; then
 	)
 fi
 
-# Issue #847: deploy/scripts/generate-dev-stack.sh --mode agent replaces this
-# script's former hand-rolled devcontainer bind-mount translation, secrets,
-# subnet-collision override, master key, and LocalAuth__*/RunnerResources__
-# Fallback* override with one generator call -- see
-# fresh-stack-smoke-test.sh's identical refactor comment for the full
-# rationale. Everything lands under deploy/.generated/${SLUG}/ only. This
-# script still owns computing the admin-password hash itself (a
-# backend-specific step) and handing it to the generator.
+# generate-dev-stack.sh --mode agent owns secrets/TLS/override generation;
+# this script only computes the admin-password hash and hands it in.
 GENERATED_STATE_DIR="${DEPLOY_DIR}/.generated/${SLUG}"
 
-# The admin-password hash is staged in a SEPARATE scratch directory, never in
-# ${GENERATED_STATE_DIR}: this script must not create the generator's state
-# directory behind its back (round-2 review of #847 -- the generator refuses a
-# foreign stack that has claimed this project name, and a caller that
-# pre-creates state must not be able to influence that decision). The
-# generator copies the hash into the slug directory itself and mounts its own
-# copy.
+# why: docs/rationale/deploy.md#smoke-hash-stage-separation
 HASH_STAGE_DIR="${DEPLOY_DIR}/.generated/${SLUG}.hash-stage"
 mkdir -p "${HASH_STAGE_DIR}"
 
@@ -237,29 +163,16 @@ if [[ ! -s "${HASH_STAGE_DIR}/admin-password-hash" ]]; then
 	exit 1
 fi
 
-# --- Published-port reachability (issue #896) -----------------------------
-#
-# Whether a docker-published host port is reachable from THIS process's own
-# network namespace is a property of the environment (devcontainer /
-# remote-daemon host vs. a real appliance host), not of this specific stack
-# -- so probe it once, generically, with a disposable helper container
-# BEFORE this stack is even generated. That lets --public-url below already
-# be the origin Playwright will actually navigate to, instead of guessing
-# "localhost" at generation time and discovering only after bring-up --
-# with Keycloak's issuer and the realm client's redirect/origin list already
-# baked in -- that the browser can only reach the stack via its edge-network
-# name (docs/testing.md's Postgres-fixture section documents the identical
-# devcontainer reachability gap).
+# --- Published-port reachability -----------------------------------------
+# why: docs/rationale/deploy.md#e2e-reachability-probe
 PROBE_NAME="${PROJECT}-reachability-probe"
 docker run -d --rm --name "${PROBE_NAME}" -p 127.0.0.1::7777 --entrypoint sh curlimages/curl \
 	-c 'nc -lk -p 7777' >/dev/null
 PROBE_STARTED=1
 PROBE_HOST_PORT="$(docker port "${PROBE_NAME}" 7777/tcp | head -1 | cut -d: -f2)"
-# Bounded retry (issue #904): with `userland-proxy=false`, the published port
-# DNATs straight into the container, so a connect that lands before `nc`
+# Bounded retry: with `userland-proxy=false`, a connect landing before `nc`
 # finishes binding is refused even though the port genuinely works once
-# listening. A handful of short-sleep retries absorbs that startup race
-# without meaningfully slowing down the common case where `nc` is already up.
+# listening.
 DIRECT_REACHABLE=0
 for attempt in 1 2 3; do
 	if timeout 2 bash -c "echo >/dev/tcp/127.0.0.1/${PROBE_HOST_PORT}" 2>/dev/null; then
@@ -278,19 +191,12 @@ else
 	PUBLIC_URL="${NET_BASE}"
 fi
 
-# WAYPOINT_E2E_SUBNET: overrides the generated stack's `edge` subnet when the
-# agent-mode default (203.0.113.0/24) collides with a concurrent stack on
-# this host (docs/testing.md). Never commit a run with this set.
+# WAYPOINT_E2E_SUBNET: overrides the generated stack's `edge` subnet on a
+# collision with a concurrent stack (docs/testing.md). Never commit with this set.
 #
-# --keycloak-dev-admin (issue #848, building on #846's keycloak-dev-admin
-# service): the local-auth admin hash above still seeds the browser-facing
-# runner-parity/CRUD/scan/catalog specs that don't touch login itself and
-# still gates this script's own API seeding curl calls (both narrowly
-# in-scope local-auth uses issue #848 explicitly leaves alone) -- but the
-# LOGIN spec now drives the real Keycloak authorization-code/PKCE flow, which
-# needs a real Keycloak-realm user. This flag makes the generated override
-# provision one (deploy/keycloak-dev-admin) instead of hand-authoring that
-# wiring here a second time.
+# --keycloak-dev-admin: the LOGIN spec drives the real Keycloak PKCE flow, so
+# it needs a real Keycloak-realm user; other specs still use the local-auth
+# admin hash above.
 KEYCLOAK_DEV_USERNAME="developer"
 GENERATE_ARGS=(--mode agent --slug "${SLUG}" --public-url "${PUBLIC_URL}" --port "${PORT}" \
 	--local-auth-admin-hash-file "${HASH_STAGE_DIR}/admin-password-hash" \
@@ -302,8 +208,7 @@ fi
 
 log "Generating isolated dev stack (deploy/scripts/generate-dev-stack.sh --mode agent --slug ${SLUG})"
 "${SCRIPT_DIR}/generate-dev-stack.sh" "${GENERATE_ARGS[@]}"
-# The generator copied the hash into the slug directory; the scratch staging
-# copy has no further purpose.
+# The generator copied the hash into the slug directory.
 rm -rf "${HASH_STAGE_DIR}"
 
 DC="docker compose -p ${PROJECT} -f compose.yaml -f ${GENERATED_STATE_DIR}/override.yaml --env-file ${GENERATED_STATE_DIR}/.env"
@@ -340,17 +245,11 @@ done
 echo "Final container health:"
 ${DC} ps
 
-# keycloak-dev-admin (issue #846) is a one-shot service with no HEALTHCHECK
-# of its own -- the generic loop above treats "no-healthcheck" as success the
-# moment the container exists, which for a `restart: "no"` provisioning
-# container means "started", not "finished provisioning the dev-admin user".
-# The real signal is its exit code, waited for explicitly here so a failed
-# provisioning run (e.g. the realm not importing, a bad secret file) fails
-# this script loudly instead of surfacing later as an inexplicable Keycloak
-# login failure.
+# keycloak-dev-admin is a one-shot service with no HEALTHCHECK -- the exit
+# code is the real "finished provisioning" signal, waited for explicitly.
 KEYCLOAK_DEV_ADMIN_ID="$(${DC} ps -q keycloak-dev-admin 2>/dev/null || true)"
 if [[ -n "${KEYCLOAK_DEV_ADMIN_ID}" ]]; then
-	log "Waiting for keycloak-dev-admin (issue #846) to finish provisioning the dev Keycloak user"
+	log "Waiting for keycloak-dev-admin to finish provisioning the dev Keycloak user"
 	KEYCLOAK_DEV_ADMIN_EXIT="$(docker wait "${KEYCLOAK_DEV_ADMIN_ID}")"
 	if [[ "${KEYCLOAK_DEV_ADMIN_EXIT}" != "0" ]]; then
 		echo "error: keycloak-dev-admin exited ${KEYCLOAK_DEV_ADMIN_EXIT} -- Playwright's Keycloak login would fail closed. Logs:" >&2
@@ -425,21 +324,7 @@ sleep 5
 log "Seeded: site=${SITE_ID} (${SITE_NAME}), target=${TARGET_ID}, credential=${CREDENTIAL_ID} (${CREDENTIAL_NAME})"
 
 # --- Playwright base URL reachability -------------------------------------
-#
-# Unlike fresh-stack-smoke-test.sh's curl checks (routed through a helper
-# container on the stack's own edge network), Playwright's browser runs as a
-# real process on THIS script's own host/network namespace -- there is no
-# equivalent "run every request inside a container" trick available, so the
-# base URL it navigates to must actually be reachable from here. The
-# reachability decision was already made (and baked into --public-url)
-# BEFORE this stack was even generated -- see the pre-generation probe above
-# (issue #896) -- so this block only has to act on DIRECT_REACHABLE, not
-# re-probe. When published ports were found unreachable, this script joins
-# ITS OWN container to the stack's edge network (`docker network connect`,
-# undone in cleanup) so `https://nginx` (already the generated public-url in
-# this case) resolves via Docker's embedded DNS from this process directly.
-# On a real appliance host (no devcontainer/remote-daemon indirection) the
-# pre-generation probe succeeded and this block is a no-op.
+# why: docs/rationale/deploy.md#e2e-reachability-probe
 PLAYWRIGHT_BASE_URL="${BASE}"
 if [[ "${DIRECT_REACHABLE}" -eq 0 ]]; then
 	EDGE_NETWORK="${PROJECT}_edge"
@@ -460,12 +345,9 @@ fi
 
 # --- Run Playwright against this stack -----------------------------------
 
-# Issue #848: Playwright's browser-driven login now authenticates through
-# Keycloak's real PKCE flow, not the dev-flag local-auth form -- so the
-# credential it needs is the keycloak-dev-admin (issue #846) provisioned
-# user, not ${ADMIN_PASSWORD} (which stays local-auth-only, used above only
-# for this script's own API seeding). Read straight from the generator's own
-# secret file -- never echoed, never a CLI argument.
+# Playwright's login authenticates via Keycloak's real PKCE flow, so it
+# needs the keycloak-dev-admin credential, not ${ADMIN_PASSWORD}. Read
+# straight from the generator's own secret file -- never echoed.
 KEYCLOAK_DEV_ADMIN_PASSWORD_FILE="${GENERATED_STATE_DIR}/secrets/dev-admin-password"
 if [[ ! -s "${KEYCLOAK_DEV_ADMIN_PASSWORD_FILE}" ]]; then
 	echo "error: ${KEYCLOAK_DEV_ADMIN_PASSWORD_FILE} missing or empty -- Playwright's Keycloak login would fail closed" >&2
@@ -475,11 +357,9 @@ KEYCLOAK_DEV_ADMIN_PASSWORD="$(cat "${KEYCLOAK_DEV_ADMIN_PASSWORD_FILE}")"
 
 PLAYWRIGHT_JSON_OUTPUT_FILE="${GENERATED_STATE_DIR}/playwright-results.json"
 export PLAYWRIGHT_JSON_OUTPUT_FILE
-# Dependency prep runs in its OWN subshell, deliberately BEFORE the `set +e`
-# below (round-2 review of #906): with errexit still in force, a failed
-# `npm ci` or browser download aborts the whole script immediately with its own
-# honest message, instead of being folded into PLAYWRIGHT_EXIT and reported as
-# a Playwright result.
+# Dependency prep runs in its own subshell, before `set +e` below, so a
+# failed install aborts with its own message instead of masquerading as a
+# Playwright result.
 (
 	use_node22
 	cd "${FRONTEND_DIR}"
@@ -502,17 +382,7 @@ export PLAYWRIGHT_JSON_OUTPUT_FILE
 )
 
 log "Running Playwright against ${PLAYWRIGHT_BASE_URL}"
-# `set -euo pipefail` (top of this script) would otherwise terminate the
-# whole script the instant the subshell below exits nonzero -- BEFORE
-# PLAYWRIGHT_EXIT could be assigned, before issue #500's own
-# zero-tests-executed guard further down, and before the final
-# `exit "${PLAYWRIGHT_EXIT}"` ever ran. A failed Playwright run was silently
-# swallowed as whatever exit code the EXIT trap's cleanup happened to
-# produce, not the suite's real result -- found while validating issue #848
-# (a genuinely failing suite never printed this script's own "Playwright
-# exit code:" log line at all). `set +e`/`set -e` bracket exactly the
-# subshell so errexit is suspended only long enough to capture its real exit
-# code into PLAYWRIGHT_EXIT.
+# why: docs/rationale/deploy.md#e2e-playwright-exit-capture
 set +e
 (
 	use_node22
@@ -527,11 +397,8 @@ set +e
 PLAYWRIGHT_EXIT=$?
 set -e
 
-# Issue #500: a bare exit code cannot distinguish "the suite ran and passed"
-# from "the suite never ran" (e.g. `tsc` failing before `playwright test`
-# even starts still exits nonzero, but a differently-broken invocation could
-# exit 0 with zero tests executed). Parse the JSON reporter's stats and
-# require at least one test to have actually run before trusting a 0 exit.
+# A bare exit code cannot distinguish "ran and passed" from "never ran" --
+# require at least one test to have actually executed before trusting a 0 exit.
 EXECUTED=0
 if [[ -s "${PLAYWRIGHT_JSON_OUTPUT_FILE}" ]]; then
 	EXECUTED="$(python3 -c "
@@ -546,7 +413,7 @@ fi
 log "Playwright exit code: ${PLAYWRIGHT_EXIT}, tests executed: ${EXECUTED}"
 
 if [[ "${PLAYWRIGHT_EXIT}" -eq 0 && "${EXECUTED}" -eq 0 ]]; then
-	echo "error: Playwright reported success but executed zero tests -- treating as a failed run (issue #500)" >&2
+	echo "error: Playwright reported success but executed zero tests -- treating as a failed run" >&2
 	exit 1
 fi
 

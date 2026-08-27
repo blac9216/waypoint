@@ -1,88 +1,46 @@
 #!/usr/bin/env bash
 #
-# Issue #847 (epic #841): dev-stack generator. Creates everything a local or
-# agent development bring-up needs -- secrets, TLS, an isolated project
-# identity, and a validated Compose override -- WITHOUT starting any
-# container. Two modes:
+# Dev-stack generator: creates secrets, TLS, an isolated project identity,
+# and a validated Compose override, without starting any container.
 #
 #   --mode persistent (default)
-#     For the one recurring human dev loop. Ensures deploy/config/secrets/
-#     (the six base secrets init-config.sh also manages, plus
-#     dev-admin-password -- issue #846's keycloak-dev-admin service reads
-#     exactly that path/name), deploy/compose.override.yaml (copied from the
-#     committed compose.override.example.yaml if not already present -- never
-#     overwritten once it exists, since an operator may have hand-edited it),
-#     and deploy/.env (only the keys this script owns -- see "deploy/.env
-#     merge" below). `down -v` never removes deploy/config/, so the same
-#     dev-admin login persists across ordinary reset cycles.
+#     The one recurring human dev loop: deploy/config/secrets/,
+#     deploy/compose.override.yaml, deploy/.env. Never overwrites an
+#     existing secret or override; `down -v` never removes deploy/config/.
 #
 #   --mode agent --slug SLUG
-#     For a throwaway agent/CI bring-up. Writes EVERYTHING -- secrets,
-#     SAN-correct self-signed TLS for the public URL host, and a
-#     self-contained override.yaml -- under deploy/.generated/<slug>/ only.
-#     Never touches deploy/config/ or deploy/compose.override.yaml. Re-running
-#     with the same slug is idempotent: existing secrets/TLS are reused, the
-#     override is regenerated (it carries no secret material itself, only
-#     paths to files this script also never overwrites).
+#     Throwaway agent/CI bring-up, entirely under deploy/.generated/<slug>/.
+#     Never touches deploy/config/ or compose.override.yaml. Idempotent:
+#     re-running with the same slug reuses existing secrets/TLS.
 #
-# Neither mode ever starts a container. Both validate the merged
-# configuration with `docker compose config` and print the exact lifecycle
-# commands to run next.
+# Both modes validate the merged config with `docker compose config` and
+# print the lifecycle commands to run next.
 #
 # Usage:
 #   deploy/scripts/generate-dev-stack.sh --mode persistent [options]
 #   deploy/scripts/generate-dev-stack.sh --mode agent --slug SLUG [options]
 #
 # Common options:
-#   --public-url URL          WAYPOINT_PUBLIC_URL. Persistent default:
-#                              https://localhost:<port>. Agent mode: REQUIRED
-#                              (its hostname drives the generated cert's SAN).
-#   --port PORT                Host HTTPS port. Persistent default: 8443.
-#                              Agent default: 19443.
-#   --subnet CIDR               `edge` network subnet. Persistent default:
-#                              192.168.240.0/24 (compose.yaml's own default).
-#                              Agent default: 203.0.113.0/24.
-#   --username NAME            Dev admin username. Default: developer.
+#   --public-url URL            WAYPOINT_PUBLIC_URL. Persistent default:
+#                                https://localhost:<port>. Agent: required.
+#   --port PORT                 Host HTTPS port. Persistent: 8443. Agent: 19443.
+#   --subnet CIDR                `edge` network subnet. Persistent:
+#                                192.168.240.0/24. Agent: 203.0.113.0/24.
+#   --username NAME              Dev admin username. Default: developer.
 #
 # Agent-mode-only options:
-#   --local-auth-admin-hash-file PATH
-#     Absolute host or in-repo path to an already-computed local-auth admin
-#     password hash (see backend's `--hash-password`). The file is COPIED
-#     into deploy/.generated/<slug>/local-auth/admin-password-hash and the
-#     generated override turns on LocalAuth__Enabled and mounts THAT copy
-#     read-only, host-path-translated the same as every other bind source
-#     this script emits -- so the slug directory stays self-contained and
-#     the caller never has to create it beforehand. Omit to leave local auth
-#     off (Keycloak-only, the production posture) in the generated stack.
+#   --local-auth-admin-hash-file PATH   Enables local auth with this
+#                                        pre-computed password hash.
 #   --runner-resource-fallback / --no-runner-resource-fallback
-#     Whether to set RunnerResources__Fallback{CpuCores,MemoryBytes} on both
-#     runners (the documented cgroup-unreadable sandbox workaround --
-#     see fresh-stack-smoke-test.sh's own comment on the same override).
-#     Default: on (agent mode targets exactly that kind of sandbox).
-#   --keycloak-dev-admin
-#     Issue #848: also provisions the keycloak-dev-admin one-shot service
-#     (issue #846, deploy/keycloak-dev-admin) into the generated override --
-#     same build context/env/volumes/secrets contract as
-#     compose.override.example.yaml's own copy of this service, reusing the
-#     dev-admin-password secret this script already generates unconditionally
-#     and the keycloak-bootstrap-admin-password secret it already declares.
-#     Off by default: only a caller that actually needs a real Keycloak-realm
-#     login (e2e-playwright.sh) opts in.
+#                                        cgroup-unreadable sandbox workaround
+#                                        on both runners. Default: on.
+#   --keycloak-dev-admin                 Also provisions a Keycloak-realm
+#                                        dev-admin user.
 #
-# Collision detection (all three checks run BEFORE any file is written, so a
-# collision leaves nothing behind):
-#   port     -- another RUNNING container already publishes the host port.
-#   subnet   -- an existing Docker network overlaps the requested CIDR.
-#   project  -- RUNNING containers already carry this run's Compose project
-#               label. Ownership is read off those containers: Compose
-#               stamps com.docker.compose.project.working_dir, so a stack
-#               started from THIS checkout's deploy/ is an idempotent
-#               re-generate and is allowed, while one started from anywhere
-#               else is a foreign stack and fails closed. The existence of a
-#               state directory is NOT ownership evidence.
+# Collision detection (port/subnet/project) runs before any file is written,
+# so a collision leaves nothing behind.
 #
-# Requires: openssl, docker compose v2, python3 (subnet-overlap/collision
-# arithmetic only -- stdlib `ipaddress`, no network access).
+# Requires: openssl, docker compose v2, python3.
 
 set -euo pipefail
 
@@ -101,11 +59,7 @@ RUNNER_FALLBACK=1
 KEYCLOAK_DEV_ADMIN=0
 
 usage() {
-	# Print the whole header comment block: everything from the line after the
-	# shebang up to the first line that is not a comment. Stopping on content
-	# rather than a hard-coded line number keeps --help complete when the
-	# block grows (round-1 review: a fixed `sed -n '2,49p'` window truncated
-	# the option list mid-sentence).
+	# Prints the header comment block (line 2 through the first non-# line).
 	awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 }
 
@@ -188,11 +142,7 @@ if [[ "${MODE}" == "agent" ]]; then
 else
 	PORT="${PORT:-8443}"
 	SUBNET="${SUBNET:-192.168.240.0/24}"
-	# Issue #885: matches compose.yaml's own `name: waypoint` -- the base no
-	# longer stamps a "-dev" identity onto a real deployment, and this
-	# script's persistent mode is the ONE recurring human dev loop against
-	# that same base, so it uses the identical project name rather than a
-	# second, divergent default.
+	# why: docs/rationale/deploy.md#gen-persistent-project-name
 	PROJECT="waypoint"
 	STATE_DIR="${DEPLOY_DIR}/config"
 	PUBLIC_URL="${PUBLIC_URL:-https://localhost:${PORT}}"
@@ -210,13 +160,7 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 # --- Devcontainer bind-mount host-path translation ------------------------
-#
-# docs/testing.md "Devcontainer bind mounts": every bind-mount SOURCE this
-# script writes into a compose override is resolved by the Docker daemon
-# against the HOST filesystem, not this process's own. Same technique
-# fresh-stack-smoke-test.sh/e2e-playwright.sh already use, generalized here
-# so both scripts can delegate to this one instead of hand-rolling it twice
-# more (issue #847's own risk note).
+# why: docs/rationale/deploy.md#gen-host-path-translation
 HOST_PREFIX="${REPO_ROOT}"
 if [[ -S /var/run/docker.sock ]]; then
 	SELF_MOUNTS="$(docker inspect "$(hostname)" --format '{{range .Mounts}}{{.Source}}|{{.Destination}}{{"\n"}}{{end}}' 2>/dev/null || true)"
@@ -230,46 +174,13 @@ fi
 host_path() { printf '%s' "${HOST_PREFIX}${1#"${REPO_ROOT}"}"; }
 
 # --- Collision detection (BEFORE any file is written) ----------------------
-#
-# Checked against what is actually RUNNING on this Docker host, before this
-# script writes a single file, so a collision leaves no partial state behind.
-#
-# The project-collision discriminator (round-1 review of issue #847): a
-# Compose project name is claimed by RUNNING containers carrying that
-# project label -- not by the mere existence of a directory. So:
-#
-#   * Running containers labelled com.docker.compose.project=<PROJECT> that
-#     this run does not own  -> collision, fail closed. A later `up` under
-#     that name would otherwise recreate somebody else's containers.
-#   * Nothing running under that name -> accepted, even when this script
-#     already produced state for the same slug/mode earlier. That is the
-#     idempotent re-run this script promises (re-running is byte-stable:
-#     existing secrets and TLS are reused, never regenerated).
-#
-# Ownership is decided by EVIDENCE FROM THE RUNNING CONTAINERS THEMSELVES,
-# never by the existence of a directory (round-2 review finding 1: a bare
-# `mkdir` -- which both live suites used to do before calling this script,
-# and which `init-config.sh` does for deploy/config/ -- would otherwise claim
-# any project name, silencing this check exactly where the hazard is real).
-#
-# Compose stamps com.docker.compose.project.working_dir on every container it
-# creates: the project directory of the `docker compose` invocation that
-# created it. Both live suites and every documented lifecycle command run
-# compose from deploy/, so a container this checkout started carries THIS
-# checkout's deploy directory. A different checkout (or a different machine's
-# clone) carries a different one. The label records the path as the compose
-# CLI process saw it, which is this process's own path when compose runs
-# inside a devcontainer and the host-side path when it runs on the host --
-# accept either spelling, since both name this same deploy directory.
+# why: docs/rationale/deploy.md#gen-project-ownership-discriminator
 OWN_DEPLOY_DIRS=("${DEPLOY_DIR}" "$(host_path "${DEPLOY_DIR}")")
 
-# Fallback, used ONLY for a container that carries no working_dir label at
-# all (a plain `docker run` of a Compose-built image inherits the project
-# label from the image but not the working_dir): fall back to an artifact
-# THIS generator produces and nothing else does -- the override file in agent
-# mode, the dev-admin-password secret in persistent mode (init-config.sh
-# creates the other six, never that one). An empty or hand-`mkdir`ed state
-# directory therefore proves nothing.
+# Fallback for a container with no working_dir label (a plain `docker run`
+# of a Compose-built image inherits the project label from the image but
+# not the working_dir): an artifact THIS generator produces and nothing
+# else does.
 if [[ "${MODE}" == "agent" ]]; then
 	OWN_ARTIFACT="${STATE_DIR}/override.yaml"
 else
@@ -317,16 +228,9 @@ if [[ "${OWNED_STATE}" -eq 0 && -n "${FOREIGN_CONTAINERS}" ]]; then
 	exit 1
 fi
 
-# Host-port collision. Attribution is by CONTAINER NAME and IMAGE: the
-# com.docker.compose.project LABEL is inherited from the image, so a plain
-# `docker run` of a Compose-built image reports a project that never started
-# it (round-1 review finding 4). The label is still shown, explicitly marked
-# as the unreliable half.
-#
-# Self-exemption is by the EXACT container names proven owned above (each one
-# started from this checkout's deploy directory), not by the unreliable
-# project label: an idempotent re-run must not trip over its own published
-# port, but nothing else may be excused.
+# Host-port collision. Attribution is by container name and image, not the
+# (image-inherited, unreliable) compose project label. Self-exemption is by
+# the EXACT container names proven owned above.
 PORT_OWNER="$(docker ps --format '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project"}}\t{{.Ports}}' 2>/dev/null |
 	awk -F'\t' -v p=":${PORT}->" -v ownlist="${OWN_CONTAINER_NAMES}" '
 		BEGIN { n = split(ownlist, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") own[a[i]] = 1 }
@@ -368,11 +272,9 @@ for net_id in out:
             print(f"{name}\t{subnet}")
 PYEOF
 )"
-# Our own project's edge network (an idempotent re-run) is not a collision --
-# but ONLY when the running project was proven above to belong to this
-# checkout (round-2 review finding 2: an ungated exemption waved through a
-# foreign stack's network too). The match is on the whole name field, exactly
-# "${PROJECT}_edge", so an unrelated "wp-demo_edge2" is never swallowed.
+# Our own project's edge network (an idempotent re-run) is not a collision,
+# but only when ownership was already proven above. Matches the whole name
+# field so an unrelated "wp-demo_edge2" is never swallowed.
 if [[ "${OWNED_STATE}" -eq 1 ]]; then
 	SUBNET_COLLISION="$(printf '%s\n' "${SUBNET_COLLISION}" |
 		awk -F'\t' -v self="${PROJECT}_edge" '$1 != self' || true)"
@@ -430,12 +332,7 @@ if [[ "${MODE}" == "agent" ]]; then
 		echo "Secrets: master key reused -- ${MASTER_KEY}"
 	fi
 
-	# The caller-supplied admin password hash is COPIED into this run's own
-	# state directory and the copy is what the override mounts. Two reasons:
-	# the slug directory stays fully self-contained (one `rm -rf` still
-	# removes every file the stack needs), and callers no longer have to
-	# pre-create the state directory just to stage the hash before this
-	# script runs -- the pattern round-2 review finding 1(a) flagged.
+	# why: docs/rationale/deploy.md#gen-local-auth-hash-copy
 	if [[ -n "${LOCAL_AUTH_HASH_FILE}" ]]; then
 		[[ -s "${LOCAL_AUTH_HASH_FILE}" ]] || {
 			echo "error: --local-auth-admin-hash-file '${LOCAL_AUTH_HASH_FILE}' is missing or empty." >&2
@@ -467,14 +364,7 @@ if [[ "${MODE}" == "agent" ]]; then
 		echo "error: could not parse a hostname out of --public-url '${PUBLIC_URL}'." >&2
 		exit 1
 	}
-	# Issue #847 (review finding on the pre-generator staging this replaced,
-	# https://github.com/blac9216/waypoint/issues/847): a PARTIAL pair -- one
-	# file present/non-empty, the other missing or empty -- must never be
-	# silently completed. Regenerating both from scratch would overwrite the
-	# survivor, which is exactly the "existing secrets/TLS are reused and
-	# never overwritten" acceptance criterion applied to a key pair instead
-	# of a single file. Reuse requires BOTH files non-empty; anything else
-	# that isn't "neither exists" fails closed instead of guessing.
+	# why: docs/rationale/deploy.md#gen-secret-reuse-never-overwrite
 	if [[ -s "${TLS_CERT}" && -s "${TLS_KEY}" ]]; then
 		echo "TLS: reusing existing self-signed pair -- ${TLS_CERT}"
 	elif [[ -s "${TLS_CERT}" || -s "${TLS_KEY}" ]]; then
@@ -509,17 +399,13 @@ if [[ "${MODE}" == "persistent" ]]; then
 		echo "Override: created ${OVERRIDE_FILE} from compose.override.example.yaml."
 	fi
 
-	# deploy/.env merge: only the keys THIS script owns are added/updated;
-	# any other line (an operator's own override) is left exactly as-is.
-	# Order/formatting of untouched lines is preserved -- only a managed key
-	# is replaced in place or appended if missing.
+	# why: docs/rationale/deploy.md#gen-env-file-merge
 	ENV_FILE="${DEPLOY_DIR}/.env"
 	touch "${ENV_FILE}"
 	set_env_key() {
 		local key="$1" value="$2"
 		if grep -qE "^${key}=" "${ENV_FILE}"; then
-			# Portable in-place edit (works with both GNU and BSD sed via a
-			# throwaway temp file, avoiding sed -i's flag-syntax split).
+			# Portable in-place edit (temp file, not sed -i -- GNU/BSD flag split).
 			grep -vE "^${key}=" "${ENV_FILE}" >"${ENV_FILE}.tmp"
 			mv "${ENV_FILE}.tmp" "${ENV_FILE}"
 		fi
@@ -536,21 +422,7 @@ else
 	mkdir -p "${STATE_DIR}"
 	OVERRIDE_FILE="${STATE_DIR}/override.yaml"
 
-	# Port/subnet/public-url drive through a slug-scoped --env-file, NOT
-	# override.yaml, and are read by compose.yaml's own operator-config
-	# anchors (x-operator-config: public-url/https-port/edge-subnet) exactly
-	# the way an operator's deploy/.env would. This matters, not just tidier:
-	# Compose's own merge semantics APPEND list entries under `ports:` and
-	# `networks:.edge.ipam.config` rather than replacing the base's by
-	# target/subnet (live-verified while building this script -- an earlier
-	# revision that put `ports:`/`networks:` overrides directly in
-	# override.yaml produced a merged config with BOTH the base's default
-	# port and this one published side by side). Using the same anchors the
-	# base already exposes sidesteps the whole class of list-merge surprises.
-	# --env-file also means agent mode NEVER auto-loads deploy/.env (Compose
-	# only auto-loads the default `.env` when --env-file is not given) -- a
-	# persistent-mode operator's own deploy/.env can never leak into an
-	# agent-mode bring-up.
+	# why: docs/rationale/deploy.md#gen-env-file-list-merge
 	ENV_FILE="${STATE_DIR}/.env"
 	{
 		echo "WAYPOINT_HTTPS_PORT=${PORT}"
@@ -618,25 +490,10 @@ else
 		echo "        target: /run/secrets/waypoint-master-key"
 		echo "        read_only: true"
 		if [[ "${KEYCLOAK_DEV_ADMIN}" -eq 1 ]]; then
-			# Same service/contract as compose.override.example.yaml's own
-			# keycloak-dev-admin (issue #846) -- see deploy/keycloak-dev-admin
-			# for the provisioning script this builds and runs. Reuses the
-			# dev-admin-password secret this script already generates
-			# unconditionally (SECRET_NAMES above) and the
-			# keycloak-bootstrap-admin-password secret already declared below.
+			# Same service/contract as compose.override.example.yaml's own keycloak-dev-admin.
 			echo "  keycloak-dev-admin:"
 			echo "    build:"
-			# Relative to compose.yaml's own directory (deploy/), matching
-			# every other build context in this file (nginx/backend/postgres/
-			# keycloak all use `context: ..`/`./postgres`/`./keycloak`, never
-			# host_path()-translated) -- unlike a bind-mount `source:`
-			# (resolved by the Docker DAEMON against the host filesystem),
-			# `build: context:` is resolved by buildx CLIENT-side, from
-			# wherever `docker compose build` itself runs. Passing the
-			# host_path()-translated absolute path here (as an earlier
-			# revision of this change did) broke with "unable to prepare
-			# context: path not found" -- that translated path is only
-			# meaningful to the daemon, not to this process.
+			# why: docs/rationale/deploy.md#gen-build-context-not-host-path
 			echo "      context: ./keycloak-dev-admin"
 			echo "    depends_on:"
 			echo "      keycloak:"
