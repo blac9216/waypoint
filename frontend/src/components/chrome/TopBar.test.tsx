@@ -1,4 +1,4 @@
-import { render, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "../../lib/auth";
 import { SystemProvider } from "../../lib/system";
@@ -393,5 +393,97 @@ describe("TopBar Runners indicator admission starvation (issue #489)", () => {
 		});
 		expect(runnersPill().querySelector(".top-bar__stigman-dot")).toHaveClass("is-bad");
 		expect(runnersPill().getAttribute("title")).toMatch(/scan \(permanent — misconfiguration, will not self-resolve\)/);
+	});
+});
+
+/**
+ * Issue #868: `AuthContext.logout()` (lib/auth.tsx) worked end-to-end since
+ * #873 but no component ever invoked it — the rendered app had no sign-out
+ * control at all. These pin the fix: the control renders only while signed
+ * in, and activating it actually calls through to `logout()` rather than
+ * just looking like a button.
+ */
+describe("TopBar sign-out control (issue #868)", () => {
+	let originalFetch: typeof fetch;
+
+	function installFetchMock() {
+		globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "/api/v1/system") {
+				return jsonResponse({ version: "2.4.1", build: "24817", mode: "connected", update_available: null });
+			}
+			if (url === "/api/v1/stigman") {
+				return jsonResponse({ error: { code: "not_found", message: "No global STIG Manager connection is configured." } }, 404);
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as unknown as typeof fetch;
+	}
+
+	function signIn() {
+		window.sessionStorage.setItem(
+			"waypoint.session",
+			JSON.stringify({
+				token: "tok-1",
+				username: "j.moreno",
+				role: "Admin",
+				// No `kind` — restores as `"local"` (see auth.tsx's readStoredSession),
+				// so logout() takes the plain dropSession() path and does not need
+				// discovery/end-session fetch mocking on top of the above.
+				expiresAt: new Date(Date.now() + 60_000).toISOString(),
+			}),
+		);
+	}
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		installFetchMock();
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		window.sessionStorage.clear();
+	});
+
+	function mount() {
+		render(
+			<AuthProvider>
+				<SystemProvider>
+					<ThemeProvider>
+						<TopBar screenTitle="Dashboard" />
+					</ThemeProvider>
+				</SystemProvider>
+			</AuthProvider>,
+		);
+	}
+
+	it("renders a 'Sign out' control when signed in", async () => {
+		signIn();
+		mount();
+
+		await waitFor(() => {
+			expect(screen.getByRole("button", { name: "Sign out" })).toBeVisible();
+		});
+	});
+
+	it("does not render the control when signed out", async () => {
+		mount();
+
+		await waitFor(() => {
+			expect(document.querySelector(".top-bar__user")?.textContent).toBe("—");
+		});
+		expect(screen.queryByRole("button", { name: "Sign out" })).toBeNull();
+	});
+
+	it("invokes logout() (drops the session) when activated", async () => {
+		signIn();
+		mount();
+
+		const button = await screen.findByRole("button", { name: "Sign out" });
+		fireEvent.click(button);
+
+		await waitFor(() => {
+			expect(window.sessionStorage.getItem("waypoint.session")).toBeNull();
+		});
+		expect(document.querySelector(".top-bar__user")?.textContent).toBe("—");
 	});
 });

@@ -166,6 +166,22 @@
 	max-width: 220px;
 }
 
+.top-bar__signout {
+	background: var(--panel2);
+	color: var(--txt2);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-btn);
+	padding: 5px 9px;
+	font-size: 11px;
+	flex: 0 0 auto;
+	white-space: nowrap;
+}
+
+.top-bar__signout:hover {
+	color: var(--txt);
+	border-color: var(--acc);
+}
+
 .top-bar__theme-toggle {
 	width: 28px;
 	height: 28px;
