@@ -9,11 +9,9 @@ if [ ! -s /run/waypoint-dev-secrets/waypoint-master-key ]; then
 	mv /run/waypoint-dev-secrets/waypoint-master-key.tmp /run/waypoint-dev-secrets/waypoint-master-key
 fi
 
-# Issue #844: generic tls.crt/tls.key filenames (not dev-cert.pem/dev-key.pem)
-# -- deploy/nginx/conf.d/default.conf references these same generic names, so
-# an operator overriding this dev-only pair with real certificates (see the
-# commented-out bind mount on the nginx service in compose.yaml) needs
-# no config change, only real file content at the same two names.
+# Generic tls.crt/tls.key filenames -- deploy/nginx/conf.d/default.conf
+# references these same names, so an operator overriding this dev-only pair
+# with real certificates needs no config change, only real file content.
 if [ ! -s /run/waypoint-dev-tls/tls.crt ] || [ ! -s /run/waypoint-dev-tls/tls.key ]; then
 	rm -f /run/waypoint-dev-tls/tls.crt /run/waypoint-dev-tls/tls.key
 	openssl req -x509 -nodes -newkey rsa:2048 \
