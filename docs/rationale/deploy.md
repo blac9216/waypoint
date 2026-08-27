@@ -435,8 +435,7 @@ REPO_ROOT`), a single `up -d --build` fails: `build` contexts are resolved
 client-side, but the bind-mount sources this override writes need
 `--project-directory` resolved against the host path. The printed commands
 split into a client-path `build` (no `--project-directory`) and a
-host-path `up -d --no-build`, matching the split documented in
-`deploy/README.md`'s troubleshooting entry.
+host-path `up -d --no-build`.
 
 Refs: #955
 
