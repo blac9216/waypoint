@@ -58,6 +58,7 @@ public sealed class RunsController : ControllerBase
 	private readonly RunPurgeService _runPurge;
 	private readonly RunHistoryDeletionService _historyDeletion;
 	private readonly IJobEventHistoryReader _eventHistory;
+	private readonly IComponentJobRepository _componentJobs;
 
 	public RunsController(
 		IJobControlRepository repository,
@@ -70,7 +71,8 @@ public sealed class RunsController : ControllerBase
 		RunControlService runControl,
 		RunPurgeService runPurge,
 		RunHistoryDeletionService historyDeletion,
-		IJobEventHistoryReader eventHistory)
+		IJobEventHistoryReader eventHistory,
+		IComponentJobRepository componentJobs)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(configDocs);
@@ -83,6 +85,7 @@ public sealed class RunsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(runPurge);
 		ArgumentNullException.ThrowIfNull(historyDeletion);
 		ArgumentNullException.ThrowIfNull(eventHistory);
+		ArgumentNullException.ThrowIfNull(componentJobs);
 		_repository = repository;
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
@@ -94,6 +97,7 @@ public sealed class RunsController : ControllerBase
 		_runPurge = runPurge;
 		_historyDeletion = historyDeletion;
 		_eventHistory = eventHistory;
+		_componentJobs = componentJobs;
 	}
 
 	/// <summary>
@@ -577,6 +581,156 @@ public sealed class RunsController : ControllerBase
 
 		IReadOnlyList<JobSummary> jobs = await _repository.GetJobsForRunAsync(id, cancellationToken).ConfigureAwait(false);
 		return Ok(jobs.Select(MapJob).ToArray());
+	}
+
+	/// <summary>
+	/// Server-side grouped counts of a run's component jobs by (priority,
+	/// component_kind, state) -- issue #757 (epic #726 §7, ADR-0024's 10,000+-job
+	/// scale contract). Viewer+, same floor as every other run read. The Live Run
+	/// state board renders its priority groups and per-state breakdowns from this
+	/// endpoint alone; it never derives a count by fetching and counting individual
+	/// job rows client-side. <paramref name="search"/> applies the identical
+	/// <c>target_name ILIKE</c> predicate <see cref="ListComponentJobs"/> uses, so a
+	/// search narrows the counters and the paged list together.
+	/// </summary>
+	[HttpGet("{id:guid}/component-jobs/counts")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(ComponentJobCountResponse[]), StatusCodes.Status200OK)]
+	public async Task<ActionResult<IReadOnlyList<ComponentJobCountResponse>>> GetComponentJobCounts(
+		Guid id,
+		[FromQuery(Name = "state")] string? state,
+		[FromQuery(Name = "priority")] string? priority,
+		[FromQuery(Name = "component_kind")] string? componentKind,
+		[FromQuery(Name = "search")] string? search,
+		CancellationToken cancellationToken)
+	{
+		RunSummary? run = await _repository.GetRunAsync(id, cancellationToken).ConfigureAwait(false);
+		if (run is null)
+		{
+			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+		}
+
+		ComponentJobFilter filter = MapComponentJobFilter(state, priority, componentKind, search);
+		IReadOnlyList<ComponentJobCountRow> rows = await _componentJobs.GetGroupedCountsAsync(id, filter, cancellationToken).ConfigureAwait(false);
+		return Ok(rows.Select(r => new ComponentJobCountResponse(r.Priority, r.ComponentKind, r.State, r.Count)).ToArray());
+	}
+
+	/// <summary>
+	/// Cursor-paged, filtered, searchable component-job rows for a run (issue #757) --
+	/// the Live Run state board's virtualized item list reads this rather than
+	/// <see cref="GetJobs"/>, which returns the run's ENTIRE job set and is unsafe to
+	/// call against a 10,000+-job run. Viewer+, same floor as every other run read
+	/// and as <see cref="GetComponentJobCounts"/> above, whose exact filter predicate
+	/// this endpoint shares (see <see cref="MapComponentJobFilter"/>) so the counters
+	/// and the list they gate always describe the same candidate row set. Ordered
+	/// <c>priority, created_at, id</c> ascending; <c>next_cursor</c> is null exactly
+	/// when the filtered set is exhausted -- never a silent truncation.
+	/// </summary>
+	[HttpGet("{id:guid}/component-jobs")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(ComponentJobListResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<ComponentJobListResponse>> ListComponentJobs(
+		Guid id,
+		[FromQuery(Name = "state")] string? state,
+		[FromQuery(Name = "priority")] string? priority,
+		[FromQuery(Name = "component_kind")] string? componentKind,
+		[FromQuery(Name = "search")] string? search,
+		[FromQuery(Name = "cursor")] string? cursor,
+		[FromQuery(Name = "limit")] int? limit,
+		CancellationToken cancellationToken)
+	{
+		RunSummary? run = await _repository.GetRunAsync(id, cancellationToken).ConfigureAwait(false);
+		if (run is null)
+		{
+			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+		}
+
+		ComponentJobFilter filter = MapComponentJobFilter(state, priority, componentKind, search);
+
+		ComponentJobCursorPosition? after = null;
+		if (!string.IsNullOrWhiteSpace(cursor))
+		{
+			if (!ComponentJobCursor.TryDecode(cursor, out ComponentJobCursorPosition? decoded))
+			{
+				throw ApiException.Validation("cursor is not valid.", "The 'cursor' query parameter must be an opaque value returned by a previous response's next_cursor -- it cannot be constructed by hand.");
+			}
+
+			after = decoded;
+		}
+
+		const int DefaultLimit = 100;
+		const int MaxLimit = 500;
+		int effectiveLimit = limit is { } requested ? Math.Clamp(requested, 1, MaxLimit) : DefaultLimit;
+
+		ComponentJobPage page = await _componentJobs.ListComponentJobsAsync(
+			new ComponentJobListQuery(id, filter, after, effectiveLimit), cancellationToken).ConfigureAwait(false);
+
+		string? nextCursor = page.NextCursor is { } next ? ComponentJobCursor.Encode(next) : null;
+		return Ok(new ComponentJobListResponse(page.Items.Select(MapComponentJob).ToArray(), nextCursor));
+	}
+
+	/// <summary>
+	/// Validates and converts the shared state/priority/component_kind/search query
+	/// parameters <see cref="GetComponentJobCounts"/> and <see cref="ListComponentJobs"/>
+	/// both bind into one <see cref="ComponentJobFilter"/> -- every rejection is 400
+	/// <see cref="ApiException.Validation"/>, never a 500, same "cursor/filter abuse"
+	/// posture <see cref="MapHistoryQuery"/> establishes.
+	/// </summary>
+	private static ComponentJobFilter MapComponentJobFilter(string? state, string? priority, string? componentKind, string? search)
+	{
+		IReadOnlyList<string>? states = ParseAllowList(state, JobStates_IsValid, nameof(state), $"valid values: {string.Join(", ", JobStatesAll)}.");
+
+		IReadOnlyList<short>? priorities = null;
+		if (!string.IsNullOrWhiteSpace(priority))
+		{
+			string[] rawValues = priority.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+			List<short> parsed = [];
+			foreach (string rawValue in rawValues)
+			{
+				if (!short.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out short value) || value is < 1 or > 6)
+				{
+					throw ApiException.Validation("priority contains an invalid value.", $"'{rawValue}' is not a valid priority; priority must be an integer 1-6.");
+				}
+
+				parsed.Add(value);
+			}
+
+			priorities = parsed.Count > 0 ? [.. parsed.Distinct()] : null;
+		}
+
+		IReadOnlyList<string>? componentKinds = ParseAllowList(
+			componentKind,
+			value => Waypoint.Core.ComplianceContent.CatalogSelectorKinds.IsValid(value) || string.Equals(value, ComponentKindVocabulary.Unknown, StringComparison.Ordinal),
+			"component_kind",
+			$"valid values: {string.Join(", ", Waypoint.Core.ComplianceContent.CatalogSelectorKinds.All)}, {ComponentKindVocabulary.Unknown}.");
+
+		return new ComponentJobFilter(states, priorities, componentKinds, string.IsNullOrWhiteSpace(search) ? null : search);
+	}
+
+	private static bool JobStates_IsValid(string value) => JobStatesAll.Contains(value);
+
+	private static readonly string[] JobStatesAll =
+	[
+		JobStates.Queued, JobStates.Running, JobStates.Attesting, JobStates.Converting,
+		JobStates.Uploaded, JobStates.Done, JobStates.Failed, JobStates.AuthFailed,
+		JobStates.Blocked, JobStates.Cancelled,
+	];
+
+	private static ComponentJobResponse MapComponentJob(ComponentJobRow row)
+	{
+		return new ComponentJobResponse(
+			Id: row.Id.ToString(),
+			JobType: row.JobType,
+			TargetId: row.TargetId,
+			TargetName: row.TargetName,
+			State: row.State,
+			Stage: row.Stage,
+			Priority: row.Priority,
+			ComponentKind: row.ComponentKind,
+			AttemptCount: row.AttemptCount,
+			CreatedAt: row.CreatedAt,
+			StartedAt: row.StartedAt,
+			FinishedAt: row.FinishedAt);
 	}
 
 	/// <summary>

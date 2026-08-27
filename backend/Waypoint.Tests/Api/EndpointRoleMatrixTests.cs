@@ -222,6 +222,12 @@ public sealed class EndpointRoleMatrixTests
 		["RunsController.ListRuns"] = WaypointRole.Viewer,
 		["RunsController.GetRun"] = WaypointRole.Viewer,
 		["RunsController.GetJobs"] = WaypointRole.Viewer,
+		// Issue #757 (epic #726 §7, ADR-0024's 10,000+-job scale contract): the
+		// run-scoped component-job grouped-counts/paged-list read surface is Viewer+,
+		// the same floor as GetJobs/GetRun above -- ADR-0019 decision 6 ("visibility
+		// and action authorization are distinct").
+		["RunsController.GetComponentJobCounts"] = WaypointRole.Viewer,
+		["RunsController.ListComponentJobs"] = WaypointRole.Viewer,
 		["RunsController.RetryJob"] = WaypointRole.Operator,
 		["RunsController.GetArtifacts"] = WaypointRole.Viewer,
 		["RunsController.GetAttestationsApplied"] = WaypointRole.Viewer,

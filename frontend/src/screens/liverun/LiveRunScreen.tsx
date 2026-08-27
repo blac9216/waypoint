@@ -37,6 +37,7 @@ import { useAuth } from "../../lib/auth-context";
 import { Link } from "../../lib/router";
 import { formatRunDuration, formatTimestamp, scopeSiteId } from "../results/results";
 import { BlockedBanner } from "./BlockedBanner";
+import { ComponentJobBoard } from "./ComponentJobBoard";
 import { BoardLayout, Counter, LogFirstLayout, QueueLayout } from "./LiveRunLayouts";
 import { formatElapsed, progressPercentForState } from "./liverun";
 import { useActiveRuns } from "./useActiveRuns";
@@ -46,7 +47,7 @@ import { useRunIdFromQuery } from "./useRunIdFromQuery";
 import { useRunLog } from "./useRunLog";
 import "./LiveRunScreen.css";
 
-type LayoutMode = "queues" | "board" | "log";
+type LayoutMode = "queues" | "board" | "log" | "components";
 
 /** Route-connected entry point — reads `?run=` from the URL. The bare
  * `LiveRunScreen` below takes `runId` as an explicit prop so tests can drive
@@ -206,6 +207,13 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 						<button type="button" className={layout === "log" ? "is-active" : ""} onClick={() => setLayout("log")}>
 							Log-first
 						</button>
+						<button
+							type="button"
+							className={layout === "components" ? "is-active" : ""}
+							onClick={() => setLayout("components")}
+						>
+							Components
+						</button>
 					</div>
 					<span className="live-run__spacer" />
 					{connectionState !== "open" && (
@@ -229,6 +237,7 @@ export function LiveRunScreen({ runId }: { runId?: string }) {
 				{layout === "queues" && <QueueLayout header={header} jobs={jobs} jobControls={jobControls} />}
 				{layout === "board" && <BoardLayout jobs={jobs} />}
 				{layout === "log" && <LogFirstLayout jobs={jobs} lines={logLines} />}
+				{layout === "components" && <ComponentJobBoard runId={header.id} />}
 			</div>
 		</div>
 	);

@@ -732,3 +732,84 @@ public sealed record RunHistoryListResponse(
 
 	[property: JsonPropertyName("next_cursor")]
 	string? NextCursor);
+
+/// <summary>
+/// Issue #757 (epic #726 §7, ADR-0024): one server-side grouped-count row for
+/// <c>GET /api/v1/runs/{id}/component-jobs/counts</c> -- the exact number of a run's
+/// component jobs sharing this (priority, component_kind, state) triple. The state
+/// board sums/slices these to render per-priority totals and per-state breakdowns
+/// without ever requesting individual job rows for the counter view.
+/// </summary>
+public sealed record ComponentJobCountResponse(
+	[property: JsonPropertyName("priority")]
+	short Priority,
+
+	/// <summary>
+	/// The frozen catalog <c>selector_kind</c> (vcenter/esxi/vm/service/target) a
+	/// component job's plan item carries, or <c>"unknown"</c> for a job with no
+	/// <c>scan_plan_item_id</c> (legacy per-target fan-out, or a non-scan job type).
+	/// </summary>
+	[property: JsonPropertyName("component_kind")]
+	string ComponentKind,
+
+	[property: JsonPropertyName("state")]
+	string State,
+
+	[property: JsonPropertyName("count")]
+	long Count);
+
+/// <summary>
+/// One row on the wire for <c>GET /api/v1/runs/{id}/component-jobs</c> -- the
+/// cursor-paged, filtered, searchable component-job list the Live Run state board's
+/// virtualized item list renders. A subset of <see cref="JobResponse"/>'s fields
+/// (no credential attribution -- the list view has no use for it) plus
+/// <see cref="ComponentKind"/>, which <see cref="JobResponse"/> does not carry.
+/// </summary>
+public sealed record ComponentJobResponse(
+	[property: JsonPropertyName("id")]
+	string Id,
+
+	[property: JsonPropertyName("job_type")]
+	string JobType,
+
+	[property: JsonPropertyName("target_id")]
+	string? TargetId,
+
+	[property: JsonPropertyName("target_name")]
+	string? TargetName,
+
+	[property: JsonPropertyName("state")]
+	string State,
+
+	[property: JsonPropertyName("stage")]
+	string? Stage,
+
+	[property: JsonPropertyName("priority")]
+	short Priority,
+
+	[property: JsonPropertyName("component_kind")]
+	string ComponentKind,
+
+	[property: JsonPropertyName("attempt_count")]
+	int AttemptCount,
+
+	[property: JsonPropertyName("created_at")]
+	string? CreatedAt,
+
+	[property: JsonPropertyName("started_at")]
+	string? StartedAt,
+
+	[property: JsonPropertyName("finished_at")]
+	string? FinishedAt);
+
+/// <summary>
+/// Response body for <c>GET /api/v1/runs/{id}/component-jobs</c>. <see cref="NextCursor"/>
+/// is null exactly when this page reached the end of the filtered set -- never a
+/// silent truncation, matching every other paged reader's contract in this codebase.
+/// </summary>
+public sealed record ComponentJobListResponse(
+	[property: JsonPropertyName("items")]
+	IReadOnlyList<ComponentJobResponse> Items,
+
+	[property: JsonPropertyName("next_cursor")]
+	string? NextCursor);

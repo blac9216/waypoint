@@ -332,6 +332,21 @@ export function cancelJob(jobId: string): Promise<void> {
 	return apiDelete<void>(`/jobs/${jobId}`);
 }
 
+/** The real `JobRetryResponse` wire shape (`POST /runs/{runId}/jobs/{jobId}/retry`, issue #297). */
+export interface JobRetryResult {
+	job_id: string;
+	state: string;
+	stage: string | null;
+}
+
+/** Per-job manual retry of a `failed` job (issue #297's stage-preserving
+ * requeue; ADR-0024 attempt semantics — retry creates new work against the
+ * same immutable planned item, never a rewrite of prior history). Operator+
+ * (own runs), Admin any — 409 `not_retryable` for any non-`failed` state. */
+export function retryJob(runId: string, jobId: string): Promise<JobRetryResult> {
+	return apiPost<JobRetryResult>(`/runs/${runId}/jobs/${jobId}/retry`);
+}
+
 /** Admin credential-swap-resume for a halted run (ADR-0008 / #146). */
 export function resumeBlockedRun(runId: string, credentialId: string): Promise<RunActionResult> {
 	return apiPost<RunActionResult>(`/runs/${runId}/resume-blocked`, { credential_id: credentialId });

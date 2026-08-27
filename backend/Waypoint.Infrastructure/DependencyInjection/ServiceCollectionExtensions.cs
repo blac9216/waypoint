@@ -229,6 +229,11 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<IJobEventPublisher>()));
 			services.AddSingleton<IJobControlRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
 			services.AddSingleton<IJobRunnerRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
+			// Issue #757: the run-scoped grouped-counts/paged component-job read surface
+			// is a third focused interface on the same JobQueueRepository singleton --
+			// same "one implementation, several narrow interfaces" pattern as the two
+			// registrations above.
+			services.AddSingleton<Waypoint.Core.Jobs.IComponentJobRepository>(serviceProvider => serviceProvider.GetRequiredService<JobQueueRepository>());
 
 			services.AddSingleton<IJobEventPublisher>(serviceProvider =>
 			{
