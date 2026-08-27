@@ -38,10 +38,11 @@ namespace Waypoint.Tests.Infrastructure.PowerShell;
 /// Unlike PR #975's RawYaml case, Version is a TOP-LEVEL property of the item object
 /// (not nested inside a further array element) -- <see cref="PowerShellExecutor"/>
 /// already unwraps the outer PSObject layer on every top-level pipeline output object
-/// before this handler ever inspects it (see <c>PowerShellExecutor.Unwrap</c>), so this
-/// test is expected to pass whether or not #975 has merged; it exists to prove that
-/// fact for THIS field rather than assume it by analogy, and to catch a regression if
-/// the module's output shape ever nests Version one layer deeper.
+/// before this handler ever inspects it (see <c>PowerShellExecutor.Unwrap</c>). #975
+/// has since merged (<c>DiscoverJobHandler.GetProperty</c> now routes through
+/// <c>PowerShellValueUnwrap.UnwrapAs</c>), but this test's own read below deliberately
+/// stays at the raw <c>psObject.Properties[...]?.Value as string</c> level to prove the
+/// underlying PSObject wrapping itself, independent of which C#-side helper reads it.
 /// </summary>
 public sealed class DiscoveryVersionBoundaryTests : IDisposable
 {

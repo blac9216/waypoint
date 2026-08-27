@@ -527,14 +527,10 @@ public sealed class DiscoverJobHandler : IJobHandler
 
 		// Issue #974: the host's semantic vSphere product version, alongside (never
 		// instead of) Build -- see this type's own DiscoveredInventoryItem doc comment.
-		// Same top-level-property read as Type/MoRef/Name/Build above: PowerShellExecutor
-		// already unwraps the outer PSObject layer on every top-level pipeline output
-		// object before TryParseItem ever sees it, so GetProperty<string> is the correct
-		// read here (PR #975's PowerShellValueUnwrap chokepoint addresses a DIFFERENT
-		// hazard -- a property nested one level further inside an array element -- which
-		// does not apply to this flat item shape; a dedicated boundary test
-		// (PowerShellExecutorTests-style, driving the real executor) proves this field
-		// survives non-null all the same).
+		// Same top-level-property read as Type/MoRef/Name/Build above -- GetProperty
+		// now routes through #975's PowerShellValueUnwrap chokepoint, and a dedicated
+		// boundary test (DiscoveryVersionBoundaryTests, driving the real executor)
+		// proves this field survives non-null.
 		string? version = GetProperty<string>(psObject, "Version");
 
 		return new DiscoveredInventoryItem(type!, moRef, name, parentMoRef, build, maintenanceMode, version);
@@ -543,7 +539,13 @@ public sealed class DiscoverJobHandler : IJobHandler
 	private static T? GetProperty<T>(System.Management.Automation.PSObject psObject, string name)
 		where T : class
 	{
-		return psObject.Properties[name]?.Value as T;
+		// Issue #975's chokepoint (PowerShellValueUnwrap): every top-level pipeline
+		// output object is already unwrapped by PowerShellExecutor.Unwrap before
+		// TryParseItem ever sees it, so this read was never actually exposed to #972's
+		// nested-property hazard -- routing it through UnwrapAs anyway costs nothing
+		// (idempotent on an already-unwrapped value) and keeps every PSObject property
+		// read in this codebase going through the same one chokepoint.
+		return PowerShellValueUnwrap.UnwrapAs<T>(psObject.Properties[name]?.Value);
 	}
 
 	private static string? TryGetConnectionHost(string connectionJson)
