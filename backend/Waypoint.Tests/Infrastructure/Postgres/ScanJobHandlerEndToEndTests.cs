@@ -136,6 +136,18 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			ReleaseInfo = "Release: 1 Benchmark Date: 01 Jan 2026",
 			Version = "1",
 		};
+		// Issue #918: the NSX-transport analogue of the vsphere-kind static stamp above --
+		// a DISTINCT identity so NsxComponentJob_FrozenBenchmarkRevision_...'s
+		// precedence-proving assertions have a real (invented) fallback value to prove
+		// were NOT used, mirroring #915's vsphere-kind design rather than relying on a
+		// null/absent fallback that a broken precedence could not be told apart from.
+		scanOptionsValue.BenchmarkMetadata["nsx-api"] = new ScanBenchmarkMetadata
+		{
+			BenchmarkId = "invented_static_nsx_benchmark",
+			Title = "Invented Static NSX STIG",
+			ReleaseInfo = "Release: 1 Benchmark Date: 01 Jan 2026",
+			Version = "1",
+		};
 		IOptions<ScanOptions> scanOptions = Options.Create(scanOptionsValue);
 		IOptions<Waypoint.Core.ComplianceContent.ComplianceContentOptions> complianceContentOptions =
 			Options.Create(new Waypoint.Core.ComplianceContent.ComplianceContentOptions { ContentPath = _contentDirectory });
@@ -771,6 +783,83 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		Assert.Contains("benchmark=invented_static_vsphere_benchmark", ckl, StringComparison.Ordinal);
 		Assert.Contains("title=Invented Static vSphere STIG", ckl, StringComparison.Ordinal);
 		Assert.Contains("version=1", ckl, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #918: the NSX-transport analogue of
+	/// <see cref="StigComponentJob_FrozenBenchmarkRevision_StampsCklFromFrozenRevision_NotStaticFallback"/>.
+	/// PR #916 (issue #742) claimed the frozen-revision CKL stamp is transport-agnostic
+	/// because it rides the generic <c>benchmark_revision_id</c> payload field through
+	/// <c>BuildPlanItemJobSpec</c>, unchanged from #915 -- but no NSX-transport fixture
+	/// exercised it, so an nsx-api-specific regression (e.g. a branch that never threads
+	/// <c>benchmark_revision_id</c> into the stamp for this transport) would not have been
+	/// caught by the ssh/vmware tests alone (docs/testing.md's fixture-monoculture
+	/// guidance). Seeds a real (invented) migration-0052 <c>benchmark_revisions</c> row via
+	/// <see cref="_benchmarks"/> with an identity distinct from the static NSX-kind
+	/// fallback stamp, freezes it onto a narrowed nsx-api/service (NSX 4.x STIG) component
+	/// job payload, and asserts every stamped CKL field (benchmark/title/release/version)
+	/// comes from that frozen revision, never the static fallback.
+	/// </summary>
+	[Fact]
+	public async Task NsxComponentJob_FrozenBenchmarkRevision_StampsCklFromFrozenRevision_NotStaticFallback()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedNsxTargetAsync("invented-nsx-frozen-revision-canary");
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedNsxCatalogAndBaselineAsync("manager-frozen-revision", CatalogOutputKinds.HdfAndCkl, "manager", materializeOnDisk: true);
+
+		// A real (invented) frozen benchmark revision -- migration 0052's benchmark_revisions
+		// row -- with an identity deliberately unlike the static "nsx-api"-kind fallback
+		// stamp configured in the constructor's ScanOptions.BenchmarkMetadata seed.
+		BenchmarkRevision revision = await _benchmarks.ImportRevisionAsync(
+			new BenchmarkImportCandidate(
+				"xccdf_invented.vmware_nsx-manager_STIG",
+				"Invented NSX Manager STIG",
+				"2",
+				"Release: 3 Benchmark Date: 20 Feb 2026",
+				$"digest-nsx-bench-{Guid.NewGuid():N}",
+				[new XccdfRule("SV-200001r1_rule", "V-200001", BenchmarkRuleSeverities.High, "invented rule")]),
+			BenchmarkSources.ManualUpload, CancellationToken.None);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = CatalogTransports.NsxApi,
+			selector_kind = CatalogSelectorKinds.Service,
+			selector_name = "manager",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = CatalogOutputKinds.HdfAndCkl,
+			benchmark_revision_id = revision.Id,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", ScanTargetPriority.Nsx, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
+		Assert.True(File.Exists(cklPath), $"expected a CKL at '{cklPath}'.");
+		string ckl = await File.ReadAllTextAsync(cklPath);
+
+		// Every field comes from the FROZEN revision, not the static NSX-kind fallback.
+		Assert.Contains($"benchmark={revision.BenchmarkKey}", ckl, StringComparison.Ordinal);
+		Assert.Contains($"title={revision.Title}", ckl, StringComparison.Ordinal);
+		Assert.Contains($"release={revision.Release}", ckl, StringComparison.Ordinal);
+		Assert.Contains($"version={revision.Version}", ckl, StringComparison.Ordinal);
+		Assert.DoesNotContain("invented_static_nsx_benchmark", ckl, StringComparison.Ordinal);
 	}
 
 	/// <summary>
