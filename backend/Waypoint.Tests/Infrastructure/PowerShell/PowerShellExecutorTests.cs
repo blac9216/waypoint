@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Collections.Concurrent;
+using System.Linq;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
@@ -325,5 +326,108 @@ public sealed class PowerShellExecutorTests : IDisposable
 		using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(infoEvent.Item4);
 		Assert.Equal("information", document.RootElement.GetProperty("severity").GetString());
 		Assert.Equal("info leaks quote\"and\\slash", document.RootElement.GetProperty("line").GetString());
+	}
+
+	/// <summary>
+	/// Issue #972 reproduction: drives the REAL executor (real in-process SMA
+	/// runspace, real <c>Get-Content -Raw</c> cmdlet output -- not a hand-built
+	/// <see cref="System.Management.Automation.PSObject"/> literal, which never
+	/// reproduced the defect) against the invented stub function that mirrors the
+	/// real WaypointComplianceContent.psm1 shape: a top-level [pscustomobject] whose
+	/// <c>ContentEntries</c> array holds nested [pscustomobject] rows built from
+	/// <c>Get-Content -Raw</c>. Before the fix, the nested <c>RawYaml</c> NoteProperty
+	/// value read off <see cref="System.Management.Automation.PSObject.Properties"/>
+	/// was itself still a <see cref="System.Management.Automation.PSObject"/> wrapper
+	/// (SMA wraps a cmdlet's own output, even a returned <see cref="string"/>, as it
+	/// crosses the pipeline) -- so <c>psObject.Properties["RawYaml"]?.Value as string</c>
+	/// silently produced null, which is exactly the live #972 symptom (315 profiles
+	/// with a real, non-empty inspec.yml on disk rejected "empty or missing").
+	/// </summary>
+	[Fact]
+	public async Task NestedContentEntry_RawYaml_SurvivesTheRealExecutorBoundary_NonNullAndContentIdentical()
+	{
+		string manifestPath = Path.Combine(AppContext.BaseDirectory, "Assets", "WaypointStubModule", "boundary-fixture-manifest.yml");
+		string expected = await File.ReadAllTextAsync(manifestPath);
+
+		PowerShellExecutor executor = CreateExecutor();
+		PowerShellExecutionResult result = await executor.ExecuteAsync(
+			new PowerShellRequest("Get-StubNestedContentEntry", Parameters: new Dictionary<string, object?> { ["ManifestPath"] = manifestPath }),
+			CancellationToken.None);
+
+		Assert.True(result.Succeeded, result.FailureReason);
+		System.Management.Automation.PSObject root = System.Management.Automation.PSObject.AsPSObject(Assert.Single(result.Output)!);
+
+		object? rawContentEntries = root.Properties["ContentEntries"]?.Value;
+		Assert.NotNull(rawContentEntries);
+		object? firstEntry = Assert.Single(((System.Collections.IEnumerable)rawContentEntries!).Cast<object?>());
+		System.Management.Automation.PSObject entryPsObject = System.Management.Automation.PSObject.AsPSObject(firstEntry!);
+
+		// This is the exact read TryParseContentEntry performs (post-fix, via
+		// PowerShellValueUnwrap). Pre-fix, `Value as string` silently yields null even
+		// though the underlying string is present one PSObject layer down.
+		object? rawYamlValue = entryPsObject.Properties["RawYaml"]?.Value;
+		string? rawYaml = PowerShellValueUnwrap.UnwrapAs<string>(rawYamlValue);
+
+		Assert.True(
+			rawYaml is not null,
+			$"RawYaml did not surface as a string at the TryParseContentEntry-equivalent read; " +
+			$"raw property value runtime type was '{rawYamlValue?.GetType().FullName ?? "null"}' " +
+			"(a PSObject wrapper here reproduces #972's degradation point).");
+		Assert.Equal(expected, rawYaml);
+	}
+
+	/// <summary>
+	/// Issue #972 class-killing guard: round-trips one representative nested object
+	/// shape -- a multi-KB string with special characters, a string array (including a
+	/// null element), a nested [pscustomobject], and an explicit null property -- through
+	/// the REAL executor and asserts full fidelity on every branch. This is deliberately
+	/// broader than RawYaml alone: the same "SMA wraps a cmdlet's own output as it
+	/// crosses into a nested property" hazard applies to ANY nested string/array/object
+	/// value, not just RawYaml (see <c>DiscoverJobHandler</c>'s own prior "NoteProperties
+	/// stripped" scar) -- this test is what keeps the next occurrence of this class from
+	/// costing another live-lab validation round.
+	/// </summary>
+	[Fact]
+	public async Task NestedBoundaryShape_RoundTripsWithFullFidelity_ThroughTheRealExecutor()
+	{
+		string manifestPath = Path.Combine(AppContext.BaseDirectory, "Assets", "WaypointStubModule", "boundary-fixture-manifest.yml");
+		string expectedText = await File.ReadAllTextAsync(manifestPath);
+		string expectedFirstLine = expectedText.Split('\n')[0].TrimEnd('\r');
+
+		PowerShellExecutor executor = CreateExecutor();
+		PowerShellExecutionResult result = await executor.ExecuteAsync(
+			new PowerShellRequest("Get-StubBoundaryContractShape", Parameters: new Dictionary<string, object?> { ["ManifestPath"] = manifestPath }),
+			CancellationToken.None);
+
+		Assert.True(result.Succeeded, result.FailureReason);
+		System.Management.Automation.PSObject root = System.Management.Automation.PSObject.AsPSObject(Assert.Single(result.Output)!);
+		System.Management.Automation.PSObject topLevel = System.Management.Automation.PSObject.AsPSObject(
+			PowerShellValueUnwrap.Unwrap(root.Properties["TopLevel"]?.Value)!);
+
+		// Multi-KB string fidelity.
+		Assert.Equal(expectedText, PowerShellValueUnwrap.UnwrapAs<string>(topLevel.Properties["LargeText"]?.Value));
+
+		// Special-character string fidelity (quotes, spaces, unicode -- from the same
+		// fixture's first line).
+		Assert.Equal(expectedFirstLine, PowerShellValueUnwrap.UnwrapAs<string>(topLevel.Properties["SpecialText"]?.Value));
+
+		// Array fidelity, including a null element mid-array.
+		object?[] items = [.. PowerShellValueUnwrap.UnwrapEach(topLevel.Properties["StringArray"]?.Value)];
+		Assert.Equal(5, items.Length);
+		Assert.Equal("alpha", items[0] as string);
+		Assert.Equal("beta with spaces", items[1] as string);
+		Assert.Equal("gamma\"quote", items[2] as string);
+		Assert.Null(items[3]);
+		Assert.Equal("delta\\backslash", items[4] as string);
+
+		// Nested object fidelity: its own properties must still be reachable.
+		object? nestedValue = PowerShellValueUnwrap.Unwrap(topLevel.Properties["NestedObject"]?.Value);
+		Assert.NotNull(nestedValue);
+		System.Management.Automation.PSObject nested = System.Management.Automation.PSObject.AsPSObject(nestedValue!);
+		Assert.Equal("nested-value", PowerShellValueUnwrap.UnwrapAs<string>(nested.Properties["Inner"]?.Value));
+		Assert.Equal(42, System.Management.Automation.LanguagePrimitives.ConvertTo<int>(PowerShellValueUnwrap.Unwrap(nested.Properties["InnerNumber"]?.Value)));
+
+		// Explicit null fidelity: must read back as null, not an empty-string/wrapper artifact.
+		Assert.Null(PowerShellValueUnwrap.Unwrap(topLevel.Properties["NullValue"]?.Value));
 	}
 }
