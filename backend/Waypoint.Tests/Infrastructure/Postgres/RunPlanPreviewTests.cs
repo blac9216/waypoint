@@ -191,6 +191,58 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 		Assert.Equal(0L, await CountAsync(connection, "job_credential_bindings"));
 	}
 
+	/// <summary>
+	/// Issue #985's plan-preview proof: unlike every other test in this file (which
+	/// seeds <c>catalog_component_id</c> directly via <see cref="SeedCompatibleCatalogComponentAsync"/>'s
+	/// return value passed straight into <see cref="DiscoveredComponent"/>), this test
+	/// resolves the link through the REAL discovery-time linkage mechanism
+	/// (<see cref="Waypoint.Infrastructure.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync"/>)
+	/// from nothing but a catalog-key + exact-version fact, exactly as a live discovery
+	/// pass would -- documenting the full chain issue #985's own evidence named as
+	/// broken: discovered fact -&gt; resolved linkage -&gt; persisted catalog_component_id
+	/// -&gt; is_runnable=true through the unmodified capability matcher.
+	/// </summary>
+	[Fact]
+	public async Task Preview_WithComponentLinkedThroughRealDiscoveryLinkage_ReportsRunnable()
+	{
+		Guid siteId = await CreateSiteAsync("preview-real-linkage-site");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		Guid catalogComponentId = await SeedCompatibleCatalogComponentAsync();
+		Waypoint.Core.ComplianceContent.CatalogExecutionProfileDetail profileDetail =
+			(await new CatalogRepository(_fixture.ConnectionString).ListExecutionProfilesByComponentAsync(catalogComponentId, CancellationToken.None)).Single();
+		string seededVersionKey = profileDetail.ProductVersion.VersionKey;
+
+		// No CatalogComponentId supplied here -- only the fact a real discovery pass
+		// would report (catalog key + exact version). ResolveCatalogLinkageAsync must
+		// find the row SeedCompatibleCatalogComponentAsync just seeded on its own.
+		DiscoveredComponent discovered = new(
+			CatalogComponentKey: "esxi", VendorIdentity: "host-985-preview", DisplayName: "esxi-985-preview.example.internal",
+			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: seededVersionKey);
+
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> ambiguities) =
+			await Waypoint.Infrastructure.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync(
+				new CatalogRepository(_fixture.ConnectionString), [discovered], CancellationToken.None);
+		Assert.Empty(ambiguities);
+		Assert.Equal(catalogComponentId, linked.Single().CatalogComponentId);
+
+		await _components.UpsertDiscoveredAsync(targetId, linked, CancellationToken.None);
+		Component seeded = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None)).Single();
+		Assert.Equal(catalogComponentId, seeded.CatalogComponentId);
+
+		HttpResponseMessage response = await PreviewAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
+		});
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal([seeded.Id], body.RootElement.GetProperty("resolved_component_ids").EnumerateArray().Select(e => e.GetGuid()));
+		Assert.Empty(body.RootElement.GetProperty("scope_omissions").EnumerateArray());
+		Assert.True(body.RootElement.GetProperty("is_runnable").GetBoolean());
+	}
+
 	[Fact]
 	public async Task Preview_ThenCreate_WithIdenticalInputs_ProducesIdenticalDigest()
 	{

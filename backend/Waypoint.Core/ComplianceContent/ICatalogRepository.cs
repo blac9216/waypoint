@@ -77,6 +77,24 @@ public interface ICatalogRepository
 	Task<IReadOnlyList<CatalogComponent>> ListComponentsAsync(Guid productVersionId, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Issue #985: every top-level (<c>parent_component_id IS NULL</c>) catalog component
+	/// across ALL products whose own <see cref="CatalogComponent.ComponentKey"/> equals
+	/// <paramref name="catalogComponentKey"/> and whose product version's
+	/// <see cref="CatalogProductVersion.VersionKey"/> equals <paramref name="exactVersion"/>
+	/// byte-for-byte (ADR-0022: exact match only, never a range or nearest-version
+	/// fallback). Discovery supplies only a component key and an exact fact -- never a
+	/// product -- so this is a cross-product lookup by design; a caller resolving
+	/// discovery-time linkage treats more than one result as ambiguous and fails closed
+	/// (stays unlinked) rather than guessing which product the fact belongs to. Restricted
+	/// to top-level components because discovery never materializes a component beneath
+	/// another catalog-declared component today (<see cref="Waypoint.Core.Components.DiscoveredComponent"/>'s
+	/// only two non-root keys are <c>esxi</c>/<c>vm</c>, both top-level in every seeded
+	/// product version).
+	/// </summary>
+	Task<IReadOnlyList<CatalogComponent>> FindTopLevelComponentsByKeyAndVersionAsync(
+		string catalogComponentKey, string exactVersion, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Every execution profile for one component, fully joined for planner/UI
 	/// consumption. Multiple rows mean multiple content releases target the same
 	/// component (issue #728 AC "multi-release components").

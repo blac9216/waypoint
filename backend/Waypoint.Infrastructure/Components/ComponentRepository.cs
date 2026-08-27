@@ -131,6 +131,15 @@ public sealed class ComponentRepository : IComponentRepository
 			//     COALESCE-sentinel partial unique index -- ON CONFLICT names the exact
 			//     indexed expression list plus a matching WHERE predicate, required for
 			//     Postgres to bind ON CONFLICT to a partial index.
+			//
+			// Issue #985: catalog_component_id is deliberately NOT COALESCE-preserved
+			// like discovered_fact/display_name above -- DiscoverJobHandler now
+			// re-resolves catalog linkage from scratch every discovery pass and always
+			// supplies its current answer (a real id, or null when unlinked/ambiguous
+			// this pass), so a straight EXCLUDED assignment is required: a version
+			// change that newly fails to link (or that now resolves to a different
+			// catalog component) must overwrite a stale id rather than have COALESCE
+			// preserve it forever once first set.
 			Guid rowId;
 			bool wasReconnect;
 			if (item.VendorIdentity is not null)
@@ -145,7 +154,7 @@ public sealed class ComponentRepository : IComponentRepository
 					                         vendor_identity, display_name, lifecycle, discovered_fact, last_seen_at)
 					VALUES ($1, $2, $3, $4, $5, $6, 'active', $7::jsonb, now())
 					ON CONFLICT (parent_target_id, catalog_component_key, vendor_identity) DO UPDATE SET
-					    catalog_component_id = COALESCE(EXCLUDED.catalog_component_id, components.catalog_component_id),
+					    catalog_component_id = EXCLUDED.catalog_component_id,
 					    display_name = EXCLUDED.display_name,
 					    lifecycle = 'active',
 					    discovered_fact = COALESCE(EXCLUDED.discovered_fact, components.discovered_fact),
@@ -187,7 +196,7 @@ public sealed class ComponentRepository : IComponentRepository
 					ON CONFLICT (parent_target_id, COALESCE(parent_component_id, '00000000-0000-0000-0000-000000000000'::uuid), catalog_component_key)
 					    WHERE vendor_identity IS NULL
 					    DO UPDATE SET
-					        catalog_component_id = COALESCE(EXCLUDED.catalog_component_id, components.catalog_component_id),
+					        catalog_component_id = EXCLUDED.catalog_component_id,
 					        display_name = EXCLUDED.display_name,
 					        lifecycle = 'active',
 					        discovered_fact = COALESCE(EXCLUDED.discovered_fact, components.discovered_fact),

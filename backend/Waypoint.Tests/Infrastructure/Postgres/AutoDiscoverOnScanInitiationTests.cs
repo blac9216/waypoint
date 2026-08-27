@@ -225,9 +225,10 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		CredentialSecretStore secretStore = new(_fixture.ConnectionString, cipher, _redactor, NullLogger<CredentialSecretStore>.Instance);
 		InventoryRepository inventory = new(_fixture.ConnectionString);
 		ComponentRepository components = new(_fixture.ConnectionString);
+		Waypoint.Infrastructure.ComplianceContent.CatalogRepository discoverCatalog = new(_fixture.ConnectionString);
 
 		_discoverHandler = new DiscoverJobHandler(
-			executor, secretStore, credentials, _targets, inventory, components, _repository, _redactor, wrappedPsOptions);
+			executor, secretStore, credentials, _targets, inventory, components, discoverCatalog, _repository, _redactor, wrappedPsOptions);
 
 		Waypoint.Core.Scans.ScanOptions scanOptions = new()
 		{

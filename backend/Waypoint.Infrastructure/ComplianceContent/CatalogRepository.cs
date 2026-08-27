@@ -376,6 +376,34 @@ public sealed class CatalogRepository : ICatalogRepository
 		return components;
 	}
 
+	public async Task<IReadOnlyList<CatalogComponent>> FindTopLevelComponentsByKeyAndVersionAsync(
+		string catalogComponentKey, string exactVersion, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(catalogComponentKey);
+		ArgumentException.ThrowIfNullOrWhiteSpace(exactVersion);
+
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT cc.id, cc.product_version_id, cc.parent_component_id, cc.component_key, cc.display_name, cc.transport, cc.selector_kind, cc.selector_name, cc.created_at
+			FROM catalog_components cc
+			JOIN catalog_product_versions pv ON pv.id = cc.product_version_id
+			WHERE cc.parent_component_id IS NULL AND cc.component_key = $1 AND pv.version_key = $2
+			ORDER BY cc.id
+			""", connection);
+		command.Parameters.AddWithValue(catalogComponentKey);
+		command.Parameters.AddWithValue(exactVersion);
+
+		List<CatalogComponent> components = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			components.Add(MapComponent(reader, 0));
+		}
+
+		return components;
+	}
+
 	public async Task<IReadOnlyList<CatalogExecutionProfileDetail>> ListExecutionProfilesByComponentAsync(Guid componentId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);

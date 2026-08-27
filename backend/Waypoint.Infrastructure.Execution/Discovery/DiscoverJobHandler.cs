@@ -15,6 +15,7 @@
 using System.Linq;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Components;
 using Waypoint.Core.Discovery;
 using Waypoint.Core.Jobs;
@@ -57,6 +58,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 	private readonly TargetRepository _targets;
 	private readonly InventoryRepository _inventory;
 	private readonly IComponentRepository _components;
+	private readonly ICatalogRepository _catalog;
 	private readonly IJobRunnerRepository _jobs;
 	private readonly ISecretRedactor _redactor;
 	private readonly IOptions<PowerShellOptions> _powerShellOptions;
@@ -68,6 +70,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 		TargetRepository targets,
 		InventoryRepository inventory,
 		IComponentRepository components,
+		ICatalogRepository catalog,
 		IJobRunnerRepository jobs,
 		ISecretRedactor redactor,
 		IOptions<PowerShellOptions> powerShellOptions)
@@ -78,6 +81,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(targets);
 		ArgumentNullException.ThrowIfNull(inventory);
 		ArgumentNullException.ThrowIfNull(components);
+		ArgumentNullException.ThrowIfNull(catalog);
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(redactor);
 		ArgumentNullException.ThrowIfNull(powerShellOptions);
@@ -88,6 +92,7 @@ public sealed class DiscoverJobHandler : IJobHandler
 		_targets = targets;
 		_inventory = inventory;
 		_components = components;
+		_catalog = catalog;
 		_jobs = jobs;
 		_redactor = redactor;
 		_powerShellOptions = powerShellOptions;
@@ -284,8 +289,33 @@ public sealed class DiscoverJobHandler : IJobHandler
 		// upserts the components it DID see, but neither repository call above/below
 		// advances absence for anything it didn't.
 		IReadOnlyList<DiscoveredComponent> componentItems = MapToComponents(items);
+
+		// Issue #985: the linkage pass MapToComponents' own doc comment said no
+		// discovery-job code path performed -- resolves each mapped component's
+		// CatalogComponentId from its (catalog_component_key, exact_version) fact
+		// against the catalog, re-evaluated every discovery pass so a version change
+		// re-links (or honestly unlinks) rather than keeping a stale id (see
+		// ResolveCatalogLinkageAsync's own doc comment for the exact-match/ambiguity
+		// rules -- ADR-0022 never guesses).
+		(IReadOnlyList<DiscoveredComponent> linkedComponentItems, IReadOnlyList<string> linkageAmbiguities) =
+			await ResolveCatalogLinkageAsync(_catalog, componentItems, cancellationToken).ConfigureAwait(false);
+
 		ComponentUpsertOutcome componentOutcome = await _components
-			.UpsertDiscoveredAsync(targetId, componentItems, cancellationToken, advanceAbsence).ConfigureAwait(false);
+			.UpsertDiscoveredAsync(targetId, linkedComponentItems, cancellationToken, advanceAbsence).ConfigureAwait(false);
+
+		if (linkageAmbiguities.Count > 0)
+		{
+			// Same job.log severity idiom issue #865 uses for a partial-enumeration
+			// warning (PowerShellExecutor.Emit) -- an ambiguous catalog match is not a
+			// job failure (ADR-0022: stay unlinked, never guess), but it IS an
+			// actionable condition an operator should see against this job's history,
+			// not just a silent null in the components table.
+			string ambiguitySummary = string.Join("; ", linkageAmbiguities);
+			string ambiguityPayload = JsonSerializer.Serialize(new { severity = "warning", line = $"discover: catalog linkage ambiguous for one or more components -- left unlinked. {ambiguitySummary}" });
+			await context.Events
+				.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, ambiguityPayload, cancellationToken)
+				.ConfigureAwait(false);
+		}
 
 		string progressPayload = JsonSerializer.Serialize(new
 		{
@@ -462,6 +492,105 @@ public sealed class DiscoverJobHandler : IJobHandler
 		}
 
 		return components;
+	}
+
+	/// <summary>
+	/// Issue #985: the missing linkage step <see cref="MapToComponents"/>'s own doc
+	/// comment named as absent. Resolves each mapped component's
+	/// <see cref="DiscoveredComponent.CatalogComponentId"/> from the fact
+	/// <see cref="MapToComponents"/> already computed -- <see cref="DiscoveredComponent.CatalogComponentKey"/>
+	/// plus <see cref="DiscoveredComponent.ExactVersion"/> -- against
+	/// <see cref="ICatalogRepository.FindTopLevelComponentsByKeyAndVersionAsync"/>.
+	///
+	/// Design (stated for the reviewer, docs read before writing this):
+	/// <list type="bullet">
+	/// <item>Runs HERE, at discovery-map time, immediately before the upsert -- not as a
+	/// separate post-upsert pass and not deferred into <see cref="Waypoint.Core.Components.ComponentCapabilityMatcher"/>.
+	/// The matcher's own doc comment states it is "intentionally domain logic with no
+	/// I/O" and stays trivially unit-testable without a database; adding a catalog
+	/// lookup there would break that invariant. A separate post-upsert pass would mean
+	/// a discovery boundary that fails between upsert and linkage leaves components
+	/// durably unlinked with no self-healing signal -- doing it inline keeps "discover
+	/// a fact" and "link it" one atomic unit of work from the caller's perspective, and
+	/// matches how <see cref="Waypoint.Core.Discovery.DiscoveredInventoryItem"/>'s own
+	/// facts (Build/Version) are resolved in the same mapping pass.</item>
+	/// <item>Exact match only (ADR-0022 "no ranges, no nearest-version fallback"): a
+	/// component with no <see cref="DiscoveredComponent.ExactVersion"/> (unavailable
+	/// this pass) is never looked up at all -- it stays unlinked with no ambiguity
+	/// entry, the same fail-closed shape one layer up in
+	/// <see cref="Waypoint.Core.Components.ComponentCapabilityMatcher"/> ("no configured
+	/// or discovered exact product version").</item>
+	/// <item>No activated-baseline requirement: <see cref="Waypoint.Infrastructure.Runs.ScopeResolutionService"/>
+	/// (this linkage's only real consumer today) reads <c>catalog_component_id</c>
+	/// straight into <see cref="ICatalogRepository.ListExecutionProfilesByComponentAsync"/>
+	/// with no baseline-activation gate anywhere in that path -- the execution-profile
+	/// -presence check the matcher already performs ("content may not yet be staged or
+	/// activated") is the documented downstream gate for "seeded but not yet
+	/// activated" catalog rows, not this linkage. This linkage only needs a seeded
+	/// <c>catalog_components</c> row to exist; it does not check
+	/// <c>catalog_execution_profiles</c>/baseline state at all. Flagged for the
+	/// reviewer as the one place the domain docs (ADR-0022/ADR-0023, domain-model.md)
+	/// do not explicitly spell out "linkage requires X" -- this choice follows the
+	/// existing consumer rather than widening or narrowing it independently.</item>
+	/// <item>Ambiguous (more than one catalog component sharing the same component_key
+	/// + exact version across different products -- structurally possible since
+	/// discovery supplies no product) fails closed: stays unlinked
+	/// (<c>CatalogComponentId: null</c>) with an honest per-component reason surfaced
+	/// via <see cref="JobEventTypes.JobLog"/> (ADR-0022 "never guesses a winner"),
+	/// never an arbitrary "first match wins."</item>
+	/// </list>
+	/// </summary>
+	internal static async Task<(IReadOnlyList<DiscoveredComponent> Items, IReadOnlyList<string> Ambiguities)> ResolveCatalogLinkageAsync(
+		ICatalogRepository catalog, IReadOnlyList<DiscoveredComponent> items, CancellationToken cancellationToken)
+	{
+		List<DiscoveredComponent> resolved = [];
+		List<string> ambiguities = [];
+
+		foreach (DiscoveredComponent item in items)
+		{
+			if (item.ExactVersion is null)
+			{
+				// No exact fact this pass (unavailable, or a component kind -- e.g. the
+				// synthetic vcenter root, or a VM -- that never carries one): stays
+				// unlinked, no lookup attempted, no ambiguity to report. A null here
+				// still overwrites any prior link on upsert (see ComponentRepository's
+				// #985 note) -- this is not itself a stale link, it is this pass's
+				// honest re-evaluation.
+				resolved.Add(item with { CatalogComponentId = null });
+				continue;
+			}
+
+			IReadOnlyList<Waypoint.Core.ComplianceContent.CatalogComponent> candidates = await catalog
+				.FindTopLevelComponentsByKeyAndVersionAsync(item.CatalogComponentKey, item.ExactVersion, cancellationToken)
+				.ConfigureAwait(false);
+
+			if (candidates.Count == 1)
+			{
+				resolved.Add(item with { CatalogComponentId = candidates[0].Id });
+			}
+			else if (candidates.Count == 0)
+			{
+				// Honest "no catalog coverage" -- not an error, just unlinked (ADR-0022:
+				// never substitute a nearest baseline). ComponentCapabilityMatcher
+				// reports its own "not linked to a known catalog component" reason
+				// downstream; no separate log entry needed for the common no-match case.
+				resolved.Add(item with { CatalogComponentId = null });
+			}
+			else
+			{
+				// Ambiguous: more than one product's catalog component shares this exact
+				// (component_key, version) pair. Never guess a winner (ADR-0022) --
+				// stays unlinked, but this IS surfaced (unlike the honest zero-match
+				// case above) because it signals a catalog data condition an operator
+				// or catalog author should investigate, not a routine "not yet covered."
+				resolved.Add(item with { CatalogComponentId = null });
+				ambiguities.Add(
+					$"component key '{item.CatalogComponentKey}' version '{item.ExactVersion}' matched {candidates.Count} catalog components " +
+					$"across different products ({string.Join(", ", candidates.Select(c => c.Id))}); left unlinked rather than guessing.");
+			}
+		}
+
+		return (resolved, ambiguities);
 	}
 
 	/// <summary>

@@ -280,6 +280,12 @@ public sealed class ContentPullJobHandlerTests
 		public Task<IReadOnlyList<CatalogComponent>> ListComponentsAsync(Guid productVersionId, CancellationToken cancellationToken) =>
 			Task.FromResult<IReadOnlyList<CatalogComponent>>([.. _components.Values.Where(c => c.ProductVersionId == productVersionId)]);
 
+		public Task<IReadOnlyList<CatalogComponent>> FindTopLevelComponentsByKeyAndVersionAsync(string catalogComponentKey, string exactVersion, CancellationToken cancellationToken) =>
+			Task.FromResult<IReadOnlyList<CatalogComponent>>([.. _components.Values.Where(c =>
+				c.ParentComponentId is null &&
+				c.ComponentKey == catalogComponentKey &&
+				_productVersions.Values.Any(v => v.Id == c.ProductVersionId && v.VersionKey == exactVersion))]);
+
 		public Task<IReadOnlyList<CatalogExecutionProfileDetail>> ListExecutionProfilesByComponentAsync(Guid componentId, CancellationToken cancellationToken) =>
 			throw new NotSupportedException();
 
