@@ -26,6 +26,20 @@ set -eu
 
 umask 077
 
+# Force the C locale for the whole script. urlencode() below walks a string
+# one shell "character" at a time via `${_rest#?}` -- in this shell (busybox
+# ash), `?` in a glob/parameter-expansion pattern is locale-aware and matches
+# a whole multi-byte character under a UTF-8 locale, while `printf '%%%02X'
+# "'$_ch"` is POSIX-defined to yield only the numeric value of the first BYTE
+# of its argument. Under a UTF-8 locale those two disagree for any non-ASCII
+# character: `${_rest#?}` consumes all of its bytes but printf only encodes
+# the first one, silently dropping the rest (issue #890). Under LC_ALL=C,
+# `?` matches exactly one byte, so the two agree and every byte round-trips.
+# This has no other effect here -- curl/jq do their own encoding/decoding
+# independent of the shell's locale.
+LC_ALL=C
+export LC_ALL
+
 KC_BASE="${WAYPOINT_KEYCLOAK_INTERNAL_URL:-http://keycloak:8080/auth}"
 REALM="${WAYPOINT_DEV_ADMIN_REALM:-waypoint}"
 GROUP_NAME="${WAYPOINT_DEV_ADMIN_GROUP:-Admin}"
@@ -37,7 +51,20 @@ DEV_USERNAME="${WAYPOINT_DEV_ADMIN_USERNAME:-developer}"
 # profile-completion form), which would break the direct-login acceptance
 # criterion. Placeholder domain only (RFC 2606-style, matching this repo's
 # own sanitization convention) -- never a real address.
-DEV_EMAIL="${WAYPOINT_DEV_ADMIN_EMAIL:-developer@waypoint.example.internal}"
+#
+# The default is DERIVED from DEV_USERNAME rather than a fixed literal
+# (issue #890, case 2): this script's whole design is "reconcile every field
+# on every run so re-running never duplicates anything and always restores
+# drift" (see file header). An operator-driven username rename is exactly
+# that kind of drift, and a default email tied to the OLD username would
+# make the reconcile-on-every-run guarantee false for the one field that
+# happens to double as Keycloak's uniqueness key -- the create call would
+# collide with the still-present old user on a stale email instead of
+# provisioning the renamed one. Deriving the default keeps rename
+# idempotent with zero operator action, matching every other field's
+# behavior. An operator who sets WAYPOINT_DEV_ADMIN_EMAIL explicitly is
+# unaffected -- that value always wins over this default.
+DEV_EMAIL="${WAYPOINT_DEV_ADMIN_EMAIL:-${DEV_USERNAME}@waypoint.example.internal}"
 # Same reason as DEV_EMAIL above -- the default user profile also requires
 # firstName/lastName (live-verified: email alone was NOT sufficient, login
 # still redirected to VERIFY_PROFILE until these two were set as well).
@@ -209,6 +236,14 @@ if [ -z "$USER_ID" ]; then
 	CREATE_STATUS="$(printf '%s' "$CREATE_RESP" | response_status)"
 	if [ "$CREATE_STATUS" != "201" ] && [ "$CREATE_STATUS" != "204" ]; then
 		echo "waypoint-keycloak-dev-admin: user creation failed (HTTP $CREATE_STATUS)" >&2
+		if [ "$CREATE_STATUS" = "409" ]; then
+			# The default DEV_EMAIL now tracks DEV_USERNAME (see its
+			# derivation above), so this should only fire when an operator
+			# has set WAYPOINT_DEV_ADMIN_EMAIL explicitly to a value that
+			# collides with an existing user -- name it rather than leaving
+			# the operator to guess.
+			echo "waypoint-keycloak-dev-admin: most likely cause: another user in realm '$REALM' already holds email '$DEV_EMAIL'. Keycloak enforces email uniqueness; set WAYPOINT_DEV_ADMIN_EMAIL to a value not already in use, or remove the conflicting user." >&2
+		fi
 		exit 1
 	fi
 	FIND_RESP="$(admin_api GET "/realms/$REALM/users?username=$(urlencode "$DEV_USERNAME")&exact=true")"
