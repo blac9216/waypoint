@@ -462,6 +462,39 @@ Broadcom accepted the code. A nonzero exit is classified honestly: only genuine
 credential-rejection signals mark `auth_failing`; unreachable/unresolvable/refused/
 timed-out connectivity is a **network** failure, never `auth_failing`.
 
+## Live integration testing: the `*.local.md` convention
+
+The live-lab validation pass described above needs facts this public repository can
+never carry — where the operator keeps the real tool distributions, which catalog
+snapshot to use, how to reach real scan targets, and which credentials channel to
+go through. Those facts live in **untracked local docs**:
+
+- **Any `*.local.md` file is gitignored** (at every depth — see `.gitignore`). A
+  `*.local.md` holds machine- or lab-specific instructions and data that must never
+  be committed: real filesystem paths, tool locations, inventory pointers,
+  environment quirks. It is authored directly on the operator's machine and stays
+  there. Never commit one, never paste its contents into an issue, PR, commit
+  message, or log — the sanitization policy in `AGENTS.md` applies to its
+  *contents* wherever they might travel, even though the file itself is ignored.
+- **`docs/testing.local.md` is the entry point for testing the actual code against
+  the real tools.** If you are asked to run integration testing beyond the CI
+  stubs, read it first. It provides: the credentials channel for real targets (a
+  secrets-injection mechanism — credentials are never read or printed), the
+  location of the operator-provided tool distributions and the previously
+  downloaded catalog, where the real compliance content comes from, and the
+  standing authorization boundaries for the lab.
+- **If `docs/testing.local.md` does not exist on your machine**, you are not on a
+  provisioned lab machine: live integration testing is out of reach, and that is a
+  `## Verification limits` disclosure, not something to work around. Do not invent
+  paths or credentials; ask the operator.
+
+One boundary is policy rather than lab data, so it is stated here too and repeated
+in the local file: **read-only operations (downloads, catalog pulls, scans) are
+authorized; remediation against real targets is never run by an agent without the
+operator's explicit, per-occasion approval.** This mirrors the product's own rule
+(`AGENTS.md`: scans are schedulable, remediation always requires explicit human
+confirmation) — the lab is held to the same standard as the appliance.
+
 ## Honest verification
 
 Two standing rules for anything you claim in a PR body or review:
