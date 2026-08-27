@@ -105,7 +105,7 @@ describe("fetchJobEventHistory", () => {
 });
 
 describe("fetchAllJobEventHistory", () => {
-	it("follows next_cursor across pages until it goes null", async () => {
+	it("follows next_cursor across pages until it goes null, reporting truncated: false", async () => {
 		const pages = [
 			{ items: [{ seq: 1, ts: "t1", type: "job.log", run_id: "run-1", job_id: "j-1", data: {} }], next_cursor: "v1:p2" },
 			{ items: [{ seq: 2, ts: "t2", type: "job.log", run_id: "run-1", job_id: "j-1", data: {} }], next_cursor: "v1:p3" },
@@ -115,10 +115,12 @@ describe("fetchAllJobEventHistory", () => {
 		const fetchMock = vi.fn(async (..._args: FetchArgs) => jsonResponse(pages[call++]));
 		globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-		const events = await fetchAllJobEventHistory("run-1");
+		const result = await fetchAllJobEventHistory("run-1");
 
 		expect(fetchMock).toHaveBeenCalledTimes(3);
-		expect(events.map((e) => e.seq)).toEqual([1, 2, 3]);
+		expect(result.events.map((e) => e.seq)).toEqual([1, 2, 3]);
+		expect(result.truncated).toBe(false);
+		expect(result.nextCursor).toBeNull();
 		// Second call's cursor param must be the first page's opaque next_cursor, verbatim.
 		const secondCallUrl = new URL(fetchMock.mock.calls[1][0] as string, "http://localhost");
 		expect(secondCallUrl.searchParams.get("cursor")).toBe("v1:p2");
@@ -126,15 +128,17 @@ describe("fetchAllJobEventHistory", () => {
 		expect(thirdCallUrl.searchParams.get("cursor")).toBe("v1:p3");
 	});
 
-	it("stops paging once stopAfter is reached even if next_cursor is still non-null", async () => {
+	it("stops paging once stopAfter is reached and reports truncated: true with the resume cursor, even though next_cursor is still non-null", async () => {
 		const fetchMock = vi.fn(async (..._args: FetchArgs) =>
 			jsonResponse({ items: [{ seq: 1, ts: "t", type: "job.log", run_id: "run-1", job_id: "j-1", data: {} }], next_cursor: "v1:more" }),
 		);
 		globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-		const events = await fetchAllJobEventHistory("run-1", {}, 2);
+		const result = await fetchAllJobEventHistory("run-1", {}, 2);
 
-		expect(events).toHaveLength(2);
+		expect(result.events).toHaveLength(2);
+		expect(result.truncated).toBe(true);
+		expect(result.nextCursor).toBe("v1:more");
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 
@@ -144,9 +148,28 @@ describe("fetchAllJobEventHistory", () => {
 		);
 		globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-		const events = await fetchAllJobEventHistory("run-1");
+		const result = await fetchAllJobEventHistory("run-1");
 
-		expect(events).toHaveLength(1);
+		expect(result.events).toHaveLength(1);
+		expect(result.truncated).toBe(false);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("resumes from an explicit resumeCursor without re-fetching earlier pages (the #721 continuation contract)", async () => {
+		const pages = [
+			{ items: [{ seq: 11, ts: "t11", type: "job.log", run_id: "run-1", job_id: "j-1", data: {} }], next_cursor: "v1:p12" },
+			{ items: [{ seq: 12, ts: "t12", type: "job.log", run_id: "run-1", job_id: "j-1", data: {} }], next_cursor: null },
+		];
+		let call = 0;
+		const fetchMock = vi.fn(async (..._args: FetchArgs) => jsonResponse(pages[call++]));
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+		const result = await fetchAllJobEventHistory("run-1", {}, 1000, "v1:p11");
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		const firstCallUrl = new URL(fetchMock.mock.calls[0][0] as string, "http://localhost");
+		expect(firstCallUrl.searchParams.get("cursor")).toBe("v1:p11");
+		expect(result.events.map((e) => e.seq)).toEqual([11, 12]);
+		expect(result.truncated).toBe(false);
 	});
 });

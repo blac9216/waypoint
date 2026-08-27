@@ -131,30 +131,52 @@ export async function fetchJobEventHistory(runId: string, query: JobEventHistory
 	};
 }
 
+export interface AllJobEventHistoryResult {
+	events: WaypointEvent[];
+	/** Opaque; pass verbatim as the next `fetchAllJobEventHistory` call's `resumeCursor` to fetch the remainder. Null once history is exhausted. */
+	nextCursor: string | null;
+	/**
+	 * True when this call stopped short of the end of history because
+	 * `stopAfter` was reached, NOT because the server ran out of pages.
+	 * Callers (issue #721) must treat `truncated: true` as an honest
+	 * "more exists" signal — never render it as a complete history. Always
+	 * `false` when `nextCursor` is null.
+	 */
+	truncated: boolean;
+}
+
 /**
- * Pages through the ENTIRE history for `runId` (or until `stopAfter` events
- * have been collected), following `next_cursor` until it goes null. Used by
- * the workspace's historical log view for a selected terminal job, where
- * "give me what happened" is more useful than manual "load more" clicking
- * for a bounded per-run event volume (PR #684: "a run's event volume is
- * bounded by its own job count and log verbosity, not the whole table").
- * `stopAfter` is a client-side safety bound, not a server contract — it
- * simply stops requesting further pages once reached.
+ * Pages through history for `runId` starting at `resumeCursor` (or the
+ * beginning, if omitted), stopping after collecting `stopAfter` events OR
+ * reaching the end of history, whichever comes first. Used by the
+ * workspace's historical log view for a selected terminal job.
+ *
+ * `stopAfter` bounds a single call's browser-memory/request cost for scale
+ * (epic #726 §7: the design must support tens of thousands of job events
+ * without loading all rows into browser memory) — it is a batch-size
+ * control, not an end-of-history signal. Unlike the pre-#721 behavior, a
+ * bound that stops mid-history is reported via `truncated: true` +
+ * `nextCursor`, so callers can offer an honest "load more" continuation
+ * instead of silently presenting a prefix as the whole history (issue
+ * #721).
  */
 export async function fetchAllJobEventHistory(
 	runId: string,
 	query: Omit<JobEventHistoryQuery, "cursor"> = {},
-	stopAfter = 5000,
-): Promise<WaypointEvent[]> {
-	const all: WaypointEvent[] = [];
-	let cursor: string | undefined;
+	stopAfter = 1000,
+	resumeCursor?: string,
+): Promise<AllJobEventHistoryResult> {
+	const events: WaypointEvent[] = [];
+	let cursor = resumeCursor;
 	for (;;) {
 		const page = await fetchJobEventHistory(runId, { ...query, cursor });
-		all.push(...page.items);
-		if (!page.nextCursor || all.length >= stopAfter) {
-			break;
+		events.push(...page.items);
+		if (!page.nextCursor) {
+			return { events, nextCursor: null, truncated: false };
+		}
+		if (events.length >= stopAfter) {
+			return { events, nextCursor: page.nextCursor, truncated: true };
 		}
 		cursor = page.nextCursor;
 	}
-	return all;
 }
