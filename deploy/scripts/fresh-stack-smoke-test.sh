@@ -521,7 +521,7 @@ fi
 
 # --- 10. SSE stream reconnect/replay --------------------------------------
 
-log "10. SSE stream basic connectivity (proxy_buffering off proof lives in deploy/README.md; this checks the route answers with events content-type live)"
+log "10. SSE stream basic connectivity (proxy_buffering off lives in nginx/conf.d/default.conf; this checks the route answers with events content-type live)"
 if [[ -n "${ADMIN_TOKEN}" ]]; then
 	SSE_HEADERS="$(net_curl -D - -o /dev/null --max-time 3 -H "Authorization: Bearer ${ADMIN_TOKEN}" "${NET_BASE}/api/v1/events")"
 	if printf '%s' "${SSE_HEADERS}" | grep -qi "text/event-stream"; then

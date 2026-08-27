@@ -26,7 +26,8 @@ namespace Waypoint.Core.Configuration;
 /// this class. This section survives only as an explicit, off-by-default escape
 /// hatch (<see cref="Enabled"/>) for environments with no Keycloak available: the
 /// Playwright e2e suite and <c>deploy/scripts/fresh-stack-smoke-test.sh</c> both log
-/// in this way today (see <c>deploy/README.md</c> "Local auth (dev-flag)"). Nothing
+/// in this way today (see <c>deploy/compose.override.example.yaml</c>'s
+/// <c>LocalAuth__*</c> block). Nothing
 /// outside the auth layer should read these values directly.
 /// </summary>
 public sealed class LocalAuthOptions
@@ -70,7 +71,8 @@ public sealed class LocalAuthOptions
 	/// trailing newline is tolerated and trimmed). Set via the
 	/// <c>LocalAuth__AdminPasswordHashFile</c> environment variable (or
 	/// <c>LocalAuth:AdminPasswordHashFile</c> in configuration) to the operator-mounted
-	/// path — see <c>deploy/compose.yaml</c> and <c>deploy/README.md</c> "Bring-up".
+	/// path — see <c>deploy/compose.yaml</c> and
+	/// <c>deploy/compose.override.example.yaml</c>.
 	/// This is the preferred delivery mechanism (issue #333); when set and the file
 	/// exists, it takes precedence over <see cref="AdminPasswordHash"/> as read directly
 	/// from configuration/env.

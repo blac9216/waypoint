@@ -21,8 +21,7 @@ deploy/config.example/
 │   ├── postgres-keycloak-password
 │   ├── keycloak-bootstrap-admin-password
 │   ├── keycloak-backend-client-secret
-│   ├── dev-admin-password              # dev-only Keycloak user
-│   └── waypoint-master-key             # OPERATOR-PROVIDED, production only
+│   └── dev-admin-password              # dev-only Keycloak user
 ├── tls/
 │   └── tls.crt                         # operator-provided, production only
 └── local-auth/
@@ -36,11 +35,14 @@ exactly the kind of file that stays out even as an invented placeholder, and
 the repo's sanitize scanner refuses to certify any `.key` file clean for the
 same reason. Real deployments place their own key alongside `tls.crt`.
 
-The master key is the one entry no generator writes into
-`deploy/config/secrets/` — it's operator-supplied material for production
-only. Both dev paths (`--mode agent`, `--mode persistent`) provision their
-own master key automatically elsewhere (see `deploy/README.md`'s
-secrets/config-layout table).
+`secrets/waypoint-master-key` is deliberately absent from the tree above:
+it's the one entry no generator writes into `deploy/config/secrets/` —
+operator-supplied material for production only, and the mount that carries
+it into the three trusted services is the operator's own
+`compose.override.yaml`. Both dev paths (`--mode agent`, `--mode
+persistent`) provision their own master key automatically elsewhere. See
+`deploy/README.md` "Production only: secrets master key" for the create +
+mount + restart procedure.
 
 Real generation:
 

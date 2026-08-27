@@ -253,20 +253,23 @@ Refs: #579, #613
 
 ### compose-runner-egress-topology
 
-Both runners previously sat only on `internal` (no route out), so neither
-could reach anything outside the compose stack. `runner-egress` is a
-second, non-`internal:` bridge network that gives both a route out while
+Both runners previously sat only on `internal` (no route out). `runner-egress`
+is a second, non-`internal:` bridge network giving both a route out while
 `postgres` stays on `internal` alone — neither runner's new network reaches
-Postgres. An operator running disconnected can detach download-runner from
-it in their own override.
+Postgres. Detaching download-runner in an override needs Compose's
+`networks: !override [internal]` tag; a plain `networks: [internal]`
+union-merges and silently leaves `runner-egress` attached.
 
 Refs: #578
 
 ### compose-replica-scaling
 
 One replica of each runner is the default; ADR-0013 decision 6 deliberately
-does not multiply services without measured need. See deploy/README.md's
-var-reference table before setting `deploy.replicas` > 1 on either runner.
+does not multiply services without measured need. Scaling is safe by
+construction — each replica claims jobs from Postgres under the same
+skip-locked contract, so `--scale compliance-runner=2` cannot double-run a
+job — but N replicas compete for one host's CPU/memory, which is the real
+reason to measure before raising `deploy.replicas`.
 
 Refs: ADR-0013 (decision 6)
 

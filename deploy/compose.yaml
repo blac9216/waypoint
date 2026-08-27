@@ -306,6 +306,7 @@ networks:
     driver: bridge
 
 # why: docs/rationale/deploy.md#compose-secrets-fail-closed
+# why: docs/rationale/deploy.md#compose-secrets-mode-0644-convention
 secrets:
   postgres-owner-password:
     file: ./config/secrets/postgres-owner-password

@@ -25,6 +25,7 @@ REALM="${WAYPOINT_DEV_ADMIN_REALM:-waypoint}"
 GROUP_NAME="${WAYPOINT_DEV_ADMIN_GROUP:-Admin}"
 DEV_USERNAME="${WAYPOINT_DEV_ADMIN_USERNAME:-developer}"
 # why: docs/rationale/deploy.md#kcdevadmin-verify-profile-requirement
+# why: docs/rationale/deploy.md#kcdevadmin-default-email-derivation
 case "$DEV_USERNAME" in
 *@*) DEFAULT_DEV_EMAIL="$DEV_USERNAME" ;;
 *) DEFAULT_DEV_EMAIL="${DEV_USERNAME}@waypoint.example.internal" ;;

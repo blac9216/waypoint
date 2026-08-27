@@ -101,6 +101,6 @@ public sealed partial class LocalAuthOptionsPostConfigure : IPostConfigureOption
 		Message = "LocalAuth:AdminPasswordHash is set via environment variable/inline configuration. " +
 			"This works but is deprecated: env vars leak via /proc/<pid>/environ, 'docker inspect', " +
 			"and crash dumps. Prefer LocalAuth:AdminPasswordHashFile (env LocalAuth__AdminPasswordHashFile) " +
-			"pointing at an operator-mounted file containing the hash. See deploy/README.md \"Bring-up\".")]
+			"pointing at an operator-mounted file containing the hash. See deploy/compose.override.example.yaml.")]
 	private partial void LogEnvVarDeprecated();
 }
