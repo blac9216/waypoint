@@ -125,6 +125,7 @@ public sealed class CatalogVocabularyValidatorTests
 	[InlineData("vcsa-ssh")]
 	[InlineData("nsx-api")]
 	[InlineData("srg-ssh")]
+	[InlineData("vcf-api")]
 	public void ValidateCredentialPurpose_KnownValues_NoErrors(string purpose)
 	{
 		Assert.Empty(CatalogVocabularyValidator.ValidateCredentialPurpose(purpose));

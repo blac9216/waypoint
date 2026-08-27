@@ -132,6 +132,16 @@ public class CredentialPurposeMatrixTests
 
 		foreach (string purpose in CredentialPurposes.All)
 		{
+			// Issue #977: VcfApi is catalog-only today (ADR-0024's resolved vcf-api
+			// credential purpose) -- no Waypoint.Core.Sites.TargetKinds value exists for
+			// the vcf-api transport yet, so this target-kind x operation matrix has no
+			// entry to reference it. It is exempted here, not added with a fabricated
+			// matrix row.
+			if (purpose == CredentialPurposes.VcfApi)
+			{
+				continue;
+			}
+
 			Assert.Contains(purpose, referencedPurposes);
 		}
 	}
@@ -141,10 +151,26 @@ public class CredentialPurposeMatrixTests
 	{
 		foreach (string purpose in CredentialPurposes.All)
 		{
+			// Issue #977: see the exemption note above -- VcfApi has no target kind and
+			// therefore no credential-type binding in this matrix yet.
+			if (purpose == CredentialPurposes.VcfApi)
+			{
+				continue;
+			}
+
 			Assert.True(
 				CredentialPurposeMatrix.SatisfyingCredentialTypes.TryGetValue(purpose, out IReadOnlyCollection<string>? types) && types.Count > 0,
 				$"Purpose '{purpose}' has no satisfying credential type(s) recorded.");
 		}
+	}
+
+	[Fact]
+	public void VcfApi_Is_A_Distinct_Purpose_From_Every_Other_Purpose()
+	{
+		// ADR-0024: "a distinct compatible purpose for catalog-declared vcf-api work" --
+		// mirrors VSphereApi_And_VcsaSsh_Are_Distinct_Purposes' headline shape for the
+		// new purpose issue #977 adds.
+		Assert.DoesNotContain(CredentialPurposes.VcfApi, new[] { CredentialPurposes.VSphereApi, CredentialPurposes.VcsaSsh, CredentialPurposes.NsxApi, CredentialPurposes.SrgSsh });
 	}
 
 	[Fact]
@@ -184,6 +210,7 @@ public class CredentialPurposeMatrixTests
 	[InlineData(CredentialPurposes.VcsaSsh)]
 	[InlineData(CredentialPurposes.NsxApi)]
 	[InlineData(CredentialPurposes.SrgSsh)]
+	[InlineData(CredentialPurposes.VcfApi)]
 	public void CredentialPurposes_IsValid_Accepts_Every_Closed_Set_Value(string purpose)
 	{
 		Assert.True(CredentialPurposes.IsValid(purpose));

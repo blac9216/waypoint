@@ -55,10 +55,13 @@ public static class CatalogDerivationMatrix
 			"Adding it is #729/#730 catalog-authority follow-up work, not this contract-test slice.",
 		["vcf-9-x-vcf-api"] =
 			"VCF 9-x vcf-api/named-service row (SDDC Manager application; Automation application): " +
-			"docs/compliance-parity.md itself states the vcf-api credential purpose is 'planned under " +
-			"#807' and PR #822's body confirms catalog_credential_requirements' CHECK constraint " +
-			"intentionally excludes vcf-api today. This row cannot derive a real credential-purpose " +
-			"tuple until that purpose is approved catalog vocabulary.",
+			"issue #977 resolved the vcf-api credential purpose into closed catalog vocabulary " +
+			"(ADR-0024) and seeded this row's identity tree (migration 0069). This TEST-ONLY " +
+			"catalog/importer-parity slice is still exempted for a separate reason: " +
+			"VendorHierarchyInterpreter's closed family table (PR #823) does not yet include a " +
+			"'vcf' family -- only vsphere/vcsa/nsx/photon/aria-*/vidm are recognized, so this " +
+			"contract-test slice cannot derive an on-disk-import-driven tuple for it. Adding the " +
+			"family is #729/#730 catalog-authority follow-up work.",
 	};
 
 	/// <summary>

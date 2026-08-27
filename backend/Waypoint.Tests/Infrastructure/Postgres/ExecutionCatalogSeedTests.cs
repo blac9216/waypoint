@@ -229,13 +229,15 @@ public sealed class ExecutionCatalogSeedExpansionTests
 	}
 
 	/// <summary>
-	/// Issue #967's deliberately-unseeded row: VCF 9-x `vcf-api` named-service
-	/// components (SDDC Manager application, Automation application) have no seed row
-	/// at all -- migration 0050's catalog_credential_requirements purpose CHECK
-	/// excludes 'vcf-api' pending issue #807.
+	/// Issue #977: the 13th (final) provenance-matrix row -- VCF 9-x `vcf-api`
+	/// named-service components (SDDC Manager application, Automation application) --
+	/// is now seeded by migration 0069, which also widened migration 0050's
+	/// catalog_credential_requirements_purpose_check CHECK to admit 'vcf-api'
+	/// (ADR-0024's resolved vcf-api credential purpose, #807 closed). Supersedes the
+	/// former <c>VcfApiNamedServiceRow_RemainsDeliberatelyUnseeded</c> test.
 	/// </summary>
 	[Fact]
-	public async Task VcfApiNamedServiceRow_RemainsDeliberatelyUnseeded()
+	public async Task VcfApiNamedServiceRow_IsNowSeeded()
 	{
 		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
 		await migrator.ApplyAsync();
@@ -245,17 +247,22 @@ public sealed class ExecutionCatalogSeedExpansionTests
 
 		await ReapplySeedMigrationsAsync(connection);
 
+		await AssertLinkableComponentAsync(connection, "vcf", "9.0.0", "sddc-manager-api", "vcf-api", "service");
+		await AssertLinkableComponentAsync(connection, "vcf", "9.0.0", "automation-api", "vcf-api", "service");
+
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT count(*)
-			FROM catalog_components cc
-			JOIN catalog_product_versions pv ON pv.id = cc.product_version_id
-			JOIN catalog_products p ON p.id = pv.product_id
-			WHERE p.product_key = 'vcf' AND cc.transport = 'vcf-api'
+			SELECT cr.purpose
+			FROM catalog_credential_requirements cr
+			JOIN catalog_execution_profiles ep ON ep.id = cr.execution_profile_id
+			JOIN catalog_components cc ON cc.id = ep.component_id
+			WHERE cc.transport = 'vcf-api' AND cc.component_key = 'sddc-manager-api'
 			""", connection);
-		long count = Convert.ToInt64(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		bool found = await reader.ReadAsync();
 
-		Assert.Equal(0, count);
+		Assert.True(found, "Expected a catalog_credential_requirements row for the seeded vcf-api component.");
+		Assert.Equal("vcf-api", reader.GetString(0));
 	}
 
 	[Fact]
@@ -269,7 +276,7 @@ public sealed class ExecutionCatalogSeedExpansionTests
 
 		await ReapplySeedMigrationsAsync(connection);
 		long before = await CountAsync(connection, "SELECT count(*) FROM catalog_execution_profiles");
-		Assert.True(before > 0, "Expected migrations 0064+0067 to have seeded at least one catalog_execution_profiles row.");
+		Assert.True(before > 0, "Expected migrations 0064+0067+0069 to have seeded at least one catalog_execution_profiles row.");
 
 		await ReapplySeedMigrationsAsync(connection);
 
@@ -278,15 +285,19 @@ public sealed class ExecutionCatalogSeedExpansionTests
 	}
 
 	/// <summary>
-	/// Re-applies 0064's AND 0067's embedded raw SQL directly, in migration order --
-	/// 0067 assumes 0064's catalog_report_groups/catalog_credential_requirements CHECK
-	/// vocabulary already exists (it does; both ship in this same schema), and re-runs
-	/// cleanly regardless of which migration a sibling Postgres-collection test's
-	/// TRUNCATE most recently invalidated.
+	/// Re-applies 0064's, 0067's, AND 0069's embedded raw SQL directly, in migration
+	/// order -- 0067/0069 assume 0064's catalog_report_groups/
+	/// catalog_credential_requirements CHECK vocabulary already exists (it does; all
+	/// three ship in this same schema), and re-run cleanly regardless of which
+	/// migration a sibling Postgres-collection test's TRUNCATE most recently
+	/// invalidated. 0069's ALTER TABLE statements are idempotent by construction (DROP
+	/// CONSTRAINT IF EXISTS, then unconditional ADD CONSTRAINT) -- every re-apply drops
+	/// whatever definition currently exists and re-adds the same widened one, matching
+	/// migration 0022's established idiom for this exact drop/re-create shape.
 	/// </summary>
 	private static async Task ReapplySeedMigrationsAsync(NpgsqlConnection connection)
 	{
-		foreach (string fileName in new[] { "0064_execution_catalog_seed.sql", "0067_execution_catalog_seed_expansion.sql" })
+		foreach (string fileName in new[] { "0064_execution_catalog_seed.sql", "0067_execution_catalog_seed_expansion.sql", "0069_vcf_api_credential_purpose.sql" })
 		{
 			string sql = await ReadEmbeddedMigrationAsync(fileName);
 			await using NpgsqlCommand reapply = new(sql, connection);
@@ -347,22 +358,24 @@ public sealed class ExecutionCatalogSeedExpansionTests
 /// issue #959.
 ///
 /// Issue #967 narrowed this guard's tolerance for unseeded rows to (effectively) zero:
-/// with 0067 landed, the guard now requires FULL provenance-matrix coverage -- every one
-/// of the doc's 13 rows must be traceable to a seeded catalog row -- EXCEPT the one row
-/// named explicitly below (VCF 9-x `vcf-api` named-service), which stays unseeded on
-/// purpose (migration 0050's catalog_credential_requirements purpose CHECK constraint
-/// excludes 'vcf-api' pending issue #807; seeding components/profiles without a
-/// resolvable credential requirement would be a non-functional catalog entry). A future
-/// row silently going unseeded -- one this guard does not know to exempt -- now fails
-/// loudly instead of passing by omission, the same defect class issue #959 itself was
-/// filed for.
+/// with 0067 landed, the guard required FULL provenance-matrix coverage -- every one of
+/// the doc's 13 rows traceable to a seeded catalog row -- EXCEPT the one row named
+/// explicitly (VCF 9-x `vcf-api` named-service), which stayed unseeded on purpose
+/// (migration 0050's catalog_credential_requirements purpose CHECK constraint excluded
+/// 'vcf-api' pending issue #807). Issue #977 resolved that gap: migration 0069 widened
+/// the CHECK to admit 'vcf-api' (ADR-0024's resolved purpose) and seeded the row, so
+/// this guard now requires and proves FULL 13/13 coverage with ZERO exemptions -- the
+/// deliberate-exemption mechanism itself was retired rather than left dead, since #977
+/// closed the last documented gap it existed to track. A future row silently going
+/// unseeded still fails loudly instead of passing by omission, the same defect class
+/// issue #959 was filed for.
 ///
 /// This guard requires three things: (1) for every row EITHER migration covers, its
 /// transport/purpose/output values match the doc's row exactly -- a hand-edit that
 /// quietly changes a seeded row's transport/purpose/output without updating the doc (or
 /// vice versa) fails this test; (2) the closed priority vocabulary's exact six report
-/// groups/priorities are all present in the seed; and (3) every doc row other than the
-/// one explicitly-named exemption is covered by at least one of the two migrations.
+/// groups/priorities are all present in the seed; and (3) every one of the doc's 13 rows
+/// is covered by at least one of the three seed migrations, with no exemption remaining.
 ///
 /// Pure source/SQL-parsing test -- no Postgres container required (same idiom as
 /// <see cref="CatalogNaturalKeyWriteGuardTests"/>/<c>LayoutTableParityTests</c>), so it
@@ -371,14 +384,6 @@ public sealed class ExecutionCatalogSeedExpansionTests
 public sealed class ExecutionCatalogSeedDriftGuardTests
 {
 	private sealed record ProvenanceMatrixRow(string ProductVersionKey, string Kind, string Transport, string Purpose, string Output);
-
-	/// <summary>
-	/// The single provenance-matrix row this guard knows is deliberately unseeded, and
-	/// why -- see the class remarks. Keyed the same way <see cref="ParseProvenanceMatrixRows"/>
-	/// keys every other row: (product/version key, kind, transport).
-	/// </summary>
-	private static readonly (string ProductVersionKey, string Kind, string Transport) DeliberatelyUnseededRow =
-		("VCF `9-x`", "SRG", "vcf-api");
 
 	[Fact]
 	public void SeededReportGroups_MatchTheDocumentedClosedPriorityVocabularyExactly()
@@ -437,6 +442,7 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 
 		string migration0064 = ReadRepoFile("backend", "Waypoint.Infrastructure", "Data", "Migrations", "0064_execution_catalog_seed.sql");
 		string migration0067 = ReadRepoFile("backend", "Waypoint.Infrastructure", "Data", "Migrations", "0067_execution_catalog_seed_expansion.sql");
+		string migration0069 = ReadRepoFile("backend", "Waypoint.Infrastructure", "Data", "Migrations", "0069_vcf_api_credential_purpose.sql");
 
 		// 0064's original slice.
 		AssertRowCoveredCorrectly(rows, migration0064, "vSphere `8-0`", "STIG", "vmware",
@@ -475,13 +481,21 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 				"operations-httpd", "operations-postgresql", "operations-photon",
 				"operations-hcx-httpd", "operations-hcx-photon",
 				"operations-networks-nginx-platform", "operations-networks-ubuntu"]);
+
+		// 0069's addition (issue #977): the 13th and final provenance-matrix row, VCF
+		// 9-x's `vcf-api` named-service split -- same SRG/hdf-by-construction shape as
+		// 0067's rows.
+		AssertRowComponentsSeededAsHdf(rows, migration0069, "VCF `9-x`", "SRG", "vcf-api",
+			seededComponentKeys: ["sddc-manager-api", "automation-api"]);
 	}
 
 	/// <summary>
-	/// Migration 0067 equivalent of <see cref="AssertRowCoveredCorrectly"/>: confirms the
+	/// 0067/0069 equivalent of <see cref="AssertRowCoveredCorrectly"/>: confirms the
 	/// doc row exists, is SRG/HDF (never CKL, per the doc's own Output column), and that
-	/// every seeded component key appears in 0067's catalog_execution_profiles VALUES
-	/// list bound to the shared 'Y26M05-srg' release key.
+	/// every seeded component key appears in the given migration's
+	/// catalog_execution_profiles VALUES list bound to the shared 'Y26M05-srg' release
+	/// key. Used by both 0067 (9 rows) and 0069 (the 13th row, issue #977) since both
+	/// migrations share the exact same SRG/hdf-by-construction VALUES-tuple shape.
 	/// </summary>
 	private static void AssertRowComponentsSeededAsHdf(
 		List<ProvenanceMatrixRow> rows, string migration, string productVersionKey, string kind, string transport, string[] seededComponentKeys)
@@ -490,28 +504,29 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 			string.Equals(r.ProductVersionKey, productVersionKey, StringComparison.Ordinal) &&
 			string.Equals(r.Kind, kind, StringComparison.Ordinal) &&
 			string.Equals(r.Transport, transport, StringComparison.Ordinal));
-		Assert.True(row is not null, $"docs/compliance-parity.md has no provenance-matrix row for '{productVersionKey}' / '{kind}' / '{transport}' -- migration 0067's doc-comment claims to cover it.");
+		Assert.True(row is not null, $"docs/compliance-parity.md has no provenance-matrix row for '{productVersionKey}' / '{kind}' / '{transport}' -- a seed migration's doc-comment claims to cover it.");
 		Assert.DoesNotContain("CKL", row!.Output, StringComparison.OrdinalIgnoreCase);
 
 		foreach (string componentKey in seededComponentKeys)
 		{
 			Match tuple = Regex.Match(migration, $@"\('[a-z-]+', '(?:9\.0\.0|8\.0\.0|3\.3\.0)', '{Regex.Escape(componentKey)}', 'Y26M05-srg'\)");
-			Assert.True(tuple.Success, $"Migration 0067 has no catalog_execution_profiles VALUES tuple for component '{componentKey}' -- expected one covering documented row '{productVersionKey}'/'{kind}'.");
+			Assert.True(tuple.Success, $"Migration has no catalog_execution_profiles VALUES tuple for component '{componentKey}' -- expected one covering documented row '{productVersionKey}'/'{kind}'.");
 		}
 	}
 
 	/// <summary>
-	/// Issue #967's tightened guard: every provenance-matrix row parsed from the doc must
-	/// be covered by one of the two seed migrations' explicit assertions above, EXCEPT
-	/// <see cref="DeliberatelyUnseededRow"/> -- named here so a future doc row silently
-	/// landing without a seed (or a seed migration) fails loudly instead of passing by
-	/// omission.
+	/// Issue #977: the guard's exemption mechanism is retired -- it now requires FULL
+	/// 13/13 provenance-matrix coverage with no exceptions. Every row parsed from the
+	/// doc must be covered by one of the three seed migrations' explicit assertions
+	/// above; a future doc row silently landing without a seed (or a seed migration)
+	/// still fails loudly instead of passing by omission (issue #959's defect class).
 	/// </summary>
 	[Fact]
 	public void EveryDocumentedProvenanceMatrixRow_IsEitherSeededOrDeliberatelyExempted()
 	{
 		List<ProvenanceMatrixRow> rows = ParseProvenanceMatrixRows();
 		Assert.NotEmpty(rows);
+		Assert.Equal(13, rows.Count);
 
 		HashSet<(string, string, string)> coveredRows = new()
 		{
@@ -527,17 +542,15 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 			("Aria Suite Lifecycle `8-x`", "SRG", "ssh"),
 			("Workspace ONE Access `3-3-x`", "SRG", "ssh"),
 			("VCF `9-x`", "SRG", "ssh"),
+			("VCF `9-x`", "SRG", "vcf-api"),
 		};
+
+		Assert.Equal(13, coveredRows.Count);
 
 		List<string> uncovered = [];
 		foreach (ProvenanceMatrixRow row in rows)
 		{
 			(string, string, string) key = (row.ProductVersionKey, row.Kind, row.Transport);
-			if (key == DeliberatelyUnseededRow)
-			{
-				continue;
-			}
-
 			if (!coveredRows.Contains(key))
 			{
 				uncovered.Add($"{row.ProductVersionKey} / {row.Kind} / {row.Transport}");
@@ -545,11 +558,10 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 		}
 
 		Assert.True(uncovered.Count == 0,
-			"Provenance-matrix rows with no seed coverage and no declared exemption:\n" + string.Join("\n", uncovered));
+			"Provenance-matrix rows with no seed coverage:\n" + string.Join("\n", uncovered));
 
-		// Sanity check the reverse direction too: a stale exemption or a coveredRows
-		// entry for a row the doc no longer has would otherwise go unnoticed.
-		Assert.Contains(rows, r => (r.ProductVersionKey, r.Kind, r.Transport) == DeliberatelyUnseededRow);
+		// Sanity check the reverse direction too: a coveredRows entry for a row the doc
+		// no longer has would otherwise go unnoticed.
 		foreach ((string productVersionKey, string kind, string transport) in coveredRows)
 		{
 			Assert.Contains(rows, r => r.ProductVersionKey == productVersionKey && r.Kind == kind && r.Transport == transport);

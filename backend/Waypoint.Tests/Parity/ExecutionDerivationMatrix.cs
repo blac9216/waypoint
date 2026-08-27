@@ -67,9 +67,11 @@ public static class ExecutionDerivationMatrix
 			"family, so no execution profile for it can be seeded to drive ScanJobHandler at all.",
 		["vcf-9-x-vcf-api"] =
 			"VCF 9-x vcf-api/named-service row: no runner path consumes the vcf-api transport " +
-			"yet (ScanComponentNarrowing's own doc comment: 'no runner path consumes it yet') " +
-			"and the vcf-api credential purpose is 'planned under #807', not yet closed catalog " +
-			"vocabulary -- ScanJobHandler has no branch to exercise for this transport.",
+			"yet (ScanComponentNarrowing's own doc comment: 'no runner path consumes it yet') -- " +
+			"ScanJobHandler has no branch to exercise for this transport. Issue #977 resolved the " +
+			"vcf-api credential purpose into closed catalog vocabulary and seeded the catalog row, " +
+			"but that is identity/capability data only; this execution-parity slice's gap remains " +
+			"the missing runner-side transport handler, unrelated to credential-purpose closure.",
 		["aria-operations-8-x-srg"] =
 			"Whole-appliance ssh/target SRG row (Aria Operations): command-construction for " +
 			"the ssh/target selector is already covered by this matrix's other ssh/target row " +

@@ -72,10 +72,13 @@ public static class PlannerDerivationMatrix
 			"cannot be imported in the first place; this is #729/#730 catalog-authority " +
 			"follow-up work, not this planner-test slice.",
 		["vcf-9-x-vcf-api"] =
-			"VCF 9-x vcf-api/named-service row: same underlying gap as 'vcf-9-x-ssh' " +
-			"(CatalogDerivationMatrix.OwnerLiveOnlyRows['vcf-9-x-vcf-api']) -- the vcf-api " +
-			"credential purpose is 'planned under #807' and is not yet closed catalog " +
-			"vocabulary, so no execution profile requiring it can be seeded today.",
+			"VCF 9-x vcf-api/named-service row: same underlying gap as 'vcf-9-x-ssh' -- " +
+			"VendorHierarchyInterpreter's closed family table does not yet include a 'vcf' " +
+			"family (issue #729/#730 catalog-authority follow-up). Issue #977 resolved the " +
+			"vcf-api credential purpose into closed catalog vocabulary and seeded the " +
+			"identity-tree row (CatalogDerivationMatrix.OwnerLiveOnlyRows['vcf-9-x-vcf-api']), " +
+			"but a planner-parity fixture still cannot seed a catalog execution profile that " +
+			"cannot be imported in the first place.",
 	};
 
 	/// <summary>The automatable rows, in the same order as docs/compliance-parity.md's table.</summary>

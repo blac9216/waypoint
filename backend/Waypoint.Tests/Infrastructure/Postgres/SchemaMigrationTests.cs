@@ -228,15 +228,25 @@ public sealed class SchemaMigrationTests
 	/// NSX 9-x SRG named-function row, Aria Operations/Automation/Suite Lifecycle SRG
 	/// whole-appliance rows, Workspace ONE Access SRG whole-appliance row, VCF 9-x SRG
 	/// ssh named-service row), same invented-from-documentation/idempotent-ON-CONFLICT/
-	/// no-new-grants pattern as 0064. The VCF 9-x `vcf-api` named-service row is
-	/// deliberately NOT seeded: migration 0050's catalog_credential_requirements
-	/// purpose CHECK constraint excludes 'vcf-api' pending issue #807, and this
-	/// migration is not a schema change, issue #967 --
-	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.
+	/// no-new-grants pattern as 0064. The VCF 9-x `vcf-api` named-service row was
+	/// deliberately NOT seeded by 0067: migration 0050's catalog_credential_requirements
+	/// purpose CHECK constraint excluded 'vcf-api' pending issue #807, issue #967 --
 	///
 	/// 0068 (issue #974): adds `inventory_items.version`, additive alongside the
-	/// existing `build` column -- no new tables, no runner grant changes.</summary>
-	private const int ExpectedMigrationCount = 67;
+	/// existing `build` column -- no new tables, no runner grant changes --
+	///
+	/// 0069 (issue #977, epic #726; slot verified free against both the migrations
+	/// directory and open PRs at this PR's own commit time, rebased onto main after
+	/// PR #978 claimed and merged slot 0068) closes the vcf-api gap: #807 closed and
+	/// its ADR-0024 resolved the vcf-api credential purpose, so 0069 widens 0050's
+	/// CHECK (DROP CONSTRAINT IF EXISTS + ADD CONSTRAINT idiom, matching migration
+	/// 0022's precedent for widening a closed-vocabulary CHECK) to admit 'vcf-api' and
+	/// seeds the 13th and final provenance-matrix row (VCF 9-x `vcf-api` named-service:
+	/// SDDC Manager application, Automation application), same
+	/// invented-from-documentation/idempotent-ON-CONFLICT/no-new-grants pattern as
+	/// 0064/0067 --
+	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
+	private const int ExpectedMigrationCount = 68;
 
 	private readonly PostgresFixture _fixture;
 
@@ -883,6 +893,18 @@ public sealed class SchemaMigrationTests
 	/// migration text (embedded resource) and asserts set-equality with the C# constants, so
 	/// adding/removing a value on either side without the other fails here -- drift in either
 	/// direction, not just additions.
+	///
+	/// Issue #977 widened <c>catalog_credential_requirements_purpose_check</c> via a LATER
+	/// migration (0069's DROP CONSTRAINT IF EXISTS + ADD CONSTRAINT idiom, matching 0022's
+	/// own precedent for widening a closed-vocabulary CHECK -- see
+	/// <see cref="Migrations_Credentials_AcceptsEveryClosedSetCredentialType"/>'s comment for
+	/// why 0047's widening of 0022's constraint also has no static-parse-of-0050-equivalent
+	/// test: a migration file's own literal is a point-in-time historical fact, not a live
+	/// query of the CURRENT constraint). So this one assertion parses 0050's ORIGINAL four
+	/// purposes only -- 0069's added 'vcf-api' purpose is proven instead by
+	/// <see cref="Migration0069_WidensCredentialPurposeCheck_ToAdmitVcfApi"/> against the
+	/// live, fully-migrated database, the same live-proof idiom already established for
+	/// 0047's widening.
 	/// </summary>
 	[Fact]
 	public async Task Migration0050_CheckConstraintValueLists_MatchTheCSharpClosedVocabulary()
@@ -902,8 +924,50 @@ public sealed class SchemaMigrationTests
 			CatalogOutputKinds.All.OrderBy(v => v, StringComparer.Ordinal),
 			ParseCheckInList(migration, "catalog_execution_profiles_output_kind_check"));
 		Assert.Equal(
-			CredentialPurposes.All.OrderBy(v => v, StringComparer.Ordinal),
+			CredentialPurposes.All.Where(p => p != CredentialPurposes.VcfApi).OrderBy(v => v, StringComparer.Ordinal),
 			ParseCheckInList(migration, "catalog_credential_requirements_purpose_check"));
+	}
+
+	/// <summary>
+	/// Issue #977: live-database companion to
+	/// <see cref="Migration0050_CheckConstraintValueLists_MatchTheCSharpClosedVocabulary"/>'s
+	/// deliberately-narrowed 0050-only assertion above -- proves the CURRENT (post-0069)
+	/// constraint accepts every value in <see cref="CredentialPurposes"/>'s closed set,
+	/// including 'vcf-api', mirroring <see cref="Migrations_Credentials_AcceptsEveryClosedSetCredentialType"/>'s
+	/// exact live-proof idiom for 0047's analogous widening of 0022's constraint.
+	/// </summary>
+	[Theory]
+	[InlineData("vsphere-api")]
+	[InlineData("vcsa-ssh")]
+	[InlineData("nsx-api")]
+	[InlineData("srg-ssh")]
+	[InlineData("vcf-api")]
+	public async Task Migration0069_WidensCredentialPurposeCheck_ToAdmitVcfApi(string purpose)
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// A real catalog_execution_profiles row is required to satisfy the FK -- reuse
+		// migration 0069's own seeded vcf-api component/profile, present on every fresh
+		// migration.
+		await using NpgsqlCommand selectProfile = new(
+			"SELECT id FROM catalog_execution_profiles LIMIT 1", connection);
+		object? executionProfileId = await selectProfile.ExecuteScalarAsync();
+		Assert.NotNull(executionProfileId);
+
+		await using NpgsqlCommand insert = new(
+			"INSERT INTO catalog_credential_requirements (execution_profile_id, purpose) VALUES ($1, $2) ON CONFLICT (execution_profile_id, purpose) DO NOTHING RETURNING id",
+			connection);
+		insert.Parameters.AddWithValue(executionProfileId!);
+		insert.Parameters.AddWithValue(purpose);
+
+		// Either a new row is inserted, or the (execution_profile_id, purpose) pair
+		// already exists from seeding (e.g. 'vcf-api' itself) -- both are proof the
+		// CHECK constraint accepted the value; only a check_violation would fail this.
+		await insert.ExecuteScalarAsync();
 	}
 
 	/// <summary>
