@@ -1364,6 +1364,18 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 				services.Remove(eventHistoryDescriptor);
 			}
 			services.AddSingleton<IJobEventHistoryReader>(EventHistory);
+
+			// Issue #757: GetComponentJobCounts/ListComponentJobs resolve
+			// IComponentJobRepository through RunsController -- same fake-swap pattern
+			// as every other dependency above (ComponentJobEndpointTests is the
+			// consumer; real SQL correctness lives in
+			// Waypoint.Tests.Infrastructure.Postgres.ComponentJobQueryRepositoryTests).
+			var componentJobsDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IComponentJobRepository));
+			if (componentJobsDescriptor != null)
+			{
+				services.Remove(componentJobsDescriptor);
+			}
+			services.AddSingleton<IComponentJobRepository>(ComponentJobs);
 		});
 	}
 
@@ -1372,6 +1384,40 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 	public FakeRunHistoryDeletionRepository HistoryDeletionRepository { get; } = new();
 
 	public FakeJobEventHistoryReader EventHistory { get; } = new();
+
+	public FakeComponentJobRepository ComponentJobs { get; } = new();
+}
+
+/// <summary>
+/// Minimal fake <see cref="IComponentJobRepository"/> for controller-level tests
+/// (issue #757): records the last filter/query the controller mapped from the query
+/// string and returns canned rows/pages, so <c>ComponentJobEndpointTests</c> can pin
+/// the 200/404/400 mapping without Postgres -- SQL correctness lives in
+/// <c>Waypoint.Tests.Infrastructure.Postgres.ComponentJobQueryRepositoryTests</c>.
+/// </summary>
+public sealed class FakeComponentJobRepository : IComponentJobRepository
+{
+	public Guid? LastCountsRunId { get; private set; }
+	public ComponentJobFilter? LastCountsFilter { get; private set; }
+	public ComponentJobListQuery? LastListQuery { get; private set; }
+
+	public IReadOnlyList<ComponentJobCountRow> CountRows { get; set; } = [];
+	public ComponentJobPage NextPage { get; set; } = new([], null);
+
+	public Task<IReadOnlyList<ComponentJobCountRow>> GetGroupedCountsAsync(Guid runId, ComponentJobFilter filter, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		LastCountsRunId = runId;
+		LastCountsFilter = filter;
+		return Task.FromResult(CountRows);
+	}
+
+	public Task<ComponentJobPage> ListComponentJobsAsync(ComponentJobListQuery query, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		LastListQuery = query;
+		return Task.FromResult(NextPage);
+	}
 }
 
 /// <summary>

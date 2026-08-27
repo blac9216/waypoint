@@ -214,6 +214,104 @@ public sealed class ComponentJobQueryRepositoryTests : IAsyncLifetime
 		Assert.True(pages > 1, "the seeded set should have required more than one page at this page size");
 	}
 
+	/// <summary>
+	/// Explicit id tie-break case (PR #941 round-1 note (b)): several rows share the
+	/// EXACT same (priority, created_at) pair, so only the cursor's third leg can
+	/// order them. Paging one row at a time must visit each exactly once in
+	/// ascending-id order with no skip or duplicate across the tied boundary.
+	/// </summary>
+	[Fact]
+	public async Task ListComponentJobsAsync_SamePriorityAndCreatedAt_TieBreaksOnIdExactlyOnce()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		Guid runId;
+		await using (NpgsqlCommand insertRun = new("INSERT INTO runs (run_type) VALUES ('scan') RETURNING id", connection))
+		{
+			runId = (Guid)(await insertRun.ExecuteScalarAsync())!;
+		}
+
+		// Five rows, identical priority AND identical created_at (pinned to one
+		// literal timestamp, not now()) -- the keyset's first two legs are useless
+		// here by construction.
+		List<Guid> insertedIds = [];
+		for (int i = 0; i < 5; i++)
+		{
+			await using NpgsqlCommand insertJob = new(
+				"""
+				INSERT INTO jobs (run_id, job_type, target_name, priority, state, created_at)
+				VALUES ($1, 'scan', $2, 3, 'queued', '2026-08-27T00:00:00Z'::timestamptz)
+				RETURNING id
+				""", connection);
+			insertJob.Parameters.AddWithValue(runId);
+			insertJob.Parameters.AddWithValue($"tied-host-{i}");
+			insertedIds.Add((Guid)(await insertJob.ExecuteScalarAsync())!);
+		}
+
+		List<Guid> expectedOrder = [.. insertedIds.OrderBy(id => id)];
+
+		List<Guid> visited = [];
+		ComponentJobCursorPosition? cursor = null;
+		for (int page = 0; page < 10; page++)
+		{
+			ComponentJobPage result = await _repository.ListComponentJobsAsync(
+				new ComponentJobListQuery(runId, NoFilter, cursor, Limit: 1), CancellationToken.None);
+			visited.AddRange(result.Items.Select(r => r.Id));
+			if (result.NextCursor is null)
+			{
+				break;
+			}
+
+			cursor = result.NextCursor;
+		}
+
+		Assert.Equal(expectedOrder, visited);
+	}
+
+	/// <summary>
+	/// Issue #946 (folded from PR #941 round-1 deferred finding (c)): the ILIKE
+	/// escape character itself must be escaped, not just <c>%</c>/<c>_</c> -- a
+	/// search term containing a literal backslash must match only names containing
+	/// that literal backslash, and a literal <c>%</c> term must not act as a
+	/// wildcard.
+	/// </summary>
+	[Fact]
+	public async Task ListComponentJobsAsync_SearchEscapesBackslashAndWildcardsLiterally()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		Guid runId;
+		await using (NpgsqlCommand insertRun = new("INSERT INTO runs (run_type) VALUES ('scan') RETURNING id", connection))
+		{
+			runId = (Guid)(await insertRun.ExecuteScalarAsync())!;
+		}
+
+		foreach (string name in new[] { @"domain\host-a", "host-100%", "host-plain", "hostX100Y" })
+		{
+			await using NpgsqlCommand insertJob = new(
+				"INSERT INTO jobs (run_id, job_type, target_name, priority, state) VALUES ($1, 'scan', $2, 3, 'queued')", connection);
+			insertJob.Parameters.AddWithValue(runId);
+			insertJob.Parameters.AddWithValue(name);
+			await insertJob.ExecuteNonQueryAsync();
+		}
+
+		// A literal backslash matches only the backslash row (an unescaped "\h"
+		// would instead be the escape sequence for a bare 'h' and over-match).
+		ComponentJobPage backslash = await _repository.ListComponentJobsAsync(
+			new ComponentJobListQuery(runId, new ComponentJobFilter(null, null, null, @"domain\host"), null, 10), CancellationToken.None);
+		ComponentJobRow backslashRow = Assert.Single(backslash.Items);
+		Assert.Equal(@"domain\host-a", backslashRow.TargetName);
+
+		// A literal '%' term must not wildcard: "100%" matches only host-100%,
+		// never hostX100Y (which unescaped-'%' leakage would also match).
+		ComponentJobPage percent = await _repository.ListComponentJobsAsync(
+			new ComponentJobListQuery(runId, new ComponentJobFilter(null, null, null, "100%"), null, 10), CancellationToken.None);
+		ComponentJobRow percentRow = Assert.Single(percent.Items);
+		Assert.Equal("host-100%", percentRow.TargetName);
+	}
+
 	[Fact]
 	public async Task ListComponentJobsAsync_FilterAndSearchPinAnIndividualItem()
 	{

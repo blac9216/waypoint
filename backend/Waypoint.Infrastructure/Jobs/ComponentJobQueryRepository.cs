@@ -198,7 +198,15 @@ public sealed partial class JobQueueRepository : IComponentJobRepository
 		{
 			int idx = parameters.Count + 1;
 			clauses.Add($"j.target_name ILIKE ${idx}");
-			parameters.Add("%" + filter.Search.Replace("%", "\\%", System.StringComparison.Ordinal).Replace("_", "\\_", System.StringComparison.Ordinal) + "%");
+			// Escape the ILIKE default escape character itself FIRST (issue #946),
+			// then the two wildcards -- otherwise a literal backslash in the search
+			// term would combine with the following character into an unintended
+			// escape sequence instead of matching literally.
+			string escaped = filter.Search
+				.Replace("\\", "\\\\", System.StringComparison.Ordinal)
+				.Replace("%", "\\%", System.StringComparison.Ordinal)
+				.Replace("_", "\\_", System.StringComparison.Ordinal);
+			parameters.Add("%" + escaped + "%");
 		}
 	}
 }
