@@ -40,7 +40,10 @@ public static class CredentialPurposes
 	/// <summary>SRG product SSH login (Photon, Aria Operations, Aria Lifecycle, vIDM), sudo-capable. Not split per product -- all four share the same transport and credential shape, differing only in <c>sudo_enabled</c>.</summary>
 	public const string SrgSsh = "srg-ssh";
 
-	public static readonly IReadOnlyCollection<string> All = [VSphereApi, VcsaSsh, NsxApi, SrgSsh];
+	/// <summary>VCF SDDC Manager/Automation named-service API session -- ADR-0024's "distinct compatible purpose for catalog-declared <c>vcf-api</c> work" (issue #977, resolving issue #807). Distinct from <see cref="VSphereApi"/>/<see cref="NsxApi"/>: VCF appliance API access is not vCenter- or NSX Manager-mediated. No <see cref="Waypoint.Core.Sites.TargetKinds"/> value exists for this transport yet, so it is catalog-only (<see cref="CredentialPurposeMatrix"/> has no entry) until a vcf-api target kind lands.</summary>
+	public const string VcfApi = "vcf-api";
+
+	public static readonly IReadOnlyCollection<string> All = [VSphereApi, VcsaSsh, NsxApi, SrgSsh, VcfApi];
 
 	public static bool IsValid(string? purpose) => purpose is not null && All.Contains(purpose);
 }
