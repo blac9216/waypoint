@@ -172,6 +172,34 @@ if [[ ! -s "${HASH_STAGE_DIR}/admin-password-hash" ]]; then
 	exit 1
 fi
 
+# --- Published-port reachability (issue #896) -----------------------------
+#
+# Whether a docker-published host port is reachable from THIS process's own
+# network namespace is a property of the environment (devcontainer /
+# remote-daemon host vs. a real appliance host), not of this specific stack
+# -- so probe it once, generically, with a disposable helper container
+# BEFORE this stack is even generated. That lets --public-url below already
+# be the origin Playwright will actually navigate to, instead of guessing
+# "localhost" at generation time and discovering only after bring-up --
+# with Keycloak's issuer and the realm client's redirect/origin list already
+# baked in -- that the browser can only reach the stack via its edge-network
+# name (docs/testing.md's Postgres-fixture section documents the identical
+# devcontainer reachability gap).
+PROBE_NAME="${PROJECT}-reachability-probe"
+docker run -d --rm --name "${PROBE_NAME}" -p 127.0.0.1::7777 --entrypoint sh curlimages/curl \
+	-c 'nc -lk -p 7777' >/dev/null
+PROBE_HOST_PORT="$(docker port "${PROBE_NAME}" 7777/tcp | head -1 | cut -d: -f2)"
+DIRECT_REACHABLE=1
+timeout 2 bash -c "echo >/dev/tcp/127.0.0.1/${PROBE_HOST_PORT}" 2>/dev/null || DIRECT_REACHABLE=0
+docker rm -f "${PROBE_NAME}" >/dev/null 2>&1 || true
+
+if [[ "${DIRECT_REACHABLE}" -eq 1 ]]; then
+	PUBLIC_URL="${BASE}"
+else
+	log "Published ports not reachable from this process's own network namespace -- generating with public-url=${NET_BASE}"
+	PUBLIC_URL="${NET_BASE}"
+fi
+
 # WAYPOINT_E2E_SUBNET: overrides the generated stack's `edge` subnet when the
 # agent-mode default (203.0.113.0/24) collides with a concurrent stack on
 # this host (docs/testing.md). Never commit a run with this set.
@@ -186,7 +214,7 @@ fi
 # provision one (deploy/keycloak-dev-admin) instead of hand-authoring that
 # wiring here a second time.
 KEYCLOAK_DEV_USERNAME="developer"
-GENERATE_ARGS=(--mode agent --slug "${SLUG}" --public-url "https://localhost:${PORT}" --port "${PORT}" \
+GENERATE_ARGS=(--mode agent --slug "${SLUG}" --public-url "${PUBLIC_URL}" --port "${PORT}" \
 	--local-auth-admin-hash-file "${HASH_STAGE_DIR}/admin-password-hash" \
 	--keycloak-dev-admin --username "${KEYCLOAK_DEV_USERNAME}")
 if [[ -n "${WAYPOINT_E2E_SUBNET:-}" ]]; then
@@ -324,22 +352,20 @@ log "Seeded: site=${SITE_ID} (${SITE_NAME}), target=${TARGET_ID}, credential=${C
 # container on the stack's own edge network), Playwright's browser runs as a
 # real process on THIS script's own host/network namespace -- there is no
 # equivalent "run every request inside a container" trick available, so the
-# base URL it navigates to must actually be reachable from here. In a
-# devcontainer/remote-daemon environment the published host port is not
-# reachable from this namespace at all (docs/testing.md's Postgres-fixture
-# section documents the identical failure mode; verified again here: a
-# throwaway container on the stack's own edge network reaches nginx fine,
-# while a direct probe from this process's namespace to 127.0.0.1:$PORT
-# times out/ECONNREFUSEDs). When the direct probe fails, this script joins
+# base URL it navigates to must actually be reachable from here. The
+# reachability decision was already made (and baked into --public-url)
+# BEFORE this stack was even generated -- see the pre-generation probe above
+# (issue #896) -- so this block only has to act on DIRECT_REACHABLE, not
+# re-probe. When published ports were found unreachable, this script joins
 # ITS OWN container to the stack's edge network (`docker network connect`,
-# undone in cleanup) so `https://nginx` resolves via Docker's embedded DNS
-# from this process directly -- then Playwright navigates to that instead of
-# the published port. On a real appliance host (no devcontainer/remote-daemon
-# indirection) the direct probe succeeds and this block is a no-op.
+# undone in cleanup) so `https://nginx` (already the generated public-url in
+# this case) resolves via Docker's embedded DNS from this process directly.
+# On a real appliance host (no devcontainer/remote-daemon indirection) the
+# pre-generation probe succeeded and this block is a no-op.
 PLAYWRIGHT_BASE_URL="${BASE}"
-if ! curl -k -sS -o /dev/null --max-time 3 "${BASE}/api/v1/health" 2>/dev/null; then
-	log "${BASE} not reachable from this process's own network namespace -- joining ${PROJECT}_edge directly"
+if [[ "${DIRECT_REACHABLE}" -eq 0 ]]; then
 	EDGE_NETWORK="${PROJECT}_edge"
+	log "Published ports unreachable from this namespace -- joining ${EDGE_NETWORK} directly"
 	if docker network connect "${EDGE_NETWORK}" "$(hostname)" 2>/dev/null; then
 		SELF_JOINED_EDGE_NETWORK="${EDGE_NETWORK}"
 		sleep 1
