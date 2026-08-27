@@ -118,6 +118,17 @@ written before posting it. Do not duplicate the recipe here — it drifts; go re
 └── .claude/skills/      # Canonical github-workflow + github-pr-review skill sources
 ```
 
+### Rationale index — deploy/ comment convention
+
+Code comments in `deploy/` are short section markers and terse one-line
+warnings only — no issue/ADR/PR references in code. A warning needing a
+"why" points at a rationale file instead: `# why: docs/rationale/<area>.md#<kebab-slug>`.
+Rationale files live under `docs/rationale/`, one master file per area
+(`docs/rationale/deploy.md` today). Each entry is a kebab-slug `###`
+heading, 2–6 lines of why, and a closing `Refs:` line — provenance belongs
+there, not in code. See `docs/rationale/deploy.md`'s own header for the
+full format and a filled example.
+
 ## Workflow
 
 - All work is issue-driven via the `github-workflow` skill; PRs are reviewed with the
