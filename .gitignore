@@ -18,21 +18,25 @@
 vault-pass*
 secrets*.json
 secrets*.yml
-# Anchored to the repo root (leading slash) — this ignores only a top-level
-# operator-config mount (e.g. a root config/ directory), matching the intent
-# in CLAUDE.md's "dev/local/, .env, config/" list. Without the leading
-# slash, git matches "config/" at ANY depth, including inside application
-# source (e.g. frontend/src/screens/config/) — silently dropping real
-# source files from `git status`/`git add`. See issue #254. Do not remove
-# the leading slash.
-/config/
-# Issue #844: the epic's (#841) persistent local-state location for
+# Issue #844/#845: the epic's (#841) persistent local-state location for
 # file-backed secrets (deploy/config/secrets/) and operator TLS
-# (deploy/config/tls/) -- deliberately a SEPARATE anchored entry from the
-# legacy /config/ rule above, not a rename of it. Removing the legacy
-# /config/ rule/convention is #845's job, not this one's -- both stay
-# ignored side by side until that migration lands.
+# (deploy/config/tls/). Anchored (leading slash) for the same reason #254
+# anchored the old root-level config/ rule: so this ignores the one
+# directory under deploy/ and never something coincidentally named config/
+# elsewhere in the tree (e.g. frontend/src/screens/config/). Issue #845 removed the legacy
+# repo-root /config/ convention this superseded -- compose.yaml no longer
+# references anything under ../config/ (relative to deploy/), only
+# ./config/ (this entry). No compatibility migration needed (epic #841).
 /deploy/config/
+# Issue #845: Compose auto-loads this file alongside compose.yaml when
+# present (see compose.override.example.yaml, which IS committed and safe
+# to track -- it carries no secrets, only the development topology).
+/deploy/compose.override.yaml
+# Issue #845: reserved for any future generated/derived local state under
+# deploy/ (e.g. a future generator script's scratch output, #847) that
+# isn't operator-authored config and doesn't belong in deploy/config/.
+# Nothing writes here yet.
+/deploy/.generated/
 dev/local/
 *.local.json
 *.local.yml

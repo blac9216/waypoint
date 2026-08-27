@@ -11,7 +11,7 @@ this is not a full port of the sibling repo. The call graph was inventoried from
 Waypoint-owned shim modules that dot-source these files
 (`backend/Waypoint.Infrastructure/PowerShell/Modules/Waypoint{Discovery,Scan,
 CredentialTest}/*.psm1`) and the compose env vars that point at them
-(`deploy/docker-compose.yml`, `WAYPOINT_VMWARE_STIG_DOCKER_*`, issue #395/#427):
+(`deploy/compose.yaml`, `WAYPOINT_VMWARE_STIG_DOCKER_*`, issue #395/#427):
 
 | File | Functions the shims dot-source | Used by |
 | ---- | ------------------------------- | ------- |
@@ -61,6 +61,6 @@ directory.
 ## Runtime wiring
 
 The compliance-runner image copies these project-owned scripts into `/powershell`.
-`deploy/docker-compose.yml` points the `WAYPOINT_VMWARE_STIG_DOCKER_*_PATH`
+`deploy/compose.yaml` points the `WAYPOINT_VMWARE_STIG_DOCKER_*_PATH`
 variables at those image paths, replacing the former host bind mount completed by
 #440/#442.

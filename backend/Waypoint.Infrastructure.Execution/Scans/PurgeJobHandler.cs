@@ -30,7 +30,7 @@ namespace Waypoint.Infrastructure.Scans;
 /// on its next call. Runs on <c>compliance-runner</c> only
 /// (<see cref="JobCapabilities.Compliance"/>) -- it is the only execution domain with
 /// read-write access to the scan-artifact volume (ADR-0014 §7; the API mounts it
-/// read-only, deploy/docker-compose.yml).
+/// read-only, deploy/compose.yaml).
 ///
 /// Payload contract: <c>{"job_ids": ["&lt;guid&gt;", ...]}</c> -- the target run's scan
 /// job ids, resolved by <c>RunPurgeService</c> from <c>jobs.run_id</c> before enqueueing

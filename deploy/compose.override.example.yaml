@@ -1,0 +1,160 @@
+# Development-only layer for deploy/compose.yaml (issue #845; epic #841).
+#
+# compose.yaml is the PRODUCTION base -- Keycloak-only auth, operator-
+# provided TLS, file-backed secrets an operator supplies under
+# deploy/config/secrets/. This file adds everything a local development loop
+# needs instead: a dev-bootstrap service that generates a throwaway TLS
+# pair, master key, and local-auth admin password hash into named volumes;
+# the local-auth dev flag; and lower resource fallbacks for a laptop-sized
+# Docker host.
+#
+# Not used automatically. Copy it to the name Compose auto-loads alongside
+# compose.yaml:
+#
+#   cp deploy/compose.override.example.yaml deploy/compose.override.yaml
+#   cd deploy && docker compose up -d
+#
+# `compose.override.yaml` (without `.example`) is gitignored -- see
+# .gitignore's /deploy/compose.override.yaml entry -- so your local copy,
+# and any further edits you make to it (a different host port, a real
+# WAYPOINT_PUBLIC_URL for testing against a LAN hostname, etc.), never gets
+# committed. Never rename or copy this file to `compose.yaml` itself, and
+# never add anything here that a real deployment needs -- that belongs in
+# the base.
+#
+# Issues #846 (dev-admin user provisioning) and #847 (secret/TLS generator
+# scripts) extend this file additively; neither exists yet, so this file
+# does not reference them.
+
+services:
+  # Generates the throwaway TLS pair, master key, and (via dev-auth-bootstrap
+  # below) local-auth admin password hash that this development loop uses in
+  # place of compose.yaml's operator-provided equivalents. Never used by the
+  # production base on its own.
+  dev-bootstrap:
+    build:
+      context: ./dev-bootstrap
+    volumes:
+      - dev-secrets:/run/waypoint-dev-secrets
+      - dev-tls:/run/waypoint-dev-tls
+      - compliance-profiles:/opt/waypoint/profiles
+    network_mode: none
+    restart: "no"
+
+  # Hashes WAYPOINT_DEV_PASSWORD (default below) into the dev-secrets volume
+  # so the local-auth dev flag (LocalAuth__Enabled below) has an admin
+  # credential to check against. Runs the backend image itself in a
+  # one-shot, non-networked mode purely to reuse its own --hash-password
+  # tool -- never reachable as a service.
+  dev-auth-bootstrap:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    depends_on:
+      dev-bootstrap:
+        condition: service_completed_successfully
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ ! -s /run/waypoint-dev-secrets/local-auth-admin-password-hash ]; then
+          printf '%s\n' "$$WAYPOINT_DEV_PASSWORD" \
+            | dotnet Waypoint.Api.dll --hash-password \
+            > /run/waypoint-dev-secrets/local-auth-admin-password-hash.tmp
+          mv /run/waypoint-dev-secrets/local-auth-admin-password-hash.tmp \
+            /run/waypoint-dev-secrets/local-auth-admin-password-hash
+          chown 1654:1654 /run/waypoint-dev-secrets/local-auth-admin-password-hash
+          chmod 600 /run/waypoint-dev-secrets/local-auth-admin-password-hash
+        fi
+    environment:
+      WAYPOINT_DEV_PASSWORD: "${WAYPOINT_DEV_PASSWORD:-waypoint-dev}"
+    volumes:
+      - dev-secrets:/run/waypoint-dev-secrets
+    network_mode: none
+    restart: "no"
+
+  nginx:
+    depends_on:
+      dev-bootstrap:
+        condition: service_completed_successfully
+    # Compose merges `volumes:` entries by TARGET (verified): an entry here
+    # whose `target:` exactly matches one of the base's REPLACES it rather
+    # than adding a second mount at the same path. The base's TLS mounts are
+    # mandatory bind mounts with no host file present by default
+    # (`create_host_path: false` -- a missing source fails `up` closed,
+    # verified), so without this override nginx never starts; WITH it, these
+    # two entries take over both exact targets and point them at subpaths of
+    # the dev-bootstrap-generated `dev-tls` named volume instead. A
+    # directory-level mount at /etc/nginx/certs would coexist with, not
+    # replace, the base's per-file mounts (different target strings) and
+    # still fail on the missing bind sources -- it must be these same two
+    # targets.
+    volumes:
+      - type: volume
+        source: dev-tls
+        target: /etc/nginx/certs/tls.crt
+        read_only: true
+        volume:
+          subpath: tls.crt
+      - type: volume
+        source: dev-tls
+        target: /etc/nginx/certs/tls.key
+        read_only: true
+        volume:
+          subpath: tls.key
+
+  backend:
+    depends_on:
+      dev-auth-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      # Dev-grade local auth (ADR-0004 rollout note; backend/README.md "Run
+      # locally"). See LocalAuthOptions and InMemoryLocalAuthenticationService
+      # -- never set any of these three on a real deployment.
+      LocalAuth__AdminPasswordHashFile: "/run/secrets/local-auth-admin-password-hash"
+      LocalAuth__AdminPasswordHash: "${WAYPOINT_ADMIN_PASSWORD_HASH:-}"
+      LocalAuth__Enabled: "${LOCAL_AUTH_ENABLED:-true}"
+      # The base's public-url anchor falls back to a deliberately
+      # nonfunctional placeholder domain (issue #845) -- this override
+      # replaces it with a working localhost default sized to the same
+      # WAYPOINT_HTTPS_PORT the base's nginx `ports:` mapping uses, so a
+      # fresh `docker compose up` gets a real login with no manual
+      # WAYPOINT_PUBLIC_URL step. Override WAYPOINT_PUBLIC_URL yourself (in
+      # deploy/.env) to test against a LAN hostname instead.
+      Oidc__PublicUrl: "${WAYPOINT_PUBLIC_URL:-https://localhost:${WAYPOINT_HTTPS_PORT:-8443}}"
+    volumes:
+      - dev-secrets:/run/secrets:ro
+
+  keycloak:
+    environment:
+      # Same working localhost default as the backend's Oidc__PublicUrl
+      # above -- both must always carry the SAME value (issue #842), so this
+      # is the identical expression, not an independent one.
+      WAYPOINT_PUBLIC_URL: "${WAYPOINT_PUBLIC_URL:-https://localhost:${WAYPOINT_HTTPS_PORT:-8443}}"
+      KC_HOSTNAME: "${WAYPOINT_PUBLIC_URL:-https://localhost:${WAYPOINT_HTTPS_PORT:-8443}}/auth"
+
+  compliance-runner:
+    depends_on:
+      dev-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      # Dev-picked conservative sizing (see RunnerResourceOptions' own
+      # compiled-in default for what applies without this override).
+      RunnerResources__FallbackCpuCores: "${RUNNER_FALLBACK_CPU_CORES:-4}"
+      RunnerResources__FallbackMemoryBytes: "${RUNNER_FALLBACK_MEMORY_BYTES:-4294967296}"
+    volumes:
+      - dev-secrets:/run/secrets:ro
+
+  download-runner:
+    depends_on:
+      dev-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - dev-secrets:/run/secrets:ro
+
+volumes:
+  # Generated development-only master key and local-auth hash. Persistent so
+  # encrypted credentials survive ordinary down/up cycles; `down -v` resets it.
+  dev-secrets:
+  # Generated development-only self-signed nginx certificate and key.
+  dev-tls:

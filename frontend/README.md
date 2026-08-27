@@ -83,7 +83,7 @@ future work per the roadmap.
 ## No real backend in dev
 
 Issue #3 (the ASP.NET Core backend) has landed in `backend/`, and the compose
-stack's `backend` service (`deploy/docker-compose.yml`) builds it directly —
+stack's `backend` service (`deploy/compose.yaml`) builds it directly —
 the old `deploy/backend-stub` nginx placeholder it used to point at is no
 longer wired up. `npm run dev` runs the Vite dev server standalone, with no
 proxy to that or any backend container, so it still uses a dev-server-only

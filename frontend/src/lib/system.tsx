@@ -28,7 +28,7 @@ import { SystemContext, type SystemInfo, type StigmanStatus } from "./system-con
  *
  * - **Floor.** It must not fire on a backend that is merely slow, because
  *   firing means "disconnected", which hides connected-only features on an
- *   appliance that has them. `deploy/docker-compose.yml` gives the backend a
+ *   appliance that has them. `deploy/compose.yaml` gives the backend a
  *   5 s healthcheck timeout and a 20 s start period, so once nginx is
  *   serving at all (it is gated on `service_healthy`), a request taking more
  *   than 8 s is not a slow appliance — it is a stuck one.

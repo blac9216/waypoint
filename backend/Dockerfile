@@ -10,7 +10,7 @@
 # with SDK-default analyzer settings instead of this repo's posture — see issue #92 for
 # the full history. Build from the repo root:
 #   docker build -f backend/Dockerfile .
-# `deploy/docker-compose.yml`'s backend service context is set the same way.
+# `deploy/compose.yaml`'s backend service context is set the same way.
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
@@ -58,7 +58,7 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 \
 	CMD ["dotnet", "Waypoint.Api.dll", "--health-check"]
 
 # Issue #621: the backend now mounts one read-write volume (tool-upload-staging, for
-# ManagedToolController.Upload's staging directory -- deploy/docker-compose.yml),
+# ManagedToolController.Upload's staging directory -- deploy/compose.yaml),
 # which arrives root-owned like every Compose named volume does regardless of
 # what gets chowned at build time. No plain `USER app` here anymore (that was
 # safe when the backend had no read-write mount at all): the container now

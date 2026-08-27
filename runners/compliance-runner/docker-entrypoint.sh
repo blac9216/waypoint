@@ -21,7 +21,7 @@ if [ "$(id -u)" = '0' ]; then
 	# Scan artifact store (ADR-0014 §7 "scan-artifact write access") --
 	# read-write for this service specifically. ScanOptions.ArtifactStorePath
 	# defaults to a `scans/` subdirectory of the shared `artifacts` named
-	# volume (deploy/docker-compose.yml), which does not exist until something
+	# volume (deploy/compose.yaml), which does not exist until something
 	# creates it -- `mkdir -p` here rather than relying on the app to create
 	# its own working directory, so ComplianceReadinessCheck's writability
 	# probe (which requires the directory to already exist) passes on a fresh
@@ -31,7 +31,7 @@ if [ "$(id -u)" = '0' ]; then
 
 	# content-pull/content-import working tree (ADR-0017, issue #616,
 	# live-verified) -- ComplianceContentOptions.ContentPath, backed by the
-	# compliance-content named volume (deploy/docker-compose.yml). Compose
+	# compliance-content named volume (deploy/compose.yaml). Compose
 	# named volumes always arrive root-owned regardless of what the image
 	# chowns at build time (see header comment); without this, `git clone`
 	# as uid 1654 fails with exit 128 before ever reaching the network.

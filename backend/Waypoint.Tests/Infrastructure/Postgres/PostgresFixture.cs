@@ -26,7 +26,7 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// substitute away a tool that is actually available" rule (docker is available in
 /// this sandbox). Isolated per docs/testing.md's recipe: a container name unique per
 /// test run and a dynamically reserved host port, so this never collides with the
-/// shared <c>deploy/docker-compose.yml</c> stack (fixed container names,
+/// shared <c>deploy/compose.yaml</c> stack (fixed container names,
 /// <c>waypoint-postgres</c>) or another agent's ad hoc container. Removed with
 /// <c>docker rm -f</c> in <see cref="DisposeAsync"/> regardless of test outcome.
 /// </summary>

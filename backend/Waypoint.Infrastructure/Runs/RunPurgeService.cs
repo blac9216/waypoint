@@ -30,7 +30,7 @@ namespace Waypoint.Infrastructure.Runs;
 ///
 /// API-side vs. runner-job split (the design question the issue calls out
 /// explicitly): the API process mounts the scan-artifact volume read-only
-/// (deploy/docker-compose.yml, "the backend never writes an artifact itself") -- it
+/// (deploy/compose.yaml, "the backend never writes an artifact itself") -- it
 /// structurally cannot delete a file on that volume. Everything this service does
 /// synchronously is therefore database-only, using the SAME owner-privileged
 /// connection every other controller-invoked service already has: deleting

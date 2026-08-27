@@ -127,7 +127,7 @@ with open(dst, "w", encoding="utf-8") as fh:
 # `docker run -v` source below (docs/testing.md "Devcontainer bind mounts").
 # `docker compose` resolves its own bind-mount sources against the compose
 # file's directory in a way that works from inside this devcontainer (the
-# committed docker-compose.yml's own `./keycloak/realm` mount is proof), but
+# committed compose.yaml's own `./keycloak/realm` mount is proof), but
 # a plain `docker run -v <path>:...` given directly to the daemon is NOT
 # translated -- the daemon looks for that literal path on the HOST, and a
 # container-side /workspaces/... path silently mounts an empty directory
@@ -165,7 +165,7 @@ NETWORK="${PROJECT}_internal"
 
 echo "Deleting any existing 'waypoint' realm so the import below recreates it..."
 # Issue #534 (live-verified): every Keycloak-served path now lives under
-# /auth (KC_HTTP_RELATIVE_PATH=/auth, docker-compose.yml's keycloak service --
+# /auth (KC_HTTP_RELATIVE_PATH=/auth, compose.yaml's keycloak service --
 # needed so the browser-facing SPA login flow, which goes through nginx's
 # /auth/ proxy path, gets self-referential URLs Keycloak itself renders
 # correctly). This script talks to Keycloak directly, container-to-container,

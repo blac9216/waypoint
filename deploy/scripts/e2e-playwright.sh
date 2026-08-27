@@ -65,6 +65,11 @@ SELF_JOINED_EDGE_NETWORK=""
 GENERATED_SECRET_FILES=()
 SECRET_LABEL="e2e"
 
+# Issue #845: same treatment for the throwaway TLS pair this run stages at
+# deploy/config/tls/ (see the prerequisites block below) -- an operator's
+# own pair, if one is already there, is used as-is and never removed.
+GENERATED_TLS_FILES=()
+
 log() { printf '\n=== %s ===\n' "$*"; }
 
 # shellcheck disable=SC2317,SC2329  # invoked indirectly via `trap cleanup EXIT`
@@ -80,6 +85,9 @@ cleanup() {
 	rm -f "${SCRATCH_KEY_DIR:-/nonexistent}"/* 2>/dev/null || true
 	if [[ ${#GENERATED_SECRET_FILES[@]} -gt 0 ]]; then
 		rm -f "${GENERATED_SECRET_FILES[@]}" 2>/dev/null || true
+	fi
+	if [[ ${#GENERATED_TLS_FILES[@]} -gt 0 ]]; then
+		rm -f "${GENERATED_TLS_FILES[@]}" 2>/dev/null || true
 	fi
 }
 trap cleanup EXIT
@@ -122,11 +130,28 @@ fi
 
 cd "${DEPLOY_DIR}"
 
-# Issue #844 renamed this pair to the generic tls.crt/tls.key names
-# deploy/nginx/conf.d/default.conf now references.
-if [[ ! -f nginx/certs/tls.crt || ! -f nginx/certs/tls.key ]]; then
-	log "Generating dev TLS cert"
+# Issue #845: compose.yaml (the production base this script now runs on its
+# own) mounts nginx's TLS material PER FILE from deploy/config/tls/tls.crt
+# and deploy/config/tls/tls.key with `bind: {create_host_path: false}`, so
+# `up` dies at container creation when that pair is missing -- and a
+# directory-level /etc/nginx/certs mount does NOT replace per-file mounts
+# (Compose merges volumes by target), it coexists with them. So stage the
+# throwaway pair at exactly the location the base mandates -- gitignored
+# under /deploy/config/, the same convention as the config/secrets/ files
+# below -- rather than at deploy/nginx/certs/, which the base never mounts.
+# Issue #844 renamed the pair to the generic tls.crt/tls.key names
+# deploy/nginx/conf.d/default.conf references; #847 replaces this
+# hand-rolled staging with a first-class generator.
+TLS_DIR="${DEPLOY_DIR}/config/tls"
+mkdir -p "${TLS_DIR}"
+if [[ ! -s "${TLS_DIR}/tls.crt" || ! -s "${TLS_DIR}/tls.key" ]]; then
+	log "Staging dev TLS pair into ${TLS_DIR}"
 	nginx/certs/generate-dev-certs.sh
+	cp nginx/certs/tls.crt "${TLS_DIR}/tls.crt"
+	cp nginx/certs/tls.key "${TLS_DIR}/tls.key"
+	chmod 644 "${TLS_DIR}/tls.crt"
+	chmod 600 "${TLS_DIR}/tls.key"
+	GENERATED_TLS_FILES+=("${TLS_DIR}/tls.crt" "${TLS_DIR}/tls.key")
 fi
 
 if [[ ! -f "${FRONTEND_DIR}/dist/index.html" ]]; then
@@ -155,7 +180,10 @@ if [[ -S /var/run/docker.sock ]]; then
 fi
 
 WAYPOINT_E2E_OVERRIDE_FILE="${WAYPOINT_E2E_OVERRIDE_FILE:-}"
-if [[ -z "${WAYPOINT_E2E_OVERRIDE_FILE}" ]] && [[ "${HOST_PREFIX}" != "${REPO_ROOT}" ]]; then
+# Generated whenever the devcontainer indirection is detected, even if the
+# operator also passed WAYPOINT_E2E_OVERRIDE_FILE (issue #845) -- see
+# fresh-stack-smoke-test.sh's matching comment.
+if [[ "${HOST_PREFIX}" != "${REPO_ROOT}" ]]; then
 	log "devcontainer bind-mount translation: this container's ${REPO_ROOT} is the host's ${HOST_PREFIX} -- generating a scratch override"
 	GENERATED_OVERRIDE="$(mktemp)"
 	cat > "${GENERATED_OVERRIDE}" <<-EOF
@@ -167,9 +195,17 @@ if [[ -z "${WAYPOINT_E2E_OVERRIDE_FILE}" ]] && [[ "${HOST_PREFIX}" != "${REPO_RO
 	        target: /etc/nginx/conf.d
 	        read_only: true
 	      - type: bind
-	        source: ${HOST_PREFIX}/deploy/nginx/certs
-	        target: /etc/nginx/certs
+	        source: ${HOST_PREFIX}/deploy/config/tls/tls.crt
+	        target: /etc/nginx/certs/tls.crt
 	        read_only: true
+	        bind:
+	          create_host_path: false
+	      - type: bind
+	        source: ${HOST_PREFIX}/deploy/config/tls/tls.key
+	        target: /etc/nginx/certs/tls.key
+	        read_only: true
+	        bind:
+	          create_host_path: false
 	      - type: bind
 	        source: ${HOST_PREFIX}/frontend/dist
 	        target: /usr/share/nginx/html
@@ -193,7 +229,7 @@ if [[ -z "${WAYPOINT_E2E_OVERRIDE_FILE}" ]] && [[ "${HOST_PREFIX}" != "${REPO_RO
 	  keycloak-backend-client-secret:
 	    file: ${HOST_PREFIX}/deploy/config/secrets/keycloak-backend-client-secret
 	EOF
-	WAYPOINT_E2E_OVERRIDE_FILE="${GENERATED_OVERRIDE}"
+	WAYPOINT_E2E_OVERRIDE_FILE="${WAYPOINT_E2E_OVERRIDE_FILE:+${WAYPOINT_E2E_OVERRIDE_FILE} }${GENERATED_OVERRIDE}"
 fi
 
 # --- File-backed secrets (issue #844) ----------------------------------
@@ -267,7 +303,10 @@ SCRATCH_KEY_DIR="$(mktemp -d)"
 openssl rand -hex 32 > "${SCRATCH_KEY_DIR}/master.key"
 chmod 644 "${SCRATCH_KEY_DIR}/master.key"
 
-CONFIG_DIR="${REPO_ROOT}/config"
+# Issue #845: deploy/config/ (anchored under deploy/, matching the
+# already-established file-backed-secrets convention issue #844 introduced
+# for postgres/keycloak), not the legacy repo-root config/ this replaces.
+CONFIG_DIR="${DEPLOY_DIR}/config"
 mkdir -p "${CONFIG_DIR}/secrets" "${CONFIG_DIR}/local-auth"
 cp "${SCRATCH_KEY_DIR}/master.key" "${CONFIG_DIR}/secrets/master.key"
 chmod 644 "${CONFIG_DIR}/secrets/master.key"
@@ -286,12 +325,20 @@ if [[ ! -s "${SCRATCH_KEY_DIR}/admin-hash" ]]; then
 fi
 cp "${SCRATCH_KEY_DIR}/admin-hash" "${CONFIG_DIR}/local-auth/admin-password-hash"
 
-MASTER_KEY_HOST_PATH="${HOST_PREFIX}/config/secrets/master.key"
-ADMIN_HASH_HOST_PATH="${HOST_PREFIX}/config/local-auth/admin-password-hash"
+MASTER_KEY_HOST_PATH="${HOST_PREFIX}/deploy/config/secrets/master.key"
+ADMIN_HASH_HOST_PATH="${HOST_PREFIX}/deploy/config/local-auth/admin-password-hash"
 MASTER_KEY_OVERRIDE="$(mktemp)"
 {
 	echo "services:"
 	echo "  backend:"
+	echo "    environment:"
+	# Issue #845: compose.yaml's base carries no LocalAuth__* keys at all
+	# (Keycloak-only auth) -- this Playwright login step needs the local-auth
+	# dev flag and the mounted-hash-file path explicitly turned on, which the
+	# base's now-removed `${LOCAL_AUTH_ENABLED:-true}` default and
+	# LocalAuth__AdminPasswordHashFile key used to supply implicitly.
+	echo "      LocalAuth__Enabled: \"true\""
+	echo "      LocalAuth__AdminPasswordHashFile: \"/run/secrets/local-auth-admin-password-hash\""
 	echo "    volumes:"
 	echo "      - type: bind"
 	echo "        source: ${MASTER_KEY_HOST_PATH}"
@@ -322,7 +369,7 @@ MASTER_KEY_OVERRIDE="$(mktemp)"
 	echo "        read_only: true"
 } > "${MASTER_KEY_OVERRIDE}"
 
-COMPOSE_FILES="-f docker-compose.yml"
+COMPOSE_FILES="-f compose.yaml"
 if [[ -n "${WAYPOINT_E2E_OVERRIDE_FILE}" ]]; then
 	# WAYPOINT_E2E_OVERRIDE_FILE may carry more than one path (space-separated
 	# -- the devcontainer bind-mount override and the subnet override above

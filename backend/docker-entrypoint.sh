@@ -24,7 +24,7 @@ set -eu
 if [ "$(id -u)" = '0' ]; then
 	# Manual-upload staging (issue #621): the `tool-upload-staging` named
 	# volume, mounted read-write into BOTH this backend and the download-runner
-	# (deploy/docker-compose.yml) -- shared so a file this controller stages
+	# (deploy/compose.yaml) -- shared so a file this controller stages
 	# under it is readable by the download-runner's tool-install job once it
 	# claims the install job this controller queues. Matches
 	# ManagedToolOptions.UploadStagingPath. Scoped to the staging mount only.

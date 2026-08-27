@@ -70,7 +70,7 @@ public sealed class LocalAuthOptions
 	/// trailing newline is tolerated and trimmed). Set via the
 	/// <c>LocalAuth__AdminPasswordHashFile</c> environment variable (or
 	/// <c>LocalAuth:AdminPasswordHashFile</c> in configuration) to the operator-mounted
-	/// path — see <c>deploy/docker-compose.yml</c> and <c>deploy/README.md</c> "Bring-up".
+	/// path — see <c>deploy/compose.yaml</c> and <c>deploy/README.md</c> "Bring-up".
 	/// This is the preferred delivery mechanism (issue #333); when set and the file
 	/// exists, it takes precedence over <see cref="AdminPasswordHash"/> as read directly
 	/// from configuration/env.

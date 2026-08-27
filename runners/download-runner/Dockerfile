@@ -86,7 +86,7 @@ COPY runners/download-runner/powershell/ /app/PowerShell/
 # Execution.csproj copies into the publish output at PowerShell/Modules/ (the
 # single canonical source, issue #456); at runtime they dot-source
 # vcf-download-manager.common.ps1 under /app/PowerShell/project (see
-# WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH in deploy/docker-compose.yml).
+# WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH in deploy/compose.yaml).
 COPY --from=dotnet-build /app /app
 
 # Non-root: mcr.microsoft.com/dotnet/sdk:8.0 already ships the same `app`
@@ -113,7 +113,7 @@ ENV DOTNET_EnableDiagnostics=0
 # The host reports its own readiness via a file sentinel, not a loopback HTTP call
 # (ADR-0013 decision 1: a runner has no REST/SSE surface) -- see
 # ReadinessReportingHostedService and HealthCheckProbe's doc comments.
-# deploy/docker-compose.yml invokes this exact command as the service's Compose
+# deploy/compose.yaml invokes this exact command as the service's Compose
 # healthcheck. Runs as root (no USER switch for HEALTHCHECK), which can always
 # read the readiness file the `app`-owned process writes.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \

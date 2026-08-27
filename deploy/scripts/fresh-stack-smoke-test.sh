@@ -80,6 +80,11 @@ ADMIN_TOKEN=""
 GENERATED_SECRET_FILES=()
 SECRET_LABEL="smoke"
 
+# Issue #845: same treatment for the throwaway TLS pair this run stages at
+# deploy/config/tls/ (see the prerequisites block below) -- an operator's
+# own pair, if one is already there, is used as-is and never removed.
+GENERATED_TLS_FILES=()
+
 log() { printf '\n=== %s ===\n' "$*"; }
 ok()  { PASS_COUNT=$((PASS_COUNT + 1)); printf '[PASS] %s\n' "$*"; }
 bad() { FAIL_COUNT=$((FAIL_COUNT + 1)); FAILURES+=("$*"); printf '[FAIL] %s\n' "$*"; }
@@ -95,6 +100,9 @@ cleanup() {
 	if [[ ${#GENERATED_SECRET_FILES[@]} -gt 0 ]]; then
 		rm -f "${GENERATED_SECRET_FILES[@]}" 2>/dev/null || true
 	fi
+	if [[ ${#GENERATED_TLS_FILES[@]} -gt 0 ]]; then
+		rm -f "${GENERATED_TLS_FILES[@]}" 2>/dev/null || true
+	fi
 	rm -f "${CATALOG_ARTIFACTS_FILE:-/nonexistent}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -107,11 +115,28 @@ docker ps --format '{{.Names}}' | grep -v "^${PROJECT}-" || echo "  (none curren
 
 cd "${DEPLOY_DIR}"
 
-# Issue #844 renamed this pair to the generic tls.crt/tls.key names
-# deploy/nginx/conf.d/default.conf now references.
-if [[ ! -f nginx/certs/tls.crt || ! -f nginx/certs/tls.key ]]; then
-	log "Generating dev TLS cert"
+# Issue #845: compose.yaml (the production base this script now runs on its
+# own) mounts nginx's TLS material PER FILE from deploy/config/tls/tls.crt
+# and deploy/config/tls/tls.key with `bind: {create_host_path: false}`, so
+# `up` dies at container creation when that pair is missing -- and a
+# directory-level /etc/nginx/certs mount does NOT replace per-file mounts
+# (Compose merges volumes by target), it coexists with them. So stage the
+# throwaway pair at exactly the location the base mandates -- gitignored
+# under /deploy/config/, the same convention as the config/secrets/ files
+# below -- rather than at deploy/nginx/certs/, which the base never mounts.
+# Issue #844 renamed the pair to the generic tls.crt/tls.key names
+# deploy/nginx/conf.d/default.conf references; #847 replaces this
+# hand-rolled staging with a first-class generator.
+TLS_DIR="${DEPLOY_DIR}/config/tls"
+mkdir -p "${TLS_DIR}"
+if [[ ! -s "${TLS_DIR}/tls.crt" || ! -s "${TLS_DIR}/tls.key" ]]; then
+	log "Staging dev TLS pair into ${TLS_DIR}"
 	nginx/certs/generate-dev-certs.sh
+	cp nginx/certs/tls.crt "${TLS_DIR}/tls.crt"
+	cp nginx/certs/tls.key "${TLS_DIR}/tls.key"
+	chmod 644 "${TLS_DIR}/tls.crt"
+	chmod 600 "${TLS_DIR}/tls.key"
+	GENERATED_TLS_FILES+=("${TLS_DIR}/tls.crt" "${TLS_DIR}/tls.key")
 fi
 
 if [[ ! -f "${REPO_ROOT}/frontend/dist/index.html" ]]; then
@@ -126,7 +151,7 @@ fi
 # docs/testing.md "Devcontainer bind mounts": when this script itself runs
 # from inside the devcontainer, the Docker daemon resolves every bind-mount
 # SOURCE against the HOST filesystem, not this container's. A relative source
-# in docker-compose.yml (frontend/dist, postgres/initdb) is silently mounted
+# in compose.yaml (frontend/dist, postgres/initdb) is silently mounted
 # as an empty directory instead of erroring, which then makes nginx serve a
 # bare 403 and/or postgres silently skip 01-runner-roles.sh (both hit and
 # fixed while first authoring this script -- see docs/testing.md and the PR
@@ -146,7 +171,12 @@ if [[ -S /var/run/docker.sock ]]; then
 	done <<< "${SELF_MOUNTS}"
 fi
 
-if [[ -z "${WAYPOINT_SMOKE_OVERRIDE_FILE:-}" ]] && [[ "${HOST_PREFIX}" != "${REPO_ROOT}" ]]; then
+# Generated whenever the devcontainer indirection is detected, even if the
+# operator also passed WAYPOINT_SMOKE_OVERRIDE_FILE: that variable exists to
+# route around a shared-host subnet collision, and suppressing the host-path
+# translation because of it would break the run for an unrelated reason
+# (issue #845).
+if [[ "${HOST_PREFIX}" != "${REPO_ROOT}" ]]; then
 	log "devcontainer bind-mount translation: this container's ${REPO_ROOT} is the host's ${HOST_PREFIX} -- generating a scratch override"
 	GENERATED_OVERRIDE="$(mktemp)"
 	cat > "${GENERATED_OVERRIDE}" <<-EOF
@@ -158,9 +188,17 @@ if [[ -z "${WAYPOINT_SMOKE_OVERRIDE_FILE:-}" ]] && [[ "${HOST_PREFIX}" != "${REP
 	        target: /etc/nginx/conf.d
 	        read_only: true
 	      - type: bind
-	        source: ${HOST_PREFIX}/deploy/nginx/certs
-	        target: /etc/nginx/certs
+	        source: ${HOST_PREFIX}/deploy/config/tls/tls.crt
+	        target: /etc/nginx/certs/tls.crt
 	        read_only: true
+	        bind:
+	          create_host_path: false
+	      - type: bind
+	        source: ${HOST_PREFIX}/deploy/config/tls/tls.key
+	        target: /etc/nginx/certs/tls.key
+	        read_only: true
+	        bind:
+	          create_host_path: false
 	      - type: bind
 	        source: ${HOST_PREFIX}/frontend/dist
 	        target: /usr/share/nginx/html
@@ -184,7 +222,7 @@ if [[ -z "${WAYPOINT_SMOKE_OVERRIDE_FILE:-}" ]] && [[ "${HOST_PREFIX}" != "${REP
 	  keycloak-backend-client-secret:
 	    file: ${HOST_PREFIX}/deploy/config/secrets/keycloak-backend-client-secret
 	EOF
-	WAYPOINT_SMOKE_OVERRIDE_FILE="${GENERATED_OVERRIDE}"
+	WAYPOINT_SMOKE_OVERRIDE_FILE="${WAYPOINT_SMOKE_OVERRIDE_FILE:+${WAYPOINT_SMOKE_OVERRIDE_FILE} }${GENERATED_OVERRIDE}"
 fi
 
 # --- File-backed secrets (issue #844) ----------------------------------
@@ -225,7 +263,10 @@ SCRATCH_KEY_DIR="$(mktemp -d)"
 openssl rand -hex 32 > "${SCRATCH_KEY_DIR}/master.key"
 chmod 644 "${SCRATCH_KEY_DIR}/master.key"
 
-CONFIG_DIR="${REPO_ROOT}/config"
+# Issue #845: deploy/config/ (anchored under deploy/, matching the
+# already-established file-backed-secrets convention issue #844 introduced
+# for postgres/keycloak), not the legacy repo-root config/ this replaces.
+CONFIG_DIR="${DEPLOY_DIR}/config"
 mkdir -p "${CONFIG_DIR}/secrets" "${CONFIG_DIR}/local-auth"
 cp "${SCRATCH_KEY_DIR}/master.key" "${CONFIG_DIR}/secrets/master.key"
 chmod 644 "${CONFIG_DIR}/secrets/master.key"
@@ -264,12 +305,23 @@ fi
 # skip it if the hash could not be computed, so backend still starts (with
 # every login failing closed, as documented) rather than compose refusing to
 # come up on a missing bind source.
-MASTER_KEY_HOST_PATH="${HOST_PREFIX}/config/secrets/master.key"
-ADMIN_HASH_HOST_PATH="${HOST_PREFIX}/config/local-auth/admin-password-hash"
+MASTER_KEY_HOST_PATH="${HOST_PREFIX}/deploy/config/secrets/master.key"
+ADMIN_HASH_HOST_PATH="${HOST_PREFIX}/deploy/config/local-auth/admin-password-hash"
 MASTER_KEY_OVERRIDE="$(mktemp)"
 {
 	echo "services:"
 	echo "  backend:"
+	echo "    environment:"
+	# Issue #845: compose.yaml's base carries no LocalAuth__* keys at all
+	# (Keycloak-only auth) -- this smoke test's login step needs the
+	# local-auth dev flag explicitly turned on, which the base's now-removed
+	# `${LOCAL_AUTH_ENABLED:-true}` default used to supply implicitly.
+	echo "      LocalAuth__Enabled: \"true\""
+	if [[ -n "${ADMIN_PASSWORD}" ]]; then
+		# Also removed from the base for the same reason -- without this key
+		# the mounted hash file below is never read.
+		echo "      LocalAuth__AdminPasswordHashFile: \"/run/secrets/local-auth-admin-password-hash\""
+	fi
 	echo "    volumes:"
 	echo "      - type: bind"
 	echo "        source: ${MASTER_KEY_HOST_PATH}"
@@ -310,9 +362,13 @@ MASTER_KEY_OVERRIDE="$(mktemp)"
 	echo "        read_only: true"
 } > "${MASTER_KEY_OVERRIDE}"
 
-COMPOSE_FILES="-f docker-compose.yml"
+COMPOSE_FILES="-f compose.yaml"
 if [[ -n "${WAYPOINT_SMOKE_OVERRIDE_FILE:-}" ]]; then
-	COMPOSE_FILES="${COMPOSE_FILES} -f ${WAYPOINT_SMOKE_OVERRIDE_FILE}"
+	# May carry more than one path (space-separated): an operator-supplied
+	# override plus the generated devcontainer translation above.
+	for f in ${WAYPOINT_SMOKE_OVERRIDE_FILE}; do
+		COMPOSE_FILES="${COMPOSE_FILES} -f ${f}"
+	done
 fi
 COMPOSE_FILES="${COMPOSE_FILES} -f ${MASTER_KEY_OVERRIDE}"
 DC="docker compose -p ${PROJECT} ${COMPOSE_FILES}"

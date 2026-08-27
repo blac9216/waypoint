@@ -79,7 +79,7 @@ $$ LANGUAGE plpgsql;
 -- null) that happens inline in the orchestration call; artifact_job_id is the
 -- enqueued compliance-runner 'purge' job that deletes the on-disk files (the API
 -- process has no write access to the artifacts volume -- see
--- deploy/docker-compose.yml's ":ro" backend mount / ADR-0014 §7); artifacts_phase
+-- deploy/compose.yaml's ":ro" backend mount / ADR-0014 §7); artifacts_phase
 -- mirrors that job's own outcome back so a re-invocation can tell "still running",
 -- "done", or "failed, retry" apart without re-deriving it from jobs.state. A
 -- fully-completed row (both phases done) is what flips runs.purged_at and writes

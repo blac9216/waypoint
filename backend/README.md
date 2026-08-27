@@ -73,7 +73,7 @@ dotnet run --project Waypoint.Api --no-launch-profile
 
 `LocalAuth__AdminPasswordHash` is fine for this bare `dotnet run` loop, but it leaks via
 `/proc/<pid>/environ`, `docker inspect`, and crash dumps — the containerized compose
-stack (`deploy/docker-compose.yml`, `deploy/README.md` "Bring-up" step 3) prefers a
+stack (`deploy/compose.yaml`, `deploy/README.md` "Bring-up" step 3) prefers a
 mounted file instead: set `LocalAuth__AdminPasswordHashFile` to a path containing the
 hash and it takes precedence (issue #333, `LocalAuthOptionsPostConfigure`). The env var
 above remains a supported fallback either way — a mounted file just isn't the natural
@@ -116,9 +116,9 @@ that shape.
   applies migrations at all — `appsettings.Testing.json` turns it off because the
   in-process `WebApplicationFactory` test host has no Postgres to migrate against.
   `appsettings.json`'s default connection string matches
-  `deploy/docker-compose.yml`'s `postgres` service defaults (dev-only credentials
+  `deploy/compose.yaml`'s `postgres` service defaults (dev-only credentials
   already committed there), so the image works against the dev stack unmodified.
-  `deploy/docker-compose.yml` also sets `ConnectionStrings__Waypoint` on the
+  `deploy/compose.yaml` also sets `ConnectionStrings__Waypoint` on the
   `backend` service, composed from the same `POSTGRES_USER`/`POSTGRES_PASSWORD`/
   `POSTGRES_DB` variables the `postgres` service reads (#103) — an operator who
   overrides those in `deploy/.env` does not need to separately override the

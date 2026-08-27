@@ -23,7 +23,7 @@ namespace Waypoint.Tests.Deploy;
 /// <summary>
 /// Issue #613 (live-verified): <c>WaypointComplianceContent</c> shipped in the
 /// compliance-runner image but was never added to that service's
-/// <c>PowerShell__ModulePreloadPaths__*</c> in <c>deploy/docker-compose.yml</c>, so
+/// <c>PowerShell__ModulePreloadPaths__*</c> in <c>deploy/compose.yaml</c>, so
 /// <see cref="Waypoint.Infrastructure.PowerShell.WaypointRunspacePool.CreateRunspace"/>
 /// never imported it and <c>Invoke-WaypointComplianceContentPull</c> was undefined at
 /// invocation time -- content-pull/content-import always failed with "term ... is not
@@ -36,7 +36,7 @@ namespace Waypoint.Tests.Deploy;
 /// to its runner's preload list now fails this test instead of only surfacing at
 /// first live invocation.
 ///
-/// Parses <c>deploy/docker-compose.yml</c> directly with YamlDotNet (same technique as
+/// Parses <c>deploy/compose.yaml</c> directly with YamlDotNet (same technique as
 /// <see cref="RunnerEgressTopologyTests"/>) -- no Docker daemon required.
 /// </summary>
 public sealed class ModulePreloadCompletenessTests
@@ -46,7 +46,7 @@ public sealed class ModulePreloadCompletenessTests
 	// paired with the runner service that must preload it. WaypointLogging is
 	// deliberately excluded: it is a support module (Get-LogSplat/Write-Log) other
 	// shims dot-source, not something a job handler invokes by command name -- see
-	// deploy/docker-compose.yml's own preload-order comment on compliance-runner.
+	// deploy/compose.yaml's own preload-order comment on compliance-runner.
 	private static readonly (string Module, string Runner)[] ExpectedModuleRunnerPairs =
 	[
 		("WaypointDiscovery", "compliance-runner"),
@@ -132,7 +132,7 @@ public sealed class ModulePreloadCompletenessTests
 		return (YamlMappingNode)yaml.Documents[0].RootNode;
 	}
 
-	// Walk up from the test assembly's location until deploy/docker-compose.yml
+	// Walk up from the test assembly's location until deploy/compose.yaml
 	// is found. Robust to the bin/<config>/<tfm>/ build layout locally and in
 	// CI alike, and independent of the process working directory.
 	private static string ResolveComposePath()
@@ -140,7 +140,7 @@ public sealed class ModulePreloadCompletenessTests
 		DirectoryInfo? dir = new(AppContext.BaseDirectory);
 		while (dir is not null)
 		{
-			string candidate = Path.Combine(dir.FullName, "deploy", "docker-compose.yml");
+			string candidate = Path.Combine(dir.FullName, "deploy", "compose.yaml");
 			if (File.Exists(candidate))
 			{
 				return candidate;
@@ -150,7 +150,7 @@ public sealed class ModulePreloadCompletenessTests
 		}
 
 		throw new FileNotFoundException(
-			"Could not locate deploy/docker-compose.yml by walking up from "
+			"Could not locate deploy/compose.yaml by walking up from "
 			+ AppContext.BaseDirectory);
 	}
 }

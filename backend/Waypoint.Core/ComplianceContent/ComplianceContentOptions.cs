@@ -25,7 +25,7 @@ public sealed class ComplianceContentOptions
 
 	/// <summary>
 	/// Root directory of the compliance-content working tree. Matches
-	/// <c>deploy/docker-compose.yml</c>'s eventual <c>compliance-content</c> volume
+	/// <c>deploy/compose.yaml</c>'s eventual <c>compliance-content</c> volume
 	/// mount; tests point this at a temp directory.
 	/// </summary>
 	public string ContentPath { get; set; } = "/var/lib/waypoint/compliance-content";

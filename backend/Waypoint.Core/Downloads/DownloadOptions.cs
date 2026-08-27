@@ -21,7 +21,7 @@ public sealed class DownloadOptions
 
 	/// <summary>
 	/// Root directory of the artifact store volume downloaded files land in — matches
-	/// <c>deploy/docker-compose.yml</c>'s existing <c>artifacts</c> volume mount
+	/// <c>deploy/compose.yaml</c>'s existing <c>artifacts</c> volume mount
 	/// (<c>/var/lib/waypoint/artifacts</c>) in production; tests point this at a temp
 	/// directory. A <c>quarantine</c> subdirectory holds files that failed sha256
 	/// verification (see <see cref="Waypoint.Infrastructure.Downloads.DownloadJobHandler"/>).

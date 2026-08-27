@@ -21,7 +21,7 @@
 #
 # Password source (issue #844): file-backed, not an inline env var --
 # POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE / POSTGRES_DOWNLOAD_RUNNER_PASSWORD_FILE
-# on the postgres service in docker-compose.yml, each pointing at a Compose
+# on the postgres service in compose.yaml, each pointing at a Compose
 # `secrets:`-mounted file under deploy/config/secrets/ (gitignored -- see
 # .gitignore's /deploy/config/ entry). A MISSING file is caught by the Docker
 # daemon at container-create time (`docker compose config` renders fine and

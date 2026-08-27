@@ -47,7 +47,7 @@ public static class JobCapabilities
 	/// #577) belongs here for the same reason <c>scan</c> does: deleting a terminal
 	/// run's HDF/CKL artifact files requires write access to the scan-artifact volume
 	/// (ADR-0014 §7), which only <c>compliance-runner</c>'s mount grants -- the API
-	/// process mounts that volume read-only (deploy/docker-compose.yml).
+	/// process mounts that volume read-only (deploy/compose.yaml).
 	/// </summary>
 	public static readonly IReadOnlySet<string> Compliance = new HashSet<string>(StringComparer.Ordinal)
 	{
