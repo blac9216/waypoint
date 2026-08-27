@@ -63,6 +63,9 @@ function Invoke-WaypointScan {
 		[string]$SelectorName,
 
 		[Parameter()]
+		[string]$InputsFilePath,
+
+		[Parameter()]
 		[string]$VmwareStigDockerCommonPath
 	)
 
@@ -75,9 +78,14 @@ function Invoke-WaypointScan {
 	# a distinct 'selector=esxi/<host>' line; a whole-target (legacy or collapsed
 	# remainder) job carries 'selector=<whole-target>'. This is the round-1 review's
 	# required "assert what an executed job scans, not just the job count" observation.
+	#
+	# Issue #738: also echoes whether a resolved-inputs file was supplied (and its
+	# CONTENT, not just presence) so a test can assert the vCenter component path
+	# actually materialized #879's resolved Input config docs into InSpec inputs.
 	$InformationPreference = 'Continue'
 	$SelectorSummary = if ($SelectorKind) { "$SelectorKind/$SelectorName" } else { '<whole-target>' }
-	Write-Information "Scanning stub vCenter '$VCenter' as '$Username' (password length $($Password.Length)) profile '$ProfilePath' selector=$SelectorSummary"
+	$InputsSummary = if ($InputsFilePath -and (Test-Path -Path $InputsFilePath -PathType Leaf)) { Get-Content -Path $InputsFilePath -Raw } else { '<none>' }
+	Write-Information "Scanning stub vCenter '$VCenter' as '$Username' (password length $($Password.Length)) profile '$ProfilePath' selector=$SelectorSummary inputsFile=$InputsSummary"
 
 	$Mode = $env:WAYPOINT_SCAN_STUB_MODE
 	if (-not $Mode) { $Mode = 'success' }

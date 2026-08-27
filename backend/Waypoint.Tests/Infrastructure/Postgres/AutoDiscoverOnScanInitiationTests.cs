@@ -247,9 +247,19 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 			stigman, new NeverCalledStigManagerUploadClient(), secretStore, _repository, _redactor);
 
 		ComplianceContentOptions complianceContentOptions = new() { ContentPath = Directory.CreateTempSubdirectory("wp-autodiscover-content").FullName };
+		IOptions<ComplianceContentOptions> wrappedComplianceContentOptions = Options.Create(complianceContentOptions);
+
+		// Issue #738: wired for DI-graph parity -- no vcenter-selector plan item exists
+		// in this suite's job payloads, so ResolveAsync is never invoked.
+		Waypoint.Core.ComplianceContent.ICatalogRepository catalog =
+			new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(_fixture.ConnectionString);
+		Waypoint.Core.ComplianceContent.IBaselineRepository baselines =
+			new Waypoint.Infrastructure.ComplianceContent.BaselineRepository(_fixture.ConnectionString);
+		Waypoint.Infrastructure.Scans.VCenterProfileRevisionResolver vCenterProfileRevisions = new(baselines, catalog, wrappedComplianceContentOptions);
+
 		_scanHandler = new Waypoint.Infrastructure.Scans.ScanJobHandler(
 			executor, secretStore, credentials, _targets, runSecrets, _repository, _redactor, wrappedPsOptions,
-			Options.Create(scanOptions), Options.Create(complianceContentOptions), configDocs, attestationSnapshots, uploadCoordinator);
+			Options.Create(scanOptions), wrappedComplianceContentOptions, configDocs, attestationSnapshots, uploadCoordinator, vCenterProfileRevisions);
 
 		_credentials = credentials;
 		_secretStore = secretStore;

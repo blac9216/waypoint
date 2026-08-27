@@ -262,6 +262,56 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Assert.NotNull(scanJobs[0].ScanPlanItemId);
 	}
 
+	/// <summary>
+	/// Issue #738 AC "the exact planned vCenter endpoint and profile/input revisions
+	/// are executed": a <c>vcenter</c>-selector plan item's fanned-out job payload
+	/// carries its OWN frozen <c>catalog_execution_profile_id</c>/<c>baseline_id</c> --
+	/// not the run-level <c>profile_key</c> (absent here entirely, per #895's
+	/// target_scope contract) -- so <c>ScanJobHandler</c> can resolve the activated
+	/// content-revision profile directory instead of any fixed/legacy path. An
+	/// esxi-selector sibling on the SAME target/run stays on the pre-#738 payload shape
+	/// (no such fields) -- proving this issue's behavior change is scoped to the
+	/// vcenter-selector item only, per its AC "esxi/vm transports stay byte-unchanged."
+	/// </summary>
+	[Fact]
+	public async Task CreateScanRun_VCenterSelectorComponent_JobPayloadCarriesFrozenProfileAndBaselineIds()
+	{
+		Guid siteId = await CreateSiteAsync("fanout-vcenter-profile");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
+		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+
+		Guid vcenterComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "vcenter-main", ["vsphere-api"], priority: 3, transport: CatalogTransports.VMware, selectorKind: CatalogSelectorKinds.VCenter);
+		Guid esxiComponentId = await SeedComponentAsync(targetId, "esxi-sibling", priority: 4);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		Guid vcenterJobId = await ReadJobIdForComponentAsync(runId, vcenterComponentId);
+		using JsonDocument vcenterPayload = JsonDocument.Parse(await ReadJobPayloadAsync(vcenterJobId));
+		Assert.Equal("vcenter", vcenterPayload.RootElement.GetProperty("selector_kind").GetString());
+		Assert.True(vcenterPayload.RootElement.TryGetProperty("catalog_execution_profile_id", out JsonElement profileIdElement));
+		Assert.True(Guid.TryParse(profileIdElement.GetString(), out Guid _));
+		Assert.True(vcenterPayload.RootElement.TryGetProperty("baseline_id", out JsonElement baselineIdElement));
+		Assert.True(Guid.TryParse(baselineIdElement.GetString(), out Guid _));
+		Assert.True(vcenterPayload.RootElement.TryGetProperty("input_resolutions", out _));
+
+		Guid esxiJobId = await ReadJobIdForComponentAsync(runId, esxiComponentId);
+		using JsonDocument esxiPayload = JsonDocument.Parse(await ReadJobPayloadAsync(esxiJobId));
+		Assert.Equal("esxi", esxiPayload.RootElement.GetProperty("selector_kind").GetString());
+		Assert.False(
+			esxiPayload.RootElement.TryGetProperty("catalog_execution_profile_id", out _),
+			"an esxi-selector item's payload must stay byte-unchanged by this issue (#739/#740's remit).");
+		Assert.False(esxiPayload.RootElement.TryGetProperty("baseline_id", out _));
+	}
+
 	[Fact]
 	public async Task CreateScanRun_MixedNarrowableAndGated_FansOutPerNarrowablePlusExactlyOneCollapsed()
 	{

@@ -678,6 +678,23 @@ public sealed class CatalogRepository : ICatalogRepository
 		return reports;
 	}
 
+	public async Task<string?> GetProfileKeyForExecutionProfileAsync(Guid executionProfileId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT profile_key
+			FROM catalog_import_report_entries
+			WHERE execution_profile_id = $1
+			ORDER BY created_at DESC
+			LIMIT 1
+			""", connection);
+		command.Parameters.AddWithValue(executionProfileId);
+
+		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		return result as string;
+	}
+
 	public async Task<IReadOnlyList<CatalogImportReportEntry>> ListImportReportEntriesAsync(Guid reportId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
