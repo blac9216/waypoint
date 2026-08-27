@@ -71,9 +71,9 @@ depended on it.
 Delivered: Keycloak in the Compose stack on its own Postgres database with scripted
 realm bootstrap (four role groups, example LDAP federation config, CAC/PIV x.509 flow
 documented for site enablement — [ADR-0004](adr/0004-identity-keycloak.md)); OIDC
-bearer-token validation on the backend with canonical-issuer pinning
-(`Oidc:ValidIssuer`, decoupled from discovery so a real browser-minted token
-validates correctly behind nginx); a hand-rolled authorization-code + PKCE login flow
+bearer-token validation on the backend with canonical-issuer pinning derived from
+one operator-set `Oidc:PublicUrl` (issue #842, decoupled from discovery so a real
+browser-minted token validates correctly behind nginx); a hand-rolled authorization-code + PKCE login flow
 in the SPA (no external OIDC libs) replacing the M1 local-auth form, with local auth
 now an off-by-default dev-flag for e2e/smoke paths only; four-role RBAC
 (Viewer/Cyber/Operator/Admin) enforced end to end, closed out by a reflection-driven

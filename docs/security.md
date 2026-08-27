@@ -242,7 +242,7 @@ real-world importance:
    This control governs the envelope-encryption master key (ADR-0005). Compose mounts
    it into all three trusted services named above — the API, `compliance-runner`, and
    `download-runner` (issue #442) — each reading it from its own uid-matched file
-   permission (`deploy/README.md` "Bring-up" step 4). The dev-grade
+   permission (`deploy/README.md` "Production only: secrets master key"). The dev-grade
    local-auth admin password hash
    (`LocalAuthOptions.AdminPasswordHash`, issue #62) is a *different* piece of secret
    material this control doesn't literally cover — but the same leakage argument

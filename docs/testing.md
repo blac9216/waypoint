@@ -1360,33 +1360,59 @@ cd deploy
 ./scripts/e2e-playwright.sh <your-slug> <your-port>
 ```
 
+**Known limitation inside a devcontainer / remote-daemon environment (issue
+[#896](https://github.com/blac9216/waypoint/issues/896), open).** The script
+pins the stack's `--public-url` to `https://localhost:<port>` *before* it
+probes whether that published host port is reachable from this namespace. When
+it is not (the devcontainer case below), the script falls back to joining the
+`edge` network and navigates the browser at the container-internal origin
+instead — but the stack was already generated for the `localhost:<port>`
+origin, so the origin Playwright uses is not the one the backend and Keycloak
+were configured with, and **every** spec in the suite currently fails on
+origin discipline. This is a known wiring gap, not a mistake on your part, and
+there is no supported workaround today; #896 tracks the fix. Run the suite from
+a host shell that can reach the published port until it lands.
+
 Same isolation recipe as the smoke script (unique `-p`/port, full `down -v`
 teardown on exit including on failure), plus: seeds one site/target/
-(shared) credential via the API so the Start-a-Scan wizard has something to
-select, joins its own process to the stack's `edge` network when the
-published host port is unreachable from this namespace (identical
+(shared) credential via the local-auth API so the Start-a-Scan wizard has
+something to select, joins its own process to the stack's `edge` network when
+the published host port is unreachable from this namespace (identical
 devcontainer/remote-daemon trap the smoke script's helper-container pattern
 works around — see that script's header comment; this one has no
 Playwright-side equivalent to "run every request in a container", so it
 joins the network directly instead and disconnects in its own cleanup trap),
 and finally runs `npm run test:e2e` from `frontend/` with `E2E_BASE_URL`/
-`E2E_ADMIN_PASSWORD`/`E2E_SITE_NAME`/`E2E_CREDENTIAL_NAME` set. Requires
-`frontend/node_modules/.bin/playwright` and a locally installed Chromium
-(`cd frontend && npm ci && npx playwright install chromium` — browser
-binaries are a devDependency-managed local install, never committed and
-never fetched at appliance runtime; `npm run build`'s external-asset guard
-never scans `frontend/e2e/`).
+`E2E_ADMIN_USERNAME`/`E2E_ADMIN_PASSWORD`/`E2E_SITE_NAME`/`E2E_CREDENTIAL_NAME`
+set — ensuring `frontend/node_modules` and a locally installed Chromium exist
+first (`npm ci`/`npx playwright install chromium` if either is missing;
+browser binaries are a devDependency-managed local install, never committed
+and never fetched at appliance runtime — `npm run build`'s external-asset
+guard never scans `frontend/e2e/`).
 
 Issue #847: the stack itself, and everything it needs (secrets, TLS,
 devcontainer bind-mount host-path translation, the master key, the
-`LocalAuth__*`/`RunnerResources__Fallback*` override), now comes from one
+`LocalAuth__*`/`RunnerResources__Fallback*` override), comes from one
 `deploy/scripts/generate-dev-stack.sh --mode agent --slug <slug>` call this
 script makes internally — see "The generator is the authoritative mechanism"
 above. This script still computes the local-auth admin-password hash itself
 (a backend-specific step, `backend --hash-password`) and hands the resulting
-file to the generator via `--local-auth-admin-hash-file`. Everything the
-generator writes lives under `deploy/.generated/<slug>/` only, and this
-script's own cleanup trap removes that whole directory on exit.
+file to the generator via `--local-auth-admin-hash-file`; that identity is
+used only for this script's own API seeding calls and for the handful of
+non-login specs that still exercise local auth narrowly.
+
+**Issue #848: the LOGIN spec drives Keycloak's real authorization-code + PKCE
+flow, not the local-auth form.** The generator call also passes
+`--keycloak-dev-admin --username developer`, which provisions a real
+Keycloak-realm `developer` user (issue #846's `keycloak-dev-admin` service)
+into the generated stack — this script waits on that one-shot container's
+exit code (it has no healthcheck of its own) before treating the stack as
+ready, then reads its password straight from the generator's own
+`deploy/.generated/<slug>/secrets/dev-admin-password` file (never echoed,
+never a CLI argument) and exports it as `E2E_ADMIN_PASSWORD`/
+`E2E_ADMIN_USERNAME` for the browser to log in with. Everything the generator
+writes lives under `deploy/.generated/<slug>/` only, and this script's own
+cleanup trap removes that whole directory on exit.
 
 If the generated stack's default `edge` subnet (`203.0.113.0/24`) collides
 with a concurrent stack on a shared host, `WAYPOINT_E2E_SUBNET` (e.g.

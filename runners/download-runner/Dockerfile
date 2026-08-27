@@ -31,8 +31,8 @@
 # reintroducing the two-base-image problem the compliance-runner's own Dockerfile
 # comment describes.
 #
-# Build context is the REPO ROOT (matches backend/Dockerfile and deploy/docker-
-# compose.yml's `context: ..` convention):
+# Build context is the REPO ROOT (matches backend/Dockerfile and
+# deploy/compose.yaml's `context: ..` convention):
 #   docker build -f runners/download-runner/Dockerfile .
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS dotnet-build
 WORKDIR /src
@@ -93,9 +93,10 @@ COPY --from=dotnet-build /app /app
 # user (uid 1654) as mcr.microsoft.com/dotnet/aspnet:8.0 (backend/Dockerfile's
 # base) -- reuse it rather than useradd a second uid-1654 account, which
 # fails outright ("UID 1654 is not unique"). Same uid as backend and
-# compliance-runner either way, so the master key mount (deploy/docker-
-# compose.yml) works under the one file-permission note in deploy/README.md
-# "Bring-up" step 4, extended to all three trusted services by this issue.
+# compliance-runner either way, so the master key mount (deploy/compose.yaml)
+# works under the one file-permission note in deploy/README.md
+# "Production only: secrets master key", extended to all three trusted services
+# by this issue.
 RUN chown -R app:app /app
 
 # The container still STARTS as root (no USER here) because Compose named

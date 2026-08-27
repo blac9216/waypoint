@@ -241,7 +241,7 @@ services:
       ForwardedHeaders__KnownNetworks__0: *edge-subnet
       # Secrets master key (issue #405; ADR-0005, AWX-pattern envelope
       # encryption). Preferred and only delivery path is a mounted file,
-      # bind-mounted below from ./config/secrets/master.key (gitignored -
+      # bind-mounted below from ./config/secrets/waypoint-master-key (gitignored -
       # see .gitignore's /deploy/config/ entry; issue #845 migrated this off
       # the legacy repo-root /config/ convention onto the same
       # deploy/config/ location #844 already used for the Compose
@@ -290,11 +290,15 @@ services:
       # comment above), so a stack without this mount still starts and
       # reports healthy - only a credential write (or anything else that
       # touches the secret store) fails, with FileMasterKeyProvider's own
-      # clean fail-closed error. Uncomment and create
-      # ./config/secrets/master.key (see deploy/README.md "Bring-up") to
-      # enable the credential store:
+      # clean fail-closed error. This commented block is the mount SHAPE to
+      # copy into deploy/compose.override.yaml (auto-loaded by `docker
+      # compose up -d`, no -f needed) - do NOT uncomment it here; editing
+      # this service body is what deploy/README.md "Production only: secrets
+      # master key (issue #405)" tells operators not to do. That section has
+      # the ready-to-paste override, including the anchor that applies the
+      # same mount to all three trusted services:
       # - type: bind
-      #   source: ./config/secrets/master.key
+      #   source: ./config/secrets/waypoint-master-key
       #   target: /run/secrets/waypoint-master-key
       #   read_only: true
       #   bind:
@@ -665,12 +669,13 @@ services:
       # discover/credential-test/scan all decrypt a credential before doing
       # anything else (ADR-0014 §6), so a runner that cannot reach this key
       # still starts and reports healthy, but every job it claims fails
-      # until the key is mounted. See deploy/README.md "Bring-up" step 4 -
-      # the same uid/permission note applies (this image's app user is also
-      # uid 1654; see the Dockerfile).
-      # Uncomment and create ./config/secrets/master.key to enable:
+      # until the key is mounted. See deploy/README.md "Production only:
+      # secrets master key (issue #405)" - the same uid/permission note
+      # applies (this image's app user is also uid 1654; see the Dockerfile).
+      # As with the backend, this is the mount SHAPE to copy into
+      # deploy/compose.override.yaml, not something to uncomment in place:
       # - type: bind
-      #   source: ./config/secrets/master.key
+      #   source: ./config/secrets/waypoint-master-key
       #   target: /run/secrets/waypoint-master-key
       #   read_only: true
       #   bind:
@@ -778,10 +783,12 @@ services:
       # Secrets master key file (issue #405/#442) - same convention as
       # compliance-runner's own mount above; catalog-index resolves the depot
       # token credential and download resolves the target credential, both
-      # through this key (ADR-0014 §6). Uncomment and create
-      # ./config/secrets/master.key to enable:
+      # through this key (ADR-0014 §6). Same rule as the two services above:
+      # copy this shape into deploy/compose.override.yaml rather than
+      # uncommenting it here (deploy/README.md "Production only: secrets
+      # master key (issue #405)"):
       # - type: bind
-      #   source: ./config/secrets/master.key
+      #   source: ./config/secrets/waypoint-master-key
       #   target: /run/secrets/waypoint-master-key
       #   read_only: true
       #   bind:
