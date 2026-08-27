@@ -10,6 +10,15 @@
 # reconciles the password/group membership on EVERY run, so re-running never
 # duplicates anything and always restores drift.
 #
+# RENAMING THE DEV USER: the find-or-create step keys on the USERNAME, so
+# changing WAYPOINT_DEV_ADMIN_USERNAME provisions a NEW user rather than
+# renaming the existing one. The previously provisioned user stays behind,
+# still enabled, still in the Admin group and still holding the reconciled
+# dev password. That is by design for a dev-only provisioner -- this script
+# never deletes accounts -- so cleaning up the old one is a manual operator
+# step (Keycloak admin console, or `kcadm.sh delete users/<id> -r <realm>`),
+# or reset the whole stack with `docker compose down -v`.
+#
 # curl+jq against the Admin REST API directly, not kcadm.sh: kcadm's own
 # `config credentials` step takes --password only as a CLI flag (no file-based
 # or stdin-based indirection in this image), which is exactly the argv/
@@ -64,7 +73,53 @@ DEV_USERNAME="${WAYPOINT_DEV_ADMIN_USERNAME:-developer}"
 # idempotent with zero operator action, matching every other field's
 # behavior. An operator who sets WAYPOINT_DEV_ADMIN_EMAIL explicitly is
 # unaffected -- that value always wins over this default.
-DEV_EMAIL="${WAYPOINT_DEV_ADMIN_EMAIL:-${DEV_USERNAME}@waypoint.example.internal}"
+#
+# RENAME SEMANTICS (read this before changing WAYPOINT_DEV_ADMIN_USERNAME):
+# find-or-create keys on the USERNAME, so changing it provisions a BRAND NEW
+# user. The previously provisioned user is left exactly as it was -- still
+# enabled, still a member of the Admin group, still holding the reconciled
+# dev password -- and can still log in. This script never deletes users; for
+# a dev-only one-shot provisioner that is deliberate (deleting accounts on a
+# config change would be a surprising, unrecoverable side effect). Cleaning
+# up the old account is a manual operator step: remove it via the Keycloak
+# admin console or `kcadm.sh delete users/<id> -r <realm>`, or reset the
+# whole stack with `docker compose down -v`, which drops the realm database
+# and leaves only the currently configured user on the next `up`.
+#
+# The derived default must also be a VALID address for any username Keycloak
+# accepts. A username that is itself email-shaped (`dev@waypoint.example
+# .internal` -- a common convention, and reachable straight from
+# `generate-dev-stack.sh --username`) would otherwise derive
+# `dev@waypoint.example.internal@waypoint.example.internal`, which Keycloak
+# rejects with a bare HTTP 400. An email-shaped username IS a valid value for
+# the email field, so use it as-is in that case; only a bare local-part gets
+# the placeholder domain appended.
+case "$DEV_USERNAME" in
+*@*) DEFAULT_DEV_EMAIL="$DEV_USERNAME" ;;
+*) DEFAULT_DEV_EMAIL="${DEV_USERNAME}@waypoint.example.internal" ;;
+esac
+DEV_EMAIL="${WAYPOINT_DEV_ADMIN_EMAIL:-$DEFAULT_DEV_EMAIL}"
+
+# Fail early, and by name, on a username that cannot produce a valid address
+# (and that Keycloak would reject anyway) rather than letting it reach the
+# API and come back as an opaque HTTP 400 several seconds later. Deliberately
+# a narrow reject-list, not an allow-list: non-ASCII usernames are supported
+# and live-verified (issue #890, case 1), so only characters that are
+# structurally illegal in an addr-spec -- whitespace, the RFC 5322 specials,
+# and a second `@` -- are refused.
+username_error=""
+case "$DEV_USERNAME" in
+'') username_error="it is empty" ;;
+*[[:space:]]*) username_error="it contains whitespace" ;;
+*@*@*) username_error="it contains more than one '@'" ;;
+@* | *@) username_error="it starts or ends with '@'" ;;
+*[]\"\\,\;:\<\>\(\)[]*) username_error="it contains one of the characters \" \\ , ; : < > ( ) [ ]" ;;
+esac
+if [ -n "$username_error" ]; then
+	echo "waypoint-keycloak-dev-admin: refusing to provision: WAYPOINT_DEV_ADMIN_USERNAME is not usable because $username_error." >&2
+	echo "waypoint-keycloak-dev-admin: the username must be either a bare local-part (a placeholder email is derived from it) or a complete email address; Keycloak rejects anything else. Set WAYPOINT_DEV_ADMIN_USERNAME to a valid value and re-run." >&2
+	exit 1
+fi
 # Same reason as DEV_EMAIL above -- the default user profile also requires
 # firstName/lastName (live-verified: email alone was NOT sufficient, login
 # still redirected to VERIFY_PROFILE until these two were set as well).
@@ -215,6 +270,44 @@ admin_api() {
 response_body() { sed '$d'; }
 response_status() { tail -n1; }
 
+# Keycloak reports validation and conflict failures as a small JSON object --
+# {"errorMessage": "..."} for user-profile/validation errors, {"error": "..."}
+# for a few others. Surface that text so no bare "HTTP 400" is ever the only
+# thing an operator gets. Sanitized on the way out: control characters
+# stripped (a response body is untrusted input to this log) and truncated, so
+# a large or hostile body cannot flood or corrupt the container log. $1 = the
+# response body. Prints nothing if the body carries no recognizable message.
+api_error_summary() {
+	printf '%s' "$1" | jq -r '.errorMessage // .error // .error_description // empty' 2>/dev/null |
+		tr -d '\000-\037' | cut -c1-200
+}
+
+# Explain a failed create/update in operator terms. $1 = HTTP status,
+# $2 = response body, $3 = the operation ("creation"/"update", for wording).
+explain_user_write_failure() {
+	_summary="$(api_error_summary "$2")"
+	if [ -n "$_summary" ]; then
+		echo "waypoint-keycloak-dev-admin: Keycloak said: $_summary" >&2
+	fi
+	case "$1" in
+	400)
+		# Reached only for values this script cannot pre-validate (a
+		# WAYPOINT_DEV_ADMIN_EMAIL the operator set by hand, a realm with a
+		# custom user profile adding required attributes, a first/last name
+		# failing a profile validator). The username's own shape is already
+		# checked before any API call, above.
+		echo "waypoint-keycloak-dev-admin: HTTP 400 means Keycloak rejected the user representation as invalid. Most likely cause: the email address '$DEV_EMAIL' is not acceptable to this realm's user profile (set WAYPOINT_DEV_ADMIN_EMAIL to a valid address), or a realm user-profile attribute is required but unset." >&2
+		;;
+	409)
+		# The default DEV_EMAIL now tracks DEV_USERNAME (see its derivation
+		# above), so this should only fire when an operator has set
+		# WAYPOINT_DEV_ADMIN_EMAIL explicitly to a value that collides with
+		# an existing user -- name it rather than leaving them to guess.
+		echo "waypoint-keycloak-dev-admin: most likely cause: another user in realm '$REALM' already holds email '$DEV_EMAIL'. Keycloak enforces email uniqueness; set WAYPOINT_DEV_ADMIN_EMAIL to a value not already in use, or remove the conflicting user." >&2
+		;;
+	esac
+}
+
 # --- find-or-create the user -------------------------------------------
 FIND_RESP="$(admin_api GET "/realms/$REALM/users?username=$(urlencode "$DEV_USERNAME")&exact=true")"
 FIND_STATUS="$(printf '%s' "$FIND_RESP" | response_status)"
@@ -236,14 +329,7 @@ if [ -z "$USER_ID" ]; then
 	CREATE_STATUS="$(printf '%s' "$CREATE_RESP" | response_status)"
 	if [ "$CREATE_STATUS" != "201" ] && [ "$CREATE_STATUS" != "204" ]; then
 		echo "waypoint-keycloak-dev-admin: user creation failed (HTTP $CREATE_STATUS)" >&2
-		if [ "$CREATE_STATUS" = "409" ]; then
-			# The default DEV_EMAIL now tracks DEV_USERNAME (see its
-			# derivation above), so this should only fire when an operator
-			# has set WAYPOINT_DEV_ADMIN_EMAIL explicitly to a value that
-			# collides with an existing user -- name it rather than leaving
-			# the operator to guess.
-			echo "waypoint-keycloak-dev-admin: most likely cause: another user in realm '$REALM' already holds email '$DEV_EMAIL'. Keycloak enforces email uniqueness; set WAYPOINT_DEV_ADMIN_EMAIL to a value not already in use, or remove the conflicting user." >&2
-		fi
+		explain_user_write_failure "$CREATE_STATUS" "$(printf '%s' "$CREATE_RESP" | response_body)"
 		exit 1
 	fi
 	FIND_RESP="$(admin_api GET "/realms/$REALM/users?username=$(urlencode "$DEV_USERNAME")&exact=true")"
@@ -267,6 +353,7 @@ PROFILE_RESP="$(admin_api PUT "/realms/$REALM/users/$USER_ID" "$PROFILE_BODY")"
 PROFILE_STATUS="$(printf '%s' "$PROFILE_RESP" | response_status)"
 if [ "$PROFILE_STATUS" != "204" ]; then
 	echo "waypoint-keycloak-dev-admin: profile reconciliation failed (HTTP $PROFILE_STATUS)" >&2
+	explain_user_write_failure "$PROFILE_STATUS" "$(printf '%s' "$PROFILE_RESP" | response_body)"
 	exit 1
 fi
 
