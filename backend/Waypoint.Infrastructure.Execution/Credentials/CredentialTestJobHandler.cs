@@ -278,8 +278,12 @@ public sealed class CredentialTestJobHandler : IJobHandler
 			return (false, null);
 		}
 
-		bool success = psObject.Properties["Success"]?.Value is true;
-		string? failureReason = psObject.Properties["FailureReason"]?.Value as string;
+		// Issue #976: routed through the PowerShellValueUnwrap chokepoint for uniformity
+		// -- top-level pipeline-output properties, already unwrapped by
+		// PowerShellExecutor.Unwrap, so never actually exposed to #972's nested-property
+		// hazard, but Unwrap/UnwrapAs are idempotent on an already-unwrapped value.
+		bool success = PowerShellValueUnwrap.Unwrap(psObject.Properties["Success"]?.Value) is true;
+		string? failureReason = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["FailureReason"]?.Value);
 		return (success, failureReason);
 	}
 

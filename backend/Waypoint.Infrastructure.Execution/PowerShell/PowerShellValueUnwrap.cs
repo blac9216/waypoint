@@ -22,14 +22,14 @@ namespace Waypoint.Infrastructure.PowerShell;
 /// property sits on a top-level output object or on a row nested inside it (e.g. one
 /// <c>ContentEntries[]</c> element).
 ///
-/// SMA wraps a CmdletProvider/cmdlet's own OWN output values -- even primitives like
+/// SMA wraps a CmdletProvider/cmdlet's own output values -- even primitives like
 /// the <see cref="string"/> <c>Get-Content -Raw</c> returns -- in a <see cref="PSObject"/>
 /// as they cross out of that cmdlet's pipeline. Assigning that wrapped value straight
 /// into a <c>[PSCustomObject]@{ Key = Get-Content ... -Raw }</c> literal does not strip
 /// the wrapper: the hashtable literal stores whatever object reference it was handed,
 /// and for cmdlet output that reference is the <see cref="PSObject"/>, not its
 /// <see cref="PSObject.BaseObject"/>. <see cref="PowerShellExecutor.Unwrap"/> only ever
-/// ran on each TOP-LEVET pipeline output object, so this one extra wrapper layer on a
+/// ran on each TOP-LEVEL pipeline output object, so this one extra wrapper layer on a
 /// NESTED property survived every read of <c>psObject.Properties["X"]?.Value as string</c>
 /// as a silent <c>null</c> -- proven live by issue #972 (315 recognized-layout
 /// <c>inspec.yml</c> profiles rejected "empty or missing" even though
@@ -77,6 +77,21 @@ public static class PowerShellValueUnwrap
 	public static T? UnwrapAs<T>(object? value)
 		where T : class =>
 		Unwrap(value) as T;
+
+	/// <summary>
+	/// <see cref="Unwrap(object?)"/> plus an <c>is</c>-pattern-style cast, for the same
+	/// "read one property as a concrete CLR type" call site as <see cref="UnwrapAs{T}"/>
+	/// but for a <typeparamref name="T"/> that is a value type (<c>bool</c>, <c>int</c>,
+	/// etc.) -- the <c>where T : class</c> constraint on <see cref="UnwrapAs{T}"/> cannot
+	/// express those, since <c>as T</c> is illegal for a non-nullable value type. Returns
+	/// <c>null</c> both when the property is absent and when the unwrapped value is not a
+	/// <typeparamref name="T"/>, matching <see cref="UnwrapAs{T}"/>'s silent-null
+	/// degradation convention exactly (a malformed/missing field degrades the row, it
+	/// never throws).
+	/// </summary>
+	public static T? UnwrapAsStruct<T>(object? value)
+		where T : struct =>
+		Unwrap(value) is T typed ? typed : null;
 
 	/// <summary>
 	/// Recursively unwraps every element of an <see cref="System.Collections.IEnumerable"/>
