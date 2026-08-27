@@ -144,15 +144,19 @@ export interface ScanScope {
 	 * the backend's `TargetIds is null || Count == 0` full-site-scan check. */
 	target_ids?: string[];
 	/** Issue #639: which pulled compliance-content profile (`GET /profiles`
-	 * `id`) this scan executes against — required by the backend
-	 * (`RunCreationService.CreateScanRunAsync` 400s without it, 404s on an
-	 * unknown id). */
-	profile_id: string;
+	 * `id`) this scan executes against — required by the backend ONLY for a
+	 * legacy request with no `target_scope` (`RunCreationService.CreateScanRunAsync`
+	 * 400s without it, 404s on an unknown id). Issue #895: REJECTED (400) when
+	 * `target_scope` is present — a `target_scope` run resolves its execution
+	 * content per component from the active-baseline catalog execution profile
+	 * instead, so it must be omitted whenever `target_scope` is set. */
+	profile_id?: string;
 	/** Issue #733 (epic #726 Wave 2, ADR-0023): the operator's resolved
-	 * component-tree selection, additive to `target_ids`/`profile_id` in this
-	 * interim slice (docs/api-contract.md "Interim additive
-	 * `scope.target_scope`"). Omitted when no target under this scope has any
-	 * known components yet (nothing to resolve). */
+	 * component-tree selection, additive to `target_ids` in this interim slice
+	 * (docs/api-contract.md "Interim additive `scope.target_scope`"). Omitted
+	 * when no target under this scope has any known components yet (nothing to
+	 * resolve). Mutually exclusive with `profile_id` (issue #895) — never both
+	 * set on the same request. */
 	target_scope?: TargetScopeInput;
 }
 
@@ -244,10 +248,11 @@ export function createScanRun(input: CreateScanRunInput): Promise<RunCreatedResp
  * request body — the SAME `scope`/`credential_overrides`/`ad_hoc_credentials` shapes
  * `POST /runs` accepts for a scan (`Waypoint.Api.Contracts.RunPlanPreviewRequest`),
  * restricted to the `target_scope` form: preview never selects a profile (ADR-0022 §7),
- * so `scope.profile_id` must be absent here even though `ScanScope.profile_id` is
- * required for create. `previewScanRun`/`toPreviewRequest` below build this from the
- * exact same `ScanScope` object `createScanRun` sends, minus `profile_id` — never a
- * re-derivation from wizard state that could drift from what create actually submits.
+ * so `scope.profile_id` must be absent here — and, as of issue #895, create applies
+ * the identical rule for a `target_scope` request, so this is no longer a
+ * preview-only restriction. `previewScanRun`/`toPreviewScope` below build this from
+ * the exact same `ScanScope` object `createScanRun` sends, minus `profile_id` — never
+ * a re-derivation from wizard state that could drift from what create actually submits.
  */
 export interface PreviewScanRunInput {
 	scope: Omit<ScanScope, "profile_id">;
@@ -283,10 +288,12 @@ export interface PlanPreviewResponse {
 /**
  * Builds the exact `target_scope`-only scope object `POST /runs/plan-preview` accepts
  * from the same `ScanScope` the wizard would submit to `POST /runs` — dropping only
- * `profile_id` (preview-rejected, ADR-0022 §7). Sharing this function between the
- * preview call and `createScanRun`'s input is what guarantees "preview-request payload
- * equals create payload for identical selections" (issue #733 AC): there is exactly
- * one place scope is assembled from wizard state, and preview/create both consume it.
+ * `profile_id` (preview-rejected, ADR-0022 §7). Issue #895: `useScanWizard`'s `submit`
+ * calls this SAME function before posting to `POST /runs` whenever `target_scope` is
+ * set, since create now rejects `profile_id` there too — one function assembles the
+ * one payload shape both endpoints actually accept for a `target_scope` request, so
+ * "preview-request payload equals create payload for identical selections" (issue
+ * #733 AC, and issue #895's fix) holds by construction, not by convention.
  */
 export function toPreviewScope(scope: ScanScope): Omit<ScanScope, "profile_id"> {
 	const { profile_id: _profileId, ...rest } = scope;

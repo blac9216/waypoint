@@ -180,7 +180,27 @@ public sealed class RunCreationService
 				"Set \"scope\": { \"site_id\": \"<uuid>\" } (optionally with \"target_ids\") in the request body.");
 		}
 
-		if (scope.ProfileId is not { } profileId)
+		// Issue #895: a `target_scope` request resolves its execution content from the
+		// per-component catalog execution profile the planner freezes onto each
+		// accepted `ScanPlanItem` (`CatalogExecutionProfileId`, resolved from the
+		// component's own active baseline) -- never a run-level `profile_id`. This is
+		// the SAME request-shape rule `RunPlanPreviewService.PreviewAsync` already
+		// enforces (ADR-0022 section 7 "Start a Scan ... never selects a profile") and
+		// docs/api-contract.md's `/runs` row states as the target end-state: create must
+		// reject `profile_id` here too, or the wizard's preview-then-create handoff
+		// cannot reuse one `scope` payload (issue #895's repro). A legacy request with
+		// no `target_scope` is completely unaffected: it still requires `profile_id`,
+		// exactly as before this fix.
+		if (scope.TargetScope is not null)
+		{
+			if (scope.ProfileId is not null)
+			{
+				throw ApiException.Validation(
+					"scope.profile_id is not accepted for a target_scope scan run.",
+					"A target_scope run resolves its execution content from each component's own active-baseline catalog execution profile, not a run-level profile_id (ADR-0022 section 7 \"Start a Scan ... never selects a profile\"); omit \"profile_id\" -- the same rule POST /runs/plan-preview already enforces.");
+			}
+		}
+		else if (scope.ProfileId is null)
 		{
 			throw ApiException.Validation(
 				"scope.profile_id is required for a scan run.",
@@ -196,13 +216,23 @@ public sealed class RunCreationService
 		// The profile must be an installed row in the pulled-content inventory (issue
 		// #639 AC "profile must exist in the inventory, or actionable 4xx") -- resolved
 		// once here to the on-disk-directory-name profile_key, carried on every fanned-
-		// out job's payload instead of a re-lookup per job/target.
-		Profile? profile = await _profiles.GetAsync(profileId, cancellationToken).ConfigureAwait(false);
-		if (profile is null)
+		// out job's payload instead of a re-lookup per job/target. Null for a
+		// target_scope request (issue #895): BuildPlanItemJobSpec/BuildUnnarrowedTargetJobSpec
+		// omit profile_key from the payload in that case, and ScanJobHandler.ResolveProfilePath
+		// already tolerates a null/absent profile_key (falls back to the legacy fixed
+		// ScanOptions path) -- BuildLegacyTargetJobSpec is the only caller that still
+		// requires a non-null profile, and it is only ever reached for a legacy
+		// (non-target_scope) target, where scope.ProfileId is guaranteed set above.
+		Profile? profile = null;
+		if (scope.ProfileId is { } profileId)
 		{
-			throw ApiException.NotFound(
-				"Profile not found.",
-				$"Profile '{profileId}' does not exist; pick one from GET /profiles (pull compliance content first via POST /compliance-content/pull if the list is empty).");
+			profile = await _profiles.GetAsync(profileId, cancellationToken).ConfigureAwait(false);
+			if (profile is null)
+			{
+				throw ApiException.NotFound(
+					"Profile not found.",
+					$"Profile '{profileId}' does not exist; pick one from GET /profiles (pull compliance content first via POST /compliance-content/pull if the list is empty).");
+			}
 		}
 
 		IReadOnlyList<Target> targets = await ResolveScanTargetsAsync(siteId, scope.TargetIds, cancellationToken).ConfigureAwait(false);
@@ -654,7 +684,7 @@ public sealed class RunCreationService
 		string? vendorIdentity,
 		Target target,
 		Guid siteId,
-		Profile profile,
+		Profile? profile,
 		bool useRunSecret,
 		Dictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings,
 		Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> adHocByTarget)
@@ -683,7 +713,7 @@ public sealed class RunCreationService
 			target_id = target.Id,
 			site_id = siteId,
 			target_kind = target.Kind,
-			profile_key = profile.ProfileKey,
+			profile_key = profile?.ProfileKey,
 			component_id = item.ComponentId,
 			transport = item.Transport,
 			selector_kind = item.SelectorKind,
@@ -766,7 +796,7 @@ public sealed class RunCreationService
 		Waypoint.Core.Scans.ScanPlanItem representative,
 		Target target,
 		Guid siteId,
-		Profile profile,
+		Profile? profile,
 		bool useRunSecret,
 		Dictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings,
 		Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> adHocByTarget)
@@ -776,7 +806,7 @@ public sealed class RunCreationService
 			target_id = target.Id,
 			site_id = siteId,
 			target_kind = target.Kind,
-			profile_key = profile.ProfileKey,
+			profile_key = profile?.ProfileKey,
 			component_id = representative.ComponentId,
 			transport = representative.Transport,
 			unnarrowed = true,
@@ -836,12 +866,18 @@ public sealed class RunCreationService
 	/// The pre-#737 legacy per-target <see cref="JobSpec"/> shape, extracted verbatim
 	/// (no behavior change) so <see cref="CreateScanRunAsync"/> can call it for a
 	/// target with no plan items at all -- see that method's doc comment for the exact
-	/// plan-driven-vs-legacy distinction.
+	/// plan-driven-vs-legacy distinction. <paramref name="profile"/> is null (issue
+	/// #895) for a target_scope request whose OTHER targets are plan-driven but THIS
+	/// target itself resolved zero candidate plan items -- e.g. a legacy
+	/// <c>target_ids</c> entry outside the requested <c>target_scope</c>'s resolved
+	/// component set; a true legacy (no target_scope at all) request always has a
+	/// non-null profile here, since <see cref="CreateScanRunAsync"/> requires
+	/// <c>scope.profile_id</c> whenever <c>scope.target_scope</c> is absent.
 	/// </summary>
 	private static JobSpec BuildLegacyTargetJobSpec(
 		Target target,
 		Guid siteId,
-		Profile profile,
+		Profile? profile,
 		bool useRunSecret,
 		Dictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings,
 		Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> adHocByTarget)
@@ -853,8 +889,9 @@ public sealed class RunCreationService
 		// the content-store-relative directory name ScanJobHandler resolves under
 		// ComplianceContentOptions.ContentPath -- carried per-job (not re-derived from
 		// scope) so a job replayed after a later content-pull still scans the exact
-		// profile the operator picked at run-creation time.
-		string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId, target_kind = target.Kind, profile_key = profile.ProfileKey });
+		// profile the operator picked at run-creation time; null (issue #895) falls
+		// back to ScanJobHandler.ResolveProfilePath's legacy fixed ScanOptions path.
+		string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId, target_kind = target.Kind, profile_key = profile?.ProfileKey });
 		if (useRunSecret)
 		{
 			// No credential_id at all for an ad hoc job -- the secret lives only in

@@ -563,8 +563,15 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 		try {
 			const { credentialOverrides, adHocCredentials } = credentialRequestPayload;
 
+			// Issue #895: POST /runs now rejects scope.profile_id whenever
+			// scope.target_scope is set (the same rule plan-preview already
+			// enforces), so submit must drop it there too -- toPreviewScope is the
+			// one place that already knows how (shared with runPreview above), so
+			// this is the identical payload runPreview just sent, never a second
+			// hand-rolled omission that could drift from it. The legacy
+			// (no target_scope) path is unaffected: profile_id still rides along.
 			const result = await createScanRun({
-				scope,
+				scope: targetScope ? toPreviewScope(scope) : scope,
 				credential_overrides: credentialOverrides.length > 0 ? credentialOverrides : undefined,
 				ad_hoc_credentials: adHocCredentials.length > 0 ? adHocCredentials : undefined,
 			});
@@ -602,7 +609,7 @@ export function useScanWizard({ userRole, navigate }: UseScanWizardArgs) {
 			setSubmitting(false);
 			submitGuardRef.current = false;
 		}
-	}, [scope, credentialRequestPayload, navigate]);
+	}, [scope, targetScope, credentialRequestPayload, navigate]);
 
 	const stepIndex = STEPS.findIndex((s) => s.key === step);
 	const canAdvance = useCallback(

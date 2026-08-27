@@ -172,7 +172,6 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = Array.Empty<Guid>() },
 		});
 
@@ -203,7 +202,6 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
 		});
 
@@ -271,7 +269,6 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = new[] { Guid.NewGuid() } },
 		});
 
@@ -304,7 +301,6 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
 		});
 
@@ -368,7 +364,6 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "bogus" },
 		});
 

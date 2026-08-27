@@ -208,7 +208,6 @@ public sealed class PlanDrivenCredentialResolutionTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = new[] { componentId } },
 		});
 
@@ -236,7 +235,6 @@ public sealed class PlanDrivenCredentialResolutionTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = new[] { componentId } },
 		});
 
@@ -267,7 +265,6 @@ public sealed class PlanDrivenCredentialResolutionTests : IAsyncLifetime
 			new
 			{
 				site_id = siteId,
-				profile_id = _profileId,
 				target_scope = new { mode = "explicit", component_ids = new[] { componentId } },
 			},
 			adHocCredentials: [new { target_id = targetId, purpose = "vsphere-api", username = "adhoc-user", secret = "adhoc-secret-value" }]);
@@ -309,7 +306,6 @@ public sealed class PlanDrivenCredentialResolutionTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = new[] { boundComponent, unboundComponent } },
 		});
 
