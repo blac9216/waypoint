@@ -35,7 +35,14 @@ namespace Waypoint.Tests.Infrastructure.Execution;
 /// lands in pull history -- across the config-missing, invocation-failure, no-commit,
 /// success, and tag-vs-branch state paths, plus the <c>ParseOutput</c>/<c>TryParseProfile</c>
 /// parsing (including malformed rows that must not fail the whole pull).
+///
+/// <see cref="InspecCheckPathMutationCollection"/> serializes
+/// <see cref="Execute_RealExecutor_FixtureContentTree_StagesAndPromotesProfiles"/> against
+/// <c>InspecCheckRealExecutorTests</c> -- both mutate the process-wide <c>PATH</c>
+/// environment variable to resolve <c>Get-Command inspec</c> onto an invented stub, which
+/// is unsafe under xUnit's default class-level parallelism without a shared collection.
 /// </summary>
+[Collection("InspecCheckPathMutation")]
 public sealed class ContentPullJobHandlerTests
 {
 	private const string RepositoryUrl = "https://git.example.internal/dod/compliance-content.git";
@@ -1071,11 +1078,21 @@ public sealed class ContentPullJobHandlerTests
 	/// non-empty <c>inspec.yml</c> on disk). Pre-fix, this test fails the same way: zero
 	/// profiles promoted, because <c>RawYaml</c> never reaches
 	/// <c>InspecManifestParser.TryParse</c> as a non-empty string.
+	///
+	/// Issue #984: this chain now also exercises the real bounded
+	/// <c>Test-WaypointInspecCheck</c> (see
+	/// <c>WaypointContentPullRealExecutorStubModule.psm1</c>'s issue #984 note) -- an
+	/// invented stub "inspec" executable is put on PATH for the duration of this test so
+	/// the check genuinely runs (via the SAME System.Diagnostics.Process bound issue #984
+	/// introduced, replacing Start-Job/Wait-Job) rather than reporting "not found", and
+	/// promotion depends on it reporting Passed=true within its bound.
 	/// </summary>
 	[Fact]
 	public async Task Execute_RealExecutor_FixtureContentTree_StagesAndPromotesProfiles()
 	{
 		string fixtureRoot = Directory.CreateTempSubdirectory("wp-972-content-tree").FullName;
+		string stubInspecDir = Directory.CreateTempSubdirectory("wp-984-inspec-stub").FullName;
+		string originalPath = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
 		try
 		{
 			string profileDir = Path.Combine(fixtureRoot, "vsphere", "8.0.3", "v2r3-stig", "inspec", "baseline", "vcenter");
@@ -1085,6 +1102,9 @@ public sealed class ContentPullJobHandlerTests
 			await File.WriteAllTextAsync(
 				Path.Combine(profileDir, "controls", "vcenter_control.rb"),
 				"control 'V-000001' do\n  title 'Invented fixture control'\n  impact 0.7\nend\n");
+
+			WriteStubInspec(stubInspecDir, exitCode: 0);
+			Environment.SetEnvironmentVariable("PATH", stubInspecDir + Path.PathSeparator + originalPath);
 
 			string stubModulePath = Path.Combine(
 				AppContext.BaseDirectory, "Assets", "WaypointContentPullRealExecutorStubModule", "WaypointContentPullRealExecutorStubModule.psm1");
@@ -1151,8 +1171,36 @@ public sealed class ContentPullJobHandlerTests
 		}
 		finally
 		{
+			Environment.SetEnvironmentVariable("PATH", originalPath);
 			Directory.Delete(fixtureRoot, recursive: true);
+			Directory.Delete(stubInspecDir, recursive: true);
 		}
+	}
+
+	/// <summary>
+	/// Issue #984: an invented stub "inspec" executable (a throwaway shell script,
+	/// faithful only to `inspec check &lt;path&gt; --format json`'s argument contract and
+	/// exit-code convention, never real InSpec/cinc-auditor bytes -- docs/testing.md's CI
+	/// stub discipline) so <c>Test-WaypointInspecCheck</c> genuinely runs during this
+	/// end-to-end test instead of reporting "inspec executable not found on PATH".
+	/// </summary>
+	private static void WriteStubInspec(string directory, int exitCode)
+	{
+		string stubPath = Path.Combine(directory, "inspec");
+		string script = "#!/bin/sh\n"
+			+ "# Invented stub for issue #984's real-executor end-to-end test -- mirrors\n"
+			+ "# `inspec check <path> --format json`'s argument contract only.\n"
+			+ "echo '{\"controls\": []}'\n"
+			+ $"exit {exitCode}\n";
+		File.WriteAllText(stubPath, script.ReplaceLineEndings("\n"));
+
+#pragma warning disable CA1416 // Linux-only test asset; this repo's CI and runners are both Linux.
+		File.SetUnixFileMode(
+			stubPath,
+			UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+				| UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+				| UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+#pragma warning restore CA1416
 	}
 
 	/// <summary>Records job.log events without a real IJobLogBuffer backend -- this test only needs the real executor to run, not to inspect its stream output.</summary>
