@@ -18,10 +18,11 @@ namespace Waypoint.Core.Scans;
 
 /// <summary>
 /// Issue #737 item-4 (epic #726 Wave 2, ADR-0024), extended by #741/#743 (Wave 3 SSH
-/// family): the single, shared rule deciding whether one accepted plan item's
-/// <c>transport</c>/<c>selector_kind</c> can be executed as a component-NARROWED scan
-/// (its own job scans only that component's named service / whole appliance) or must
-/// fall back to a whole-target scan.
+/// family) and #742 (Wave 3 NSX family, the epic's final transport): the single,
+/// shared rule deciding whether one accepted plan item's <c>transport</c>/
+/// <c>selector_kind</c> can be executed as a component-NARROWED scan (its own job
+/// executes only that component's leaf profile) or must fall back to a whole-target
+/// scan.
 ///
 /// This is the load-bearing invariant the round-1 review demanded: a <c>target_scope</c>
 /// run must never fan out N sibling jobs that each re-scan the whole target. Both the
@@ -49,10 +50,20 @@ namespace Waypoint.Core.Scans;
 ///   component IS the appliance, so narrowing here means one job per catalog component
 ///   on that transport (never collapsing two independent appliance products behind one
 ///   representative job).</description></item>
-/// <item><description><c>nsx-api</c> -- NOT narrowed: whole-Manager API scan; collapses
-///   (residual tracked by #892 -- issue #742 is the follow-on NSX slice).</description></item>
+/// <item><description><c>nsx-api</c> / <c>service</c> -- NARROWED (issue #742, the
+///   epic's final Wave 3 transport): a named NSX functional component (Manager,
+///   distributed firewall, tier-0/tier-1 firewall/router, and any newer set the
+///   activated catalog/release adds), per docs/compliance-parity.md's "NSX ... named
+///   function" rows. Each component is its own leaf profile/benchmark (or SRG closure
+///   for the VCF 9.x NSX baselines) with its own job, executed over the manager's
+///   nsx-api transport with its own attribution -- there is no whole-Manager object
+///   selector below the component itself; "narrowed" means one job per named
+///   component rather than one whole-Manager scan covering every function at once.
+///   This shrinks #892's residual to the <c>vcf-api</c> row only, restated
+///   below.</description></item>
 /// <item><description><c>vcf-api</c> -- NOT narrowed: no runner path consumes it yet;
-///   collapses (residual tracked by #892).</description></item>
+///   collapses (residual tracked by #892 -- the sole remaining un-narrowable
+///   transport once this issue lands).</description></item>
 /// </list>
 /// </summary>
 public static class ScanComponentNarrowing
@@ -60,14 +71,17 @@ public static class ScanComponentNarrowing
 	/// <summary>
 	/// True when an item with this <paramref name="transport"/> and
 	/// <paramref name="selectorKind"/> can be executed as a component-narrowed scan.
-	/// Today: the vSphere-family object selectors on the vmware transport (#737), plus
-	/// the ssh-family named-service and whole-appliance selectors (#741/#743).
+	/// Today: the vSphere-family object selectors on the vmware transport (#737), the
+	/// ssh-family named-service and whole-appliance selectors (#741/#743), and the
+	/// nsx-api named-function selector (#742).
 	/// </summary>
 	public static bool CanNarrow(string? transport, string? selectorKind) =>
 		(string.Equals(transport, CatalogTransports.VMware, StringComparison.Ordinal)
 			&& selectorKind is CatalogSelectorKinds.VCenter or CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm)
 		|| (string.Equals(transport, CatalogTransports.Ssh, StringComparison.Ordinal)
-			&& selectorKind is CatalogSelectorKinds.Service or CatalogSelectorKinds.Target);
+			&& selectorKind is CatalogSelectorKinds.Service or CatalogSelectorKinds.Target)
+		|| (string.Equals(transport, CatalogTransports.NsxApi, StringComparison.Ordinal)
+			&& string.Equals(selectorKind, CatalogSelectorKinds.Service, StringComparison.Ordinal));
 
 	/// <summary>Convenience overload for a resolved <see cref="ScanPlanItem"/>.</summary>
 	public static bool CanNarrow(ScanPlanItem item)

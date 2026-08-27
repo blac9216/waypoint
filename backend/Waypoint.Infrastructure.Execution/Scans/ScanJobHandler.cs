@@ -261,7 +261,20 @@ public sealed class ScanJobHandler : IJobHandler
 		bool isVSphereComponent = string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal)
 			&& string.Equals(payload.Transport, CatalogTransports.VMware, StringComparison.Ordinal)
 			&& payload.SelectorKind is CatalogSelectorKinds.VCenter or CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm;
-		bool isNarrowedComponent = isVSphereComponent || isSshTransportItem;
+
+		// Issue #742 (epic #726 Wave 3's final transport): a narrowed nsx-api/service
+		// item -- one named NSX functional component (Manager, DFW, tier-0/tier-1
+		// firewall/router, or a newer catalog-added set) -- resolves and executes its
+		// OWN leaf profile exactly like the vSphere/ssh families, rather than the one
+		// arbitrary whole-Manager profile the pre-#742 collapsed remainder job ran.
+		// Gated on isNsx (the owning target's kind) the same defensive way
+		// isVSphereComponent is gated on vsphere -- ScanComponentNarrowing.CanNarrow
+		// already restricts which items reach this payload shape at fan-out time; this
+		// re-check fails closed rather than trusting an unexpected combination.
+		bool isNsxComponent = isNsx
+			&& string.Equals(payload.Transport, CatalogTransports.NsxApi, StringComparison.Ordinal)
+			&& string.Equals(payload.SelectorKind, CatalogSelectorKinds.Service, StringComparison.Ordinal);
+		bool isNarrowedComponent = isVSphereComponent || isSshTransportItem || isNsxComponent;
 		string? resolvedInputsYaml = null;
 		Guid? attributedContentRevisionId = null;
 		Guid? attributedBaselineId = null;
@@ -321,23 +334,29 @@ public sealed class ScanJobHandler : IJobHandler
 				// literal key collision, so ordering here follows the same
 				// InputResolutions ordering PlanConfigResolutionService produced.
 				//
-				// Issue #911, extended by #741/#743: a NARROWED vmware selector (esxi/vm --
-				// a vcenter selector carries no narrowing key to begin with) is at risk of
-				// an operator config-doc body overriding the platform's own
+				// Issue #911, extended by #741/#743 and #742: a NARROWED vmware selector
+				// (esxi/vm -- a vcenter selector carries no narrowing key to begin with) is
+				// at risk of an operator config-doc body overriding the platform's own
 				// vmhostName/vmName scoping key -- the ssh family (service/target
 				// selectors) introduces no analogous platform-computed scoping key of its
 				// own (no --input-file selector-scope file is generated for ssh at all,
-				// see below), so there is nothing for ScanScopingInputFilter's reserved-key
-				// set to protect there yet; the filter is still applied defensively so an
-				// ssh-family config doc is never silently exempted from a future reserved
-				// key without a code change. Filtering here (a WARN-logged drop, not a hard
-				// reject -- see ScanScopingInputFilter's doc comment for the rationale) is
-				// the primary defense; WaypointScan.psm1's own flag-ordering flip (the
-				// operator inputs file appended BEFORE the platform scoping file, not
-				// after) is the second, independent one for the vmware family.
+				// see below), so there is nothing for ScanScopingInputFilter's
+				// vSphere-scoping keys to protect there; the filter is still applied
+				// defensively so an ssh-family config doc is never silently exempted from a
+				// future reserved key without a code change. The nsx-api family is
+				// different in kind, not merely defensive: its generated auth-input keys
+				// (nsxManager/sessionToken/sessionCookieId or the VCF 9.x nsx_* names) are
+				// SECRET session material, not scoping -- an operator value colliding with
+				// one of those keys must always be dropped, so NSX is filtered
+				// unconditionally, same as every narrowed selector. Filtering here (a
+				// WARN-logged drop, not a hard reject -- see ScanScopingInputFilter's doc
+				// comment for the rationale) is the primary defense; WaypointScan.psm1's
+				// own flag-ordering flip (the operator inputs file appended BEFORE the
+				// platform/auth file, not after) is the second, independent one for every
+				// family including NSX.
 				string concatenatedYaml = string.Join('\n', resolvedYamlBodies);
 				bool isNarrowedSelector = payload.SelectorKind is CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm;
-				if (isNarrowedSelector || isSshTransportItem)
+				if (isNarrowedSelector || isSshTransportItem || isNsxComponent)
 				{
 					ScanScopingFilterResult filterResult = ScanScopingInputFilter.Filter(concatenatedYaml);
 					resolvedInputsYaml = filterResult.FilteredYaml;
@@ -353,8 +372,8 @@ public sealed class ScanJobHandler : IJobHandler
 		if (droppedScopingKeys.Count > 0)
 		{
 			string warnLine = $"job '{context.Job.Id}' operator config-doc inputs for target '{payload.TargetId}' "
-				+ $"named reserved selector-scoping key(s) [{string.Join(", ", droppedScopingKeys)}] -- dropped; "
-				+ $"the platform's own '{payload.SelectorKind}' scope ('{payload.SelectorName}') was applied instead (issue #911).";
+				+ $"named reserved selector-scoping/auth key(s) [{string.Join(", ", droppedScopingKeys)}] -- dropped; "
+				+ $"the platform's own '{payload.SelectorKind}' scope/session ('{payload.SelectorName}') was applied instead (issues #911/#742).";
 			await EmitWarnAsync(context, warnLine, cancellationToken).ConfigureAwait(false);
 		}
 
@@ -394,6 +413,45 @@ public sealed class ScanJobHandler : IJobHandler
 					["ReportPath"] = reportPath,
 					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
 				};
+
+				// Issue #742: a narrowed nsx-api/service item passes its own catalog
+				// named-function identity (manager/dfw/tier0-fw/...) for
+				// logging/diagnostics only -- SelectorName never scopes the NSX Manager
+				// API call itself (unlike vmware's esxi/vm object narrowing); the actual
+				// per-component scoping already happened via profilePath resolving to
+				// THIS component's own activated leaf profile above. A legacy/unnarrowed
+				// nsx-api job (no SelectorKind on the payload) omits it, preserving the
+				// pre-#742 invocation exactly.
+				if (isNsxComponent && !string.IsNullOrWhiteSpace(payload.SelectorName))
+				{
+					parameters["SelectorName"] = payload.SelectorName;
+				}
+
+				// Issue #742, same non-argv discipline as the vmware/ssh families' own
+				// InputsFilePath: this narrowed nsx-api component's frozen resolved Input
+				// config docs, materialized into a generated, owner-only 0600
+				// --input-file. resolvedInputsYaml was already unconditionally filtered
+				// through ScanScopingInputFilter above for every nsx-api component (the
+				// NSX auth-input keys are reserved regardless of selector), and
+				// Invoke-WaypointNsxScan appends this flag BEFORE its own generated
+				// auth-block file -- so the runner's real session always wins InSpec's
+				// last-file-wins resolution over any operator value, even one that
+				// somehow survived the C#-side filter.
+				if (isNsxComponent && resolvedInputsYaml is not null)
+				{
+					inputsFilePath = Path.Combine(
+						_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.nsx-inputs.generated.yml");
+					using (FileStream createStream = File.Create(inputsFilePath))
+					{
+						if (!OperatingSystem.IsWindows())
+						{
+							File.SetUnixFileMode(inputsFilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+						}
+					}
+
+					await File.WriteAllTextAsync(inputsFilePath, resolvedInputsYaml, cancellationToken).ConfigureAwait(false);
+					parameters["InputsFilePath"] = inputsFilePath;
+				}
 			}
 			else if (isSrg)
 			{

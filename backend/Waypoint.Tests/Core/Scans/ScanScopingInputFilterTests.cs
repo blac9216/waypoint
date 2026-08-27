@@ -122,4 +122,56 @@ public sealed class ScanScopingInputFilterTests
 			new HashSet<string> { "vsphereSelectorKind", "vmhostName", "vmName" },
 			new HashSet<string>(ScanScopingInputFilter.ReservedScopingKeys));
 	}
+
+	// Issue #742 (NSX, epic #726 Wave 3's final transport): the NSX session-auth input
+	// keys are SECRET material, not scoping, but ride the same operator-writable Input
+	// config-doc surface -- an operator naming one of these must never be allowed to
+	// inject/desync the runner's real NSX session.
+	[Theory]
+	[InlineData("nsxManager")]
+	[InlineData("sessionToken")]
+	[InlineData("sessionCookieId")]
+	[InlineData("nsx_managerAddress")]
+	[InlineData("nsx_sessionToken")]
+	[InlineData("nsx_sessionCookieId")]
+	public void Filter_KeyCollidesWithNsxAuthInputKey_DropsKeyAndReportsIt(string reservedKey)
+	{
+		ScanScopingFilterResult result = ScanScopingInputFilter.Filter($"{reservedKey}: 'attacker-supplied-value'\n");
+
+		Assert.Equal([reservedKey], result.DroppedKeys);
+		Assert.DoesNotContain("attacker-supplied-value", result.FilteredYaml, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void Filter_MixedNsxAuthKeyAndUnrelatedKey_DropsOnlyAuthKey_KeepsUnrelated()
+	{
+		const string yaml = "sessionToken: 'attacker-token'\ninvented_unrelated_input: 'kept-value'\n";
+
+		ScanScopingFilterResult result = ScanScopingInputFilter.Filter(yaml);
+
+		Assert.Equal(["sessionToken"], result.DroppedKeys);
+		Assert.Contains("invented_unrelated_input", result.FilteredYaml, StringComparison.Ordinal);
+		Assert.Contains("kept-value", result.FilteredYaml, StringComparison.Ordinal);
+		Assert.DoesNotContain("attacker-token", result.FilteredYaml, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void ReservedNsxAuthKeys_MatchesWaypointScanPsm1sGeneratedNsxAuthBlockKeys()
+	{
+		// Pins the closed set this filter guards -- must stay in lockstep with
+		// Invoke-WaypointNsxScan's own generated auth-block keys (both the NSX 4.x and
+		// VCF 9.x NSX baseline key name sets) or the filter silently stops protecting
+		// real session-auth material.
+		Assert.Equal(
+			new HashSet<string> { "nsxManager", "sessionToken", "sessionCookieId", "nsx_managerAddress", "nsx_sessionToken", "nsx_sessionCookieId" },
+			new HashSet<string>(ScanScopingInputFilter.ReservedNsxAuthKeys));
+	}
+
+	[Fact]
+	public void AllReservedKeys_IsUnionOfScopingAndNsxAuthKeys()
+	{
+		Assert.Equal(
+			new HashSet<string>([.. ScanScopingInputFilter.ReservedScopingKeys, .. ScanScopingInputFilter.ReservedNsxAuthKeys]),
+			new HashSet<string>(ScanScopingInputFilter.AllReservedKeys));
+	}
 }

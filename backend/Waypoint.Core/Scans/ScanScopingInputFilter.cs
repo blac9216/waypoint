@@ -46,6 +46,20 @@ namespace Waypoint.Core.Scans;
 /// config-doc-derived file's flag, so even a key this filter somehow missed still loses
 /// to the platform's own scoping value on InSpec's last-file-wins semantics -- belt and
 /// suspenders, not an either/or.
+///
+/// Issue #742 (NSX, epic #726 Wave 3's final transport) extends the reserved set with
+/// the NSX session-authentication input keys <c>Invoke-WaypointNsxScan</c> generates
+/// (<c>nsxManager</c>/<c>sessionToken</c>/<c>sessionCookieId</c> for the NSX 4.x
+/// baselines, <c>nsx_managerAddress</c>/<c>nsx_sessionToken</c>/<c>nsx_sessionCookieId</c>
+/// for the VCF 9.x NSX baselines): these are SECRET runner-generated auth inputs, not
+/// merely platform scoping -- an operator config-doc body naming one must never be
+/// allowed to inject a value the InSpec http() resource would then authenticate with
+/// (or, on the more benign end, simply desync from the real session and break the
+/// scan). The auth-input file is always appended LAST by
+/// <c>Invoke-WaypointNsxScan</c> (after the operator inputs file), so this filter is
+/// the PRIMARY defense here -- the ordering-based "belt and suspenders" described
+/// above is still the second, independent line for every reserved key including
+/// these.
 /// </summary>
 public static class ScanScopingInputFilter
 {
@@ -56,6 +70,22 @@ public static class ScanScopingInputFilter
 	/// </summary>
 	public static readonly IReadOnlyCollection<string> ReservedScopingKeys =
 		["vsphereSelectorKind", "vmhostName", "vmName"];
+
+	/// <summary>
+	/// Issue #742: the NSX session-authentication input keys -- secret-carrying
+	/// (session token/cookie), not merely scope-narrowing, but reserved through the
+	/// same drop-and-warn mechanism since they ride the same operator-writable Input
+	/// config-doc surface. Both the NSX 4.x (STIG) and VCF 9.x NSX (SRG) baselines'
+	/// key names are included; a given component's catalog kind only ever uses one
+	/// set, but reserving both means a config-doc author can never smuggle either
+	/// baseline's auth shape past the filter.
+	/// </summary>
+	public static readonly IReadOnlyCollection<string> ReservedNsxAuthKeys =
+		["nsxManager", "sessionToken", "sessionCookieId", "nsx_managerAddress", "nsx_sessionToken", "nsx_sessionCookieId"];
+
+	/// <summary>The full reserved-key set: platform vSphere scoping keys plus NSX auth-input keys.</summary>
+	public static readonly IReadOnlyCollection<string> AllReservedKeys =
+		[.. ReservedScopingKeys, .. ReservedNsxAuthKeys];
 
 	/// <summary>
 	/// Removes any top-level mapping key in <paramref name="yaml"/> that collides with
@@ -90,7 +120,7 @@ public static class ScanScopingInputFilter
 		List<KeyValuePair<YamlNode, YamlNode>> keptEntries = [];
 		foreach (KeyValuePair<YamlNode, YamlNode> entry in mapping.Children)
 		{
-			if (entry.Key is YamlScalarNode { Value: { } keyText } && ReservedScopingKeys.Contains(keyText))
+			if (entry.Key is YamlScalarNode { Value: { } keyText } && AllReservedKeys.Contains(keyText))
 			{
 				droppedKeys.Add(keyText);
 				continue;

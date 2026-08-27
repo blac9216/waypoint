@@ -998,6 +998,53 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #742 (NSX, epic #726 Wave 3's final transport): the nsx-api/service
+	/// analog of <see cref="SeedSshCatalogAndBaselineAsync"/> -- seeds a real catalog
+	/// execution profile for one named NSX functional component (manager/dfw/tier0-fw/
+	/// ...), an ACTIVATED baseline bound to a content revision, an accepted
+	/// <c>catalog_import_report_entries</c> row, and -- when
+	/// <paramref name="materializeOnDisk"/> is true -- the real on-disk revision/profile
+	/// directory so <see cref="ComponentProfileRevisionResolver"/> resolution succeeds
+	/// end to end. Returns the ids a narrowed nsx-api component job payload needs.
+	/// </summary>
+	private async Task<(Guid CatalogExecutionProfileId, Guid BaselineId, string ProfileKey)> SeedNsxCatalogAndBaselineAsync(
+		string suffix, string outputKind, string selectorName, bool materializeOnDisk)
+	{
+		CatalogSourceRevision source = await _catalog.UpsertSourceRevisionAsync($"rev-{suffix}-{Guid.NewGuid():N}", null, CancellationToken.None);
+		CatalogProduct product = await _catalog.UpsertProductAsync(source.Id, "nsx", $"nsx-{suffix}-{Guid.NewGuid():N}", "Invented NSX Product", CancellationToken.None);
+		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, "4.x", "4.x", CancellationToken.None);
+		CatalogComponent catalogComponent = await _catalog.UpsertComponentAsync(
+			productVersion.Id,
+			new CatalogComponentDefinition($"service-{suffix}", CatalogSelectorKinds.Service, CatalogTransports.NsxApi, CatalogSelectorKinds.Service, selectorName, null),
+			CancellationToken.None);
+		string contentKind = string.Equals(outputKind, CatalogOutputKinds.HdfAndCkl, StringComparison.Ordinal) ? CatalogKinds.Stig : CatalogKinds.Srg;
+		CatalogContentRelease release = await _catalog.UpsertContentReleaseAsync(source.Id, contentKind, $"release-{suffix}-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await _catalog.UpsertReportGroupAsync($"group-{suffix}-{Guid.NewGuid():N}", "Test Group", 1, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(
+			catalogComponent.Id, release.Id, reportGroup.Id, "v1", outputKind, CancellationToken.None);
+
+		string profileKey = $"nsx-api/invented/{selectorName}-{suffix}-profile";
+		CatalogImportReport report = await _catalog.RecordImportReportAsync($"commit-{suffix}", $"digest-{suffix}-{Guid.NewGuid():N}", 1, 0, 0, CancellationToken.None);
+		await _catalog.RecordImportReportEntryAsync(report.Id, CatalogImportEntryDispositions.Accepted, profileKey, null, executionProfile.Id, CancellationToken.None);
+
+		string contentDigest = $"digest-{suffix}-{Guid.NewGuid():N}";
+		string stagedRelativePath = $"revisions/{contentDigest}";
+		ContentRevision revision = await _baselines.RecordStagedRevisionAsync($"commit-{suffix}", contentDigest, stagedRelativePath, CancellationToken.None);
+		Baseline staged = await _baselines.CreateStagedBaselineAsync(revision.Id, executionProfile.Id, benchmarkRevisionId: null, CancellationToken.None);
+		BaselineActivationOutcome outcome = await _baselines.ActivateAsync(staged.Id, "test-fixture", CancellationToken.None);
+		Assert.Equal(BaselineActivationOutcome.Activated, outcome);
+
+		if (materializeOnDisk)
+		{
+			string profileDirectory = Path.Combine(_contentDirectory, stagedRelativePath, profileKey);
+			Directory.CreateDirectory(profileDirectory);
+			await File.WriteAllTextAsync(Path.Combine(profileDirectory, "inspec.yml"), $"name: invented-nsx-{selectorName}-{suffix}-profile\n");
+		}
+
+		return (executionProfile.Id, staged.Id, profileKey);
+	}
+
+	/// <summary>
 	/// Seeds a real catalog execution profile (vcenter selector), an ACTIVATED baseline
 	/// bound to a content revision, an accepted <c>catalog_import_report_entries</c> row
 	/// (so <see cref="ComponentProfileRevisionResolver"/> can resolve the profile-key
@@ -1633,6 +1680,228 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 
 		Assert.Equal("uploaded", await GetJobFieldAsync(nsxJobId, "state"));
 		Assert.Equal("uploaded", await GetJobFieldAsync(vsphereJobId, "state"));
+	}
+
+	/// <summary>
+	/// Issue #742 (NSX, epic #726 Wave 3's final transport) AC "each component executes
+	/// the correct leaf profile and benchmark mapping": a narrowed nsx-api/service item
+	/// (e.g. the NSX Manager function) resolves its OWN activated content-revision
+	/// profile through the SAME <see cref="ComponentProfileRevisionResolver"/> chain
+	/// #738/#739/#740/#741/#743 proved for the vmware/ssh families, and its
+	/// SelectorName rides the invocation for attribution -- never falling back to the
+	/// run-level profile_key/legacy NsxProfilePath.
+	/// </summary>
+	[Fact]
+	public async Task NsxComponentJob_ResolvesActivatedRevisionProfilePath_AndCarriesSelectorName()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedNsxTargetAsync("invented-nsx-component-canary");
+		(Guid executionProfileId, Guid baselineId, string profileKey) =
+			await SeedNsxCatalogAndBaselineAsync("manager-resolve-success", CatalogOutputKinds.HdfAndCkl, "manager", materializeOnDisk: true);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = CatalogTransports.NsxApi,
+			selector_kind = CatalogSelectorKinds.Service,
+			selector_name = "manager",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = CatalogOutputKinds.HdfAndCkl,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", ScanTargetPriority.Nsx, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.True(await ScanLogContainsAsync(jobIds[0], profileKey),
+			"expected the stub's Information line to echo the resolved activated-revision profile path.");
+		Assert.False(await ScanLogContainsAsync(jobIds[0], "/invented/nsx/profile/path"),
+			"an nsx-api component job must never fall back to the legacy fixed NsxProfilePath.");
+		Assert.True(await ScanLogContainsAsync(jobIds[0], "selector=manager"),
+			"expected the stub to echo the component's own SelectorName (manager).");
+	}
+
+	/// <summary>
+	/// Issue #742's fail-closed half, same shape as
+	/// <see cref="VCenterComponentJob_RevisionNotMaterializedOnDisk_FailsClosed_WithActionableDiagnostic"/>:
+	/// an nsx-api component job whose baseline's content revision was never
+	/// materialized on disk fails ONLY this job with an actionable diagnostic, never
+	/// silently falling back to a wrong/fixed profile.
+	/// </summary>
+	[Fact]
+	public async Task NsxComponentJob_RevisionNotMaterializedOnDisk_FailsClosed_WithActionableDiagnostic()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedNsxTargetAsync("invented-nsx-missing-revision-canary");
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedNsxCatalogAndBaselineAsync("dfw-missing-revision", CatalogOutputKinds.HdfAndCkl, "dfw", materializeOnDisk: false);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = CatalogTransports.NsxApi,
+			selector_kind = CatalogSelectorKinds.Service,
+			selector_name = "dfw",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = CatalogOutputKinds.HdfAndCkl,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", ScanTargetPriority.Nsx, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+		string note = await GetJobNoteAsync(jobIds[0]);
+		Assert.Contains("not materialized", note, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #742's defensive compatibility gate, same shape as
+	/// <see cref="VCenterComponentJob_MissingFrozenProfileIds_FailsClosed_NeverFallsBackToUnscopedProfile"/>:
+	/// an nsx-api/service payload with NO catalog_execution_profile_id/baseline_id (a
+	/// malformed/legacy payload the planner should never produce for this selector)
+	/// fails closed with an actionable diagnostic rather than silently falling back to
+	/// an unscoped profile.
+	/// </summary>
+	[Fact]
+	public async Task NsxComponentJob_MissingFrozenProfileIds_FailsClosed_NeverFallsBackToUnscopedProfile()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedNsxTargetAsync("invented-nsx-no-ids-canary");
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = CatalogTransports.NsxApi,
+			selector_kind = CatalogSelectorKinds.Service,
+			selector_name = "manager",
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", ScanTargetPriority.Nsx, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+		string note = await GetJobNoteAsync(jobIds[0]);
+		Assert.Contains("carries no catalog_execution_profile_id", note, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #742's security-critical AC: a narrowed nsx-api component's resolved Input
+	/// config-doc body IS materialized into the InSpec inputs file (same as the
+	/// vmware/ssh families), but an operator-supplied auth-input key
+	/// (<c>sessionToken</c>) is dropped by <see cref="ScanScopingInputFilter"/> rather
+	/// than ever reaching the InSpec invocation -- proven both negatively (the
+	/// attacker-supplied token value never appears anywhere in job.log) and positively
+	/// (an unrelated key from the same doc survives, and a job.log WARN names the
+	/// dropped key).
+	/// </summary>
+	[Fact]
+	public async Task NsxComponentJob_ConfigDocNamingSessionToken_NeverReachesInvocation_DropsAndWarns()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedNsxTargetAsync("invented-nsx-auth-input-canary");
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedNsxCatalogAndBaselineAsync("manager-auth-key-guard", CatalogOutputKinds.HdfAndCkl, "manager", materializeOnDisk: true);
+
+		const string attackerToken = "attacker-supplied-session-token-9f3c"; // gitleaks:allow -- invented test canary, not a real token
+		const string inputsBody = "sessionToken: 'attacker-supplied-session-token-9f3c'\ninvented_unrelated_input: 'kept-value'\n"; // gitleaks:allow -- invented test canary, not a real token
+		(ConfigDocSaveOutcome saveOutcome, ConfigDoc? doc, ConfigDocVersion? version) = await _configDocs.SaveAsync(
+			Guid.NewGuid(), ConfigDocKinds.Input, $"invented-nsx-inputs-profile-{Guid.NewGuid():N}", ConfigDocLayers.Global,
+			null, "test-fixture", inputsBody, CancellationToken.None, executionProfileId);
+		Assert.Equal(ConfigDocSaveOutcome.Ok, saveOutcome);
+		Assert.NotNull(doc);
+		Assert.NotNull(version);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = CatalogTransports.NsxApi,
+			selector_kind = CatalogSelectorKinds.Service,
+			selector_name = "manager",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = CatalogOutputKinds.HdfAndCkl,
+			input_resolutions = new[]
+			{
+				new { InputName = "sessionToken", State = "resolved", DocId = doc!.Id, DocVersion = version!.Version },
+			},
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", ScanTargetPriority.Nsx, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		// Negative proof: the attacker-supplied token value never reaches job.log at all
+		// (it was dropped before the inputs file was ever written, so the stub's echo of
+		// the materialized file's content never contains it).
+		Assert.False(await ScanLogContainsAsync(jobIds[0], attackerToken),
+			"a reserved NSX auth-input key's operator-supplied value must never reach the InSpec invocation.");
+
+		// Positive proof: the unrelated sibling key from the SAME doc survived filtering.
+		Assert.True(await ScanLogContainsAsync(jobIds[0], "invented_unrelated_input"),
+			"expected the unrelated key from the same config doc to survive filtering.");
+
+		// The drop itself is attributed via a job.log WARN naming the reserved key.
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' AND payload::text LIKE '%sessionToken%' AND payload::text LIKE '%Warning%'", connection);
+		query.Parameters.AddWithValue(jobIds[0]);
+		Assert.True((long)(await query.ExecuteScalarAsync())! >= 1, "expected a job.log WARN naming the dropped reserved key 'sessionToken'.");
+
+		// Also assert the real credential's password never leaked (same canary
+		// discipline as every other e2e test in this file).
+		await AssertCanaryNeverLeakedAsync("invented-nsx-auth-input-canary", credentialId);
 	}
 
 	/// <summary>
