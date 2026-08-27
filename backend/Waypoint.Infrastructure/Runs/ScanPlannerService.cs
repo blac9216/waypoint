@@ -240,7 +240,7 @@ public sealed class ScanPlannerService
 			if (target is not null)
 			{
 				PlanConfigResolution configResolution = await _configResolution.ResolveAsync(
-					profile.ExecutionProfile.Id, target.SiteId, componentId, declaredInputs, DateTimeOffset.UtcNow, cancellationToken)
+					profile.ExecutionProfile.Id, target.SiteId, target.Id, declaredInputs, DateTimeOffset.UtcNow, cancellationToken)
 					.ConfigureAwait(false);
 				inputResolutions = configResolution.Inputs;
 				attestationResolution = configResolution.Attestation;

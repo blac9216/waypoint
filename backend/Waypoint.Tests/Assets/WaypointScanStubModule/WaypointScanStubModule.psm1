@@ -28,6 +28,13 @@
 #   'auth' -- returns Success = $false with a FailureReason containing an
 #     AuthFailureMarkers-recognized token ("401"), so the handler's classification path
 #     is exercised without a real credential ever being rejected by anything.
+#   'unreachable' -- issue #921: mirrors the real Wave 3 shape -- writes the underlying
+#     transport diagnostic to the (non-terminating) error stream FIRST, exactly like
+#     Invoke-ExternalCommand's -SurfaceOutputOnFailure does for a real InSpec transport
+#     failure, then returns Success = $false with the generic downstream
+#     "report file not found" FailureReason InSpec's own missing-report Test-Path
+#     check produces -- never the real cause. Exercises ScanJobHandler.SelectFailureNote
+#     preferring the captured error-stream line over this generic symptom.
 
 function Invoke-WaypointScan {
 	[CmdletBinding()]
@@ -105,6 +112,16 @@ function Invoke-WaypointScan {
 			ExitCode      = 2
 			ReportPath    = $null
 			FailureReason = '401 Unauthorized: invented credential rejection (stub).'
+		}
+	}
+
+	if ($Mode -eq 'unreachable') {
+		Write-Error 'Unable to connect to VIServer at invented-vcsa.example.internal. Connect-VIServer : Name or service not known (invented-vcsa.example.internal:443)' -ErrorAction Continue
+		return [pscustomobject]@{
+			Success       = $false
+			ExitCode      = $null
+			ReportPath    = $null
+			FailureReason = "InSpec scan completed but report file not found at $ReportPath."
 		}
 	}
 

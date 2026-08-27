@@ -1604,6 +1604,43 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		Assert.True(await EventTypeExistsAsync(JobEventTypes.JobLog, jobIds[0]));
 	}
 
+	/// <summary>
+	/// Issue #921 (Wave 3 live validation): an unreachable-endpoint transport failure
+	/// must name the underlying connection error in the job's failure note, not the
+	/// downstream "report file not found" symptom the stub module reports (mirroring
+	/// the real Invoke-WaypointScan's own Test-Path-driven message when InSpec exits
+	/// nonzero with no report on disk). The stub writes the transport diagnostic to
+	/// the error stream first, exactly as the real module's underlying
+	/// Invoke-ExternalCommand -SurfaceOutputOnFailure does.
+	/// </summary>
+	[Fact]
+	public async Task UnreachableEndpointFailure_NotesTheTransportError_NotTheMissingReportConsequence()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "unreachable");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-unreachable-canary");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+		string note = await GetJobFieldAsync(jobIds[0], "note");
+		Assert.Contains("Unable to connect to VIServer", note, StringComparison.Ordinal);
+		Assert.DoesNotContain("report file not found", note, StringComparison.Ordinal);
+	}
+
 	/// <summary>An auth-shaped InSpec failure (marker "401") classifies as `auth-failed`, feeding the ADR-0008 consecutive-failure halt.</summary>
 	[Fact]
 	public async Task AuthShapedFailure_MapsToAuthFailed()

@@ -58,7 +58,13 @@ public sealed record PowerShellRequest(
 /// errors keep the PowerShell convention (the pipeline ran to completion; they are
 /// surfaced on the error stream and via <paramref name="HadErrors"/>).
 /// <paramref name="Output"/> holds the pipeline's returned objects unwrapped to
-/// their base .NET objects.
+/// their base .NET objects. <paramref name="ErrorLines"/> is the non-terminating
+/// error stream's own messages, in arrival order -- the same text already forwarded
+/// into <c>job.log</c> as "error"-severity events (issue #921: a wrapper module's own
+/// returned failure summary can name a downstream symptom, e.g. a missing report
+/// file, while the underlying cause -- a transport connection failure -- only ever
+/// reached the error stream; callers that want the more specific diagnostic read it
+/// from here rather than re-deriving it from job.log).
 /// </summary>
 public sealed record PowerShellExecutionResult(
 	bool Succeeded,
@@ -66,4 +72,5 @@ public sealed record PowerShellExecutionResult(
 	bool HadErrors,
 	bool TimedOut,
 	string? FailureReason,
-	int? NativeExitCode);
+	int? NativeExitCode,
+	IReadOnlyList<string>? ErrorLines = null);
