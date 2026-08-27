@@ -1,14 +1,5 @@
 import { expect, test } from "@playwright/test";
-import {
-	adminPassword,
-	assertOnConfiguredOrigin,
-	configuredOrigin,
-	currentSessionIdToken,
-	currentSessionToken,
-	keycloakUsername,
-	login,
-	oidcClientId,
-} from "./helpers";
+import { adminPassword, assertOnConfiguredOrigin, configuredOrigin, currentSessionToken, keycloakUsername, login } from "./helpers";
 
 /**
  * Login + the global chrome's Runners indicator (issue #465), rewritten for
@@ -110,20 +101,16 @@ test("GET /api/v1/auth/me reflects the configured Keycloak Admin identity after 
 });
 
 /**
- * Issue #848's "verify logout" acceptance criterion, exercised at the
- * mechanism level: the rendered app has NO sign-out control anywhere in its
- * chrome (`AuthContext.logout` is wired in `lib/auth.tsx` but never invoked
- * from any component — tracked separately by #868; out of this issue's
- * frontend/e2e + e2e-playwright.sh file surface to fix here). This test
- * therefore drives the exact same steps the real `logout()` performs for an
- * OIDC session (issue #873's fix, live in `main`): discover the end-session
- * endpoint, replay `client_id` + the real `id_token_hint` — and proves the
- * fixed one-hop behavior: no Keycloak confirmation interstitial, the
- * redirect lands directly back on the configured origin, and the SSO
- * session is actually dead (a subsequent login is challenged for
- * credentials again, not silently re-authenticated).
+ * Issue #848's "verify logout" acceptance criterion, now exercised through
+ * the real UI control (issue #868 added a "Sign out" button to the top bar,
+ * wired to `AuthContext.logout()` — `lib/auth.tsx`, working end-to-end since
+ * #873). This proves the fixed one-hop behavior a real user actually gets by
+ * clicking it: no Keycloak confirmation interstitial, the redirect lands
+ * directly back on the configured origin, and the SSO session is actually
+ * dead (a subsequent login is challenged for credentials again, not
+ * silently re-authenticated) — not just the mechanism replayed manually.
  */
-test("ending the Keycloak SSO session is a one-hop redirect that actually ends the SSO session", async ({ page }) => {
+test("clicking Sign out is a one-hop redirect that actually ends the SSO session", async ({ page }) => {
 	await login(page);
 	const origin = configuredOrigin();
 
@@ -133,28 +120,18 @@ test("ending the Keycloak SSO session is a one-hop redirect that actually ends t
 	expect(typeof discovery.end_session_endpoint).toBe("string");
 	assertOnConfiguredOrigin(discovery.end_session_endpoint as string, "end_session_endpoint");
 
-	const clientId = await oidcClientId(page, origin);
-	const idTokenHint = await currentSessionIdToken(page);
-	await page.evaluate(() => window.sessionStorage.removeItem("waypoint.session"));
+	await page.getByRole("button", { name: "Sign out" }).click();
 
-	const params = new URLSearchParams({
-		client_id: clientId,
-		post_logout_redirect_uri: origin,
-		id_token_hint: idTokenHint,
-	});
-	await page.goto(`${discovery.end_session_endpoint}?${params.toString()}`);
-
-	// Issue #873's fix: `client_id` + `id_token_hint` together end the
-	// session in ONE hop — no "Do you want to log out?" confirmation page.
-	// Assert its absence explicitly rather than just tolerating it: a
-	// regression back to the confirmation page (e.g. a future change that
-	// drops `id_token_hint`) must fail this test, not silently pass by
-	// falling through an `if (visible) click()` escape hatch.
+	// Issue #873's fix: `logout()` replays `client_id` + the real
+	// `id_token_hint` together, ending the session in ONE hop — no "Do you
+	// want to log out?" confirmation page. Assert its absence explicitly
+	// rather than just tolerating it: a regression back to the confirmation
+	// page must fail this test, not silently pass by falling through an
+	// `if (visible) click()` escape hatch.
+	await page.waitForURL((url) => url.origin === origin, { timeout: 15_000 });
 	await expect(page.getByRole("button", { name: /logout|log out/i })).toHaveCount(0);
 	assertOnConfiguredOrigin(page.url(), "post-logout redirect");
-	expect(page.url().replace(/\/$/, "")).toBe(origin);
 
-	await page.goto("/");
 	await expect(page.getByRole("button", { name: "Sign in with Keycloak", exact: true })).toBeVisible({ timeout: 15_000 });
 	assertOnConfiguredOrigin(page.url(), "post-logout app landing");
 

@@ -15,7 +15,7 @@ const MODE_TOOLTIP: Record<"connected" | "disconnected", string> = {
 };
 
 export function TopBar({ screenTitle }: { screenTitle: string }) {
-	const { user } = useAuth();
+	const { user, logout } = useAuth();
 	const { system, stigman, mode, ready } = useSystem();
 	const { theme, toggleTheme } = useTheme();
 
@@ -87,6 +87,19 @@ export function TopBar({ screenTitle }: { screenTitle: string }) {
 			<div className="top-bar__user" title={`Signed in as ${user?.username ?? "—"}`}>
 				{user ? `${user.username} · ${user.role}` : "—"}
 			</div>
+
+			{/* Issue #868: `AuthContext.logout()` (frontend/src/lib/auth.tsx) has
+			    worked end-to-end since #873 — OIDC sessions redirect to Keycloak's
+			    end-session endpoint, local-auth sessions just drop the stored
+			    session — but nothing in the chrome ever called it. Rendered
+			    whenever a user is signed in (matching every other affordance in
+			    this bar), so there is no code path where a signed-in operator has
+			    no way to end the session. */}
+			{user && (
+				<button type="button" className="top-bar__signout" onClick={logout} aria-label="Sign out" title="Sign out">
+					Sign out
+				</button>
+			)}
 
 			<button
 				type="button"
