@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Management.Automation;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.ComplianceContent.SemanticImport;
@@ -20,6 +21,8 @@ using Waypoint.Core.Jobs;
 using Waypoint.Core.PowerShell;
 using Waypoint.Infrastructure.Execution.ComplianceContent;
 using Xunit;
+using RealPowerShellExecutor = Waypoint.Infrastructure.PowerShell.PowerShellExecutor;
+using RealWaypointRunspacePool = Waypoint.Infrastructure.PowerShell.WaypointRunspacePool;
 
 namespace Waypoint.Tests.Infrastructure.Execution;
 
@@ -1051,5 +1054,143 @@ public sealed class ContentPullJobHandlerTests
 		Assert.Equal(CatalogImportEntryDispositions.Accepted, entry.Disposition);
 		Assert.Null(entry.ExecutionProfileId);
 		Assert.Contains("aggregate", entry.Reason, StringComparison.OrdinalIgnoreCase);
+	}
+
+	// --- issue #972: real-executor end-to-end (the exact chain #972 blocked) ---------
+
+	/// <summary>
+	/// Issue #972 end-to-end proof: an invented, recognized-layout fixture content tree
+	/// (a real <c>inspec.yml</c> + <c>controls/*.rb</c> on disk) flows through the REAL
+	/// <see cref="RealPowerShellExecutor"/> (real in-process SMA
+	/// runspace pool, real <c>Get-Content -Raw</c> cmdlet output, the SAME
+	/// <c>ContentEntries</c> assembly shape as the deployed
+	/// <c>WaypointComplianceContent.psm1</c>) into <see cref="ContentPullJobHandler.ExecuteAsync"/>
+	/// and yields at least one staged/promoted profile with a manifest that parsed
+	/// (non-null <c>ExecutionProfileId</c>) -- the exact chain #972 blocked end to end
+	/// (315 recognized profiles all rejected "empty or missing" despite a real,
+	/// non-empty <c>inspec.yml</c> on disk). Pre-fix, this test fails the same way: zero
+	/// profiles promoted, because <c>RawYaml</c> never reaches
+	/// <c>InspecManifestParser.TryParse</c> as a non-empty string.
+	/// </summary>
+	[Fact]
+	public async Task Execute_RealExecutor_FixtureContentTree_StagesAndPromotesProfiles()
+	{
+		string fixtureRoot = Directory.CreateTempSubdirectory("wp-972-content-tree").FullName;
+		try
+		{
+			string profileDir = Path.Combine(fixtureRoot, "vsphere", "8.0.3", "v2r3-stig", "inspec", "baseline", "vcenter");
+			Directory.CreateDirectory(profileDir);
+			Directory.CreateDirectory(Path.Combine(profileDir, "controls"));
+			await File.WriteAllTextAsync(Path.Combine(profileDir, "inspec.yml"), ValidVCenterManifest);
+			await File.WriteAllTextAsync(
+				Path.Combine(profileDir, "controls", "vcenter_control.rb"),
+				"control 'V-000001' do\n  title 'Invented fixture control'\n  impact 0.7\nend\n");
+
+			string stubModulePath = Path.Combine(
+				AppContext.BaseDirectory, "Assets", "WaypointContentPullRealExecutorStubModule", "WaypointContentPullRealExecutorStubModule.psm1");
+			string realModulePath = Path.Combine(
+				AppContext.BaseDirectory, "PowerShell", "Modules", "WaypointComplianceContent", "WaypointComplianceContent.psm1");
+			Assert.True(File.Exists(realModulePath), $"real module not found at '{realModulePath}' -- Waypoint.Infrastructure.Execution's PowerShell\\Modules content did not copy into the test output.");
+
+			PowerShellOptions options = new()
+			{
+				MaxRunspaces = 1,
+				DefaultInvocationTimeout = TimeSpan.FromMinutes(1),
+				StopGracePeriod = TimeSpan.FromSeconds(2),
+			};
+			options.ModulePreloadPaths.Add(realModulePath);
+			options.ModulePreloadPaths.Add(stubModulePath);
+			IOptions<PowerShellOptions> wrappedOptions = Options.Create(options);
+
+			using RealWaypointRunspacePool pool = new(wrappedOptions, NullLogger<RealWaypointRunspacePool>.Instance);
+			RecordingJobLogBuffer logBuffer = new();
+			RealPowerShellExecutor realExecutor = new(pool, logBuffer, wrappedOptions, NullLogger<RealPowerShellExecutor>.Instance);
+
+			FakeContentRepository content = new(Config(ComplianceContentRefTypes.Branch, "main"));
+			FakeProfileRepository profiles = new();
+			FakeProfileControlRepository profileControls = new();
+			FakeCatalogRepository catalog = new();
+			FakeJobRunnerRepository jobs = new("admin@example.internal");
+			IOptions<ComplianceContentOptions> contentOptions =
+				Options.Create(new ComplianceContentOptions { ContentPath = fixtureRoot });
+
+			// A thin executor adapter: ContentPullJobHandler always invokes the fixed
+			// command name "Invoke-WaypointComplianceContentPull" -- this test's stub
+			// intentionally has a DIFFERENT name (it skips git entirely, so it is not a
+			// drop-in replacement for the real command's parameter contract) and is
+			// invoked here as the same PowerShellRequest.Command the handler issues,
+			// remapped to the stub's own command/parameters, still through the REAL
+			// PowerShellExecutor.ExecuteAsync path end to end.
+			RemappingExecutor executor = new(realExecutor, fixtureRoot);
+
+			ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, contentOptions, new FakeContentRevisionStager());
+
+			Guid jobId = Guid.NewGuid();
+			Guid runId = Guid.NewGuid();
+			ClaimedJob job = new(jobId, runId, "content-pull", TargetId: null, TargetName: null, CredentialId: null,
+				Priority: 5, Payload: "{}", AttemptCount: 0, MaxAttempts: 1);
+			RecordingEventPublisher events = new();
+			JobExecutionContext context = new(job, "worker-1", events, jobs, JobShape.Simple);
+
+			JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+
+			Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+
+			CatalogImportReport report = Assert.Single(catalog.Reports);
+			Assert.True(report.AcceptedCount > 0, "semantic import accepted zero candidates -- RawYaml likely did not survive the real executor boundary.");
+			Assert.Equal(0, report.RejectedCount);
+
+			CatalogImportReportEntry entry = Assert.Single(catalog.Entries);
+			Assert.Equal(CatalogImportEntryDispositions.Accepted, entry.Disposition);
+			Assert.Equal("vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", entry.ProfileKey);
+			Assert.NotNull(entry.ExecutionProfileId);
+			Assert.Null(entry.Reason);
+
+			Assert.Contains(profiles.Replaced!, p => p.ProfileKey == "vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter");
+			Assert.Contains("1 catalog execution profile(s) promoted", outcome.Note, StringComparison.Ordinal);
+		}
+		finally
+		{
+			Directory.Delete(fixtureRoot, recursive: true);
+		}
+	}
+
+	/// <summary>Records job.log events without a real IJobLogBuffer backend -- this test only needs the real executor to run, not to inspect its stream output.</summary>
+	private sealed class RecordingJobLogBuffer : IJobLogBuffer
+	{
+		public bool TryEnqueue(string eventType, Guid? jobId, Guid? runId, string payloadJson) => true;
+	}
+
+	/// <summary>
+	/// Adapts <see cref="ContentPullJobHandler"/>'s fixed
+	/// <c>Invoke-WaypointComplianceContentPull</c> command name onto this test's
+	/// git-free stub command, while still routing the ACTUAL invocation through the
+	/// real <see cref="RealPowerShellExecutor.ExecuteAsync"/> --
+	/// only the command name/parameters are remapped, nothing about output handling.
+	/// </summary>
+	private sealed class RemappingExecutor : IPowerShellExecutor
+	{
+		private readonly IPowerShellExecutor _inner;
+		private readonly string _contentPath;
+
+		public RemappingExecutor(IPowerShellExecutor inner, string contentPath)
+		{
+			_inner = inner;
+			_contentPath = contentPath;
+		}
+
+		public Task<PowerShellExecutionResult> ExecuteAsync(PowerShellRequest request, CancellationToken cancellationToken)
+		{
+			PowerShellRequest remapped = request with
+			{
+				Command = "Invoke-WaypointContentPullRealExecutorStub",
+				Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
+				{
+					["ContentPath"] = _contentPath,
+					["Commit"] = "invented0000000000000000000000000000abcd",
+				},
+			};
+			return _inner.ExecuteAsync(remapped, cancellationToken);
+		}
 	}
 }

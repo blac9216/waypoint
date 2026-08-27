@@ -299,11 +299,12 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 	/// A [pscustomobject]'s note properties live on the PSObject wrapper, not on its
 	/// BaseObject (a property-less PSCustomObject sentinel) -- unwrapping those loses
 	/// the data. CLR-backed objects (strings, ints, real .NET types) unwrap cleanly.
+	/// Delegates to <see cref="PowerShellValueUnwrap.Unwrap(object?)"/> -- the SAME rule
+	/// applies one layer down, at every NESTED property a job handler reads off this
+	/// top-level result (issue #972); this call site and that one share one
+	/// implementation so they can never drift apart again.
 	/// </summary>
-	private static object? Unwrap(PSObject? item)
-	{
-		return item?.BaseObject is PSCustomObject ? item : item?.BaseObject;
-	}
+	private static object? Unwrap(PSObject? item) => PowerShellValueUnwrap.Unwrap(item);
 
 	/// <summary>
 	/// Clears a previous invocation's <c>$LASTEXITCODE</c> before running (round-1

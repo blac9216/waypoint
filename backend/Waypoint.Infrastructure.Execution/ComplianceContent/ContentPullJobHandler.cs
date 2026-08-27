@@ -18,6 +18,7 @@ using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.ComplianceContent.SemanticImport;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.PowerShell;
+using Waypoint.Infrastructure.PowerShell;
 
 namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 
@@ -375,7 +376,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 				continue;
 			}
 
-			string? commit = psObject.Properties["Commit"]?.Value as string;
+			string? commit = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["Commit"]?.Value);
 			if (string.IsNullOrWhiteSpace(commit))
 			{
 				continue;
@@ -383,29 +384,23 @@ public sealed class ContentPullJobHandler : IJobHandler
 
 			List<ProfileUpsert> profiles = [];
 			Dictionary<string, IReadOnlyList<ProfileControlUpsert>> controlsByProfileKey = new(StringComparer.Ordinal);
-			if (psObject.Properties["Profiles"]?.Value is System.Collections.IEnumerable rawProfiles)
+			foreach (object? rawProfile in PowerShellValueUnwrap.UnwrapEach(psObject.Properties["Profiles"]?.Value))
 			{
-				foreach (object? rawProfile in rawProfiles)
+				ProfileUpsert? parsed = TryParseProfile(rawProfile, commit, state);
+				if (parsed is not null)
 				{
-					ProfileUpsert? parsed = TryParseProfile(rawProfile, commit, state);
-					if (parsed is not null)
-					{
-						profiles.Add(parsed);
-						controlsByProfileKey[parsed.ProfileKey] = TryParseControls(rawProfile);
-					}
+					profiles.Add(parsed);
+					controlsByProfileKey[parsed.ProfileKey] = TryParseControls(rawProfile);
 				}
 			}
 
 			List<VendorContentEntry> contentEntries = [];
-			if (psObject.Properties["ContentEntries"]?.Value is System.Collections.IEnumerable rawEntries)
+			foreach (object? rawEntry in PowerShellValueUnwrap.UnwrapEach(psObject.Properties["ContentEntries"]?.Value))
 			{
-				foreach (object? rawEntry in rawEntries)
+				VendorContentEntry? parsed = TryParseContentEntry(rawEntry);
+				if (parsed is not null)
 				{
-					VendorContentEntry? parsed = TryParseContentEntry(rawEntry);
-					if (parsed is not null)
-					{
-						contentEntries.Add(parsed);
-					}
+					contentEntries.Add(parsed);
 				}
 			}
 
@@ -430,28 +425,25 @@ public sealed class ContentPullJobHandler : IJobHandler
 			return null;
 		}
 
-		string? profileKey = psObject.Properties["ProfileKey"]?.Value as string;
+		string? profileKey = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["ProfileKey"]?.Value);
 		if (string.IsNullOrWhiteSpace(profileKey))
 		{
 			return null;
 		}
 
-		string? rawYaml = psObject.Properties["RawYaml"]?.Value as string;
-		bool hasControlsDirectory = psObject.Properties["HasControlsDirectory"]?.Value is true;
-		bool hasFilesDirectory = psObject.Properties["HasFilesDirectory"]?.Value is true;
-		bool inspecCheckRan = psObject.Properties["InspecCheckRan"]?.Value is true;
-		bool inspecCheckPassed = psObject.Properties["InspecCheckPassed"]?.Value is true;
-		string? inspecCheckDetail = psObject.Properties["InspecCheckDetail"]?.Value as string;
+		string? rawYaml = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["RawYaml"]?.Value);
+		bool hasControlsDirectory = PowerShellValueUnwrap.Unwrap(psObject.Properties["HasControlsDirectory"]?.Value) is true;
+		bool hasFilesDirectory = PowerShellValueUnwrap.Unwrap(psObject.Properties["HasFilesDirectory"]?.Value) is true;
+		bool inspecCheckRan = PowerShellValueUnwrap.Unwrap(psObject.Properties["InspecCheckRan"]?.Value) is true;
+		bool inspecCheckPassed = PowerShellValueUnwrap.Unwrap(psObject.Properties["InspecCheckPassed"]?.Value) is true;
+		string? inspecCheckDetail = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["InspecCheckDetail"]?.Value);
 
 		List<string> controlFileNames = [];
-		if (psObject.Properties["ControlFileNames"]?.Value is System.Collections.IEnumerable rawNames)
+		foreach (object? rawName in PowerShellValueUnwrap.UnwrapEach(psObject.Properties["ControlFileNames"]?.Value))
 		{
-			foreach (object? rawName in rawNames)
+			if (rawName is string name && !string.IsNullOrWhiteSpace(name))
 			{
-				if (rawName is string name && !string.IsNullOrWhiteSpace(name))
-				{
-					controlFileNames.Add(name);
-				}
+				controlFileNames.Add(name);
 			}
 		}
 
@@ -467,7 +459,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 			return null;
 		}
 
-		string? profileKey = psObject.Properties["ProfileKey"]?.Value as string;
+		string? profileKey = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["ProfileKey"]?.Value);
 		if (string.IsNullOrWhiteSpace(profileKey))
 		{
 			// One malformed profile row must not fail the whole pull -- same
@@ -476,8 +468,8 @@ public sealed class ContentPullJobHandler : IJobHandler
 			return null;
 		}
 
-		string? name = psObject.Properties["Name"]?.Value as string;
-		string? version = psObject.Properties["Version"]?.Value as string;
+		string? name = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["Name"]?.Value);
+		string? version = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["Version"]?.Value);
 		return new ProfileUpsert(profileKey, string.IsNullOrWhiteSpace(name) ? profileKey : name, version, commit, state);
 	}
 
@@ -490,13 +482,12 @@ public sealed class ContentPullJobHandler : IJobHandler
 	private static List<ProfileControlUpsert> TryParseControls(object? item)
 	{
 		List<ProfileControlUpsert> controls = [];
-		if (item is not System.Management.Automation.PSObject psObject
-			|| psObject.Properties["Controls"]?.Value is not System.Collections.IEnumerable rawControls)
+		if (item is not System.Management.Automation.PSObject psObject)
 		{
 			return controls;
 		}
 
-		foreach (object? rawControl in rawControls)
+		foreach (object? rawControl in PowerShellValueUnwrap.UnwrapEach(psObject.Properties["Controls"]?.Value))
 		{
 			if (rawControl is not System.Management.Automation.PSObject controlObject)
 			{
@@ -505,14 +496,14 @@ public sealed class ContentPullJobHandler : IJobHandler
 				continue;
 			}
 
-			string? controlId = controlObject.Properties["ControlId"]?.Value as string;
+			string? controlId = PowerShellValueUnwrap.UnwrapAs<string>(controlObject.Properties["ControlId"]?.Value);
 			if (string.IsNullOrWhiteSpace(controlId))
 			{
 				continue;
 			}
 
-			string? title = controlObject.Properties["Title"]?.Value as string;
-			string? severity = controlObject.Properties["Severity"]?.Value as string;
+			string? title = PowerShellValueUnwrap.UnwrapAs<string>(controlObject.Properties["Title"]?.Value);
+			string? severity = PowerShellValueUnwrap.UnwrapAs<string>(controlObject.Properties["Severity"]?.Value);
 			controls.Add(new ProfileControlUpsert(
 				controlId,
 				string.IsNullOrWhiteSpace(title) ? null : title,

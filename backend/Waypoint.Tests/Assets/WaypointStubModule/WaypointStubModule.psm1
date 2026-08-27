@@ -103,4 +103,66 @@ function Invoke-StubHangThenWrite {
     Write-Warning 'late line after the job already finished'
 }
 
-Export-ModuleMember -Function Get-StubInventory, Write-StubStreams, Get-StubEcho, Invoke-StubFailure, Invoke-StubHang, Invoke-StubHangThenWrite, Write-StubSecretLeak, Write-StubDoublyEscapedSecretLeak
+function Get-StubNestedContentEntry {
+    <#
+    .SYNOPSIS
+        Issue #972 repro/regression fixture: mirrors the REAL
+        WaypointComplianceContent.psm1 shape that lost RawYaml -- a top-level
+        [PSCustomObject] whose ContentEntries array holds nested [PSCustomObject] rows
+        assembled with Get-Content -Raw, exactly like the real module's
+        Get-WaypointComplianceContentRawManifest. No vendor code/content: the manifest
+        text is this test asset's own invented fixture file.
+
+    .PARAMETER ManifestPath
+        Path to the invented fixture inspec.yml-shaped text this function reads with
+        Get-Content -Raw -- the SMA cmdlet whose own pipeline-output wrapping is the
+        thing under test, not a hand-written PowerShell string literal (a literal
+        never reproduced the defect).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $ManifestPath)
+
+    $entries = @(foreach ($i in 1..1) {
+            [PSCustomObject]@{
+                ProfileKey = 'boundary/fixture/profile'
+                RawYaml    = Get-Content -Path $ManifestPath -Raw
+            }
+        })
+
+    [PSCustomObject]@{
+        Commit         = 'invented0000000000000000000000000000abcd'
+        ContentEntries = $entries
+    }
+}
+
+function Get-StubBoundaryContractShape {
+    <#
+    .SYNOPSIS
+        Issue #972 class-killing guard fixture: one representative nested object
+        shape exercising every hazard flavor in one pipeline output -- a multi-KB
+        string with special characters (read via Get-Content -Raw, the same cmdlet
+        that triggered #972), a string array, a nested [PSCustomObject], and an
+        explicit $null property -- so a future regression in ANY of these, not just
+        RawYaml, fails this one test.
+
+    .PARAMETER ManifestPath
+        Path to the multi-KB invented fixture text asset.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $ManifestPath)
+
+    [PSCustomObject]@{
+        TopLevel = [PSCustomObject]@{
+            LargeText   = Get-Content -Path $ManifestPath -Raw
+            SpecialText = Get-Content -Path $ManifestPath | Select-Object -First 1
+            StringArray = @('alpha', 'beta with spaces', 'gamma"quote', $null, 'delta\backslash')
+            NestedObject = [PSCustomObject]@{
+                Inner       = 'nested-value'
+                InnerNumber = 42
+            }
+            NullValue   = $null
+        }
+    }
+}
+
+Export-ModuleMember -Function Get-StubInventory, Write-StubStreams, Get-StubEcho, Invoke-StubFailure, Invoke-StubHang, Invoke-StubHangThenWrite, Write-StubSecretLeak, Write-StubDoublyEscapedSecretLeak, Get-StubNestedContentEntry, Get-StubBoundaryContractShape
