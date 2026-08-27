@@ -39,11 +39,13 @@ export function useRunControls(runId: string | undefined, role: Role | undefined
 	const [aborting, setAborting] = useState(false);
 	const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
 
-	// api-contract.md "Runs & jobs": pause/resume/abort are Operator+ (own
-	// runs), Admin any; the run-ownership check itself is server-side (this is
-	// presentation only, per roles.ts). Per-job cancel rides the same floor —
-	// it is a finer-grained abort, not a separate capability.
-	const runControlGate = role ? roleGateProps(role, "Operator") : { disabled: true, style: { opacity: 0.42 } };
+	// api-contract.md "Runs & jobs": pause/resume/abort are Cyber+ (own runs),
+	// Admin any (issue #757's "Cyber controls owned live scans" owner decision
+	// lowered this floor from Operator+ — PR #819's role-matrix reconciliation);
+	// the run-ownership check itself is server-side (this is presentation only,
+	// per roles.ts). Per-job cancel rides the same floor — it is a
+	// finer-grained abort, not a separate capability.
+	const runControlGate = role ? roleGateProps(role, "Cyber") : { disabled: true, style: { opacity: 0.42 } };
 
 	async function handlePauseToggle(paused: boolean) {
 		if (!runId) {

@@ -18,7 +18,7 @@
  * DOM-free by design — the unit tests assert windowing arithmetic directly
  * instead of mounting 10,000 nodes.
  */
-import { apiGet } from "../../lib/api";
+import { apiGet, apiPost } from "../../lib/api";
 
 export interface ComponentJobCount {
 	priority: number;
@@ -102,6 +102,81 @@ export async function fetchComponentJobsPage(
 ): Promise<ComponentJobPage> {
 	const wire = await apiGet<ComponentJobListWire>(`/runs/${runId}/component-jobs${buildQueryString(filters, cursor, limit)}`);
 	return { items: wire.items, nextCursor: wire.next_cursor };
+}
+
+// -- bulk operations (issue #757) --------------------------------------------
+//
+// `POST /runs/{id}/jobs/bulk-cancel` and `bulk-retry`: audited, bounded (500
+// items server-side), per-item-outcome bulk actions. Exactly one of explicit
+// `jobIds` or a `filter` (the array-valued sibling of `ComponentJobFilters`,
+// resolved to explicit ids SERVER-SIDE before anything is mutated) may be
+// supplied — never both, never neither. A too-large explicit id list OR a
+// filter matching more than the bound is a 400 `too_many_matches`, surfaced
+// to the caller as a thrown `ApiError` rather than silently executing a
+// partial, arbitrarily-chosen subset.
+
+export interface BulkJobActionFilter {
+	state?: string[];
+	priority?: number[];
+	componentKind?: string[];
+	search?: string;
+}
+
+export type BulkJobActionRequest =
+	| { jobIds: string[]; filter?: undefined }
+	| { jobIds?: undefined; filter: BulkJobActionFilter };
+
+export interface BulkJobActionItem {
+	jobId: string;
+	outcome: string;
+}
+
+export interface BulkJobActionResult {
+	resolvedCount: number;
+	items: BulkJobActionItem[];
+}
+
+interface BulkJobActionItemWire {
+	job_id: string;
+	outcome: string;
+}
+
+interface BulkJobActionResponseWire {
+	resolved_count: number;
+	items: BulkJobActionItemWire[];
+}
+
+function toBulkRequestBody(request: BulkJobActionRequest): { job_ids?: string[]; filter?: Record<string, unknown> } {
+	if (request.jobIds) {
+		return { job_ids: request.jobIds };
+	}
+	return {
+		filter: {
+			state: request.filter.state,
+			priority: request.filter.priority,
+			component_kind: request.filter.componentKind,
+			search: request.filter.search,
+		},
+	};
+}
+
+function fromBulkResponseWire(wire: BulkJobActionResponseWire): BulkJobActionResult {
+	return {
+		resolvedCount: wire.resolved_count,
+		items: wire.items.map((item) => ({ jobId: item.job_id, outcome: item.outcome })),
+	};
+}
+
+/** Audited bulk cancel — cooperative on in-flight jobs, immediate on queued/blocked, same per-item legality as the singular `cancelJob`. */
+export async function bulkCancelJobs(runId: string, request: BulkJobActionRequest): Promise<BulkJobActionResult> {
+	const wire = await apiPost<BulkJobActionResponseWire>(`/runs/${runId}/jobs/bulk-cancel`, toBulkRequestBody(request));
+	return fromBulkResponseWire(wire);
+}
+
+/** Audited bulk retry — `failed` jobs only, same per-item legality as the singular `retryJob`. */
+export async function bulkRetryJobs(runId: string, request: BulkJobActionRequest): Promise<BulkJobActionResult> {
+	const wire = await apiPost<BulkJobActionResponseWire>(`/runs/${runId}/jobs/bulk-retry`, toBulkRequestBody(request));
+	return fromBulkResponseWire(wire);
 }
 
 // -- virtualization windowing (pure) -----------------------------------------

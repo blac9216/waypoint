@@ -6,14 +6,16 @@
  * without mounting 10,000 DOM nodes.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { apiGet } from "../../lib/api";
-import { computeWindow, fetchComponentJobCounts, fetchComponentJobsPage } from "./componentJobs";
+import { apiGet, apiPost } from "../../lib/api";
+import { bulkCancelJobs, bulkRetryJobs, computeWindow, fetchComponentJobCounts, fetchComponentJobsPage } from "./componentJobs";
 
 vi.mock("../../lib/api", () => ({
 	apiGet: vi.fn(),
+	apiPost: vi.fn(),
 }));
 
 const mockApiGet = vi.mocked(apiGet);
+const mockApiPost = vi.mocked(apiPost);
 
 describe("computeWindow", () => {
 	it("renders only a bounded slice of a 10,000-row list", () => {
@@ -89,5 +91,43 @@ describe("component-job clients", () => {
 		const second = await fetchComponentJobsPage("run-1", {}, first.nextCursor!, 200);
 		expect(second.nextCursor).toBeNull();
 		expect(mockApiGet).toHaveBeenLastCalledWith("/runs/run-1/component-jobs?cursor=v1%3Aopaque&limit=200");
+	});
+});
+
+describe("bulk job action clients (issue #757)", () => {
+	beforeEach(() => {
+		mockApiPost.mockReset();
+	});
+
+	it("bulkCancelJobs posts explicit job_ids and maps the response", async () => {
+		mockApiPost.mockResolvedValue({
+			resolved_count: 2,
+			items: [
+				{ job_id: "a", outcome: "cancelled" },
+				{ job_id: "b", outcome: "not_cancellable" },
+			],
+		});
+
+		const result = await bulkCancelJobs("run-1", { jobIds: ["a", "b"] });
+
+		expect(mockApiPost).toHaveBeenCalledWith("/runs/run-1/jobs/bulk-cancel", { job_ids: ["a", "b"] });
+		expect(result).toEqual({
+			resolvedCount: 2,
+			items: [
+				{ jobId: "a", outcome: "cancelled" },
+				{ jobId: "b", outcome: "not_cancellable" },
+			],
+		});
+	});
+
+	it("bulkRetryJobs posts a filter body when no explicit ids are given", async () => {
+		mockApiPost.mockResolvedValue({ resolved_count: 1, items: [{ job_id: "a", outcome: "queued" }] });
+
+		const result = await bulkRetryJobs("run-1", { filter: { state: ["failed"], priority: [4], componentKind: ["esxi"], search: "host" } });
+
+		expect(mockApiPost).toHaveBeenCalledWith("/runs/run-1/jobs/bulk-retry", {
+			filter: { state: ["failed"], priority: [4], component_kind: ["esxi"], search: "host" },
+		});
+		expect(result.items).toEqual([{ jobId: "a", outcome: "queued" }]);
 	});
 });
