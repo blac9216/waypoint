@@ -81,9 +81,10 @@ public sealed class ScanUploadCoordinator
 		await _jobs.SetUploadStatusAsync(jobId, JobUploadStatuses.Pending, null, cancellationToken).ConfigureAwait(false);
 
 		StigManagerUploadResult result;
+		ResolvedStigManagerConnection? connection = null;
 		try
 		{
-			ResolvedStigManagerConnection? connection = await _stigman.ResolveForSiteAsync(target.SiteId, cancellationToken).ConfigureAwait(false);
+			connection = await _stigman.ResolveForSiteAsync(target.SiteId, cancellationToken).ConfigureAwait(false);
 			if (connection is null)
 			{
 				result = new StigManagerUploadResult(StigManagerUploadOutcome.Failed, "No STIG Manager connection is configured for this site or globally.");
@@ -127,6 +128,21 @@ public sealed class ScanUploadCoordinator
 		};
 		string? detail = result.Detail is null ? null : _redactor.Redact(result.Detail);
 		await _jobs.SetUploadStatusAsync(jobId, status, detail, cancellationToken).ConfigureAwait(false);
+
+		// Issue #744: appends this attempt to the immutable per-attempt history
+		// (migration 0062's upload_attempts) alongside the current-outcome summary
+		// write above -- never throws (mirrors this method's own "never fail the scan
+		// run" contract): a failure to RECORD the attempt history must not turn into a
+		// failure to REPORT the attempt's real outcome to the caller.
+		try
+		{
+			await _jobs.RecordUploadAttemptAsync(
+				jobId, connection?.Endpoint, connection?.Collection, status, detail, cancellationToken).ConfigureAwait(false);
+		}
+		catch (Exception exception) when (exception is not OperationCanceledException)
+		{
+		}
+
 		return result;
 	}
 

@@ -175,9 +175,17 @@ public sealed class SchemaMigrationTests
 	/// target_scope-driven run's plan-item-granular fan-out. No new runner grant
 	/// (jobs already grants waypoint_compliance_runner SELECT/INSERT/UPDATE via
 	/// migration 0025; ScanJobHandler's component-granular execution consuming
-	/// scan_plan_items is this issue's stated remainder), issue #737 --
+	/// scan_plan_items is this issue's stated remainder), issue #737 -- 0062 adds
+	/// the append-only <c>upload_attempts</c> table (issue #744, epic #726 Wave 4
+	/// first slice): a per-attempt audit row (endpoint/collection/attempt_number/
+	/// status/error_detail) recorded by ScanUploadCoordinator alongside its existing
+	/// jobs.upload_status/upload_detail summary write, so a job's full upload attempt
+	/// history (first pass and every stigman-upload-retry call) is queryable rather
+	/// than overwritten. New runner grant: SELECT, INSERT on upload_attempts to
+	/// waypoint_compliance_runner (append-only; the runner never updates/deletes a
+	/// recorded attempt) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 61;
+	private const int ExpectedMigrationCount = 62;
 
 	private readonly PostgresFixture _fixture;
 

@@ -213,6 +213,7 @@ function Invoke-WaypointConvert {
 		[Parameter()] [AllowNull()] [string]$Title,
 		[Parameter()] [AllowNull()] [string]$ReleaseInfo,
 		[Parameter()] [AllowNull()] [string]$Version,
+		[Parameter()] [AllowNull()] [hashtable]$RuleCorrections,
 		[Parameter()] [int]$TimeoutSeconds,
 		[Parameter()] [string]$VmwareStigDockerCommonPath
 	)
@@ -221,7 +222,7 @@ function Invoke-WaypointConvert {
 	if (-not $Mode) { $Mode = 'success' }
 
 	if ($Mode -eq 'failure') {
-		return [pscustomobject]@{ Success = $false; CklPath = $null; MetadataApplied = $false; FailureReason = 'invented SAF conversion failure (stub).' }
+		return [pscustomobject]@{ Success = $false; CklPath = $null; MetadataApplied = $false; FailureReason = 'invented SAF conversion failure (stub).'; RuleCoverage = $null }
 	}
 
 	$CklDirectory = Split-Path -Path $CklOutputPath -Parent
@@ -234,7 +235,25 @@ function Invoke-WaypointConvert {
 	# convert stage chose -- the frozen benchmark_revision_id when present, else the
 	# static target-kind fallback (#741 CKL benchmark identity).
 	"<CHECKLIST><!-- invented stub CKL, benchmark=$BenchmarkId title=$Title release=$ReleaseInfo version=$Version --></CHECKLIST>" | Set-Content -Path $CklOutputPath -Encoding utf8
-	return [pscustomobject]@{ Success = $true; CklPath = $CklOutputPath; MetadataApplied = [bool]$BenchmarkId; FailureReason = $null }
+
+	# Issue #744: invented rule-correction simulation -- the stub's own fixed CKL always
+	# "declares" rule id 'SV-100001r1_rule' as its one Vuln entry's existing identity
+	# (a stand-in for whatever SAF's real hdf2ckl would have emitted from the HDF's
+	# InSpec control id), matched against $RuleCorrections' keys exactly the way the
+	# real Set-WaypointCklRuleIdentity does -- so a test controls matched-vs-unmatched
+	# purely by whether it freezes a benchmark revision whose rule_id is that fixed
+	# value (matched) or something else entirely (unmatched), never by env var.
+	$RuleCoverage = $null
+	if ($RuleCorrections -and $RuleCorrections.Count -gt 0) {
+		$StubExistingRuleId = 'SV-100001r1_rule'
+		if ($RuleCorrections.ContainsKey($StubExistingRuleId)) {
+			$RuleCoverage = [pscustomobject]@{ Matched = 1; Unmatched = @(); Error = $null }
+		} else {
+			$RuleCoverage = [pscustomobject]@{ Matched = 0; Unmatched = @($StubExistingRuleId); Error = $null }
+		}
+	}
+
+	return [pscustomobject]@{ Success = $true; CklPath = $CklOutputPath; MetadataApplied = [bool]$BenchmarkId; FailureReason = $null; RuleCoverage = $RuleCoverage }
 }
 
 # Invented stub for Invoke-WaypointNsxScan (issue #308). Same $env:WAYPOINT_SCAN_STUB_MODE

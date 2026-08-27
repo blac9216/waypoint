@@ -908,12 +908,28 @@ public sealed class ScanJobHandler : IJobHandler
 		// kind is STIG (an SRG item never reaches convert at all).
 		ScanBenchmarkMetadata? staticMetadata = _scanOptions.Value.BenchmarkMetadata.GetValueOrDefault(target.Kind);
 		StigManagerBenchmarkMetadata fallback = new(staticMetadata?.BenchmarkId, staticMetadata?.Title, staticMetadata?.ReleaseInfo, staticMetadata?.Version);
+
+		// Issue #744: the mapped benchmark revision's own rules (migration 0052's
+		// benchmark_rules) are the authoritative CKL rule/vuln identity source -- read
+		// here (not just the revision's own title/version already read below) so the
+		// convert invocation can correct each CKL Vuln entry's Rule_ID/Vuln_Num against
+		// them, never trusting whatever SAF's hdf2ckl converter derived from the raw
+		// HDF alone. Empty for a legacy/unmapped job (no frozen BenchmarkRevisionId) --
+		// rule correction is then skipped entirely by Invoke-WaypointConvert, matching
+		// the pre-#744 behavior exactly.
+		Dictionary<string, string?> ruleCorrections = [];
 		if (payload.BenchmarkRevisionId is { } benchmarkRevisionId)
 		{
 			BenchmarkRevision? revision = await _benchmarks.GetRevisionAsync(benchmarkRevisionId, cancellationToken).ConfigureAwait(false);
 			if (revision is not null)
 			{
 				fallback = new StigManagerBenchmarkMetadata(revision.BenchmarkKey, revision.Title, revision.Release, revision.Version);
+
+				IReadOnlyList<BenchmarkRule> rules = await _benchmarks.ListRulesAsync(benchmarkRevisionId, cancellationToken).ConfigureAwait(false);
+				foreach (BenchmarkRule rule in rules)
+				{
+					ruleCorrections[rule.RuleId] = rule.VulnId;
+				}
 			}
 		}
 
@@ -945,6 +961,16 @@ public sealed class ScanJobHandler : IJobHandler
 			["Version"] = metadata.Version,
 			["TimeoutSeconds"] = _scanOptions.Value.SafTimeoutSeconds,
 		};
+		if (ruleCorrections.Count > 0)
+		{
+			Dictionary<string, object?> ruleCorrectionsForWire = new(StringComparer.Ordinal);
+			foreach (KeyValuePair<string, string?> entry in ruleCorrections)
+			{
+				ruleCorrectionsForWire[entry.Key] = entry.Value;
+			}
+
+			parameters["RuleCorrections"] = ruleCorrectionsForWire;
+		}
 
 		PowerShellRequest request = new(ConvertCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
 		PowerShellExecutionResult result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
@@ -964,6 +990,17 @@ public sealed class ScanJobHandler : IJobHandler
 		if (string.IsNullOrWhiteSpace(output.CklPath) || !File.Exists(output.CklPath))
 		{
 			return await FailScanAsync(context, "convert invocation reported success but produced no CKL file.", cancellationToken).ConfigureAwait(false);
+		}
+
+		// Issue #744 AC "rule-level correction coverage is measured; unresolved/
+		// ambiguous rules are visible and cannot masquerade as complete": emit a
+		// structured job.log event with the coverage counts and the exact unmatched
+		// rule ids -- never silently dropped. No event at all when no correction was
+		// attempted (ruleCorrections empty -- legacy/unmapped job), matching the
+		// pre-#744 behavior for every job shape without a frozen benchmark revision.
+		if (ruleCorrections.Count > 0)
+		{
+			await EmitRuleCoverageAsync(context, output.RuleCoverage, cancellationToken).ConfigureAwait(false);
 		}
 
 		// Issue #311: post-convert upload, not a new pipeline stage -- ADR-0012's
@@ -1242,6 +1279,53 @@ public sealed class ScanJobHandler : IJobHandler
 		await context.Events.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, payload, cancellationToken).ConfigureAwait(false);
 	}
 
+	/// <summary>
+	/// Issue #744 AC "rule-level correction coverage is measured; unresolved/ambiguous
+	/// rules are visible and cannot masquerade as complete": one structured job.log
+	/// event per convert stage that attempted correction, naming the exact matched
+	/// count and every unmatched rule id -- never summarized away. A coverage-parse
+	/// failure (null <paramref name="coverage"/> -- an unexpected PowerShell output
+	/// shape) or a correction-attempt exception (<see cref="RuleCoverageResult.Error"/>
+	/// set) is reported as a Warning, same severity as an unmatched rule, since both
+	/// mean "correction did not fully account for this CKL's rules" -- the raw CKL is
+	/// never destroyed or blocked by either case (issue #744 AC "preserve raw HDF/CKL
+	/// when metadata correction ... fails").
+	/// </summary>
+	private static async Task EmitRuleCoverageAsync(JobExecutionContext context, RuleCoverageResult? coverage, CancellationToken cancellationToken)
+	{
+		if (coverage is null)
+		{
+			await EmitWarnAsync(
+				context,
+				$"job '{context.Job.Id}' rule-identity correction produced no coverage result (unexpected convert output shape); CKL rule identifiers were not corrected.",
+				cancellationToken).ConfigureAwait(false);
+			return;
+		}
+
+		if (coverage.Error is not null)
+		{
+			await EmitWarnAsync(
+				context,
+				$"job '{context.Job.Id}' rule-identity correction failed: {coverage.Error}; raw CKL preserved uncorrected.",
+				cancellationToken).ConfigureAwait(false);
+			return;
+		}
+
+		string severity = coverage.Unmatched.Count > 0 ? "Warning" : "Info";
+		string line = coverage.Unmatched.Count > 0
+			? $"job '{context.Job.Id}' rule-identity correction: {coverage.Matched} matched, {coverage.Unmatched.Count} unmatched rule(s) [{string.Join(", ", coverage.Unmatched)}] -- left uncorrected, never dropped."
+			: $"job '{context.Job.Id}' rule-identity correction: {coverage.Matched} matched, full coverage.";
+		string payload = JsonSerializer.Serialize(new
+		{
+			severity,
+			line,
+			matched = coverage.Matched,
+			unmatched_count = coverage.Unmatched.Count,
+			unmatched_rule_ids = coverage.Unmatched,
+		});
+		await context.Events.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, payload, cancellationToken).ConfigureAwait(false);
+	}
+
 	private static string? TryGetConnectionHost(string connectionJson)
 	{
 		using JsonDocument document = JsonDocument.Parse(connectionJson);
@@ -1353,7 +1437,46 @@ public sealed class ScanJobHandler : IJobHandler
 		string? cklPath = psObject.Properties["CklPath"]?.Value as string;
 		bool metadataApplied = psObject.Properties["MetadataApplied"]?.Value is true;
 		string? failureReason = psObject.Properties["FailureReason"]?.Value as string;
-		return new ConvertInvocationOutput(success, cklPath, metadataApplied, failureReason);
+		RuleCoverageResult? ruleCoverage = TryParseRuleCoverage(psObject.Properties["RuleCoverage"]?.Value);
+		return new ConvertInvocationOutput(success, cklPath, metadataApplied, failureReason, ruleCoverage);
+	}
+
+	/// <summary>
+	/// Issue #744: parses <c>Set-WaypointCklRuleIdentity</c>'s coverage summary
+	/// (Matched/Unmatched/Error) off the convert invocation's nested RuleCoverage
+	/// property. Returns null when no correction was attempted (legacy/unmapped job)
+	/// or the property is an unexpected shape -- never throws, matching this handler's
+	/// existing "a malformed PowerShell output property degrades rather than crashes"
+	/// discipline (see TryParseConvertOutput's own sibling properties).
+	/// </summary>
+	private static RuleCoverageResult? TryParseRuleCoverage(object? value)
+	{
+		if (value is not System.Management.Automation.PSObject coverageObject)
+		{
+			return null;
+		}
+
+		int matched = coverageObject.Properties["Matched"]?.Value switch
+		{
+			int intValue => intValue,
+			long longValue => (int)longValue,
+			_ => 0,
+		};
+		List<string> unmatched = [];
+		if (coverageObject.Properties["Unmatched"]?.Value is System.Collections.IEnumerable enumerable
+			and not string)
+		{
+			foreach (object? item in enumerable)
+			{
+				if (item is string ruleId)
+				{
+					unmatched.Add(ruleId);
+				}
+			}
+		}
+
+		string? error = coverageObject.Properties["Error"]?.Value as string;
+		return new RuleCoverageResult(matched, unmatched, error);
 	}
 
 	private static ScanPayload ParsePayload(string payloadJson)
@@ -1504,7 +1627,11 @@ public sealed class ScanJobHandler : IJobHandler
 
 	private sealed record AttestInvocationOutput(bool Success, bool AttestApplied, string? FailureReason);
 
-	private sealed record ConvertInvocationOutput(bool Success, string? CklPath, bool MetadataApplied, string? FailureReason);
+	private sealed record ConvertInvocationOutput(
+		bool Success, string? CklPath, bool MetadataApplied, string? FailureReason, RuleCoverageResult? RuleCoverage = null);
+
+	/// <summary>Issue #744: rule-level correction coverage for one convert invocation -- <see cref="Unmatched"/> is exact (never truncated) so every unresolved rule id remains visible.</summary>
+	private sealed record RuleCoverageResult(int Matched, List<string> Unmatched, string? Error);
 
 	/// <summary>Internal-only signal from <see cref="ResolveCredentialAsync"/> to its caller; never crosses a handler boundary as a thrown exception.</summary>
 	private sealed class ScanCredentialException(string message) : Exception(message);

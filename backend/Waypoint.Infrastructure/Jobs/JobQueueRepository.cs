@@ -1122,6 +1122,68 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
 
+	public async Task RecordUploadAttemptAsync(
+		Guid jobId, string? endpoint, string? collection, string uploadStatus, string? detail, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(uploadStatus);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		// Issue #744: attempt_number is assigned under this same connection immediately
+		// before the insert -- a benign race under concurrent retries (there is no
+		// uniqueness constraint on (job_id, attempt_number)) produces at worst a gap or
+		// a duplicate ordinal, never a lost attempt row; every insert always lands.
+		await using NpgsqlCommand countCommand = new(
+			"SELECT count(*) FROM upload_attempts WHERE job_id = $1", connection);
+		countCommand.Parameters.AddWithValue(jobId);
+		long priorAttempts = (long)(await countCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+
+		await using NpgsqlCommand insertCommand = new(
+			"""
+			INSERT INTO upload_attempts (job_id, attempt_number, endpoint, collection, status, error_detail)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			""", connection);
+		insertCommand.Parameters.AddWithValue(jobId);
+		insertCommand.Parameters.AddWithValue((int)priorAttempts + 1);
+		insertCommand.Parameters.AddWithValue((object?)endpoint ?? DBNull.Value);
+		insertCommand.Parameters.AddWithValue((object?)collection ?? DBNull.Value);
+		insertCommand.Parameters.AddWithValue(uploadStatus);
+		insertCommand.Parameters.AddWithValue((object?)detail ?? DBNull.Value);
+		await insertCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
+	public async Task<IReadOnlyList<UploadAttemptRecord>> GetUploadAttemptsAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT id, job_id, attempt_number, endpoint, collection, status, error_detail, attempted_at
+			FROM upload_attempts
+			WHERE job_id = $1
+			ORDER BY attempt_number
+			""", connection);
+		command.Parameters.AddWithValue(jobId);
+
+		List<UploadAttemptRecord> attempts = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			attempts.Add(new UploadAttemptRecord(
+				Id: reader.GetGuid(0),
+				JobId: reader.GetGuid(1),
+				AttemptNumber: reader.GetInt32(2),
+				Endpoint: reader.IsDBNull(3) ? null : reader.GetString(3),
+				Collection: reader.IsDBNull(4) ? null : reader.GetString(4),
+				Status: reader.GetString(5),
+				ErrorDetail: reader.IsDBNull(6) ? null : reader.GetString(6),
+				AttemptedAt: reader.GetFieldValue<DateTimeOffset>(7)));
+		}
+
+		return attempts;
+	}
+
 	public async Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

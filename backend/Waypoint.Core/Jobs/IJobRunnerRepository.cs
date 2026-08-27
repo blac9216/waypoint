@@ -162,6 +162,28 @@ public interface IJobRunnerRepository
 	Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Issue #744 (epic #726 Wave 4): appends one immutable upload-attempt row
+	/// (migration 0062's <c>upload_attempts</c>) alongside <see cref="SetUploadStatusAsync"/>'s
+	/// current-outcome summary write -- never updates or deletes a prior attempt.
+	/// <paramref name="endpoint"/>/<paramref name="collection"/> are the resolved STIG
+	/// Manager connection's identity (null when no connection was configured at all,
+	/// so even a "nothing to upload to" outcome is attributable). The attempt number is
+	/// assigned by the implementation (1-based, monotonic per <paramref name="jobId"/>).
+	/// Called by <see cref="Waypoint.Infrastructure.Scans.ScanUploadCoordinator"/> for
+	/// both the first convert-stage upload and every later
+	/// <c>stigman-upload-retry</c> call, so both share one attempt history.
+	/// </summary>
+	Task RecordUploadAttemptAsync(
+		Guid jobId, string? endpoint, string? collection, string uploadStatus, string? detail, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Issue #744: every recorded attempt for one job, oldest first -- the read side of
+	/// <see cref="RecordUploadAttemptAsync"/>, backing the outcome-persistence
+	/// round-trip test and any future retry-history surface.
+	/// </summary>
+	Task<IReadOnlyList<UploadAttemptRecord>> GetUploadAttemptsAsync(Guid jobId, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Issue #585 (epic #582): a claimed job's immutable per-purpose credential snapshot
 	/// (<c>job_credential_bindings</c>, migration 0044), resolved and persisted at
 	/// run-creation fan-out. Handlers use the entry for their execution purpose

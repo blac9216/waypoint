@@ -1644,6 +1644,14 @@ public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRe
 		return Task.CompletedTask;
 	}
 
+	public Task RecordUploadAttemptAsync(Guid jobId, string? endpoint, string? collection, string uploadStatus, string? detail, CancellationToken cancellationToken)
+	{
+		_ = (jobId, endpoint, collection, uploadStatus, detail, cancellationToken);
+		return Task.CompletedTask;
+	}
+
+	public Task<IReadOnlyList<UploadAttemptRecord>> GetUploadAttemptsAsync(Guid jobId, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<UploadAttemptRecord>>([]);
+
 	public Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<JobCredentialBinding>>([]);
 }
 
