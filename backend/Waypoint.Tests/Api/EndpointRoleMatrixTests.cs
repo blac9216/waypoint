@@ -230,6 +230,9 @@ public sealed class EndpointRoleMatrixTests
 		["RunsController.ListComponentJobs"] = WaypointRole.Viewer,
 		["RunsController.RetryJob"] = WaypointRole.Operator,
 		["RunsController.GetArtifacts"] = WaypointRole.Viewer,
+		// Issue #745: the domain-owned component-result run rollup -- Viewer+, matching
+		// every other run read (GetArtifacts immediately above).
+		["RunsController.GetComponentResultsSummary"] = WaypointRole.Viewer,
 		["RunsController.GetAttestationsApplied"] = WaypointRole.Viewer,
 		// Issue #581 (ADR-0019): bounded historical job-log/event reads are Viewer+,
 		// matching every other run read -- visibility of operational history is not a

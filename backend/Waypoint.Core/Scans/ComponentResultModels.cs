@@ -1,0 +1,142 @@
+// Copyright 2026 Justin Black
+//
+// Licensed under the Apache License, Version 2.0 (the "License").
+// You may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+namespace Waypoint.Core.Scans;
+
+/// <summary>
+/// The closed component-result-attempt status vocabulary -- migration 0063's
+/// <c>component_results_status_check</c>, duplicated here the same way
+/// <see cref="Waypoint.Core.Jobs.JobUploadStatuses"/> mirrors migration 0018's
+/// upload_status CHECK. <see cref="ComponentResultStatusConstraintDriftTests"/> pins
+/// this against the migration's actual constraint text.
+/// </summary>
+public static class ComponentResultStatuses
+{
+	public const string Completed = "completed";
+	public const string ExecutionError = "execution_error";
+	public const string Skipped = "skipped";
+
+	public static readonly IReadOnlyList<string> All = [Completed, ExecutionError, Skipped];
+}
+
+/// <summary>
+/// The closed per-finding status vocabulary -- migration 0063's
+/// <c>component_result_findings_status_check</c>. Epic #726 §6: "Failed, skipped,
+/// excluded, not-applicable, open, and passed states are not conflated" --
+/// <see cref="NotReviewed"/> is the exact-once "applicable control that cannot
+/// execute" state (never omitted, never <see cref="NotApplicable"/>).
+/// </summary>
+public static class ComponentFindingStatuses
+{
+	public const string Passed = "passed";
+	public const string Failed = "failed";
+	public const string NotApplicable = "not_applicable";
+	public const string NotReviewed = "not_reviewed";
+	public const string ExecutionError = "execution_error";
+	public const string Skipped = "skipped";
+
+	public static readonly IReadOnlyList<string> All =
+		[Passed, Failed, NotApplicable, NotReviewed, ExecutionError, Skipped];
+
+	/// <summary>Statuses that count as an OPEN finding for CAT severity rollups (mirrors <see cref="HdfSeverityCounter"/>'s open predicate, generalized to the full status vocabulary).</summary>
+	public static bool IsOpen(string status) => string.Equals(status, Failed, StringComparison.Ordinal);
+}
+
+/// <summary>The closed CAT-severity vocabulary -- migration 0063's <c>component_result_findings_severity_check</c>.</summary>
+public static class ComponentFindingSeverities
+{
+	public const string CatI = "cat_i";
+	public const string CatII = "cat_ii";
+	public const string CatIII = "cat_iii";
+
+	public static readonly IReadOnlyList<string> All = [CatI, CatII, CatIII];
+}
+
+/// <summary>The closed artifact-kind vocabulary -- migration 0063's <c>component_result_artifacts_kind_check</c>.</summary>
+public static class ComponentResultArtifactKinds
+{
+	public const string HdfRaw = "hdf_raw";
+	public const string HdfAttested = "hdf_attested";
+	public const string Ckl = "ckl";
+	public const string Summary = "summary";
+	public const string Log = "log";
+
+	public static readonly IReadOnlyList<string> All = [HdfRaw, HdfAttested, Ckl, Summary, Log];
+}
+
+/// <summary>One parsed/synthesized control-level finding, ready to persist as a <c>component_result_findings</c> row.</summary>
+public sealed record ComponentResultFinding(
+	string ControlId,
+	string? RuleId,
+	string? Title,
+	string Severity,
+	string Status,
+	string? Evidence);
+
+/// <summary>One artifact reference (kind/path/digest/size), ready to persist as a <c>component_result_artifacts</c> row.</summary>
+public sealed record ComponentResultArtifact(
+	string Kind,
+	string Path,
+	string Digest,
+	long SizeBytes);
+
+/// <summary>
+/// The full immutable result of one job attempt against one scan plan item --
+/// everything <see cref="ComponentResultRepository"/> needs to write one
+/// <c>component_results</c> row plus its findings/artifacts in one transaction.
+/// </summary>
+public sealed record ComponentResultRecord(
+	Guid RunId,
+	Guid JobId,
+	Guid ScanPlanItemId,
+	Guid ComponentId,
+	int AttemptNumber,
+	string Status,
+	string? Detail,
+	IReadOnlyList<ComponentResultFinding> Findings,
+	IReadOnlyList<ComponentResultArtifact> Artifacts)
+{
+	public int CatIOpen => Findings.Count(f => ComponentFindingStatuses.IsOpen(f.Status) && f.Severity == ComponentFindingSeverities.CatI);
+	public int CatIIOpen => Findings.Count(f => ComponentFindingStatuses.IsOpen(f.Status) && f.Severity == ComponentFindingSeverities.CatII);
+	public int CatIIIOpen => Findings.Count(f => ComponentFindingStatuses.IsOpen(f.Status) && f.Severity == ComponentFindingSeverities.CatIII);
+	public int PassedCount => Findings.Count(f => f.Status == ComponentFindingStatuses.Passed);
+	public int NotApplicableCount => Findings.Count(f => f.Status == ComponentFindingStatuses.NotApplicable);
+	public int NotReviewedCount => Findings.Count(f => f.Status == ComponentFindingStatuses.NotReviewed);
+	public int SkippedCount => Findings.Count(f => f.Status == ComponentFindingStatuses.Skipped);
+}
+
+/// <summary>One (priority-free) row of the run rollup: counts by component-result status, CAT totals, and coverage.</summary>
+public sealed record RunResultRollupRow(
+	string Status,
+	int ComponentCount,
+	int CatIOpen,
+	int CatIIOpen,
+	int CatIIIOpen,
+	int PassedCount,
+	int NotApplicableCount,
+	int NotReviewedCount,
+	int SkippedCount);
+
+/// <summary>
+/// The full run-level rollup -- <c>GET /runs/{id}/component-results/summary</c>.
+/// <see cref="PlannedComponentCount"/> is the plan's total accepted item count
+/// (scan_plan_items row count for the run) so a caller can compute coverage
+/// (<c>ByStatus</c> counts vs. planned) without a second request; a plan item with NO
+/// component_results row at all (never claimed, still queued/running) is coverage
+/// that simply is not yet reflected -- never fabricated as any status.
+/// </summary>
+public sealed record RunResultRollup(
+	Guid RunId,
+	int PlannedComponentCount,
+	IReadOnlyList<RunResultRollupRow> ByStatus);

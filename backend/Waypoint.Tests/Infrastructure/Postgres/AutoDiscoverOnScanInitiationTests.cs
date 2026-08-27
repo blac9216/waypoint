@@ -258,11 +258,14 @@ public sealed class AutoDiscoverOnScanInitiationTests : IAsyncLifetime, IDisposa
 		Waypoint.Infrastructure.Scans.ComponentProfileRevisionResolver vCenterProfileRevisions = new(baselines, catalog, wrappedComplianceContentOptions);
 		Waypoint.Core.ComplianceContent.IBenchmarkRepository benchmarks =
 			new Waypoint.Infrastructure.ComplianceContent.BenchmarkRepository(_fixture.ConnectionString);
+		Waypoint.Infrastructure.Runs.ComponentResultRecordingService resultRecording = new(
+			new Waypoint.Infrastructure.Runs.ComponentResultRepository(_fixture.ConnectionString),
+			NullLogger<Waypoint.Infrastructure.Runs.ComponentResultRecordingService>.Instance);
 
 		_scanHandler = new Waypoint.Infrastructure.Scans.ScanJobHandler(
 			executor, secretStore, credentials, _targets, runSecrets, _repository, _redactor, wrappedPsOptions,
 			Options.Create(scanOptions), wrappedComplianceContentOptions, configDocs, attestationSnapshots, uploadCoordinator, vCenterProfileRevisions,
-			benchmarks);
+			benchmarks, resultRecording);
 
 		_credentials = credentials;
 		_secretStore = secretStore;

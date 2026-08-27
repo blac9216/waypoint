@@ -26,6 +26,7 @@ using Waypoint.Core.Sites;
 using Waypoint.Core.StigManager;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.PowerShell;
+using Waypoint.Infrastructure.Runs;
 using Waypoint.Infrastructure.Sites;
 
 namespace Waypoint.Infrastructure.Scans;
@@ -92,6 +93,7 @@ public sealed class ScanJobHandler : IJobHandler
 	private readonly ScanUploadCoordinator _upload;
 	private readonly ComponentProfileRevisionResolver _componentProfileRevisions;
 	private readonly IBenchmarkRepository _benchmarks;
+	private readonly ComponentResultRecordingService _resultRecording;
 
 	public ScanJobHandler(
 		IPowerShellExecutor executor,
@@ -108,7 +110,8 @@ public sealed class ScanJobHandler : IJobHandler
 		AttestationSnapshotRepository attestationSnapshots,
 		ScanUploadCoordinator upload,
 		ComponentProfileRevisionResolver componentProfileRevisions,
-		IBenchmarkRepository benchmarks)
+		IBenchmarkRepository benchmarks,
+		ComponentResultRecordingService resultRecording)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(secrets);
@@ -125,6 +128,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(upload);
 		ArgumentNullException.ThrowIfNull(componentProfileRevisions);
 		ArgumentNullException.ThrowIfNull(benchmarks);
+		ArgumentNullException.ThrowIfNull(resultRecording);
 
 		_executor = executor;
 		_secrets = secrets;
@@ -141,6 +145,7 @@ public sealed class ScanJobHandler : IJobHandler
 		_upload = upload;
 		_componentProfileRevisions = componentProfileRevisions;
 		_benchmarks = benchmarks;
+		_resultRecording = resultRecording;
 	}
 
 	public string JobType => "scan";
@@ -838,6 +843,15 @@ public sealed class ScanJobHandler : IJobHandler
 				: string.Equals(target.Kind, TargetKinds.Ssh, StringComparison.Ordinal);
 			if (isHdfOnly)
 			{
+				// Issue #745: this is the Srg shape's terminal stage (attesting -> done),
+				// so it is the only place an HDF-only component's result is ever
+				// recordable -- additive, never affects `note`/the job outcome below.
+				await _resultRecording.RecordCompletedAsync(
+					context.Job,
+					hdfPath: reportPath,
+					attestedHdfPath: File.Exists(attestedPath) ? attestedPath : null,
+					cklPath: null,
+					cancellationToken).ConfigureAwait(false);
 				return JobExecutionOutcome.Succeeded(note);
 			}
 
@@ -1021,6 +1035,16 @@ public sealed class ScanJobHandler : IJobHandler
 			_ => $"STIG Manager upload failed: {uploadResult.Detail ?? "no detail"}",
 		};
 
+		// Issue #745: convert is the Standard shape's terminal stage -- the one place a
+		// STIG component's full HDF+CKL result is recordable. Additive: never affects
+		// the note/outcome below, and a recording failure is swallowed internally.
+		await _resultRecording.RecordCompletedAsync(
+			context.Job,
+			hdfPath: File.Exists(rawPath) ? rawPath : null,
+			attestedHdfPath: File.Exists(attestedPath) ? attestedPath : null,
+			cklPath: File.Exists(output.CklPath) ? output.CklPath : null,
+			cancellationToken).ConfigureAwait(false);
+
 		return JobExecutionOutcome.Succeeded(
 			$"CKL persisted at '{output.CklPath}' (benchmark metadata applied: {output.MetadataApplied}; {uploadNote}).");
 	}
@@ -1036,6 +1060,13 @@ public sealed class ScanJobHandler : IJobHandler
 		bool isAuthFailure = AuthFailureClassifier.IsAuthFailure(rawNote, [.. _powerShellOptions.Value.AuthFailureMarkers]);
 		string note = _redactor.Redact(rawNote);
 		await EmitLogTailAsync(context, note, cancellationToken).ConfigureAwait(false);
+
+		// Issue #745, epic #726 §6: any stage failure for a plan-item-granular job is a
+		// component that "cannot execute" -- recorded exactly once as execution_error/
+		// Not_Reviewed (never omitted), using the already-redacted note so no raw
+		// credential-shaped text ever reaches component_results.detail.
+		await _resultRecording.RecordExecutionErrorAsync(context.Job, note, cancellationToken).ConfigureAwait(false);
+
 		return isAuthFailure ? JobExecutionOutcome.AuthFailed(note) : JobExecutionOutcome.Failed(note);
 	}
 

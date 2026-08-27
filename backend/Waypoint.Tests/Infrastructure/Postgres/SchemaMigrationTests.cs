@@ -95,6 +95,9 @@ public sealed class SchemaMigrationTests
 		"scan_plan_items",
 		"trust_bundles",
 		"trust_policies",
+		"component_results",
+		"component_result_findings",
+		"component_result_artifacts",
 		"schema_migrations"
 	];
 
@@ -183,9 +186,19 @@ public sealed class SchemaMigrationTests
 	/// history (first pass and every stigman-upload-retry call) is queryable rather
 	/// than overwritten. New runner grant: SELECT, INSERT on upload_attempts to
 	/// waypoint_compliance_runner (append-only; the runner never updates/deletes a
-	/// recorded attempt) --
+	/// recorded attempt), issue #744 -- 0063 adds the immutable domain-owned result
+	/// model (issue #745, epic #726 Wave 4, ADR-0024/0025): component_results (one row
+	/// per job attempt against a scan_plan_item, closed status vocabulary
+	/// completed/execution_error/skipped, CAT I/II/III open + passed/not_applicable/
+	/// not_reviewed/skipped counts), component_result_findings (one row per XCCDF-
+	/// mapped control finding, closed status vocabulary distinguishing pass/fail/
+	/// not_applicable/not_reviewed/execution_error/skipped -- epic #726 §6's exactly-
+	/// once Not_Reviewed rule), and component_result_artifacts (kind/path/digest/size
+	/// for raw/attested HDF, CKL, summary, log). All three append-only, no UPDATE path.
+	/// New runner grant: SELECT, INSERT on all three tables to
+	/// waypoint_compliance_runner --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 62;
+	private const int ExpectedMigrationCount = 63;
 
 	private readonly PostgresFixture _fixture;
 

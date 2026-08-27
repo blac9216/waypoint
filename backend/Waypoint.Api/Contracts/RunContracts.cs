@@ -813,3 +813,56 @@ public sealed record ComponentJobListResponse(
 
 	[property: JsonPropertyName("next_cursor")]
 	string? NextCursor);
+
+/// <summary>
+/// One status bucket of <c>GET /api/v1/runs/{id}/component-results/summary</c> (issue
+/// #745): the LATEST attempt per scan_plan_item, grouped by component-result status.
+/// <see cref="ComponentCount"/> is a count of COMPONENTS (scan_plan_items), not
+/// findings -- CAT/passed/etc. counts are the SUM across those components' latest
+/// attempts.
+/// </summary>
+public sealed record RunResultRollupStatusResponse(
+	[property: JsonPropertyName("status")]
+	string Status,
+
+	[property: JsonPropertyName("component_count")]
+	int ComponentCount,
+
+	[property: JsonPropertyName("cat_i_open")]
+	int CatIOpen,
+
+	[property: JsonPropertyName("cat_ii_open")]
+	int CatIIOpen,
+
+	[property: JsonPropertyName("cat_iii_open")]
+	int CatIIIOpen,
+
+	[property: JsonPropertyName("passed_count")]
+	int PassedCount,
+
+	[property: JsonPropertyName("not_applicable_count")]
+	int NotApplicableCount,
+
+	[property: JsonPropertyName("not_reviewed_count")]
+	int NotReviewedCount,
+
+	[property: JsonPropertyName("skipped_count")]
+	int SkippedCount);
+
+/// <summary>
+/// Response body for <c>GET /api/v1/runs/{id}/component-results/summary</c>.
+/// <see cref="PlannedComponentCount"/> is the run's total accepted plan-item count
+/// (scan_plan_items row count) -- a caller computes coverage as
+/// <c>sum(by_status[].component_count) vs. planned_component_count</c>; the gap
+/// (planned but no result row at all yet) is components still queued/running/legacy,
+/// never fabricated into any status bucket.
+/// </summary>
+public sealed record RunResultRollupResponse(
+	[property: JsonPropertyName("run_id")]
+	string RunId,
+
+	[property: JsonPropertyName("planned_component_count")]
+	int PlannedComponentCount,
+
+	[property: JsonPropertyName("by_status")]
+	IReadOnlyList<RunResultRollupStatusResponse> ByStatus);

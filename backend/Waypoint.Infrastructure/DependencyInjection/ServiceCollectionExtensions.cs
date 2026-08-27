@@ -383,6 +383,14 @@ public static class ServiceCollectionExtensions
 			// HDF-derived CAT counting rather than a second implementation.
 			services.AddSingleton<Runs.DashboardAggregateService>();
 
+			// Issue #745: the domain-owned immutable component-result model (migration
+			// 0063) -- ScanJobHandler's recording hook and the run-rollup read endpoint
+			// both depend on this pair. New runner grant: SELECT/INSERT on all three new
+			// tables (see the migration header); the recording service itself never
+			// updates/deletes.
+			services.AddSingleton<Waypoint.Core.Scans.IComponentResultRepository>(new Runs.ComponentResultRepository(connectionString));
+			services.AddSingleton<Runs.ComponentResultRecordingService>();
+
 			// Issue #594 (epic #577): admin-only terminal-compliance-run purge.
 			// IRunPurgeRepository is registered here (control-plane composition, same
 			// host-kind gate as everything else in this connection-string-gated block)

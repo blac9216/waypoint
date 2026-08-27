@@ -21,7 +21,9 @@ using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
 using Waypoint.Core.Secrets;
+using Waypoint.Core.Scans;
 using Waypoint.Infrastructure.Components;
+using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
@@ -1689,6 +1691,152 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, updateException.SqlState);
 
 		await using NpgsqlCommand delete = new("DELETE FROM upload_attempts WHERE job_id = $1", connection);
+		delete.Parameters.AddWithValue(jobId);
+		PostgresException deleteException = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, deleteException.SqlState);
+	}
+
+	/// <summary>Full 0050 identity tree down to one scan_plan_items row -- everything a component_results row's FKs need. Mirrors ScanPlanRepositoryTests' own helper.</summary>
+	private async Task<(Guid ComponentId, Guid ScanPlanItemId)> SeedScanPlanItemAsync(Guid runId, string suffix)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		Guid siteId;
+		await using (NpgsqlCommand site = new("INSERT INTO sites (name) VALUES ($1) RETURNING id", connection))
+		{
+			site.Parameters.AddWithValue($"site-{suffix}");
+			siteId = (Guid)(await site.ExecuteScalarAsync())!;
+		}
+
+		Guid targetId;
+		await using (NpgsqlCommand target = new(
+			"INSERT INTO targets (site_id, kind, name, connection) VALUES ($1, 'vsphere', $2, '{}'::jsonb) RETURNING id", connection))
+		{
+			target.Parameters.AddWithValue(siteId);
+			target.Parameters.AddWithValue($"target-{suffix}");
+			targetId = (Guid)(await target.ExecuteScalarAsync())!;
+		}
+
+		Guid componentId;
+		await using (NpgsqlCommand component = new(
+			"""
+			INSERT INTO components (parent_target_id, catalog_component_key, vendor_identity, display_name, lifecycle)
+			VALUES ($1, 'esxi', $2, $2, 'active') RETURNING id
+			""", connection))
+		{
+			component.Parameters.AddWithValue(targetId);
+			component.Parameters.AddWithValue($"host-{suffix}");
+			componentId = (Guid)(await component.ExecuteScalarAsync())!;
+		}
+
+		CatalogRepository catalog = new(_fixture.ConnectionString);
+		CatalogSourceRevision sourceRevision = await catalog.UpsertSourceRevisionAsync($"source-{suffix}", null, CancellationToken.None);
+		CatalogProduct product = await catalog.UpsertProductAsync(sourceRevision.Id, "VMware", $"vsphere-{suffix}", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion productVersion = await catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
+		CatalogComponent catalogComponent = await catalog.UpsertComponentAsync(
+			productVersion.Id, new CatalogComponentDefinition($"esxi-{suffix}", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
+		CatalogContentRelease release = await catalog.UpsertContentReleaseAsync(sourceRevision.Id, CatalogKinds.Srg, $"release-{suffix}", "Test Release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await catalog.UpsertReportGroupAsync($"group-{suffix}", "Test Group", 2, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await catalog.CreateExecutionProfileAsync(
+			catalogComponent.Id, release.Id, reportGroup.Id, "1.0.0", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+
+		ScanPlanRepository scanPlans = new(_fixture.ConnectionString);
+		ScanPlanItem item = new(
+			componentId, executionProfile.Id, BaselineId: null, BenchmarkRevisionId: null,
+			Transport: CatalogTransports.VMware, SelectorKind: CatalogSelectorKinds.Esxi, SelectorName: null,
+			ReportGroupKey: $"group-{suffix}", Priority: 2, OutputKind: CatalogOutputKinds.HdfAndCkl,
+			RequiredPurposes: ["vsphere-api"], DeclaredInputNames: ["target_ip"]);
+		ScanPlan plan = new(runId, ScanPlanSchema.CurrentVersion, [item], [], $"digest-{suffix}", "1 of 1 accepted");
+		IReadOnlyDictionary<Guid, Guid> itemIds = await scanPlans.RecordAsync(runId, runScopeSnapshotId: null, plan, CancellationToken.None);
+
+		return (componentId, itemIds[componentId]);
+	}
+
+	private async Task<Guid> SeedJobWithPlanItemAsync(Guid runId, Guid scanPlanItemId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO jobs (run_id, job_type, priority, state, has_run_secret, scan_plan_item_id)
+			VALUES ($1, 'scan', 1, 'queued', true, $2) RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(runId);
+		command.Parameters.AddWithValue(scanPlanItemId);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	/// <summary>
+	/// Issue #745 (migration 0063), same standing lesson as the upload_attempts tests
+	/// above: the real compliance-runner role must be able to run
+	/// <see cref="ComponentResultRepository.RecordAsync"/>'s full write path (the header
+	/// INSERT plus its finding/artifact child INSERTs, all in one transaction) without
+	/// 42501 -- proving the migration's grants actually land.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_RecordComponentResultWithoutPermissionDenied()
+	{
+		Guid runId = await SeedRunAsync();
+		(Guid componentId, Guid scanPlanItemId) = await SeedScanPlanItemAsync(runId, "grant-record");
+		Guid jobId = await SeedJobWithPlanItemAsync(runId, scanPlanItemId);
+
+		ComponentResultRepository runnerRepository = new(_complianceRunnerConnectionString);
+
+		// The runner's real write protocol, in order: resolve the claimed job's frozen
+		// plan-item component (migration 0061's deferred scan_plan_items SELECT grant,
+		// landed by 0063), compute the next attempt number, then the transactional
+		// header+findings+artifacts INSERT.
+		Assert.Equal(componentId, await runnerRepository.GetComponentIdForPlanItemAsync(scanPlanItemId, CancellationToken.None));
+		int attemptNumber = await runnerRepository.NextAttemptNumberAsync(jobId, CancellationToken.None);
+		Assert.Equal(1, attemptNumber);
+
+		ComponentResultRecord record = new(
+			runId, jobId, scanPlanItemId, componentId, attemptNumber,
+			Status: ComponentResultStatuses.Completed, Detail: null,
+			Findings: [new ComponentResultFinding("SV-1", null, null, ComponentFindingSeverities.CatI, ComponentFindingStatuses.Failed, "invented evidence")],
+			Artifacts: [new ComponentResultArtifact(ComponentResultArtifactKinds.HdfRaw, "invented.json", "deadbeef", 512)]);
+
+		await runnerRepository.RecordAsync(record, CancellationToken.None);
+
+		// Read back through the OWNER role: the run rollup is the API's read surface
+		// (RunsController), never the runner's -- the runner role deliberately has no
+		// scan_plans SELECT, so verifying through it would demand a grant production
+		// never needs.
+		ComponentResultRepository ownerRepository = new(_fixture.ConnectionString);
+		RunResultRollup rollup = await ownerRepository.GetRunRollupAsync(runId, CancellationToken.None);
+		Assert.Equal(1, Assert.Single(rollup.ByStatus).ComponentCount);
+	}
+
+	/// <summary>
+	/// Issue #745: component_results/component_result_findings/component_result_artifacts
+	/// are append-only by design (migration 0063's own doc comment) -- the
+	/// compliance-runner role must still fail 42501 on UPDATE/DELETE against all three,
+	/// proving the migration granted SELECT/INSERT only.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotUpdateOrDeleteComponentResults()
+	{
+		Guid runId = await SeedRunAsync();
+		(Guid componentId, Guid scanPlanItemId) = await SeedScanPlanItemAsync(runId, "grant-immutable");
+		Guid jobId = await SeedJobWithPlanItemAsync(runId, scanPlanItemId);
+
+		ComponentResultRepository ownerRepository = new(_fixture.ConnectionString);
+		ComponentResultRecord record = new(
+			runId, jobId, scanPlanItemId, componentId, AttemptNumber: 1,
+			Status: ComponentResultStatuses.Completed, Detail: null,
+			Findings: [], Artifacts: []);
+		await ownerRepository.RecordAsync(record, CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand update = new("UPDATE component_results SET status = 'skipped' WHERE job_id = $1", connection);
+		update.Parameters.AddWithValue(jobId);
+		PostgresException updateException = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, updateException.SqlState);
+
+		await using NpgsqlCommand delete = new("DELETE FROM component_results WHERE job_id = $1", connection);
 		delete.Parameters.AddWithValue(jobId);
 		PostgresException deleteException = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
 		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, deleteException.SqlState);

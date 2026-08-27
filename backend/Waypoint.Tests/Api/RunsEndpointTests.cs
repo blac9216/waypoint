@@ -229,6 +229,94 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 	}
 
+	// -- issue #745: GET /runs/{id}/component-results/summary -----------------------
+
+	[Fact]
+	public async Task GetComponentResultsSummary_UnknownRun_Returns404()
+	{
+		Guid runId = Guid.NewGuid();
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/component-results/summary");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetComponentResultsSummary_NoAuthHeader_Returns401()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage response = await client.GetAsync($"/api/v1/runs/{runId}/component-results/summary");
+
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetComponentResultsSummary_ViewerRole_Returns200WithRollup()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.ComponentResults.NextRollup = new Waypoint.Core.Scans.RunResultRollup(
+			runId,
+			PlannedComponentCount: 3,
+			ByStatus:
+			[
+				new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 2, CatIOpen: 1, CatIIOpen: 0, CatIIIOpen: 2, PassedCount: 10, NotApplicableCount: 1, NotReviewedCount: 0, SkippedCount: 0),
+				new Waypoint.Core.Scans.RunResultRollupRow("execution_error", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 0, NotApplicableCount: 0, NotReviewedCount: 1, SkippedCount: 0),
+			]);
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/component-results/summary");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = doc.RootElement;
+		Assert.Equal(runId.ToString(), root.GetProperty("run_id").GetString());
+		Assert.Equal(3, root.GetProperty("planned_component_count").GetInt32());
+
+		JsonElement byStatus = root.GetProperty("by_status");
+		Assert.Equal(2, byStatus.GetArrayLength());
+
+		JsonElement completedRow = byStatus.EnumerateArray().Single(e => e.GetProperty("status").GetString() == "completed");
+		Assert.Equal(2, completedRow.GetProperty("component_count").GetInt32());
+		Assert.Equal(1, completedRow.GetProperty("cat_i_open").GetInt32());
+		Assert.Equal(2, completedRow.GetProperty("cat_iii_open").GetInt32());
+		Assert.Equal(10, completedRow.GetProperty("passed_count").GetInt32());
+
+		JsonElement errorRow = byStatus.EnumerateArray().Single(e => e.GetProperty("status").GetString() == "execution_error");
+		Assert.Equal(1, errorRow.GetProperty("not_reviewed_count").GetInt32());
+
+		Assert.Equal(runId, _factory.ComponentResults.LastRollupRunId);
+	}
+
+	[Fact]
+	public async Task GetComponentResultsSummary_NoComponentResultsYet_ReturnsEmptyByStatusNot404()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+		_factory.ComponentResults.NextRollup = new Waypoint.Core.Scans.RunResultRollup(runId, PlannedComponentCount: 5, ByStatus: []);
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/component-results/summary");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal(5, doc.RootElement.GetProperty("planned_component_count").GetInt32());
+		Assert.Equal(0, doc.RootElement.GetProperty("by_status").GetArrayLength());
+	}
+
 	// -- issue #592 (epic #588, last child): generic operational-history deletion ---
 
 	[Theory]
@@ -1376,6 +1464,16 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 				services.Remove(componentJobsDescriptor);
 			}
 			services.AddSingleton<IComponentJobRepository>(ComponentJobs);
+
+			// Issue #745: GetComponentResultsSummary resolves IComponentResultRepository
+			// through RunsController -- same fake-swap pattern as every other dependency
+			// above, so role-guard/happy-path tests never touch Postgres.
+			var componentResultsDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(Waypoint.Core.Scans.IComponentResultRepository));
+			if (componentResultsDescriptor != null)
+			{
+				services.Remove(componentResultsDescriptor);
+			}
+			services.AddSingleton<Waypoint.Core.Scans.IComponentResultRepository>(ComponentResults);
 		});
 	}
 
@@ -1386,6 +1484,8 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 	public FakeJobEventHistoryReader EventHistory { get; } = new();
 
 	public FakeComponentJobRepository ComponentJobs { get; } = new();
+
+	public FakeComponentResultRepository ComponentResults { get; } = new();
 }
 
 /// <summary>
@@ -1417,6 +1517,34 @@ public sealed class FakeComponentJobRepository : IComponentJobRepository
 		_ = cancellationToken;
 		LastListQuery = query;
 		return Task.FromResult(NextPage);
+	}
+}
+
+/// <summary>
+/// Minimal fake <see cref="Waypoint.Core.Scans.IComponentResultRepository"/> for
+/// controller-level tests (role guard, 404, response-shape mapping) -- aggregation
+/// truthfulness against real seeded data lives in
+/// <c>Waypoint.Tests.Infrastructure.Postgres.ComponentResultRepositoryTests</c> against
+/// a real database. Returns a canned rollup (empty by default, settable via
+/// <see cref="NextRollup"/>); the write-path methods are never exercised by
+/// <c>RunsController</c>'s read-only endpoint and return no-op defaults.
+/// </summary>
+public sealed class FakeComponentResultRepository : Waypoint.Core.Scans.IComponentResultRepository
+{
+	public Waypoint.Core.Scans.RunResultRollup NextRollup { get; set; } = new(Guid.Empty, 0, []);
+
+	public Guid? LastRollupRunId { get; private set; }
+
+	public Task RecordAsync(Waypoint.Core.Scans.ComponentResultRecord record, CancellationToken cancellationToken) => Task.CompletedTask;
+
+	public Task<int> NextAttemptNumberAsync(Guid jobId, CancellationToken cancellationToken) => Task.FromResult(1);
+
+	public Task<Guid?> GetComponentIdForPlanItemAsync(Guid scanPlanItemId, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
+
+	public Task<Waypoint.Core.Scans.RunResultRollup> GetRunRollupAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		LastRollupRunId = runId;
+		return Task.FromResult(NextRollup with { RunId = runId });
 	}
 }
 
