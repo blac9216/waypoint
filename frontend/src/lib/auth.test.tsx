@@ -825,10 +825,31 @@ describe("AuthProvider OIDC callback (issue #534 — mint a session from token c
 		);
 		// Persisted as an OIDC session (drives the end-session logout path).
 		expect(window.sessionStorage.getItem(STORAGE_KEY)).toContain('"kind":"oidc"');
+		// No id_token in this token response, so none is persisted.
+		expect(JSON.parse(window.sessionStorage.getItem(STORAGE_KEY)!).idToken).toBeUndefined();
 		// The code/state query params are stripped and the app is returned to the
 		// path startLogin was called from.
 		expect(window.location.pathname).toBe("/dashboard");
 		expect(window.location.search).toBe("");
+	});
+
+	it("persists the id_token alongside the session so logout can replay it as id_token_hint (issue #873)", async () => {
+		mockCallbackFetch({
+			access_token: fakeAccessToken({ role: "Operator", preferred_username: "opuser", sub: "s-1", exp: 1893456000 }),
+			expires_in: 3600,
+			token_type: "Bearer",
+			id_token: "id-token-fixture",
+		});
+		landOnCallback("/dashboard");
+
+		render(
+			<AuthProvider>
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByText(/signed in as opuser \(Operator\)/)).toBeInTheDocument());
+		expect(JSON.parse(window.sessionStorage.getItem(STORAGE_KEY)!).idToken).toBe("id-token-fixture");
 	});
 
 	it("falls back to `sub` for the username when the token has no preferred_username", async () => {
@@ -1090,8 +1111,8 @@ describe("AuthProvider OIDC logout + authorize redirects (issue #534)", () => {
 		}) as unknown as typeof fetch;
 	}
 
-	/** Seeds a restored OIDC-kind session so logout() takes the end-session path. */
-	function seedOidcSession(): void {
+	/** Seeds a restored OIDC-kind session so logout() takes the end-session path. Passing an `idToken` also exercises the storage round trip that carries it into `id_token_hint`. */
+	function seedOidcSession(idToken?: string): void {
 		window.sessionStorage.setItem(
 			STORAGE_KEY,
 			JSON.stringify({
@@ -1100,6 +1121,7 @@ describe("AuthProvider OIDC logout + authorize redirects (issue #534)", () => {
 				role: "Operator",
 				expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
 				kind: "oidc",
+				...(idToken === undefined ? {} : { idToken }),
 			}),
 		);
 	}
@@ -1131,7 +1153,37 @@ describe("AuthProvider OIDC logout + authorize redirects (issue #534)", () => {
 		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
 		// ...and the browser is sent to the RP-initiated logout URL.
 		await waitFor(() => expect(assignMock).toHaveBeenCalledTimes(1));
-		expect(String(assignMock.mock.calls[0][0])).toContain(END_SESSION_ENDPOINT);
+		const endSessionUrl = String(assignMock.mock.calls[0][0]);
+		expect(endSessionUrl).toContain(END_SESSION_ENDPOINT);
+		// issue #873: client_id must be present or Keycloak 400s the redirect.
+		expect(new URL(endSessionUrl).searchParams.get("client_id")).toBe("waypoint-frontend");
+		// No stored id_token here, so no hint is invented.
+		expect(new URL(endSessionUrl).searchParams.has("id_token_hint")).toBe(false);
+		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+	});
+
+	it("sends the stored id_token as id_token_hint so Keycloak ends the SSO session in one hop (issue #873)", async () => {
+		mockConfigAndDiscovery();
+		seedOidcSession("id-token-fixture");
+
+		render(
+			<AuthProvider>
+				<LogoutTrigger />
+				<Probe />
+			</AuthProvider>,
+		);
+
+		await waitFor(() => expect(screen.getByText(/signed in as opuser/)).toBeInTheDocument());
+		screen.getByText("logout").click();
+
+		await waitFor(() => expect(assignMock).toHaveBeenCalledTimes(1));
+		const params = new URL(String(assignMock.mock.calls[0][0])).searchParams;
+		// The hint survives the sessionStorage round trip and is read off the
+		// session *before* dropSession() clears it — without it Keycloak ≥18
+		// renders a logout-confirm page and leaves the SSO session alive.
+		expect(params.get("id_token_hint")).toBe("id-token-fixture");
+		expect(params.get("client_id")).toBe("waypoint-frontend");
+		expect(params.get("post_logout_redirect_uri")).toBe(window.location.origin);
 		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
 	});
 

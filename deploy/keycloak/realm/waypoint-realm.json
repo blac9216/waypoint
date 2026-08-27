@@ -130,7 +130,8 @@
         "${WAYPOINT_PUBLIC_URL}"
       ],
       "attributes": {
-        "pkce.code.challenge.method": "S256"
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${WAYPOINT_PUBLIC_URL}"
       },
       "fullScopeAllowed": false,
       "defaultClientScopes": [
