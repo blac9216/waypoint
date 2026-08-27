@@ -75,7 +75,7 @@ cleanup() {
 	# TLS, the admin-password hash, the override/env files -- lives ONLY
 	# under this one slug-scoped directory, so a full run's throwaway state
 	# is exactly this one `rm -rf`.
-	rm -rf "${DEPLOY_DIR}/.generated/${SLUG}"
+	rm -rf "${DEPLOY_DIR}/.generated/${SLUG}" "${DEPLOY_DIR}/.generated/${SLUG}.hash-stage"
 }
 trap cleanup EXIT
 
@@ -144,8 +144,16 @@ fi
 # script still owns computing the admin-password hash itself (a
 # backend-specific step) and handing it to the generator.
 GENERATED_STATE_DIR="${DEPLOY_DIR}/.generated/${SLUG}"
-LOCAL_AUTH_DIR="${GENERATED_STATE_DIR}/local-auth"
-mkdir -p "${LOCAL_AUTH_DIR}"
+
+# The admin-password hash is staged in a SEPARATE scratch directory, never in
+# ${GENERATED_STATE_DIR}: this script must not create the generator's state
+# directory behind its back (round-2 review of #847 -- the generator refuses a
+# foreign stack that has claimed this project name, and a caller that
+# pre-creates state must not be able to influence that decision). The
+# generator copies the hash into the slug directory itself and mounts its own
+# copy.
+HASH_STAGE_DIR="${DEPLOY_DIR}/.generated/${SLUG}.hash-stage"
+mkdir -p "${HASH_STAGE_DIR}"
 
 ADMIN_PASSWORD="invented-e2e-password-$(openssl rand -hex 4)"
 log "Computing admin password hash via backend --hash-password"
@@ -153,9 +161,9 @@ log "Computing admin password hash via backend --hash-password"
 	cd "${REPO_ROOT}/backend"
 	dotnet build Waypoint.Api >/dev/null
 	printf '%s\n' "${ADMIN_PASSWORD}" | dotnet run --project Waypoint.Api --no-launch-profile --no-build -- --hash-password \
-		| tail -1 > "${LOCAL_AUTH_DIR}/admin-password-hash"
+		| tail -1 > "${HASH_STAGE_DIR}/admin-password-hash"
 )
-if [[ ! -s "${LOCAL_AUTH_DIR}/admin-password-hash" ]]; then
+if [[ ! -s "${HASH_STAGE_DIR}/admin-password-hash" ]]; then
 	echo "error: could not compute admin password hash locally -- Playwright login step would fail closed" >&2
 	exit 1
 fi
@@ -164,7 +172,7 @@ fi
 # agent-mode default (203.0.113.0/24) collides with a concurrent stack on
 # this host (docs/testing.md). Never commit a run with this set.
 GENERATE_ARGS=(--mode agent --slug "${SLUG}" --public-url "https://localhost:${PORT}" --port "${PORT}" \
-	--local-auth-admin-hash-file "${LOCAL_AUTH_DIR}/admin-password-hash")
+	--local-auth-admin-hash-file "${HASH_STAGE_DIR}/admin-password-hash")
 if [[ -n "${WAYPOINT_E2E_SUBNET:-}" ]]; then
 	log "WAYPOINT_E2E_SUBNET=${WAYPOINT_E2E_SUBNET} -- overriding the generated edge subnet"
 	GENERATE_ARGS+=(--subnet "${WAYPOINT_E2E_SUBNET}")
@@ -172,6 +180,9 @@ fi
 
 log "Generating isolated dev stack (deploy/scripts/generate-dev-stack.sh --mode agent --slug ${SLUG})"
 "${SCRIPT_DIR}/generate-dev-stack.sh" "${GENERATE_ARGS[@]}"
+# The generator copied the hash into the slug directory; the scratch staging
+# copy has no further purpose.
+rm -rf "${HASH_STAGE_DIR}"
 
 DC="docker compose -p ${PROJECT} -f compose.yaml -f ${GENERATED_STATE_DIR}/override.yaml --env-file ${GENERATED_STATE_DIR}/.env"
 if [[ -n "${WAYPOINT_E2E_OVERRIDE_FILE:-}" ]]; then

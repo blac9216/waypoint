@@ -196,11 +196,25 @@ secrets, a SAN-correct self-signed TLS pair, and a validated Compose override
 under `deploy/.generated/<slug>/` **only** (never `deploy/config/`, never the
 shared `deploy/compose.override.yaml`), detects port/subnet/project
 collisions against what is currently running on the host **before** creating
-anything — a project name claimed by running containers this checkout has no
-state directory for is a foreign stack and fails closed, while re-running for
-a slug whose `deploy/.generated/<slug>/` already exists is the idempotent case
-and is allowed — and validates the merged configuration with
+anything — and validates the merged configuration with
 `docker compose config` itself — all without starting a single container.
+
+The project-collision check decides ownership from the **running containers
+themselves**, not from the presence of a directory: Compose stamps
+`com.docker.compose.project.working_dir` on everything it creates, so a stack
+whose containers were started from *this* checkout's `deploy/` directory is
+your own stack being re-generated in place (the idempotent case, allowed),
+and one started from any other directory is a foreign stack and fails closed.
+Creating `deploy/.generated/<slug>/` or `deploy/config/` yourself therefore
+buys you nothing — it is not ownership evidence, and neither is a state
+directory left behind by an earlier run. (Only for a container carrying no
+`working_dir` label at all — a plain `docker run` of a Compose-built image,
+which inherits the project label from the image — does the generator fall
+back to an artifact it alone produces: `deploy/.generated/<slug>/override.yaml`
+in agent mode, `deploy/config/secrets/dev-admin-password` in persistent mode.)
+The port check's self-exemption is likewise by the exact names of containers
+proven to be yours, and the subnet check exempts `wp-<slug>_edge` only when
+that project is yours.
 `deploy/scripts/fresh-stack-smoke-test.sh` and `deploy/scripts/e2e-playwright.sh`
 both call it internally (see "Running the smoke script"/"Running the
 Playwright suite" below); calling it directly is the same mechanism a fresh

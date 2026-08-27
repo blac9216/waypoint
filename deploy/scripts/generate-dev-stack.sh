@@ -47,11 +47,13 @@
 # Agent-mode-only options:
 #   --local-auth-admin-hash-file PATH
 #     Absolute host or in-repo path to an already-computed local-auth admin
-#     password hash (see backend's `--hash-password`). When given, the
-#     generated override turns on LocalAuth__Enabled and mounts this file
+#     password hash (see backend's `--hash-password`). The file is COPIED
+#     into deploy/.generated/<slug>/local-auth/admin-password-hash and the
+#     generated override turns on LocalAuth__Enabled and mounts THAT copy
 #     read-only, host-path-translated the same as every other bind source
-#     this script emits. Omit to leave local auth off (Keycloak-only, the
-#     production posture) in the generated stack.
+#     this script emits -- so the slug directory stays self-contained and
+#     the caller never has to create it beforehand. Omit to leave local auth
+#     off (Keycloak-only, the production posture) in the generated stack.
 #   --runner-resource-fallback / --no-runner-resource-fallback
 #     Whether to set RunnerResources__Fallback{CpuCores,MemoryBytes} on both
 #     runners (the documented cgroup-unreadable sandbox workaround --
@@ -63,11 +65,12 @@
 #   port     -- another RUNNING container already publishes the host port.
 #   subnet   -- an existing Docker network overlaps the requested CIDR.
 #   project  -- RUNNING containers already carry this run's Compose project
-#               label. Re-running for a project this checkout owns (its state
-#               directory -- deploy/.generated/<slug>/ or deploy/config/ --
-#               already exists here) is the idempotent case and is allowed;
-#               a project claimed by containers this checkout has no state
-#               for is a foreign stack and fails closed.
+#               label. Ownership is read off those containers: Compose
+#               stamps com.docker.compose.project.working_dir, so a stack
+#               started from THIS checkout's deploy/ is an idempotent
+#               re-generate and is allowed, while one started from anywhere
+#               else is a foreign stack and fails closed. The existence of a
+#               state directory is NOT ownership evidence.
 #
 # Requires: openssl, docker compose v2, python3 (subnet-overlap/collision
 # arithmetic only -- stdlib `ipaddress`, no network access).
@@ -229,27 +232,72 @@ host_path() { printf '%s' "${HOST_PREFIX}${1#"${REPO_ROOT}"}"; }
 #     idempotent re-run this script promises (re-running is byte-stable:
 #     existing secrets and TLS are reused, never regenerated).
 #
-# Ownership is decided by this run's own state directory
-# (deploy/.generated/<slug>/ in agent mode, deploy/config/ in persistent
-# mode): if it already exists here, the running project is this same
-# generated stack being re-generated in place (generate -> up -> generate),
-# not a foreign squatter. A foreign project that claimed the name leaves no
-# such directory in this checkout. The directory alone is never sufficient
-# -- it only excuses containers that are already running.
-OWNED_STATE=0
-[[ -d "${STATE_DIR}" ]] && OWNED_STATE=1
+# Ownership is decided by EVIDENCE FROM THE RUNNING CONTAINERS THEMSELVES,
+# never by the existence of a directory (round-2 review finding 1: a bare
+# `mkdir` -- which both live suites used to do before calling this script,
+# and which `init-config.sh` does for deploy/config/ -- would otherwise claim
+# any project name, silencing this check exactly where the hazard is real).
+#
+# Compose stamps com.docker.compose.project.working_dir on every container it
+# creates: the project directory of the `docker compose` invocation that
+# created it. Both live suites and every documented lifecycle command run
+# compose from deploy/, so a container this checkout started carries THIS
+# checkout's deploy directory. A different checkout (or a different machine's
+# clone) carries a different one. The label records the path as the compose
+# CLI process saw it, which is this process's own path when compose runs
+# inside a devcontainer and the host-side path when it runs on the host --
+# accept either spelling, since both name this same deploy directory.
+OWN_DEPLOY_DIRS=("${DEPLOY_DIR}" "$(host_path "${DEPLOY_DIR}")")
 
-PROJECT_CONTAINERS="$(docker ps --filter "label=com.docker.compose.project=${PROJECT}" --format '{{.Names}} (image {{.Image}})' 2>/dev/null || true)"
-if [[ -n "${PROJECT_CONTAINERS}" && "${OWNED_STATE}" -eq 0 ]]; then
-	echo "error: Compose project '${PROJECT}' is already claimed by running container(s) on this Docker host:" >&2
-	while IFS= read -r line; do
-		[[ -n "${line}" ]] && echo "  ${line}" >&2
-	done <<<"${PROJECT_CONTAINERS}"
+# Fallback, used ONLY for a container that carries no working_dir label at
+# all (a plain `docker run` of a Compose-built image inherits the project
+# label from the image but not the working_dir): fall back to an artifact
+# THIS generator produces and nothing else does -- the override file in agent
+# mode, the dev-admin-password secret in persistent mode (init-config.sh
+# creates the other six, never that one). An empty or hand-`mkdir`ed state
+# directory therefore proves nothing.
+if [[ "${MODE}" == "agent" ]]; then
+	OWN_ARTIFACT="${STATE_DIR}/override.yaml"
+else
+	OWN_ARTIFACT="${STATE_DIR}/secrets/dev-admin-password"
+fi
+
+OWNED_STATE=0
+OWN_CONTAINER_NAMES=""
+FOREIGN_CONTAINERS=""
+PROJECT_PS="$(docker ps --filter "label=com.docker.compose.project=${PROJECT}" \
+	--format '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null || true)"
+if [[ -n "${PROJECT_PS}" ]]; then
+	OWNED_STATE=1
+	while IFS=$'\t' read -r c_name c_image c_workdir; do
+		[[ -n "${c_name}" ]] || continue
+		c_owned=0
+		if [[ -n "${c_workdir}" ]]; then
+			for d in "${OWN_DEPLOY_DIRS[@]}"; do
+				if [[ "${c_workdir}" == "${d}" ]]; then
+					c_owned=1
+					break
+				fi
+			done
+		elif [[ -s "${OWN_ARTIFACT}" ]]; then
+			c_owned=1
+		fi
+		if [[ "${c_owned}" -eq 1 ]]; then
+			OWN_CONTAINER_NAMES+="${c_name}"$'\n'
+		else
+			OWNED_STATE=0
+			FOREIGN_CONTAINERS+="  ${c_name} (image ${c_image}; started from ${c_workdir:-<no project-dir label>})"$'\n'
+		fi
+	done <<<"${PROJECT_PS}"
+fi
+
+if [[ "${OWNED_STATE}" -eq 0 && -n "${FOREIGN_CONTAINERS}" ]]; then
+	echo "error: Compose project '${PROJECT}' is already claimed by running container(s) this checkout did not start:" >&2
+	printf '%s' "${FOREIGN_CONTAINERS}" >&2
+	echo "This checkout's deploy directory is ${DEPLOY_DIR} (host-side: ${OWN_DEPLOY_DIRS[1]})." >&2
 	if [[ "${MODE}" == "agent" ]]; then
-		echo "No state exists at ${STATE_DIR}, so this run does not own that project." >&2
 		echo "Pick a different --slug (the project name is 'wp-<slug>'), or stop that stack first." >&2
 	else
-		echo "No state exists at ${STATE_DIR}, so this run does not own that project." >&2
 		echo "Stop that stack first, or use --mode agent --slug SLUG for an isolated one." >&2
 	fi
 	exit 1
@@ -260,10 +308,16 @@ fi
 # `docker run` of a Compose-built image reports a project that never started
 # it (round-1 review finding 4). The label is still shown, explicitly marked
 # as the unreliable half.
+#
+# Self-exemption is by the EXACT container names proven owned above (each one
+# started from this checkout's deploy directory), not by the unreliable
+# project label: an idempotent re-run must not trip over its own published
+# port, but nothing else may be excused.
 PORT_OWNER="$(docker ps --format '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project"}}\t{{.Ports}}' 2>/dev/null |
-	awk -F'\t' -v p=":${PORT}->" -v self="${PROJECT}" -v owned="${OWNED_STATE}" '
+	awk -F'\t' -v p=":${PORT}->" -v ownlist="${OWN_CONTAINER_NAMES}" '
+		BEGIN { n = split(ownlist, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") own[a[i]] = 1 }
 		$4 ~ p {
-			if (owned == 1 && $3 == self) next
+			if ($1 in own) next
 			printf "  container %s (image %s; compose project label %s)\n", $1, $2, ($3 == "" ? "<none>" : $3)
 		}' || true)"
 if [[ -n "${PORT_OWNER}" ]]; then
@@ -300,8 +354,15 @@ for net_id in out:
             print(f"{name}\t{subnet}")
 PYEOF
 )"
-# Our own project's edge network (an idempotent re-run) is not a collision.
-SUBNET_COLLISION="$(printf '%s\n' "${SUBNET_COLLISION}" | grep -v "^${PROJECT}_edge" || true)"
+# Our own project's edge network (an idempotent re-run) is not a collision --
+# but ONLY when the running project was proven above to belong to this
+# checkout (round-2 review finding 2: an ungated exemption waved through a
+# foreign stack's network too). The match is on the whole name field, exactly
+# "${PROJECT}_edge", so an unrelated "wp-demo_edge2" is never swallowed.
+if [[ "${OWNED_STATE}" -eq 1 ]]; then
+	SUBNET_COLLISION="$(printf '%s\n' "${SUBNET_COLLISION}" |
+		awk -F'\t' -v self="${PROJECT}_edge" '$1 != self' || true)"
+fi
 if [[ -n "${SUBNET_COLLISION}" ]]; then
 	echo "error: --subnet ${SUBNET} overlaps an existing Docker network:" >&2
 	printf '%s\n' "${SUBNET_COLLISION}" >&2
@@ -353,6 +414,29 @@ if [[ "${MODE}" == "agent" ]]; then
 		echo "Secrets: master key generated -- ${MASTER_KEY}"
 	else
 		echo "Secrets: master key reused -- ${MASTER_KEY}"
+	fi
+
+	# The caller-supplied admin password hash is COPIED into this run's own
+	# state directory and the copy is what the override mounts. Two reasons:
+	# the slug directory stays fully self-contained (one `rm -rf` still
+	# removes every file the stack needs), and callers no longer have to
+	# pre-create the state directory just to stage the hash before this
+	# script runs -- the pattern round-2 review finding 1(a) flagged.
+	if [[ -n "${LOCAL_AUTH_HASH_FILE}" ]]; then
+		[[ -s "${LOCAL_AUTH_HASH_FILE}" ]] || {
+			echo "error: --local-auth-admin-hash-file '${LOCAL_AUTH_HASH_FILE}' is missing or empty." >&2
+			exit 1
+		}
+		LOCAL_AUTH_DIR="${STATE_DIR}/local-auth"
+		mkdir -p "${LOCAL_AUTH_DIR}"
+		if [[ "${LOCAL_AUTH_HASH_FILE}" -ef "${LOCAL_AUTH_DIR}/admin-password-hash" ]]; then
+			echo "Local auth: admin password hash already in place -- ${LOCAL_AUTH_DIR}/admin-password-hash"
+		else
+			cp "${LOCAL_AUTH_HASH_FILE}" "${LOCAL_AUTH_DIR}/admin-password-hash"
+			chmod 644 "${LOCAL_AUTH_DIR}/admin-password-hash"
+			echo "Local auth: admin password hash copied into ${LOCAL_AUTH_DIR}/admin-password-hash (value never printed)"
+		fi
+		LOCAL_AUTH_HASH_FILE="${LOCAL_AUTH_DIR}/admin-password-hash"
 	fi
 fi
 

@@ -90,7 +90,7 @@ cleanup() {
 	# TLS, the admin-password hash, the override/env files -- lives ONLY
 	# under this one slug-scoped directory, so a full run's throwaway state
 	# is exactly this one `rm -rf`.
-	rm -rf "${DEPLOY_DIR}/.generated/${SLUG}"
+	rm -rf "${DEPLOY_DIR}/.generated/${SLUG}" "${DEPLOY_DIR}/.generated/${SLUG}.hash-stage"
 	rm -f "${CATALOG_ARTIFACTS_FILE:-/nonexistent}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -130,13 +130,20 @@ fi
 # admin-password hash (a backend-specific step the generator deliberately
 # does not do) and handing it in via --local-auth-admin-hash-file.
 GENERATED_STATE_DIR="${DEPLOY_DIR}/.generated/${SLUG}"
-LOCAL_AUTH_DIR="${GENERATED_STATE_DIR}/local-auth"
-mkdir -p "${LOCAL_AUTH_DIR}"
 
 # Admin password: fixed dev-only value, hashed via the backend's own CLI so
 # the hash format always matches what LocalAuthOptionsPostConfigure expects.
 # Computed here (before the generator call) because the generator only wires
 # up a hash file it is handed -- it never computes one itself.
+#
+# Staged in a SEPARATE scratch directory, never in ${GENERATED_STATE_DIR}:
+# this script must not create the generator's state directory behind its
+# back (round-2 review of #847 -- the generator refuses a foreign stack that
+# has claimed this project name, and a caller that pre-creates state must
+# not be able to influence that decision). The generator copies the hash
+# into the slug directory itself and mounts its own copy.
+HASH_STAGE_DIR="${DEPLOY_DIR}/.generated/${SLUG}.hash-stage"
+mkdir -p "${HASH_STAGE_DIR}"
 ADMIN_PASSWORD="invented-smoke-test-password-$(openssl rand -hex 4)"
 log "Computing admin password hash via backend --hash-password"
 (
@@ -144,12 +151,12 @@ log "Computing admin password hash via backend --hash-password"
 	if command -v dotnet >/dev/null 2>&1; then
 		dotnet build Waypoint.Api >/dev/null
 		printf '%s\n' "${ADMIN_PASSWORD}" | dotnet run --project Waypoint.Api --no-launch-profile --no-build -- --hash-password \
-			| tail -1 > "${LOCAL_AUTH_DIR}/admin-password-hash"
+			| tail -1 > "${HASH_STAGE_DIR}/admin-password-hash"
 	fi
 )
 LOCAL_AUTH_ARGS=()
-if [[ -s "${LOCAL_AUTH_DIR}/admin-password-hash" ]]; then
-	LOCAL_AUTH_ARGS=(--local-auth-admin-hash-file "${LOCAL_AUTH_DIR}/admin-password-hash")
+if [[ -s "${HASH_STAGE_DIR}/admin-password-hash" ]]; then
+	LOCAL_AUTH_ARGS=(--local-auth-admin-hash-file "${HASH_STAGE_DIR}/admin-password-hash")
 else
 	echo "warning: could not compute admin password hash locally; login-gated steps will be skipped" >&2
 	ADMIN_PASSWORD=""
@@ -167,6 +174,9 @@ fi
 
 log "Generating isolated dev stack (deploy/scripts/generate-dev-stack.sh --mode agent --slug ${SLUG})"
 "${SCRIPT_DIR}/generate-dev-stack.sh" "${GENERATE_ARGS[@]}"
+# The generator copied the hash into the slug directory; the scratch staging
+# copy has no further purpose.
+rm -rf "${HASH_STAGE_DIR}"
 
 DC="docker compose -p ${PROJECT} -f compose.yaml -f ${GENERATED_STATE_DIR}/override.yaml --env-file ${GENERATED_STATE_DIR}/.env"
 if [[ -n "${WAYPOINT_SMOKE_OVERRIDE_FILE:-}" ]]; then
