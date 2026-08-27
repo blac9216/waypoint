@@ -207,9 +207,23 @@ public sealed class SchemaMigrationTests
 	/// own purge transaction ever sets -- no new tables, no new runner grants (purge
 	/// deletion is exclusively API-side, same owner-privileged connection every other
 	/// purge step already uses), closing PR #961's stated "purge currently RESTRICTs"
-	/// gap --
+	/// gap, issue #963 -- 0064 (the slot 0066 above's own comment already noted as
+	/// "reserved by parallel agents at branch time"; re-verified free against both the
+	/// migrations directory and open PRs at this PR's own commit time) adds no new
+	/// tables: it seeds the hand-curated execution catalog (issue #959 Option C, epic
+	/// #726) from docs/compliance-parity.md's documented provenance-matrix rows into
+	/// 0050's existing catalog_source_revisions/catalog_products/
+	/// catalog_product_versions/catalog_content_releases/catalog_components/
+	/// catalog_report_groups/catalog_execution_profiles/
+	/// catalog_credential_requirements/catalog_benchmark_references tables -- a
+	/// representative slice covering every documented shape (vSphere object-kind
+	/// split, VCSA named-service split, NSX named-function split, Photon
+	/// whole-appliance), invented-from-documentation data only, every INSERT
+	/// idempotent via ON CONFLICT DO NOTHING against 0050's existing natural-key
+	/// constraints, no new runner grants (seed-only, same "no runner mutates this
+	/// schema" convention as 0050), issue #959 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 64;
+	private const int ExpectedMigrationCount = 65;
 
 	private readonly PostgresFixture _fixture;
 
