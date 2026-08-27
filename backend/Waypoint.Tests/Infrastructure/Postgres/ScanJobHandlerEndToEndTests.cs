@@ -137,11 +137,11 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		ScanUploadCoordinator uploadCoordinator = new(
 			stigman, new StubStigManagerUploadClient(), _secretStore, _repository, _redactor);
 
-		// Issue #738: VCenterProfileRevisionResolver's dependencies, also kept as fields
+		// Issue #738: ComponentProfileRevisionResolver's dependencies, also kept as fields
 		// so the vcenter-component tests below can seed real catalog/baseline rows.
 		_catalog = new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(_fixture.ConnectionString);
 		_baselines = new Waypoint.Infrastructure.ComplianceContent.BaselineRepository(_fixture.ConnectionString);
-		VCenterProfileRevisionResolver vCenterProfileRevisions = new(_baselines, _catalog, complianceContentOptions);
+		ComponentProfileRevisionResolver vCenterProfileRevisions = new(_baselines, _catalog, complianceContentOptions);
 
 		_handler = new ScanJobHandler(
 			executor, _secretStore, _credentials, _targets, _runSecrets, _repository, _redactor, wrappedPsOptions, scanOptions,
@@ -376,14 +376,16 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
-	/// Issue #737 item-4 (round-2, the round-1 review's blocker): a NARROWABLE component
-	/// job (transport <c>vmware</c>, selector <c>esxi</c>) executes an InSpec invocation
-	/// SCOPED TO THAT ESXi host -- not the whole vCenter. Proven the same way the
-	/// profile-key test proves path resolution: the stub echoes the selector the handler
-	/// passed onto the Information stream, captured as a <c>job.log</c> event. The narrowed
-	/// job's line reads <c>selector=esxi/&lt;host&gt;</c>; it must NEVER read
-	/// <c>&lt;whole-target&gt;</c>. This is the "assert what an EXECUTED component job
-	/// scans, not just how many jobs exist" observation finding 1 required.
+	/// Issue #737 item-4 (round-2, the round-1 review's blocker), extended by #739/#740
+	/// to carry the frozen profile/baseline ids every real esxi-selector plan item now
+	/// freezes: a NARROWABLE component job (transport <c>vmware</c>, selector
+	/// <c>esxi</c>) executes an InSpec invocation SCOPED TO THAT ESXi host -- not the
+	/// whole vCenter. Proven the same way the profile-key test proves path resolution:
+	/// the stub echoes the selector the handler passed onto the Information stream,
+	/// captured as a <c>job.log</c> event. The narrowed job's line reads
+	/// <c>selector=esxi/&lt;host&gt;</c>; it must NEVER read <c>&lt;whole-target&gt;</c>.
+	/// This is the "assert what an EXECUTED component job scans, not just how many jobs
+	/// exist" observation finding 1 required.
 	/// </summary>
 	[Fact]
 	public async Task NarrowableEsxiComponentJob_ScopesInvocationToThatHost_NotWholeVCenter()
@@ -392,6 +394,8 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
 		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
 		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-narrow-esxi-canary");
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedVSphereCatalogAndBaselineAsync("narrow-esxi", CatalogSelectorKinds.Esxi, materializeOnDisk: true);
 
 		const string esxiHost = "esxi-narrow-07.example.internal";
 		string payload = JsonSerializer.Serialize(new
@@ -400,6 +404,8 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			transport = "vmware",
 			selector_kind = "esxi",
 			selector_name = esxiHost,
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
 		});
 		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
 		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
@@ -424,11 +430,11 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
-	/// Issue #737 item-4 sibling isolation: two ESXi component jobs on the SAME target
-	/// each scan their OWN host, with DISTINCT selectors -- neither re-scans the whole
-	/// vCenter, and neither carries the other's selector. This is the direct
-	/// counter-proof to the round-1 blocker ("N sibling jobs each run the identical
-	/// whole-target scan").
+	/// Issue #737 item-4 sibling isolation, extended by #739/#740's frozen profile/
+	/// baseline ids: two ESXi component jobs on the SAME target each scan their OWN
+	/// host, with DISTINCT selectors -- neither re-scans the whole vCenter, and neither
+	/// carries the other's selector. This is the direct counter-proof to the round-1
+	/// blocker ("N sibling jobs each run the identical whole-target scan").
 	/// </summary>
 	[Fact]
 	public async Task TwoNarrowableSiblingJobs_EachScopeToTheirOwnHost_NeverWholeTarget()
@@ -437,11 +443,21 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
 		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
 		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-narrow-siblings-canary");
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedVSphereCatalogAndBaselineAsync("narrow-siblings", CatalogSelectorKinds.Esxi, materializeOnDisk: true);
 
 		const string hostA = "esxi-sib-a.example.internal";
 		const string hostB = "esxi-sib-b.example.internal";
-		string payloadA = JsonSerializer.Serialize(new { target_id = targetId, transport = "vmware", selector_kind = "esxi", selector_name = hostA });
-		string payloadB = JsonSerializer.Serialize(new { target_id = targetId, transport = "vmware", selector_kind = "esxi", selector_name = hostB });
+		string payloadA = JsonSerializer.Serialize(new
+		{
+			target_id = targetId, transport = "vmware", selector_kind = "esxi", selector_name = hostA,
+			catalog_execution_profile_id = executionProfileId, baseline_id = baselineId,
+		});
+		string payloadB = JsonSerializer.Serialize(new
+		{
+			target_id = targetId, transport = "vmware", selector_kind = "esxi", selector_name = hostB,
+			catalog_execution_profile_id = executionProfileId, baseline_id = baselineId,
+		});
 
 		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
 		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
@@ -524,28 +540,41 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	/// <summary>
 	/// Seeds a real catalog execution profile (vcenter selector), an ACTIVATED baseline
 	/// bound to a content revision, an accepted <c>catalog_import_report_entries</c> row
-	/// (so <see cref="VCenterProfileRevisionResolver"/> can resolve the profile-key
+	/// (so <see cref="ComponentProfileRevisionResolver"/> can resolve the profile-key
 	/// provenance), and -- when <paramref name="materializeOnDisk"/> is true -- the real
 	/// on-disk revision/profile directory under <see cref="_contentDirectory"/> so
 	/// resolution succeeds end to end. Returns the ids a vcenter-selector job payload
 	/// needs.
 	/// </summary>
-	private async Task<(Guid CatalogExecutionProfileId, Guid BaselineId, string ProfileKey)> SeedVCenterCatalogAndBaselineAsync(
-		string suffix, bool materializeOnDisk)
+	private Task<(Guid CatalogExecutionProfileId, Guid BaselineId, string ProfileKey)> SeedVCenterCatalogAndBaselineAsync(
+		string suffix, bool materializeOnDisk) =>
+		SeedVSphereCatalogAndBaselineAsync(suffix, CatalogSelectorKinds.VCenter, materializeOnDisk);
+
+	/// <summary>
+	/// Issue #739/#740: the selector-parameterized generalization of
+	/// <see cref="SeedVCenterCatalogAndBaselineAsync"/> -- the SAME seeding shape (one
+	/// catalog execution profile, one activated baseline bound to a staged content
+	/// revision, one accepted import-provenance row) for whichever narrowable
+	/// vSphere-family selector (<paramref name="selectorKind"/>: vcenter/esxi/vm) a test
+	/// needs, since <see cref="ComponentProfileRevisionResolver"/> resolves the same
+	/// baseline -&gt; revision -&gt; profile_key chain regardless of selector kind.
+	/// </summary>
+	private async Task<(Guid CatalogExecutionProfileId, Guid BaselineId, string ProfileKey)> SeedVSphereCatalogAndBaselineAsync(
+		string suffix, string selectorKind, bool materializeOnDisk)
 	{
 		CatalogSourceRevision source = await _catalog.UpsertSourceRevisionAsync($"rev-{suffix}-{Guid.NewGuid():N}", null, CancellationToken.None);
 		CatalogProduct product = await _catalog.UpsertProductAsync(source.Id, "vmware", $"vsphere-{suffix}-{Guid.NewGuid():N}", "VMware vSphere", CancellationToken.None);
 		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
 		CatalogComponent catalogComponent = await _catalog.UpsertComponentAsync(
 			productVersion.Id,
-			new CatalogComponentDefinition($"vcenter-{suffix}", "vCenter", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null),
+			new CatalogComponentDefinition($"{selectorKind}-{suffix}", selectorKind, CatalogTransports.VMware, selectorKind, null, null),
 			CancellationToken.None);
 		CatalogContentRelease release = await _catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Srg, $"release-{suffix}-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
 		CatalogReportGroup reportGroup = await _catalog.UpsertReportGroupAsync($"group-{suffix}-{Guid.NewGuid():N}", "Test Group", 3, CancellationToken.None);
 		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(
 			catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.Hdf, CancellationToken.None);
 
-		string profileKey = $"vmware/vsphere/vcenter-{suffix}-stig-baseline";
+		string profileKey = $"vmware/vsphere/{selectorKind}-{suffix}-stig-baseline";
 		CatalogImportReport report = await _catalog.RecordImportReportAsync($"commit-{suffix}", $"digest-{suffix}-{Guid.NewGuid():N}", 1, 0, 0, CancellationToken.None);
 		await _catalog.RecordImportReportEntryAsync(report.Id, CatalogImportEntryDispositions.Accepted, profileKey, null, executionProfile.Id, CancellationToken.None);
 
@@ -560,7 +589,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		{
 			string profileDirectory = Path.Combine(_contentDirectory, stagedRelativePath, profileKey);
 			Directory.CreateDirectory(profileDirectory);
-			await File.WriteAllTextAsync(Path.Combine(profileDirectory, "inspec.yml"), "name: invented-vcenter-stig-profile\n");
+			await File.WriteAllTextAsync(Path.Combine(profileDirectory, "inspec.yml"), $"name: invented-{selectorKind}-stig-profile\n");
 		}
 
 		return (executionProfile.Id, staged.Id, profileKey);
@@ -571,7 +600,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	/// are executed"): a job payload naming a vcenter-selector item's
 	/// <c>catalog_execution_profile_id</c>/<c>baseline_id</c> resolves and executes
 	/// against the ACTIVATED content-revision directory
-	/// (<see cref="VCenterProfileRevisionResolver"/>), never the run-level
+	/// (<see cref="ComponentProfileRevisionResolver"/>), never the run-level
 	/// <c>profile_key</c>/legacy fixed path -- proven the same way the #639 profile-key
 	/// test proves resolution: the stub echoes its resolved <c>ProfilePath</c> onto the
 	/// Information stream.
@@ -756,6 +785,160 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
 		Assert.True(await ScanLogContainsAsync(jobIds[0], "invented_target_ip"),
 			"expected the resolved Input config doc's body to be materialized into the InSpec inputs file the stub echoed.");
+	}
+
+	/// <summary>
+	/// Issue #739/#740 AC "the exact planned ESXi/VM endpoint and profile/input
+	/// revisions are executed": an esxi-selector item resolves its activated content
+	/// revision through the SAME <see cref="ComponentProfileRevisionResolver"/> chain
+	/// PR #907 (#738) proved for vcenter, AND still carries its narrowed
+	/// SelectorName through to the invocation -- proving profile resolution and object
+	/// narrowing compose rather than one replacing the other.
+	/// </summary>
+	[Theory]
+	[InlineData("esxi")]
+	[InlineData("vm")]
+	public async Task NarrowedVSphereComponentJob_ResolvesActivatedRevisionProfilePath_AndKeepsSelectorNarrowing(string selectorKind)
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync($"invented-{selectorKind}-component-canary");
+		(Guid executionProfileId, Guid baselineId, string profileKey) =
+			await SeedVSphereCatalogAndBaselineAsync($"{selectorKind}-resolve-success", selectorKind, materializeOnDisk: true);
+
+		const string objectName = "invented-object-01.example.internal";
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "vmware",
+			selector_kind = selectorKind,
+			selector_name = objectName,
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.True(await ScanLogContainsAsync(jobIds[0], profileKey),
+			"expected the stub's Information line to echo the resolved activated-revision profile path.");
+		Assert.False(await ScanLogContainsAsync(jobIds[0], "/invented/profile/path"),
+			"a narrowed component job must never fall back to the legacy fixed ProfilePath.");
+		Assert.True(await ScanLogContainsAsync(jobIds[0], $"selector={selectorKind}/{objectName}"),
+			"resolving the activated profile must not drop the item's own object narrowing.");
+	}
+
+	/// <summary>
+	/// Issue #911 (closed by this slice): an operator Input config-doc body naming a
+	/// reserved platform selector-scoping key (<c>vmhostName</c>) must NEVER widen a
+	/// narrowed esxi scan -- this is the exact repro from #911's Summary, now reachable
+	/// because #739/#740 wires the config-doc inputs file for esxi/vm. Proven two ways:
+	/// (1) the stub's echoed inputs-file content shows the PLATFORM's own vmhostName
+	/// (the narrowed host), never the operator-supplied one, and (2) a job.log WARN
+	/// names the dropped key -- the operator's colliding value is not silently ignored,
+	/// it is diagnosably rejected.
+	/// </summary>
+	[Fact]
+	public async Task EsxiComponentJob_ConfigDocInputsNamingVmhostName_NeverOverridesNarrowedSelector()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-911-repro-canary");
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedVSphereCatalogAndBaselineAsync("911-repro", CatalogSelectorKinds.Esxi, materializeOnDisk: true);
+
+		const string narrowedHost = "esxi-narrowed-real.example.internal";
+		const string attackerHost = "esxi-attacker-widened.example.internal";
+
+		// The operator's Input config doc names the RESERVED scoping key `vmhostName` --
+		// #911's Summary's exact hazard: this must never reach InSpec and override the
+		// platform-computed narrowed selector.
+		string inputsBody = $"vmhostName: '{attackerHost}'\ninvented_unrelated_input: 'kept'\n";
+		(ConfigDocSaveOutcome saveOutcome, ConfigDoc? doc, ConfigDocVersion? version) = await _configDocs.SaveAsync(
+			Guid.NewGuid(), ConfigDocKinds.Input, $"invented-911-inputs-profile-{Guid.NewGuid():N}", ConfigDocLayers.Global,
+			null, "test-fixture", inputsBody, CancellationToken.None, executionProfileId);
+		Assert.Equal(ConfigDocSaveOutcome.Ok, saveOutcome);
+		Assert.NotNull(doc);
+		Assert.NotNull(version);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "vmware",
+			selector_kind = "esxi",
+			selector_name = narrowedHost,
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			input_resolutions = new[]
+			{
+				new { InputName = "vmhostName", State = "resolved", DocId = doc!.Id, DocVersion = version!.Version },
+			},
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		// The narrowed selector file (appended LAST, issue #911's flag-order flip) always
+		// carries the platform's own vmhostName -- assert the ACTUAL scan scope, not just
+		// job success.
+		Assert.True(await ScanLogContainsAsync(jobIds[0], $"selector=esxi/{narrowedHost}"),
+			"the executed scan must stay narrowed to the platform-computed host.");
+
+		// The generated operator inputs file (echoed by the stub) must never contain the
+		// attacker-supplied vmhostName value -- the reserved key was dropped before the
+		// file was even written, not merely out-voted by ordering.
+		Assert.False(await ScanLogContainsAsync(jobIds[0], attackerHost),
+			"the operator config-doc's vmhostName value must never reach the invocation at all.");
+
+		// The unrelated key from the SAME config doc survives the filter -- proving this
+		// is a targeted key drop, not a reject of the whole document.
+		Assert.True(await ScanLogContainsAsync(jobIds[0], "invented_unrelated_input"),
+			"a non-reserved key in the same config doc must still be materialized.");
+
+		// A WARN names the dropped key -- diagnosable, not silent.
+		bool sawWarn = await JobLogContainsSeverityAndFragmentAsync(jobIds[0], "Warning", "vmhostName");
+		Assert.True(sawWarn, "expected a job.log WARN naming the dropped reserved scoping key.");
+	}
+
+	/// <summary>True when any of the job's <c>job.log</c> events at <paramref name="severity"/> contains <paramref name="fragment"/> (same simple substring idiom as the pre-existing attestation-WARN test).</summary>
+	private async Task<bool> JobLogContainsSeverityAndFragmentAsync(Guid jobId, string severity, string fragment)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' "
+				+ "AND payload::text LIKE '%' || $2 || '%' AND payload::text LIKE '%' || $3 || '%'", connection);
+		query.Parameters.AddWithValue(jobId);
+		query.Parameters.AddWithValue(severity);
+		query.Parameters.AddWithValue(fragment);
+		return (long)(await query.ExecuteScalarAsync())! >= 1;
 	}
 
 	/// <summary>True when any of the job's <c>job.log</c> events contains <paramref name="fragment"/> (the scan stub echoes its resolved selector there).</summary>

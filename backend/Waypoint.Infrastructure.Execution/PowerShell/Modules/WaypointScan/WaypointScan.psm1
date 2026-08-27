@@ -73,13 +73,16 @@ function Invoke-WaypointScan {
 	    dot-sourced to bring Invoke-ExternalCommand into scope.
 
 	.PARAMETER InputsFilePath
-	    Issue #738: an already-materialized InSpec inputs YAML file (the vCenter
-	    component item's frozen, resolved config-doc Inputs -- ScanJobHandler writes
-	    this file BEFORE calling in, owner-only 0600, and deletes it after). Passed to
-	    InSpec as its OWN --input-file flag, alongside (never merged with) the
-	    SelectorKind/SelectorName scoping file below -- InSpec accepts multiple
-	    --input-file flags on one invocation. Absent/empty = no additional resolved
-	    inputs (the pre-#738 behavior for every non-vcenter-component job).
+	    Issue #738, generalized to esxi/vm by #739/#740: an already-materialized InSpec
+	    inputs YAML file (the vcenter/esxi/vm component item's frozen, resolved
+	    config-doc Inputs, already filtered of #911's reserved scoping keys --
+	    ScanJobHandler writes this file BEFORE calling in, owner-only 0600, and deletes
+	    it after). Passed to InSpec as its OWN --input-file flag, alongside (never
+	    merged with) the SelectorKind/SelectorName scoping file below -- InSpec accepts
+	    multiple --input-file flags on one invocation. Issue #911: appended BEFORE the
+	    selector-scoping file so the platform's own scope always wins InSpec's
+	    last-`--input-file`-key-wins resolution on any collision. Absent/empty = no
+	    additional resolved inputs (the pre-#738 behavior for every non-component job).
 
 	.OUTPUTS
 	    One [pscustomobject]: Success (bool), ExitCode (int), ReportPath (string),
@@ -152,6 +155,23 @@ function Invoke-WaypointScan {
 
 	$InspecArguments = "`"$ProfilePath`" -t vmware:// --reporter=json:`"$ReportPath`" --show-progress --enhanced-outcomes"
 
+	# Issue #738: the vCenter/esxi/vm component item's already-materialized
+	# resolved-Input file, passed as its own --input-file flag -- ScanJobHandler owns
+	# this file's entire lifecycle (creation, filtering of #911's reserved scoping keys,
+	# 0600 mode, deletion); this function only reads its path and never writes/deletes
+	# it, unlike $InputsPath below.
+	#
+	# Issue #911: this flag is appended BEFORE the platform selector-scoping flag below
+	# (was AFTER, pre-#911 -- InSpec's last-`--input-file`-key-wins semantics meant the
+	# operator-authored config-doc body silently won a key collision). Ordering the
+	# operator file FIRST and the platform scoping file LAST means the platform's own
+	# vsphereSelectorKind/vmhostName/vmName always wins InSpec's last-file-wins
+	# resolution even if a colliding key somehow reached this file -- belt and
+	# suspenders alongside ScanJobHandler's own ScanScopingInputFilter drop.
+	if ($InputsFilePath) {
+		$InspecArguments += " --input-file `"$InputsFilePath`""
+	}
+
 	# Issue #737 item-4: a narrowed scan scopes InSpec to one component object rather
 	# than the whole vCenter. The narrowing selector is written into a generated
 	# --input-file (created 0600 BEFORE the value is written, the same owner-only,
@@ -160,7 +180,9 @@ function Invoke-WaypointScan {
 	# whole-target scan (the pre-#737 InSpec args, unchanged). The input keys mirror the
 	# vmware STIG profile's documented object-scoping inputs (vmhostName for an esxi
 	# host, vmName for a vm); a vcenter selector scopes to the vCenter itself and carries
-	# no object name.
+	# no object name. Appended LAST (issue #911) so the platform's own scoping always
+	# wins InSpec's last-`--input-file`-key-wins resolution over the operator inputs
+	# file above.
 	$InputsPath = $null
 	if ($SelectorKind) {
 		$InputsPath = Join-Path $ReportDirectory "$([Guid]::NewGuid().ToString('N')).vsphere-scope.generated.yml"
@@ -181,14 +203,6 @@ function Invoke-WaypointScan {
 		Set-Content -Path $InputsPath -Value $InputsContent -ErrorAction Stop
 
 		$InspecArguments += " --input-file `"$InputsPath`""
-	}
-
-	# Issue #738: the vCenter component item's already-materialized resolved-Input
-	# file, passed as its own --input-file flag -- ScanJobHandler owns this file's
-	# entire lifecycle (creation, 0600 mode, deletion); this function only reads its
-	# path and never writes/deletes it, unlike $InputsPath above.
-	if ($InputsFilePath) {
-		$InspecArguments += " --input-file `"$InputsFilePath`""
 	}
 
 	try {
