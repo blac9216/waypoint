@@ -1385,10 +1385,15 @@ and finally runs `npm run test:e2e` from `frontend/` with `E2E_BASE_URL`/
 set — ensuring `frontend/node_modules` and a locally installed Chromium exist
 first (`npm ci` if `node_modules` is missing *or* stale — issue #906: staleness
 is detected by comparing `package-lock.json`'s hash against a stamp file
-written after the last successful `npm ci`, not by the lockfile's mere
+written only after a successful `npm ci`, not by the lockfile's mere
 presence, so a pre-existing `node_modules` that predates a devDependency
-addition still triggers a reinstall; `npx playwright install chromium` if the
-Chromium binary is missing; browser binaries are a devDependency-managed
+addition still triggers a reinstall. A failed `npm ci` writes no stamp, and
+the script aborts immediately naming the install failure — it never
+misattributes a broken install to a missing dependency, and the next run
+retries the install rather than taking a poisoned fast path. Both install
+sites (the `frontend/dist` build and the Playwright run) share this one
+guard, so a fresh checkout installs exactly once; `npx playwright install
+chromium` if the Chromium binary is missing; browser binaries are a devDependency-managed
 local install, never committed and never fetched at appliance runtime —
 `npm run build`'s external-asset guard never scans `frontend/e2e/`).
 

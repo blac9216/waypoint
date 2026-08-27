@@ -44,6 +44,61 @@ use_node22() {
 	fi
 }
 
+# Issue #848 finding #2 (orchestrator comment on #847's validation): this
+# script used to assume node_modules was already present in a fresh sandbox --
+# an ordering dependency on whatever other script happened to populate
+# frontend/dist first. Ensure this script's own dependencies regardless of what
+# ran before it.
+#
+# Issue #906: `[[ ! -d node_modules ]]` only tests whether the directory
+# exists, not whether it matches what package-lock.json currently declares. A
+# checkout whose node_modules predates a devDependency addition (this repo's
+# own history: @playwright/test landing after an older install) satisfies that
+# guard, skips npm ci entirely, and then trips the executable check below with
+# an error message that asserts "after npm ci" even though npm ci never ran.
+# Track install correctness with a stamp file written only on a successful
+# npm ci, containing package-lock.json's hash -- cheap (one sha256sum, no
+# network, no `npm ls`/`npm ci --dry-run` version-dependent behavior) and
+# reliable (any change to the lockfile since the last successful install,
+# including "the file predates this devDependency", changes the hash).
+#
+# Round-2 review of #906: this is the SINGLE install site. Both callers (the
+# frontend/dist build below and the Playwright dependency prep) route through
+# here, so a fresh checkout installs exactly once instead of once per site.
+# Caller must be cd'd into ${FRONTEND_DIR} with Node 22 selected. Sets
+# NPM_CI_RAN=1 when an install actually ran (the caller's error messages
+# distinguish "missing after npm ci" from "missing without npm ci"); returns
+# nonzero when the install failed.
+NPM_CI_STAMP="node_modules/.waypoint-npm-ci-stamp"
+NPM_CI_RAN=0
+frontend_npm_ci_if_needed() {
+	local lockfile_hash
+	lockfile_hash="$(sha256sum package-lock.json | awk '{print $1}')"
+	NPM_CI_RAN=0
+	if [[ ! -d node_modules ]]; then
+		log "frontend/node_modules missing -- npm ci"
+	elif [[ ! -f "${NPM_CI_STAMP}" ]] || [[ "$(cat "${NPM_CI_STAMP}")" != "${lockfile_hash}" ]]; then
+		log "frontend/node_modules stale (package-lock.json does not match the last successful npm ci) -- npm ci"
+	else
+		return 0
+	fi
+	NPM_CI_RAN=1
+	# Remove any pre-existing stamp BEFORE installing so an interrupted run
+	# cannot leave an old-but-matching stamp behind, and check `npm ci`'s
+	# exit status explicitly rather than relying on errexit: round-1 review
+	# of #906 found that the Playwright block below deliberately runs with
+	# `set +e` (issue #848's PLAYWRIGHT_EXIT capture) and shell options are
+	# inherited by subshells, so a failed install used to be stamped as
+	# successful -- permanently poisoning the fast path and re-introducing
+	# exactly the confident-but-wrong diagnosis issue #906 exists to remove.
+	rm -f "${NPM_CI_STAMP}"
+	if ! npm ci; then
+		echo "error: npm ci failed in ${FRONTEND_DIR} -- frontend dependencies are NOT installed (no stamp written; the next run will retry the install). Fix the install itself (registry/network reachability, disk space, or package-lock.json) and re-run." >&2
+		return 1
+	fi
+	echo "${lockfile_hash}" >"${NPM_CI_STAMP}"
+}
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
 REPO_ROOT="$(cd -- "${DEPLOY_DIR}/.." &>/dev/null && pwd)"
@@ -134,7 +189,7 @@ if [[ ! -f "${FRONTEND_DIR}/dist/index.html" ]]; then
 	(
 		use_node22
 		cd "${FRONTEND_DIR}"
-		npm ci
+		frontend_npm_ci_if_needed
 		npm run build
 	)
 fi
@@ -397,6 +452,32 @@ KEYCLOAK_DEV_ADMIN_PASSWORD="$(cat "${KEYCLOAK_DEV_ADMIN_PASSWORD_FILE}")"
 
 PLAYWRIGHT_JSON_OUTPUT_FILE="${GENERATED_STATE_DIR}/playwright-results.json"
 export PLAYWRIGHT_JSON_OUTPUT_FILE
+# Dependency prep runs in its OWN subshell, deliberately BEFORE the `set +e`
+# below (round-2 review of #906): with errexit still in force, a failed
+# `npm ci` or browser download aborts the whole script immediately with its own
+# honest message, instead of being folded into PLAYWRIGHT_EXIT and reported as
+# a Playwright result.
+(
+	use_node22
+	cd "${FRONTEND_DIR}"
+	frontend_npm_ci_if_needed
+	if [[ ! -x node_modules/.bin/playwright ]]; then
+		if [[ "${NPM_CI_RAN}" -eq 1 ]]; then
+			echo "error: node_modules/.bin/playwright missing after npm ci -- @playwright/test did not install correctly" >&2
+		else
+			echo "error: node_modules/.bin/playwright missing, but frontend/node_modules already matched package-lock.json (npm ci was NOT re-run) -- @playwright/test is not declared as a dependency of the installed tree; check frontend/package.json and frontend/package-lock.json, or remove ${NPM_CI_STAMP} to force a reinstall" >&2
+		fi
+		exit 1
+	fi
+	# Playwright's default browser cache dir (PLAYWRIGHT_BROWSERS_PATH unset)
+	# -- a simple existence check rather than shelling out to Node to ask
+	# playwright-core for its resolved executable path.
+	if ! find "${PLAYWRIGHT_BROWSERS_PATH:-${HOME}/.cache/ms-playwright}" -maxdepth 1 -iname 'chromium-*' 2>/dev/null | grep -q .; then
+		log "Chromium browser binary not found -- npx playwright install chromium"
+		npx playwright install chromium
+	fi
+)
+
 log "Running Playwright against ${PLAYWRIGHT_BASE_URL}"
 # `set -euo pipefail` (top of this script) would otherwise terminate the
 # whole script the instant the subshell below exits nonzero -- BEFORE
@@ -413,54 +494,6 @@ set +e
 (
 	use_node22
 	cd "${FRONTEND_DIR}"
-	# Issue #848 finding #2 (orchestrator comment on #847's validation): this
-	# script used to assume node_modules was already present in a fresh
-	# sandbox -- an ordering dependency on whatever other script happened to
-	# populate frontend/dist first. Ensure this script's own dependencies
-	# regardless of what ran before it.
-	#
-	# Issue #906: `[[ ! -d node_modules ]]` only tests whether the directory
-	# exists, not whether it matches what package-lock.json currently
-	# declares. A checkout whose node_modules predates a devDependency
-	# addition (this repo's own history: @playwright/test landing after an
-	# older install) satisfies that guard, skips npm ci entirely, and then
-	# trips the executable check below with an error message that asserts
-	# "after npm ci" even though npm ci never ran. Track install
-	# correctness with a stamp file written only on a successful npm ci,
-	# containing package-lock.json's hash -- cheap (one sha256sum, no
-	# network, no `npm ls`/`npm ci --dry-run` version-dependent behavior)
-	# and reliable (any change to the lockfile since the last successful
-	# install, including "the file predates this devDependency", changes
-	# the hash).
-	NPM_CI_STAMP="node_modules/.waypoint-npm-ci-stamp"
-	LOCKFILE_HASH="$(sha256sum package-lock.json | awk '{print $1}')"
-	NEED_NPM_CI=0
-	if [[ ! -d node_modules ]]; then
-		log "frontend/node_modules missing -- npm ci"
-		NEED_NPM_CI=1
-	elif [[ ! -f "${NPM_CI_STAMP}" ]] || [[ "$(cat "${NPM_CI_STAMP}")" != "${LOCKFILE_HASH}" ]]; then
-		log "frontend/node_modules stale (package-lock.json does not match the last successful npm ci) -- npm ci"
-		NEED_NPM_CI=1
-	fi
-	if [[ "${NEED_NPM_CI}" -eq 1 ]]; then
-		npm ci
-		echo "${LOCKFILE_HASH}" >"${NPM_CI_STAMP}"
-	fi
-	if [[ ! -x node_modules/.bin/playwright ]]; then
-		if [[ "${NEED_NPM_CI}" -eq 1 ]]; then
-			echo "error: node_modules/.bin/playwright missing after npm ci -- @playwright/test did not install correctly" >&2
-		else
-			echo "error: node_modules/.bin/playwright missing, but frontend/node_modules already matched package-lock.json (npm ci was NOT re-run) -- @playwright/test is not declared as a dependency of the installed tree; check frontend/package.json and frontend/package-lock.json, or remove ${NPM_CI_STAMP} to force a reinstall" >&2
-		fi
-		exit 1
-	fi
-	# Playwright's default browser cache dir (PLAYWRIGHT_BROWSERS_PATH unset)
-	# -- a simple existence check rather than shelling out to Node to ask
-	# playwright-core for its resolved executable path.
-	if ! find "${PLAYWRIGHT_BROWSERS_PATH:-${HOME}/.cache/ms-playwright}" -maxdepth 1 -iname 'chromium-*' 2>/dev/null | grep -q .; then
-		log "Chromium browser binary not found -- npx playwright install chromium"
-		npx playwright install chromium
-	fi
 	export E2E_BASE_URL="${PLAYWRIGHT_BASE_URL}"
 	export E2E_ADMIN_USERNAME="${KEYCLOAK_DEV_USERNAME}"
 	export E2E_ADMIN_PASSWORD="${KEYCLOAK_DEV_ADMIN_PASSWORD}"
