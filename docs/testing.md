@@ -1368,8 +1368,13 @@ script probes it once, generically, with a disposable helper container
 bring-up. That single decision drives both `--public-url` at generation time
 and, further down, whether the script joins its own process to the stack's
 `edge` network so the browser can reach the container-internal origin
-directly — so the origin Playwright actually navigates to always matches the
-origin Keycloak and the backend were generated with, in either case.
+directly — so the origin Playwright actually navigates to matches the origin
+Keycloak and the backend were generated with, on both happy paths (published
+port reachable directly, or the join and `https://nginx/api/v1/health` both
+succeed). The two degraded branches — `docker network connect` fails, or the
+join succeeds but that health check still doesn't — are the exception: they
+warn loudly and leave `PLAYWRIGHT_BASE_URL` at the published-port origin,
+which then fails on origin discipline rather than silently mismatching.
 
 Same isolation recipe as the smoke script (unique `-p`/port, full `down -v`
 teardown on exit including on failure), plus: seeds one site/target/

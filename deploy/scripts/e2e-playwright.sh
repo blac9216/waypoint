@@ -111,6 +111,13 @@ BASE="https://127.0.0.1:${PORT}"
 NET_BASE="https://nginx"
 HELPER_NAME="${PROJECT}-e2e-helper"
 HELPER_STARTED=""
+# Set once the reachability-probe helper container (below) is actually
+# running, so cleanup() can always reap it -- see PROBE_NAME below (issue
+# #904: this used to be removed only by an explicit `docker rm -f` a few
+# lines after `docker run`, with no trap coverage in between; a `set -euo
+# pipefail` abort in that window left a never-exiting `nc -lk` container
+# behind under a deterministic name, blocking a re-run with the same slug).
+PROBE_STARTED=""
 # Set below if this script's own process needs to join the stack's `edge`
 # network directly to reach it (devcontainer/remote-daemon environment where
 # the published host port is unreachable from this namespace -- see the
@@ -125,6 +132,9 @@ cleanup() {
 	log "Tearing down ${PROJECT} (docs/testing.md: always your own project, always -v)"
 	if [[ -n "${HELPER_STARTED}" ]]; then
 		docker rm -f "${HELPER_NAME}" >/dev/null 2>&1 || true
+	fi
+	if [[ -n "${PROBE_STARTED}" ]]; then
+		docker rm -f "${PROBE_NAME}" >/dev/null 2>&1 || true
 	fi
 	if [[ -n "${SELF_JOINED_EDGE_NETWORK}" ]]; then
 		docker network disconnect "${SELF_JOINED_EDGE_NETWORK}" "$(hostname)" >/dev/null 2>&1 || true
@@ -243,10 +253,23 @@ fi
 PROBE_NAME="${PROJECT}-reachability-probe"
 docker run -d --rm --name "${PROBE_NAME}" -p 127.0.0.1::7777 --entrypoint sh curlimages/curl \
 	-c 'nc -lk -p 7777' >/dev/null
+PROBE_STARTED=1
 PROBE_HOST_PORT="$(docker port "${PROBE_NAME}" 7777/tcp | head -1 | cut -d: -f2)"
-DIRECT_REACHABLE=1
-timeout 2 bash -c "echo >/dev/tcp/127.0.0.1/${PROBE_HOST_PORT}" 2>/dev/null || DIRECT_REACHABLE=0
+# Bounded retry (issue #904): with `userland-proxy=false`, the published port
+# DNATs straight into the container, so a connect that lands before `nc`
+# finishes binding is refused even though the port genuinely works once
+# listening. A handful of short-sleep retries absorbs that startup race
+# without meaningfully slowing down the common case where `nc` is already up.
+DIRECT_REACHABLE=0
+for attempt in 1 2 3; do
+	if timeout 2 bash -c "echo >/dev/tcp/127.0.0.1/${PROBE_HOST_PORT}" 2>/dev/null; then
+		DIRECT_REACHABLE=1
+		break
+	fi
+	[[ "${attempt}" -lt 3 ]] && sleep 0.3
+done
 docker rm -f "${PROBE_NAME}" >/dev/null 2>&1 || true
+PROBE_STARTED=""
 
 if [[ "${DIRECT_REACHABLE}" -eq 1 ]]; then
 	PUBLIC_URL="${BASE}"
