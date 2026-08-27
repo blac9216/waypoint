@@ -1360,6 +1360,19 @@ cd deploy
 ./scripts/e2e-playwright.sh <your-slug> <your-port>
 ```
 
+**Known limitation inside a devcontainer / remote-daemon environment (issue
+[#896](https://github.com/blac9216/waypoint/issues/896), open).** The script
+pins the stack's `--public-url` to `https://localhost:<port>` *before* it
+probes whether that published host port is reachable from this namespace. When
+it is not (the devcontainer case below), the script falls back to joining the
+`edge` network and navigates the browser at the container-internal origin
+instead — but the stack was already generated for the `localhost:<port>`
+origin, so the origin Playwright uses is not the one the backend and Keycloak
+were configured with, and **every** spec in the suite currently fails on
+origin discipline. This is a known wiring gap, not a mistake on your part, and
+there is no supported workaround today; #896 tracks the fix. Run the suite from
+a host shell that can reach the published port until it lands.
+
 Same isolation recipe as the smoke script (unique `-p`/port, full `down -v`
 teardown on exit including on failure), plus: seeds one site/target/
 (shared) credential via the local-auth API so the Start-a-Scan wizard has

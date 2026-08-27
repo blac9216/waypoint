@@ -24,7 +24,8 @@ deploy/config.example/
 │   ├── keycloak-backend-client-secret       # waypoint-backend realm client secret
 │   ├── dev-admin-password                   # development-only Keycloak user (issue #846)
 │   └── master.key                           # AES-256-GCM envelope key (issue #405, ADR-0005)
-│                                            # -- OPERATOR-PROVIDED: no generator creates it
+│                                            # -- OPERATOR-PROVIDED, production only (both dev
+│                                            #    paths generate their own; see below)
 ├── tls/
 │   └── tls.crt                              # operator-provided certificate (production only)
 └── local-auth/
@@ -44,17 +45,27 @@ prove a key file carries no embedded secret). Real deployments place their
 own key at `deploy/config/tls/tls.key`, alongside `tls.crt`, matching
 `deploy/compose.yaml`'s `tls-key-file` anchor.
 
-**The master key is the one entry above that no generator produces.**
-`init-config.sh` and `--mode persistent` create the seven `secrets/*`
-password files only; `deploy/config/secrets/master.key` is operator-supplied
-material, and `deploy/compose.yaml`'s bind for it (`source:
-./config/secrets/master.key`, `target: /run/secrets/waypoint-master-key`)
-ships commented out until the operator creates the file. The only automatic
-master key in this repo is agent-mode's: `--mode agent --slug SLUG` writes a
-random one to `deploy/.generated/<slug>/secrets/waypoint-master-key` (named
-after its in-container target) and mounts it in the override it generates.
-That path is throwaway per-slug state and never appears under
-`deploy/config/`.
+**The master key is the one entry above that no generator writes into
+`deploy/config/secrets/`.** `init-config.sh` and `--mode persistent` create the
+seven `secrets/*` password files only; the file under `deploy/config/secrets/`
+is operator-supplied material, and `deploy/compose.yaml`'s bind for it
+(`source: ./config/secrets/master.key`, `target:
+/run/secrets/waypoint-master-key`) ships commented out until the operator
+creates the file. Only the `target` name is load-bearing -- the host-side
+filename is the operator's choice, and `deploy/README.md` uses
+`waypoint-master-key` on both sides so it matches what the dev paths generate.
+
+Both dev paths do provision a master key automatically, just never under
+`deploy/config/`:
+`--mode agent --slug SLUG` writes a random one to
+`deploy/.generated/<slug>/secrets/waypoint-master-key` (named after its
+in-container target) and mounts it in the override it generates — throwaway
+per-slug state — while `--mode persistent` gets one from
+`compose.override.example.yaml`'s `dev-bootstrap` service, generated into the
+`dev-secrets` named volume that is mounted read-only at `/run/secrets` on
+`backend`, `compliance-runner` and `download-runner`. So the operator-supplied
+file is a **production**-only step; see `deploy/README.md`, "Production only:
+secrets master key".
 
 Real generation:
 
