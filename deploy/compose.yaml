@@ -38,7 +38,20 @@
 # `compose.override.example.yaml` to that name to opt in. See
 # deploy/README.md.
 
-name: waypoint-dev
+# Issue #885: this file is the PRODUCTION base (see the header comment
+# above) -- a real deployment stamping "-dev" onto every network/volume/
+# container name it creates was an operator-facing oddity left over from
+# before #845 split production from the dev override. `waypoint` alone is
+# the base's canonical project identity; concurrent isolated bring-ups
+# still override it with `-p` (docs/testing.md's isolation recipe) and the
+# persistent human dev loop's helper (deploy/scripts/generate-dev-stack.sh
+# --mode persistent) passes the same default explicitly rather than relying
+# on this file's own name. A plain, un-`-p`'d `docker compose up -d` from
+# any checkout now lands in the shared `waypoint` project instead of
+# `waypoint-dev` -- still a collision hazard between two such unisolated
+# bring-ups on one host (unchanged from before this rename), but no longer
+# a misleadingly dev-flavored name on a real appliance.
+name: waypoint
 
 # ── Operator-editable configuration (issue #845) ───────────────────────────
 # The handful of values a real deployment is expected to change. Edit these

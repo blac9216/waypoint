@@ -853,7 +853,7 @@ PROBE=wp-$SLUG-sse-probe                     # throwaway probe container
 DC="docker compose -p wp-$SLUG"
 ```
 
-(On an unisolated default stack those are `NGINX=waypoint-dev-nginx-1`,
+(On an unisolated default stack those are `NGINX=waypoint-nginx-1`,
 `PORT=8443`, `DC="docker compose"` — but this repo asks you to isolate, so
 prefer the above.)
 

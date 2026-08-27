@@ -261,6 +261,7 @@ api_get_body() { net_curl -H "Authorization: Bearer ${ADMIN_TOKEN}" "${NET_BASE}
 api_post() { net_curl -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_TOKEN}" -d "$2" "${NET_BASE}$1"; }
 api_post_body() { net_curl -X POST -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_TOKEN}" -d "$2" "${NET_BASE}$1"; }
 api_delete() { net_curl -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer ${ADMIN_TOKEN}" "${NET_BASE}$1"; }
+api_put() { net_curl -o /dev/null -w '%{http_code}' -X PUT -H "Content-Type: application/json" -H "Authorization: Bearer ${ADMIN_TOKEN}" -d "$2" "${NET_BASE}$1"; }
 
 # --- 1. All services healthy (already asserted above via the wait loop) --
 
@@ -434,6 +435,58 @@ if [[ -n "${ADMIN_TOKEN}" ]]; then
 		'{"name":"smoke-svc-cred","credential_type":"ssh","owner":"shared","secret":"invented-smoke-canary-9f3a"}')" # gitleaks:allow — invented smoke canary, never a real secret
 	CREDENTIAL_ID="$(printf '%s' "${CRED_RESPONSE}" | json_field id 2>/dev/null || true)"
 	if [[ -n "${CREDENTIAL_ID}" ]]; then ok "service credential created (${CREDENTIAL_ID})"; else bad "credential creation failed: ${CRED_RESPONSE}"; fi
+
+	# Issue #733/epic #726 wave 2 (component-scope credential-purpose
+	# resolution): a scan run now 400s with credential_binding_gaps unless
+	# every scoped target resolves the "srg-ssh" purpose via an assigned
+	# binding, a credential_override, or an ad_hoc credential (this smoke
+	# test's own step 8 already supplies the latter, which is why only the
+	# service-credential-path steps need this). Bind the just-created service
+	# credential to the just-created target for that purpose -- same shape as
+	# 6b's profile-row seeding: this is environment seeding for a real,
+	# already-shipped product requirement, not a workaround for one.
+	if [[ -n "${TARGET_ID}" && -n "${CREDENTIAL_ID}" ]]; then
+		BIND_CODE="$(api_put "/api/v1/targets/${TARGET_ID}/credential-bindings/srg-ssh" "{\"credential_ref\":\"${CREDENTIAL_ID}\"}")"
+		if [[ "${BIND_CODE}" == "200" ]]; then ok "srg-ssh credential binding set on ${TARGET_ID}"; else bad "srg-ssh credential binding failed on ${TARGET_ID}: ${BIND_CODE}"; fi
+	fi
+else
+	bad "skipped (no admin token)"
+fi
+
+# --- 6b. Provision a compliance-content profile row (issue #882) ---------
+#
+# Issue #639 (RunCreationService.CreateScanRunAsync) requires every scan
+# run's scope to name an installed profiles.id -- a real installed row comes
+# from POST /compliance-content/pull, which clones a real InSpec content
+# repository. This fresh, isolated stack deliberately never runs that (no
+# network egress assumed, and the compliance-profiles/compliance-content
+# volumes are intentionally pre-seeded empty above -- "a legitimate,
+# disclosed stand-in" per that comment), so a real pull is not an option
+# here. RunCreationService only checks _profiles.GetAsync(profileId) at run-
+# creation time -- it never stats the on-disk profile directory itself (that
+# happens later, inside the claimed job) -- so a directly-inserted `profiles`
+# row is sufficient to get past the scope.profile_id gate and exercise the
+# real enqueue/claim/fail path steps 7-9/12 assert. The scan job's OWN
+# terminal failure then comes from whichever the runner hits first: the
+# still-invented-unreachable target, or the (also legitimately empty)
+# profile directory -- either way a genuine "failed"/"auth-failed" terminal
+# state, which is exactly the signal those steps check for.
+log "6b. Provisioning a throwaway compliance-content profile row for scope.profile_id"
+PROFILE_ID=""
+if [[ -n "${ADMIN_TOKEN}" ]]; then
+	# psql -tAc still emits an "INSERT 0 1" command-completion tag alongside
+	# the RETURNING row for an INSERT (tuples-only only suppresses column
+	# headers/row-count footers, not that tag) -- verified live: a blind
+	# `tr -d '[:space:]'` concatenated it straight onto the UUID, which the
+	# backend then rejected as an invalid Guid. Extract just the UUID shape
+	# instead of trusting psql's output to be exactly one bare value.
+	PROFILE_ID="$(${DC} exec -T postgres psql -U "${POSTGRES_USER:-waypoint}" -d "${POSTGRES_DB:-waypoint}" -tAc "
+		INSERT INTO profiles (profile_key, name, commit, state)
+		VALUES ('smoke-test-profile', 'Smoke Test Invented Profile', 'smoke0000000000000000000000000000000000', 'current')
+		ON CONFLICT (profile_key) DO UPDATE SET updated_at = now()
+		RETURNING id;
+	" 2>/dev/null | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)"
+	if [[ -n "${PROFILE_ID}" ]]; then ok "profile row provisioned (${PROFILE_ID})"; else bad "profile row provisioning failed"; fi
 else
 	bad "skipped (no admin token)"
 fi
@@ -442,9 +495,9 @@ fi
 
 log "7. Service-credential scan against an invented unreachable target"
 SERVICE_RUN_ID=""
-if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" ]]; then
+if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" && -n "${PROFILE_ID}" ]]; then
 	SCAN_RESPONSE="$(api_post_body /api/v1/runs \
-		"{\"run_type\":\"scan\",\"scope\":\"{\\\"site_id\\\":\\\"${SITE_ID}\\\",\\\"target_ids\\\":[\\\"${TARGET_ID}\\\"]}\"}")"
+		"{\"run_type\":\"scan\",\"scope\":\"{\\\"site_id\\\":\\\"${SITE_ID}\\\",\\\"target_ids\\\":[\\\"${TARGET_ID}\\\"],\\\"profile_id\\\":\\\"${PROFILE_ID}\\\"}\"}")"
 	SERVICE_RUN_ID="$(printf '%s' "${SCAN_RESPONSE}" | json_field run_id 2>/dev/null || true)"
 	if [[ -n "${SERVICE_RUN_ID}" ]]; then
 		ok "service-credential scan run queued (${SERVICE_RUN_ID})"
@@ -473,9 +526,9 @@ fi
 
 log "8. Personal-credential (ad hoc) scan against an invented unreachable target"
 PERSONAL_RUN_ID=""
-if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" ]]; then
+if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" && -n "${PROFILE_ID}" ]]; then
 	PERSONAL_SCAN_RESPONSE="$(api_post_body /api/v1/runs \
-		"{\"run_type\":\"scan\",\"scope\":\"{\\\"site_id\\\":\\\"${SITE_ID}\\\",\\\"target_ids\\\":[\\\"${TARGET_ID}\\\"]}\",\"credential\":{\"kind\":\"personal\",\"username\":\"smoke-operator@example.internal\",\"secret\":\"invented-personal-canary-b7e1\"}}")" # gitleaks:allow — invented personal canary, never a real secret
+		"{\"run_type\":\"scan\",\"scope\":\"{\\\"site_id\\\":\\\"${SITE_ID}\\\",\\\"target_ids\\\":[\\\"${TARGET_ID}\\\"],\\\"profile_id\\\":\\\"${PROFILE_ID}\\\"}\",\"credential\":{\"kind\":\"personal\",\"username\":\"smoke-operator@example.internal\",\"secret\":\"invented-personal-canary-b7e1\"}}")" # gitleaks:allow — invented personal canary, never a real secret
 	PERSONAL_RUN_ID="$(printf '%s' "${PERSONAL_SCAN_RESPONSE}" | json_field run_id 2>/dev/null || true)"
 	if [[ -n "${PERSONAL_RUN_ID}" ]]; then
 		ok "personal-credential scan run queued (${PERSONAL_RUN_ID})"
@@ -515,12 +568,16 @@ fi
 # runner race possible. Resume afterward so the (now-cancelled) run doesn't
 # linger paused for the rest of the script/teardown.
 log "9. Cancellation mid-run (run paused first so the job cannot be claimed before cancel)"
-if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" ]]; then
+if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" && -n "${PROFILE_ID}" ]]; then
 	CANCEL_TARGET_RESPONSE="$(api_post_body "/api/v1/sites/${SITE_ID}/targets" \
 		'{"kind":"ssh","name":"srg-cancel-01","connection":{"host":"srg-cancel-01.example.internal"}}')"
 	CANCEL_TARGET_ID="$(printf '%s' "${CANCEL_TARGET_RESPONSE}" | json_field id 2>/dev/null || true)"
+	# Same seeding as step 6's -- see that step's comment. Best-effort (not a
+	# separate assertion): a real failure here surfaces as this step's own
+	# scan-run/terminal-state checks below failing instead.
+	[[ -n "${CANCEL_TARGET_ID}" && -n "${CREDENTIAL_ID}" ]] && api_put "/api/v1/targets/${CANCEL_TARGET_ID}/credential-bindings/srg-ssh" "{\"credential_ref\":\"${CREDENTIAL_ID}\"}" >/dev/null
 	CANCEL_SCAN_RESPONSE="$(api_post_body /api/v1/runs \
-		"{\"run_type\":\"scan\",\"scope\":\"{\\\"site_id\\\":\\\"${SITE_ID}\\\",\\\"target_ids\\\":[\\\"${CANCEL_TARGET_ID}\\\"]}\"}")"
+		"{\"run_type\":\"scan\",\"scope\":\"{\\\"site_id\\\":\\\"${SITE_ID}\\\",\\\"target_ids\\\":[\\\"${CANCEL_TARGET_ID}\\\"],\\\"profile_id\\\":\\\"${PROFILE_ID}\\\"}\"}")"
 	CANCEL_RUN_ID="$(printf '%s' "${CANCEL_SCAN_RESPONSE}" | json_field run_id 2>/dev/null || true)"
 	if [[ -n "${CANCEL_RUN_ID}" ]]; then
 		# Pause immediately -- before the dispatcher's next claim tick can reach
@@ -634,7 +691,7 @@ fi
 # --- 12. Runner replica scale-out claims without duplication -------------
 
 log "12. Scaling compliance-runner to 2 replicas and confirming no duplicate claim"
-if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" ]]; then
+if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${PROFILE_ID}" ]]; then
 	${DC} up -d --scale compliance-runner=2 --no-recreate
 	sleep 5
 	REPLICA_COUNT="$(${DC} ps -q compliance-runner | wc -l | tr -d ' ')"
@@ -648,12 +705,16 @@ if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" ]]; then
 		TR="$(api_post_body "/api/v1/sites/${SITE_ID}/targets" \
 			"{\"kind\":\"ssh\",\"name\":\"srg-scale-${n}\",\"connection\":{\"host\":\"srg-scale-${n}.example.internal\"}}")"
 		TID="$(printf '%s' "${TR}" | json_field id 2>/dev/null || true)"
-		[[ -n "${TID}" ]] && SCALE_TARGET_IDS+=("\"${TID}\"")
+		if [[ -n "${TID}" ]]; then
+			SCALE_TARGET_IDS+=("\"${TID}\"")
+			# Same seeding as step 6's -- see that step's comment.
+			[[ -n "${CREDENTIAL_ID}" ]] && api_put "/api/v1/targets/${TID}/credential-bindings/srg-ssh" "{\"credential_ref\":\"${CREDENTIAL_ID}\"}" >/dev/null
+		fi
 	done
 	if [[ "${#SCALE_TARGET_IDS[@]}" -gt 0 ]]; then
 		JOINED_IDS="$(IFS=,; echo "${SCALE_TARGET_IDS[*]}")"
 		SCALE_RUN_RESPONSE="$(api_post_body /api/v1/runs \
-			"{\"run_type\":\"scan\",\"scope\":\"{\\\"site_id\\\":\\\"${SITE_ID}\\\",\\\"target_ids\\\":[${JOINED_IDS//\"/\\\"}]}\"}")"
+			"{\"run_type\":\"scan\",\"scope\":\"{\\\"site_id\\\":\\\"${SITE_ID}\\\",\\\"target_ids\\\":[${JOINED_IDS//\"/\\\"}],\\\"profile_id\\\":\\\"${PROFILE_ID}\\\"}\"}")"
 		SCALE_RUN_ID="$(printf '%s' "${SCALE_RUN_RESPONSE}" | json_field run_id 2>/dev/null || true)"
 		if [[ -n "${SCALE_RUN_ID}" ]]; then
 			sleep 15

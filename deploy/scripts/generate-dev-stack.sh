@@ -155,7 +155,12 @@ if [[ "${MODE}" == "agent" ]]; then
 else
 	PORT="${PORT:-8443}"
 	SUBNET="${SUBNET:-192.168.240.0/24}"
-	PROJECT="waypoint-dev"
+	# Issue #885: matches compose.yaml's own `name: waypoint` -- the base no
+	# longer stamps a "-dev" identity onto a real deployment, and this
+	# script's persistent mode is the ONE recurring human dev loop against
+	# that same base, so it uses the identical project name rather than a
+	# second, divergent default.
+	PROJECT="waypoint"
 	STATE_DIR="${DEPLOY_DIR}/config"
 	PUBLIC_URL="${PUBLIC_URL:-https://localhost:${PORT}}"
 fi
@@ -311,8 +316,20 @@ if [[ "${MODE}" == "agent" ]]; then
 		echo "error: could not parse a hostname out of --public-url '${PUBLIC_URL}'." >&2
 		exit 1
 	}
-	if [[ -f "${TLS_CERT}" && -f "${TLS_KEY}" ]]; then
+	# Issue #847 (review finding on the pre-generator staging this replaced,
+	# https://github.com/blac9216/waypoint/issues/847): a PARTIAL pair -- one
+	# file present/non-empty, the other missing or empty -- must never be
+	# silently completed. Regenerating both from scratch would overwrite the
+	# survivor, which is exactly the "existing secrets/TLS are reused and
+	# never overwritten" acceptance criterion applied to a key pair instead
+	# of a single file. Reuse requires BOTH files non-empty; anything else
+	# that isn't "neither exists" fails closed instead of guessing.
+	if [[ -s "${TLS_CERT}" && -s "${TLS_KEY}" ]]; then
 		echo "TLS: reusing existing self-signed pair -- ${TLS_CERT}"
+	elif [[ -s "${TLS_CERT}" || -s "${TLS_KEY}" ]]; then
+		echo "error: partial TLS pair at ${TLS_DIR} -- only one of tls.crt/tls.key exists (or one is empty)." >&2
+		echo "  Refusing to regenerate over the surviving file. Remove the stray file yourself, or restore its pair, then re-run." >&2
+		exit 1
 	else
 		SAN="DNS:${TLS_HOST}"
 		if [[ "${TLS_HOST}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
