@@ -112,11 +112,13 @@ public sealed class RunsController : ControllerBase
 		Enum.TryParse(User.FindFirstValue(WaypointClaimTypes.Role), out WaypointRole role) && role >= minimum;
 
 	/// <summary>
-	/// Enforces docs/api-contract.md's pause/resume/abort scope: "Operator+ (own
-	/// runs), Admin any." Admin bypasses the check entirely. A non-Admin caller must
-	/// match the run's recorded initiator; a run with no recorded initiator
-	/// (<see cref="RunQueueState.InitiatedBy"/> null — system/scheduled run) is
-	/// Admin-only, since there is no owner to compare against.
+	/// Enforces docs/api-contract.md's pause/resume/abort scope: "Cyber+ (own
+	/// runs), Admin any" (PR #819's role-matrix reconciliation; issue #757's "Cyber
+	/// controls owned live scans" owner decision). Admin bypasses the check entirely.
+	/// A non-Admin caller must match the run's recorded initiator; a run with no
+	/// recorded initiator (<see cref="RunQueueState.InitiatedBy"/> null —
+	/// system/scheduled run) is Admin-only, since there is no owner to compare
+	/// against.
 	///
 	/// Shared with <see cref="JobsController"/>'s per-job cancel (issue #294), which
 	/// applies the same "own runs, Admin any" scope to the run owning the job being
@@ -755,10 +757,12 @@ public sealed class RunsController : ControllerBase
 	/// <see cref="IJobControlRepository.RetryJobAsync"/>. <c>jobs.stage</c> is preserved
 	/// untouched, so the next claim resumes the pipeline at the marker rather than
 	/// restarting it (ADR-0012 §5), and the action is recorded to <c>audit_log</c>
-	/// (<c>event_type = 'job.retried'</c>).
+	/// (<c>event_type = 'job.retried'</c>). Cyber+ per docs/api-contract.md's role
+	/// matrix (PR #819; issue #757's "Cyber controls owned live scans" decision) --
+	/// same floor as <see cref="PauseRun"/>/<see cref="JobsController.CancelJob"/>.
 	/// </summary>
 	[HttpPost("{runId:guid}/jobs/{jobId:guid}/retry")]
-	[RequireOperatorRole]
+	[RequireCyberRole]
 	[ProducesResponseType(typeof(JobRetryResponse), StatusCodes.Status200OK)]
 	public async Task<ActionResult<JobRetryResponse>> RetryJob(Guid runId, Guid jobId, CancellationToken cancellationToken)
 	{
@@ -791,6 +795,145 @@ public sealed class RunsController : ControllerBase
 			default:
 				return Ok(new JobRetryResponse(jobId.ToString(), JobStates.Queued, job.Stage));
 		}
+	}
+
+	/// <summary>Bounded, audited bulk cancel over an explicit or filter-resolved job id set (issue #757). See <see cref="ResolveBulkJobIdsAsync"/> for the shared resolution/bound logic and <see cref="MapBulkOutcome{TOutcome}"/> for the wire vocabulary.</summary>
+	[HttpPost("{id:guid}/jobs/bulk-cancel")]
+	[RequireCyberRole]
+	[ProducesResponseType(typeof(BulkJobActionResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<BulkJobActionResponse>> BulkCancelJobs(Guid id, [FromBody] BulkJobActionRequest request, CancellationToken cancellationToken)
+	{
+		RunQueueState? state = await _repository.GetRunQueueStateAsync(id, cancellationToken).ConfigureAwait(false);
+		if (state is null)
+		{
+			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+		}
+
+		EnforceRunOwnership(state);
+
+		IReadOnlyList<Guid> jobIds = await ResolveBulkJobIdsAsync(id, request, cancellationToken).ConfigureAwait(false);
+		string actor = User.GetRequiredUsername();
+		BulkJobActionResult<JobCancelOutcome> result = await _repository.BulkCancelJobsAsync(id, jobIds, actor, cancellationToken).ConfigureAwait(false);
+
+		return Ok(new BulkJobActionResponse(
+			jobIds.Count,
+			result.Items.Select(item => new BulkJobActionItemResponse(item.JobId.ToString(), MapBulkOutcome(item.Outcome))).ToArray()));
+	}
+
+	/// <summary>Bounded, audited bulk retry over an explicit or filter-resolved job id set (issue #757). See <see cref="ResolveBulkJobIdsAsync"/>/<see cref="MapBulkOutcome{TOutcome}"/>.</summary>
+	[HttpPost("{id:guid}/jobs/bulk-retry")]
+	[RequireCyberRole]
+	[ProducesResponseType(typeof(BulkJobActionResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<BulkJobActionResponse>> BulkRetryJobs(Guid id, [FromBody] BulkJobActionRequest request, CancellationToken cancellationToken)
+	{
+		RunQueueState? state = await _repository.GetRunQueueStateAsync(id, cancellationToken).ConfigureAwait(false);
+		if (state is null)
+		{
+			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+		}
+
+		EnforceRunOwnership(state);
+
+		IReadOnlyList<Guid> jobIds = await ResolveBulkJobIdsAsync(id, request, cancellationToken).ConfigureAwait(false);
+		string actor = User.GetRequiredUsername();
+		BulkJobActionResult<JobRetryOutcome> result = await _repository.BulkRetryJobsAsync(id, jobIds, actor, cancellationToken).ConfigureAwait(false);
+
+		return Ok(new BulkJobActionResponse(
+			jobIds.Count,
+			result.Items.Select(item => new BulkJobActionItemResponse(item.JobId.ToString(), MapBulkOutcome(item.Outcome))).ToArray()));
+	}
+
+	/// <summary>
+	/// Bound applied to every bulk action (issue #757 AC "bounded -- no unbounded 'all
+	/// matching' execution"). Matches the paged component-job list's own max page size
+	/// (<see cref="ListComponentJobs"/>'s <c>MaxLimit</c>) so a caller who already
+	/// understands that bound is not surprised by a second, different one here.
+	/// </summary>
+	private const int BulkActionMaxItems = 500;
+
+	/// <summary>
+	/// Resolves <see cref="BulkJobActionRequest"/> to an explicit, bounded job id list
+	/// shared by <see cref="BulkCancelJobs"/>/<see cref="BulkRetryJobs"/>. Exactly one
+	/// of <see cref="BulkJobActionRequest.JobIds"/>/<see cref="BulkJobActionRequest.Filter"/>
+	/// must be present (400 otherwise -- an ambiguous or empty request is rejected
+	/// before anything is resolved, let alone mutated). A filter is resolved via
+	/// <see cref="IComponentJobRepository.ResolveJobIdsAsync"/>, which itself fetches
+	/// one row past <see cref="BulkActionMaxItems"/> to detect an over-bound match set
+	/// without truncating it silently -- that case is a 400 here, not a
+	/// partially-applied bulk action. Explicit <c>job_ids</c> are bound-checked the
+	/// same way (a request naming more than the bound ids is also 400, not
+	/// silently clipped to the first N).
+	/// </summary>
+	private async Task<IReadOnlyList<Guid>> ResolveBulkJobIdsAsync(Guid runId, BulkJobActionRequest request, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(request);
+
+		bool hasIds = request.JobIds is { Count: > 0 };
+		bool hasFilter = request.Filter is not null;
+		if (hasIds == hasFilter)
+		{
+			throw ApiException.Validation(
+				"Exactly one of job_ids or filter is required.",
+				"Supply either an explicit, non-empty 'job_ids' array or a 'filter' object -- not both, not neither.");
+		}
+
+		if (hasIds)
+		{
+			if (request.JobIds!.Count > BulkActionMaxItems)
+			{
+				throw new ApiException(
+					System.Net.HttpStatusCode.BadRequest, "too_many_matches",
+					"Too many job_ids for one bulk action.",
+					$"'job_ids' named {request.JobIds.Count} entries; the bound is {BulkActionMaxItems}. Split the request into smaller batches.");
+			}
+
+			List<Guid> ids = [];
+			foreach (string raw in request.JobIds)
+			{
+				if (!Guid.TryParse(raw, out Guid parsed))
+				{
+					throw ApiException.Validation("job_ids contains an invalid id.", $"'{raw}' is not a valid job id.");
+				}
+
+				ids.Add(parsed);
+			}
+
+			return ids;
+		}
+
+		BulkJobActionFilterRequest filterRequest = request.Filter!;
+		ComponentJobFilter filter = MapComponentJobFilter(
+			filterRequest.State is { Count: > 0 } states ? string.Join(',', states) : null,
+			filterRequest.Priority is { Count: > 0 } priorities ? string.Join(',', priorities) : null,
+			filterRequest.ComponentKind is { Count: > 0 } kinds ? string.Join(',', kinds) : null,
+			filterRequest.Search);
+
+		IReadOnlyList<Guid> resolved = await _componentJobs.ResolveJobIdsAsync(runId, filter, BulkActionMaxItems, cancellationToken).ConfigureAwait(false);
+		if (resolved.Count > BulkActionMaxItems)
+		{
+			throw new ApiException(
+				System.Net.HttpStatusCode.BadRequest, "too_many_matches",
+				"The filter matched too many jobs for one bulk action.",
+				$"The filter matched more than {BulkActionMaxItems} jobs. Narrow state/priority/component_kind/search, or page explicit job_ids instead.");
+		}
+
+		return resolved;
+	}
+
+	/// <summary>Maps either per-item outcome enum to the wire vocabulary <see cref="BulkJobActionItemResponse.Outcome"/> uses -- the same string values <see cref="JobCancelResponse"/>/<see cref="JobRetryResponse"/> already emit for the singular actions, so a client does not need two vocabularies for one concept.</summary>
+	private static string MapBulkOutcome<TOutcome>(TOutcome outcome) where TOutcome : struct, Enum
+	{
+		return outcome switch
+		{
+			JobCancelOutcome.Cancelled => "cancelled",
+			JobCancelOutcome.CancelRequested => "cancel_requested",
+			JobCancelOutcome.NotCancellable => "not_cancellable",
+			JobCancelOutcome.NotFound => "not_found",
+			JobRetryOutcome.Retried => JobStates.Queued,
+			JobRetryOutcome.NotFailed => "not_retryable",
+			JobRetryOutcome.NotFound => "not_found",
+			_ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, "Unmapped bulk job outcome."),
+		};
 	}
 
 	/// <summary>
@@ -908,11 +1051,12 @@ public sealed class RunsController : ControllerBase
 		return Ok(rows);
 	}
 
-	/// <summary>Pause dispatch for a run. Operator+ (own runs), Admin any — see
-	/// <see cref="EnforceRunOwnership"/>.
+	/// <summary>Pause dispatch for a run. Cyber+ (own runs), Admin any — see
+	/// <see cref="EnforceRunOwnership"/> and docs/api-contract.md's role matrix
+	/// (PR #819; issue #757's "Cyber controls owned live scans" owner decision).
 	/// </summary>
 	[HttpPost("{id:guid}/pause")]
-	[RequireOperatorRole]
+	[RequireCyberRole]
 	[ProducesResponseType(typeof(RunActionResponse), StatusCodes.Status200OK)]
 	public async Task<ActionResult<RunActionResponse>> PauseRun(Guid id, CancellationToken cancellationToken)
 	{
@@ -929,11 +1073,12 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Resume dispatch for a paused run. Operator+ (own runs), Admin any — see
-	/// <see cref="EnforceRunOwnership"/>.
+	/// Resume dispatch for a paused run. Cyber+ (own runs), Admin any — see
+	/// <see cref="EnforceRunOwnership"/> and docs/api-contract.md's role matrix
+	/// (PR #819; issue #757's "Cyber controls owned live scans" owner decision).
 	/// </summary>
 	[HttpPost("{id:guid}/resume")]
-	[RequireOperatorRole]
+	[RequireCyberRole]
 	[ProducesResponseType(typeof(RunActionResponse), StatusCodes.Status200OK)]
 	public async Task<ActionResult<RunActionResponse>> ResumeRun(Guid id, CancellationToken cancellationToken)
 	{
@@ -950,11 +1095,12 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
-	/// Abort a run. Operator+ (own runs), Admin any — see
-	/// <see cref="EnforceRunOwnership"/>.
+	/// Abort a run. Cyber+ (own runs), Admin any — see
+	/// <see cref="EnforceRunOwnership"/> and docs/api-contract.md's role matrix
+	/// (PR #819; issue #757's "Cyber controls owned live scans" owner decision).
 	/// </summary>
 	[HttpPost("{id:guid}/abort")]
-	[RequireOperatorRole]
+	[RequireCyberRole]
 	[ProducesResponseType(typeof(RunActionResponse), StatusCodes.Status200OK)]
 	public async Task<ActionResult<RunActionResponse>> AbortRun(Guid id, CancellationToken cancellationToken)
 	{

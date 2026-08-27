@@ -1548,6 +1548,92 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		return JobRetryOutcome.Retried;
 	}
 
+	/// <summary>Issue #757 -- see <see cref="IJobControlRepository.BulkCancelJobsAsync"/>.</summary>
+	public async Task<BulkJobActionResult<JobCancelOutcome>> BulkCancelJobsAsync(
+		Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(jobIds);
+		ArgumentException.ThrowIfNullOrWhiteSpace(actor);
+
+		List<BulkJobItemResult<JobCancelOutcome>> results = new(jobIds.Count);
+		Dictionary<JobCancelOutcome, int> tally = [];
+		foreach (Guid jobId in jobIds)
+		{
+			// Scope to this run BEFORE attempting the cancel -- a job id belonging to a
+			// different run must never be touched under this run's authority, same rule
+			// RetryJob (the singular HTTP action) already enforces via GetJobAsync.
+			JobSummary? job = await GetJobAsync(jobId, cancellationToken).ConfigureAwait(false);
+			JobCancelOutcome outcome = job is null || job.RunId != runId
+				? JobCancelOutcome.NotFound
+				: await CancelJobAsync(jobId, cancellationToken).ConfigureAwait(false);
+
+			results.Add(new BulkJobItemResult<JobCancelOutcome>(jobId, outcome));
+			tally[outcome] = tally.GetValueOrDefault(outcome) + 1;
+		}
+
+		await WriteBulkAuditAsync("job.bulk_cancelled", runId, actor, jobIds.Count, tally, cancellationToken).ConfigureAwait(false);
+		LogBulkJobActionCompleted("job.bulk_cancelled", runId, jobIds.Count, actor);
+		return new BulkJobActionResult<JobCancelOutcome>(results);
+	}
+
+	/// <summary>Issue #757 -- see <see cref="IJobControlRepository.BulkRetryJobsAsync"/>.</summary>
+	public async Task<BulkJobActionResult<JobRetryOutcome>> BulkRetryJobsAsync(
+		Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(jobIds);
+		ArgumentException.ThrowIfNullOrWhiteSpace(actor);
+
+		List<BulkJobItemResult<JobRetryOutcome>> results = new(jobIds.Count);
+		Dictionary<JobRetryOutcome, int> tally = [];
+		foreach (Guid jobId in jobIds)
+		{
+			JobSummary? job = await GetJobAsync(jobId, cancellationToken).ConfigureAwait(false);
+			JobRetryOutcome outcome = job is null || job.RunId != runId
+				? JobRetryOutcome.NotFound
+				: await RetryJobAsync(jobId, actor, cancellationToken).ConfigureAwait(false);
+
+			results.Add(new BulkJobItemResult<JobRetryOutcome>(jobId, outcome));
+			tally[outcome] = tally.GetValueOrDefault(outcome) + 1;
+		}
+
+		// RetryJobAsync above already wrote one 'job.retried' row per successfully
+		// retried job -- this summary row is the bulk-level record (actor + full
+		// tally including conflicts), not a duplicate of those per-job rows.
+		await WriteBulkAuditAsync("job.bulk_retried", runId, actor, jobIds.Count, tally, cancellationToken).ConfigureAwait(false);
+		LogBulkJobActionCompleted("job.bulk_retried", runId, jobIds.Count, actor);
+		return new BulkJobActionResult<JobRetryOutcome>(results);
+	}
+
+	/// <summary>
+	/// Shared summary-audit writer for <see cref="BulkCancelJobsAsync"/>/
+	/// <see cref="BulkRetryJobsAsync"/> -- one row per bulk call, detail carries the
+	/// resolved id count and a <c>{ outcome: count }</c> tally so an auditor can see
+	/// how many of the N resolved jobs landed in each outcome without re-deriving it
+	/// from N per-item rows.
+	/// </summary>
+	private async Task WriteBulkAuditAsync<TOutcome>(
+		string eventType, Guid runId, string actor, int resolvedCount, Dictionary<TOutcome, int> tally, CancellationToken cancellationToken)
+		where TOutcome : struct, Enum
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand audit = new(
+			"""
+			INSERT INTO audit_log (event_type, actor, run_id, detail)
+			VALUES ($1, $2, $3, $4::jsonb)
+			""", connection);
+		audit.Parameters.AddWithValue(eventType);
+		audit.Parameters.AddWithValue(actor);
+		audit.Parameters.AddWithValue(runId);
+		audit.Parameters.AddWithValue(System.Text.Json.JsonSerializer.Serialize(new
+		{
+			run_id = runId,
+			resolved_count = resolvedCount,
+			outcomes = tally.ToDictionary(pair => pair.Key.ToString(), pair => pair.Value, StringComparer.Ordinal),
+		}));
+		await audit.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
 	public async Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken)
 	{
 		if (threshold <= 0)
@@ -2054,6 +2140,9 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 
 	[LoggerMessage(Level = LogLevel.Information, Message = "Job {JobId} retried by {Actor}")]
 	private partial void LogJobRetried(Guid jobId, string actor);
+
+	[LoggerMessage(Level = LogLevel.Information, Message = "Bulk action {EventType} on run {RunId}: {ResolvedCount} job(s) resolved, requested by {Actor}")]
+	private partial void LogBulkJobActionCompleted(string eventType, Guid runId, int resolvedCount, string actor);
 
 	[LoggerMessage(Level = LogLevel.Error, Message = "Credential {CredentialId} hit {Threshold} consecutive auth failures: {BlockedRunCount} run(s) and {BlockedJobCount} queued job(s) blocked")]
 	private partial void LogAuthFailureHalt(Guid credentialId, int threshold, int blockedRunCount, int blockedJobCount);

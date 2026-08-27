@@ -372,6 +372,64 @@ public sealed record JobRetryResponse(
 	string? Stage);
 
 /// <summary>
+/// Request body for <c>POST /api/v1/runs/{id}/jobs/bulk-cancel</c> and
+/// <c>bulk-retry</c> (issue #757). Exactly one of <see cref="JobIds"/> or
+/// <see cref="Filter"/> must be supplied (400 otherwise) -- a filter is resolved to
+/// explicit job ids SERVER-SIDE, bounded, before any mutation is attempted; there is
+/// no "apply to everything matching" mode that skips that bound. <see cref="Filter"/>
+/// shares the exact `state`/`priority`/`component_kind`/`search` vocabulary
+/// `GET /runs/{id}/component-jobs` accepts, as arrays rather than comma-joined query
+/// strings.
+/// </summary>
+public sealed record BulkJobActionRequest(
+	[property: JsonPropertyName("job_ids")]
+	IReadOnlyList<string>? JobIds,
+
+	[property: JsonPropertyName("filter")]
+	BulkJobActionFilterRequest? Filter);
+
+/// <summary>The array-valued sibling of the query-string filter <see cref="RunsController"/>'s <c>MapComponentJobFilter</c> parses.</summary>
+public sealed record BulkJobActionFilterRequest(
+	[property: JsonPropertyName("state")]
+	IReadOnlyList<string>? State,
+
+	[property: JsonPropertyName("priority")]
+	IReadOnlyList<short>? Priority,
+
+	[property: JsonPropertyName("component_kind")]
+	IReadOnlyList<string>? ComponentKind,
+
+	[property: JsonPropertyName("search")]
+	string? Search);
+
+/// <summary>
+/// One resolved job's outcome within <see cref="BulkJobActionResponse"/> -- honest
+/// per-item reporting, never collapsed into a single success/failure boolean (issue
+/// #757 AC "report partial conflicts honestly").
+/// </summary>
+public sealed record BulkJobActionItemResponse(
+	[property: JsonPropertyName("job_id")]
+	string JobId,
+
+	[property: JsonPropertyName("outcome")]
+	string Outcome);
+
+/// <summary>
+/// Response body for <c>POST /api/v1/runs/{id}/jobs/bulk-cancel</c> and
+/// <c>bulk-retry</c>. <see cref="ResolvedCount"/> is how many job ids the server
+/// resolved (from <see cref="BulkJobActionRequest.JobIds"/> directly, or from
+/// <see cref="BulkJobActionRequest.Filter"/>) before attempting anything --
+/// <see cref="Items"/> always has exactly that many entries, one per resolved job, in
+/// resolution order.
+/// </summary>
+public sealed record BulkJobActionResponse(
+	[property: JsonPropertyName("resolved_count")]
+	int ResolvedCount,
+
+	[property: JsonPropertyName("items")]
+	IReadOnlyList<BulkJobActionItemResponse> Items);
+
+/// <summary>
 /// Request body for <c>POST /api/v1/runs/{id}/resume-blocked</c> (ADR-0008, issue #291).
 /// <see cref="CredentialId"/> is the REPLACEMENT credential to swap onto the run's
 /// halted jobs -- not the id of the halted credential itself, which the server

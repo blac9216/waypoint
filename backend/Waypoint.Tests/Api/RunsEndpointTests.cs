@@ -555,44 +555,45 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 	}
 
-	[Theory]
-	[InlineData("Viewer")]
-	[InlineData("Cyber")]
-	public async Task PauseRun_WithRoleBelowOperator_Returns403(string role)
+	[Fact]
+	public async Task PauseRun_WithRoleBelowCyber_Returns403()
 	{
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/pause");
-		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
 
 		HttpResponseMessage response = await client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
 	}
 
+	/// <summary>
+	/// Issue #757's "Cyber controls owned live scans" owner decision lowered
+	/// pause/resume/abort's floor from Operator+ to Cyber+ (docs/api-contract.md's
+	/// role matrix, PR #819) -- a Cyber caller on their OWN run now succeeds.
+	/// </summary>
 	[Fact]
-	public async Task PauseRun_WithOperatorRole_ReturnsOk()
+	public async Task PauseRun_WithCyberRole_ReturnsOk()
 	{
 		// TestAuthHandler names every principal "test-user"; this run must be owned
-		// by the caller for a non-Admin Operator to act on it (issue #209).
+		// by the caller for a non-Admin Cyber caller to act on it (issue #209).
 		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
 		_factory.Repository.SetPauseResult(true);
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/pause");
-		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Cyber");
 
 		HttpResponseMessage response = await client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 	}
 
-	[Theory]
-	[InlineData("Viewer")]
-	[InlineData("Cyber")]
-	public async Task ResumeRun_WithRoleBelowOperator_Returns403(string role)
+	[Fact]
+	public async Task ResumeRun_WithRoleBelowCyber_Returns403()
 	{
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/resume");
-		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
 
 		HttpResponseMessage response = await client.SendAsync(request);
 
@@ -600,27 +601,25 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	}
 
 	[Fact]
-	public async Task ResumeRun_WithOperatorRole_ReturnsOk()
+	public async Task ResumeRun_WithCyberRole_ReturnsOk()
 	{
 		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", true, false, null, InitiatedBy: "test-user"));
 		_factory.Repository.SetResumeResult(true);
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/resume");
-		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Cyber");
 
 		HttpResponseMessage response = await client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 	}
 
-	[Theory]
-	[InlineData("Viewer")]
-	[InlineData("Cyber")]
-	public async Task AbortRun_WithRoleBelowOperator_Returns403(string role)
+	[Fact]
+	public async Task AbortRun_WithRoleBelowCyber_Returns403()
 	{
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/abort");
-		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
 
 		HttpResponseMessage response = await client.SendAsync(request);
 
@@ -628,12 +627,12 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	}
 
 	[Fact]
-	public async Task AbortRun_WithOperatorRole_ReturnsOk()
+	public async Task AbortRun_WithCyberRole_ReturnsOk()
 	{
 		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/abort");
-		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Cyber");
 
 		HttpResponseMessage response = await client.SendAsync(request);
 
@@ -641,14 +640,16 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	}
 
 	// -- issue #209: run-action ownership ------------------------------------
-	// docs/api-contract.md: "/runs/{id}/pause · /resume · /abort ... Operator+ (own
-	// runs), Admin any." TestAuthHandler names every principal "test-user".
+	// docs/api-contract.md: "/runs/{id}/pause · /resume · /abort ... Cyber+ (own
+	// runs), Admin any" (floor lowered from Operator+ by issue #757's "Cyber controls
+	// owned live scans" decision, PR #819). TestAuthHandler names every principal
+	// "test-user".
 
 	[Theory]
 	[InlineData("pause")]
 	[InlineData("resume")]
 	[InlineData("abort")]
-	public async Task RunAction_OwnerOperator_ReturnsOk(string action)
+	public async Task RunAction_OwnerCyber_ReturnsOk(string action)
 	{
 		// Paused must match the pre-condition each action needs to succeed: resume
 		// requires an already-paused run, pause/abort require an unpaused one.
@@ -657,7 +658,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		_factory.Repository.SetResumeResult(true);
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/{action}");
-		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Cyber");
 
 		HttpResponseMessage response = await client.SendAsync(request);
 
@@ -668,12 +669,12 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	[InlineData("pause")]
 	[InlineData("resume")]
 	[InlineData("abort")]
-	public async Task RunAction_NonOwnerOperator_Returns403(string action)
+	public async Task RunAction_NonOwnerCyber_Returns403(string action)
 	{
 		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", action == "resume", false, null, InitiatedBy: "another-user"));
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/{action}");
-		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Cyber");
 
 		HttpResponseMessage response = await client.SendAsync(request);
 
@@ -703,13 +704,13 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 	[InlineData("pause")]
 	[InlineData("resume")]
 	[InlineData("abort")]
-	public async Task RunAction_OperatorOnOwnerlessRun_Returns403(string action)
+	public async Task RunAction_CyberOnOwnerlessRun_Returns403(string action)
 	{
 		// InitiatedBy null simulates a system/scheduled run with no recorded initiator.
 		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", action == "resume", false, null, InitiatedBy: null));
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{_factory.RunId}/{action}");
-		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Cyber");
 
 		HttpResponseMessage response = await client.SendAsync(request);
 
@@ -733,6 +734,170 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		HttpResponseMessage response = await client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+	}
+
+	// -- issue #757: POST /runs/{id}/jobs/bulk-cancel · bulk-retry -----------
+	// Controller-level wiring against FakeJobQueueRepository/FakeComponentJobRepository;
+	// real per-item state-machine/audit correctness lives in
+	// Waypoint.Tests.Infrastructure.Postgres.BulkJobActionApiTests (real Postgres).
+
+	private async Task<HttpResponseMessage> PostBulkAsync(string action, Guid runId, object body, string role = "Cyber")
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/bulk-{action}")
+		{
+			Content = System.Net.Http.Json.JsonContent.Create(body),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+		return await client.SendAsync(request);
+	}
+
+	[Theory]
+	[InlineData("cancel")]
+	[InlineData("retry")]
+	public async Task BulkJobAction_UnknownRun_Returns404(string action)
+	{
+		HttpResponseMessage response = await PostBulkAsync(action, Guid.NewGuid(), new { job_ids = new[] { Guid.NewGuid().ToString() } });
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData("cancel")]
+	[InlineData("retry")]
+	public async Task BulkJobAction_BelowCyber_Returns403(string action)
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
+
+		HttpResponseMessage response = await PostBulkAsync(action, _factory.RunId, new { job_ids = new[] { Guid.NewGuid().ToString() } }, role: "Viewer");
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData("cancel")]
+	[InlineData("retry")]
+	public async Task BulkJobAction_NonOwnerCyber_Returns403(string action)
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "another-user"));
+
+		HttpResponseMessage response = await PostBulkAsync(action, _factory.RunId, new { job_ids = new[] { Guid.NewGuid().ToString() } });
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "forbidden");
+	}
+
+	[Theory]
+	[InlineData("cancel")]
+	[InlineData("retry")]
+	public async Task BulkJobAction_NeitherJobIdsNorFilter_Returns400(string action)
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
+
+		HttpResponseMessage response = await PostBulkAsync(action, _factory.RunId, new { });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Theory]
+	[InlineData("cancel")]
+	[InlineData("retry")]
+	public async Task BulkJobAction_BothJobIdsAndFilter_Returns400(string action)
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
+
+		string[] failedFilterStates = ["failed"];
+		HttpResponseMessage response = await PostBulkAsync(
+			action, _factory.RunId,
+			new { job_ids = new[] { Guid.NewGuid().ToString() }, filter = new { state = failedFilterStates } });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task BulkJobAction_TooManyExplicitJobIds_Returns400()
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
+		string[] jobIds = [.. Enumerable.Range(0, 501).Select(_ => Guid.NewGuid().ToString())];
+
+		HttpResponseMessage response = await PostBulkAsync("cancel", _factory.RunId, new { job_ids = jobIds });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "too_many_matches");
+	}
+
+	[Fact]
+	public async Task BulkJobAction_FilterMatchesTooMany_Returns400WithoutMutatingAnything()
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
+		_factory.ComponentJobs.ResolvedJobIds = [.. Enumerable.Range(0, 501).Select(_ => Guid.NewGuid())];
+		string[] queuedFilterStates = ["queued"];
+
+		HttpResponseMessage response = await PostBulkAsync("cancel", _factory.RunId, new { filter = new { state = queuedFilterStates } });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "too_many_matches");
+	}
+
+	[Fact]
+	public async Task BulkJobAction_MalformedFilter_Returns400()
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
+		string[] bogusFilterStates = ["bogus"];
+
+		HttpResponseMessage response = await PostBulkAsync("cancel", _factory.RunId, new { filter = new { state = bogusFilterStates } });
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task BulkCancelJobs_ExplicitJobIds_ForwardsToRepositoryAndMapsOutcomes()
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
+		Guid jobA = Guid.NewGuid();
+		Guid jobB = Guid.NewGuid();
+		_factory.Repository.NextBulkCancelResult = new BulkJobActionResult<JobCancelOutcome>(
+		[
+			new BulkJobItemResult<JobCancelOutcome>(jobA, JobCancelOutcome.Cancelled),
+			new BulkJobItemResult<JobCancelOutcome>(jobB, JobCancelOutcome.NotCancellable),
+		]);
+
+		HttpResponseMessage response = await PostBulkAsync("cancel", _factory.RunId, new { job_ids = new[] { jobA.ToString(), jobB.ToString() } });
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal(2, body.RootElement.GetProperty("resolved_count").GetInt32());
+		JsonElement items = body.RootElement.GetProperty("items");
+		Assert.Equal(2, items.GetArrayLength());
+		Assert.Equal("cancelled", items[0].GetProperty("outcome").GetString());
+		Assert.Equal("not_cancellable", items[1].GetProperty("outcome").GetString());
+		Assert.Equal([jobA, jobB], _factory.Repository.LastBulkCancelJobIds);
+	}
+
+	[Fact]
+	public async Task BulkRetryJobs_FilterResolvesJobIdsServerSide_BeforeMutation()
+	{
+		_factory.Repository.SetRun(_factory.RunId, new RunQueueState("running", false, false, null, InitiatedBy: "test-user"));
+		Guid jobA = Guid.NewGuid();
+		_factory.ComponentJobs.ResolvedJobIds = [jobA];
+		_factory.Repository.NextBulkRetryResult = new BulkJobActionResult<JobRetryOutcome>(
+		[
+			new BulkJobItemResult<JobRetryOutcome>(jobA, JobRetryOutcome.Retried),
+		]);
+		string[] failedFilterStates = ["failed"];
+
+		HttpResponseMessage response = await PostBulkAsync("retry", _factory.RunId, new { filter = new { state = failedFilterStates } });
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal(1, body.RootElement.GetProperty("resolved_count").GetInt32());
+		Assert.Equal("queued", body.RootElement.GetProperty("items")[0].GetProperty("outcome").GetString());
+		Assert.Equal(_factory.RunId, _factory.ComponentJobs.LastResolveRunId);
+		Assert.Equal(["failed"], _factory.ComponentJobs.LastResolveFilter!.States);
+		Assert.Equal([jobA], _factory.Repository.LastBulkRetryJobIds);
 	}
 
 	// -- 404 tests ----------------------------------------------------------
@@ -1518,6 +1683,20 @@ public sealed class FakeComponentJobRepository : IComponentJobRepository
 		LastListQuery = query;
 		return Task.FromResult(NextPage);
 	}
+
+	public Guid? LastResolveRunId { get; private set; }
+	public ComponentJobFilter? LastResolveFilter { get; private set; }
+	public int LastResolveMaxItems { get; private set; }
+	public IReadOnlyList<Guid> ResolvedJobIds { get; set; } = [];
+
+	public Task<IReadOnlyList<Guid>> ResolveJobIdsAsync(Guid runId, ComponentJobFilter filter, int maxItems, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		LastResolveRunId = runId;
+		LastResolveFilter = filter;
+		LastResolveMaxItems = maxItems;
+		return Task.FromResult(ResolvedJobIds);
+	}
 }
 
 /// <summary>
@@ -1749,6 +1928,28 @@ public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRe
 	{
 		_ = (jobId, actor, cancellationToken);
 		return Task.FromResult(JobRetryOutcome.Retried);
+	}
+
+	public BulkJobActionResult<JobCancelOutcome>? NextBulkCancelResult { get; set; }
+	public IReadOnlyList<Guid>? LastBulkCancelJobIds { get; private set; }
+
+	public Task<BulkJobActionResult<JobCancelOutcome>> BulkCancelJobsAsync(Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken)
+	{
+		_ = (runId, actor, cancellationToken);
+		LastBulkCancelJobIds = jobIds;
+		return Task.FromResult(NextBulkCancelResult ?? new BulkJobActionResult<JobCancelOutcome>(
+			[.. jobIds.Select(id => new BulkJobItemResult<JobCancelOutcome>(id, JobCancelOutcome.Cancelled))]));
+	}
+
+	public BulkJobActionResult<JobRetryOutcome>? NextBulkRetryResult { get; set; }
+	public IReadOnlyList<Guid>? LastBulkRetryJobIds { get; private set; }
+
+	public Task<BulkJobActionResult<JobRetryOutcome>> BulkRetryJobsAsync(Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken)
+	{
+		_ = (runId, actor, cancellationToken);
+		LastBulkRetryJobIds = jobIds;
+		return Task.FromResult(NextBulkRetryResult ?? new BulkJobActionResult<JobRetryOutcome>(
+			[.. jobIds.Select(id => new BulkJobItemResult<JobRetryOutcome>(id, JobRetryOutcome.Retried))]));
 	}
 
 	public Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, IReadOnlySet<string> allowedJobTypes, CancellationToken cancellationToken)

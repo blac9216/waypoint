@@ -331,6 +331,20 @@ public sealed class CatalogFakeJobQueueRepository : IJobControlRepository, IJobR
 		return Task.FromResult(JobCancelOutcome.Cancelled);
 	}
 
+	public Task<BulkJobActionResult<JobCancelOutcome>> BulkCancelJobsAsync(Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken)
+	{
+		_ = (runId, actor, cancellationToken);
+		return Task.FromResult(new BulkJobActionResult<JobCancelOutcome>(
+			[.. jobIds.Select(id => new BulkJobItemResult<JobCancelOutcome>(id, JobCancelOutcome.Cancelled))]));
+	}
+
+	public Task<BulkJobActionResult<JobRetryOutcome>> BulkRetryJobsAsync(Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken)
+	{
+		_ = (runId, actor, cancellationToken);
+		return Task.FromResult(new BulkJobActionResult<JobRetryOutcome>(
+			[.. jobIds.Select(id => new BulkJobItemResult<JobRetryOutcome>(id, JobRetryOutcome.Retried))]));
+	}
+
 	public Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken)
 	{
 		_ = (credentialId, threshold, cancellationToken);

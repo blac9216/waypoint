@@ -202,19 +202,24 @@ public sealed class EndpointRoleMatrixTests
 		["EventStreamController.GlobalStream"] = WaypointRole.Viewer,
 		["EventStreamController.RunStream"] = WaypointRole.Viewer,
 
-		// JobsController -- per-job cancel and upload-retry are Operator+ (own runs),
-		// Admin any (RunsController.EnforceRunOwnership, checked in-action -- see class
-		// doc comment); artifact download is Viewer+.
-		["JobsController.CancelJob"] = WaypointRole.Operator,
+		// JobsController -- per-job cancel is Cyber+ (own runs), Admin any
+		// (RunsController.EnforceRunOwnership, checked in-action -- see class doc
+		// comment); issue #757's "Cyber controls owned live scans" owner decision
+		// lowered this floor from Operator+ to match docs/api-contract.md's role
+		// matrix (PR #819). Upload-retry (a narrower STIG Manager re-upload action,
+		// not a job-state control) stays Operator+; artifact download is Viewer+.
+		["JobsController.CancelJob"] = WaypointRole.Cyber,
 		["JobsController.GetArtifact"] = WaypointRole.Viewer,
 		["JobsController.RetryUpload"] = WaypointRole.Operator,
 		["JobsController.GetUploadAttempts"] = WaypointRole.Viewer,
 
 		// RunsController -- CreateRun is Cyber+ at the attribute floor (remediation's
 		// additional Admin + confirmation gate is checked in-action, not attribute-level
-		// -- see class doc comment); reads Viewer+; pause/resume/abort/retry are
-		// Operator+ (own runs), Admin any (EnforceRunOwnership, in-action);
-		// resume-blocked (credential-swap-resume) is Admin.
+		// -- see class doc comment); reads Viewer+; pause/resume/abort/retry/bulk-*
+		// are Cyber+ (own runs), Admin any (EnforceRunOwnership, in-action) -- issue
+		// #757's "Cyber controls owned live scans" owner decision, matching
+		// docs/api-contract.md's role matrix (PR #819); resume-blocked
+		// (credential-swap-resume) is Admin.
 		["RunsController.CreateRun"] = WaypointRole.Cyber,
 		// Issues #733/#734 remainder: POST /runs/plan-preview shares CreateRun's Cyber+
 		// floor exactly (docs/api-contract.md's planned `/runs/plan-preview` row) -- it
@@ -229,7 +234,7 @@ public sealed class EndpointRoleMatrixTests
 		// and action authorization are distinct").
 		["RunsController.GetComponentJobCounts"] = WaypointRole.Viewer,
 		["RunsController.ListComponentJobs"] = WaypointRole.Viewer,
-		["RunsController.RetryJob"] = WaypointRole.Operator,
+		["RunsController.RetryJob"] = WaypointRole.Cyber,
 		["RunsController.GetArtifacts"] = WaypointRole.Viewer,
 		// Issue #745: the domain-owned component-result run rollup -- Viewer+, matching
 		// every other run read (GetArtifacts immediately above).
@@ -239,9 +244,14 @@ public sealed class EndpointRoleMatrixTests
 		// matching every other run read -- visibility of operational history is not a
 		// domain action (ADR-0019 decision 6).
 		["RunsController.GetEventHistory"] = WaypointRole.Viewer,
-		["RunsController.PauseRun"] = WaypointRole.Operator,
-		["RunsController.ResumeRun"] = WaypointRole.Operator,
-		["RunsController.AbortRun"] = WaypointRole.Operator,
+		["RunsController.PauseRun"] = WaypointRole.Cyber,
+		["RunsController.ResumeRun"] = WaypointRole.Cyber,
+		["RunsController.AbortRun"] = WaypointRole.Cyber,
+		// Issue #757: audited bulk per-item cancel/retry -- same Cyber+ (own runs),
+		// Admin any floor as the singular actions above (EnforceRunOwnership,
+		// in-action).
+		["RunsController.BulkCancelJobs"] = WaypointRole.Cyber,
+		["RunsController.BulkRetryJobs"] = WaypointRole.Cyber,
 		["RunsController.ResumeBlocked"] = WaypointRole.Admin,
 		// Issue #594 (epic #577): purge is Admin-only, stronger than pause/resume/
 		// abort's Operator+-own-runs, matching resume-blocked's precedent for an
