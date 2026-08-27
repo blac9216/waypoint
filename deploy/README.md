@@ -85,8 +85,9 @@ Neither runner is reachable from `nginx` or the host on either network — see
 - **backend** is the real ASP.NET Core API (issue #3), built from `../backend`.
   It owns REST/RBAC/SSE, enqueueing, and run controls — it does not execute jobs
   (ADR-0013 §1). Local auth (ADR-0004 rollout note) is a dev-grade single admin
-  user with no compiled-in default password — see "Bring-up" step 3 to enable
-  login, and step 4 to enable the credential store's secret encryption.
+  user with no compiled-in default password — see "Local auth (dev-flag, issue
+  #29)" to enable login, and "Production only: secrets master key" to enable the
+  credential store's secret encryption.
 - **compliance-runner** and **download-runner** are long-lived Generic Host
   services (ADR-0013 §3), each claiming only its allowlisted job types
   (`discover`/`credential-test`/`scan`/later `remediate`, and
@@ -719,11 +720,11 @@ so a file containing nothing but these three mounts is picked up with no other
 change. That file is free for operator use in production: only the two dev
 paths populate it (`--mode persistent` writes it from the example;
 `--mode agent` writes its own override under `deploy/.generated/<slug>/`
-instead and never touches this one). Note `compose.yaml`'s commented example
-names its host-side source `./config/secrets/master.key`; the source filename is
+instead and never touches this one). `compose.yaml`'s commented blocks name the same
+host-side source, `./config/secrets/waypoint-master-key`. The source filename is
 the operator's choice — the load-bearing name is the in-container `target`,
 `/run/secrets/waypoint-master-key`, which is what `WAYPOINT_MASTER_KEY_FILE`
-reads. This README uses `waypoint-master-key` on both sides so the host file
+reads — but both use `waypoint-master-key` on both sides so the host file
 matches the name every other path already generates.
 
 ```yaml

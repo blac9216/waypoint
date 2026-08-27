@@ -38,12 +38,12 @@ public sealed partial class ErrorHandlingMiddleware
 	/// generic about *where* the key lives -- the mounted file path is server
 	/// filesystem layout (docs/security.md control 1) and stays in the log-only
 	/// exception message (<see cref="LogMasterKeyUnavailable"/>), never the response
-	/// body. Points at deploy/README.md's "Generate a secrets master key" step instead
-	/// of repeating its instructions here, so the two don't drift.
+	/// body. Points at deploy/README.md's "Production only: secrets master key" section
+	/// instead of repeating its instructions here, so the two don't drift.
 	/// </summary>
 	internal const string MasterKeyUnavailableMessage =
 		"The appliance secrets master key is not available. An administrator must mount the master key file and " +
-		"restart the appliance -- see deploy/README.md, \"Generate a secrets master key\".";
+		"restart the appliance -- see deploy/README.md, \"Production only: secrets master key\".";
 
 	/// <summary>
 	/// Wire text for the local-auth warm-up window (issue #505). Deliberately says

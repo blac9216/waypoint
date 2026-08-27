@@ -22,8 +22,8 @@
 # self-contained-less framework-dependent publish plus the .NET runtime installed
 # below via Microsoft's apt feed (already added for PowerShell).
 #
-# Build context is the REPO ROOT (matches backend/Dockerfile and deploy/docker-
-# compose.yml's `context: ..` convention):
+# Build context is the REPO ROOT (matches backend/Dockerfile and
+# deploy/compose.yaml's `context: ..` convention):
 #   docker build -f runners/compliance-runner/Dockerfile .
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS dotnet-build
 WORKDIR /src

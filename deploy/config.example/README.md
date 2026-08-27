@@ -23,7 +23,7 @@ deploy/config.example/
 │   ├── keycloak-bootstrap-admin-password    # Keycloak master-realm bootstrap admin
 │   ├── keycloak-backend-client-secret       # waypoint-backend realm client secret
 │   ├── dev-admin-password                   # development-only Keycloak user (issue #846)
-│   └── master.key                           # AES-256-GCM envelope key (issue #405, ADR-0005)
+│   └── waypoint-master-key                  # AES-256-GCM envelope key (issue #405, ADR-0005)
 │                                            # -- OPERATOR-PROVIDED, production only (both dev
 │                                            #    paths generate their own; see below)
 ├── tls/
@@ -49,11 +49,13 @@ own key at `deploy/config/tls/tls.key`, alongside `tls.crt`, matching
 `deploy/config/secrets/`.** `init-config.sh` and `--mode persistent` create the
 seven `secrets/*` password files only; the file under `deploy/config/secrets/`
 is operator-supplied material, and `deploy/compose.yaml`'s bind for it
-(`source: ./config/secrets/master.key`, `target:
+(`source: ./config/secrets/waypoint-master-key`, `target:
 /run/secrets/waypoint-master-key`) ships commented out until the operator
-creates the file. Only the `target` name is load-bearing -- the host-side
-filename is the operator's choice, and `deploy/README.md` uses
-`waypoint-master-key` on both sides so it matches what the dev paths generate.
+creates the file -- as a shape to copy into `deploy/compose.override.yaml`,
+not to uncomment in place (see `deploy/README.md` "Production only: secrets
+master key"). Only the `target` name is load-bearing -- the host-side filename
+is the operator's choice, and both files use `waypoint-master-key` on both
+sides so it matches what the dev paths generate.
 
 Both dev paths do provision a master key automatically, just never under
 `deploy/config/`:
