@@ -46,9 +46,18 @@ public static class VendorHierarchyInterpreter
 	// Family layouts, one row per docs/compliance-parity.md provenance-matrix entry.
 	// segments[0] is always the vendor-family directory name (case-insensitive); the
 	// interpreter never accepts an unlisted first segment.
+	// Issue #959 (epic #726): upstream `master` now nests the 9.x vSphere/vCenter/ESXi/VM
+	// baselines under a consolidated `vcf/<major>.x/...` tree instead of a top-level
+	// `vsphere/9-0/...` tree. This is the SAME vsphere product family and
+	// ObjectKindSplit shape docs/compliance-parity.md already documents -- only the
+	// vendor-repository directory literal differs, so `vcf` maps to the `vsphere`
+	// VendorFamily.Name (not a new product family) rather than inventing a "vcf"
+	// product. Nothing else changes: the vcf/ tree still fails closed for any layout
+	// that is not this exact shape.
 	private static readonly Dictionary<string, VendorFamily> Families = new Dictionary<string, VendorFamily>(StringComparer.OrdinalIgnoreCase)
 	{
 		["vsphere"] = new VendorFamily("vsphere", VendorFamilyShape.ObjectKindSplit),
+		["vcf"] = new VendorFamily("vsphere", VendorFamilyShape.ObjectKindSplit),
 		["vcsa"] = new VendorFamily("vcsa", VendorFamilyShape.NamedServiceSplit),
 		["nsx"] = new VendorFamily("nsx", VendorFamilyShape.NamedFunctionSplit),
 		["photon"] = new VendorFamily("photon", VendorFamilyShape.WholeAppliance),
@@ -64,6 +73,16 @@ public static class VendorHierarchyInterpreter
 		["esxi"] = CatalogSelectorKinds.Esxi,
 		["vm"] = CatalogSelectorKinds.Vm,
 	};
+
+	// Issue #959: the current upstream `vsphere/7.0` and `vsphere/8.0` trees split by
+	// object kind BEFORE the `inspec` segment -- `vsphere/<version>/<release>/
+	// <object-kind>/inspec/<baseline>` -- rather than the documented
+	// `<family>/<version>/<release>/inspec/<baseline>` shape. Only these two literal
+	// directory names are recognized as that inserted object-kind segment (mirroring
+	// vSphere's own object-kind vocabulary); anything else at that position is still a
+	// near-miss and is quarantined, never guessed.
+	private static readonly HashSet<string> ObjectKindBeforeInspecSegments =
+		new(StringComparer.OrdinalIgnoreCase) { "vcsa", "vsphere" };
 
 	/// <summary>
 	/// Interprets every discovered <paramref name="entries"/> against the documented
@@ -148,7 +167,29 @@ public static class VendorHierarchyInterpreter
 			return;
 		}
 
-		if (!string.Equals(segments[3], "inspec", StringComparison.OrdinalIgnoreCase))
+		// Issue #959: the vsphere family (both its `vsphere` and consolidated `vcf`
+		// directory literals) additionally accepts an object-kind segment
+		// (`vcsa`/`vsphere`) INSERTED before `inspec` --
+		// <family>/<version>/<release>/<object-kind>/inspec/<baseline>[/leaf] -- one
+		// segment deeper than every other documented family. This is still a single
+		// documented, closed shape: an unrecognized segment at that position is a
+		// near-miss and is quarantined below, never guessed into this shape.
+		int inspecIndex = 3;
+		if (string.Equals(family.Name, "vsphere", StringComparison.OrdinalIgnoreCase)
+			&& !string.Equals(segments[3], "inspec", StringComparison.OrdinalIgnoreCase)
+			&& ObjectKindBeforeInspecSegments.Contains(segments[3]))
+		{
+			inspecIndex = 4;
+			if (segments.Length < MinimumSegments + 1)
+			{
+				rejections.Add(new SemanticImportRejection(entry.ProfileKey,
+					$"profile path has {segments.Length} segment(s); the object-kind-before-inspec vsphere layout requires at least {MinimumSegments + 1} " +
+					"(<family>/<version>/<release>/<object-kind>/inspec/<baseline-directory>[/leaf]) -- this near-miss is missing the baseline profile directory and is quarantined, never guessed"));
+				return;
+			}
+		}
+
+		if (!string.Equals(segments[inspecIndex], "inspec", StringComparison.OrdinalIgnoreCase))
 		{
 			rejections.Add(new SemanticImportRejection(entry.ProfileKey,
 				"expected an 'inspec' directory segment after the release directory"));
@@ -163,16 +204,19 @@ public static class VendorHierarchyInterpreter
 			return;
 		}
 
-		// Segments after "<family>/<version>/<release>/inspec/" are the baseline
-		// directory plus (for split families) the object-kind/service leaf. The
-		// baseline directory itself (segments[4]) is never part of component identity
-		// -- it is the vendor's own top-level profile folder name, already captured by
+		// Segments after "<inspec-segment>/" are the baseline directory plus (for split
+		// families) the object-kind/service leaf. The baseline directory itself
+		// (segments[inspecIndex + 1]) is never part of component identity -- it is the
+		// vendor's own top-level profile folder name, already captured by
 		// productVersionKey+releaseKey; only what comes AFTER it distinguishes
-		// aggregate-vs-leaf and (for split families) which sub-component this is. The
-		// MinimumSegments guard above guarantees segments.Length >= 5, so this slice can
-		// never be out of range; the explicit bound below is defence-in-depth against any
-		// future edit that weakens the guard (same crash class as the round-1 blocker).
-		string[] tail = segments.Length > MinimumSegments ? segments[MinimumSegments..] : [];
+		// aggregate-vs-leaf and (for split families) which sub-component this is.
+		// inspecIndex is either 3 (documented shape) or 4 (issue #959's
+		// object-kind-before-inspec vsphere shape), and both branches above guarantee
+		// segments.Length >= inspecIndex + 2, so this slice can never be out of range;
+		// the explicit bound below is defence-in-depth against any future edit that
+		// weakens either guard (same crash class as the round-1 blocker).
+		int baselineIndex = inspecIndex + 1;
+		string[] tail = segments.Length > baselineIndex + 1 ? segments[(baselineIndex + 1)..] : [];
 
 		SemanticCandidate? candidate = family.Shape switch
 		{

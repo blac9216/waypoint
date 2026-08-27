@@ -302,6 +302,17 @@ public sealed class VendorHierarchyInterpreterTests
 	// (classifies), split families have no documented sub-shape that deep -> quarantine.
 	[InlineData("photon/5-0/v3r3-srg/inspec/photon-baseline/extra/deeper", true)]
 	[InlineData("vsphere/8-0/v2r3-stig/inspec/vsphere-baseline/vcenter/deeper", false)]
+	// Issue #959: vcf consolidated tree (same shape as vsphere, one segment deeper
+	// baseline requirement is unchanged -- only the top-level literal differs).
+	[InlineData("vcf/9-0/y26m05-srg/inspec", false)]
+	[InlineData("vcf/9-0/y26m05-srg/inspec/vcf-baseline", true)]
+	[InlineData("vcf/9-0/y26m05-srg/inspec/vcf-baseline/vcenter", true)]
+	// Issue #959: vsphere object-kind-before-inspec shape needs one extra segment
+	// before its own baseline-dir requirement kicks in.
+	[InlineData("vsphere/8-0/v2r3-stig/vsphere/inspec", false)]
+	[InlineData("vsphere/8-0/v2r3-stig/vsphere/inspec/vsphere-baseline", true)]
+	[InlineData("vsphere/8-0/v2r3-stig/vsphere/inspec/vsphere-baseline/vcenter", true)]
+	[InlineData("vsphere/8-0/v2r3-stig/vsphere/inspec/vsphere-baseline/vcenter/deeper", false)]
 	public void DepthSweep_AcrossFamilies_EitherClassifiesOrQuarantinesNeverThrows(string profileKey, bool expectClassified)
 	{
 		VendorContentEntry entry = Leaf(profileKey, Manifest("m"), "controls/x.rb");
@@ -344,6 +355,136 @@ public sealed class VendorHierarchyInterpreterTests
 		SemanticImportRejection rejection = Assert.Single(result.Rejections);
 		Assert.Contains("unexpected error interpreting profile path", rejection.Reason, StringComparison.Ordinal);
 		Assert.Contains("NullReferenceException", rejection.Reason, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void VcfConsolidatedTree_ClassifiesAsVsphereFamily_ObjectKindSplit()
+	{
+		// Issue #959: upstream `master` now nests the 9.x vSphere/vCenter/ESXi/VM
+		// baselines under a consolidated vcf/<major>.x/... tree instead of a top-level
+		// vsphere/9-0/... tree. Same vsphere product family, same object-kind-split
+		// shape -- only the top-level directory literal differs.
+		VendorContentEntry vcenter = Leaf(
+			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/vcenter",
+			Manifest("vcenter", "VCF 9.0 vCenter SRG", "1.0.0"),
+			"controls/vc-000001.rb");
+		VendorContentEntry esxi = Leaf(
+			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/esxi",
+			Manifest("esxi", "VCF 9.0 ESXi SRG", "1.0.0"),
+			"controls/esxi-000001.rb");
+		VendorContentEntry vm = Leaf(
+			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/vm",
+			Manifest("vm", "VCF 9.0 VM SRG", "1.0.0"),
+			"controls/vm-000001.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([vcenter, esxi, vm]);
+
+		Assert.Empty(result.Rejections);
+		Assert.Equal(3, result.Candidates.Count);
+		Assert.All(result.Candidates, c => Assert.Equal("vsphere", c.VendorFamily));
+		Assert.All(result.Candidates, c => Assert.Equal(CatalogTransports.VMware, c.Transport));
+		Assert.All(result.Candidates, c => Assert.Equal(CatalogKinds.Srg, c.Kind));
+		Assert.Equal("9-0", result.Candidates[0].ProductVersionKey);
+	}
+
+	[Fact]
+	public void VsphereObjectKindBeforeInspec_ClassifiesAsVsphereFamily()
+	{
+		// Issue #959: the current upstream vsphere/7.0 and vsphere/8.0 trees split by
+		// object kind ONE segment before `inspec` --
+		// vsphere/<version>/<release>/<object-kind>/inspec/<baseline>/<leaf> -- rather
+		// than the documented <family>/<version>/<release>/inspec/<baseline> shape.
+		VendorContentEntry vcenter = Leaf(
+			"vsphere/8-0/v2r3-stig/vsphere/inspec/vsphere-8-0-stig-baseline/vcenter",
+			Manifest("vcenter", "vSphere 8.0 vCenter STIG", "2.3.0"),
+			"controls/vc-000001.rb");
+		VendorContentEntry vcsaObjectKind = Leaf(
+			"vsphere/8-0/v2r3-stig/vcsa/inspec/vsphere-8-0-vcsa-object-stig-baseline/vcenter",
+			Manifest("vcenter", "vSphere 8.0 VCSA-object STIG", "2.3.0"),
+			"controls/vcsa-000001.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([vcenter, vcsaObjectKind]);
+
+		Assert.Empty(result.Rejections);
+		Assert.Equal(2, result.Candidates.Count);
+		Assert.All(result.Candidates, c => Assert.Equal("vsphere", c.VendorFamily));
+		Assert.All(result.Candidates, c => Assert.Equal(CatalogTransports.VMware, c.Transport));
+		Assert.All(result.Candidates, c => Assert.Equal(CatalogSelectorKinds.VCenter, c.SelectorKind));
+	}
+
+	[Fact]
+	public void VsphereObjectKindBeforeInspec_UnrecognizedObjectKindSegment_IsQuarantined()
+	{
+		VendorContentEntry entry = Leaf(
+			"vsphere/8-0/v2r3-stig/some-unlisted-object-kind-segment/inspec/vsphere-8-0-stig-baseline/vcenter",
+			Manifest("vcenter"),
+			"controls/x.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([entry]);
+
+		Assert.Empty(result.Candidates);
+		SemanticImportRejection rejection = Assert.Single(result.Rejections);
+		Assert.Contains("expected an 'inspec' directory segment", rejection.Reason);
+	}
+
+	[Fact]
+	public void VsphereObjectKindBeforeInspec_MissingBaselineDirectory_IsQuarantinedNotThrows()
+	{
+		VendorContentEntry entry = Leaf(
+			"vsphere/8-0/v2r3-stig/vsphere/inspec",
+			Manifest("inspec"),
+			"controls/x.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([entry]);
+
+		Assert.Empty(result.Candidates);
+		SemanticImportRejection rejection = Assert.Single(result.Rejections);
+		Assert.Contains("baseline", rejection.Reason, StringComparison.Ordinal);
+	}
+
+	[Theory]
+	[InlineData("aria")]
+	[InlineData("vcd")]
+	[InlineData("avi")]
+	public void StillUnrecognizedFamilies_RemainQuarantined_NeverGuessed(string unrecognizedFamily)
+	{
+		// Issue #959's disposition explicitly keeps aria/vcd/avi (and anything else not
+		// documented in docs/compliance-parity.md's layout table) quarantined -- only
+		// the vcf tree and the vsphere object-kind-before-inspec shape are newly
+		// recognized.
+		VendorContentEntry entry = Leaf(
+			$"{unrecognizedFamily}/1-0/v1r1-srg/inspec/{unrecognizedFamily}-baseline",
+			Manifest($"{unrecognizedFamily}-baseline"),
+			"controls/x.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([entry]);
+
+		Assert.Empty(result.Candidates);
+		SemanticImportRejection rejection = Assert.Single(result.Rejections);
+		Assert.Contains("not a recognized vendor family", rejection.Reason);
+	}
+
+	[Fact]
+	public void IssueRejectionClasses_BothNowImportCleanly()
+	{
+		// Issue #959 acceptance: "a fixture reproducing the issue's two rejection
+		// classes must now import cleanly" -- the 156-count vcf tree (formerly "'vcf'
+		// is not a recognized vendor family directory") and the 111-count
+		// object-kind-before-inspec tree (formerly "expected an 'inspec' directory
+		// segment after the release directory").
+		VendorContentEntry vcfTree = Leaf(
+			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/esxi",
+			Manifest("esxi", "VCF 9.0 ESXi SRG", "1.0.0"),
+			"controls/esxi-000001.rb");
+		VendorContentEntry objectKindBeforeInspecTree = Leaf(
+			"vsphere/7-0/v1r1-stig/vsphere/inspec/vsphere-7-0-stig-baseline/vm",
+			Manifest("vm", "vSphere 7.0 VM STIG", "1.1.0"),
+			"controls/vm-000001.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([vcfTree, objectKindBeforeInspecTree]);
+
+		Assert.Empty(result.Rejections);
+		Assert.Equal(2, result.Candidates.Count);
 	}
 
 	[Fact]

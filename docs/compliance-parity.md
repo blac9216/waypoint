@@ -29,6 +29,36 @@ never identity or support declarations.
 Unknown values fail closed and remain visible as quarantined content or unsupported
 coverage. Operators cannot add executable plugins, scripts, mappings, or products.
 
+## Recognized on-disk import layouts
+
+`VendorHierarchyInterpreter` (`backend/Waypoint.Core/ComplianceContent/SemanticImport/
+VendorHierarchyInterpreter.cs`) is a closed, data-driven family table: it recognizes
+ONLY the vendor-repository directory layouts below and quarantines everything else,
+never guessing an unrecognized shape into the nearest-looking family (issue #729,
+extended by issue #959). `Waypoint.Tests.Core.ComplianceContent.SemanticImport.
+LayoutTableParityTests` parses this table directly out of this file and asserts it
+against the interpreter's recognized-family table, so the two cannot silently drift
+apart again the way they did before issue #959.
+
+| Vendor directory literal | Maps to family | Path shape | Notes |
+|---|---|---|---|
+| `vsphere` | `vsphere` | `vsphere/<version>/<release>/inspec/<baseline>/[vcenter\|esxi\|vm]` | Object-kind split directly under the baseline directory (vSphere 8.0 and earlier). |
+| `vcf` | `vsphere` | `vcf/<version>/<release>/inspec/<baseline>/[vcenter\|esxi\|vm]` | Issue #959: upstream `master` now nests the 9.x vSphere/vCenter/ESXi/VM baselines under this consolidated tree instead of a top-level `vsphere/9-0` tree. Same vsphere product family and object-kind-split shape, only the top-level directory literal differs. |
+| `vsphere` (object-kind-before-inspec) | `vsphere` | `vsphere/<version>/<release>/<object-kind>/inspec/<baseline>/[vcenter\|esxi\|vm]`, `<object-kind>` one of `vcsa`, `vsphere` | Issue #959: the current upstream `vsphere/7.0` and `vsphere/8.0` trees split by object kind ONE segment before `inspec` rather than after the baseline directory. Still the vsphere family; still fails closed if `<object-kind>` is anything other than `vcsa`/`vsphere`. |
+| `vcsa` | `vcsa` | `vcsa/<version>/<release>/inspec/<baseline>/<service-name>` | Named-sub-service split, `ssh` transport (EAM, Lookup, PostgreSQL, ...). |
+| `nsx` | `nsx` | `nsx/<version>/<release>/inspec/<baseline>/<function-name>` | Named-function split, `nsx-api` transport. |
+| `photon` | `photon` | `photon/<version>/<release>/inspec/<baseline>` | Whole-appliance, `ssh`/`target` selector. |
+| `aria-operations` | `aria-operations` | `aria-operations/<version>/<release>/inspec/<baseline>` | Whole-appliance, `ssh`/`target` selector. |
+| `aria-automation` | `aria-automation` | `aria-automation/<version>/<release>/inspec/<baseline>` | Whole-appliance, `ssh`/`target` selector. |
+| `aria-suite-lifecycle` | `aria-suite-lifecycle` | `aria-suite-lifecycle/<version>/<release>/inspec/<baseline>` | Whole-appliance, `ssh`/`target` selector. |
+| `vidm` | `vidm` | `vidm/<version>/<release>/inspec/<baseline>` | Whole-appliance (Workspace ONE Access), `ssh`/`target` selector. |
+
+Any other top-level directory (`aria` unqualified, `vcd`, `avi`, and anything else not
+listed above) is unrecognized and quarantined, never guessed, per the closed-family-
+table rule above -- this table only grows when a new row is added here first and the
+interpreter's family table is updated to match (issue #959's fix for the defect class
+where the interpreter's table drifted from upstream layout with no test catching it).
+
 ## Sibling source-capability provenance matrix
 
 The entries below enumerate every scan component in the sibling catalog at the source
