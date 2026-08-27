@@ -65,6 +65,17 @@ resolves to a real anchor is tracked separately (#939) and is not built here.
 
 ## README.md
 
+### readme-devcontainer-build-up-split
+
+Adding `--build` to the devcontainer/remote-daemon `up` recipe broke it:
+build contexts are resolved by the client (this shell), while
+`--project-directory` makes bind-mount sources resolve against the host —
+one flag can't satisfy both resolution rules at once. `build` (client
+paths, no `--project-directory`) and `up -d --no-build` (host project
+directory) must run as two commands.
+
+Refs: #955
+
 ## config.example/
 
 ## compose.yaml
@@ -416,6 +427,18 @@ absolute path broke with "unable to prepare context: path not found", so
 the keycloak-dev-admin build context stays relative (`./keycloak-dev-admin`).
 
 Refs: #847, #846
+
+### gen-devcontainer-build-up-split
+
+When devcontainer bind-mount indirection is detected (`HOST_PREFIX !=
+REPO_ROOT`), a single `up -d --build` fails: `build` contexts are resolved
+client-side, but the bind-mount sources this override writes need
+`--project-directory` resolved against the host path. The printed commands
+split into a client-path `build` (no `--project-directory`) and a
+host-path `up -d --no-build`, matching the split documented in
+`deploy/README.md`'s troubleshooting entry.
+
+Refs: #955
 
 ## scripts/init-config.sh
 

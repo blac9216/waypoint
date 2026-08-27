@@ -75,7 +75,7 @@ The one recurring human dev loop, real Keycloak login included.
 ```bash
 cd deploy
 ./scripts/generate-dev-stack.sh --mode persistent
-docker compose -p waypoint -f compose.yaml -f compose.override.yaml --env-file .env up -d
+docker compose -p waypoint -f compose.yaml -f compose.override.yaml --env-file .env up -d --build
 ```
 
 The override's `dev-bootstrap` service provisions a throwaway self-signed
@@ -161,11 +161,15 @@ definition, see `deploy/keycloak/README.md`) and `deploy/config/tls/tls.{crt,key
 fails at container creation with "bind source path does not exist" on the
 first secret file.** The daemon resolves relative bind-mount sources against
 the **host** filesystem, not the shell's own. Pass `--project-directory
-<host-side deploy path>`, keeping `-f`/`--env-file` as documented:
+<host-side deploy path>`, keeping `-f`/`--env-file` as documented. Adding
+`--build` to that single command then fails a different way — "unable to
+prepare context: path … not found" — because build contexts are resolved
+client-side, so `build` and `up` must run as separate commands:
 
 ```bash
-docker compose -p waypoint -f compose.yaml -f compose.override.yaml \
-  --env-file .env --project-directory /host/path/to/deploy up -d
+docker compose -p waypoint -f compose.yaml -f compose.override.yaml --env-file .env build
+docker compose -p waypoint -f compose.yaml -f compose.override.yaml --env-file .env \
+  --project-directory /host/path/to/deploy up -d --no-build
 ```
 
 Find the host-side path with `docker inspect "$(hostname)" --format
@@ -173,7 +177,8 @@ Find the host-side path with `docker inspect "$(hostname)" --format
 the entry whose destination is your workspace mount — see
 [`docs/testing.md`](../docs/testing.md) "Devcontainer bind mounts" for the
 full explanation. `-f`/`--env-file` stay relative to the shell you're in;
-only `--project-directory` needs the host-side translation.
+only `--project-directory` needs the host-side translation, and only for
+`up` — `build` never takes it.
 
 **Changing `WAYPOINT_PUBLIC_URL` requires `down -v`.** The realm's
 `rootUrl`/`redirectUris`/`webOrigins` placeholders substitute only once, at
