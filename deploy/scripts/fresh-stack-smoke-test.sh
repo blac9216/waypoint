@@ -74,6 +74,12 @@ FAIL_COUNT=0
 FAILURES=()
 ADMIN_TOKEN=""
 
+# Issue #844: secret files this run generated (see the "File-backed secrets"
+# block below) -- tracked so cleanup removes exactly those and never an
+# operator's own.
+GENERATED_SECRET_FILES=()
+SECRET_LABEL="smoke"
+
 log() { printf '\n=== %s ===\n' "$*"; }
 ok()  { PASS_COUNT=$((PASS_COUNT + 1)); printf '[PASS] %s\n' "$*"; }
 bad() { FAIL_COUNT=$((FAIL_COUNT + 1)); FAILURES+=("$*"); printf '[FAIL] %s\n' "$*"; }
@@ -86,6 +92,9 @@ cleanup() {
 	fi
 	(cd "${DEPLOY_DIR}" && ${DC} down -v) || true
 	rm -f "${SCRATCH_KEY_DIR:-/nonexistent}"/* 2>/dev/null || true
+	if [[ ${#GENERATED_SECRET_FILES[@]} -gt 0 ]]; then
+		rm -f "${GENERATED_SECRET_FILES[@]}" 2>/dev/null || true
+	fi
 	rm -f "${CATALOG_ARTIFACTS_FILE:-/nonexistent}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -98,7 +107,9 @@ docker ps --format '{{.Names}}' | grep -v "^${PROJECT}-" || echo "  (none curren
 
 cd "${DEPLOY_DIR}"
 
-if [[ ! -f nginx/certs/dev-cert.pem || ! -f nginx/certs/dev-key.pem ]]; then
+# Issue #844 renamed this pair to the generic tls.crt/tls.key names
+# deploy/nginx/conf.d/default.conf now references.
+if [[ ! -f nginx/certs/tls.crt || ! -f nginx/certs/tls.key ]]; then
 	log "Generating dev TLS cert"
 	nginx/certs/generate-dev-certs.sh
 fi
@@ -159,9 +170,56 @@ if [[ -z "${WAYPOINT_SMOKE_OVERRIDE_FILE:-}" ]] && [[ "${HOST_PREFIX}" != "${REP
 	  postgres:
 	    volumes:
 	      - ${HOST_PREFIX}/deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
+	secrets:
+	  postgres-owner-password:
+	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-owner-password
+	  postgres-compliance-runner-password:
+	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-compliance-runner-password
+	  postgres-download-runner-password:
+	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-download-runner-password
+	  postgres-keycloak-password:
+	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-keycloak-password
+	  keycloak-bootstrap-admin-password:
+	    file: ${HOST_PREFIX}/deploy/config/secrets/keycloak-bootstrap-admin-password
+	  keycloak-backend-client-secret:
+	    file: ${HOST_PREFIX}/deploy/config/secrets/keycloak-backend-client-secret
 	EOF
 	WAYPOINT_SMOKE_OVERRIDE_FILE="${GENERATED_OVERRIDE}"
 fi
+
+# --- File-backed secrets (issue #844) ----------------------------------
+#
+# The stack's Postgres bootstrap/runner/Keycloak passwords and the
+# waypoint-backend realm client secret are Compose `secrets:` file sources
+# under deploy/config/secrets/ (gitignored). They are MANDATORY: with them
+# absent, `docker compose up` dies at container creation ("bind source path
+# does not exist") -- `docker compose config` still exits 0, so nothing
+# warns earlier. Generate obviously-invented, per-run values for any that
+# are not already there; an operator's own real files (if any) are left
+# untouched, and only files this run created are removed on teardown.
+#
+# #847 replaces this plumbing with a first-class generator; until then each
+# bring-up script grows its own minimal copy.
+SECRETS_DIR="${DEPLOY_DIR}/config/secrets"
+mkdir -p "${SECRETS_DIR}"
+for secret_name in postgres-owner-password postgres-compliance-runner-password \
+	postgres-download-runner-password postgres-keycloak-password \
+	keycloak-bootstrap-admin-password keycloak-backend-client-secret; do
+	if [[ ! -s "${SECRETS_DIR}/${secret_name}" ]]; then
+		printf 'invented-%s-%s-%s\n' "${SECRET_LABEL}" "${secret_name}" "$(openssl rand -hex 6)" \
+			> "${SECRETS_DIR}/${secret_name}"
+		# 0644, not 0600: Compose bind-mounts a `file:` secret source
+		# verbatim (host uid/mode preserved -- no 0444 re-materialization),
+		# and postgres's initdb scripts read it as the in-container
+		# `postgres` user, which is neither root nor this script's uid. A
+		# 0600 file here fails closed in postgres's entrypoint wrapper --
+		# correct, but not what this script wants. Same 0644 convention the
+		# master-key file above already uses.
+		chmod 644 "${SECRETS_DIR}/${secret_name}"
+		GENERATED_SECRET_FILES+=("${SECRETS_DIR}/${secret_name}")
+	fi
+done
+log "File-backed secrets: ${#GENERATED_SECRET_FILES[@]} generated in ${SECRETS_DIR} (pre-existing files left alone)"
 
 SCRATCH_KEY_DIR="$(mktemp -d)"
 openssl rand -hex 32 > "${SCRATCH_KEY_DIR}/master.key"

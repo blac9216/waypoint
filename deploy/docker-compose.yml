@@ -89,6 +89,28 @@ services:
       - "${WAYPOINT_HTTPS_PORT:-8443}:443"
     volumes:
       - dev-tls:/etc/nginx/certs:ro
+      # Operator-provided TLS (issue #844) -- uncomment and place real
+      # certificate/key material at deploy/config/tls/tls.crt and
+      # deploy/config/tls/tls.key (gitignored -- see .gitignore's
+      # /deploy/config/ entry) to override the dev-bootstrap-generated
+      # self-signed pair above with real certs from your internal CA. Both
+      # mount at the SAME generic names (tls.crt/tls.key,
+      # deploy/nginx/conf.d/default.conf) the dev pair already uses -- this
+      # override needs no config change, only real file content. Same
+      # nested-mount-inside-a-named-volume pattern as the backend service's
+      # commented-out admin-password-hash/master-key mounts above.
+      # - type: bind
+      #   source: ./config/tls/tls.crt
+      #   target: /etc/nginx/certs/tls.crt
+      #   read_only: true
+      #   bind:
+      #     create_host_path: false
+      # - type: bind
+      #   source: ./config/tls/tls.key
+      #   target: /etc/nginx/certs/tls.key
+      #   read_only: true
+      #   bind:
+      #     create_host_path: false
     networks:
       - edge
     healthcheck:
@@ -200,16 +222,20 @@ services:
       # outside this compose stack) and 5432 is the container's fixed listen
       # port from the postgres:16-alpine image, so neither varies with the
       # operator's credential choice.
-      ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=${POSTGRES_USER:-waypoint};Password=${POSTGRES_PASSWORD:-waypoint_dev_only}"
-      # Issue #843: file-backed alternative to the inline Password= above, resolved
-      # once at startup by DatabaseConnectionStringResolver (backend/Waypoint.
-      # Infrastructure/Data) -- when this names a readable file, its contents (minus
-      # exactly one trailing newline) override whatever Password= ConnectionStrings__
-      # Waypoint carries. Empty by default, so this dev stack's inline-password
-      # behavior above is unchanged; actually mounting a Postgres secret file here is
-      # #844's scope (Postgres/Keycloak/nginx secrets under deploy/config/), not this
-      # issue's.
-      Database__PasswordFile: "${WAYPOINT_DB_PASSWORD_FILE:-}"
+      # Password= deliberately empty (issue #844): Database__PasswordFile
+      # below is mandatory (postgres itself now refuses to start without its
+      # own POSTGRES_PASSWORD_FILE -- see the postgres service), so the
+      # file-backed value always wins and an inline fallback here would only
+      # ever be an unused literal sitting in `docker inspect` output.
+      ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=${POSTGRES_USER:-waypoint};Password="
+      # Issue #843: resolved once at startup by DatabaseConnectionStringResolver
+      # (backend/Waypoint.Infrastructure/Data) -- when this names a readable file,
+      # its contents (minus a trailing newline) override whatever Password=
+      # ConnectionStrings__Waypoint carries; DatabaseConnectionStringResolver fails
+      # startup closed if the file is named but unreadable. Defaults to the same
+      # Compose `secrets:`-mounted file (issue #844) the postgres service's own
+      # POSTGRES_PASSWORD_FILE reads.
+      Database__PasswordFile: "${WAYPOINT_DB_PASSWORD_FILE:-/run/db-secret/postgres-owner-password}"
       # #191: narrows ForwardedHeaders:KnownNetworks (Program.cs) from the
       # whole-RFC-1918-space fallback to exactly the edge network's pinned
       # subnet (see the `edge` network's ipam config below) - the only network
@@ -292,6 +318,18 @@ services:
       #   read_only: true
       #   bind:
       #     create_host_path: false
+    # Issue #844: Compose's own file-secret mechanism -- mounts
+    # deploy/config/secrets/postgres-owner-password read-only at
+    # /run/db-secret/postgres-owner-password, the path Database__PasswordFile
+    # above reads. A DELIBERATELY different target than the default
+    # /run/secrets/<name> (live-verified necessary): backend already mounts
+    # the read-only `dev-secrets` NAMED VOLUME at /run/secrets below, and a
+    # read-only mount's directory tree cannot host a new nested mountpoint --
+    # `docker compose up` fails closed with "read-only file system" if this
+    # target collides with that one.
+    secrets:
+      - source: postgres-owner-password
+        target: /run/db-secret/postgres-owner-password
     networks:
       - edge
       - internal
@@ -313,25 +351,42 @@ services:
       context: ./postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-waypoint}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-waypoint_dev_only}
       POSTGRES_DB: ${POSTGRES_DB:-waypoint}
+      # Issue #844: file-backed, not an inline value - POSTGRES_PASSWORD_FILE
+      # is the postgres:16-alpine image's OWN built-in convention (its
+      # docker-entrypoint.sh file_env helper), so this one needs no wrapper
+      # script; the three below are Waypoint-defined (consumed by the initdb
+      # scripts, not the base image) but follow the same naming shape for
+      # consistency. Every path here is a Compose `secrets:`-mounted file
+      # (see the top-level `secrets:` block below) - a missing host file
+      # makes `docker compose up` fail at container creation (the daemon
+      # rejects the bind), and deploy/postgres/docker-entrypoint-wrapper.sh
+      # rejects an empty/unreadable one BEFORE the stock entrypoint can run
+      # initdb, so a bad file can never leave a half-initialized data
+      # directory behind. See that script's header comment.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-owner-password
       # Issue #442 (ADR-0014 §7): passwords for the two dedicated runner DB
-      # roles postgres/initdb/01-runner-roles.sh creates on first init. Never
-      # committed - override in deploy/.env (gitignored) alongside
-      # POSTGRES_PASSWORD for anything beyond this dev-only default. Table
+      # roles postgres/initdb/01-runner-roles.sh creates on first init. Table
       # grants for these roles live in a versioned backend migration
       # (0025_runner_db_roles.sql), not here - see that file's header comment
       # for why role creation and grants are deliberately split.
-      POSTGRES_COMPLIANCE_RUNNER_PASSWORD: ${POSTGRES_COMPLIANCE_RUNNER_PASSWORD:-waypoint_compliance_runner_dev_only}
-      POSTGRES_DOWNLOAD_RUNNER_PASSWORD: ${POSTGRES_DOWNLOAD_RUNNER_PASSWORD:-waypoint_download_runner_dev_only}
+      POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE: /run/secrets/postgres-compliance-runner-password
+      POSTGRES_DOWNLOAD_RUNNER_PASSWORD_FILE: /run/secrets/postgres-download-runner-password
       # Issue #28 (ADR-0004): password for Keycloak's own login role + database,
       # created by postgres/initdb/02-keycloak-db.sh on first init. Unlike the
       # two runner passwords above, this role OWNS its database outright
       # (Keycloak manages its own schema via its own migrations) rather than
       # receiving grants into the shared `waypoint` database - see that
       # script's header comment for why it deliberately does not follow the
-      # 01-runner-roles.sh + 0025-migration grants pattern.
-      POSTGRES_KEYCLOAK_PASSWORD: ${POSTGRES_KEYCLOAK_PASSWORD:-waypoint_keycloak_dev_only}
+      # 01-runner-roles.sh + 0025-migration grants pattern. The SAME file is
+      # also mounted into the `keycloak` service below (KC_DB_PASSWORD_FILE) -
+      # one file, one password, both sides of the same login.
+      POSTGRES_KEYCLOAK_PASSWORD_FILE: /run/secrets/postgres-keycloak-password
+    secrets:
+      - postgres-owner-password
+      - postgres-compliance-runner-password
+      - postgres-download-runner-password
+      - postgres-keycloak-password
     volumes:
       - pgdata:/var/lib/postgresql/data
     # No `ports:` - reachable only from other containers on the internal
@@ -340,11 +395,28 @@ services:
     networks:
       - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-waypoint} -d ${POSTGRES_DB:-waypoint}"]
+      # Issue #844: deliberately NOT a bare `pg_isready`. A half-initialized
+      # cluster (initdb ran, docker-entrypoint-initdb.d aborted) accepts
+      # connections and would pass pg_isready while having none of the roles
+      # or the `keycloak` database the rest of the stack depends on -- so
+      # this also asserts both initdb scripts completed. See
+      # deploy/postgres/healthcheck.sh.
+      test: ["CMD", "/usr/local/bin/waypoint-postgres-healthcheck.sh"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 5
-      start_period: 5s
+      # Longer than the old bare-pg_isready start_period (5s) on purpose: a
+      # socket-only temp server is already pg_isready-positive part way
+      # through `initdb`, so the old check could go green BEFORE
+      # docker-entrypoint-initdb.d had run at all. This one deliberately
+      # cannot pass until 01-runner-roles.sh and 02-keycloak-db.sh have both
+      # finished, which on a loaded host (a full `up --build` starting six
+      # other services at once) takes appreciably longer than the pg_isready
+      # window did -- live-observed exceeding a 15s start_period during a
+      # fresh-stack-smoke-test.sh run. Failures inside start_period do not
+      # count toward `retries`, so this only widens the first-boot grace
+      # period; a genuinely broken cluster still goes unhealthy 50s later.
+      start_period: 120s
     restart: unless-stopped
 
   # Keycloak (issue #28, ADR-0004): the IdP. The backend and frontend remain
@@ -386,15 +458,28 @@ services:
       KC_DB: postgres
       KC_DB_URL: "jdbc:postgresql://postgres:5432/keycloak"
       KC_DB_USERNAME: keycloak
-      KC_DB_PASSWORD: ${POSTGRES_KEYCLOAK_PASSWORD:-waypoint_keycloak_dev_only}
-      # Dev-stack bootstrap admin (Keycloak's own bootstrap-admin mechanism,
-      # analogous to backend's LocalAuth admin password - issue #333's
-      # reasoning applies equally here). Dev-only default so an unconfigured
-      # stack still comes up with a usable admin console login; override in
-      # deploy/.env for anything beyond local dev, same convention as every
-      # other POSTGRES_*/WAYPOINT_* dev default in this file.
+      # Issue #844: consumed by deploy/keycloak/docker-entrypoint-wrapper.sh,
+      # NOT a built-in Keycloak convention - live-verified (see that script's
+      # header comment) that KC_DB_PASSWORD is not vault-aware in this image,
+      # so a wrapper reads the file and exports the real KC_DB_PASSWORD
+      # before handing off to kc.sh. Same Compose `secrets:`-mounted file as
+      # the postgres service's own POSTGRES_KEYCLOAK_PASSWORD_FILE above.
+      KC_DB_PASSWORD_FILE: /run/secrets/postgres-keycloak-password
+      # Bootstrap admin (Keycloak's own bootstrap-admin mechanism, analogous
+      # to backend's LocalAuth admin password - issue #333's reasoning
+      # applies equally here). KEYCLOAK_ADMIN is a username, not a secret;
+      # KEYCLOAK_ADMIN_PASSWORD_FILE is the same wrapper-consumed convention
+      # as KC_DB_PASSWORD_FILE above (also not vault-aware, live-verified).
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-waypoint_keycloak_admin_dev_only}
+      KEYCLOAK_ADMIN_PASSWORD_FILE: /run/secrets/keycloak-bootstrap-admin-password
+      # Issue #844: the waypoint-backend realm client's secret
+      # (deploy/keycloak/realm/waypoint-realm.json's `${WAYPOINT_BACKEND_CLIENT_SECRET}`
+      # field) - unlike the two _FILE vars above, this one IS consumed by a
+      # genuine Keycloak mechanism once the wrapper exports it: the same
+      # keycloak.migration.replace-placeholders substitution JAVA_OPTS_APPEND
+      # turns on below for WAYPOINT_PUBLIC_URL. See
+      # deploy/keycloak/README.md "What's here" for the full explanation.
+      WAYPOINT_BACKEND_CLIENT_SECRET_FILE: /run/secrets/keycloak-backend-client-secret
       # start-dev's HTTP listener is fine here: TLS is terminated once, at
       # nginx (operator-provided certs, ADR-0003) - same split as backend,
       # which also listens on plain HTTP behind the edge network.
@@ -456,6 +541,10 @@ services:
       # https://<host>/realms/waypoint/protocol/openid-connect/auth (missing
       # /auth); after it, https://<host>/auth/realms/waypoint/... (correct).
       KC_HTTP_RELATIVE_PATH: "/auth"
+    secrets:
+      - postgres-keycloak-password
+      - keycloak-bootstrap-admin-password
+      - keycloak-backend-client-secret
     networks:
       - edge
       - internal
@@ -508,13 +597,16 @@ services:
       # Least-privilege role (0025_runner_db_roles.sql), distinct from the
       # backend's own ${POSTGRES_USER} owner role - see postgres service above
       # and that migration's header comment.
-      ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_compliance_runner;Password=${POSTGRES_COMPLIANCE_RUNNER_PASSWORD:-waypoint_compliance_runner_dev_only}"
+      # Password= deliberately empty (issue #844) -- Database__PasswordFile
+      # below always wins once populated; see the backend service's own
+      # comment on the same pattern.
+      ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_compliance_runner;Password="
       # Issue #843: same file-backed override as the backend's own Database__
       # PasswordFile above -- a DIFFERENT variable than the backend's, since this
-      # role's password (waypoint_compliance_runner, above) is never the same
-      # secret as the backend's owner-role password. Empty by default; actual
-      # secret-file delivery is #844.
-      Database__PasswordFile: "${WAYPOINT_COMPLIANCE_DB_PASSWORD_FILE:-}"
+      # role's password is never the same secret as the backend's owner-role
+      # password. Defaults to the Compose `secrets:`-mounted file (issue #844)
+      # matching postgres's own POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE.
+      Database__PasswordFile: "${WAYPOINT_COMPLIANCE_DB_PASSWORD_FILE:-/run/db-secret/postgres-compliance-runner-password}"
       # Same file-delivery convention and in-container path as the backend's own
       # mount below (issue #405/ADR-0005) - every trusted service reads the same
       # key material, never an env var carrying the key itself.
@@ -596,6 +688,14 @@ services:
       #   read_only: true
       #   bind:
       #     create_host_path: false
+    # Different target than the default /run/secrets/<name> (issue #844,
+    # live-verified) -- this service also mounts the read-only `dev-secrets`
+    # volume at /run/secrets below, and a read-only mount cannot host a new
+    # nested mountpoint. See the backend service's own comment on the same
+    # collision.
+    secrets:
+      - source: postgres-compliance-runner-password
+        target: /run/db-secret/postgres-compliance-runner-password
     networks:
       - internal
       - runner-egress
@@ -639,13 +739,17 @@ services:
       # Least-privilege role (0025_runner_db_roles.sql), distinct from the
       # backend's own ${POSTGRES_USER} owner role - see postgres service above
       # and that migration's header comment.
-      ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_download_runner;Password=${POSTGRES_DOWNLOAD_RUNNER_PASSWORD:-waypoint_download_runner_dev_only}"
+      # Password= deliberately empty (issue #844) -- Database__PasswordFile
+      # below always wins once populated; see the backend service's own
+      # comment on the same pattern.
+      ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_download_runner;Password="
       # Issue #843: same file-backed override as the backend's own Database__
       # PasswordFile above -- a DIFFERENT variable than the backend's and the
-      # compliance-runner's, since this role's password (waypoint_download_runner,
-      # above) is its own least-privilege secret. Empty by default; actual
-      # secret-file delivery is #844.
-      Database__PasswordFile: "${WAYPOINT_DOWNLOAD_DB_PASSWORD_FILE:-}"
+      # compliance-runner's, since this role's password is its own
+      # least-privilege secret. Defaults to the Compose `secrets:`-mounted
+      # file (issue #844) matching postgres's own
+      # POSTGRES_DOWNLOAD_RUNNER_PASSWORD_FILE.
+      Database__PasswordFile: "${WAYPOINT_DOWNLOAD_DB_PASSWORD_FILE:-/run/db-secret/postgres-download-runner-password}"
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
       # Shim modules baked into the image at /app/PowerShell/Modules (Waypoint.
       # Infrastructure.csproj's CopyToPublishDirectory - see the Dockerfile).
@@ -698,6 +802,12 @@ services:
       #   read_only: true
       #   bind:
       #     create_host_path: false
+    # Different target than the default /run/secrets/<name> (issue #844,
+    # live-verified) -- same read-only `dev-secrets`-volume collision as the
+    # backend and compliance-runner services above.
+    secrets:
+      - source: postgres-download-runner-password
+        target: /run/db-secret/postgres-download-runner-password
     networks:
       - internal
       - runner-egress
@@ -756,6 +866,62 @@ networks:
   # -- see deploy/README.md "Runner egress".
   runner-egress:
     driver: bridge
+
+# Issue #844: Compose's own file-secret mechanism (NOT Swarm secrets -- this
+# also works for plain `docker compose up`).
+#
+# Fail-closed behaviour, stated precisely (live-verified; an earlier version
+# of this comment overstated it and the PR #860 review caught that):
+# `docker compose config` does NOT fail on a missing `file:` source -- it
+# renders and exits 0, which is exactly why CI can validate this file
+# without any deploy/config/ present. On `docker compose up`, the Compose
+# client emits a warning ("secret file ... does not exist") and then the
+# DAEMON rejects the bind at container-create time, so no service ever
+# starts. Net effect is still fail-closed, but the enforcement point is the
+# daemon at create time, not the client at parse time.
+#
+# A file that exists but is empty/unreadable gets past that layer entirely,
+# so each consumer validates its own before doing anything destructive:
+# deploy/postgres/docker-entrypoint-wrapper.sh (before the stock entrypoint
+# can run initdb -- see its header for the poisoned-volume failure that
+# forced it) and deploy/keycloak/docker-entrypoint-wrapper.sh (before
+# handing off to kc.sh).
+#
+# Each appears at /run/secrets/<name> inside the consuming container. NOTE
+# (live-verified, and NOT what the Swarm-secrets documentation implies): a
+# `file:` source is bind-mounted VERBATIM -- the container sees the host
+# file's ownership and mode, there is no 0444 re-materialization. Postgres's
+# initdb scripts run as the in-container `postgres` user, so a host file
+# only the operator's own uid can read is unreadable there; 0644 is the
+# convention this repo uses for mounted secret material (same as the
+# commented-out master-key bind mounts above). postgres's entrypoint wrapper
+# checks readability AS that user and fails closed before initdb rather than
+# discovering it half way through. Paths are relative to this file's
+# directory (`deploy/`), matching every other relative source in this file
+# (`./postgres`, etc.).
+#
+# Create these six files under deploy/config/secrets/ (gitignored -- see
+# .gitignore's /deploy/config/ entry) before a fresh bring-up; #847 will add
+# a generator, but does not exist yet. Each file's entire content (minus a
+# trailing newline) is the raw password/secret value -- no quoting, no
+# key=value shape. Example, using an obviously-invented placeholder value
+# (never reuse this literal):
+#
+#   mkdir -p config/secrets
+#   printf 'correct-horse-battery-staple-EXAMPLE-1\n' > config/secrets/postgres-owner-password  # gitleaks:allow
+secrets:
+  postgres-owner-password:
+    file: ./config/secrets/postgres-owner-password
+  postgres-compliance-runner-password:
+    file: ./config/secrets/postgres-compliance-runner-password
+  postgres-download-runner-password:
+    file: ./config/secrets/postgres-download-runner-password
+  postgres-keycloak-password:
+    file: ./config/secrets/postgres-keycloak-password
+  keycloak-bootstrap-admin-password:
+    file: ./config/secrets/keycloak-bootstrap-admin-password
+  keycloak-backend-client-secret:
+    file: ./config/secrets/keycloak-backend-client-secret
 
 volumes:
   # Generated development-only master key and local-auth hash. Persistent so

@@ -6,14 +6,17 @@
 # internal CA — this script exists only to stand up a local dev loop).
 #
 # Output lands next to this script and is git-ignored (repo root .gitignore
-# matches *.pem / *.key at any depth). Never commit it, never reuse it
-# outside a disposable local dev environment.
+# matches *.key at any depth, plus an explicit deploy/nginx/certs/tls.crt
+# entry -- *.pem no longer covers the cert since issue #844 renamed the pair
+# to the generic tls.crt/tls.key names deploy/nginx/conf.d/default.conf and
+# dev-bootstrap both use). Never commit it, never reuse it outside a
+# disposable local dev environment.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-CERT_FILE="${SCRIPT_DIR}/dev-cert.pem"
-KEY_FILE="${SCRIPT_DIR}/dev-key.pem"
+CERT_FILE="${SCRIPT_DIR}/tls.crt"
+KEY_FILE="${SCRIPT_DIR}/tls.key"
 DAYS="${1:-365}"
 
 if [[ -f "${CERT_FILE}" && -f "${KEY_FILE}" ]]; then

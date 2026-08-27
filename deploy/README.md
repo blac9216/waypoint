@@ -86,10 +86,18 @@ listener to probe (ADR-0013 §1) — see "Runner health checks" below.
 volume is initialized (Postgres's own `docker-entrypoint-initdb.d` convention —
 it does **not** re-run against an existing volume), and creates two
 `NOSUPERUSER NOCREATEDB NOCREATEROLE` login roles: `waypoint_compliance_runner`
-and `waypoint_download_runner`. Their passwords come from
-`POSTGRES_COMPLIANCE_RUNNER_PASSWORD`/`POSTGRES_DOWNLOAD_RUNNER_PASSWORD`
-(`deploy/.env`, gitignored — same convention as `POSTGRES_PASSWORD`; dev-only
-defaults apply if unset).
+and `waypoint_download_runner`. Their passwords come from mounted files
+(issue #844 — see "File-backed secrets" below), not `deploy/.env`.
+`postgres/docker-entrypoint-wrapper.sh` validates all four password files
+before the stock entrypoint runs, so a missing/empty/unreadable one aborts
+the container before `initdb` creates the data directory — the service
+restart-loops on a clean error and never reports healthy. The healthcheck
+(`postgres/healthcheck.sh`) additionally asserts that both init scripts
+actually completed (both runner roles, the `keycloak` role, the `keycloak`
+database), so a half-initialized cluster can never satisfy another service's
+`depends_on: service_healthy`. An operator whose `pgdata` volume predates
+issues #442/#28 will see that healthcheck report unhealthy until those roles
+are created by hand — deliberately visible rather than silently broken.
 
 Table-level `GRANT`s for those two roles live in a versioned backend migration —
 `backend/Waypoint.Infrastructure/Data/Migrations/0025_runner_db_roles.sql` —
@@ -106,6 +114,60 @@ roles** (only possible on a genuinely fresh volume with a misordered manual
 loudly (`role "waypoint_compliance_runner" does not exist`) rather than
 silently granting nothing — `docker compose logs backend` names the missing
 role.
+
+### File-backed secrets (issue #844)
+
+Postgres bootstrap passwords, Keycloak's DB/bootstrap-admin passwords, and
+the `waypoint-backend` realm client secret are never Compose environment
+values — each is a file under `deploy/config/secrets/` (gitignored — see
+`.gitignore`'s `/deploy/config/` entry), wired in via Compose's own
+`secrets:` mechanism (`docker-compose.yml`'s top-level `secrets:` block).
+Create all six before a fresh bring-up (`#847` will add a generator, but does
+not exist yet):
+
+```bash
+cd deploy
+mkdir -p config/secrets
+printf '%s\n' 'CHANGE-ME-owner-password'               > config/secrets/postgres-owner-password
+printf '%s\n' 'CHANGE-ME-compliance-runner-password'    > config/secrets/postgres-compliance-runner-password
+printf '%s\n' 'CHANGE-ME-download-runner-password'      > config/secrets/postgres-download-runner-password
+printf '%s\n' 'CHANGE-ME-keycloak-db-password'          > config/secrets/postgres-keycloak-password
+printf '%s\n' 'CHANGE-ME-keycloak-admin-password'       > config/secrets/keycloak-bootstrap-admin-password
+printf '%s\n' 'CHANGE-ME-backend-client-secret'         > config/secrets/keycloak-backend-client-secret
+```
+
+Each file's whole content (minus a trailing newline) is the raw value — no
+quoting, no `key=value` shape. Leave them mode `0644`: a Compose `file:`
+secret is bind-mounted **verbatim** (the container sees the host file's
+ownership and mode — there is no `0444` re-materialization the way Swarm
+secrets do it), and `postgres`'s init scripts read them as the in-container
+`postgres` user, which is neither `root` nor your uid. A `0600` file is
+rejected, by design, by `postgres/docker-entrypoint-wrapper.sh` before
+anything is initialized. Host-side confidentiality comes from
+`deploy/config/` being gitignored and operator-owned, not from the file mode.
+
+What happens when one is wrong, precisely:
+
+| Case | Where it fails | Effect |
+| --- | --- | --- |
+| File missing | `docker compose up`, at **container creation** — the Compose client warns (`secret file ... does not exist`) and the Docker **daemon** then rejects the bind | No container starts. Note `docker compose config` still renders and exits **0** — it does not validate `file:` sources, which is why CI can lint this compose file with no `deploy/config/` present. |
+| File present but empty/unreadable | The service's own entrypoint wrapper — `postgres/docker-entrypoint-wrapper.sh` and `keycloak/docker-entrypoint-wrapper.sh` — **before** anything irreversible happens | The container exits non-zero and restart-loops on a clean error. Postgres in particular never reaches `initdb`, so the `pgdata` volume is left untouched: fix the file and the next restart initializes that same volume correctly, no `down -v` required. |
+
+Neither wrapper ever prints the value it rejected. The `[ -s ... ]` checks
+still present inside `postgres/initdb/01-runner-roles.sh` and
+`02-keycloak-db.sh` are a last-ditch defence-in-depth layer behind the
+Postgres wrapper, not the primary gate — by the time an initdb script runs,
+the data directory already exists.
+
+nginx TLS follows the same shape but stays optional: `deploy/nginx/conf.d/default.conf`
+now references generic `tls.crt`/`tls.key` names (renamed from
+`dev-cert.pem`/`dev-key.pem`), which `dev-bootstrap` still generates
+automatically for local dev. An operator overrides them with real
+certificates by uncommenting the `nginx` service's `config/tls/tls.crt` /
+`config/tls/tls.key` bind mounts in `docker-compose.yml` and creating those
+two files — same "commented out until an operator provides real content"
+convention as the admin-password-hash and master-key mounts already in this
+file.
 
 ### Keycloak (issues #28/#29, ADR-0004)
 
@@ -132,9 +194,9 @@ grants-only logins against the shared `waypoint` database,
 separate `keycloak` database outright — Keycloak manages its own schema via
 its own migrations on every boot, so it needs ownership, not table grants
 into a database `backend` owns. There is no `0025`-style backend migration
-for it and there should never be one. Password:
-`POSTGRES_KEYCLOAK_PASSWORD` (`deploy/.env`, gitignored — same dev-only-default
-convention as every other `POSTGRES_*` password in this file).
+for it and there should never be one. Password: a mounted file (issue #844,
+`deploy/config/secrets/postgres-keycloak-password` — see "File-backed
+secrets" above), not a `deploy/.env` variable.
 
 **No master-key mount, no runner DB roles** (`docs/security.md` control 6).
 Keycloak never receives the envelope-encryption master key and is not one of
@@ -160,16 +222,20 @@ reading `deploy/keycloak/realm/waypoint-realm.json` (bind-mounted read-only)
 — `IGNORE_EXISTING` strategy, so a realm that already exists (a stack with a
 live `pgdata` volume from a previous run) is left alone; only a genuinely
 fresh Keycloak database gets the realm created. The committed realm file's
-OIDC client secret is the literal placeholder `__WAYPOINT_BACKEND_CLIENT_SECRET__`
-— fine for this dev stack (nothing yet authenticates against Keycloak), and
-`deploy/scripts/keycloak-realm-import.sh` is the path to bootstrap with a
-real, usable secret instead. See `deploy/keycloak/README.md` "Round-trip" for
-both scripts.
+OIDC client secret is the placeholder `${WAYPOINT_BACKEND_CLIENT_SECRET}` —
+Keycloak's own `keycloak.migration.replace-placeholders` substitution
+(issue #844) resolves it at import time from a mounted file
+(`deploy/config/secrets/keycloak-backend-client-secret`, gitignored — see
+"File-backed secrets" below), the same mechanism `WAYPOINT_PUBLIC_URL`
+already uses for `rootUrl`/`redirectUris`/`webOrigins`. `deploy/scripts/
+keycloak-realm-import.sh` is a separate, local-only path to re-import with a
+secret supplied directly on the shell instead. See `deploy/keycloak/README.md`
+"Round-trip" for both scripts.
 
 **Admin console**: `https://localhost:8443/auth/` once nginx and Keycloak are
-both up (dev admin credentials: `KEYCLOAK_ADMIN`/`KEYCLOAK_ADMIN_PASSWORD`,
-same dev-only-default convention as everything else in this file — override
-in `deploy/.env`).
+both up. Username is `KEYCLOAK_ADMIN` (`deploy/.env`, default `admin`); the
+password is the mounted `deploy/config/secrets/keycloak-bootstrap-admin-password`
+file (issue #844), not a `deploy/.env` variable.
 
 **Canonical identity (issue #536, unified under #842) — one variable,
 `WAYPOINT_PUBLIC_URL`.** Both Keycloak's own `KC_HOSTNAME` (hostname-v2
@@ -598,18 +664,7 @@ the frontend bundle).
    # deploy/.env
    WAYPOINT_ADMIN_PASSWORD_HASH=paste-the-hash-from-above-here
    POSTGRES_USER=waypoint
-   POSTGRES_PASSWORD=waypoint_dev_only
    POSTGRES_DB=waypoint
-   # Issue #442: passwords for the two dedicated runner DB roles. Same
-   # dev-only-default convention as POSTGRES_PASSWORD above — see "Database
-   # roles" and postgres/initdb/01-runner-roles.sh.
-   POSTGRES_COMPLIANCE_RUNNER_PASSWORD=waypoint_compliance_runner_dev_only
-   POSTGRES_DOWNLOAD_RUNNER_PASSWORD=waypoint_download_runner_dev_only
-   # Issue #28: Keycloak's own database role password (see "Keycloak" below
-   # and postgres/initdb/02-keycloak-db.sh) plus its dev admin console login.
-   POSTGRES_KEYCLOAK_PASSWORD=waypoint_keycloak_dev_only
-   KEYCLOAK_ADMIN=admin
-   KEYCLOAK_ADMIN_PASSWORD=waypoint_keycloak_admin_dev_only
    WAYPOINT_HTTPS_PORT=8443
    ```
 
@@ -621,15 +676,13 @@ the frontend bundle).
    `/api/v1/health`, it just refuses every login (fails closed by design;
    see `backend/README.md` "Run locally").
 
-   Changing `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` here is enough on
-   its own — the `backend` service composes its `ConnectionStrings__Waypoint`
-   from the same three variables (#103), so there is no separate connection
-   string to keep in sync. `POSTGRES_COMPLIANCE_RUNNER_PASSWORD`/
-   `POSTGRES_DOWNLOAD_RUNNER_PASSWORD` only take effect on a **fresh**
-   `pgdata` volume (`docker-entrypoint-initdb.d` scripts never re-run against
-   an existing one — same rule `POSTGRES_PASSWORD` itself already follows);
-   changing them against a stack that already has data requires `ALTER ROLE
-   ... PASSWORD` by hand, or a fresh volume.
+   **Postgres/Keycloak passwords and the Keycloak client secret are no
+   longer `deploy/.env` variables (issue #844) — see "File-backed secrets"
+   below.** `POSTGRES_USER`/`POSTGRES_DB` here are still enough to rename the
+   database/owner role; the six passwords/secrets themselves come from
+   mounted files under `deploy/config/secrets/` instead, and Postgres/Keycloak
+   both now fail to start at all without them (fail-closed by design, not a
+   dev-only default).
 
 4. Generate a secrets master key (issue #405) so the credential store works.
    ADR-0005's envelope encryption (the AWX pattern) fails closed without
