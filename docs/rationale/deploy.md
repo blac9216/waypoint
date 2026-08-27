@@ -21,7 +21,8 @@ one durable home for that provenance.
   `keycloak-healthcheck-start-period`, never a bare `healthcheck-start-period`
   repeated across sections.
 - Entry body: 2–6 lines explaining the why (the reasoning, trade-off, or
-  constraint — not a restatement of the code).
+  constraint — not a restatement of the code). An entry that would need more
+  than 6 lines is a sign it bundles more than one claim — split it instead.
 - Entry ends with a `Refs:` line carrying provenance: issue numbers, ADRs,
   PRs. This is the only place that provenance lives — do not duplicate it
   in code comments or in deploy/ markdown.
@@ -82,13 +83,11 @@ Refs: #845, #885
 ### compose-public-url-single-origin
 
 The backend's token issuer and Keycloak's own hostname used to be two
-independently configured settings that a real deployment had to keep in
-lockstep by hand. `x-operator-config.public-url` is the one browser-facing
-HTTPS origin both are now derived from, so they cannot drift out of sync.
-The fallback is a deliberately nonfunctional placeholder domain, never
-`localhost`, so an unconfigured base fails OIDC discovery/login clearly
-instead of quietly working against a loopback origin nothing external can
-reach.
+independently configured settings a real deployment kept in lockstep by
+hand. `x-operator-config.public-url` is the one browser-facing HTTPS origin
+both now derive from. The fallback is a deliberately nonfunctional
+placeholder domain, never `localhost`, so an unconfigured base fails OIDC
+login clearly instead of quietly working against an unreachable origin.
 
 Refs: #842
 
@@ -96,11 +95,10 @@ Refs: #842
 
 `ForwardedHeaders:KnownNetworks` needs to trust exactly the network nginx
 and the backend share, not the whole RFC 1918 space. The chosen /24 sits
-outside Docker's default address-pool allocation order and outside the
-low `192.168.0.0/16` range a typical home/office LAN or nested Docker host
-is likely to already use, so a fixed subnet is unlikely to collide on a
-shared or nested host. Only `edge` is pinned; `internal` has no route out,
-so a fixed subnet buys it nothing.
+outside Docker's default address-pool order and outside the low
+`192.168.0.0/16` range a typical LAN or nested Docker host is likely to
+already use, so it's unlikely to collide. Only `edge` is pinned; `internal`
+has no route out, so a fixed subnet buys it nothing.
 
 Refs: #191
 
@@ -127,7 +125,7 @@ Refs: #845
 Both TLS bind mounts set `create_host_path: false`, so a missing
 `deploy/config/tls/tls.{crt,key}` fails `docker compose up` closed at
 container-create time instead of Docker silently creating an empty
-directory at that path and nginx failing later with a confusing TLS error.
+directory and nginx failing later with a confusing TLS error.
 
 Refs: #844, #845
 
@@ -144,12 +142,10 @@ Refs: #534
 ### compose-db-passwordfile-split
 
 `ConnectionStrings__Waypoint` always carries `Password=` empty.
-`Database__PasswordFile`, resolved by `DatabaseConnectionStringResolver`,
-is mandatory and always wins once populated — postgres itself now refuses
-to start without its own `POSTGRES_PASSWORD_FILE`, so an inline password
-here would only ever be an unused literal sitting in `docker inspect`
-output. The same pattern repeats for both runners' own least-privilege
-roles.
+`Database__PasswordFile` is mandatory and always wins once populated —
+postgres itself refuses to start without its own `POSTGRES_PASSWORD_FILE`,
+so an inline password here would only be an unused literal sitting in
+`docker inspect` output. The same pattern repeats for both runners' roles.
 
 Refs: #843, #844
 
@@ -158,30 +154,27 @@ Refs: #843, #844
 `FileMasterKeyProvider` only ever reads a file, by design — env vars leak
 via `/proc/<pid>/environ`, `docker inspect`, and crash dumps. The key is
 read lazily on first secret-store operation, not at startup, so a stack
-without the mount still comes up healthy; only a credential write fails,
-with `FileMasterKeyProvider`'s own "No master key is configured" error.
+without the mount still comes up healthy; only a credential write fails.
 
 Refs: #405, ADR-0005
 
 ### compose-master-key-override-not-uncomment
 
-The commented mount block is the mount SHAPE to copy into an operator's
-own `compose.override.yaml` (auto-loaded, no `-f` needed) — not something
-to uncomment in this service body directly. Editing the base risks an
-operator's override drifting back out of sync on the next pull; the
-override is the one durable place for a real deployment's secret paths.
+The commented mount block is the mount SHAPE to copy into an operator's own
+`compose.override.yaml` (auto-loaded, no `-f` needed) — not something to
+uncomment in this service body directly. Editing the base risks an
+operator's override drifting back out of sync on the next pull.
 
 Refs: #405
 
 ### compose-db-secret-vs-run-secrets-split
 
 Each trusted service mounts its Postgres role password at
-`/run/db-secret/<name>`, a deliberately different target than the default
-`/run/secrets/<name>`. The development override mounts a read-only
-`dev-secrets` named volume at `/run/secrets` on these same services, and a
-read-only mount's directory tree cannot host a new nested mountpoint —
-`docker compose up` fails closed with "read-only file system" if both
-targets collide.
+`/run/db-secret/<name>`, deliberately different from `/run/secrets/<name>`.
+The development override mounts a read-only `dev-secrets` volume at
+`/run/secrets` on these same services, and a read-only mount's tree cannot
+host a new nested mountpoint — colliding targets fail `docker compose up`
+closed with "read-only file system".
 
 Refs: #844, #845
 
@@ -199,48 +192,40 @@ Refs: #442 (AC5), ADR-0014 §7
 `tool-upload-staging` is a separate, staging-only volume from the
 `managed-tool` store. The backend deliberately does not mount
 `managed-tool` at all, so it never gets write access to the verified tool
-binary or the RSA release-key trust anchor — only to the staging path
-where an uploaded artifact + signature wait for download-runner to claim
-the tool-install job that reads them back.
+binary or its trust anchor — only to the staging path where an uploaded
+artifact + signature wait for download-runner to claim the install job.
 
 Refs: #621, #630, ADR-0014 §7
 
 ### compose-postgres-healthcheck-wrapper
 
 A bare `pg_isready` passes on a half-initialized cluster (initdb ran, but
-`docker-entrypoint-initdb.d` aborted before creating the runner roles or
-the `keycloak` database the rest of the stack depends on). The wrapper
-script also asserts both initdb scripts completed. `start_period: 120s` is
-deliberately longer than the old 5s: a socket-only temp server is already
-pg_isready-positive partway through `initdb`, before the initdb scripts
-have run at all, and a fresh `up --build` starting six services at once
-has been live-observed exceeding a 15s window.
+`docker-entrypoint-initdb.d` aborted before creating the runner roles or the
+`keycloak` database). The wrapper script also asserts both initdb scripts
+completed. `start_period: 120s` replaces an old 5s: a socket-only temp
+server is already `pg_isready`-positive before the initdb scripts run at
+all, and a fresh `up --build` starting six services has live-exceeded 15s.
 
 Refs: #844
 
 ### compose-keycloak-hostname-strict
 
-`--hostname-strict=true` is required for `KC_HOSTNAME` to actually pin one
-canonical issuer — `hostname-strict=false` (start-dev's implicit default)
-was live-verified to keep deriving the discovery document's `issuer` from
-whatever `Host` header the request arrived with, even with `KC_HOSTNAME`
-set. Without both this flag and the explicit `/auth` suffix on
-`KC_HOSTNAME` (hostname-v2 does not auto-append
-`KC_HTTP_RELATIVE_PATH`), a browser request through nginx and a direct
-container-network request from `backend` would disagree on `iss`, and no
-single `ValidIssuer` on the backend could match both.
+`--hostname-strict=true` is required for `KC_HOSTNAME` to pin one canonical
+issuer — `hostname-strict=false` (start-dev's default) was live-verified to
+keep deriving the discovery document's `issuer` from whatever `Host` header
+arrived. That, plus the explicit `/auth` suffix (hostname-v2 does not
+auto-append `KC_HTTP_RELATIVE_PATH`), keeps a browser request and a direct
+`backend` request from disagreeing on `iss`.
 
 Refs: #536, #842
 
 ### compose-realm-placeholder-substitution
 
-Keycloak's realm-import placeholder substitution
-(`${WAYPOINT_PUBLIC_URL}` in `waypoint-realm.json`) is off by default.
-`JAVA_OPTS_APPEND` turns it on for the `--import-realm` boot path —
-live-verified that `KC_*` env vars do not map to this JVM system property,
-it must go through `JAVA_OPTS_APPEND`. Without it, Keycloak imports the
-literal string `${WAYPOINT_PUBLIC_URL}` as the client's redirect
-URI/origin instead of substituting the real value.
+Keycloak's realm-import placeholder substitution (`${WAYPOINT_PUBLIC_URL}`
+in `waypoint-realm.json`) is off by default. `JAVA_OPTS_APPEND` turns it on
+for the `--import-realm` boot path — live-verified that `KC_*` env vars do
+not map to this JVM system property. Without it, Keycloak imports the
+literal string `${WAYPOINT_PUBLIC_URL}` instead of the real value.
 
 Refs: #844
 
@@ -248,65 +233,61 @@ Refs: #844
 
 `KC_HTTP_RELATIVE_PATH=/auth` tells Keycloak's own URL-building to include
 the prefix nginx actually proxies it under — without it, every
-self-referential URL (discovery document endpoints, login-form `action=`)
-renders without `/auth` and 404s through nginx, a silent broken-login
-redirect rather than an obvious error. This shifts EVERY Keycloak-served
-path, including the management port's own health endpoint
-(`/auth/health/ready`, not `/health/ready`), live-verified against a real
-bring-up.
+self-referential URL (discovery document, login-form `action=`) renders
+without `/auth` and 404s through nginx, a silent broken-login redirect. This
+shifts every Keycloak-served path, including the management health endpoint
+(`/auth/health/ready`), live-verified against a real bring-up.
 
 Refs: #534, #536
 
 ### compose-module-preload-order
 
 `WaypointLogging` must preload first: the imported vmware-stig-docker
-transport files the other modules dot-source expect
-`Get-LogSplat`/`Write-Log` already in scope. `ModulePreloadCompletenessTests`
-fails the build if a future handler's module ships without an entry in
-this list — the guard exists because `WaypointComplianceContent` was once
-missing here and `Invoke-WaypointComplianceContentPull` silently failed
-with "term ... is not recognized".
+transport files the other modules dot-source expect `Get-LogSplat`/
+`Write-Log` already in scope. `ModulePreloadCompletenessTests` fails the
+build if a future handler's module ships without an entry here — the guard
+exists because `WaypointComplianceContent` was once missing and silently
+failed with "term ... is not recognized".
 
 Refs: #579, #613
 
 ### compose-runner-egress-topology
 
 Both runners previously sat only on `internal` (no route out), so neither
-could reach anything outside the compose stack — compliance-runner
-couldn't reach scan targets/STIG Manager, download-runner couldn't reach
-the Broadcom depot. `runner-egress` is a second, non-`internal:` bridge
-network that gives both runners a route out while `postgres` stays on
-`internal` alone: neither runner's new network reaches Postgres, and
-nothing on `edge`/`internal` gains a route out through this change. An
-operator running disconnected/air-gapped can detach download-runner from
-it, or override the network's driver options, in their own override.
+could reach anything outside the compose stack. `runner-egress` is a
+second, non-`internal:` bridge network that gives both a route out while
+`postgres` stays on `internal` alone — neither runner's new network reaches
+Postgres. An operator running disconnected can detach download-runner from
+it in their own override.
 
 Refs: #578
 
 ### compose-replica-scaling
 
-One replica of each runner is the default; ADR-0013 decision 6
-deliberately does not multiply services without measured need. See
-deploy/README.md's replica-safe scaling note before setting
-`deploy.replicas` > 1 on either runner.
+One replica of each runner is the default; ADR-0013 decision 6 deliberately
+does not multiply services without measured need. See deploy/README.md's
+var-reference table before setting `deploy.replicas` > 1 on either runner.
 
 Refs: ADR-0013 (decision 6)
 
 ### compose-secrets-fail-closed
 
-Compose's own file-secret mechanism (not Swarm secrets — this also works
-for plain `docker compose up`). `docker compose config` does NOT fail on a
-missing `file:` source; it renders and exits 0, which is why CI can
-validate this file with no `deploy/config/` present. On `docker compose
-up`, the daemon rejects the bind at container-create time, so no service
-ever starts — fail-closed, but the enforcement point is the daemon at
-create time, not the client at parse time. A file that exists but is
-empty/unreadable gets past that layer entirely, so each consumer (the
-postgres and keycloak entrypoint wrappers) validates its own before doing
-anything destructive. A `file:` source is bind-mounted verbatim — the
-container sees the host file's ownership/mode, there is no 0444
-re-materialization — so 0644 is this repo's convention for mounted secret
-material.
+Compose's own file-secret mechanism (not Swarm secrets). `docker compose
+config` does NOT fail on a missing `file:` source — it renders and exits 0,
+which is why CI can validate this file with no `deploy/config/` present. On
+`docker compose up`, the daemon rejects the bind at container-create time,
+so no service ever starts: fail-closed, but the enforcement point is the
+daemon at create time, not the client at parse time.
+
+Refs: #844, PR #860
+
+### compose-secrets-mode-0644-convention
+
+A `file:` source is bind-mounted verbatim — the container sees the host
+file's ownership/mode, with no Swarm-style `0444` re-materialization — so
+`0644` is this repo's convention for mounted secret material. An
+empty/unreadable file passes the fail-closed check above; each consumer
+(postgres/keycloak entrypoint wrappers) validates its own content first.
 
 Refs: #844, PR #860
 
@@ -318,39 +299,29 @@ Refs: #844, PR #860
 `dev-auth-bootstrap`) a local-auth admin password hash into named volumes,
 replacing the base's operator-provided equivalents for a local loop.
 `dev-auth-bootstrap` runs the backend image itself in a one-shot,
-non-networked mode purely to reuse its own `--hash-password` tool — it is
-never reachable as a service. The backend's `LocalAuth__*` trio
-(`LocalAuthOptions`, `InMemoryLocalAuthenticationService`) must never be
-set on a real deployment; the base ships none of them, so an unconfigured
-production stack 404s `AuthController.Login` outright.
+non-networked mode purely to reuse its `--hash-password` tool. The
+`LocalAuth__*` trio must never be set on a real deployment.
 
 Refs: #845, #29, #333, #62
 
 ### override-volume-subpath-replacement
 
-Compose merges `volumes:` entries by target (verified): an entry here
-whose `target:` exactly matches one of the base's replaces it rather than
-adding a second mount at the same path. The base's TLS mounts are
-mandatory bind mounts with no host file present by default
-(`create_host_path: false`), so without this override nginx never starts;
-with it, these two entries take over both exact targets and point them at
-subpaths of the dev-bootstrap-generated `dev-tls` named volume instead. A
-directory-level mount at `/etc/nginx/certs` would coexist with, not
-replace, the base's per-file mounts and still fail on the missing bind
-sources — it must be these same two targets.
+Compose merges `volumes:` entries by target: an entry here whose `target:`
+exactly matches the base's replaces it rather than adding a second mount at
+the same path. The base's TLS mounts are mandatory with no host file
+present by default (`create_host_path: false`), so without this override
+nginx never starts; with it, these two entries point at subpaths of the
+dev-bootstrap-generated `dev-tls` volume instead.
 
 Refs: #845
 
 ### override-dev-admin-idempotent-provisioning
 
-`keycloak-dev-admin` creates-or-finds the user by username, then
-reconciles the password (non-temporary) and Admin-group membership on
-every run, so a changed password file or a manually-removed group
-membership is restored on the next `up`. Changing
-`WAYPOINT_DEV_ADMIN_USERNAME` provisions a NEW user rather than renaming
-the old one — the provisioner never deletes accounts (deliberate for a
-dev-only tool) — so the previously provisioned account stays enabled and
-usable until removed by hand or via `docker compose down -v`.
+`keycloak-dev-admin` creates-or-finds the user by username, then reconciles
+the password (non-temporary) and Admin-group membership on every run, so a
+changed password file or removed group membership is restored on the next
+`up`. Changing `WAYPOINT_DEV_ADMIN_USERNAME` provisions a NEW user rather
+than renaming the old one — the provisioner never deletes accounts.
 
 Refs: #846
 
@@ -358,11 +329,9 @@ Refs: #846
 
 The base's `public-url` anchor falls back to a deliberately nonfunctional
 placeholder domain. This override replaces it with a working `localhost`
-default sized to the same `WAYPOINT_HTTPS_PORT` the base's nginx `ports:`
-mapping uses, so a fresh `docker compose up` gets a real login with no
-manual `WAYPOINT_PUBLIC_URL` step. `keycloak`'s `WAYPOINT_PUBLIC_URL`/
-`KC_HOSTNAME` carry the identical expression on purpose — the two values
-must never drift apart (see compose-public-url-single-origin).
+default sized to `WAYPOINT_HTTPS_PORT`, so a fresh `docker compose up`
+gets a real login with no manual step — `keycloak`'s own
+`WAYPOINT_PUBLIC_URL`/`KC_HOSTNAME` carry the same expression on purpose.
 
 Refs: #845, #842
 
@@ -382,40 +351,37 @@ Refs: #885
 A bind-mount `source:` this script writes into a compose override is
 resolved by the Docker daemon against the HOST filesystem, not this
 process's own. Inside a devcontainer whose workspace is itself a bind
-mount, the daemon-visible path differs from this process's path, so every
-source this script emits is translated via the container's own inspected
-mounts before use.
+mount, the daemon-visible path differs, so every source this script emits
+is translated via the container's own inspected mounts before use.
 
 Refs: #847
 
 ### gen-project-ownership-discriminator
 
 A Compose project name is claimed by RUNNING containers carrying that
-project label, not by the mere existence of a state directory -- a bare
+project label, not by the mere existence of a state directory — a bare
 `mkdir` would otherwise let any caller silently claim a project name.
 Ownership is decided from `com.docker.compose.project.working_dir`
-(accepting both the in-container and host-side spelling of this deploy
-directory), with the generator's own artifact file as a fallback for a
-container carrying no working_dir label at all.
+(accepting both in-container and host-side spellings), with the
+generator's own artifact file as a fallback.
 
 Refs: #847
 
 ### gen-local-auth-hash-copy
 
-The caller-supplied admin password hash is copied into this run's own
-state directory, and the copy is what the generated override mounts, so
-the slug directory stays self-contained (one `rm -rf` removes everything)
-and callers never have to pre-create the state directory to stage the hash.
+The caller-supplied admin password hash is copied into this run's own state
+directory, and the copy is what the generated override mounts, so the slug
+directory stays self-contained (one `rm -rf` removes everything) and
+callers never have to pre-create the state directory to stage the hash.
 
 Refs: #847
 
 ### gen-secret-reuse-never-overwrite
 
 Existing secrets and TLS material are reused, never regenerated, once
-present. For a TLS pair specifically, a partial pair (one file present,
-the other missing or empty) must never be silently completed --
-regenerating both would overwrite the survivor. Reuse requires both files
-non-empty; anything else fails closed instead of guessing.
+present. For a TLS pair specifically, a partial pair (one file present, the
+other missing or empty) must never be silently completed — regenerating
+both would overwrite the survivor. Reuse requires both files non-empty.
 
 Refs: #847
 
@@ -429,29 +395,22 @@ Refs: #847
 
 ### gen-env-file-list-merge
 
-Agent mode drives port/subnet/public-url through a slug-scoped
-`--env-file` and compose.yaml's own operator-config anchors, not through
-`ports:`/`networks:` overrides placed directly in override.yaml. Compose's
-merge semantics APPEND list entries under those keys rather than replacing
-the base's by target/subnet -- verified live: an override.yaml with its
-own `ports:` produced a merged config publishing both the base's default
-port and the override's, side by side. Using the base's own anchors
-avoids that whole class of list-merge surprise. `--env-file` also means
-agent mode never auto-loads deploy/.env, so persistent mode's own env can
-never leak into an agent-mode bring-up.
+Agent mode drives port/subnet/public-url through a slug-scoped `--env-file`
+and compose.yaml's own operator-config anchors, not `ports:`/`networks:`
+overrides. Compose's merge semantics APPEND list entries under those keys
+rather than replacing by target/subnet — verified live: an override with
+its own `ports:` published both the base's default port and its own, side
+by side.
 
 Refs: #847
 
 ### gen-build-context-not-host-path
 
-Unlike a bind-mount `source:` (resolved by the Docker daemon against the
-host filesystem), `build: context:` is resolved by the buildx client from
-wherever `docker compose build` itself runs. Passing the host-path-
-translated absolute path here broke with "unable to prepare context: path
-not found" -- that translated path is only meaningful to the daemon.
-The keycloak-dev-admin build context therefore stays relative
-(`./keycloak-dev-admin`), matching every other build context in the
-generated override.
+Unlike a bind-mount `source:` (resolved by the daemon against the host
+filesystem), `build: context:` is resolved by the buildx client from
+wherever `docker compose build` runs. Passing the host-path-translated
+absolute path broke with "unable to prepare context: path not found", so
+the keycloak-dev-admin build context stays relative (`./keycloak-dev-admin`).
 
 Refs: #847, #846
 
@@ -460,10 +419,10 @@ Refs: #847, #846
 ### initcfg-secret-file-mode-0644
 
 Secret files are written 0644, not 0600: Compose bind-mounts a `file:`
-secret source verbatim (host uid/mode preserved, no re-materialization),
-and postgres's initdb scripts read their three files as the in-container
-`postgres` user, neither root nor this script's uid. 0644 is the
-convention this repo uses for every mounted secret file.
+secret source verbatim (host uid/mode preserved), and postgres's initdb
+scripts read their three files as the in-container `postgres` user, neither
+root nor this script's uid. 0644 is this repo's convention for every
+mounted secret file.
 
 Refs: #844
 
@@ -472,13 +431,11 @@ Refs: #844
 ### smoke-in-network-helper
 
 HTTP checks route through a helper container on the stack's own `edge`
-network via `docker exec`, rather than the host-published port directly.
-A published container port is not reliably reachable from the test
-process's own network namespace in every environment (devcontainer /
-remote-Docker-daemon setups) -- a throwaway container on the same edge
-network reaches nginx fine while this script's own process gets
-ECONNREFUSED/timeout on both 127.0.0.1 and the bridge gateway. This costs
-nothing extra where the published port IS reachable.
+network via `docker exec`, rather than the host-published port directly. A
+published container port is not reliably reachable from the test process's
+own network namespace in every environment (devcontainer / remote-daemon
+setups) — a throwaway container on the same network reaches nginx fine
+where the process itself gets ECONNREFUSED/timeout.
 
 Refs: #219, #444
 
@@ -488,9 +445,7 @@ The admin-password hash is computed and staged in a separate scratch
 directory, never inside the generator's own state directory. This script
 must not create the generator's state directory behind its back: the
 generator refuses a foreign stack that has already claimed this project
-name, and a caller that pre-creates state must not be able to influence
-that decision. The generator copies the hash into the slug directory
-itself once called.
+name, and a caller that pre-creates state must not influence that decision.
 
 Refs: #847
 
@@ -498,12 +453,9 @@ Refs: #847
 
 Two preconditions are seeded before a scan job can honestly fail against
 its invented unreachable target instead of failing earlier at a readiness
-gate: (1) compliance-runner's readiness check requires
-Scans:ProfilePath/NsxProfilePath/SrgProfilePath to exist as readable
-directories, so the three expected (empty) subdirectories are pre-created
-on the fresh `compliance-profiles` volume; (2) a scan run requires a
-resolvable `srg-ssh` credential-purpose binding per scoped target, so the
-just-created service credential is bound to the just-created target before
+gate: the three expected profile-path subdirectories are pre-created on the
+fresh `compliance-profiles` volume, and a resolvable `srg-ssh`
+credential-purpose binding is created for the just-created target before
 the run is submitted.
 
 Refs: #444, #733, #726, #882, #639
@@ -512,11 +464,10 @@ Refs: #444, #733, #726, #882, #639
 
 Cancelling a job racing a fast-failing invented-unreachable target
 intermittently lost the race against the runner claiming and failing it
-first. The run is paused before the cancel request so the job dispatcher
-never claims the still-queued job at all -- cancel then deterministically
-moves a queued job to `cancelled`. A run/job already gone terminal before
-the pause lands is accepted as correct product behavior (400/409), not a
-test failure.
+first. The run is paused before the cancel request so the dispatcher never
+claims the still-queued job — cancel then deterministically moves it to
+`cancelled`. A run/job already terminal before the pause lands is accepted
+as correct product behavior, not a test failure.
 
 Refs: #498
 
@@ -533,44 +484,40 @@ Refs: ADR-0011
 ### e2e-npm-ci-stamp
 
 `[[ ! -d node_modules ]]` only tests whether the directory exists, not
-whether it matches what package-lock.json currently declares -- a
-checkout whose node_modules predates a devDependency addition satisfies
-that guard and skips `npm ci` entirely. Install correctness is tracked
-instead with a stamp file, written only on a successful `npm ci`,
-containing package-lock.json's hash: cheap (one sha256sum, no network) and
-reliable (any lockfile change invalidates it). This is the single install
-site both the frontend/dist build and the Playwright dependency prep route
-through, so a fresh checkout installs exactly once.
+whether it matches package-lock.json — a checkout whose node_modules
+predates a devDependency addition satisfies that guard and skips `npm ci`.
+Install correctness is instead tracked with a stamp file, written only on
+a successful `npm ci`, containing the lockfile's hash.
 
 Refs: #906
 
 ### e2e-reachability-probe
 
 Whether a docker-published host port is reachable from this process's own
-network namespace is a property of the environment (devcontainer /
-remote-daemon host vs. a real appliance host), not of this specific
-stack -- so it is probed once, generically, with a disposable helper
-container BEFORE the stack is even generated. That lets `--public-url`
-already be the origin Playwright will actually navigate to, instead of
-guessing "localhost" and discovering only after bring-up -- with
-Keycloak's issuer and redirect/origin list already baked in -- that the
-browser can only reach the stack via its edge-network name. The retry
-loop is bounded because with `userland-proxy=false` a connect landing
-before `nc` finishes binding is refused even though the port genuinely
-works once listening.
+network namespace is a property of the environment, not of this stack —
+so it is probed once, generically, with a disposable helper container
+BEFORE the stack is even generated. That lets `--public-url` already be
+the real navigation origin instead of guessing "localhost" and discovering
+only after bring-up that the browser can't reach it.
+
+Refs: #896, #904
+
+### e2e-reachability-probe-retry-bound
+
+The retry loop is bounded because with `userland-proxy=false` a connect
+landing before `nc` finishes binding is refused even though the port
+genuinely works once listening — an unbounded retry would mask a probe
+that never actually succeeds.
 
 Refs: #896, #904
 
 ### e2e-playwright-exit-capture
 
-`set -euo pipefail` would otherwise terminate the whole script the instant
-the Playwright subshell exits nonzero -- before its exit code could be
-captured, before the zero-tests-executed guard runs, and before the
-script's own final `exit` ever ran. A failed Playwright run was silently
-swallowed as whatever exit code the EXIT trap's cleanup happened to
-produce, not the suite's real result. `set +e`/`set -e` bracket exactly
-the subshell so errexit is suspended only long enough to capture the real
-exit code.
+`set -euo pipefail` would otherwise kill the script the instant the
+Playwright subshell exits nonzero, swallowing a failed run as whatever the
+EXIT trap's cleanup produced — before the exit code is captured or the
+zero-tests-executed guard runs. `set +e`/`set -e` bracket exactly the
+subshell so errexit is suspended only long enough to capture the real code.
 
 Refs: #848, #500
 
@@ -579,40 +526,33 @@ Refs: #848, #500
 ### realmimport-host-path-translation
 
 A bind-mount SOURCE given to a plain `docker run -v` (unlike `docker
-compose`'s own bind mounts) is not translated when this script runs
-inside a devcontainer whose workspace is itself a bind mount -- the
-daemon looks for that literal path on the host, and a container-side path
-silently mounts an empty directory there. The scratch directory's host-
-side path is resolved from the container's own inspected mounts before
-use; on a real appliance host this loop finds no mapping and the path is
-used as-is. deploy/ is used for the scratch dir rather than /tmp because
-container /tmp is never host-shared at all.
+compose`'s own bind mounts) is not translated inside a devcontainer whose
+workspace is itself a bind mount — the daemon looks for that literal path
+on the host, silently mounting an empty directory. The scratch dir's
+host-side path is resolved from the container's own inspected mounts;
+`deploy/` is used rather than `/tmp` because container `/tmp` isn't shared.
 
 Refs: #28
 
 ### realmimport-python-not-sed
 
-sed's replacement side has its own metacharacters (`&` expands to the
-whole match, `\` escapes, and any delimiter appearing in the value ends
-the expression early), so a generated secret containing those characters
+sed's replacement side has its own metacharacters (`&`, `\`, and any
+delimiter appearing in the value), so a generated secret containing them
 was silently mangled. A literal, non-regex replacement in python3 has no
-metacharacters, and also JSON-escapes the value -- the placeholder sits
-inside a JSON string, so a secret containing `"` or `\` must be escaped to
-keep the file parseable. The secret is passed through the environment,
-never argv, since argv is visible in `ps`/`/proc/<pid>/cmdline` to
-anything else on the host.
+metacharacters and also JSON-escapes the value. The secret is passed
+through the environment, never argv, since argv is visible in `ps`/
+`/proc/<pid>/cmdline` to anything else on the host.
 
 Refs: #844, #860
 
 ### realmimport-stop-before-reimport
 
 Running the throwaway import alongside a live `keycloak` service against
-the same database silently no-ops: the realm delete appears to succeed,
-but the throwaway boot's `IGNORE_EXISTING` import then also silently does
-nothing, with no error at any layer. Two Keycloak processes clustering
-against one DB backend was never a supported concurrent-write scenario.
-The compose-managed service is stopped first and restarted at the end
-either way, via a trap.
+the same database silently no-ops: the realm delete appears to succeed, but
+the throwaway boot's `IGNORE_EXISTING` import then also silently does
+nothing. Two Keycloak processes clustering against one DB was never a
+supported concurrent-write scenario, so the compose-managed service is
+stopped first and restarted at the end via a trap.
 
 Refs: #28
 
@@ -620,15 +560,19 @@ Refs: #28
 
 Keycloak 25's standalone `import --override true` CLI logs success and
 exits 0 against an already-initialized database, but the realm silently
-does not land -- a fresh `SELECT` against `realm`/`client` afterward shows
-no change, reproduced against both a stopped and a running `keycloak`
+does not land — reproduced against both a stopped and a running `keycloak`
 service. Keycloak's own server-boot import path (`start-dev
---import-realm`, `IGNORE_EXISTING` strategy) reliably creates the realm
-and its client with the substituted secret when the realm does not
-already exist. This script therefore deletes the existing realm via the
-admin REST API, then boots a throwaway `keycloak` container against the
-same database with `--import-realm` -- slower than a bare `kc.sh import`,
-but the path actually proven to persist.
+--import-realm`, `IGNORE_EXISTING`) reliably creates the realm when it does
+not already exist.
+
+Refs: #28
+
+### realmimport-delete-then-reboot-strategy
+
+This script therefore deletes the existing realm via the admin REST API,
+then boots a throwaway `keycloak` container against the same database with
+`--import-realm` — slower than a bare `kc.sh import`, but the only path
+actually proven to persist (see realmimport-server-boot-not-cli).
 
 Refs: #28
 
@@ -637,24 +581,21 @@ Refs: #28
 ### realmexport-host-path-translation
 
 A bind-mount SOURCE given to a plain `docker run -v` is resolved by the
-Docker daemon against the HOST filesystem, and gets no translation when
-invoked from inside a devcontainer whose workspace is itself a bind mount
--- an un-translated container-side path here silently exports into an
-empty directory the daemon creates on the host, while the export command
-still reports success. The output directory's host-side path is resolved
-from the container's own inspected mounts before use; on a real appliance
-host this loop finds no mapping and the path is used as-is.
+Docker daemon against the HOST filesystem, with no translation from inside
+a devcontainer whose workspace is itself a bind mount — an un-translated
+path silently exports into an empty directory the daemon creates, while
+the export command still reports success. The output directory's
+host-side path is resolved from the container's own inspected mounts.
 
 Refs: #28
 
 ### realmexport-throwaway-container
 
 `kc.sh export` requires exclusive DB access via its own embedded
-connection, which is not available while `start-dev` owns the process. A
-throwaway container runs `export` against the same database instead --
-Keycloak's own docs support this, since export/import both connect to
-`KC_DB_URL` directly, independent of whether a server is already running
-against it.
+connection, not available while `start-dev` owns the process. A throwaway
+container runs `export` against the same database instead — Keycloak's own
+docs support this, since export/import both connect to `KC_DB_URL`
+directly.
 
 Refs: #28
 
@@ -665,9 +606,8 @@ Refs: #28
 The production compose base bind-mounts the operator's own certificate/key
 onto `tls.crt`/`tls.key` and fails closed at container creation if either is
 absent. The dev override replaces the same two mount points with
-dev-bootstrap's throwaway self-signed pair. Either way this config reads the
-SAME two filenames, so it never changes per deployment and there is no
-in-config branch on connected/disconnected or dev/prod.
+dev-bootstrap's throwaway self-signed pair — this config reads the same two
+filenames either way, with no in-config branch on dev/prod.
 
 Refs: #844
 
@@ -675,13 +615,10 @@ Refs: #844
 
 A literal `proxy_pass http://backend:8080;` target is resolved once at
 config load and cached for the worker's lifetime. Recreating the `backend`
-or `keycloak` container (self-update, plain restart) gives it a new IP on
-the bridge network, and nginx keeps dialling the stale address until
-`nginx -s reload`. The fix is a `resolver` directive plus a proxy_pass
-target that carries a *variable* (`$backend_host`/`$keycloak_host`, never
-the literal service name), so nginx re-resolves per request instead of
-caching one lookup forever. `127.0.0.11` is Docker's embedded DNS, present
-on every container on a user-defined bridge network.
+or `keycloak` container gives it a new IP on the bridge network, and nginx
+keeps dialling the stale address until `nginx -s reload`. The fix is a
+`resolver` directive plus a proxy_pass target that carries a *variable*
+(`$backend_host`/`$keycloak_host`) so nginx re-resolves per request.
 
 Refs: #59
 
@@ -690,8 +627,7 @@ Refs: #59
 Rejects methods this stack never serves (TRACE/CONNECT/etc., DISA/CIS
 guidance) with a single `if ($request_method !~ ...) { return 405; }` at
 server level rather than `limit_except` per location, which would have to
-be repeated and kept in sync across every `location` block in this file.
-The allowed set (GET/HEAD/POST/PUT/DELETE/OPTIONS) is derived from
+be repeated across every `location` block. The allowed set is derived from
 docs/api-contract.md's full resource table.
 
 Refs: #388, #52
@@ -699,11 +635,10 @@ Refs: #388, #52
 ### nginx-csp-same-origin
 
 The PWA is a zero-external-asset bundle (no CDN fonts/images, no inline
-style/script), so `default-src 'self'` covers scripts, styles, images, and
-fonts without any `unsafe-inline`/`unsafe-eval` relaxation, and
-`connect-src 'self'` covers both REST and SSE traffic through this same
-proxy. If a future screen needs an inline style/script or a cross-origin
-connection, this directive has to change with it.
+style/script), so `default-src 'self'` covers scripts/styles/images/fonts
+with no relaxation, and `connect-src 'self'` covers both REST and SSE
+traffic through this same proxy. A future screen needing an inline
+style/script or cross-origin connection must change this directive with it.
 
 Refs: #52
 
@@ -711,11 +646,9 @@ Refs: #52
 
 The vcf-download-tool artifact runs hundreds of MB, well past nginx's 1 MB
 default `client_max_body_size`. This is scoped to the single upload route
-(exact-match location, evaluated before the general `/api/` prefix) rather
-than raised globally, so every other `/api/` request keeps the small
-default body cap. Must be changed together with
-`ManagedToolController.MaxUploadBytes` and the action's
-`FormOptions.MultipartBodyLengthLimit` — nginx's cap alone is not enough.
+rather than raised globally, so every other `/api/` request keeps the small
+default cap. Must change together with `ManagedToolController.MaxUploadBytes`
+and `FormOptions.MultipartBodyLengthLimit` — nginx's cap alone isn't enough.
 
 Refs: #620, #641
 
@@ -723,25 +656,20 @@ Refs: #620, #641
 
 Keycloak is configured with `KC_HTTP_RELATIVE_PATH=/auth` and itself serves
 at that same prefix, so the raw request URI is forwarded unmodified — no
-prefix stripping here. An earlier version tried the trailing-slash
-`proxy_pass .../;` stripping trick, but that only works for a *literal*
-proxy_pass target; once the target became a resolver-driven variable (see
-nginx-dynamic-backend-resolution), no stripping ever happened and Keycloak
-rendered every self-referential URL without `/auth`, breaking the whole
-login flow.
+prefix stripping here. An earlier trailing-slash `proxy_pass .../;` trick
+only works for a *literal* target; once the target became a resolver-driven
+variable (nginx-dynamic-backend-resolution), stripping stopped happening
+and Keycloak broke the whole login flow.
 
 Refs: #28, #534
 
 ### nginx-healthz-split
 
-`/healthz` (liveness: nginx itself is up) and `/healthz/upstream`
-(readiness: nginx AND the backend it proxies to are reachable) are kept as
-distinct endpoints, and this file stays separate from `default.conf`,
-rather than folding backend reachability into the container HEALTHCHECK.
-Folding them together would make nginx report unhealthy every time
-`backend` is legitimately recreated (self-update, `docker compose restart
-backend`), and anything treating Docker HEALTHCHECK as a liveness signal
-would then bounce or block on nginx for a problem that isn't nginx's.
+`/healthz` (liveness) and `/healthz/upstream` (readiness: nginx AND the
+backend are reachable) are kept as distinct endpoints, and this file stays
+separate from `default.conf`, rather than folding backend reachability into
+the container HEALTHCHECK. Folding them would make nginx report unhealthy
+every time `backend` is legitimately recreated (self-update, `restart`).
 
 Refs: #66
 
@@ -749,65 +677,54 @@ Refs: #66
 
 ### postgres-poisoned-volume-fail-closed
 
-The initdb scripts' own `[ -s ... ]` checks run from
-`docker_process_init_files`, which the stock entrypoint invokes AFTER
-`initdb` has already created and populated the data directory — an empty or
-unreadable secret file used to fail at a point where the damage was already
-done: the entrypoint aborted, `restart: unless-stopped` restarted the
-container, the second boot found a non-empty data directory and skipped
-initialization, and postgres reported HEALTHY with no runner roles and no
-`keycloak` role/database. The pgdata volume was permanently poisoned (initdb
-never re-runs) and only `down -v` recovered it. Validating every mounted
-secret file in a wrapper BEFORE `exec`ing the stock entrypoint means a bad
-secret file aborts the container before initdb ever touches the data
-directory: the container restart-loops on the same clean error, the volume
-stays pristine, and fixing the file lets the very next restart initialize
-the same volume correctly.
+The initdb scripts' own checks run AFTER `initdb` has already created and
+populated the data directory — an empty/unreadable secret file used to fail
+at a point where the damage was already done: the container restarted, the
+second boot found a non-empty data directory and skipped initialization,
+and postgres reported HEALTHY with no runner roles. Only `down -v`
+recovered a volume poisoned this way.
+
+Refs: #844, PR #860
+
+### postgres-wrapper-validates-before-initdb
+
+Validating every mounted secret file in a wrapper BEFORE `exec`ing the
+stock entrypoint means a bad file aborts the container before initdb ever
+touches the data directory: it restart-loops on a clean error, the volume
+stays pristine, and fixing the file lets the next restart initialize it
+correctly (see postgres-poisoned-volume-fail-closed).
 
 Refs: #844, PR #860
 
 ### postgres-runtime-user-readability-check
 
 Compose `secrets:` with a `file:` source is a plain bind mount of the HOST
-file — there is no 0444 re-materialization the way Swarm secrets do it. The
-stock entrypoint drops to the `postgres` user before running
-docker-entrypoint-initdb.d, so a host file only root (or only the
-operator's own uid) can read is readable in this root-run wrapper and NOT
-readable by the scripts that actually consume it. Live-observed exactly
-that failure after initdb had already created the data directory — the
-poisoned-volume trap again — so readability is checked as the user the
-server will actually run as (`su-exec "$RUNTIME_USER" sh -c 'test -r ...'`).
+file — no 0444 re-materialization the way Swarm secrets do it. The stock
+entrypoint drops to the `postgres` user before running initdb scripts, so a
+host file only root can read is readable in this root-run wrapper and NOT
+by the scripts that consume it — live-observed after initdb had already
+created the data directory. Readability is checked as the runtime user.
 
 Refs: #844, PR #860
 
 ### postgres-role-asserting-healthcheck
 
 `pg_isready` alone answers "the server accepts connections", which a
-half-initialized cluster answers too. If initdb ran but
-docker-entrypoint-initdb.d aborted partway, `pg_isready` reports healthy
-while none of the roles or databases the rest of the stack depends on
-exist — a backend migration then fails on a missing role and Keycloak
-cannot log in at all, both AFTER `depends_on: service_healthy` said go. The
-healthcheck therefore also asserts both initdb scripts actually completed
-(four catalog lookups over the local unix socket). This pairs with a 120s
-`start_period` on the compose healthcheck itself (see compose.yaml's
-section) so a cold-cache first boot has room to finish initdb before the
-first probe counts against it.
+half-initialized cluster answers too — a backend migration then fails on a
+missing role, and Keycloak can't log in, both AFTER `depends_on:
+service_healthy` said go. The healthcheck therefore also asserts both
+initdb scripts completed. This pairs with the 120s `start_period` on the
+compose healthcheck so a cold-cache first boot has room to finish initdb.
 
 Refs: #844
 
 ### postgres-secret-file-password-source
 
-Runner and Keycloak DB passwords are file-backed
-(`*_PASSWORD_FILE`, Compose `secrets:`-mounted), not inline env vars, so a
-password never appears in `docker inspect`/`docker compose config` output
-or a committed migration file. A missing file is caught by the Docker
-daemon at container-create time; an empty or unreadable one is caught by
-the entrypoint wrapper before initdb runs at all (see
-postgres-poisoned-volume-fail-closed), so the initdb scripts' own `[ -s
-... ]` checks are only a last-ditch defence-in-depth layer. Values are
-never echoed or logged — psql `-v` substitution keeps them out of this
-script's own output and out of shell history inside the container.
+Runner and Keycloak DB passwords are file-backed (`*_PASSWORD_FILE`,
+Compose `secrets:`-mounted), not inline env vars, so a password never
+appears in `docker inspect`/`docker compose config` output. A missing file
+is caught by the daemon at create time; an empty/unreadable one is caught
+by the entrypoint wrapper (see postgres-poisoned-volume-fail-closed).
 
 Refs: #844, #442, #28
 
@@ -817,29 +734,20 @@ Refs: #844, #442, #28
 
 Live-verified against quay.io/keycloak/keycloak:25.0: a `--vault=file
 --vault-dir` setup with `KC_DB_PASSWORD='${vault.db-password}'` still fails
-datasource startup with "The server requested SCRAM-based authentication,
-but no password was provided" — kc.sh's vault substitution does not apply
-to `db-password` (or, by the same server-bootstrap-ordering reasoning, to
-the bootstrap admin password) in this version. `--db-password`/
-`KEYCLOAK_ADMIN_PASSWORD` have no built-in `_FILE` indirection either
-(unlike postgres:16-alpine's `POSTGRES_PASSWORD_FILE`). A thin wrapper that
-reads the mounted files and exports the plain env vars before handing off
-to `kc.sh` is therefore the only available fail-closed mechanism for those
-two values.
+datasource startup — kc.sh's vault substitution doesn't apply to
+`db-password` or the bootstrap admin password in this version, and neither
+has a built-in `_FILE` indirection. A thin wrapper exporting the mounted
+files as plain env vars before `kc.sh` is the only fail-closed option.
 
 Refs: #844
 
 ### keycloak-realm-placeholder-substitution
 
-The realm client secret is handled differently from the DB/admin
-passwords: `waypoint-realm.json`'s `secret` field is
-`${WAYPOINT_BACKEND_CLIENT_SECRET}`, using Keycloak's own
-`keycloak.migration.replace-placeholders` substitution at import time
-(the same mechanism already proven for `rootUrl`/`redirectUris`/
-`webOrigins` via `WAYPOINT_PUBLIC_URL`). The wrapper's only job for this
-one value is to export it into the environment Keycloak's own substitution
-engine reads — it does not need the vault-workaround treatment the other
-two secrets need, because placeholder substitution already works for it.
+Unlike the DB/admin passwords, the realm client secret uses Keycloak's own
+`keycloak.migration.replace-placeholders` substitution at import time (same
+mechanism as `rootUrl`/`redirectUris`/`webOrigins`): `waypoint-realm.json`'s
+`secret` field is the placeholder `${WAYPOINT_BACKEND_CLIENT_SECRET}`. The
+wrapper's only job is exporting the value for that engine to read.
 
 Refs: #842, #844
 
@@ -848,39 +756,33 @@ Refs: #842, #844
 ### kcdevadmin-secret-passing-design
 
 `curl`+`jq` against the Admin REST API directly, not `kcadm.sh`: kcadm's
-own `config credentials` step takes `--password` only as a CLI flag (no
-file-based or stdin-based indirection in this image), which is exactly the
+own `config credentials` step takes `--password` only as a CLI flag — the
 argv/`docker top` exposure this script exists to avoid. Every curl call
-that carries a secret goes through a `-K` config file instead of `-d`/`-H`
-on the command line; the one place a secret has to reach an external
-binary (`jq`, building the reset-password JSON) uses `--rawfile` so only
-the file path is an argument. Net effect: neither password nor the
-short-lived bearer token ever appears in this container's argv.
+carrying a secret goes through a `-K` config file instead of `-d`/`-H`; the
+one place a secret must reach an external binary (`jq`) uses `--rawfile`
+so only the file path is an argument.
 
 Refs: #846, epic #841
 
 ### kcdevadmin-verify-profile-requirement
 
-Keycloak's default declarative user profile marks `email` (and
-`firstName`/`lastName`) required; a user missing them gets a silent
-`VERIFY_PROFILE` required-action injected at the next login (the user
-representation itself shows `requiredActions: []` even though login
-redirects to a profile-completion form) — live-verified against this
-stack. That would break the direct-login acceptance criterion, so the
-script derives and sets all three on every reconcile pass rather than
-leaving them to Keycloak's default.
+Keycloak's default declarative user profile marks `email`/`firstName`/
+`lastName` required; a user missing them gets a silent `VERIFY_PROFILE`
+required-action injected at the next login (the user representation itself
+shows `requiredActions: []`) — live-verified against this stack. That would
+break the direct-login acceptance criterion, so the script sets all three
+on every reconcile pass.
 
 Refs: #846, #890
 
 ### kcdevadmin-urlencode-semantics
 
 Pure-shell percent-encoding (not an external tool) so operator-settable
-values (username, group name) never become an external command's argument
-and can't be mistaken for shell metacharacters. Forces `LC_ALL=C` for the
-whole script: `${_rest#?}` is locale-aware and consumes a whole multi-byte
-character under a UTF-8 locale, while `printf '%%%02X' "'$_ch"` only
-encodes the first byte — under UTF-8 those two disagree and silently drop
-bytes. Under `LC_ALL=C` both operate one byte at a time and agree.
+values never become an external command's argument. Forces `LC_ALL=C`:
+`${_rest#?}` is locale-aware and consumes a whole multi-byte character
+under UTF-8, while `printf '%%%02X' "'$_ch"` only encodes the first byte —
+those two disagree and silently drop bytes unless both operate one byte at
+a time under `LC_ALL=C`.
 
 Refs: #890
 
@@ -888,14 +790,19 @@ Refs: #890
 
 Find-or-create keys on the username, so changing
 `WAYPOINT_DEV_ADMIN_USERNAME` provisions a brand-new user rather than
-renaming the existing one — the previous user is left enabled, still in
-the Admin group, still holding the reconciled password. This script never
-deletes accounts: for a dev-only one-shot provisioner, silently deleting on
-a config change would be a surprising, unrecoverable side effect. The
-default email is derived from the username (rather than a fixed literal)
-so this same reconcile-on-every-run guarantee holds for email too — a
-default tied to the OLD username would collide with the still-present old
-user instead of provisioning the renamed one.
+renaming the existing one — the previous user is left enabled, still in the
+Admin group. This script never deletes accounts: silently deleting on a
+config change would be a surprising, unrecoverable side effect for a
+dev-only provisioner.
+
+Refs: #846, #890
+
+### kcdevadmin-default-email-derivation
+
+The default email is derived from the username, not a fixed literal, so
+the reconcile-on-every-run guarantee holds for email too — a default tied
+to the OLD username would collide with the still-present old user instead
+of provisioning the renamed one.
 
 Refs: #846, #890
 
