@@ -404,4 +404,58 @@ public sealed class ComponentJobQueryRepositoryTests : IAsyncLifetime
 		ComponentJobCountRow countRow = Assert.Single(counts);
 		Assert.Equal("esxi", countRow.ComponentKind);
 	}
+
+	// -- issue #757: ResolveJobIdsAsync (bulk-action id resolution) ----------
+
+	[Fact]
+	public async Task ResolveJobIdsAsync_WithinBound_ReturnsExactlyMatchingIds()
+	{
+		const int perCell = 10; // 110 jobs total, well under the bound
+		Guid runId = await SeedRunWithJobsAsync(perCell);
+
+		ComponentJobFilter queuedFilter = new(States: [JobStates.Queued], Priorities: null, ComponentKinds: null, Search: null);
+		IReadOnlyList<Guid> ids = await _repository.ResolveJobIdsAsync(runId, queuedFilter, maxItems: 500, CancellationToken.None);
+
+		int expectedQueuedCells = StateMatrix.Count(x => x.State == JobStates.Queued);
+		Assert.Equal(expectedQueuedCells * perCell, ids.Count);
+		Assert.Equal(ids.Count, ids.Distinct().Count());
+	}
+
+	[Fact]
+	public async Task ResolveJobIdsAsync_OverBound_ReturnsMoreThanMaxItems_SoCallerCan400WithoutTruncatingSilently()
+	{
+		const int perCell = 50; // 550 jobs total
+		Guid runId = await SeedRunWithJobsAsync(perCell);
+
+		// No filter -- matches all 550 jobs, well past a deliberately small bound.
+		IReadOnlyList<Guid> ids = await _repository.ResolveJobIdsAsync(runId, NoFilter, maxItems: 100, CancellationToken.None);
+
+		// maxItems + 1 (101), never silently clamped to 100 -- the caller (RunsController)
+		// is the one that turns "more than the bound" into a 400, not this method.
+		Assert.Equal(101, ids.Count);
+	}
+
+	[Fact]
+	public async Task ResolveJobIdsAsync_ScopedToRun_NeverReturnsAnotherRunsJobs()
+	{
+		Guid runId = await SeedRunWithJobsAsync(perCell: 5);
+		Guid otherRunId = await SeedRunWithJobsAsync(perCell: 5);
+
+		IReadOnlyList<Guid> ids = await _repository.ResolveJobIdsAsync(runId, NoFilter, maxItems: 500, CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand otherRunJobIds = new("SELECT id FROM jobs WHERE run_id = $1", connection);
+		otherRunJobIds.Parameters.AddWithValue(otherRunId);
+		HashSet<Guid> foreignIds = [];
+		await using (NpgsqlDataReader reader = await otherRunJobIds.ExecuteReaderAsync())
+		{
+			while (await reader.ReadAsync())
+			{
+				foreignIds.Add(reader.GetGuid(0));
+			}
+		}
+
+		Assert.DoesNotContain(ids, id => foreignIds.Contains(id));
+	}
 }

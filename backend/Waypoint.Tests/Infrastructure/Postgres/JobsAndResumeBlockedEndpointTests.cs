@@ -173,10 +173,8 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
 	}
 
-	[Theory]
-	[InlineData("Viewer")]
-	[InlineData("Cyber")]
-	public async Task CancelJob_BelowOperator_Returns403(string role)
+	[Fact]
+	public async Task CancelJob_BelowCyber_Returns403()
 	{
 		Guid credentialId = await SeedCredentialAsync();
 		// Owned by "test-user" so this exercises the role gate specifically, not
@@ -184,9 +182,27 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
 		Guid jobId = await SeedQueuedJobAsync(runId, credentialId);
 
-		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", role, body: null);
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", "Viewer", body: null);
 
 		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #757's "Cyber controls owned live scans" owner decision lowered this
+	/// floor from Operator+ to Cyber+ (docs/api-contract.md's role matrix, PR #819) --
+	/// a Cyber caller on their OWN run now succeeds where it previously 403'd.
+	/// </summary>
+	[Fact]
+	public async Task CancelJob_OwnerCyber_Returns200()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
+		Guid jobId = await SeedQueuedJobAsync(runId, credentialId);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Delete, $"/api/v1/jobs/{jobId}", "Cyber", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		Assert.Equal("cancelled", await ReadJobStateAsync(jobId));
 	}
 
 	// -- issue #294: job-cancel ownership -------------------------------------
@@ -381,19 +397,33 @@ public sealed class JobsAndResumeBlockedEndpointTests : IAsyncLifetime
 		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "not_found");
 	}
 
-	[Theory]
-	[InlineData("Viewer")]
-	[InlineData("Cyber")]
-	public async Task RetryJob_BelowOperator_Returns403(string role)
+	[Fact]
+	public async Task RetryJob_BelowCyber_Returns403()
 	{
 		Guid credentialId = await SeedCredentialAsync();
 		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
 		Guid jobId = await SeedFailedJobAsync(runId, credentialId, stage: null);
 
-		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/{jobId}/retry", role, body: null);
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/{jobId}/retry", "Viewer", body: null);
 
 		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
 		Assert.Equal("failed", await ReadJobStateAsync(jobId));
+	}
+
+	/// <summary>Issue #757's role-floor change (see <see cref="CancelJob_OwnerCyber_Returns200"/>) applied identically to retry.</summary>
+	[Fact]
+	public async Task RetryJob_OwnerCyber_Returns200()
+	{
+		Guid credentialId = await SeedCredentialAsync();
+		Guid runId = await SeedRunAsyncWithInitiator(credentialId, "test-user");
+		Guid jobId = await SeedFailedJobAsync(runId, credentialId, stage: "attesting");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/runs/{runId}/jobs/{jobId}/retry", "Cyber", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		(string state, string? stage) = await ReadJobStateAndStageAsync(jobId);
+		Assert.Equal("queued", state);
+		Assert.Equal("attesting", stage);
 	}
 
 	[Fact]

@@ -164,6 +164,48 @@ public sealed partial class JobQueueRepository : IComponentJobRepository
 		return new ComponentJobPage(rows, nextCursor);
 	}
 
+	public async Task<IReadOnlyList<Guid>> ResolveJobIdsAsync(Guid runId, ComponentJobFilter filter, int maxItems, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(filter);
+		if (maxItems <= 0)
+		{
+			throw new ArgumentOutOfRangeException(nameof(maxItems), maxItems, "maxItems must be positive.");
+		}
+
+		List<object> parameters = [runId];
+		List<string> clauses = ["j.run_id = $1"];
+		AppendComponentJobFilters(filter, clauses, parameters);
+
+		int limitParamIndex = parameters.Count + 1;
+		parameters.Add(maxItems + 1);
+
+		string sql = $"""
+			SELECT j.id
+			FROM jobs j
+			LEFT JOIN scan_plan_items spi ON spi.id = j.scan_plan_item_id
+			WHERE {string.Join(" AND ", clauses)}
+			ORDER BY j.priority, j.created_at, j.id
+			LIMIT ${limitParamIndex}
+			""";
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(sql, connection);
+		foreach (object parameter in parameters)
+		{
+			command.Parameters.AddWithValue(parameter);
+		}
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		List<Guid> ids = [];
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			ids.Add(reader.GetGuid(0));
+		}
+
+		return ids;
+	}
+
 	/// <summary>
 	/// Appends <see cref="ComponentJobFilter"/>'s optional state/priority/component-kind/
 	/// search predicates to <paramref name="clauses"/>/<paramref name="parameters"/> --

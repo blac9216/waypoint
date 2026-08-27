@@ -154,6 +154,38 @@ public interface IJobControlRepository
 	Task<JobRetryOutcome> RetryJobAsync(Guid jobId, string actor, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Issue #757: audited bulk cancel over an explicit, already-bounded job id set
+	/// (the caller -- <c>RunsController.BulkCancelJobs</c> -- resolves a filter to ids
+	/// via <see cref="IComponentJobRepository.ResolveJobIdsAsync"/> and enforces the
+	/// bound BEFORE this method ever runs; this method itself does not re-check a
+	/// count limit, matching "bounded" being a request-shaping concern, not a
+	/// storage-layer one). Every id is scoped to <paramref name="runId"/> -- an id from
+	/// a different run reports <see cref="JobCancelOutcome.NotFound"/> rather than
+	/// being cancelled under the wrong run's authority, the same "job must belong to
+	/// this run" rule <c>RunsController.RetryJob</c> already enforces for the singular
+	/// action. Each job is cancelled independently through the exact same state-gated
+	/// transaction <see cref="CancelJobAsync"/> uses (one conflict does not block or
+	/// roll back the others), so the result is an honest per-item outcome list, never
+	/// a fake all-or-nothing transaction. Writes exactly one summary
+	/// <c>audit_log</c> row (<c>event_type = 'job.bulk_cancelled'</c>) carrying the
+	/// actor, run id, resolved id count, and the per-outcome tally -- "no audit, no
+	/// bulk action" mirrors every other run-control primitive in this repository.
+	/// </summary>
+	Task<BulkJobActionResult<JobCancelOutcome>> BulkCancelJobsAsync(Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Issue #757: audited bulk retry, the bulk counterpart to <see cref="RetryJobAsync"/>
+	/// with the identical per-item semantics (scoped to <c>failed</c> jobs only,
+	/// <c>jobs.stage</c> preserved, not subject to the automatic-retry budget) and the
+	/// same run-scoping/bounding contract as <see cref="BulkCancelJobsAsync"/>. Writes
+	/// one summary <c>audit_log</c> row (<c>event_type = 'job.bulk_retried'</c>)
+	/// instead of one row per job -- <see cref="RetryJobAsync"/>'s own per-job
+	/// <c>job.retried</c> audit row is NOT also written for jobs retried this way, so a
+	/// bulk retry of N jobs produces exactly one audit entry, not N+1.
+	/// </summary>
+	Task<BulkJobActionResult<JobRetryOutcome>> BulkRetryJobsAsync(Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Clears <c>credentials.queue_halted</c> and transitions that credential's
 	/// <c>blocked</c> jobs back to <c>queued</c> (and their runs unblocked) in one
 	/// transaction, serialized against the halt's <c>FOR UPDATE</c> idiom. This is the
@@ -234,6 +266,23 @@ public enum JobRetryOutcome
 	Retried,
 	NotFailed,
 }
+
+/// <summary>
+/// One resolved job's outcome within an audited bulk action (issue #757) --
+/// <see cref="Outcome"/> is the same per-item outcome enum the singular action
+/// returns (<see cref="JobCancelOutcome"/>/<see cref="JobRetryOutcome"/>), so the
+/// bulk and singular endpoints report identical vocabulary for identical results.
+/// </summary>
+public sealed record BulkJobItemResult<TOutcome>(Guid JobId, TOutcome Outcome) where TOutcome : struct, Enum;
+
+/// <summary>
+/// The full result of an audited bulk job action (issue #757): one entry per
+/// resolved job id, in the same order the caller supplied them. Never collapses to a
+/// single boolean -- a partial conflict (some jobs already terminal, some belonging
+/// to a different run) is reported item-by-item, never as a fake all-or-nothing
+/// success or failure.
+/// </summary>
+public sealed record BulkJobActionResult<TOutcome>(IReadOnlyList<BulkJobItemResult<TOutcome>> Items) where TOutcome : struct, Enum;
 
 /// <summary>A page of run summaries plus the full collection's total row count (for <c>X-Total-Count</c>).</summary>
 public sealed record RunListResult(IReadOnlyList<RunSummary> Items, int TotalCount);

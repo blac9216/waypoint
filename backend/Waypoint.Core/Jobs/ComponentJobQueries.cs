@@ -144,4 +144,20 @@ public interface IComponentJobRepository
 	/// proves too slow at real 10,000+ scale).
 	/// </summary>
 	Task<ComponentJobPage> ListComponentJobsAsync(ComponentJobListQuery query, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Issue #757: resolves a filter to explicit job ids for an audited bulk
+	/// operation, bounded to <paramref name="maxItems"/> -- the server-side
+	/// "explicit ids, never unbounded 'all matching'" half of the bulk-cancel/
+	/// bulk-retry contract. Fetches <paramref name="maxItems"/> + 1 rows (same
+	/// "one extra row, never a second COUNT query" idiom
+	/// <see cref="ListComponentJobsAsync"/> uses) so the caller can distinguish
+	/// "the filter matched exactly the bound" from "the filter matched more than the
+	/// bound and must be narrowed" without a second query; it never truncates
+	/// silently -- the caller is expected to 400 rather than execute a partial,
+	/// arbitrarily-chosen subset of a too-large match set. Same stable
+	/// <c>priority, created_at, id</c> order as <see cref="ListComponentJobsAsync"/>
+	/// so a caller who narrows and retries sees deterministic results.
+	/// </summary>
+	Task<IReadOnlyList<Guid>> ResolveJobIdsAsync(Guid runId, ComponentJobFilter filter, int maxItems, CancellationToken cancellationToken);
 }

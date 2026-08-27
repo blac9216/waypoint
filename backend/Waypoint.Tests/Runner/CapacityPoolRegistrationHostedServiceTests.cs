@@ -237,6 +237,10 @@ public sealed class CapacityPoolRegistrationHostedServiceTests
 		public Task<AbortRunResult> AbortRunAsync(Guid runId, CancellationToken cancellationToken) => Task.FromResult(new AbortRunResult([], []));
 		public Task<JobCancelOutcome> CancelJobAsync(Guid jobId, CancellationToken cancellationToken) => Task.FromResult(JobCancelOutcome.Cancelled);
 		public Task<JobRetryOutcome> RetryJobAsync(Guid jobId, string actor, CancellationToken cancellationToken) => Task.FromResult(JobRetryOutcome.Retried);
+		public Task<BulkJobActionResult<JobCancelOutcome>> BulkCancelJobsAsync(Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken) =>
+			Task.FromResult(new BulkJobActionResult<JobCancelOutcome>([.. jobIds.Select(id => new BulkJobItemResult<JobCancelOutcome>(id, JobCancelOutcome.Cancelled))]));
+		public Task<BulkJobActionResult<JobRetryOutcome>> BulkRetryJobsAsync(Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken) =>
+			Task.FromResult(new BulkJobActionResult<JobRetryOutcome>([.. jobIds.Select(id => new BulkJobItemResult<JobRetryOutcome>(id, JobRetryOutcome.Retried))]));
 		public Task<AuthFailureHaltResult> CheckConsecutiveAuthFailuresAsync(Guid credentialId, int threshold, CancellationToken cancellationToken) =>
 			Task.FromResult(new AuthFailureHaltResult(HaltTripped: false, [], []));
 		public Task<bool> ReleaseClaimAsync(Guid jobId, string workerId, CancellationToken cancellationToken) => Task.FromResult(true);
