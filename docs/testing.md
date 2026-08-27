@@ -172,7 +172,8 @@ service.** Without it, Compose derives container names from the project
 override-file workaround below is no longer needed and should not be reintroduced.
 Service-to-service traffic (nginx → `backend`, backend → `postgres`) was never
 affected either way: nginx resolves the Compose **service** name via Docker's
-embedded DNS (`resolver 127.0.0.11`, see `deploy/README.md` "Networking"), which has
+embedded DNS (`resolver 127.0.0.11`, see [ADR-0003](adr/0003-reverse-proxy-nginx.md)
+and `docs/rationale/deploy.md#nginx-dynamic-backend-resolution`), which has
 always been per-project, never per-`container_name`.
 
 ## The recipe
@@ -1196,7 +1197,7 @@ future change) can tell what still covers what without re-deriving it.
 | Service-credential scan: enqueue → compliance-runner claim → honest failure against an invented unreachable target | smoke-test step 7; `ScanJobHandlerEndToEndTests.cs`. **Operator-visible (Start-a-Scan wizard, service-credential path):** `frontend/e2e/03-scan-liverun-results.spec.ts` (issue #468) |
 | Personal-credential scan: same, ad hoc credential | smoke-test step 8; `RunSecretScanRunTests.cs` |
 | Cancellation mid-run | smoke-test step 9; `AuthFailureHaltTests.cs`/job-cancel unit coverage. **Operator-visible (Abort run control):** `frontend/e2e/03-scan-liverun-results.spec.ts` proves the Operator+-gated control submits (issue #468) — the terminal-state assertion is deferred to the Live Run gap below |
-| SSE stream reconnect/replay | smoke-test step 10 (route-level: answers `text/event-stream` live); `proxy_buffering off` streaming proof is `deploy/README.md` "Verifying SSE streaming"; `JobEventStreamServiceTests.cs`/`EventStreamEndpointTests.cs` at the integration level. Reconnect/replay **from a browser `EventSource`** is still not exercised — `LiveRunScreen`'s SSE consumption is unreachable through the UI today, see the "Live Run screen" gap below |
+| SSE stream reconnect/replay | smoke-test step 10 (route-level: answers `text/event-stream` live); the `proxy_buffering off` directive itself is in `deploy/nginx/conf.d/default.conf`'s events location (the manual timing-comparison probe procedure no longer ships); `JobEventStreamServiceTests.cs`/`EventStreamEndpointTests.cs` at the integration level. Reconnect/replay **from a browser `EventSource`** is still not exercised — `LiveRunScreen`'s SSE consumption is unreachable through the UI today, see the "Live Run screen" gap below |
 | Secret canary scan (no plaintext in DB/artifacts/logs) | smoke-test step 13; `RunSecretScanRunTests.CreateScanRun_WithRunSecret_NeverPersistedInsecurely_CanaryProof` |
 | Discovery inventory caching | `AutoDiscoverOnScanInitiationTests.cs`, `DiscoverJobHandlerEndToEndTests.cs` |
 | Stage resume / retry | `JobStageDispatcherTests.cs`, `ScanJobHandlerEndToEndTests.cs` (`StageComplete` outcome) |
@@ -1253,11 +1254,10 @@ and *why* without reading a runner container's logs.
 
 ### Disclosed gaps
 
-- **Locally-installed test tool success path.** `deploy/README.md` "Compliance
-  content and managed-tool state" documents the `managed-tool` named volume
-  `download-runner` mounts read-write at `/var/lib/waypoint/managed-tool`
-  (`ManagedToolOptions.ToolStatePath`) as the interface an operator's install flow
-  populates. Exercising the *success* path with an invented stub executable placed
+- **Locally-installed test tool success path.** `deploy/compose.yaml`'s
+  `managed-tool` named volume — which `download-runner` mounts read-write at
+  `/var/lib/waypoint/managed-tool` (`ManagedToolOptions.ToolStatePath`) — is
+  the interface an operator's install flow populates. Exercising the *success* path with an invented stub executable placed
   in that volume was judged not worth the risk of the stub being mistaken for
   real tool-shape guidance in a public repo, and was not automated here — the
   absence path (`ToolGatedDownloadJobHandler`'s clear failure) is proven live and

@@ -170,6 +170,7 @@ docker run -d --rm --name "${PROBE_NAME}" -p 127.0.0.1::7777 --entrypoint sh cur
 	-c 'nc -lk -p 7777' >/dev/null
 PROBE_STARTED=1
 PROBE_HOST_PORT="$(docker port "${PROBE_NAME}" 7777/tcp | head -1 | cut -d: -f2)"
+# why: docs/rationale/deploy.md#e2e-reachability-probe-retry-bound
 # Bounded retry: with `userland-proxy=false`, a connect landing before `nc`
 # finishes binding is refused even though the port genuinely works once
 # listening.

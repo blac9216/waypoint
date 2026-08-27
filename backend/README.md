@@ -73,8 +73,8 @@ dotnet run --project Waypoint.Api --no-launch-profile
 
 `LocalAuth__AdminPasswordHash` is fine for this bare `dotnet run` loop, but it leaks via
 `/proc/<pid>/environ`, `docker inspect`, and crash dumps — the containerized compose
-stack (`deploy/compose.yaml`, `deploy/README.md` "Local auth (dev-flag, issue #29)")
-prefers a
+stack (`deploy/compose.yaml`, `deploy/compose.override.example.yaml`'s `LocalAuth__*`
+block) prefers a
 mounted file instead: set `LocalAuth__AdminPasswordHashFile` to a path containing the
 hash and it takes precedence (issue #333, `LocalAuthOptionsPostConfigure`). The env var
 above remains a supported fallback either way — a mounted file just isn't the natural

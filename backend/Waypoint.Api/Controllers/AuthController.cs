@@ -77,7 +77,7 @@ public sealed class AuthController : ControllerBase
 		{
 			throw ApiException.NotFound(
 				"Local auth is disabled. Sign in through Keycloak (ADR-0004).",
-				"LocalAuth:Enabled is false or unset -- this is the production default. See deploy/README.md 'Local auth (dev-flag)'.");
+				"LocalAuth:Enabled is false or unset -- this is the production default. See deploy/compose.override.example.yaml's LocalAuth__* block.");
 		}
 
 		LocalSession? session = _authenticationService.Authenticate(request.Username, request.Password);

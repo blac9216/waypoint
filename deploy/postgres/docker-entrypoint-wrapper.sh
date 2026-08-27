@@ -3,6 +3,7 @@
 # postgres:16-alpine entrypoint is allowed to run.
 #
 # why: docs/rationale/deploy.md#postgres-poisoned-volume-fail-closed
+# why: docs/rationale/deploy.md#postgres-wrapper-validates-before-initdb
 set -eu
 
 : "${POSTGRES_PASSWORD_FILE:?POSTGRES_PASSWORD_FILE must be set}"

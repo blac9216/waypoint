@@ -49,4 +49,4 @@ buffering disabled.
   pairing, since addresses still change on redeploy — or move to static addressing
   if the backend gets a stable address. See
   `deploy/nginx/conf.d/default.conf` for the directive and the full reasoning, and
-  `deploy/README.md` for the operator-facing note.
+  `docs/rationale/deploy.md#nginx-dynamic-backend-resolution` for the porting note.

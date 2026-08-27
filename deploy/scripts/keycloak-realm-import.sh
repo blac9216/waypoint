@@ -113,6 +113,7 @@ if [ -z "$ADMIN_TOKEN" ]; then
 	exit 1
 fi
 
+# why: docs/rationale/deploy.md#realmimport-delete-then-reboot-strategy
 docker run --rm --network "$NETWORK" curlimages/curl:latest -s -o /dev/null -X DELETE \
 	http://keycloak:8080/auth/admin/realms/waypoint \
 	-H "Authorization: Bearer ${ADMIN_TOKEN}"

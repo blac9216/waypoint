@@ -26,8 +26,8 @@ the IdP remains swappable. Application roles (Viewer/Cyber/Operator/Admin — se
 Local auth (backend-issued sessions) was acceptable for the first development
 milestone (see `roadmap.md`). Issue #29 landed the OIDC bearer-validation swap:
 Keycloak is now the production sign-in path. Local auth survives only as an
-explicit, off-by-default dev-flag (`LocalAuth:Enabled` — see `deploy/README.md`
-"Local auth (dev-flag)") for the e2e/smoke-test paths that have not yet moved to a
+explicit, off-by-default dev-flag (`LocalAuth:Enabled` — see
+`docs/rationale/deploy.md#override-dev-bootstrap-local-auth-design`) for the e2e/smoke-test paths that have not yet moved to a
 real interactive OIDC login flow; it is not a supported deployment configuration.
 
 ## Consequences

@@ -156,7 +156,7 @@ without the protocol mapper configured, or any other IdP — is treated as never
 philosophy `OidcClaimsMappingOptionsSetup` and `MinimumRoleAuthorizationHandler` already
 apply to a missing role claim. It means step-up literally does not work until the
 mapper is deployed — documented in `deploy/keycloak/realm/waypoint-realm.json` and
-`deploy/README.md` as a required realm configuration step, not left to be discovered
+`deploy/keycloak/README.md` as a required realm configuration step, not left to be discovered
 as a silent bypass.
 
 **Dev-flag local auth is explicit, not fail-closed.** `LocalSessionAuthenticationHandler`
@@ -230,7 +230,7 @@ real-world importance:
    write associated state and events. Postgres listens only on an internal compose
    network (`internal: true`, no gateway, no published port) — issue #578's
    `runner-egress` network (outbound-only reachability for the two runners, see
-   `deploy/README.md` "Runner egress") does not attach to Postgres and does not
+   `docs/rationale/deploy.md#compose-runner-egress-topology`) does not attach to Postgres and does not
    change this: the runners reach Postgres exclusively over `internal`, same as
    before, and nothing else gains a route to it. nginx and Keycloak never see the
    key, and neither is attached to `runner-egress` either. Plaintext credentials
@@ -250,7 +250,9 @@ real-world importance:
    (`LocalAuth:AdminPasswordHashFile` / `LocalAuth__AdminPasswordHashFile`), preferred
    over the `LocalAuth__AdminPasswordHash` environment variable, which is kept as a
    deprecated fallback (one-time startup WARN) so existing deployments' admin login
-   doesn't break. See `deploy/README.md` "Bring-up" for the operator flow. This entire
+   doesn't break. See `deploy/config.example/README.md` for the file's place in the
+   config layout, and `deploy/compose.override.example.yaml`'s `LocalAuth__*` block
+   for how the dev stack wires it. This entire
    mechanism — and the control-6 analogy it stands on — is moot once Keycloak (#29)
    replaces local auth.
 7. **Plaintext lifetime.** Decrypted values live as briefly as practical and are not

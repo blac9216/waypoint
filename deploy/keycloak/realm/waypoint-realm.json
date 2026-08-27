@@ -58,7 +58,7 @@
     {
       "clientId": "waypoint-backend",
       "name": "Waypoint backend (control plane)",
-      "description": "Confidential OIDC client the ASP.NET Core backend uses as a plain relying party. Client secret is templated -- never committed. See deploy/README.md 'Keycloak realm bootstrap'.",
+      "description": "Confidential OIDC client the ASP.NET Core backend uses as a plain relying party. Client secret is templated -- never committed. See deploy/keycloak/README.md.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
