@@ -268,7 +268,7 @@ OIDC client secret is the placeholder `${WAYPOINT_BACKEND_CLIENT_SECRET}` —
 Keycloak's own `keycloak.migration.replace-placeholders` substitution
 (issue #844) resolves it at import time from a mounted file
 (`deploy/config/secrets/keycloak-backend-client-secret`, gitignored — see
-"File-backed secrets" below), the same mechanism `WAYPOINT_PUBLIC_URL`
+"File-backed secrets" above), the same mechanism `WAYPOINT_PUBLIC_URL`
 already uses for `rootUrl`/`redirectUris`/`webOrigins`. `deploy/scripts/
 keycloak-realm-import.sh` is a separate, local-only path to re-import with a
 secret supplied directly on the shell instead. See `deploy/keycloak/README.md`
@@ -360,7 +360,7 @@ identity path.** Enabling it is logged once at Warning on startup.
 end to end. The Playwright e2e suite (`frontend/e2e`, issue #848) now drives
 the browser through Keycloak's real authorization-code + PKCE flow for
 **login/logout** (the `developer` user provisioned by `keycloak-dev-admin` —
-see "Bring-up" above) — it keeps a local-auth token only for a few
+see "Bring-up" below) — it keeps a local-auth token only for a few
 non-auth setup calls (seeding a site/credential ahead of the Start-a-Scan
 wizard), a use this flag continues to exist for. `fresh-stack-smoke-test.sh`
 switching to a real OIDC flow as well is tracked separately; once nothing
@@ -370,7 +370,7 @@ be removed outright.
 To enable for a dev/test compose run: bring the stack up with
 `compose.override.example.yaml` (copied to `compose.override.yaml` by
 `generate-dev-stack.sh --mode persistent`, or generated directly by
-`--mode agent` — see "Bring-up" above) — it sets `LocalAuth__Enabled=true` and
+`--mode agent` — see "Bring-up" below) — it sets `LocalAuth__Enabled=true` and
 automates the admin password hash via `dev-auth-bootstrap`. The base
 `compose.yaml` on its own carries none of these `LocalAuth__*` keys at all
 (issue #845). When both OIDC and local auth are enabled at once (the normal
@@ -596,7 +596,7 @@ that hostname). Then:
 WAYPOINT_PUBLIC_URL=https://waypoint.example.internal docker compose up -d
 ```
 
-See "File-backed secrets" and "Keycloak" below for what each secret gates and
+See "File-backed secrets" and "Keycloak" above for what each secret gates and
 why `WAYPOINT_PUBLIC_URL` is the one variable a real deployment sets.
 
 #### Persistent development
@@ -641,7 +641,7 @@ Postgres, encrypted credentials, and the Keycloak realm; add `-v` to reset
 everything, but note `-v` does **not** remove `deploy/config/` — the same
 username/password log back in against the fresh volume. This override also
 turns on the `LocalAuth__Enabled` dev flag for the Playwright/smoke suites that
-still use it for non-auth setup steps (see "Local auth (dev-flag)" below) — it
+still use it for non-auth setup steps (see "Local auth (dev-flag)" above) — it
 is never a substitute for the Keycloak login above.
 
 #### Isolated agent stacks
