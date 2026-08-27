@@ -54,17 +54,25 @@ public sealed class JobsController : ControllerBase
 	};
 
 	private readonly IJobControlRepository _repository;
+	private readonly IJobRunnerRepository _jobRunnerRepository;
 	private readonly IOptions<ScanOptions> _scanOptions;
 	private readonly TargetRepository _targets;
 	private readonly ScanUploadCoordinator _upload;
 
-	public JobsController(IJobControlRepository repository, IOptions<ScanOptions> scanOptions, TargetRepository targets, ScanUploadCoordinator upload)
+	public JobsController(
+		IJobControlRepository repository,
+		IJobRunnerRepository jobRunnerRepository,
+		IOptions<ScanOptions> scanOptions,
+		TargetRepository targets,
+		ScanUploadCoordinator upload)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
+		ArgumentNullException.ThrowIfNull(jobRunnerRepository);
 		ArgumentNullException.ThrowIfNull(scanOptions);
 		ArgumentNullException.ThrowIfNull(targets);
 		ArgumentNullException.ThrowIfNull(upload);
 		_repository = repository;
+		_jobRunnerRepository = jobRunnerRepository;
 		_scanOptions = scanOptions;
 		_targets = targets;
 		_upload = upload;
@@ -222,5 +230,39 @@ public sealed class JobsController : ControllerBase
 			_ => JobUploadStatuses.Failed,
 		};
 		return Ok(new JobUploadRetryResponse(id.ToString(), status, result.Detail));
+	}
+
+	/// <summary>
+	/// Issue #744 remainder: the append-only STIG Manager upload-attempt history for one
+	/// job (migration 0062's <c>upload_attempts</c>, written by
+	/// <see cref="Waypoint.Infrastructure.Scans.ScanUploadCoordinator"/> for both the
+	/// first convert-stage upload and every later <see cref="RetryUpload"/> call).
+	/// Viewer+, matching every other run/job read in this API. Oldest-first, mirroring
+	/// <see cref="IJobRunnerRepository.GetUploadAttemptsAsync"/> -- the Results screen's
+	/// attempt-history drill-down renders these directly without re-sorting. A job with
+	/// no recorded attempts (never uploaded, or a non-scan job) returns an empty list,
+	/// not a 404 -- the job itself existing is the only precondition, matching
+	/// <see cref="GetComponentResultsSummary"/>'s "resource exists, evidence may not
+	/// yet" convention on <see cref="RunsController"/>.
+	/// </summary>
+	[HttpGet("{id:guid}/upload-attempts")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(UploadAttemptResponse[]), StatusCodes.Status200OK)]
+	public async Task<ActionResult<IReadOnlyList<UploadAttemptResponse>>> GetUploadAttempts(Guid id, CancellationToken cancellationToken)
+	{
+		JobSummary? job = await _repository.GetJobAsync(id, cancellationToken).ConfigureAwait(false);
+		if (job is null)
+		{
+			throw ApiException.NotFound("Job not found.", $"Job '{id}' does not exist.");
+		}
+
+		IReadOnlyList<UploadAttemptRecord> attempts = await _jobRunnerRepository.GetUploadAttemptsAsync(id, cancellationToken).ConfigureAwait(false);
+		return Ok(attempts.Select(a => new UploadAttemptResponse(
+			AttemptNumber: a.AttemptNumber,
+			Endpoint: a.Endpoint,
+			Collection: a.Collection,
+			Status: a.Status,
+			ErrorDetail: a.ErrorDetail,
+			AttemptedAt: a.AttemptedAt)).ToArray());
 	}
 }

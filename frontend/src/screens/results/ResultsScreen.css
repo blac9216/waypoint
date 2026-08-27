@@ -545,3 +545,143 @@
 .results__stat-value--bad {
 	color: var(--bad);
 }
+
+/* --- Component results panel (issue #745/#744 remainders) ---
+   Status buckets: each of the three component-result statuses gets its own
+   visually distinct treatment -- execution_error and skipped are never
+   collapsed into the same red/green binary as completed. */
+
+.results__cresult-buckets {
+	display: flex;
+	gap: 10px;
+	padding: 4px 14px 10px;
+	flex-wrap: wrap;
+}
+
+.results__cresult-status {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 6px 12px;
+	border-radius: 3px;
+	border: 1px solid var(--line);
+	min-width: 96px;
+}
+
+.results__cresult-status-label {
+	font-size: 10px;
+	letter-spacing: 0.04em;
+	color: var(--txt3);
+}
+
+.results__cresult-status-count {
+	font-size: 15px;
+}
+
+.results__cresult-status--completed {
+	border-color: var(--okd, var(--line));
+}
+
+.results__cresult-status--completed .results__cresult-status-count {
+	color: var(--ok);
+}
+
+.results__cresult-status--error {
+	border-color: var(--badd);
+}
+
+.results__cresult-status--error .results__cresult-status-count {
+	color: var(--bad);
+}
+
+.results__cresult-status--skipped .results__cresult-status-count {
+	color: var(--txt3);
+}
+
+.results__cresult-status--unknown .results__cresult-status-count {
+	color: var(--na);
+}
+
+.results__cresult-severity-totals {
+	display: flex;
+	gap: 8px;
+	padding: 0 14px 10px;
+	flex-wrap: wrap;
+}
+
+.results__cresult-body {
+	display: grid;
+	grid-template-columns: 1fr 1.4fr;
+	gap: 0;
+	border-top: 1px solid var(--line);
+	min-height: 0;
+}
+
+.results__cresult-list {
+	border-right: 1px solid var(--line);
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.results__cresult-row {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 6px 14px;
+	background: transparent;
+	border: none;
+	border-bottom: 1px solid var(--soft);
+	color: var(--txt2);
+	font-size: 11.5px;
+	text-align: left;
+	cursor: pointer;
+	width: 100%;
+}
+
+.results__cresult-row.is-selected {
+	background: var(--panel2, rgba(255, 255, 255, 0.04));
+	color: var(--txt1);
+}
+
+.results__cresult-row-state {
+	color: var(--txt3);
+	font-size: 10.5px;
+	white-space: nowrap;
+}
+
+.results__cresult-detail {
+	padding: 12px 14px;
+	min-width: 0;
+}
+
+.results__cresult-detail-title {
+	font-size: 12.5px;
+	margin-bottom: 8px;
+}
+
+.results__cresult-detail-row {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	font-size: 11.5px;
+	padding: 4px 0;
+	border-bottom: 1px solid var(--soft);
+	margin-bottom: 8px;
+}
+
+.results__cresult-subtitle {
+	margin-top: 10px;
+}
+
+.results__cresult-attempts th,
+.results__cresult-attempts td {
+	font-size: 10.5px;
+	padding: 5px 8px;
+}
+
+.results__cresult-error {
+	color: var(--bad);
+	font-size: 10px;
+	margin-top: 2px;
+}

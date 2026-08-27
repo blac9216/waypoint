@@ -466,6 +466,33 @@ public sealed record JobUploadRetryResponse(
 	string? UploadDetail);
 
 /// <summary>
+/// One immutable row of <c>GET /api/v1/jobs/{id}/upload-attempts</c> (issue #744
+/// remainder: the read side of migration 0062's append-only <c>upload_attempts</c>
+/// table, un-stubbing the Results screen's attempt-history drill-down). Ordered
+/// oldest-first, mirroring <see cref="Waypoint.Core.Jobs.IJobRunnerRepository.GetUploadAttemptsAsync"/>.
+/// <see cref="Endpoint"/>/<see cref="Collection"/> are null only when no STIG Manager
+/// connection was resolved at all for that attempt.
+/// </summary>
+public sealed record UploadAttemptResponse(
+	[property: JsonPropertyName("attempt_number")]
+	int AttemptNumber,
+
+	[property: JsonPropertyName("endpoint")]
+	string? Endpoint,
+
+	[property: JsonPropertyName("collection")]
+	string? Collection,
+
+	[property: JsonPropertyName("status")]
+	string Status,
+
+	[property: JsonPropertyName("error_detail")]
+	string? ErrorDetail,
+
+	[property: JsonPropertyName("attempted_at")]
+	DateTimeOffset AttemptedAt);
+
+/// <summary>
 /// One waiver row of <c>GET /api/v1/runs/{id}/attestations-applied</c> (issue #299,
 /// docs/domain-model.md: "Results lists expired attestations explicitly"). There is no
 /// per-control waiver ledger persisted anywhere -- config-docs resolve as whole YAML
