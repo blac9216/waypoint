@@ -709,16 +709,19 @@ public sealed class RunCreationService
 		// has no object identity below the vCenter itself, so its selector_name stays
 		// null (the whole vCenter IS the object).
 		//
-		// Issue #738: a `vcenter`-selector item ALSO carries its frozen
-		// `catalog_execution_profile_id`/`baseline_id` so ScanJobHandler can resolve the
-		// exact activated content-revision profile directory (VCenterProfileRevisionResolver)
-		// instead of the run-level `profile_key`/legacy fixed path -- vCenter is a
-		// distinct execution component with its own catalog-selected content, not the
-		// top-level vSphere connection's profile. `esxi`/`vm` selectors are #739/#740's
-		// remit and are deliberately left byte-unchanged (no new fields) by this issue.
-		bool isVCenterComponent = string.Equals(item.Transport, CatalogTransports.VMware, StringComparison.Ordinal)
-			&& string.Equals(item.SelectorKind, CatalogSelectorKinds.VCenter, StringComparison.Ordinal);
-		string payload = isVCenterComponent
+		// Issue #738, generalized by #739/#740: a narrowable vSphere-family item
+		// (vcenter/esxi/vm selector -- ScanComponentNarrowing.CanNarrow) carries its OWN
+		// frozen `catalog_execution_profile_id`/`baseline_id` so ScanJobHandler can
+		// resolve the exact activated content-revision profile directory
+		// (ComponentProfileRevisionResolver, renamed from PR #907's
+		// VCenterProfileRevisionResolver) instead of the run-level `profile_key`/legacy
+		// fixed path -- each selector kind is a distinct execution component with its own
+		// catalog-selected content, not the top-level vSphere connection's profile.
+		// `service`/`target` selectors (never narrowable) and every non-vmware transport
+		// keep the pre-#738 payload shape (no new fields).
+		bool isVSphereComponentProfile = string.Equals(item.Transport, CatalogTransports.VMware, StringComparison.Ordinal)
+			&& item.SelectorKind is CatalogSelectorKinds.VCenter or CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm;
+		string payload = isVSphereComponentProfile
 			? JsonSerializer.Serialize(new
 			{
 				target_id = target.Id,

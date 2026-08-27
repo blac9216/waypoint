@@ -89,7 +89,7 @@ public sealed class ScanJobHandler : IJobHandler
 	private readonly ConfigDocRepository _configDocs;
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
 	private readonly ScanUploadCoordinator _upload;
-	private readonly VCenterProfileRevisionResolver _vCenterProfileRevisions;
+	private readonly ComponentProfileRevisionResolver _componentProfileRevisions;
 
 	public ScanJobHandler(
 		IPowerShellExecutor executor,
@@ -105,7 +105,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ConfigDocRepository configDocs,
 		AttestationSnapshotRepository attestationSnapshots,
 		ScanUploadCoordinator upload,
-		VCenterProfileRevisionResolver vCenterProfileRevisions)
+		ComponentProfileRevisionResolver componentProfileRevisions)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(secrets);
@@ -120,7 +120,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(configDocs);
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
 		ArgumentNullException.ThrowIfNull(upload);
-		ArgumentNullException.ThrowIfNull(vCenterProfileRevisions);
+		ArgumentNullException.ThrowIfNull(componentProfileRevisions);
 
 		_executor = executor;
 		_secrets = secrets;
@@ -135,7 +135,7 @@ public sealed class ScanJobHandler : IJobHandler
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
 		_upload = upload;
-		_vCenterProfileRevisions = vCenterProfileRevisions;
+		_componentProfileRevisions = componentProfileRevisions;
 	}
 
 	public string JobType => "scan";
@@ -213,38 +213,40 @@ public sealed class ScanJobHandler : IJobHandler
 		string legacyFallbackPath = isNsx ? _scanOptions.Value.NsxProfilePath : isSrg ? _scanOptions.Value.SrgProfilePath : _scanOptions.Value.ProfilePath;
 		string profilePath = ResolveProfilePath(payload.ProfileKey, legacyFallbackPath);
 
-		// Issue #738: a vCenter execution item (transport `vmware`, selector `vcenter` --
+		// Issue #738, generalized to esxi/vm by #739/#740: a narrowable vSphere-family
+		// execution item (transport `vmware`, selector `vcenter`/`esxi`/`vm` --
 		// ScanComponentNarrowing already narrows it above via SelectorKind/SelectorName)
 		// resolves its InSpec profile from the ACTIVATED content-revision directory
 		// bound to the plan item's own frozen CatalogExecutionProfileId/BaselineId,
-		// never the run-level profile_key/legacy fixed path -- vCenter is a distinct
-		// execution component and DISA benchmark, not the top-level vSphere connection's
-		// profile (this issue's Motivation). Compatibility gate (AC "only vCenter-
+		// never the run-level profile_key/legacy fixed path -- each selector kind is a
+		// distinct execution component and DISA benchmark, not the top-level vSphere
+		// connection's profile (this issue's Motivation). Compatibility gate (AC "only
 		// compatible catalog profiles can reach this handler"): the planner already
-		// guarantees a vcenter-selector item only exists for a vmware-transport,
-		// vCenter-compatible execution profile (ScanPlannerService/ComponentCapabilityMatcher),
+		// guarantees a narrowable-selector item only exists for a vmware-transport,
+		// compatible execution profile (ScanPlannerService/ComponentCapabilityMatcher),
 		// so this re-check is defensive, not authoritative -- it fails closed rather
 		// than trusting an unexpected payload shape.
-		bool isVCenterComponent = string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal)
+		bool isVSphereComponent = string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal)
 			&& string.Equals(payload.Transport, CatalogTransports.VMware, StringComparison.Ordinal)
-			&& string.Equals(payload.SelectorKind, CatalogSelectorKinds.VCenter, StringComparison.Ordinal);
+			&& payload.SelectorKind is CatalogSelectorKinds.VCenter or CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm;
 		string? resolvedInputsYaml = null;
 		Guid? attributedContentRevisionId = null;
 		Guid? attributedBaselineId = null;
-		if (isVCenterComponent)
+		List<string> droppedScopingKeys = [];
+		if (isVSphereComponent)
 		{
-			if (payload.CatalogExecutionProfileId is not { } vCenterExecutionProfileId || payload.BaselineId is not { } vCenterBaselineId)
+			if (payload.CatalogExecutionProfileId is not { } componentExecutionProfileId || payload.BaselineId is not { } componentBaselineId)
 			{
 				return JobExecutionOutcome.Failed(
-					$"job '{context.Job.Id}' is a vcenter component item but carries no catalog_execution_profile_id/baseline_id -- the plan item this job was fanned out from should always freeze both; refusing to fall back to an unscoped profile.");
+					$"job '{context.Job.Id}' is a '{payload.SelectorKind}' component item but carries no catalog_execution_profile_id/baseline_id -- the plan item this job was fanned out from should always freeze both; refusing to fall back to an unscoped profile.");
 			}
 
-			VCenterProfileRevisionResult revisionResult = await _vCenterProfileRevisions
-				.ResolveAsync(vCenterExecutionProfileId, vCenterBaselineId, cancellationToken).ConfigureAwait(false);
+			ComponentProfileRevisionResult revisionResult = await _componentProfileRevisions
+				.ResolveAsync(componentExecutionProfileId, componentBaselineId, cancellationToken).ConfigureAwait(false);
 			if (!revisionResult.Succeeded)
 			{
 				return JobExecutionOutcome.Failed(
-					$"vcenter component scan for target '{payload.TargetId}' could not resolve its activated profile revision: {revisionResult.FailureReason}");
+					$"'{payload.SelectorKind}' component scan for target '{payload.TargetId}' could not resolve its activated profile revision: {revisionResult.FailureReason}");
 			}
 
 			profilePath = revisionResult.ProfilePath!;
@@ -285,8 +287,36 @@ public sealed class ScanJobHandler : IJobHandler
 				// file; InSpec applies later `--input-file` keys over earlier ones on a
 				// literal key collision, so ordering here follows the same
 				// InputResolutions ordering PlanConfigResolutionService produced.
-				resolvedInputsYaml = string.Join('\n', resolvedYamlBodies);
+				//
+				// Issue #911: only a NARROWED selector (esxi/vm -- a vcenter selector
+				// carries no narrowing key to begin with, so there is nothing to protect)
+				// is at risk of an operator config-doc body overriding the platform's own
+				// vmhostName/vmName scoping key. Filtering here (a WARN-logged drop, not a
+				// hard reject -- see ScanScopingInputFilter's doc comment for the
+				// rationale) is the primary defense; WaypointScan.psm1's own
+				// flag-ordering flip (the operator inputs file appended BEFORE the
+				// platform scoping file, not after) is the second, independent one.
+				string concatenatedYaml = string.Join('\n', resolvedYamlBodies);
+				bool isNarrowedSelector = payload.SelectorKind is CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm;
+				if (isNarrowedSelector)
+				{
+					ScanScopingFilterResult filterResult = ScanScopingInputFilter.Filter(concatenatedYaml);
+					resolvedInputsYaml = filterResult.FilteredYaml;
+					droppedScopingKeys = [.. filterResult.DroppedKeys];
+				}
+				else
+				{
+					resolvedInputsYaml = concatenatedYaml;
+				}
 			}
+		}
+
+		if (droppedScopingKeys.Count > 0)
+		{
+			string warnLine = $"job '{context.Job.Id}' operator config-doc inputs for target '{payload.TargetId}' "
+				+ $"named reserved selector-scoping key(s) [{string.Join(", ", droppedScopingKeys)}] -- dropped; "
+				+ $"the platform's own '{payload.SelectorKind}' scope ('{payload.SelectorName}') was applied instead (issue #911).";
+			await EmitWarnAsync(context, warnLine, cancellationToken).ConfigureAwait(false);
 		}
 
 		PowerShellExecutionResult result;
@@ -374,14 +404,18 @@ public sealed class ScanJobHandler : IJobHandler
 					}
 				}
 
-				// Issue #738/#879: the vCenter item's frozen resolved Input config docs,
-				// materialized into a generated, owner-only 0600 --input-file -- same
-				// non-argv discipline as the selector-scoping file above and
-				// Invoke-WaypointNsxScan's session-token file. A separate file (not
-				// merged text) so Invoke-WaypointScan can pass it as its own
-				// `--input-file` flag alongside the selector file; InSpec accepts
-				// multiple `--input-file` flags on one invocation.
-				if (isVCenterComponent && resolvedInputsYaml is not null)
+				// Issue #738/#879, generalized to esxi/vm by #739/#740: the component
+				// item's frozen resolved Input config docs, materialized into a
+				// generated, owner-only 0600 --input-file -- same non-argv discipline as
+				// the selector-scoping file above and Invoke-WaypointNsxScan's
+				// session-token file. A separate file (not merged text) so
+				// Invoke-WaypointScan can pass it as its own `--input-file` flag
+				// alongside the selector file; InSpec accepts multiple `--input-file`
+				// flags on one invocation. Issue #911: for esxi/vm this body was already
+				// filtered of reserved scoping keys above, AND WaypointScan.psm1 appends
+				// this flag BEFORE the selector-scoping flag -- so even an unfiltered
+				// collision would still lose to the platform's own scope.
+				if (isVSphereComponent && resolvedInputsYaml is not null)
 				{
 					inputsFilePath = Path.Combine(
 						_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.vsphere-inputs.generated.yml");
@@ -454,16 +488,19 @@ public sealed class ScanJobHandler : IJobHandler
 			return await FailScanAsync(context, "scan invocation reported success but produced no HDF report file.", cancellationToken).ConfigureAwait(false);
 		}
 
-		// Issue #738 AC "HDF contains stable component/endpoint attribution": a vCenter
-		// component job's structured completion event carries the exact component,
-		// endpoint (target host), and resolved content-revision/baseline identity it
-		// executed against -- non-secret identifiers only (host, ids), never a
-		// credential -- so Live Run/Results and any later HDF-metadata enrichment have
-		// a stable, provenance-complete attribution record independent of re-deriving
-		// it from current (possibly since-changed) catalog/component state.
-		if (isVCenterComponent)
+		// Issue #738 AC "HDF contains stable component/endpoint attribution", generalized
+		// to esxi/vm by #739/#740's own per-host/per-VM AC: a vSphere-family component
+		// job's structured completion event carries the exact component, endpoint
+		// (target host), selector (kind + the discovered object's own vendor identity --
+		// stable regardless of display-name churn), and resolved content-revision/
+		// baseline identity it executed against -- non-secret identifiers only (host,
+		// ids, vendor identity), never a credential -- so Live Run/Results and any later
+		// HDF-metadata enrichment have a stable, provenance-complete attribution record
+		// independent of re-deriving it from current (possibly since-changed) catalog/
+		// component/inventory state.
+		if (isVSphereComponent)
 		{
-			await EmitVCenterAttributionAsync(
+			await EmitVSphereComponentAttributionAsync(
 				context, payload, host!, attributedContentRevisionId, attributedBaselineId, cancellationToken).ConfigureAwait(false);
 		}
 
@@ -472,12 +509,13 @@ public sealed class ScanJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// Issue #738: one structured <c>job.log</c> Info event naming the exact vCenter
-	/// component/endpoint/content identity this job executed -- emitted once, right
-	/// after a successful InSpec completion, alongside (not instead of) the ordinary
-	/// stage-advance note. Component/endpoint attribution only; no credential material.
+	/// Issue #738, generalized to esxi/vm by #739/#740: one structured <c>job.log</c>
+	/// Info event naming the exact vcenter/esxi/vm component/endpoint/selector/content
+	/// identity this job executed -- emitted once, right after a successful InSpec
+	/// completion, alongside (not instead of) the ordinary stage-advance note.
+	/// Component/endpoint/selector attribution only; no credential material.
 	/// </summary>
-	private static async Task EmitVCenterAttributionAsync(
+	private static async Task EmitVSphereComponentAttributionAsync(
 		JobExecutionContext context,
 		ScanPayload payload,
 		string endpointHost,
@@ -485,13 +523,16 @@ public sealed class ScanJobHandler : IJobHandler
 		Guid? baselineId,
 		CancellationToken cancellationToken)
 	{
-		string line = $"vcenter component scan complete: component '{payload.ComponentId}' at endpoint '{endpointHost}', "
+		string line = $"{payload.SelectorKind} component scan complete: component '{payload.ComponentId}' "
+			+ $"selector '{payload.SelectorKind}/{payload.SelectorName}' at endpoint '{endpointHost}', "
 			+ $"content_revision '{contentRevisionId}', baseline '{baselineId}'.";
 		string eventPayload = JsonSerializer.Serialize(new
 		{
 			severity = "Info",
 			line,
 			component_id = payload.ComponentId,
+			selector_kind = payload.SelectorKind,
+			selector_name = payload.SelectorName,
 			endpoint = endpointHost,
 			content_revision_id = contentRevisionId,
 			baseline_id = baselineId,
@@ -1143,11 +1184,12 @@ public sealed class ScanJobHandler : IJobHandler
 		bool unnarrowed = root.TryGetProperty("unnarrowed", out JsonElement unnarrowedElement)
 			&& unnarrowedElement.ValueKind == JsonValueKind.True;
 
-		// Issue #738: only present on a `vcenter`-selector plan-item job
-		// (RunCreationService.BuildPlanItemJobSpec's isVCenterComponent branch). Absent
-		// on every esxi/vm/legacy/unnarrowed job -- those keep resolving through
-		// ResolveProfilePath's run-level profile_key/legacy-fixed-path fallback exactly
-		// as before this issue.
+		// Issue #738, generalized to esxi/vm by #739/#740: present on any narrowable
+		// vSphere-family (vcenter/esxi/vm) selector plan-item job
+		// (RunCreationService.BuildPlanItemJobSpec's isVSphereComponentProfile branch).
+		// Absent on every service/target/legacy/unnarrowed job -- those keep resolving
+		// through ResolveProfilePath's run-level profile_key/legacy-fixed-path fallback
+		// exactly as before this issue.
 		Guid? catalogExecutionProfileId = root.TryGetProperty("catalog_execution_profile_id", out JsonElement profileIdElement)
 			&& profileIdElement.ValueKind == JsonValueKind.String
 			&& Guid.TryParse(profileIdElement.GetString(), out Guid parsedProfileId)

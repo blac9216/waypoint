@@ -263,27 +263,35 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 	}
 
 	/// <summary>
-	/// Issue #738 AC "the exact planned vCenter endpoint and profile/input revisions
-	/// are executed": a <c>vcenter</c>-selector plan item's fanned-out job payload
-	/// carries its OWN frozen <c>catalog_execution_profile_id</c>/<c>baseline_id</c> --
+	/// Issue #738 AC "the exact planned vCenter endpoint and profile/input revisions are
+	/// executed", generalized to esxi/vm by #739/#740: every narrowable vSphere-family
+	/// selector's (vcenter/esxi/vm) fanned-out job payload carries its OWN frozen
+	/// <c>catalog_execution_profile_id</c>/<c>baseline_id</c>/<c>input_resolutions</c> --
 	/// not the run-level <c>profile_key</c> (absent here entirely, per #895's
 	/// target_scope contract) -- so <c>ScanJobHandler</c> can resolve the activated
 	/// content-revision profile directory instead of any fixed/legacy path. An
-	/// esxi-selector sibling on the SAME target/run stays on the pre-#738 payload shape
-	/// (no such fields) -- proving this issue's behavior change is scoped to the
-	/// vcenter-selector item only, per its AC "esxi/vm transports stay byte-unchanged."
+	/// un-narrowable ssh/target sibling on the SAME target/run stays on the pre-#738
+	/// payload shape (no such fields) -- proving the actual boundary is narrowability
+	/// (<c>ScanComponentNarrowing</c>), not selector kind.
 	/// </summary>
 	[Fact]
-	public async Task CreateScanRun_VCenterSelectorComponent_JobPayloadCarriesFrozenProfileAndBaselineIds()
+	public async Task CreateScanRun_NarrowableVSphereSelectorComponents_JobPayloadCarriesFrozenProfileAndBaselineIds()
 	{
-		Guid siteId = await CreateSiteAsync("fanout-vcenter-profile");
+		Guid siteId = await CreateSiteAsync("fanout-vsphere-profile");
 		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
 		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		Guid sshCred = await SeedCredentialAsync("ssh");
 		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+		await SeedBindingAsync(targetId, "vcsa-ssh", sshCred);
 
 		Guid vcenterComponentId = await SeedComponentWithRequirementsAsync(
 			targetId, "vcenter-main", ["vsphere-api"], priority: 3, transport: CatalogTransports.VMware, selectorKind: CatalogSelectorKinds.VCenter);
-		Guid esxiComponentId = await SeedComponentAsync(targetId, "esxi-sibling", priority: 4);
+		Guid esxiComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "esxi-sibling", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware, selectorKind: CatalogSelectorKinds.Esxi);
+		Guid vmComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-sibling", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware, selectorKind: CatalogSelectorKinds.Vm);
+		Guid sshComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "vcsa-svc-sibling", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
 
 		HttpResponseMessage response = await PostRunAsync(new
 		{
@@ -294,22 +302,33 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		Guid runId = await ReadRunIdAsync(response);
 
-		Guid vcenterJobId = await ReadJobIdForComponentAsync(runId, vcenterComponentId);
-		using JsonDocument vcenterPayload = JsonDocument.Parse(await ReadJobPayloadAsync(vcenterJobId));
-		Assert.Equal("vcenter", vcenterPayload.RootElement.GetProperty("selector_kind").GetString());
-		Assert.True(vcenterPayload.RootElement.TryGetProperty("catalog_execution_profile_id", out JsonElement profileIdElement));
-		Assert.True(Guid.TryParse(profileIdElement.GetString(), out Guid _));
-		Assert.True(vcenterPayload.RootElement.TryGetProperty("baseline_id", out JsonElement baselineIdElement));
-		Assert.True(Guid.TryParse(baselineIdElement.GetString(), out Guid _));
-		Assert.True(vcenterPayload.RootElement.TryGetProperty("input_resolutions", out _));
+		foreach ((Guid componentId, string expectedSelectorKind) in new[]
+		{
+			(vcenterComponentId, "vcenter"),
+			(esxiComponentId, "esxi"),
+			(vmComponentId, "vm"),
+		})
+		{
+			Guid jobId = await ReadJobIdForComponentAsync(runId, componentId);
+			using JsonDocument payload = JsonDocument.Parse(await ReadJobPayloadAsync(jobId));
+			Assert.Equal(expectedSelectorKind, payload.RootElement.GetProperty("selector_kind").GetString());
+			Assert.True(payload.RootElement.TryGetProperty("catalog_execution_profile_id", out JsonElement profileIdElement),
+				$"expected a '{expectedSelectorKind}'-selector item's payload to carry its frozen catalog_execution_profile_id.");
+			Assert.True(Guid.TryParse(profileIdElement.GetString(), out Guid _));
+			Assert.True(payload.RootElement.TryGetProperty("baseline_id", out JsonElement baselineIdElement));
+			Assert.True(Guid.TryParse(baselineIdElement.GetString(), out Guid _));
+			Assert.True(payload.RootElement.TryGetProperty("input_resolutions", out _));
+		}
 
-		Guid esxiJobId = await ReadJobIdForComponentAsync(runId, esxiComponentId);
-		using JsonDocument esxiPayload = JsonDocument.Parse(await ReadJobPayloadAsync(esxiJobId));
-		Assert.Equal("esxi", esxiPayload.RootElement.GetProperty("selector_kind").GetString());
+		// The un-narrowable ssh/target sibling (ScanComponentNarrowing.CanNarrow ==
+		// false) is the one job that legitimately collapses to the pre-#738 shape --
+		// proving the boundary is narrowability, not selector kind.
+		Guid sshJobId = await ReadJobIdForComponentAsync(runId, sshComponentId);
+		using JsonDocument sshPayload = JsonDocument.Parse(await ReadJobPayloadAsync(sshJobId));
 		Assert.False(
-			esxiPayload.RootElement.TryGetProperty("catalog_execution_profile_id", out _),
-			"an esxi-selector item's payload must stay byte-unchanged by this issue (#739/#740's remit).");
-		Assert.False(esxiPayload.RootElement.TryGetProperty("baseline_id", out _));
+			sshPayload.RootElement.TryGetProperty("catalog_execution_profile_id", out _),
+			"an un-narrowable ssh/target-selector item's payload must stay byte-unchanged.");
+		Assert.False(sshPayload.RootElement.TryGetProperty("baseline_id", out _));
 	}
 
 	[Fact]

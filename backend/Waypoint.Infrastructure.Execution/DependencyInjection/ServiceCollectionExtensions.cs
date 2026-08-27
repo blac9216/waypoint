@@ -133,7 +133,7 @@ public static class ServiceCollectionExtensions
 		// depends only on IBaselineRepository/ICatalogRepository (already registered by
 		// AddWaypointInfrastructure, shared with the API process) and
 		// ComplianceContentOptions (already bound above).
-		services.AddSingleton<Scans.VCenterProfileRevisionResolver>();
+		services.AddSingleton<Scans.ComponentProfileRevisionResolver>();
 		services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
 		services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();
 
