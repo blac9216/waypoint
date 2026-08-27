@@ -195,8 +195,11 @@ project name, port, subnet, and file-backed secrets yourself. It writes
 secrets, a SAN-correct self-signed TLS pair, and a validated Compose override
 under `deploy/.generated/<slug>/` **only** (never `deploy/config/`, never the
 shared `deploy/compose.override.yaml`), detects port/subnet/project
-collisions against every other Compose project currently running on the host
-**before** creating anything, and validates the merged configuration with
+collisions against what is currently running on the host **before** creating
+anything — a project name claimed by running containers this checkout has no
+state directory for is a foreign stack and fails closed, while re-running for
+a slug whose `deploy/.generated/<slug>/` already exists is the idempotent case
+and is allowed — and validates the merged configuration with
 `docker compose config` itself — all without starting a single container.
 `deploy/scripts/fresh-stack-smoke-test.sh` and `deploy/scripts/e2e-playwright.sh`
 both call it internally (see "Running the smoke script"/"Running the

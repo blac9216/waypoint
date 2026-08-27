@@ -58,6 +58,17 @@
 #     see fresh-stack-smoke-test.sh's own comment on the same override).
 #     Default: on (agent mode targets exactly that kind of sandbox).
 #
+# Collision detection (all three checks run BEFORE any file is written, so a
+# collision leaves nothing behind):
+#   port     -- another RUNNING container already publishes the host port.
+#   subnet   -- an existing Docker network overlaps the requested CIDR.
+#   project  -- RUNNING containers already carry this run's Compose project
+#               label. Re-running for a project this checkout owns (its state
+#               directory -- deploy/.generated/<slug>/ or deploy/config/ --
+#               already exists here) is the idempotent case and is allowed;
+#               a project claimed by containers this checkout has no state
+#               for is a foreign stack and fails closed.
+#
 # Requires: openssl, docker compose v2, python3 (subnet-overlap/collision
 # arithmetic only -- stdlib `ipaddress`, no network access).
 
@@ -77,7 +88,12 @@ LOCAL_AUTH_HASH_FILE=""
 RUNNER_FALLBACK=1
 
 usage() {
-	sed -n '2,49p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	# Print the whole header comment block: everything from the line after the
+	# shebang up to the first line that is not a comment. Stopping on content
+	# rather than a hard-coded line number keeps --help complete when the
+	# block grows (round-1 review: a fixed `sed -n '2,49p'` window truncated
+	# the option list mid-sentence).
+	awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -198,26 +214,63 @@ host_path() { printf '%s' "${HOST_PREFIX}${1#"${REPO_ROOT}"}"; }
 
 # --- Collision detection (BEFORE any file is written) ----------------------
 #
-# Checked against every OTHER Compose project currently running on this
-# Docker host -- re-running this script for the SAME project/slug (the
-# idempotent case) must not trip its own prior state.
-OTHER_PROJECTS="$(docker ps -a --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | sort -u | grep -vFx "${PROJECT}" || true)"
+# Checked against what is actually RUNNING on this Docker host, before this
+# script writes a single file, so a collision leaves no partial state behind.
+#
+# The project-collision discriminator (round-1 review of issue #847): a
+# Compose project name is claimed by RUNNING containers carrying that
+# project label -- not by the mere existence of a directory. So:
+#
+#   * Running containers labelled com.docker.compose.project=<PROJECT> that
+#     this run does not own  -> collision, fail closed. A later `up` under
+#     that name would otherwise recreate somebody else's containers.
+#   * Nothing running under that name -> accepted, even when this script
+#     already produced state for the same slug/mode earlier. That is the
+#     idempotent re-run this script promises (re-running is byte-stable:
+#     existing secrets and TLS are reused, never regenerated).
+#
+# Ownership is decided by this run's own state directory
+# (deploy/.generated/<slug>/ in agent mode, deploy/config/ in persistent
+# mode): if it already exists here, the running project is this same
+# generated stack being re-generated in place (generate -> up -> generate),
+# not a foreign squatter. A foreign project that claimed the name leaves no
+# such directory in this checkout. The directory alone is never sufficient
+# -- it only excuses containers that are already running.
+OWNED_STATE=0
+[[ -d "${STATE_DIR}" ]] && OWNED_STATE=1
 
-if printf '%s\n' "${OTHER_PROJECTS}" | grep -qFx "${PROJECT}"; then
-	echo "error: project '${PROJECT}' collision -- this should be unreachable (self-filtered above)." >&2
+PROJECT_CONTAINERS="$(docker ps --filter "label=com.docker.compose.project=${PROJECT}" --format '{{.Names}} (image {{.Image}})' 2>/dev/null || true)"
+if [[ -n "${PROJECT_CONTAINERS}" && "${OWNED_STATE}" -eq 0 ]]; then
+	echo "error: Compose project '${PROJECT}' is already claimed by running container(s) on this Docker host:" >&2
+	while IFS= read -r line; do
+		[[ -n "${line}" ]] && echo "  ${line}" >&2
+	done <<<"${PROJECT_CONTAINERS}"
+	if [[ "${MODE}" == "agent" ]]; then
+		echo "No state exists at ${STATE_DIR}, so this run does not own that project." >&2
+		echo "Pick a different --slug (the project name is 'wp-<slug>'), or stop that stack first." >&2
+	else
+		echo "No state exists at ${STATE_DIR}, so this run does not own that project." >&2
+		echo "Stop that stack first, or use --mode agent --slug SLUG for an isolated one." >&2
+	fi
 	exit 1
 fi
-# Container-name collision: Compose derives names as <project>-<service>-<n>.
-EXISTING_CONTAINERS="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^${PROJECT}-" || true)"
-if [[ -n "${EXISTING_CONTAINERS}" ]]; then
-	# Belongs to this same project (idempotent re-run) -- not a collision.
-	:
-fi
 
-PORT_OWNER="$(docker ps --format '{{.Label "com.docker.compose.project"}}\t{{.Ports}}' 2>/dev/null | awk -F'\t' -v p=":${PORT}->" '$2 ~ p {print $1}' | sort -u || true)"
-PORT_OWNER="$(printf '%s\n' "${PORT_OWNER}" | grep -vFx "${PROJECT}" || true)"
+# Host-port collision. Attribution is by CONTAINER NAME and IMAGE: the
+# com.docker.compose.project LABEL is inherited from the image, so a plain
+# `docker run` of a Compose-built image reports a project that never started
+# it (round-1 review finding 4). The label is still shown, explicitly marked
+# as the unreliable half.
+PORT_OWNER="$(docker ps --format '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project"}}\t{{.Ports}}' 2>/dev/null |
+	awk -F'\t' -v p=":${PORT}->" -v self="${PROJECT}" -v owned="${OWNED_STATE}" '
+		$4 ~ p {
+			if (owned == 1 && $3 == self) next
+			printf "  container %s (image %s; compose project label %s)\n", $1, $2, ($3 == "" ? "<none>" : $3)
+		}' || true)"
 if [[ -n "${PORT_OWNER}" ]]; then
-	echo "error: host port ${PORT} is already published by project '${PORT_OWNER}' -- pick a different --port." >&2
+	echo "error: host port ${PORT} is already published on this Docker host by:" >&2
+	printf '%s\n' "${PORT_OWNER}" >&2
+	echo "(the compose project label is image-inherited and may not name the owning stack)" >&2
+	echo "Pick a different --port." >&2
 	exit 1
 fi
 
