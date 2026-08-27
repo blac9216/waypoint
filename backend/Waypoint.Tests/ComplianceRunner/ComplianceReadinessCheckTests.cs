@@ -23,9 +23,13 @@ namespace Waypoint.Tests.ComplianceRunner;
 
 /// <summary>
 /// Issue #440 AC4: "The host fails readiness when required compliance dependencies are
-/// missing and reports its capabilities." Each test isolates exactly one dependency
-/// (module path, one of the three content roots, the artifact store, or the master
-/// key) so a readiness regression names precisely what broke.
+/// missing and reports its capabilities." Issue #905 narrowed which gaps fail
+/// <see cref="ReadinessReport.Ready"/>: the deprecated profile-fallback content roots and
+/// master-key absence are reported in <see cref="ReadinessReport.Problems"/> but no
+/// longer fail readiness -- production ships both as supported, unconfigured-by-default
+/// states (see <see cref="ComplianceReadinessCheck"/>'s doc comment). Module preload
+/// paths and the artifact store remain hard failures. Each test isolates exactly one
+/// dependency so a readiness regression names precisely what broke.
 /// </summary>
 public sealed class ComplianceReadinessCheckTests : IDisposable
 {
@@ -75,13 +79,16 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 	[InlineData("profile")]
 	[InlineData("nsx")]
 	[InlineData("srg")]
-	public void MissingContentRoot_FailsReadiness(string which)
+	public void MissingContentRoot_IsDegradedButDoesNotFailReadiness(string which)
 	{
+		// Issue #905: these three roots are ScanJobHandler's deprecated fallback
+		// (issue #639) -- production ships the mount empty by design, so a missing
+		// subdirectory is reported for observability, not a readiness failure.
 		ComplianceReadinessCheck check = BuildCheck(out Paths paths, missingContentRoot: which);
 
 		ReadinessReport report = check.Evaluate();
 
-		Assert.False(report.Ready);
+		Assert.True(report.Ready);
 		Assert.NotEmpty(report.Problems);
 	}
 
@@ -97,13 +104,17 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 	}
 
 	[Fact]
-	public void UnavailableMasterKey_FailsReadinessWithoutThrowing()
+	public void UnavailableMasterKey_IsDegradedButDoesNotFailReadinessWithoutThrowing()
 	{
+		// Issue #905: production deliberately ships without a master key until an
+		// operator supplies one (deploy/README.md "Production only: secrets master
+		// key"; compose.yaml's own comment on this service). Key absence is reported,
+		// not fatal, matching the download-runner's tool-absent precedent.
 		ComplianceReadinessCheck check = BuildCheck(out _, masterKeyThrows: true);
 
 		ReadinessReport report = check.Evaluate();
 
-		Assert.False(report.Ready);
+		Assert.True(report.Ready);
 		Assert.Contains(report.Problems, problem => problem.Contains("Master key", StringComparison.Ordinal));
 	}
 
@@ -125,20 +136,36 @@ public sealed class ComplianceReadinessCheckTests : IDisposable
 	[InlineData("Scans:ProfilePath")]
 	[InlineData("Scans:NsxProfilePath")]
 	[InlineData("Scans:SrgProfilePath")]
-	[InlineData("Scans:ArtifactStorePath")]
-	public void UnconfiguredContentOrArtifactPath_FailsReadinessAndNamesTheSetting(string settingName)
+	public void UnconfiguredDeprecatedContentPath_IsDegradedButDoesNotFailReadiness(string settingName)
 	{
-		// A blank (unconfigured) path is a different failure from a configured-but-missing
-		// one and must be reported as "not configured", naming the setting so an operator
-		// knows which mount to declare.
+		// A blank (unconfigured) deprecated fallback path is reported by name (still
+		// distinct from a configured-but-missing one), but issue #905 keeps it out of
+		// the Ready verdict for the same reason a missing directory is.
 		ComplianceReadinessCheck check = BuildCheck(out _, blankSetting: settingName);
+
+		ReadinessReport report = check.Evaluate();
+
+		Assert.True(report.Ready);
+		Assert.Contains(
+			report.Problems,
+			problem => problem.Contains(settingName, StringComparison.Ordinal)
+				&& problem.Contains("not configured", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public void UnconfiguredArtifactPath_FailsReadinessAndNamesTheSetting()
+	{
+		// The artifact store remains a hard, load-bearing dependency (ADR-0014 §7) --
+		// unlike the deprecated profile-fallback roots above, a blank/missing path here
+		// still fails readiness.
+		ComplianceReadinessCheck check = BuildCheck(out _, blankSetting: "Scans:ArtifactStorePath");
 
 		ReadinessReport report = check.Evaluate();
 
 		Assert.False(report.Ready);
 		Assert.Contains(
 			report.Problems,
-			problem => problem.Contains(settingName, StringComparison.Ordinal)
+			problem => problem.Contains("Scans:ArtifactStorePath", StringComparison.Ordinal)
 				&& problem.Contains("not configured", StringComparison.Ordinal));
 	}
 

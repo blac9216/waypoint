@@ -648,6 +648,13 @@ services:
       # ScanJobHandler's transitional fallback for a job payload with no profile_key
       # (see that handler's ResolveProfilePath doc comment) -- read-only (ADR-0014 §7).
       # Remove once nothing legitimately needs the fallback path.
+      #
+      # Production ships this named volume EMPTY -- nothing here populates the
+      # vsphere/nsx/srg subdirectories (only the dev override's dev-bootstrap
+      # service does, for the local loop). Issue #905: ComplianceReadinessCheck
+      # reports that as a degraded capability, not a startup failure, so a
+      # by-the-book production bring-up still reaches container-healthy with this
+      # deprecated fallback unpopulated.
       - compliance-profiles:/opt/waypoint/profiles:ro
       # Scan artifacts (HDF/CKL) - read-write (ADR-0014 §7: "scan-artifact write
       # access"). Same named volume the backend mounts read-only above, so the
@@ -672,6 +679,9 @@ services:
       # until the key is mounted. See deploy/README.md "Production only:
       # secrets master key (issue #405)" - the same uid/permission note
       # applies (this image's app user is also uid 1654; see the Dockerfile).
+      # Issue #905: ComplianceReadinessCheck now actually honors this --
+      # master-key absence is reported in the health JSON but no longer fails
+      # the container healthcheck, matching this comment's promise.
       # As with the backend, this is the mount SHAPE to copy into
       # deploy/compose.override.yaml, not something to uncomment in place:
       # - type: bind
@@ -695,8 +705,10 @@ services:
     # to probe) - RunnerHealthReportingHostedService re-evaluates readiness every
     # RunnerHealth:RefreshInterval and writes a JSON report; --health-check reads
     # it back and exits 0/1. See ComplianceReadinessCheck's doc comment for
-    # exactly what "ready" means here (module/content/artifact mounts + master
-    # key, deliberately not InSpec/PowerCLI binary presence).
+    # exactly what "ready" means here: module preload paths + the artifact store
+    # fail closed; the deprecated profile-fallback mount and master-key absence
+    # (issue #905, both supported unconfigured-by-default in production) are
+    # reported in the JSON report but do not fail this healthcheck.
     healthcheck:
       test: ["CMD", "dotnet", "Waypoint.ComplianceRunner.dll", "--health-check"]
       interval: 10s
