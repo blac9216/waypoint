@@ -74,14 +74,24 @@ public static class JobShapes
 		return string.Equals(jobType, "scan", StringComparison.Ordinal) ? JobShape.Standard : JobShape.Simple;
 	}
 
+	private const string OutputKindPropertyName = "output_kind";
+
 	/// <summary>
-	/// The full mapping (issue #309): a <c>scan</c> job whose payload carries
-	/// <c>target_kind: "ssh"</c> (written at fan-out by <c>RunsController.CreateScanRunAsync</c>)
-	/// routes to <see cref="JobShape.Srg"/>; every other <c>scan</c> job (no
-	/// <c>target_kind</c>, or any kind other than <c>ssh</c>) is <see cref="JobShape.Standard"/>,
-	/// matching <see cref="ForJobType"/>'s prior behavior exactly -- so a payload that
-	/// predates this field, or is malformed, degrades to the pre-#309 mapping rather than
-	/// throwing. Non-<c>scan</c> job types never inspect the payload at all.
+	/// The full mapping (issue #309, output-routing signal replaced by #741/#743): a
+	/// <c>scan</c> job whose payload carries a frozen catalog <c>output_kind</c> (written
+	/// at fan-out for every NARROWED plan-item job, <c>RunCreationService.BuildPlanItemJobSpec</c>)
+	/// routes by that CATALOG KIND -- <see cref="Waypoint.Core.ComplianceContent.CatalogOutputKinds.Hdf"/>
+	/// to <see cref="JobShape.Srg"/> (HDF-only, no convert/upload), anything else to
+	/// <see cref="JobShape.Standard"/> -- never by the owning target's connection kind
+	/// (#743 AC "catalog kind, not target kind, determines HDF-only versus CKL
+	/// pipeline"; a VCSA STIG service item on a <c>vsphere</c>-kind target must reach
+	/// <see cref="JobShape.Standard"/> for its HDF+CKL output, and an SRG product item on
+	/// an <c>ssh</c>-kind target must reach <see cref="JobShape.Srg"/> -- target kind
+	/// alone would get the VCSA case wrong). A job with no <c>output_kind</c> at all (a
+	/// legacy/unnarrowed job predating #741/#743, or a non-plan-driven request) falls
+	/// back to the pre-#741 <c>target_kind: "ssh"</c> inference, preserving byte-identical
+	/// behavior for every job shape that predates this issue. Non-<c>scan</c> job types
+	/// never inspect the payload at all.
 	/// </summary>
 	public static JobShape ForJob(string jobType, string payloadJson)
 	{
@@ -92,7 +102,45 @@ public static class JobShapes
 			return JobShape.Simple;
 		}
 
+		bool? hdfOnlyByOutputKind = TryReadHdfOnlyOutputKind(payloadJson);
+		if (hdfOnlyByOutputKind is { } hdfOnly)
+		{
+			return hdfOnly ? JobShape.Srg : JobShape.Standard;
+		}
+
 		return IsSshTargetKind(payloadJson) ? JobShape.Srg : JobShape.Standard;
+	}
+
+	/// <summary>
+	/// Reads the payload's frozen catalog <c>output_kind</c> (present only on a NARROWED
+	/// plan-item job, #741/#743): <c>true</c> for HDF-only, <c>false</c> for HDF+CKL,
+	/// <c>null</c> when the field is absent/malformed -- the caller then falls back to
+	/// the legacy target-kind inference rather than treating an absent field as either
+	/// outcome.
+	/// </summary>
+	private static bool? TryReadHdfOnlyOutputKind(string payloadJson)
+	{
+		if (string.IsNullOrWhiteSpace(payloadJson))
+		{
+			return null;
+		}
+
+		try
+		{
+			using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(payloadJson);
+			if (!document.RootElement.TryGetProperty(OutputKindPropertyName, out System.Text.Json.JsonElement outputKindElement)
+				|| outputKindElement.ValueKind != System.Text.Json.JsonValueKind.String)
+			{
+				return null;
+			}
+
+			string? outputKind = outputKindElement.GetString();
+			return string.Equals(outputKind, Waypoint.Core.ComplianceContent.CatalogOutputKinds.Hdf, StringComparison.Ordinal);
+		}
+		catch (System.Text.Json.JsonException)
+		{
+			return null;
+		}
 	}
 
 	private static bool IsSshTargetKind(string payloadJson)

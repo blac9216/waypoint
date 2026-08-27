@@ -17,10 +17,11 @@ using Waypoint.Core.ComplianceContent;
 namespace Waypoint.Core.Scans;
 
 /// <summary>
-/// Issue #737 item-4 (epic #726 Wave 2, ADR-0024): the single, shared rule deciding
-/// whether one accepted plan item's <c>transport</c>/<c>selector_kind</c> can be
-/// executed as a component-NARROWED scan (its own job scans only that component's
-/// object) or must fall back to a whole-target scan.
+/// Issue #737 item-4 (epic #726 Wave 2, ADR-0024), extended by #741/#743 (Wave 3 SSH
+/// family): the single, shared rule deciding whether one accepted plan item's
+/// <c>transport</c>/<c>selector_kind</c> can be executed as a component-NARROWED scan
+/// (its own job scans only that component's named service / whole appliance) or must
+/// fall back to a whole-target scan.
 ///
 /// This is the load-bearing invariant the round-1 review demanded: a <c>target_scope</c>
 /// run must never fan out N sibling jobs that each re-scan the whole target. Both the
@@ -35,12 +36,23 @@ namespace Waypoint.Core.Scans;
 /// <list type="bullet">
 /// <item><description><c>vmware</c> / <c>vcenter</c>, <c>esxi</c>, <c>vm</c> -- NARROWED
 ///   (InSpec vmware train scoped to that vCenter / ESXi host / VM via input file).</description></item>
-/// <item><description><c>vmware</c> / <c>service</c> -- NOT narrowed: a named vCenter
-///   sub-service (EAM, ...) has no vmware-train object selector; collapses.</description></item>
-/// <item><description><c>ssh</c> (VCSA/appliance component) -- NOT narrowed: the SRG/ssh
-///   transport scans the whole appliance; no per-service selector today; collapses.</description></item>
-/// <item><description><c>nsx-api</c> -- NOT narrowed: whole-Manager API scan; collapses.</description></item>
-/// <item><description><c>vcf-api</c> -- NOT narrowed: no runner path consumes it yet; collapses.</description></item>
+/// <item><description><c>ssh</c> / <c>service</c> -- NARROWED (issue #741): a named VCSA
+///   OS-level service (Envoy, PostgreSQL, VAMI, STS, UI, EAM, Photon, ...), per
+///   docs/compliance-parity.md's "ssh / named VCSA service" rows. Each named service is
+///   its own leaf profile/benchmark with its own job, executed over the owning
+///   appliance's ssh transport with its own attribution -- there is no vmware-train
+///   object selector for these; "narrowed" means one job per named service rather than
+///   one whole-appliance scan covering every service at once.</description></item>
+/// <item><description><c>ssh</c> / <c>target</c> -- NARROWED (issue #743): a whole-
+///   appliance SSH product (Photon OS, Aria Operations/Automation/Suite Lifecycle,
+///   Workspace ONE Access, ...), per docs/compliance-parity.md's "ssh / target" rows. The
+///   component IS the appliance, so narrowing here means one job per catalog component
+///   on that transport (never collapsing two independent appliance products behind one
+///   representative job).</description></item>
+/// <item><description><c>nsx-api</c> -- NOT narrowed: whole-Manager API scan; collapses
+///   (residual tracked by #892 -- issue #742 is the follow-on NSX slice).</description></item>
+/// <item><description><c>vcf-api</c> -- NOT narrowed: no runner path consumes it yet;
+///   collapses (residual tracked by #892).</description></item>
 /// </list>
 /// </summary>
 public static class ScanComponentNarrowing
@@ -48,11 +60,14 @@ public static class ScanComponentNarrowing
 	/// <summary>
 	/// True when an item with this <paramref name="transport"/> and
 	/// <paramref name="selectorKind"/> can be executed as a component-narrowed scan.
-	/// Today: exactly the vSphere-family object selectors on the vmware transport.
+	/// Today: the vSphere-family object selectors on the vmware transport (#737), plus
+	/// the ssh-family named-service and whole-appliance selectors (#741/#743).
 	/// </summary>
 	public static bool CanNarrow(string? transport, string? selectorKind) =>
-		string.Equals(transport, CatalogTransports.VMware, StringComparison.Ordinal)
-		&& selectorKind is CatalogSelectorKinds.VCenter or CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm;
+		(string.Equals(transport, CatalogTransports.VMware, StringComparison.Ordinal)
+			&& selectorKind is CatalogSelectorKinds.VCenter or CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm)
+		|| (string.Equals(transport, CatalogTransports.Ssh, StringComparison.Ordinal)
+			&& selectorKind is CatalogSelectorKinds.Service or CatalogSelectorKinds.Target);
 
 	/// <summary>Convenience overload for a resolved <see cref="ScanPlanItem"/>.</summary>
 	public static bool CanNarrow(ScanPlanItem item)

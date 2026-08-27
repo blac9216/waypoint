@@ -212,7 +212,11 @@ function Invoke-WaypointConvert {
 		New-Item -ItemType Directory -Path $CklDirectory -Force | Out-Null
 	}
 
-	"<CHECKLIST><!-- invented stub CKL, benchmark=$BenchmarkId --></CHECKLIST>" | Set-Content -Path $CklOutputPath -Encoding utf8
+	# Echo every stamped STIG_INFO field the handler resolved (benchmark id/title/
+	# release/version) so an e2e test can assert exactly which benchmark identity the
+	# convert stage chose -- the frozen benchmark_revision_id when present, else the
+	# static target-kind fallback (#741 CKL benchmark identity).
+	"<CHECKLIST><!-- invented stub CKL, benchmark=$BenchmarkId title=$Title release=$ReleaseInfo version=$Version --></CHECKLIST>" | Set-Content -Path $CklOutputPath -Encoding utf8
 	return [pscustomobject]@{ Success = $true; CklPath = $CklOutputPath; MetadataApplied = [bool]$BenchmarkId; FailureReason = $null }
 }
 
@@ -341,11 +345,18 @@ function Invoke-WaypointSrgScan {
 		[bool]$SudoRequiresPassword = $true,
 
 		[Parameter()]
+		[string]$InputsFilePath,
+
+		[Parameter()]
 		[string]$VmwareStigDockerCommonPath
 	)
 
+	# Issue #741/#743: echoes whether/what resolved-inputs file was supplied, same
+	# rationale as Invoke-WaypointScan's own InputsSummary line -- lets a test assert the
+	# ssh-transport component path actually materialized resolved Input config docs.
 	$InformationPreference = 'Continue'
-	Write-Information "Scanning stub SRG host '$SshHost' as '$Username' (password length $($Password.Length)) profile '$ProfilePath' sudo=$Sudo sudoRequiresPassword=$SudoRequiresPassword"
+	$InputsSummary = if ($InputsFilePath -and (Test-Path -Path $InputsFilePath -PathType Leaf)) { Get-Content -Path $InputsFilePath -Raw } else { '<none>' }
+	Write-Information "Scanning stub SRG host '$SshHost' as '$Username' (password length $($Password.Length)) profile '$ProfilePath' sudo=$Sudo sudoRequiresPassword=$SudoRequiresPassword inputsFile=$InputsSummary"
 
 	# Predecessor behavior: remove any stale inspec.lock next to the profile before
 	# "running" -- mirrors the real function's cleanup so a test can seed a lock file and

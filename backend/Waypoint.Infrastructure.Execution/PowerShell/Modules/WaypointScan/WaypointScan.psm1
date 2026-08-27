@@ -752,6 +752,15 @@ function Invoke-WaypointSrgScan {
 	    Whether sudo needs the ssh password supplied via --config (Photon's default sudo
 	    is passwordless; vIDM requires a sudo password) -- ignored when Sudo is $false.
 
+	.PARAMETER InputsFilePath
+	    Issue #741/#743: an already-materialized InSpec inputs YAML file (a narrowed
+	    ssh-transport item's -- VCSA service or whole-appliance SSH product -- frozen,
+	    resolved config-doc Inputs). ScanJobHandler writes this file BEFORE calling in,
+	    owner-only 0600, and deletes it after -- same non-argv discipline as
+	    Invoke-WaypointScan's own InputsFilePath. Passed to InSpec as its own
+	    --input-file flag. Absent/empty = no additional resolved inputs (the pre-#741
+	    behavior for every SRG job).
+
 	.OUTPUTS
 	    One [pscustomobject]: Success (bool), ExitCode (int), ReportPath (string),
 	    FailureReason (string, only set when Success is $false).
@@ -788,6 +797,9 @@ function Invoke-WaypointSrgScan {
 		[bool]$SudoRequiresPassword = $true,
 
 		[Parameter()]
+		[string]$InputsFilePath,
+
+		[Parameter()]
 		[string]$VmwareStigDockerCommonPath = $Script:VmwareStigDockerCommonModulePath
 	)
 
@@ -815,6 +827,15 @@ function Invoke-WaypointSrgScan {
 	Remove-Item -Path (Join-Path $ProfilePath 'inspec.lock') -Force -ErrorAction SilentlyContinue
 
 	$InspecArguments = "`"$ProfilePath`" -t ssh://$Username@$SshHost --reporter=json:`"$ReportPath`" --show-progress --enhanced-outcomes"
+
+	# Issue #741/#743: the narrowed ssh-transport item's already-materialized resolved
+	# Input file, passed as its own --input-file flag -- ScanJobHandler owns this file's
+	# entire lifecycle (creation, filtering, 0600 mode, deletion); this function only
+	# reads its path and never writes/deletes it, mirroring Invoke-WaypointScan's own
+	# InputsFilePath handling.
+	if ($InputsFilePath) {
+		$InspecArguments += " --input-file `"$InputsFilePath`""
+	}
 
 	$SudoPassword = $null
 	if ($Sudo) {
