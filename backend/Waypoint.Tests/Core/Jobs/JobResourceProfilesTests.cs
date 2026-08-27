@@ -82,4 +82,44 @@ public sealed class JobResourceProfilesTests
 
 		return data;
 	}
+
+	/// <summary>
+	/// Issue #737 (epic #726 Wave 2 capstone, ADR-0024 "Resource admission applies to
+	/// real component jobs"): every closed catalog transport
+	/// (<see cref="Waypoint.Core.ComplianceContent.CatalogTransports.All"/>) resolves to
+	/// a positive, lighter-than-the-flat-scan-weight profile -- a single component is a
+	/// materially smaller unit of work than the legacy whole-target fan-out.
+	/// </summary>
+	[Theory]
+	[InlineData("vmware")]
+	[InlineData("ssh")]
+	[InlineData("nsx-api")]
+	[InlineData("vcf-api")]
+	public void ResolveScanComponentProfile_EveryClosedTransport_ResolvesToAPositiveProfileLighterThanFlatScan(string transport)
+	{
+		JobResourceProfile componentProfile = JobResourceProfiles.ResolveScanComponentProfile(transport);
+		JobResourceProfile flatScan = JobResourceProfiles.ForJobType("scan");
+
+		Assert.True(componentProfile.CpuCores > 0);
+		Assert.True(componentProfile.MemoryBytes > 0);
+		Assert.True(componentProfile.CpuCores <= flatScan.CpuCores);
+		Assert.True(componentProfile.MemoryBytes <= flatScan.MemoryBytes);
+	}
+
+	[Fact]
+	public void ResolveScanComponentProfile_NullTransport_FallsBackToFlatScanWeight()
+	{
+		// The legacy per-target scan payload has no `transport` key at all -- null
+		// must resolve to the unchanged flat `scan` weight, not throw and not silently
+		// under-admit a whole-target job at a component-sized budget.
+		JobResourceProfile profile = JobResourceProfiles.ResolveScanComponentProfile(null);
+		Assert.Equal(JobResourceProfiles.ForJobType("scan"), profile);
+	}
+
+	[Fact]
+	public void ResolveScanComponentProfile_UnknownTransport_FallsBackToFlatScanWeight()
+	{
+		JobResourceProfile profile = JobResourceProfiles.ResolveScanComponentProfile("not-a-real-transport");
+		Assert.Equal(JobResourceProfiles.ForJobType("scan"), profile);
+	}
 }

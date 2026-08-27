@@ -146,9 +146,26 @@ public sealed partial class ResourceAdmissionController
 	/// misconfiguration rather than silently overcommitting to break the cap.
 	/// </para>
 	/// </summary>
-	public bool TryAdmit(Guid jobId, string jobType)
+	public bool TryAdmit(Guid jobId, string jobType) => TryAdmit(jobId, jobType, scanComponentTransport: null);
+
+	/// <summary>
+	/// Issue #737 (epic #726 Wave 2 capstone, ADR-0024 "Resource admission applies to
+	/// real component jobs"): overload accepting <paramref name="scanComponentTransport"/>
+	/// -- the claimed job's <c>scan_plan_items.transport</c> value when
+	/// <paramref name="jobType"/> is <c>scan</c> and the job carries a
+	/// <c>scan_plan_item_id</c> (a component-granular job; see
+	/// <see cref="Waypoint.Runner.Jobs.JobDispatcherHostedService"/>'s claim path,
+	/// which parses it from the claimed job's payload). Null for every other job type
+	/// and for a legacy per-target <c>scan</c> job -- both resolve
+	/// <see cref="JobResourceProfiles.ForJobType"/> exactly as <see cref="TryAdmit(Guid,string)"/>
+	/// already did, so this overload is purely additive and changes no existing
+	/// admission behavior.
+	/// </summary>
+	public bool TryAdmit(Guid jobId, string jobType, string? scanComponentTransport)
 	{
-		JobResourceProfile profile = JobResourceProfiles.ForJobType(jobType);
+		JobResourceProfile profile = string.Equals(jobType, "scan", StringComparison.Ordinal)
+			? JobResourceProfiles.ResolveScanComponentProfile(scanComponentTransport)
+			: JobResourceProfiles.ForJobType(jobType);
 
 		lock (_gate)
 		{

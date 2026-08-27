@@ -166,9 +166,18 @@ public sealed class SchemaMigrationTests
 	/// fixed ScanOptions.AttestationProfile name, and freezes the resolution into the
 	/// plan item alongside its other frozen fields. No new runner grant (this slice's
 	/// write path is API-side only, mirroring migration 0057; ScanJobHandler's
-	/// runtime attestation resolution is unchanged this slice), issue #735 --
+	/// runtime attestation resolution is unchanged this slice), issue #735, 0061 adds
+	/// jobs.scan_plan_item_id (issue #737 first slice, epic #726 Wave 2 capstone,
+	/// ADR-0024 "one Postgres component job" per accepted plan item): a nullable
+	/// ON DELETE RESTRICT link from a fanned-out 'scan' job to the exact immutable
+	/// scan_plan_items row it executes. NULL for the legacy target-granular fan-out
+	/// path, which RunCreationService keeps unchanged; non-NULL only for a
+	/// target_scope-driven run's plan-item-granular fan-out. No new runner grant
+	/// (jobs already grants waypoint_compliance_runner SELECT/INSERT/UPDATE via
+	/// migration 0025; ScanJobHandler's component-granular execution consuming
+	/// scan_plan_items is this issue's stated remainder), issue #737 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 60;
+	private const int ExpectedMigrationCount = 61;
 
 	private readonly PostgresFixture _fixture;
 

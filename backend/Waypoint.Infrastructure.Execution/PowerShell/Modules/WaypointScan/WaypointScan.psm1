@@ -54,6 +54,20 @@ function Invoke-WaypointScan {
 	.PARAMETER ReportPath
 	    Where InSpec writes its JSON (HDF) report.
 
+	.PARAMETER SelectorKind
+	    Issue #737 item-4: when set (vcenter|esxi|vm), narrows the scan to one component
+	    object rather than the whole vCenter. Absent/empty = whole-target scan (the
+	    pre-#737 behavior, preserved verbatim for legacy jobs and the collapsed
+	    whole-target remainder job).
+
+	.PARAMETER SelectorName
+	    The object identity a narrowed esxi/vm scan scopes to (the discovered component's
+	    vendor identity: the ESXi hostname / VM identity). A vcenter SelectorKind needs
+	    no name (the whole vCenter IS the object). Passed to InSpec as a generated
+	    --input-file (the same non-argv, owner-only-0600 discipline Invoke-WaypointNsxScan
+	    uses for its session token), so the object identity never lands on the process
+	    command line.
+
 	.PARAMETER VmwareStigDockerCommonPath
 	    Path to the sibling repo's unmodified module.common.ps1,
 	    dot-sourced to bring Invoke-ExternalCommand into scope.
@@ -88,6 +102,13 @@ function Invoke-WaypointScan {
 		[int]$TimeoutSeconds = 1800,
 
 		[Parameter()]
+		[ValidateSet('vcenter', 'esxi', 'vm')]
+		[string]$SelectorKind,
+
+		[Parameter()]
+		[string]$SelectorName,
+
+		[Parameter()]
 		[string]$VmwareStigDockerCommonPath = $Script:VmwareStigDockerCommonModulePath
 	)
 
@@ -119,6 +140,37 @@ function Invoke-WaypointScan {
 
 	$InspecArguments = "`"$ProfilePath`" -t vmware:// --reporter=json:`"$ReportPath`" --show-progress --enhanced-outcomes"
 
+	# Issue #737 item-4: a narrowed scan scopes InSpec to one component object rather
+	# than the whole vCenter. The narrowing selector is written into a generated
+	# --input-file (created 0600 BEFORE the value is written, the same owner-only,
+	# non-argv discipline Invoke-WaypointNsxScan uses for its session token), so the
+	# object identity never appears on the process command line. Absent SelectorKind =
+	# whole-target scan (the pre-#737 InSpec args, unchanged). The input keys mirror the
+	# vmware STIG profile's documented object-scoping inputs (vmhostName for an esxi
+	# host, vmName for a vm); a vcenter selector scopes to the vCenter itself and carries
+	# no object name.
+	$InputsPath = $null
+	if ($SelectorKind) {
+		$InputsPath = Join-Path $ReportDirectory "$([Guid]::NewGuid().ToString('N')).vsphere-scope.generated.yml"
+		$InputsContent = "vsphereSelectorKind: '$SelectorKind'`n"
+		if ($SelectorName) {
+			switch ($SelectorKind) {
+				'esxi' { $InputsContent += "vmhostName: '$SelectorName'`n" }
+				'vm'   { $InputsContent += "vmName: '$SelectorName'`n" }
+			}
+		}
+
+		New-Item -ItemType File -Path $InputsPath -Force -ErrorAction Stop | Out-Null
+		if (-not $IsWindows) {
+			[System.IO.File]::SetUnixFileMode(
+				$InputsPath,
+				[System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserWrite)
+		}
+		Set-Content -Path $InputsPath -Value $InputsContent -ErrorAction Stop
+
+		$InspecArguments += " --input-file `"$InputsPath`""
+	}
+
 	try {
 		# AllowedExitCodes 0/100/101 mirrors module.scan.ps1's own call: InSpec's exit
 		# codes 100 (compliance failures present) and 101 (skipped controls present) are
@@ -149,6 +201,10 @@ function Invoke-WaypointScan {
 			ExitCode      = $null
 			ReportPath    = $null
 			FailureReason = "InSpec scan failed for $VCenter`: $($_.Exception.Message)"
+		}
+	} finally {
+		if ($InputsPath -and (Test-Path -Path $InputsPath -PathType Leaf)) {
+			Remove-Item -Path $InputsPath -Force -ErrorAction SilentlyContinue
 		}
 	}
 }

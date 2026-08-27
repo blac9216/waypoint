@@ -41,6 +41,17 @@ namespace Waypoint.Core.Jobs;
 /// purpose model (downloads, credential-test's explicit credential-under-test) and for
 /// run-secret jobs (ad hoc per-purpose secrets are issue #586).
 /// </param>
+/// <param name="ScanPlanItemId">
+/// Issue #737 (epic #726 Wave 2 capstone, ADR-0024 "one Postgres component job" per
+/// accepted plan item): the exact immutable <c>scan_plan_items</c> row this job
+/// executes, persisted onto <c>jobs.scan_plan_item_id</c> (migration 0061) in the same
+/// fan-out transaction. Non-null only for a job fanned out from a target_scope-driven
+/// run's compiled plan -- <see cref="Waypoint.Infrastructure.Runs.RunCreationService"/>
+/// fans out one job per ACCEPTED plan item on that path instead of one job per target.
+/// Null for every other job type and for the still-supported legacy
+/// target_ids/profile_id-only scan path, which keeps its pre-#737 one-job-per-target
+/// shape unchanged.
+/// </param>
 public sealed record JobSpec(
 	string JobType,
 	short Priority,
@@ -49,4 +60,5 @@ public sealed record JobSpec(
 	Guid? CredentialId = null,
 	string Payload = "{}",
 	bool HasRunSecret = false,
-	IReadOnlyList<JobCredentialBindingSpec>? CredentialBindings = null);
+	IReadOnlyList<JobCredentialBindingSpec>? CredentialBindings = null,
+	Guid? ScanPlanItemId = null);

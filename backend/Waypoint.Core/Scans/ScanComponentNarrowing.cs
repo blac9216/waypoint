@@ -1,0 +1,63 @@
+// Copyright 2026 Justin Black
+//
+// Licensed under the Apache License, Version 2.0 (the "License").
+// You may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using Waypoint.Core.ComplianceContent;
+
+namespace Waypoint.Core.Scans;
+
+/// <summary>
+/// Issue #737 item-4 (epic #726 Wave 2, ADR-0024): the single, shared rule deciding
+/// whether one accepted plan item's <c>transport</c>/<c>selector_kind</c> can be
+/// executed as a component-NARROWED scan (its own job scans only that component's
+/// object) or must fall back to a whole-target scan.
+///
+/// This is the load-bearing invariant the round-1 review demanded: a <c>target_scope</c>
+/// run must never fan out N sibling jobs that each re-scan the whole target. Both the
+/// fan-out side (<c>RunCreationService</c>, which emits one job per narrowable item and
+/// exactly ONE collapsed whole-target job for the un-narrowable remainder) and the
+/// execution side (<c>ScanJobHandler</c>, which narrows the InSpec invocation to the
+/// item's object when this returns true) consult the SAME classifier, so the two can
+/// never disagree about which items are narrowed.
+///
+/// Narrowing remainder, stated per transport (what today's runner can NOT yet narrow,
+/// so those items collapse to one whole-target job):
+/// <list type="bullet">
+/// <item><description><c>vmware</c> / <c>vcenter</c>, <c>esxi</c>, <c>vm</c> -- NARROWED
+///   (InSpec vmware train scoped to that vCenter / ESXi host / VM via input file).</description></item>
+/// <item><description><c>vmware</c> / <c>service</c> -- NOT narrowed: a named vCenter
+///   sub-service (EAM, ...) has no vmware-train object selector; collapses.</description></item>
+/// <item><description><c>ssh</c> (VCSA/appliance component) -- NOT narrowed: the SRG/ssh
+///   transport scans the whole appliance; no per-service selector today; collapses.</description></item>
+/// <item><description><c>nsx-api</c> -- NOT narrowed: whole-Manager API scan; collapses.</description></item>
+/// <item><description><c>vcf-api</c> -- NOT narrowed: no runner path consumes it yet; collapses.</description></item>
+/// </list>
+/// </summary>
+public static class ScanComponentNarrowing
+{
+	/// <summary>
+	/// True when an item with this <paramref name="transport"/> and
+	/// <paramref name="selectorKind"/> can be executed as a component-narrowed scan.
+	/// Today: exactly the vSphere-family object selectors on the vmware transport.
+	/// </summary>
+	public static bool CanNarrow(string? transport, string? selectorKind) =>
+		string.Equals(transport, CatalogTransports.VMware, StringComparison.Ordinal)
+		&& selectorKind is CatalogSelectorKinds.VCenter or CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm;
+
+	/// <summary>Convenience overload for a resolved <see cref="ScanPlanItem"/>.</summary>
+	public static bool CanNarrow(ScanPlanItem item)
+	{
+		ArgumentNullException.ThrowIfNull(item);
+		return CanNarrow(item.Transport, item.SelectorKind);
+	}
+}

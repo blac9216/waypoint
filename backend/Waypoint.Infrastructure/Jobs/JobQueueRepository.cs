@@ -699,8 +699,8 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		{
 			await using NpgsqlCommand insertJob = new(
 				"""
-				INSERT INTO jobs (run_id, job_type, target_id, target_name, credential_id, priority, payload, created_by, state, has_run_secret)
-				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued', $9)
+				INSERT INTO jobs (run_id, job_type, target_id, target_name, credential_id, priority, payload, created_by, state, has_run_secret, scan_plan_item_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued', $9, $10)
 				RETURNING id, state, note
 				""", connection, transaction);
 			insertJob.Parameters.AddWithValue(runId);
@@ -712,6 +712,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			insertJob.Parameters.AddWithValue(string.IsNullOrWhiteSpace(spec.Payload) ? "{}" : spec.Payload);
 			insertJob.Parameters.AddWithValue((object?)createdBy ?? DBNull.Value);
 			insertJob.Parameters.AddWithValue(spec.HasRunSecret);
+			insertJob.Parameters.AddWithValue((object?)spec.ScanPlanItemId ?? DBNull.Value);
 
 			Guid jobId;
 			await using (NpgsqlDataReader reader = await insertJob.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))

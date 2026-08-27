@@ -37,7 +37,7 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 		_connectionString = connectionString;
 	}
 
-	public async Task RecordAsync(Guid runId, Guid? runScopeSnapshotId, ScanPlan plan, CancellationToken cancellationToken)
+	public async Task<IReadOnlyDictionary<Guid, Guid>> RecordAsync(Guid runId, Guid? runScopeSnapshotId, ScanPlan plan, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(plan);
 
@@ -62,6 +62,11 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 			planId = (Guid)(await header.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 		}
 
+		// Issue #737: RETURNING id keyed back by component_id -- scan_plan_items has no
+		// wire-level DTO id (see IScanPlanRepository.RecordAsync's doc comment), so the
+		// caller's component-granular job fan-out needs this mapping to populate
+		// jobs.scan_plan_item_id in the same fan-out that follows this call.
+		Dictionary<Guid, Guid> planItemIdsByComponentId = new(plan.Items.Count);
 		foreach (ScanPlanItem item in plan.Items)
 		{
 			await using NpgsqlCommand itemCommand = new(
@@ -71,6 +76,7 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 					transport, selector_kind, selector_name, report_group_key, priority, output_kind,
 					required_purposes_json, declared_inputs_json, input_resolutions_json, attestation_resolution_json)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb)
+				RETURNING id
 				""", connection, transaction);
 			itemCommand.Parameters.AddWithValue(planId);
 			itemCommand.Parameters.AddWithValue(item.ComponentId);
@@ -92,10 +98,13 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 					? JsonSerializer.Serialize(attestation, SerializerOptions)
 					: DBNull.Value,
 			});
-			await itemCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			Guid planItemId = (Guid)(await itemCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+			planItemIdsByComponentId[item.ComponentId] = planItemId;
 		}
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+		return planItemIdsByComponentId;
 	}
 
 	public async Task<ScanPlan?> GetForRunAsync(Guid runId, CancellationToken cancellationToken)

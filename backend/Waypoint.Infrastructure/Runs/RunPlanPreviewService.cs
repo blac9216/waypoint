@@ -160,7 +160,7 @@ public sealed class RunPlanPreviewService
 		// create-time-only secrets, never resolved in advance of a run existing), except
 		// a gap here is only ever surfaced, never thrown -- a preview's whole point is to
 		// show the caller every gap before they commit to creating the run.
-		IReadOnlyDictionary<Guid, PlanTargetRequirement> requirementsByTarget =
+		Dictionary<Guid, PlanTargetRequirement> requirementsByTarget =
 			await PlanCredentialRequirements.GroupByTargetAsync(plan, _components, cancellationToken).ConfigureAwait(false);
 
 		(IReadOnlyList<CredentialBindingGap> gaps, ScanPlan demotedPlan) = requirementsByTarget.Count == 0
@@ -184,7 +184,7 @@ public sealed class RunPlanPreviewService
 	/// </summary>
 	private async Task<(IReadOnlyList<CredentialBindingGap> Gaps, ScanPlan Plan)> EvaluateCredentialCoverageAsync(
 		ScanPlan plan,
-		IReadOnlyDictionary<Guid, PlanTargetRequirement> requirementsByTarget,
+		Dictionary<Guid, PlanTargetRequirement> requirementsByTarget,
 		IReadOnlyList<RunCredentialOverride>? overrides,
 		IReadOnlyList<RunAdHocCredential>? adHocCredentials,
 		CancellationToken cancellationToken)
@@ -264,7 +264,7 @@ public sealed class RunPlanPreviewService
 	/// </summary>
 	private static ScanPlan DemoteForCredentialGaps(
 		ScanPlan plan,
-		IReadOnlyDictionary<Guid, PlanTargetRequirement> requirementsByTarget,
+		Dictionary<Guid, PlanTargetRequirement> requirementsByTarget,
 		List<CredentialBindingGap> gaps)
 	{
 		if (gaps.Count == 0)
