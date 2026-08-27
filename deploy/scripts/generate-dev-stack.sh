@@ -538,11 +538,19 @@ OVERRIDE_REL="${OVERRIDE_FILE#"${DEPLOY_DIR}/"}"
 ENV_REL="${ENV_FILE#"${DEPLOY_DIR}/"}"
 DC_PRINT="docker compose -p ${PROJECT} -f compose.yaml -f ${OVERRIDE_REL} --env-file ${ENV_REL}"
 
+# why: docs/rationale/deploy.md#gen-devcontainer-build-up-split
+if [[ "${HOST_PREFIX}" != "${REPO_ROOT}" ]]; then
+	UP_BLOCK="  Build: ${DC_PRINT} build
+  Up:    ${DC_PRINT} --project-directory $(host_path "${DEPLOY_DIR}") up -d --no-build"
+else
+	UP_BLOCK="  Up:   ${DC_PRINT} up -d --build"
+fi
+
 cat <<EOF
 
 Generated stack ready (nothing started). Lifecycle commands, run from deploy/:
 
-  Up:   ${DC_PRINT} up -d
+${UP_BLOCK}
   Test: https://localhost:${PORT}/api/v1/health  (or, for agent mode inside a
         devcontainer, curl through a helper container on the '${PROJECT}_edge'
         network -- see docs/testing.md)
