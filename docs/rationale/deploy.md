@@ -368,15 +368,295 @@ Refs: #845, #842
 
 ## scripts/generate-dev-stack.sh
 
+### gen-persistent-project-name
+
+Persistent mode uses the Compose project name `waypoint`, matching
+compose.yaml's own `name: waypoint`, rather than a second "-dev" identity.
+Persistent mode is the one recurring human dev loop against that same base,
+so the two should never diverge.
+
+Refs: #885
+
+### gen-host-path-translation
+
+A bind-mount `source:` this script writes into a compose override is
+resolved by the Docker daemon against the HOST filesystem, not this
+process's own. Inside a devcontainer whose workspace is itself a bind
+mount, the daemon-visible path differs from this process's path, so every
+source this script emits is translated via the container's own inspected
+mounts before use.
+
+Refs: #847
+
+### gen-project-ownership-discriminator
+
+A Compose project name is claimed by RUNNING containers carrying that
+project label, not by the mere existence of a state directory -- a bare
+`mkdir` would otherwise let any caller silently claim a project name.
+Ownership is decided from `com.docker.compose.project.working_dir`
+(accepting both the in-container and host-side spelling of this deploy
+directory), with the generator's own artifact file as a fallback for a
+container carrying no working_dir label at all.
+
+Refs: #847
+
+### gen-local-auth-hash-copy
+
+The caller-supplied admin password hash is copied into this run's own
+state directory, and the copy is what the generated override mounts, so
+the slug directory stays self-contained (one `rm -rf` removes everything)
+and callers never have to pre-create the state directory to stage the hash.
+
+Refs: #847
+
+### gen-secret-reuse-never-overwrite
+
+Existing secrets and TLS material are reused, never regenerated, once
+present. For a TLS pair specifically, a partial pair (one file present,
+the other missing or empty) must never be silently completed --
+regenerating both would overwrite the survivor. Reuse requires both files
+non-empty; anything else fails closed instead of guessing.
+
+Refs: #847
+
+### gen-env-file-merge
+
+deploy/.env is merged, not overwritten: only the keys this script owns are
+added or replaced in place, and any other line (an operator's own
+addition) is left exactly as-is, in its original position.
+
+Refs: #847
+
+### gen-env-file-list-merge
+
+Agent mode drives port/subnet/public-url through a slug-scoped
+`--env-file` and compose.yaml's own operator-config anchors, not through
+`ports:`/`networks:` overrides placed directly in override.yaml. Compose's
+merge semantics APPEND list entries under those keys rather than replacing
+the base's by target/subnet -- verified live: an override.yaml with its
+own `ports:` produced a merged config publishing both the base's default
+port and the override's, side by side. Using the base's own anchors
+avoids that whole class of list-merge surprise. `--env-file` also means
+agent mode never auto-loads deploy/.env, so persistent mode's own env can
+never leak into an agent-mode bring-up.
+
+Refs: #847
+
+### gen-build-context-not-host-path
+
+Unlike a bind-mount `source:` (resolved by the Docker daemon against the
+host filesystem), `build: context:` is resolved by the buildx client from
+wherever `docker compose build` itself runs. Passing the host-path-
+translated absolute path here broke with "unable to prepare context: path
+not found" -- that translated path is only meaningful to the daemon.
+The keycloak-dev-admin build context therefore stays relative
+(`./keycloak-dev-admin`), matching every other build context in the
+generated override.
+
+Refs: #847, #846
+
 ## scripts/init-config.sh
+
+### initcfg-secret-file-mode-0644
+
+Secret files are written 0644, not 0600: Compose bind-mounts a `file:`
+secret source verbatim (host uid/mode preserved, no re-materialization),
+and postgres's initdb scripts read their three files as the in-container
+`postgres` user, neither root nor this script's uid. 0644 is the
+convention this repo uses for every mounted secret file.
+
+Refs: #844
 
 ## scripts/fresh-stack-smoke-test.sh
 
+### smoke-in-network-helper
+
+HTTP checks route through a helper container on the stack's own `edge`
+network via `docker exec`, rather than the host-published port directly.
+A published container port is not reliably reachable from the test
+process's own network namespace in every environment (devcontainer /
+remote-Docker-daemon setups) -- a throwaway container on the same edge
+network reaches nginx fine while this script's own process gets
+ECONNREFUSED/timeout on both 127.0.0.1 and the bridge gateway. This costs
+nothing extra where the published port IS reachable.
+
+Refs: #219, #444
+
+### smoke-hash-stage-separation
+
+The admin-password hash is computed and staged in a separate scratch
+directory, never inside the generator's own state directory. This script
+must not create the generator's state directory behind its back: the
+generator refuses a foreign stack that has already claimed this project
+name, and a caller that pre-creates state must not be able to influence
+that decision. The generator copies the hash into the slug directory
+itself once called.
+
+Refs: #847
+
+### smoke-seeding-preconditions
+
+Two preconditions are seeded before a scan job can honestly fail against
+its invented unreachable target instead of failing earlier at a readiness
+gate: (1) compliance-runner's readiness check requires
+Scans:ProfilePath/NsxProfilePath/SrgProfilePath to exist as readable
+directories, so the three expected (empty) subdirectories are pre-created
+on the fresh `compliance-profiles` volume; (2) a scan run requires a
+resolvable `srg-ssh` credential-purpose binding per scoped target, so the
+just-created service credential is bound to the just-created target before
+the run is submitted.
+
+Refs: #444, #733, #726, #882, #639
+
+### smoke-cancel-pause-race
+
+Cancelling a job racing a fast-failing invented-unreachable target
+intermittently lost the race against the runner claiming and failing it
+first. The run is paused before the cancel request so the job dispatcher
+never claims the still-queued job at all -- cancel then deterministically
+moves a queued job to `cancelled`. A run/job already gone terminal before
+the pause lands is accepted as correct product behavior (400/409), not a
+test failure.
+
+Refs: #498
+
+### smoke-credential-owner-shared
+
+`owner` must be `'shared'` on every credential this script creates: there
+is no per-user credential ownership model in v1, so any other value is a
+400 validation_error.
+
+Refs: ADR-0011
+
 ## scripts/e2e-playwright.sh
+
+### e2e-npm-ci-stamp
+
+`[[ ! -d node_modules ]]` only tests whether the directory exists, not
+whether it matches what package-lock.json currently declares -- a
+checkout whose node_modules predates a devDependency addition satisfies
+that guard and skips `npm ci` entirely. Install correctness is tracked
+instead with a stamp file, written only on a successful `npm ci`,
+containing package-lock.json's hash: cheap (one sha256sum, no network) and
+reliable (any lockfile change invalidates it). This is the single install
+site both the frontend/dist build and the Playwright dependency prep route
+through, so a fresh checkout installs exactly once.
+
+Refs: #906
+
+### e2e-reachability-probe
+
+Whether a docker-published host port is reachable from this process's own
+network namespace is a property of the environment (devcontainer /
+remote-daemon host vs. a real appliance host), not of this specific
+stack -- so it is probed once, generically, with a disposable helper
+container BEFORE the stack is even generated. That lets `--public-url`
+already be the origin Playwright will actually navigate to, instead of
+guessing "localhost" and discovering only after bring-up -- with
+Keycloak's issuer and redirect/origin list already baked in -- that the
+browser can only reach the stack via its edge-network name. The retry
+loop is bounded because with `userland-proxy=false` a connect landing
+before `nc` finishes binding is refused even though the port genuinely
+works once listening.
+
+Refs: #896, #904
+
+### e2e-playwright-exit-capture
+
+`set -euo pipefail` would otherwise terminate the whole script the instant
+the Playwright subshell exits nonzero -- before its exit code could be
+captured, before the zero-tests-executed guard runs, and before the
+script's own final `exit` ever ran. A failed Playwright run was silently
+swallowed as whatever exit code the EXIT trap's cleanup happened to
+produce, not the suite's real result. `set +e`/`set -e` bracket exactly
+the subshell so errexit is suspended only long enough to capture the real
+exit code.
+
+Refs: #848, #500
 
 ## scripts/keycloak-realm-import.sh
 
+### realmimport-host-path-translation
+
+A bind-mount SOURCE given to a plain `docker run -v` (unlike `docker
+compose`'s own bind mounts) is not translated when this script runs
+inside a devcontainer whose workspace is itself a bind mount -- the
+daemon looks for that literal path on the host, and a container-side path
+silently mounts an empty directory there. The scratch directory's host-
+side path is resolved from the container's own inspected mounts before
+use; on a real appliance host this loop finds no mapping and the path is
+used as-is. deploy/ is used for the scratch dir rather than /tmp because
+container /tmp is never host-shared at all.
+
+Refs: #28
+
+### realmimport-python-not-sed
+
+sed's replacement side has its own metacharacters (`&` expands to the
+whole match, `\` escapes, and any delimiter appearing in the value ends
+the expression early), so a generated secret containing those characters
+was silently mangled. A literal, non-regex replacement in python3 has no
+metacharacters, and also JSON-escapes the value -- the placeholder sits
+inside a JSON string, so a secret containing `"` or `\` must be escaped to
+keep the file parseable. The secret is passed through the environment,
+never argv, since argv is visible in `ps`/`/proc/<pid>/cmdline` to
+anything else on the host.
+
+Refs: #844, #860
+
+### realmimport-stop-before-reimport
+
+Running the throwaway import alongside a live `keycloak` service against
+the same database silently no-ops: the realm delete appears to succeed,
+but the throwaway boot's `IGNORE_EXISTING` import then also silently does
+nothing, with no error at any layer. Two Keycloak processes clustering
+against one DB backend was never a supported concurrent-write scenario.
+The compose-managed service is stopped first and restarted at the end
+either way, via a trap.
+
+Refs: #28
+
+### realmimport-server-boot-not-cli
+
+Keycloak 25's standalone `import --override true` CLI logs success and
+exits 0 against an already-initialized database, but the realm silently
+does not land -- a fresh `SELECT` against `realm`/`client` afterward shows
+no change, reproduced against both a stopped and a running `keycloak`
+service. Keycloak's own server-boot import path (`start-dev
+--import-realm`, `IGNORE_EXISTING` strategy) reliably creates the realm
+and its client with the substituted secret when the realm does not
+already exist. This script therefore deletes the existing realm via the
+admin REST API, then boots a throwaway `keycloak` container against the
+same database with `--import-realm` -- slower than a bare `kc.sh import`,
+but the path actually proven to persist.
+
+Refs: #28
+
 ## scripts/keycloak-realm-export.sh
+
+### realmexport-host-path-translation
+
+A bind-mount SOURCE given to a plain `docker run -v` is resolved by the
+Docker daemon against the HOST filesystem, and gets no translation when
+invoked from inside a devcontainer whose workspace is itself a bind mount
+-- an un-translated container-side path here silently exports into an
+empty directory the daemon creates on the host, while the export command
+still reports success. The output directory's host-side path is resolved
+from the container's own inspected mounts before use; on a real appliance
+host this loop finds no mapping and the path is used as-is.
+
+Refs: #28
+
+### realmexport-throwaway-container
+
+`kc.sh export` requires exclusive DB access via its own embedded
+connection, which is not available while `start-dev` owns the process. A
+throwaway container runs `export` against the same database instead --
+Keycloak's own docs support this, since export/import both connect to
+`KC_DB_URL` directly, independent of whether a server is already running
+against it.
+
+Refs: #28
 
 ## nginx/
 

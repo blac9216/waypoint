@@ -1,45 +1,24 @@
 #!/usr/bin/env bash
 #
-# Issue #444 fresh-stack M1/M2 parity acceptance matrix -- deploy smoke-test tooling.
+# Fresh-stack acceptance smoke test: brings up an isolated `docker compose`
+# project from scratch (a real `--build`) and walks the operator-visible
+# surface -- system/runner health, catalog-index, download tool-absent
+# failure, site/target/credential setup, scan enqueue/claim/honest-failure,
+# cancellation, SSE, runner stop/scale-out, and a secret canary sweep.
 #
-# Brings up an ISOLATED `docker compose` project from scratch (a real
-# `--build`, not a cached image reuse) and walks the operator-visible surface
-# the runner architecture (ADRs 0013/0014/0015) must still support after
-# execution moved out of the API host (#443): system/runner health,
-# catalog-index without the gated tool, download's honest tool-absent
-# failure, site/target/credential setup, service-credential and
-# personal-credential scan enqueue/claim/honest-failure, cancellation,
-# SSE reconnect, stopping one runner leaves the other's domain visible and
-# functional, replica scale-out claims without duplication, and a secret
-# canary check across the database/artifacts/logs.
-#
-# Follows docs/testing.md's mandatory isolation recipe: unique -p project
-# name, unique host port, no touching another agent's stack, full `down -v`
-# teardown on exit (trap-based, runs even on failure).
+# Follows docs/testing.md's isolation recipe: unique -p project name, unique
+# host port, full `down -v` teardown on exit (trap-based).
 #
 # HTTP checks run through a helper container on the stack's own `edge`
-# network, not through the host-published port directly. docs/testing.md's
-# Postgres-fixture section documents "remote Docker daemon" / "bridge-
-# networked test process" environments where a published container port is
-# unreachable from the test process's own network namespace at all -- issue
-# #219 for Postgres, and this script hit the identical failure mode for
-# nginx's published HTTPS port while first authoring it (verified: a
-# throwaway container on the SAME edge network reaches nginx fine over
-# `https://nginx/`, while this script's own process gets ECONNREFUSED/timeout
-# on both 127.0.0.1:$PORT and the bridge gateway). Routing every request
-# through `docker exec` into a long-lived helper container on that network
-# sidesteps the whole class of host-loopback/NAT unreachability, and costs
-# nothing extra on a host where the published port IS reachable -- the helper
-# container reaches nginx exactly the way it would from any other client.
+# network rather than the host-published port directly.
+# why: docs/rationale/deploy.md#smoke-in-network-helper
 #
 # Usage:
 #   deploy/scripts/fresh-stack-smoke-test.sh [slug] [port]
 #
-# Defaults: slug derived from date+pid, port 19443. Both are printed at the
-# start of the run so a concurrent agent can tell stacks apart.
+# Defaults: slug derived from date+pid, port 19443.
 #
-# Requires: docker compose v2, curl, openssl, python3 (for the SSE probe and
-# JSON field extraction -- no jq dependency assumed).
+# Requires: docker compose v2, curl, openssl, python3.
 
 set -euo pipefail
 
@@ -50,19 +29,11 @@ REPO_ROOT="$(cd -- "${DEPLOY_DIR}/.." &>/dev/null && pwd)"
 SLUG="${1:-smoke-$(date +%s)-$$}"
 PORT="${2:-19443}"
 PROJECT="wp-${SLUG}"
-# WAYPOINT_SMOKE_OVERRIDE_FILE: rare manual escape hatch, an uncommitted extra
-# compose override layered on top of everything deploy/scripts/generate-dev-
-# stack.sh --mode agent already generates below. WAYPOINT_SMOKE_SUBNET (also
-# below) is the normal way to route around an `edge`-subnet collision with a
-# concurrent stack on this host (docs/testing.md) -- prefer it; never commit a
-# run with either set. `DC` is finalized further down, after the generator
-# call.
-# In-network base -- the helper container below reaches nginx by its Compose
-# service name (Docker's embedded DNS, same resolver mechanism
-# deploy/README.md "Networking" describes for nginx's own upstream lookups),
-# not through the host-published $PORT. $PORT/$BASE are still used for the
-# operator-facing curl examples this script prints, and for a best-effort
-# direct probe that succeeds on a host where the published port IS reachable.
+# WAYPOINT_SMOKE_OVERRIDE_FILE: rare manual escape hatch, uncommitted extra
+# compose override. WAYPOINT_SMOKE_SUBNET: reroutes around an `edge`-subnet
+# collision with a concurrent stack (docs/testing.md). `DC` is finalized
+# further down. $PORT/$BASE are also used for operator-facing examples and a
+# best-effort direct probe.
 BASE="https://127.0.0.1:${PORT}"
 NET_BASE="https://nginx"
 HELPER_NAME="${PROJECT}-smoke-helper"
@@ -86,10 +57,6 @@ cleanup() {
 	if [[ -n "${DC:-}" ]]; then
 		(cd "${DEPLOY_DIR}" && ${DC} down -v) || true
 	fi
-	# Issue #847: everything the generator wrote for this run -- secrets,
-	# TLS, the admin-password hash, the override/env files -- lives ONLY
-	# under this one slug-scoped directory, so a full run's throwaway state
-	# is exactly this one `rm -rf`.
 	rm -rf "${DEPLOY_DIR}/.generated/${SLUG}" "${DEPLOY_DIR}/.generated/${SLUG}.hash-stage"
 	rm -f "${CATALOG_ARTIFACTS_FILE:-/nonexistent}" 2>/dev/null || true
 }
@@ -103,13 +70,8 @@ docker ps --format '{{.Names}}' | grep -v "^${PROJECT}-" || echo "  (none curren
 
 cd "${DEPLOY_DIR}"
 
-# Issue #847: no TLS staging here -- deploy/scripts/generate-dev-stack.sh
-# --mode agent generates its own SAN-correct self-signed pair under
-# deploy/.generated/${SLUG}/tls/ and binds it directly at compose.yaml's
-# per-file targets (/etc/nginx/certs/tls.{crt,key}), replacing the base's
-# mandatory-but-missing deploy/config/tls/ mounts -- see the generator call
-# below. deploy/config/tls/ (the production/persistent-mode location) is
-# never touched by an agent-mode run.
+# TLS is generated by generate-dev-stack.sh --mode agent below, not staged
+# here; deploy/config/tls/ (the persistent-mode location) is never touched.
 
 if [[ ! -f "${REPO_ROOT}/frontend/dist/index.html" ]]; then
 	log "frontend/dist missing (Node 22 required, sandbox has Node ${NODE_VER:-unknown}) -- writing an accepted placeholder per docs/testing.md's disclosed workaround"
@@ -120,28 +82,11 @@ if [[ ! -f "${REPO_ROOT}/frontend/dist/index.html" ]]; then
 	EOF
 fi
 
-# Issue #847: deploy/scripts/generate-dev-stack.sh --mode agent replaces this
-# script's former hand-rolled secret/TLS/override construction (devcontainer
-# bind-mount host-path translation, the six base secrets, the master key, and
-# the LocalAuth__*/RunnerResources__Fallback* override) with one generator
-# call. It writes everything under deploy/.generated/${SLUG}/ only, detects
-# port/subnet/project collisions before creating anything, and validates the
-# merged config itself -- this script only still owns computing the
-# admin-password hash (a backend-specific step the generator deliberately
-# does not do) and handing it in via --local-auth-admin-hash-file.
+# generate-dev-stack.sh --mode agent owns secrets/TLS/override generation;
+# this script only computes the admin-password hash and hands it in.
 GENERATED_STATE_DIR="${DEPLOY_DIR}/.generated/${SLUG}"
 
-# Admin password: fixed dev-only value, hashed via the backend's own CLI so
-# the hash format always matches what LocalAuthOptionsPostConfigure expects.
-# Computed here (before the generator call) because the generator only wires
-# up a hash file it is handed -- it never computes one itself.
-#
-# Staged in a SEPARATE scratch directory, never in ${GENERATED_STATE_DIR}:
-# this script must not create the generator's state directory behind its
-# back (round-2 review of #847 -- the generator refuses a foreign stack that
-# has claimed this project name, and a caller that pre-creates state must
-# not be able to influence that decision). The generator copies the hash
-# into the slug directory itself and mounts its own copy.
+# why: docs/rationale/deploy.md#smoke-hash-stage-separation
 HASH_STAGE_DIR="${DEPLOY_DIR}/.generated/${SLUG}.hash-stage"
 mkdir -p "${HASH_STAGE_DIR}"
 ADMIN_PASSWORD="invented-smoke-test-password-$(openssl rand -hex 4)"
@@ -174,31 +119,16 @@ fi
 
 log "Generating isolated dev stack (deploy/scripts/generate-dev-stack.sh --mode agent --slug ${SLUG})"
 "${SCRIPT_DIR}/generate-dev-stack.sh" "${GENERATE_ARGS[@]}"
-# The generator copied the hash into the slug directory; the scratch staging
-# copy has no further purpose.
 rm -rf "${HASH_STAGE_DIR}"
 
 DC="docker compose -p ${PROJECT} -f compose.yaml -f ${GENERATED_STATE_DIR}/override.yaml --env-file ${GENERATED_STATE_DIR}/.env"
 if [[ -n "${WAYPOINT_SMOKE_OVERRIDE_FILE:-}" ]]; then
-	# Rare manual escape hatch (e.g. a one-off scratch override this script's
-	# generated stack does not otherwise need) -- layered LAST so it can
-	# override anything the generator wrote.
+	# Rare manual escape hatch, layered LAST so it can override anything the
+	# generator wrote.
 	DC="${DC} -f ${WAYPOINT_SMOKE_OVERRIDE_FILE}"
 fi
 
-# compliance-runner's own readiness check (ComplianceReadinessCheck) requires
-# Scans:ProfilePath/NsxProfilePath/SrgProfilePath to exist as readable
-# directories -- the shipped `compliance-profiles` named volume starts
-# completely empty on a fresh stack (no operator has populated real InSpec
-# content yet), so compliance-runner's own Docker healthcheck fails closed
-# before this script ever gets to enqueue a job (discovered by this script's
-# own fresh-stack run -- see the PR body for #444). Pre-create the three
-# expected subdirectories, still with NO real profile content in them, so
-# readiness passes and a scan job can reach and honestly fail against its
-# invented unreachable target (the actual signal steps 7/8 below look for)
-# instead of failing at the readiness gate first. This mirrors an operator
-# who has populated the volume with real content -- this script populates it
-# with none, which is a legitimate, disclosed stand-in.
+# why: docs/rationale/deploy.md#smoke-seeding-preconditions
 docker volume create "${PROJECT}_compliance-profiles" >/dev/null
 docker run --rm -v "${PROJECT}_compliance-profiles:/x" alpine \
 	sh -c "mkdir -p /x/vsphere /x/nsx /x/srg" >/dev/null
@@ -230,13 +160,9 @@ ${DC} ps
 
 # --- Helpers -------------------------------------------------------------
 
-# Long-lived helper container on the stack's OWN edge network (see the
-# header comment above for why: the published host port is not reliably
-# reachable from this script's own network namespace in every environment).
-# `docker exec` into it for every request instead of `docker run`-per-call,
-# so the per-request cost is a plain exec, not a container start. curlimages/
-# curl bundles curl + python3 (Alpine base), which covers both this and the
-# json_field/SSE helpers below without a second image.
+# Long-lived helper container on the stack's own edge network; `docker exec`
+# into it per request rather than `docker run`-per-call.
+# why: docs/rationale/deploy.md#smoke-in-network-helper
 EDGE_NETWORK="${PROJECT}_edge"
 docker run -d --rm --name "${HELPER_NAME}" --network "${EDGE_NETWORK}" \
 	--entrypoint sh curlimages/curl -c "while true; do sleep 3600; done" >/dev/null
@@ -316,13 +242,8 @@ fi
 
 log "3. GET /system reports both runner domains"
 if [[ -n "${ADMIN_TOKEN}" ]]; then
-	# worker_registry heartbeats on an interval -- give both runners a couple
-	# of ticks before asserting.
-	# compliance-runner's own healthcheck start_period is 30s and its readiness
-	# refresh interval is another 30s on top -- 12s here was measured too short
-	# (compliance-runner's heartbeat can genuinely still be absent from
-	# worker_registry at that point even though download-runner's already
-	# landed), so this polls up to 60s instead of a single fixed sleep.
+	# Poll up to 60s: heartbeats lag, and compliance-runner readiness can
+	# trail download-runner's.
 	for i in $(seq 1 30); do
 		SYSTEM_PROBE_BODY="$(api_get_body /api/v1/system)"
 		if printf '%s' "${SYSTEM_PROBE_BODY}" | python3 -c "
@@ -336,11 +257,7 @@ sys.exit(0 if len(d.get('runners', [])) >= 2 else 1)
 	done
 	SYSTEM_BODY="$(api_get_body /api/v1/system)"
 	echo "${SYSTEM_BODY}"
-	# The runner list has no "domain" field -- SystemRunnerStatusResponse is
-	# {worker_id, job_types, available, last_seen_at} (SystemContracts.cs), and
-	# worker_id defaults to Environment.MachineName (the container hostname,
-	# an opaque hex id under Compose -- no "compliance"/"download" substring).
-	# Classify by job_types membership instead, matching JobCapabilities.
+	# No "domain" field on the runner list -- classify by job_types membership.
 	COMPLIANCE_UP="$(printf '%s' "${SYSTEM_BODY}" | python3 -c "
 import json,sys
 d = json.load(sys.stdin)
@@ -439,22 +356,13 @@ if [[ -n "${ADMIN_TOKEN}" ]]; then
 		if [[ -n "${TARGET_ID}" ]]; then ok "target created (${TARGET_ID}, invented unreachable host)"; else bad "target creation failed: ${TARGET_RESPONSE}"; fi
 	fi
 
-	# ADR-0011: 'owner' must be 'shared' -- there is no per-user credential
-	# ownership model in v1, so any other value is a 400 validation_error.
+	# why: docs/rationale/deploy.md#smoke-credential-owner-shared
 	CRED_RESPONSE="$(api_post_body /api/v1/credentials \
 		'{"name":"smoke-svc-cred","credential_type":"ssh","owner":"shared","secret":"invented-smoke-canary-9f3a"}')" # gitleaks:allow — invented smoke canary, never a real secret
 	CREDENTIAL_ID="$(printf '%s' "${CRED_RESPONSE}" | json_field id 2>/dev/null || true)"
 	if [[ -n "${CREDENTIAL_ID}" ]]; then ok "service credential created (${CREDENTIAL_ID})"; else bad "credential creation failed: ${CRED_RESPONSE}"; fi
 
-	# Issue #733/epic #726 wave 2 (component-scope credential-purpose
-	# resolution): a scan run now 400s with credential_binding_gaps unless
-	# every scoped target resolves the "srg-ssh" purpose via an assigned
-	# binding, a credential_override, or an ad_hoc credential (this smoke
-	# test's own step 8 already supplies the latter, which is why only the
-	# service-credential-path steps need this). Bind the just-created service
-	# credential to the just-created target for that purpose -- same shape as
-	# 6b's profile-row seeding: this is environment seeding for a real,
-	# already-shipped product requirement, not a workaround for one.
+	# why: docs/rationale/deploy.md#smoke-seeding-preconditions
 	if [[ -n "${TARGET_ID}" && -n "${CREDENTIAL_ID}" ]]; then
 		BIND_CODE="$(api_put "/api/v1/targets/${TARGET_ID}/credential-bindings/srg-ssh" "{\"credential_ref\":\"${CREDENTIAL_ID}\"}")"
 		if [[ "${BIND_CODE}" == "200" ]]; then ok "srg-ssh credential binding set on ${TARGET_ID}"; else bad "srg-ssh credential binding failed on ${TARGET_ID}: ${BIND_CODE}"; fi
@@ -463,33 +371,13 @@ else
 	bad "skipped (no admin token)"
 fi
 
-# --- 6b. Provision a compliance-content profile row (issue #882) ---------
-#
-# Issue #639 (RunCreationService.CreateScanRunAsync) requires every scan
-# run's scope to name an installed profiles.id -- a real installed row comes
-# from POST /compliance-content/pull, which clones a real InSpec content
-# repository. This fresh, isolated stack deliberately never runs that (no
-# network egress assumed, and the compliance-profiles/compliance-content
-# volumes are intentionally pre-seeded empty above -- "a legitimate,
-# disclosed stand-in" per that comment), so a real pull is not an option
-# here. RunCreationService only checks _profiles.GetAsync(profileId) at run-
-# creation time -- it never stats the on-disk profile directory itself (that
-# happens later, inside the claimed job) -- so a directly-inserted `profiles`
-# row is sufficient to get past the scope.profile_id gate and exercise the
-# real enqueue/claim/fail path steps 7-9/12 assert. The scan job's OWN
-# terminal failure then comes from whichever the runner hits first: the
-# still-invented-unreachable target, or the (also legitimately empty)
-# profile directory -- either way a genuine "failed"/"auth-failed" terminal
-# state, which is exactly the signal those steps check for.
+# --- 6b. Provision a compliance-content profile row ---------------------
+# why: docs/rationale/deploy.md#smoke-seeding-preconditions
 log "6b. Provisioning a throwaway compliance-content profile row for scope.profile_id"
 PROFILE_ID=""
 if [[ -n "${ADMIN_TOKEN}" ]]; then
-	# psql -tAc still emits an "INSERT 0 1" command-completion tag alongside
-	# the RETURNING row for an INSERT (tuples-only only suppresses column
-	# headers/row-count footers, not that tag) -- verified live: a blind
-	# `tr -d '[:space:]'` concatenated it straight onto the UUID, which the
-	# backend then rejected as an invalid Guid. Extract just the UUID shape
-	# instead of trusting psql's output to be exactly one bare value.
+	# psql -tAc still emits an "INSERT 0 1" tag alongside RETURNING -- extract
+	# just the UUID shape rather than trusting bare output.
 	PROFILE_ID="$(${DC} exec -T postgres psql -U "${POSTGRES_USER:-waypoint}" -d "${POSTGRES_DB:-waypoint}" -tAc "
 		INSERT INTO profiles (profile_key, name, commit, state)
 		VALUES ('smoke-test-profile', 'Smoke Test Invented Profile', 'smoke0000000000000000000000000000000000', 'current')
@@ -565,41 +453,22 @@ fi
 
 # --- 9. Cancellation mid-run ----------------------------------------------
 
-# Issue #498: cancelling a job racing a fast-failing invented-unreachable
-# target intermittently lost the race -- compliance-runner claims and fails
-# the job before the DELETE request lands, so IJobControlRepository.CancelJobAsync
-# correctly returns NotCancellable/409 (JobsController.CancelJob) even though
-# nothing is wrong. Pause the run FIRST (POST /runs/{id}/pause,
-# RunControlService.PauseAsync) so the job dispatcher never claims its queued
-# job in the first place (JobDispatcherHostedServiceTests exercises the same
-# claim-skip behavior for a paused run) -- the job is then guaranteed to still
-# be `queued` when the cancel request lands, and CancelJobAsync moves a
-# queued job straight to `cancelled` (JobCancelOutcome.Cancelled) with no
-# runner race possible. Resume afterward so the (now-cancelled) run doesn't
-# linger paused for the rest of the script/teardown.
+# why: docs/rationale/deploy.md#smoke-cancel-pause-race
 log "9. Cancellation mid-run (run paused first so the job cannot be claimed before cancel)"
 if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" && -n "${PROFILE_ID}" ]]; then
 	CANCEL_TARGET_RESPONSE="$(api_post_body "/api/v1/sites/${SITE_ID}/targets" \
 		'{"kind":"ssh","name":"srg-cancel-01","connection":{"host":"srg-cancel-01.example.internal"}}')"
 	CANCEL_TARGET_ID="$(printf '%s' "${CANCEL_TARGET_RESPONSE}" | json_field id 2>/dev/null || true)"
-	# Same seeding as step 6's -- see that step's comment. Best-effort (not a
-	# separate assertion): a real failure here surfaces as this step's own
-	# scan-run/terminal-state checks below failing instead.
+	# Same seeding as step 6's; best-effort, not a separate assertion.
 	[[ -n "${CANCEL_TARGET_ID}" && -n "${CREDENTIAL_ID}" ]] && api_put "/api/v1/targets/${CANCEL_TARGET_ID}/credential-bindings/srg-ssh" "{\"credential_ref\":\"${CREDENTIAL_ID}\"}" >/dev/null
 	CANCEL_SCAN_RESPONSE="$(api_post_body /api/v1/runs \
 		"{\"run_type\":\"scan\",\"scope\":\"{\\\"site_id\\\":\\\"${SITE_ID}\\\",\\\"target_ids\\\":[\\\"${CANCEL_TARGET_ID}\\\"],\\\"profile_id\\\":\\\"${PROFILE_ID}\\\"}\"}")"
 	CANCEL_RUN_ID="$(printf '%s' "${CANCEL_SCAN_RESPONSE}" | json_field run_id 2>/dev/null || true)"
 	if [[ -n "${CANCEL_RUN_ID}" ]]; then
-		# Pause immediately -- before the dispatcher's next claim tick can reach
-		# this run's queued job. A pause on an already-claimed/running job is
-		# harmless (dispatch just stops advancing it further); the goal here is
-		# only to keep a still-queued job queued.
+		# Pause before the dispatcher's next claim tick reaches the queued job.
 		PAUSE_CODE="$(net_curl -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${ADMIN_TOKEN}" "${NET_BASE}/api/v1/runs/${CANCEL_RUN_ID}/pause")"
-		# Same residual race the cancel fallback below tolerates (issue #498
-		# regression): a single fast-failing job can drive the whole run
-		# terminal before this pause request lands, and pausing a terminal run
-		# correctly returns 400. Accept it, distinguished in the log, instead
-		# of hard-failing on correct product behavior.
+		# A run gone terminal before the pause lands correctly returns 400 --
+		# accepted, not a failure.
 		if [[ "${PAUSE_CODE}" == "200" ]]; then
 			ok "run paused before cancel (${PAUSE_CODE})"
 		elif [[ "${PAUSE_CODE}" == "400" ]]; then
@@ -612,13 +481,8 @@ if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" && -n "${PROFI
 		CANCEL_JOB_ID="$(printf '%s' "${JOBS_BODY}" | json_field '0.id' 2>/dev/null || true)"
 		if [[ -n "${CANCEL_JOB_ID}" ]]; then
 			CANCEL_CODE="$(api_delete "/api/v1/jobs/${CANCEL_JOB_ID}")"
-			# With the run paused, the job is guaranteed still `queued` -- cancel
-			# should deterministically succeed (200). A 409 here would mean the
-			# job was claimed before the pause took effect (e.g. an in-flight
-			# claim from a tick that started just before the pause request
-			# landed); still accept it as pass, distinguished in the log, rather
-			# than hard-failing on a residual, much narrower race than the
-			# pre-fix one.
+			# 200 is the normal case; a 409 (claimed just before pause landed) is
+			# also accepted as pass.
 			if [[ "${CANCEL_CODE}" == "200" ]]; then
 				ok "job cancel returned 200 (queued job cancelled deterministically)"
 			elif [[ "${CANCEL_CODE}" == "409" ]]; then
@@ -637,13 +501,10 @@ if [[ -n "${ADMIN_TOKEN}" && -n "${SITE_ID}" && -n "${TARGET_ID}" && -n "${PROFI
 			bad "no job id found on cancellation run: ${JOBS_BODY}"
 		fi
 
-		# Resume so the run doesn't linger paused (harmless either way since the
-		# job is already terminal, but leaves the run in a clean, non-paused
-		# state for anything downstream that lists runs).
+		# Resume so the run doesn't linger paused for anything downstream.
 		RESUME_CODE="$(net_curl -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${ADMIN_TOKEN}" "${NET_BASE}/api/v1/runs/${CANCEL_RUN_ID}/resume")"
-		# Mirrors the pause tolerance above: resuming a run that went terminal
-		# (or was never successfully paused) returns 400 -- correct behavior,
-		# accepted and distinguished rather than hard-failed.
+		# Mirrors the pause tolerance above: 400 on an already-terminal run is
+		# accepted, not a failure.
 		if [[ "${RESUME_CODE}" == "200" ]]; then
 			ok "run resumed after cancel"
 		elif [[ "${RESUME_CODE}" == "400" ]]; then
