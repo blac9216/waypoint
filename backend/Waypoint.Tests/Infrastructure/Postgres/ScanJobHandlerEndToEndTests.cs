@@ -77,6 +77,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	private ScanJobHandler _handler = null!;
 	private Waypoint.Infrastructure.ComplianceContent.CatalogRepository _catalog = null!;
 	private Waypoint.Infrastructure.ComplianceContent.BaselineRepository _baselines = null!;
+	private Waypoint.Infrastructure.ComplianceContent.BenchmarkRepository _benchmarks = null!;
 
 	public ScanJobHandlerEndToEndTests(PostgresFixture fixture)
 	{
@@ -142,10 +143,11 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		_catalog = new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(_fixture.ConnectionString);
 		_baselines = new Waypoint.Infrastructure.ComplianceContent.BaselineRepository(_fixture.ConnectionString);
 		ComponentProfileRevisionResolver vCenterProfileRevisions = new(_baselines, _catalog, complianceContentOptions);
+		_benchmarks = new Waypoint.Infrastructure.ComplianceContent.BenchmarkRepository(_fixture.ConnectionString);
 
 		_handler = new ScanJobHandler(
 			executor, _secretStore, _credentials, _targets, _runSecrets, _repository, _redactor, wrappedPsOptions, scanOptions,
-			complianceContentOptions, _configDocs, _attestationSnapshots, uploadCoordinator, vCenterProfileRevisions);
+			complianceContentOptions, _configDocs, _attestationSnapshots, uploadCoordinator, vCenterProfileRevisions, _benchmarks);
 	}
 
 	public async Task DisposeAsync()
@@ -535,6 +537,306 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			"an unnarrowed collapsed job must run a whole-target scan.");
 		Assert.False(await ScanLogContainsAsync(jobIds[0], "selector=esxi/"),
 			"an unnarrowed collapsed job must NOT carry any object selector.");
+	}
+
+	/// <summary>
+	/// Issue #741/#743: a VCSA service item (ssh/service) executes over ssh, authenticated
+	/// with the ITEM's own vcsa-ssh purpose -- never the vsphere-api credential the
+	/// OWNING TARGET's kind would otherwise default to. Proven the stub-echo way every
+	/// other selector test in this class proves invocation shape: the stub's
+	/// Information line names the ssh host/username it was actually called with.
+	/// </summary>
+	[Fact]
+	public async Task VcsaServiceComponentJob_AuthenticatesWithVcsaSshPurpose_NotVsphereApi()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid vsphereApiCredentialId) = await SeedVsphereTargetAsync("invented-vsphere-api-secret"); // gitleaks:allow -- invented test canary
+		Guid vcsaSshCredentialId = (await _credentials.CreateAsync(
+			$"svc-vcsa-ssh-{Guid.NewGuid():N}@example.internal", CredentialTypes.Ssh, CredentialOwners.Shared,
+			sudoEnabled: false, CancellationToken.None, "root@example.internal"))!.Value;
+		await _secretStore.StoreAsync(vcsaSshCredentialId, System.Text.Encoding.UTF8.GetBytes("invented-vcsa-ssh-secret" /* gitleaks:allow -- invented test canary */), "test", CancellationToken.None);
+
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedSshCatalogAndBaselineAsync("vcsa-envoy", CatalogSelectorKinds.Service, CatalogOutputKinds.HdfAndCkl, selectorName: "envoy", materializeOnDisk: true);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			selector_kind = "service",
+			selector_name = "envoy",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = "hdf_ckl",
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec(
+				"scan", 2, TargetId: targetId, CredentialId: vsphereApiCredentialId, Payload: payload,
+				CredentialBindings: [new JobCredentialBindingSpec(CredentialPurposes.VcsaSsh, vcsaSshCredentialId)])],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		// This is HDF+CKL output (STIG) -- the job must complete the FULL Standard
+		// pipeline (uploaded), not terminate early at 'done' the way an SRG job would.
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.True(await ScanLogContainsAsync(jobIds[0], "Scanning stub SRG host"),
+			"a VCSA service item must invoke the SRG/ssh path, never the vmware:// path.");
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using (NpgsqlCommand vcsaDecrypts = new(
+			"SELECT count(*) FROM audit_log WHERE event_type = 'secret.decrypted' AND credential_id = $1 AND job_id = $2", connection))
+		{
+			vcsaDecrypts.Parameters.AddWithValue(vcsaSshCredentialId);
+			vcsaDecrypts.Parameters.AddWithValue(jobIds[0]);
+			Assert.Equal(1L, (long)(await vcsaDecrypts.ExecuteScalarAsync())!);
+		}
+
+		await using (NpgsqlCommand vsphereDecrypts = new(
+			"SELECT count(*) FROM audit_log WHERE event_type = 'secret.decrypted' AND credential_id = $1 AND job_id = $2", connection))
+		{
+			vsphereDecrypts.Parameters.AddWithValue(vsphereApiCredentialId);
+			vsphereDecrypts.Parameters.AddWithValue(jobIds[0]);
+			Assert.Equal(0L, (long)(await vsphereDecrypts.ExecuteScalarAsync())!);
+		}
+	}
+
+	/// <summary>
+	/// Issue #741/#743 output routing: SRG output (<c>output_kind: "hdf"</c>) terminates
+	/// at <c>done</c> after the attest stage -- NEVER reaching convert/CKL/upload --
+	/// determined purely by the item's frozen CATALOG kind, proven here on a VCSA
+	/// SERVICE item whose OWNING TARGET is vsphere-kind (the case #743's AC explicitly
+	/// calls out: target kind must never decide this).
+	/// </summary>
+	[Fact]
+	public async Task VcsaServiceComponentJob_SrgOutputKind_TerminatesAtDone_NeverReachesConvert()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid vsphereApiCredentialId) = await SeedVsphereTargetAsync("invented-vsphere-api-secret-2"); // gitleaks:allow -- invented test canary
+		Guid vcsaSshCredentialId = (await _credentials.CreateAsync(
+			$"svc-vcsa-ssh-{Guid.NewGuid():N}@example.internal", CredentialTypes.Ssh, CredentialOwners.Shared,
+			sudoEnabled: false, CancellationToken.None, "root@example.internal"))!.Value;
+		await _secretStore.StoreAsync(vcsaSshCredentialId, System.Text.Encoding.UTF8.GetBytes("invented-vcsa-ssh-secret-2" /* gitleaks:allow -- invented test canary */), "test", CancellationToken.None);
+
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedSshCatalogAndBaselineAsync("vcsa-vami-srg", CatalogSelectorKinds.Service, CatalogOutputKinds.Hdf, selectorName: "vami", materializeOnDisk: true);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			selector_kind = "service",
+			selector_name = "vami",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = "hdf",
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec(
+				"scan", 2, TargetId: targetId, CredentialId: vsphereApiCredentialId, Payload: payload,
+				CredentialBindings: [new JobCredentialBindingSpec(CredentialPurposes.VcsaSsh, vcsaSshCredentialId)])],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		// 'done', never 'uploaded' -- the convert/CKL/upload stage must be unreachable.
+		Assert.Equal("done", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.False(File.Exists(Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl")),
+			"an SRG-output (hdf-only) job must never produce a CKL file.");
+	}
+
+	/// <summary>
+	/// Issue #743: a whole-appliance SSH product item (ssh/target -- Photon/Aria/vIDM)
+	/// on an <c>ssh</c>-kind target executes over ssh with its OWN frozen profile/
+	/// baseline, exactly like the VCSA service path, proving the SAME narrowing/
+	/// execution machinery serves both #741 and #743 families.
+	/// </summary>
+	[Fact]
+	public async Task SshTargetProductComponentJob_ResolvesActivatedRevisionProfilePath()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedSrgTargetAsync("invented-photon-secret"); // gitleaks:allow -- invented test canary
+		(Guid executionProfileId, Guid baselineId, string profileKey) =
+			await SeedSshCatalogAndBaselineAsync("photon-os", CatalogSelectorKinds.Target, CatalogOutputKinds.Hdf, selectorName: null, materializeOnDisk: true);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			selector_kind = "target",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = "hdf",
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 6, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("done", await GetJobFieldAsync(jobIds[0], "state"));
+		string expectedProfilePath = Path.Combine(_contentDirectory, "revisions/digest-photon-os", profileKey);
+		Assert.True(await ScanLogContainsAsync(jobIds[0], expectedProfilePath),
+			"expected the ssh/target item to resolve and execute the ACTIVATED content-revision profile directory.");
+	}
+
+	/// <summary>
+	/// Issue #911's reserved-key guard reused for the ssh family (#741/#743): an operator
+	/// config-doc Input body for a narrowed ssh-transport item is still passed through
+	/// <see cref="Waypoint.Core.Scans.ScanScopingInputFilter"/> even though the ssh
+	/// family introduces no platform-computed scoping key of its own today -- this test
+	/// pins that the filter runs unconditionally (defensive: a future reserved ssh
+	/// scoping key would then already be protected with no code change here) and that an
+	/// ordinary (non-reserved-key) resolved input still reaches the invocation.
+	/// </summary>
+	[Fact]
+	public async Task VcsaServiceComponentJob_ResolvedInputsReachInvocation_ViaGeneratedInputFile()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid vsphereApiCredentialId) = await SeedVsphereTargetAsync("invented-vsphere-api-secret-3"); // gitleaks:allow -- invented test canary
+		Guid vcsaSshCredentialId = (await _credentials.CreateAsync(
+			$"svc-vcsa-ssh-{Guid.NewGuid():N}@example.internal", CredentialTypes.Ssh, CredentialOwners.Shared,
+			sudoEnabled: false, CancellationToken.None, "root@example.internal"))!.Value;
+		await _secretStore.StoreAsync(vcsaSshCredentialId, System.Text.Encoding.UTF8.GetBytes("invented-vcsa-ssh-secret-3" /* gitleaks:allow -- invented test canary */), "test", CancellationToken.None);
+
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedSshCatalogAndBaselineAsync("vcsa-sts", CatalogSelectorKinds.Service, CatalogOutputKinds.HdfAndCkl, selectorName: "sts", materializeOnDisk: true);
+
+		(Guid docId, int docVersion) = await CreateResolvedInputDocAsync(executionProfileId, "invented_value: 'not-a-reserved-key'\n");
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			selector_kind = "service",
+			selector_name = "sts",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = "hdf_ckl",
+			input_resolutions = new[]
+			{
+				new { InputName = "postgresqlPort", State = "resolved", DocId = docId, DocVersion = docVersion },
+			},
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec(
+				"scan", 2, TargetId: targetId, CredentialId: vsphereApiCredentialId, Payload: payload,
+				CredentialBindings: [new JobCredentialBindingSpec(CredentialPurposes.VcsaSsh, vcsaSshCredentialId)])],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.True(await ScanLogContainsAsync(jobIds[0], "invented_value"),
+			"expected the resolved Input config-doc body to reach the ssh invocation via the generated --input-file.");
+	}
+
+	/// <summary>Seeds a Global-layer Input config doc keyed to <paramref name="executionProfileId"/> (the same key <c>PlanConfigResolutionService</c> resolves against) and returns its (DocId, Version) for a payload's <c>input_resolutions</c> entry.</summary>
+	private async Task<(Guid DocId, int Version)> CreateResolvedInputDocAsync(Guid executionProfileId, string bodyYaml)
+	{
+		(ConfigDocSaveOutcome outcome, ConfigDoc? doc, ConfigDocVersion? version) = await _configDocs.SaveAsync(
+			Guid.NewGuid(), ConfigDocKinds.Input, $"profile-{executionProfileId:N}", ConfigDocLayers.Global, layerRef: null,
+			"tester", bodyYaml, CancellationToken.None, catalogExecutionProfileId: executionProfileId);
+		Assert.Equal(ConfigDocSaveOutcome.Ok, outcome);
+		return (doc!.Id, version!.Version);
+	}
+
+	/// <summary>
+	/// Issue #741/#743: the ssh-family generalization of
+	/// <see cref="SeedVSphereCatalogAndBaselineAsync"/> -- seeds a real catalog execution
+	/// profile on the <c>ssh</c> transport (either the <c>service</c> or <c>target</c>
+	/// selector), an ACTIVATED baseline bound to a content revision, an accepted
+	/// <c>catalog_import_report_entries</c> row, and -- when
+	/// <paramref name="materializeOnDisk"/> is true -- the real on-disk revision/profile
+	/// directory so <see cref="ComponentProfileRevisionResolver"/> resolution succeeds
+	/// end to end. Returns the ids a narrowed ssh-transport job payload needs.
+	/// </summary>
+	private async Task<(Guid CatalogExecutionProfileId, Guid BaselineId, string ProfileKey)> SeedSshCatalogAndBaselineAsync(
+		string suffix, string selectorKind, string outputKind, string? selectorName, bool materializeOnDisk)
+	{
+		CatalogSourceRevision source = await _catalog.UpsertSourceRevisionAsync($"rev-{suffix}-{Guid.NewGuid():N}", null, CancellationToken.None);
+		CatalogProduct product = await _catalog.UpsertProductAsync(source.Id, "vmware", $"ssh-{suffix}-{Guid.NewGuid():N}", "Invented SSH Product", CancellationToken.None);
+		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, "1.0.0", "1.0.0", CancellationToken.None);
+		CatalogComponent catalogComponent = await _catalog.UpsertComponentAsync(
+			productVersion.Id,
+			new CatalogComponentDefinition($"{selectorKind}-{suffix}", selectorKind, CatalogTransports.Ssh, selectorKind, selectorName, null),
+			CancellationToken.None);
+		string contentKind = string.Equals(outputKind, CatalogOutputKinds.HdfAndCkl, StringComparison.Ordinal) ? CatalogKinds.Stig : CatalogKinds.Srg;
+		CatalogContentRelease release = await _catalog.UpsertContentReleaseAsync(source.Id, contentKind, $"release-{suffix}-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await _catalog.UpsertReportGroupAsync($"group-{suffix}-{Guid.NewGuid():N}", "Test Group", 2, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(
+			catalogComponent.Id, release.Id, reportGroup.Id, "v1", outputKind, CancellationToken.None);
+
+		string profileKey = $"ssh/invented/{selectorKind}-{suffix}-profile";
+		CatalogImportReport report = await _catalog.RecordImportReportAsync($"commit-{suffix}", $"digest-{suffix}-{Guid.NewGuid():N}", 1, 0, 0, CancellationToken.None);
+		await _catalog.RecordImportReportEntryAsync(report.Id, CatalogImportEntryDispositions.Accepted, profileKey, null, executionProfile.Id, CancellationToken.None);
+
+		string contentDigest = $"digest-{suffix}";
+		string stagedRelativePath = $"revisions/{contentDigest}";
+		ContentRevision revision = await _baselines.RecordStagedRevisionAsync($"commit-{suffix}", contentDigest, stagedRelativePath, CancellationToken.None);
+		Baseline staged = await _baselines.CreateStagedBaselineAsync(revision.Id, executionProfile.Id, benchmarkRevisionId: null, CancellationToken.None);
+		BaselineActivationOutcome outcome = await _baselines.ActivateAsync(staged.Id, "test-fixture", CancellationToken.None);
+		Assert.Equal(BaselineActivationOutcome.Activated, outcome);
+
+		if (materializeOnDisk)
+		{
+			string profileDirectory = Path.Combine(_contentDirectory, stagedRelativePath, profileKey);
+			Directory.CreateDirectory(profileDirectory);
+			await File.WriteAllTextAsync(Path.Combine(profileDirectory, "inspec.yml"), $"name: invented-{selectorKind}-{suffix}-profile\n");
+		}
+
+		return (executionProfile.Id, staged.Id, profileKey);
 	}
 
 	/// <summary>

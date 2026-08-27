@@ -15,6 +15,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.ComplianceContent.Xccdf;
 using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -90,6 +91,7 @@ public sealed class ScanJobHandler : IJobHandler
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
 	private readonly ScanUploadCoordinator _upload;
 	private readonly ComponentProfileRevisionResolver _componentProfileRevisions;
+	private readonly IBenchmarkRepository _benchmarks;
 
 	public ScanJobHandler(
 		IPowerShellExecutor executor,
@@ -105,7 +107,8 @@ public sealed class ScanJobHandler : IJobHandler
 		ConfigDocRepository configDocs,
 		AttestationSnapshotRepository attestationSnapshots,
 		ScanUploadCoordinator upload,
-		ComponentProfileRevisionResolver componentProfileRevisions)
+		ComponentProfileRevisionResolver componentProfileRevisions,
+		IBenchmarkRepository benchmarks)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(secrets);
@@ -121,6 +124,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
 		ArgumentNullException.ThrowIfNull(upload);
 		ArgumentNullException.ThrowIfNull(componentProfileRevisions);
+		ArgumentNullException.ThrowIfNull(benchmarks);
 
 		_executor = executor;
 		_secrets = secrets;
@@ -136,6 +140,7 @@ public sealed class ScanJobHandler : IJobHandler
 		_attestationSnapshots = attestationSnapshots;
 		_upload = upload;
 		_componentProfileRevisions = componentProfileRevisions;
+		_benchmarks = benchmarks;
 	}
 
 	public string JobType => "scan";
@@ -196,10 +201,21 @@ public sealed class ScanJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed($"target '{payload.TargetId}' has no 'connection.host' to scan.");
 		}
 
+		// Issue #741/#743: computed here (before credential resolution) so the ssh
+		// invocation authenticates with the ITEM's own required purpose -- vcsa-ssh for
+		// a named VCSA service, srg-ssh for a whole-appliance SSH product -- rather than
+		// the OWNING TARGET's kind-default purpose (vsphere-api for a vsphere-kind
+		// target, which is what a VCSA service item's target actually is).
+		bool payloadIsSshTransportItem = string.Equals(payload.Transport, CatalogTransports.Ssh, StringComparison.Ordinal)
+			&& payload.SelectorKind is CatalogSelectorKinds.Service or CatalogSelectorKinds.Target;
+		string? executionPurposeOverride = payloadIsSshTransportItem
+			? (payload.SelectorKind == CatalogSelectorKinds.Service ? CredentialPurposes.VcsaSsh : CredentialPurposes.SrgSsh)
+			: null;
+
 		ResolvedCredential resolved;
 		try
 		{
-			resolved = await ResolveCredentialAsync(context, target.Kind, cancellationToken).ConfigureAwait(false);
+			resolved = await ResolveCredentialAsync(context, target.Kind, cancellationToken, executionPurposeOverride).ConfigureAwait(false);
 		}
 		catch (ScanCredentialException exception)
 		{
@@ -208,32 +224,49 @@ public sealed class ScanJobHandler : IJobHandler
 
 		string reportPath = Path.Combine(_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.json");
 		bool isNsx = string.Equals(target.Kind, TargetKinds.NsxApi, StringComparison.Ordinal);
-		bool isSrg = string.Equals(target.Kind, TargetKinds.Ssh, StringComparison.Ordinal);
+
+		// Issue #741/#743: an ssh-transport plan item drives the SRG/ssh InSpec
+		// invocation regardless of the OWNING TARGET's kind -- a VCSA service item
+		// (#741) lives on a `vsphere`-kind target (the appliance is reached over ssh for
+		// its own OS-level services, while the target's primary kind stays vsphere for
+		// vCenter API access), and a whole-appliance SSH product item (#743, Photon/
+		// Aria/vIDM) lives on an `ssh`-kind target. Routing by `payload.Transport` (the
+		// item's own frozen catalog transport) rather than `target.Kind` is exactly the
+		// #743 AC "connection kind ssh does not imply SRG, and SRG does not identify a
+		// product... output behavior and components must come from the selected catalog
+		// entry, not the target kind." A legacy/unnarrowed job (no transport on the
+		// payload, or an `ssh`-kind target with no narrowable item at all) falls back to
+		// the pre-#741 target-kind-driven classification, preserving byte-identical
+		// behavior for every job shape that predates this issue.
+		bool isSshTransportItem = payloadIsSshTransportItem;
+		bool isSrg = isSshTransportItem || string.Equals(target.Kind, TargetKinds.Ssh, StringComparison.Ordinal);
 
 		string legacyFallbackPath = isNsx ? _scanOptions.Value.NsxProfilePath : isSrg ? _scanOptions.Value.SrgProfilePath : _scanOptions.Value.ProfilePath;
 		string profilePath = ResolveProfilePath(payload.ProfileKey, legacyFallbackPath);
 
-		// Issue #738, generalized to esxi/vm by #739/#740: a narrowable vSphere-family
-		// execution item (transport `vmware`, selector `vcenter`/`esxi`/`vm` --
-		// ScanComponentNarrowing already narrows it above via SelectorKind/SelectorName)
-		// resolves its InSpec profile from the ACTIVATED content-revision directory
-		// bound to the plan item's own frozen CatalogExecutionProfileId/BaselineId,
-		// never the run-level profile_key/legacy fixed path -- each selector kind is a
-		// distinct execution component and DISA benchmark, not the top-level vSphere
-		// connection's profile (this issue's Motivation). Compatibility gate (AC "only
-		// compatible catalog profiles can reach this handler"): the planner already
-		// guarantees a narrowable-selector item only exists for a vmware-transport,
-		// compatible execution profile (ScanPlannerService/ComponentCapabilityMatcher),
-		// so this re-check is defensive, not authoritative -- it fails closed rather
-		// than trusting an unexpected payload shape.
+		// Issue #738, generalized to esxi/vm by #739/#740 and to the ssh family
+		// (VCSA service / whole-appliance product) by #741/#743: a narrowable execution
+		// item (ScanComponentNarrowing already narrowed it at fan-out time via
+		// SelectorKind/SelectorName) resolves its InSpec profile from the ACTIVATED
+		// content-revision directory bound to the plan item's own frozen
+		// CatalogExecutionProfileId/BaselineId, never the run-level profile_key/legacy
+		// fixed path -- each selector/service is a distinct execution component and
+		// DISA benchmark (or SRG closure), not the top-level connection's profile (this
+		// issue's Motivation). Compatibility gate (AC "only compatible catalog profiles
+		// can reach this handler"): the planner already guarantees a narrowable-selector
+		// item only exists for a compatible execution profile
+		// (ScanPlannerService/ComponentCapabilityMatcher), so this re-check is
+		// defensive, not authoritative -- it fails closed rather than trusting an
+		// unexpected payload shape.
 		bool isVSphereComponent = string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal)
 			&& string.Equals(payload.Transport, CatalogTransports.VMware, StringComparison.Ordinal)
 			&& payload.SelectorKind is CatalogSelectorKinds.VCenter or CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm;
+		bool isNarrowedComponent = isVSphereComponent || isSshTransportItem;
 		string? resolvedInputsYaml = null;
 		Guid? attributedContentRevisionId = null;
 		Guid? attributedBaselineId = null;
 		List<string> droppedScopingKeys = [];
-		if (isVSphereComponent)
+		if (isNarrowedComponent)
 		{
 			if (payload.CatalogExecutionProfileId is not { } componentExecutionProfileId || payload.BaselineId is not { } componentBaselineId)
 			{
@@ -288,17 +321,23 @@ public sealed class ScanJobHandler : IJobHandler
 				// literal key collision, so ordering here follows the same
 				// InputResolutions ordering PlanConfigResolutionService produced.
 				//
-				// Issue #911: only a NARROWED selector (esxi/vm -- a vcenter selector
-				// carries no narrowing key to begin with, so there is nothing to protect)
-				// is at risk of an operator config-doc body overriding the platform's own
-				// vmhostName/vmName scoping key. Filtering here (a WARN-logged drop, not a
-				// hard reject -- see ScanScopingInputFilter's doc comment for the
-				// rationale) is the primary defense; WaypointScan.psm1's own
-				// flag-ordering flip (the operator inputs file appended BEFORE the
-				// platform scoping file, not after) is the second, independent one.
+				// Issue #911, extended by #741/#743: a NARROWED vmware selector (esxi/vm --
+				// a vcenter selector carries no narrowing key to begin with) is at risk of
+				// an operator config-doc body overriding the platform's own
+				// vmhostName/vmName scoping key -- the ssh family (service/target
+				// selectors) introduces no analogous platform-computed scoping key of its
+				// own (no --input-file selector-scope file is generated for ssh at all,
+				// see below), so there is nothing for ScanScopingInputFilter's reserved-key
+				// set to protect there yet; the filter is still applied defensively so an
+				// ssh-family config doc is never silently exempted from a future reserved
+				// key without a code change. Filtering here (a WARN-logged drop, not a hard
+				// reject -- see ScanScopingInputFilter's doc comment for the rationale) is
+				// the primary defense; WaypointScan.psm1's own flag-ordering flip (the
+				// operator inputs file appended BEFORE the platform scoping file, not
+				// after) is the second, independent one for the vmware family.
 				string concatenatedYaml = string.Join('\n', resolvedYamlBodies);
 				bool isNarrowedSelector = payload.SelectorKind is CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm;
-				if (isNarrowedSelector)
+				if (isNarrowedSelector || isSshTransportItem)
 				{
 					ScanScopingFilterResult filterResult = ScanScopingInputFilter.Filter(concatenatedYaml);
 					resolvedInputsYaml = filterResult.FilteredYaml;
@@ -370,6 +409,31 @@ public sealed class ScanJobHandler : IJobHandler
 					["Sudo"] = resolved.SudoEnabled,
 					["SudoRequiresPassword"] = true,
 				};
+
+				// Issue #741/#743, generalized from the vmware family's #738/#879
+				// mechanism: an ssh-transport narrowed item's (VCSA service or
+				// whole-appliance product) frozen resolved Input config docs, materialized
+				// into a generated, owner-only 0600 --input-file -- same non-argv
+				// discipline as the vmware path. ScanScopingInputFilter was already
+				// applied to resolvedInputsYaml above for every ssh-transport item
+				// (defensive: the ssh family has no platform-computed scoping key of its
+				// own today, but the filter is applied unconditionally rather than
+				// silently exempting this family from a future reserved key).
+				if (isSshTransportItem && resolvedInputsYaml is not null)
+				{
+					inputsFilePath = Path.Combine(
+						_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.ssh-inputs.generated.yml");
+					using (FileStream createStream = File.Create(inputsFilePath))
+					{
+						if (!OperatingSystem.IsWindows())
+						{
+							File.SetUnixFileMode(inputsFilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+						}
+					}
+
+					await File.WriteAllTextAsync(inputsFilePath, resolvedInputsYaml, cancellationToken).ConfigureAwait(false);
+					parameters["InputsFilePath"] = inputsFilePath;
+				}
 			}
 			else
 			{
@@ -489,18 +553,20 @@ public sealed class ScanJobHandler : IJobHandler
 		}
 
 		// Issue #738 AC "HDF contains stable component/endpoint attribution", generalized
-		// to esxi/vm by #739/#740's own per-host/per-VM AC: a vSphere-family component
+		// to esxi/vm by #739/#740's own per-host/per-VM AC, and to the ssh family
+		// (VCSA service / whole-appliance product) by #741/#743: a narrowed component
 		// job's structured completion event carries the exact component, endpoint
-		// (target host), selector (kind + the discovered object's own vendor identity --
-		// stable regardless of display-name churn), and resolved content-revision/
-		// baseline identity it executed against -- non-secret identifiers only (host,
-		// ids, vendor identity), never a credential -- so Live Run/Results and any later
-		// HDF-metadata enrichment have a stable, provenance-complete attribution record
-		// independent of re-deriving it from current (possibly since-changed) catalog/
-		// component/inventory state.
-		if (isVSphereComponent)
+		// (target host), selector (kind + the stable identity -- the discovered object's
+		// own vendor identity for esxi/vm, or the catalog's own named-service identity
+		// for an ssh `service` selector, stable regardless of display-name churn), and
+		// resolved content-revision/baseline identity it executed against --
+		// non-secret identifiers only (host, ids, vendor/service identity), never a
+		// credential -- so Live Run/Results and any later HDF-metadata enrichment have a
+		// stable, provenance-complete attribution record independent of re-deriving it
+		// from current (possibly since-changed) catalog/component/inventory state.
+		if (isNarrowedComponent)
 		{
-			await EmitVSphereComponentAttributionAsync(
+			await EmitComponentAttributionAsync(
 				context, payload, host!, attributedContentRevisionId, attributedBaselineId, cancellationToken).ConfigureAwait(false);
 		}
 
@@ -509,13 +575,14 @@ public sealed class ScanJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// Issue #738, generalized to esxi/vm by #739/#740: one structured <c>job.log</c>
-	/// Info event naming the exact vcenter/esxi/vm component/endpoint/selector/content
-	/// identity this job executed -- emitted once, right after a successful InSpec
-	/// completion, alongside (not instead of) the ordinary stage-advance note.
-	/// Component/endpoint/selector attribution only; no credential material.
+	/// Issue #738, generalized to esxi/vm by #739/#740 and to the ssh family (VCSA
+	/// service / whole-appliance product) by #741/#743: one structured <c>job.log</c>
+	/// Info event naming the exact component/endpoint/selector/content identity this
+	/// job executed -- emitted once, right after a successful InSpec completion,
+	/// alongside (not instead of) the ordinary stage-advance note. Component/endpoint/
+	/// selector attribution only; no credential material.
 	/// </summary>
-	private static async Task EmitVSphereComponentAttributionAsync(
+	private static async Task EmitComponentAttributionAsync(
 		JobExecutionContext context,
 		ScanPayload payload,
 		string endpointHost,
@@ -690,16 +757,28 @@ public sealed class ScanJobHandler : IJobHandler
 			await context.AdvanceAsync(JobStates.Attesting, "attest stage claimed.", cancellationToken).ConfigureAwait(false);
 
 			// Issue #309 AC "HDF-only: attest then terminate at done, NO convert, NO CKL,
-			// NO STIG Manager upload": an ssh (SRG) target's attest stage is the Srg
-			// shape's LAST stage (JobStateMachine.SrgTransitions: attesting -> done),
-			// unlike Standard's attesting -> converting. Reporting Succeeded here (rather
-			// than StageComplete(ConvertingStage)) makes ExecuteAsync's Stage switch never
-			// see 'converting' for this target at all -- so the convert stage's STIG
-			// Manager upload path (#311/#318, not yet on main when this slice branched) is
-			// unreachable for SRG by construction, not by a runtime kind check inside
-			// convert. If a future change makes convert reachable independent of shape,
-			// that guard-by-unreachability assumption breaks and needs re-verifying here.
-			if (string.Equals(target.Kind, TargetKinds.Ssh, StringComparison.Ordinal))
+			// NO STIG Manager upload", output routing generalized by #741/#743 to the
+			// item's own frozen CATALOG kind rather than the target's connection kind
+			// (#743 AC "catalog kind, not target kind, determines HDF-only versus CKL
+			// pipeline" -- test-pinned, never inferred): an HDF-only item's attest stage
+			// is the Srg shape's LAST stage (JobStateMachine.SrgTransitions: attesting ->
+			// done), unlike Standard's attesting -> converting. This MUST agree with
+			// JobShapes.ForJob's OWN output_kind-first read of the identical payload
+			// field -- both read the same value so the state machine JobShapes selected
+			// at claim time and the terminal transition this stage actually attempts can
+			// never disagree (a disagreement would attempt an illegal transition against
+			// JobStateMachine). Reporting Succeeded here (rather than
+			// StageComplete(ConvertingStage)) makes ExecuteAsync's Stage switch never see
+			// 'converting' for this job at all -- so the convert stage's STIG Manager
+			// upload path is unreachable for HDF-only output by construction, not by a
+			// runtime kind check inside convert. A legacy/unnarrowed job with no
+			// output_kind on its payload falls back to the pre-#741 target-kind
+			// inference, preserving byte-identical behavior for every job shape that
+			// predates this issue.
+			bool isHdfOnly = payload.OutputKind is { } frozenOutputKind
+				? string.Equals(frozenOutputKind, CatalogOutputKinds.Hdf, StringComparison.Ordinal)
+				: string.Equals(target.Kind, TargetKinds.Ssh, StringComparison.Ordinal);
+			if (isHdfOnly)
 			{
 				return JobExecutionOutcome.Succeeded(note);
 			}
@@ -756,14 +835,35 @@ public sealed class ScanJobHandler : IJobHandler
 		}
 
 		string cklPath = Path.Combine(_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.ckl");
-		ScanBenchmarkMetadata? staticMetadata = _scanOptions.Value.BenchmarkMetadata.GetValueOrDefault(target.Kind);
 
-		// Issue #311: enrich the static catalog stamp with STIG Manager's installed
-		// title/release/version when reachable -- degrades to staticMetadata unchanged
+		// Issue #741/#743: a narrowed component job's frozen BenchmarkRevisionId (set by
+		// the planner at plan-compile time from the catalog's own component-to-
+		// benchmark-revision mapping, #828/#834 -- ADR-0022) is the authoritative CKL
+		// identity for ANY component, VCSA service included -- never inferred from the
+		// owning target's kind (a VCSA STIG service on a vsphere-kind target has its own
+		// distinct benchmark, unrelated to any vSphere connection-level benchmark stamp).
+		// A legacy/unnarrowed job (no BenchmarkRevisionId on its payload) falls back to
+		// the pre-#741 static target-kind-keyed stamp, preserving byte-identical
+		// behavior for every job shape that predates this issue. This stage is only
+		// reachable for HDF+CKL output (ExecuteAttestStageAsync's routing above), so a
+		// narrowed item reaching here always has a benchmark identity when its catalog
+		// kind is STIG (an SRG item never reaches convert at all).
+		ScanBenchmarkMetadata? staticMetadata = _scanOptions.Value.BenchmarkMetadata.GetValueOrDefault(target.Kind);
+		StigManagerBenchmarkMetadata fallback = new(staticMetadata?.BenchmarkId, staticMetadata?.Title, staticMetadata?.ReleaseInfo, staticMetadata?.Version);
+		if (payload.BenchmarkRevisionId is { } benchmarkRevisionId)
+		{
+			BenchmarkRevision? revision = await _benchmarks.GetRevisionAsync(benchmarkRevisionId, cancellationToken).ConfigureAwait(false);
+			if (revision is not null)
+			{
+				fallback = new StigManagerBenchmarkMetadata(revision.BenchmarkKey, revision.Title, revision.Release, revision.Version);
+			}
+		}
+
+		// Issue #311: enrich the resolved stamp with STIG Manager's installed
+		// title/release/version when reachable -- degrades to fallback unchanged
 		// on any failure (ScanUploadCoordinator.ResolveBenchmarkMetadataAsync never
 		// throws), so this call site needs no try/catch of its own, matching the
 		// predecessor Resolve-BenchmarkMetadata's "resolution never throws" contract.
-		StigManagerBenchmarkMetadata fallback = new(staticMetadata?.BenchmarkId, staticMetadata?.Title, staticMetadata?.ReleaseInfo, staticMetadata?.Version);
 		StigManagerBenchmarkMetadata metadata = await _upload
 			.ResolveBenchmarkMetadataAsync(context.Job.Id, target, fallback, cancellationToken).ConfigureAwait(false);
 
@@ -881,13 +981,23 @@ public sealed class ScanJobHandler : IJobHandler
 	/// failure, never a silent fall-through to a stored credential -- see
 	/// <see cref="IRunSecretStore"/>'s "no personal rows, ever" contract.
 	/// </summary>
-	private async Task<ResolvedCredential> ResolveCredentialAsync(JobExecutionContext context, string targetKind, CancellationToken cancellationToken)
+	private async Task<ResolvedCredential> ResolveCredentialAsync(
+		JobExecutionContext context, string targetKind, CancellationToken cancellationToken, string? executionPurposeOverride = null)
 	{
 		IReadOnlyList<JobCredentialBinding> bindings = await _jobs
 			.GetJobCredentialBindingsAsync(context.Job.Id, cancellationToken).ConfigureAwait(false);
 		if (bindings.Count > 0)
 		{
-			if (!CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(targetKind, out string? executionPurpose))
+			// Issue #741/#743: an ssh-transport narrowed item's OWN execution purpose
+			// (vcsa-ssh for a VCSA service, srg-ssh for a whole-appliance SSH product)
+			// overrides the target-kind default -- a VCSA service item's OWNING TARGET is
+			// `vsphere`-kind (whose default purpose is vsphere-api, the vCenter API
+			// credential), but the ssh invocation this handler is about to make
+			// authenticates with the item's OWN required purpose instead. Every other
+			// item (no override -- the vmware family and legacy/unnarrowed jobs) keeps
+			// the pre-#741 target-kind-keyed lookup exactly as before.
+			string? executionPurpose = executionPurposeOverride;
+			if (executionPurpose is null && !CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(targetKind, out executionPurpose))
 			{
 				throw new ScanCredentialException(
 					$"job '{context.Job.Id}' carries a credential snapshot but target kind '{targetKind}' has no execution purpose in the shared matrix.");
@@ -1206,6 +1316,26 @@ public sealed class ScanJobHandler : IJobHandler
 				? parsedComponentId
 				: null;
 
+		// Issue #741/#743: the item's frozen catalog output kind (hdf | hdf_ckl,
+		// CatalogOutputKinds) -- present on any narrowable plan-item job
+		// (RunCreationService.BuildPlanItemJobSpec). This is the CATALOG-KIND signal
+		// JobShapes.ForJob already reads to pick Standard vs Srg BEFORE this handler ever
+		// runs; ExecuteAttestStageAsync reads the SAME field here so its own
+		// converting-vs-done branch can never disagree with the job's actual state
+		// machine. Absent on a legacy/unnarrowed job -- those keep falling back to the
+		// pre-#741 target-kind inference.
+		string? outputKind = ReadOptionalString(root, "output_kind");
+
+		// Issue #741/#743: the item's frozen benchmark-revision identity (null for an
+		// SRG execution profile -- no XCCDF concept, ADR-0022). The convert stage reads
+		// this to stamp the exact catalog-mapped benchmark (#828/#834) rather than a
+		// target-kind-keyed static stamp.
+		Guid? benchmarkRevisionId = root.TryGetProperty("benchmark_revision_id", out JsonElement benchmarkRevisionIdElement)
+			&& benchmarkRevisionIdElement.ValueKind == JsonValueKind.String
+			&& Guid.TryParse(benchmarkRevisionIdElement.GetString(), out Guid parsedBenchmarkRevisionId)
+				? parsedBenchmarkRevisionId
+				: null;
+
 		List<ScanPayloadInputResolution> inputResolutions = [];
 		if (root.TryGetProperty("input_resolutions", out JsonElement inputResolutionsElement) && inputResolutionsElement.ValueKind == JsonValueKind.Array)
 		{
@@ -1238,7 +1368,9 @@ public sealed class ScanJobHandler : IJobHandler
 			catalogExecutionProfileId,
 			baselineId,
 			inputResolutions,
-			componentId);
+			componentId,
+			outputKind,
+			benchmarkRevisionId);
 	}
 
 	private static string? ReadOptionalString(JsonElement root, string property) =>
@@ -1256,7 +1388,9 @@ public sealed class ScanJobHandler : IJobHandler
 		Guid? CatalogExecutionProfileId = null,
 		Guid? BaselineId = null,
 		IReadOnlyList<ScanPayloadInputResolution>? InputResolutions = null,
-		Guid? ComponentId = null)
+		Guid? ComponentId = null,
+		string? OutputKind = null,
+		Guid? BenchmarkRevisionId = null)
 	{
 		public IReadOnlyList<ScanPayloadInputResolution> InputResolutionsOrEmpty => InputResolutions ?? [];
 	}

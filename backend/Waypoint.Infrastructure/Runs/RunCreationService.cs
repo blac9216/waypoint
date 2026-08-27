@@ -701,52 +701,55 @@ public sealed class RunCreationService
 		// Issue #737 item-4: this method is only ever called for a NARROWABLE item
 		// (ScanComponentNarrowing.CanNarrow == true -- the caller partitioned the
 		// remainder off to BuildUnnarrowedTargetJobSpec). `selector_kind` is the item's
-		// catalog object kind (vcenter/esxi/vm); `selector_name` is the discovered
-		// component's own VENDOR IDENTITY (the ESXi hostname / VM identity that scopes
-		// the InSpec vmware invocation to that one object) -- NOT the catalog
-		// SelectorName (which is null for these object kinds; only a `service` selector
-		// carries a catalog name, and `service` is never narrowable). A vcenter selector
-		// has no object identity below the vCenter itself, so its selector_name stays
-		// null (the whole vCenter IS the object).
+		// catalog object kind (vcenter/esxi/vm/service/target); `selector_name` is either
+		// the discovered component's own VENDOR IDENTITY (esxi/vm -- the ESXi hostname /
+		// VM identity that scopes the InSpec vmware invocation to that one object) or,
+		// for an ssh `service` selector (#741), the catalog's own named-service identity
+		// (e.g. `envoy`, `postgresql` -- there is no separate discovered vendor identity
+		// per VCSA sub-service, the catalog name IS the stable identity). A vcenter or
+		// ssh `target` selector has no object identity below the appliance/vCenter
+		// itself, so its selector_name stays null (the whole vCenter/appliance IS the
+		// object).
 		//
-		// Issue #738, generalized by #739/#740: a narrowable vSphere-family item
-		// (vcenter/esxi/vm selector -- ScanComponentNarrowing.CanNarrow) carries its OWN
-		// frozen `catalog_execution_profile_id`/`baseline_id` so ScanJobHandler can
+		// Issue #738, generalized by #739/#740 (vmware family) and #741/#743 (ssh
+		// family): every narrowable item (ScanComponentNarrowing.CanNarrow) carries its
+		// OWN frozen `catalog_execution_profile_id`/`baseline_id`/`output_kind` (and
+		// `benchmark_revision_id` when the catalog kind is STIG) so ScanJobHandler can
 		// resolve the exact activated content-revision profile directory
-		// (ComponentProfileRevisionResolver, renamed from PR #907's
-		// VCenterProfileRevisionResolver) instead of the run-level `profile_key`/legacy
-		// fixed path -- each selector kind is a distinct execution component with its own
-		// catalog-selected content, not the top-level vSphere connection's profile.
-		// `service`/`target` selectors (never narrowable) and every non-vmware transport
-		// keep the pre-#738 payload shape (no new fields).
-		bool isVSphereComponentProfile = string.Equals(item.Transport, CatalogTransports.VMware, StringComparison.Ordinal)
-			&& item.SelectorKind is CatalogSelectorKinds.VCenter or CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm;
-		string payload = isVSphereComponentProfile
-			? JsonSerializer.Serialize(new
+		// (ComponentProfileRevisionResolver) and route output by the item's own frozen
+		// catalog kind, instead of the run-level `profile_key`/legacy fixed path and
+		// instead of inferring HDF-vs-CKL from the target's connection kind (#743 AC
+		// "catalog kind, not target kind, determines the output pipeline"). Every
+		// non-narrowable transport/selector keeps the pre-#738 payload shape (no new
+		// fields) -- it never reaches this method (BuildUnnarrowedTargetJobSpec handles
+		// it instead).
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = target.Id,
+			site_id = siteId,
+			target_kind = target.Kind,
+			profile_key = profile?.ProfileKey,
+			component_id = item.ComponentId,
+			transport = item.Transport,
+			selector_kind = item.SelectorKind,
+			selector_name = item.SelectorKind switch
 			{
-				target_id = target.Id,
-				site_id = siteId,
-				target_kind = target.Kind,
-				profile_key = profile?.ProfileKey,
-				component_id = item.ComponentId,
-				transport = item.Transport,
-				selector_kind = item.SelectorKind,
-				selector_name = vendorIdentity,
-				catalog_execution_profile_id = item.CatalogExecutionProfileId,
-				baseline_id = item.BaselineId,
-				input_resolutions = item.InputResolutionsOrEmpty,
-			})
-			: JsonSerializer.Serialize(new
-			{
-				target_id = target.Id,
-				site_id = siteId,
-				target_kind = target.Kind,
-				profile_key = profile?.ProfileKey,
-				component_id = item.ComponentId,
-				transport = item.Transport,
-				selector_kind = item.SelectorKind,
-				selector_name = vendorIdentity,
-			});
+				// A `service` selector's stable identity is the catalog's OWN named-service
+				// identity (e.g. `envoy`) -- there is no separate discovered vendor identity
+				// per VCSA sub-service. A `target`/`vcenter` selector has no object identity
+				// below the appliance/vCenter itself (the whole appliance/vCenter IS the
+				// object), so it must never carry a selector_name even when the underlying
+				// discovered component happens to have its own vendor identity recorded.
+				CatalogSelectorKinds.Service => item.SelectorName,
+				CatalogSelectorKinds.Target or CatalogSelectorKinds.VCenter => null,
+				_ => vendorIdentity,
+			},
+			catalog_execution_profile_id = item.CatalogExecutionProfileId,
+			baseline_id = item.BaselineId,
+			benchmark_revision_id = item.BenchmarkRevisionId,
+			output_kind = item.OutputKind,
+			input_resolutions = item.InputResolutionsOrEmpty,
+		});
 
 		short priority = ScanTargetPriority.ForPlanItem(item);
 

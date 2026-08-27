@@ -341,11 +341,18 @@ function Invoke-WaypointSrgScan {
 		[bool]$SudoRequiresPassword = $true,
 
 		[Parameter()]
+		[string]$InputsFilePath,
+
+		[Parameter()]
 		[string]$VmwareStigDockerCommonPath
 	)
 
+	# Issue #741/#743: echoes whether/what resolved-inputs file was supplied, same
+	# rationale as Invoke-WaypointScan's own InputsSummary line -- lets a test assert the
+	# ssh-transport component path actually materialized resolved Input config docs.
 	$InformationPreference = 'Continue'
-	Write-Information "Scanning stub SRG host '$SshHost' as '$Username' (password length $($Password.Length)) profile '$ProfilePath' sudo=$Sudo sudoRequiresPassword=$SudoRequiresPassword"
+	$InputsSummary = if ($InputsFilePath -and (Test-Path -Path $InputsFilePath -PathType Leaf)) { Get-Content -Path $InputsFilePath -Raw } else { '<none>' }
+	Write-Information "Scanning stub SRG host '$SshHost' as '$Username' (password length $($Password.Length)) profile '$ProfilePath' sudo=$Sudo sudoRequiresPassword=$SudoRequiresPassword inputsFile=$InputsSummary"
 
 	# Predecessor behavior: remove any stale inspec.lock next to the profile before
 	# "running" -- mirrors the real function's cleanup so a test can seed a lock file and

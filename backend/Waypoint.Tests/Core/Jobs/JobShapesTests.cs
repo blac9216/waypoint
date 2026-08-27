@@ -78,4 +78,70 @@ public sealed class JobShapesTests
 		// repointed at ForJob's payload-aware behavior.
 		Assert.Equal(JobShape.Standard, JobShapes.ForJobType("scan"));
 	}
+
+	// Issue #741/#743: output_kind (a narrowed plan item's frozen catalog kind) is now
+	// the PRIMARY routing signal -- test-pinned to prove it is read BY CATALOG KIND, not
+	// inferred from target_kind, per #743's AC.
+
+	[Fact]
+	public void ForJob_VcsaServiceStigItemOnVsphereTarget_ReturnsStandard_NotSrg()
+	{
+		// The critical case #741 exists to fix: a VCSA STIG service item's OWNING TARGET
+		// is vsphere-kind (not ssh-kind), and the pre-#741 target_kind-only inference
+		// would have wrongly routed a vsphere target to Standard regardless -- but this
+		// proves the NEW output_kind-first read reaches the same correct answer for the
+		// right reason (catalog kind hdf_ckl), not by accident of target_kind agreeing.
+		string payload = """{"target_id":"11111111-1111-1111-1111-111111111111","target_kind":"vsphere","transport":"ssh","selector_kind":"service","selector_name":"envoy","output_kind":"hdf_ckl"}""";
+		Assert.Equal(JobShape.Standard, JobShapes.ForJob("scan", payload));
+	}
+
+	[Fact]
+	public void ForJob_VcsaServiceSrgItemOnVsphereTarget_ReturnsSrg_NotStandard()
+	{
+		// The inverse: an SRG-kind VCSA service item on the SAME vsphere-kind target
+		// (docs/compliance-parity.md's vSphere 9-0 SRG row) must route to Srg (HDF-only)
+		// -- target_kind alone would get this wrong the other direction (it would infer
+		// Standard because the target is vsphere-kind).
+		string payload = """{"target_id":"11111111-1111-1111-1111-111111111111","target_kind":"vsphere","transport":"ssh","selector_kind":"service","selector_name":"envoy","output_kind":"hdf"}""";
+		Assert.Equal(JobShape.Srg, JobShapes.ForJob("scan", payload));
+	}
+
+	[Fact]
+	public void ForJob_SshTargetProductItem_OutputKindHdf_ReturnsSrg()
+	{
+		string payload = """{"target_id":"11111111-1111-1111-1111-111111111111","target_kind":"ssh","transport":"ssh","selector_kind":"target","output_kind":"hdf"}""";
+		Assert.Equal(JobShape.Srg, JobShapes.ForJob("scan", payload));
+	}
+
+	[Fact]
+	public void ForJob_UnnarrowedCollapsedJob_NoOutputKind_FallsBackToTargetKindInference()
+	{
+		// A collapsed whole-target remainder job (RunCreationService.BuildUnnarrowedTargetJobSpec)
+		// carries no output_kind -- the legacy target_kind inference must still apply so
+		// this pre-#741 job shape is unaffected.
+		string payload = """{"target_id":"11111111-1111-1111-1111-111111111111","target_kind":"ssh","unnarrowed":true}""";
+		Assert.Equal(JobShape.Srg, JobShapes.ForJob("scan", payload));
+	}
+
+	[Theory]
+	[InlineData("123")]
+	[InlineData("null")]
+	public void ForJob_NonStringOutputKind_FallsBackToTargetKindInference(string outputKindJsonValue)
+	{
+		// A non-string output_kind value (malformed payload shape) is treated as absent
+		// -- falls back to target_kind inference -- rather than either hard-coded shape.
+		string payload = $$"""{"target_id":"11111111-1111-1111-1111-111111111111","target_kind":"vsphere","output_kind":{{outputKindJsonValue}}}""";
+		Assert.Equal(JobShape.Standard, JobShapes.ForJob("scan", payload));
+	}
+
+	[Fact]
+	public void ForJob_UnknownOutputKindStringValue_TreatedAsNotHdf_ReturnsStandard()
+	{
+		// A well-formed but out-of-vocabulary output_kind string is NOT treated as
+		// "absent" -- it is read literally and only "hdf" routes to Srg, so any other
+		// string (including an unrecognized one) routes to Standard. This is the
+		// primary catalog-kind read succeeding, not a target_kind fallback.
+		string payload = """{"target_id":"11111111-1111-1111-1111-111111111111","target_kind":"ssh","output_kind":"unknown_kind"}""";
+		Assert.Equal(JobShape.Standard, JobShapes.ForJob("scan", payload));
+	}
 }

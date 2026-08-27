@@ -218,24 +218,25 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 	[Fact]
 	public async Task CreateScanRun_GatedUnNarrowableComponents_CollapseToExactlyOneWholeTargetJob()
 	{
-		// Issue #737 item-4 fan-out gate (the round-1 blocker's invariant): a target
-		// whose accepted components are all UN-narrowable (here two ssh/target VCSA
-		// appliance components -- ScanComponentNarrowing.CanNarrow == false) must NOT fan
-		// out one whole-target job per component (that would be N duplicate whole-target
-		// scans). They collapse to EXACTLY ONE whole-target job, marked unnarrowed. No
-		// configuration can produce duplicate whole-target executions.
+		// Issue #737 item-4 fan-out gate (the round-1 blocker's invariant), re-pinned by
+		// #741/#743 against a transport that is STILL un-narrowable now that ssh/target
+		// and ssh/service moved to the narrowed side (nsx-api has no per-item scoping
+		// path yet -- see ScanComponentNarrowing's doc comment / the #892 residual): a
+		// target whose accepted components are all UN-narrowable (two nsx-api/service
+		// components) must NOT fan out one whole-target job per component (that would be
+		// N duplicate whole-target scans). They collapse to EXACTLY ONE whole-target job,
+		// marked unnarrowed. No configuration can produce duplicate whole-target
+		// executions.
 		Guid siteId = await CreateSiteAsync("fanout-gated-collapse");
-		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
-		Guid vcenterCred = await SeedCredentialAsync("vcenter");
-		Guid sshCred = await SeedCredentialAsync("ssh");
-		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
-		await SeedBindingAsync(targetId, "vcsa-ssh", sshCred);
+		Guid targetId = await CreateTargetAsync(siteId, "nsx-api", "nsx-01");
+		Guid nsxCred = await SeedCredentialAsync("nsx");
+		await SeedBindingAsync(targetId, "nsx-api", nsxCred);
 
-		// Two un-narrowable ssh/target components on the same target.
+		// Two un-narrowable nsx-api/service components on the same target.
 		await SeedComponentWithRequirementsAsync(
-			targetId, "vcsa-svc-a", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
+			targetId, "nsx-svc-a", ["nsx-api"], transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "manager");
 		await SeedComponentWithRequirementsAsync(
-			targetId, "vcsa-svc-b", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
+			targetId, "nsx-svc-b", ["nsx-api"], transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "dfw");
 
 		HttpResponseMessage response = await PostRunAsync(new
 		{
@@ -262,17 +263,100 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Assert.NotNull(scanJobs[0].ScanPlanItemId);
 	}
 
+	[Fact]
+	public async Task CreateScanRun_VcsaServiceAndSshTargetComponents_FanOutOnePerNarrowedItem()
+	{
+		// Issue #741/#743: ScanComponentNarrowing now narrows ssh/service (VCSA OS-level
+		// services) and ssh/target (whole-appliance SSH products) -- each gets its OWN
+		// job instead of collapsing behind one representative whole-target job (shrinking
+		// #892's collapsed set). Two VCSA services on a vsphere-kind target fan out as
+		// TWO independent jobs, each carrying its own selector/profile identity.
+		Guid siteId = await CreateSiteAsync("fanout-ssh-narrowed");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
+		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		Guid sshCred = await SeedCredentialAsync("ssh");
+		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+		await SeedBindingAsync(targetId, "vcsa-ssh", sshCred);
+
+		Guid envoyComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "envoy", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Service, selectorName: "envoy");
+		Guid postgresComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "postgresql", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Service, selectorName: "postgresql");
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		List<Guid> scanJobIds = await ReadScanJobIdsAsync(runId);
+		Assert.Equal(2, scanJobIds.Count);
+
+		foreach ((Guid componentId, string expectedServiceName) in new[] { (envoyComponentId, "envoy"), (postgresComponentId, "postgresql") })
+		{
+			Guid jobId = await ReadJobIdForComponentAsync(runId, componentId);
+			using JsonDocument payload = JsonDocument.Parse(await ReadJobPayloadAsync(jobId));
+			Assert.Equal("service", payload.RootElement.GetProperty("selector_kind").GetString());
+			Assert.Equal(expectedServiceName, payload.RootElement.GetProperty("selector_name").GetString());
+			Assert.True(payload.RootElement.TryGetProperty("catalog_execution_profile_id", out _),
+				"a narrowed ssh/service item must carry its own frozen catalog_execution_profile_id.");
+			Assert.True(payload.RootElement.TryGetProperty("baseline_id", out _));
+			Assert.True(payload.RootElement.TryGetProperty("output_kind", out _));
+			Assert.False(payload.RootElement.TryGetProperty("unnarrowed", out _), "a narrowed item's job is never marked unnarrowed.");
+		}
+	}
+
+	[Fact]
+	public async Task CreateScanRun_SshTargetWholeApplianceComponent_FansOutItsOwnJob_NeverCollapsed()
+	{
+		// Issue #743: a whole-appliance SSH product (Photon/Aria/vIDM -- ssh/target
+		// selector) fans out its own per-component job rather than being folded into a
+		// collapsed representative job alongside an unrelated sibling.
+		Guid siteId = await CreateSiteAsync("fanout-ssh-target");
+		Guid targetId = await CreateTargetAsync(siteId, "ssh", "photon-01");
+		Guid sshCred = await SeedCredentialAsync("ssh");
+		await SeedBindingAsync(targetId, "srg-ssh", sshCred);
+
+		Guid photonComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "photon-os", ["srg-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		List<Guid> scanJobIds = await ReadScanJobIdsAsync(runId);
+		Assert.Single(scanJobIds);
+
+		Guid jobId = await ReadJobIdForComponentAsync(runId, photonComponentId);
+		using JsonDocument payload = JsonDocument.Parse(await ReadJobPayloadAsync(jobId));
+		Assert.Equal("target", payload.RootElement.GetProperty("selector_kind").GetString());
+		Assert.False(payload.RootElement.TryGetProperty("selector_name", out JsonElement selectorNameElement) && selectorNameElement.ValueKind != JsonValueKind.Null,
+			"a target selector carries no object identity -- the whole appliance IS the object.");
+		Assert.False(payload.RootElement.TryGetProperty("unnarrowed", out _));
+	}
+
 	/// <summary>
 	/// Issue #738 AC "the exact planned vCenter endpoint and profile/input revisions are
-	/// executed", generalized to esxi/vm by #739/#740: every narrowable vSphere-family
-	/// selector's (vcenter/esxi/vm) fanned-out job payload carries its OWN frozen
+	/// executed", generalized to esxi/vm by #739/#740 and to the ssh family by #741/#743:
+	/// every narrowable selector's (vcenter/esxi/vm/service/target) fanned-out job
+	/// payload carries its OWN frozen
 	/// <c>catalog_execution_profile_id</c>/<c>baseline_id</c>/<c>input_resolutions</c> --
 	/// not the run-level <c>profile_key</c> (absent here entirely, per #895's
 	/// target_scope contract) -- so <c>ScanJobHandler</c> can resolve the activated
 	/// content-revision profile directory instead of any fixed/legacy path. An
-	/// un-narrowable ssh/target sibling on the SAME target/run stays on the pre-#738
-	/// payload shape (no such fields) -- proving the actual boundary is narrowability
-	/// (<c>ScanComponentNarrowing</c>), not selector kind.
+	/// un-narrowable nsx-api/service sibling on a DIFFERENT run stays on the pre-#738
+	/// payload shape (no such fields, proven by
+	/// <see cref="CreateScanRun_GatedUnNarrowableComponents_CollapseToExactlyOneWholeTargetJob"/>)
+	/// -- proving the actual boundary is narrowability (<c>ScanComponentNarrowing</c>),
+	/// not vmware-vs-ssh transport.
 	/// </summary>
 	[Fact]
 	public async Task CreateScanRun_NarrowableVSphereSelectorComponents_JobPayloadCarriesFrozenProfileAndBaselineIds()
@@ -291,7 +375,7 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Guid vmComponentId = await SeedComponentWithRequirementsAsync(
 			targetId, "vm-sibling", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware, selectorKind: CatalogSelectorKinds.Vm);
 		Guid sshComponentId = await SeedComponentWithRequirementsAsync(
-			targetId, "vcsa-svc-sibling", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
+			targetId, "vcsa-svc-sibling", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Service, selectorName: "envoy");
 
 		HttpResponseMessage response = await PostRunAsync(new
 		{
@@ -307,6 +391,7 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 			(vcenterComponentId, "vcenter"),
 			(esxiComponentId, "esxi"),
 			(vmComponentId, "vm"),
+			(sshComponentId, "service"),
 		})
 		{
 			Guid jobId = await ReadJobIdForComponentAsync(runId, componentId);
@@ -318,39 +403,47 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 			Assert.True(payload.RootElement.TryGetProperty("baseline_id", out JsonElement baselineIdElement));
 			Assert.True(Guid.TryParse(baselineIdElement.GetString(), out Guid _));
 			Assert.True(payload.RootElement.TryGetProperty("input_resolutions", out _));
+			Assert.False(payload.RootElement.TryGetProperty("unnarrowed", out _));
 		}
 
-		// The un-narrowable ssh/target sibling (ScanComponentNarrowing.CanNarrow ==
-		// false) is the one job that legitimately collapses to the pre-#738 shape --
-		// proving the boundary is narrowability, not selector kind.
+		// The ssh/service item's own selector_name is the catalog's named-service
+		// identity, never the discovered vendor identity used for esxi/vm.
 		Guid sshJobId = await ReadJobIdForComponentAsync(runId, sshComponentId);
 		using JsonDocument sshPayload = JsonDocument.Parse(await ReadJobPayloadAsync(sshJobId));
-		Assert.False(
-			sshPayload.RootElement.TryGetProperty("catalog_execution_profile_id", out _),
-			"an un-narrowable ssh/target-selector item's payload must stay byte-unchanged.");
-		Assert.False(sshPayload.RootElement.TryGetProperty("baseline_id", out _));
+		Assert.Equal("envoy", sshPayload.RootElement.GetProperty("selector_name").GetString());
 	}
 
 	[Fact]
 	public async Task CreateScanRun_MixedNarrowableAndGated_FansOutPerNarrowablePlusExactlyOneCollapsed()
 	{
-		// Issue #737 item-4: on one target with TWO narrowable esxi components and TWO
-		// un-narrowable ssh components, the run fans out one job per narrowable component
-		// (2) PLUS exactly ONE collapsed whole-target job for the gated remainder = 3
-		// jobs total -- never 4, and never a duplicate whole-target scan.
+		// Issue #737 item-4, re-pinned by #741/#743 against a still-un-narrowable
+		// transport (nsx-api/service -- see the class doc comment / #892 residual, now
+		// that ssh/service and ssh/target moved to the narrowed side): on one target with
+		// TWO narrowable esxi components and TWO un-narrowable nsx-api components, the
+		// run fans out one job per narrowable component (2) PLUS exactly ONE collapsed
+		// whole-target job for the gated remainder = 3 jobs total -- never 4, and never a
+		// duplicate whole-target scan.
+		//
+		// nsx-api components require a DIFFERENT target kind than vsphere/esxi
+		// (ComponentCapabilityMatcher's real compatibility gate is orthogonal to this
+		// narrowing-only test's fixture helper, which does not model per-kind
+		// compatibility) -- this suite's SeedComponentWithRequirementsAsync seeds
+		// catalog/baseline rows directly and links them under the SAME target
+		// deliberately, exercising only the narrowing/fan-out boundary, not discovery
+		// compatibility.
 		Guid siteId = await CreateSiteAsync("fanout-mixed-gate");
 		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
 		Guid vcenterCred = await SeedCredentialAsync("vcenter");
-		Guid sshCred = await SeedCredentialAsync("ssh");
+		Guid nsxCred = await SeedCredentialAsync("nsx");
 		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
-		await SeedBindingAsync(targetId, "vcsa-ssh", sshCred);
+		await SeedBindingAsync(targetId, "nsx-api", nsxCred);
 
 		Guid esxiA = await SeedComponentAsync(targetId, "esxi-a", priority: 4);
 		Guid esxiB = await SeedComponentAsync(targetId, "esxi-b", priority: 4);
 		await SeedComponentWithRequirementsAsync(
-			targetId, "vcsa-svc-a", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
+			targetId, "nsx-svc-a", ["nsx-api"], transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "manager");
 		await SeedComponentWithRequirementsAsync(
-			targetId, "vcsa-svc-b", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
+			targetId, "nsx-svc-b", ["nsx-api"], transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "dfw");
 
 		HttpResponseMessage response = await PostRunAsync(new
 		{
