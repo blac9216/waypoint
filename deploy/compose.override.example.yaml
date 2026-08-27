@@ -22,9 +22,13 @@
 # never add anything here that a real deployment needs -- that belongs in
 # the base.
 #
-# Issues #846 (dev-admin user provisioning) and #847 (secret/TLS generator
-# scripts) extend this file additively; neither exists yet, so this file
-# does not reference them.
+# Issue #846 (dev-admin user provisioning) extends this file additively
+# below. Issue #847 (secret/TLS generator scripts) does not exist yet; until
+# it lands, create the one file this service needs by hand -- an obviously
+# invented placeholder, never reused for anything real:
+#
+#   mkdir -p config/secrets
+#   printf 'dev-admin-EXAMPLE-password-1\n' > config/secrets/dev-admin-password  # gitleaks:allow
 
 services:
   # Generates the throwaway TLS pair, master key, and (via dev-auth-bootstrap
@@ -71,6 +75,57 @@ services:
     volumes:
       - dev-secrets:/run/waypoint-dev-secrets
     network_mode: none
+    restart: "no"
+
+  # Issue #846: provisions a normal Waypoint-realm user (Admin group, epic
+  # #841) so the persistent dev stack has a real Keycloak login -- distinct
+  # from Keycloak's own master-realm bootstrap admin (KEYCLOAK_ADMIN above),
+  # which is never used for day-to-day login. One-shot (restart: "no"), and
+  # idempotent: it creates-or-finds the user, then reconciles the password
+  # (non-temporary) and Admin-group membership on EVERY run, so a changed
+  # password file or a manually-removed group membership is restored on the
+  # next `up`. `down -v` does not remove deploy/config/, so the SAME
+  # username/password log back in after a full volume reset (this service
+  # just re-provisions the fresh realm from the same file). See
+  # deploy/keycloak-dev-admin/provision.sh for the curl+jq admin-API
+  # implementation and why it avoids kcadm.sh (its own `config credentials`
+  # step takes --password only as a bare CLI flag).
+  keycloak-dev-admin:
+    build:
+      context: ./keycloak-dev-admin
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    environment:
+      # Sensible default dev username; override in deploy/.env if you want a
+      # different one. Not a secret -- the password is what gates login.
+      WAYPOINT_DEV_ADMIN_USERNAME: "${WAYPOINT_DEV_ADMIN_USERNAME:-developer}"
+      # Container-network view of Keycloak, same value as the backend's own
+      # Oidc__Authority default in compose.yaml -- a browser can never reach
+      # this address, only other containers on `internal` can.
+      WAYPOINT_KEYCLOAK_INTERNAL_URL: "http://keycloak:8080/auth"
+      # Needed to obtain a master-realm admin token (KEYCLOAK_ADMIN above is
+      # a username, not a secret -- same convention as the keycloak service).
+      KEYCLOAK_ADMIN: "${KEYCLOAK_ADMIN:-admin}"
+    volumes:
+      # The dev password lives in an operator-created file (see the comment
+      # at the top of this file for the manual one-liner until #847's
+      # generator lands), never an inline env value -- never printed by this
+      # service, never a CLI argument.
+      - type: bind
+        source: ./config/secrets/dev-admin-password
+        target: /run/secrets/dev-admin-password
+        read_only: true
+        bind:
+          create_host_path: false
+    # Same Keycloak bootstrap-admin secret the keycloak service itself reads
+    # (deploy/compose.yaml's top-level `secrets:` already declares it) --
+    # this service authenticates against the admin REST API with the exact
+    # credential Keycloak's own entrypoint wrapper uses, not a second one.
+    secrets:
+      - keycloak-bootstrap-admin-password
+    networks:
+      - internal
     restart: "no"
 
   nginx:
