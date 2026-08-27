@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
 #
 # Generates a throwaway self-signed TLS certificate/key pair for the dev
-# compose stack's nginx service (ADR-0003: nginx terminates TLS with
-# operator-provided certs; in production those come from the operator's
-# internal CA — this script exists only to stand up a local dev loop).
+# compose stack's nginx service. In production, certs come from the
+# operator's internal CA — this script exists only for a local dev loop.
 #
-# Output lands next to this script and is git-ignored (repo root .gitignore
-# matches *.key at any depth, plus an explicit deploy/nginx/certs/tls.crt
-# entry -- *.pem no longer covers the cert since issue #844 renamed the pair
-# to the generic tls.crt/tls.key names deploy/nginx/conf.d/default.conf and
-# dev-bootstrap both use). Never commit it, never reuse it outside a
-# disposable local dev environment.
+# Output lands next to this script and is git-ignored. Never commit it,
+# never reuse it outside a disposable local dev environment.
 
 set -euo pipefail
 

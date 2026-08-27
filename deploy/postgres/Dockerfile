@@ -5,11 +5,9 @@ FROM postgres:16-alpine
 
 COPY initdb/ /docker-entrypoint-initdb.d/
 
-# Issue #844: validate every mounted secret file BEFORE the stock entrypoint
-# can run initdb, and assert both initdb scripts actually completed before
-# reporting healthy. See each script's header comment for why the initdb
-# scripts' own checks were not enough (they fire after the data directory
-# already exists, which poisoned the pgdata volume).
+# Validate every mounted secret file BEFORE the stock entrypoint can run
+# initdb, and assert both initdb scripts completed before reporting healthy.
+# why: docs/rationale/deploy.md#postgres-poisoned-volume-fail-closed
 COPY docker-entrypoint-wrapper.sh /usr/local/bin/waypoint-postgres-entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/waypoint-postgres-healthcheck.sh
 RUN chmod 0755 /usr/local/bin/waypoint-postgres-entrypoint.sh \

@@ -1,25 +1,12 @@
 #!/bin/sh
-# Postgres healthcheck for the Waypoint compose stack (issue #844, round-2
-# review of PR #860).
+# Postgres healthcheck for the Waypoint compose stack.
 #
-# `pg_isready` alone is not enough: it answers "the server accepts
-# connections", which a HALF-INITIALIZED cluster does too. If initdb ran but
-# docker-entrypoint-initdb.d aborted part way (the poisoned-volume trap the
-# entrypoint wrapper now prevents going forward, and which an operator may
-# already have on disk from before that fix), pg_isready reports healthy
-# while none of the roles or databases the rest of the stack depends on
-# exist -- backend's migration 0025 then fails on a missing role and Keycloak
-# cannot log in at all, both AFTER `depends_on: service_healthy` said go.
+# `pg_isready` alone answers "the server accepts connections", which a
+# half-initialized cluster does too. This also asserts that both initdb
+# scripts completed: the two runner login roles, and the `keycloak` role
+# plus database.
 #
-# So health also asserts that both initdb scripts actually completed: the two
-# runner login roles from 01-runner-roles.sh, and the `keycloak` role plus
-# the `keycloak` database from 02-keycloak-db.sh. Four catalog lookups over
-# the local unix socket -- cheap enough for a 10s interval.
-#
-# Note for an operator with a pgdata volume predating issue #442/#28: those
-# init scripts never re-run against an existing volume, so this healthcheck
-# will (correctly, and visibly) report unhealthy until the roles/database are
-# created by hand. See deploy/README.md "Database roles".
+# why: docs/rationale/deploy.md#postgres-role-asserting-healthcheck
 set -eu
 
 pg_isready -U "${POSTGRES_USER:-waypoint}" -d "${POSTGRES_DB:-waypoint}" >/dev/null

@@ -1,35 +1,14 @@
 #!/bin/sh
-# Creates Keycloak's own login role and database the first time this Postgres
-# data directory is initialized (issue #28, ADR-0004). Runs via the
-# postgres:16-alpine image's docker-entrypoint-initdb.d convention (same
-# mechanism 01-runner-roles.sh uses) -- fires only against a FRESH data
-# directory, never against an existing ../pgdata volume.
+# Creates Keycloak's own login role and database the first time this
+# Postgres data directory is initialized. Runs via the same
+# docker-entrypoint-initdb.d convention as 01-runner-roles.sh -- fires only
+# against a FRESH data directory.
 #
-# Deliberately NOT the 01-runner-roles.sh grants pattern (validation notes on
-# issue #28, 2026-08-19): the two runner roles are grants-only logins against
-# the shared `waypoint` database that `backend`'s own migration (0025) owns
-# and grants into. Keycloak is a different shape entirely -- it manages its
-# own schema via Liquibase migrations it runs itself on every boot, so it
-# needs to OWN a database outright, not receive table-level grants into one
-# Waypoint owns. There is no corresponding "0025-style" backend migration for
-# Keycloak and there should never be one: Keycloak's schema is Keycloak's to
-# manage.
+# Deliberately NOT the 01-runner-roles.sh grants pattern: Keycloak manages
+# its own schema via Liquibase migrations it runs itself, so it needs to OWN
+# a database outright, not receive table-level grants into one Waypoint owns.
 #
-# Password source (issue #844): file-backed, not an inline env var --
-# POSTGRES_KEYCLOAK_PASSWORD_FILE, set on the postgres service in
-# compose.yaml, points at the SAME Compose `secrets:`-mounted file
-# (deploy/config/secrets/postgres-keycloak-password, gitignored) the
-# `keycloak` service itself reads via KC_DB_PASSWORD_FILE -- one file, one
-# password, both sides of the same login. A missing file is rejected by the
-# Docker daemon at container-create time and an empty/unreadable one by
-# deploy/postgres/docker-entrypoint-wrapper.sh before initdb runs at all --
-# see 01-runner-roles.sh's header for the precise enforcement points and why
-# the `[ -s ... ]` check below is only a last-ditch layer. Never echoed,
-# never logged --
-# psql -v substitution keeps the value out of this script's own output and
-# out of shell history inside the container (same technique
-# 01-runner-roles.sh uses; see that file's header comment for why a
-# DO $$ ... $$ block doesn't work for this).
+# why: docs/rationale/deploy.md#postgres-secret-file-password-source
 set -eu
 
 : "${POSTGRES_KEYCLOAK_PASSWORD_FILE:?POSTGRES_KEYCLOAK_PASSWORD_FILE must be set}"
@@ -61,12 +40,8 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
 	ALTER ROLE keycloak NOSUPERUSER NOCREATEDB NOCREATEROLE;
 EOSQL
 
-# CREATE DATABASE cannot run inside the multi-statement heredoc above (it
-# cannot execute inside a transaction block, and psql wraps -f/heredoc input
-# in one implicitly in some contexts) -- kept as a separate, idempotent
-# invocation. "SELECT ... WHERE NOT EXISTS" can't drive CREATE DATABASE
-# either (still DDL, still no subquery-driven conditional), so the existence
-# check happens client-side in shell instead.
+# CREATE DATABASE cannot run inside the multi-statement heredoc above (no DDL
+# inside a transaction block) -- kept as a separate, idempotent invocation.
 KEYCLOAK_DB_EXISTS=$(psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
   --tuples-only --no-align -c "SELECT 1 FROM pg_database WHERE datname = 'keycloak'")
 
