@@ -16,8 +16,12 @@
 # `docker top` exposure this script exists to avoid for the bootstrap admin
 # and dev-admin passwords. Every curl call that carries a secret (the admin
 # password grant, the dev password reset) goes through a curl `-K` config
-# file instead of `-d`/`-H` on the command line, so neither password nor the
-# short-lived bearer token ever appears in this container's argv.
+# file instead of `-d`/`-H` on the command line, and the one place a secret
+# has to reach an external binary (jq, building the reset-password JSON)
+# uses `--rawfile` so only the FILE PATH is an argument. `printf` is a shell
+# builtin in this image, so writing secrets into those config/body files is
+# likewise argv-free. Net effect: neither password nor the short-lived
+# bearer token ever appears in this container's argv (`ps`/`docker top`).
 set -eu
 
 umask 077
@@ -48,17 +52,50 @@ trap 'rm -rf "$CFG_DIR"' EXIT
 
 # $1 = human label for the error message only -- never prints file content.
 # $2 = path to the mounted secret file.
-read_secret_file() {
-	if [ ! -s "$2" ]; then
+#
+# Fails closed on missing, zero-byte AND whitespace-only files. The
+# whitespace-only case matters because every consumer below strips trailing
+# newlines: a file holding just "\n" would otherwise sail past a bare `-s`
+# test and only blow up much later as an opaque HTTP 400 from Keycloak's
+# password endpoint. `tr` only ever sees a constant argument (the content
+# arrives on stdin via redirect), so this check is argv-safe too.
+require_secret_file() {
+	if [ ! -s "$2" ] || [ -z "$(tr -d '[:space:]' <"$2")" ]; then
 		echo "waypoint-keycloak-dev-admin: missing or empty secret file for $1: $2" >&2
 		echo "waypoint-keycloak-dev-admin: refusing to provision without it." >&2
 		exit 1
 	fi
+}
+
+read_secret_file() {
+	require_secret_file "$1" "$2"
 	cat "$2"
 }
 
 ADMIN_PASSWORD="$(read_secret_file 'Keycloak bootstrap admin password (KEYCLOAK_ADMIN_PASSWORD_FILE)' "$ADMIN_PASSWORD_FILE")"
-DEV_PASSWORD="$(read_secret_file 'Waypoint dev-admin password (WAYPOINT_DEV_ADMIN_PASSWORD_FILE)' "$DEV_PASSWORD_FILE")"
+# The dev password is deliberately NEVER read into a shell variable -- it goes
+# straight from its file into jq's `--rawfile` at reset-password time below.
+# Validate it up front anyway so an unusable file fails before any API call.
+require_secret_file 'Waypoint dev-admin password (WAYPOINT_DEV_ADMIN_PASSWORD_FILE)' "$DEV_PASSWORD_FILE"
+
+# Percent-encodes $1 for safe use as a URL query-string value. Pure shell --
+# `printf` is a builtin in this image, so the value never becomes an external
+# command's argument. Used for the operator-settable username/group names,
+# which would otherwise silently look up the wrong thing if they contained a
+# space, `&`, or `#`.
+urlencode() {
+	_rest="$1"
+	_enc=""
+	while [ -n "$_rest" ]; do
+		_ch="${_rest%"${_rest#?}"}"
+		_rest="${_rest#?}"
+		case "$_ch" in
+		[a-zA-Z0-9.~_-]) _enc="$_enc$_ch" ;;
+		*) _enc="$_enc$(printf '%%%02X' "'$_ch")" ;;
+		esac
+	done
+	printf '%s' "$_enc"
+}
 
 echo "waypoint-keycloak-dev-admin: waiting for realm '$REALM' to be ready at $KC_BASE ..."
 i=0
@@ -83,8 +120,10 @@ TOKEN_CFG="$CFG_DIR/token.cfg"
 
 # curl's -K format does not support multi-line quoting the way a shell string
 # does, so the password/username go through --data-urlencode read from a
-# per-field temp file instead -- still never on the command line, and each
-# field file is removed immediately after curl reads it.
+# per-field temp file instead -- still never on the command line. The field
+# files (like every other temp file here) live only inside the umask-077
+# mktemp dir and are removed as soon as the curl call that reads them
+# returns; the EXIT trap is the backstop, not the primary cleanup.
 write_urlencoded_field() {
 	# $1 = target cfg file (appended to), $2 = field name, $3 = field value.
 	# curl's `--data-urlencode name@filename` form reads ONLY the value from
@@ -102,7 +141,10 @@ write_urlencoded_field "$TOKEN_CFG" "client_id" "admin-cli"
 write_urlencoded_field "$TOKEN_CFG" "username" "$ADMIN_USERNAME"
 write_urlencoded_field "$TOKEN_CFG" "password" "$ADMIN_PASSWORD"
 
-TOKEN_RESPONSE="$(curl -sS -X POST -K "$TOKEN_CFG" "$KC_BASE/realms/master/protocol/openid-connect/token")"
+TOKEN_RESPONSE="$(curl -sS -X POST -K "$TOKEN_CFG" "$KC_BASE/realms/master/protocol/openid-connect/token" || true)"
+# curl has read them; drop the bootstrap-admin credential from disk now
+# rather than waiting for the EXIT trap.
+rm -f "$TOKEN_CFG" "$CFG_DIR"/field.*
 ADMIN_TOKEN="$(printf '%s' "$TOKEN_RESPONSE" | jq -r '.access_token // empty')"
 if [ -z "$ADMIN_TOKEN" ]; then
 	echo "waypoint-keycloak-dev-admin: failed to obtain an admin token (response withheld -- may carry retry hints only, no secret)." >&2
@@ -132,7 +174,14 @@ admin_api() {
 		printf '%s' "$body" >"$body_file"
 		printf 'data-binary = "@%s"\n' "$body_file" >>"$cfg"
 	fi
-	curl -sS -K "$cfg" -w '\n%{http_code}' "$KC_BASE/admin$path"
+	api_out="$(curl -sS -K "$cfg" -w '\n%{http_code}' "$KC_BASE/admin$path" || true)"
+	# Remove the bearer-token config (and any secret-bearing body) as soon as
+	# curl is done with it; the EXIT trap is only the backstop.
+	rm -f "$cfg"
+	if [ -n "$body" ]; then
+		rm -f "$body_file"
+	fi
+	printf '%s' "$api_out"
 }
 
 # Split a response body from admin_api's trailing "\n<status>" line.
@@ -140,7 +189,7 @@ response_body() { sed '$d'; }
 response_status() { tail -n1; }
 
 # --- find-or-create the user -------------------------------------------
-FIND_RESP="$(admin_api GET "/realms/$REALM/users?username=$DEV_USERNAME&exact=true")"
+FIND_RESP="$(admin_api GET "/realms/$REALM/users?username=$(urlencode "$DEV_USERNAME")&exact=true")"
 FIND_STATUS="$(printf '%s' "$FIND_RESP" | response_status)"
 FIND_BODY="$(printf '%s' "$FIND_RESP" | response_body)"
 if [ "$FIND_STATUS" != "200" ]; then
@@ -162,7 +211,7 @@ if [ -z "$USER_ID" ]; then
 		echo "waypoint-keycloak-dev-admin: user creation failed (HTTP $CREATE_STATUS)" >&2
 		exit 1
 	fi
-	FIND_RESP="$(admin_api GET "/realms/$REALM/users?username=$DEV_USERNAME&exact=true")"
+	FIND_RESP="$(admin_api GET "/realms/$REALM/users?username=$(urlencode "$DEV_USERNAME")&exact=true")"
 	USER_ID="$(printf '%s' "$FIND_RESP" | response_body | jq -r '.[0].id // empty')"
 	if [ -z "$USER_ID" ]; then
 		echo "waypoint-keycloak-dev-admin: created user '$DEV_USERNAME' but could not look it back up." >&2
@@ -187,7 +236,13 @@ if [ "$PROFILE_STATUS" != "204" ]; then
 fi
 
 # --- reconcile the password, every run (non-temporary) ------------------
-CRED_BODY="$(jq -n --arg pw "$DEV_PASSWORD" '{type: "password", value: $pw, temporary: false}')"
+# `--rawfile` (not `--arg`): jq is an external binary, so an `--arg pw <value>`
+# would put the dev password straight into this process's argv where `ps` and
+# `docker top` can read it. With `--rawfile` only the PATH is an argument and
+# jq reads the value itself. `sub` strips the trailing newline a
+# `printf '%s\n' ... > secret-file` style generator leaves behind.
+CRED_BODY="$(jq -n --rawfile pw "$DEV_PASSWORD_FILE" \
+	'{type: "password", value: ($pw | sub("[\r\n]+$"; "")), temporary: false}')"
 CRED_RESP="$(admin_api PUT "/realms/$REALM/users/$USER_ID/reset-password" "$CRED_BODY")"
 CRED_STATUS="$(printf '%s' "$CRED_RESP" | response_status)"
 if [ "$CRED_STATUS" != "204" ]; then
@@ -197,7 +252,7 @@ fi
 echo "waypoint-keycloak-dev-admin: password reconciled (non-temporary)."
 
 # --- ensure Admin-group membership, every run ----------------------------
-GROUP_RESP="$(admin_api GET "/realms/$REALM/groups?search=$GROUP_NAME&exact=true")"
+GROUP_RESP="$(admin_api GET "/realms/$REALM/groups?search=$(urlencode "$GROUP_NAME")&exact=true")"
 GROUP_STATUS="$(printf '%s' "$GROUP_RESP" | response_status)"
 GROUP_BODY="$(printf '%s' "$GROUP_RESP" | response_body)"
 if [ "$GROUP_STATUS" != "200" ]; then
