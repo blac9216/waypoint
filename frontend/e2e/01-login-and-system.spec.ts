@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
+	adminPassword,
 	assertOnConfiguredOrigin,
 	configuredOrigin,
 	currentSessionIdToken,
@@ -46,7 +47,7 @@ test("PKCE login stays on the configured public origin and the proxied /auth pat
 	expect(page.url()).not.toContain("keycloak:8080");
 
 	await page.locator("#username").fill(keycloakUsername());
-	await page.locator("#password").fill(process.env.E2E_ADMIN_PASSWORD ?? "");
+	await page.locator("#password").fill(adminPassword());
 	await page.locator("#kc-login").click();
 
 	// Not the "WAYPOINT" wordmark — `LoginScreen` (unauthenticated) shows the
@@ -74,11 +75,13 @@ test("rejects a bad Keycloak password without leaving the Keycloak login form", 
 	// A rejected credential re-renders Keycloak's OWN login form (its exact
 	// error markup varies by theme/version, so the stable, version-proof
 	// signal is that the browser never left the Keycloak realm's /auth/
-	// path for /oidc/callback) — never silently completes.
-	await page.waitForTimeout(1000);
+	// path for /oidc/callback) — never silently completes. Wait for that
+	// re-render deterministically (the form's own full-page navigation)
+	// rather than a fixed sleep, which could theoretically race on a slow
+	// host.
+	await expect(page.locator("#username")).toBeVisible({ timeout: 15_000 });
 	assertOnConfiguredOrigin(page.url(), "rejected Keycloak login");
 	expect(page.url()).toContain("/auth/realms/waypoint/");
-	await expect(page.locator("#username")).toBeVisible();
 });
 
 test("issuer/discovery document is served same-origin under /auth/realms/waypoint", async ({ page }) => {
