@@ -61,6 +61,7 @@ import { useAuth } from "../../lib/auth-context";
 import { roleGateProps } from "../../lib/roles";
 import { ArtifactsTable } from "./ArtifactsTable";
 import { AttestationsPanel } from "./AttestationsPanel";
+import { ComponentResultsPanel } from "./ComponentResultsPanel";
 import { kpiTiles } from "./results-metrics";
 import { formatRunDuration, formatTimestamp, scopeSiteId } from "./results";
 import "./ResultsScreen.css";
@@ -68,6 +69,7 @@ import { PurgeRunPanel } from "./PurgeRunPanel";
 import { RunHistoryDeletionPanel } from "./RunHistoryDeletionPanel";
 import { UploadStatusPanel } from "./UploadStatusPanel";
 import { useCklExport } from "./useCklExport";
+import { useComponentResults } from "./useComponentResults";
 import { useRunDetail } from "./useRunDetail";
 import { useRunList } from "./useRunList";
 
@@ -79,6 +81,14 @@ export function ResultsScreen() {
 		useRunDetail(selectedRunId, selectedRow);
 
 	const { exporting, handleExport } = useCklExport(run, jobs, token);
+
+	// Issue #745 remainder: the component-results rollup is fetched
+	// independently of jobs/artifacts/attestations above -- a purged run
+	// renders the tombstone panel below and never reaches this fetch at all
+	// (the `!purged` guard around the whole results pane), so "purged runs
+	// render the tombstone state unchanged" holds without any extra branching
+	// here.
+	const { rollup, loading: rollupLoading, unavailable: rollupUnavailable } = useComponentResults(selectedRunId);
 
 	// Purged (issue #656/#594): once PurgeRunPanel confirms the tombstone
 	// outcome, the results panes/export/remediate actions are hidden — a
@@ -219,6 +229,14 @@ export function ResultsScreen() {
 										<UploadStatusPanel jobs={jobs} />
 									</div>
 								</div>
+
+								<ComponentResultsPanel
+									rollup={rollup}
+									rollupLoading={rollupLoading}
+									rollupUnavailable={rollupUnavailable}
+									jobs={jobs}
+									artifacts={artifacts}
+								/>
 							</>
 						)}
 					</>

@@ -128,18 +128,67 @@ function jsonResponse(body: unknown, headers: Record<string, string> = {}): Resp
 	return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json", ...headers } });
 }
 
+/** `RunResultRollupResponse` (RunContracts.cs) — issue #745 remainder. Two
+ * status buckets (completed, execution_error) matching RUN_JOBS' one
+ * uploaded + one failed job, with a coverage gap (planned 3, resulted 2) so
+ * the honest "not yet resulted" ledger line has something to show. */
+const COMPONENT_RESULTS_ROLLUP = {
+	run_id: "RUN-2026-0802-0412",
+	planned_component_count: 3,
+	by_status: [
+		{
+			status: "completed",
+			component_count: 1,
+			cat_i_open: 1,
+			cat_ii_open: 8,
+			cat_iii_open: 11,
+			passed_count: 40,
+			not_applicable_count: 2,
+			not_reviewed_count: 0,
+			skipped_count: 0,
+		},
+		{
+			status: "execution_error",
+			component_count: 1,
+			cat_i_open: 0,
+			cat_ii_open: 0,
+			cat_iii_open: 0,
+			passed_count: 0,
+			not_applicable_count: 0,
+			not_reviewed_count: 5,
+			skipped_count: 0,
+		},
+	],
+};
+
+/** `UploadAttemptResponse[]` (RunContracts.cs) — issue #744 remainder. */
+const UPLOAD_ATTEMPTS = [
+	{
+		attempt_number: 1,
+		endpoint: "https://stigman.example.internal/api",
+		collection: "vcf-collection",
+		status: "uploaded",
+		error_detail: null,
+		attempted_at: "2026-08-02T04:20:00Z",
+	},
+];
+
 function installFetchMock(
 	options: {
 		artifactsAvailable?: boolean;
 		artifacts?: unknown[];
 		attestationsApplied?: unknown[] | "unavailable";
 		runList?: unknown[];
+		componentResultsRollup?: unknown | "unavailable";
+		uploadAttempts?: unknown[] | "unavailable";
 	} = {},
 ) {
 	const artifactsAvailable = options.artifactsAvailable ?? true;
 	const artifacts = options.artifacts ?? RUN_ARTIFACTS;
 	const attestationsApplied = options.attestationsApplied ?? ATTESTATIONS_APPLIED;
 	const runList = options.runList ?? RUN_LIST;
+	const componentResultsRollup = options.componentResultsRollup ?? COMPONENT_RESULTS_ROLLUP;
+	const uploadAttempts = options.uploadAttempts ?? UPLOAD_ATTEMPTS;
 	globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
 		const url = typeof input === "string" ? input : input.toString();
 
@@ -159,6 +208,17 @@ function installFetchMock(
 			return attestationsApplied === "unavailable"
 				? new Response("not found", { status: 404 })
 				: jsonResponse(attestationsApplied);
+		}
+		if (url === "/api/v1/runs/RUN-2026-0802-0412/component-results/summary") {
+			return componentResultsRollup === "unavailable"
+				? new Response("not found", { status: 404 })
+				: jsonResponse(componentResultsRollup);
+		}
+		if (url === "/api/v1/jobs/job-1/upload-attempts") {
+			return uploadAttempts === "unavailable" ? new Response("not found", { status: 404 }) : jsonResponse(uploadAttempts);
+		}
+		if (url === "/api/v1/jobs/job-2/upload-attempts") {
+			return jsonResponse([]);
 		}
 		if (url.startsWith("/api/v1/config-docs/resolve")) {
 			return jsonResponse([]);
@@ -370,7 +430,7 @@ describe("ResultsScreen", () => {
 			expect(screen.getByTitle("CAT III open: 11")).toBeInTheDocument();
 		});
 		expect(screen.getByText("CKL · HDF")).toBeInTheDocument();
-		expect(screen.getByText("uploaded")).toBeInTheDocument();
+		expect(screen.getByText("uploaded", { selector: ".results__upload-pill" })).toBeInTheDocument();
 	});
 
 	it("renders an uncountable row (counts_available:false) as n/a, never a fabricated 0", async () => {
@@ -497,6 +557,91 @@ describe("ResultsScreen", () => {
 			renderWithAuth();
 
 			await waitFor(() => expect(screen.getByText("RUN-2026-0802-0412")).toBeInTheDocument());
+		});
+	});
+
+	// --- Issue #745/#744 remainders: component-results panel ---
+
+	describe("Component results panel", () => {
+		it("renders the six-status vocabulary honestly: execution_error is never presented as a plain pass/fail", async () => {
+			installFetchMock();
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("COMPONENT RESULTS")).toBeInTheDocument());
+			expect(screen.getByText("Completed")).toBeInTheDocument();
+			expect(screen.getByText("Execution error")).toBeInTheDocument();
+
+			const errorBucket = screen.getByText("Execution error").closest(".results__cresult-status");
+			expect(errorBucket?.className).toContain("results__cresult-status--error");
+			const completedBucket = screen.getByText("Completed").closest(".results__cresult-status");
+			expect(completedBucket?.className).toContain("results__cresult-status--completed");
+			// The two buckets never share the same status-class modifier.
+			expect(errorBucket?.className).not.toBe(completedBucket?.className);
+		});
+
+		it("renders the honest coverage ledger: planned vs resulted vs not-yet-resulted, never a fabricated 100%", async () => {
+			installFetchMock();
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("Coverage")).toBeInTheDocument());
+			// COMPONENT_RESULTS_ROLLUP: 2 resulted (1 completed + 1 execution_error),
+			// 1 not yet resulted, 3 planned total.
+			expect(screen.getByText("2 resulted / 1 not yet resulted / 3 planned")).toBeInTheDocument();
+		});
+
+		it("renders CAT severity totals summed across every status bucket", async () => {
+			installFetchMock();
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("COMPONENT RESULTS")).toBeInTheDocument());
+			const panel = screen.getByText("COMPONENT RESULTS").closest(".results__panel") as HTMLElement;
+			expect(within(panel).getByText("1", { selector: ".results__cresult-severity-totals .mono" })).toBeInTheDocument();
+		});
+
+		it("shows a graceful empty state (not an error) when a run has no component results yet", async () => {
+			installFetchMock({ componentResultsRollup: { run_id: "RUN-2026-0802-0412", planned_component_count: 5, by_status: [] } });
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("COMPONENT RESULTS")).toBeInTheDocument());
+			expect(screen.getByText(/No component results yet/)).toBeInTheDocument();
+			expect(screen.queryByText(/could not be loaded/)).not.toBeInTheDocument();
+		});
+
+		it("shows an explicit unavailable state (distinct from 'no results yet') when the summary request fails", async () => {
+			installFetchMock({ componentResultsRollup: "unavailable" });
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("COMPONENT RESULTS")).toBeInTheDocument());
+			expect(screen.getByText(/component-results\/summary failed/)).toBeInTheDocument();
+			expect(screen.queryByText(/No component results yet/)).not.toBeInTheDocument();
+		});
+
+		it("loads upload-attempt history only after a component is selected, and never before", async () => {
+			installFetchMock();
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("COMPONENT RESULTS")).toBeInTheDocument());
+			expect(screen.getByText("Select a component to view artifacts and upload history.")).toBeInTheDocument();
+
+			const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+			expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("upload-attempts"))).toBe(false);
+
+			fireEvent.click(screen.getByText("esxi-01.example.internal", { selector: ".results__cresult-row span" }));
+
+			await waitFor(() => expect(screen.getByText("UPLOAD ATTEMPT HISTORY")).toBeInTheDocument());
+			const attemptsTable = await screen.findByText("vcf-collection");
+			const row = attemptsTable.closest("tr") as HTMLElement;
+			expect(within(row).getByText("uploaded")).toBeInTheDocument();
+		});
+
+		it("renders an honest empty state for a component with no recorded upload attempts", async () => {
+			installFetchMock();
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("COMPONENT RESULTS")).toBeInTheDocument());
+			fireEvent.click(screen.getByText("esxi-02.example.internal", { selector: ".results__cresult-row span" }));
+
+			await waitFor(() => expect(screen.getByText("No upload attempts recorded for this component.")).toBeInTheDocument());
 		});
 	});
 });

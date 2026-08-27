@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -342,6 +343,82 @@ public sealed class StigManagerUploadApiTests : IAsyncLifetime, IDisposable
 		// jobs.upload_status reflects only the LATEST outcome -- the attempt history is
 		// what makes the FIRST (successful) attempt still visible/auditable.
 		Assert.Equal("failed", await GetJobFieldAsync(jobId, "upload_status"));
+	}
+
+	// -- issue #744 remainder: GET /jobs/{id}/upload-attempts -----------------------
+
+	[Fact]
+	public async Task GetUploadAttempts_UnknownJob_Is404()
+	{
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/jobs/{Guid.NewGuid()}/upload-attempts", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetUploadAttempts_NoAttemptsYet_ReturnsEmptyListNot404()
+	{
+		Guid runId = await CreateRunAsync();
+		Guid jobId = await FanOutJobAsync(runId, jobType: "download", state: "done");
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/jobs/{jobId}/upload-attempts", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal(JsonValueKind.Array, document.RootElement.ValueKind);
+		Assert.Equal(0, document.RootElement.GetArrayLength());
+	}
+
+	[Fact]
+	public async Task GetUploadAttempts_BelowViewerRole_Is401()
+	{
+		Guid runId = await CreateRunAsync();
+		Guid jobId = await FanOutJobAsync(runId, jobType: "download", state: "done");
+
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/jobs/{jobId}/upload-attempts");
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetUploadAttempts_UploadThenRetry_ListsBothOrderedOldestFirst()
+	{
+		(_, Guid targetId) = await CreateSiteWithStigManagerAsync("attempts-list-target");
+		Guid runId = await CreateRunAsync();
+		Guid jobId = await FanOutScanJobAsync(runId, targetId, "failed");
+		WriteCkl(jobId);
+
+		_factory.UploadClient.Result = new StigManagerUploadResult(StigManagerUploadOutcome.Uploaded, null);
+		HttpResponseMessage first = await SendAsync(HttpMethod.Post, $"/api/v1/jobs/{jobId}/stigman-upload-retry", "Operator", body: null);
+		Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+		_factory.UploadClient.Result = new StigManagerUploadResult(StigManagerUploadOutcome.Failed, "second attempt failed");
+		HttpResponseMessage second = await SendAsync(HttpMethod.Post, $"/api/v1/jobs/{jobId}/stigman-upload-retry", "Operator", body: null);
+		Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/jobs/{jobId}/upload-attempts", "Viewer", body: null);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = document.RootElement;
+		Assert.Equal(2, root.GetArrayLength());
+		JsonElement[] rows = root.EnumerateArray().ToArray();
+
+		JsonElement attempt1 = rows[0];
+		Assert.Equal(1, attempt1.GetProperty("attempt_number").GetInt32());
+		Assert.Equal("uploaded", attempt1.GetProperty("status").GetString());
+		Assert.False(string.IsNullOrWhiteSpace(attempt1.GetProperty("endpoint").GetString()));
+		Assert.False(string.IsNullOrWhiteSpace(attempt1.GetProperty("collection").GetString()));
+		// WaypointJsonOptions omits null properties entirely (WhenWritingNull) --
+		// a successful attempt's error_detail is absent from the wire, not a
+		// literal JSON null.
+		Assert.False(attempt1.TryGetProperty("error_detail", out _));
+
+		JsonElement attempt2 = rows[1];
+		Assert.Equal(2, attempt2.GetProperty("attempt_number").GetInt32());
+		Assert.Equal("failed", attempt2.GetProperty("status").GetString());
+		Assert.Equal("second attempt failed", attempt2.GetProperty("error_detail").GetString());
 	}
 
 	[Fact]

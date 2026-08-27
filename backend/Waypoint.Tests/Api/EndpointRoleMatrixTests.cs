@@ -208,6 +208,7 @@ public sealed class EndpointRoleMatrixTests
 		["JobsController.CancelJob"] = WaypointRole.Operator,
 		["JobsController.GetArtifact"] = WaypointRole.Viewer,
 		["JobsController.RetryUpload"] = WaypointRole.Operator,
+		["JobsController.GetUploadAttempts"] = WaypointRole.Viewer,
 
 		// RunsController -- CreateRun is Cyber+ at the attribute floor (remediation's
 		// additional Admin + confirmation gate is checked in-action, not attribute-level
