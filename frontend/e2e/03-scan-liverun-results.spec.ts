@@ -21,12 +21,32 @@ import { login } from "./helpers";
  * screen now renders the live board without throwing. The Live Run test
  * below asserts that fixed behaviour (run header + priority-queue board
  * render for the seeded run), replacing the earlier crash escape-hatch.
+ *
+ * WIZARD REALIGNMENT (issue #960): the target_scope wizard rework (epic #726
+ * area, #874/#888/#900-adjacent changes) added a Preview step between
+ * Schedule and Confirm, reworded the Scope step from "inventory" to
+ * "components" copy, and moved the profile picker onto the Scope step
+ * (`useScanWizard.ts`'s `canConfirm` still requires a `profile_id` on the
+ * legacy target_ids path a never-discovered seed target takes — see issue
+ * #900 for the parallel target_scope-only gap). `walkWizardToSubmit` below
+ * walks the six real steps (Site -> Scope -> Credential -> Schedule ->
+ * Preview -> Confirm) and selects a profile on Scope, matching
+ * `StartScanScreen.test.tsx`'s own `goToScope`/`goToConfirm` helpers.
+ *
+ * KNOWN GAP (issue #980): `deploy/scripts/e2e-playwright.sh` does not seed a
+ * `profiles` row (unlike `fresh-stack-smoke-test.sh`'s "6b" step), so
+ * `E2E_PROFILE_NAME` is unset on a stack brought up via the documented e2e
+ * recipe today and this whole file skips until that script exports it.
  */
 
 const SITE_NAME = process.env.E2E_SITE_NAME;
 const CREDENTIAL_NAME = process.env.E2E_CREDENTIAL_NAME;
+const PROFILE_NAME = process.env.E2E_PROFILE_NAME;
 
-test.skip(!SITE_NAME || !CREDENTIAL_NAME, "E2E_SITE_NAME/E2E_CREDENTIAL_NAME not set — run via deploy/scripts/e2e-playwright.sh");
+test.skip(
+	!SITE_NAME || !CREDENTIAL_NAME || !PROFILE_NAME,
+	"E2E_SITE_NAME/E2E_CREDENTIAL_NAME/E2E_PROFILE_NAME not set — run via deploy/scripts/e2e-playwright.sh (issue #980: that script does not yet seed a profile row, so E2E_PROFILE_NAME is unset today)",
+);
 
 async function walkWizardToSubmit(page: import("@playwright/test").Page) {
 	await page.getByRole("link", { name: "Start a Scan" }).click();
@@ -35,19 +55,51 @@ async function walkWizardToSubmit(page: import("@playwright/test").Page) {
 	await page.getByText(SITE_NAME!, { exact: true }).click();
 	await page.getByRole("button", { name: "Next" }).click();
 
-	await expect(page.getByText("Scope — inventory")).toBeVisible();
-	await expect(page.getByText("No cached inventory — scanning the whole target.")).toBeVisible();
+	await expect(page.getByText("Scope — components")).toBeVisible();
+	await expect(page.getByText("No cached components — scanning the whole target.")).toBeVisible();
+	// The rendered option label is "<name> (<version>)" when the profile has a
+	// version, so match on the seeded name as a substring rather than an exact
+	// label (issue #980's future seed row's version, if any, is not asserted here).
+	const profileOption = page.locator("option", { hasText: PROFILE_NAME! });
+	await profileOption.waitFor({ state: "attached" });
+	const profileValue = await profileOption.getAttribute("value");
+	await page.getByRole("combobox").first().selectOption(profileValue!);
 	await page.getByRole("button", { name: "Next" }).click();
 
+	// Default "assigned" mode reads coverage straight off the target's own
+	// bindings — the seeded target has none (deploy/scripts/e2e-playwright.sh
+	// creates the site/target/credential but never binds them), so coverage
+	// shows "Missing required binding" here. Switch to "Customize per
+	// target/purpose" and apply the seeded credential as a per-target
+	// override — the same override-mode path StartScanScreen.test.tsx's own
+	// credential-gap tests exercise.
 	await expect(page.locator(".start-scan-screen__panel-title", { hasText: "Credential" })).toBeVisible();
-	await page.locator("option", { hasText: CREDENTIAL_NAME! }).waitFor({ state: "attached" });
-	await page.getByRole("combobox").selectOption({ label: CREDENTIAL_NAME! });
+	await expect(page.getByText(/Missing required binding/)).toBeVisible();
+	await page.getByText("Customize per target/purpose").click();
+	// The per-target override table has one "<target> <purpose> saved
+	// credential" combobox per (target, purpose) row — exactly one row exists
+	// for the single seeded ssh target's single required "SRG SSH" purpose.
+	// The same credential also appears in the "Bulk apply" column's own
+	// select above it, so the option lookup is scoped to this row's select
+	// rather than a bare page-wide `option` locator, which would resolve to
+	// both and trip Playwright's strict-mode ambiguity check.
+	const perTargetSelect = page.getByLabel(/saved credential$/);
+	const credentialOption = perTargetSelect.locator("option", { hasText: CREDENTIAL_NAME! });
+	await credentialOption.waitFor({ state: "attached" });
+	const credentialValue = await credentialOption.getAttribute("value");
+	await perTargetSelect.selectOption(credentialValue!);
+	await expect(page.getByText(/^Override: /)).toBeVisible();
 	await page.getByRole("button", { name: "Next" }).click();
 
 	await expect(page.getByText("Coming in a future milestone (M3).")).toBeVisible();
-	await page.getByRole("button", { name: "Next" }).click();
+	await page.getByRole("button", { name: "Next" }).click(); // -> preview
+
+	await expect(page.getByText("Preview — would-be plan")).toBeVisible();
+	await expect(page.getByText("Previewing the plan…")).toHaveCount(0);
+	await page.getByRole("button", { name: "Next" }).click(); // -> confirm
 
 	await expect(page.getByRole("button", { name: "Start scan" })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Start scan" })).toBeEnabled();
 	await page.getByRole("button", { name: "Start scan" }).click();
 }
 
