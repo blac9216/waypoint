@@ -96,6 +96,7 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 		Waypoint.Infrastructure.Components.ComponentRepository componentRepository = new(_fixture.ConnectionString);
 		CatalogRepository catalogRepository = new(_fixture.ConnectionString);
 		BaselineRepository baselineRepository = new(_fixture.ConnectionString);
+		Waypoint.Infrastructure.ConfigDocs.ConfigDocRepository configDocRepository = new(_fixture.ConnectionString);
 		RunCreationService runCreation = new(
 			jobs, _sites, _targets,
 			new TargetCredentialBindingRepository(_fixture.ConnectionString),
@@ -104,7 +105,9 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 			runSecrets, Options.Create(new DiscoveryOptions()), Options.Create(new RunSecretOptions()),
 			new ScopeResolutionService(_targets, componentRepository, catalogRepository),
 			new RunScopeSnapshotRepository(_fixture.ConnectionString),
-			new ScanPlannerService(componentRepository, catalogRepository, baselineRepository),
+			new ScanPlannerService(
+				componentRepository, catalogRepository, baselineRepository, _targets,
+				new Waypoint.Infrastructure.ConfigDocs.PlanConfigResolutionService(configDocRepository)),
 			new ScanPlanRepository(_fixture.ConnectionString),
 			componentRepository);
 

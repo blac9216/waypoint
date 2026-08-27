@@ -94,6 +94,14 @@ public sealed class PlanDrivenCredentialResolutionTests : IAsyncLifetime
 				services.AddSingleton<ScopeResolutionService>();
 				services.AddSingleton<IRunScopeSnapshotRepository>(new RunScopeSnapshotRepository(_connectionString));
 				services.AddSingleton<IBaselineRepository>(new BaselineRepository(_connectionString));
+
+				// Issue #735: ScanPlannerService now also depends on PlanConfigResolutionService
+				// (config-doc resolution), which in turn depends on ConfigDocRepository -- both
+				// must be re-registered against THIS fixture's connection string, same reason
+				// every other repository above is, or CreateScanRunAsync's plan-compile step
+				// 500s trying to reach Program.cs's default (unreachable-in-test) connection.
+				services.AddSingleton(new Waypoint.Infrastructure.ConfigDocs.ConfigDocRepository(_connectionString));
+				services.AddSingleton<Waypoint.Infrastructure.ConfigDocs.PlanConfigResolutionService>();
 				services.AddSingleton<ScanPlannerService>();
 				services.AddSingleton<Waypoint.Core.Scans.IScanPlanRepository>(new ScanPlanRepository(_connectionString));
 

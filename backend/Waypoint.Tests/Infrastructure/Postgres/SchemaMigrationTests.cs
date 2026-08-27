@@ -155,9 +155,20 @@ public sealed class SchemaMigrationTests
 	/// indexes enforce at most one ACTIVE bundle per fingerprint and at most one
 	/// CURRENT policy per scope, mirroring migrations 0052/0055's "one current row"
 	/// idiom. No new runner grants (this slice is Admin-only API CRUD; runtime
-	/// consumption is this issue's stated remainder), issue #753 --
+	/// consumption is this issue's stated remainder), issue #753, 0060 keys
+	/// config_docs to the stable catalog_execution_profile_id identity (nullable,
+	/// additive alongside the existing free-text profile column) and adds
+	/// scan_plan_items.input_resolutions_json/attestation_resolution_json/
+	/// config_resolution_digest -- issue #735 (epic #726 Wave 2, ADR-0024
+	/// "Control-granular settings and snapshots"): resolves each plan item's Input/
+	/// Attestation config-doc snapshot Global -> Site -> Target at plan-compile time,
+	/// keyed to the plan item's own catalog execution profile rather than a single
+	/// fixed ScanOptions.AttestationProfile name, and freezes the resolution into the
+	/// plan item alongside its other frozen fields. No new runner grant (this slice's
+	/// write path is API-side only, mirroring migration 0057; ScanJobHandler's
+	/// runtime attestation resolution is unchanged this slice), issue #735 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 59;
+	private const int ExpectedMigrationCount = 60;
 
 	private readonly PostgresFixture _fixture;
 

@@ -94,6 +94,13 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 				// factory's own connection string rather than inheriting Program.cs's
 				// composition.
 				services.AddSingleton<Waypoint.Core.ComplianceContent.IBaselineRepository>(new BaselineRepository(_connectionString));
+
+				// Issue #735: ScanPlannerService now also depends on PlanConfigResolutionService
+				// (config-doc resolution), which in turn depends on ConfigDocRepository -- both
+				// re-registered against this factory's own connection string for the same
+				// reason as every other RunCreationService dependency above.
+				services.AddSingleton(new Waypoint.Infrastructure.ConfigDocs.ConfigDocRepository(_connectionString));
+				services.AddSingleton<Waypoint.Infrastructure.ConfigDocs.PlanConfigResolutionService>();
 				services.AddSingleton<ScanPlannerService>();
 				services.AddSingleton<Waypoint.Core.Scans.IScanPlanRepository>(new ScanPlanRepository(_connectionString));
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Net;
+using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Errors;
 
 namespace Waypoint.Core.Scans;
@@ -102,7 +103,19 @@ public static class ScanPlanSkipReasons
 	/// <summary>A STIG execution profile's benchmark reference has no corresponding imported <c>benchmark_revisions</c> row, or no current component-to-benchmark-revision mapping exists (ADR-0022/#730).</summary>
 	public const string UnmappedBenchmark = "unmapped_benchmark";
 
-	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, UnmappedBenchmark];
+	/// <summary>
+	/// A declared Input marked required (<c>catalog_declared_inputs.is_required</c>)
+	/// resolved to no config document at any layer (Global/Site/Target) for the plan
+	/// item's execution profile (issue #735, ADR-0024 "A missing required Input leaves
+	/// the affected component job visibly skipped without an execution attempt and with a
+	/// safe readiness reason"). The component is skipped -- never executed without its
+	/// required environmental input -- while siblings with satisfied inputs still plan.
+	/// The skip <see cref="ScanPlanSkip.Detail"/> names the input definition (a
+	/// non-secret catalog identifier, not a resolved value) and remediation path.
+	/// </summary>
+	public const string MissingRequiredInput = "missing_required_input";
+
+	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, UnmappedBenchmark, MissingRequiredInput];
 }
 
 /// <summary>
@@ -126,6 +139,18 @@ public sealed record ScanPlanSkip(Guid ComponentId, string Reason, string Detail
 /// active baseline (a STIG profile lacking either is a <see cref="ScanPlanSkip"/>, not
 /// a partially-populated item -- see <see cref="ScanPlannerService"/>).
 /// </summary>
+/// <summary>
+/// <see cref="InputResolutions"/> and <see cref="AttestationResolution"/> are the
+/// issue #735/ADR-0024 config-resolution snapshot: resolved once at plan-compile time
+/// by <see cref="Waypoint.Infrastructure.ConfigDocs.PlanConfigResolutionService"/> from
+/// the Global -> Site -> Target config-doc stack keyed to
+/// <see cref="CatalogExecutionProfileId"/>, and frozen here alongside every other
+/// plan-item field -- reused by every attempt, never re-derived (ADR-0024 "The
+/// immutable snapshot is part of the planned item's compliance definition"). Both
+/// default to "no resolution attempted" (empty list / null) so a <see cref="ScanPlanItem"/>
+/// built without going through the resolver (e.g. an existing unit test fixture
+/// predating this issue) remains a valid, fully-constructible record.
+/// </summary>
 public sealed record ScanPlanItem(
 	Guid ComponentId,
 	Guid CatalogExecutionProfileId,
@@ -138,7 +163,13 @@ public sealed record ScanPlanItem(
 	int Priority,
 	string OutputKind,
 	IReadOnlyList<string> RequiredPurposes,
-	IReadOnlyList<string> DeclaredInputNames);
+	IReadOnlyList<string> DeclaredInputNames,
+	IReadOnlyList<PlanInputResolution>? InputResolutions = null,
+	PlanAttestationResolution? AttestationResolution = null)
+{
+	/// <summary>Never-null convenience accessor -- callers iterate this instead of null-checking <see cref="InputResolutions"/> everywhere.</summary>
+	public IReadOnlyList<PlanInputResolution> InputResolutionsOrEmpty => InputResolutions ?? [];
+}
 
 /// <summary>
 /// The complete, immutable, digest-addressed plan for one run (migration 0057's

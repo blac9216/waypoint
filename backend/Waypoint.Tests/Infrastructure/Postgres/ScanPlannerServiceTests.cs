@@ -16,10 +16,12 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Components;
+using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Scans;
 using Waypoint.Core.Sites;
 using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Components;
+using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Runs;
 using Waypoint.Infrastructure.Sites;
@@ -54,6 +56,7 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 	private BaselineRepository _baselines = null!;
 	private TargetRepository _targets = null!;
 	private SiteRepository _sites = null!;
+	private ConfigDocRepository _configDocs = null!;
 
 	public ScanPlannerServiceTests(PostgresFixture fixture)
 	{
@@ -71,7 +74,8 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		_baselines = new BaselineRepository(_fixture.ConnectionString);
 		_targets = new TargetRepository(_fixture.ConnectionString);
 		_sites = new SiteRepository(_fixture.ConnectionString);
-		_planner = new ScanPlannerService(_components, _catalog, _baselines);
+		_configDocs = new ConfigDocRepository(_fixture.ConnectionString);
+		_planner = new ScanPlannerService(_components, _catalog, _baselines, _targets, new PlanConfigResolutionService(_configDocs));
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
@@ -84,6 +88,7 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 			"""
 			TRUNCATE TABLE
 				scan_plan_items, scan_plans, run_scope_snapshots,
+				config_versions, config_docs,
 				baselines, content_revisions,
 				component_observations, components, targets, sites,
 				catalog_import_report_entries, catalog_import_reports, catalog_declared_inputs,
@@ -140,7 +145,11 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(
 			component.Id, contentRelease.Id, reportGroup.Id, "1.0.0", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
 		await _catalog.AddCredentialRequirementAsync(executionProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
-		await _catalog.UpsertDeclaredInputAsync(executionProfile.Id, "target_ip", "string", isRequired: true, CancellationToken.None);
+		// Declared OPTIONAL so these planner-shape tests (accepted-item / digest / skip-reason
+		// coverage) exercise config resolution without tripping issue #735's missing-required-
+		// input skip -- they seed no config doc. The dedicated required-input skip behavior has
+		// its own coverage in PlanConfigResolutionServiceTests.
+		await _catalog.UpsertDeclaredInputAsync(executionProfile.Id, "target_ip", "string", isRequired: false, CancellationToken.None);
 
 		if (withBenchmark is not null)
 		{

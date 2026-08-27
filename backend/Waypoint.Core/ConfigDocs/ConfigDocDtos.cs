@@ -47,6 +47,14 @@ public static class ConfigDocLayers
 /// rows, one per save, never mutated (docs/domain-model.md: "Every save creates a
 /// version with author + timestamp").
 /// </summary>
+/// <summary>
+/// <see cref="CatalogExecutionProfileId"/> (migration 0060, issue #735/ADR-0024) is the
+/// stable catalog identity this doc is ADDITIONALLY keyed to, alongside the original
+/// free-text <see cref="Profile"/> name -- null for every doc created before this issue
+/// and for any doc an operator authors without picking a catalog execution profile
+/// (the authoring-UI update is a deferred remainder of #735). Both keys can resolve the
+/// same doc; nothing in this slice makes populating this column mandatory.
+/// </summary>
 public sealed record ConfigDoc(
 	Guid Id,
 	string Kind,
@@ -55,7 +63,8 @@ public sealed record ConfigDoc(
 	Guid? LayerRef,
 	int CurrentVersion,
 	DateTimeOffset CreatedAt,
-	DateTimeOffset UpdatedAt);
+	DateTimeOffset UpdatedAt,
+	Guid? CatalogExecutionProfileId = null);
 
 /// <summary>One immutable version of a config-doc's body (docs/api-contract.md `/config-docs/{id}/versions`: "Full history -- the auditor answer").</summary>
 public sealed record ConfigDocVersion(

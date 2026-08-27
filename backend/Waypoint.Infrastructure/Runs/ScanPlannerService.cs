@@ -15,6 +15,9 @@
 using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Components;
 using Waypoint.Core.Scans;
+using Waypoint.Core.Sites;
+using Waypoint.Infrastructure.ConfigDocs;
+using Waypoint.Infrastructure.Sites;
 
 namespace Waypoint.Infrastructure.Runs;
 
@@ -80,15 +83,26 @@ public sealed class ScanPlannerService
 	private readonly IComponentRepository _components;
 	private readonly ICatalogRepository _catalog;
 	private readonly IBaselineRepository _baselines;
+	private readonly TargetRepository _targets;
+	private readonly PlanConfigResolutionService _configResolution;
 
-	public ScanPlannerService(IComponentRepository components, ICatalogRepository catalog, IBaselineRepository baselines)
+	public ScanPlannerService(
+		IComponentRepository components,
+		ICatalogRepository catalog,
+		IBaselineRepository baselines,
+		TargetRepository targets,
+		PlanConfigResolutionService configResolution)
 	{
 		ArgumentNullException.ThrowIfNull(components);
 		ArgumentNullException.ThrowIfNull(catalog);
 		ArgumentNullException.ThrowIfNull(baselines);
+		ArgumentNullException.ThrowIfNull(targets);
+		ArgumentNullException.ThrowIfNull(configResolution);
 		_components = components;
 		_catalog = catalog;
 		_baselines = baselines;
+		_targets = targets;
+		_configResolution = configResolution;
 	}
 
 	/// <summary>
@@ -203,9 +217,51 @@ public sealed class ScanPlannerService
 				.Select(r => r.Purpose)
 				.OrderBy(p => p, StringComparer.Ordinal)];
 
-			List<string> declaredInputs = [.. profile.DeclaredInputs
-				.Select(i => i.Name)
-				.OrderBy(n => n, StringComparer.Ordinal)];
+			// Carry the catalog's required/optional flag through (issue #735 Finding 1):
+			// a bare name list would discard IsRequired, which is exactly what let a
+			// missing REQUIRED input slip through as an accepted, executable item. The
+			// name-only list is still the value ScanPlanItem.DeclaredInputNames snapshots.
+			List<PlanDeclaredInput> declaredInputs = [.. profile.DeclaredInputs
+				.Select(i => new PlanDeclaredInput(i.Name, i.IsRequired))
+				.OrderBy(i => i.Name, StringComparer.Ordinal)];
+			List<string> declaredInputNames = [.. declaredInputs.Select(i => i.Name)];
+
+			// Issue #735/ADR-0024: resolve this item's Input/Attestation config-doc
+			// snapshot NOW, at plan-compile time, from the target's own site -- the same
+			// "resolve once, freeze forever" discipline this method already applies to
+			// baseline/benchmark identity above. A component with no resolvable target
+			// (should not happen -- ON DELETE RESTRICT from components.parent_target_id
+			// -- defensive only) skips config resolution rather than failing the whole
+			// plan; the item still plans with an empty snapshot, matching
+			// ScanPlanItem's "no resolution attempted" default.
+			Target? target = await _targets.GetAsync(component.ParentTargetId, cancellationToken).ConfigureAwait(false);
+			IReadOnlyList<Waypoint.Core.ConfigDocs.PlanInputResolution>? inputResolutions = null;
+			Waypoint.Core.ConfigDocs.PlanAttestationResolution? attestationResolution = null;
+			if (target is not null)
+			{
+				PlanConfigResolution configResolution = await _configResolution.ResolveAsync(
+					profile.ExecutionProfile.Id, target.SiteId, componentId, declaredInputs, DateTimeOffset.UtcNow, cancellationToken)
+					.ConfigureAwait(false);
+				inputResolutions = configResolution.Inputs;
+				attestationResolution = configResolution.Attestation;
+
+				// Missing-required-input gate (issue #735 owner decision "missing input
+				// isolation", ADR-0024 line 114): a declared input marked required that
+				// resolved to no document at any layer means this component cannot execute
+				// without its required environmental input. Skip it (visible, non-secret
+				// diagnostic naming the input definition) so siblings still plan -- the
+				// sanctioned per-component skip path, NOT a plan-integrity failure.
+				List<string> missingRequired = [.. inputResolutions
+					.Where(r => r.IsRequired && string.Equals(r.State, Waypoint.Core.ConfigDocs.ConfigResolutionStates.Missing, StringComparison.Ordinal))
+					.Select(r => r.InputName)
+					.OrderBy(n => n, StringComparer.Ordinal)];
+				if (missingRequired.Count > 0)
+				{
+					return (null, new ScanPlanSkip(componentId, ScanPlanSkipReasons.MissingRequiredInput,
+						$"Component '{componentId}' requires input(s) '{string.Join("', '", missingRequired)}' which resolve to no configuration document at any layer (Global/Site/Target) for execution profile '{profile.ExecutionProfile.Id}'. "
+							+ "Author an Input document supplying the required value(s) before scanning; no scan attempt was created for this component."));
+				}
+			}
 
 			ScanPlanItem item = new(
 				ComponentId: componentId,
@@ -219,7 +275,9 @@ public sealed class ScanPlannerService
 				Priority: profile.ReportGroup.Priority,
 				OutputKind: profile.ExecutionProfile.OutputKind,
 				RequiredPurposes: purposes,
-				DeclaredInputNames: declaredInputs);
+				DeclaredInputNames: declaredInputNames,
+				InputResolutions: inputResolutions,
+				AttestationResolution: attestationResolution);
 
 			return (item, null);
 		}

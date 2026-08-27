@@ -14,6 +14,8 @@
 
 using System.Text.Json;
 using Npgsql;
+using NpgsqlTypes;
+using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Scans;
 
 namespace Waypoint.Infrastructure.Runs;
@@ -67,8 +69,8 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 				INSERT INTO scan_plan_items (
 					scan_plan_id, component_id, catalog_execution_profile_id, baseline_id, benchmark_revision_id,
 					transport, selector_kind, selector_name, report_group_key, priority, output_kind,
-					required_purposes_json, declared_inputs_json)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb)
+					required_purposes_json, declared_inputs_json, input_resolutions_json, attestation_resolution_json)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb)
 				""", connection, transaction);
 			itemCommand.Parameters.AddWithValue(planId);
 			itemCommand.Parameters.AddWithValue(item.ComponentId);
@@ -83,6 +85,13 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 			itemCommand.Parameters.AddWithValue(item.OutputKind);
 			itemCommand.Parameters.AddWithValue(JsonSerializer.Serialize(item.RequiredPurposes, SerializerOptions));
 			itemCommand.Parameters.AddWithValue(JsonSerializer.Serialize(item.DeclaredInputNames, SerializerOptions));
+			itemCommand.Parameters.AddWithValue(JsonSerializer.Serialize(item.InputResolutionsOrEmpty, SerializerOptions));
+			itemCommand.Parameters.Add(new NpgsqlParameter(parameterName: null, NpgsqlDbType.Jsonb)
+			{
+				Value = item.AttestationResolution is { } attestation
+					? JsonSerializer.Serialize(attestation, SerializerOptions)
+					: DBNull.Value,
+			});
 			await itemCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
 
@@ -124,7 +133,7 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 			"""
 			SELECT i.component_id, i.catalog_execution_profile_id, i.baseline_id, i.benchmark_revision_id,
 				i.transport, i.selector_kind, i.selector_name, i.report_group_key, i.priority, i.output_kind,
-				i.required_purposes_json, i.declared_inputs_json
+				i.required_purposes_json, i.declared_inputs_json, i.input_resolutions_json, i.attestation_resolution_json
 			FROM scan_plan_items i
 			JOIN scan_plans p ON p.id = i.scan_plan_id
 			WHERE p.run_id = $1
@@ -147,7 +156,11 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 					Priority: reader.GetInt32(8),
 					OutputKind: reader.GetString(9),
 					RequiredPurposes: JsonSerializer.Deserialize<List<string>>(reader.GetString(10), SerializerOptions) ?? [],
-					DeclaredInputNames: JsonSerializer.Deserialize<List<string>>(reader.GetString(11), SerializerOptions) ?? []));
+					DeclaredInputNames: JsonSerializer.Deserialize<List<string>>(reader.GetString(11), SerializerOptions) ?? [],
+					InputResolutions: JsonSerializer.Deserialize<List<PlanInputResolution>>(reader.GetString(12), SerializerOptions) ?? [],
+					AttestationResolution: reader.IsDBNull(13)
+						? null
+						: JsonSerializer.Deserialize<PlanAttestationResolution>(reader.GetString(13), SerializerOptions)));
 			}
 		}
 
