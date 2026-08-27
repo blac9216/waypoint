@@ -50,7 +50,7 @@ function formatEventLine(event: WaypointEvent): string {
  */
 export function GenericJobDetail({ job, group }: JobDetailProps): ReactElement {
 	const terminal = isTerminalJobState(job.state);
-	const { events, loading, error } = useJobHistory(group.run_id, job.job_id, terminal);
+	const { events, loading, error, truncated, loadMore } = useJobHistory(group.run_id, job.job_id, terminal);
 	const reason = waitReasonForJob(job, group);
 
 	return (
@@ -119,6 +119,14 @@ export function GenericJobDetail({ job, group }: JobDetailProps): ReactElement {
 								{formatEventLine(event)}
 							</div>
 						))}
+						{truncated && (
+							<div className="live-jobs-detail__log-truncated" role="status">
+								<span>Showing the first {events.length.toLocaleString()} events — more history exists.</span>
+								<button type="button" className="live-jobs__load-more" onClick={loadMore} disabled={loading}>
+									{loading ? "Loading…" : "Load more history"}
+								</button>
+							</div>
+						)}
 					</>
 				) : (
 					<>

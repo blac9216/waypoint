@@ -244,6 +244,25 @@
 	word-break: break-word;
 }
 
+/* Issue #721: honest truncation indicator + continuation control for a
+ * bounded history batch (mirrors .live-jobs__load-more's history-list
+ * affordance, scoped to the log panel). */
+.live-jobs-detail__log-truncated {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px solid var(--line);
+	color: var(--txt3);
+}
+
+.live-jobs-detail__log-truncated .live-jobs__load-more {
+	width: auto;
+	border-top: none;
+	padding: 4px 8px;
+}
+
 /* Issue #708: Active/History mode toggle + History mode's own list/detail
  * chrome. Deliberately reuses the existing .live-jobs__list/.live-jobs__body/
  * .live-jobs-detail__facts classes above rather than a parallel class set --
