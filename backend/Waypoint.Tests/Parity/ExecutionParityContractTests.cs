@@ -655,7 +655,7 @@ public sealed class ExecutionParityContractTests : IAsyncLifetime, IDisposable
 		// read of the real contract, not a value this fact merely restates.
 		string modulePath = FindRepoFile("backend/Waypoint.Infrastructure.Execution/PowerShell/Modules/WaypointScan/WaypointScan.psm1");
 		string moduleSource = File.ReadAllText(modulePath);
-		int occurrences = System.Text.RegularExpressions.Regex.Matches(moduleSource, @"AllowedExitCodes\s+@\(0,\s*100,\s*101\)").Count;
+		int occurrences = System.Text.RegularExpressions.Regex.Count(moduleSource, @"AllowedExitCodes\s+@\(0,\s*100,\s*101\)");
 		Assert.True(occurrences >= 3, $"expected at least 3 transport functions (vmware/nsx/srg) to declare AllowedExitCodes @(0, 100, 101); found {occurrences} in '{modulePath}'.");
 	}
 
