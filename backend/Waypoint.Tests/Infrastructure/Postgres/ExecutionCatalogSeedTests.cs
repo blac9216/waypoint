@@ -520,9 +520,11 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 	/// doc must be covered by one of the three seed migrations' explicit assertions
 	/// above; a future doc row silently landing without a seed (or a seed migration)
 	/// still fails loudly instead of passing by omission (issue #959's defect class).
+	/// Issue #988: renamed from <c>EveryDocumentedProvenanceMatrixRow_IsEitherSeededOrDeliberatelyExempted</c>
+	/// now that there is no exemption path left to name.
 	/// </summary>
 	[Fact]
-	public void EveryDocumentedProvenanceMatrixRow_IsEitherSeededOrDeliberatelyExempted()
+	public void EveryDocumentedProvenanceMatrixRow_IsSeeded()
 	{
 		List<ProvenanceMatrixRow> rows = ParseProvenanceMatrixRows();
 		Assert.NotEmpty(rows);

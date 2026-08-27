@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.PowerShell;
@@ -24,8 +25,8 @@ namespace Waypoint.Tests.Infrastructure.PowerShell;
 /// <c>.Properties[...]?.Value</c> handed straight to a <c>switch</c>/cast) OUTSIDE
 /// <c>PowerShellValueUnwrap.cs</c> itself. A future handler that reintroduces the
 /// #972 class -- reading a nested PowerShell property without routing through the one
-/// shared chokepoint -- fails this test by file/line, instead of costing another
-/// live-lab validation round.
+/// shared chokepoint -- fails this test by file and offending statement, instead of
+/// costing another live-lab validation round.
 ///
 /// This is a source-scan test (parsing <c>.cs</c> files as text), not a reflection- or
 /// IL-based check, because the defect class is a SYNTACTIC pattern at the call site
@@ -35,6 +36,18 @@ namespace Waypoint.Tests.Infrastructure.PowerShell;
 /// are this repo's two closest guard idioms (reflection-discovery and doc/text-parsing,
 /// respectively); text-scanning production source for a banned call shape is the
 /// direct extension of the latter.
+///
+/// Issue #991: the scan is statement-aware, not line-aware. A direct read wrapped
+/// across two lines --
+/// <code>
+/// string? x = psObject.Properties["X"]
+///     ?.Value as string;
+/// </code>
+/// -- has neither token pair nor the <c>PowerShellValueUnwrap.</c> escape on any single
+/// line, so a naive per-line scan misses it entirely. Each file is joined into
+/// <c>;</c>-terminated logical statements (whitespace/newlines collapsed to a single
+/// space first) before matching, so a <c>.Properties[...]</c> read and its <c>.Value</c>
+/// access are evaluated together regardless of how the source wraps them.
 /// </summary>
 public sealed class PowerShellBoundaryChokepointGuardTests
 {
@@ -53,31 +66,39 @@ public sealed class PowerShellBoundaryChokepointGuardTests
 				continue;
 			}
 
-			string[] lines = File.ReadAllLines(path);
-			for (int i = 0; i < lines.Length; i++)
+			string source = File.ReadAllText(path);
+
+			// Collapse all whitespace (including newlines) to single spaces, then split
+			// into ';'-terminated logical statements. This reunites a '.Properties[...]'
+			// read with its '.Value' access even when the source wraps them across lines,
+			// closing the multi-line evasion issue #991 found in the original per-line scan.
+			string collapsed = Regex.Replace(source, @"\s+", " ");
+			string[] statements = collapsed.Split(';');
+
+			foreach (string statement in statements)
 			{
-				string line = lines[i];
-				if (!line.Contains(".Properties[", StringComparison.Ordinal) || !line.Contains(".Value", StringComparison.Ordinal))
+				if (!statement.Contains(".Properties[", StringComparison.Ordinal) || !statement.Contains(".Value", StringComparison.Ordinal))
 				{
 					continue;
 				}
 
-				// Routed through the chokepoint on this same line -- allowed regardless of
+				// Routed through the chokepoint in this statement -- allowed regardless of
 				// exact shape (Unwrap/UnwrapAs/UnwrapAsStruct/UnwrapEach all wrap the read).
-				if (line.Contains("PowerShellValueUnwrap.", StringComparison.Ordinal))
+				if (statement.Contains("PowerShellValueUnwrap.", StringComparison.Ordinal))
 				{
 					continue;
 				}
 
-				offenders.Add($"{Path.GetRelativePath(executionProjectDir, path)}:{i + 1}: {line.Trim()}");
+				offenders.Add($"{Path.GetRelativePath(executionProjectDir, path)}: {statement.Trim()}");
 			}
 		}
 
 		Assert.True(
 			offenders.Count == 0,
 			"Found direct PSObject.Properties[...].Value read(s) outside PowerShellValueUnwrap " +
-			"(issue #972/#976's chokepoint). Route these through PowerShellValueUnwrap.Unwrap/" +
-			"UnwrapAs<T>/UnwrapAsStruct<T>/UnwrapEach instead:\n" + string.Join('\n', offenders));
+			"(issue #972/#976's chokepoint), including any split across lines (issue #991). Route " +
+			"these through PowerShellValueUnwrap.Unwrap/UnwrapAs<T>/UnwrapAsStruct<T>/UnwrapEach " +
+			"instead:\n" + string.Join('\n', offenders));
 	}
 
 	private static string FindDirectoryUpward(string repoRelativePath)
