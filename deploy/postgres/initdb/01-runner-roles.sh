@@ -47,8 +47,8 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
 		CREATE ROLE waypoint_download_runner LOGIN PASSWORD :'download_pw';
 	\endif
 
-	-- Neither role may create objects, databases, or other roles -- least privilege
-	-- (ADR-0014 SS7). Table-level GRANTs are applied later by the 0025 migration,
+	-- Neither role may create objects, databases, or other roles -- least privilege.
+	-- Table-level GRANTs are applied later by the 0025 migration,
 	-- which runs as $POSTGRES_USER (this database's owner) and therefore has
 	-- authority to grant on objects it owns without either runner role being an
 	-- owner itself.

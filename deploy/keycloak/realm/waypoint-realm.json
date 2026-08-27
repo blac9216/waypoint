@@ -58,7 +58,7 @@
     {
       "clientId": "waypoint-backend",
       "name": "Waypoint backend (control plane)",
-      "description": "Confidential OIDC client the ASP.NET Core backend uses as a plain relying party (ADR-0004). Client secret is templated -- never committed. See deploy/README.md 'Keycloak realm bootstrap'.",
+      "description": "Confidential OIDC client the ASP.NET Core backend uses as a plain relying party. Client secret is templated -- never committed. See deploy/README.md 'Keycloak realm bootstrap'.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
@@ -115,7 +115,7 @@
     {
       "clientId": "waypoint-frontend",
       "name": "Waypoint frontend (SPA)",
-      "description": "Public OIDC client (issue #534) for the React PWA's authorization-code + PKCE flow. No client secret (publicClient, PKCE S256 required) -- see deploy/keycloak/README.md.",
+      "description": "Public OIDC client for the React PWA's authorization-code + PKCE flow. No client secret (publicClient, PKCE S256 required) -- see deploy/keycloak/README.md.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": true,

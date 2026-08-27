@@ -32,6 +32,6 @@ missing="$(psql -U "${POSTGRES_USER:-waypoint}" -d "${POSTGRES_DB:-waypoint}" \
 
 if [ -n "$missing" ]; then
 	echo "waypoint: postgres is accepting connections but initdb never completed -- missing: ${missing}" >&2
-	echo "waypoint: reporting UNHEALTHY rather than letting dependents start against a half-initialized cluster (issue #844)." >&2
+	echo "waypoint: reporting UNHEALTHY rather than letting dependents start against a half-initialized cluster." >&2
 	exit 1
 fi
