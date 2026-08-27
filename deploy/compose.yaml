@@ -1,88 +1,23 @@
-# Waypoint dev compose stack (issue #2, epic #1; runner topology issue #442,
-# ADR-0013/0014/0015; runner egress issue #578).
-#
-# Topology (docs/architecture.md component view; ADR-0001 packaging):
-#   nginx (edge, TLS + static frontend + /api proxy)
-#     -> backend (ASP.NET Core control plane -- REST/RBAC/SSE, no execution)
-#        -> postgres (internal network only, no published port)
-#   compliance-runner (discover/credential-test/scan)
-#     -> postgres (internal), lab/target infrastructure (runner-egress)
-#   download-runner   (catalog-index/download)
-#     -> postgres (internal), depot/internet in connected mode (runner-egress)
-#
-# The two runners are long-lived Generic Host services, not additional web APIs
-# (ADR-0013 decision 3) -- they claim jobs directly from Postgres (ADR-0014
-# decision 1) and are not reachable from nginx or the host. One replica of each is
-# the default; ADR-0013 decision 6 explicitly does not multiply services without
-# measured need. Each connects to Postgres as its own least-privilege role
-# (waypoint_compliance_runner / waypoint_download_runner -- see the postgres
-# service below and backend/Waypoint.Infrastructure/Data/Migrations/
-# 0025_runner_db_roles.sql), separate from the backend's own waypoint/owner role.
-#
-# Issue #578: both runners previously sat ONLY on `internal` (no route out), so
-# neither could resolve or reach anything outside the compose stack --
-# compliance-runner cannot reach scan targets/STIG Manager, download-runner
-# cannot reach the Broadcom depot. `runner-egress` (below) is a second,
-# project-scoped bridge network (not `internal: true`) that gives both runners
-# a route out while `postgres` stays on `internal` alone -- neither runner's
-# new network reaches Postgres, and nothing on `edge`/`internal` gains a route
-# out through this change. See deploy/README.md "Runner egress" for the
-# disconnected/air-gapped operator override.
-#
-# Bring-up: `cd deploy && docker compose up -d`. This file is the PRODUCTION
-# base -- Keycloak-only auth, file-backed secrets (issue #844), operator-
-# provided TLS. It has no dev bootstrap services and no dev-auth fallback.
-# For a local development loop (self-signed TLS, generated secrets, the
-# local-auth dev flag, and lower resource fallbacks), Compose auto-loads
-# `compose.override.yaml` when present -- copy the committed
-# `compose.override.example.yaml` to that name to opt in. See
-# deploy/README.md.
-
-# Issue #885: this file is the PRODUCTION base (see the header comment
-# above) -- a real deployment stamping "-dev" onto every network/volume/
-# container name it creates was an operator-facing oddity left over from
-# before #845 split production from the dev override. `waypoint` alone is
-# the base's canonical project identity; concurrent isolated bring-ups
-# still override it with `-p` (docs/testing.md's isolation recipe) and the
-# persistent human dev loop's helper (deploy/scripts/generate-dev-stack.sh
-# --mode persistent) passes the same default explicitly rather than relying
-# on this file's own name. A plain, un-`-p`'d `docker compose up -d` from
-# any checkout now lands in the shared `waypoint` project instead of
-# `waypoint-dev` -- still a collision hazard between two such unisolated
-# bring-ups on one host (unchanged from before this rename), but no longer
-# a misleadingly dev-flavored name on a real appliance.
+# Waypoint production compose base: Keycloak-only auth, operator-provided
+# TLS/secrets, no dev bootstrap. For local dev, copy
+# compose.override.example.yaml to compose.override.yaml. See
+# deploy/README.md and docs/rationale/deploy.md.
+# why: docs/rationale/deploy.md#compose-name-waypoint-project-identity
 name: waypoint
 
-# ── Operator-editable configuration (issue #845) ───────────────────────────
-# The handful of values a real deployment is expected to change. Edit these
-# anchors directly, or leave them as `${VAR:-default}` and set VAR in
-# deploy/.env -- either way, every service below references one of these six
-# anchors instead of repeating its own `${VAR:-default}`. Everything past
-# this block is topology and should not need to change per-deployment.
+# ── Operator-editable configuration ─────────────────────────────────────
 x-operator-config:
-  # Issue #842: the ONE browser-facing HTTPS origin for this appliance. Both
-  # the backend's token issuer (Oidc__PublicUrl below) and Keycloak's own
-  # identity (WAYPOINT_PUBLIC_URL/KC_HOSTNAME below) are derived from this
-  # single anchor so they cannot drift out of sync. REQUIRED for a real
-  # deployment -- the fallback is an obviously-nonfunctional placeholder
-  # domain (RFC 2606-style, matching this repo's own sanitization
-  # convention), never `localhost`, so an unconfigured base fails OIDC
-  # discovery/login clearly instead of quietly working against a loopback
-  # origin nothing external can reach.
+  # Browser-facing HTTPS origin; derives the backend's OIDC issuer and
+  # Keycloak's own hostname. REQUIRED for a real deployment.
+  # why: docs/rationale/deploy.md#compose-public-url-single-origin
   public-url: &public-url "${WAYPOINT_PUBLIC_URL:-https://waypoint.example.internal}"
-  # Host port nginx's TLS listener publishes to. 8443 is a reasonable
-  # default for both a real appliance and concurrent isolated bring-ups
-  # (docs/testing.md) alike, so it stays a default here rather than moving
-  # to the development-only override.
+  # Host port nginx's TLS listener publishes to.
   https-port: &https-port "${WAYPOINT_HTTPS_PORT:-8443}"
-  # Subnet for the `edge` network (nginx <-> backend/keycloak) -- pinned so
-  # ForwardedHeaders:KnownNetworks (backend env below) can trust exactly
-  # this network. See the `edge` network's own comment below for why this
-  # particular range was chosen.
+  # Subnet for the `edge` network (nginx <-> backend/keycloak).
+  # why: docs/rationale/deploy.md#compose-edge-subnet-pinning
   edge-subnet: &edge-subnet "${WAYPOINT_EDGE_SUBNET:-192.168.240.0/24}"
-  # Operator-provided TLS certificate/key (ADR-0003) -- REQUIRED. No
-  # dev-bootstrap self-signed fallback in this file; see
-  # compose.override.example.yaml for the development-only pair.
+  # Operator-provided TLS certificate/key. REQUIRED.
+  # why: docs/rationale/deploy.md#compose-tls-required-no-fallback
   tls-cert-file: &tls-cert-file ./config/tls/tls.crt
   tls-key-file: &tls-key-file ./config/tls/tls.key
 
@@ -92,6 +27,7 @@ x-backend-image: &backend-image
     dockerfile: backend/Dockerfile
 
 services:
+  # --- nginx ---
   nginx:
     build:
       context: ..
@@ -99,23 +35,14 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    # Long syntax so `published:` can alias the https-port anchor above
-    # (a YAML alias node can't be spliced into part of a scalar string, so
-    # this can't be the short "HOST:CONTAINER" form).
+    # Long syntax: published: aliases https-port.
+    # why: docs/rationale/deploy.md#compose-ports-long-syntax
     ports:
       - target: 443
         published: *https-port
     volumes:
-      # Operator-provided TLS (issue #844/#845) -- place real
-      # certificate/key material at deploy/config/tls/tls.crt and
-      # deploy/config/tls/tls.key (gitignored -- see .gitignore's
-      # /deploy/config/ entry; paths editable via the tls-cert-file/
-      # tls-key-file anchors above) before bringing this file up on its own.
-      # Both mount at the SAME generic names
-      # (tls.crt/tls.key, deploy/nginx/conf.d/default.conf) the development
-      # override's dev-bootstrap-generated self-signed pair also uses, so
-      # switching between this base and compose.override.example.yaml needs
-      # no nginx config change, only which TLS material is present.
+      # Place real cert/key at deploy/config/tls/tls.{crt,key} (gitignored).
+      # why: docs/rationale/deploy.md#compose-tls-bind-fail-closed
       - type: bind
         source: *tls-cert-file
         target: /etc/nginx/certs/tls.crt
@@ -138,192 +65,49 @@ services:
       start_period: 5s
     restart: unless-stopped
 
-  # The real ASP.NET Core backend (#3), replacing the nginx-based stub this
-  # file shipped with. The service name (`backend`), the /api/v1/health
-  # contract, and its position on the edge+internal networks are the
-  # interface nginx and postgres depend on - unchanged across the swap.
+  # --- backend ---
   backend:
     <<: *backend-image
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      # Issue #845: this base ships Keycloak-only auth -- no LocalAuth__*
-      # keys here at all, so LocalAuthOptions binds its own compiled-in
-      # default (Enabled=false, AuthController.Login 404s outright). See
-      # compose.override.example.yaml for the local-auth dev flag
-      # (Waypoint.Core.Configuration.LocalAuthOptions, issue #29/#333/#62,
-      # deploy/README.md "Local auth (dev-flag)").
-      #
-      # Issue #29, ADR-0004: the backend validates Keycloak-issued bearer
-      # tokens as a plain OIDC relying party. Authority drives DISCOVERY ONLY
-      # (issue #842 -- see Oidc__PublicUrl below for issuer derivation) and
-      # is this compose stack's own Keycloak service, reachable from
-      # `backend` over the shared `internal` network (Keycloak's own
-      # listener is plain HTTP inside the compose network -- TLS is
-      # terminated once, at nginx, same split as backend's own listener) --
-      # RequireHttpsMetadata is false for exactly that reason in this
-      # stack; a real deployment behind its own TLS-terminated Keycloak
-      # should override both. Includes the /auth prefix
-      # (KC_HTTP_RELATIVE_PATH below) because that prefix shifts EVERY URL
-      # Keycloak serves, including on its internal container-network
-      # listener, not just the nginx-proxied browser path (issue #536; this
-      # was previously missing the prefix on this internal value even after
-      # #534 added it to Oidc__PublicAuthority below). Audience must match
-      # the realm's `waypoint-backend` client id
-      # (deploy/keycloak/realm/waypoint-realm.json).
+      # No LocalAuth__* here — Keycloak-only. See compose.override.example.yaml.
       Oidc__Authority: "${OIDC_AUTHORITY:-http://keycloak:8080/auth/realms/waypoint}"
-      # Issue #842: the ONE browser-facing HTTPS origin for this appliance.
-      # Both the backend's token issuer (derived as
-      # {PublicUrl}/auth/realms/waypoint, see OidcAuthOptions.DerivedIssuer)
-      # and Keycloak's own KC_HOSTNAME (below) come from this single value --
-      # they used to be two independently-configured settings (Oidc__ValidIssuer
-      # + KC_HOSTNAME) that a real deployment had to keep in lockstep by hand,
-      # which is exactly the drift this issue closes. An operator who exposes
-      # a real edge hostname or overrides WAYPOINT_HTTPS_PORT need change only
-      # this one variable; see deploy/README.md "Keycloak" for the exact
-      # operator override steps. Must be an absolute HTTPS origin with no
-      # path/query/fragment/trailing slash (OidcAuthOptions.IsValidPublicUrl)
-      # -- startup fails clearly (ValidateOnStart) otherwise. Sourced from
-      # the public-url operator-config anchor at the top of this file --
-      # REQUIRED for a real deployment; the anchor's fallback is a
-      # deliberately nonfunctional placeholder domain, never `localhost`.
+      # why: docs/rationale/deploy.md#compose-public-url-single-origin
       Oidc__PublicUrl: *public-url
       Oidc__Audience: "${OIDC_AUDIENCE:-waypoint-backend}"
       Oidc__RequireHttpsMetadata: "${OIDC_REQUIRE_HTTPS_METADATA:-false}"
-      # Issue #534: the BROWSER-facing authority + public client id, handed to
-      # the SPA anonymously via GET /api/v1/auth/config so it never hardcodes
-      # either. Deliberately NOT the same value as Oidc__Authority above --
-      # that is the backend's container-network view of Keycloak
-      # (http://keycloak:8080/...), which a browser can never reach. The
-      # default here is nginx's own same-origin proxy path (`/auth/`,
-      # deploy/nginx/conf.d/default.conf, issue #28) -- a relative path with
-      # no host/port baked in, since an air-gapped appliance has no fixed
-      # public hostname to assume. Override only if an operator's edge
-      # topology puts Keycloak somewhere else relative to the browser.
+      # Browser-facing authority/client id — deliberately not Oidc__Authority.
+      # why: docs/rationale/deploy.md#compose-oidc-authority-vs-public-authority
       Oidc__PublicAuthority: "${OIDC_PUBLIC_AUTHORITY:-/auth/realms/waypoint}"
       Oidc__PublicClientId: "${OIDC_PUBLIC_CLIENT_ID:-waypoint-frontend}"
-      # Postgres connection (#103): backend/appsettings.json bakes in a default
-      # ConnectionStrings:Waypoint that happens to match the postgres service's
-      # own defaults below, so an unconfigured stack still connects out of the
-      # box (issue #4). But the two are not actually linked - Compose has no
-      # way to interpolate one service's environment from another's inline, so
-      # an operator who overrides POSTGRES_USER/PASSWORD/DB (the whole point of
-      # the `${...:-default}` on the postgres service) needs the backend to
-      # follow. This composes the standard ASP.NET Core double-underscore
-      # environment override (Microsoft.Extensions.Configuration.EnvironmentVariables;
-      # same mechanism as LocalAuth__AdminPasswordHash above) from the exact
-      # same POSTGRES_* variables, so one set of overrides in .env covers both
-      # containers. Host/port/sslmode are dev-stack constants, not operator
-      # knobs: `postgres` is the internal-network service name (never resolvable
-      # outside this compose stack) and 5432 is the container's fixed listen
-      # port from the postgres:16-alpine image, so neither varies with the
-      # operator's credential choice.
-      # Password= deliberately empty (issue #844): Database__PasswordFile
-      # below is mandatory (postgres itself now refuses to start without its
-      # own POSTGRES_PASSWORD_FILE -- see the postgres service), so the
-      # file-backed value always wins and an inline fallback here would only
-      # ever be an unused literal sitting in `docker inspect` output.
+      # why: docs/rationale/deploy.md#compose-db-passwordfile-split
       ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=${POSTGRES_USER:-waypoint};Password="
-      # Issue #843: resolved once at startup by DatabaseConnectionStringResolver
-      # (backend/Waypoint.Infrastructure/Data) -- when this names a readable file,
-      # its contents (minus a trailing newline) override whatever Password=
-      # ConnectionStrings__Waypoint carries; DatabaseConnectionStringResolver fails
-      # startup closed if the file is named but unreadable. Defaults to the same
-      # Compose `secrets:`-mounted file (issue #844) the postgres service's own
-      # POSTGRES_PASSWORD_FILE reads.
       Database__PasswordFile: "${WAYPOINT_DB_PASSWORD_FILE:-/run/db-secret/postgres-owner-password}"
-      # #191: narrows ForwardedHeaders:KnownNetworks (Program.cs) from the
-      # whole-RFC-1918-space fallback to exactly the edge network's pinned
-      # subnet (see the `edge` network's ipam config below) - the only network
-      # nginx and the backend share, and the only source X-Forwarded-For/
-      # X-Forwarded-Proto should ever be trusted from in this deployment.
       ForwardedHeaders__KnownNetworks__0: *edge-subnet
-      # Secrets master key (issue #405; ADR-0005, AWX-pattern envelope
-      # encryption). Preferred and only delivery path is a mounted file,
-      # mounted via an operator compose.override.yaml from ./config/secrets/waypoint-master-key (gitignored -
-      # see .gitignore's /deploy/config/ entry; issue #845 migrated this off
-      # the legacy repo-root /config/ convention onto the same
-      # deploy/config/ location #844 already used for the Compose
-      # `secrets:`-backed files below). This env var names the
-      # in-container path; FileMasterKeyProvider reads the key from it
-      # lazily, on the first secret-store operation, not at startup - so an
-      # unconfigured stack still comes up healthy and only a credential
-      # write fails, with FileMasterKeyProvider's own
-      # "No master key is configured..." error. There is no env-var
-      # fallback here: FileMasterKeyProvider only ever reads a file, by design, since env
-      # vars leak via /proc/<pid>/environ, `docker inspect`, and crash
-      # dumps. See deploy/README.md "Bring-up" for how to generate the
-      # key file's contents.
+      # why: docs/rationale/deploy.md#compose-master-key-file-only
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
     volumes:
-      # Read-only (issue #442 AC5: "backend no longer mounts execution scripts
-      # or domain tool stores read-write"). ADR-0014 §7: "backend: read-only
-      # artifact access where required to serve results/downloads" -- the
-      # backend never writes an artifact itself (it has no execution
-      # dispatcher, ADR-0013 §1), it only serves already-written scan/download
-      # output back to the API caller. compliance-runner and download-runner
-      # (below) hold the read-write mount for the same named volume.
+      # why: docs/rationale/deploy.md#compose-backend-artifact-mount-scope
       - artifacts:/var/lib/waypoint/artifacts:ro
-      # Read-write (issue #621, re-scoped per #630 review): ManagedToolController.Upload
-      # (POST /api/v1/downloads/tool/upload) stages the uploaded artifact +
-      # detached signature under ManagedToolOptions.UploadStagingPath before
-      # queuing the tool-install job that reads it back. This is a SEPARATE,
-      # staging-only named volume (NOT the managed-tool tool store): the backend
-      # deliberately does NOT mount `managed-tool`, so it never has write access
-      # to the verified tool binary (ToolStatePath) or the RSA release-key trust
-      # anchor (ReleasePublicKeyPath) -- ADR-0014 §7 (backend read-only where
-      # required; tool mounts scoped to the domain that needs them) and the
-      # issue-#442 AC5 boundary (see the artifacts comment above; #570 kept the
-      # API off the tool store). The SAME `tool-upload-staging` volume is mounted
-      # into download-runner (below) so a file this controller stages is on a
-      # filesystem the download-runner reads once it claims that job -- a distinct
-      # volume per service would stage a file the runner could never see. The
-      # backend's docker-entrypoint.sh chowns ONLY this staging mount to `app` at
-      # container start (the same root-then-drop pattern download-runner uses).
+      # why: docs/rationale/deploy.md#compose-tool-upload-staging-volume
       - tool-upload-staging:/var/lib/waypoint/tool-upload-staging
-      # Secrets master key file (issue #405) - operator-provided, gitignored
-      # (deploy/config/ is covered by .gitignore's anchored /deploy/config/
-      # entry). Commented out by default so an unconfigured stack does not
-      # fail to start on a missing bind source: FileMasterKeyProvider only
-      # loads the key lazily on first use (see the WAYPOINT_MASTER_KEY_FILE
-      # comment above), so a stack without this mount still starts and
-      # reports healthy - only a credential write (or anything else that
-      # touches the secret store) fails, with FileMasterKeyProvider's own
-      # clean fail-closed error. This commented block is the mount SHAPE to
-      # copy into deploy/compose.override.yaml (auto-loaded by `docker
-      # compose up -d`, no -f needed) - do NOT uncomment it here; editing
-      # this service body is what deploy/README.md "Production only: secrets
-      # master key (issue #405)" tells operators not to do. That section has
-      # the ready-to-paste override, including the anchor that applies the
-      # same mount to all three trusted services:
+      # Mount SHAPE to copy into compose.override.yaml — do not uncomment here.
+      # why: docs/rationale/deploy.md#compose-master-key-override-not-uncomment
       # - type: bind
       #   source: ./config/secrets/waypoint-master-key
       #   target: /run/secrets/waypoint-master-key
       #   read_only: true
       #   bind:
       #     create_host_path: false
-    # Issue #844: Compose's own file-secret mechanism -- mounts
-    # deploy/config/secrets/postgres-owner-password read-only at
-    # /run/db-secret/postgres-owner-password, the path Database__PasswordFile
-    # above reads. A DELIBERATELY different target than the default
-    # /run/secrets/<name>: the development override (issue #845,
-    # compose.override.example.yaml) mounts a read-only `dev-secrets` named
-    # volume at /run/secrets on this service, and a read-only mount's
-    # directory tree cannot host a new nested mountpoint -- `docker compose
-    # up` fails closed with "read-only file system" under that override if
-    # this target collides with that one, so both files use this path.
+    # why: docs/rationale/deploy.md#compose-db-secret-vs-run-secrets-split
     secrets:
       - source: postgres-owner-password
         target: /run/db-secret/postgres-owner-password
     networks:
       - edge
       - internal
-    # The image reports its own health; compose only invokes it (see
-    # backend/README.md "Container health"). The .NET runtime image ships
-    # neither wget nor curl, so the previous `wget --spider` probe could
-    # never run - it failed every attempt and nginx, gated on
-    # `condition: service_healthy`, never started.
     healthcheck:
       test: ["CMD", "dotnet", "Waypoint.Api.dll", "--health-check"]
       interval: 10s
@@ -332,41 +116,16 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # --- postgres ---
   postgres:
     build:
       context: ./postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-waypoint}
       POSTGRES_DB: ${POSTGRES_DB:-waypoint}
-      # Issue #844: file-backed, not an inline value - POSTGRES_PASSWORD_FILE
-      # is the postgres:16-alpine image's OWN built-in convention (its
-      # docker-entrypoint.sh file_env helper), so this one needs no wrapper
-      # script; the three below are Waypoint-defined (consumed by the initdb
-      # scripts, not the base image) but follow the same naming shape for
-      # consistency. Every path here is a Compose `secrets:`-mounted file
-      # (see the top-level `secrets:` block below) - a missing host file
-      # makes `docker compose up` fail at container creation (the daemon
-      # rejects the bind), and deploy/postgres/docker-entrypoint-wrapper.sh
-      # rejects an empty/unreadable one BEFORE the stock entrypoint can run
-      # initdb, so a bad file can never leave a half-initialized data
-      # directory behind. See that script's header comment.
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres-owner-password
-      # Issue #442 (ADR-0014 §7): passwords for the two dedicated runner DB
-      # roles postgres/initdb/01-runner-roles.sh creates on first init. Table
-      # grants for these roles live in a versioned backend migration
-      # (0025_runner_db_roles.sql), not here - see that file's header comment
-      # for why role creation and grants are deliberately split.
       POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE: /run/secrets/postgres-compliance-runner-password
       POSTGRES_DOWNLOAD_RUNNER_PASSWORD_FILE: /run/secrets/postgres-download-runner-password
-      # Issue #28 (ADR-0004): password for Keycloak's own login role + database,
-      # created by postgres/initdb/02-keycloak-db.sh on first init. Unlike the
-      # two runner passwords above, this role OWNS its database outright
-      # (Keycloak manages its own schema via its own migrations) rather than
-      # receiving grants into the shared `waypoint` database - see that
-      # script's header comment for why it deliberately does not follow the
-      # 01-runner-roles.sh + 0025-migration grants pattern. The SAME file is
-      # also mounted into the `keycloak` service below (KC_DB_PASSWORD_FILE) -
-      # one file, one password, both sides of the same login.
       POSTGRES_KEYCLOAK_PASSWORD_FILE: /run/secrets/postgres-keycloak-password
     secrets:
       - postgres-owner-password
@@ -375,162 +134,45 @@ services:
       - postgres-keycloak-password
     volumes:
       - pgdata:/var/lib/postgresql/data
-    # No `ports:` - reachable only from other containers on the internal
-    # network (ADR-0002; issue #2 acceptance criteria). Not published to
-    # the host, not reachable from the edge network nginx sits on.
+    # No ports: — reachable only on `internal`, never published to the host.
     networks:
       - internal
     healthcheck:
-      # Issue #844: deliberately NOT a bare `pg_isready`. A half-initialized
-      # cluster (initdb ran, docker-entrypoint-initdb.d aborted) accepts
-      # connections and would pass pg_isready while having none of the roles
-      # or the `keycloak` database the rest of the stack depends on -- so
-      # this also asserts both initdb scripts completed. See
-      # deploy/postgres/healthcheck.sh.
+      # why: docs/rationale/deploy.md#compose-postgres-healthcheck-wrapper
       test: ["CMD", "/usr/local/bin/waypoint-postgres-healthcheck.sh"]
       interval: 10s
       timeout: 5s
       retries: 5
-      # Longer than the old bare-pg_isready start_period (5s) on purpose: a
-      # socket-only temp server is already pg_isready-positive part way
-      # through `initdb`, so the old check could go green BEFORE
-      # docker-entrypoint-initdb.d had run at all. This one deliberately
-      # cannot pass until 01-runner-roles.sh and 02-keycloak-db.sh have both
-      # finished, which on a loaded host (a full `up --build` starting six
-      # other services at once) takes appreciably longer than the pg_isready
-      # window did -- live-observed exceeding a 15s start_period during a
-      # fresh-stack-smoke-test.sh run. Failures inside start_period do not
-      # count toward `retries`, so this only widens the first-boot grace
-      # period; a genuinely broken cluster still goes unhealthy 50s later.
       start_period: 120s
     restart: unless-stopped
 
-  # Keycloak (issue #28, ADR-0004): the IdP. The backend and frontend remain
-  # plain OIDC relying parties (no Keycloak-specific application code), so
-  # this service exists purely to authenticate and issue tokens - the
-  # backend's own OIDC swap lands in #29. Straddles `edge` (nginx proxies to
-  # it, same as `backend`) and `internal` (its own Postgres database) - the
-  # same network shape as `backend`, deliberately: nginx -> keycloak is a
-  # first-class proxy path per docs/architecture.md's component-view mermaid,
-  # not an afterthought. Pinned image version (air-gap: no ":latest", no
-  # runtime image resolution) - see deploy/README.md "Keycloak" for how an
-  # operator air-gaps this pull per ADR-0015's source-build norms (Keycloak
-  # itself is third-party, not project-owned code, so ADR-0015's "operator
-  # builds from source" duty doesn't apply the way it does to backend/the two
-  # runners - the norm that DOES apply is the same one nginx and postgres
-  # already follow: pin a version, let the operator's own registry mirror or
-  # pre-pulled image cache satisfy it in a disconnected environment).
+  # --- keycloak ---
   keycloak:
     build:
       context: ./keycloak
-    # Issue #536: --hostname-strict=true is REQUIRED for KC_HOSTNAME (below) to
-    # actually pin one canonical issuer -- hostname-strict=false ("Disables
-    # dynamically resolving the hostname from request headers" per `kc.sh
-    # --help-all`) is start-dev's implicit default, and live-verified to override
-    # KC_HOSTNAME silently: the discovery document's `issuer` kept reflecting
-    # whatever Host header the request arrived with even with KC_HOSTNAME set,
-    # until this flag was added. This is the opposite of what "strict" sounds like
-    # it should do relative to the old (v1) --hostname-strict semantics, so do not
-    # "simplify" this back out without re-reading that live-verification note.
+    # why: docs/rationale/deploy.md#compose-keycloak-hostname-strict
     command: ["start-dev", "--import-realm", "--http-enabled=true", "--hostname-strict=true", "--health-enabled=true"]
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      # Keycloak's own database - its dedicated login role + database from
-      # postgres/initdb/02-keycloak-db.sh, NOT the shared `waypoint` database
-      # backend/the runners use (see that script's header comment and the
-      # postgres service's own comment above).
       KC_DB: postgres
       KC_DB_URL: "jdbc:postgresql://postgres:5432/keycloak"
       KC_DB_USERNAME: keycloak
-      # Issue #844: consumed by deploy/keycloak/docker-entrypoint-wrapper.sh,
-      # NOT a built-in Keycloak convention - live-verified (see that script's
-      # header comment) that KC_DB_PASSWORD is not vault-aware in this image,
-      # so a wrapper reads the file and exports the real KC_DB_PASSWORD
-      # before handing off to kc.sh. Same Compose `secrets:`-mounted file as
-      # the postgres service's own POSTGRES_KEYCLOAK_PASSWORD_FILE above.
       KC_DB_PASSWORD_FILE: /run/secrets/postgres-keycloak-password
-      # Bootstrap admin (Keycloak's own bootstrap-admin mechanism, analogous
-      # to backend's LocalAuth admin password - issue #333's reasoning
-      # applies equally here). KEYCLOAK_ADMIN is a username, not a secret;
-      # KEYCLOAK_ADMIN_PASSWORD_FILE is the same wrapper-consumed convention
-      # as KC_DB_PASSWORD_FILE above (also not vault-aware, live-verified).
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
       KEYCLOAK_ADMIN_PASSWORD_FILE: /run/secrets/keycloak-bootstrap-admin-password
-      # Issue #844: the waypoint-backend realm client's secret
-      # (deploy/keycloak/realm/waypoint-realm.json's `${WAYPOINT_BACKEND_CLIENT_SECRET}`
-      # field) - unlike the two _FILE vars above, this one IS consumed by a
-      # genuine Keycloak mechanism once the wrapper exports it: the same
-      # keycloak.migration.replace-placeholders substitution JAVA_OPTS_APPEND
-      # turns on below for WAYPOINT_PUBLIC_URL. See
-      # deploy/keycloak/README.md "What's here" for the full explanation.
       WAYPOINT_BACKEND_CLIENT_SECRET_FILE: /run/secrets/keycloak-backend-client-secret
-      # start-dev's HTTP listener is fine here: TLS is terminated once, at
-      # nginx (operator-provided certs, ADR-0003) - same split as backend,
-      # which also listens on plain HTTP behind the edge network.
+      # start-dev HTTP is fine — TLS terminates once, at nginx.
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: "xforwarded"
-      # Issue #842: the same single public origin the backend derives its
-      # issuer from (Oidc__PublicUrl above). Two consumers read it here:
-      # (1) KC_HOSTNAME below derives Keycloak's own canonical identity from
-      # it directly in the env value (no separate KC_HOSTNAME override to
-      # keep in sync); (2) waypoint-realm.json's `${WAYPOINT_PUBLIC_URL}`
-      # placeholders (rootUrl/redirectUris/webOrigins on both clients) are
-      # substituted into the imported realm at boot -- see
-      # JAVA_OPTS_APPEND below, which is what turns that substitution on.
+      # why: docs/rationale/deploy.md#compose-public-url-single-origin
       WAYPOINT_PUBLIC_URL: *public-url
-      # Keycloak's realm-import placeholder substitution
-      # (`${WAYPOINT_PUBLIC_URL}` in waypoint-realm.json) is OFF by default;
-      # this system property turns it on for the `--import-realm` boot path
-      # (live-verified: KC_ env vars do not map to this JVM system property,
-      # it must go through JAVA_OPTS_APPEND). Without it Keycloak imports the
-      # literal string `${WAYPOINT_PUBLIC_URL}` as the client's redirect
-      # URI/origin instead of substituting the real value.
+      # why: docs/rationale/deploy.md#compose-realm-placeholder-substitution
       JAVA_OPTS_APPEND: "-Dkeycloak.migration.replace-placeholders=true"
-      # Issue #536/#842: pins Keycloak's hostname-v2 provider (the default
-      # since Keycloak 22, still active here) to ONE canonical public
-      # identity instead of the request-derived behavior
-      # `--hostname-strict=false` (start-dev's own implicit default)
-      # previously left in place. Without this (and --hostname-strict=true
-      # above -- live-verified required: hostname-strict=false silently
-      # keeps deriving from request headers even with KC_HOSTNAME set),
-      # Keycloak echoes back whatever Host/X-Forwarded-* header the request
-      # arrived with as its `iss` claim -- a browser request through nginx
-      # and a direct container-network request from `backend` disagree, so
-      # no single ValidIssuer string on the backend could ever match both
-      # (the actual bug this issue fixes).
-      #
-      # MUST include the /auth path explicitly (live-verified: hostname-v2
-      # does NOT automatically append KC_HTTP_RELATIVE_PATH below to
-      # KC_HOSTNAME the way it does for the port/scheme) -- without it every
-      # self-referential URL, including `iss`, renders without the /auth
-      # prefix and 404s through nginx's `/auth/` proxy. Derived directly from
-      # WAYPOINT_PUBLIC_URL above (issue #842) instead of its own independent
-      # KC_HOSTNAME override -- one variable now drives both the backend's
-      # issuer and Keycloak's own identity, so they cannot drift out of sync.
-      # Can't alias *public-url here: a YAML alias node can't be spliced
-      # into part of a scalar string, and this value needs the /auth suffix
-      # appended. Kept as the same literal expression as the public-url
-      # anchor above -- same underlying WAYPOINT_PUBLIC_URL variable and
-      # placeholder fallback, just not expressible as an alias.
+      # why: docs/rationale/deploy.md#compose-keycloak-hostname-strict
       KC_HOSTNAME: "${WAYPOINT_PUBLIC_URL:-https://waypoint.example.internal}/auth"
-      # Issue #534 (live-verified): without this, Keycloak has no idea it is
-      # reverse-proxied under nginx's /auth/ prefix (deploy/nginx/conf.d
-      # default.conf's `location /auth/`) and renders every self-referential
-      # URL -- the discovery document's authorization_endpoint/token_endpoint,
-      # and every login-form `action=` on its own HTML pages -- WITHOUT the
-      # /auth prefix. A real browser (or this SPA) following any of those
-      # URLs then hits nginx with a bare /realms/... path, which has no
-      # matching location and falls through to the frontend's SPA catch-all
-      # -- a silent, totally-broken login redirect, not an obvious error.
-      # KC_HTTP_RELATIVE_PATH tells Keycloak's own URL-building to include
-      # the prefix it is actually served under, matching nginx's proxy path
-      # exactly. Verified against a real bring-up (docs/testing.md isolation
-      # recipe): before this line, GET .../auth/realms/waypoint/.well-known/
-      # openid-configuration's authorization_endpoint was
-      # https://<host>/realms/waypoint/protocol/openid-connect/auth (missing
-      # /auth); after it, https://<host>/auth/realms/waypoint/... (correct).
+      # why: docs/rationale/deploy.md#compose-keycloak-relative-path
       KC_HTTP_RELATIVE_PATH: "/auth"
     secrets:
       - postgres-keycloak-password
@@ -539,23 +181,9 @@ services:
     networks:
       - edge
       - internal
-    # No published ports - reachable only via nginx's proxy path (edge
-    # network) or from other edge/internal containers, never directly from
-    # the host, matching backend's own no-`ports:` convention.
-    # --health-enabled=true (above) serves /health/ready on the management
-    # port (9000 by default, separate from the 8080 app port) rather than
-    # the main HTTP listener - this image ships neither curl nor wget, so
-    # the probe is a raw /dev/tcp request (same technique as this file's
-    # other CMD-SHELL health checks that lack a dedicated HTTP client).
-    #
-    # Path is /auth/health/ready, not /health/ready (issue #534,
-    # live-verified): KC_HTTP_RELATIVE_PATH=/auth above shifts EVERY
-    # Keycloak-served path under that prefix, including the management
-    # port's own health endpoints, not just the main app's realm/admin
-    # routes - verified against a real bring-up that a bare /health/ready
-    # 404s once KC_HTTP_RELATIVE_PATH is set, and /auth/health/ready is what
-    # actually answers "UP".
+    # No published ports — reachable only via nginx's proxy path.
     healthcheck:
+      # why: docs/rationale/deploy.md#compose-keycloak-relative-path
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /auth/health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"]
       interval: 10s
       timeout: 5s
@@ -563,152 +191,50 @@ services:
       start_period: 60s
     restart: unless-stopped
 
-  # compliance-runner (issue #442, ADR-0013/0014): claims discover/credential-test/
-  # scan (later remediate) jobs directly from Postgres and hosts PowerShell/PowerCLI/
-  # cinc-auditor/SAF in-process. Not reachable from nginx or the host - no
-  # `ports:`, ever. On `internal` for Postgres and `runner-egress` (issue #578)
-  # for lab/target reachability (vCenter/ESXi/NSX/SRG/STIG Manager) - the
-  # latter is the only network this service can dial out on; it still has no
-  # route back in from either network. One replica by default (ADR-0013
-  # decision 6); see "Replica-safe scaling" in deploy/README.md before setting
-  # `deploy.replicas` > 1.
+  # --- compliance-runner ---
+  # One replica by default.
+  # why: docs/rationale/deploy.md#compose-replica-scaling
   compliance-runner:
     build:
-      # Repo-root context, same convention as backend (issue #92) - this image's
-      # own dotnet-build stage needs backend/ too. See
-      # runners/compliance-runner/Dockerfile's header comment.
       context: ..
       dockerfile: runners/compliance-runner/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      # Least-privilege role (0025_runner_db_roles.sql), distinct from the
-      # backend's own ${POSTGRES_USER} owner role - see postgres service above
-      # and that migration's header comment.
-      # Password= deliberately empty (issue #844) -- Database__PasswordFile
-      # below always wins once populated; see the backend service's own
-      # comment on the same pattern.
       ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_compliance_runner;Password="
-      # Issue #843: same file-backed override as the backend's own Database__
-      # PasswordFile above -- a DIFFERENT variable than the backend's, since this
-      # role's password is never the same secret as the backend's owner-role
-      # password. Defaults to the Compose `secrets:`-mounted file (issue #844)
-      # matching postgres's own POSTGRES_COMPLIANCE_RUNNER_PASSWORD_FILE.
       Database__PasswordFile: "${WAYPOINT_COMPLIANCE_DB_PASSWORD_FILE:-/run/db-secret/postgres-compliance-runner-password}"
-      # Same file-delivery convention and in-container path as the backend's own
-      # mount below (issue #405/ADR-0005) - every trusted service reads the same
-      # key material, never an env var carrying the key itself.
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
-      # No RunnerResources__Fallback* keys here (issue #845): the base ships
-      # no dev-picked resource-fallback default -- RunnerResourceOptions'
-      # own compiled-in default applies unless compose.override.example.yaml
-      # (or an operator's own override) sets one.
-      # Shim modules baked into the image at /app/PowerShell/Modules (Waypoint.
-      # Infrastructure.csproj's CopyToPublishDirectory - see the Dockerfile).
-      # Preload order matches the mapping deploy/README.md previously documented
-      # on the backend service - now this service's own. WaypointLogging preloads
-      # FIRST (issue #579): it provides Get-LogSplat/Write-Log, which the imported
-      # vmware-stig-docker transport files dot-sourced by the other three modules
-      # expect to already be in scope.
-      # Issue #613 (live-verified): WaypointComplianceContent was never added to
-      # this list, so Invoke-WaypointComplianceContentPull was undefined in the
-      # runspace and content-pull/content-import always failed with "term ...
-      # is not recognized". ModulePreloadCompletenessTests' preload-completeness
-      # guard (Waypoint.Tests) fails the build if a future handler's module ships
-      # without an entry here.
+      # why: docs/rationale/deploy.md#compose-module-preload-order
       PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointLogging"
       PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDiscovery"
       PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointScan"
       PowerShell__ModulePreloadPaths__3: "/app/PowerShell/Modules/WaypointCredentialTest"
       PowerShell__ModulePreloadPaths__4: "/app/PowerShell/Modules/WaypointComplianceContent"
-      # By-NAME module import (issue #629/#618), resolved via PSModulePath rather than a
-      # disk path under /app. The full VMware.PowerCLI meta-module must be imported into
-      # every pooled runspace up front: without it, PowerCLI cmdlets run under partial
-      # cmdlet-autoload (the same profile-never-ran state issue #307 documents), and in
-      # this runner's in-process host that partial state makes discovery pscustomobject
-      # rows arrive with their NoteProperties stripped through the executor's output
-      # capture -- live discovery then silently stored zero inventory. Kept separate from
-      # ModulePreloadPaths so the readiness check does not stat it as a filesystem path.
       PowerShell__ModulePreloadNames__0: "VMware.PowerCLI"
-      # Project-owned .ps1 files the shims above dot-source, baked into the image under
-      # /powershell/ (runners/compliance-runner/powershell/, imported from the
-      # vmware-stig-docker sibling repo per CLAUDE.md's borrowing policy) -
-      # replaces the backend's former host bind mount (issue #395/#427) now that
-      # the sibling-repository source lives in this repository (ADR-0015 decision 2).
       WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_PATH: "/powershell/module.transport.vmware.ps1"
       WAYPOINT_VMWARE_STIG_DOCKER_NSXAPI_PATH: "/powershell/module.transport.nsxapi.ps1"
       WAYPOINT_VMWARE_STIG_DOCKER_COMMON_PATH: "/powershell/module.common.ps1"
     volumes:
-      # DEPRECATED (issue #639): compliance-profiles/ScanOptions' fixed ProfilePath/
-      # NsxProfilePath/SrgProfilePath were the ORIGINAL (never actually wired) profile
-      # source -- a scan now resolves its InSpec profile directory under the
-      # compliance-content volume below (the same working tree content-pull
-      # populates), selected per run via scope.profile_id. This mount stays only as
-      # ScanJobHandler's transitional fallback for a job payload with no profile_key
-      # (see that handler's ResolveProfilePath doc comment) -- read-only (ADR-0014 §7).
-      # Remove once nothing legitimately needs the fallback path.
-      #
-      # Production ships this named volume EMPTY -- nothing here populates the
-      # vsphere/nsx/srg subdirectories (only the dev override's dev-bootstrap
-      # service does, for the local loop). Issue #905: ComplianceReadinessCheck
-      # reports that as a degraded capability, not a startup failure, so a
-      # by-the-book production bring-up still reaches container-healthy with this
-      # deprecated fallback unpopulated.
+      # DEPRECATED transitional fallback — see ScanJobHandler.ResolveProfilePath.
       - compliance-profiles:/opt/waypoint/profiles:ro
-      # Scan artifacts (HDF/CKL) - read-write (ADR-0014 §7: "scan-artifact write
-      # access"). Same named volume the backend mounts read-only above, so the
-      # API can serve already-written results without itself being able to
-      # write into the store.
       - artifacts:/var/lib/waypoint/artifacts
-      # content-pull/content-import working tree (ADR-0017; issue #616,
-      # live-verified) - read-write, this service only. Matches
-      # ComplianceContentOptions.ContentPath's default. Without this named
-      # volume the clone target does not exist at all, and even if the app
-      # created it itself it would be root-owned like every other Compose
-      # mount point until docker-entrypoint.sh chowns it below (same fix
-      # shape as the download-runner's managed-tool volume).
       - compliance-content:/var/lib/waypoint/compliance-content
-      # Secrets master key file (issue #405/#442) - operator-provided, gitignored
-      # (deploy/config/ is covered by .gitignore's anchored /deploy/config/
-      # entry). Same file, same in-container path, and the same
-      # optional/fail-closed behavior as the backend's own mount above:
-      # discover/credential-test/scan all decrypt a credential before doing
-      # anything else (ADR-0014 §6), so a runner that cannot reach this key
-      # still starts and reports healthy, but every job it claims fails
-      # until the key is mounted. See deploy/README.md "Production only:
-      # secrets master key (issue #405)" - the same uid/permission note
-      # applies (this image's app user is also uid 1654; see the Dockerfile).
-      # Issue #905: ComplianceReadinessCheck now actually honors this --
-      # master-key absence is reported in the health JSON but no longer fails
-      # the container healthcheck, matching this comment's promise.
-      # As with the backend, this is the mount SHAPE to copy into
-      # deploy/compose.override.yaml, not something to uncomment in place:
+      # Mount SHAPE to copy into compose.override.yaml — do not uncomment here.
+      # why: docs/rationale/deploy.md#compose-master-key-override-not-uncomment
       # - type: bind
       #   source: ./config/secrets/waypoint-master-key
       #   target: /run/secrets/waypoint-master-key
       #   read_only: true
       #   bind:
       #     create_host_path: false
-    # Different target than the default /run/secrets/<name> -- the
-    # development override (compose.override.example.yaml) also mounts a
-    # read-only `dev-secrets` volume at /run/secrets on this service, and a
-    # read-only mount cannot host a new nested mountpoint. See the backend
-    # service's own comment on the same collision.
+    # why: docs/rationale/deploy.md#compose-db-secret-vs-run-secrets-split
     secrets:
       - source: postgres-compliance-runner-password
         target: /run/db-secret/postgres-compliance-runner-password
     networks:
       - internal
       - runner-egress
-    # File-sentinel healthcheck (ADR-0013 §1: this process has no HTTP listener
-    # to probe) - RunnerHealthReportingHostedService re-evaluates readiness every
-    # RunnerHealth:RefreshInterval and writes a JSON report; --health-check reads
-    # it back and exits 0/1. See ComplianceReadinessCheck's doc comment for
-    # exactly what "ready" means here: module preload paths + the artifact store
-    # fail closed; the deprecated profile-fallback mount and master-key absence
-    # (issue #905, both supported unconfigured-by-default in production) are
-    # reported in the JSON report but do not fail this healthcheck.
     healthcheck:
       test: ["CMD", "dotnet", "Waypoint.ComplianceRunner.dll", "--health-check"]
       interval: 10s
@@ -717,19 +243,9 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # download-runner (issue #442, ADR-0013/0014): claims catalog-index/download
-  # (later content-library/repository/managed-content) jobs directly from Postgres
-  # and hosts PowerShell in-process. Not reachable from nginx or the host - no
-  # `ports:`, ever. On `internal` for Postgres and `runner-egress` (issue #578)
-  # for the Broadcom depot/operator repositories in connected mode - the latter
-  # is the only network this service can dial out on; it still has no route
-  # back in from either network. In a disconnected deployment this network
-  # carries no traffic (download features are hidden/disabled per
-  # docs/architecture.md's connected/disconnected mode table) but stays
-  # attached rather than becoming a per-mode compose variant - see
-  # deploy/README.md "Runner egress" for the operator-facing egress lockdown
-  # note. One replica by default (ADR-0013 decision 6); see "Replica-safe
-  # scaling" in deploy/README.md before setting `deploy.replicas` > 1.
+  # --- download-runner ---
+  # One replica by default.
+  # why: docs/rationale/deploy.md#compose-replica-scaling
   download-runner:
     build:
       context: ..
@@ -738,86 +254,33 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # Least-privilege role (0025_runner_db_roles.sql), distinct from the
-      # backend's own ${POSTGRES_USER} owner role - see postgres service above
-      # and that migration's header comment.
-      # Password= deliberately empty (issue #844) -- Database__PasswordFile
-      # below always wins once populated; see the backend service's own
-      # comment on the same pattern.
       ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_download_runner;Password="
-      # Issue #843: same file-backed override as the backend's own Database__
-      # PasswordFile above -- a DIFFERENT variable than the backend's and the
-      # compliance-runner's, since this role's password is its own
-      # least-privilege secret. Defaults to the Compose `secrets:`-mounted
-      # file (issue #844) matching postgres's own
-      # POSTGRES_DOWNLOAD_RUNNER_PASSWORD_FILE.
       Database__PasswordFile: "${WAYPOINT_DOWNLOAD_DB_PASSWORD_FILE:-/run/db-secret/postgres-download-runner-password}"
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
-      # Shim modules baked into the image at /app/PowerShell/Modules (Waypoint.
-      # Infrastructure.csproj's CopyToPublishDirectory - see the Dockerfile).
-      # WaypointDownload was missing from this list on `main` even before this
-      # issue (pre-existing gap, not introduced here) - DownloadJobHandler
-      # invokes Invoke-WaypointDownload, which only exists once this module is
-      # preloaded into the runspace (WaypointRunspacePool.CreateRunspace only
-      # imports what ModulePreloadPaths names). Included here alongside
-      # WaypointCatalogIndex now that this is this service's own config.
       PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointCatalogIndex"
       PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDownload"
-      # Project-owned script baked into the image under /app/PowerShell/project
-      # (runners/download-runner/powershell/project/, imported from the
-      # vcf-docker-download sibling repo per CLAUDE.md's borrowing policy) -
-      # replaces the backend's former host bind mount (issue #223) now that the
-      # sibling-repository source lives in this repository (ADR-0015 decision 2).
       WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH: "/app/PowerShell/project/vcf-download-manager.common.ps1"
     volumes:
-      # Offline depot share to index - read-write (ADR-0014 §7: "download
-      # runner: managed tool/depot/content write access"). Matches CatalogOptions'
-      # DepotPath default.
       - depot:/vcf
-      # Download artifact store - read-write. Same named volume the backend
-      # mounts read-only above.
       - artifacts:/var/lib/waypoint/artifacts
-      # Operator-installed managed tool state (ADR-0015 decision 3): the
-      # account-gated vcf-download-tool executable lands here through a future
-      # appliance install flow, never baked into this image. Matches
-      # ManagedToolOptions' ToolStatePath default. Read-write so that future
-      # install flow can place the binary; download jobs only ever read it.
       - managed-tool:/var/lib/waypoint/managed-tool
-      # Manual-upload staging (issue #621, re-scoped per #630 review): the SAME
-      # staging-only volume the backend mounts read-write. The tool-install job
-      # reads the artifact + detached signature the backend staged under
-      # ManagedToolOptions.UploadStagingPath here (and the depot-fetch path
-      # writes its own subdir), then activates the verified binary onto the
-      # managed-tool store above. Kept OFF the managed-tool volume so the backend
-      # never needs write access to the tool store or the release-key trust
-      # anchor (ADR-0014 §7 / issue #442 AC5 / #570).
+      # why: docs/rationale/deploy.md#compose-tool-upload-staging-volume
       - tool-upload-staging:/var/lib/waypoint/tool-upload-staging
-      # Secrets master key file (issue #405/#442) - same convention as
-      # compliance-runner's own mount above; catalog-index resolves the depot
-      # token credential and download resolves the target credential, both
-      # through this key (ADR-0014 §6). Same rule as the two services above:
-      # copy this shape into deploy/compose.override.yaml rather than
-      # uncommenting it here (deploy/README.md "Production only: secrets
-      # master key (issue #405)"):
+      # Mount SHAPE to copy into compose.override.yaml — do not uncomment here.
+      # why: docs/rationale/deploy.md#compose-master-key-override-not-uncomment
       # - type: bind
       #   source: ./config/secrets/waypoint-master-key
       #   target: /run/secrets/waypoint-master-key
       #   read_only: true
       #   bind:
       #     create_host_path: false
-    # Different target than the default /run/secrets/<name> -- same
-    # development-override `dev-secrets`-volume collision as the backend and
-    # compliance-runner services above.
+    # why: docs/rationale/deploy.md#compose-db-secret-vs-run-secrets-split
     secrets:
       - source: postgres-download-runner-password
         target: /run/db-secret/postgres-download-runner-password
     networks:
       - internal
       - runner-egress
-    # File-sentinel healthcheck, same convention as compliance-runner above -
-    # see ReadinessReportingHostedService/HealthCheckProbe's doc comments. Unlike
-    # the compliance-runner's check, this one also confirms Postgres
-    # reachability (CheckDatabaseAsync) as part of "ready".
     healthcheck:
       test: ["CMD", "dotnet", "Waypoint.DownloadRunner.dll", "--health-check"]
       interval: 10s
@@ -827,95 +290,22 @@ services:
     restart: unless-stopped
 
 networks:
-  # nginx <-> backend. Published to the host via nginx's port mapping only.
-  # Subnet pinned (#191) so ForwardedHeaders:KnownNetworks (backend env below,
-  # Program.cs) can trust exactly this network instead of all of RFC 1918.
-  # The chosen /24 sits outside Docker's default address pool (the top of the
-  # 172.16.0.0/12 space, consumed top-down as bridge networks are created --
-  # this shared host's concurrent stacks already occupy several /16s there,
-  # see docs/testing.md) and outside the handful of /24s a typical home/office
-  # LAN or a nested Docker host is likely to already be using in the low
-  # 192.168.0.0/16 range, so a fixed subnet is unlikely to collide with either
-  # source on a shared or nested host. Only `edge` is pinned; `internal` has
-  # no route out (see below) so a fixed subnet buys it nothing.
+  # nginx <-> backend/keycloak. Published to the host via nginx's port mapping.
   edge:
     driver: bridge
     ipam:
       config:
         - subnet: *edge-subnet
-  # backend, compliance-runner, download-runner <-> postgres. internal: true
-  # means Docker gives this network no route out (no host access, no
-  # default-gateway/internet); only containers attached to it can reach each
-  # other. nginx is deliberately not attached - neither runner is reachable
-  # from nginx or the host (issue #442).
+  # backend, compliance-runner, download-runner <-> postgres. No route out.
   internal:
     driver: bridge
     internal: true
-  # compliance-runner, download-runner <-> lab/target infrastructure and the
-  # internet (issue #578). A normal (non-`internal:`) bridge network, so Docker
-  # gives it a default gateway/route out through the host -- deliberately the
-  # ONLY network attribute that differs from `internal` above. Project-scoped
-  # like every other network in this file (Compose namespaces it
-  # `<project>_runner-egress`, per docs/testing.md's isolation recipe) --
-  # never external/shared, so concurrent stacks on one Docker host still don't
-  # collide. No `ports:` on either attached service and no other service is
-  # attached to this network, so it grants outbound reachability only -
-  # nothing gains a new path IN to compliance-runner/download-runner, and
-  # postgres/backend/nginx/keycloak are unaffected (still exactly `edge`/
-  # `internal` as before). An operator running a disconnected/air-gapped
-  # instance who wants to physically remove even this egress path (e.g. no
-  # download-runner internet route at all) can override this network's driver
-  # options or detach download-runner from it in a compose.override.yaml
-  # -- see deploy/README.md "Runner egress".
+  # compliance-runner, download-runner <-> lab/target infra and the internet.
+  # why: docs/rationale/deploy.md#compose-runner-egress-topology
   runner-egress:
     driver: bridge
 
-# Issue #844: Compose's own file-secret mechanism (NOT Swarm secrets -- this
-# also works for plain `docker compose up`).
-#
-# Fail-closed behaviour, stated precisely (live-verified; an earlier version
-# of this comment overstated it and the PR #860 review caught that):
-# `docker compose config` does NOT fail on a missing `file:` source -- it
-# renders and exits 0, which is exactly why CI can validate this file
-# without any deploy/config/ present. On `docker compose up`, the Compose
-# client emits a warning ("secret file ... does not exist") and then the
-# DAEMON rejects the bind at container-create time, so no service ever
-# starts. Net effect is still fail-closed, but the enforcement point is the
-# daemon at create time, not the client at parse time.
-#
-# A file that exists but is empty/unreadable gets past that layer entirely,
-# so each consumer validates its own before doing anything destructive:
-# deploy/postgres/docker-entrypoint-wrapper.sh (before the stock entrypoint
-# can run initdb -- see its header for the poisoned-volume failure that
-# forced it) and deploy/keycloak/docker-entrypoint-wrapper.sh (before
-# handing off to kc.sh).
-#
-# Each appears at /run/secrets/<name> inside the consuming container. NOTE
-# (live-verified, and NOT what the Swarm-secrets documentation implies): a
-# `file:` source is bind-mounted VERBATIM -- the container sees the host
-# file's ownership and mode, there is no 0444 re-materialization. Postgres's
-# initdb scripts run as the in-container `postgres` user, so a host file
-# only the operator's own uid can read is unreadable there; 0644 is the
-# convention this repo uses for mounted secret material (same as the
-# commented-out master-key bind mounts above). postgres's entrypoint wrapper
-# checks readability AS that user and fails closed before initdb rather than
-# discovering it half way through. Paths are relative to this file's
-# directory (`deploy/`), matching every other relative source in this file
-# (`./postgres`, etc.).
-#
-# Create these six files under deploy/config/secrets/ (gitignored -- see
-# .gitignore's /deploy/config/ entry) before bringing THIS base file up on
-# its own -- deploy/scripts/init-config.sh (production) or
-# deploy/scripts/generate-dev-stack.sh --mode persistent (issue #847)
-# generate them for you, idempotently, and never overwrite an existing one.
-# compose.override.example.yaml's dev-bootstrap service generates its own
-# separate dev-only secrets instead -- see that file. Each file's entire
-# content (minus a trailing newline) is the raw password/secret value -- no
-# quoting, no key=value shape. Example, using an obviously-invented
-# placeholder value (never reuse this literal):
-#
-#   mkdir -p config/secrets
-#   printf 'correct-horse-battery-staple-EXAMPLE-1\n' > config/secrets/postgres-owner-password  # gitleaks:allow
+# why: docs/rationale/deploy.md#compose-secrets-fail-closed
 secrets:
   postgres-owner-password:
     file: ./config/secrets/postgres-owner-password
@@ -931,39 +321,12 @@ secrets:
     file: ./config/secrets/keycloak-backend-client-secret
 
 volumes:
-  # No dev-secrets/dev-tls volumes in this base (issue #845) -- both are
-  # development-only, generated by compose.override.example.yaml's
-  # dev-bootstrap service, and declared there instead.
-  # Postgres data directory.
+  # No dev-secrets/dev-tls here — see compose.override.example.yaml.
   pgdata:
-  # Scan (compliance-runner) and download (download-runner) artifact output.
-  # download-runner and compliance-runner both mount this read-write; backend
-  # mounts it read-only to serve already-written results (issue #442 AC5).
   artifacts:
-  # Offline depot share (see vcf-docker-download's UMDS/VCSA/VKS/ContentLibrary
-  # layout) - download-runner only.
   depot:
-  # Operator-installed managed tool state (ADR-0015 decision 3, e.g. the
-  # account-gated vcf-download-tool executable + the RSA release-key trust
-  # anchor) - download-runner only. The backend deliberately does NOT mount
-  # this: it would hand the API-facing process write access to the verified
-  # tool binary and the signature-verification key (ADR-0014 §7, issue #442
-  # AC5, #570). Manual uploads land on the separate `tool-upload-staging`
-  # volume below instead.
   managed-tool:
-  # Manual-upload staging (issue #621, re-scoped per #630 review) - mounted
-  # read-write by BOTH backend (ManagedToolController.Upload stages here) and
-  # download-runner (the tool-install job reads the staged artifact/signature,
-  # and the depot-fetch path writes a subdir). Deliberately separate from
-  # `managed-tool` so the backend gets a writable staging path WITHOUT any
-  # access to the tool store or release key. Matches ManagedToolOptions.UploadStagingPath.
+  # why: docs/rationale/deploy.md#compose-tool-upload-staging-volume
   tool-upload-staging:
-  # Compliance content (InSpec profiles) - compliance-runner only, read-only at
-  # the mount (see that service's volumes:).
   compliance-profiles:
-  # content-pull/content-import working tree (ADR-0017, issue #616) -
-  # compliance-runner only, read-write at the mount (see that service's
-  # volumes:). Distinct from compliance-profiles above: this is the git
-  # clone target content-pull writes into, not the operator-provisioned
-  # read-only profile set scan/discover/credential-test consume.
   compliance-content:
