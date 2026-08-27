@@ -59,6 +59,15 @@
 #     runners (the documented cgroup-unreadable sandbox workaround --
 #     see fresh-stack-smoke-test.sh's own comment on the same override).
 #     Default: on (agent mode targets exactly that kind of sandbox).
+#   --keycloak-dev-admin
+#     Issue #848: also provisions the keycloak-dev-admin one-shot service
+#     (issue #846, deploy/keycloak-dev-admin) into the generated override --
+#     same build context/env/volumes/secrets contract as
+#     compose.override.example.yaml's own copy of this service, reusing the
+#     dev-admin-password secret this script already generates unconditionally
+#     and the keycloak-bootstrap-admin-password secret it already declares.
+#     Off by default: only a caller that actually needs a real Keycloak-realm
+#     login (e2e-playwright.sh) opts in.
 #
 # Collision detection (all three checks run BEFORE any file is written, so a
 # collision leaves nothing behind):
@@ -89,6 +98,7 @@ SUBNET=""
 USERNAME="developer"
 LOCAL_AUTH_HASH_FILE=""
 RUNNER_FALLBACK=1
+KEYCLOAK_DEV_ADMIN=0
 
 usage() {
 	# Print the whole header comment block: everything from the line after the
@@ -135,6 +145,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--no-runner-resource-fallback)
 		RUNNER_FALLBACK=0
+		shift
+		;;
+	--keycloak-dev-admin)
+		KEYCLOAK_DEV_ADMIN=1
 		shift
 		;;
 	-h | --help)
@@ -603,6 +617,43 @@ else
 		echo "        source: ${MASTER_KEY_HOST}"
 		echo "        target: /run/secrets/waypoint-master-key"
 		echo "        read_only: true"
+		if [[ "${KEYCLOAK_DEV_ADMIN}" -eq 1 ]]; then
+			# Same service/contract as compose.override.example.yaml's own
+			# keycloak-dev-admin (issue #846) -- see deploy/keycloak-dev-admin
+			# for the provisioning script this builds and runs. Reuses the
+			# dev-admin-password secret this script already generates
+			# unconditionally (SECRET_NAMES above) and the
+			# keycloak-bootstrap-admin-password secret already declared below.
+			echo "  keycloak-dev-admin:"
+			echo "    build:"
+			# Relative to compose.yaml's own directory (deploy/), matching
+			# every other build context in this file (nginx/backend/postgres/
+			# keycloak all use `context: ..`/`./postgres`/`./keycloak`, never
+			# host_path()-translated) -- unlike a bind-mount `source:`
+			# (resolved by the Docker DAEMON against the host filesystem),
+			# `build: context:` is resolved by buildx CLIENT-side, from
+			# wherever `docker compose build` itself runs. Passing the
+			# host_path()-translated absolute path here (as an earlier
+			# revision of this change did) broke with "unable to prepare
+			# context: path not found" -- that translated path is only
+			# meaningful to the daemon, not to this process.
+			echo "      context: ./keycloak-dev-admin"
+			echo "    depends_on:"
+			echo "      keycloak:"
+			echo "        condition: service_healthy"
+			echo "    environment:"
+			echo "      WAYPOINT_DEV_ADMIN_USERNAME: \"${USERNAME}\""
+			echo "    volumes:"
+			echo "      - type: bind"
+			echo "        source: $(host_path "${SECRETS_DIR}/dev-admin-password")"
+			echo "        target: /run/secrets/dev-admin-password"
+			echo "        read_only: true"
+			echo "    secrets:"
+			echo "      - keycloak-bootstrap-admin-password"
+			echo "    networks:"
+			echo "      - internal"
+			echo "    restart: \"no\""
+		fi
 		echo "secrets:"
 		for name in postgres-owner-password postgres-compliance-runner-password \
 			postgres-download-runner-password postgres-keycloak-password \
