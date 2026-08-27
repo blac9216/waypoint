@@ -749,6 +749,24 @@
 	max-width: 360px;
 }
 
+.component-board__bulk-toolbar {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	padding: 6px 10px;
+	border: 1px solid var(--line);
+	border-radius: 6px;
+	background: var(--panel2, rgba(255, 255, 255, 0.06));
+}
+
+.component-board__bulk-result {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	font-size: 12px;
+	color: var(--txt2, var(--txt1));
+}
+
 .component-board__error {
 	color: var(--bad);
 	font-size: 12px;
@@ -775,20 +793,29 @@
 .component-board__row {
 	display: flex;
 	width: 100%;
-	justify-content: space-between;
 	align-items: center;
 	gap: 8px;
 	padding: 0 10px;
-	border: 0;
 	border-bottom: 1px solid var(--line);
 	background: transparent;
-	color: var(--txt1);
-	cursor: pointer;
-	text-align: left;
 }
 
 .component-board__row.is-selected {
 	background: var(--panel2, rgba(255, 255, 255, 0.06));
+}
+
+.component-board__row-button {
+	display: flex;
+	flex: 1 1 auto;
+	min-width: 0;
+	justify-content: space-between;
+	align-items: center;
+	gap: 8px;
+	border: 0;
+	background: transparent;
+	color: var(--txt1);
+	cursor: pointer;
+	text-align: left;
 }
 
 .component-board__row-name {

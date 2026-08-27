@@ -18,9 +18,19 @@
  *      /runs/{runId}/jobs/{jobId}/retry, `failed` only) — shown only where
  *      legal for the item's state, per ADR-0024 attempt semantics.
  *
- * Bulk operations and bounded SSE live-updates are issue #757's stated
- * remainder; the board offers an explicit Refresh instead of folding SSE in
- * this slice.
+ * Bulk operations (issue #757): a checkbox per row plus a selection toolbar
+ * that calls the audited `bulk-cancel`/`bulk-retry` endpoints with the
+ * exact selected job ids — never an "apply to everything matching the
+ * filter" mode from the UI (the backend's filter-resolution path exists for
+ * API callers, but this screen always sends explicit ids so an operator
+ * only ever affects what they can see checked). Reports the honest per-item
+ * outcome list the server returns, never a fake all-or-nothing toast.
+ *
+ * Bounded SSE live-updates for this board are issue #757's stated remainder;
+ * the board offers an explicit Refresh instead of folding SSE in this slice
+ * (per-run SSE already exists and is gap-free on reconnect — see
+ * EventStreamController/JobEventStreamService — this board simply does not
+ * yet fold those events into its own state the way the legacy board does).
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchAllJobEventHistory } from "../../api/jobEventHistory";
@@ -28,7 +38,7 @@ import { ApiError } from "../../lib/api";
 import { useAuth } from "../../lib/auth-context";
 import type { WaypointEvent } from "../../lib/events";
 import { roleGateProps } from "../../lib/roles";
-import { computeWindow, type ComponentJobFilters, type ComponentJobItem } from "./componentJobs";
+import { bulkCancelJobs, bulkRetryJobs, computeWindow, type BulkJobActionItem, type ComponentJobFilters, type ComponentJobItem } from "./componentJobs";
 import { cancelJob, retryJob, TERMINAL_JOB_STATES, type JobState } from "./liverun";
 import { useComponentJobs } from "./useComponentJobs";
 
@@ -48,6 +58,9 @@ export function ComponentJobBoard({ runId }: { runId: string }) {
 	const [scrollTop, setScrollTop] = useState(0);
 	const [actionError, setActionError] = useState<string | null>(null);
 	const [actingJobId, setActingJobId] = useState<string | null>(null);
+	const [checkedIds, setCheckedIds] = useState<ReadonlySet<string>>(new Set());
+	const [bulkRunning, setBulkRunning] = useState(false);
+	const [bulkResult, setBulkResult] = useState<BulkJobActionItem[] | null>(null);
 
 	const filters = useMemo<ComponentJobFilters>(
 		() => ({
@@ -87,7 +100,11 @@ export function ComponentJobBoard({ runId }: { runId: string }) {
 
 	const totalJobs = useMemo(() => counts.reduce((sum, row) => sum + row.count, 0), [counts]);
 
-	const controlGate = user?.role ? roleGateProps(user.role, "Operator") : { disabled: true, style: { opacity: 0.42 } };
+	// Issue #757's "Cyber controls owned live scans" owner decision lowered
+	// per-item cancel/retry's floor from Operator+ to Cyber+ (own runs), Admin
+	// any — same server-enforced gate useRunControls.ts uses for the run-level
+	// controls (PR #819's role-matrix reconciliation).
+	const controlGate = user?.role ? roleGateProps(user.role, "Cyber") : { disabled: true, style: { opacity: 0.42 } };
 
 	async function handleCancel(item: ComponentJobItem) {
 		if (!window.confirm(`Cancel "${item.target_name ?? item.id}"? This cannot be undone.`)) {
@@ -115,6 +132,46 @@ export function ComponentJobBoard({ runId }: { runId: string }) {
 			setActionError(err instanceof ApiError ? err.message : "Could not retry the job.");
 		} finally {
 			setActingJobId(null);
+		}
+	}
+
+	function toggleChecked(id: string) {
+		setCheckedIds((prev) => {
+			const next = new Set(prev);
+			if (next.has(id)) {
+				next.delete(id);
+			} else {
+				next.add(id);
+			}
+			return next;
+		});
+	}
+
+	// Bulk actions always send the operator's exact checked ids (never a
+	// filter-resolved "everything matching" mode from this screen) — the
+	// server still enforces the same per-item legality/ownership as the
+	// singular actions and reports an honest per-item outcome, never a fake
+	// all-or-nothing result (issue #757 AC).
+	async function handleBulk(action: "cancel" | "retry") {
+		const jobIds = [...checkedIds];
+		if (jobIds.length === 0) {
+			return;
+		}
+		if (action === "cancel" && !window.confirm(`Cancel ${jobIds.length} selected job(s)? This cannot be undone.`)) {
+			return;
+		}
+		setActionError(null);
+		setBulkResult(null);
+		setBulkRunning(true);
+		try {
+			const result = action === "cancel" ? await bulkCancelJobs(runId, { jobIds }) : await bulkRetryJobs(runId, { jobIds });
+			setBulkResult(result.items);
+			setCheckedIds(new Set());
+			refresh();
+		} catch (err) {
+			setActionError(err instanceof ApiError ? err.message : `Could not run the bulk ${action}.`);
+		} finally {
+			setBulkRunning(false);
 		}
 	}
 
@@ -162,6 +219,40 @@ export function ComponentJobBoard({ runId }: { runId: string }) {
 				)}
 			</div>
 
+			{checkedIds.size > 0 && (
+				<div className="component-board__bulk-toolbar" aria-label="Bulk actions">
+					<span className="mono">{checkedIds.size} selected</span>
+					<button
+						type="button"
+						{...controlGate}
+						disabled={controlGate.disabled || bulkRunning}
+						onClick={() => void handleBulk("cancel")}
+					>
+						{bulkRunning ? "Working…" : "Bulk cancel"}
+					</button>
+					<button
+						type="button"
+						{...controlGate}
+						disabled={controlGate.disabled || bulkRunning}
+						onClick={() => void handleBulk("retry")}
+					>
+						{bulkRunning ? "Working…" : "Bulk retry"}
+					</button>
+					<button type="button" onClick={() => setCheckedIds(new Set())}>
+						Clear selection
+					</button>
+				</div>
+			)}
+
+			{bulkResult && (
+				<div className="component-board__bulk-result" role="status" aria-label="Bulk action results">
+					{summarizeBulkOutcomes(bulkResult)}
+					<button type="button" onClick={() => setBulkResult(null)}>
+						Dismiss
+					</button>
+				</div>
+			)}
+
 			{error && <div className="component-board__error">{error}</div>}
 			{actionError && <div className="component-board__error">{actionError}</div>}
 			{loading && <div className="component-board__loading">Loading components…</div>}
@@ -177,20 +268,31 @@ export function ComponentJobBoard({ runId }: { runId: string }) {
 					>
 						<div style={{ height: win.topPad }} />
 						{items.slice(win.start, win.end).map((item) => (
-							<button
+							<div
 								key={item.id}
-								type="button"
-								role="option"
-								aria-selected={selected?.id === item.id}
 								className={`component-board__row${selected?.id === item.id ? " is-selected" : ""}`}
 								style={{ height: ROW_HEIGHT }}
-								onClick={() => setSelected(item)}
 							>
-								<span className="component-board__row-name">{item.target_name ?? item.id}</span>
-								<span className="mono component-board__row-meta">
-									p{item.priority} · {item.component_kind} · {item.state}
-								</span>
-							</button>
+								<input
+									type="checkbox"
+									aria-label={`Select ${item.target_name ?? item.id}`}
+									checked={checkedIds.has(item.id)}
+									onChange={() => toggleChecked(item.id)}
+									onClick={(e) => e.stopPropagation()}
+								/>
+								<button
+									type="button"
+									role="option"
+									aria-selected={selected?.id === item.id}
+									className="component-board__row-button"
+									onClick={() => setSelected(item)}
+								>
+									<span className="component-board__row-name">{item.target_name ?? item.id}</span>
+									<span className="mono component-board__row-meta">
+										p{item.priority} · {item.component_kind} · {item.state}
+									</span>
+								</button>
+							</div>
 						))}
 						<div style={{ height: win.bottomPad }} />
 						{loadingMore && <div className="component-board__loading">Loading more…</div>}
@@ -364,4 +466,19 @@ function formatEventData(event: WaypointEvent): string {
 		return `→ ${data.to}`;
 	}
 	return "";
+}
+
+/**
+ * Renders the honest per-item bulk-action tally (issue #757 AC: "report
+ * partial conflicts honestly") — a count per distinct outcome, never a
+ * single collapsed success/failure message that would hide a partial
+ * conflict.
+ */
+function summarizeBulkOutcomes(items: BulkJobActionItem[]): string {
+	const tally = new Map<string, number>();
+	for (const item of items) {
+		tally.set(item.outcome, (tally.get(item.outcome) ?? 0) + 1);
+	}
+	const parts = [...tally.entries()].map(([outcome, count]) => `${count} ${outcome}`);
+	return `${items.length} resolved: ${parts.join(", ")}`;
 }
