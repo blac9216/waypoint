@@ -1,40 +1,15 @@
-# Development-only layer for deploy/compose.yaml (issue #845; epic #841).
+# Development-only overlay for compose.yaml. Copy to compose.override.yaml
+# (gitignored) to opt in — Compose auto-loads it:
+#   cp compose.override.example.yaml compose.override.yaml && docker compose up -d
+# Never rename/copy to compose.yaml. See deploy/README.md and
+# docs/rationale/deploy.md.
 #
-# compose.yaml is the PRODUCTION base -- Keycloak-only auth, operator-
-# provided TLS, file-backed secrets an operator supplies under
-# deploy/config/secrets/. This file adds everything a local development loop
-# needs instead: a dev-bootstrap service that generates a throwaway TLS
-# pair, master key, and local-auth admin password hash into named volumes;
-# the local-auth dev flag; and lower resource fallbacks for a laptop-sized
-# Docker host.
-#
-# Not used automatically. Copy it to the name Compose auto-loads alongside
-# compose.yaml:
-#
-#   cp deploy/compose.override.example.yaml deploy/compose.override.yaml
-#   cd deploy && docker compose up -d
-#
-# `compose.override.yaml` (without `.example`) is gitignored -- see
-# .gitignore's /deploy/compose.override.yaml entry -- so your local copy,
-# and any further edits you make to it (a different host port, a real
-# WAYPOINT_PUBLIC_URL for testing against a LAN hostname, etc.), never gets
-# committed. Never rename or copy this file to `compose.yaml` itself, and
-# never add anything here that a real deployment needs -- that belongs in
-# the base.
-#
-# Issue #846 (dev-admin user provisioning) extends this file additively
-# below. Issue #847 (secret/TLS generator scripts) does not exist yet; until
-# it lands, create the one file this service needs by hand -- an obviously
-# invented placeholder, never reused for anything real:
-#
-#   mkdir -p config/secrets
-#   printf 'dev-admin-EXAMPLE-password-1\n' > config/secrets/dev-admin-password  # gitleaks:allow
+# dev-bootstrap and keycloak-dev-admin need
+# ./config/secrets/dev-admin-password (see deploy/README.md).
 
 services:
-  # Generates the throwaway TLS pair, master key, and (via dev-auth-bootstrap
-  # below) local-auth admin password hash that this development loop uses in
-  # place of compose.yaml's operator-provided equivalents. Never used by the
-  # production base on its own.
+  # --- dev-bootstrap ---
+  # why: docs/rationale/deploy.md#override-dev-bootstrap-local-auth-design
   dev-bootstrap:
     build:
       context: ./dev-bootstrap
@@ -45,11 +20,7 @@ services:
     network_mode: none
     restart: "no"
 
-  # Hashes WAYPOINT_DEV_PASSWORD (default below) into the dev-secrets volume
-  # so the local-auth dev flag (LocalAuth__Enabled below) has an admin
-  # credential to check against. Runs the backend image itself in a
-  # one-shot, non-networked mode purely to reuse its own --hash-password
-  # tool -- never reachable as a service.
+  # --- dev-auth-bootstrap ---
   dev-auth-bootstrap:
     build:
       context: ..
@@ -77,19 +48,11 @@ services:
     network_mode: none
     restart: "no"
 
-  # Issue #846: provisions a normal Waypoint-realm user (Admin group, epic
-  # #841) so the persistent dev stack has a real Keycloak login -- distinct
-  # from Keycloak's own master-realm bootstrap admin (KEYCLOAK_ADMIN above),
-  # which is never used for day-to-day login. One-shot (restart: "no"), and
-  # idempotent: it creates-or-finds the user, then reconciles the password
-  # (non-temporary) and Admin-group membership on EVERY run, so a changed
-  # password file or a manually-removed group membership is restored on the
-  # next `up`. `down -v` does not remove deploy/config/, so the SAME
-  # username/password log back in after a full volume reset (this service
-  # just re-provisions the fresh realm from the same file). See
-  # deploy/keycloak-dev-admin/provision.sh for the curl+jq admin-API
-  # implementation and why it avoids kcadm.sh (its own `config credentials`
-  # step takes --password only as a bare CLI flag).
+  # --- keycloak-dev-admin ---
+  # Provisions a real Waypoint-realm login user, distinct from Keycloak's own
+  # master-realm bootstrap admin. Idempotent: reconciles password/group on
+  # every run.
+  # why: docs/rationale/deploy.md#override-dev-admin-idempotent-provisioning
   keycloak-dev-admin:
     build:
       context: ./keycloak-dev-admin
@@ -97,46 +60,16 @@ services:
       keycloak:
         condition: service_healthy
     environment:
-      # Sensible default dev username; override in deploy/.env if you want a
-      # different one. Not a secret -- the password is what gates login.
-      #
-      # CHANGING IT PROVISIONS A NEW USER: provisioning finds-or-creates by
-      # username, so a rename creates a second account and leaves the
-      # previously provisioned one in place -- still enabled, still in the
-      # Admin group, still holding the reconciled dev password, so it can
-      # still log in. The provisioner never deletes accounts (deliberate for
-      # a dev-only tool); remove the old one yourself via the Keycloak admin
-      # console or `kcadm.sh delete users/<id> -r waypoint`, or reset the
-      # stack with `docker compose down -v` to start from a fresh realm.
-      #
-      # If WAYPOINT_DEV_ADMIN_EMAIL is unset, the email is derived from this
-      # value: an email-shaped username is used as the address as-is,
-      # otherwise `<username>@waypoint.example.internal`. Usernames with
-      # whitespace, a stray `@`, or RFC 5322 specials are rejected up front
-      # with a named error instead of an opaque Keycloak HTTP 400.
       WAYPOINT_DEV_ADMIN_USERNAME: "${WAYPOINT_DEV_ADMIN_USERNAME:-developer}"
-      # Container-network view of Keycloak, same value as the backend's own
-      # Oidc__Authority default in compose.yaml -- a browser can never reach
-      # this address, only other containers on `internal` can.
       WAYPOINT_KEYCLOAK_INTERNAL_URL: "http://keycloak:8080/auth"
-      # Needed to obtain a master-realm admin token (KEYCLOAK_ADMIN above is
-      # a username, not a secret -- same convention as the keycloak service).
       KEYCLOAK_ADMIN: "${KEYCLOAK_ADMIN:-admin}"
     volumes:
-      # The dev password lives in an operator-created file (see the comment
-      # at the top of this file for the manual one-liner until #847's
-      # generator lands), never an inline env value -- never printed by this
-      # service, never a CLI argument.
       - type: bind
         source: ./config/secrets/dev-admin-password
         target: /run/secrets/dev-admin-password
         read_only: true
         bind:
           create_host_path: false
-    # Same Keycloak bootstrap-admin secret the keycloak service itself reads
-    # (deploy/compose.yaml's top-level `secrets:` already declares it) --
-    # this service authenticates against the admin REST API with the exact
-    # credential Keycloak's own entrypoint wrapper uses, not a second one.
     secrets:
       - keycloak-bootstrap-admin-password
     networks:
@@ -147,18 +80,9 @@ services:
     depends_on:
       dev-bootstrap:
         condition: service_completed_successfully
-    # Compose merges `volumes:` entries by TARGET (verified): an entry here
-    # whose `target:` exactly matches one of the base's REPLACES it rather
-    # than adding a second mount at the same path. The base's TLS mounts are
-    # mandatory bind mounts with no host file present by default
-    # (`create_host_path: false` -- a missing source fails `up` closed,
-    # verified), so without this override nginx never starts; WITH it, these
-    # two entries take over both exact targets and point them at subpaths of
-    # the dev-bootstrap-generated `dev-tls` named volume instead. A
-    # directory-level mount at /etc/nginx/certs would coexist with, not
-    # replace, the base's per-file mounts (different target strings) and
-    # still fail on the missing bind sources -- it must be these same two
-    # targets.
+    # Compose merges `volumes:` by target — these replace the base's mandatory
+    # bind mounts with subpaths of the generated dev-tls volume.
+    # why: docs/rationale/deploy.md#override-volume-subpath-replacement
     volumes:
       - type: volume
         source: dev-tls
@@ -178,28 +102,20 @@ services:
       dev-auth-bootstrap:
         condition: service_completed_successfully
     environment:
-      # Dev-grade local auth (ADR-0004 rollout note; backend/README.md "Run
-      # locally"). See LocalAuthOptions and InMemoryLocalAuthenticationService
-      # -- never set any of these three on a real deployment.
+      # Dev-grade local auth — never set on a real deployment.
+      # why: docs/rationale/deploy.md#override-dev-bootstrap-local-auth-design
       LocalAuth__AdminPasswordHashFile: "/run/secrets/local-auth-admin-password-hash"
       LocalAuth__AdminPasswordHash: "${WAYPOINT_ADMIN_PASSWORD_HASH:-}"
       LocalAuth__Enabled: "${LOCAL_AUTH_ENABLED:-true}"
-      # The base's public-url anchor falls back to a deliberately
-      # nonfunctional placeholder domain (issue #845) -- this override
-      # replaces it with a working localhost default sized to the same
-      # WAYPOINT_HTTPS_PORT the base's nginx `ports:` mapping uses, so a
-      # fresh `docker compose up` gets a real login with no manual
-      # WAYPOINT_PUBLIC_URL step. Override WAYPOINT_PUBLIC_URL yourself (in
-      # deploy/.env) to test against a LAN hostname instead.
+      # why: docs/rationale/deploy.md#override-public-url-localhost-default
       Oidc__PublicUrl: "${WAYPOINT_PUBLIC_URL:-https://localhost:${WAYPOINT_HTTPS_PORT:-8443}}"
     volumes:
       - dev-secrets:/run/secrets:ro
 
   keycloak:
     environment:
-      # Same working localhost default as the backend's Oidc__PublicUrl
-      # above -- both must always carry the SAME value (issue #842), so this
-      # is the identical expression, not an independent one.
+      # Same localhost default as backend's Oidc__PublicUrl — must stay equal.
+      # why: docs/rationale/deploy.md#override-public-url-localhost-default
       WAYPOINT_PUBLIC_URL: "${WAYPOINT_PUBLIC_URL:-https://localhost:${WAYPOINT_HTTPS_PORT:-8443}}"
       KC_HOSTNAME: "${WAYPOINT_PUBLIC_URL:-https://localhost:${WAYPOINT_HTTPS_PORT:-8443}}/auth"
 
@@ -208,8 +124,7 @@ services:
       dev-bootstrap:
         condition: service_completed_successfully
     environment:
-      # Dev-picked conservative sizing (see RunnerResourceOptions' own
-      # compiled-in default for what applies without this override).
+      # Dev-picked conservative sizing; see RunnerResourceOptions' default.
       RunnerResources__FallbackCpuCores: "${RUNNER_FALLBACK_CPU_CORES:-4}"
       RunnerResources__FallbackMemoryBytes: "${RUNNER_FALLBACK_MEMORY_BYTES:-4294967296}"
     volumes:
@@ -223,8 +138,7 @@ services:
       - dev-secrets:/run/secrets:ro
 
 volumes:
-  # Generated development-only master key and local-auth hash. Persistent so
-  # encrypted credentials survive ordinary down/up cycles; `down -v` resets it.
+  # Generated dev-only master key + local-auth hash; `down -v` resets them.
   dev-secrets:
-  # Generated development-only self-signed nginx certificate and key.
+  # Generated dev-only self-signed nginx certificate/key.
   dev-tls:
