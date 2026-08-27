@@ -101,7 +101,8 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 				powershell.AddParameter(name, value);
 			}
 
-			unwireStreams = WireStreamCapture(powershell, request);
+			List<string> errorLines = [];
+			unwireStreams = WireStreamCapture(powershell, request, errorLines);
 			ResetNativeExitCode(lease);
 
 			bool timedOut = false;
@@ -163,7 +164,8 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 				HadErrors: powershell.HadErrors,
 				TimedOut: timedOut,
 				FailureReason: failureReason,
-				NativeExitCode: nativeExitCode);
+				NativeExitCode: nativeExitCode,
+				ErrorLines: errorLines);
 		}
 		finally
 		{
@@ -251,14 +253,18 @@ public sealed partial class PowerShellExecutor : IPowerShellExecutor
 	/// these handlers its late records would keep landing in <c>job.log</c> under a
 	/// finished job (#160).
 	/// </summary>
-	private Action WireStreamCapture(global::System.Management.Automation.PowerShell powershell, PowerShellRequest request)
+	private Action WireStreamCapture(global::System.Management.Automation.PowerShell powershell, PowerShellRequest request, List<string> errorLines)
 	{
 		EventHandler<DataAddedEventArgs> onInformation = (sender, args) =>
 			Emit(request, "information", ((PSDataCollection<InformationRecord>)sender!)[args.Index].ToString());
 		EventHandler<DataAddedEventArgs> onWarning = (sender, args) =>
 			Emit(request, "warning", ((PSDataCollection<WarningRecord>)sender!)[args.Index].Message);
 		EventHandler<DataAddedEventArgs> onError = (sender, args) =>
-			Emit(request, "error", ((PSDataCollection<ErrorRecord>)sender!)[args.Index].ToString());
+		{
+			string line = ((PSDataCollection<ErrorRecord>)sender!)[args.Index].ToString();
+			errorLines.Add(line);
+			Emit(request, "error", line);
+		};
 		EventHandler<DataAddedEventArgs> onVerbose = (sender, args) =>
 			Emit(request, "verbose", ((PSDataCollection<VerboseRecord>)sender!)[args.Index].Message);
 		EventHandler<DataAddedEventArgs> onDebug = (sender, args) =>

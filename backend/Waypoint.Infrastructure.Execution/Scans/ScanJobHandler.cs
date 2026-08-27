@@ -601,7 +601,7 @@ public sealed class ScanJobHandler : IJobHandler
 
 		if (!output.Success)
 		{
-			string rawNote = output.FailureReason ?? "scan invocation reported failure with no reason.";
+			string rawNote = SelectFailureNote(output.FailureReason, result.ErrorLines);
 			return await FailScanAsync(context, rawNote, cancellationToken).ConfigureAwait(false);
 		}
 
@@ -1274,6 +1274,41 @@ public sealed class ScanJobHandler : IJobHandler
 	/// </summary>
 	private string ResolveProfilePath(string? profileKey, string legacyFallbackPath) =>
 		profileKey is null ? legacyFallbackPath : Path.Combine(_complianceContentOptions.Value.ContentPath, profileKey);
+
+	/// <summary>
+	/// Issue #921: when the InSpec-invoking wrapper module (Invoke-WaypointScan /
+	/// Invoke-WaypointSrgScan) reports only the downstream "report file not found"
+	/// symptom -- which is what a nonzero, transport-caused InSpec exit with no
+	/// report on disk always produces, since the module's own Test-Path check can't
+	/// tell WHY the report is missing -- prefer the first PowerShell error-stream
+	/// line captured during the SAME invocation. That line is the actual transport
+	/// diagnostic (e.g. "Unable to connect to VIServer ... Name or service not
+	/// known"), already surfaced by Invoke-ExternalCommand's -SurfaceOutputOnFailure
+	/// at Error severity and captured verbatim by PowerShellExecutor's error-stream
+	/// handler -- it just previously reached only job.log, one severity below the
+	/// terminal note, rather than the note itself. Any other module-reported reason
+	/// (auth rejection, argument error, etc.) is specific enough on its own and is
+	/// returned unchanged; the underlying error line is a fallback preference, not
+	/// an unconditional override, so an unrelated captured error stream line never
+	/// masks an already-actionable module message.
+	/// </summary>
+	private static string SelectFailureNote(string? moduleFailureReason, IReadOnlyList<string>? errorLines)
+	{
+		string fallback = moduleFailureReason ?? "scan invocation reported failure with no reason.";
+		if (errorLines is not { Count: > 0 })
+		{
+			return fallback;
+		}
+
+		bool isMissingReportSymptom = moduleFailureReason is not null
+			&& moduleFailureReason.Contains("report file not found", StringComparison.OrdinalIgnoreCase);
+		if (!isMissingReportSymptom)
+		{
+			return fallback;
+		}
+
+		return errorLines[0];
+	}
 
 	/// <summary>Parses Invoke-WaypointScan's returned [pscustomobject] the same way DownloadJobHandler.TryParseOutput reads its own module's result -- the executor's own Succeeded only reflects the transport, not what the function body itself reported.</summary>
 	private static ScanInvocationOutput? TryParseOutput(IReadOnlyList<object?> output)

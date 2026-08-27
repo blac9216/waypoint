@@ -205,15 +205,65 @@ public sealed class PlanConfigResolutionServiceTests : IAsyncLifetime
 
 		await SaveConfigDocAsync(ConfigDocKinds.Input, executionProfileId, ConfigDocLayers.Global, null, "target_ip: 192.0.2.10\n");
 		await SaveConfigDocAsync(ConfigDocKinds.Input, executionProfileId, ConfigDocLayers.Site, siteId, "target_ip: 192.0.2.20\n");
-		// The doc is keyed to the CONTROL/COMPONENT (componentId), which is what
-		// ScanPlannerService actually resolves against for the Target layer -- see
-		// PlanConfigResolutionService.ResolveAsync's targetId parameter.
-		await SaveConfigDocAsync(ConfigDocKinds.Input, executionProfileId, ConfigDocLayers.Target, componentId, "target_ip: 192.0.2.30\n");
+		// The doc is keyed to the parent TARGET id -- the only Target-layer shape any
+		// API path produces (issue #920: the planner used to key this lookup off the
+		// component id instead, so a doc scoped like this never resolved).
+		await SaveConfigDocAsync(ConfigDocKinds.Input, executionProfileId, ConfigDocLayers.Target, targetId, "target_ip: 192.0.2.30\n");
 
 		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
 
 		PlanInputResolution input = Assert.Single(Assert.Single(plan.Items).InputResolutionsOrEmpty);
-		Assert.Equal($"{ConfigDocLayers.Target}:{componentId}", input.Layer);
+		Assert.Equal($"{ConfigDocLayers.Target}:{targetId}", input.Layer);
+	}
+
+	[Fact]
+	public async Task CompileAsync_TargetLayerDoc_ResolvesIntoSnapshot_AndShiftsThePlanDigest()
+	{
+		// Issue #920 regression (Wave 3 live validation's exact digest-parity repro):
+		// a Target-layer Input doc scoped to the parent TARGET id must both resolve
+		// into the frozen plan snapshot AND change the plan digest relative to a
+		// compile with no doc present. Before the fix, ScanPlannerService passed the
+		// component id as the Target-layer lookup key, so this doc was invisible: the
+		// item stayed "missing" and the digest was byte-identical to the no-doc case.
+		(Guid targetId, _) = await SeedSiteAndTargetAsync();
+		Guid executionProfileId = await SeedExecutionProfileAsync("target-doc-resolves", "8.0.3", inputRequired: false);
+		await ActivateBaselineAsync(executionProfileId, "target-doc-resolves");
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-cfg-9001");
+
+		ScanPlan withoutDoc = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+		PlanInputResolution inputWithoutDoc = Assert.Single(Assert.Single(withoutDoc.Items).InputResolutionsOrEmpty);
+		Assert.Equal(ConfigResolutionStates.Missing, inputWithoutDoc.State);
+
+		await SaveConfigDocAsync(ConfigDocKinds.Input, executionProfileId, ConfigDocLayers.Target, targetId, "target_ip: 192.0.2.70\n");
+
+		ScanPlan withDoc = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+		PlanInputResolution inputWithDoc = Assert.Single(Assert.Single(withDoc.Items).InputResolutionsOrEmpty);
+
+		Assert.Equal(ConfigResolutionStates.Resolved, inputWithDoc.State);
+		Assert.Equal($"{ConfigDocLayers.Target}:{targetId}", inputWithDoc.Layer);
+		Assert.NotEqual(withoutDoc.PlanDigest, withDoc.PlanDigest);
+	}
+
+	[Fact]
+	public async Task CompileAsync_TargetLayerDocKeyedToComponentId_DoesNotResolve()
+	{
+		// Pins the corrected semantics precisely: a doc scoped to the COMPONENT id
+		// (the pre-fix, API-unreachable shape) must NOT resolve at the Target layer --
+		// only a doc scoped to the parent target id resolves there.
+		(Guid targetId, _) = await SeedSiteAndTargetAsync();
+		Guid executionProfileId = await SeedExecutionProfileAsync("target-doc-wrong-key", "8.0.3", inputRequired: false);
+		await ActivateBaselineAsync(executionProfileId, "target-doc-wrong-key");
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-cfg-9002");
+
+		await SaveConfigDocAsync(ConfigDocKinds.Input, executionProfileId, ConfigDocLayers.Target, componentId, "target_ip: 192.0.2.80\n");
+
+		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+
+		PlanInputResolution input = Assert.Single(Assert.Single(plan.Items).InputResolutionsOrEmpty);
+		Assert.Equal(ConfigResolutionStates.Missing, input.State);
+		Assert.Null(input.Layer);
 	}
 
 	[Fact]
