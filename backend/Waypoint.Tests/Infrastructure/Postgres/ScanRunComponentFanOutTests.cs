@@ -218,6 +218,103 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 	}
 
 	[Fact]
+	public async Task CreateScanRun_GatedUnNarrowableComponents_CollapseToExactlyOneWholeTargetJob()
+	{
+		// Issue #737 item-4 fan-out gate (the round-1 blocker's invariant): a target
+		// whose accepted components are all UN-narrowable (here two ssh/target VCSA
+		// appliance components -- ScanComponentNarrowing.CanNarrow == false) must NOT fan
+		// out one whole-target job per component (that would be N duplicate whole-target
+		// scans). They collapse to EXACTLY ONE whole-target job, marked unnarrowed. No
+		// configuration can produce duplicate whole-target executions.
+		Guid siteId = await CreateSiteAsync("fanout-gated-collapse");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
+		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		Guid sshCred = await SeedCredentialAsync("ssh");
+		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+		await SeedBindingAsync(targetId, "vcsa-ssh", sshCred);
+
+		// Two un-narrowable ssh/target components on the same target.
+		await SeedComponentWithRequirementsAsync(
+			targetId, "vcsa-svc-a", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
+		await SeedComponentWithRequirementsAsync(
+			targetId, "vcsa-svc-b", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			profile_id = _profileId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		// Exactly ONE scan job for the whole target, not two.
+		List<Guid> scanJobIds = await ReadScanJobIdsAsync(runId);
+		Assert.Single(scanJobIds);
+
+		// It is marked unnarrowed in its payload (a whole-target scan), and still links
+		// back into the plan for provenance.
+		string payload = await ReadJobPayloadAsync(scanJobIds[0]);
+		using JsonDocument doc = JsonDocument.Parse(payload);
+		Assert.True(doc.RootElement.TryGetProperty("unnarrowed", out JsonElement unnarrowed) && unnarrowed.GetBoolean());
+		Assert.False(doc.RootElement.TryGetProperty("selector_kind", out _), "a collapsed whole-target job carries no object selector.");
+
+		List<(Guid? ScanPlanItemId, short Priority)> scanJobs = await ReadScanJobsAsync(runId);
+		Assert.Single(scanJobs);
+		Assert.NotNull(scanJobs[0].ScanPlanItemId);
+	}
+
+	[Fact]
+	public async Task CreateScanRun_MixedNarrowableAndGated_FansOutPerNarrowablePlusExactlyOneCollapsed()
+	{
+		// Issue #737 item-4: on one target with TWO narrowable esxi components and TWO
+		// un-narrowable ssh components, the run fans out one job per narrowable component
+		// (2) PLUS exactly ONE collapsed whole-target job for the gated remainder = 3
+		// jobs total -- never 4, and never a duplicate whole-target scan.
+		Guid siteId = await CreateSiteAsync("fanout-mixed-gate");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
+		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		Guid sshCred = await SeedCredentialAsync("ssh");
+		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+		await SeedBindingAsync(targetId, "vcsa-ssh", sshCred);
+
+		Guid esxiA = await SeedComponentAsync(targetId, "esxi-a", priority: 4);
+		Guid esxiB = await SeedComponentAsync(targetId, "esxi-b", priority: 4);
+		await SeedComponentWithRequirementsAsync(
+			targetId, "vcsa-svc-a", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
+		await SeedComponentWithRequirementsAsync(
+			targetId, "vcsa-svc-b", ["vcsa-ssh"], transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			profile_id = _profileId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		List<Guid> scanJobIds = await ReadScanJobIdsAsync(runId);
+		Assert.Equal(3, scanJobIds.Count);
+
+		// Exactly one of the three is the collapsed whole-target (unnarrowed) job.
+		int unnarrowedCount = 0;
+		foreach (Guid jobId in scanJobIds)
+		{
+			using JsonDocument doc = JsonDocument.Parse(await ReadJobPayloadAsync(jobId));
+			if (doc.RootElement.TryGetProperty("unnarrowed", out JsonElement u) && u.GetBoolean())
+			{
+				unnarrowedCount++;
+			}
+		}
+
+		Assert.Equal(1, unnarrowedCount);
+		_ = (esxiA, esxiB);
+	}
+
+	[Fact]
 	public async Task CreateScanRun_WithTwoComponentsOnOneTarget_JobCredentialBindingsAreItemScoped_NotUnioned()
 	{
 		// AC-4 "without over-halting": component A requires only vsphere-api; sibling
@@ -378,14 +475,21 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		return await SeedComponentWithRequirementsAsync(targetId, suffix, ["vsphere-api"], priority);
 	}
 
-	private async Task<Guid> SeedComponentWithRequirementsAsync(Guid targetId, string suffix, string[] purposes, int priority = 1)
+	private async Task<Guid> SeedComponentWithRequirementsAsync(
+		Guid targetId,
+		string suffix,
+		string[] purposes,
+		int priority = 1,
+		string transport = CatalogTransports.VMware,
+		string selectorKind = CatalogSelectorKinds.Esxi,
+		string? selectorName = null)
 	{
 		CatalogSourceRevision source = await _catalog.UpsertSourceRevisionAsync($"rev-{suffix}-{Guid.NewGuid():N}", null, CancellationToken.None);
 		CatalogProduct product = await _catalog.UpsertProductAsync(source.Id, "vmware", $"vsphere-{suffix}-{Guid.NewGuid():N}", "VMware vSphere", CancellationToken.None);
 		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
 		CatalogComponent catalogComponent = await _catalog.UpsertComponentAsync(
 			productVersion.Id,
-			new CatalogComponentDefinition($"comp-{suffix}", "Component", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null),
+			new CatalogComponentDefinition($"comp-{suffix}", "Component", transport, selectorKind, selectorName, null),
 			CancellationToken.None);
 		CatalogContentRelease release = await _catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Srg, $"release-{suffix}-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
 		CatalogReportGroup reportGroup = await _catalog.UpsertReportGroupAsync($"group-{suffix}-{Guid.NewGuid():N}", "Test Group", priority, CancellationToken.None);
@@ -504,6 +608,17 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		object? result = await command.ExecuteScalarAsync();
 		Assert.NotNull(result);
 		return (Guid)result!;
+	}
+
+	private async Task<string> ReadJobPayloadAsync(Guid jobId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT payload FROM jobs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(jobId);
+		object? result = await command.ExecuteScalarAsync();
+		Assert.NotNull(result);
+		return (string)result!;
 	}
 
 	private async Task<List<string>> ReadJobPurposesAsync(Guid jobId)

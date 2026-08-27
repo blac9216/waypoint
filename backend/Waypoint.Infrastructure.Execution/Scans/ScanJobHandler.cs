@@ -272,6 +272,26 @@ public sealed class ScanJobHandler : IJobHandler
 					["ReportPath"] = reportPath,
 					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
 				};
+
+				// Issue #737 item-4: a NARROWABLE plan item (the vSphere-family object
+				// selectors -- ScanComponentNarrowing.CanNarrow) scopes the InSpec vmware
+				// invocation to THAT component's object (this ESXi host / this VM /
+				// vCenter-scoped controls) rather than the whole vCenter, so N sibling
+				// component jobs no longer each re-scan the entire target. The ONE
+				// collapsed whole-target remainder job carries Unnarrowed == true (and no
+				// selector), and a legacy whole-target job carries no selector at all --
+				// both fall through with no SelectorKind/SelectorName, preserving the
+				// pre-#737 whole-vCenter invocation exactly. SelectorName is passed only
+				// for the object-identifying kinds (esxi/vm); a vcenter selector needs no
+				// name (the whole vCenter IS the object).
+				if (!payload.Unnarrowed && ScanComponentNarrowing.CanNarrow(payload.Transport, payload.SelectorKind))
+				{
+					parameters["SelectorKind"] = payload.SelectorKind;
+					if (!string.IsNullOrWhiteSpace(payload.SelectorName))
+					{
+						parameters["SelectorName"] = payload.SelectorName;
+					}
+				}
 			}
 
 			PowerShellRequest request = new(
@@ -960,10 +980,40 @@ public sealed class ScanJobHandler : IJobHandler
 			? profileKeyElement.GetString()
 			: null;
 
-		return new ScanPayload(targetId, string.IsNullOrWhiteSpace(profileKey) ? null : profileKey);
+		// Issue #737 item-4: component-narrowing fields, written by
+		// RunCreationService.BuildPlanItemJobSpec for a NARROWABLE plan item
+		// (ScanComponentNarrowing.CanNarrow == true -- the vSphere-family object
+		// selectors). All three are absent on a legacy whole-target job and on the ONE
+		// collapsed whole-target remainder job (which carries unnarrowed = true instead)
+		// -- ResolveNarrowing below (and CanNarrow) treats those as "scan the whole
+		// target", so a null/absent field never narrows.
+		string? transport = ReadOptionalString(root, "transport");
+		string? selectorKind = ReadOptionalString(root, "selector_kind");
+		string? selectorName = ReadOptionalString(root, "selector_name");
+		bool unnarrowed = root.TryGetProperty("unnarrowed", out JsonElement unnarrowedElement)
+			&& unnarrowedElement.ValueKind == JsonValueKind.True;
+
+		return new ScanPayload(
+			targetId,
+			string.IsNullOrWhiteSpace(profileKey) ? null : profileKey,
+			transport,
+			selectorKind,
+			selectorName,
+			unnarrowed);
 	}
 
-	private sealed record ScanPayload(Guid TargetId, string? ProfileKey);
+	private static string? ReadOptionalString(JsonElement root, string property) =>
+		root.TryGetProperty(property, out JsonElement element) && element.ValueKind == JsonValueKind.String
+			? element.GetString()
+			: null;
+
+	private sealed record ScanPayload(
+		Guid TargetId,
+		string? ProfileKey,
+		string? Transport = null,
+		string? SelectorKind = null,
+		string? SelectorName = null,
+		bool Unnarrowed = false);
 
 	private sealed record ResolvedCredential(string Username, string Secret, bool SudoEnabled, Action Release);
 

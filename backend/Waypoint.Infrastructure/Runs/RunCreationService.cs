@@ -388,11 +388,27 @@ public sealed class RunCreationService
 		// come from the post-demotion plan.Items, or a credential-demoted item would be
 		// fanned out as a job anyway with no way to resolve its own binding.
 		Dictionary<Guid, Guid> targetIdByComponentId = [];
+		// Issue #737 item-4: the discovered component's own vendor identity (ESXi
+		// hostname / VM identity, ADR-0023 "identity is never display name") is what a
+		// NARROWED vSphere scan scopes InSpec to -- frozen into the narrowed job's
+		// payload here (component_id -> vendor identity) so the runner scans exactly THAT
+		// host/VM's controls, not the whole vCenter, and two sibling ESXi jobs carry
+		// distinct selectors. A component with no vendor identity (a catalog-declared
+		// service with no independent upstream object) is never narrowable anyway
+		// (ScanComponentNarrowing.CanNarrow is false for the service selector), so its
+		// absence from this map is expected, not a gap.
+		Dictionary<Guid, string> vendorIdentityByComponentId = [];
 		foreach ((Guid targetId, PlanTargetRequirement requirement) in planRequirementsByTarget)
 		{
 			foreach (Waypoint.Core.Scans.ScanPlanItem item in requirement.Items)
 			{
 				targetIdByComponentId[item.ComponentId] = targetId;
+				Waypoint.Core.Components.Component? component =
+					await _components.GetAsync(item.ComponentId, cancellationToken).ConfigureAwait(false);
+				if (!string.IsNullOrWhiteSpace(component?.VendorIdentity))
+				{
+					vendorIdentityByComponentId[item.ComponentId] = component!.VendorIdentity!;
+				}
 			}
 		}
 
@@ -440,10 +456,54 @@ public sealed class RunCreationService
 			{
 				if (survivingItemsByTarget.TryGetValue(target.Id, out List<Waypoint.Core.Scans.ScanPlanItem>? items))
 				{
+					// Issue #737 item-4 fan-out gate (round-2, per the round-1 review's
+					// blocker): the runner can execute a NARROWED scan (ScanJobHandler
+					// scopes the InSpec invocation to the item's own object) only for the
+					// vSphere-family object selectors -- ScanComponentNarrowing.CanNarrow.
+					// Every such item gets its own per-item job. Any item the runner
+					// cannot yet narrow (vmware/service, ssh, nsx-api, vcf-api component
+					// sub-transports) would, if given its own job, re-run the identical
+					// whole-target scan -- N duplicate whole-target executions. So the
+					// entire un-narrowable REMAINDER on this target collapses to EXACTLY
+					// ONE whole-target job, marked unnarrowed. The plan's per-item rows
+					// remain the provenance record; this is the tested invariant that no
+					// configuration can produce duplicate whole-target executions.
+					List<Waypoint.Core.Scans.ScanPlanItem> narrowable = [];
+					List<Waypoint.Core.Scans.ScanPlanItem> remainder = [];
 					foreach (Waypoint.Core.Scans.ScanPlanItem item in items)
 					{
+						if (Waypoint.Core.Scans.ScanComponentNarrowing.CanNarrow(item))
+						{
+							narrowable.Add(item);
+						}
+						else
+						{
+							remainder.Add(item);
+						}
+					}
+
+					foreach (Waypoint.Core.Scans.ScanPlanItem item in narrowable)
+					{
 						planItemSpecPositions.Add((specs.Count, item.ComponentId));
-						specs.Add(BuildPlanItemJobSpec(item, target, siteId, profile, useRunSecret, resolvedBindings, adHocByTarget));
+						vendorIdentityByComponentId.TryGetValue(item.ComponentId, out string? vendorIdentity);
+						specs.Add(BuildPlanItemJobSpec(
+							item, vendorIdentity, target, siteId, profile, useRunSecret, resolvedBindings, adHocByTarget));
+					}
+
+					if (remainder.Count > 0)
+					{
+						// One whole-target job for the whole remainder. Linked to the
+						// remainder's highest-priority (lowest catalog priority number)
+						// item as its representative plan row so the job still carries a
+						// non-null scan_plan_item_id back into the plan; every remainder
+						// component stays a first-class scan_plan_items row regardless.
+						Waypoint.Core.Scans.ScanPlanItem representative = remainder
+							.OrderBy(candidate => Waypoint.Core.Jobs.ScanTargetPriority.ForPlanItem(candidate))
+							.ThenBy(candidate => candidate.ComponentId)
+							.First();
+						planItemSpecPositions.Add((specs.Count, representative.ComponentId));
+						specs.Add(BuildUnnarrowedTargetJobSpec(
+							remainder, representative, target, siteId, profile, useRunSecret, resolvedBindings, adHocByTarget));
 					}
 				}
 
@@ -591,6 +651,7 @@ public sealed class RunCreationService
 	/// </summary>
 	private static JobSpec BuildPlanItemJobSpec(
 		Waypoint.Core.Scans.ScanPlanItem item,
+		string? vendorIdentity,
 		Target target,
 		Guid siteId,
 		Profile profile,
@@ -606,6 +667,17 @@ public sealed class RunCreationService
 		// resource-admission check needs it before a handler ever reads the frozen
 		// plan item row, so it must be readable straight from the claimed job without
 		// a database round trip.
+		//
+		// Issue #737 item-4: this method is only ever called for a NARROWABLE item
+		// (ScanComponentNarrowing.CanNarrow == true -- the caller partitioned the
+		// remainder off to BuildUnnarrowedTargetJobSpec). `selector_kind` is the item's
+		// catalog object kind (vcenter/esxi/vm); `selector_name` is the discovered
+		// component's own VENDOR IDENTITY (the ESXi hostname / VM identity that scopes
+		// the InSpec vmware invocation to that one object) -- NOT the catalog
+		// SelectorName (which is null for these object kinds; only a `service` selector
+		// carries a catalog name, and `service` is never narrowable). A vcenter selector
+		// has no object identity below the vCenter itself, so its selector_name stays
+		// null (the whole vCenter IS the object).
 		string payload = JsonSerializer.Serialize(new
 		{
 			target_id = target.Id,
@@ -615,7 +687,7 @@ public sealed class RunCreationService
 			component_id = item.ComponentId,
 			transport = item.Transport,
 			selector_kind = item.SelectorKind,
-			selector_name = item.SelectorName,
+			selector_name = vendorIdentity,
 		});
 
 		short priority = ScanTargetPriority.ForPlanItem(item);
@@ -656,6 +728,96 @@ public sealed class RunCreationService
 		Guid? effectiveCredentialId =
 			CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(target.Kind, out string? defaultPurpose)
 			&& itemPurposes.Contains(defaultPurpose)
+			&& targetPurposes.TryGetValue(defaultPurpose, out Guid executionCredentialId)
+				? executionCredentialId
+				: null;
+
+		return new JobSpec(
+			ScanJobType,
+			priority,
+			TargetId: target.Id,
+			TargetName: target.Name,
+			CredentialId: effectiveCredentialId,
+			Payload: payload,
+			CredentialBindings: bindingSpecs.Count == 0 ? null : bindingSpecs);
+	}
+
+	/// <summary>
+	/// Issue #737 item-4 fan-out gate (round-2): the ONE collapsed whole-target
+	/// <see cref="JobSpec"/> for a plan-driven target's un-narrowable remainder --
+	/// every accepted item on the target whose transport/selector the runner cannot yet
+	/// scope to a single object (<see cref="Waypoint.Core.Scans.ScanComponentNarrowing"/>).
+	/// If each such item got its own per-item job, every one would re-run the identical
+	/// whole-target scan (the round-1 blocker); collapsing the whole remainder to a
+	/// single whole-target job makes duplicate whole-target execution impossible.
+	///
+	/// The payload carries <c>unnarrowed = true</c> so <c>ScanJobHandler</c> runs the
+	/// legacy whole-target invocation for it (no selector), and NO <c>selector_kind</c>/
+	/// <c>selector_name</c> (this job scans the whole target, not one object). It is
+	/// linked to <paramref name="representative"/>'s plan row (via
+	/// <see cref="JobSpec.ScanPlanItemId"/>, patched in by the caller) so the collapsed
+	/// job still points back into the immutable plan; every remainder component remains
+	/// its own <c>scan_plan_items</c> row for provenance. Credential bindings are the
+	/// UNION of every remainder item's own <c>RequiredPurposes</c> -- a whole-target
+	/// scan legitimately consumes all of them, unlike a narrowed per-item job.
+	/// </summary>
+	private static JobSpec BuildUnnarrowedTargetJobSpec(
+		List<Waypoint.Core.Scans.ScanPlanItem> remainder,
+		Waypoint.Core.Scans.ScanPlanItem representative,
+		Target target,
+		Guid siteId,
+		Profile profile,
+		bool useRunSecret,
+		Dictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings,
+		Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> adHocByTarget)
+	{
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = target.Id,
+			site_id = siteId,
+			target_kind = target.Kind,
+			profile_key = profile.ProfileKey,
+			component_id = representative.ComponentId,
+			transport = representative.Transport,
+			unnarrowed = true,
+		});
+
+		// Priority: the highest-priority (lowest number) remainder item, so the
+		// collapsed job is scheduled no later than its most urgent constituent would
+		// have been.
+		short priority = Waypoint.Core.Jobs.ScanTargetPriority.ForPlanItem(representative);
+
+		if (useRunSecret)
+		{
+			return new JobSpec(
+				ScanJobType,
+				priority,
+				TargetId: target.Id,
+				TargetName: target.Name,
+				Payload: payload,
+				HasRunSecret: true);
+		}
+
+		IReadOnlyDictionary<string, Guid> targetPurposes = resolvedBindings.TryGetValue(target.Id, out IReadOnlyDictionary<string, Guid>? foundSaved)
+			? foundSaved
+			: new Dictionary<string, Guid>();
+		IReadOnlyDictionary<string, RunAdHocCredential> targetAdHocPurposes = adHocByTarget.TryGetValue(target.Id, out IReadOnlyDictionary<string, RunAdHocCredential>? foundAdHoc)
+			? foundAdHoc
+			: new Dictionary<string, RunAdHocCredential>();
+
+		// Union of every remainder item's own RequiredPurposes -- a whole-target scan
+		// consumes all of them (unlike a narrowed per-item job, which carries only its
+		// own component's purposes).
+		HashSet<string> remainderPurposes = [.. remainder.SelectMany(item => item.RequiredPurposes)];
+		List<JobCredentialBindingSpec> bindingSpecs = [
+			.. targetPurposes.Where(pair => remainderPurposes.Contains(pair.Key)).Select(pair => new JobCredentialBindingSpec(pair.Key, pair.Value)),
+			.. targetAdHocPurposes.Keys.Where(remainderPurposes.Contains).Select(purpose => new JobCredentialBindingSpec(purpose, CredentialId: null, IsRunSecret: true)),
+		];
+		bindingSpecs.Sort((a, b) => string.CompareOrdinal(a.Purpose, b.Purpose));
+
+		Guid? effectiveCredentialId =
+			CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(target.Kind, out string? defaultPurpose)
+			&& remainderPurposes.Contains(defaultPurpose)
 			&& targetPurposes.TryGetValue(defaultPurpose, out Guid executionCredentialId)
 				? executionCredentialId
 				: null;

@@ -56,14 +56,28 @@ function Invoke-WaypointScan {
 		[int]$TimeoutSeconds,
 
 		[Parameter()]
+		[ValidateSet('vcenter', 'esxi', 'vm')]
+		[string]$SelectorKind,
+
+		[Parameter()]
+		[string]$SelectorName,
+
+		[Parameter()]
 		[string]$VmwareStigDockerCommonPath
 	)
 
 	# Deliberately touches the Information stream, exactly like
 	# WaypointDiscoveryStubModule -- if the decrypted password ever leaked into this
 	# handler's invocation, the canary test would catch it here.
+	#
+	# Issue #737 item-4: the stub also echoes the narrowing SELECTOR the handler passed,
+	# so a test can assert WHAT an executed component job scans -- a narrowed job carries
+	# a distinct 'selector=esxi/<host>' line; a whole-target (legacy or collapsed
+	# remainder) job carries 'selector=<whole-target>'. This is the round-1 review's
+	# required "assert what an executed job scans, not just the job count" observation.
 	$InformationPreference = 'Continue'
-	Write-Information "Scanning stub vCenter '$VCenter' as '$Username' (password length $($Password.Length)) profile '$ProfilePath'"
+	$SelectorSummary = if ($SelectorKind) { "$SelectorKind/$SelectorName" } else { '<whole-target>' }
+	Write-Information "Scanning stub vCenter '$VCenter' as '$Username' (password length $($Password.Length)) profile '$ProfilePath' selector=$SelectorSummary"
 
 	$Mode = $env:WAYPOINT_SCAN_STUB_MODE
 	if (-not $Mode) { $Mode = 'success' }

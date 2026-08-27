@@ -366,6 +366,164 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		Assert.True((long)(await query.ExecuteScalarAsync())! >= 1, "expected the stub's Information line to echo the legacy fixed ProfilePath.");
 	}
 
+	/// <summary>
+	/// Issue #737 item-4 (round-2, the round-1 review's blocker): a NARROWABLE component
+	/// job (transport <c>vmware</c>, selector <c>esxi</c>) executes an InSpec invocation
+	/// SCOPED TO THAT ESXi host -- not the whole vCenter. Proven the same way the
+	/// profile-key test proves path resolution: the stub echoes the selector the handler
+	/// passed onto the Information stream, captured as a <c>job.log</c> event. The narrowed
+	/// job's line reads <c>selector=esxi/&lt;host&gt;</c>; it must NEVER read
+	/// <c>&lt;whole-target&gt;</c>. This is the "assert what an EXECUTED component job
+	/// scans, not just how many jobs exist" observation finding 1 required.
+	/// </summary>
+	[Fact]
+	public async Task NarrowableEsxiComponentJob_ScopesInvocationToThatHost_NotWholeVCenter()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-narrow-esxi-canary");
+
+		const string esxiHost = "esxi-narrow-07.example.internal";
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "vmware",
+			selector_kind = "esxi",
+			selector_name = esxiHost,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 4, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.True(await ScanLogContainsAsync(jobIds[0], $"selector=esxi/{esxiHost}"),
+			"expected the executed scan to be narrowed to this ESXi host.");
+		Assert.False(await ScanLogContainsAsync(jobIds[0], "selector=<whole-target>"),
+			"a narrowed esxi component job must NOT run a whole-target scan.");
+	}
+
+	/// <summary>
+	/// Issue #737 item-4 sibling isolation: two ESXi component jobs on the SAME target
+	/// each scan their OWN host, with DISTINCT selectors -- neither re-scans the whole
+	/// vCenter, and neither carries the other's selector. This is the direct
+	/// counter-proof to the round-1 blocker ("N sibling jobs each run the identical
+	/// whole-target scan").
+	/// </summary>
+	[Fact]
+	public async Task TwoNarrowableSiblingJobs_EachScopeToTheirOwnHost_NeverWholeTarget()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-narrow-siblings-canary");
+
+		const string hostA = "esxi-sib-a.example.internal";
+		const string hostB = "esxi-sib-b.example.internal";
+		string payloadA = JsonSerializer.Serialize(new { target_id = targetId, transport = "vmware", selector_kind = "esxi", selector_name = hostA });
+		string payloadB = JsonSerializer.Serialize(new { target_id = targetId, transport = "vmware", selector_kind = "esxi", selector_name = hostB });
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[
+				new JobSpec("scan", 4, TargetId: targetId, CredentialId: credentialId, Payload: payloadA),
+				new JobSpec("scan", 4, TargetId: targetId, CredentialId: credentialId, Payload: payloadB),
+			],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+			await PollUntilTerminalAsync(jobIds[1]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		// Each job scanned exactly its own host, never the other's, never whole-target.
+		Assert.True(await ScanLogContainsAsync(jobIds[0], $"selector=esxi/{hostA}"));
+		Assert.False(await ScanLogContainsAsync(jobIds[0], $"selector=esxi/{hostB}"));
+		Assert.True(await ScanLogContainsAsync(jobIds[1], $"selector=esxi/{hostB}"));
+		Assert.False(await ScanLogContainsAsync(jobIds[1], $"selector=esxi/{hostA}"));
+		Assert.False(await ScanLogContainsAsync(jobIds[0], "selector=<whole-target>"));
+		Assert.False(await ScanLogContainsAsync(jobIds[1], "selector=<whole-target>"));
+	}
+
+	/// <summary>
+	/// Issue #737 item-4 fan-out gate: the ONE collapsed whole-target remainder job
+	/// (payload <c>unnarrowed = true</c>) executes a WHOLE-TARGET scan -- exactly the
+	/// pre-#737 invocation, with NO selector -- so an un-narrowable component set never
+	/// forces a narrowed invocation the runner cannot honor. Together with the fan-out
+	/// tests (which prove there is exactly ONE such job per target), this is the
+	/// "no configuration produces duplicate whole-target executions" invariant.
+	/// </summary>
+	[Fact]
+	public async Task UnnarrowedCollapsedJob_RunsWholeTargetScan_NoSelector()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-unnarrowed-canary");
+
+		// The collapsed remainder job carries a component_id + transport for provenance,
+		// but unnarrowed = true and NO selector_kind -- the handler must ignore any
+		// narrowing and run the whole-target invocation.
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			component_id = Guid.NewGuid(),
+			unnarrowed = true,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.True(await ScanLogContainsAsync(jobIds[0], "selector=<whole-target>"),
+			"an unnarrowed collapsed job must run a whole-target scan.");
+		Assert.False(await ScanLogContainsAsync(jobIds[0], "selector=esxi/"),
+			"an unnarrowed collapsed job must NOT carry any object selector.");
+	}
+
+	/// <summary>True when any of the job's <c>job.log</c> events contains <paramref name="fragment"/> (the scan stub echoes its resolved selector there).</summary>
+	private async Task<bool> ScanLogContainsAsync(Guid jobId, string fragment)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' AND payload::text LIKE '%' || $2 || '%'", connection);
+		query.Parameters.AddWithValue(jobId);
+		query.Parameters.AddWithValue(fragment);
+		return (long)(await query.ExecuteScalarAsync())! >= 1;
+	}
+
 	/// <summary>Predecessor constraint: InSpec exit code 100 is a completed scan, not a tool failure.</summary>
 	[Fact]
 	public async Task ExitCode100_IsMappedToSuccess_NotFailure()
