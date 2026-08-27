@@ -21,9 +21,15 @@
 # path (ContentEntries built via Get-Content -Raw inside a [PSCustomObject] literal) that
 # lost RawYaml, through the SAME real PowerShellExecutor/WaypointRunspacePool the runner
 # uses -- without a real git remote or the real (unavailable, licensed-tool-adjacent)
-# inspec binary. InspecCheckRan/Passed are stubbed true here (this fixture's controls/
-# directories are invented and would not actually pass a real `inspec check`) -- the
-# inspec-check gate itself is proven separately by ContentPullJobHandlerTests' fakes.
+# inspec binary.
+#
+# Issue #984: InspecCheckRan/Passed now also call the REAL WaypointComplianceContent.psm1
+# Test-WaypointInspecCheck (not a hand-stubbed true) for controls/-bearing profiles, so
+# this end-to-end fixture chain exercises the exact bounded-check path issue #984 fixed
+# (System.Diagnostics.Process, no Start-Job/Wait-Job) under the real in-process SMA host.
+# ContentPullJobHandlerTests.Execute_RealExecutor_FixtureContentTree_StagesAndPromotesProfiles
+# puts an invented stub "inspec" executable on PATH before calling this, so the check
+# genuinely runs (and completes well inside its bound) rather than reporting "not found".
 #
 # The real WaypointComplianceContent.psm1 is imported separately, alongside this stub,
 # via PowerShellOptions.ModulePreloadPaths (both land in the same InitialSessionState),
@@ -59,15 +65,25 @@ function Invoke-WaypointContentPullRealExecutorStub {
 	# issue #972 proved loses the string without PowerShellValueUnwrap.
 	$entries = @(foreach ($p in $profiles) {
 			$hasControlsDirectory = Test-Path (Join-Path $p._ProfileDirectory 'controls')
+			# Issue #984: run the REAL bounded check (not a hand-stubbed true) so this
+			# end-to-end chain exercises the exact path issue #984 fixed, under the real
+			# in-process SMA host -- the caller puts an invented stub "inspec" executable
+			# on PATH so this genuinely runs and completes well inside its bound.
+			$inspecCheck = if ($hasControlsDirectory) {
+				Test-WaypointInspecCheck -ProfileDirectory $p._ProfileDirectory -TimeoutSeconds 30
+			}
+			else {
+				[PSCustomObject]@{ Ran = $false; Passed = $false; Detail = 'no controls/ directory -- not an executable-leaf candidate, inspec check skipped' }
+			}
 			[PSCustomObject]@{
 				ProfileKey            = $p.ProfileKey
 				RawYaml               = Get-WaypointComplianceContentRawManifest -ProfileDirectory $p._ProfileDirectory
 				HasControlsDirectory  = $hasControlsDirectory
 				HasFilesDirectory     = Test-Path (Join-Path $p._ProfileDirectory 'files')
 				ControlFileNames      = @(Get-WaypointComplianceContentControlFileNames -ProfileDirectory $p._ProfileDirectory)
-				InspecCheckRan        = $hasControlsDirectory
-				InspecCheckPassed     = $hasControlsDirectory
-				InspecCheckDetail     = $null
+				InspecCheckRan        = $inspecCheck.Ran
+				InspecCheckPassed     = $inspecCheck.Passed
+				InspecCheckDetail     = $inspecCheck.Detail
 			}
 		})
 

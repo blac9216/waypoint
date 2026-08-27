@@ -44,9 +44,24 @@
 # structurally valid profile, non-zero + JSON diagnostics otherwise), the same
 # "faithful argument contract, invented content" discipline docs/testing.md's VCFDT
 # section establishes for a different (licensed) tool. Execution is bounded: a wall-
-# clock timeout (Start-Job, hard-stopped past the limit) and a captured-output size cap
-# (issue #729 AC "bounded runner work") so one hung or pathological profile cannot stall
-# or memory-balloon the whole content-pull job attempt.
+# clock timeout and a captured-output size cap (issue #729 AC "bounded runner work") so
+# one hung or pathological profile cannot stall or memory-balloon the whole content-pull
+# job attempt.
+#
+# Issue #984 (live-proven, epic #726 round 3): the ORIGINAL bound used
+# `Start-Job`/`Wait-Job`, which depends on PowerShell's background-job subsystem (a
+# child-process launcher plus the job/event pump) that is only wired up in a full `pwsh`
+# host. The compliance-runner hosts PowerShell in-process via a hand-rolled SMA runspace
+# pool (`WaypointRunspacePool`, `InitialSessionState.CreateDefault2()`, ADR-0013/0014),
+# which never wires that subsystem up -- `Wait-Job` never observed the job completing, so
+# EVERY invocation hit the 60s bound and every valid profile was fail-closed quarantined
+# (net promoted content = 0). The bound is now built directly on
+# `System.Diagnostics.Process` + `WaitForExit(timeoutMilliseconds)`: `inspec` is always an
+# external executable regardless of host, so a plain process start/wait/kill-on-timeout is
+# host-agnostic -- it depends on nothing but the .NET process APIs already available
+# inside any SMA runspace (embedded or full-`pwsh`), proven end to end by
+# ContentPullJobHandlerTests' `Execute_RealExecutor_FixtureContentTree_StagesAndPromotesProfiles`
+# (PR #975's real-in-process-host pattern), which now drives this exact function.
 #
 # Issue #617: the real vmware/dod-compliance-and-automation repo nests its ~385 InSpec
 # profiles many directories deep (e.g.
@@ -269,7 +284,8 @@ function Test-WaypointInspecCheck {
 		[int]$MaxOutputBytes = 65536
 	)
 
-	if (-not (Get-Command inspec -ErrorAction SilentlyContinue)) {
+	$inspecCommand = Get-Command inspec -ErrorAction SilentlyContinue
+	if (-not $inspecCommand) {
 		# No inspec binary on PATH (e.g. a CI image without it staged) -- this is not a
 		# profile failure, just unavailable bounded validation; the caller (candidate
 		# promotion) must treat "did not run" distinctly from "ran and failed" and fail
@@ -278,39 +294,84 @@ function Test-WaypointInspecCheck {
 		return [PSCustomObject]@{ Ran = $false; Passed = $false; Detail = 'inspec executable not found on PATH' }
 	}
 
-	# Bounded via Start-Job rather than the module's own thread so a hung `inspec`
-	# process (e.g. a pathological profile.yml symlink loop) cannot block the pull job
-	# attempt past TimeoutSeconds -- Wait-Job returns even if the job's own child
-	# process never exits on its own, and Remove-Job -Force below reaps it.
-	$job = Start-Job -ScriptBlock {
-		param($dir)
-		$output = & inspec check $dir --format json 2>&1 | Out-String
-		[PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $output }
-	} -ArgumentList $ProfileDirectory
+	# Issue #984: bounded via a direct System.Diagnostics.Process + WaitForExit(timeout)
+	# rather than Start-Job/Wait-Job -- `inspec` is an external executable regardless of
+	# host, so this bound depends on nothing but the .NET process APIs, which work
+	# identically whether this module is loaded into a full `pwsh` host or the
+	# compliance-runner's embedded SMA runspace (WaypointRunspacePool,
+	# InitialSessionState.CreateDefault2()). Start-Job/Wait-Job depended on PowerShell's
+	# background-job subsystem, which the embedded runspace never wires up -- Wait-Job
+	# never observed completion and every invocation hit the timeout (issue #984).
+	$psi = [System.Diagnostics.ProcessStartInfo]::new()
+	$psi.FileName = $inspecCommand.Source
+	$psi.ArgumentList.Add('check')
+	$psi.ArgumentList.Add($ProfileDirectory)
+	$psi.ArgumentList.Add('--format')
+	$psi.ArgumentList.Add('json')
+	$psi.RedirectStandardOutput = $true
+	$psi.RedirectStandardError = $true
+	$psi.UseShellExecute = $false
 
-	$completed = Wait-Job -Job $job -Timeout $TimeoutSeconds
-	if (-not $completed) {
-		Stop-Job -Job $job -ErrorAction SilentlyContinue
-		Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+	$process = [System.Diagnostics.Process]::new()
+	$process.StartInfo = $psi
+
+	try {
+		[void]$process.Start()
+
+		# Task-based async reads (StandardOutput/Error.ReadToEndAsync), NOT
+		# Register-ObjectEvent + Begin*ReadLine -- reading a redirected stream
+		# synchronously after the process exits can deadlock if the child fills the OS
+		# pipe buffer before exiting, so the read must start before WaitForExit either
+		# way, but Register-ObjectEvent's callback only runs when PowerShell's own
+		# event queue is pumped (Wait-Event/Get-Event/a message loop), which nothing
+		# in this synchronous function does -- proven live in issue #984's own fix
+		# round: output silently came back empty because the DataReceived event
+		# handlers never fired. Task.ReadToEndAsync is pure BCL (no PowerShell engine
+		# event pump involved) and completes identically in a full pwsh host or the
+		# compliance-runner's embedded SMA runspace.
+		$stdoutTask = $process.StandardOutput.ReadToEndAsync()
+		$stderrTask = $process.StandardError.ReadToEndAsync()
+
+		$completed = $process.WaitForExit($TimeoutSeconds * 1000)
+		if (-not $completed) {
+			try {
+				$process.Kill($true)
+			}
+			catch {
+				# The process may have exited between WaitForExit's false return and here;
+				# either way, there is nothing left to bound -- Write-Verbose only (not an
+				# actionable failure) to satisfy PSAvoidUsingEmptyCatchBlock.
+				Write-Verbose "inspec check process kill after timeout raised: $_"
+			}
+			# Give the kill a moment to unblock the read tasks before this function
+			# returns -- best-effort only, never itself unbounded; the outer caller
+			# already fails closed on the timeout regardless of what this captures.
+			[void]$process.WaitForExit(5000)
+			[System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 5000) | Out-Null
+
+			return [PSCustomObject]@{
+				Ran    = $true
+				Passed = $false
+				Detail = "inspec check did not complete within ${TimeoutSeconds}s -- treated as a failed check (fail closed)"
+			}
+		}
+
+		[System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask))
+
+		$exitCode = $process.ExitCode
+		$detail = $stdoutTask.Result + $stderrTask.Result
+		if ($detail.Length -gt $MaxOutputBytes) {
+			$detail = $detail.Substring(0, $MaxOutputBytes) + "... [truncated at $MaxOutputBytes bytes]"
+		}
+
 		return [PSCustomObject]@{
-			Ran     = $true
-			Passed  = $false
-			Detail  = "inspec check did not complete within ${TimeoutSeconds}s -- treated as a failed check (fail closed)"
+			Ran    = $true
+			Passed = ($exitCode -eq 0)
+			Detail = $detail
 		}
 	}
-
-	$result = Receive-Job -Job $job
-	Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-
-	$detail = if ($result.Output) { $result.Output } else { '' }
-	if ($detail.Length -gt $MaxOutputBytes) {
-		$detail = $detail.Substring(0, $MaxOutputBytes) + "... [truncated at $MaxOutputBytes bytes]"
-	}
-
-	return [PSCustomObject]@{
-		Ran    = $true
-		Passed = ($result.ExitCode -eq 0)
-		Detail = $detail
+	finally {
+		$process.Dispose()
 	}
 }
 
