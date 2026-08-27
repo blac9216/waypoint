@@ -232,8 +232,11 @@ public sealed class SchemaMigrationTests
 	/// deliberately NOT seeded: migration 0050's catalog_credential_requirements
 	/// purpose CHECK constraint excludes 'vcf-api' pending issue #807, and this
 	/// migration is not a schema change, issue #967 --
-	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 66;
+	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.
+	///
+	/// 0068 (issue #974): adds `inventory_items.version`, additive alongside the
+	/// existing `build` column -- no new tables, no runner grant changes.</summary>
+	private const int ExpectedMigrationCount = 67;
 
 	private readonly PostgresFixture _fixture;
 

@@ -163,7 +163,7 @@ next sign-in would silently reuse the still-live Keycloak session.
 |---|---|---|
 | `/sites` · `/sites/{id}` | GET, POST, PUT, DELETE | Admin writes. Site: name, description, stigman_override?. |
 | `/sites/{id}/targets` · `/targets/{id}` | GET, POST, PUT, DELETE | kind (`vsphere`\|`nsx-api`\|`ssh`), connection.host, credential_ref, discovery_status, last_refreshed. |
-| `/targets/{id}/inventory` | GET | Cached hosts/VMs tree (cluster → host → vm), build info, maintenance_mode. |
+| `/targets/{id}/inventory` | GET | Cached hosts/VMs tree (cluster → host → vm), build info, semantic version (issue #974, host rows only), maintenance_mode. |
 | `/targets/{id}/discover` | POST | 202 → `discover` job. |
 
 🚧 **Planned cached component inventory (epic #726, [ADR-0023](adr/0023-compliance-inventory-and-immutable-plans.md)).**
@@ -851,7 +851,9 @@ halt; a successful resolved outcome still breaks the consecutive sequence.
 ## Postgres schema sketch
 
 `sites` · `targets` (site_id, kind, connection jsonb, credential_id, discovery_status)
-· `inventory_items` (target_id, type, parent_id, name, build, maintenance) ·
+· `inventory_items` (target_id, type, parent_id, name, build, version, maintenance) --
+`version` (issue #974) is the host's semantic vSphere product version, additive
+alongside `build`, which is retained unchanged as a discovered fact ·
 `credentials` (owner='shared', type, username?, health, rotated_at) · `credential_secrets`
 (credential_id, ciphertext, data_key_wrapped, master_key_id — ADR-0005) · `runs` ·
 `jobs` (run_id, target_id, priority 1-6, state, stage, counts, note, lease/heartbeat)

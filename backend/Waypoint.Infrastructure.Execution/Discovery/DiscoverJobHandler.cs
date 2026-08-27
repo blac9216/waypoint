@@ -443,14 +443,25 @@ public sealed class DiscoverJobHandler : IJobHandler
 				// host) inventory parent -- both this root and every esxi/vm row have
 				// ParentVendorIdentity null, so both land as top-level (ParentComponentId
 				// null) components under the target, matching the root's own top-level
-				// position. Build is captured as the component's discovered fact only for
-				// a host -- a VM's Build carries VMware Tools version in this module's
-				// output, which is not a product-version fact for the VM itself, so it is
-				// intentionally NOT passed as ExactVersion here (that would misrepresent a
-				// guest property as the component's own compliance-relevant version).
+				// position. Issue #974 (owner decision on #967's options analysis, "Option
+				// A"): a host's ExactVersion is its semantic vSphere product version
+				// (item.Version, e.g. "8.0.3"), NOT its raw Build number -- Build never
+				// equals the catalog's semantic VersionKey byte-for-byte (ADR-0022), so
+				// using it as ExactVersion could never match and made every discovered
+				// ESXi component permanently incompatible. Build is still captured/stored
+				// in inventory_items exactly as before (see InventoryRepository), the
+				// owner wants it retained for later use -- it is simply no longer what a
+				// host's catalog match is keyed on. A host whose Version is unavailable
+				// this pass gets ExactVersion=null -- fail-closed, per ADR-0023: never
+				// substitute or infer a version from Build.
+				// A VM's Build carries VMware Tools version in this module's output, which
+				// is not a product-version fact for the VM itself, so it is intentionally
+				// NOT passed as ExactVersion here (that would misrepresent a guest property
+				// as the component's own compliance-relevant version); VMs have no
+				// analogous Version field either, so they keep ExactVersion=null.
 				ParentVendorIdentity: null,
 				CatalogComponentId: null,
-				ExactVersion: item.Type == InventoryItemTypes.Host ? item.Build : null));
+				ExactVersion: item.Type == InventoryItemTypes.Host ? item.Version : null));
 		}
 
 		return components;
@@ -514,13 +525,27 @@ public sealed class DiscoverJobHandler : IJobHandler
 		string? build = GetProperty<string>(psObject, "Build");
 		bool? maintenanceMode = psObject.Properties["MaintenanceMode"]?.Value as bool?;
 
-		return new DiscoveredInventoryItem(type!, moRef, name, parentMoRef, build, maintenanceMode);
+		// Issue #974: the host's semantic vSphere product version, alongside (never
+		// instead of) Build -- see this type's own DiscoveredInventoryItem doc comment.
+		// Same top-level-property read as Type/MoRef/Name/Build above -- GetProperty
+		// now routes through #975's PowerShellValueUnwrap chokepoint, and a dedicated
+		// boundary test (DiscoveryVersionBoundaryTests, driving the real executor)
+		// proves this field survives non-null.
+		string? version = GetProperty<string>(psObject, "Version");
+
+		return new DiscoveredInventoryItem(type!, moRef, name, parentMoRef, build, maintenanceMode, version);
 	}
 
 	private static T? GetProperty<T>(System.Management.Automation.PSObject psObject, string name)
 		where T : class
 	{
-		return psObject.Properties[name]?.Value as T;
+		// Issue #975's chokepoint (PowerShellValueUnwrap): every top-level pipeline
+		// output object is already unwrapped by PowerShellExecutor.Unwrap before
+		// TryParseItem ever sees it, so this read was never actually exposed to #972's
+		// nested-property hazard -- routing it through UnwrapAs anyway costs nothing
+		// (idempotent on an already-unwrapped value) and keeps every PSObject property
+		// read in this codebase going through the same one chokepoint.
+		return PowerShellValueUnwrap.UnwrapAs<T>(psObject.Properties[name]?.Value);
 	}
 
 	private static string? TryGetConnectionHost(string connectionJson)

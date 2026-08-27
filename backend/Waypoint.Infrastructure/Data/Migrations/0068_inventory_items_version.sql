@@ -1,0 +1,15 @@
+-- Issue #974 (owner decision on #967's options analysis, "Option A"): ESXi discovery
+-- reports the host's raw build number (`inventory_items.build`, migration 0011) but
+-- ComponentCapabilityMatcher requires a component's ExactVersion to equal the
+-- catalog's semantic VersionKey byte-for-byte (ADR-0022) -- a build number never
+-- matches, so discovered ESXi components could never reach is_compatible=true.
+--
+-- The fix is a NEW, additive column: `version` carries the host's semantic vSphere
+-- product version (e.g. "8.0.3"), populated only for `host` rows. `build` is
+-- UNCHANGED and continues to be captured/stored exactly as before -- the owner wants
+-- the raw build number retained for later use, so this migration adds a column, it
+-- never repurposes or drops the existing one.
+--
+-- Idempotent by construction (IF NOT EXISTS), matching every prior migration in this
+-- directory.
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS version TEXT NULL;
