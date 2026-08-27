@@ -174,24 +174,195 @@ public sealed class ExecutionCatalogSeedTests
 }
 
 /// <summary>
-/// Class-killing drift guard for migration 0064, mirroring
+/// Issue #967 (epic #726): proves migration 0067's expansion of the execution-catalog
+/// seed to 9 of the remaining provenance-matrix rows, using the exact same
+/// re-apply-raw-SQL-directly idiom as <see cref="ExecutionCatalogSeedTests"/> (see that
+/// class's remarks for why <c>NpgsqlSchemaMigrator.ApplyAsync()</c> alone is not
+/// sufficient against the shared Postgres-collection database).
+/// </summary>
+[Collection("Postgres")]
+public sealed class ExecutionCatalogSeedExpansionTests
+{
+	private readonly PostgresFixture _fixture;
+
+	public ExecutionCatalogSeedExpansionTests(PostgresFixture fixture)
+	{
+		_fixture = fixture;
+	}
+
+	[Fact]
+	public async Task FreshMigration_SeedsExpansionRows_AcrossEveryNewlyDocumentedShape()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await ReapplySeedMigrationsAsync(connection);
+
+		// vSphere 9-0 SRG: vmware object-kind row.
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "vcenter", "vmware", "vcenter");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "esxi", "vmware", "esxi");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "vm", "vmware", "vm");
+
+		// vSphere 9-0 SRG: VCSA named-service row.
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "envoy", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "postgresql", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "vami", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "photon", "ssh", "service");
+
+		// NSX 9-x SRG: named-function row.
+		await AssertLinkableComponentAsync(connection, "nsx", "9.0.0", "manager", "nsx-api", "service");
+		await AssertLinkableComponentAsync(connection, "nsx", "9.0.0", "routing", "nsx-api", "service");
+
+		// Aria Operations / Aria Automation / Aria Suite Lifecycle / Workspace ONE
+		// Access SRG: whole-appliance rows.
+		await AssertLinkableComponentAsync(connection, "aria-operations", "8.0.0", "aria-operations", "ssh", "target");
+		await AssertLinkableComponentAsync(connection, "aria-automation", "8.0.0", "aria-automation", "ssh", "target");
+		await AssertLinkableComponentAsync(connection, "aria-suite-lifecycle", "8.0.0", "aria-suite-lifecycle", "ssh", "target");
+		await AssertLinkableComponentAsync(connection, "vidm", "3.3.0", "vidm", "ssh", "target");
+
+		// VCF 9-x SRG: ssh named-service row (spot-check a representative subset).
+		await AssertLinkableComponentAsync(connection, "vcf", "9.0.0", "sddc-manager-nginx", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vcf", "9.0.0", "operations-networks-ubuntu", "ssh", "service");
+	}
+
+	/// <summary>
+	/// Issue #967's deliberately-unseeded row: VCF 9-x `vcf-api` named-service
+	/// components (SDDC Manager application, Automation application) have no seed row
+	/// at all -- migration 0050's catalog_credential_requirements purpose CHECK
+	/// excludes 'vcf-api' pending issue #807.
+	/// </summary>
+	[Fact]
+	public async Task VcfApiNamedServiceRow_RemainsDeliberatelyUnseeded()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await ReapplySeedMigrationsAsync(connection);
+
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT count(*)
+			FROM catalog_components cc
+			JOIN catalog_product_versions pv ON pv.id = cc.product_version_id
+			JOIN catalog_products p ON p.id = pv.product_id
+			WHERE p.product_key = 'vcf' AND cc.transport = 'vcf-api'
+			""", connection);
+		long count = Convert.ToInt64(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+
+		Assert.Equal(0, count);
+	}
+
+	[Fact]
+	public async Task ReapplyingExpansionSeedSql_Directly_IsIdempotent()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await ReapplySeedMigrationsAsync(connection);
+		long before = await CountAsync(connection, "SELECT count(*) FROM catalog_execution_profiles");
+		Assert.True(before > 0, "Expected migrations 0064+0067 to have seeded at least one catalog_execution_profiles row.");
+
+		await ReapplySeedMigrationsAsync(connection);
+
+		long after = await CountAsync(connection, "SELECT count(*) FROM catalog_execution_profiles");
+		Assert.Equal(before, after);
+	}
+
+	/// <summary>
+	/// Re-applies 0064's AND 0067's embedded raw SQL directly, in migration order --
+	/// 0067 assumes 0064's catalog_report_groups/catalog_credential_requirements CHECK
+	/// vocabulary already exists (it does; both ship in this same schema), and re-runs
+	/// cleanly regardless of which migration a sibling Postgres-collection test's
+	/// TRUNCATE most recently invalidated.
+	/// </summary>
+	private static async Task ReapplySeedMigrationsAsync(NpgsqlConnection connection)
+	{
+		foreach (string fileName in new[] { "0064_execution_catalog_seed.sql", "0067_execution_catalog_seed_expansion.sql" })
+		{
+			string sql = await ReadEmbeddedMigrationAsync(fileName);
+			await using NpgsqlCommand reapply = new(sql, connection);
+			await reapply.ExecuteNonQueryAsync();
+		}
+	}
+
+	private static async Task AssertLinkableComponentAsync(
+		NpgsqlConnection connection, string productKey, string versionKey, string componentKey, string expectedTransport, string expectedSelectorKind)
+	{
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT cc.transport, cc.selector_kind, count(ep.id)
+			FROM catalog_components cc
+			JOIN catalog_product_versions pv ON pv.id = cc.product_version_id
+			JOIN catalog_products p ON p.id = pv.product_id
+			LEFT JOIN catalog_execution_profiles ep ON ep.component_id = cc.id
+			WHERE p.product_key = $1 AND pv.version_key = $2 AND cc.component_key = $3
+			GROUP BY cc.transport, cc.selector_kind
+			""", connection);
+		command.Parameters.AddWithValue(productKey);
+		command.Parameters.AddWithValue(versionKey);
+		command.Parameters.AddWithValue(componentKey);
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		bool found = await reader.ReadAsync();
+
+		Assert.True(found, $"Expected a seeded catalog_component for product '{productKey}' version '{versionKey}' component '{componentKey}'.");
+		Assert.Equal(expectedTransport, reader.GetString(0));
+		Assert.Equal(expectedSelectorKind, reader.GetString(1));
+		Assert.True(reader.GetInt64(2) > 0, $"Expected at least one catalog_execution_profiles row for '{productKey}'/'{versionKey}'/'{componentKey}'.");
+	}
+
+	private static async Task<long> CountAsync(NpgsqlConnection connection, string sql)
+	{
+		await using NpgsqlCommand command = new(sql, connection);
+		object? result = await command.ExecuteScalarAsync();
+		return Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
+	}
+
+	private static async Task<string> ReadEmbeddedMigrationAsync(string fileName)
+	{
+		System.Reflection.Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
+		string resourceName = assembly.GetManifestResourceNames().Single(n => n.EndsWith(fileName, StringComparison.Ordinal));
+		await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+		using StreamReader reader = new(stream);
+		return await reader.ReadToEndAsync();
+	}
+}
+
+/// <summary>
+/// Class-killing drift guard for migrations 0064+0067, mirroring
 /// <c>LayoutTableParityTests</c>'s doc-is-authority idiom (issue #959): parses
 /// docs/compliance-parity.md's "Sibling source-capability provenance matrix" and
 /// "Priority" row directly out of the doc -- the same source a human maintainer edits --
-/// and asserts the seed migration's SQL literals agree, so the doc and the shipped seed
+/// and asserts the seed migrations' SQL literals agree, so the doc and the shipped seed
 /// cannot silently diverge the way the interpreter's family table and the doc did before
 /// issue #959.
 ///
-/// Migration 0064 deliberately seeds a representative SLICE of the provenance matrix's
-/// 13 rows (its own header comment: "not a byte-for-byte transcription of all 44 sibling
-/// scan components... expanding the remaining rows is additive... and does not require a
-/// schema change"), so this guard does not require every matrix row to be present. It
-/// requires two things instead: (1) for every row the migration DOES cover, the
-/// migration's transport/purpose/output values match that row's documented values
-/// exactly -- a hand-edit that quietly changes a seeded row's transport/purpose/output
-/// without updating the doc (or vice versa) fails this test; and (2) the closed priority
-/// vocabulary's exact six report groups/priorities are all present in the seed, since
-/// every execution profile's report_group_id FK requires one to exist.
+/// Issue #967 narrowed this guard's tolerance for unseeded rows to (effectively) zero:
+/// with 0067 landed, the guard now requires FULL provenance-matrix coverage -- every one
+/// of the doc's 13 rows must be traceable to a seeded catalog row -- EXCEPT the one row
+/// named explicitly below (VCF 9-x `vcf-api` named-service), which stays unseeded on
+/// purpose (migration 0050's catalog_credential_requirements purpose CHECK constraint
+/// excludes 'vcf-api' pending issue #807; seeding components/profiles without a
+/// resolvable credential requirement would be a non-functional catalog entry). A future
+/// row silently going unseeded -- one this guard does not know to exempt -- now fails
+/// loudly instead of passing by omission, the same defect class issue #959 itself was
+/// filed for.
+///
+/// This guard requires three things: (1) for every row EITHER migration covers, its
+/// transport/purpose/output values match the doc's row exactly -- a hand-edit that
+/// quietly changes a seeded row's transport/purpose/output without updating the doc (or
+/// vice versa) fails this test; (2) the closed priority vocabulary's exact six report
+/// groups/priorities are all present in the seed; and (3) every doc row other than the
+/// one explicitly-named exemption is covered by at least one of the two migrations.
 ///
 /// Pure source/SQL-parsing test -- no Postgres container required (same idiom as
 /// <see cref="CatalogNaturalKeyWriteGuardTests"/>/<c>LayoutTableParityTests</c>), so it
@@ -200,6 +371,14 @@ public sealed class ExecutionCatalogSeedTests
 public sealed class ExecutionCatalogSeedDriftGuardTests
 {
 	private sealed record ProvenanceMatrixRow(string ProductVersionKey, string Kind, string Transport, string Purpose, string Output);
+
+	/// <summary>
+	/// The single provenance-matrix row this guard knows is deliberately unseeded, and
+	/// why -- see the class remarks. Keyed the same way <see cref="ParseProvenanceMatrixRows"/>
+	/// keys every other row: (product/version key, kind, transport).
+	/// </summary>
+	private static readonly (string ProductVersionKey, string Kind, string Transport) DeliberatelyUnseededRow =
+		("VCF `9-x`", "SRG", "vcf-api");
 
 	[Fact]
 	public void SeededReportGroups_MatchTheDocumentedClosedPriorityVocabularyExactly()
@@ -247,10 +426,8 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 	}
 
 	/// <summary>
-	/// For every provenance-matrix row the seed migration actually covers (vSphere 8-0
-	/// STIG vmware/object-kind row, vSphere 8-0 STIG VCSA named-service row, NSX 4-x STIG
-	/// named-function row, Photon OS SRG row), the migration's transport/purpose/output
-	/// literals must agree with the doc exactly.
+	/// For every provenance-matrix row EITHER seed migration covers, the migration's
+	/// transport/purpose/output literals must agree with the doc exactly.
 	/// </summary>
 	[Fact]
 	public void SeededExecutionProfiles_MatchTheirDocumentedProvenanceMatrixRow()
@@ -258,16 +435,125 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 		List<ProvenanceMatrixRow> rows = ParseProvenanceMatrixRows();
 		Assert.NotEmpty(rows);
 
-		string migration = ReadRepoFile("backend", "Waypoint.Infrastructure", "Data", "Migrations", "0064_execution_catalog_seed.sql");
+		string migration0064 = ReadRepoFile("backend", "Waypoint.Infrastructure", "Data", "Migrations", "0064_execution_catalog_seed.sql");
+		string migration0067 = ReadRepoFile("backend", "Waypoint.Infrastructure", "Data", "Migrations", "0067_execution_catalog_seed_expansion.sql");
 
-		AssertRowCoveredCorrectly(rows, migration, "vSphere `8-0`", "STIG", "vmware",
+		// 0064's original slice.
+		AssertRowCoveredCorrectly(rows, migration0064, "vSphere `8-0`", "STIG", "vmware",
 			seededComponentKeys: ["vcenter", "esxi", "vm"], expectedOutputKind: "hdf_ckl");
-		AssertRowCoveredCorrectly(rows, migration, "vSphere `8-0`", "STIG", "ssh",
+		AssertRowCoveredCorrectly(rows, migration0064, "vSphere `8-0`", "STIG", "ssh",
 			seededComponentKeys: ["eam", "lookup", "postgresql", "vami"], expectedOutputKind: "hdf_ckl");
-		AssertRowCoveredCorrectly(rows, migration, "NSX `4-x`", "STIG", "nsx-api",
+		AssertRowCoveredCorrectly(rows, migration0064, "NSX `4-x`", "STIG", "nsx-api",
 			seededComponentKeys: ["manager", "distributed-firewall"], expectedOutputKind: "hdf_ckl");
-		AssertRowCoveredCorrectly(rows, migration, "Photon OS `5-0`", "SRG", "ssh",
+		AssertRowCoveredCorrectly(rows, migration0064, "Photon OS `5-0`", "SRG", "ssh",
 			seededComponentKeys: ["photon"], expectedOutputKind: "hdf");
+
+		// 0067's expansion (issue #967). Unlike 0064, every 0067 execution-profile row is
+		// SRG/hdf by construction (see 0067's own header: "every row this migration
+		// seeds is SRG"; its SELECT hard-codes the literal 'hdf' output_kind rather than
+		// varying it per VALUES tuple), so this guard confirms coverage of each
+		// component-key tuple in 0067's own catalog_execution_profiles VALUES list
+		// instead of reusing 0064's per-tuple output_kind regex (which assumes an
+		// inline output_kind column 0067 does not have).
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "vSphere `9-0`", "SRG", "vmware",
+			seededComponentKeys: ["vcenter", "esxi", "vm"]);
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "vSphere `9-0`", "SRG", "ssh",
+			seededComponentKeys: ["envoy", "postgresql", "vami", "photon"]);
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "NSX `9-x`", "SRG", "nsx-api",
+			seededComponentKeys: ["manager", "routing"]);
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "Aria Operations `8-x`", "SRG", "ssh",
+			seededComponentKeys: ["aria-operations"]);
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "Aria Automation `8-x`", "SRG", "ssh",
+			seededComponentKeys: ["aria-automation"]);
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "Aria Suite Lifecycle `8-x`", "SRG", "ssh",
+			seededComponentKeys: ["aria-suite-lifecycle"]);
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "Workspace ONE Access `3-3-x`", "SRG", "ssh",
+			seededComponentKeys: ["vidm"]);
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "VCF `9-x`", "SRG", "ssh",
+			seededComponentKeys: [
+				"sddc-manager-nginx", "sddc-manager-postgresql", "sddc-manager-photon",
+				"operations-httpd", "operations-postgresql", "operations-photon",
+				"operations-hcx-httpd", "operations-hcx-photon",
+				"operations-networks-nginx-platform", "operations-networks-ubuntu"]);
+	}
+
+	/// <summary>
+	/// Migration 0067 equivalent of <see cref="AssertRowCoveredCorrectly"/>: confirms the
+	/// doc row exists, is SRG/HDF (never CKL, per the doc's own Output column), and that
+	/// every seeded component key appears in 0067's catalog_execution_profiles VALUES
+	/// list bound to the shared 'Y26M05-srg' release key.
+	/// </summary>
+	private static void AssertRowComponentsSeededAsHdf(
+		List<ProvenanceMatrixRow> rows, string migration, string productVersionKey, string kind, string transport, string[] seededComponentKeys)
+	{
+		ProvenanceMatrixRow? row = rows.FirstOrDefault(r =>
+			string.Equals(r.ProductVersionKey, productVersionKey, StringComparison.Ordinal) &&
+			string.Equals(r.Kind, kind, StringComparison.Ordinal) &&
+			string.Equals(r.Transport, transport, StringComparison.Ordinal));
+		Assert.True(row is not null, $"docs/compliance-parity.md has no provenance-matrix row for '{productVersionKey}' / '{kind}' / '{transport}' -- migration 0067's doc-comment claims to cover it.");
+		Assert.DoesNotContain("CKL", row!.Output, StringComparison.OrdinalIgnoreCase);
+
+		foreach (string componentKey in seededComponentKeys)
+		{
+			Match tuple = Regex.Match(migration, $@"\('[a-z-]+', '(?:9\.0\.0|8\.0\.0|3\.3\.0)', '{Regex.Escape(componentKey)}', 'Y26M05-srg'\)");
+			Assert.True(tuple.Success, $"Migration 0067 has no catalog_execution_profiles VALUES tuple for component '{componentKey}' -- expected one covering documented row '{productVersionKey}'/'{kind}'.");
+		}
+	}
+
+	/// <summary>
+	/// Issue #967's tightened guard: every provenance-matrix row parsed from the doc must
+	/// be covered by one of the two seed migrations' explicit assertions above, EXCEPT
+	/// <see cref="DeliberatelyUnseededRow"/> -- named here so a future doc row silently
+	/// landing without a seed (or a seed migration) fails loudly instead of passing by
+	/// omission.
+	/// </summary>
+	[Fact]
+	public void EveryDocumentedProvenanceMatrixRow_IsEitherSeededOrDeliberatelyExempted()
+	{
+		List<ProvenanceMatrixRow> rows = ParseProvenanceMatrixRows();
+		Assert.NotEmpty(rows);
+
+		HashSet<(string, string, string)> coveredRows = new()
+		{
+			("vSphere `8-0`", "STIG", "vmware"),
+			("vSphere `8-0`", "STIG", "ssh"),
+			("NSX `4-x`", "STIG", "nsx-api"),
+			("Photon OS `5-0`", "SRG", "ssh"),
+			("vSphere `9-0`", "SRG", "vmware"),
+			("vSphere `9-0`", "SRG", "ssh"),
+			("NSX `9-x`", "SRG", "nsx-api"),
+			("Aria Operations `8-x`", "SRG", "ssh"),
+			("Aria Automation `8-x`", "SRG", "ssh"),
+			("Aria Suite Lifecycle `8-x`", "SRG", "ssh"),
+			("Workspace ONE Access `3-3-x`", "SRG", "ssh"),
+			("VCF `9-x`", "SRG", "ssh"),
+		};
+
+		List<string> uncovered = [];
+		foreach (ProvenanceMatrixRow row in rows)
+		{
+			(string, string, string) key = (row.ProductVersionKey, row.Kind, row.Transport);
+			if (key == DeliberatelyUnseededRow)
+			{
+				continue;
+			}
+
+			if (!coveredRows.Contains(key))
+			{
+				uncovered.Add($"{row.ProductVersionKey} / {row.Kind} / {row.Transport}");
+			}
+		}
+
+		Assert.True(uncovered.Count == 0,
+			"Provenance-matrix rows with no seed coverage and no declared exemption:\n" + string.Join("\n", uncovered));
+
+		// Sanity check the reverse direction too: a stale exemption or a coveredRows
+		// entry for a row the doc no longer has would otherwise go unnoticed.
+		Assert.Contains(rows, r => (r.ProductVersionKey, r.Kind, r.Transport) == DeliberatelyUnseededRow);
+		foreach ((string productVersionKey, string kind, string transport) in coveredRows)
+		{
+			Assert.Contains(rows, r => r.ProductVersionKey == productVersionKey && r.Kind == kind && r.Transport == transport);
+		}
 	}
 
 	private static void AssertRowCoveredCorrectly(

@@ -221,9 +221,19 @@ public sealed class SchemaMigrationTests
 	/// whole-appliance), invented-from-documentation data only, every INSERT
 	/// idempotent via ON CONFLICT DO NOTHING against 0050's existing natural-key
 	/// constraints, no new runner grants (seed-only, same "no runner mutates this
-	/// schema" convention as 0050), issue #959 --
+	/// schema" convention as 0050), issue #959 -- 0067 (slot verified free against
+	/// both the migrations directory and open PRs at this PR's own commit time;
+	/// 0065 remains reserved by a different issue) expands 0064's seed to 9 of the
+	/// remaining provenance-matrix rows (vSphere 9-0 SRG vmware + VCSA-service rows,
+	/// NSX 9-x SRG named-function row, Aria Operations/Automation/Suite Lifecycle SRG
+	/// whole-appliance rows, Workspace ONE Access SRG whole-appliance row, VCF 9-x SRG
+	/// ssh named-service row), same invented-from-documentation/idempotent-ON-CONFLICT/
+	/// no-new-grants pattern as 0064. The VCF 9-x `vcf-api` named-service row is
+	/// deliberately NOT seeded: migration 0050's catalog_credential_requirements
+	/// purpose CHECK constraint excludes 'vcf-api' pending issue #807, and this
+	/// migration is not a schema change, issue #967 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 65;
+	private const int ExpectedMigrationCount = 66;
 
 	private readonly PostgresFixture _fixture;
 
