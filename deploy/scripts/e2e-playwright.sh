@@ -59,17 +59,6 @@ HELPER_STARTED=""
 # cleanup can always disconnect it, even on early failure.
 SELF_JOINED_EDGE_NETWORK=""
 
-# Issue #844: secret files this run generated (see the "File-backed secrets"
-# block below) -- tracked so cleanup removes exactly those and never an
-# operator's own.
-GENERATED_SECRET_FILES=()
-SECRET_LABEL="e2e"
-
-# Issue #845: same treatment for the throwaway TLS pair this run stages at
-# deploy/config/tls/ (see the prerequisites block below) -- an operator's
-# own pair, if one is already there, is used as-is and never removed.
-GENERATED_TLS_FILES=()
-
 log() { printf '\n=== %s ===\n' "$*"; }
 
 # shellcheck disable=SC2317,SC2329  # invoked indirectly via `trap cleanup EXIT`
@@ -82,13 +71,11 @@ cleanup() {
 		docker network disconnect "${SELF_JOINED_EDGE_NETWORK}" "$(hostname)" >/dev/null 2>&1 || true
 	fi
 	(cd "${DEPLOY_DIR}" && ${DC:-docker compose -p "${PROJECT}"} down -v) || true
-	rm -f "${SCRATCH_KEY_DIR:-/nonexistent}"/* 2>/dev/null || true
-	if [[ ${#GENERATED_SECRET_FILES[@]} -gt 0 ]]; then
-		rm -f "${GENERATED_SECRET_FILES[@]}" 2>/dev/null || true
-	fi
-	if [[ ${#GENERATED_TLS_FILES[@]} -gt 0 ]]; then
-		rm -f "${GENERATED_TLS_FILES[@]}" 2>/dev/null || true
-	fi
+	# Issue #847: everything the generator wrote for this run -- secrets,
+	# TLS, the admin-password hash, the override/env files -- lives ONLY
+	# under this one slug-scoped directory, so a full run's throwaway state
+	# is exactly this one `rm -rf`.
+	rm -rf "${DEPLOY_DIR}/.generated/${SLUG}" "${DEPLOY_DIR}/.generated/${SLUG}.hash-stage"
 }
 trap cleanup EXIT
 
@@ -130,29 +117,13 @@ fi
 
 cd "${DEPLOY_DIR}"
 
-# Issue #845: compose.yaml (the production base this script now runs on its
-# own) mounts nginx's TLS material PER FILE from deploy/config/tls/tls.crt
-# and deploy/config/tls/tls.key with `bind: {create_host_path: false}`, so
-# `up` dies at container creation when that pair is missing -- and a
-# directory-level /etc/nginx/certs mount does NOT replace per-file mounts
-# (Compose merges volumes by target), it coexists with them. So stage the
-# throwaway pair at exactly the location the base mandates -- gitignored
-# under /deploy/config/, the same convention as the config/secrets/ files
-# below -- rather than at deploy/nginx/certs/, which the base never mounts.
-# Issue #844 renamed the pair to the generic tls.crt/tls.key names
-# deploy/nginx/conf.d/default.conf references; #847 replaces this
-# hand-rolled staging with a first-class generator.
-TLS_DIR="${DEPLOY_DIR}/config/tls"
-mkdir -p "${TLS_DIR}"
-if [[ ! -s "${TLS_DIR}/tls.crt" || ! -s "${TLS_DIR}/tls.key" ]]; then
-	log "Staging dev TLS pair into ${TLS_DIR}"
-	nginx/certs/generate-dev-certs.sh
-	cp nginx/certs/tls.crt "${TLS_DIR}/tls.crt"
-	cp nginx/certs/tls.key "${TLS_DIR}/tls.key"
-	chmod 644 "${TLS_DIR}/tls.crt"
-	chmod 600 "${TLS_DIR}/tls.key"
-	GENERATED_TLS_FILES+=("${TLS_DIR}/tls.crt" "${TLS_DIR}/tls.key")
-fi
+# Issue #847: no TLS staging here -- deploy/scripts/generate-dev-stack.sh
+# --mode agent generates its own SAN-correct self-signed pair under
+# deploy/.generated/${SLUG}/tls/ and binds it directly at compose.yaml's
+# per-file targets (/etc/nginx/certs/tls.{crt,key}), replacing the base's
+# mandatory-but-missing deploy/config/tls/ mounts -- see the generator call
+# below. deploy/config/tls/ (the production/persistent-mode location) is
+# never touched by an agent-mode run.
 
 if [[ ! -f "${FRONTEND_DIR}/dist/index.html" ]]; then
 	log "frontend/dist missing -- building it first (Node 22 required)"
@@ -164,152 +135,25 @@ if [[ ! -f "${FRONTEND_DIR}/dist/index.html" ]]; then
 	)
 fi
 
-# Same devcontainer bind-mount host-path translation as
-# fresh-stack-smoke-test.sh -- see that script's comment block for the full
-# explanation. Duplicated rather than sourced: the two scripts are meant to
-# stay independently readable end to end.
-HOST_PREFIX="${REPO_ROOT}"
-if [[ -S /var/run/docker.sock ]]; then
-	SELF_MOUNTS="$(docker inspect "$(hostname)" --format '{{range .Mounts}}{{.Source}}|{{.Destination}}{{"\n"}}{{end}}' 2>/dev/null || true)"
-	while IFS='|' read -r src dst; do
-		if [[ "${dst}" == "${REPO_ROOT}" || "${REPO_ROOT}" == "${dst}"/* ]]; then
-			HOST_PREFIX="${src}${REPO_ROOT#"${dst}"}"
-			break
-		fi
-	done <<< "${SELF_MOUNTS}"
-fi
+# Issue #847: deploy/scripts/generate-dev-stack.sh --mode agent replaces this
+# script's former hand-rolled devcontainer bind-mount translation, secrets,
+# subnet-collision override, master key, and LocalAuth__*/RunnerResources__
+# Fallback* override with one generator call -- see
+# fresh-stack-smoke-test.sh's identical refactor comment for the full
+# rationale. Everything lands under deploy/.generated/${SLUG}/ only. This
+# script still owns computing the admin-password hash itself (a
+# backend-specific step) and handing it to the generator.
+GENERATED_STATE_DIR="${DEPLOY_DIR}/.generated/${SLUG}"
 
-WAYPOINT_E2E_OVERRIDE_FILE="${WAYPOINT_E2E_OVERRIDE_FILE:-}"
-# Generated whenever the devcontainer indirection is detected, even if the
-# operator also passed WAYPOINT_E2E_OVERRIDE_FILE (issue #845) -- see
-# fresh-stack-smoke-test.sh's matching comment.
-if [[ "${HOST_PREFIX}" != "${REPO_ROOT}" ]]; then
-	log "devcontainer bind-mount translation: this container's ${REPO_ROOT} is the host's ${HOST_PREFIX} -- generating a scratch override"
-	GENERATED_OVERRIDE="$(mktemp)"
-	cat > "${GENERATED_OVERRIDE}" <<-EOF
-	services:
-	  nginx:
-	    volumes:
-	      - type: bind
-	        source: ${HOST_PREFIX}/deploy/nginx/conf.d
-	        target: /etc/nginx/conf.d
-	        read_only: true
-	      - type: bind
-	        source: ${HOST_PREFIX}/deploy/config/tls/tls.crt
-	        target: /etc/nginx/certs/tls.crt
-	        read_only: true
-	        bind:
-	          create_host_path: false
-	      - type: bind
-	        source: ${HOST_PREFIX}/deploy/config/tls/tls.key
-	        target: /etc/nginx/certs/tls.key
-	        read_only: true
-	        bind:
-	          create_host_path: false
-	      - type: bind
-	        source: ${HOST_PREFIX}/frontend/dist
-	        target: /usr/share/nginx/html
-	        read_only: true
-	        bind:
-	          create_host_path: false
-	  postgres:
-	    volumes:
-	      - ${HOST_PREFIX}/deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
-	secrets:
-	  postgres-owner-password:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-owner-password
-	  postgres-compliance-runner-password:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-compliance-runner-password
-	  postgres-download-runner-password:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-download-runner-password
-	  postgres-keycloak-password:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/postgres-keycloak-password
-	  keycloak-bootstrap-admin-password:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/keycloak-bootstrap-admin-password
-	  keycloak-backend-client-secret:
-	    file: ${HOST_PREFIX}/deploy/config/secrets/keycloak-backend-client-secret
-	EOF
-	WAYPOINT_E2E_OVERRIDE_FILE="${WAYPOINT_E2E_OVERRIDE_FILE:+${WAYPOINT_E2E_OVERRIDE_FILE} }${GENERATED_OVERRIDE}"
-fi
-
-# --- File-backed secrets (issue #844) ----------------------------------
-#
-# The stack's Postgres bootstrap/runner/Keycloak passwords and the
-# waypoint-backend realm client secret are Compose `secrets:` file sources
-# under deploy/config/secrets/ (gitignored). They are MANDATORY: with them
-# absent, `docker compose up` dies at container creation ("bind source path
-# does not exist") -- `docker compose config` still exits 0, so nothing
-# warns earlier. Generate obviously-invented, per-run values for any that
-# are not already there; an operator's own real files (if any) are left
-# untouched, and only files this run created are removed on teardown.
-#
-# #847 replaces this plumbing with a first-class generator; until then each
-# bring-up script grows its own minimal copy.
-SECRETS_DIR="${DEPLOY_DIR}/config/secrets"
-mkdir -p "${SECRETS_DIR}"
-for secret_name in postgres-owner-password postgres-compliance-runner-password \
-	postgres-download-runner-password postgres-keycloak-password \
-	keycloak-bootstrap-admin-password keycloak-backend-client-secret; do
-	if [[ ! -s "${SECRETS_DIR}/${secret_name}" ]]; then
-		printf 'invented-%s-%s-%s\n' "${SECRET_LABEL}" "${secret_name}" "$(openssl rand -hex 6)" \
-			> "${SECRETS_DIR}/${secret_name}"
-		# 0644, not 0600: Compose bind-mounts a `file:` secret source
-		# verbatim (host uid/mode preserved -- no 0444 re-materialization),
-		# and postgres's initdb scripts read it as the in-container
-		# `postgres` user, which is neither root nor this script's uid. A
-		# 0600 file here fails closed in postgres's entrypoint wrapper --
-		# correct, but not what this script wants. Same 0644 convention the
-		# master-key file above already uses.
-		chmod 644 "${SECRETS_DIR}/${secret_name}"
-		GENERATED_SECRET_FILES+=("${SECRETS_DIR}/${secret_name}")
-	fi
-done
-log "File-backed secrets: ${#GENERATED_SECRET_FILES[@]} generated in ${SECRETS_DIR} (pre-existing files left alone)"
-
-# docs/testing.md: the shipped `edge` network's pinned 192.168.240.0/24 can
-# collide with a concurrent stack's identically-pinned network on a shared
-# host (this compose file always requests that exact subnet, so two runs at
-# once will collide unless one is overridden). WAYPOINT_E2E_SUBNET lets a
-# caller pick an alternate /24 for this run; when set, the backend's
-# ForwardedHeaders__KnownNetworks__0 is moved to match in the SAME override
-# (docs/testing.md: "the two must move together, since the backend only
-# trusts forwarded headers from that exact subnet"). Never commit a run with
-# this set -- it exists purely to dodge a shared-host collision, and the
-# shipped subnet is correct on a real appliance host with no concurrent
-# stacks.
-if [[ -n "${WAYPOINT_E2E_SUBNET:-}" ]]; then
-	log "WAYPOINT_E2E_SUBNET=${WAYPOINT_E2E_SUBNET} -- overriding the edge network subnet + ForwardedHeaders:KnownNetworks together"
-	SUBNET_OVERRIDE="$(mktemp)"
-	cat > "${SUBNET_OVERRIDE}" <<-EOF
-	services:
-	  backend:
-	    environment:
-	      ForwardedHeaders__KnownNetworks__0: "${WAYPOINT_E2E_SUBNET}"
-	networks:
-	  edge:
-	    driver: bridge
-	    ipam:
-	      config:
-	        - subnet: ${WAYPOINT_E2E_SUBNET}
-	EOF
-	if [[ -n "${WAYPOINT_E2E_OVERRIDE_FILE}" ]]; then
-		WAYPOINT_E2E_OVERRIDE_FILE="${WAYPOINT_E2E_OVERRIDE_FILE} ${SUBNET_OVERRIDE}"
-	else
-		WAYPOINT_E2E_OVERRIDE_FILE="${SUBNET_OVERRIDE}"
-	fi
-fi
-
-SCRATCH_KEY_DIR="$(mktemp -d)"
-openssl rand -hex 32 > "${SCRATCH_KEY_DIR}/master.key"
-chmod 644 "${SCRATCH_KEY_DIR}/master.key"
-
-# Issue #845: deploy/config/ (anchored under deploy/, matching the
-# already-established file-backed-secrets convention issue #844 introduced
-# for postgres/keycloak), not the legacy repo-root config/ this replaces.
-CONFIG_DIR="${DEPLOY_DIR}/config"
-mkdir -p "${CONFIG_DIR}/secrets" "${CONFIG_DIR}/local-auth"
-cp "${SCRATCH_KEY_DIR}/master.key" "${CONFIG_DIR}/secrets/master.key"
-chmod 644 "${CONFIG_DIR}/secrets/master.key"
+# The admin-password hash is staged in a SEPARATE scratch directory, never in
+# ${GENERATED_STATE_DIR}: this script must not create the generator's state
+# directory behind its back (round-2 review of #847 -- the generator refuses a
+# foreign stack that has claimed this project name, and a caller that
+# pre-creates state must not be able to influence that decision). The
+# generator copies the hash into the slug directory itself and mounts its own
+# copy.
+HASH_STAGE_DIR="${DEPLOY_DIR}/.generated/${SLUG}.hash-stage"
+mkdir -p "${HASH_STAGE_DIR}"
 
 ADMIN_PASSWORD="invented-e2e-password-$(openssl rand -hex 4)"
 log "Computing admin password hash via backend --hash-password"
@@ -317,69 +161,37 @@ log "Computing admin password hash via backend --hash-password"
 	cd "${REPO_ROOT}/backend"
 	dotnet build Waypoint.Api >/dev/null
 	printf '%s\n' "${ADMIN_PASSWORD}" | dotnet run --project Waypoint.Api --no-launch-profile --no-build -- --hash-password \
-		| tail -1 > "${SCRATCH_KEY_DIR}/admin-hash"
+		| tail -1 > "${HASH_STAGE_DIR}/admin-password-hash"
 )
-if [[ ! -s "${SCRATCH_KEY_DIR}/admin-hash" ]]; then
+if [[ ! -s "${HASH_STAGE_DIR}/admin-password-hash" ]]; then
 	echo "error: could not compute admin password hash locally -- Playwright login step would fail closed" >&2
 	exit 1
 fi
-cp "${SCRATCH_KEY_DIR}/admin-hash" "${CONFIG_DIR}/local-auth/admin-password-hash"
 
-MASTER_KEY_HOST_PATH="${HOST_PREFIX}/deploy/config/secrets/master.key"
-ADMIN_HASH_HOST_PATH="${HOST_PREFIX}/deploy/config/local-auth/admin-password-hash"
-MASTER_KEY_OVERRIDE="$(mktemp)"
-{
-	echo "services:"
-	echo "  backend:"
-	echo "    environment:"
-	# Issue #845: compose.yaml's base carries no LocalAuth__* keys at all
-	# (Keycloak-only auth) -- this Playwright login step needs the local-auth
-	# dev flag and the mounted-hash-file path explicitly turned on, which the
-	# base's now-removed `${LOCAL_AUTH_ENABLED:-true}` default and
-	# LocalAuth__AdminPasswordHashFile key used to supply implicitly.
-	echo "      LocalAuth__Enabled: \"true\""
-	echo "      LocalAuth__AdminPasswordHashFile: \"/run/secrets/local-auth-admin-password-hash\""
-	echo "    volumes:"
-	echo "      - type: bind"
-	echo "        source: ${MASTER_KEY_HOST_PATH}"
-	echo "        target: /run/secrets/waypoint-master-key"
-	echo "        read_only: true"
-	echo "      - type: bind"
-	echo "        source: ${ADMIN_HASH_HOST_PATH}"
-	echo "        target: /run/secrets/local-auth-admin-password-hash"
-	echo "        read_only: true"
-	echo "  compliance-runner:"
-	echo "    volumes:"
-	echo "      - type: bind"
-	echo "        source: ${MASTER_KEY_HOST_PATH}"
-	echo "        target: /run/secrets/waypoint-master-key"
-	echo "        read_only: true"
-	echo "    environment:"
-	# See fresh-stack-smoke-test.sh's identical override for why: a
-	# nested-Docker/devcontainer host with unreadable cgroup limits falls
-	# back to 1 CPU core, below scan's 2.0-core weight, so scan jobs never
-	# get admitted without raising the fallback floor.
-	echo "      RunnerResources__FallbackCpuCores: \"4\""
-	echo "      RunnerResources__FallbackMemoryBytes: \"4294967296\""
-	echo "  download-runner:"
-	echo "    volumes:"
-	echo "      - type: bind"
-	echo "        source: ${MASTER_KEY_HOST_PATH}"
-	echo "        target: /run/secrets/waypoint-master-key"
-	echo "        read_only: true"
-} > "${MASTER_KEY_OVERRIDE}"
+# WAYPOINT_E2E_SUBNET: overrides the generated stack's `edge` subnet when the
+# agent-mode default (203.0.113.0/24) collides with a concurrent stack on
+# this host (docs/testing.md). Never commit a run with this set.
+GENERATE_ARGS=(--mode agent --slug "${SLUG}" --public-url "https://localhost:${PORT}" --port "${PORT}" \
+	--local-auth-admin-hash-file "${HASH_STAGE_DIR}/admin-password-hash")
+if [[ -n "${WAYPOINT_E2E_SUBNET:-}" ]]; then
+	log "WAYPOINT_E2E_SUBNET=${WAYPOINT_E2E_SUBNET} -- overriding the generated edge subnet"
+	GENERATE_ARGS+=(--subnet "${WAYPOINT_E2E_SUBNET}")
+fi
 
-COMPOSE_FILES="-f compose.yaml"
-if [[ -n "${WAYPOINT_E2E_OVERRIDE_FILE}" ]]; then
-	# WAYPOINT_E2E_OVERRIDE_FILE may carry more than one path (space-separated
-	# -- the devcontainer bind-mount override and the subnet override above
-	# can both be set at once), so each gets its own `-f`.
+log "Generating isolated dev stack (deploy/scripts/generate-dev-stack.sh --mode agent --slug ${SLUG})"
+"${SCRIPT_DIR}/generate-dev-stack.sh" "${GENERATE_ARGS[@]}"
+# The generator copied the hash into the slug directory; the scratch staging
+# copy has no further purpose.
+rm -rf "${HASH_STAGE_DIR}"
+
+DC="docker compose -p ${PROJECT} -f compose.yaml -f ${GENERATED_STATE_DIR}/override.yaml --env-file ${GENERATED_STATE_DIR}/.env"
+if [[ -n "${WAYPOINT_E2E_OVERRIDE_FILE:-}" ]]; then
+	# Rare manual escape hatch, layered LAST so it can override anything the
+	# generator wrote. May carry more than one space-separated path.
 	for f in ${WAYPOINT_E2E_OVERRIDE_FILE}; do
-		COMPOSE_FILES="${COMPOSE_FILES} -f ${f}"
+		DC="${DC} -f ${f}"
 	done
 fi
-COMPOSE_FILES="${COMPOSE_FILES} -f ${MASTER_KEY_OVERRIDE}"
-DC="docker compose -p ${PROJECT} ${COMPOSE_FILES}"
 
 docker volume create "${PROJECT}_compliance-profiles" >/dev/null
 docker run --rm -v "${PROJECT}_compliance-profiles:/x" alpine \
@@ -508,7 +320,7 @@ fi
 
 # --- Run Playwright against this stack -----------------------------------
 
-PLAYWRIGHT_JSON_OUTPUT_FILE="${SCRATCH_KEY_DIR}/playwright-results.json"
+PLAYWRIGHT_JSON_OUTPUT_FILE="${GENERATED_STATE_DIR}/playwright-results.json"
 export PLAYWRIGHT_JSON_OUTPUT_FILE
 log "Running Playwright against ${PLAYWRIGHT_BASE_URL}"
 (

@@ -187,32 +187,82 @@ Pick a slug unique to your work — the issue you are on plus your role, e.g.
 `issue3-fix`, `review-67`. Pick a host port nobody else is using (the default is
 `8443`; pick something well away from it, e.g. `18443`, `19443`).
 
+### The generator is the authoritative mechanism (issue #847)
+
+`deploy/scripts/generate-dev-stack.sh --mode agent --slug <slug>` is the
+supported way to produce an isolated bring-up — it replaces hand-rolling a
+project name, port, subnet, and file-backed secrets yourself. It writes
+secrets, a SAN-correct self-signed TLS pair, and a validated Compose override
+under `deploy/.generated/<slug>/` **only** (never `deploy/config/`, never the
+shared `deploy/compose.override.yaml`), detects port/subnet/project
+collisions against what is currently running on the host **before** creating
+anything — and validates the merged configuration with
+`docker compose config` itself — all without starting a single container.
+
+The project-collision check decides ownership from the **running containers
+themselves**, not from the presence of a directory: Compose stamps
+`com.docker.compose.project.working_dir` on everything it creates, so a stack
+whose containers were started from *this* checkout's `deploy/` directory is
+your own stack being re-generated in place (the idempotent case, allowed),
+and one started from any other directory is a foreign stack and fails closed.
+Creating `deploy/.generated/<slug>/` or `deploy/config/` yourself therefore
+buys you nothing — it is not ownership evidence, and neither is a state
+directory left behind by an earlier run. (Only for a container carrying no
+`working_dir` label at all — a plain `docker run` of a Compose-built image,
+which inherits the project label from the image — does the generator fall
+back to an artifact it alone produces: `deploy/.generated/<slug>/override.yaml`
+in agent mode, `deploy/config/secrets/dev-admin-password` in persistent mode.)
+The port check's self-exemption is likewise by the exact names of containers
+proven to be yours, and the subnet check exempts `wp-<slug>_edge` only when
+that project is yours.
+`deploy/scripts/fresh-stack-smoke-test.sh` and `deploy/scripts/e2e-playwright.sh`
+both call it internally (see "Running the smoke script"/"Running the
+Playwright suite" below); calling it directly is the same mechanism a fresh
+agent bring-up with no test harness around it should use too:
+
 ```bash
 SLUG=issue3-fix          # your unique slug
 PORT=18443               # your unique host port
 
-# Bring up: unique project (-p) + unique port (env var) is now sufficient.
 cd deploy
-WAYPOINT_HTTPS_PORT=$PORT docker compose -p wp-$SLUG up -d
+./scripts/generate-dev-stack.sh --mode agent --slug "$SLUG" \
+  --public-url "https://localhost:$PORT" --port "$PORT"
 ```
+
+The generator's own final output prints the exact `up`/`down` commands for
+the stack it just prepared — paste those, they already carry your project
+name, port, and the generated override/env files. `deploy/config/` stays
+reserved for the **persistent** human dev loop instead
+(`--mode persistent`, no `--slug`): it creates/reuses the same six base
+secrets plus `dev-admin-password` (issue #846) under `deploy/config/secrets/`,
+copies `compose.override.example.yaml` to `compose.override.yaml` on first
+run only (never overwritten afterward), and writes `deploy/.env`. Both modes
+reuse an existing secret byte-for-byte on every re-run and never print a
+secret value.
+
+For production bring-up (no dev override at all), see
+`deploy/scripts/init-config.sh` instead — it manages the same six base
+secrets under `deploy/config/secrets/` and validates operator-supplied TLS,
+but never generates a self-signed certificate.
 
 Two independent things are being separated, and `-p` alone now covers both container
 identity and the rest of the project's namespaced resources:
 
 | Collides on | Isolated by |
 | --- | --- |
-| Container names, networks, volumes | `-p wp-$SLUG` |
-| Host port `8443` | `WAYPOINT_HTTPS_PORT=$PORT` |
+| Container names, networks, volumes | `-p wp-$SLUG` (the generator derives this from `--slug`) |
+| Host port `8443` | `--port` |
+| `edge` network subnet `192.168.240.0/24` | `--subnet` |
 
 ## Verify your isolation before you trust a result
 
-`docker compose config` renders the merged configuration **without starting
-anything**. Check it first:
+The generator already runs `docker compose config` itself and fails closed on
+error, but re-checking against the printed lifecycle command costs nothing:
 
 ```bash
 cd deploy
-WAYPOINT_HTTPS_PORT=$PORT docker compose -p wp-$SLUG config \
-  | grep -E "^name:|published:"
+docker compose -p wp-$SLUG -f compose.yaml -f .generated/$SLUG/override.yaml \
+  --env-file .generated/$SLUG/.env config | grep -E "^name:|published:"
 ```
 
 Expect your project in `name:` and your port in `published:`. If you see `8443`
@@ -1327,15 +1377,25 @@ binaries are a devDependency-managed local install, never committed and
 never fetched at appliance runtime; `npm run build`'s external-asset guard
 never scans `frontend/e2e/`).
 
-If the shipped `edge` network's pinned subnet collides with a concurrent
-stack on a shared host, `WAYPOINT_E2E_SUBNET` (e.g.
-`WAYPOINT_E2E_SUBNET="203.0.113.0/24"`) overrides both the `edge` subnet
-and the backend's `ForwardedHeaders__KnownNetworks__0` together, same
-requirement as the smoke script's `WAYPOINT_SMOKE_OVERRIDE_FILE`.
-`WAYPOINT_E2E_OVERRIDE_FILE` carries the same devcontainer bind-mount
-translation override the smoke script generates automatically, and can hold
-more than one path (space-separated) if both a devcontainer override and a
-subnet override are needed at once.
+Issue #847: the stack itself, and everything it needs (secrets, TLS,
+devcontainer bind-mount host-path translation, the master key, the
+`LocalAuth__*`/`RunnerResources__Fallback*` override), now comes from one
+`deploy/scripts/generate-dev-stack.sh --mode agent --slug <slug>` call this
+script makes internally — see "The generator is the authoritative mechanism"
+above. This script still computes the local-auth admin-password hash itself
+(a backend-specific step, `backend --hash-password`) and hands the resulting
+file to the generator via `--local-auth-admin-hash-file`. Everything the
+generator writes lives under `deploy/.generated/<slug>/` only, and this
+script's own cleanup trap removes that whole directory on exit.
+
+If the generated stack's default `edge` subnet (`203.0.113.0/24`) collides
+with a concurrent stack on a shared host, `WAYPOINT_E2E_SUBNET` (e.g.
+`WAYPOINT_E2E_SUBNET="198.51.100.0/24"`) passes `--subnet` through to the
+generator, same requirement as the smoke script's `WAYPOINT_SMOKE_SUBNET`.
+`WAYPOINT_E2E_OVERRIDE_FILE` is now a rare manual escape hatch layered on
+top of the generated override (space-separated for more than one path) —
+the devcontainer bind-mount translation it used to carry is handled by the
+generator automatically and no longer needs one.
 
 ### Running the smoke script
 
@@ -1345,27 +1405,22 @@ cd deploy
 ```
 
 Follows the isolation recipe above automatically (unique `-p` derived from the slug,
-unique `WAYPOINT_HTTPS_PORT`) and tears its own project down (`down -v`) on exit,
-including on failure. It also self-provisions what `deploy/README.md`'s manual
-"Bring-up" steps 3/4 otherwise require by hand (a dev admin password + hash, a
-generated secrets master key, mounted into all three trusted services) so a fresh
-run needs no pre-existing `deploy/config/` state. It also stages a throwaway TLS
-pair at `deploy/config/tls/tls.{crt,key}`, the per-file location
-`deploy/compose.yaml` mandates (the base fails closed at container creation
-without it), and auto-detects the devcontainer bind-mount host-path trap
-described earlier in this document (translating `frontend/dist`,
-`nginx/conf.d`, the two `config/tls` certificate files, `postgres/initdb`, the
-six `secrets:` file sources, and the generated master-key/admin-hash sources to
-their host-absolute paths when it detects it is itself running inside a mounted
-container).
+unique port) and tears its own project down (`down -v`) on exit, including on
+failure. Issue #847: this script computes the local-auth admin-password hash
+itself, then delegates everything else — the six base secrets, the secrets
+master key, a SAN-correct self-signed TLS pair, devcontainer bind-mount
+host-path translation, and the `LocalAuth__*`/`RunnerResources__Fallback*`
+override — to `deploy/scripts/generate-dev-stack.sh --mode agent --slug
+<slug>` (see "The generator is the authoritative mechanism" above). A fresh
+run needs no pre-existing `deploy/config/` state; everything the generator
+writes lives under `deploy/.generated/<slug>/` only, and this script's own
+cleanup trap removes that whole directory on exit.
 
-If the shipped `edge` network's pinned `192.168.240.0/24`
-collides with a concurrent stack on a shared host, pass an uncommitted override file
-via `WAYPOINT_SMOKE_OVERRIDE_FILE` (a scratch compose file overriding both the `edge`
-subnet and the backend's `ForwardedHeaders__KnownNetworks__0` to match — the two must
-move together, since the backend only trusts forwarded headers from that exact
-subnet). Never commit an override file; the shipped subnet is correct on a real
-appliance host with no concurrent stacks. The variable may name more than one file
-(space-separated), and passing it no longer suppresses the devcontainer
-path-translation override — the script still generates that one automatically
-whenever it detects the indirection, and layers it after yours.
+If the generated stack's default `edge` subnet (`203.0.113.0/24`) collides
+with a concurrent stack on a shared host, set `WAYPOINT_SMOKE_SUBNET` (e.g.
+`WAYPOINT_SMOKE_SUBNET="198.51.100.0/24"`) — this script passes it through
+to the generator's `--subnet` flag. Never commit a run with it set; the
+generator's default is correct on a real appliance host with no concurrent
+stacks. `WAYPOINT_SMOKE_OVERRIDE_FILE` remains a rare manual escape hatch
+(an extra compose file layered on top of everything the generator already
+wrote) — prefer `WAYPOINT_SMOKE_SUBNET` for the ordinary collision case.
