@@ -50,7 +50,13 @@ public sealed record InventoryItemResponse(
 	bool Removed,
 
 	[property: JsonPropertyName("children")]
-	IReadOnlyList<InventoryItemResponse> Children)
+	IReadOnlyList<InventoryItemResponse> Children,
+
+	// Issue #974: the host's semantic vSphere product version (e.g. "8.0.3"), additive
+	// alongside Build -- present only for `host` rows where discovery could report it;
+	// Build is unchanged and always still reported when known.
+	[property: JsonPropertyName("version")]
+	string? Version = null)
 {
 	public static InventoryItemResponse FromDomain(InventoryItem item, IReadOnlyList<InventoryItemResponse> children)
 	{
@@ -58,7 +64,7 @@ public sealed record InventoryItemResponse(
 		ArgumentNullException.ThrowIfNull(children);
 		return new InventoryItemResponse(
 			item.Id, item.Type, item.Moref, item.Name, item.Build, item.MaintenanceMode,
-			item.LastSeenAt, item.RemovedAt is not null, children);
+			item.LastSeenAt, item.RemovedAt is not null, children, item.Version);
 	}
 }
 

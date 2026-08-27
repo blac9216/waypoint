@@ -52,8 +52,14 @@ function Invoke-WaypointDiscovery {
 
 	.OUTPUTS
 	    One [pscustomobject] per discovered item: Type ('cluster'|'host'|'vm'), MoRef,
-	    Name, ParentMoRef (nullable), Build (nullable), MaintenanceMode (nullable
-	    bool). Clusters and hosts are emitted before their children.
+	    Name, ParentMoRef (nullable), Build (nullable), Version (nullable),
+	    MaintenanceMode (nullable bool). Clusters and hosts are emitted before their
+	    children.
+
+	    Issue #974: Version is the host's semantic vSphere product version
+	    ($VMHost.Version, e.g. "8.0.3") -- populated only for 'host' rows, alongside
+	    (never instead of) Build, which continues to be captured/reported exactly as
+	    before. 'cluster'/'vm' rows always report Version = $null.
 
 	    Issue #865 (ADR-0023 completeness gap): the default $ErrorActionPreference is
 	    'Continue', so a non-terminating PowerCLI error on one subtree (an unreachable
@@ -126,6 +132,7 @@ function Invoke-WaypointDiscovery {
 					Name            = $Cluster.Name
 					ParentMoRef     = $null
 					Build           = $null
+					Version         = $null
 					MaintenanceMode = $null
 				}
 
@@ -144,6 +151,7 @@ function Invoke-WaypointDiscovery {
 							Name            = $VMHost.Name
 							ParentMoRef     = $Cluster.ExtensionData.MoRef.Value
 							Build           = $VMHost.Build
+							Version         = $VMHost.Version
 							MaintenanceMode = ($VMHost.ConnectionState -eq 'Maintenance')
 						}
 
@@ -155,6 +163,7 @@ function Invoke-WaypointDiscovery {
 									Name            = $VM.Name
 									ParentMoRef     = $VMHost.ExtensionData.MoRef.Value
 									Build           = $VM.Guest.ToolsVersion
+									Version         = $null
 									MaintenanceMode = $null
 								}
 							}
@@ -178,6 +187,7 @@ function Invoke-WaypointDiscovery {
 						Name            = $VMHost.Name
 						ParentMoRef     = $null
 						Build           = $VMHost.Build
+						Version         = $VMHost.Version
 						MaintenanceMode = ($VMHost.ConnectionState -eq 'Maintenance')
 					}
 
@@ -189,6 +199,7 @@ function Invoke-WaypointDiscovery {
 								Name            = $VM.Name
 								ParentMoRef     = $VMHost.ExtensionData.MoRef.Value
 								Build           = $VM.Guest.ToolsVersion
+								Version         = $null
 								MaintenanceMode = $null
 							}
 						}

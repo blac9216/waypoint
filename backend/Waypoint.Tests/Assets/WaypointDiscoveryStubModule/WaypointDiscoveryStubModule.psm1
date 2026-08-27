@@ -91,15 +91,19 @@ function Invoke-WaypointDiscovery {
 
 	[pscustomobject]@{
 		Type = 'cluster'; MoRef = 'domain-c1'; Name = 'stub-cluster-01'
-		ParentMoRef = $null; Build = $null; MaintenanceMode = $null
+		ParentMoRef = $null; Build = $null; Version = $null; MaintenanceMode = $null
 	}
 	[pscustomobject]@{
+		# Issue #974: invented Version distinct from Build, mirroring the real
+		# $VMHost.Version/$VMHost.Build split -- host-11 is the "Version reported"
+		# case, matched against migration 0064's real seeded 'vsphere'/'8.0.3' row by
+		# DiscoverJobHandlerEndToEndTests.
 		Type = 'host'; MoRef = 'host-11'; Name = 'esxi-01.example.internal'
-		ParentMoRef = 'domain-c1'; Build = '99.0.12345678'; MaintenanceMode = $false
+		ParentMoRef = 'domain-c1'; Build = '99.0.12345678'; Version = '8.0.3'; MaintenanceMode = $false
 	}
 	[pscustomobject]@{
 		Type = 'vm'; MoRef = 'vm-101'; Name = 'stub-vm-01'
-		ParentMoRef = 'host-11'; Build = '12345'; MaintenanceMode = $null
+		ParentMoRef = 'host-11'; Build = '12345'; Version = $null; MaintenanceMode = $null
 	}
 
 	if ($Pass -eq '1' -or $Pass -eq 'partial') {
@@ -110,8 +114,12 @@ function Invoke-WaypointDiscovery {
 		# pass, ADR-0023 unverified cache).
 		if ($Pass -eq '1') {
 			[pscustomobject]@{
+				# Issue #974: host-12 is the "Version unavailable this pass" case --
+				# Build is still reported (retained fact), but Version is $null, so
+				# DiscoverJobHandler.MapToComponents must resolve ExactVersion=null
+				# (fail-closed) for this host rather than falling back to Build.
 				Type = 'host'; MoRef = 'host-12'; Name = 'esxi-02.example.internal'
-				ParentMoRef = 'domain-c1'; Build = '99.0.12345678'; MaintenanceMode = $true
+				ParentMoRef = 'domain-c1'; Build = '99.0.12345678'; Version = $null; MaintenanceMode = $true
 			}
 		}
 	}

@@ -155,6 +155,16 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		Assert.Equal(TargetDiscoveryStatuses.Discovered, (await _targets.GetAsync(targetId, CancellationToken.None))!.DiscoveryStatus);
 		Assert.NotNull((await _targets.GetAsync(targetId, CancellationToken.None))!.LastRefreshed);
 
+		// Issue #974: the raw build number is retained in inventory_items exactly as
+		// before, alongside (never replaced by) the new semantic Version -- host-11
+		// reports a Version, host-12 does not, but BOTH still carry their Build.
+		InventoryItem host11 = (await GetItemByMorefAsync(targetId, "host-11"))!;
+		Assert.Equal("99.0.12345678", host11.Build);
+		Assert.Equal("8.0.3", host11.Version);
+		InventoryItem host12 = (await GetItemByMorefAsync(targetId, "host-12"))!;
+		Assert.Equal("99.0.12345678", host12.Build);
+		Assert.Null(host12.Version);
+
 		// Issue #732 (discovery-wiring remainder): the same successful pass must also
 		// materialize `components` rows -- the synthetic vcenter root plus one component
 		// per esxi/vm, never one for the vSphere-grouping-only `cluster` type (no
@@ -163,6 +173,13 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		// dropped; see this handler's own MapToComponents doc comment for the mapping
 		// rule).
 		await AssertComponentCountAsync(targetId, expectedActive: 4);
+
+		// Issue #974: host-11's component-level ExactVersion is the semantic Version
+		// ("8.0.3"), never the raw Build ("99.0.12345678") -- ADR-0022's byte-for-byte
+		// contract means using Build here could never match any real catalog row.
+		Waypoint.Core.Components.Component host11Component = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
+			.Single(c => c.VendorIdentity == "host-11");
+		Assert.Equal("8.0.3", host11Component.DiscoveredFact?.ExactVersion);
 
 		// Re-discover with the SAME pass: same identities upsert in place, not duplicated.
 		await RunDiscoverOnceAsync(targetId);
