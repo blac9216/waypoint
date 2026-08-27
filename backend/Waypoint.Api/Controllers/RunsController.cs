@@ -59,6 +59,7 @@ public sealed class RunsController : ControllerBase
 	private readonly RunHistoryDeletionService _historyDeletion;
 	private readonly IJobEventHistoryReader _eventHistory;
 	private readonly IComponentJobRepository _componentJobs;
+	private readonly IComponentResultRepository _componentResults;
 
 	public RunsController(
 		IJobControlRepository repository,
@@ -72,7 +73,8 @@ public sealed class RunsController : ControllerBase
 		RunPurgeService runPurge,
 		RunHistoryDeletionService historyDeletion,
 		IJobEventHistoryReader eventHistory,
-		IComponentJobRepository componentJobs)
+		IComponentJobRepository componentJobs,
+		IComponentResultRepository componentResults)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(configDocs);
@@ -86,6 +88,7 @@ public sealed class RunsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(historyDeletion);
 		ArgumentNullException.ThrowIfNull(eventHistory);
 		ArgumentNullException.ThrowIfNull(componentJobs);
+		ArgumentNullException.ThrowIfNull(componentResults);
 		_repository = repository;
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
@@ -98,6 +101,7 @@ public sealed class RunsController : ControllerBase
 		_historyDeletion = historyDeletion;
 		_eventHistory = eventHistory;
 		_componentJobs = componentJobs;
+		_componentResults = componentResults;
 	}
 
 	/// <summary>
@@ -815,6 +819,44 @@ public sealed class RunsController : ControllerBase
 
 		IReadOnlyList<RunArtifactRow> rows = await _artifactProjection.GetArtifactsAsync(id, cancellationToken).ConfigureAwait(false);
 		return Ok(rows.Select(MapArtifactRow).ToArray());
+	}
+
+	/// <summary>
+	/// Issue #745 first slice: the run-level component-result rollup -- counts by
+	/// component-result status (latest attempt per scan_plan_item), CAT totals, and
+	/// coverage (<c>planned_component_count</c> vs. the sum of <c>by_status</c> counts).
+	/// Viewer+, matching every other run read. Pure SQL <c>GROUP BY</c>
+	/// (<see cref="IComponentResultRepository.GetRunRollupAsync"/>) -- never loads the
+	/// full result/finding set (issue #941's grouped-counts idiom). A run with no
+	/// component_results rows at all (pre-#745 run, or a run whose jobs have not yet
+	/// completed) returns an empty <c>by_status</c> list, not a 404 -- the run itself
+	/// existing is the only precondition.
+	/// </summary>
+	[HttpGet("{id:guid}/component-results/summary")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(RunResultRollupResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunResultRollupResponse>> GetComponentResultsSummary(Guid id, CancellationToken cancellationToken)
+	{
+		RunSummary? run = await _repository.GetRunAsync(id, cancellationToken).ConfigureAwait(false);
+		if (run is null)
+		{
+			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+		}
+
+		RunResultRollup rollup = await _componentResults.GetRunRollupAsync(id, cancellationToken).ConfigureAwait(false);
+		return Ok(new RunResultRollupResponse(
+			RunId: rollup.RunId.ToString(),
+			PlannedComponentCount: rollup.PlannedComponentCount,
+			ByStatus: [.. rollup.ByStatus.Select(row => new RunResultRollupStatusResponse(
+				Status: row.Status,
+				ComponentCount: row.ComponentCount,
+				CatIOpen: row.CatIOpen,
+				CatIIOpen: row.CatIIOpen,
+				CatIIIOpen: row.CatIIIOpen,
+				PassedCount: row.PassedCount,
+				NotApplicableCount: row.NotApplicableCount,
+				NotReviewedCount: row.NotReviewedCount,
+				SkippedCount: row.SkippedCount))]));
 	}
 
 	/// <summary>

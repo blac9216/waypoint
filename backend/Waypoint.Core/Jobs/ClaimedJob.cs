@@ -34,4 +34,11 @@ public sealed record ClaimedJob(
 	string Payload,
 	int AttemptCount,
 	int MaxAttempts,
-	string? Stage = null);
+	string? Stage = null,
+	// Issue #745: the frozen scan_plan_items row (migration 0057/0061) this job
+	// executes, when it was fanned out from a target_scope-driven plan-item-granular
+	// run. NULL for the legacy target-granular fan-out path and for every non-scan job
+	// type -- ComponentResultRecordingService treats NULL as "no domain result to
+	// record" and is a no-op, so this column is purely additive to every existing
+	// caller/test that constructs a ClaimedJob without naming it.
+	Guid? ScanPlanItemId = null);

@@ -107,7 +107,7 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			attempt_count = attempt_count + 1,
 			started_at = COALESCE(started_at, now())
 		WHERE id IN (SELECT id FROM claimable)
-		RETURNING id, run_id, job_type, target_id, target_name, credential_id, priority, payload::text, attempt_count, max_attempts, stage
+		RETURNING id, run_id, job_type, target_id, target_name, credential_id, priority, payload::text, attempt_count, max_attempts, stage, scan_plan_item_id
 		""";
 
 	public async Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, IReadOnlySet<string> allowedJobTypes, CancellationToken cancellationToken)
@@ -154,7 +154,8 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			Payload: reader.GetString(7),
 			AttemptCount: reader.GetInt32(8),
 			MaxAttempts: reader.GetInt32(9),
-			Stage: reader.IsDBNull(10) ? null : reader.GetString(10));
+			Stage: reader.IsDBNull(10) ? null : reader.GetString(10),
+			ScanPlanItemId: reader.IsDBNull(11) ? null : reader.GetGuid(11));
 	}
 
 	public async Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken)

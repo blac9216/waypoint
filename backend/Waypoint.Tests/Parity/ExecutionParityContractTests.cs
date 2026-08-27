@@ -32,6 +32,7 @@ using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.Runs;
 using Waypoint.Infrastructure.Scans;
 using Waypoint.Infrastructure.Secrets;
 using Waypoint.Infrastructure.Sites;
@@ -161,9 +162,12 @@ public sealed class ExecutionParityContractTests : IAsyncLifetime, IDisposable
 		ComponentProfileRevisionResolver componentProfileRevisions = new(_baselines, _catalog, complianceContentOptions);
 		_benchmarks = new BenchmarkRepository(_fixture.ConnectionString);
 
+		ComponentResultRecordingService resultRecording = new(
+			new ComponentResultRepository(_fixture.ConnectionString), NullLogger<ComponentResultRecordingService>.Instance);
+
 		_handler = new ScanJobHandler(
 			_executor, _secretStore, _credentials, _targets, _runSecrets, _repository, _redactor, wrappedPsOptions, scanOptions,
-			complianceContentOptions, _configDocs, _attestationSnapshots, uploadCoordinator, componentProfileRevisions, _benchmarks);
+			complianceContentOptions, _configDocs, _attestationSnapshots, uploadCoordinator, componentProfileRevisions, _benchmarks, resultRecording);
 	}
 
 	public Task DisposeAsync() => _logBuffer.StopAsync(CancellationToken.None);

@@ -32,6 +32,7 @@ using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.PowerShell;
+using Waypoint.Infrastructure.Runs;
 using Waypoint.Infrastructure.Scans;
 using Waypoint.Infrastructure.Secrets;
 using Waypoint.Infrastructure.Sites;
@@ -169,9 +170,14 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		ComponentProfileRevisionResolver vCenterProfileRevisions = new(_baselines, _catalog, complianceContentOptions);
 		_benchmarks = new Waypoint.Infrastructure.ComplianceContent.BenchmarkRepository(_fixture.ConnectionString);
 
+		// Issue #745: component-result recording, additive alongside the pre-existing
+		// pipeline this suite already exercises end to end.
+		ComponentResultRecordingService resultRecording = new(
+			new ComponentResultRepository(_fixture.ConnectionString), NullLogger<ComponentResultRecordingService>.Instance);
+
 		_handler = new ScanJobHandler(
 			executor, _secretStore, _credentials, _targets, _runSecrets, _repository, _redactor, wrappedPsOptions, scanOptions,
-			complianceContentOptions, _configDocs, _attestationSnapshots, uploadCoordinator, vCenterProfileRevisions, _benchmarks);
+			complianceContentOptions, _configDocs, _attestationSnapshots, uploadCoordinator, vCenterProfileRevisions, _benchmarks, resultRecording);
 	}
 
 	public async Task DisposeAsync()
