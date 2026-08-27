@@ -119,11 +119,24 @@ export interface TokenResponseWire {
 	access_token: unknown;
 	expires_in: unknown;
 	token_type: unknown;
+	/** Present whenever `openid` is in the requested scope (it always is here — see `startLogin`). Optional on the wire because RFC 6749 token responses in general need not carry one, and because a future refresh-grant response may legitimately omit it (OIDC Core §12.2 makes `id_token` optional on refresh). */
+	id_token?: unknown;
 }
 
 export interface ExchangedTokens {
 	accessToken: string;
 	expiresAt: string;
+	/**
+	 * The raw ID token, kept solely to be replayed as `id_token_hint` on
+	 * RP-Initiated Logout (issue #873). Without it Keycloak ≥18 cannot
+	 * attribute the end-session request to the authenticated SSO session, so
+	 * instead of a `302` it renders a "Do you want to log out?" confirmation
+	 * page and leaves the session alive until the user clicks — i.e. the very
+	 * silent-re-authentication symptom #873 is about survives the redirect.
+	 * Optional because a token response is not *required* to carry one; the
+	 * logout path degrades to the confirmation page rather than breaking.
+	 */
+	idToken?: string;
 }
 
 /**
@@ -174,9 +187,14 @@ export async function completeLogin(discovery: OidcDiscoveryDocument, clientId: 
 	if (typeof wire.expires_in !== "number" || !Number.isFinite(wire.expires_in)) {
 		throw new Error("Token endpoint returned no usable expires_in.");
 	}
+	// `id_token` is deliberately *not* required: a missing one degrades logout
+	// to Keycloak's confirmation page (see `ExchangedTokens.idToken`), which is
+	// a worse logout, not a failed sign-in — refusing the whole exchange over
+	// it would turn a cosmetic degradation into an outage.
 	return {
 		accessToken: wire.access_token,
 		expiresAt: new Date(Date.now() + wire.expires_in * 1000).toISOString(),
+		...(typeof wire.id_token === "string" && wire.id_token.trim() !== "" ? { idToken: wire.id_token } : {}),
 	};
 }
 
@@ -194,8 +212,21 @@ export function consumeReturnTo(): string {
  * is registered per-client, so without `client_id` Keycloak has no client
  * to validate `post_logout_redirect_uri` against and rejects the request
  * with 400 (issue #873) regardless of how well-formed the rest of the
- * query string is. Falls back to a same-origin reload when the discovery
- * document has no `end_session_endpoint` (not every issuer publishes one).
+ * query string is.
+ *
+ * `idTokenHint` is what actually *ends* the session in one hop. With
+ * `client_id` alone Keycloak ≥18 answers `200` with a "Do you want to log
+ * out?" confirmation page and keeps the SSO session alive until the user
+ * clicks through — verified live against Keycloak 25. Supplying the ID
+ * token issued for this session identifies the session to end, so Keycloak
+ * logs out immediately and `302`s to `post_logout_redirect_uri`. It stays
+ * optional because a token response need not carry an `id_token`; the
+ * caller passes the best value it has and the confirmation page is the
+ * documented fallback, not a failure.
+ *
+ * Returns `null` when the discovery document has no `end_session_endpoint`
+ * (not every issuer publishes one) — the caller then just stays put with
+ * its local session already dropped.
  */
 export function endSessionUrl(discovery: OidcDiscoveryDocument, clientId: string, idTokenHint?: string): string | null {
 	if (!discovery.end_session_endpoint) {

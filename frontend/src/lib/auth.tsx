@@ -129,6 +129,8 @@ interface StoredSession {
 	expiresAt: string;
 	/** `"local"` (dev-flag `POST /auth/login`) or `"oidc"` (Keycloak) — logout behaves differently per kind (see `logout()`): an OIDC session ends with an end-session redirect, a local session just clears storage. Defaults to `"local"` on restore of a session persisted before this field existed (issue #534) so an in-flight dev session isn't dropped by the upgrade. */
 	kind?: "local" | "oidc";
+	/** OIDC only: the raw ID token from the code exchange, held alongside the access token purely so `logout()` can replay it as `id_token_hint` and get a one-hop end-session `302` instead of Keycloak's logout-confirmation page (issue #873, see `oidc.ts`'s `endSessionUrl`). Optional and never required on restore: a session persisted before this field existed (or by an issuer that returned no `id_token`) must still restore as a valid session — it just logs out via the confirmation page. */
+	idToken?: string;
 }
 
 function isRole(value: unknown): value is Role {
@@ -326,6 +328,9 @@ function readStoredSession(): StoredSession | null {
 			// failure that would sign the user out on the very upgrade that
 			// added this field.
 			kind: parsed.kind === "oidc" ? "oidc" : "local",
+			// Best-effort: a blank/absent `idToken` costs a one-hop logout, not
+			// a valid session (see `StoredSession.idToken`).
+			...(isNonBlankString(parsed.idToken) ? { idToken: parsed.idToken } : {}),
 		};
 	} catch {
 		return null;
@@ -419,7 +424,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			}
 			const role = toRole(claims.role, "Keycloak access token");
 			const username = toWireText(claims.preferred_username ?? claims.sub, "preferred_username/sub", "Keycloak access token");
-			const next: StoredSession = { token: tokens.accessToken, username, role, expiresAt: tokens.expiresAt, kind: "oidc" };
+			const next: StoredSession = {
+				token: tokens.accessToken,
+				username,
+				role,
+				expiresAt: tokens.expiresAt,
+				kind: "oidc",
+				...(tokens.idToken ? { idToken: tokens.idToken } : {}),
+			};
 			setSession(next);
 			setStatus("signed-in");
 			persistSession(next);
@@ -568,18 +580,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	/**
-	 * OIDC sessions end with Keycloak's own RP-Initiated Logout redirect
-	 * (kills the browser's Keycloak SSO cookie too — without it, the very
-	 * next `startOidcLogin` would silently re-authenticate the same user via
-	 * the still-live Keycloak session, which is not what a user who clicked
-	 * "sign out" asked for). Local-auth sessions have no IdP session to end,
-	 * so they fall back to the plain `dropSession()` every prior version of
-	 * this app used. Either way `dropSession()` runs first so the app's own
-	 * state is clean even if the discovery fetch below fails (offline
-	 * Keycloak should never trap a user mid-logout).
+	 * OIDC sessions end with Keycloak's own RP-Initiated Logout redirect.
+	 * Without it the very next `startOidcLogin` would silently re-authenticate
+	 * the same user via the still-live Keycloak SSO session, which is not what
+	 * a user who clicked "sign out" asked for (issue #873).
+	 *
+	 * Ending that SSO session in a single hop requires the `id_token_hint`
+	 * captured below: with `client_id` alone, Keycloak ≥18 responds `200` with
+	 * a "Do you want to log out?" confirmation page and keeps the SSO session
+	 * alive until the user clicks it — so the silent-re-auth symptom survives
+	 * (verified live against Keycloak 25). The hint is read off the session
+	 * *before* `dropSession()` clears it, since that call is what wipes both
+	 * the in-memory session and `sessionStorage`. If the session carries no ID
+	 * token (an issuer that returned none, or a session persisted before this
+	 * field existed), the redirect still happens — it just lands on the
+	 * confirmation page instead of a `302`.
+	 *
+	 * Local-auth sessions have no IdP session to end, so they fall back to the
+	 * plain `dropSession()` every prior version of this app used. Either way
+	 * `dropSession()` runs first so the app's own state is clean even if the
+	 * discovery fetch below fails (offline Keycloak should never trap a user
+	 * mid-logout).
 	 */
 	const logout = useCallback(() => {
 		const kind = sessionRef.current?.kind;
+		const idToken = sessionRef.current?.idToken;
 		dropSession();
 		if (kind !== "oidc") {
 			return;
@@ -587,7 +612,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 		fetchAuthConfig()
 			.then((config) => discoverOidc(config.oidcAuthority).then((discovery) => ({ config, discovery })))
 			.then(({ config, discovery }) => {
-				const url = endSessionUrl(discovery, config.oidcClientId);
+				const url = endSessionUrl(discovery, config.oidcClientId, idToken);
 				if (url) {
 					window.location.assign(url);
 				}

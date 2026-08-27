@@ -176,6 +176,43 @@ describe("completeLogin (code exchange)", () => {
 		expect(params.get("redirect_uri")).toBe(redirectUri());
 	});
 
+	it("carries the id_token through so logout can send it as id_token_hint (issue #873)", async () => {
+		seedPkceState("the-state");
+		globalThis.fetch = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ access_token: "tok-1", expires_in: 300, token_type: "Bearer", id_token: "id-tok-1" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+		) as unknown as typeof fetch;
+
+		const result = await completeLogin(DISCOVERY, "waypoint-frontend", "https://waypoint.example.internal/oidc/callback?code=abc&state=the-state");
+
+		expect(result.idToken).toBe("id-tok-1");
+	});
+
+	it.each([
+		["absent", {}],
+		["blank", { id_token: "   " }],
+		["not a string", { id_token: 42 }],
+	])("still returns a usable session when the token response's id_token is %s", async (_label, extra) => {
+		seedPkceState("the-state");
+		globalThis.fetch = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ access_token: "tok-1", expires_in: 300, token_type: "Bearer", ...extra }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+		) as unknown as typeof fetch;
+
+		const result = await completeLogin(DISCOVERY, "waypoint-frontend", "https://waypoint.example.internal/oidc/callback?code=abc&state=the-state");
+
+		// A missing id_token degrades logout to Keycloak's confirmation page —
+		// it must never fail the sign-in itself.
+		expect(result.accessToken).toBe("tok-1");
+		expect(result.idToken).toBeUndefined();
+	});
+
 	it("clears the stashed PKCE verifier/state so a reload of the callback URL cannot replay them", async () => {
 		seedPkceState("the-state");
 		globalThis.fetch = vi.fn(
@@ -240,10 +277,19 @@ describe("endSessionUrl", () => {
 		expect(parsed.searchParams.get("client_id")).toBe("waypoint-frontend");
 	});
 
-	it("includes id_token_hint when provided", () => {
+	it("includes id_token_hint when provided — the parameter that makes Keycloak 302 instead of rendering a logout-confirm page (issue #873)", () => {
 		const url = endSessionUrl(DISCOVERY, "waypoint-frontend", "the-id-token");
 		const parsed = new URL(url!, "https://waypoint.example.internal");
 		expect(parsed.searchParams.get("id_token_hint")).toBe("the-id-token");
+	});
+
+	it("omits id_token_hint entirely when the session carries no ID token", () => {
+		const parsed = new URL(endSessionUrl(DISCOVERY, "waypoint-frontend")!, "https://waypoint.example.internal");
+		expect(parsed.searchParams.has("id_token_hint")).toBe(false);
+		// ...and an empty-string hint is omitted too, rather than sent as a
+		// blank parameter Keycloak would reject.
+		const blank = new URL(endSessionUrl(DISCOVERY, "waypoint-frontend", "")!, "https://waypoint.example.internal");
+		expect(blank.searchParams.has("id_token_hint")).toBe(false);
 	});
 
 	it("returns null when the discovery document has no end_session_endpoint", () => {
