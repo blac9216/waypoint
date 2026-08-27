@@ -33,8 +33,17 @@ public interface IScanPlanRepository
 	/// is true -- an unrunnable plan is rejected by the caller before any run row
 	/// exists, so this method never has to represent "a plan with zero items" for a
 	/// real run.
+	///
+	/// Returns the persisted <c>scan_plan_items.id</c> for every accepted item, keyed
+	/// by <see cref="ScanPlanItem.ComponentId"/> (issue #737, epic #726 Wave 2
+	/// capstone: <see cref="Waypoint.Infrastructure.Runs.RunCreationService"/>'s
+	/// component-granular job fan-out needs the real row id to populate
+	/// <c>jobs.scan_plan_item_id</c>, which does not exist on the pre-persistence
+	/// <see cref="ScanPlanItem"/> DTO itself). <c>scan_plan_items_unique_component_per_plan</c>
+	/// (migration 0057) guarantees at most one row per component within this plan, so
+	/// the mapping is unambiguous.
 	/// </summary>
-	Task RecordAsync(Guid runId, Guid? runScopeSnapshotId, ScanPlan plan, CancellationToken cancellationToken);
+	Task<IReadOnlyDictionary<Guid, Guid>> RecordAsync(Guid runId, Guid? runScopeSnapshotId, ScanPlan plan, CancellationToken cancellationToken);
 
 	/// <summary>The recorded plan for a run, or null when this run predates #734 or was not planned (e.g. a legacy request shape with no target_scope).</summary>
 	Task<ScanPlan?> GetForRunAsync(Guid runId, CancellationToken cancellationToken);

@@ -348,6 +348,50 @@ public sealed class ResourceAdmissionControllerTests : IDisposable
 		Assert.Equal(2, logger.Entries.Count(e => e.Level == LogLevel.Warning));
 	}
 
+	/// <summary>
+	/// Issue #737 (epic #726 Wave 2 capstone, ADR-0024 "Resource admission applies to
+	/// real component jobs"): the <c>scanComponentTransport</c> overload admits MORE
+	/// component-granular `scan` jobs within the same budget than the flat `scan`
+	/// weight would, because <see cref="Waypoint.Core.Jobs.JobResourceProfiles.ResolveScanComponentProfile"/>'s
+	/// per-transport weight is lighter than <see cref="Waypoint.Core.Jobs.JobResourceProfiles.ForJobType"/>'s
+	/// flat `scan` entry (2.0 cores) -- proving admission actually reads the finer
+	/// profile rather than silently ignoring the transport hint.
+	/// </summary>
+	[Fact]
+	public void TryAdmit_WithScanComponentTransport_UsesLighterPerTransportProfile()
+	{
+		ResourceAdmissionController controller = CreateController(new RunnerResourceOptions
+		{
+			// 1.0 CPU core: too small for the flat `scan` weight (2.0 cores) but large
+			// enough for the `vmware` component weight (0.5 cores) with room to spare
+			// for a second one.
+			FallbackCpuCores = 1.0,
+			FallbackMemoryBytes = 4L * 1024 * 1024 * 1024,
+		});
+
+		Assert.False(controller.TryAdmit(Guid.NewGuid(), "scan"));
+
+		bool admittedFirst = controller.TryAdmit(Guid.NewGuid(), "scan", "vmware");
+		bool admittedSecond = controller.TryAdmit(Guid.NewGuid(), "scan", "vmware");
+		Assert.True(admittedFirst);
+		Assert.True(admittedSecond);
+		Assert.Equal(2, controller.AdmittedJobCount);
+	}
+
+	[Fact]
+	public void TryAdmit_WithNullScanComponentTransport_BehavesExactlyLikeTheFlatOverload()
+	{
+		ResourceAdmissionController controller = CreateController(new RunnerResourceOptions
+		{
+			FallbackCpuCores = 4.0,
+			FallbackMemoryBytes = 4L * 1024 * 1024 * 1024,
+		});
+
+		bool admitted = controller.TryAdmit(Guid.NewGuid(), "scan", scanComponentTransport: null);
+		Assert.True(admitted);
+		Assert.Equal(1, controller.AdmittedJobCount);
+	}
+
 	private sealed class ManualTimeProvider : TimeProvider
 	{
 		private DateTimeOffset _now = DateTimeOffset.UtcNow;

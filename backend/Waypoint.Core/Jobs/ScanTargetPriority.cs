@@ -52,4 +52,38 @@ public static class ScanTargetPriority
 			_ => throw new ArgumentOutOfRangeException(nameof(kind), kind, $"unrecognized target kind '{kind}'."),
 		};
 	}
+
+	/// <summary>
+	/// Issue #737 (epic #726 Wave 2 capstone, ADR-0024): maps one accepted
+	/// <see cref="Waypoint.Core.Scans.ScanPlanItem"/>'s catalog-declared
+	/// <see cref="Waypoint.Core.Scans.ScanPlanItem.Priority"/> (sourced from
+	/// <c>catalog_report_groups.priority</c>, itself <c>CHECK</c>-constrained to the
+	/// same 1-6 range this method clamps into -- migration 0050) onto the queue's own
+	/// closed <c>jobs_priority_check</c> bound (migration 0001: <c>priority BETWEEN 1
+	/// AND 6</c>). The clamp is defensive, not load-bearing under today's schema: it
+	/// exists so a future catalog change that widens the report-group priority range
+	/// can never let an out-of-bounds value escape into a job row and fail the
+	/// <c>INSERT</c> outright (AC "no unbounded values escape") -- the queue's bound is
+	/// the closed contract; the catalog's bound is data that could, in principle,
+	/// change independently of it.
+	/// </summary>
+	public static short ForPlanItem(Waypoint.Core.Scans.ScanPlanItem item)
+	{
+		ArgumentNullException.ThrowIfNull(item);
+
+		const short minPriority = 1;
+		const short maxPriority = 6;
+		int priority = item.Priority;
+		if (priority < minPriority)
+		{
+			return minPriority;
+		}
+
+		if (priority > maxPriority)
+		{
+			return maxPriority;
+		}
+
+		return (short)priority;
+	}
 }

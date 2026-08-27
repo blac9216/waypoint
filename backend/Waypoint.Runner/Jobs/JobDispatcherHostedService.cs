@@ -279,7 +279,19 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 			// like the paused/blocked-run release path below, so the job is neither
 			// executed over-budget nor lost; another worker (or this one, once running
 			// jobs free up budget) picks it up on a later poll.
-			if (_resourceAdmission is not null && !_resourceAdmission.TryAdmit(job.Id, job.JobType))
+			//
+			// Issue #737: a component-granular `scan` job's payload carries its own
+			// `scan_plan_item.transport` hint (RunCreationService writes it at fan-out
+			// time, alongside `scan_plan_item_id` -- see that method's payload
+			// construction) so admission can resolve
+			// JobResourceProfiles.ResolveScanComponentProfile's finer per-transport
+			// weight without the runner needing a database round trip or a new grant on
+			// scan_plan_items to look it up. TryParseScanComponentTransport returns null
+			// for every other job type and for the legacy per-target `scan` payload
+			// shape (no `transport` key), which resolves the unchanged flat `scan`
+			// weight exactly as before.
+			string? scanComponentTransport = TryParseScanComponentTransport(job.JobType, job.Payload);
+			if (_resourceAdmission is not null && !_resourceAdmission.TryAdmit(job.Id, job.JobType, scanComponentTransport))
 			{
 				await _repository.ReleaseClaimAsync(job.Id, WorkerId, stoppingToken).ConfigureAwait(false);
 				gate.Release();
@@ -709,6 +721,41 @@ public sealed partial class JobDispatcherHostedService : BackgroundService
 		}
 
 		await _events.EmitAsync(JobEventTypes.SystemNotice, null, null, payload, cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Issue #737: reads the optional <c>transport</c> hint a component-granular
+	/// <c>scan</c> job's payload carries (RunCreationService writes it only when the
+	/// job was fanned out from an accepted <c>scan_plan_items</c> row -- see that
+	/// method's payload construction) so admission can resolve a finer per-transport
+	/// resource profile. Returns null for every non-<c>scan</c> job type, an
+	/// unparseable payload, or a legacy per-target <c>scan</c> payload that has no
+	/// <c>transport</c> key at all -- every one of those callers already gets the
+	/// unchanged flat <c>scan</c> weight from
+	/// <see cref="Waypoint.Core.Jobs.JobResourceProfiles.ResolveScanComponentProfile"/>.
+	/// Never throws: a malformed payload is a resource-accounting lookup miss, not a
+	/// reason to crash the dispatcher (same "never throw" contract every other
+	/// profile-resolution helper in this codebase already has).
+	/// </summary>
+	private static string? TryParseScanComponentTransport(string jobType, string payload)
+	{
+		if (!string.Equals(jobType, "scan", StringComparison.Ordinal) || string.IsNullOrWhiteSpace(payload))
+		{
+			return null;
+		}
+
+		try
+		{
+			using JsonDocument document = JsonDocument.Parse(payload);
+			return document.RootElement.TryGetProperty("transport", out JsonElement transportElement)
+				&& transportElement.ValueKind == JsonValueKind.String
+				? transportElement.GetString()
+				: null;
+		}
+		catch (JsonException)
+		{
+			return null;
+		}
 	}
 
 	private static async Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)

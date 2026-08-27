@@ -271,7 +271,7 @@ public sealed class RunCreationService
 		// digest/history only; job fan-out below remains the existing target-granular
 		// path.
 		Waypoint.Core.Scans.ScanPlan? plan = null;
-		IReadOnlyDictionary<Guid, PlanTargetRequirement> planRequirementsByTarget = new Dictionary<Guid, PlanTargetRequirement>();
+		Dictionary<Guid, PlanTargetRequirement> planRequirementsByTarget = [];
 		if (resolvedTargetScope is not null)
 		{
 			plan = await _planner.CompileAsync(null, resolvedTargetScope.ResolvedComponentIds, cancellationToken).ConfigureAwait(false);
@@ -333,8 +333,14 @@ public sealed class RunCreationService
 				new Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>>())
 			: await ResolveCredentialBindingsAsync(
 				targets, credentialId, credentialOverrides, adHocCredentials, planRequirementsByTarget, cancellationToken).ConfigureAwait(false);
-		IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings = resolution.SavedByTarget;
-		IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> adHocByTarget = resolution.AdHocByTarget;
+		// CredentialBindingResolution's public properties are IReadOnlyDictionary (its
+		// own public-surface contract), but every concrete value the record is ever
+		// constructed with above is a Dictionary -- cast rather than copy so
+		// BuildPlanItemJobSpec/BuildLegacyTargetJobSpec (private methods) can take the
+		// concrete type per this codebase's CA1859 discipline (no interface-typed
+		// collection params on private methods).
+		Dictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings = (Dictionary<Guid, IReadOnlyDictionary<string, Guid>>)resolution.SavedByTarget;
+		Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> adHocByTarget = (Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>>)resolution.AdHocByTarget;
 
 		// Issue #736 (ADR-0024): demote exactly the plan item(s) whose required
 		// purpose failed to resolve to an explicit ScanPlanSkip -- per-component
@@ -356,75 +362,113 @@ public sealed class RunCreationService
 		List<(Guid TargetId, string Purpose, RunAdHocCredential Credential)> adHocToStore = [.. adHocByTarget
 			.SelectMany(pair => pair.Value.Select(inner => (pair.Key, inner.Key, inner.Value)))];
 
+		// Issue #737 (epic #726 Wave 2 capstone, ADR-0024 "one Postgres component job"
+		// per accepted plan item): a plan-driven target (one with accepted
+		// scan_plan_items -- planRequirementsByTarget) fans out one job PER ACCEPTED
+		// PLAN ITEM instead of one job for the whole target, each linked to its exact
+		// immutable plan item via JobSpec.ScanPlanItemId. This is the mechanism that
+		// makes AC-1 ("one failed endpoint/component cannot halt unrelated execution
+		// items") and AC-4 ("halt/resume identifies the affected credential
+		// purpose/component set without over-halting") true at the queue layer: each
+		// component's job is now its own independently claimable/failable/haltable row,
+		// carrying only the credential bindings its OWN RequiredPurposes need (never the
+		// target-level union another sibling component might also need). A target with
+		// NO plan items (legacy target_ids/profile_id-only request, or every candidate
+		// component was itself skipped by the planner/credential-demotion above) keeps
+		// the pre-#737 one-job-per-target shape completely unchanged -- see
+		// BuildPlanItemJobSpec/BuildLegacyTargetJobSpec below for the two shapes.
+		//
+		// Reads plan.Items rather than planRequirementsByTarget's own per-item lists:
+		// DemotePlanItemsWithUnresolvedCredentials (immediately above) may have
+		// replaced `plan` with a new record whose Items no longer include a
+		// credential-demoted item, but planRequirementsByTarget itself is NOT
+		// recomputed after demotion -- it still reflects the PRE-demotion item set. The
+		// component->target map built here is still valid after demotion (a
+		// component's owning target never changes), but the ITEM LIST fanned out must
+		// come from the post-demotion plan.Items, or a credential-demoted item would be
+		// fanned out as a job anyway with no way to resolve its own binding.
+		Dictionary<Guid, Guid> targetIdByComponentId = [];
+		foreach ((Guid targetId, PlanTargetRequirement requirement) in planRequirementsByTarget)
+		{
+			foreach (Waypoint.Core.Scans.ScanPlanItem item in requirement.Items)
+			{
+				targetIdByComponentId[item.ComponentId] = targetId;
+			}
+		}
+
+		Dictionary<Guid, List<Waypoint.Core.Scans.ScanPlanItem>> survivingItemsByTarget = [];
+		if (plan is not null)
+		{
+			foreach (Waypoint.Core.Scans.ScanPlanItem item in plan.Items)
+			{
+				if (!targetIdByComponentId.TryGetValue(item.ComponentId, out Guid ownerTargetId))
+				{
+					continue;
+				}
+
+				if (!survivingItemsByTarget.TryGetValue(ownerTargetId, out List<Waypoint.Core.Scans.ScanPlanItem>? existing))
+				{
+					existing = [];
+					survivingItemsByTarget[ownerTargetId] = existing;
+				}
+
+				existing.Add(item);
+			}
+		}
+
+		// Issue #737: (spec list index, component id) for every plan-item spec added
+		// below -- ScanPlanItem has no persisted row id of its own until
+		// _plans.RecordAsync below actually inserts it (see that method's doc
+		// comment), so this list lets the code after RecordAsync patch each spec's
+		// JobSpec.ScanPlanItemId in place once the real ids are known, without
+		// rebuilding the whole specs list or re-deriving target/credential context.
+		List<(int SpecIndex, Guid ComponentId)> planItemSpecPositions = [];
+
 		List<JobSpec> specs = [];
 		foreach (Target target in targets)
 		{
-			// target_kind is the shape-routing signal JobShapes.ForJob reads (issue #309):
-			// every scan fans out as job_type = 'scan' regardless of kind, so the payload
-			// is the only place the dispatcher can learn "this is an ssh (SRG) target"
-			// before a handler ever resolves the target row. profile_key (issue #639) is
-			// the content-store-relative directory name ScanJobHandler resolves under
-			// ComplianceContentOptions.ContentPath -- carried per-job (not re-derived from
-			// scope) so a job replayed after a later content-pull still scans the exact
-			// profile the operator picked at run-creation time.
-			string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId, target_kind = target.Kind, profile_key = profile.ProfileKey });
-			if (useRunSecret)
+			// A target counts as plan-driven the moment it has ANY candidate plan item
+			// (planRequirementsByTarget, computed pre-demotion) -- including the case
+			// where every one of its items was subsequently credential-demoted to zero
+			// surviving items. That target must fan out NO job at all (per-component
+			// isolation: its components are honestly skipped/incomplete, never silently
+			// promoted back to the coarse legacy whole-target shape/static credential
+			// matrix). Only a target with NO plan items whatsoever (a legacy
+			// target_ids/profile_id-only request, or no target_scope was supplied at
+			// all) uses the legacy per-target fan-out below.
+			if (planRequirementsByTarget.ContainsKey(target.Id))
 			{
-				// No credential_id at all for an ad hoc job -- the secret lives only in
-				// run_secrets, keyed by the run id (one legacy row per run, issue #434)
-				// rather than one row per job. Falling back to target.CredentialId here
-				// would silently mix tiers (a "my credentials" run quietly using a stored
-				// service secret). No job_credential_bindings rows either: this is the
-				// pre-#586 flat shape, not the per-purpose one.
-				specs.Add(new JobSpec(
-					ScanJobType,
-					ScanTargetPriority.ForTargetKind(target.Kind),
-					TargetId: target.Id,
-					TargetName: target.Name,
-					Payload: payload,
-					HasRunSecret: true));
+				if (survivingItemsByTarget.TryGetValue(target.Id, out List<Waypoint.Core.Scans.ScanPlanItem>? items))
+				{
+					foreach (Waypoint.Core.Scans.ScanPlanItem item in items)
+					{
+						planItemSpecPositions.Add((specs.Count, item.ComponentId));
+						specs.Add(BuildPlanItemJobSpec(item, target, siteId, profile, useRunSecret, resolvedBindings, adHocByTarget));
+					}
+				}
+
+				continue;
 			}
-			else
-			{
-				// Migration 0044's dual-write contract: jobs.credential_id keeps carrying
-				// the execution purpose's resolved credential (the kind's default purpose
-				// -- the one today's wrappers authenticate with), and the full per-purpose
-				// snapshot (including e.g. a vsphere target's vcsa-ssh binding, which has
-				// no jobs-column slot) rides CredentialBindings into job_credential_bindings
-				// in the same fan-out transaction. An ad hoc purpose (issue #586) never
-				// has a jobs.credential_id slot -- if the target's DEFAULT purpose itself
-				// resolved ad hoc, effectiveCredentialId stays null (the legacy column has
-				// no ad hoc representation; ScanJobHandler's snapshot-preferred resolution
-				// reads the job_credential_bindings row, not this column, whenever any
-				// snapshot rows exist at all).
-				IReadOnlyDictionary<string, Guid> purposes = resolvedBindings.TryGetValue(target.Id, out IReadOnlyDictionary<string, Guid>? foundSaved)
-					? foundSaved
-					: new Dictionary<string, Guid>();
-				IReadOnlyDictionary<string, RunAdHocCredential> adHocPurposes = adHocByTarget.TryGetValue(target.Id, out IReadOnlyDictionary<string, RunAdHocCredential>? foundAdHoc)
-					? foundAdHoc
-					: new Dictionary<string, RunAdHocCredential>();
 
-				Guid? effectiveCredentialId =
-					CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(target.Kind, out string? defaultPurpose)
-					&& purposes.TryGetValue(defaultPurpose, out Guid executionCredentialId)
-						? executionCredentialId
-						: null;
+			specs.Add(BuildLegacyTargetJobSpec(target, siteId, profile, useRunSecret, resolvedBindings, adHocByTarget));
+		}
 
-				List<JobCredentialBindingSpec> bindingSpecs = [
-					.. purposes.Select(pair => new JobCredentialBindingSpec(pair.Key, pair.Value)),
-					.. adHocPurposes.Keys.Select(purpose => new JobCredentialBindingSpec(purpose, CredentialId: null, IsRunSecret: true)),
-				];
-				bindingSpecs.Sort((a, b) => string.CompareOrdinal(a.Purpose, b.Purpose));
-
-				specs.Add(new JobSpec(
-					ScanJobType,
-					ScanTargetPriority.ForTargetKind(target.Kind),
-					TargetId: target.Id,
-					TargetName: target.Name,
-					CredentialId: effectiveCredentialId,
-					Payload: payload,
-					CredentialBindings: bindingSpecs.Count == 0 ? null : bindingSpecs));
-			}
+		// Issue #737: per-component credential demotion (ADR-0024, immediately above)
+		// can now leave a plan-driven run with zero surviving scan specs -- every
+		// accepted item on every plan-driven target lost its own required purpose,
+		// with no legacy (non-plan-driven) target in the same request to fall back to.
+		// Pre-#737 this could not happen: target-granular fan-out always emitted
+		// exactly one job per resolved target regardless of plan-item credential
+		// demotion. Reject cleanly here, before FanOutJobsAsync's own (less specific)
+		// "a run must fan out to at least one job" guard would otherwise fire.
+		if (specs.Count == 0)
+		{
+			throw new ApiException(
+				System.Net.HttpStatusCode.BadRequest,
+				"no_plannable_component",
+				"No component in the resolved scope could be compiled into a runnable plan.",
+				"Every accepted plan item's required credential purpose failed to resolve. "
+					+ "Assign the missing/compatible bindings or resolve the reported gaps before starting this scan.");
 		}
 
 		specs.AddRange(await BuildStaleDiscoverSpecsAsync(targets, useRunSecret ? null : resolvedBindings, cancellationToken).ConfigureAwait(false));
@@ -464,9 +508,27 @@ public sealed class RunCreationService
 		// actually compiled (i.e. the caller supplied target_scope); a legacy
 		// target_ids/profile_id-only request has no plan, matching IScanPlanRepository.GetForRunAsync's
 		// documented null case.
+		//
+		// Issue #737: RecordAsync now returns the persisted scan_plan_items.id per
+		// component (ScanPlanItem itself has no row id until this INSERT happens) --
+		// patch that real id onto every plan-item JobSpec built above, at the exact
+		// list position planItemSpecPositions recorded, before FanOutJobsAsync writes
+		// jobs.scan_plan_item_id below. A component id this map does not contain
+		// (should not happen -- every planItemSpecPositions entry came from an item in
+		// the same `plan.Items` this call just persisted) leaves that spec's
+		// ScanPlanItemId null rather than throwing -- defensive only.
 		if (plan is not null)
 		{
-			await _plans.RecordAsync(runId, runScopeSnapshotId, plan, cancellationToken).ConfigureAwait(false);
+			IReadOnlyDictionary<Guid, Guid> planItemIdsByComponentId =
+				await _plans.RecordAsync(runId, runScopeSnapshotId, plan, cancellationToken).ConfigureAwait(false);
+
+			foreach ((int specIndex, Guid componentId) in planItemSpecPositions)
+			{
+				if (planItemIdsByComponentId.TryGetValue(componentId, out Guid planItemId))
+				{
+					specs[specIndex] = specs[specIndex] with { ScanPlanItemId = planItemId };
+				}
+			}
 		}
 
 		if (useRunSecret)
@@ -504,6 +566,191 @@ public sealed class RunCreationService
 	}
 
 	/// <summary>
+	/// Issue #737 (epic #726 Wave 2 capstone, ADR-0024 "one Postgres component job"):
+	/// builds the component-granular <see cref="JobSpec"/> for one accepted
+	/// <paramref name="item"/>. <see cref="JobSpec.ScanPlanItemId"/> links the job to
+	/// its exact immutable plan row -- the runner reads the frozen plan item rather
+	/// than re-deriving current catalog/component state (this issue's Summary); that
+	/// runner-side read is this issue's stated remainder (ScanJobHandler execution),
+	/// so this slice only freezes the linkage. Priority comes from
+	/// <see cref="ScanTargetPriority.ForPlanItem"/> (the item's own catalog priority,
+	/// clamped into the queue's closed bound) rather than
+	/// <see cref="ScanTargetPriority.ForTargetKind"/>'s coarser target-kind tiering --
+	/// AC-2's "priority ordering matches the activated catalog." The payload carries
+	/// <c>transport</c> (the item's own catalog transport, e.g. <c>vmware</c>/<c>ssh</c>/
+	/// <c>nsx-api</c>/<c>vcf-api</c> -- <see cref="Waypoint.Core.ComplianceContent.CatalogTransports"/>)
+	/// so <see cref="Waypoint.Runner.Jobs.JobDispatcherHostedService"/> can resolve
+	/// <see cref="JobResourceProfiles.ResolveScanComponentProfile"/>'s finer per-
+	/// transport resource profile (AC-3) without a database round trip.
+	///
+	/// Credential bindings are scoped to exactly <paramref name="item"/>'s own
+	/// <see cref="Waypoint.Core.Scans.ScanPlanItem.RequiredPurposes"/> -- never the
+	/// owning target's full union across ALL its accepted items -- so one component's
+	/// job never carries (and therefore never halts on) a purpose only a SIBLING
+	/// component on the same target requires (AC-4's "without over-halting").
+	/// </summary>
+	private static JobSpec BuildPlanItemJobSpec(
+		Waypoint.Core.Scans.ScanPlanItem item,
+		Target target,
+		Guid siteId,
+		Profile profile,
+		bool useRunSecret,
+		Dictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings,
+		Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> adHocByTarget)
+	{
+		// scan_plan_item_id is NOT in this payload -- it rides jobs.scan_plan_item_id
+		// itself (JobSpec.ScanPlanItemId, patched in by the caller once
+		// IScanPlanRepository.RecordAsync assigns the real row id; see
+		// CreateScanRunAsync's doc comment on planItemSpecPositions). `transport` IS
+		// duplicated onto the payload deliberately: JobDispatcherHostedService's
+		// resource-admission check needs it before a handler ever reads the frozen
+		// plan item row, so it must be readable straight from the claimed job without
+		// a database round trip.
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = target.Id,
+			site_id = siteId,
+			target_kind = target.Kind,
+			profile_key = profile.ProfileKey,
+			component_id = item.ComponentId,
+			transport = item.Transport,
+			selector_kind = item.SelectorKind,
+			selector_name = item.SelectorName,
+		});
+
+		short priority = ScanTargetPriority.ForPlanItem(item);
+
+		// ScanPlanItemId is left null on both JobSpecs this method returns -- the
+		// caller (CreateScanRunAsync) patches in the real scan_plan_items.id once
+		// IScanPlanRepository.RecordAsync assigns it (see planItemSpecPositions).
+		if (useRunSecret)
+		{
+			// Same ad hoc shape as the legacy per-target path: no credential_id, no
+			// job_credential_bindings rows -- the secret lives only in run_secrets
+			// keyed by the run id.
+			return new JobSpec(
+				ScanJobType,
+				priority,
+				TargetId: target.Id,
+				TargetName: target.Name,
+				Payload: payload,
+				HasRunSecret: true);
+		}
+
+		IReadOnlyDictionary<string, Guid> targetPurposes = resolvedBindings.TryGetValue(target.Id, out IReadOnlyDictionary<string, Guid>? foundSaved)
+			? foundSaved
+			: new Dictionary<string, Guid>();
+		IReadOnlyDictionary<string, RunAdHocCredential> targetAdHocPurposes = adHocByTarget.TryGetValue(target.Id, out IReadOnlyDictionary<string, RunAdHocCredential>? foundAdHoc)
+			? foundAdHoc
+			: new Dictionary<string, RunAdHocCredential>();
+
+		// Item-scoped subset: only this component's own RequiredPurposes, never the
+		// target-level union (see this method's doc comment).
+		HashSet<string> itemPurposes = [.. item.RequiredPurposes];
+		List<JobCredentialBindingSpec> bindingSpecs = [
+			.. targetPurposes.Where(pair => itemPurposes.Contains(pair.Key)).Select(pair => new JobCredentialBindingSpec(pair.Key, pair.Value)),
+			.. targetAdHocPurposes.Keys.Where(itemPurposes.Contains).Select(purpose => new JobCredentialBindingSpec(purpose, CredentialId: null, IsRunSecret: true)),
+		];
+		bindingSpecs.Sort((a, b) => string.CompareOrdinal(a.Purpose, b.Purpose));
+
+		Guid? effectiveCredentialId =
+			CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(target.Kind, out string? defaultPurpose)
+			&& itemPurposes.Contains(defaultPurpose)
+			&& targetPurposes.TryGetValue(defaultPurpose, out Guid executionCredentialId)
+				? executionCredentialId
+				: null;
+
+		return new JobSpec(
+			ScanJobType,
+			priority,
+			TargetId: target.Id,
+			TargetName: target.Name,
+			CredentialId: effectiveCredentialId,
+			Payload: payload,
+			CredentialBindings: bindingSpecs.Count == 0 ? null : bindingSpecs);
+	}
+
+	/// <summary>
+	/// The pre-#737 legacy per-target <see cref="JobSpec"/> shape, extracted verbatim
+	/// (no behavior change) so <see cref="CreateScanRunAsync"/> can call it for a
+	/// target with no plan items at all -- see that method's doc comment for the exact
+	/// plan-driven-vs-legacy distinction.
+	/// </summary>
+	private static JobSpec BuildLegacyTargetJobSpec(
+		Target target,
+		Guid siteId,
+		Profile profile,
+		bool useRunSecret,
+		Dictionary<Guid, IReadOnlyDictionary<string, Guid>> resolvedBindings,
+		Dictionary<Guid, IReadOnlyDictionary<string, RunAdHocCredential>> adHocByTarget)
+	{
+		// target_kind is the shape-routing signal JobShapes.ForJob reads (issue #309):
+		// every scan fans out as job_type = 'scan' regardless of kind, so the payload
+		// is the only place the dispatcher can learn "this is an ssh (SRG) target"
+		// before a handler ever resolves the target row. profile_key (issue #639) is
+		// the content-store-relative directory name ScanJobHandler resolves under
+		// ComplianceContentOptions.ContentPath -- carried per-job (not re-derived from
+		// scope) so a job replayed after a later content-pull still scans the exact
+		// profile the operator picked at run-creation time.
+		string payload = JsonSerializer.Serialize(new { target_id = target.Id, site_id = siteId, target_kind = target.Kind, profile_key = profile.ProfileKey });
+		if (useRunSecret)
+		{
+			// No credential_id at all for an ad hoc job -- the secret lives only in
+			// run_secrets, keyed by the run id (one legacy row per run, issue #434)
+			// rather than one row per job. Falling back to target.CredentialId here
+			// would silently mix tiers (a "my credentials" run quietly using a stored
+			// service secret). No job_credential_bindings rows either: this is the
+			// pre-#586 flat shape, not the per-purpose one.
+			return new JobSpec(
+				ScanJobType,
+				ScanTargetPriority.ForTargetKind(target.Kind),
+				TargetId: target.Id,
+				TargetName: target.Name,
+				Payload: payload,
+				HasRunSecret: true);
+		}
+
+		// Migration 0044's dual-write contract: jobs.credential_id keeps carrying
+		// the execution purpose's resolved credential (the kind's default purpose
+		// -- the one today's wrappers authenticate with), and the full per-purpose
+		// snapshot (including e.g. a vsphere target's vcsa-ssh binding, which has
+		// no jobs-column slot) rides CredentialBindings into job_credential_bindings
+		// in the same fan-out transaction. An ad hoc purpose (issue #586) never
+		// has a jobs.credential_id slot -- if the target's DEFAULT purpose itself
+		// resolved ad hoc, effectiveCredentialId stays null (the legacy column has
+		// no ad hoc representation; ScanJobHandler's snapshot-preferred resolution
+		// reads the job_credential_bindings row, not this column, whenever any
+		// snapshot rows exist at all).
+		IReadOnlyDictionary<string, Guid> purposes = resolvedBindings.TryGetValue(target.Id, out IReadOnlyDictionary<string, Guid>? foundSaved)
+			? foundSaved
+			: new Dictionary<string, Guid>();
+		IReadOnlyDictionary<string, RunAdHocCredential> adHocPurposes = adHocByTarget.TryGetValue(target.Id, out IReadOnlyDictionary<string, RunAdHocCredential>? foundAdHoc)
+			? foundAdHoc
+			: new Dictionary<string, RunAdHocCredential>();
+
+		Guid? effectiveCredentialId =
+			CredentialPurposeMatrix.DefaultPurposeByTargetKind.TryGetValue(target.Kind, out string? defaultPurpose)
+			&& purposes.TryGetValue(defaultPurpose, out Guid executionCredentialId)
+				? executionCredentialId
+				: null;
+
+		List<JobCredentialBindingSpec> bindingSpecs = [
+			.. purposes.Select(pair => new JobCredentialBindingSpec(pair.Key, pair.Value)),
+			.. adHocPurposes.Keys.Select(purpose => new JobCredentialBindingSpec(purpose, CredentialId: null, IsRunSecret: true)),
+		];
+		bindingSpecs.Sort((a, b) => string.CompareOrdinal(a.Purpose, b.Purpose));
+
+		return new JobSpec(
+			ScanJobType,
+			ScanTargetPriority.ForTargetKind(target.Kind),
+			TargetId: target.Id,
+			TargetName: target.Name,
+			CredentialId: effectiveCredentialId,
+			Payload: payload,
+			CredentialBindings: bindingSpecs.Count == 0 ? null : bindingSpecs);
+	}
+
+	/// <summary>
 	/// Issue #259 (deferred half of #21's AC): builds one <c>discover</c>
 	/// <see cref="JobSpec"/> per <c>vsphere</c> target in <paramref name="targets"/>
 	/// whose cached inventory is stale or has never been populated -- the same
@@ -537,7 +784,7 @@ public sealed class RunCreationService
 	/// </summary>
 	private async Task<List<JobSpec>> BuildStaleDiscoverSpecsAsync(
 		IReadOnlyList<Target> targets,
-		IReadOnlyDictionary<Guid, IReadOnlyDictionary<string, Guid>>? resolvedBindings,
+		Dictionary<Guid, IReadOnlyDictionary<string, Guid>>? resolvedBindings,
 		CancellationToken cancellationToken)
 	{
 		DateTimeOffset staleBefore = DateTimeOffset.UtcNow.AddMinutes(-_discoveryOptions.Value.StaleAfterMinutes);
@@ -639,7 +886,7 @@ public sealed class RunCreationService
 		Guid? runCredentialId,
 		IReadOnlyList<RunCredentialOverride>? overrides,
 		IReadOnlyList<RunAdHocCredential>? adHocCredentials,
-		IReadOnlyDictionary<Guid, PlanTargetRequirement> planRequirementsByTarget,
+		Dictionary<Guid, PlanTargetRequirement> planRequirementsByTarget,
 		CancellationToken cancellationToken)
 	{
 		Dictionary<Guid, Target> targetsById = targets.ToDictionary(t => t.Id);
@@ -894,7 +1141,7 @@ public sealed class RunCreationService
 	/// </summary>
 	private static Waypoint.Core.Scans.ScanPlan DemotePlanItemsWithUnresolvedCredentials(
 		Waypoint.Core.Scans.ScanPlan plan,
-		IReadOnlyDictionary<Guid, PlanTargetRequirement> planRequirementsByTarget,
+		Dictionary<Guid, PlanTargetRequirement> planRequirementsByTarget,
 		IReadOnlyList<CredentialBindingGap> planDrivenGaps)
 	{
 		// (targetId, purpose) -> true for every gap -- a plan item on that target

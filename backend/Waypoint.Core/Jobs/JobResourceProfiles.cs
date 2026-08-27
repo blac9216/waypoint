@@ -91,4 +91,53 @@ public static class JobResourceProfiles
 	/// </summary>
 	public static JobResourceProfile ForJobType(string jobType) =>
 		Profiles.TryGetValue(jobType, out JobResourceProfile profile) ? profile : Default;
+
+	/// <summary>
+	/// Issue #737 (epic #726 Wave 2 capstone, ADR-0024 "Resource admission applies to
+	/// real component jobs"): PROVISIONAL per-transport weights for a component-
+	/// granular <c>scan</c> job (one fanned out from a single accepted
+	/// <c>scan_plan_items</c> row, carrying <c>scan_plan_item_id</c> -- see
+	/// <see cref="Waypoint.Infrastructure.Runs.RunCreationService"/>), keyed by
+	/// <see cref="Waypoint.Core.ComplianceContent.CatalogTransports"/> rather than by
+	/// the flat <c>scan</c> job type <see cref="Profiles"/> uses above. A single
+	/// component (one ESXi host, one VM, one VCSA service) is a materially lighter unit
+	/// of work than the legacy per-target fan-out's whole-target InSpec run, so these
+	/// are deliberately lighter than <see cref="Profiles"/>'s flat <c>scan</c> entry --
+	/// still engineering estimates, not measured limits, per this file's own remarks.
+	/// </summary>
+	private static readonly Dictionary<string, JobResourceProfile> ScanComponentProfilesByTransport = new(StringComparer.Ordinal)
+	{
+		// vmware: one vCenter/ESXi/VM/VCSA-service InSpec run against a single
+		// discovered object -- a fraction of the whole-target fan-out's shape.
+		["vmware"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024),
+		// ssh: one SRG appliance scan (Photon/Aria/vIDM) -- already single-target
+		// shaped even under the legacy model, unchanged weight.
+		["ssh"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024),
+		// nsx-api: one NSX Manager API-driven scan -- network-bound, light CPU/memory,
+		// same shape as discover/credential-test's network-probe profile.
+		["nsx-api"] = new JobResourceProfile(CpuCores: 0.25, MemoryBytes: 128L * 1024 * 1024),
+		// vcf-api: catalog-declared SDDC Manager/VCF API work -- no handler yet
+		// (issue #737's stated remainder keeps this transport on the legacy path),
+		// profiled defensively at the heavier vmware shape until it is measured.
+		["vcf-api"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024),
+	};
+
+	/// <summary>
+	/// Resolves a component-granular <c>scan</c> job's profile by transport, falling
+	/// back to <see cref="Profiles"/>'s flat <c>scan</c> entry for a transport this
+	/// dictionary has not been extended to cover -- same "conservative fallback, never
+	/// throw" contract as <see cref="ForJobType"/>. <paramref name="transport"/> is
+	/// null for a job with no <c>scan_plan_item_id</c> (the legacy per-target fan-out
+	/// path); callers pass null there and get the ordinary flat <c>scan</c> weight
+	/// unchanged.
+	/// </summary>
+	public static JobResourceProfile ResolveScanComponentProfile(string? transport)
+	{
+		if (transport is not null && ScanComponentProfilesByTransport.TryGetValue(transport, out JobResourceProfile profile))
+		{
+			return profile;
+		}
+
+		return ForJobType("scan");
+	}
 }

@@ -49,7 +49,7 @@ public static class PlanCredentialRequirements
 	/// throwing; <see cref="ResolveAndDemoteAsync"/> still resolves every other item
 	/// normally.
 	/// </summary>
-	public static async Task<IReadOnlyDictionary<Guid, PlanTargetRequirement>> GroupByTargetAsync(
+	public static async Task<Dictionary<Guid, PlanTargetRequirement>> GroupByTargetAsync(
 		ScanPlan plan, IComponentRepository components, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(plan);
