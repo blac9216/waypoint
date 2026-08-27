@@ -40,6 +40,10 @@ secrets*.yml
 dev/local/
 *.local.json
 *.local.yml
+# Issue #957: untracked local-docs convention — any *.local.md holds
+# machine/lab-specific instructions (docs/testing.md describes the
+# convention; docs/testing.local.md is the live-testing entry point).
+*.local.md
 # Issue #28: deploy/scripts/keycloak-realm-import.sh's scratch copy of a
 # realm export with a REAL client secret substituted in (never the
 # committed deploy/keycloak/realm/waypoint-realm.json placeholder) -- see
