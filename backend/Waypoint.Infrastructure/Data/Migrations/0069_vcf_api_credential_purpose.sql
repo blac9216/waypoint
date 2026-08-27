@@ -15,8 +15,9 @@
 -- vcf-api does the same, matching catalog_components_transport_check's 'vcf-api'
 -- transport literal it has always admitted). No schema change beyond this one CHECK
 -- widening is required; migration 0069 slot verified free against both the migrations
--- directory and open PRs at commit time (0068 claimed by open PR #978, not yet merged;
--- this migration assumes it lands first and claims the next free slot).
+-- directory and open PRs at commit time (0068 was claimed by open PR #978, not yet
+-- merged when this migration branched; #978 merged first and this migration was
+-- rebased onto it, confirming slot 0069 remained free).
 --
 -- Constraint-alteration idiom: Postgres cannot ALTER a CHECK constraint in place, so
 -- this migration DROPs and re-CREATEs it with the widened vocabulary -- the exact
