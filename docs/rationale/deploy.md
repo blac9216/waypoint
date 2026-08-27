@@ -12,6 +12,14 @@ one durable home for that provenance.
   `deploy/`.
 - Within a section, one `###` entry per kebab-case slug. The slug is the
   exact anchor a code comment points at.
+- **Slugs are unique across the whole file, not just within a section.**
+  GitHub anchors are file-global: a duplicate `###` heading anywhere in this
+  file silently becomes `#slug-1`, and every `# why:` pointer written against
+  the second entry then resolves to the *first* one instead — a failure that
+  looks correct in review. Disambiguate by prefixing the slug with the
+  service/file it belongs to, e.g. `postgres-healthcheck-start-period` and
+  `keycloak-healthcheck-start-period`, never a bare `healthcheck-start-period`
+  repeated across sections.
 - Entry body: 2–6 lines explaining the why (the reasoning, trade-off, or
   constraint — not a restatement of the code).
 - Entry ends with a `Refs:` line carrying provenance: issue numbers, ADRs,
@@ -23,7 +31,7 @@ one durable home for that provenance.
 A filled entry under a `## compose.yaml` section looks like this:
 
 ```markdown
-### healthcheck-start-period-30s
+### compose-healthcheck-start-period-30s
 
 The backend's first boot runs pending EF Core migrations before it starts
 accepting connections, which can take longer than a typical healthcheck
@@ -33,10 +41,14 @@ window under cold cache. A short `start_period` produced flapping
 Refs: #000 (invented placeholder — not a real issue)
 ```
 
+The `compose-` prefix disambiguates this slug from, say, a similarly-named
+`postgres-healthcheck-start-period-30s` entry under a different section —
+see the file-global uniqueness rule above.
+
 And the matching code comment, in `compose.yaml` itself:
 
 ```yaml
-# why: docs/rationale/deploy.md#healthcheck-start-period-30s
+# why: docs/rationale/deploy.md#compose-healthcheck-start-period-30s
 start_period: 30s
 ```
 
@@ -44,10 +56,15 @@ start_period: 30s
 
 Add a new entry by appending a `###` slug under the relevant `##` file
 section, writing the 2–6 line why, and closing with `Refs:`. Point to it
-from code with `# why: docs/rationale/deploy.md#<slug>`. This index is
-deploy-scoped for now; a repo-wide pointer-integrity check that verifies
-every `# why:` comment resolves to a real anchor is tracked separately
-(#939) and is not built here.
+from code with `# why: docs/rationale/deploy.md#<slug>`. If the source file
+has no `##` section yet, create one — append it in `deploy/`-tree order —
+rather than leaving the entry homeless. This index is deploy-scoped for now;
+a repo-wide pointer-integrity check that verifies every `# why:` comment
+resolves to a real anchor is tracked separately (#939) and is not built here.
+
+## README.md
+
+## config.example/
 
 ## compose.yaml
 
