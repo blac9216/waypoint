@@ -15,7 +15,7 @@ set -eu
 read_secret_file() {
 	if [ ! -s "$2" ]; then
 		echo "waypoint: missing or empty secret file for $1: $2" >&2
-		echo "waypoint: refusing to start Keycloak without it (issue #844 fail-closed)." >&2
+		echo "waypoint: refusing to start Keycloak without it (fail-closed)." >&2
 		exit 1
 	fi
 	cat "$2"
