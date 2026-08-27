@@ -19,6 +19,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.ComplianceContent.Xccdf;
 using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -117,14 +118,25 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		_configDocs = new ConfigDocRepository(_fixture.ConnectionString);
 		_attestationSnapshots = new AttestationSnapshotRepository(_fixture.ConnectionString);
 
-		IOptions<ScanOptions> scanOptions = Options.Create(new ScanOptions
+		ScanOptions scanOptionsValue = new()
 		{
 			ArtifactStorePath = _artifactDirectory,
 			ProfilePath = "/invented/profile/path",
 			TimeoutSeconds = 60,
 			AttestationProfile = "invented-vsphere-stig",
 			SafTimeoutSeconds = 30,
-		});
+		};
+		// Issue #741 CKL benchmark identity: the legacy static target-kind-keyed stamp
+		// for a vsphere-kind target -- deliberately distinct from any frozen benchmark
+		// revision an e2e test seeds, so the fallback-vs-frozen precedence is provable.
+		scanOptionsValue.BenchmarkMetadata["vsphere"] = new ScanBenchmarkMetadata
+		{
+			BenchmarkId = "invented_static_vsphere_benchmark",
+			Title = "Invented Static vSphere STIG",
+			ReleaseInfo = "Release: 1 Benchmark Date: 01 Jan 2026",
+			Version = "1",
+		};
+		IOptions<ScanOptions> scanOptions = Options.Create(scanOptionsValue);
 		IOptions<Waypoint.Core.ComplianceContent.ComplianceContentOptions> complianceContentOptions =
 			Options.Create(new Waypoint.Core.ComplianceContent.ComplianceContentOptions { ContentPath = _contentDirectory });
 
@@ -613,6 +625,152 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			vsphereDecrypts.Parameters.AddWithValue(jobIds[0]);
 			Assert.Equal(0L, (long)(await vsphereDecrypts.ExecuteScalarAsync())!);
 		}
+	}
+
+	/// <summary>
+	/// Issue #741 CKL benchmark identity (the review's finding-1 non-null branch): a STIG
+	/// component job whose plan item FREEZES a real <c>benchmark_revision_id</c> stamps the
+	/// produced CKL with THAT revision's own benchmark identity
+	/// (<see cref="BenchmarkRevision.BenchmarkKey"/>/<c>Title</c>/<c>Release</c>/<c>Version</c>),
+	/// NOT the legacy static target-kind-keyed <see cref="ScanBenchmarkMetadata"/> stamp --
+	/// proving the convert stage prefers the frozen revision (ADR-0022 exact-version
+	/// behavior). The static vsphere stamp is deliberately configured to a DISTINCT value
+	/// (see the constructor's <see cref="ScanOptions.BenchmarkMetadata"/> seed), so a wrong
+	/// precedence would surface the static id in the CKL and fail this test. The stub
+	/// convert echoes every stamped field into the CKL body for exactly this assertion.
+	/// </summary>
+	[Fact]
+	public async Task StigComponentJob_FrozenBenchmarkRevision_StampsCklFromFrozenRevision_NotStaticFallback()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid vsphereApiCredentialId) = await SeedVsphereTargetAsync("invented-vsphere-api-secret-bench"); // gitleaks:allow -- invented test canary
+		Guid vcsaSshCredentialId = (await _credentials.CreateAsync(
+			$"svc-vcsa-ssh-{Guid.NewGuid():N}@example.internal", CredentialTypes.Ssh, CredentialOwners.Shared,
+			sudoEnabled: false, CancellationToken.None, "root@example.internal"))!.Value;
+		await _secretStore.StoreAsync(vcsaSshCredentialId, System.Text.Encoding.UTF8.GetBytes("invented-vcsa-ssh-secret-bench" /* gitleaks:allow -- invented test canary */), "test", CancellationToken.None);
+
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedSshCatalogAndBaselineAsync("vcsa-sts-bench", CatalogSelectorKinds.Service, CatalogOutputKinds.HdfAndCkl, selectorName: "sts", materializeOnDisk: true);
+
+		// A real (invented) frozen benchmark revision -- migration 0052's benchmark_revisions
+		// row -- with an identity deliberately unlike the static vsphere fallback.
+		BenchmarkRevision revision = await _benchmarks.ImportRevisionAsync(
+			new BenchmarkImportCandidate(
+				"xccdf_invented.vmware_vcsa-sts_STIG",
+				"Invented VCSA STS Service STIG",
+				"2",
+				"Release: 4 Benchmark Date: 15 Feb 2026",
+				$"digest-bench-{Guid.NewGuid():N}",
+				[new XccdfRule("SV-100001r1_rule", "V-100001", BenchmarkRuleSeverities.High, "invented rule")]),
+			BenchmarkSources.ManualUpload, CancellationToken.None);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			selector_kind = "service",
+			selector_name = "sts",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = "hdf_ckl",
+			benchmark_revision_id = revision.Id,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec(
+				"scan", 2, TargetId: targetId, CredentialId: vsphereApiCredentialId, Payload: payload,
+				CredentialBindings: [new JobCredentialBindingSpec(CredentialPurposes.VcsaSsh, vcsaSshCredentialId)])],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
+		Assert.True(File.Exists(cklPath), $"expected a CKL at '{cklPath}'.");
+		string ckl = await File.ReadAllTextAsync(cklPath);
+
+		// Every field comes from the FROZEN revision, not the static vsphere fallback.
+		Assert.Contains($"benchmark={revision.BenchmarkKey}", ckl, StringComparison.Ordinal);
+		Assert.Contains($"title={revision.Title}", ckl, StringComparison.Ordinal);
+		Assert.Contains($"release={revision.Release}", ckl, StringComparison.Ordinal);
+		Assert.Contains($"version={revision.Version}", ckl, StringComparison.Ordinal);
+		Assert.DoesNotContain("invented_static_vsphere_benchmark", ckl, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #741 CKL benchmark identity (finding-1 fallback branch): a STIG component job
+	/// with NO frozen <c>benchmark_revision_id</c> on its payload falls back to the legacy
+	/// static target-kind-keyed <see cref="ScanBenchmarkMetadata"/> stamp -- byte-identical
+	/// to pre-#741 behavior for any job that never froze a benchmark identity. Pins that
+	/// the new non-null branch is the ONLY thing that changes the stamp; its absence leaves
+	/// the static path intact.
+	/// </summary>
+	[Fact]
+	public async Task StigComponentJob_NoFrozenBenchmarkRevision_StampsCklFromStaticFallback()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid vsphereApiCredentialId) = await SeedVsphereTargetAsync("invented-vsphere-api-secret-static"); // gitleaks:allow -- invented test canary
+		Guid vcsaSshCredentialId = (await _credentials.CreateAsync(
+			$"svc-vcsa-ssh-{Guid.NewGuid():N}@example.internal", CredentialTypes.Ssh, CredentialOwners.Shared,
+			sudoEnabled: false, CancellationToken.None, "root@example.internal"))!.Value;
+		await _secretStore.StoreAsync(vcsaSshCredentialId, System.Text.Encoding.UTF8.GetBytes("invented-vcsa-ssh-secret-static" /* gitleaks:allow -- invented test canary */), "test", CancellationToken.None);
+
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedSshCatalogAndBaselineAsync("vcsa-sts-static", CatalogSelectorKinds.Service, CatalogOutputKinds.HdfAndCkl, selectorName: "sts", materializeOnDisk: true);
+
+		// No benchmark_revision_id key at all -- the legacy/unnarrowed shape.
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			selector_kind = "service",
+			selector_name = "sts",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = "hdf_ckl",
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec(
+				"scan", 2, TargetId: targetId, CredentialId: vsphereApiCredentialId, Payload: payload,
+				CredentialBindings: [new JobCredentialBindingSpec(CredentialPurposes.VcsaSsh, vcsaSshCredentialId)])],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
+		Assert.True(File.Exists(cklPath), $"expected a CKL at '{cklPath}'.");
+		string ckl = await File.ReadAllTextAsync(cklPath);
+
+		// The static vsphere-kind stamp, exactly as configured in the constructor.
+		Assert.Contains("benchmark=invented_static_vsphere_benchmark", ckl, StringComparison.Ordinal);
+		Assert.Contains("title=Invented Static vSphere STIG", ckl, StringComparison.Ordinal);
+		Assert.Contains("version=1", ckl, StringComparison.Ordinal);
 	}
 
 	/// <summary>
