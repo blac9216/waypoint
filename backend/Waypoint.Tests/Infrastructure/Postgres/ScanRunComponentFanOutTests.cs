@@ -169,7 +169,6 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = new[] { componentA, componentB } },
 		});
 
@@ -205,7 +204,6 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = new[] { componentId } },
 		});
 
@@ -242,7 +240,6 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "all" },
 		});
 
@@ -289,7 +286,6 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "all" },
 		});
 
@@ -337,7 +333,6 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = new[] { componentA, componentB } },
 		});
 
@@ -374,7 +369,6 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = new[] { componentA, componentB } },
 		});
 
@@ -432,7 +426,6 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		HttpResponseMessage response = await PostRunAsync(new
 		{
 			site_id = siteId,
-			profile_id = _profileId,
 			target_scope = new { mode = "explicit", component_ids = componentIds },
 		});
 

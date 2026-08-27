@@ -639,13 +639,16 @@ describe("StartScanScreen (issue #284, credential-binding rework issue #587, sco
 		const createBody = JSON.parse(createCall.init!.body as string) as Record<string, unknown>;
 		const createScope = JSON.parse(createBody.scope as string) as Record<string, unknown>;
 
-		// Preview never sends profile_id (ADR-0022 §7); every other scope field
-		// — site_id, target_ids/target_scope — is identical to what create sends
-		// for the same selection, because both are built from the same `scope`
-		// object (useScanWizard's shared memo), never re-derived separately.
+		// Preview never sends profile_id (ADR-0022 §7), and -- issue #895 -- create
+		// now rejects it too whenever target_scope is set, so this fixture's
+		// all-components selection means BOTH requests omit profile_id entirely,
+		// not merely send it as undefined; every other scope field (site_id,
+		// target_ids/target_scope) is identical, because both are built from the
+		// same `scope` object via the same `toPreviewScope` (useScanWizard's
+		// shared memo/helper), never re-derived separately.
 		expect(previewScope.profile_id).toBeUndefined();
-		const { profile_id: _profileId, ...createScopeWithoutProfile } = createScope;
-		expect(previewScope).toEqual(createScopeWithoutProfile);
+		expect(createScope.profile_id).toBeUndefined();
+		expect(previewScope).toEqual(createScope);
 	});
 
 	it("issue #733 remainder: renders accepted items, the plan digest, and carries the digest into Confirm", async () => {

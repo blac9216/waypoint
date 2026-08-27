@@ -215,12 +215,11 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 		using JsonDocument previewBody = JsonDocument.Parse(await previewResponse.Content.ReadAsStringAsync());
 		string previewDigest = previewBody.RootElement.GetProperty("plan_digest").GetString()!;
 
-		HttpResponseMessage createResponse = await PostRunAsync(new
-		{
-			site_id = siteId,
-			profile_id = _profileId,
-			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
-		});
+		// Issue #895: create takes the EXACT SAME scopeBody preview was just called
+		// with -- no profile_id added -- proving the wizard's one-payload preview→create
+		// handoff this issue fixes, not merely that the two ENDPOINTS can each be made
+		// to produce the same digest given two different, hand-tailored payloads.
+		HttpResponseMessage createResponse = await PostRunAsync(scopeBody);
 		Assert.Equal(HttpStatusCode.Accepted, createResponse.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
@@ -301,12 +300,9 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 		using JsonDocument previewBody = JsonDocument.Parse(await previewResponse.Content.ReadAsStringAsync());
 		string previewDigest = previewBody.RootElement.GetProperty("plan_digest").GetString()!;
 
-		HttpResponseMessage createResponse = await PostRunAsync(new
-		{
-			site_id = siteId,
-			profile_id = _profileId,
-			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
-		});
+		// Issue #895: same scopeBody preview used, no profile_id added -- see the base
+		// parity test's comment.
+		HttpResponseMessage createResponse = await PostRunAsync(scopeBody);
 		Assert.Equal(HttpStatusCode.Accepted, createResponse.StatusCode);
 		using JsonDocument created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync());
 		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
@@ -396,8 +392,10 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 	[Fact]
 	public async Task Preview_WithProfileId_Returns400ValidationError()
 	{
-		// Preview never selects a profile (ADR-0022 section 7) -- unlike create, which
-		// still accepts (and in this transitional slice requires) profile_id.
+		// Preview never selects a profile (ADR-0022 section 7) -- and, as of issue
+		// #895, create applies the identical rule for a target_scope request (see
+		// CreateScanRun_TargetScopeWithProfileId_Returns400ValidationError below), so
+		// one scope payload now serves both endpoints.
 		Guid siteId = await CreateSiteAsync("preview-rejects-profile-site");
 
 		HttpResponseMessage response = await PreviewAsync(new
@@ -409,6 +407,58 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task CreateScanRun_TargetScopeWithProfileId_Returns400ValidationError()
+	{
+		// Issue #895's repro, pinned as a regression test directly on create (not just
+		// preview): a target_scope run must reject scope.profile_id with the same
+		// actionable shape preview already uses -- the wizard's preview→create handoff
+		// depends on both endpoints applying the identical rule to the identical scope.
+		Guid siteId = await CreateSiteAsync("create-rejects-profile-site");
+		await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			profile_id = _profileId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
+	}
+
+	[Fact]
+	public async Task CreateScanRun_TargetScopeWithoutProfileId_Succeeds()
+	{
+		// Issue #895: a target_scope run resolves its execution content from each
+		// accepted plan item's own catalog execution profile (the active baseline),
+		// never a run-level profile_id -- so omitting profile_id entirely must succeed
+		// end to end through fan-out, exactly like preview already tolerates it.
+		Guid siteId = await CreateSiteAsync("create-succeeds-without-profile-site");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01", """{"host":"vcsa-01.example.internal"}""");
+
+		Guid catalogComponentId = await SeedCompatibleCatalogComponentAsync();
+		await _components.UpsertDiscoveredAsync(
+			targetId, [new DiscoveredComponent("esxi", "host-9200", "esxi-no-profile.example.internal", null, catalogComponentId, "8.0.3")], CancellationToken.None);
+		Component seeded = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None)).Single();
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		ScanPlanRepository plans = new(_fixture.ConnectionString);
+		Waypoint.Core.Scans.ScanPlan? persistedPlan = await plans.GetForRunAsync(runId, CancellationToken.None);
+		Assert.NotNull(persistedPlan);
+		Assert.Single(persistedPlan!.Items);
 	}
 
 	[Fact]
