@@ -202,12 +202,20 @@ public sealed class RunPurgeService
 	/// Deletes the compliance-owned database projections this service has direct,
 	/// owner-privileged access to (see class doc comment for why this list excludes
 	/// artifact files and stops at what the API connection can actually reach):
-	/// attestation_snapshots for the run, any leftover run_secrets row, and nulling
-	/// schedules.last_run_id if this run was the referenced schedule's most recent.
+	/// attestation_snapshots for the run, the migration 0066 evidence tables
+	/// (component_results/component_result_findings/component_result_artifacts,
+	/// upload_attempts) -- issue #745's stated "ADR-0019/retention wiring for the new
+	/// tables (purge currently RESTRICTs)" remainder -- any leftover run_secrets row,
+	/// and nulling schedules.last_run_id if this run was the referenced schedule's
+	/// most recent.
 	/// </summary>
 	private async Task RunDatabasePhaseAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		await _attestationSnapshots.DeleteForRunAsync(runId, cancellationToken).ConfigureAwait(false);
+
+		IReadOnlyList<JobSummary> jobs = await _jobs.GetJobsForRunAsync(runId, cancellationToken).ConfigureAwait(false);
+		IReadOnlyList<Guid> jobIds = [.. jobs.Select(job => job.Id)];
+		await DeleteComplianceEvidenceAsync(runId, jobIds, cancellationToken).ConfigureAwait(false);
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -223,6 +231,71 @@ public sealed class RunPurgeService
 			nullScheduleRef.Parameters.AddWithValue(runId);
 			await nullScheduleRef.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
+	}
+
+	/// <summary>
+	/// Migration 0066: deletes every component_results/component_result_findings/
+	/// component_result_artifacts row for <paramref name="runId"/> (children first,
+	/// the order that migration's append-only-trigger carve-out requires -- see its
+	/// header) and every upload_attempts row for the run's own job ids, all inside
+	/// one transaction with the two session-local GUCs (<c>waypoint.purge_run_id</c>,
+	/// <c>waypoint.purge_job_ids</c>) the block-mutation triggers check, set via
+	/// <c>SET LOCAL</c> so the exception cannot outlive this one statement batch or
+	/// leak onto a pooled connection's next use -- same idiom
+	/// <see cref="AttestationSnapshotRepository.DeleteForRunAsync"/> already
+	/// established. A run with no component results/upload attempts (the common case
+	/// for a non-scan-plan or legacy fan-out run) is a harmless no-op delete.
+	/// </summary>
+	private async Task DeleteComplianceEvidenceAsync(Guid runId, IReadOnlyList<Guid> jobIds, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		await using (NpgsqlCommand setRunGuc = new("SELECT set_config('waypoint.purge_run_id', $1, true)", connection, transaction))
+		{
+			setRunGuc.Parameters.AddWithValue(runId.ToString());
+			await setRunGuc.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		string jobIdsCsv = string.Join(',', jobIds);
+		await using (NpgsqlCommand setJobsGuc = new("SELECT set_config('waypoint.purge_job_ids', $1, true)", connection, transaction))
+		{
+			setJobsGuc.Parameters.AddWithValue(jobIdsCsv);
+			await setJobsGuc.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await using (NpgsqlCommand deleteFindings = new(
+			"DELETE FROM component_result_findings WHERE component_result_id IN (SELECT id FROM component_results WHERE run_id = $1)",
+			connection, transaction))
+		{
+			deleteFindings.Parameters.AddWithValue(runId);
+			await deleteFindings.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await using (NpgsqlCommand deleteArtifacts = new(
+			"DELETE FROM component_result_artifacts WHERE component_result_id IN (SELECT id FROM component_results WHERE run_id = $1)",
+			connection, transaction))
+		{
+			deleteArtifacts.Parameters.AddWithValue(runId);
+			await deleteArtifacts.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await using (NpgsqlCommand deleteResults = new("DELETE FROM component_results WHERE run_id = $1", connection, transaction))
+		{
+			deleteResults.Parameters.AddWithValue(runId);
+			await deleteResults.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		if (jobIds.Count > 0)
+		{
+			await using NpgsqlCommand deleteUploadAttempts = new(
+				"DELETE FROM upload_attempts WHERE job_id = ANY($1)", connection, transaction);
+			deleteUploadAttempts.Parameters.AddWithValue(jobIds.Select(id => id).ToArray());
+			await deleteUploadAttempts.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	private static RunPurgeOutcome ClassifyInFlight(RunPurgeStatus status) =>

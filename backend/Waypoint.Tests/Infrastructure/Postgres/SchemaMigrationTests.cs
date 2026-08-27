@@ -196,9 +196,20 @@ public sealed class SchemaMigrationTests
 	/// once Not_Reviewed rule), and component_result_artifacts (kind/path/digest/size
 	/// for raw/attested HDF, CKL, summary, log). All three append-only, no UPDATE path.
 	/// New runner grant: SELECT, INSERT on all three tables to
-	/// waypoint_compliance_runner --
+	/// waypoint_compliance_runner, issue #745 -- 0066 (slot claimed for this PR;
+	/// 0064/0065 reserved by parallel agents at branch time, verified free at commit
+	/// time against both the migrations directory and open PRs) wires ADR-0019
+	/// retention/purge into the migration 0062/0063 evidence tables: append-only
+	/// block-mutation triggers (mirroring 0021/0042's attestation_snapshots pattern)
+	/// on component_results, component_result_findings, component_result_artifacts,
+	/// and upload_attempts, each with a narrow session-local-GUC carve-out
+	/// (waypoint.purge_run_id / waypoint.purge_job_ids) that only RunPurgeService's
+	/// own purge transaction ever sets -- no new tables, no new runner grants (purge
+	/// deletion is exclusively API-side, same owner-privileged connection every other
+	/// purge step already uses), closing PR #961's stated "purge currently RESTRICTs"
+	/// gap --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 63;
+	private const int ExpectedMigrationCount = 64;
 
 	private readonly PostgresFixture _fixture;
 
