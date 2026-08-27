@@ -219,24 +219,27 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 	public async Task CreateScanRun_GatedUnNarrowableComponents_CollapseToExactlyOneWholeTargetJob()
 	{
 		// Issue #737 item-4 fan-out gate (the round-1 blocker's invariant), re-pinned by
-		// #741/#743 against a transport that is STILL un-narrowable now that ssh/target
-		// and ssh/service moved to the narrowed side (nsx-api has no per-item scoping
-		// path yet -- see ScanComponentNarrowing's doc comment / the #892 residual): a
-		// target whose accepted components are all UN-narrowable (two nsx-api/service
-		// components) must NOT fan out one whole-target job per component (that would be
-		// N duplicate whole-target scans). They collapse to EXACTLY ONE whole-target job,
-		// marked unnarrowed. No configuration can produce duplicate whole-target
+		// #741/#743 and #742 against the ONE transport that remains un-narrowable now
+		// that ssh/target, ssh/service, AND nsx-api/service have all moved to the
+		// narrowed side (see ScanComponentNarrowing's doc comment / the #892 residual,
+		// now restated to vcf-api only): a target whose accepted components are all
+		// UN-narrowable (two vcf-api/service components -- no runner path consumes
+		// vcf-api yet) must NOT fan out one whole-target job per component (that would
+		// be N duplicate whole-target scans). They collapse to EXACTLY ONE whole-target
+		// job, marked unnarrowed. No configuration can produce duplicate whole-target
 		// executions.
 		Guid siteId = await CreateSiteAsync("fanout-gated-collapse");
 		Guid targetId = await CreateTargetAsync(siteId, "nsx-api", "nsx-01");
-		Guid nsxCred = await SeedCredentialAsync("nsx");
-		await SeedBindingAsync(targetId, "nsx-api", nsxCred);
 
-		// Two un-narrowable nsx-api/service components on the same target.
+		// Two un-narrowable vcf-api/service components on the same target. vcf-api
+		// carries no credential purpose yet (docs/compliance-parity.md: "authentication
+		// is a catalog requirement whose final purpose is planned under #807"), so no
+		// requirement/binding is seeded for it -- this fixture exercises only the
+		// narrowing/fan-out boundary, not credential resolution.
 		await SeedComponentWithRequirementsAsync(
-			targetId, "nsx-svc-a", ["nsx-api"], transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "manager");
+			targetId, "vcf-svc-a", [], transport: CatalogTransports.VcfApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "sddc-manager");
 		await SeedComponentWithRequirementsAsync(
-			targetId, "nsx-svc-b", ["nsx-api"], transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "dfw");
+			targetId, "vcf-svc-b", [], transport: CatalogTransports.VcfApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "operations");
 
 		HttpResponseMessage response = await PostRunAsync(new
 		{
@@ -343,16 +346,64 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Assert.False(payload.RootElement.TryGetProperty("unnarrowed", out _));
 	}
 
+	[Fact]
+	public async Task CreateScanRun_NsxNamedFunctionComponents_FanOutOnePerNarrowedItem()
+	{
+		// Issue #742 (NSX, epic #726 Wave 3's final transport): ScanComponentNarrowing
+		// now narrows nsx-api/service (each NSX functional component -- Manager, DFW,
+		// tier-0/tier-1 firewall/router, or a newer catalog-added set) -- each gets its
+		// OWN job instead of collapsing behind one representative whole-Manager job
+		// (shrinking #892's residual to vcf-api only). Two NSX functions on the same
+		// manager target fan out as TWO independent jobs, each carrying its own
+		// selector/profile identity, mirroring
+		// CreateScanRun_VcsaServiceAndSshTargetComponents_FanOutOnePerNarrowedItem's
+		// ssh/service shape exactly.
+		Guid siteId = await CreateSiteAsync("fanout-nsx-narrowed");
+		Guid targetId = await CreateTargetAsync(siteId, "nsx-api", "nsx-01");
+		Guid nsxCred = await SeedCredentialAsync("nsx");
+		await SeedBindingAsync(targetId, "nsx-api", nsxCred);
+
+		Guid managerComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "manager", ["nsx-api"], transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "manager");
+		Guid dfwComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "dfw", ["nsx-api"], transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "dfw");
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		List<Guid> scanJobIds = await ReadScanJobIdsAsync(runId);
+		Assert.Equal(2, scanJobIds.Count);
+
+		foreach ((Guid componentId, string expectedFunctionName) in new[] { (managerComponentId, "manager"), (dfwComponentId, "dfw") })
+		{
+			Guid jobId = await ReadJobIdForComponentAsync(runId, componentId);
+			using JsonDocument payload = JsonDocument.Parse(await ReadJobPayloadAsync(jobId));
+			Assert.Equal("service", payload.RootElement.GetProperty("selector_kind").GetString());
+			Assert.Equal(expectedFunctionName, payload.RootElement.GetProperty("selector_name").GetString());
+			Assert.True(payload.RootElement.TryGetProperty("catalog_execution_profile_id", out _),
+				"a narrowed nsx-api/service item must carry its own frozen catalog_execution_profile_id.");
+			Assert.True(payload.RootElement.TryGetProperty("baseline_id", out _));
+			Assert.True(payload.RootElement.TryGetProperty("output_kind", out _));
+			Assert.False(payload.RootElement.TryGetProperty("unnarrowed", out _), "a narrowed item's job is never marked unnarrowed.");
+		}
+	}
+
 	/// <summary>
 	/// Issue #738 AC "the exact planned vCenter endpoint and profile/input revisions are
-	/// executed", generalized to esxi/vm by #739/#740 and to the ssh family by #741/#743:
-	/// every narrowable selector's (vcenter/esxi/vm/service/target) fanned-out job
-	/// payload carries its OWN frozen
+	/// executed", generalized to esxi/vm by #739/#740, to the ssh family by #741/#743,
+	/// and to the nsx-api family by #742: every narrowable selector's
+	/// (vcenter/esxi/vm/service/target) fanned-out job payload carries its OWN frozen
 	/// <c>catalog_execution_profile_id</c>/<c>baseline_id</c>/<c>input_resolutions</c> --
 	/// not the run-level <c>profile_key</c> (absent here entirely, per #895's
 	/// target_scope contract) -- so <c>ScanJobHandler</c> can resolve the activated
 	/// content-revision profile directory instead of any fixed/legacy path. An
-	/// un-narrowable nsx-api/service sibling on a DIFFERENT run stays on the pre-#738
+	/// un-narrowable vcf-api/service sibling on a DIFFERENT run stays on the pre-#738
 	/// payload shape (no such fields, proven by
 	/// <see cref="CreateScanRun_GatedUnNarrowableComponents_CollapseToExactlyOneWholeTargetJob"/>)
 	/// -- proving the actual boundary is narrowability (<c>ScanComponentNarrowing</c>),
@@ -416,15 +467,15 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 	[Fact]
 	public async Task CreateScanRun_MixedNarrowableAndGated_FansOutPerNarrowablePlusExactlyOneCollapsed()
 	{
-		// Issue #737 item-4, re-pinned by #741/#743 against a still-un-narrowable
-		// transport (nsx-api/service -- see the class doc comment / #892 residual, now
-		// that ssh/service and ssh/target moved to the narrowed side): on one target with
-		// TWO narrowable esxi components and TWO un-narrowable nsx-api components, the
-		// run fans out one job per narrowable component (2) PLUS exactly ONE collapsed
-		// whole-target job for the gated remainder = 3 jobs total -- never 4, and never a
-		// duplicate whole-target scan.
+		// Issue #737 item-4, re-pinned by #741/#743/#742 against the ONE remaining
+		// un-narrowable transport (vcf-api/service -- see the class doc comment / #892
+		// residual, now that ssh/service, ssh/target, AND nsx-api/service have all moved
+		// to the narrowed side): on one target with TWO narrowable esxi components and
+		// TWO un-narrowable vcf-api components, the run fans out one job per narrowable
+		// component (2) PLUS exactly ONE collapsed whole-target job for the gated
+		// remainder = 3 jobs total -- never 4, and never a duplicate whole-target scan.
 		//
-		// nsx-api components require a DIFFERENT target kind than vsphere/esxi
+		// vcf-api components require a DIFFERENT target kind than vsphere/esxi
 		// (ComponentCapabilityMatcher's real compatibility gate is orthogonal to this
 		// narrowing-only test's fixture helper, which does not model per-kind
 		// compatibility) -- this suite's SeedComponentWithRequirementsAsync seeds
@@ -434,16 +485,14 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Guid siteId = await CreateSiteAsync("fanout-mixed-gate");
 		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
 		Guid vcenterCred = await SeedCredentialAsync("vcenter");
-		Guid nsxCred = await SeedCredentialAsync("nsx");
 		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
-		await SeedBindingAsync(targetId, "nsx-api", nsxCred);
 
 		Guid esxiA = await SeedComponentAsync(targetId, "esxi-a", priority: 4);
 		Guid esxiB = await SeedComponentAsync(targetId, "esxi-b", priority: 4);
 		await SeedComponentWithRequirementsAsync(
-			targetId, "nsx-svc-a", ["nsx-api"], transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "manager");
+			targetId, "vcf-svc-a", [], transport: CatalogTransports.VcfApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "sddc-manager");
 		await SeedComponentWithRequirementsAsync(
-			targetId, "nsx-svc-b", ["nsx-api"], transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "dfw");
+			targetId, "vcf-svc-b", [], transport: CatalogTransports.VcfApi, selectorKind: CatalogSelectorKinds.Service, selectorName: "operations");
 
 		HttpResponseMessage response = await PostRunAsync(new
 		{

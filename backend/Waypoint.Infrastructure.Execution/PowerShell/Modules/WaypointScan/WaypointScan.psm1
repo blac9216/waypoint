@@ -516,6 +516,29 @@ function Set-WaypointCklBenchmarkMetadata {
 # On any throw the caught exception message is reduced by Get-NsxAuthFailureReason before
 # being returned, so a session-token HTTP failure's exception text (which could otherwise
 # echo the request body) never leaves this function un-redacted.
+#
+# Issue #742 (epic #726 Wave 3's final transport, expanding one NSX Manager entry point
+# into its catalog-defined functional components -- Manager/DFW/tier-0/tier-1
+# firewall/router/newer sets): session-reuse reading. The issue asks to "reuse one
+# bounded session acquisition where safe while keeping job credential/lease ownership
+# clear." This function is called ONCE PER COMPONENT JOB (ScanComponentNarrowing now
+# narrows nsx-api/service, so RunCreationService fans out one job per NSX function),
+# and each job independently decrypts its own credential and acquires its own session
+# token here -- there is no cross-JOB session cache. That is a deliberate reading, not
+# an oversight: ADR-0014 gives each job its own credential decrypt/lease, and a session
+# token cached across job boundaries would either (a) require a shared cache keyed by
+# manager+credential outside any one job's lease/cancellation scope, silently
+# reintroducing cross-job coupling the runner topology was built to avoid, or (b) risk
+# handing a still-valid token to a job whose credential was rotated/revoked between
+# acquisitions. The session IS reused in the one place that is safe without crossing a
+# job boundary: within a single job's own invocation of this function, ONE session
+# token is acquired and used for that job's one InSpec `inspec exec` call against its
+# one component's profile -- there is nothing else to reuse it FOR inside one job
+# (unlike the sibling `vmware-stig-docker` engine's per-run session honoring N
+# component targets from one token acquisition, which this runner's one-job-per-
+# component model does not have an analogous multi-target loop for). If a future
+# measured-performance case justifies a real cross-job cache, it needs its own ADR
+# addressing lease/revocation semantics -- not a change folded into this issue.
 function Invoke-WaypointNsxScan {
 	<#
 	.SYNOPSIS
@@ -537,6 +560,31 @@ function Invoke-WaypointNsxScan {
 
 	.PARAMETER ReportPath
 	    Where InSpec writes its JSON (HDF) report.
+
+	.PARAMETER SelectorName
+	    Issue #742: the catalog's own named-function identity for this NSX component
+	    (e.g. 'manager', 'dfw', 'tier0-fw') -- there is no separate discovered vendor
+	    identity per NSX function, the catalog name IS the stable identity (same
+	    convention as Invoke-WaypointSrgScan's ssh `service` selector). Used only for
+	    logging/diagnostics here (ProcessName) -- the actual component/profile scoping
+	    already happened one layer up: ProfilePath IS this component's own resolved
+	    leaf profile (ComponentProfileRevisionResolver), so nothing about the NSX
+	    Manager API call itself needs to change per component; unlike the vmware
+	    transport, there is no whole-Manager-vs-one-function InSpec input to narrow.
+
+	.PARAMETER InputsFilePath
+	    Issue #742: an already-materialized InSpec inputs YAML file (the nsx-api
+	    component item's frozen, resolved config-doc Inputs, already filtered of
+	    ScanScopingInputFilter's reserved keys -- including the NSX auth-input key
+	    names below). ScanJobHandler writes this file BEFORE calling in, owner-only
+	    0600, and deletes it after -- same non-argv discipline as
+	    Invoke-WaypointScan/Invoke-WaypointSrgScan's own InputsFilePath. Passed to
+	    InSpec as its own --input-file flag, appended BEFORE the runner's own
+	    auth-block file (below) -- so even an operator value that collided with a
+	    reserved auth-input key AND somehow survived the C#-side filter would still
+	    lose to the runner's real session on InSpec's last-file-wins semantics (belt
+	    and suspenders, matching the vmware/ssh families' own ordering discipline).
+	    Absent/empty = no additional resolved inputs (the pre-#742 behavior).
 
 	.OUTPUTS
 	    One [pscustomobject]: Success (bool), ExitCode (int), ReportPath (string),
@@ -566,6 +614,12 @@ function Invoke-WaypointNsxScan {
 
 		[Parameter()]
 		[int]$TimeoutSeconds = 1800,
+
+		[Parameter()]
+		[string]$SelectorName,
+
+		[Parameter()]
+		[string]$InputsFilePath,
 
 		[Parameter()]
 		[string]$VmwareStigDockerCommonPath = $Script:VmwareStigDockerCommonModulePath,
@@ -645,13 +699,32 @@ function Invoke-WaypointNsxScan {
 		}
 		Set-Content -Path $InputsPath -Value $InputsContent -ErrorAction Stop
 
-		$InspecArguments = "`"$ProfilePath`" -t local --input-file `"$InputsPath`" --reporter=json:`"$ReportPath`" --show-progress --enhanced-outcomes"
+		$InspecArguments = "`"$ProfilePath`" -t local"
+
+		# Issue #742: the nsx-api component item's already-materialized resolved Input
+		# config docs, passed as their OWN --input-file flag -- ScanJobHandler owns this
+		# file's entire lifecycle (creation, ScanScopingInputFilter filtering including
+		# the NSX auth-input key names, 0600 mode, deletion); this function only reads
+		# its path and never writes/deletes it, mirroring Invoke-WaypointScan/
+		# Invoke-WaypointSrgScan's own InputsFilePath handling. Appended BEFORE the
+		# runner's own auth-block file below -- so the runner's real session always wins
+		# InSpec's last-`--input-file`-key-wins resolution over any operator value, even
+		# one that collided with a reserved auth key and somehow survived the C#-side
+		# filter (belt and suspenders, same ordering discipline the vmware/ssh families
+		# use for their own platform-computed files).
+		if ($InputsFilePath) {
+			$InspecArguments += " --input-file `"$InputsFilePath`""
+		}
+
+		$InspecArguments += " --input-file `"$InputsPath`" --reporter=json:`"$ReportPath`" --show-progress --enhanced-outcomes"
+
+		$ProcessLabel = if ($SelectorName) { "InSpec NSX scan for $Manager/$SelectorName" } else { "InSpec NSX scan for $Manager" }
 
 		# AllowedExitCodes 0/100/101, same predecessor constraint as the vSphere path:
 		# InSpec exit 100 (compliance failures present) and 101 (skipped controls
 		# present) are both a completed, reportable scan, not a tool failure.
 		$null = Invoke-ExternalCommand -Executable 'inspec' -Arguments "exec $InspecArguments" `
-			-TimeoutMilliseconds ($TimeoutSeconds * 1000) -ProcessName "InSpec NSX scan for $Manager" `
+			-TimeoutMilliseconds ($TimeoutSeconds * 1000) -ProcessName $ProcessLabel `
 			-AllowedExitCodes @(0, 100, 101) -Source 'nsx' -SurfaceOutputOnFailure
 
 		if (-not (Test-Path -Path $ReportPath -PathType Leaf)) {

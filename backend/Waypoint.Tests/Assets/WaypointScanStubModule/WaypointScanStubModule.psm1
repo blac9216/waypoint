@@ -249,11 +249,24 @@ function Invoke-WaypointNsxScan {
 		[string]$ReportPath,
 
 		[Parameter()]
-		[int]$TimeoutSeconds
+		[int]$TimeoutSeconds,
+
+		[Parameter()]
+		[string]$SelectorName,
+
+		[Parameter()]
+		[string]$InputsFilePath
 	)
 
+	# Issue #742: echoes the component SelectorName (manager/dfw/tier0-fw/...) and
+	# whether/what a resolved-inputs file was supplied -- same rationale as
+	# Invoke-WaypointScan/Invoke-WaypointSrgScan's own summaries -- so a test can assert
+	# WHICH NSX component a narrowed job executed and that its resolved Input config
+	# docs were actually materialized (with reserved auth keys already filtered out).
 	$InformationPreference = 'Continue'
-	Write-Information "Scanning stub NSX manager '$Manager' as '$Username' (password length $($Password.Length)) profile '$ProfilePath'"
+	$SelectorSummary = if ($SelectorName) { $SelectorName } else { '<whole-manager>' }
+	$InputsSummary = if ($InputsFilePath -and (Test-Path -Path $InputsFilePath -PathType Leaf)) { Get-Content -Path $InputsFilePath -Raw } else { '<none>' }
+	Write-Information "Scanning stub NSX manager '$Manager' as '$Username' (password length $($Password.Length)) profile '$ProfilePath' selector=$SelectorSummary inputsFile=$InputsSummary"
 
 	$Mode = $env:WAYPOINT_SCAN_STUB_MODE
 	if (-not $Mode) { $Mode = 'success' }
