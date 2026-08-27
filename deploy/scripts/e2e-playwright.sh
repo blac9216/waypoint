@@ -249,7 +249,7 @@ ${DC} ps
 # code is the real "finished provisioning" signal, waited for explicitly.
 KEYCLOAK_DEV_ADMIN_ID="$(${DC} ps -q keycloak-dev-admin 2>/dev/null || true)"
 if [[ -n "${KEYCLOAK_DEV_ADMIN_ID}" ]]; then
-	log "Waiting for keycloak-dev-admin (issue #846) to finish provisioning the dev Keycloak user"
+	log "Waiting for keycloak-dev-admin to finish provisioning the dev Keycloak user"
 	KEYCLOAK_DEV_ADMIN_EXIT="$(docker wait "${KEYCLOAK_DEV_ADMIN_ID}")"
 	if [[ "${KEYCLOAK_DEV_ADMIN_EXIT}" != "0" ]]; then
 		echo "error: keycloak-dev-admin exited ${KEYCLOAK_DEV_ADMIN_EXIT} -- Playwright's Keycloak login would fail closed. Logs:" >&2
@@ -413,7 +413,7 @@ fi
 log "Playwright exit code: ${PLAYWRIGHT_EXIT}, tests executed: ${EXECUTED}"
 
 if [[ "${PLAYWRIGHT_EXIT}" -eq 0 && "${EXECUTED}" -eq 0 ]]; then
-	echo "error: Playwright reported success but executed zero tests -- treating as a failed run (issue #500)" >&2
+	echo "error: Playwright reported success but executed zero tests -- treating as a failed run" >&2
 	exit 1
 fi
 
