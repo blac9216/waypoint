@@ -356,16 +356,13 @@ public sealed class DiscoverJobHandler : IJobHandler
 
 		itemOutput = output.Take(output.Count - 1).ToList();
 
-		bool isComplete = last.Properties["Complete"]?.Value is bool complete ? complete : true;
+		bool isComplete = PowerShellValueUnwrap.UnwrapAsStruct<bool>(last.Properties["Complete"]?.Value) ?? true;
 		List<string> errors = [];
-		if (last.Properties["Errors"]?.Value is System.Collections.IEnumerable rawErrors)
+		foreach (object? entry in PowerShellValueUnwrap.UnwrapEach(last.Properties["Errors"]?.Value))
 		{
-			foreach (object? entry in rawErrors)
+			if (entry is not null)
 			{
-				if (entry is not null)
-				{
-					errors.Add(entry.ToString() ?? string.Empty);
-				}
+				errors.Add(entry.ToString() ?? string.Empty);
 			}
 		}
 
@@ -523,7 +520,11 @@ public sealed class DiscoverJobHandler : IJobHandler
 
 		string? parentMoRef = GetProperty<string>(psObject, "ParentMoRef");
 		string? build = GetProperty<string>(psObject, "Build");
-		bool? maintenanceMode = psObject.Properties["MaintenanceMode"]?.Value as bool?;
+		// Issue #976: this is a value type, so it cannot go through the class-constrained
+		// GetProperty<T>/UnwrapAs<T> above -- UnwrapAsStruct<T> is the same chokepoint's
+		// value-type sibling, with the identical silent-null-on-absent-or-mismatch
+		// degradation convention.
+		bool? maintenanceMode = PowerShellValueUnwrap.UnwrapAsStruct<bool>(psObject.Properties["MaintenanceMode"]?.Value);
 
 		// Issue #974: the host's semantic vSphere product version, alongside (never
 		// instead of) Build -- see this type's own DiscoveredInventoryItem doc comment.

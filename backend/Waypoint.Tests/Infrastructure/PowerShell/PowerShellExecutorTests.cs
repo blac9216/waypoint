@@ -430,4 +430,48 @@ public sealed class PowerShellExecutorTests : IDisposable
 		// Explicit null fidelity: must read back as null, not an empty-string/wrapper artifact.
 		Assert.Null(PowerShellValueUnwrap.Unwrap(topLevel.Properties["NullValue"]?.Value));
 	}
+
+	/// <summary>
+	/// Issue #976 characterization: a NESTED property whose value is itself another
+	/// PowerShell FUNCTION's own [PSCustomObject] return (assigned through an
+	/// intermediate variable, exactly like WaypointScan.psm1's
+	/// <c>$RuleCoverage = Set-WaypointCklRuleIdentity ...</c> then
+	/// <c>RuleCoverage = $RuleCoverage</c>) does NOT hit the #972/#975 double-wrap
+	/// hazard the way a built-in cmdlet's own output (e.g. <c>Get-Content -Raw</c>)
+	/// does -- a plain PowerShell function's [PSCustomObject] return is exactly the
+	/// "literal construction" case <see cref="PowerShellValueUnwrap"/>'s doc comment
+	/// says is exempt. This test proves that empirically against the REAL executor
+	/// rather than resting on the doc comment's claim, so
+	/// <c>ScanJobHandler.TryParseRuleCoverage</c>'s pre-#976 direct
+	/// <c>value is PSObject coverageObject</c> read was already safe -- routing it
+	/// through the chokepoint (this PR) is a uniformity refactor, not a behavior fix.
+	/// </summary>
+	[Fact]
+	public async Task NestedFunctionReturnedCoverageObject_IsNotDoubleWrapped_UnlikeCmdletOutput()
+	{
+		PowerShellExecutor executor = CreateExecutor();
+		PowerShellExecutionResult result = await executor.ExecuteAsync(
+			new PowerShellRequest("Get-StubNestedFunctionCoverage"), CancellationToken.None);
+
+		Assert.True(result.Succeeded, result.FailureReason);
+		System.Management.Automation.PSObject root = System.Management.Automation.PSObject.AsPSObject(Assert.Single(result.Output)!);
+
+		object? rawCoverage = root.Properties["RuleCoverage"]?.Value;
+		Assert.NotNull(rawCoverage);
+
+		// The pre-#976 direct read ScanJobHandler.TryParseRuleCoverage used to perform:
+		// no PowerShellValueUnwrap.Unwrap first.
+		Assert.True(rawCoverage is System.Management.Automation.PSObject,
+			"Expected the nested property's raw value to already be the PSObject wrapping the PSCustomObject sentinel (the normal, single-layer shape) -- not a plain CLR value.");
+		System.Management.Automation.PSObject coverageObject = (System.Management.Automation.PSObject)rawCoverage!;
+		Assert.IsType<System.Management.Automation.PSCustomObject>(coverageObject.BaseObject);
+
+		// The hazard, if present, would show up as Matched/Unmatched/Error themselves
+		// being one-more-level wrapped than a hand-built literal. They are not: this is
+		// exactly the "second layer" #972 found for Get-Content -Raw, and it does not
+		// occur here.
+		Assert.Equal(3, System.Management.Automation.LanguagePrimitives.ConvertTo<int>(coverageObject.Properties["Matched"]?.Value));
+		Assert.IsAssignableFrom<System.Collections.IEnumerable>(coverageObject.Properties["Unmatched"]?.Value);
+		Assert.Null(coverageObject.Properties["Error"]?.Value);
+	}
 }

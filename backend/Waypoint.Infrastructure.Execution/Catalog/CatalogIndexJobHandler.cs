@@ -172,7 +172,7 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 		string? sha256 = GetProperty<string>(psObject, "Sha256");
 		string? product = GetProperty<string>(psObject, "Product");
 		string? version = GetProperty<string>(psObject, "Version");
-		object? sizeBytes = psObject.Properties["SizeBytes"]?.Value;
+		object? sizeBytes = PowerShellValueUnwrap.Unwrap(psObject.Properties["SizeBytes"]?.Value);
 		string? relativePath = GetProperty<string>(psObject, "RelativePath");
 
 		Dictionary<string, object?> metadata = new(StringComparer.Ordinal)
@@ -197,6 +197,6 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 	private static T? GetProperty<T>(System.Management.Automation.PSObject psObject, string name)
 		where T : class
 	{
-		return psObject.Properties[name]?.Value as T;
+		return PowerShellValueUnwrap.UnwrapAs<T>(psObject.Properties[name]?.Value);
 	}
 }

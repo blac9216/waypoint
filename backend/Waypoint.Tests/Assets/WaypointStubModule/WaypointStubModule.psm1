@@ -165,4 +165,48 @@ function Get-StubBoundaryContractShape {
     }
 }
 
-Export-ModuleMember -Function Get-StubInventory, Write-StubStreams, Get-StubEcho, Invoke-StubFailure, Invoke-StubHang, Invoke-StubHangThenWrite, Write-StubSecretLeak, Write-StubDoublyEscapedSecretLeak, Get-StubNestedContentEntry, Get-StubBoundaryContractShape
+function Get-StubInnerCoverage {
+    <#
+    .SYNOPSIS
+        Issue #976 characterization fixture: mirrors WaypointScan.psm1's
+        Set-WaypointCklRuleIdentity -- a user-authored PowerShell FUNCTION (not a
+        built-in SMA cmdlet) returning a [PSCustomObject] literal built from local
+        variables (never a cmdlet's own pipeline output like Get-Content -Raw).
+    #>
+    [CmdletBinding()]
+    param()
+
+    $matchedCount = 3
+    $unmatchedIds = [System.Collections.Generic.List[string]]::new()
+    $unmatchedIds.Add('rule-one')
+    $unmatchedIds.Add('rule-two')
+
+    [PSCustomObject]@{
+        Matched   = $matchedCount
+        Unmatched = @($unmatchedIds)
+        Error     = $null
+    }
+}
+
+function Get-StubNestedFunctionCoverage {
+    <#
+    .SYNOPSIS
+        Issue #976 characterization fixture: exercises whether assigning ANOTHER
+        PowerShell FUNCTION's own [PSCustomObject] return value (via an intermediate
+        variable, exactly like WaypointScan.psm1's `$RuleCoverage = Set-WaypointCklRuleIdentity ...`
+        then `RuleCoverage = $RuleCoverage`) into a nested property hits the same
+        one-extra-PSObject-layer hazard #972/#975 found for Get-Content -Raw's cmdlet
+        output, or whether a plain function's own PSCustomObject return is exempt (as
+        PowerShellValueUnwrap's doc comment claims for "literal" construction).
+    #>
+    [CmdletBinding()]
+    param()
+
+    $innerCoverage = Get-StubInnerCoverage
+    [PSCustomObject]@{
+        Success      = $true
+        RuleCoverage = $innerCoverage
+    }
+}
+
+Export-ModuleMember -Function Get-StubInventory, Write-StubStreams, Get-StubEcho, Invoke-StubFailure, Invoke-StubHang, Invoke-StubHangThenWrite, Write-StubSecretLeak, Write-StubDoublyEscapedSecretLeak, Get-StubNestedContentEntry, Get-StubBoundaryContractShape, Get-StubInnerCoverage, Get-StubNestedFunctionCoverage

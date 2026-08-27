@@ -1434,9 +1434,13 @@ public sealed class ScanJobHandler : IJobHandler
 			return null;
 		}
 
-		bool success = psObject.Properties["Success"]?.Value is true;
-		string? reportPath = psObject.Properties["ReportPath"]?.Value as string;
-		string? failureReason = psObject.Properties["FailureReason"]?.Value as string;
+		// Issue #976: routed through the PowerShellValueUnwrap chokepoint for uniformity
+		// -- top-level pipeline-output properties, already unwrapped by
+		// PowerShellExecutor.Unwrap, so never actually exposed to #972's nested-property
+		// hazard, but Unwrap/UnwrapAs are idempotent on an already-unwrapped value.
+		bool success = PowerShellValueUnwrap.Unwrap(psObject.Properties["Success"]?.Value) is true;
+		string? reportPath = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["ReportPath"]?.Value);
+		string? failureReason = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["FailureReason"]?.Value);
 		return new ScanInvocationOutput(success, reportPath, failureReason);
 	}
 
@@ -1449,9 +1453,9 @@ public sealed class ScanJobHandler : IJobHandler
 			return null;
 		}
 
-		bool success = psObject.Properties["Success"]?.Value is true;
-		bool attestApplied = psObject.Properties["AttestApplied"]?.Value is true;
-		string? failureReason = psObject.Properties["FailureReason"]?.Value as string;
+		bool success = PowerShellValueUnwrap.Unwrap(psObject.Properties["Success"]?.Value) is true;
+		bool attestApplied = PowerShellValueUnwrap.Unwrap(psObject.Properties["AttestApplied"]?.Value) is true;
+		string? failureReason = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["FailureReason"]?.Value);
 		return new AttestInvocationOutput(success, attestApplied, failureReason);
 	}
 
@@ -1464,11 +1468,11 @@ public sealed class ScanJobHandler : IJobHandler
 			return null;
 		}
 
-		bool success = psObject.Properties["Success"]?.Value is true;
-		string? cklPath = psObject.Properties["CklPath"]?.Value as string;
-		bool metadataApplied = psObject.Properties["MetadataApplied"]?.Value is true;
-		string? failureReason = psObject.Properties["FailureReason"]?.Value as string;
-		RuleCoverageResult? ruleCoverage = TryParseRuleCoverage(psObject.Properties["RuleCoverage"]?.Value);
+		bool success = PowerShellValueUnwrap.Unwrap(psObject.Properties["Success"]?.Value) is true;
+		string? cklPath = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["CklPath"]?.Value);
+		bool metadataApplied = PowerShellValueUnwrap.Unwrap(psObject.Properties["MetadataApplied"]?.Value) is true;
+		string? failureReason = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["FailureReason"]?.Value);
+		RuleCoverageResult? ruleCoverage = TryParseRuleCoverage(PowerShellValueUnwrap.Unwrap(psObject.Properties["RuleCoverage"]?.Value));
 		return new ConvertInvocationOutput(success, cklPath, metadataApplied, failureReason, ruleCoverage);
 	}
 
@@ -1482,31 +1486,32 @@ public sealed class ScanJobHandler : IJobHandler
 	/// </summary>
 	private static RuleCoverageResult? TryParseRuleCoverage(object? value)
 	{
-		if (value is not System.Management.Automation.PSObject coverageObject)
+		// Issue #976: RuleCoverage is a NESTED property (one level inside the top-level
+		// Convert output), so it must go through the chokepoint's Unwrap before the
+		// PSObject pattern-match, not directly against the raw property value -- unlike
+		// this handler's other TryParse* helpers above, which only read top-level
+		// properties already unwrapped by PowerShellExecutor.Unwrap.
+		if (PowerShellValueUnwrap.Unwrap(value) is not System.Management.Automation.PSObject coverageObject)
 		{
 			return null;
 		}
 
-		int matched = coverageObject.Properties["Matched"]?.Value switch
+		int matched = PowerShellValueUnwrap.Unwrap(coverageObject.Properties["Matched"]?.Value) switch
 		{
 			int intValue => intValue,
 			long longValue => (int)longValue,
 			_ => 0,
 		};
 		List<string> unmatched = [];
-		if (coverageObject.Properties["Unmatched"]?.Value is System.Collections.IEnumerable enumerable
-			and not string)
+		foreach (object? item in PowerShellValueUnwrap.UnwrapEach(coverageObject.Properties["Unmatched"]?.Value))
 		{
-			foreach (object? item in enumerable)
+			if (item is string ruleId)
 			{
-				if (item is string ruleId)
-				{
-					unmatched.Add(ruleId);
-				}
+				unmatched.Add(ruleId);
 			}
 		}
 
-		string? error = coverageObject.Properties["Error"]?.Value as string;
+		string? error = PowerShellValueUnwrap.UnwrapAs<string>(coverageObject.Properties["Error"]?.Value);
 		return new RuleCoverageResult(matched, unmatched, error);
 	}
 

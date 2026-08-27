@@ -20,6 +20,7 @@ using Waypoint.Core.Downloads;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Pagination;
 using Waypoint.Core.PowerShell;
+using Waypoint.Infrastructure.PowerShell;
 
 namespace Waypoint.Infrastructure.Downloads;
 
@@ -328,8 +329,13 @@ public sealed class DownloadJobHandler : IJobHandler
 			return null;
 		}
 
-		bool success = psObject.Properties["Success"]?.Value is true;
-		long size = psObject.Properties["Size"]?.Value switch
+		// Issue #976: routed through the PowerShellValueUnwrap chokepoint for uniformity
+		// -- this is a top-level pipeline-output property (already unwrapped by
+		// PowerShellExecutor.Unwrap before TryParseOutput ever sees it), so it was never
+		// actually exposed to #972's nested-property hazard, but Unwrap is idempotent on
+		// an already-unwrapped value.
+		bool success = PowerShellValueUnwrap.Unwrap(psObject.Properties["Success"]?.Value) is true;
+		long size = PowerShellValueUnwrap.Unwrap(psObject.Properties["Size"]?.Value) switch
 		{
 			long l => l,
 			int i => i,
