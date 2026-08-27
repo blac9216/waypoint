@@ -127,6 +127,13 @@ public static class ServiceCollectionExtensions
 		services.AddSingleton<IJobHandler, Downloads.DepotEnrollmentJobHandler>();
 
 		services.AddSingleton<IJobHandler, Discovery.DiscoverJobHandler>();
+
+		// Issue #738: resolves a vCenter execution item's frozen catalog execution
+		// profile/baseline to the activated content-revision profile directory --
+		// depends only on IBaselineRepository/ICatalogRepository (already registered by
+		// AddWaypointInfrastructure, shared with the API process) and
+		// ComplianceContentOptions (already bound above).
+		services.AddSingleton<Scans.VCenterProfileRevisionResolver>();
 		services.AddSingleton<IJobHandler, Scans.ScanJobHandler>();
 		services.AddSingleton<IJobHandler, Credentials.CredentialTestJobHandler>();
 

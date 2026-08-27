@@ -18,6 +18,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.ConfigDocs;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Logging;
@@ -74,6 +75,8 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	private ConfigDocRepository _configDocs = null!;
 	private AttestationSnapshotRepository _attestationSnapshots = null!;
 	private ScanJobHandler _handler = null!;
+	private Waypoint.Infrastructure.ComplianceContent.CatalogRepository _catalog = null!;
+	private Waypoint.Infrastructure.ComplianceContent.BaselineRepository _baselines = null!;
 
 	public ScanJobHandlerEndToEndTests(PostgresFixture fixture)
 	{
@@ -134,9 +137,15 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		ScanUploadCoordinator uploadCoordinator = new(
 			stigman, new StubStigManagerUploadClient(), _secretStore, _repository, _redactor);
 
+		// Issue #738: VCenterProfileRevisionResolver's dependencies, also kept as fields
+		// so the vcenter-component tests below can seed real catalog/baseline rows.
+		_catalog = new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(_fixture.ConnectionString);
+		_baselines = new Waypoint.Infrastructure.ComplianceContent.BaselineRepository(_fixture.ConnectionString);
+		VCenterProfileRevisionResolver vCenterProfileRevisions = new(_baselines, _catalog, complianceContentOptions);
+
 		_handler = new ScanJobHandler(
 			executor, _secretStore, _credentials, _targets, _runSecrets, _repository, _redactor, wrappedPsOptions, scanOptions,
-			complianceContentOptions, _configDocs, _attestationSnapshots, uploadCoordinator);
+			complianceContentOptions, _configDocs, _attestationSnapshots, uploadCoordinator, vCenterProfileRevisions);
 	}
 
 	public async Task DisposeAsync()
@@ -510,6 +519,243 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			"an unnarrowed collapsed job must run a whole-target scan.");
 		Assert.False(await ScanLogContainsAsync(jobIds[0], "selector=esxi/"),
 			"an unnarrowed collapsed job must NOT carry any object selector.");
+	}
+
+	/// <summary>
+	/// Seeds a real catalog execution profile (vcenter selector), an ACTIVATED baseline
+	/// bound to a content revision, an accepted <c>catalog_import_report_entries</c> row
+	/// (so <see cref="VCenterProfileRevisionResolver"/> can resolve the profile-key
+	/// provenance), and -- when <paramref name="materializeOnDisk"/> is true -- the real
+	/// on-disk revision/profile directory under <see cref="_contentDirectory"/> so
+	/// resolution succeeds end to end. Returns the ids a vcenter-selector job payload
+	/// needs.
+	/// </summary>
+	private async Task<(Guid CatalogExecutionProfileId, Guid BaselineId, string ProfileKey)> SeedVCenterCatalogAndBaselineAsync(
+		string suffix, bool materializeOnDisk)
+	{
+		CatalogSourceRevision source = await _catalog.UpsertSourceRevisionAsync($"rev-{suffix}-{Guid.NewGuid():N}", null, CancellationToken.None);
+		CatalogProduct product = await _catalog.UpsertProductAsync(source.Id, "vmware", $"vsphere-{suffix}-{Guid.NewGuid():N}", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
+		CatalogComponent catalogComponent = await _catalog.UpsertComponentAsync(
+			productVersion.Id,
+			new CatalogComponentDefinition($"vcenter-{suffix}", "vCenter", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null),
+			CancellationToken.None);
+		CatalogContentRelease release = await _catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Srg, $"release-{suffix}-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await _catalog.UpsertReportGroupAsync($"group-{suffix}-{Guid.NewGuid():N}", "Test Group", 3, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(
+			catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.Hdf, CancellationToken.None);
+
+		string profileKey = $"vmware/vsphere/vcenter-{suffix}-stig-baseline";
+		CatalogImportReport report = await _catalog.RecordImportReportAsync($"commit-{suffix}", $"digest-{suffix}-{Guid.NewGuid():N}", 1, 0, 0, CancellationToken.None);
+		await _catalog.RecordImportReportEntryAsync(report.Id, CatalogImportEntryDispositions.Accepted, profileKey, null, executionProfile.Id, CancellationToken.None);
+
+		string contentDigest = $"digest-{suffix}-{Guid.NewGuid():N}";
+		string stagedRelativePath = $"revisions/{contentDigest}";
+		ContentRevision revision = await _baselines.RecordStagedRevisionAsync($"commit-{suffix}", contentDigest, stagedRelativePath, CancellationToken.None);
+		Baseline staged = await _baselines.CreateStagedBaselineAsync(revision.Id, executionProfile.Id, benchmarkRevisionId: null, CancellationToken.None);
+		BaselineActivationOutcome outcome = await _baselines.ActivateAsync(staged.Id, "test-fixture", CancellationToken.None);
+		Assert.Equal(BaselineActivationOutcome.Activated, outcome);
+
+		if (materializeOnDisk)
+		{
+			string profileDirectory = Path.Combine(_contentDirectory, stagedRelativePath, profileKey);
+			Directory.CreateDirectory(profileDirectory);
+			await File.WriteAllTextAsync(Path.Combine(profileDirectory, "inspec.yml"), "name: invented-vcenter-stig-profile\n");
+		}
+
+		return (executionProfile.Id, staged.Id, profileKey);
+	}
+
+	/// <summary>
+	/// Issue #738 AC 1 ("the exact planned vCenter endpoint and profile/input revisions
+	/// are executed"): a job payload naming a vcenter-selector item's
+	/// <c>catalog_execution_profile_id</c>/<c>baseline_id</c> resolves and executes
+	/// against the ACTIVATED content-revision directory
+	/// (<see cref="VCenterProfileRevisionResolver"/>), never the run-level
+	/// <c>profile_key</c>/legacy fixed path -- proven the same way the #639 profile-key
+	/// test proves resolution: the stub echoes its resolved <c>ProfilePath</c> onto the
+	/// Information stream.
+	/// </summary>
+	[Fact]
+	public async Task VCenterComponentJob_ResolvesActivatedRevisionProfilePath_NotLegacyOrRunLevelPath()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-vcenter-component-canary");
+		(Guid executionProfileId, Guid baselineId, string profileKey) =
+			await SeedVCenterCatalogAndBaselineAsync("resolve-success", materializeOnDisk: true);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "vmware",
+			selector_kind = "vcenter",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		// The resolved path is {ContentPath}/revisions/{digest}/{profileKey} -- assert
+		// on the profileKey suffix (the digest is randomized per test run) plus that the
+		// legacy fixed ProfilePath never appears.
+		Assert.True(await ScanLogContainsAsync(jobIds[0], profileKey),
+			"expected the stub's Information line to echo the resolved activated-revision profile path.");
+		Assert.False(await ScanLogContainsAsync(jobIds[0], "/invented/profile/path"),
+			"a vcenter component job must never fall back to the legacy fixed ProfilePath.");
+	}
+
+	/// <summary>
+	/// Issue #738 AC 1's fail-closed half: a vcenter-selector job whose baseline's
+	/// content revision was never materialized on disk (a real, common failure --
+	/// e.g. this runner's compliance-content volume does not yet have the revision the
+	/// plan item was frozen against) fails ONLY this job with an actionable diagnostic,
+	/// never silently falling back to a wrong/fixed profile.
+	/// </summary>
+	[Fact]
+	public async Task VCenterComponentJob_RevisionNotMaterializedOnDisk_FailsClosed_WithActionableDiagnostic()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-vcenter-missing-revision-canary");
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedVCenterCatalogAndBaselineAsync("missing-revision", materializeOnDisk: false);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "vmware",
+			selector_kind = "vcenter",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+		string note = await GetJobNoteAsync(jobIds[0]);
+		Assert.Contains("not materialized", note, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #738 AC 1's defensive compatibility gate: a vcenter-selector payload with
+	/// NO <c>catalog_execution_profile_id</c>/<c>baseline_id</c> (a malformed/legacy
+	/// payload the planner should never produce for this selector) fails closed with an
+	/// actionable diagnostic rather than silently falling back to an unscoped profile.
+	/// </summary>
+	[Fact]
+	public async Task VCenterComponentJob_MissingFrozenProfileIds_FailsClosed_NeverFallsBackToUnscopedProfile()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-vcenter-no-ids-canary");
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "vmware",
+			selector_kind = "vcenter",
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+		string note = await GetJobNoteAsync(jobIds[0]);
+		Assert.Contains("carries no catalog_execution_profile_id", note, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #738/#879: a vCenter component job's frozen, RESOLVED Input config-doc
+	/// (state = resolved, naming a real config_docs/config_versions row) is materialized
+	/// into an actual InSpec inputs file passed to the invocation -- not merely recorded
+	/// as plan-time provenance. Proven via the same stub-echo idiom: the stub's
+	/// Information line includes the generated inputs file's raw content.
+	/// </summary>
+	[Fact]
+	public async Task VCenterComponentJob_ResolvedInputConfigDoc_IsMaterializedAsInspecInputsFile()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-vcenter-inputs-canary");
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedVCenterCatalogAndBaselineAsync("inputs-materialize", materializeOnDisk: true);
+
+		const string inputsBody = "invented_target_ip: '198.51.100.42'\n";
+		(ConfigDocSaveOutcome saveOutcome, ConfigDoc? doc, ConfigDocVersion? version) = await _configDocs.SaveAsync(
+			Guid.NewGuid(), ConfigDocKinds.Input, $"invented-vcenter-inputs-profile-{Guid.NewGuid():N}", ConfigDocLayers.Global,
+			null, "test-fixture", inputsBody, CancellationToken.None, executionProfileId);
+		Assert.Equal(ConfigDocSaveOutcome.Ok, saveOutcome);
+		Assert.NotNull(doc);
+		Assert.NotNull(version);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "vmware",
+			selector_kind = "vcenter",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			input_resolutions = new[]
+			{
+				new { InputName = "invented_target_ip", State = "resolved", DocId = doc!.Id, DocVersion = version!.Version },
+			},
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.True(await ScanLogContainsAsync(jobIds[0], "invented_target_ip"),
+			"expected the resolved Input config doc's body to be materialized into the InSpec inputs file the stub echoed.");
 	}
 
 	/// <summary>True when any of the job's <c>job.log</c> events contains <paramref name="fragment"/> (the scan stub echoes its resolved selector there).</summary>

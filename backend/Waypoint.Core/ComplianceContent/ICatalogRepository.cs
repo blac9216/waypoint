@@ -125,6 +125,22 @@ public interface ICatalogRepository
 	Task<IReadOnlyList<CatalogImportReportEntry>> ListImportReportEntriesAsync(Guid reportId, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Issue #738: the vendor-repository-relative profile directory (<see cref="CatalogImportReportEntry.ProfileKey"/>)
+	/// that was accepted-and-promoted into <paramref name="executionProfileId"/>, or
+	/// null when no accepted import entry names this execution profile (should not
+	/// happen for a real catalog-promoted profile -- every row in
+	/// <c>catalog_execution_profiles</c> is created by <see cref="PromoteCandidateAsync"/>,
+	/// which is only ever called for an accepted entry, but this stays nullable rather
+	/// than throwing so a caller can produce an actionable diagnostic instead of an
+	/// unhandled exception on corrupt/incomplete seed data). The most recent accepted
+	/// entry wins when more than one import promoted the same profile identity (e.g. a
+	/// re-import of unchanged content) -- the relative path is expected to be identical
+	/// across those entries in practice, since the execution profile's (component,
+	/// content release) identity does not change.
+	/// </summary>
+	Task<string?> GetProfileKeyForExecutionProfileAsync(Guid executionProfileId, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Promotes one accepted <see cref="Waypoint.Core.ComplianceContent.SemanticImport.SemanticCandidate"/>
 	/// into the migration 0050 catalog identity tree plus its declared inputs (issue
 	/// #729 deliverable: "candidate promotion into the 0050 catalog tables"). Additive

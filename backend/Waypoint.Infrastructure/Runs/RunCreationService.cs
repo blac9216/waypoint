@@ -708,17 +708,42 @@ public sealed class RunCreationService
 		// carries a catalog name, and `service` is never narrowable). A vcenter selector
 		// has no object identity below the vCenter itself, so its selector_name stays
 		// null (the whole vCenter IS the object).
-		string payload = JsonSerializer.Serialize(new
-		{
-			target_id = target.Id,
-			site_id = siteId,
-			target_kind = target.Kind,
-			profile_key = profile?.ProfileKey,
-			component_id = item.ComponentId,
-			transport = item.Transport,
-			selector_kind = item.SelectorKind,
-			selector_name = vendorIdentity,
-		});
+		//
+		// Issue #738: a `vcenter`-selector item ALSO carries its frozen
+		// `catalog_execution_profile_id`/`baseline_id` so ScanJobHandler can resolve the
+		// exact activated content-revision profile directory (VCenterProfileRevisionResolver)
+		// instead of the run-level `profile_key`/legacy fixed path -- vCenter is a
+		// distinct execution component with its own catalog-selected content, not the
+		// top-level vSphere connection's profile. `esxi`/`vm` selectors are #739/#740's
+		// remit and are deliberately left byte-unchanged (no new fields) by this issue.
+		bool isVCenterComponent = string.Equals(item.Transport, CatalogTransports.VMware, StringComparison.Ordinal)
+			&& string.Equals(item.SelectorKind, CatalogSelectorKinds.VCenter, StringComparison.Ordinal);
+		string payload = isVCenterComponent
+			? JsonSerializer.Serialize(new
+			{
+				target_id = target.Id,
+				site_id = siteId,
+				target_kind = target.Kind,
+				profile_key = profile?.ProfileKey,
+				component_id = item.ComponentId,
+				transport = item.Transport,
+				selector_kind = item.SelectorKind,
+				selector_name = vendorIdentity,
+				catalog_execution_profile_id = item.CatalogExecutionProfileId,
+				baseline_id = item.BaselineId,
+				input_resolutions = item.InputResolutionsOrEmpty,
+			})
+			: JsonSerializer.Serialize(new
+			{
+				target_id = target.Id,
+				site_id = siteId,
+				target_kind = target.Kind,
+				profile_key = profile?.ProfileKey,
+				component_id = item.ComponentId,
+				transport = item.Transport,
+				selector_kind = item.SelectorKind,
+				selector_name = vendorIdentity,
+			});
 
 		short priority = ScanTargetPriority.ForPlanItem(item);
 

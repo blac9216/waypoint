@@ -310,6 +310,13 @@ public sealed class ContentPullJobHandlerTests
 		public Task<IReadOnlyList<CatalogImportReportEntry>> ListImportReportEntriesAsync(Guid reportId, CancellationToken cancellationToken) =>
 			Task.FromResult<IReadOnlyList<CatalogImportReportEntry>>([.. Entries.Where(e => e.ReportId == reportId).OrderBy(e => e.ProfileKey, StringComparer.Ordinal)]);
 
+		public Task<string?> GetProfileKeyForExecutionProfileAsync(Guid executionProfileId, CancellationToken cancellationToken) =>
+			Task.FromResult(Entries
+				.Where(e => e.ExecutionProfileId == executionProfileId)
+				.OrderByDescending(e => e.CreatedAt)
+				.Select(e => (string?)e.ProfileKey)
+				.FirstOrDefault());
+
 		public async Task<CatalogPromotionOutcome> PromoteCandidateAsync(SemanticCandidate candidate, CatalogPromotionRequest request, CancellationToken cancellationToken)
 		{
 			if (!candidate.IsExecutableLeaf)

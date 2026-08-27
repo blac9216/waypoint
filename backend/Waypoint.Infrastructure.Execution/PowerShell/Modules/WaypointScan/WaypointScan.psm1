@@ -72,6 +72,15 @@ function Invoke-WaypointScan {
 	    Path to the sibling repo's unmodified module.common.ps1,
 	    dot-sourced to bring Invoke-ExternalCommand into scope.
 
+	.PARAMETER InputsFilePath
+	    Issue #738: an already-materialized InSpec inputs YAML file (the vCenter
+	    component item's frozen, resolved config-doc Inputs -- ScanJobHandler writes
+	    this file BEFORE calling in, owner-only 0600, and deletes it after). Passed to
+	    InSpec as its OWN --input-file flag, alongside (never merged with) the
+	    SelectorKind/SelectorName scoping file below -- InSpec accepts multiple
+	    --input-file flags on one invocation. Absent/empty = no additional resolved
+	    inputs (the pre-#738 behavior for every non-vcenter-component job).
+
 	.OUTPUTS
 	    One [pscustomobject]: Success (bool), ExitCode (int), ReportPath (string),
 	    FailureReason (string, only set when Success is $false).
@@ -107,6 +116,9 @@ function Invoke-WaypointScan {
 
 		[Parameter()]
 		[string]$SelectorName,
+
+		[Parameter()]
+		[string]$InputsFilePath,
 
 		[Parameter()]
 		[string]$VmwareStigDockerCommonPath = $Script:VmwareStigDockerCommonModulePath
@@ -169,6 +181,14 @@ function Invoke-WaypointScan {
 		Set-Content -Path $InputsPath -Value $InputsContent -ErrorAction Stop
 
 		$InspecArguments += " --input-file `"$InputsPath`""
+	}
+
+	# Issue #738: the vCenter component item's already-materialized resolved-Input
+	# file, passed as its own --input-file flag -- ScanJobHandler owns this file's
+	# entire lifecycle (creation, 0600 mode, deletion); this function only reads its
+	# path and never writes/deletes it, unlike $InputsPath above.
+	if ($InputsFilePath) {
+		$InspecArguments += " --input-file `"$InputsFilePath`""
 	}
 
 	try {

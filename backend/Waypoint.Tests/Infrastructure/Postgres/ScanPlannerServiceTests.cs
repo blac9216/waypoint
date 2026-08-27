@@ -191,6 +191,54 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		Assert.False(string.IsNullOrWhiteSpace(plan.PlanDigest));
 	}
 
+	/// <summary>
+	/// Issue #738 AC "linked-vCenter identity: no duplicate execution for linked
+	/// environments" -- pinned at the layer that actually enforces it.
+	/// <see cref="ScanPlannerService.CompileAsync"/> dedupes its
+	/// <c>resolvedComponentIds</c> input via <c>.Distinct()</c> before compiling, so a
+	/// caller that (e.g. through an overlapping "all" scope resolution, or a caller bug)
+	/// requests the SAME component id more than once still produces exactly ONE accepted
+	/// plan item -- never two sibling items/jobs racing to scan the identical vCenter
+	/// object. This is a vcenter-selector component specifically (the transport this
+	/// issue's execution path targets), proving the structural dedupe holds for it too,
+	/// not only for the esxi/vm shapes the pre-existing planner tests exercise.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_SameComponentIdRequestedTwice_ProducesExactlyOneAcceptedItem()
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+		Guid executionProfileId = await SeedVCenterExecutionProfileAsync("dedupe", "8.0.3");
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		await ActivateBaselineAsync(executionProfileId, "dedupe", benchmarkRevisionId: null);
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "vcenter-dedupe-6001");
+
+		ScanPlan plan = await _planner.CompileAsync(null, [componentId, componentId], CancellationToken.None);
+
+		Assert.True(plan.IsRunnable);
+		ScanPlanItem item = Assert.Single(plan.Items);
+		Assert.Equal(componentId, item.ComponentId);
+		Assert.Empty(plan.Skips);
+	}
+
+	/// <summary>Same shape as <see cref="SeedExecutionProfileAsync"/> but the catalog component's selector is <c>vcenter</c> (this issue's execution path) instead of <c>esxi</c>.</summary>
+	private async Task<Guid> SeedVCenterExecutionProfileAsync(string suffix, string exactVersion)
+	{
+		CatalogSourceRevision sourceRevision = await _catalog.UpsertSourceRevisionAsync($"source-{suffix}", null, CancellationToken.None);
+		CatalogProduct product = await _catalog.UpsertProductAsync(sourceRevision.Id, "VMware", $"vsphere-{suffix}", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, exactVersion, exactVersion, CancellationToken.None);
+		CatalogComponent component = await _catalog.UpsertComponentAsync(
+			productVersion.Id,
+			new CatalogComponentDefinition($"vcenter-{suffix}", "vCenter", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null),
+			CancellationToken.None);
+		CatalogContentRelease contentRelease = await _catalog.UpsertContentReleaseAsync(
+			sourceRevision.Id, CatalogKinds.Srg, $"release-{suffix}", "Test Release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await _catalog.UpsertReportGroupAsync($"group-{suffix}", "Test Group", 3, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(
+			component.Id, contentRelease.Id, reportGroup.Id, "1.0.0", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		await _catalog.AddCredentialRequirementAsync(executionProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
+		return executionProfile.Id;
+	}
+
 	[Fact]
 	public async Task CompileAsync_CompatibleComponentWithActiveSrgBaseline_ProducesOneAcceptedItemWithNoBenchmark()
 	{

@@ -89,6 +89,7 @@ public sealed class ScanJobHandler : IJobHandler
 	private readonly ConfigDocRepository _configDocs;
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
 	private readonly ScanUploadCoordinator _upload;
+	private readonly VCenterProfileRevisionResolver _vCenterProfileRevisions;
 
 	public ScanJobHandler(
 		IPowerShellExecutor executor,
@@ -103,7 +104,8 @@ public sealed class ScanJobHandler : IJobHandler
 		IOptions<ComplianceContentOptions> complianceContentOptions,
 		ConfigDocRepository configDocs,
 		AttestationSnapshotRepository attestationSnapshots,
-		ScanUploadCoordinator upload)
+		ScanUploadCoordinator upload,
+		VCenterProfileRevisionResolver vCenterProfileRevisions)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(secrets);
@@ -118,6 +120,7 @@ public sealed class ScanJobHandler : IJobHandler
 		ArgumentNullException.ThrowIfNull(configDocs);
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
 		ArgumentNullException.ThrowIfNull(upload);
+		ArgumentNullException.ThrowIfNull(vCenterProfileRevisions);
 
 		_executor = executor;
 		_secrets = secrets;
@@ -132,6 +135,7 @@ public sealed class ScanJobHandler : IJobHandler
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
 		_upload = upload;
+		_vCenterProfileRevisions = vCenterProfileRevisions;
 	}
 
 	public string JobType => "scan";
@@ -209,7 +213,84 @@ public sealed class ScanJobHandler : IJobHandler
 		string legacyFallbackPath = isNsx ? _scanOptions.Value.NsxProfilePath : isSrg ? _scanOptions.Value.SrgProfilePath : _scanOptions.Value.ProfilePath;
 		string profilePath = ResolveProfilePath(payload.ProfileKey, legacyFallbackPath);
 
+		// Issue #738: a vCenter execution item (transport `vmware`, selector `vcenter` --
+		// ScanComponentNarrowing already narrows it above via SelectorKind/SelectorName)
+		// resolves its InSpec profile from the ACTIVATED content-revision directory
+		// bound to the plan item's own frozen CatalogExecutionProfileId/BaselineId,
+		// never the run-level profile_key/legacy fixed path -- vCenter is a distinct
+		// execution component and DISA benchmark, not the top-level vSphere connection's
+		// profile (this issue's Motivation). Compatibility gate (AC "only vCenter-
+		// compatible catalog profiles can reach this handler"): the planner already
+		// guarantees a vcenter-selector item only exists for a vmware-transport,
+		// vCenter-compatible execution profile (ScanPlannerService/ComponentCapabilityMatcher),
+		// so this re-check is defensive, not authoritative -- it fails closed rather
+		// than trusting an unexpected payload shape.
+		bool isVCenterComponent = string.Equals(target.Kind, TargetKinds.VSphere, StringComparison.Ordinal)
+			&& string.Equals(payload.Transport, CatalogTransports.VMware, StringComparison.Ordinal)
+			&& string.Equals(payload.SelectorKind, CatalogSelectorKinds.VCenter, StringComparison.Ordinal);
+		string? resolvedInputsYaml = null;
+		Guid? attributedContentRevisionId = null;
+		Guid? attributedBaselineId = null;
+		if (isVCenterComponent)
+		{
+			if (payload.CatalogExecutionProfileId is not { } vCenterExecutionProfileId || payload.BaselineId is not { } vCenterBaselineId)
+			{
+				return JobExecutionOutcome.Failed(
+					$"job '{context.Job.Id}' is a vcenter component item but carries no catalog_execution_profile_id/baseline_id -- the plan item this job was fanned out from should always freeze both; refusing to fall back to an unscoped profile.");
+			}
+
+			VCenterProfileRevisionResult revisionResult = await _vCenterProfileRevisions
+				.ResolveAsync(vCenterExecutionProfileId, vCenterBaselineId, cancellationToken).ConfigureAwait(false);
+			if (!revisionResult.Succeeded)
+			{
+				return JobExecutionOutcome.Failed(
+					$"vcenter component scan for target '{payload.TargetId}' could not resolve its activated profile revision: {revisionResult.FailureReason}");
+			}
+
+			profilePath = revisionResult.ProfilePath!;
+			attributedContentRevisionId = revisionResult.ContentRevisionId;
+			attributedBaselineId = revisionResult.BaselineId;
+
+			// Issue #738 / #879: materialize this item's frozen resolved Input config
+			// docs (Global -> Site -> Target, snapshotted at plan-compile time) as actual
+			// InSpec inputs -- the runtime-materialization remainder #879 explicitly left
+			// unimplemented ("the runner still resolves ... live against the fixed
+			// AttestationProfile" applies to the input side too: nothing consumed
+			// InputResolutions before this issue). Every entry not in the Resolved state
+			// (Missing/Expired -- Expired never applies to Input, only Attestation) is
+			// skipped: a missing REQUIRED input already prevented this item from being
+			// accepted by the planner (ScanPlanSkipReasons.MissingRequiredInput), and a
+			// missing OPTIONAL input has nothing to materialize.
+			List<string> resolvedYamlBodies = [];
+			foreach (ScanPayloadInputResolution inputResolution in payload.InputResolutionsOrEmpty)
+			{
+				if (!string.Equals(inputResolution.State, ConfigResolutionStates.Resolved, StringComparison.Ordinal)
+					|| inputResolution.DocId is not { } inputDocId || inputResolution.DocVersion is not { } inputDocVersion)
+				{
+					continue;
+				}
+
+				ConfigDocVersion? version = await _configDocs.GetVersionAsync(inputDocId, inputDocVersion, cancellationToken).ConfigureAwait(false);
+				if (version is not null && !string.IsNullOrWhiteSpace(version.BodyYaml))
+				{
+					resolvedYamlBodies.Add(version.BodyYaml);
+				}
+			}
+
+			if (resolvedYamlBodies.Count > 0)
+			{
+				// Each resolved Input doc's body is itself a whole InSpec-inputs-shaped
+				// YAML document (one per plan item, ADR-0024 "resolves at whole-document
+				// granularity") -- concatenated (not merged key-by-key) into one generated
+				// file; InSpec applies later `--input-file` keys over earlier ones on a
+				// literal key collision, so ordering here follows the same
+				// InputResolutions ordering PlanConfigResolutionService produced.
+				resolvedInputsYaml = string.Join('\n', resolvedYamlBodies);
+			}
+		}
+
 		PowerShellExecutionResult result;
+		string? inputsFilePath = null;
 		try
 		{
 			// The NSX path passes Manager/Username/Password/ProfilePath/ReportPath to
@@ -292,6 +373,29 @@ public sealed class ScanJobHandler : IJobHandler
 						parameters["SelectorName"] = payload.SelectorName;
 					}
 				}
+
+				// Issue #738/#879: the vCenter item's frozen resolved Input config docs,
+				// materialized into a generated, owner-only 0600 --input-file -- same
+				// non-argv discipline as the selector-scoping file above and
+				// Invoke-WaypointNsxScan's session-token file. A separate file (not
+				// merged text) so Invoke-WaypointScan can pass it as its own
+				// `--input-file` flag alongside the selector file; InSpec accepts
+				// multiple `--input-file` flags on one invocation.
+				if (isVCenterComponent && resolvedInputsYaml is not null)
+				{
+					inputsFilePath = Path.Combine(
+						_scanOptions.Value.ArtifactStorePath, $"{context.Job.Id:N}.vsphere-inputs.generated.yml");
+					using (FileStream createStream = File.Create(inputsFilePath))
+					{
+						if (!OperatingSystem.IsWindows())
+						{
+							File.SetUnixFileMode(inputsFilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+						}
+					}
+
+					await File.WriteAllTextAsync(inputsFilePath, resolvedInputsYaml, cancellationToken).ConfigureAwait(false);
+					parameters["InputsFilePath"] = inputsFilePath;
+				}
 			}
 
 			PowerShellRequest request = new(
@@ -300,6 +404,11 @@ public sealed class ScanJobHandler : IJobHandler
 		}
 		finally
 		{
+			if (inputsFilePath is not null && File.Exists(inputsFilePath))
+			{
+				File.Delete(inputsFilePath);
+			}
+
 			// Ends the in-play redaction window as soon as the invocation is done, same
 			// discipline as DiscoverJobHandler regardless of which credential tier this
 			// came from -- a stored credential's DecryptedSecret and an ad hoc run
@@ -345,8 +454,49 @@ public sealed class ScanJobHandler : IJobHandler
 			return await FailScanAsync(context, "scan invocation reported success but produced no HDF report file.", cancellationToken).ConfigureAwait(false);
 		}
 
+		// Issue #738 AC "HDF contains stable component/endpoint attribution": a vCenter
+		// component job's structured completion event carries the exact component,
+		// endpoint (target host), and resolved content-revision/baseline identity it
+		// executed against -- non-secret identifiers only (host, ids), never a
+		// credential -- so Live Run/Results and any later HDF-metadata enrichment have
+		// a stable, provenance-complete attribution record independent of re-deriving
+		// it from current (possibly since-changed) catalog/component state.
+		if (isVCenterComponent)
+		{
+			await EmitVCenterAttributionAsync(
+				context, payload, host!, attributedContentRevisionId, attributedBaselineId, cancellationToken).ConfigureAwait(false);
+		}
+
 		await context.AdvanceAsync(JobStates.Attesting, "InSpec scan complete; HDF persisted.", cancellationToken).ConfigureAwait(false);
 		return JobExecutionOutcome.StageComplete(AttestingStage, $"HDF persisted at '{output.ReportPath}'.");
+	}
+
+	/// <summary>
+	/// Issue #738: one structured <c>job.log</c> Info event naming the exact vCenter
+	/// component/endpoint/content identity this job executed -- emitted once, right
+	/// after a successful InSpec completion, alongside (not instead of) the ordinary
+	/// stage-advance note. Component/endpoint attribution only; no credential material.
+	/// </summary>
+	private static async Task EmitVCenterAttributionAsync(
+		JobExecutionContext context,
+		ScanPayload payload,
+		string endpointHost,
+		Guid? contentRevisionId,
+		Guid? baselineId,
+		CancellationToken cancellationToken)
+	{
+		string line = $"vcenter component scan complete: component '{payload.ComponentId}' at endpoint '{endpointHost}', "
+			+ $"content_revision '{contentRevisionId}', baseline '{baselineId}'.";
+		string eventPayload = JsonSerializer.Serialize(new
+		{
+			severity = "Info",
+			line,
+			component_id = payload.ComponentId,
+			endpoint = endpointHost,
+			content_revision_id = contentRevisionId,
+			baseline_id = baselineId,
+		});
+		await context.Events.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, eventPayload, cancellationToken).ConfigureAwait(false);
 	}
 
 	/// <summary>
@@ -993,13 +1143,60 @@ public sealed class ScanJobHandler : IJobHandler
 		bool unnarrowed = root.TryGetProperty("unnarrowed", out JsonElement unnarrowedElement)
 			&& unnarrowedElement.ValueKind == JsonValueKind.True;
 
+		// Issue #738: only present on a `vcenter`-selector plan-item job
+		// (RunCreationService.BuildPlanItemJobSpec's isVCenterComponent branch). Absent
+		// on every esxi/vm/legacy/unnarrowed job -- those keep resolving through
+		// ResolveProfilePath's run-level profile_key/legacy-fixed-path fallback exactly
+		// as before this issue.
+		Guid? catalogExecutionProfileId = root.TryGetProperty("catalog_execution_profile_id", out JsonElement profileIdElement)
+			&& profileIdElement.ValueKind == JsonValueKind.String
+			&& Guid.TryParse(profileIdElement.GetString(), out Guid parsedProfileId)
+				? parsedProfileId
+				: null;
+		Guid? baselineId = root.TryGetProperty("baseline_id", out JsonElement baselineIdElement)
+			&& baselineIdElement.ValueKind == JsonValueKind.String
+			&& Guid.TryParse(baselineIdElement.GetString(), out Guid parsedBaselineId)
+				? parsedBaselineId
+				: null;
+		Guid? componentId = root.TryGetProperty("component_id", out JsonElement componentIdElement)
+			&& componentIdElement.ValueKind == JsonValueKind.String
+			&& Guid.TryParse(componentIdElement.GetString(), out Guid parsedComponentId)
+				? parsedComponentId
+				: null;
+
+		List<ScanPayloadInputResolution> inputResolutions = [];
+		if (root.TryGetProperty("input_resolutions", out JsonElement inputResolutionsElement) && inputResolutionsElement.ValueKind == JsonValueKind.Array)
+		{
+			foreach (JsonElement entry in inputResolutionsElement.EnumerateArray())
+			{
+				string? state = ReadOptionalString(entry, "State") ?? ConfigResolutionStates.Missing;
+				Guid? docId = entry.TryGetProperty("DocId", out JsonElement docIdElement)
+					&& docIdElement.ValueKind == JsonValueKind.String
+					&& Guid.TryParse(docIdElement.GetString(), out Guid parsedDocId)
+						? parsedDocId
+						: null;
+				int? docVersion = entry.TryGetProperty("DocVersion", out JsonElement docVersionElement) && docVersionElement.ValueKind == JsonValueKind.Number
+					? docVersionElement.GetInt32()
+					: null;
+				string? inputName = ReadOptionalString(entry, "InputName");
+				if (!string.IsNullOrWhiteSpace(inputName))
+				{
+					inputResolutions.Add(new ScanPayloadInputResolution(inputName, state, docId, docVersion));
+				}
+			}
+		}
+
 		return new ScanPayload(
 			targetId,
 			string.IsNullOrWhiteSpace(profileKey) ? null : profileKey,
 			transport,
 			selectorKind,
 			selectorName,
-			unnarrowed);
+			unnarrowed,
+			catalogExecutionProfileId,
+			baselineId,
+			inputResolutions,
+			componentId);
 	}
 
 	private static string? ReadOptionalString(JsonElement root, string property) =>
@@ -1013,7 +1210,24 @@ public sealed class ScanJobHandler : IJobHandler
 		string? Transport = null,
 		string? SelectorKind = null,
 		string? SelectorName = null,
-		bool Unnarrowed = false);
+		bool Unnarrowed = false,
+		Guid? CatalogExecutionProfileId = null,
+		Guid? BaselineId = null,
+		IReadOnlyList<ScanPayloadInputResolution>? InputResolutions = null,
+		Guid? ComponentId = null)
+	{
+		public IReadOnlyList<ScanPayloadInputResolution> InputResolutionsOrEmpty => InputResolutions ?? [];
+	}
+
+	/// <summary>
+	/// Issue #738: the wire shape of one <see cref="Waypoint.Core.ConfigDocs.PlanInputResolution"/>
+	/// entry as it rides the job payload. <c>RunCreationService.BuildPlanItemJobSpec</c>
+	/// serializes <c>item.InputResolutionsOrEmpty</c> with the default
+	/// <see cref="JsonSerializer"/> options (no camelCase naming policy applied anywhere
+	/// else in this payload either), so the record's PascalCase property names ride the
+	/// wire verbatim -- <c>ParsePayload</c>'s reader below matches that exactly.
+	/// </summary>
+	private sealed record ScanPayloadInputResolution(string InputName, string State, Guid? DocId, int? DocVersion);
 
 	private sealed record ResolvedCredential(string Username, string Secret, bool SudoEnabled, Action Release);
 
