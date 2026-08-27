@@ -1131,7 +1131,10 @@ describe("AuthProvider OIDC logout + authorize redirects (issue #534)", () => {
 		await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument());
 		// ...and the browser is sent to the RP-initiated logout URL.
 		await waitFor(() => expect(assignMock).toHaveBeenCalledTimes(1));
-		expect(String(assignMock.mock.calls[0][0])).toContain(END_SESSION_ENDPOINT);
+		const endSessionUrl = String(assignMock.mock.calls[0][0]);
+		expect(endSessionUrl).toContain(END_SESSION_ENDPOINT);
+		// issue #873: client_id must be present or Keycloak 400s the redirect.
+		expect(new URL(endSessionUrl).searchParams.get("client_id")).toBe("waypoint-frontend");
 		expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
 	});
 

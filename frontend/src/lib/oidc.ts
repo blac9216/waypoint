@@ -187,12 +187,24 @@ export function consumeReturnTo(): string {
 	return value;
 }
 
-/** Keycloak end-session redirect (RP-Initiated Logout). Falls back to a same-origin reload when the discovery document has no `end_session_endpoint` (not every issuer publishes one). */
-export function endSessionUrl(discovery: OidcDiscoveryDocument, idTokenHint?: string): string | null {
+/**
+ * Keycloak end-session redirect (RP-Initiated Logout, OIDC RP-Initiated
+ * Logout 1.0). `client_id` is required: `waypoint-frontend`'s
+ * `post.logout.redirect.uris` attribute (`deploy/keycloak/realm/waypoint-realm.json`)
+ * is registered per-client, so without `client_id` Keycloak has no client
+ * to validate `post_logout_redirect_uri` against and rejects the request
+ * with 400 (issue #873) regardless of how well-formed the rest of the
+ * query string is. Falls back to a same-origin reload when the discovery
+ * document has no `end_session_endpoint` (not every issuer publishes one).
+ */
+export function endSessionUrl(discovery: OidcDiscoveryDocument, clientId: string, idTokenHint?: string): string | null {
 	if (!discovery.end_session_endpoint) {
 		return null;
 	}
-	const params = new URLSearchParams({ post_logout_redirect_uri: window.location.origin });
+	const params = new URLSearchParams({
+		client_id: clientId,
+		post_logout_redirect_uri: window.location.origin,
+	});
 	if (idTokenHint) {
 		params.set("id_token_hint", idTokenHint);
 	}

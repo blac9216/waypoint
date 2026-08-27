@@ -585,9 +585,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 			return;
 		}
 		fetchAuthConfig()
-			.then((config) => discoverOidc(config.oidcAuthority))
-			.then((discovery) => {
-				const url = endSessionUrl(discovery);
+			.then((config) => discoverOidc(config.oidcAuthority).then((discovery) => ({ config, discovery })))
+			.then(({ config, discovery }) => {
+				const url = endSessionUrl(discovery, config.oidcClientId);
 				if (url) {
 					window.location.assign(url);
 				}

@@ -231,15 +231,22 @@ describe("completeLogin (code exchange)", () => {
 });
 
 describe("endSessionUrl", () => {
-	it("builds a post_logout_redirect_uri pointing at the app origin", () => {
-		const url = endSessionUrl(DISCOVERY);
+	it("builds a post_logout_redirect_uri and client_id pointing at the app origin/client (issue #873)", () => {
+		const url = endSessionUrl(DISCOVERY, "waypoint-frontend");
 		expect(url).toBeTruthy();
 		const parsed = new URL(url!, "https://waypoint.example.internal");
 		expect(parsed.pathname).toBe("/auth/realms/waypoint/protocol/openid-connect/logout");
 		expect(parsed.searchParams.get("post_logout_redirect_uri")).toBe(window.location.origin);
+		expect(parsed.searchParams.get("client_id")).toBe("waypoint-frontend");
+	});
+
+	it("includes id_token_hint when provided", () => {
+		const url = endSessionUrl(DISCOVERY, "waypoint-frontend", "the-id-token");
+		const parsed = new URL(url!, "https://waypoint.example.internal");
+		expect(parsed.searchParams.get("id_token_hint")).toBe("the-id-token");
 	});
 
 	it("returns null when the discovery document has no end_session_endpoint", () => {
-		expect(endSessionUrl({ authorization_endpoint: "x", token_endpoint: "y" })).toBeNull();
+		expect(endSessionUrl({ authorization_endpoint: "x", token_endpoint: "y" }, "waypoint-frontend")).toBeNull();
 	});
 });
