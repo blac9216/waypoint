@@ -283,6 +283,67 @@ public sealed class StigManagerUploadApiTests : IAsyncLifetime, IDisposable
 		Assert.DoesNotContain("WAYPOINT_MASTER_KEY_FILE", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
 	}
 
+	/// <summary>
+	/// Issue #744 outcome-persistence round trip: the FIRST upload attempt (this test's
+	/// stand-in convert-stage call, made directly through the same coordinator
+	/// JobsController uses) and a SECOND attempt via the real HTTP retry route both
+	/// land as distinct, ordered rows in migration 0062's <c>upload_attempts</c> --
+	/// proving attempts accumulate rather than overwrite (unlike jobs.upload_status,
+	/// which only ever reflects the LATEST outcome), and that both the endpoint and
+	/// collection identity are recorded per attempt.
+	/// </summary>
+	[Fact]
+	public async Task UploadThenRetry_RecordsTwoOrderedUploadAttempts_WithEndpointAndCollection()
+	{
+		(_, Guid targetId) = await CreateSiteWithStigManagerAsync("attempts-roundtrip-target");
+		Guid runId = await CreateRunAsync();
+		Guid jobId = await FanOutScanJobAsync(runId, targetId, "failed");
+		WriteCkl(jobId);
+
+		Waypoint.Core.Sites.Target? target = await new TargetRepository(_fixture.ConnectionString).GetAsync(targetId, CancellationToken.None);
+
+		// CreateSiteWithStigManagerAsync's override carries no credential_id, so
+		// ScanUploadCoordinator's ResolveClientSecretAsync short-circuits before ever
+		// touching ICredentialSecretStore -- a real FileMasterKeyProvider-backed store
+		// is unnecessary here (unlike Retry_MasterKeyUnavailable_* above, which
+		// deliberately exercises that path).
+		Waypoint.Infrastructure.Scans.ScanUploadCoordinator coordinator = new(
+			new Waypoint.Infrastructure.StigManager.StigManagerRepository(_fixture.ConnectionString),
+			_factory.UploadClient,
+			new CredentialSecretStore(
+				_fixture.ConnectionString,
+				new AesGcmEnvelopeCipher(new FileMasterKeyProvider(keyFilePath: null)),
+				new InPlaySecretRedactor(),
+				NullLogger<CredentialSecretStore>.Instance),
+			new JobQueueRepository(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance),
+			new InPlaySecretRedactor());
+
+		_factory.UploadClient.Result = new StigManagerUploadResult(StigManagerUploadOutcome.Uploaded, null);
+		string cklPath = Path.Combine(_artifactStorePath, $"{jobId:N}.ckl");
+		await coordinator.UploadAsync(jobId, target!, cklPath, CancellationToken.None);
+
+		_factory.UploadClient.Result = new StigManagerUploadResult(StigManagerUploadOutcome.Failed, "second attempt failed");
+		HttpResponseMessage response = await SendAsync(HttpMethod.Post, $"/api/v1/jobs/{jobId}/stigman-upload-retry", "Operator", body: null);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+		JobQueueRepository reader = new(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
+		IReadOnlyList<UploadAttemptRecord> attempts = await reader.GetUploadAttemptsAsync(jobId, CancellationToken.None);
+
+		Assert.Equal(2, attempts.Count);
+		Assert.Equal(1, attempts[0].AttemptNumber);
+		Assert.Equal(JobUploadStatuses.Uploaded, attempts[0].Status);
+		Assert.False(string.IsNullOrWhiteSpace(attempts[0].Endpoint));
+		Assert.False(string.IsNullOrWhiteSpace(attempts[0].Collection));
+
+		Assert.Equal(2, attempts[1].AttemptNumber);
+		Assert.Equal(JobUploadStatuses.Failed, attempts[1].Status);
+		Assert.Contains("second attempt failed", attempts[1].ErrorDetail, StringComparison.Ordinal);
+
+		// jobs.upload_status reflects only the LATEST outcome -- the attempt history is
+		// what makes the FIRST (successful) attempt still visible/auditable.
+		Assert.Equal("failed", await GetJobFieldAsync(jobId, "upload_status"));
+	}
+
 	[Fact]
 	public async Task Retry_NoCklArtifact_Is409()
 	{

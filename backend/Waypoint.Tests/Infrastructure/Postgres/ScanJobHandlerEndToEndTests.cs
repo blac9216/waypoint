@@ -786,6 +786,167 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #744 (epic #726 Wave 4 first slice) rule-correction matrix, matched case:
+	/// a frozen benchmark revision whose one rule_id is exactly the CKL stub's
+	/// fixed existing rule id ('SV-100001r1_rule', see
+	/// <c>WaypointScanStubModule.Invoke-WaypointConvert</c>'s invented simulation)
+	/// reaches ScanJobHandler's convert stage as a fully-matched correction: the
+	/// emitted job.log coverage event reports Matched=1, zero unmatched, and Info
+	/// severity (full coverage never warns).
+	/// </summary>
+	[Fact]
+	public async Task StigComponentJob_RuleCorrection_AllRulesMatched_ReportsFullCoverage()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid vsphereApiCredentialId) = await SeedVsphereTargetAsync("invented-vsphere-api-secret-rulematch"); // gitleaks:allow -- invented test canary
+		Guid vcsaSshCredentialId = (await _credentials.CreateAsync(
+			$"svc-vcsa-ssh-{Guid.NewGuid():N}@example.internal", CredentialTypes.Ssh, CredentialOwners.Shared,
+			sudoEnabled: false, CancellationToken.None, "root@example.internal"))!.Value;
+		await _secretStore.StoreAsync(vcsaSshCredentialId, System.Text.Encoding.UTF8.GetBytes("invented-vcsa-ssh-secret-rulematch" /* gitleaks:allow -- invented test canary */), "test", CancellationToken.None);
+
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedSshCatalogAndBaselineAsync("vcsa-sts-rulematch", CatalogSelectorKinds.Service, CatalogOutputKinds.HdfAndCkl, selectorName: "sts", materializeOnDisk: true);
+
+		// Matches the stub's fixed existing rule id exactly -- a fully-covered revision.
+		BenchmarkRevision revision = await _benchmarks.ImportRevisionAsync(
+			new BenchmarkImportCandidate(
+				"xccdf_invented.vmware_vcsa-sts_STIG",
+				"Invented VCSA STS Service STIG",
+				"2",
+				"Release: 4 Benchmark Date: 15 Feb 2026",
+				$"digest-rulematch-{Guid.NewGuid():N}",
+				[new XccdfRule("SV-100001r1_rule", "V-100001", BenchmarkRuleSeverities.High, "invented rule")]),
+			BenchmarkSources.ManualUpload, CancellationToken.None);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			selector_kind = "service",
+			selector_name = "sts",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = "hdf_ckl",
+			benchmark_revision_id = revision.Id,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec(
+				"scan", 2, TargetId: targetId, CredentialId: vsphereApiCredentialId, Payload: payload,
+				CredentialBindings: [new JobCredentialBindingSpec(CredentialPurposes.VcsaSsh, vcsaSshCredentialId)])],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand query = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' "
+			+ "AND payload::text LIKE '%\"matched\": 1%' AND payload::text LIKE '%\"unmatched_count\": 0%'", connection);
+		query.Parameters.AddWithValue(jobIds[0]);
+		Assert.True(
+			(long)(await query.ExecuteScalarAsync())! >= 1,
+			"expected a job.log coverage event reporting matched=1, unmatched_count=0.");
+	}
+
+	/// <summary>
+	/// Issue #744 rule-correction matrix, unmatched case: a frozen benchmark revision
+	/// whose ONE rule_id is deliberately NOT the CKL stub's fixed existing rule id
+	/// reaches ScanJobHandler's convert stage as a fully-unmatched correction -- the
+	/// AC "unmatched rules are visible and cannot masquerade as complete" -- proving
+	/// the coverage event surfaces the exact unmatched rule id rather than silently
+	/// reporting success, and the job still completes (unmatched rules degrade
+	/// honestly, they never fail the scan run).
+	/// </summary>
+	[Fact]
+	public async Task StigComponentJob_RuleCorrection_UnmatchedRule_ReportsCoverageGapWithoutFailingJob()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid vsphereApiCredentialId) = await SeedVsphereTargetAsync("invented-vsphere-api-secret-ruleunmatched"); // gitleaks:allow -- invented test canary
+		Guid vcsaSshCredentialId = (await _credentials.CreateAsync(
+			$"svc-vcsa-ssh-{Guid.NewGuid():N}@example.internal", CredentialTypes.Ssh, CredentialOwners.Shared,
+			sudoEnabled: false, CancellationToken.None, "root@example.internal"))!.Value;
+		await _secretStore.StoreAsync(vcsaSshCredentialId, System.Text.Encoding.UTF8.GetBytes("invented-vcsa-ssh-secret-ruleunmatched" /* gitleaks:allow -- invented test canary */), "test", CancellationToken.None);
+
+		(Guid executionProfileId, Guid baselineId, string _) =
+			await SeedSshCatalogAndBaselineAsync("vcsa-sts-ruleunmatched", CatalogSelectorKinds.Service, CatalogOutputKinds.HdfAndCkl, selectorName: "sts", materializeOnDisk: true);
+
+		// Deliberately a DIFFERENT rule_id than the stub's fixed existing identity --
+		// simulates a mapped revision whose rules do not cover this CKL's controls.
+		BenchmarkRevision revision = await _benchmarks.ImportRevisionAsync(
+			new BenchmarkImportCandidate(
+				"xccdf_invented.vmware_vcsa-sts_STIG",
+				"Invented VCSA STS Service STIG",
+				"2",
+				"Release: 4 Benchmark Date: 15 Feb 2026",
+				$"digest-ruleunmatched-{Guid.NewGuid():N}",
+				[new XccdfRule("SV-999999r1_rule", "V-999999", BenchmarkRuleSeverities.High, "unrelated invented rule")]),
+			BenchmarkSources.ManualUpload, CancellationToken.None);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			selector_kind = "service",
+			selector_name = "sts",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = "hdf_ckl",
+			benchmark_revision_id = revision.Id,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec(
+				"scan", 2, TargetId: targetId, CredentialId: vsphereApiCredentialId, Payload: payload,
+				CredentialBindings: [new JobCredentialBindingSpec(CredentialPurposes.VcsaSsh, vcsaSshCredentialId)])],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		// Unmatched rules never fail the scan run -- the job still reaches its terminal.
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
+		Assert.True(File.Exists(cklPath), "unmatched rule correction must never destroy the CKL artifact.");
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' "
+			+ "AND payload::text LIKE '%\"matched\": 0%' AND payload::text LIKE '%SV-100001r1_rule%' AND payload::text LIKE '%Warning%'", connection);
+		query.Parameters.AddWithValue(jobIds[0]);
+		Assert.True(
+			(long)(await query.ExecuteScalarAsync())! >= 1,
+			"expected a Warning job.log coverage event naming the exact unmatched rule id 'SV-100001r1_rule', never silently dropped.");
+	}
+
+	/// <summary>
 	/// Issue #918: the NSX-transport analogue of
 	/// <see cref="StigComponentJob_FrozenBenchmarkRevision_StampsCklFromFrozenRevision_NotStaticFallback"/>.
 	/// PR #916 (issue #742) claimed the frozen-revision CKL stamp is transport-agnostic
@@ -2760,6 +2921,58 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		// The HDF (or attested report) from the first attempt was never rewritten --
 		// proof the resumed execution re-ran only convert, not InSpec/attest.
 		Assert.Equal(hdfWrittenAt, File.GetLastWriteTimeUtc(File.Exists(attestedPath) ? attestedPath : hdfPath));
+	}
+
+	/// <summary>
+	/// Issue #744 AC "preserve raw HDF/CKL when metadata correction or upload fails":
+	/// a convert-stage failure (SAF conversion itself failing, the stub's 'failure'
+	/// mode) must never delete or truncate the raw HDF report already persisted by the
+	/// InSpec stage -- the evidence artifact survives a downstream failure so an
+	/// operator can retry or inspect it, and the job fails honestly (state=failed)
+	/// rather than silently discarding what was already collected.
+	/// </summary>
+	[Fact]
+	public async Task ConvertStageFailure_PreservesRawHdfArtifact_FailsHonestly()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "failure");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-preserve-hdf-canary");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		// Fails honestly -- never masquerades as succeeded.
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.Equal("converting", await GetJobFieldAsync(jobIds[0], "stage"));
+
+		// The raw HDF (or attested report) evidence artifact is never destroyed by the
+		// convert failure -- it is exactly what a later retry/resume reads back.
+		string hdfPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.json");
+		string attestedPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.attested.json");
+		Assert.True(
+			File.Exists(hdfPath) || File.Exists(attestedPath),
+			"expected the raw HDF or attested report to survive a convert-stage failure.");
+
+		// No CKL was ever produced (the failure happened before any CKL existed) --
+		// distinct from the "CKL exists but upload failed" preservation case, which
+		// StigManagerUploadApiTests' Retry_RepeatFailure_Returns200NotError already
+		// covers (the CKL is never deleted there either).
+		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
+		Assert.False(File.Exists(cklPath));
 	}
 
 	private async Task<(Guid TargetId, Guid CredentialId)> SeedVsphereTargetAsync(string secretValue, string? username = "administrator@example.internal")

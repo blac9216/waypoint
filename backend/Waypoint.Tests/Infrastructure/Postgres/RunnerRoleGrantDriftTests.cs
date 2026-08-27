@@ -1636,4 +1636,61 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		await reader.ReadAsync();
 		return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetFieldValue<DateTimeOffset>(1));
 	}
+
+	/// <summary>
+	/// Issue #744 (migration 0062): the real compliance-runner role must be able to run
+	/// <see cref="JobQueueRepository.RecordUploadAttemptAsync"/>'s full protocol (a
+	/// SELECT count(*) followed by an INSERT, both against <c>upload_attempts</c>) and
+	/// read its own writes back via <see cref="JobQueueRepository.GetUploadAttemptsAsync"/>
+	/// -- proving both grants this migration adds actually land, not just that the
+	/// GRANT statement ran without error (this file's own standing lesson).
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_RecordAndReadUploadAttemptsWithoutPermissionDenied()
+	{
+		Guid runId = await SeedRunAsync();
+		Guid jobId = await SeedJobAsync(runId);
+
+		JobQueueRepository runnerRepository = new(_complianceRunnerConnectionString, NullLogger<JobQueueRepository>.Instance);
+		await runnerRepository.RecordUploadAttemptAsync(
+			jobId, "https://stigman.example.internal", "collection-1", JobUploadStatuses.Uploaded, null, CancellationToken.None);
+		await runnerRepository.RecordUploadAttemptAsync(
+			jobId, "https://stigman.example.internal", "collection-1", JobUploadStatuses.Failed, "conflict on retry", CancellationToken.None);
+
+		IReadOnlyList<UploadAttemptRecord> attempts = await runnerRepository.GetUploadAttemptsAsync(jobId, CancellationToken.None);
+		Assert.Equal(2, attempts.Count);
+		Assert.Equal(1, attempts[0].AttemptNumber);
+		Assert.Equal(JobUploadStatuses.Uploaded, attempts[0].Status);
+		Assert.Equal(2, attempts[1].AttemptNumber);
+		Assert.Equal(JobUploadStatuses.Failed, attempts[1].Status);
+		Assert.Equal("conflict on retry", attempts[1].ErrorDetail);
+	}
+
+	/// <summary>
+	/// Issue #744: <c>upload_attempts</c> is append-only by design (this migration's own
+	/// doc comment) -- the compliance-runner role must still fail 42501 on UPDATE/DELETE
+	/// even though it has SELECT/INSERT, proving 0062 did not accidentally grant a write
+	/// path that would let a runner mutate a prior attempt's history in place.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_CannotUpdateOrDeleteUploadAttempts()
+	{
+		Guid runId = await SeedRunAsync();
+		Guid jobId = await SeedJobAsync(runId);
+		JobQueueRepository ownerRepository = new(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
+		await ownerRepository.RecordUploadAttemptAsync(jobId, null, null, JobUploadStatuses.Failed, "seed", CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand update = new("UPDATE upload_attempts SET status = 'uploaded' WHERE job_id = $1", connection);
+		update.Parameters.AddWithValue(jobId);
+		PostgresException updateException = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, updateException.SqlState);
+
+		await using NpgsqlCommand delete = new("DELETE FROM upload_attempts WHERE job_id = $1", connection);
+		delete.Parameters.AddWithValue(jobId);
+		PostgresException deleteException = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, deleteException.SqlState);
+	}
 }

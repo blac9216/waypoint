@@ -369,6 +369,18 @@ function Invoke-WaypointConvert {
 		[Parameter()]
 		[int]$TimeoutSeconds = 300,
 
+		# Issue #744: the mapped benchmark revision's own rules (migration 0052's
+		# benchmark_rules, read by ScanJobHandler via IBenchmarkRepository.ListRulesAsync
+		# before this call), keyed by rule_id -> vuln_id. When supplied, every CKL Vuln
+		# entry's Rule_ID/Vuln_Num STIG_DATA identity is corrected to the mapped
+		# revision's exact identifiers rather than trusted as SAF emitted them --
+		# $null/empty means "no frozen benchmark revision" (legacy/unmapped path):
+		# rule correction is skipped entirely and RuleCoverage reports zero matched/
+		# unmatched, exactly like the pre-#744 behavior.
+		[Parameter()]
+		[AllowNull()]
+		[hashtable]$RuleCorrections,
+
 		[Parameter()]
 		[string]$VmwareStigDockerCommonPath = $Script:VmwareStigDockerCommonModulePath
 	)
@@ -403,6 +415,7 @@ function Invoke-WaypointConvert {
 				CklPath         = $null
 				MetadataApplied = $false
 				FailureReason   = "SAF conversion completed but CKL file not found at $CklOutputPath."
+				RuleCoverage    = $null
 			}
 		}
 	} catch {
@@ -411,6 +424,7 @@ function Invoke-WaypointConvert {
 			CklPath         = $null
 			MetadataApplied = $false
 			FailureReason   = "SAF conversion failed: $($_.Exception.Message)"
+			RuleCoverage    = $null
 		}
 	}
 
@@ -425,11 +439,92 @@ function Invoke-WaypointConvert {
 		}
 	}
 
+	# Issue #744: rule-level correction is independent of (and never blocks) the
+	# STIG_INFO stamp above -- a correction failure here still returns Success with the
+	# raw, uploadable CKL untouched below the point of failure (never destroys the
+	# artifact, AC "Preserve raw HDF/CKL when metadata correction or upload fails").
+	$RuleCoverage = $null
+	if ($RuleCorrections -and $RuleCorrections.Count -gt 0) {
+		try {
+			$RuleCoverage = Set-WaypointCklRuleIdentity -CklPath $CklOutputPath -RuleCorrections $RuleCorrections
+		} catch {
+			$RuleCoverage = [pscustomobject]@{
+				Matched   = 0
+				Unmatched = @()
+				Error     = $_.Exception.Message
+			}
+		}
+	}
+
 	return [pscustomobject]@{
 		Success         = $true
 		CklPath         = $CklOutputPath
 		MetadataApplied = $MetadataApplied
 		FailureReason   = $null
+		RuleCoverage    = $RuleCoverage
+	}
+}
+
+# Issue #744 (epic #726 Wave 4 first slice): corrects each CKL Vuln entry's STIG_DATA
+# rule identity (Rule_ID/Vuln_Num) from the mapped benchmark revision's own rules
+# (benchmark_rules, migration 0052) rather than trusting whatever SAF's hdf2ckl
+# converter emitted from the raw HDF/InSpec control metadata. Matching key is the
+# CKL's OWN existing Rule_ID STIG_DATA value against $RuleCorrections' keys (the
+# frozen revision's rule_id set) -- a Vuln entry whose existing Rule_ID has no entry
+# in $RuleCorrections is left untouched and counted as Unmatched (issue #744 AC
+# "unresolved/ambiguous rules are visible and cannot masquerade as complete"; this
+# function NEVER silently drops an unmatched rule -- it reports it, it does not
+# remove or blank it). Returns a coverage summary: Matched (count corrected),
+# Unmatched (list of the CKL's own uncorrected Rule_ID values).
+function Set-WaypointCklRuleIdentity {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[string]$CklPath,
+
+		[Parameter(Mandatory)]
+		[hashtable]$RuleCorrections
+	)
+
+	[xml]$Xml = Get-Content -Path $CklPath -Raw
+
+	$Matched = 0
+	$Unmatched = [System.Collections.Generic.List[string]]::new()
+
+	foreach ($Vuln in @($Xml.SelectNodes('//VULN'))) {
+		$StigDataNodes = @($Vuln.SelectNodes('STIG_DATA'))
+		$RuleIdNode = $StigDataNodes | Where-Object {
+			$_.SelectSingleNode('VULN_ATTRIBUTE').InnerText -eq 'Rule_ID'
+		} | Select-Object -First 1
+
+		if ($null -eq $RuleIdNode) {
+			continue
+		}
+
+		$ExistingRuleId = $RuleIdNode.SelectSingleNode('ATTRIBUTE_DATA').InnerText
+		if (-not $RuleCorrections.ContainsKey($ExistingRuleId)) {
+			$Unmatched.Add($ExistingRuleId)
+			continue
+		}
+
+		$CorrectVulnId = $RuleCorrections[$ExistingRuleId]
+		$VulnNumNode = $StigDataNodes | Where-Object {
+			$_.SelectSingleNode('VULN_ATTRIBUTE').InnerText -eq 'Vuln_Num'
+		} | Select-Object -First 1
+
+		if ($null -ne $VulnNumNode -and $CorrectVulnId) {
+			$VulnNumNode.SelectSingleNode('ATTRIBUTE_DATA').InnerText = [string]$CorrectVulnId
+		}
+
+		$Matched++
+	}
+
+	$Xml.Save($CklPath)
+
+	return [pscustomobject]@{
+		Matched   = $Matched
+		Unmatched = @($Unmatched)
+		Error     = $null
 	}
 }
 
