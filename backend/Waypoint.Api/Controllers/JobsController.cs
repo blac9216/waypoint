@@ -293,10 +293,13 @@ public sealed class JobsController : ControllerBase
 	/// bounded-list idiom rather than `/runs/{id}/events/history`'s cursor. A job that
 	/// exists but has no recorded component-result attempt at all (not yet claimed,
 	/// legacy non-component job, or its evidence was purged) returns
-	/// <c>items: []</c>/<c>total_count: 0</c> with null attempt fields -- honest-empty,
-	/// never a 404 -- because only the job's own existence is this endpoint's
-	/// precondition, matching <see cref="GetUploadAttempts"/> and
-	/// <see cref="RunsController.GetComponentResultsSummary"/>.
+	/// <c>items: []</c>/<c>X-Total-Count: 0</c> with null attempt fields --
+	/// honest-empty, never a 404 -- because only the job's own existence is this
+	/// endpoint's precondition, matching <see cref="GetUploadAttempts"/> and
+	/// <see cref="RunsController.GetComponentResultsSummary"/>. The total matching-row
+	/// count travels in the <c>X-Total-Count</c> response header per docs/api-contract.md
+	/// Conventions (the <see cref="RunsController.ListRuns"/> precedent) -- never in
+	/// the body.
 	/// </summary>
 	[HttpGet("{id:guid}/component-results/findings")]
 	[RequireViewerRole]
@@ -322,6 +325,7 @@ public sealed class JobsController : ControllerBase
 		}
 
 		ComponentResultFindingsPage page = await _componentResults.GetLatestFindingsAsync(id, limit, offset, cancellationToken).ConfigureAwait(false);
+		Response.Headers["X-Total-Count"] = page.TotalCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
 		return Ok(new ComponentResultFindingsResponse(
 			JobId: id.ToString(),
 			AttemptNumber: page.Result?.AttemptNumber,
@@ -333,7 +337,6 @@ public sealed class JobsController : ControllerBase
 				Severity: f.Severity,
 				Status: f.Status,
 				Evidence: f.Evidence))],
-			TotalCount: page.TotalCount,
 			Limit: limit,
 			Offset: offset));
 	}

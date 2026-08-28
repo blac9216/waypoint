@@ -440,14 +440,17 @@ six-value finding vocabulary (`passed`\|`failed`\|`not_applicable`\|`not_reviewe
 endpoint performs no re-derivation. Limit/offset paged (`limit` 1–500 default 100,
 `offset` ≥ 0, 400 `validation_error` outside those bounds) — one attempt's finding
 count is bounded by one benchmark's control count, not an unboundedly growing
-history, so this follows `GET /runs`'s bounded-list `?limit&offset` idiom rather than
-`/runs/{id}/events/history`'s cursor. Response: `job_id`, `attempt_number`/
-`component_result_status` (both null when the job has no recorded attempt at all —
-never claimed yet, a legacy non-component job, or a purged run's evidence, all
-indistinguishable and all honest-empty), `items` (`control_id`, `rule_id`?, `title`?,
-`severity`, `status`, `evidence`?), `total_count`, `limit`, `offset`. 404 only when the
-job itself does not exist; a job with zero findings (or zero recorded attempts) is 200
-with `items: []`, matching `GetUploadAttempts`/`GetComponentResultsSummary`'s
+history, so this follows the Conventions' `?limit/offset` + **`X-Total-Count`
+header** idiom (`GET /runs` precedent) rather than `/runs/{id}/events/history`'s
+cursor. The total matching-finding count travels ONLY in the `X-Total-Count`
+response header, never in the body — no list endpoint in this API carries an
+in-body count. Response body: `job_id`, `attempt_number`/`component_result_status`
+(both null when the job has no recorded attempt at all — never claimed yet, a legacy
+non-component job, or a purged run's evidence, all indistinguishable and all
+honest-empty), `items` (`control_id`, `rule_id`?, `title`?, `severity`, `status`,
+`evidence`?), `limit`, `offset`. 404 only when the job itself does not exist; a job
+with zero findings (or zero recorded attempts) is 200 with `items: []` and
+`X-Total-Count: 0`, matching `GetUploadAttempts`/`GetComponentResultsSummary`'s
 "resource exists, evidence may not yet" convention.
 
 ✅ **`GET /jobs/{id}/component-results/artifacts`** (issue #745, migration 0063's

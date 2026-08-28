@@ -982,12 +982,17 @@ public sealed record ComponentResultFindingResponse(
 /// Response body for <c>GET /api/v1/jobs/{id}/component-results/findings</c>. Limit/
 /// offset paged -- a single attempt's finding count is bounded by one benchmark's
 /// control count (never an unboundedly growing history), so this endpoint uses the
-/// same <c>?limit&amp;offset</c> + total-count idiom as <c>GET /runs</c> rather than
-/// the cursor idiom `/runs/{id}/events/history` uses for genuinely unbounded history.
-/// <see cref="AttemptNumber"/>/<see cref="ComponentResultStatus"/> describe WHICH
-/// attempt these findings belong to (always the job's latest) so a caller never has to
-/// guess. <c>null</c> attempt fields mean the job has no recorded component-result
-/// attempt at all yet -- honest-empty, distinct from "attempt exists, zero findings".
+/// same <c>?limit&amp;offset</c> + <c>X-Total-Count</c> HEADER idiom as
+/// <c>GET /runs</c> (docs/api-contract.md Conventions; see
+/// <see cref="Waypoint.Core.Pagination.PageRequest"/>'s doc comment) rather than the
+/// cursor idiom `/runs/{id}/events/history` uses for genuinely unbounded history. The
+/// total matching-finding count travels ONLY in the <c>X-Total-Count</c> response
+/// header, never in this body -- no list endpoint in this API carries an in-body
+/// count. <see cref="AttemptNumber"/>/<see cref="ComponentResultStatus"/> describe
+/// WHICH attempt these findings belong to (always the job's latest) so a caller never
+/// has to guess. <c>null</c> attempt fields mean the job has no recorded
+/// component-result attempt at all yet -- honest-empty, distinct from "attempt
+/// exists, zero findings".
 /// </summary>
 public sealed record ComponentResultFindingsResponse(
 	[property: JsonPropertyName("job_id")]
@@ -1001,9 +1006,6 @@ public sealed record ComponentResultFindingsResponse(
 
 	[property: JsonPropertyName("items")]
 	IReadOnlyList<ComponentResultFindingResponse> Items,
-
-	[property: JsonPropertyName("total_count")]
-	int TotalCount,
 
 	[property: JsonPropertyName("limit")]
 	int Limit,

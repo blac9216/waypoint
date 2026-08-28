@@ -277,6 +277,13 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 		return await _client.SendAsync(request);
 	}
 
+	/// <summary>The `X-Total-Count` response header (docs/api-contract.md Conventions' `?limit/offset` idiom, the `GET /runs` precedent) -- the ONLY place the total travels; the body never carries a count.</summary>
+	private static int GetTotalCountHeader(HttpResponseMessage response)
+	{
+		Assert.True(response.Headers.TryGetValues("X-Total-Count", out IEnumerable<string>? values), "X-Total-Count header missing");
+		return int.Parse(values!.Single(), System.Globalization.CultureInfo.InvariantCulture);
+	}
+
 	// -- GET /jobs/{id}/component-results/findings -----------------------------------
 
 	[Fact]
@@ -294,7 +301,10 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 		Assert.Equal(jobId.ToString(), root.GetProperty("job_id").GetString());
 		Assert.Equal(1, root.GetProperty("attempt_number").GetInt32());
 		Assert.Equal("completed", root.GetProperty("component_result_status").GetString());
-		Assert.Equal(3, root.GetProperty("total_count").GetInt32());
+		// Total travels ONLY in the X-Total-Count header (round-1 review finding) --
+		// pin both the header's correctness and the body field's absence.
+		Assert.Equal(3, GetTotalCountHeader(response));
+		Assert.False(root.TryGetProperty("total_count", out _), "total_count must not appear in the body -- X-Total-Count header only");
 
 		JsonElement[] items = root.GetProperty("items").EnumerateArray().ToArray();
 		Assert.Equal(3, items.Length);
@@ -349,7 +359,7 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 		JsonElement root = document.RootElement;
 		Assert.Equal(2, root.GetProperty("attempt_number").GetInt32());
 		Assert.Equal("completed", root.GetProperty("component_result_status").GetString());
-		Assert.Equal(3, root.GetProperty("total_count").GetInt32());
+		Assert.Equal(3, GetTotalCountHeader(response));
 	}
 
 	[Fact]
@@ -363,13 +373,45 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		JsonElement root = document.RootElement;
-		Assert.Equal(3, root.GetProperty("total_count").GetInt32());
+		// The header reports the FULL matching count (3) even though this page holds 1
+		// row -- exactly the GET /runs X-Total-Count semantics.
+		Assert.Equal(3, GetTotalCountHeader(response));
 		Assert.Equal(1, root.GetProperty("limit").GetInt32());
 		Assert.Equal(1, root.GetProperty("offset").GetInt32());
 		JsonElement[] items = root.GetProperty("items").EnumerateArray().ToArray();
 		Assert.Single(items);
 		// Ordered by control_id: SV-1, SV-2, SV-3 -- offset 1 skips SV-1, lands on SV-2.
 		Assert.Equal("SV-2", items[0].GetProperty("control_id").GetString());
+	}
+
+	/// <summary>
+	/// Round-1 review finding on PR #1010: the total must travel in the
+	/// <c>X-Total-Count</c> response header per docs/api-contract.md Conventions'
+	/// `?limit/offset` idiom (the `GET /runs` precedent) -- never as an in-body
+	/// `total_count` field. Pins the header on every page of a multi-page walk AND the
+	/// body field's absence on each.
+	/// </summary>
+	[Fact]
+	public async Task GetFindings_TotalCount_IsXTotalCountHeaderOnly_OnEveryPage()
+	{
+		(Guid runId, Guid componentId, Guid scanPlanItemId) = await SeedPlanItemAsync("findings-header-pages");
+		Guid jobId = await SeedJobAsync(runId, scanPlanItemId);
+		await _componentResults.RecordAsync(CompletedRecord(runId, jobId, scanPlanItemId, componentId, attempt: 1), CancellationToken.None);
+
+		string[] expectedByPage = ["SV-1", "SV-2", "SV-3"];
+		for (int offset = 0; offset < expectedByPage.Length; offset++)
+		{
+			HttpResponseMessage response = await SendAsync(
+				HttpMethod.Get, $"/api/v1/jobs/{jobId}/component-results/findings?limit=1&offset={offset}", "Viewer");
+
+			Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+			Assert.Equal(3, GetTotalCountHeader(response));
+			using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+			JsonElement root = document.RootElement;
+			Assert.False(root.TryGetProperty("total_count", out _), "total_count must never appear in the body");
+			JsonElement item = Assert.Single(root.GetProperty("items").EnumerateArray().ToArray());
+			Assert.Equal(expectedByPage[offset], item.GetProperty("control_id").GetString());
+		}
 	}
 
 	[Fact]
@@ -410,7 +452,7 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 		Assert.False(root.TryGetProperty("attempt_number", out _));
 		Assert.False(root.TryGetProperty("component_result_status", out _));
 		Assert.Empty(root.GetProperty("items").EnumerateArray());
-		Assert.Equal(0, root.GetProperty("total_count").GetInt32());
+		Assert.Equal(0, GetTotalCountHeader(response));
 	}
 
 	/// <summary>Post-#963/#966 purge hard-deletes component_results/findings rows -- a purged job's finding list is honestly empty, never half-rendered.</summary>
@@ -430,7 +472,7 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 		JsonElement root = document.RootElement;
 		Assert.False(root.TryGetProperty("attempt_number", out _));
 		Assert.Empty(root.GetProperty("items").EnumerateArray());
-		Assert.Equal(0, root.GetProperty("total_count").GetInt32());
+		Assert.Equal(0, GetTotalCountHeader(response));
 	}
 
 	[Fact]
