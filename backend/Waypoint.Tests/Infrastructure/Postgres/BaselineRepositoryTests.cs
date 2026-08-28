@@ -113,6 +113,35 @@ public sealed class BaselineRepositoryTests : IAsyncLifetime
 		Assert.Null(await _baselines.GetActiveBaselineAsync(executionProfileId, CancellationToken.None));
 	}
 
+	/// <summary>
+	/// Issue #1002 item 2: <paramref name="benchmarkRevisionId"/> is null here and
+	/// <see cref="SeedExecutionProfileAsync"/> seeds a <see cref="CatalogKinds.Stig"/>
+	/// execution profile -- this is exactly "a STIG execution profile with no
+	/// benchmark" activating successfully. Activation/approval of the profile-only
+	/// baseline is NOT gated on a benchmark revision being present; the standing
+	/// `benchmark_missing` alert (Waypoint.Api's BenchmarksController) surfaces the gap
+	/// without blocking this call. The scan-time consequence of the still-missing
+	/// benchmark is a separate, already-non-blocking, per-component
+	/// <c>ScanPlanSkipReasons.UnmappedBenchmark</c> skip in
+	/// <c>ScanPlannerService</c> -- see <c>ScanPlannerServiceTests</c> for that half of
+	/// the "approvable, scannable, standing alert" contract.
+	/// </summary>
+	[Fact]
+	public async Task ActivateAsync_StigExecutionProfileWithNoBenchmarkRevision_ActivatesSuccessfully()
+	{
+		string suffix = Guid.NewGuid().ToString("N")[..8];
+		ContentRevision revision = await SeedRevisionAsync(suffix);
+		Guid executionProfileId = await SeedExecutionProfileAsync(suffix);
+		Baseline staged = await _baselines.CreateStagedBaselineAsync(revision.Id, executionProfileId, benchmarkRevisionId: null, CancellationToken.None);
+
+		BaselineActivationOutcome outcome = await _baselines.ActivateAsync(staged.Id, "admin@example.internal", CancellationToken.None);
+
+		Assert.Equal(BaselineActivationOutcome.Activated, outcome);
+		Baseline? active = await _baselines.GetActiveBaselineAsync(executionProfileId, CancellationToken.None);
+		Assert.NotNull(active);
+		Assert.Null(active!.BenchmarkRevisionId);
+	}
+
 	[Fact]
 	public async Task ActivateAsync_FirstActivationForExecutionProfile_Succeeds()
 	{

@@ -86,17 +86,24 @@ public sealed record BenchmarkRuleResponse(
 /// One catalog-component-to-benchmark-revision mapping decision, current or
 /// historical -- <c>GET /api/v1/benchmark-mappings/{catalogComponentId}</c> and
 /// <c>GET /api/v1/benchmark-mappings/{catalogComponentId}/history</c> (issue #730 AC
-/// "versioned audit history"). <see cref="IsSrgNoBenchmark"/> is the explicit "SRG
-/// content has no published DISA benchmark" marker (issue #730 AC) -- it is never
-/// inferred from <see cref="BenchmarkRevisionId"/> being null on its own, since an
-/// `unmapped`/`ambiguous` row is also null there.
+/// "versioned audit history").
+///
+/// Issue #1002: <see cref="DerivedState"/> replaces migration 0052's admin-stated
+/// <c>is_srg_no_benchmark</c> flag (dropped by migration 0071). It is computed at read
+/// time, never stored: <see cref="BenchmarkMappingDerivedStates.NotApplicableSrg"/>
+/// when the component's bound catalog content kind is <c>srg</c> (an SRG never has a
+/// benchmark concept -- ADR-0022); <see cref="BenchmarkMappingDerivedStates.BenchmarkMissing"/>
+/// when the component's kind is <c>stig</c> and its current mapping has no benchmark
+/// revision (a persistent, non-blocking, open alert -- issue #1002 item 2); otherwise
+/// <see langword="null"/> (a stig component with a mapped benchmark revision has
+/// nothing further to surface here).
 /// </summary>
 public sealed record BenchmarkMappingResponse(
 	string Id,
 	string CatalogComponentId,
 	string? BenchmarkRevisionId,
 	string Status,
-	bool IsSrgNoBenchmark,
+	string? DerivedState,
 	bool IsAdminOverride,
 	bool IsCurrent,
 	int AmbiguousCandidateCount,
@@ -104,7 +111,7 @@ public sealed record BenchmarkMappingResponse(
 	string? Actor,
 	DateTimeOffset CreatedAt)
 {
-	public static BenchmarkMappingResponse FromDomain(BenchmarkComponentMapping mapping)
+	public static BenchmarkMappingResponse FromDomain(BenchmarkComponentMapping mapping, string? derivedState)
 	{
 		ArgumentNullException.ThrowIfNull(mapping);
 		return new BenchmarkMappingResponse(
@@ -112,7 +119,7 @@ public sealed record BenchmarkMappingResponse(
 			mapping.CatalogComponentId.ToString(),
 			mapping.BenchmarkRevisionId?.ToString(),
 			mapping.Status,
-			mapping.IsSrgNoBenchmark,
+			derivedState,
 			mapping.IsAdminOverride,
 			mapping.IsCurrent,
 			mapping.AmbiguousCandidateCount,
@@ -137,11 +144,20 @@ public sealed record BenchmarkMappingCoverageResponse(
 	int AmbiguousCount,
 	int UnmappedCount)
 {
-	public static BenchmarkMappingCoverageResponse FromDomain(IReadOnlyList<BenchmarkComponentMapping> current)
+	/// <summary>
+	/// Issue #1002: <paramref name="derivedStateLookup"/> resolves each mapping's
+	/// per-component <see cref="BenchmarkMappingDerivedStates"/> value (or
+	/// <see langword="null"/>) -- the coverage report joins the catalog's content-kind
+	/// data once per component rather than this contract re-deriving it itself, keeping
+	/// this record a pure wire-shape mapper like <see cref="BenchmarkMappingResponse"/>.
+	/// </summary>
+	public static BenchmarkMappingCoverageResponse FromDomain(
+		IReadOnlyList<BenchmarkComponentMapping> current, Func<BenchmarkComponentMapping, string?> derivedStateLookup)
 	{
 		ArgumentNullException.ThrowIfNull(current);
+		ArgumentNullException.ThrowIfNull(derivedStateLookup);
 		return new BenchmarkMappingCoverageResponse(
-			current.Select(BenchmarkMappingResponse.FromDomain).ToArray(),
+			current.Select(m => BenchmarkMappingResponse.FromDomain(m, derivedStateLookup(m))).ToArray(),
 			current.Count(m => m.Status == BenchmarkMappingStatuses.Mapped),
 			current.Count(m => m.Status == BenchmarkMappingStatuses.Suggested),
 			current.Count(m => m.Status == BenchmarkMappingStatuses.Ambiguous),
@@ -157,9 +173,19 @@ public sealed record BenchmarkMappingCoverageResponse(
 /// second copy of its rules -- the repository itself still fail-closed validates
 /// status/vocabulary/mutual-exclusion so a caller cannot bypass those invariants by
 /// going around this contract.
+///
+/// Issue #1002: <c>is_srg_no_benchmark</c> is REMOVED from this contract (migration
+/// 0071 dropped the column it wrote). <see cref="IsSrgNoBenchmarkRemoved"/> exists only
+/// so <c>BenchmarksController.SetMapping</c> can detect a caller still sending the old
+/// field name and reject it with a pointed 400 (this repo's `validation_failed` idiom)
+/// instead of silently ignoring it -- see the controller's own remarks.
 /// </summary>
 public sealed record BenchmarkMappingOverrideRequest(
 	string? BenchmarkRevisionId,
 	string Status,
-	bool IsSrgNoBenchmark,
-	string? Reason);
+	string? Reason,
+	bool? IsSrgNoBenchmark = null)
+{
+	/// <summary>True when the caller sent the removed field with a truthy value -- the case worth a pointed rejection.</summary>
+	public bool IsSrgNoBenchmarkRemoved => IsSrgNoBenchmark is true;
+}

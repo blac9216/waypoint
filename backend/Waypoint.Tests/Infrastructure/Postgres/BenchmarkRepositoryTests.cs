@@ -100,6 +100,36 @@ public sealed class BenchmarkRepositoryTests : IAsyncLifetime
 		return component.Id;
 	}
 
+	/// <summary>
+	/// Issue #1002: seeds a catalog component bound to an execution profile of the
+	/// given <paramref name="kind"/> (stig|srg) -- the join
+	/// <see cref="IBenchmarkRepository.GetComponentContentKindAsync"/> derives its
+	/// answer from. A STIG kind additionally records a <c>catalog_benchmark_references</c>
+	/// row (docs/compliance-parity.md "STIG: exact profile/XCCDF pair") -- not required
+	/// for the kind derivation itself, but keeps this fixture representative of a real
+	/// STIG execution profile.
+	/// </summary>
+	private async Task<Guid> SeedCatalogComponentWithKindAsync(string kind, string componentKey)
+	{
+		CatalogSourceRevision sourceRevision = await _catalogRepository.UpsertSourceRevisionAsync($"test-revision-{Guid.NewGuid():N}", "invented fixture revision", CancellationToken.None);
+		CatalogProduct product = await _catalogRepository.UpsertProductAsync(sourceRevision.Id, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion version = await _catalogRepository.UpsertProductVersionAsync(product.Id, "8.0.3", "vSphere 8.0 Update 3", CancellationToken.None);
+		CatalogComponent component = await _catalogRepository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition(componentKey, "vCenter Server", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null), CancellationToken.None);
+		CatalogContentRelease contentRelease = await _catalogRepository.UpsertContentReleaseAsync(
+			sourceRevision.Id, kind, $"{componentKey}-{kind}-release", $"Invented {kind} release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await _catalogRepository.UpsertReportGroupAsync($"{componentKey}-{kind}-group", $"Invented {kind} report group", 3, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await _catalogRepository.CreateExecutionProfileAsync(
+			component.Id, contentRelease.Id, reportGroup.Id, "V1", kind == CatalogKinds.Stig ? CatalogOutputKinds.HdfAndCkl : CatalogOutputKinds.Hdf, CancellationToken.None);
+
+		if (kind == CatalogKinds.Stig)
+		{
+			await _catalogRepository.SetBenchmarkReferenceAsync(executionProfile.Id, $"invented-{componentKey}-stig", "V1R1", CancellationToken.None);
+		}
+
+		return component.Id;
+	}
+
 	[Fact]
 	public async Task ImportRevisionAsync_NewContent_PersistsRevisionAndRules()
 	{
@@ -186,7 +216,7 @@ public sealed class BenchmarkRepositoryTests : IAsyncLifetime
 		BenchmarkRevision revision = await _repository.ImportRevisionAsync(InventedCandidate(), BenchmarkSources.ManualUpload, CancellationToken.None);
 
 		BenchmarkComponentMapping mapping = await _repository.SetMappingAsync(
-			componentId, revision.Id, BenchmarkMappingStatuses.Mapped, isSrgNoBenchmark: false, isAdminOverride: false, ambiguousCandidateCount: 0, reason: "exact benchmark_key match", actor: "system", CancellationToken.None);
+			componentId, revision.Id, BenchmarkMappingStatuses.Mapped, isAdminOverride: false, ambiguousCandidateCount: 0, reason: "exact benchmark_key match", actor: "system", CancellationToken.None);
 
 		Assert.Equal(BenchmarkMappingStatuses.Mapped, mapping.Status);
 		Assert.Equal(revision.Id, mapping.BenchmarkRevisionId);
@@ -204,7 +234,7 @@ public sealed class BenchmarkRepositoryTests : IAsyncLifetime
 		Guid componentId = await SeedCatalogComponentAsync();
 
 		BenchmarkComponentMapping mapping = await _repository.SetMappingAsync(
-			componentId, benchmarkRevisionId: null, BenchmarkMappingStatuses.Ambiguous, isSrgNoBenchmark: false, isAdminOverride: false, ambiguousCandidateCount: 3, reason: "3 benchmark revisions share this component's product version", actor: null, CancellationToken.None);
+			componentId, benchmarkRevisionId: null, BenchmarkMappingStatuses.Ambiguous, isAdminOverride: false, ambiguousCandidateCount: 3, reason: "3 benchmark revisions share this component's product version", actor: null, CancellationToken.None);
 
 		Assert.Equal(BenchmarkMappingStatuses.Ambiguous, mapping.Status);
 		Assert.Null(mapping.BenchmarkRevisionId);
@@ -217,33 +247,11 @@ public sealed class BenchmarkRepositoryTests : IAsyncLifetime
 		Guid componentId = await SeedCatalogComponentAsync();
 
 		await _repository.SetMappingAsync(
-			componentId, benchmarkRevisionId: null, BenchmarkMappingStatuses.Unmapped, isSrgNoBenchmark: false, isAdminOverride: false, ambiguousCandidateCount: 0, reason: "no candidate found", actor: null, CancellationToken.None);
+			componentId, benchmarkRevisionId: null, BenchmarkMappingStatuses.Unmapped, isAdminOverride: false, ambiguousCandidateCount: 0, reason: "no candidate found", actor: null, CancellationToken.None);
 
 		IReadOnlyList<BenchmarkComponentMapping> allCurrent = await _repository.ListCurrentMappingsAsync(CancellationToken.None);
 		BenchmarkComponentMapping mapping = Assert.Single(allCurrent);
 		Assert.Equal(BenchmarkMappingStatuses.Unmapped, mapping.Status);
-	}
-
-	[Fact]
-	public async Task SetMappingAsync_SrgComponent_RecordsExplicitNoPublishedBenchmark()
-	{
-		Guid componentId = await SeedCatalogComponentAsync();
-
-		BenchmarkComponentMapping mapping = await _repository.SetMappingAsync(
-			componentId, benchmarkRevisionId: null, BenchmarkMappingStatuses.Unmapped, isSrgNoBenchmark: true, isAdminOverride: false, ambiguousCandidateCount: 0, reason: "SRG content has no published DISA benchmark", actor: null, CancellationToken.None);
-
-		Assert.True(mapping.IsSrgNoBenchmark);
-		Assert.Null(mapping.BenchmarkRevisionId);
-	}
-
-	[Fact]
-	public async Task SetMappingAsync_SrgFlagWithRevision_IsRejectedAsMutuallyExclusive()
-	{
-		Guid componentId = await SeedCatalogComponentAsync();
-		BenchmarkRevision revision = await _repository.ImportRevisionAsync(InventedCandidate(), BenchmarkSources.ManualUpload, CancellationToken.None);
-
-		await Assert.ThrowsAsync<ArgumentException>(() => _repository.SetMappingAsync(
-			componentId, revision.Id, BenchmarkMappingStatuses.Mapped, isSrgNoBenchmark: true, isAdminOverride: false, ambiguousCandidateCount: 0, reason: null, actor: null, CancellationToken.None));
 	}
 
 	[Fact]
@@ -252,7 +260,7 @@ public sealed class BenchmarkRepositoryTests : IAsyncLifetime
 		Guid componentId = await SeedCatalogComponentAsync();
 
 		await Assert.ThrowsAsync<ArgumentException>(() => _repository.SetMappingAsync(
-			componentId, benchmarkRevisionId: null, BenchmarkMappingStatuses.Mapped, isSrgNoBenchmark: false, isAdminOverride: false, ambiguousCandidateCount: 0, reason: null, actor: null, CancellationToken.None));
+			componentId, benchmarkRevisionId: null, BenchmarkMappingStatuses.Mapped, isAdminOverride: false, ambiguousCandidateCount: 0, reason: null, actor: null, CancellationToken.None));
 	}
 
 	[Fact]
@@ -263,10 +271,10 @@ public sealed class BenchmarkRepositoryTests : IAsyncLifetime
 		BenchmarkRevision revisionTwo = await _repository.ImportRevisionAsync(InventedCandidate(ruleTitle: "second"), BenchmarkSources.ManualUpload, CancellationToken.None);
 
 		BenchmarkComponentMapping systemSuggested = await _repository.SetMappingAsync(
-			componentId, revisionOne.Id, BenchmarkMappingStatuses.Suggested, isSrgNoBenchmark: false, isAdminOverride: false, ambiguousCandidateCount: 0, reason: "system suggestion", actor: null, CancellationToken.None);
+			componentId, revisionOne.Id, BenchmarkMappingStatuses.Suggested, isAdminOverride: false, ambiguousCandidateCount: 0, reason: "system suggestion", actor: null, CancellationToken.None);
 
 		BenchmarkComponentMapping adminOverride = await _repository.SetMappingAsync(
-			componentId, revisionTwo.Id, BenchmarkMappingStatuses.Mapped, isSrgNoBenchmark: false, isAdminOverride: true, ambiguousCandidateCount: 0, reason: "admin confirmed the correct revision", actor: "admin@example.internal", CancellationToken.None);
+			componentId, revisionTwo.Id, BenchmarkMappingStatuses.Mapped, isAdminOverride: true, ambiguousCandidateCount: 0, reason: "admin confirmed the correct revision", actor: "admin@example.internal", CancellationToken.None);
 
 		BenchmarkComponentMapping? current = await _repository.GetCurrentMappingAsync(componentId, CancellationToken.None);
 		Assert.NotNull(current);
@@ -286,9 +294,9 @@ public sealed class BenchmarkRepositoryTests : IAsyncLifetime
 		Guid componentA = await SeedCatalogComponentAsync("vcenter");
 		Guid componentB = await SeedCatalogComponentAsync("esxi");
 
-		await _repository.SetMappingAsync(componentA, null, BenchmarkMappingStatuses.Unmapped, false, false, 0, null, null, CancellationToken.None);
-		await _repository.SetMappingAsync(componentA, null, BenchmarkMappingStatuses.Ambiguous, false, false, 2, "re-evaluated", null, CancellationToken.None);
-		await _repository.SetMappingAsync(componentB, null, BenchmarkMappingStatuses.Unmapped, false, false, 0, null, null, CancellationToken.None);
+		await _repository.SetMappingAsync(componentA, null, BenchmarkMappingStatuses.Unmapped, false, 0, null, null, CancellationToken.None);
+		await _repository.SetMappingAsync(componentA, null, BenchmarkMappingStatuses.Ambiguous, false, 2, "re-evaluated", null, CancellationToken.None);
+		await _repository.SetMappingAsync(componentB, null, BenchmarkMappingStatuses.Unmapped, false, 0, null, null, CancellationToken.None);
 
 		IReadOnlyList<BenchmarkComponentMapping> current = await _repository.ListCurrentMappingsAsync(CancellationToken.None);
 
@@ -303,5 +311,49 @@ public sealed class BenchmarkRepositoryTests : IAsyncLifetime
 		Guid componentId = await SeedCatalogComponentAsync();
 
 		Assert.Null(await _repository.GetCurrentMappingAsync(componentId, CancellationToken.None));
+	}
+
+	// Issue #1002: SRG is derived from the catalog's own kind vocabulary, never stated
+	// by a mapping write -- these prove the derivation join itself, independent of the
+	// API-layer read-state surfaced in BenchmarksApiTests.
+
+	[Fact]
+	public async Task GetComponentContentKindAsync_SrgComponent_ReturnsSrg()
+	{
+		Guid componentId = await SeedCatalogComponentWithKindAsync(CatalogKinds.Srg, "srg-component");
+
+		Assert.Equal(CatalogKinds.Srg, await _repository.GetComponentContentKindAsync(componentId, CancellationToken.None));
+	}
+
+	[Fact]
+	public async Task GetComponentContentKindAsync_StigComponent_ReturnsStig()
+	{
+		Guid componentId = await SeedCatalogComponentWithKindAsync(CatalogKinds.Stig, "stig-component");
+
+		Assert.Equal(CatalogKinds.Stig, await _repository.GetComponentContentKindAsync(componentId, CancellationToken.None));
+	}
+
+	[Fact]
+	public async Task GetComponentContentKindAsync_NoExecutionProfileYet_ReturnsNull()
+	{
+		Guid componentId = await SeedCatalogComponentAsync();
+
+		Assert.Null(await _repository.GetComponentContentKindAsync(componentId, CancellationToken.None));
+	}
+
+	[Fact]
+	public async Task SetMappingAsync_NoLongerAcceptsIsSrgNoBenchmarkParameter_MutualExclusivityCheckIsGone()
+	{
+		// Issue #1002: migration 0071 dropped is_srg_no_benchmark and its CHECK
+		// constraint entirely -- a mapping with a null benchmark_revision_id and any
+		// non-'mapped' status is accepted regardless of the component's catalog kind;
+		// the repository itself no longer knows or cares about SRG-ness at write time.
+		Guid componentId = await SeedCatalogComponentWithKindAsync(CatalogKinds.Srg, "srg-write-component");
+
+		BenchmarkComponentMapping mapping = await _repository.SetMappingAsync(
+			componentId, benchmarkRevisionId: null, BenchmarkMappingStatuses.Unmapped, isAdminOverride: false, ambiguousCandidateCount: 0, reason: "system evaluation", actor: null, CancellationToken.None);
+
+		Assert.Equal(BenchmarkMappingStatuses.Unmapped, mapping.Status);
+		Assert.Null(mapping.BenchmarkRevisionId);
 	}
 }

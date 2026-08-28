@@ -245,8 +245,29 @@ public sealed class SchemaMigrationTests
 	/// SDDC Manager application, Automation application), same
 	/// invented-from-documentation/idempotent-ON-CONFLICT/no-new-grants pattern as
 	/// 0064/0067 --
+	///
+	/// 0070 (issue #998, epic #726, PR #1004): reconciles every seeded
+	/// catalog_product_versions.version_key from the pre-decision patch-level/exact
+	/// forms ("8.0.3", "9.0.0", ...) to the vendor's DECLARED VERSION SCOPE verbatim
+	/// ("8.0", "9.x", ...) -- catalog keys only; the scope-matching logic itself lives
+	/// in Waypoint.Core.Components.VersionScopeMatcher, no schema shape changes, no
+	/// new runner grants --
+	///
+	/// 0071 (issue #1002, epic #726; slot 0070 was reserved for issue #998's catalog
+	/// seed/matcher work per epic #726 coordination and is claimed by PR #1004's
+	/// merged migration above; 0071 verified free against both the migrations
+	/// directory and open PRs at this migration's own commit time, re-verified after
+	/// rebasing onto the merged #1003/#1004) removes
+	/// migration 0052's admin-stated benchmark_component_mappings.is_srg_no_benchmark
+	/// column and its mutual-exclusivity CHECK: SRG participation in benchmark mapping
+	/// is now a DERIVED read-state (Waypoint.Api joins the component's bound catalog
+	/// content kind), never stored, never admin-settable. Least-lossy history shape:
+	/// any row that had is_srg_no_benchmark = true gets its historical fact folded into
+	/// its own free-text `reason` column BEFORE the column drops, so an old mapping
+	/// decision's audit trail still explains itself; no new runner grants, no other
+	/// schema changes, issue #1002 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 69;
+	private const int ExpectedMigrationCount = 70;
 
 	private readonly PostgresFixture _fixture;
 
@@ -985,6 +1006,114 @@ public sealed class SchemaMigrationTests
 		Assert.Equal(
 			CatalogImportEntryDispositions.All.OrderBy(v => v, StringComparer.Ordinal),
 			ParseCheckInList(migration, "catalog_import_report_entries_disposition_check"));
+	}
+
+	/// <summary>
+	/// Issue #1002: proves migration 0071's historical-preservation shape directly
+	/// against its own SQL text -- the least-lossy behavior a fully-migrated database
+	/// can no longer exercise (the column is gone by the time <c>ApplyAsync</c>
+	/// finishes, so this reconstructs the pre-0071 shape by hand, seeds a legacy row the
+	/// same shape an old <c>SetMappingAsync</c> caller would have produced, then
+	/// executes 0071's own embedded SQL text against it -- the same "run the real
+	/// migration text" idiom <see cref="Migrations_FullPipeline_IsIdempotentAndComplete"/>
+	/// already establishes for raw re-apply). A row with a blank reason gets the
+	/// synthesized note appended; a row with an existing informative reason keeps it,
+	/// with the note appended rather than replacing it -- audit text is never
+	/// discarded, only extended.
+	/// </summary>
+	[Fact]
+	public async Task Migration0071_BackfillsReasonBeforeDroppingColumn_PreservingHistoryHonestly()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// Reconstruct the pre-0071 shape: 0071 already dropped the column on this fully
+		// migrated database, so add it back exactly as 0052 first declared it, then seed
+		// two legacy rows: one with no reason at all (the synthesized note becomes the
+		// WHOLE reason), one with an existing reason (the note is appended, not
+		// replacing what a real Admin/system caller already recorded).
+		await using (NpgsqlCommand addColumnBack = new(
+			"ALTER TABLE benchmark_component_mappings ADD COLUMN is_srg_no_benchmark BOOLEAN NOT NULL DEFAULT false",
+			connection))
+		{
+			await addColumnBack.ExecuteNonQueryAsync();
+		}
+
+		await using NpgsqlCommand insertSourceRevision = new(
+			"INSERT INTO catalog_source_revisions (revision_key) VALUES ('migration-0071-test') RETURNING id", connection);
+		Guid sourceRevisionId = (Guid)(await insertSourceRevision.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand insertProduct = new(
+			"INSERT INTO catalog_products (source_revision_id, vendor, product_key, display_name) VALUES ($1, 'vmware', 'migration-0071-test', 'Test') RETURNING id", connection);
+		insertProduct.Parameters.AddWithValue(sourceRevisionId);
+		Guid productId = (Guid)(await insertProduct.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand insertVersion = new(
+			"INSERT INTO catalog_product_versions (product_id, version_key, display_name) VALUES ($1, '1.0.0', 'Test 1.0') RETURNING id", connection);
+		insertVersion.Parameters.AddWithValue(productId);
+		Guid versionId = (Guid)(await insertVersion.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand insertComponentBlankReason = new(
+			"INSERT INTO catalog_components (product_version_id, component_key, display_name, transport, selector_kind) VALUES ($1, 'blank-reason', 'Blank Reason', 'vmware', 'vcenter') RETURNING id", connection);
+		insertComponentBlankReason.Parameters.AddWithValue(versionId);
+		Guid blankReasonComponentId = (Guid)(await insertComponentBlankReason.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand insertComponentExistingReason = new(
+			"INSERT INTO catalog_components (product_version_id, component_key, display_name, transport, selector_kind) VALUES ($1, 'existing-reason', 'Existing Reason', 'vmware', 'vcenter') RETURNING id", connection);
+		insertComponentExistingReason.Parameters.AddWithValue(versionId);
+		Guid existingReasonComponentId = (Guid)(await insertComponentExistingReason.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand insertBlankReasonMapping = new(
+			"""
+			INSERT INTO benchmark_component_mappings (catalog_component_id, status, is_srg_no_benchmark, is_current, reason)
+			VALUES ($1, 'unmapped', true, true, NULL)
+			""", connection);
+		insertBlankReasonMapping.Parameters.AddWithValue(blankReasonComponentId);
+		await insertBlankReasonMapping.ExecuteNonQueryAsync();
+
+		await using NpgsqlCommand insertExistingReasonMapping = new(
+			"""
+			INSERT INTO benchmark_component_mappings (catalog_component_id, status, is_srg_no_benchmark, is_current, reason)
+			VALUES ($1, 'unmapped', true, true, 'SRG content has no published DISA benchmark')
+			""", connection);
+		insertExistingReasonMapping.Parameters.AddWithValue(existingReasonComponentId);
+		await insertExistingReasonMapping.ExecuteNonQueryAsync();
+
+		// Now execute 0071's own embedded SQL text -- the exact statements a fresh
+		// database ran, applied here against this hand-reconstructed pre-state.
+		string migration0071 = await ReadMigrationSqlAsync("0071_drop_srg_no_benchmark_flag.sql");
+		await using (NpgsqlCommand applyMigration0071 = new(migration0071, connection))
+		{
+			await applyMigration0071.ExecuteNonQueryAsync();
+		}
+
+		// The column is gone again.
+		Assert.False(await ColumnExistsAsync(connection, "benchmark_component_mappings", "is_srg_no_benchmark"));
+
+		await using NpgsqlCommand selectBlankReason = new(
+			"SELECT reason FROM benchmark_component_mappings WHERE catalog_component_id = $1", connection);
+		selectBlankReason.Parameters.AddWithValue(blankReasonComponentId);
+		string blankReasonResult = (string)(await selectBlankReason.ExecuteScalarAsync())!;
+		Assert.Equal("[historical: recorded is_srg_no_benchmark=true before issue #1002 made SRG mapping status a derived read-state]", blankReasonResult);
+
+		await using NpgsqlCommand selectExistingReason = new(
+			"SELECT reason FROM benchmark_component_mappings WHERE catalog_component_id = $1", connection);
+		selectExistingReason.Parameters.AddWithValue(existingReasonComponentId);
+		string existingReasonResult = (string)(await selectExistingReason.ExecuteScalarAsync())!;
+		Assert.StartsWith("SRG content has no published DISA benchmark", existingReasonResult, StringComparison.Ordinal);
+		Assert.Contains("[historical: recorded is_srg_no_benchmark=true", existingReasonResult, StringComparison.Ordinal);
+	}
+
+	private static async Task<bool> ColumnExistsAsync(NpgsqlConnection connection, string table, string column)
+	{
+		await using NpgsqlCommand command = new(
+			"SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2", connection);
+		command.Parameters.AddWithValue(table);
+		command.Parameters.AddWithValue(column);
+		return await command.ExecuteScalarAsync() is not null;
 	}
 
 	/// <summary>The raw text of the 0050 migration embedded resource (authoritative CHECK source).</summary>

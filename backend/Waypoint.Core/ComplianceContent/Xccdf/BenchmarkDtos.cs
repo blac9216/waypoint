@@ -45,17 +45,22 @@ public sealed record BenchmarkRule(
 
 /// <summary>
 /// The current or historical mapping of one catalog component to a benchmark revision
-/// (migration 0052's <c>benchmark_component_mappings</c>). Issue #730 AC "explicit
-/// Admin mapping/override with versioned audit history": every row is one point-in-time
+/// (migration 0052's <c>benchmark_component_mappings</c>, migration 0071 removed the
+/// admin-stated <c>is_srg_no_benchmark</c> column). Issue #730 AC "explicit Admin
+/// mapping/override with versioned audit history": every row is one point-in-time
 /// mapping decision; <see cref="IsCurrent"/> marks the one row per component that is
 /// presently in effect, and superseded rows remain queryable history.
+///
+/// Issue #1002: SRG participation is DERIVED, never stored on this record -- see
+/// <see cref="Waypoint.Api.Contracts.BenchmarkMappingResponse"/>'s
+/// <c>DerivedState</c>, which a repository/controller computes by joining the
+/// component's bound catalog content kind, not from any column here.
 /// </summary>
 public sealed record BenchmarkComponentMapping(
 	Guid Id,
 	Guid CatalogComponentId,
 	Guid? BenchmarkRevisionId,
 	string Status,
-	bool IsSrgNoBenchmark,
 	bool IsAdminOverride,
 	bool IsCurrent,
 	int AmbiguousCandidateCount,

@@ -179,7 +179,6 @@ public sealed class BenchmarkRepository : IBenchmarkRepository
 		Guid catalogComponentId,
 		Guid? benchmarkRevisionId,
 		string status,
-		bool isSrgNoBenchmark,
 		bool isAdminOverride,
 		int ambiguousCandidateCount,
 		string? reason,
@@ -190,11 +189,6 @@ public sealed class BenchmarkRepository : IBenchmarkRepository
 		if (statusErrors.Count > 0)
 		{
 			throw new ArgumentException(string.Join("; ", statusErrors), nameof(status));
-		}
-
-		if (isSrgNoBenchmark && benchmarkRevisionId is not null)
-		{
-			throw new ArgumentException("a mapping cannot both declare 'SRG has no published benchmark' and reference a benchmark revision", nameof(benchmarkRevisionId));
 		}
 
 		if (status == BenchmarkMappingStatuses.Mapped && benchmarkRevisionId is null)
@@ -218,14 +212,13 @@ public sealed class BenchmarkRepository : IBenchmarkRepository
 		await using NpgsqlCommand insert = new(
 			"""
 			INSERT INTO benchmark_component_mappings
-				(catalog_component_id, benchmark_revision_id, status, is_srg_no_benchmark, is_admin_override, is_current, ambiguous_candidate_count, reason, actor)
-			VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8)
-			RETURNING id, catalog_component_id, benchmark_revision_id, status, is_srg_no_benchmark, is_admin_override, is_current, ambiguous_candidate_count, reason, actor, created_at
+				(catalog_component_id, benchmark_revision_id, status, is_admin_override, is_current, ambiguous_candidate_count, reason, actor)
+			VALUES ($1, $2, $3, $4, true, $5, $6, $7)
+			RETURNING id, catalog_component_id, benchmark_revision_id, status, is_admin_override, is_current, ambiguous_candidate_count, reason, actor, created_at
 			""", connection, transaction);
 		insert.Parameters.AddWithValue(catalogComponentId);
 		insert.Parameters.AddWithValue((object?)benchmarkRevisionId ?? DBNull.Value);
 		insert.Parameters.AddWithValue(status);
-		insert.Parameters.AddWithValue(isSrgNoBenchmark);
 		insert.Parameters.AddWithValue(isAdminOverride);
 		insert.Parameters.AddWithValue(ambiguousCandidateCount);
 		insert.Parameters.AddWithValue((object?)reason ?? DBNull.Value);
@@ -247,7 +240,7 @@ public sealed class BenchmarkRepository : IBenchmarkRepository
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT id, catalog_component_id, benchmark_revision_id, status, is_srg_no_benchmark, is_admin_override, is_current, ambiguous_candidate_count, reason, actor, created_at
+			SELECT id, catalog_component_id, benchmark_revision_id, status, is_admin_override, is_current, ambiguous_candidate_count, reason, actor, created_at
 			FROM benchmark_component_mappings
 			WHERE catalog_component_id = $1 AND is_current
 			""", connection);
@@ -262,7 +255,7 @@ public sealed class BenchmarkRepository : IBenchmarkRepository
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT id, catalog_component_id, benchmark_revision_id, status, is_srg_no_benchmark, is_admin_override, is_current, ambiguous_candidate_count, reason, actor, created_at
+			SELECT id, catalog_component_id, benchmark_revision_id, status, is_admin_override, is_current, ambiguous_candidate_count, reason, actor, created_at
 			FROM benchmark_component_mappings
 			WHERE catalog_component_id = $1
 			ORDER BY created_at DESC, id DESC
@@ -284,7 +277,7 @@ public sealed class BenchmarkRepository : IBenchmarkRepository
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT id, catalog_component_id, benchmark_revision_id, status, is_srg_no_benchmark, is_admin_override, is_current, ambiguous_candidate_count, reason, actor, created_at
+			SELECT id, catalog_component_id, benchmark_revision_id, status, is_admin_override, is_current, ambiguous_candidate_count, reason, actor, created_at
 			FROM benchmark_component_mappings
 			WHERE is_current
 			ORDER BY created_at DESC, id DESC
@@ -307,6 +300,27 @@ public sealed class BenchmarkRepository : IBenchmarkRepository
 		command.Parameters.AddWithValue(catalogComponentId);
 		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 		return result is not null;
+	}
+
+	public async Task<string?> GetComponentContentKindAsync(Guid catalogComponentId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		// Issue #1002: SRG is the conservative, fail-closed answer for a component
+		// whose execution profiles somehow span both kinds (should not happen for any
+		// catalog row this repository's own seed data produces) -- ORDER BY so an 'srg'
+		// row sorts first and LIMIT 1 picks it deterministically over a 'stig' row.
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT DISTINCT cr.kind
+			FROM catalog_execution_profiles ep
+			JOIN catalog_content_releases cr ON cr.id = ep.content_release_id
+			WHERE ep.component_id = $1
+			ORDER BY cr.kind ASC
+			LIMIT 1
+			""", connection);
+		command.Parameters.AddWithValue(catalogComponentId);
+		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		return result as string;
 	}
 
 	private static async Task<BenchmarkRevision?> FindByDigestAsync(
@@ -360,9 +374,8 @@ public sealed class BenchmarkRepository : IBenchmarkRepository
 		reader.GetString(offset + 3),
 		reader.GetBoolean(offset + 4),
 		reader.GetBoolean(offset + 5),
-		reader.GetBoolean(offset + 6),
-		reader.GetInt32(offset + 7),
+		reader.GetInt32(offset + 6),
+		reader.IsDBNull(offset + 7) ? null : reader.GetString(offset + 7),
 		reader.IsDBNull(offset + 8) ? null : reader.GetString(offset + 8),
-		reader.IsDBNull(offset + 9) ? null : reader.GetString(offset + 9),
-		reader.GetFieldValue<DateTimeOffset>(offset + 10));
+		reader.GetFieldValue<DateTimeOffset>(offset + 9));
 }

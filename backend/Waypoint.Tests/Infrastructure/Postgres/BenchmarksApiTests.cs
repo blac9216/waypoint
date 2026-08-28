@@ -148,6 +148,26 @@ public sealed class BenchmarksApiTests : IAsyncLifetime
 		return component.Id;
 	}
 
+	/// <summary>
+	/// Issue #1002: seeds a catalog component bound to an execution profile of the
+	/// given <paramref name="kind"/> (stig|srg) -- the join
+	/// <c>GET /benchmark-mappings/{id}</c>'s <c>derived_state</c> depends on.
+	/// </summary>
+	private async Task<Guid> SeedCatalogComponentWithKindAsync(string kind, string componentKey)
+	{
+		CatalogSourceRevision sourceRevision = await _catalogRepository.UpsertSourceRevisionAsync($"test-revision-{Guid.NewGuid():N}", "invented fixture revision", CancellationToken.None);
+		CatalogProduct product = await _catalogRepository.UpsertProductAsync(sourceRevision.Id, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion version = await _catalogRepository.UpsertProductVersionAsync(product.Id, "8.0.3", "vSphere 8.0 Update 3", CancellationToken.None);
+		CatalogComponent component = await _catalogRepository.UpsertComponentAsync(
+			version.Id, new CatalogComponentDefinition(componentKey, "vCenter Server", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null), CancellationToken.None);
+		CatalogContentRelease contentRelease = await _catalogRepository.UpsertContentReleaseAsync(
+			sourceRevision.Id, kind, $"{componentKey}-{kind}-release", $"Invented {kind} release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await _catalogRepository.UpsertReportGroupAsync($"{componentKey}-{kind}-group", $"Invented {kind} report group", 3, CancellationToken.None);
+		await _catalogRepository.CreateExecutionProfileAsync(
+			component.Id, contentRelease.Id, reportGroup.Id, "V1", kind == CatalogKinds.Stig ? CatalogOutputKinds.HdfAndCkl : CatalogOutputKinds.Hdf, CancellationToken.None);
+		return component.Id;
+	}
+
 	private static HttpRequestMessage WithRole(HttpMethod method, string url, string role)
 	{
 		HttpRequestMessage request = new(method, url);
@@ -252,9 +272,9 @@ public sealed class BenchmarksApiTests : IAsyncLifetime
 		Guid unmapped = await SeedCatalogComponentAsync("nsx-manager");
 		BenchmarkRevision revision = await _repository.ImportRevisionAsync(InventedCandidate(), BenchmarkSources.ManualUpload, CancellationToken.None);
 
-		await _repository.SetMappingAsync(mapped, revision.Id, BenchmarkMappingStatuses.Mapped, false, false, 0, "exact match", "system", CancellationToken.None);
-		await _repository.SetMappingAsync(ambiguous, null, BenchmarkMappingStatuses.Ambiguous, false, false, 2, "two candidates", "system", CancellationToken.None);
-		await _repository.SetMappingAsync(unmapped, null, BenchmarkMappingStatuses.Unmapped, false, false, 0, "no candidate", "system", CancellationToken.None);
+		await _repository.SetMappingAsync(mapped, revision.Id, BenchmarkMappingStatuses.Mapped, false, 0, "exact match", "system", CancellationToken.None);
+		await _repository.SetMappingAsync(ambiguous, null, BenchmarkMappingStatuses.Ambiguous, false, 2, "two candidates", "system", CancellationToken.None);
+		await _repository.SetMappingAsync(unmapped, null, BenchmarkMappingStatuses.Unmapped, false, 0, "no candidate", "system", CancellationToken.None);
 
 		HttpResponseMessage response = await _client.SendAsync(WithRole(HttpMethod.Get, "/api/v1/benchmark-mappings", "Viewer"));
 
@@ -282,7 +302,7 @@ public sealed class BenchmarksApiTests : IAsyncLifetime
 	{
 		Guid componentId = await SeedCatalogComponentAsync();
 		HttpRequestMessage request = WithRole(HttpMethod.Put, $"/api/v1/benchmark-mappings/{componentId}", "Viewer");
-		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, BenchmarkMappingStatuses.Unmapped, false, "reason"));
+		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, BenchmarkMappingStatuses.Unmapped, "reason"));
 
 		HttpResponseMessage response = await _client.SendAsync(request);
 
@@ -294,7 +314,7 @@ public sealed class BenchmarksApiTests : IAsyncLifetime
 	{
 		Guid componentId = await SeedCatalogComponentAsync();
 		HttpRequestMessage request = WithRole(HttpMethod.Put, $"/api/v1/benchmark-mappings/{componentId}", "Cyber");
-		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, BenchmarkMappingStatuses.Unmapped, false, "reason"));
+		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, BenchmarkMappingStatuses.Unmapped, "reason"));
 
 		HttpResponseMessage response = await _client.SendAsync(request);
 
@@ -305,7 +325,7 @@ public sealed class BenchmarksApiTests : IAsyncLifetime
 	public async Task PutMapping_UnknownComponent_Returns404()
 	{
 		HttpRequestMessage request = WithRole(HttpMethod.Put, $"/api/v1/benchmark-mappings/{Guid.NewGuid()}", "Admin");
-		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, BenchmarkMappingStatuses.Unmapped, false, "reason"));
+		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, BenchmarkMappingStatuses.Unmapped, "reason"));
 
 		HttpResponseMessage response = await _client.SendAsync(request);
 
@@ -317,7 +337,7 @@ public sealed class BenchmarksApiTests : IAsyncLifetime
 	{
 		Guid componentId = await SeedCatalogComponentAsync();
 		HttpRequestMessage request = WithRole(HttpMethod.Put, $"/api/v1/benchmark-mappings/{componentId}", "Admin");
-		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(Guid.NewGuid().ToString(), BenchmarkMappingStatuses.Mapped, false, "reason"));
+		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(Guid.NewGuid().ToString(), BenchmarkMappingStatuses.Mapped, "reason"));
 
 		HttpResponseMessage response = await _client.SendAsync(request);
 
@@ -329,39 +349,98 @@ public sealed class BenchmarksApiTests : IAsyncLifetime
 	{
 		Guid componentId = await SeedCatalogComponentAsync();
 		HttpRequestMessage request = WithRole(HttpMethod.Put, $"/api/v1/benchmark-mappings/{componentId}", "Admin");
-		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, "not-a-real-status", false, "reason"));
+		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, "not-a-real-status", "reason"));
 
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 	}
 
+	/// <summary>
+	/// Issue #1002: the endpoint no longer accepts "SRG has no published benchmark" as
+	/// an admin-stated fact -- a caller still sending the removed field with a truthy
+	/// value gets a pointed 400 naming the replacement, matching this endpoint's
+	/// existing fail-closed convention for every other rejected shape.
+	/// </summary>
 	[Fact]
-	public async Task PutMapping_SrgFlagWithRevision_Returns400()
+	public async Task PutMapping_IsSrgNoBenchmarkTrue_IsRejectedAsRemovedField()
 	{
 		Guid componentId = await SeedCatalogComponentAsync();
-		BenchmarkRevision revision = await _repository.ImportRevisionAsync(InventedCandidate(), BenchmarkSources.ManualUpload, CancellationToken.None);
 		HttpRequestMessage request = WithRole(HttpMethod.Put, $"/api/v1/benchmark-mappings/{componentId}", "Admin");
-		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(revision.Id.ToString(), BenchmarkMappingStatuses.Mapped, true, "reason"));
+		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, BenchmarkMappingStatuses.Unmapped, "reason", IsSrgNoBenchmark: true));
 
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		Assert.Contains("is_srg_no_benchmark", body, StringComparison.Ordinal);
+		Assert.Contains("1002", body, StringComparison.Ordinal);
 	}
 
+	/// <summary>A legacy client still echoing a previously-read `false` should not break.</summary>
 	[Fact]
-	public async Task PutMapping_SrgNoBenchmark_IsExplicitlyRecorded()
+	public async Task PutMapping_IsSrgNoBenchmarkFalse_IsAccepted()
 	{
-		Guid componentId = await SeedCatalogComponentAsync("srg-component");
+		Guid componentId = await SeedCatalogComponentAsync();
 		HttpRequestMessage request = WithRole(HttpMethod.Put, $"/api/v1/benchmark-mappings/{componentId}", "Admin");
-		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, BenchmarkMappingStatuses.Unmapped, true, "SRG content has no published DISA benchmark"));
+		request.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(null, BenchmarkMappingStatuses.Unmapped, "reason", IsSrgNoBenchmark: false));
 
 		HttpResponseMessage response = await _client.SendAsync(request);
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #1002 item 1: a component bound to an `srg`-kind catalog content release
+	/// renders `not_applicable_srg` -- computed at read time from the catalog join,
+	/// never from any admin-stated field.
+	/// </summary>
+	[Fact]
+	public async Task GetCurrentMapping_SrgComponent_RendersNotApplicableSrgDerivedState()
+	{
+		Guid componentId = await SeedCatalogComponentWithKindAsync(CatalogKinds.Srg, "srg-component");
+		await _repository.SetMappingAsync(componentId, null, BenchmarkMappingStatuses.Unmapped, false, 0, "no candidate", "system", CancellationToken.None);
+
+		HttpResponseMessage response = await _client.SendAsync(WithRole(HttpMethod.Get, $"/api/v1/benchmark-mappings/{componentId}", "Viewer"));
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-		Assert.True(document.RootElement.GetProperty("is_srg_no_benchmark").GetBoolean());
-		Assert.True(document.RootElement.GetProperty("is_admin_override").GetBoolean());
+		Assert.Equal("not_applicable_srg", document.RootElement.GetProperty("derived_state").GetString());
+	}
+
+	/// <summary>
+	/// Issue #1002 item 2: a stig-kind component with no mapped benchmark revision on
+	/// its CURRENT mapping renders a standing `benchmark_missing` alert -- non-blocking,
+	/// still queryable, never an error.
+	/// </summary>
+	[Fact]
+	public async Task GetCurrentMapping_StigComponentWithoutBenchmark_RendersBenchmarkMissingDerivedState()
+	{
+		Guid componentId = await SeedCatalogComponentWithKindAsync(CatalogKinds.Stig, "stig-component");
+		await _repository.SetMappingAsync(componentId, null, BenchmarkMappingStatuses.Unmapped, false, 0, "no candidate", "system", CancellationToken.None);
+
+		HttpResponseMessage response = await _client.SendAsync(WithRole(HttpMethod.Get, $"/api/v1/benchmark-mappings/{componentId}", "Viewer"));
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal("benchmark_missing", document.RootElement.GetProperty("derived_state").GetString());
+	}
+
+	/// <summary>A stig component WITH a mapped benchmark revision has nothing further to surface -- `derived_state` is null.</summary>
+	[Fact]
+	public async Task GetCurrentMapping_StigComponentWithBenchmark_HasNullDerivedState()
+	{
+		Guid componentId = await SeedCatalogComponentWithKindAsync(CatalogKinds.Stig, "stig-mapped-component");
+		BenchmarkRevision revision = await _repository.ImportRevisionAsync(InventedCandidate(), BenchmarkSources.ManualUpload, CancellationToken.None);
+		await _repository.SetMappingAsync(componentId, revision.Id, BenchmarkMappingStatuses.Mapped, false, 0, "exact match", "system", CancellationToken.None);
+
+		HttpResponseMessage response = await _client.SendAsync(WithRole(HttpMethod.Get, $"/api/v1/benchmark-mappings/{componentId}", "Viewer"));
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		// WaypointJsonOptions.Default sets DefaultIgnoreCondition.WhenWritingNull, so a
+		// null derived_state is OMITTED from the payload entirely, not present-as-null.
+		Assert.False(document.RootElement.TryGetProperty("derived_state", out _));
 	}
 
 	[Fact]
@@ -371,11 +450,11 @@ public sealed class BenchmarksApiTests : IAsyncLifetime
 		BenchmarkRevision revisionOne = await _repository.ImportRevisionAsync(InventedCandidate(ruleTitle: "first"), BenchmarkSources.ManualUpload, CancellationToken.None);
 		BenchmarkRevision revisionTwo = await _repository.ImportRevisionAsync(InventedCandidate(ruleTitle: "second"), BenchmarkSources.ManualUpload, CancellationToken.None);
 
-		await _repository.SetMappingAsync(componentId, revisionOne.Id, BenchmarkMappingStatuses.Suggested, false, false, 0, "system suggestion", null, CancellationToken.None);
+		await _repository.SetMappingAsync(componentId, revisionOne.Id, BenchmarkMappingStatuses.Suggested, false, 0, "system suggestion", null, CancellationToken.None);
 
 		HttpRequestMessage overrideRequest = WithRole(HttpMethod.Put, $"/api/v1/benchmark-mappings/{componentId}", "Admin");
 		overrideRequest.Content = MappingRequestContent(new BenchmarkMappingOverrideRequest(
-			revisionTwo.Id.ToString(), BenchmarkMappingStatuses.Mapped, false, "admin confirmed the correct revision"));
+			revisionTwo.Id.ToString(), BenchmarkMappingStatuses.Mapped, "admin confirmed the correct revision"));
 
 		HttpResponseMessage overrideResponse = await _client.SendAsync(overrideRequest);
 		Assert.Equal(HttpStatusCode.OK, overrideResponse.StatusCode);
