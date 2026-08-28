@@ -120,11 +120,12 @@ public sealed class BaselineRepositoryTests : IAsyncLifetime
 	/// benchmark" activating successfully. Activation/approval of the profile-only
 	/// baseline is NOT gated on a benchmark revision being present; the standing
 	/// `benchmark_missing` alert (Waypoint.Api's BenchmarksController) surfaces the gap
-	/// without blocking this call. The scan-time consequence of the still-missing
-	/// benchmark is a separate, already-non-blocking, per-component
-	/// <c>ScanPlanSkipReasons.UnmappedBenchmark</c> skip in
-	/// <c>ScanPlannerService</c> -- see <c>ScanPlannerServiceTests</c> for that half of
-	/// the "approvable, scannable, standing alert" contract.
+	/// without blocking this call. Issue #1021 fixed the scan-time consequence too: this
+	/// state now plans and executes the STIG profile profile-only in
+	/// <c>ScanPlannerService</c> (<c>ScanPlanItem.IsBenchmarkMissing</c>) instead of the
+	/// pre-#1021 <c>ScanPlanSkipReasons.UnmappedBenchmark</c> skip that made the
+	/// component permanently unplannable -- see <c>ScanPlannerServiceTests</c> for that
+	/// half of the "approvable, scannable, standing alert" contract.
 	/// </summary>
 	[Fact]
 	public async Task ActivateAsync_StigExecutionProfileWithNoBenchmarkRevision_ActivatesSuccessfully()

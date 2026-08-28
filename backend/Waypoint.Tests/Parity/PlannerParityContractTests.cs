@@ -186,15 +186,15 @@ public sealed class PlannerParityContractTests : IAsyncLifetime
 	}
 
 	/// <summary>
-	/// Deliverable 2 (skip-parity): a family with no active baseline and a family with
-	/// an unmapped STIG benchmark each produce explicit skips while a healthy sibling in
-	/// the SAME plan compilation still plans -- epic #726 §3/§5's per-component
-	/// isolation, exercised end-to-end through a real multi-family planner compile
-	/// rather than the single-component cases <c>ScanPlannerServiceTests</c> already
-	/// covers.
+	/// Deliverable 2 (skip-parity): a family with no active baseline produces an explicit
+	/// skip while a healthy SRG sibling and an unmapped-STIG-benchmark family (issue
+	/// #1021: profile-only, non-blocking annotation, NOT a skip) both still plan in the
+	/// SAME compilation -- epic #726 §3/§5's per-component isolation, exercised
+	/// end-to-end through a real multi-family planner compile rather than the
+	/// single-component cases <c>ScanPlannerServiceTests</c> already covers.
 	/// </summary>
 	[Fact]
-	public async Task CompileAsync_SkipParity_NoActiveBaselineAndUnmappedBenchmark_SkipAcrossTwoFamiliesWithHealthySiblingStillPlanned()
+	public async Task CompileAsync_SkipParity_NoActiveBaselineSkipsWhileUnmappedBenchmarkPlansProfileOnly()
 	{
 		Guid siteId = (await _sites.CreateAsync($"site-skip-parity-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
@@ -218,7 +218,8 @@ public sealed class PlannerParityContractTests : IAsyncLifetime
 		Guid nsxComponent = await SeedComponentLinkedToAsync(targetId.Value, nsxDetail.Component.Id, nsxRow.ProductVersionKey, "host-skip-parity-nsx-nobaseline");
 
 		// Family 2: vSphere 8-0 STIG (vmware) vCenter component whose active baseline has
-		// no benchmark revision mapped -- ScanPlanSkipReasons.UnmappedBenchmark.
+		// no benchmark revision mapped -- issue #1021: this now PLANS profile-only
+		// (IsBenchmarkMissing) instead of ScanPlanSkipReasons.UnmappedBenchmark.
 		PlannerParityRow vsphereStigRow = PlannerDerivationMatrix.Rows.Single(r => r.MatrixRowId == "vsphere-8-0-stig-vmware");
 		PlannerParityInstance vcenterInstance = vsphereStigRow.Instances.Single(i => i.ComponentKey == "vcenter");
 		Guid unmappedProfileId = await SeedExecutionProfileAsync(vsphereStigRow, vcenterInstance, benchmarkRevisionId: null);
@@ -230,12 +231,15 @@ public sealed class PlannerParityContractTests : IAsyncLifetime
 			null, [healthyComponent, nsxComponent, unmappedComponent], CancellationToken.None);
 
 		Assert.True(plan.IsRunnable);
-		ScanPlanItem accepted = Assert.Single(plan.Items);
-		Assert.Equal(healthyComponent, accepted.ComponentId);
+		Assert.Equal(2, plan.Items.Count);
+		Assert.Contains(plan.Items, i => i.ComponentId == healthyComponent);
+		ScanPlanItem unmappedItem = Assert.Single(plan.Items, i => i.ComponentId == unmappedComponent);
+		Assert.True(unmappedItem.IsBenchmarkMissing);
+		Assert.Null(unmappedItem.BenchmarkRevisionId);
 
-		Assert.Equal(2, plan.Skips.Count);
-		Assert.Contains(plan.Skips, s => s.ComponentId == nsxComponent && s.Reason == ScanPlanSkipReasons.NoActiveBaseline);
-		Assert.Contains(plan.Skips, s => s.ComponentId == unmappedComponent && s.Reason == ScanPlanSkipReasons.UnmappedBenchmark);
+		ScanPlanSkip skip = Assert.Single(plan.Skips);
+		Assert.Equal(nsxComponent, skip.ComponentId);
+		Assert.Equal(ScanPlanSkipReasons.NoActiveBaseline, skip.Reason);
 	}
 
 	/// <summary>
