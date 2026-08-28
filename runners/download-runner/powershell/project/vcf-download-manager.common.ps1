@@ -14,12 +14,15 @@
 #
 # Project-owned source migrated from the predecessor vcf-docker-download
 # repository (same author/copyright holder), preserved unmodified per
-# ADR-0013/ADR-0015 and CLAUDE.md's License & Borrowing Policy: Waypoint
-# orchestrates this project-owned script via the WaypointDownload/WaypointCatalogIndex
-# shim modules, it does not fork it. Only the functions this runner's M1 call
-# graph needs (Save-WebFile, Get-FileManifest, and their shared helpers) are
-# imported; workflow modules for UMDS/VCSA/Photon/VKS/content-library/transfer
-# are out of scope for M1 catalog-index/download and are not imported here.
+# ADR-0013/ADR-0015 and AGENTS.md's License & Borrowing Policy sibling-repo
+# carve-out: Waypoint orchestrates this project-owned script via the
+# WaypointDownload/WaypointCatalogIndex shim modules, it does not fork it. Only
+# the functions this runner's M1 call graph needs (Save-WebFile,
+# Get-FileManifest, and their shared helpers) are imported; workflow modules
+# for UMDS/VCSA/Photon/VKS/content-library/transfer are out of scope for M1
+# catalog-index/download and are not imported here. Owner-authored sibling
+# code like this is not "third-party" and needs no root NOTICE entry — NOTICE
+# is reserved for genuinely third-party fragments.
 
 <#
 .MODULE

@@ -151,9 +151,16 @@ and provisioning the GitHub label is its consequence.
 
 ## License & Borrowing Policy
 
-Waypoint is licensed **Apache-2.0** (see `LICENSE`). When incorporating third-party
-code ("cribbing" from prior art):
+Waypoint is licensed **Apache-2.0** (see `LICENSE`).
 
+- **Sibling repos are owner-authored, not third-party.** `vmware-stig-docker` and
+  `vcf-docker-download` are this project's own predecessor code (same copyright
+  holder). Importing their execution scripts and Dockerfiles into this repository is
+  explicitly authorized, with history/attribution preserved — see Key Constraints
+  below for the migration statement. The sibling repos are never edited; their work
+  re-homes here. The rules below, for code cribbed from prior art, govern genuinely
+  third-party code only — they do not gate sibling-repo imports, and a sibling repo
+  lacking its own `LICENSE` file is not a borrowing bar.
 - **Allowed**: Apache-2.0, MIT, BSD-2/3, ISC — keep the original copyright/license
   header on the copied file or fragment, **and** add an entry to the root `NOTICE`
   file (it exists; use the documented entry format). Check the actual `LICENSE` in the
@@ -161,8 +168,8 @@ code ("cribbing" from prior art):
 - **`NOTICE` is load-bearing, not bookkeeping.** Apache-2.0 §4(d) obliges anyone
   redistributing this work to carry that file forward. An attribution recorded only in
   a commit message, a PR body, or this file does not travel with the code.
-- **Not allowed**: GPL/AGPL/LGPL, SSPL, BSL, or unlicensed code — copyleft would
-  encumber the whole appliance; no-license means no permission.
+- **Not allowed**: GPL/AGPL/LGPL, SSPL, BSL, or unlicensed *third-party* code —
+  copyleft would encumber the whole appliance; no-license means no permission.
 - **Never project-publish vendor binaries.** Broadcom's `vcf-download-tool` is not
   included in source or immutable runner images. An authenticated operator installs it
   through the appliance from an authorized upstream, local repository, or manual
@@ -177,6 +184,8 @@ code ("cribbing" from prior art):
 - Scans are read-only and schedulable; **remediation is never schedulable** and always
   requires explicit human confirmation.
 - The execution scripts in the sibling repositories are project-owned code and will
-  move into this repository with their Dockerfiles and attribution/history preserved.
-  Account-gated third-party tools remain operator-installed managed state.
+  move into this repository with their Dockerfiles and attribution/history preserved
+  (see License & Borrowing Policy above for the owner-authored/third-party
+  distinction this rests on). Account-gated third-party tools remain
+  operator-installed managed state.
 - Operations must be idempotent; individual target failures must not halt a run.
