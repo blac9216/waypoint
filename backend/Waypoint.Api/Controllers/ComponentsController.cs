@@ -83,6 +83,92 @@ public sealed class ComponentsController : ControllerBase
 		return Ok(items.Select(ComponentResponse.FromDomain).ToArray());
 	}
 
+	/// <summary>
+	/// Issue #743: Admin-declared ROOT component for a target kind with no discovery
+	/// operation -- today only <c>ssh</c> (the whole-appliance SRG products: Photon,
+	/// Aria Operations/Automation/Suite Lifecycle, Workspace ONE Access). Discovery
+	/// materializes the root for <c>vsphere</c> targets, so declaring one there is
+	/// rejected rather than racing the discovery sweep; the <c>nsx-api</c> declared-root
+	/// path is tracked separately. The declared key is validated FAIL-CLOSED against the
+	/// catalog's closed vocabulary: it must name at least one top-level catalog
+	/// component whose shape is <c>ssh</c>/<c>target</c> ("generic SSH does not guess a
+	/// product" -- the Admin's explicit selection is the only product source). The row
+	/// is created UNLINKED; supplying <c>exact_version</c> routes through the SAME
+	/// configured-fact/linkage path as <c>PUT /components/{id}</c> (issue #1000), which
+	/// is what actually links it to one exact catalog product version (or leaves it
+	/// honestly unlinked/ambiguous, never guessed).
+	/// </summary>
+	[HttpPost("api/v1/targets/{targetId:guid}/components")]
+	[RequireAdminRole]
+	[ProducesResponseType(typeof(ComponentResponse), StatusCodes.Status201Created)]
+	[ProducesResponseType(StatusCodes.Status400BadRequest)]
+	[ProducesResponseType(StatusCodes.Status404NotFound)]
+	[ProducesResponseType(StatusCodes.Status409Conflict)]
+	public async Task<ActionResult<ComponentResponse>> DeclareRoot(
+		Guid targetId, [FromBody] ComponentDeclareRootBody request, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(request);
+
+		Target? target = await _targets.GetAsync(targetId, cancellationToken).ConfigureAwait(false);
+		if (target is null)
+		{
+			throw TargetNotFoundError(targetId);
+		}
+
+		if (!string.Equals(target.Kind, TargetKinds.Ssh, StringComparison.Ordinal))
+		{
+			throw new ApiException(
+				HttpStatusCode.BadRequest, "declared_component_unsupported_target_kind",
+				$"Target '{targetId}' is kind '{target.Kind}'; declared root components are supported only for '{TargetKinds.Ssh}' targets "
+					+ "(discovery owns component materialization for discoverable kinds).");
+		}
+
+		if (string.IsNullOrWhiteSpace(request.CatalogComponentKey))
+		{
+			throw new ApiException(
+				HttpStatusCode.BadRequest, "validation_error",
+				"'catalog_component_key' is required: an ssh target's product is never guessed from its connection.");
+		}
+
+		// Fail-closed catalog validation: the declared key must exist as a top-level
+		// catalog component in the closed ssh/target shape (docs/compliance-parity.md's
+		// "ssh / target" rows). Selection is by the closed transport/selector vocabulary,
+		// never a product-name list, so a future catalog-added ssh/target product needs
+		// no code change here.
+		IReadOnlyList<CatalogComponent> candidates =
+			await _catalog.ListTopLevelComponentsByKeyAsync(request.CatalogComponentKey, cancellationToken).ConfigureAwait(false);
+		CatalogComponent? declared = candidates.FirstOrDefault(c =>
+			string.Equals(c.Transport, CatalogTransports.Ssh, StringComparison.Ordinal)
+			&& string.Equals(c.SelectorKind, CatalogSelectorKinds.Target, StringComparison.Ordinal));
+		if (declared is null)
+		{
+			throw new ApiException(
+				HttpStatusCode.BadRequest, "unknown_catalog_component_key",
+				$"'{request.CatalogComponentKey}' does not name a catalog-supported whole-appliance SSH product "
+					+ "(no top-level catalog component with transport 'ssh' and selector 'target' carries this key). "
+					+ "Catalog support arrives through reviewed Waypoint updates; unsupported products cannot be declared.");
+		}
+
+		Guid? componentId = await _components
+			.CreateDeclaredRootAsync(targetId, declared.ComponentKey, declared.DisplayName, cancellationToken).ConfigureAwait(false);
+		if (componentId is not { } createdId)
+		{
+			throw new ApiException(
+				HttpStatusCode.Conflict, "component_exists",
+				$"Target '{targetId}' already has a component with catalog key '{declared.ComponentKey}'.");
+		}
+
+		if (!string.IsNullOrWhiteSpace(request.ExactVersion))
+		{
+			// Same write path as PUT /components/{id} (issue #1000): configured fact +
+			// shared linkage resolution + declared-children sync, never a forked copy.
+			await _components.SetConfiguredFactAsync(createdId, request.ExactVersion, cancellationToken).ConfigureAwait(false);
+		}
+
+		Component created = (await _components.GetAsync(createdId, cancellationToken).ConfigureAwait(false))!;
+		return CreatedAtAction(nameof(Get), new { id = createdId }, ComponentResponse.FromDomain(created));
+	}
+
 	/// <summary>Full component record. 404 when unknown.</summary>
 	[HttpGet("api/v1/components/{id:guid}")]
 	[RequireViewerRole]

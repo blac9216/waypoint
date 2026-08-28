@@ -602,6 +602,128 @@ object scopeBody = new
 		return document.RootElement.GetProperty("id").GetGuid();
 	}
 
+	private static SemanticCandidate PhotonCandidate() => new(
+		"photon/5.0/v3r3-srg/inspec/baseline", "photon", "5.0", "srg", "photon", "v3r3-srg", "Photon OS",
+		CatalogTransports.Ssh, CatalogSelectorKinds.Target, null,
+		IsAggregate: false, Title: "Photon OS SRG", ManifestVersion: "3.3.0",
+		Inputs: [], Supports: [], Depends: [], ContentDigest: "invented1111111111111111111111111111111111111111111111111111");
+
+	private static CatalogPromotionRequest PhotonPromotionRequest() => new(
+		SourceRevisionKey: "compliance-content",
+		Vendor: CatalogVendors.VMware,
+		ProductDisplayName: "VMware Photon OS",
+		ProductVersionDisplayName: "Photon OS 5.0",
+		ContentReleaseDisplayName: "srg 5.0",
+		ReportGroupKey: "srg",
+		ReportGroupDisplayName: "SRG",
+		ReportGroupPriority: 6,
+		OutputKind: CatalogOutputKinds.Hdf);
+
+	/// <summary>
+	/// Issue #743: the whole-appliance SSH product's closing leg, the ssh analogue of
+	/// <see cref="ConfiguredExactVersion_OnVCenterRoot_LinksAndPlanPreviewReportsRunnable"/>.
+	/// An <c>ssh</c> target has NO discovery operation at all, so before this issue it
+	/// had no component rows and therefore no reachable plan item -- an SSH product
+	/// could never be planned by component at all. The Admin now DECLARES the product
+	/// explicitly (<c>POST /targets/{id}/components</c>, "generic SSH does not guess a
+	/// product"), the declared row links through the SAME shared configured-fact/linkage
+	/// path every other provenance uses, and plan-preview reports it runnable.
+	/// </summary>
+	[Fact]
+	public async Task DeclaredSshProductRoot_LinksViaConfiguredVersion_AndPlanPreviewReportsRunnable()
+	{
+		CatalogPromotionOutcome promotion = await _catalog.PromoteCandidateAsync(PhotonCandidate(), PhotonPromotionRequest(), CancellationToken.None);
+		Assert.NotNull(promotion.ExecutionProfileId);
+		Guid executionProfileId = promotion.ExecutionProfileId!.Value;
+
+		CatalogExecutionProfileDetail? profileDetail = await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None);
+		Assert.NotNull(profileDetail);
+		Guid catalogComponentId = profileDetail!.Component.Id;
+		string exactVersionKey = profileDetail.ProductVersion.VersionKey;
+
+		ContentRevision revision = await _baselines.RecordStagedRevisionAsync(
+			"commit-743-photon", "digest-743-photon", "revisions/743-photon", CancellationToken.None);
+		await ActivateBaselineAsync(revision.Id, executionProfileId);
+
+		Guid siteId = await CreateSiteAsync("743-ssh-site");
+		Guid targetId = await CreateTargetAsync(siteId, "ssh", "appliance-743", """{"host":"appliance-743.example.internal"}""");
+
+		// No discovery pass exists for an ssh target -- the component list starts EMPTY.
+		Assert.Empty(await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None));
+
+		HttpRequestMessage declareRequest = WithRole(HttpMethod.Post, $"/api/v1/targets/{targetId}/components", "Admin");
+		declareRequest.Content = JsonContent.Create(
+			new { catalog_component_key = "photon", exact_version = exactVersionKey },
+			options: Waypoint.Core.Serialization.WaypointJsonOptions.Default);
+		HttpResponseMessage declareResponse = await _client.SendAsync(declareRequest);
+		Assert.Equal(HttpStatusCode.Created, declareResponse.StatusCode);
+
+		Component declared = Assert.Single(await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None));
+		Assert.Equal(catalogComponentId, declared.CatalogComponentId);
+		Assert.Equal(exactVersionKey, declared.ConfiguredFact!.ExactVersion);
+		Assert.False(declared.FactConflict);
+
+		object scopeBody = new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "explicit", component_ids = new[] { declared.Id } },
+		};
+		HttpRequestMessage previewRequest = WithRole(HttpMethod.Post, "/api/v1/runs/plan-preview", "Cyber");
+		previewRequest.Content = new StringContent(
+			JsonSerializer.Serialize(new { scope = JsonSerializer.Serialize(scopeBody) }), Encoding.UTF8, "application/json");
+
+		HttpResponseMessage previewResponse = await _client.SendAsync(previewRequest);
+		Assert.Equal(HttpStatusCode.OK, previewResponse.StatusCode);
+		using JsonDocument previewBody = JsonDocument.Parse(await previewResponse.Content.ReadAsStringAsync());
+		Assert.Empty(previewBody.RootElement.GetProperty("scope_omissions").EnumerateArray());
+		JsonElement item = Assert.Single(previewBody.RootElement.GetProperty("items").EnumerateArray());
+		Assert.True(previewBody.RootElement.GetProperty("is_runnable").GetBoolean());
+
+		// Output routing comes from the CATALOG kind (SRG -> hdf), and the required
+		// credential purpose is the whole-appliance ssh one -- neither inferred from the
+		// target's connection kind.
+		Assert.Equal(CatalogOutputKinds.Hdf, item.GetProperty("output_kind").GetString());
+		Assert.Contains("srg-ssh", item.GetProperty("required_purposes").EnumerateArray().Select(p => p.GetString()));
+	}
+
+	/// <summary>
+	/// Issue #743 AC "product/version selection is explicit and validated; generic SSH
+	/// does not guess a product": an unknown/unsupported product key is rejected
+	/// fail-closed (never created unlinked and never guessed), a discoverable target
+	/// kind is rejected (discovery owns those roots), and a second declaration of the
+	/// same key is a 409 rather than a duplicate or a silent mutation.
+	/// </summary>
+	[Fact]
+	public async Task DeclareSshProductRoot_ValidatesFailClosed()
+	{
+		await _catalog.PromoteCandidateAsync(PhotonCandidate(), PhotonPromotionRequest(), CancellationToken.None);
+
+		Guid siteId = await CreateSiteAsync("743-ssh-validation-site");
+		Guid sshTargetId = await CreateTargetAsync(siteId, "ssh", "appliance-743-validate", """{"host":"appliance-743-validate.example.internal"}""");
+		Guid vsphereTargetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-743-validate", """{"host":"vcsa-743-validate.example.internal"}""");
+
+		HttpResponseMessage unknown = await DeclareRootAsync(sshTargetId, "not-a-catalog-product");
+		Assert.Equal(HttpStatusCode.BadRequest, unknown.StatusCode);
+		Assert.Contains("unknown_catalog_component_key", await unknown.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+		HttpResponseMessage discoverable = await DeclareRootAsync(vsphereTargetId, "photon");
+		Assert.Equal(HttpStatusCode.BadRequest, discoverable.StatusCode);
+		Assert.Contains("declared_component_unsupported_target_kind", await discoverable.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+		Assert.Equal(HttpStatusCode.Created, (await DeclareRootAsync(sshTargetId, "photon")).StatusCode);
+		HttpResponseMessage duplicate = await DeclareRootAsync(sshTargetId, "photon");
+		Assert.Equal(HttpStatusCode.Conflict, duplicate.StatusCode);
+		Assert.Contains("component_exists", await duplicate.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
+	private async Task<HttpResponseMessage> DeclareRootAsync(Guid targetId, string catalogComponentKey)
+	{
+		HttpRequestMessage request = WithRole(HttpMethod.Post, $"/api/v1/targets/{targetId}/components", "Admin");
+		request.Content = JsonContent.Create(
+			new { catalog_component_key = catalogComponentKey }, options: Waypoint.Core.Serialization.WaypointJsonOptions.Default);
+		return await _client.SendAsync(request);
+	}
+
 	private async Task<Guid> CreateTargetAsync(Guid siteId, string kind, string name, string connectionJson)
 	{
 		Guid credentialId = await SeedKindCompatibleCredentialAsync(kind);

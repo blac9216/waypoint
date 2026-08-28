@@ -431,6 +431,37 @@ public sealed class CatalogRepository : ICatalogRepository
 		return components;
 	}
 
+	public async Task<IReadOnlyList<CatalogComponent>> ListTopLevelComponentsByKeyAsync(
+		string catalogComponentKey, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(catalogComponentKey);
+
+		// Issue #743: the version-free sibling of FindTopLevelComponentsByKeyAndVersionAsync
+		// above -- the declared-root provisioning path (POST /targets/{id}/components)
+		// validates an Admin-selected product key against the catalog BEFORE any version
+		// is configured, so it needs every top-level component sharing the key across all
+		// product versions (the same bounded, closed-vocabulary scan the version-matched
+		// lookup already performs; only the in-code version filter is absent).
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
+			FROM catalog_components
+			WHERE parent_component_id IS NULL AND component_key = $1
+			ORDER BY id
+			""", connection);
+		command.Parameters.AddWithValue(catalogComponentKey);
+
+		List<CatalogComponent> components = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			components.Add(MapComponent(reader, 0));
+		}
+
+		return components;
+	}
+
 	public async Task<IReadOnlyList<CatalogExecutionProfileDetail>> ListExecutionProfilesByComponentAsync(Guid componentId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
