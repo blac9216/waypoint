@@ -988,6 +988,24 @@ function Invoke-WaypointSrgScan {
 		New-Item -ItemType Directory -Path $ReportDirectory -Force | Out-Null
 	}
 
+	# Predecessor behavior (module.transport.ssh.ps1's Build-SshTransportTargets, its
+	# issue #261), adopted wholesale via the already-dot-sourced module.common.ps1's own
+	# Test-TargetReachable: a cheap bounded TCP probe on ssh port 22 BEFORE InSpec runs,
+	# so a host whose SSH is disabled/blocked/unreachable fails fast with an actionable
+	# reason instead of hanging to the full scan timeout. Probe-only, never a mutation:
+	# Waypoint never enables SSH during a scan (issue #741 -- temporary enablement is a
+	# separate, ADR-gated owner decision), so the honest outcome here is a classified
+	# execution failure naming the reachability gap, the runner-native analogue of the
+	# sibling engine recording the same condition via Add-ScanSkip.
+	if (-not (Test-TargetReachable -TargetHost $SshHost -Port 22 -Source 'srg')) {
+		return [pscustomobject]@{
+			Success       = $false
+			ExitCode      = $null
+			ReportPath    = $null
+			FailureReason = "SSH port 22 on $SshHost is not reachable within the connect timeout; SSH may be disabled, blocked, or the host unreachable. Waypoint never enables SSH as part of a scan -- restore SSH access on the appliance and retry."
+		}
+	}
+
 	# Predecessor behavior (module.transport.ssh.ps1's Build-SshTransportTargets): remove
 	# any stale inspec.lock next to the profile before running -- a lock written under a
 	# different mount pins absolute paths that don't exist here and breaks the wrapper
