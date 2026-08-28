@@ -259,6 +259,114 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// Issue #743: an ssh-transport item FREEZES the catalog component's declared sudo
+	/// policy (migration 0074) into the plan item -- sudo is CONTENT knowledge (vIDM:
+	/// sudo with password; Photon: passwordless sudo; the Aria family: no sudo), never
+	/// inferred from the target kind or the credential row. A non-ssh transport carries
+	/// no sudo concept and freezes null, so every pre-#743 item shape is unchanged.
+	/// </summary>
+	[Theory]
+	[InlineData(true, false)]   // Photon shape: sudo, passwordless.
+	[InlineData(true, true)]    // vIDM shape: sudo, password required.
+	[InlineData(false, true)]   // Aria shape: no sudo (the password flag is then moot).
+	public async Task CompileAsync_SshTransportItem_FreezesCatalogDeclaredSudoPolicy(bool requiresSudo, bool sudoRequiresPassword)
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+		string suffix = $"sudo-{requiresSudo}-{sudoRequiresPassword}";
+		Guid executionProfileId = await SeedSshTargetExecutionProfileAsync(suffix, "8.0.3", requiresSudo, sudoRequiresPassword);
+		await ActivateBaselineAsync(executionProfileId, suffix, benchmarkRevisionId: null);
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", $"appliance-{suffix}");
+
+		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+
+		ScanPlanItem item = Assert.Single(plan.Items);
+		Assert.Equal(requiresSudo, item.RequiresSudo);
+		Assert.Equal(sudoRequiresPassword, item.SudoRequiresPassword);
+	}
+
+	/// <summary>Issue #743: a vmware-transport item has no sudo concept -- both fields stay null (pre-#743 shape preserved).</summary>
+	[Fact]
+	public async Task CompileAsync_NonSshTransportItem_FreezesNoSudoPolicy()
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+		Guid executionProfileId = await SeedExecutionProfileAsync("nosudo", "8.0.3", withBenchmark: null);
+		await ActivateBaselineAsync(executionProfileId, "nosudo", benchmarkRevisionId: null);
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-nosudo-9101");
+
+		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+
+		ScanPlanItem item = Assert.Single(plan.Items);
+		Assert.Null(item.RequiresSudo);
+		Assert.Null(item.SudoRequiresPassword);
+	}
+
+	/// <summary>
+	/// Issue #743: two plans identical except for the catalog's declared sudo policy
+	/// must NOT collide on the plan digest -- sudo changes the InSpec invocation itself,
+	/// so it is part of what the accepted item commits to executing.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_SudoPolicyChange_ProducesADifferentPlanDigest()
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+		Guid executionProfileId = await SeedSshTargetExecutionProfileAsync("digest-sudo", "8.0.3", requiresSudo: false, sudoRequiresPassword: true);
+		await ActivateBaselineAsync(executionProfileId, "digest-sudo", benchmarkRevisionId: null);
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "appliance-digest-sudo");
+
+		ScanPlan before = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand update = new(
+				"UPDATE catalog_components SET requires_sudo = true, sudo_requires_password = false WHERE id = $1", connection);
+			update.Parameters.AddWithValue(catalogComponentId);
+			await update.ExecuteNonQueryAsync();
+		}
+
+		ScanPlan after = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+
+		Assert.NotEqual(before.PlanDigest, after.PlanDigest);
+	}
+
+	/// <summary>Whole-appliance ssh/target execution profile carrying an explicit catalog sudo policy (issue #743, migration 0074).</summary>
+	private async Task<Guid> SeedSshTargetExecutionProfileAsync(string suffix, string exactVersion, bool requiresSudo, bool sudoRequiresPassword)
+	{
+		CatalogSourceRevision sourceRevision = await _catalog.UpsertSourceRevisionAsync($"source-{suffix}", null, CancellationToken.None);
+		CatalogProduct product = await _catalog.UpsertProductAsync(sourceRevision.Id, "VMware", $"appliance-{suffix}", "Invented SSH Appliance", CancellationToken.None);
+		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, exactVersion, exactVersion, CancellationToken.None);
+		CatalogComponent component = await _catalog.UpsertComponentAsync(
+			productVersion.Id,
+			new CatalogComponentDefinition($"esxi-{suffix}", "Invented SSH Appliance", CatalogTransports.Ssh, CatalogSelectorKinds.Target, null, null),
+			CancellationToken.None);
+
+		// Sudo policy is catalog DATA (migration 0074's columns), written here directly
+		// because the catalog write path that owns it is the seed/importer lane, not this
+		// planner-shape fixture.
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand update = new(
+				"UPDATE catalog_components SET requires_sudo = $2, sudo_requires_password = $3 WHERE id = $1", connection);
+			update.Parameters.AddWithValue(component.Id);
+			update.Parameters.AddWithValue(requiresSudo);
+			update.Parameters.AddWithValue(sudoRequiresPassword);
+			await update.ExecuteNonQueryAsync();
+		}
+
+		CatalogContentRelease contentRelease = await _catalog.UpsertContentReleaseAsync(
+			sourceRevision.Id, CatalogKinds.Srg, $"release-{suffix}", "Test Release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await _catalog.UpsertReportGroupAsync($"group-{suffix}", "Test Group", 6, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(
+			component.Id, contentRelease.Id, reportGroup.Id, "1.0.0", CatalogOutputKinds.Hdf, CancellationToken.None);
+		await _catalog.AddCredentialRequirementAsync(executionProfile.Id, "srg-ssh", isRequired: true, CancellationToken.None);
+		return executionProfile.Id;
+	}
+
+	/// <summary>
 	/// Issue #1012 (round-8 report): before this fix, two co-existing execution
 	/// profiles for the SAME catalog component -- an imported, credential-less SRG
 	/// profile and a seeded, credential-bearing STIG profile -- were tiebroken purely
