@@ -84,11 +84,13 @@ version-string heuristic:
 | `Y##M##-srg` | vendor's year/month SRG generation numbering | `(year, month)` numeric compare | `Y26M05-srg` |
 
 A release segment that matches NEITHER closed form fails closed: the whole scope
-quarantines every candidate (the original `component_key ... collides` reason, now
-naming which release could not be parsed) rather than guessing an order. Two candidates
-that tie under the same form's ordering (including two profiles literally sharing one
-release key) also fail closed the same way -- "newest wins" presumes a strict order, and
-a tie is a genuine shape ambiguity, not a supersession.
+quarantines every candidate with the `component_key ... collides` reason extended by a
+parenthesized diagnostic naming which release could not be parsed, rather than guessing
+an order. Two candidates that tie under the same form's ordering (including two
+profiles literally sharing one release key) also fail closed -- "newest wins" presumes
+a strict order, and a tie is a genuine shape ambiguity, not a supersession; this tie
+class predates #986 (it is issue #729's same-release collision), so its reason string
+is preserved byte-for-byte with no appended diagnostic.
 
 **Cross-form ruling.** Every documented family in the provenance matrix below uses
 exactly one form consistently for a given generation of content (the STIG-era releases

@@ -105,7 +105,13 @@ public sealed class SemanticImportReconcilerTests
 
 		Assert.Empty(report.Accepted);
 		Assert.Equal(2, report.Rejected.Count);
-		Assert.All(report.Rejected, r => Assert.Contains("collides with", r.Reason));
+		// Issue #986 preserves this pre-existing reason string BYTE-FOR-BYTE for the
+		// same-release tie class (no appended release-ordering diagnostic) -- pin it
+		// exactly so a future edit that extends it fails here, not in a live report.
+		SemanticImportRejected first = Assert.Single(report.Rejected, r => r.ProfileKey == a.ProfileKey);
+		Assert.Equal(
+			"component_key 'vcenter' collides with 1 other profile(s) in the same product-version/kind scope: vsphere/8-0/v2r3-stig/inspec/base-two/vcenter",
+			first.Reason);
 	}
 
 	[Fact]

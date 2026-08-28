@@ -200,14 +200,18 @@ public static class SemanticImportReconciler
 	/// share the same form, the newest release wins -- it is returned with a
 	/// <see langword="null"/> rejection reason (so it falls through to the normal
 	/// promotion gates) and every older release is returned with a "superseded by"
-	/// reason. If ANY release fails to parse, or the releases present span both closed
+	/// reason. If two releases TIE under the same form's ordering (issue #729's original
+	/// same-release shape-ambiguity class), the whole scope fails closed into the
+	/// original component_key-collides reason BYTE-FOR-BYTE, exactly as before issue
+	/// #986. If ANY release fails to parse, or the releases present span both closed
 	/// forms (an unresolved cross-form design hole -- see <see cref="VendorReleaseOrder"/>
-	/// remarks), the whole scope fails closed into the original generic
-	/// component_key-collides reason for every candidate, exactly as before issue #986.
+	/// remarks), the scope also fails closed into that reason, extended with a
+	/// parenthesized diagnostic naming what could not be ordered (these two classes are
+	/// new with #986 and never produced the collision reason before it).
 	/// Deterministic regardless of the input list's order: candidates are re-sorted by
 	/// ProfileKey before any tie-break.
 	/// </summary>
-	private static Dictionary<string, ScopeResolution> ResolveScope(string componentKey, IReadOnlyList<SemanticCandidate> scopeCandidates)
+	private static Dictionary<string, ScopeResolution> ResolveScope(string componentKey, List<SemanticCandidate> scopeCandidates)
 	{
 		List<SemanticCandidate> ordered = [.. scopeCandidates.OrderBy(c => c.ProfileKey, StringComparer.Ordinal)];
 		Dictionary<string, ScopeResolution> result = new(StringComparer.Ordinal);
@@ -243,11 +247,11 @@ public static class SemanticImportReconciler
 				// literal release key is identical or two different keys parse to an
 				// equal ordinal position) is a genuine shape ambiguity, not a
 				// release-supersession case -- "newest wins" presumes a total order
-				// with no ties. Fail closed exactly like the pre-#986 behavior rather
-				// than picking an arbitrary winner.
-				return GenericCollision(componentKey, ordered,
-					$"releases '{candidate.Candidate.ReleaseKey}' and '{winner.Candidate.ReleaseKey}' tie under release ordering -- " +
-					"newest-release-wins requires a strict order, quarantined rather than picking an arbitrary winner");
+				// with no ties. Fail closed exactly like the pre-#986 behavior --
+				// including its reason string BYTE-FOR-BYTE (null detail), since this
+				// class (issue #729's same-release collision) existed before #986 and
+				// its reason is a pinned, load-bearing string.
+				return GenericCollision(componentKey, ordered, detail: null);
 			}
 
 			if (comparison > 0)
@@ -272,18 +276,25 @@ public static class SemanticImportReconciler
 	}
 
 	/// <summary>
-	/// Fail-closed fallback preserving the original (pre-#986) collision reason for every
-	/// candidate in the scope, used when release ordering cannot be determined at all
-	/// (unparseable form or cross-form tie).
+	/// Fail-closed fallback for every candidate in the scope when release ordering
+	/// cannot pick a winner. A <see langword="null"/> <paramref name="detail"/> emits
+	/// the original (pre-#986) collision reason BYTE-FOR-BYTE -- used for same-form
+	/// ordering ties, which include issue #729's original same-release shape-ambiguity
+	/// class, so that pre-existing reason string stays pinned exactly. A non-null
+	/// <paramref name="detail"/> appends a parenthesized diagnostic and is used only for
+	/// the two fail-closed classes issue #986 introduced (unparseable release form,
+	/// cross-form tie), which never produced this reason before #986 at all.
 	/// </summary>
-	private static Dictionary<string, ScopeResolution> GenericCollision(string componentKey, IReadOnlyList<SemanticCandidate> ordered, string detail)
+	private static Dictionary<string, ScopeResolution> GenericCollision(string componentKey, List<SemanticCandidate> ordered, string? detail)
 	{
 		Dictionary<string, ScopeResolution> result = new(StringComparer.Ordinal);
+		string suffix = detail is null ? string.Empty : $" ({detail})";
 		foreach (SemanticCandidate candidate in ordered)
 		{
-			IEnumerable<string> others = ordered.Select(c => c.ProfileKey).Where(k => k != candidate.ProfileKey).OrderBy(k => k, StringComparer.Ordinal);
 			result[candidate.ProfileKey] = new ScopeResolution(
-				$"component_key '{componentKey}' collides with {ordered.Count - 1} other profile(s) in the same product-version/kind scope: {string.Join(", ", others)} ({detail})");
+				$"component_key '{componentKey}' collides with {ordered.Count - 1} other profile(s) in the same product-version/kind scope: " +
+				string.Join(", ", ordered.Select(c => c.ProfileKey).Where(k => k != candidate.ProfileKey).OrderBy(k => k, StringComparer.Ordinal)) +
+				suffix);
 		}
 
 		return result;
