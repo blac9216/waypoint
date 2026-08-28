@@ -282,6 +282,13 @@ public sealed class EndpointRoleMatrixTests
 		// Issue #708/#689: filtered, cursor-paged run history list -- Viewer+, same
 		// floor as every other run read (ADR-0019 decision 6).
 		["RunsController.ListRunHistory"] = WaypointRole.Viewer,
+		// Issue #784: retention-hold place/remove is Admin-only, same wider-blast-radius
+		// gate as purge/history-deletion above (it directly gates purge eligibility);
+		// reading current hold status is Viewer+, matching GetPurgeStatus/
+		// GetRunHistoryDeletionStatus's own read floor.
+		["RunsController.PlaceRetentionHold"] = WaypointRole.Admin,
+		["RunsController.RemoveRetentionHold"] = WaypointRole.Admin,
+		["RunsController.GetRetentionHold"] = WaypointRole.Viewer,
 
 		// SchedulesController -- reads Viewer+; writes are Cyber+ at the attribute floor
 		// (the coarse "lowest schedulable role"), refined per-job_type in-action by

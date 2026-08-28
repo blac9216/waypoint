@@ -61,7 +61,7 @@ public sealed class RunPurgeComplianceEvidenceTests : IAsyncLifetime
 			"""
 			TRUNCATE TABLE
 				component_result_findings, component_result_artifacts, component_results,
-				upload_attempts, scan_plan_items, scan_plans, run_scope_snapshots, jobs, runs,
+				upload_attempts, run_retention_holds, scan_plan_items, scan_plans, run_scope_snapshots, jobs, runs,
 				baselines, content_revisions, components, targets, sites,
 				catalog_execution_profiles, catalog_report_groups, catalog_content_releases, catalog_components,
 				catalog_product_versions, catalog_products, catalog_source_revisions
@@ -133,6 +133,48 @@ public sealed class RunPurgeComplianceEvidenceTests : IAsyncLifetime
 		// task brief: a sibling run's rows must never be collaterally removed.
 		Assert.True(await ComponentResultsExistAsync(liveRunId));
 		Assert.True(await UploadAttemptsExistAsync(liveJobId));
+	}
+
+	/// <summary>
+	/// Issue #784 AC3 ("automated retention does not purge any held run or its
+	/// dependent records/artifacts"), proven against the REAL schema exactly like
+	/// this file's other two purge tests -- component_results, its findings/
+	/// artifacts children, AND upload_attempts (the full evidence graph "as one
+	/// unit" the issue's Risk section calls out) all survive a purge attempt while a
+	/// hold is active, and all four are removed once the hold is lifted -- so the
+	/// SAME purge call becomes eligible again with no other state change, matching
+	/// <see cref="RunRetentionHoldService.RemoveHoldAsync"/>'s doc comment.
+	/// </summary>
+	[Fact]
+	public async Task PurgeRunAsync_HeldRun_LeavesCompleteEvidenceGraphUntouchedUntilHoldRemoved()
+	{
+		Guid runId = await SeedRunAsync();
+		(Guid componentId, Guid scanPlanItemId) = await SeedPlanItemAsync(runId, "hold-target");
+		Guid jobId = await SeedScanJobAsync(runId, scanPlanItemId);
+		await _componentResults.RecordAsync(CompletedRecord(runId, jobId, scanPlanItemId, componentId, attempt: 1), CancellationToken.None);
+		await InsertUploadAttemptAsync(jobId, "uploaded");
+
+		bool placed = await _retentionHolds.TryInsertAsync(runId, "invented-audit-hold-reason", "admin-tester", CancellationToken.None);
+		Assert.True(placed);
+
+		RunPurgeResult held = await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
+		Assert.Equal(RunPurgeOutcome.Held, held.Outcome);
+
+		Assert.True(await ComponentResultsExistAsync(runId));
+		Assert.True(await ComponentResultFindingsExistAsync(runId));
+		Assert.True(await ComponentResultArtifactsExistAsync(runId));
+		Assert.True(await UploadAttemptsExistAsync(jobId));
+
+		bool removed = await _retentionHolds.TryRemoveAsync(runId, "invented-audit-unhold-reason", "admin-tester", CancellationToken.None);
+		Assert.True(removed);
+
+		RunPurgeResult resumed = await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
+		Assert.Equal(RunPurgeOutcome.InProgress, resumed.Outcome);
+
+		Assert.False(await ComponentResultsExistAsync(runId));
+		Assert.False(await ComponentResultFindingsExistAsync(runId));
+		Assert.False(await ComponentResultArtifactsExistAsync(runId));
+		Assert.False(await UploadAttemptsExistAsync(jobId));
 	}
 
 	[Fact]

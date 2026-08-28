@@ -98,6 +98,7 @@ public sealed class SchemaMigrationTests
 		"component_results",
 		"component_result_findings",
 		"component_result_artifacts",
+		"run_retention_holds",
 		"schema_migrations"
 	];
 
@@ -292,6 +293,15 @@ public sealed class SchemaMigrationTests
 	/// reconciliation UPDATEs restating docs/compliance-parity.md's documented sudo
 	/// shapes for the photon/vidm/vcf-sddc-manager rows earlier migrations seeded, no
 	/// new tables or grants --
+	/// 0075 (issue #784, epic #726; slot verified free against both the migrations
+	/// directory and open PRs at this migration's own commit time -- 0074 was
+	/// claimed by an in-flight, not-yet-pushed lane on issue #743): adds
+	/// run_retention_holds -- the presence-based Admin retention-hold table an
+	/// Admin-only reasoned action (RunRetentionHoldService/RunsController) inserts
+	/// into/deletes from, gating RunPurgeService.PurgeRunAsync's new hold-exclusion
+	/// check. No new runner grants (deliberately withheld -- see the migration's own
+	/// header); every transition is audited through the EXISTING audit_log table, no
+	/// new audit table --
 	/// 0076 (issue #1080, epic #726; slots 0074/0075 claimed and unpushed by PR #1076
 	/// and issue #784 at this migration's own commit time): re-keys the vSphere 9.x
 	/// catalog_product_versions row from the exact key '9.0' to the major-line-scoped
@@ -301,7 +311,7 @@ public sealed class SchemaMigrationTests
 	/// schema shape changes, no new runner grants, reuses migration 0070's own
 	/// idempotent-merge idiom --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 74;
+	private const int ExpectedMigrationCount = 75;
 
 	private readonly PostgresFixture _fixture;
 
