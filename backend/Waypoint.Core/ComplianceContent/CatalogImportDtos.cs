@@ -81,6 +81,18 @@ public sealed record CatalogDeclaredInput(Guid Id, Guid ExecutionProfileId, stri
 /// (see <see cref="Waypoint.Core.ComplianceContent.SemanticImport.SemanticCandidate"/>'s
 /// own "catalog-shaped EVIDENCE, not catalog authority" doc comment).
 /// </summary>
+/// <param name="Vendor">
+/// The <c>catalog_products.vendor</c> NATURAL-KEY value -- must be one of
+/// <see cref="CatalogVendors"/>'s closed set (today only <see cref="CatalogVendors.VMware"/>),
+/// never a human-readable display string. Issue #1007: this column participates in
+/// <c>catalog_products_vendor_key_unique UNIQUE (vendor, product_key)</c>, the constraint
+/// <see cref="Waypoint.Core.ComplianceContent.ICatalogRepository.PromoteCandidateAsync"/>'s
+/// upsert relies on to attach to an existing (seeded, when present) product row instead
+/// of creating a duplicate identity tree -- a display string here silently defeats that
+/// upsert instead of failing loudly, so callers must pass the same literal the seed
+/// migrations (0064/0067/0069) write. <see cref="ProductDisplayName"/> is the free-text
+/// cosmetic counterpart and never part of any natural key.
+/// </param>
 public sealed record CatalogPromotionRequest(
 	string SourceRevisionKey,
 	string Vendor,

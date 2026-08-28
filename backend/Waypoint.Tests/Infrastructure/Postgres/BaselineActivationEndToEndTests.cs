@@ -201,7 +201,7 @@ public sealed class BaselineActivationEndToEndTests : IAsyncLifetime
 
 	private static CatalogPromotionRequest VCenterPromotionRequest() => new(
 		SourceRevisionKey: "compliance-content",
-		Vendor: "VMware vSphere",
+		Vendor: CatalogVendors.VMware,
 		ProductDisplayName: "VMware vSphere",
 		ProductVersionDisplayName: "vSphere 8.0",
 		ContentReleaseDisplayName: "stig 8.0",
@@ -307,7 +307,7 @@ object scopeBody = new
 
 	private static CatalogPromotionRequest VmPromotionRequest() => new(
 		SourceRevisionKey: "compliance-content",
-		Vendor: "VMware vSphere",
+		Vendor: CatalogVendors.VMware,
 		ProductDisplayName: "VMware vSphere",
 		ProductVersionDisplayName: "vSphere 8.0",
 		ContentReleaseDisplayName: "stig 8.0",

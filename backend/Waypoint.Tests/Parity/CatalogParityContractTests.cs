@@ -135,7 +135,7 @@ public sealed class CatalogParityContractTests : IAsyncLifetime
 			//    hdf_ckl, SRG -> hdf).
 			CatalogPromotionRequest promotionRequest = new(
 				SourceRevisionKey: "parity-" + row.MatrixRowId,
-				Vendor: row.VendorFamily,
+				Vendor: CatalogVendors.VMware,
 				ProductDisplayName: row.VendorFamily,
 				ProductVersionDisplayName: row.ProductVersionKey,
 				ContentReleaseDisplayName: $"{row.Kind} {row.ProductVersionKey}",

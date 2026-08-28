@@ -396,13 +396,24 @@ public sealed class ContentPullJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// Builds the catalog-authored classification facts (vendor display name, product/
+	/// Builds the catalog-authored classification facts (vendor natural key, product/
 	/// content-release display names, report group, output kind) a candidate's own
 	/// evidence does not carry -- see <see cref="CatalogPromotionRequest"/>'s doc
 	/// comment. Report-group priority/key and output kind follow
 	/// docs/compliance-parity.md's documented table (NSX STIG 1 / VCSA STIG 2 / vCenter
 	/// STIG 3 / ESXi STIG 4 / VM STIG 5 / every SRG 6; STIG emits hdf_ckl, SRG emits hdf
 	/// -- SRGs are never CKL/upload-eligible, ADR-0022).
+	///
+	/// Issue #1007: <see cref="CatalogPromotionRequest.Vendor"/> is the
+	/// <c>catalog_products.vendor</c> NATURAL-KEY value (<see cref="CatalogVendors.VMware"/>,
+	/// the literal the seed migrations write), never the human-readable display string --
+	/// passing the display name here previously created a second <c>catalog_products</c>
+	/// row (and therefore an entire parallel product/version/component tree) under the
+	/// same <c>product_key</c> but a different <c>vendor</c> string, defeating the
+	/// <c>catalog_products_vendor_key_unique</c> upsert this promotion path relies on to
+	/// attach to the seeded catalog instead of duplicating it. The display string is kept
+	/// ONLY for <see cref="CatalogPromotionRequest.ProductDisplayName"/>, which is cosmetic
+	/// and never part of any natural key.
 	/// </summary>
 	private static CatalogPromotionRequest BuildPromotionRequest(SemanticCandidate candidate)
 	{
@@ -421,7 +432,7 @@ public sealed class ContentPullJobHandler : IJobHandler
 
 		return new CatalogPromotionRequest(
 			SourceRevisionKey: "compliance-content",
-			Vendor: vendorDisplayName,
+			Vendor: CatalogVendors.VMware,
 			ProductDisplayName: vendorDisplayName,
 			ProductVersionDisplayName: candidate.ProductVersionKey,
 			ContentReleaseDisplayName: $"{candidate.Kind} {candidate.ProductVersionKey}",

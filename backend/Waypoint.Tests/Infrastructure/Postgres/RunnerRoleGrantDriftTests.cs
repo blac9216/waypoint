@@ -1182,7 +1182,7 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 			Inputs: [new InspecManifestInput("vcenter_host", "string", true)],
 			Supports: [], Depends: [], ContentDigest: "deadbeef00000000000000000000000000000000000000000000000000000");
 		CatalogPromotionRequest request = new(
-			SourceRevisionKey: $"compliance-content-{suffix}", Vendor: "VMware vSphere", ProductDisplayName: "VMware vSphere",
+			SourceRevisionKey: $"compliance-content-{suffix}", Vendor: CatalogVendors.VMware, ProductDisplayName: "VMware vSphere",
 			ProductVersionDisplayName: "vSphere 8.0 Update 3", ContentReleaseDisplayName: "stig 8.0.3",
 			ReportGroupKey: $"vcenter-stig-{suffix}", ReportGroupDisplayName: "vCenter STIG", ReportGroupPriority: 3,
 			OutputKind: CatalogOutputKinds.HdfAndCkl);

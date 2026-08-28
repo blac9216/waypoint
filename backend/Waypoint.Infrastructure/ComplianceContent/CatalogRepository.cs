@@ -771,6 +771,7 @@ public sealed class CatalogRepository : ICatalogRepository
 		IReadOnlyList<string> vocabularyErrors = [
 			.. CatalogVocabularyValidator.ValidateComponent(candidate.Transport, candidate.SelectorKind, candidate.SelectorName),
 			.. CatalogVocabularyValidator.ValidateKind(candidate.Kind),
+			.. CatalogVocabularyValidator.ValidateVendor(request.Vendor),
 		];
 		if (vocabularyErrors.Count > 0)
 		{

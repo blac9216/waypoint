@@ -15,6 +15,32 @@
 namespace Waypoint.Core.ComplianceContent;
 
 /// <summary>
+/// The natural-key <c>catalog_products.vendor</c> value every catalog writer -- the
+/// hand-curated seed migrations (0064/0067/0069) AND the compliance-content importer's
+/// promotion path (issue #729's <c>CatalogRepository.PromoteCandidateAsync</c>) -- must
+/// use identically. Issue #1007's root cause: <c>vendor</c> is deliberately catalog-
+/// authored free text, not a CHECK-constrained closed set (ADR-0013 "new
+/// products/components remain data-driven"), so migration 0050 places NO CHECK
+/// constraint on it; the importer independently derived a human-readable display
+/// string ("VMware vSphere") instead of reusing the seed's literal ("vmware") for this
+/// column, and Postgres correctly treated the two as different natural keys under
+/// <c>catalog_products_vendor_key_unique UNIQUE (vendor, product_key)</c> -- a genuinely
+/// separate <c>catalog_products</c> row, and therefore an entirely separate identity
+/// tree beneath it, per mismatched vendor string. This constant is the single source
+/// both writers now share so the natural key can never again drift between them; adding
+/// a second vendor here is additive catalog-authored data (ADR-0013), never a schema
+/// change, exactly like adding a new product/component row.
+/// </summary>
+public static class CatalogVendors
+{
+	public const string VMware = "vmware";
+
+	public static readonly IReadOnlyCollection<string> All = [VMware];
+
+	public static bool IsValid(string? vendor) => vendor is not null && All.Contains(vendor);
+}
+
+/// <summary>
 /// The closed content-kind vocabulary (migration 0050's <c>catalog_content_releases</c>
 /// CHECK constraint). Issue #728 AC: "STIG and SRG content are distinct first-class
 /// kinds" -- never inferred from a path or leaf name.
@@ -132,6 +158,18 @@ public static class CatalogVocabularyValidator
 		CatalogKinds.IsValid(kind)
 			? []
 			: [$"kind '{kind}' is not in the closed catalog vocabulary ({string.Join(", ", CatalogKinds.All)})"];
+
+	/// <summary>
+	/// Validates a candidate <see cref="CatalogVendors"/> natural-key value. Issue #1007:
+	/// this exists so an importer path that accidentally passes a display string (or any
+	/// value outside the closed set) fails loudly with an actionable message instead of
+	/// silently creating a second <c>catalog_products</c> row -- and therefore a second
+	/// whole identity tree -- under a mismatched <c>vendor</c> natural-key value.
+	/// </summary>
+	public static IReadOnlyList<string> ValidateVendor(string vendor) =>
+		CatalogVendors.IsValid(vendor)
+			? []
+			: [$"vendor '{vendor}' is not in the closed catalog vocabulary ({string.Join(", ", CatalogVendors.All)})"];
 
 	/// <summary>Validates a candidate execution-profile <paramref name="outputKind"/>.</summary>
 	public static IReadOnlyList<string> ValidateOutputKind(string outputKind) =>
