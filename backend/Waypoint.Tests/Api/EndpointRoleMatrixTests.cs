@@ -131,6 +131,21 @@ public sealed class EndpointRoleMatrixTests
 		["ComplianceContentController.ListPulls"] = WaypointRole.Viewer,
 		["ComplianceContentController.Pull"] = WaypointRole.Admin,
 
+		// BaselinesController -- issue #731's missing operator surface (round-5
+		// live-lab finding: CreateStagedBaselineAsync/BaselineActivationService had
+		// zero non-test callers). Reads (list/get/impact-diff) are Viewer+, matching
+		// docs/api-contract.md's documented "GET /baselines ... Viewer+" row. Every
+		// write (stage-create, activate, rollback) is Admin-only, matching the
+		// contract's RBAC summary row "Content: activate/roll back a baseline; waive
+		// a candidate test" (checked Admin only) and ComplianceContentController.Pull's
+		// same trust boundary -- ADR-0022 "the activation boundary is exclusive."
+		["BaselinesController.List"] = WaypointRole.Viewer,
+		["BaselinesController.Get"] = WaypointRole.Viewer,
+		["BaselinesController.ImpactDiff"] = WaypointRole.Viewer,
+		["BaselinesController.Create"] = WaypointRole.Admin,
+		["BaselinesController.Activate"] = WaypointRole.Admin,
+		["BaselinesController.Rollback"] = WaypointRole.Admin,
+
 		// ProfilesController -- inventory read is Viewer+ (issue #40, feeds Benchmarks #559).
 		// ListControls (issue #598) is the same Viewer+ read-mostly gate as every other
 		// profile/config-doc read in this table.
