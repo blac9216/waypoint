@@ -60,6 +60,23 @@ public sealed class RunPurgeRepository : IRunPurgeRepository
 		return ReadStatus(reader);
 	}
 
+	public async Task<IReadOnlyList<Guid>> ListPendingFinalizeRunIdsAsync(CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"SELECT run_id FROM run_purges WHERE db_phase_done AND artifacts_phase = 'done' ORDER BY requested_at",
+			connection);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		List<Guid> runIds = [];
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			runIds.Add(reader.GetGuid(0));
+		}
+
+		return runIds;
+	}
+
 	public async Task<RunPurgeTombstone?> GetTombstoneAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

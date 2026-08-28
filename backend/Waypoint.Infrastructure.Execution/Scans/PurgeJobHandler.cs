@@ -26,10 +26,8 @@ namespace Waypoint.Infrastructure.Scans;
 /// deletes the on-disk scan-artifact files (<see cref="ScanArtifactPaths.RawHdf"/>,
 /// <see cref="ScanArtifactPaths.AttestedHdf"/>, <see cref="ScanArtifactPaths.Ckl"/>) for
 /// every job id named in the payload, then reports its outcome back into
-/// <c>run_purges</c> (migration 0042) and, on success, drives <c>RunPurgeService</c>
-/// straight to finalization (issue #1013) -- no separate re-POST or reconciler sweep
-/// is needed for the common case; only a genuine partial failure leaves the purge
-/// waiting on a retry. Runs on <c>compliance-runner</c> only
+/// <c>run_purges</c> (migration 0042) so <c>RunPurgeService</c> can finalize the purge
+/// on its next call. Runs on <c>compliance-runner</c> only
 /// (<see cref="JobCapabilities.Compliance"/>) -- it is the only execution domain with
 /// read-write access to the scan-artifact volume (ADR-0014 §7; the API mounts it
 /// read-only, deploy/compose.yaml).
@@ -61,23 +59,16 @@ public sealed partial class PurgeJobHandler : IJobHandler
 	};
 
 	private readonly IRunPurgeRepository _purges;
-	private readonly Waypoint.Infrastructure.Runs.RunPurgeService _purgeService;
 	private readonly IOptions<ScanOptions> _scanOptions;
 	private readonly ILogger<PurgeJobHandler> _logger;
 
-	public PurgeJobHandler(
-		IRunPurgeRepository purges,
-		Waypoint.Infrastructure.Runs.RunPurgeService purgeService,
-		IOptions<ScanOptions> scanOptions,
-		ILogger<PurgeJobHandler> logger)
+	public PurgeJobHandler(IRunPurgeRepository purges, IOptions<ScanOptions> scanOptions, ILogger<PurgeJobHandler> logger)
 	{
 		ArgumentNullException.ThrowIfNull(purges);
-		ArgumentNullException.ThrowIfNull(purgeService);
 		ArgumentNullException.ThrowIfNull(scanOptions);
 		ArgumentNullException.ThrowIfNull(logger);
 
 		_purges = purges;
-		_purgeService = purgeService;
 		_scanOptions = scanOptions;
 		_logger = logger;
 	}
@@ -163,16 +154,6 @@ public sealed partial class PurgeJobHandler : IJobHandler
 			LogPartialFailure(_logger, context.Job.Id, deleted, failed, string.Join("; ", errors));
 			return JobExecutionOutcome.Failed($"{failed} artifact file(s) could not be deleted: {string.Join("; ", errors)}");
 		}
-
-		// Issue #1013: the artifact-purge job completing is the ONLY signal that both
-		// purge phases are now done -- nothing else re-enters RunPurgeService for this
-		// run afterward (GET /runs/{id}/purge only reports status, it never finalizes).
-		// Drive finalization here, in the same execution context that just reported
-		// success, so the operator's original POST reaches Completed (purged_at +
-		// tombstone) without a second POST. See RunPurgeService.FinalizeAfterArtifactOutcomeAsync's
-		// doc comment for why this cannot regress the retry contract for a genuine
-		// failure (handled above, before this point is ever reached).
-		await _purgeService.FinalizeAfterArtifactOutcomeAsync(targetRunId.Value, cancellationToken).ConfigureAwait(false);
 
 		return JobExecutionOutcome.Succeeded($"Deleted {deleted} artifact file(s) (including already-absent files) across {payload.JobIds.Count} job(s).");
 	}

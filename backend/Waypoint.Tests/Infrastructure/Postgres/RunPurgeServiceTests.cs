@@ -43,6 +43,7 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 {
 	private readonly PostgresFixture _fixture;
 	private readonly string _artifactRoot = Directory.CreateTempSubdirectory("waypoint-run-purge-service-artifacts-").FullName;
+	private string _complianceRunnerConnectionString = string.Empty;
 	private JobQueueRepository _jobs = null!;
 	private RunPurgeRepository _purges = null!;
 	private AttestationSnapshotRepository _attestationSnapshots = null!;
@@ -59,6 +60,20 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		_purges = new RunPurgeRepository(_fixture.ConnectionString);
 		_attestationSnapshots = new AttestationSnapshotRepository(_fixture.ConnectionString);
 		_service = new RunPurgeService(_jobs, _purges, _attestationSnapshots, _fixture.ConnectionString);
+
+		// Issue #1013 round-2: the artifact-purge handler must run under the REAL
+		// least-privilege compliance-runner role, not the owner connection -- running
+		// it as the owner is exactly how round 1's runner-side finalize call shipped
+		// with a live 42501 (the role has no INSERT on run_purge_tombstones / DELETE
+		// on run_purges, migration 0042's documented posture). Same fixed test-role
+		// convention as RunnerRoleGrantDriftTests: PostgresFixture.CreateRunnerRolesAsync
+		// provisions the role with "waypoint_test" against the owner host/port/db.
+		NpgsqlConnectionStringBuilder runnerBuilder = new(_fixture.ConnectionString)
+		{
+			Username = "waypoint_compliance_runner",
+			Password = "waypoint_test",
+		};
+		_complianceRunnerConnectionString = runnerBuilder.ConnectionString;
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
@@ -86,9 +101,13 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 	/// against the actual queued <c>purge</c> job row <see cref="RunPurgeService"/>
 	/// created, rather than short-circuiting straight to
 	/// <see cref="IRunPurgeRepository.ReportArtifactOutcomeAsync"/> the way the older
-	/// tests in this file do. This is the layer issue #1013's bug actually lives at:
-	/// only by running the real handler does <see cref="RunPurgeService.FinalizeAfterArtifactOutcomeAsync"/>
-	/// get exercised the way production actually calls it.
+	/// tests in this file do. Issue #1013 round-2: the handler's repository runs under
+	/// the REAL <c>waypoint_compliance_runner</c> role (migration 0042's grants), so a
+	/// write the role is not granted fails here with 42501 exactly as it would live --
+	/// the gap that let round 1's runner-side finalize call pass owner-connection tests
+	/// while failing on the real stack. (The claim SELECT below stays on the owner
+	/// connection: it simulates the dispatcher's claim machinery, which is not under
+	/// test; every write the HANDLER makes goes through the runner-role repository.)
 	/// </summary>
 	private async Task<JobExecutionOutcome> RunArtifactPurgeJobAsync(Guid targetRunId, CancellationToken cancellationToken)
 	{
@@ -115,12 +134,28 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 			MaxAttempts: reader.GetInt32(9));
 		await reader.CloseAsync();
 
+		RunPurgeRepository runnerPurges = new(_complianceRunnerConnectionString);
 		JobExecutionContext context = new(
 			job, "worker-test", new FakeEventPublisher(),
-			new JobQueueRepository(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance), JobShape.Simple);
+			new JobQueueRepository(_complianceRunnerConnectionString, NullLogger<JobQueueRepository>.Instance), JobShape.Simple);
 		ScanOptions scanOptions = new() { ArtifactStorePath = _artifactRoot };
-		PurgeJobHandler handler = new(_purges, _service, Options.Create(scanOptions), NullLogger<PurgeJobHandler>.Instance);
+		PurgeJobHandler handler = new(runnerPurges, Options.Create(scanOptions), NullLogger<PurgeJobHandler>.Instance);
 		return await handler.ExecuteAsync(context, cancellationToken);
+	}
+
+	/// <summary>
+	/// One pass of the API-side finalization sweep
+	/// (<see cref="RunPurgeFinalizeHostedService.SweepOnceAsync"/>) under the owner
+	/// connection -- exactly what the API process's hosted service does in production
+	/// on its own timer, never an operator re-POST. The e2e tests below drive this
+	/// seam once deterministically instead of waiting out a real timer tick.
+	/// </summary>
+	private Task SweepPendingFinalizeAsync(CancellationToken cancellationToken)
+	{
+		RunPurgeFinalizeHostedService sweep = new(
+			_service, _purges, Options.Create(new RunPurgeFinalizeOptions()),
+			NullLogger<RunPurgeFinalizeHostedService>.Instance);
+		return sweep.SweepOnceAsync(cancellationToken);
 	}
 
 	[Theory]
@@ -223,9 +258,12 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 	/// and the older <see cref="PurgeRunAsync_FullFlow_DeletesProjectionsAndRecordsTombstone"/>
 	/// simulate that same manual second call -- this test proves it is no longer
 	/// necessary). This is now a passing regression test: the SAME operator action
-	/// (one <see cref="RunPurgeService.PurgeRunAsync"/> call plus the artifact job
-	/// completing under its own steam) reaches <see cref="RunPurgeOutcome.Completed"/>
-	/// with no second call into <see cref="RunPurgeService"/> at all.
+	/// (one <see cref="RunPurgeService.PurgeRunAsync"/> call, the artifact job
+	/// completing under its own steam AS the real runner role, then one automatic
+	/// API-side <see cref="RunPurgeFinalizeHostedService"/> sweep pass) reaches
+	/// <see cref="RunPurgeOutcome.Completed"/> with no second operator call at all --
+	/// and without any runner-side write beyond migration 0042's granted
+	/// column-limited UPDATE.
 	/// </summary>
 	[Fact]
 	public async Task PurgeRunAsync_RunWithArtifacts_FinalizesInOneOperatorActionWithoutASecondPurgeCall()
@@ -238,15 +276,20 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		RunPurgeResult inProgress = await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
 		Assert.Equal(RunPurgeOutcome.InProgress, inProgress.Outcome);
 
-		// The artifact-purge job completing under its own steam -- exactly what
-		// compliance-runner's JobDispatcherHostedService does in production, never a
-		// second call into RunPurgeService/PurgeRunAsync.
+		// The artifact-purge job completing under its own steam AND under the real
+		// waypoint_compliance_runner role -- exactly what compliance-runner's
+		// JobDispatcherHostedService does in production, never a second call into
+		// RunPurgeService/PurgeRunAsync.
 		JobExecutionOutcome jobOutcome = await RunArtifactPurgeJobAsync(runId, CancellationToken.None);
 		Assert.Equal(JobOutcomeKind.Succeeded, jobOutcome.Kind);
 
 		Assert.False(File.Exists(ScanArtifactPaths.RawHdf(_artifactRoot, scanJobId)));
 		Assert.False(File.Exists(ScanArtifactPaths.AttestedHdf(_artifactRoot, scanJobId)));
 		Assert.False(File.Exists(ScanArtifactPaths.Ckl(_artifactRoot, scanJobId)));
+
+		// The API-side finalization sweep firing on its own timer -- the automatic
+		// mechanism, not an operator action.
+		await SweepPendingFinalizeAsync(CancellationToken.None);
 
 		// GET /runs/{id}/purge (RunPurgeService.GetStatusAsync) -- no POST issued again.
 		RunPurgeResult? status = await _service.GetStatusAsync(runId, CancellationToken.None);
@@ -312,14 +355,14 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 
 	/// <summary>
 	/// Issue #1013: pins the retry path end-to-end through the REAL
-	/// <see cref="PurgeJobHandler"/> (not a direct repository report) for a genuine
-	/// mid-phase failure -- the handler itself hits an undeletable file, reports
-	/// failure, and <see cref="RunPurgeService.FinalizeAfterArtifactOutcomeAsync"/>
-	/// (called from inside the handler on every outcome path) must NOT finalize on
-	/// that failed report; the purge must be left honestly
-	/// <see cref="RunPurgeOutcome.Failed"/>/in-flight, not silently completed. Only
-	/// after a genuine operator retry (permissions fixed, purge re-POSTed) does the
-	/// artifact job re-run, succeed, and finalize.
+	/// <see cref="PurgeJobHandler"/> under the real runner role (not a direct
+	/// repository report) for a genuine mid-phase failure -- the handler itself hits
+	/// an undeletable file and reports failure, and the API-side finalization sweep
+	/// (<see cref="RunPurgeFinalizeHostedService"/>) must NOT finalize that failed
+	/// report; the purge must be left honestly <see cref="RunPurgeOutcome.Failed"/>,
+	/// not silently completed. Only after a genuine operator retry (permissions
+	/// fixed, purge re-POSTed) does the artifact job re-run, succeed, and the next
+	/// sweep pass finalize.
 	/// </summary>
 	[Fact]
 	public async Task PurgeRunAsync_RealHandlerMidPhaseFailure_LeavesHonestlyInProgressThenRetryCompletes()
@@ -356,8 +399,10 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 			File.SetUnixFileMode(_artifactRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
 		}
 
-		// Honestly in-progress/failed -- NOT silently finalized by the handler's own
-		// post-report finalize call (which only fires on the success path).
+		// Honestly failed -- and the API-side sweep must NOT finalize (or touch) a
+		// failed pass: ListPendingFinalizeRunIdsAsync selects artifacts_phase='done'
+		// only, so a sweep tick here leaves the retryable failure fully intact.
+		await SweepPendingFinalizeAsync(CancellationToken.None);
 		RunPurgeResult? afterFailure = await _service.GetStatusAsync(runId, CancellationToken.None);
 		Assert.NotNull(afterFailure);
 		Assert.Equal(RunPurgeOutcome.Failed, afterFailure!.Outcome);
@@ -369,10 +414,11 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		Assert.Equal(RunPurgeOutcome.InProgress, retried.Outcome);
 		Assert.Equal("running", retried.Status!.ArtifactsPhase);
 
-		// This time deletion succeeds -- the handler's own post-report finalize call
-		// must complete the purge without any further RunPurgeService call.
+		// This time deletion succeeds (real runner role again) -- and the next
+		// automatic sweep pass finalizes without any further operator call.
 		JobExecutionOutcome retryJobOutcome = await RunArtifactPurgeJobAsync(runId, CancellationToken.None);
 		Assert.Equal(JobOutcomeKind.Succeeded, retryJobOutcome.Kind);
+		await SweepPendingFinalizeAsync(CancellationToken.None);
 
 		RunPurgeResult? completed = await _service.GetStatusAsync(runId, CancellationToken.None);
 		Assert.NotNull(completed);
@@ -382,6 +428,54 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		RunPurgeTombstone? tombstone = await _purges.GetTombstoneAsync(runId, CancellationToken.None);
 		Assert.NotNull(tombstone);
 		Assert.Equal("completed", tombstone!.Outcome);
+	}
+
+	/// <summary>
+	/// Issue #1013 round-2 (RunnerRoleGrantDriftTests pattern): migration 0042's
+	/// documented posture -- "INSERT/DELETE stay API-only ... nothing runner-side ever
+	/// removes a run_purges row" -- must HOLD, not silently drift. Round 1 of this fix
+	/// called finalization from inside the runner process and shipped a live 42501
+	/// precisely because every purge test ran under the owner connection; these two
+	/// facts pin the boundary in both directions: the writes the runner is granted
+	/// succeed (proven by the e2e tests above running the real handler as the real
+	/// role), and the two finalization writes it is deliberately NOT granted are
+	/// denied.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_InsertRunPurgeTombstone_IsDenied()
+	{
+		Guid runId = await SeedRunAsync("completed");
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO run_purge_tombstones (run_id, run_type, prior_state, actor, outcome, detail)
+			VALUES ($1, 'scan', 'completed', 'runner-should-not-be-able-to-do-this', 'completed', '{}'::jsonb)
+			""", connection);
+		insert.Parameters.AddWithValue(runId);
+
+		PostgresException denied = await Assert.ThrowsAsync<PostgresException>(() => insert.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, denied.SqlState);
+	}
+
+	/// <inheritdoc cref="ComplianceRunnerRole_InsertRunPurgeTombstone_IsDenied"/>
+	[Fact]
+	public async Task ComplianceRunnerRole_DeleteRunPurgesRow_IsDenied()
+	{
+		Guid runId = await SeedRunAsync("completed");
+		await _purges.CreateAsync(runId, "admin-tester", "completed", CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand delete = new("DELETE FROM run_purges WHERE run_id = $1", connection);
+		delete.Parameters.AddWithValue(runId);
+
+		PostgresException denied = await Assert.ThrowsAsync<PostgresException>(() => delete.ExecuteNonQueryAsync());
+		Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, denied.SqlState);
+
+		// The row is untouched -- still visible, still finalizable API-side.
+		Assert.NotNull(await _purges.GetStatusAsync(runId, CancellationToken.None));
 	}
 
 	private void WriteArtifactFiles(Guid scanJobId)

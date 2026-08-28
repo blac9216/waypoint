@@ -150,9 +150,6 @@ public static class ServiceCollectionExtensions
 
 		// Issue #594 (epic #577): purge deletes a terminal run's on-disk scan-artifact
 		// files -- compliance-runner only, see JobCapabilities.Compliance's doc comment.
-		// Issue #1013: also resolves RunPurgeService (registered by AddWaypointInfrastructure,
-		// which composition always calls before this method -- see that method's own doc
-		// comment) so it can finalize the purge immediately after reporting success.
 		services.AddSingleton<IJobHandler, Scans.PurgeJobHandler>();
 
 		// Issue #437 (ADR-0014 §5): resource-aware admission -- every host that calls
