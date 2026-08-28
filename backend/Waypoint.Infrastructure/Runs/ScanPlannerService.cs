@@ -240,8 +240,9 @@ public sealed class ScanPlannerService
 				// carrying a benchmark revision means the catalog is internally
 				// inconsistent (corrupt/inconsistent state, a should-never-happen). Epic
 				// #726 §3/§5 sanction skip-and-continue only for the enumerated
-				// architecturally-skippable gaps (unsupported / no-active-baseline /
-				// unmapped-benchmark); silently dropping this component while its siblings
+				// architecturally-skippable gaps (unsupported / no-active-baseline --
+				// unmapped-benchmark was retired as a skip by issue #1021 and now plans
+				// profile-only); silently dropping this component while its siblings
 				// proceed would narrow the run's coverage on corruption rather than
 				// surface it. Fail the WHOLE plan compilation closed instead -- this throws
 				// before RunCreationService persists any run/plan/job row.
