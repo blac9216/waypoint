@@ -376,6 +376,21 @@ public sealed class CatalogRepository : ICatalogRepository
 		return components;
 	}
 
+	public async Task<CatalogComponent?> GetComponentAsync(Guid componentId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
+			FROM catalog_components
+			WHERE id = $1
+			""", connection);
+		command.Parameters.AddWithValue(componentId);
+
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? MapComponent(reader, 0) : null;
+	}
+
 	public async Task<IReadOnlyList<CatalogComponent>> FindTopLevelComponentsByKeyAndVersionAsync(
 		string catalogComponentKey, string exactVersion, CancellationToken cancellationToken)
 	{

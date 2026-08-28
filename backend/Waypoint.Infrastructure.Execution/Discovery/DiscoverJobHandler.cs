@@ -319,6 +319,38 @@ public sealed class DiscoverJobHandler : IJobHandler
 				.ConfigureAwait(false);
 		}
 
+		// Issue #741: catalog-declared service expansion, the step MapToComponents' doc
+		// comment previously deferred ("non-inventory catalog-defined expansion ... is
+		// explicitly NOT built in this slice"). Runs AFTER the component upsert so it
+		// reads the root's POST-pass linkage state -- which #1000's CASE preservation
+		// keeps from a configured-fact PUT even though discovery itself never supplies
+		// a vCenter version. Derived from catalog + linkage facts, not from this pass's
+		// enumeration, so it runs for partial boundaries too (advanceAbsence has no
+		// bearing: an unlinked root marking declared children absent is a fact-based
+		// reconciliation, not an incomplete-enumeration inference).
+		CatalogDeclaredChildSyncOutcome declaredOutcome;
+		try
+		{
+			declaredOutcome = await SyncCatalogDeclaredServiceChildrenAsync(targetId, cancellationToken).ConfigureAwait(false);
+		}
+		catch (Exception exception) when (exception is not OperationCanceledException)
+		{
+			// Fail-soft (same shape as #995's per-component linkage fault handling): the
+			// enumeration itself already succeeded and was persisted above; a failed
+			// declared-service expansion is loud (warning job.log) but never converts a
+			// successful discovery into a failure -- it self-heals on the next pass or
+			// the next configured-fact write.
+			declaredOutcome = new CatalogDeclaredChildSyncOutcome(0, 0, 0);
+			string declaredWarning = JsonSerializer.Serialize(new
+			{
+				severity = "warning",
+				line = $"discover: catalog-declared service expansion failed ({exception.GetType().Name}: {exception.Message}) -- declared VCSA service components were not reconciled this pass.",
+			});
+			await context.Events
+				.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, declaredWarning, cancellationToken)
+				.ConfigureAwait(false);
+		}
+
 		string progressPayload = JsonSerializer.Serialize(new
 		{
 			upserted = outcome.Upserted,
@@ -326,6 +358,9 @@ public sealed class DiscoverJobHandler : IJobHandler
 			components_upserted = componentOutcome.Upserted,
 			components_absent = componentOutcome.MarkedAbsent,
 			components_reconnected = componentOutcome.Reconnected,
+			declared_services_upserted = declaredOutcome.Upserted,
+			declared_services_reconnected = declaredOutcome.Reconnected,
+			declared_services_absent = declaredOutcome.MarkedAbsent,
 			complete = completeness.IsComplete,
 			enumeration_errors = completeness.Errors,
 		});
@@ -425,14 +460,14 @@ public sealed class DiscoverJobHandler : IJobHandler
 	/// preserve the cluster tier as a component tier that does not exist in the catalog
 	/// vocabulary.
 	///
-	/// Non-inventory catalog-defined expansion (named VCSA services, NSX functional
-	/// components, whole-appliance SSH component sets -- ADR-0023's "component
-	/// families with no independent upstream object") is explicitly NOT built in this
-	/// slice: it requires resolving this target's active catalog product/version to
-	/// read the catalog's declared expected-component set, which no discovery-job code
-	/// path does today (<see cref="Waypoint.Core.Components.ComponentCapabilityMatcher"/>
-	/// consumes a resolved fact, it does not supply one). Tracked as a deferred finding
-	/// in this PR's own report rather than guessed at here.
+	/// Non-inventory catalog-defined expansion of the ssh/service family (named VCSA
+	/// services -- ADR-0023's "component families with no independent upstream object")
+	/// is issue #741's <see cref="SyncCatalogDeclaredServiceChildrenAsync"/>, which runs
+	/// AFTER the component upsert (it needs the root's post-pass catalog linkage), not
+	/// here in the enumeration mapping -- these components are never enumerated, they
+	/// are declared by the catalog release the root resolved to. NSX functional
+	/// components and whole-appliance SSH component sets remain future work on their own
+	/// target kinds (#742/#743).
 	/// </summary>
 	internal static IReadOnlyList<DiscoveredComponent> MapToComponents(IReadOnlyList<DiscoveredInventoryItem> items)
 	{
@@ -500,6 +535,49 @@ public sealed class DiscoverJobHandler : IJobHandler
 		}
 
 		return components;
+	}
+
+	/// <summary>
+	/// Issue #741: materializes the catalog release's declared VCSA service set as
+	/// inventory child components beneath this target's root connection component --
+	/// "the catalog release determines the exact VCSA component list" (issue #741 AC),
+	/// never a hard-coded service list. The root (the synthetic no-vendor-identity,
+	/// no-parent <c>vcenter</c> component) anchors the expansion because the declared
+	/// services are OS-level services of the appliance the target's connection reaches;
+	/// discovered objects with their own vendor identity (ESXi hosts, VMs) are never
+	/// expansion anchors. Root unlinked (no version fact yet, cleared, conflicted, or
+	/// ambiguous): the declared set is empty and any previously-derived children are
+	/// marked absent -- honest lifecycle, never a silent stale service list. Fails soft
+	/// on a repository fault the same way per-component linkage does (#995): discovery
+	/// itself already succeeded; a failed expansion pass surfaces as a warning-level
+	/// job.log line and re-heals on the next pass or configured-fact write.
+	/// </summary>
+	private async Task<CatalogDeclaredChildSyncOutcome> SyncCatalogDeclaredServiceChildrenAsync(
+		Guid targetId, CancellationToken cancellationToken)
+	{
+		IReadOnlyList<Component> current = await _components
+			.ListForTargetAsync(targetId, includeRetired: true, cancellationToken).ConfigureAwait(false);
+		Component? root = current.FirstOrDefault(c => c.ParentComponentId is null && c.VendorIdentity is null);
+		if (root is null)
+		{
+			return new CatalogDeclaredChildSyncOutcome(0, 0, 0);
+		}
+
+		IReadOnlyList<CatalogDeclaredChild> declared = [];
+		if (root.CatalogComponentId is { } linkedCatalogComponentId)
+		{
+			CatalogComponent? linkedComponent = await _catalog
+				.GetComponentAsync(linkedCatalogComponentId, cancellationToken).ConfigureAwait(false);
+			if (linkedComponent is not null)
+			{
+				IReadOnlyList<CatalogComponent> versionComponents = await _catalog
+					.ListComponentsAsync(linkedComponent.ProductVersionId, cancellationToken).ConfigureAwait(false);
+				declared = CatalogDeclaredServiceComponents.SelectDeclaredServiceChildren(versionComponents, linkedCatalogComponentId);
+			}
+		}
+
+		return await _components
+			.SyncCatalogDeclaredChildrenAsync(targetId, root.Id, declared, cancellationToken).ConfigureAwait(false);
 	}
 
 	/// <summary>

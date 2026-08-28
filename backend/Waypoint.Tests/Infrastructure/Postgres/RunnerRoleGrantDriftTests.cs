@@ -1566,6 +1566,69 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #741, added per this file's standing "a new runner-executed write path
+	/// without a role-contract test ships grant drift silently" lesson: the discovery
+	/// job now runs the catalog-declared service expansion
+	/// (<see cref="ComponentRepository.SyncCatalogDeclaredChildrenAsync"/> plus the
+	/// catalog reads feeding it -- <c>GetComponentAsync</c>/<c>ListComponentsAsync</c>)
+	/// under the real compliance-runner role. Exercises every statement that protocol
+	/// performs as that role: child INSERT, the narrowed-set mark-absent UPDATE, and
+	/// the re-declare reconnect UPDATE -- not merely "no 42501 on the happy path".
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_SyncCatalogDeclaredChildrenAsync_FullLifecycleWithoutPermissionDenied()
+	{
+		Guid siteId = await SeedSiteAsync();
+		Guid targetId = await SeedTargetAsync(siteId);
+
+		CatalogRepository runnerCatalog = new(_complianceRunnerConnectionString);
+		ComponentRepository runnerComponents = new(_complianceRunnerConnectionString, runnerCatalog);
+
+		// Root connection component, exactly as a discovery pass creates it.
+		await runnerComponents.UpsertDiscoveredAsync(
+			targetId,
+			[new Waypoint.Core.Components.DiscoveredComponent("vcenter", null, "vCenter Server", null, null, null)],
+			CancellationToken.None);
+		Waypoint.Core.Components.Component root =
+			Assert.Single(await runnerComponents.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None));
+
+		// Catalog rows are seeded through the OWNER connection (catalog writes are the
+		// content-import path's own grant surface, covered by this file's existing
+		// catalog cases) -- the runner then READS them back through its own role, the
+		// exact reads the discovery expansion performs.
+		CatalogRepository ownerCatalog = new(_fixture.ConnectionString);
+		Waypoint.Core.ComplianceContent.CatalogSourceRevision source =
+			await ownerCatalog.UpsertSourceRevisionAsync($"rev-741-{Guid.NewGuid():N}", null, CancellationToken.None);
+		Waypoint.Core.ComplianceContent.CatalogProduct product =
+			await ownerCatalog.UpsertProductAsync(source.Id, "vmware", $"vsphere-741-{Guid.NewGuid():N}", "VMware vSphere", CancellationToken.None);
+		Waypoint.Core.ComplianceContent.CatalogProductVersion version =
+			await ownerCatalog.UpsertProductVersionAsync(product.Id, "8.0", "8.0", CancellationToken.None);
+		Waypoint.Core.ComplianceContent.CatalogComponent eam = await ownerCatalog.UpsertComponentAsync(
+			version.Id,
+			new Waypoint.Core.ComplianceContent.CatalogComponentDefinition(
+				"eam", "VCSA EAM", Waypoint.Core.ComplianceContent.CatalogTransports.Ssh,
+				Waypoint.Core.ComplianceContent.CatalogSelectorKinds.Service, "eam", null),
+			CancellationToken.None);
+
+		Assert.NotNull(await runnerCatalog.GetComponentAsync(eam.Id, CancellationToken.None));
+		Assert.NotEmpty(await runnerCatalog.ListComponentsAsync(version.Id, CancellationToken.None));
+
+		Waypoint.Core.Components.CatalogDeclaredChild declaredEam = new(eam.Id, "eam", "VCSA EAM");
+
+		Waypoint.Core.Components.CatalogDeclaredChildSyncOutcome insertOutcome =
+			await runnerComponents.SyncCatalogDeclaredChildrenAsync(targetId, root.Id, [declaredEam], CancellationToken.None);
+		Assert.Equal(1, insertOutcome.Upserted);
+
+		Waypoint.Core.Components.CatalogDeclaredChildSyncOutcome absentOutcome =
+			await runnerComponents.SyncCatalogDeclaredChildrenAsync(targetId, root.Id, [], CancellationToken.None);
+		Assert.Equal(1, absentOutcome.MarkedAbsent);
+
+		Waypoint.Core.Components.CatalogDeclaredChildSyncOutcome reconnectOutcome =
+			await runnerComponents.SyncCatalogDeclaredChildrenAsync(targetId, root.Id, [declaredEam], CancellationToken.None);
+		Assert.Equal(1, reconnectOutcome.Reconnected);
+	}
+
+	/// <summary>
 	/// Least-privilege boundary check mirroring this file's other role-boundary pairs:
 	/// migration 0058 grants the compliance-runner role INSERT-only on
 	/// <c>component_observations</c> (never SELECT/UPDATE/DELETE -- the runner writes

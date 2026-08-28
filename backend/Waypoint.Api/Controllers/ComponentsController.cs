@@ -187,6 +187,19 @@ public sealed class ComponentsController : ControllerBase
 			throw NotFoundError(id);
 		}
 
+		// Issue #741: a catalog-declared child (named VCSA service) inherits the parent
+		// appliance component's version facts through the same shared rule
+		// ScopeResolutionService applies, so this read surface and scope resolution can
+		// never disagree about a child's capability.
+		if (ComponentFactInheritance.IsCatalogDeclaredChild(component) && component.ParentComponentId is { } parentComponentId)
+		{
+			Component? parent = await _components.GetAsync(parentComponentId, cancellationToken).ConfigureAwait(false);
+			if (parent is not null)
+			{
+				component = ComponentFactInheritance.WithInheritedFacts(component, parent);
+			}
+		}
+
 		Guid? linkedProductVersionId = null;
 		string? linkedProductVersionKey = null;
 		IReadOnlyList<CatalogExecutionProfileDetail> candidateProfiles = [];
