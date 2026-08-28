@@ -150,16 +150,90 @@ public sealed class StigZipReaderTests
 		Assert.Contains("per-entry bound", error);
 	}
 
-	private static byte[] BuildZip(params (string Name, string Content)[] entries)
+	/// <summary>
+	/// Issue #1073 class-killing guard: the three real vendor package shapes (measured
+	/// against the vendor compliance-content repository) each parse to their expected
+	/// benchmark count, so the single-benchmark assumption cannot silently return.
+	/// Every fixture below is invented -- no vendor/DISA content is reproduced here.
+	/// </summary>
+	[Fact]
+	public void TryReadXccdfEntries_FlatMultiXccdf_ReturnsOneEntryPerSibling()
+	{
+		byte[] zipBytes = BuildZip(
+			("Product_ESXi_STIG_Readiness_Guide_V1R1-xccdf.xml", InventedBenchmark("esxi")),
+			("Product_vCenter_STIG_Readiness_Guide_V1R1-xccdf.xml", InventedBenchmark("vcenter")),
+			("Product_VM_STIG_Readiness_Guide_V1R1-xccdf.xml", InventedBenchmark("vm")),
+			("Product_STIG_Readiness_Guide_Overview.pdf", "not xccdf"));
+
+		bool ok = StigZipReader.TryReadXccdfEntries(zipBytes, out IReadOnlyList<XccdfZipEntry> entries, out string? error);
+
+		Assert.True(ok);
+		Assert.Null(error);
+		Assert.Equal(3, entries.Count);
+	}
+
+	[Fact]
+	public void TryReadXccdfEntries_NestedDirectoryMultiXccdf_ReturnsOneEntryPerComponentDirectory()
+	{
+		byte[] zipBytes = BuildZip(
+			("Product_Supplemental/audit.rules", "not xccdf"),
+			("Product_Supplemental/Product_ESXi_V1R1_Manual_STIG/Product_ESXi_STIG_V1R1_Manual-xccdf.xml", InventedBenchmark("esxi")),
+			("Product_Supplemental/Product_vCenter_V1R1_Manual_STIG/Product_vCenter_STIG_V1R1_Manual-xccdf.xml", InventedBenchmark("vcenter")),
+			("Product_Supplemental/Product_EAM_V1R1_Manual_STIG/Product_EAM_STIG_V1R1_Manual-xccdf.xml", InventedBenchmark("eam")),
+			("Product_Supplemental/Product_STS_V1R1_Manual_STIG/Product_STS_STIG_V1R1_Manual-xccdf.xml", InventedBenchmark("sts")));
+
+		bool ok = StigZipReader.TryReadXccdfEntries(zipBytes, out IReadOnlyList<XccdfZipEntry> entries, out string? error);
+
+		Assert.True(ok);
+		Assert.Null(error);
+		Assert.Equal(4, entries.Count);
+	}
+
+	[Fact]
+	public void TryReadXccdfEntries_ZipOfZips_RecursesIntoNestedComponentPackagesAndReturnsEveryBenchmark()
+	{
+		byte[] nsxZip = BuildZip(("NSX-Manager-xccdf.xml", InventedBenchmark("nsx-manager")));
+		byte[] vSphereZip = BuildZip(
+			("vSphere-ESXi-xccdf.xml", InventedBenchmark("esxi")),
+			("vSphere-vCenter-xccdf.xml", InventedBenchmark("vcenter")));
+		byte[] sddcManagerZip = BuildZip(("SDDC-Manager-xccdf.xml", InventedBenchmark("sddc-manager")));
+
+		byte[] bundleZip = BuildZipOfZips(
+			("U_NSX_STIG.zip", nsxZip),
+			("U_vSphere_STIG.zip", vSphereZip),
+			("U_SDDC_Manager_STIG_Readiness_Guide.zip", sddcManagerZip),
+			("Bundle_Overview.pdf", Encoding.UTF8.GetBytes("not xccdf")));
+
+		bool ok = StigZipReader.TryReadXccdfEntries(bundleZip, out IReadOnlyList<XccdfZipEntry> entries, out string? error);
+
+		Assert.True(ok);
+		Assert.Null(error);
+		Assert.Equal(4, entries.Count);
+	}
+
+	private static string InventedBenchmark(string suffix) => $$"""
+		<Benchmark id="xccdf_invented.example_benchmark_{{suffix}}_EX-1-0_STIG">
+		  <title>Invented Example STIG {{suffix}}</title>
+		  <version update="1">1</version>
+		  <Rule id="SV-1-{{suffix}}" severity="high"><title>r</title></Rule>
+		</Benchmark>
+		""";
+
+	private static byte[] BuildZip(params (string Name, string Content)[] entries) =>
+		BuildZipBytes(entries.Select(e => (e.Name, Encoding.UTF8.GetBytes(e.Content))).ToArray());
+
+	/// <summary>Zip-of-zips fixture helper: an entry's content is itself pre-built zip bytes.</summary>
+	private static byte[] BuildZipOfZips(params (string Name, byte[] Content)[] entries) => BuildZipBytes(entries);
+
+	private static byte[] BuildZipBytes(IEnumerable<(string Name, byte[] Content)> entries)
 	{
 		using MemoryStream stream = new();
 		using (ZipArchive archive = new(stream, ZipArchiveMode.Create, leaveOpen: true))
 		{
-			foreach ((string name, string content) in entries)
+			foreach ((string name, byte[] bytes) in entries)
 			{
 				ZipArchiveEntry entry = archive.CreateEntry(name, CompressionLevel.Fastest);
 				using Stream entryStream = entry.Open();
-				byte[] bytes = Encoding.UTF8.GetBytes(content);
 				entryStream.Write(bytes, 0, bytes.Length);
 			}
 		}

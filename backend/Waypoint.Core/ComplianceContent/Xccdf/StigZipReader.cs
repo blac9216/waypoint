@@ -26,6 +26,15 @@ namespace Waypoint.Core.ComplianceContent.Xccdf;
 /// only zip-slip-style entry NAMES (used solely to pick the right entry, never to
 /// build a filesystem path) and decompression-bomb-style entry SIZES.
 /// </summary>
+/// <summary>
+/// One XCCDF <c>Benchmark</c> XML document found inside a STIG package, plus its
+/// diagnostic-only entry path (issue #1073: a package yields N of these, never one-
+/// or-error). <see cref="EntryPath"/> exists purely so callers/errors can say which
+/// entry a candidate came from; it is never used to derive benchmark identity --
+/// identity comes only from the parsed XCCDF's own <c>Benchmark</c> metadata.
+/// </summary>
+public sealed record XccdfZipEntry(string EntryPath, string XmlText);
+
 public static class StigZipReader
 {
 	/// <summary>Bound on the zip archive itself (untrusted upload/sync input).</summary>
@@ -36,6 +45,24 @@ public static class StigZipReader
 
 	/// <summary>Bound on the number of entries a package may declare (guards a zip bomb built from many small entries rather than one huge one).</summary>
 	public const int MaxEntryCount = 10_000;
+
+	/// <summary>
+	/// TEMPORARY (issue #1073, step 1 of 2): stub new-shape entry point so the
+	/// class-killing parity test can be written and run red before the real fan-out
+	/// implementation lands. Today it just wraps the old single-entry reader.
+	/// </summary>
+	public static bool TryReadXccdfEntries(byte[]? zipBytes, out IReadOnlyList<XccdfZipEntry> entries, out string? error)
+	{
+		string? xml = TryReadXccdfEntry(zipBytes, out error);
+		if (xml is null)
+		{
+			entries = [];
+			return false;
+		}
+
+		entries = [new XccdfZipEntry("(single-entry stub)", xml)];
+		return true;
+	}
 
 	/// <summary>
 	/// Attempts to find and read the XCCDF <c>Benchmark</c> XML text from
