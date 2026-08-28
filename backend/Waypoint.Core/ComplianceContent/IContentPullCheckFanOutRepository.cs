@@ -34,12 +34,20 @@ public sealed record ContentCheckResultRecord(
 	bool InspecCheckPassed,
 	string? InspecCheckDetail);
 
-/// <summary>One <c>content_pull_checks</c> row -- one fanned-out chunk job for one content-pull.</summary>
+/// <summary>
+/// One <c>content_pull_checks</c> row -- one fanned-out chunk job for one content-pull.
+/// <see cref="CheckJobId"/> is null for exactly one shape: the zero-chunk MARKER row a
+/// pull that enumerated zero profiles records (see
+/// <see cref="IContentPullCheckFanOutRepository.RecordEmptyFanOutAsync"/>) so the
+/// reconcile sweep still discovers and completes it -- its
+/// <see cref="ProfileDirectories"/> is always empty for that row (schema-enforced,
+/// migration 0073's marker-shape CHECK).
+/// </summary>
 public sealed record ContentPullCheckFanOut(
 	Guid Id,
 	Guid RunId,
 	Guid ContentPullJobId,
-	Guid CheckJobId,
+	Guid? CheckJobId,
 	string SourceCommit,
 	IReadOnlyList<ContentCheckProfileDirectory> ProfileDirectories,
 	string Status);
@@ -54,10 +62,12 @@ public sealed record ContentPullCheckReconcileReadiness(bool AllTerminal, int To
 /// running every chunk itself in one long-lived invocation. A content-pull job writes
 /// one <see cref="ContentPullCheckFanOut"/> row per chunk job it enqueues; each
 /// <c>content-check</c> job writes its own <see cref="ContentCheckResultRecord"/> rows
-/// as it finishes; the reconcile sweep (<c>ContentPullReconcileHostedService</c>, API
-/// process -- mirrors <c>RunPurgeFinalizeHostedService</c>'s "the runner cannot itself
-/// resolve who-else's-job-finished, so a periodic control-plane sweep does") reads both
-/// back once every chunk job for a pull is terminal and performs the SAME atomic
+/// as it finishes; the reconcile sweep (<c>ContentPullReconcileHostedService</c>,
+/// hosted in the COMPLIANCE-RUNNER process because revision staging touches the
+/// content working tree only that process mounts -- structurally mirrors
+/// <c>RunPurgeFinalizeHostedService</c>'s "nobody in-band can resolve
+/// who-else's-job-finished, so a periodic sweep does" shape) reads both back once
+/// every chunk job for a pull is terminal and performs the SAME atomic
 /// staging/promotion <c>RunSemanticImportAsync</c> always has.
 /// </summary>
 public interface IContentPullCheckFanOutRepository
@@ -70,6 +80,17 @@ public interface IContentPullCheckFanOutRepository
 	Task RecordFanOutAsync(
 		Guid runId, Guid contentPullJobId, Guid checkJobId, string sourceCommit,
 		IReadOnlyList<ContentCheckProfileDirectory> profileDirectories, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Records the zero-chunk MARKER row for a successful pull that enumerated zero
+	/// executable profiles (PR #1017 review round 1, finding 2): the reconcile sweep
+	/// discovers work solely through <c>content_pull_checks</c>, so a pull with no
+	/// check jobs still needs one row -- <c>check_job_id NULL</c>, empty chunk -- or
+	/// its pull history/staging would never be recorded (issue #40's "every attempt
+	/// recorded" invariant). Readiness for a marker-only pull is trivially "all
+	/// terminal" (there are no check jobs to wait for).
+	/// </summary>
+	Task RecordEmptyFanOutAsync(Guid runId, Guid contentPullJobId, string sourceCommit, CancellationToken cancellationToken);
 
 	/// <summary>The profile-directory chunk a specific claimed <c>content-check</c> job must run -- read by <c>ContentCheckJobHandler</c>.</summary>
 	Task<ContentPullCheckFanOut?> GetFanOutForCheckJobAsync(Guid checkJobId, CancellationToken cancellationToken);

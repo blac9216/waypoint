@@ -85,6 +85,7 @@ public sealed class ContentCheckJobHandlerTests
 			_byCheckJobId[checkJobId] = new ContentPullCheckFanOut(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), checkJobId, sourceCommit, chunk, "pending");
 
 		public Task RecordFanOutAsync(Guid runId, Guid contentPullJobId, Guid checkJobId, string sourceCommit, IReadOnlyList<ContentCheckProfileDirectory> profileDirectories, CancellationToken cancellationToken) => throw new NotSupportedException();
+		public Task RecordEmptyFanOutAsync(Guid runId, Guid contentPullJobId, string sourceCommit, CancellationToken cancellationToken) => throw new NotSupportedException();
 
 		public Task<ContentPullCheckFanOut?> GetFanOutForCheckJobAsync(Guid checkJobId, CancellationToken cancellationToken) =>
 			Task.FromResult(_byCheckJobId.TryGetValue(checkJobId, out ContentPullCheckFanOut? fanOut) ? fanOut : null);

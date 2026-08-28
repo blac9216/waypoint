@@ -155,11 +155,19 @@ public sealed class ContentPullJobHandlerTests
 	{
 		public List<(Guid RunId, Guid ContentPullJobId, Guid CheckJobId, string SourceCommit, IReadOnlyList<ContentCheckProfileDirectory> ProfileDirectories)> RecordedFanOuts { get; } = [];
 
+		public List<(Guid RunId, Guid ContentPullJobId, string SourceCommit)> RecordedEmptyFanOuts { get; } = [];
+
 		public Task RecordFanOutAsync(
 			Guid runId, Guid contentPullJobId, Guid checkJobId, string sourceCommit,
 			IReadOnlyList<ContentCheckProfileDirectory> profileDirectories, CancellationToken cancellationToken)
 		{
 			RecordedFanOuts.Add((runId, contentPullJobId, checkJobId, sourceCommit, profileDirectories));
+			return Task.CompletedTask;
+		}
+
+		public Task RecordEmptyFanOutAsync(Guid runId, Guid contentPullJobId, string sourceCommit, CancellationToken cancellationToken)
+		{
+			RecordedEmptyFanOuts.Add((runId, contentPullJobId, sourceCommit));
 			return Task.CompletedTask;
 		}
 
@@ -356,11 +364,23 @@ public sealed class ContentPullJobHandlerTests
 		Assert.Contains("3 check job(s) fanned out", outcome.Note, StringComparison.Ordinal);
 	}
 
+	/// <summary>
+	/// PR #1017 review round 1, finding 2: a successful pull that discovers ZERO
+	/// profiles must still reach reconcile -- the sweep's worklist is
+	/// content_pull_checks alone, so the handler records a zero-chunk MARKER row for
+	/// this case (RecordEmptyFanOutAsync). Without it, no pull-history row or staged
+	/// revision would ever be recorded (the pull sat "awaiting reconcile" forever,
+	/// breaking issue #40's "every attempt recorded" invariant -- the outcome the
+	/// pre-fix version of this very test wrongly enshrined).
+	/// <c>ContentPullReconcileServiceTests.TryReconcile_ZeroChunkMarker_*</c> proves the
+	/// reconcile half: the marker completes immediately with a succeeded pull-history
+	/// row, an empty import report, and a staged revision.
+	/// </summary>
 	[Fact]
-	public async Task Execute_NoProfilesDiscovered_FansOutZeroCheckJobs_StillSucceeds()
+	public async Task Execute_NoProfilesDiscovered_RecordsZeroChunkMarker_SoReconcileStillCompletesThePull()
 	{
 		PSObject output = Success("commitEmpty");
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, FakeJobRunnerRepository jobs, FakeCheckFanOutRepository checkFanOut, _) =
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, FakeJobRunnerRepository jobs, FakeCheckFanOutRepository checkFanOut, Guid runId) =
 			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
@@ -368,6 +388,14 @@ public sealed class ContentPullJobHandlerTests
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
 		Assert.Empty(jobs.FanOutCalls);
 		Assert.Empty(checkFanOut.RecordedFanOuts);
+
+		// The honest zero-profile path: exactly one marker row, carrying this pull's
+		// run/job identity and commit, so the reconcile sweep discovers and completes it.
+		(Guid markerRunId, Guid markerPullJobId, string markerCommit) = Assert.Single(checkFanOut.RecordedEmptyFanOuts);
+		Assert.Equal(runId, markerRunId);
+		Assert.Equal(context.Job.Id, markerPullJobId);
+		Assert.Equal("commitEmpty", markerCommit);
+
 		Assert.Contains("0 check job(s) fanned out", outcome.Note, StringComparison.Ordinal);
 	}
 

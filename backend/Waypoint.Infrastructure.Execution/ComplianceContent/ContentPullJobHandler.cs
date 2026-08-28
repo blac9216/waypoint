@@ -160,10 +160,14 @@ public sealed class ContentPullJobHandler : IJobHandler
 		// ComplianceContentOptions.ContentPullChunkSize leaves onto this job's OWN run,
 		// through the ordinary queue -- the same capacity-pool-admitted parallelism
 		// (ADR-0020) scan's component jobs already use, instead of one long-lived
-		// invocation running every chunk sequentially in-process. A run with no
-		// discovered profiles at all fans out zero check jobs and reconciles
-		// immediately (ContentPullReconcileService below treats "zero expected, zero
-		// pending" as trivially ready).
+		// invocation running every chunk sequentially in-process. A pull that
+		// discovered zero profiles fans out zero check jobs but still records one
+		// zero-chunk MARKER row (RecordEmptyFanOutAsync below, after the loop) so the
+		// reconcile sweep -- whose worklist is content_pull_checks alone -- still
+		// discovers it and completes/records the pull immediately (PR #1017 review
+		// round 1 finding 2: without the marker, a zero-profile pull was stuck
+		// "awaiting reconcile" forever, breaking issue #40's "every attempt recorded"
+		// invariant).
 		if (context.Job.RunId is not Guid runId)
 		{
 			const string note = "content-pull job has no run id; cannot fan out check jobs.";
@@ -194,6 +198,15 @@ public sealed class ContentPullJobHandler : IJobHandler
 			expectedCheckJobCount++;
 		}
 
+		if (expectedCheckJobCount == 0)
+		{
+			// Zero discovered profiles: no check jobs exist, so record the zero-chunk
+			// marker the reconcile sweep needs to still see (and immediately complete)
+			// this pull -- see the fan-out comment above and RecordEmptyFanOutAsync's
+			// own doc comment.
+			await _checkFanOut.RecordEmptyFanOutAsync(runId, context.Job.Id, commit, cancellationToken).ConfigureAwait(false);
+		}
+
 		string fanOutProgressPayload = JsonSerializer.Serialize(new
 		{
 			commit,
@@ -206,8 +219,12 @@ public sealed class ContentPullJobHandler : IJobHandler
 
 		// This job's own row now reports Succeeded ("sync + fan-out completed"), but the
 		// PULL as a whole (pull history, semantic import/promotion, revision staging) is
-		// deliberately NOT recorded as complete here -- ContentPullReconcileService (API
-		// process, mirrors RunPurgeFinalizeHostedService) performs that once every
+		// deliberately NOT recorded as complete here -- ContentPullReconcileService
+		// (hosted in this same COMPLIANCE-RUNNER process by
+		// ContentPullReconcileHostedService; structurally mirrors
+		// RunPurgeFinalizeHostedService's sweep shape but runs runner-side because
+		// revision staging touches the content volume only this process mounts,
+		// ADR-0017) performs that once every
 		// fanned-out content-check job for this pull has reached a terminal state,
 		// exactly the same atomic staging/promotion RunSemanticImportAsync always
 		// performed, just moved to run once the check phase's parallel jobs finish

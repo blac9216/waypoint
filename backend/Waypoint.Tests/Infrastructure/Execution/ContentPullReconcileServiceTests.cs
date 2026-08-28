@@ -69,9 +69,16 @@ public sealed class ContentPullReconcileServiceTests
 			_resultsByCheckJob[checkJobId] = [];
 		}
 
+		/// <summary>Registers the zero-chunk marker row a zero-profile pull records (RecordEmptyFanOutAsync's shape: null check job, empty chunk).</summary>
+		public void AddEmptyFanOut(Guid runId, Guid contentPullJobId, string sourceCommit) =>
+			_fanOuts.Add(new ContentPullCheckFanOut(Guid.NewGuid(), runId, contentPullJobId, CheckJobId: null, sourceCommit, [], "pending"));
+
 		public void AddResult(Guid checkJobId, ContentCheckResultRecord result) => _resultsByCheckJob[checkJobId].Add(result);
 
 		public Task RecordFanOutAsync(Guid runId, Guid contentPullJobId, Guid checkJobId, string sourceCommit, IReadOnlyList<ContentCheckProfileDirectory> profileDirectories, CancellationToken cancellationToken) =>
+			throw new NotSupportedException();
+
+		public Task RecordEmptyFanOutAsync(Guid runId, Guid contentPullJobId, string sourceCommit, CancellationToken cancellationToken) =>
 			throw new NotSupportedException();
 
 		public Task<ContentPullCheckFanOut?> GetFanOutForCheckJobAsync(Guid checkJobId, CancellationToken cancellationToken) => throw new NotSupportedException();
@@ -86,10 +93,14 @@ public sealed class ContentPullReconcileServiceTests
 
 		public Task<ContentPullCheckReconcileReadiness> GetReconcileReadinessAsync(Guid contentPullJobId, CancellationToken cancellationToken)
 		{
-			List<Guid> checkJobIds = [.. _fanOuts.Where(f => f.ContentPullJobId == contentPullJobId).Select(f => f.CheckJobId)];
+			// Mirrors the real repository's marker-aware LEFT JOIN semantics: rows with a
+			// null CheckJobId (zero-chunk markers) count toward "this pull has fan-out
+			// state" but contribute no check job to wait on.
+			List<ContentPullCheckFanOut> rows = [.. _fanOuts.Where(f => f.ContentPullJobId == contentPullJobId)];
+			List<Guid> checkJobIds = [.. rows.Where(f => f.CheckJobId is not null).Select(f => f.CheckJobId!.Value)];
 			int total = checkJobIds.Count;
 			int failed = checkJobIds.Count(id => _checkJobStates[id] is "failed" or "auth-failed" or "cancelled");
-			bool allTerminal = total > 0 && checkJobIds.All(id => _checkJobStates[id] is "done" or "failed" or "auth-failed" or "cancelled");
+			bool allTerminal = rows.Count > 0 && checkJobIds.All(id => _checkJobStates[id] is "done" or "failed" or "auth-failed" or "cancelled");
 			return Task.FromResult(new ContentPullCheckReconcileReadiness(allTerminal, total, failed));
 		}
 
@@ -562,5 +573,44 @@ public sealed class ContentPullReconcileServiceTests
 		bool reconciled = await service.TryReconcileAsync(Guid.NewGuid(), CancellationToken.None);
 
 		Assert.False(reconciled);
+	}
+
+	/// <summary>
+	/// PR #1017 review round 1, finding 2 (the reconcile half; the handler half is
+	/// <c>ContentPullJobHandlerTests.Execute_NoProfilesDiscovered_RecordsZeroChunkMarker_SoReconcileStillCompletesThePull</c>):
+	/// a zero-profile pull's zero-chunk marker row must reconcile IMMEDIATELY -- no
+	/// check jobs to wait for -- and still record the succeeded pull-history row, the
+	/// empty import report, and the staged revision, exactly what the pre-#1016 inline
+	/// handler did for a zero-profile checkout ("every attempt recorded", issue #40).
+	/// </summary>
+	[Fact]
+	public async Task TryReconcile_ZeroChunkMarker_CompletesImmediately_RecordsSucceededPullAndStagesRevision()
+	{
+		(ContentPullReconcileService service, FakeCheckFanOutRepository checkFanOut, FakeContentRepository content, FakeCatalogRepository catalog, FakeContentRevisionStager stager, RecordingEventPublisher events) = Build();
+
+		Guid runId = Guid.NewGuid();
+		Guid pullJobId = Guid.NewGuid();
+		checkFanOut.AddEmptyFanOut(runId, pullJobId, "commitZeroProfiles");
+
+		bool reconciled = await service.TryReconcileAsync(pullJobId, CancellationToken.None);
+
+		Assert.True(reconciled);
+		Assert.True(checkFanOut.Reconciled);
+
+		// Empty import report -- semantic import over zero entries, same as the old
+		// inline handler's zero-profile pass.
+		CatalogImportReport report = Assert.Single(catalog.Reports);
+		Assert.Equal(0, report.AcceptedCount);
+		Assert.Equal(0, report.WarningCount);
+		Assert.Equal(0, report.RejectedCount);
+		Assert.Empty(catalog.Entries);
+
+		var pull = Assert.Single(content.Pulls);
+		Assert.Equal(ComplianceContentPullStatuses.Succeeded, pull.Status);
+		Assert.Equal("commitZeroProfiles", pull.Commit);
+		Assert.Equal(pullJobId, pull.JobId);
+
+		Assert.Single(stager.Calls);
+		Assert.Contains(events.Events, e => e.EventType == JobEventTypes.RunProgress && e.RunId == runId);
 	}
 }

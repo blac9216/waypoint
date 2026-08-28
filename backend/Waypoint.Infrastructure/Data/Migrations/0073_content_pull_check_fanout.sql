@@ -20,17 +20,31 @@
 -- payload/this row instead of an in-process loop variable). `status` tracks whether
 -- the reconcile sweep has already consumed this row's results; a row is never deleted
 -- (durable fan-out history, ADR-0022 "immutable source observations ... retained").
+--
+-- check_job_id is NULLABLE for exactly one shape (PR #1017 review round 1, finding 2):
+-- a successful pull that enumerated ZERO executable profiles fans out zero check jobs,
+-- but the reconcile sweep discovers work solely through this table -- without a row,
+-- such a pull would never be reconciled and its pull history/staging never recorded
+-- (breaking issue #40's "every attempt recorded" invariant). ContentPullJobHandler
+-- records one zero-chunk MARKER row (check_job_id NULL, profile_directories '[]') for
+-- that case; the marker-shape CHECK below keeps it honest (a NULL check_job_id is only
+-- ever legal with an empty chunk). UNIQUE (check_job_id) still holds for real rows --
+-- Postgres permits multiple NULLs under a plain UNIQUE constraint, and at most one
+-- marker per pull is ever written.
 CREATE TABLE IF NOT EXISTS content_pull_checks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id UUID NOT NULL REFERENCES runs (id) ON DELETE RESTRICT,
     content_pull_job_id UUID NOT NULL REFERENCES jobs (id) ON DELETE RESTRICT,
-    check_job_id UUID NOT NULL REFERENCES jobs (id) ON DELETE RESTRICT,
+    check_job_id UUID NULL REFERENCES jobs (id) ON DELETE RESTRICT,
     source_commit TEXT NOT NULL,
     profile_directories JSONB NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT content_pull_checks_check_job_unique UNIQUE (check_job_id),
-    CONSTRAINT content_pull_checks_status_check CHECK (status IN ('pending', 'reconciled'))
+    CONSTRAINT content_pull_checks_status_check CHECK (status IN ('pending', 'reconciled')),
+    CONSTRAINT content_pull_checks_marker_shape_check CHECK (
+        check_job_id IS NOT NULL OR profile_directories = '[]'::jsonb
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_content_pull_checks_content_pull_job_id
@@ -89,10 +103,21 @@ ALTER TABLE jobs
     ));
 
 -- Runner grants: compliance-runner both inserts content_pull_checks rows (fan-out, from
--- inside ContentPullJobHandler) and inserts/reads content_pull_check_results rows (the
--- content-check handler, and the reconcile sweep that reads them all back). No DELETE
--- grant -- these are durable fan-out/result history, matching catalog_import_reports'
--- "no runner delete" posture (migration 0051).
+-- inside ContentPullJobHandler; UPDATE covers the reconcile sweep's status flip -- the
+-- sweep runs inside compliance-runner too, see ContentPullReconcileHostedService) and
+-- inserts/reads content_pull_check_results rows (the content-check handler, and the
+-- reconcile sweep that reads them all back). No DELETE grant -- these are durable
+-- fan-out/result history, matching catalog_import_reports' "no runner delete" posture
+-- (migration 0051).
+--
+-- The column-scoped UPDATE on content_pull_check_results exists because
+-- RecordCheckResultAsync writes INSERT ... ON CONFLICT DO UPDATE (PR #1017 review
+-- round 1, finding 1 -- proven 42501 without it): the conflict path fires whenever a
+-- content-check job re-executes the same (check_job_id, profile_key) pair, i.e. any
+-- lease-recovery requeue or retry -- the exact re-run idempotency the ON CONFLICT is
+-- there for. Scoped to exactly the payload columns the DO UPDATE SET touches
+-- (migration 0033's column-scoped grant idiom); identity/created_at stay
+-- runner-immutable.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'waypoint_compliance_runner') THEN
@@ -103,3 +128,6 @@ $$;
 
 GRANT SELECT, INSERT, UPDATE ON content_pull_checks TO waypoint_compliance_runner;
 GRANT SELECT, INSERT ON content_pull_check_results TO waypoint_compliance_runner;
+GRANT UPDATE (raw_yaml, has_controls_directory, has_files_directory, control_file_names,
+    inspec_check_ran, inspec_check_passed, inspec_check_detail)
+    ON content_pull_check_results TO waypoint_compliance_runner;

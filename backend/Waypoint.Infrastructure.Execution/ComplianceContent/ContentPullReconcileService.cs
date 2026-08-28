@@ -31,10 +31,14 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// reached a terminal state (mirrors <c>JobQueueRepository.TryCompleteRunAsync</c>'s own
 /// "remaining == 0" run-completion gate, applied here to the check-job subset of one
 /// pull instead of a whole run). Called from <c>ContentPullReconcileHostedService</c>
-/// (a periodic control-plane sweep, structurally the same shape as
-/// <c>RunPurgeFinalizeHostedService</c>) rather than from any runner-executed job, so it
-/// runs under the same owner connection every other compliance-content write already
-/// uses for cross-cutting completion work.
+/// -- a periodic sweep hosted in the COMPLIANCE-RUNNER process (registered via
+/// <c>AddWaypointExecution</c>, never the API: revision staging touches the content
+/// working tree on disk, which only compliance-runner mounts -- the same ADR-0017
+/// placement reasoning that put content-pull execution there) -- structurally the same
+/// sweep shape as <c>RunPurgeFinalizeHostedService</c>, but runner-side. Its database
+/// writes therefore run under the compliance-runner role, whose grants migration 0073
+/// scopes to exactly what this step and the check jobs need (see
+/// <c>RunnerRoleGrantDriftTests</c>' content-pull-check cases).
 ///
 /// Partial-failure semantics: a content-check job that itself lands on a failure
 /// terminal (<c>failed</c>/<c>auth-failed</c>/<c>cancelled</c>) never blocks reconcile --
@@ -147,7 +151,12 @@ public sealed partial class ContentPullReconcileService
 
 		string sourceCommit = fanOuts[0].SourceCommit;
 		Guid runId = fanOuts[0].RunId;
-		IReadOnlyList<Guid> checkJobIds = [.. fanOuts.Select(f => f.CheckJobId)];
+		// A null CheckJobId is the zero-chunk marker row (a pull that discovered zero
+		// profiles -- RecordEmptyFanOutAsync); it carries no results to read back, but
+		// the empty-entry semantic import below still records the empty report, stages
+		// the revision, and records the succeeded pull -- exactly what the pre-#1016
+		// inline handler did for a zero-profile checkout.
+		IReadOnlyList<Guid> checkJobIds = [.. fanOuts.Where(f => f.CheckJobId is not null).Select(f => f.CheckJobId!.Value)];
 		IReadOnlyList<ContentCheckResultRecord> resultRows = await _checkFanOut
 			.ListCheckResultsAsync(checkJobIds, cancellationToken).ConfigureAwait(false);
 

@@ -51,6 +51,23 @@ public sealed class ContentPullCheckFanOutRepository : IContentPullCheckFanOutRe
 		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 	}
 
+	public async Task RecordEmptyFanOutAsync(Guid runId, Guid contentPullJobId, string sourceCommit, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(sourceCommit);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO content_pull_checks (run_id, content_pull_job_id, check_job_id, source_commit, profile_directories)
+			VALUES ($1, $2, NULL, $3, '[]'::jsonb)
+			""", connection);
+		command.Parameters.AddWithValue(runId);
+		command.Parameters.AddWithValue(contentPullJobId);
+		command.Parameters.AddWithValue(sourceCommit);
+		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+	}
+
 	public async Task<ContentPullCheckFanOut?> GetFanOutForCheckJobAsync(Guid checkJobId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
@@ -144,25 +161,34 @@ public sealed class ContentPullCheckFanOutRepository : IContentPullCheckFanOutRe
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		// LEFT JOIN so a zero-chunk MARKER row (check_job_id NULL -- see
+		// RecordEmptyFanOutAsync) still counts as "this pull exists and has fan-out
+		// state": rowCount counts every content_pull_checks row, while the check-job
+		// aggregates count only rows with a real joined job. A marker-only pull is
+		// therefore trivially ready (rowCount > 0, zero real check jobs, zero
+		// remaining) -- exactly the zero-profile-pull completion path PR #1017 review
+		// round 1 finding 2 requires.
 		await using NpgsqlCommand command = new(
 			"""
 			SELECT
 				COUNT(*),
-				COUNT(*) FILTER (WHERE j.state NOT IN ('done', 'failed', 'auth-failed', 'cancelled')),
+				COUNT(j.id),
+				COUNT(*) FILTER (WHERE j.id IS NOT NULL AND j.state NOT IN ('done', 'failed', 'auth-failed', 'cancelled')),
 				COUNT(*) FILTER (WHERE j.state IN ('failed', 'auth-failed', 'cancelled'))
 			FROM content_pull_checks c
-			JOIN jobs j ON j.id = c.check_job_id
+			LEFT JOIN jobs j ON j.id = c.check_job_id
 			WHERE c.content_pull_job_id = $1
 			""", connection);
 		command.Parameters.AddWithValue(contentPullJobId);
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
 
-		int total = Convert.ToInt32(reader.GetInt64(0), System.Globalization.CultureInfo.InvariantCulture);
-		int remaining = Convert.ToInt32(reader.GetInt64(1), System.Globalization.CultureInfo.InvariantCulture);
-		int failed = Convert.ToInt32(reader.GetInt64(2), System.Globalization.CultureInfo.InvariantCulture);
+		int rowCount = Convert.ToInt32(reader.GetInt64(0), System.Globalization.CultureInfo.InvariantCulture);
+		int totalCheckJobs = Convert.ToInt32(reader.GetInt64(1), System.Globalization.CultureInfo.InvariantCulture);
+		int remaining = Convert.ToInt32(reader.GetInt64(2), System.Globalization.CultureInfo.InvariantCulture);
+		int failed = Convert.ToInt32(reader.GetInt64(3), System.Globalization.CultureInfo.InvariantCulture);
 
-		return new ContentPullCheckReconcileReadiness(AllTerminal: total > 0 && remaining == 0, TotalCheckJobs: total, FailedCheckJobs: failed);
+		return new ContentPullCheckReconcileReadiness(AllTerminal: rowCount > 0 && remaining == 0, TotalCheckJobs: totalCheckJobs, FailedCheckJobs: failed);
 	}
 
 	public async Task<IReadOnlyList<ContentCheckResultRecord>> ListCheckResultsAsync(IReadOnlyList<Guid> checkJobIds, CancellationToken cancellationToken)
@@ -231,7 +257,7 @@ public sealed class ContentPullCheckFanOutRepository : IContentPullCheckFanOutRe
 			Id: reader.GetGuid(0),
 			RunId: reader.GetGuid(1),
 			ContentPullJobId: reader.GetGuid(2),
-			CheckJobId: reader.GetGuid(3),
+			CheckJobId: reader.IsDBNull(3) ? null : reader.GetGuid(3),
 			SourceCommit: reader.GetString(4),
 			ProfileDirectories: profileDirectories,
 			Status: reader.GetString(6));
