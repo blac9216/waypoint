@@ -122,10 +122,13 @@ public static class CatalogDerivationMatrix
 					new CatalogParityComponent("postgresql", "VCSA PostgreSQL Service", "postgresql", [Purpose.VSphereApi, Purpose.VcsaSsh]),
 				]),
 
-			// Row: vSphere 9-0 / SRG / Y26M05-srg / vmware transport / object-kind selector.
+			// Row: vSphere 9-x / SRG / Y26M05-srg / vmware transport / object-kind selector.
+			// Issue #1080: re-keyed from the exact "9.0" to the major-line-scoped "9.x"
+			// -- the vendor's own declared scope for this content (issue #1079: it lives
+			// under vcf/9.x, not a top-level vsphere/9.0 tree that does not exist).
 			new CatalogParityRow(
 				MatrixRowId: "vsphere-9-0-srg-vmware",
-				ProductVersionKey: "9.0",
+				ProductVersionKey: "9.x",
 				VendorFamily: "vsphere",
 				Kind: CatalogKinds.Srg,
 				ReleaseKey: "Y26M05-srg",
@@ -143,10 +146,11 @@ public static class CatalogDerivationMatrix
 					new CatalogParityComponent("vm", "Virtual Machine", null, [Purpose.VSphereApi], SelectorKindOverride: CatalogSelectorKinds.Vm),
 				]),
 
-			// Row: vSphere 9-0 / SRG / Y26M05-srg / ssh transport / named VCSA service selector.
+			// Row: vSphere 9-x / SRG / Y26M05-srg / ssh transport / named VCSA service selector.
+			// Issue #1080: re-keyed from "9.0" to "9.x" -- see the vmware-transport row above.
 			new CatalogParityRow(
 				MatrixRowId: "vsphere-9-0-srg-vcsa-ssh",
-				ProductVersionKey: "9.0",
+				ProductVersionKey: "9.x",
 				VendorFamily: "vsphere", // issue #1064, same as the 8.0 VCSA ssh row above
 				DirectoryLiteral: "vcsa",
 				Kind: CatalogKinds.Srg,
