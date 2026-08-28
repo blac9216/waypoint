@@ -526,9 +526,10 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 		string transport = "vmware",
 		string selectorKind = "vcenter",
 		string? manifestVersion = "2.3.0",
-		IReadOnlyList<InspecManifestInput>? inputs = null) =>
+		IReadOnlyList<InspecManifestInput>? inputs = null,
+		string releaseKey = "v2r3-stig") =>
 		new(
-			profileKey, "vsphere", productVersionKey, kind, componentKey, "vCenter Server", transport, selectorKind, null,
+			profileKey, "vsphere", productVersionKey, kind, componentKey, releaseKey, "vCenter Server", transport, selectorKind, null,
 			IsAggregate: false, Title: "vCenter STIG", ManifestVersion: manifestVersion,
 			Inputs: inputs ?? [new InspecManifestInput("vcenter_host", "string", true)],
 			Supports: [], Depends: [], ContentDigest: "deadbeef00000000000000000000000000000000000000000000000000000");

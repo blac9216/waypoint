@@ -322,6 +322,7 @@ public static class VendorHierarchyInterpreter
 			productVersionKey,
 			kind,
 			componentKey,
+			releaseKey,
 			displayName,
 			transport,
 			selectorKind,
