@@ -52,13 +52,16 @@ public interface IBenchmarkRepository
 	/// Records a new current mapping decision for <paramref name="catalogComponentId"/>,
 	/// superseding any prior current mapping in the same transaction (issue #730 AC
 	/// "versioned audit history" -- the prior row's is_current flips to false, it is
-	/// never deleted or overwritten in place).
+	/// never deleted or overwritten in place). Issue #1002: the caller can no longer
+	/// state "SRG has no published benchmark" -- migration 0071 dropped the column that
+	/// backed it; that fact is now derived at read time from the component's bound
+	/// catalog content kind (see <see cref="GetComponentContentKindAsync"/>), never
+	/// written here.
 	/// </summary>
 	Task<BenchmarkComponentMapping> SetMappingAsync(
 		Guid catalogComponentId,
 		Guid? benchmarkRevisionId,
 		string status,
-		bool isSrgNoBenchmark,
 		bool isAdminOverride,
 		int ambiguousCandidateCount,
 		string? reason,
@@ -87,4 +90,20 @@ public interface IBenchmarkRepository
 	/// against a table this repository's own FKs already reference.
 	/// </summary>
 	Task<bool> ComponentExistsAsync(Guid catalogComponentId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Issue #1002: the closed <see cref="Waypoint.Core.ComplianceContent.CatalogKinds"/>
+	/// value (<c>stig</c>|<c>srg</c>) this catalog component is bound to, derived by
+	/// joining its <c>catalog_execution_profiles</c> row(s) to
+	/// <c>catalog_content_releases.kind</c> -- never a stored column on this
+	/// repository's own tables. Returns <see langword="null"/> when the component has
+	/// no execution profile at all yet (content not staged/activated); a component
+	/// with execution profiles of BOTH kinds (should not happen for any catalog row
+	/// this repository's own seed data produces -- a component is bound to exactly one
+	/// content kind in every parity-matrix row) returns <c>srg</c> deterministically
+	/// (SRG is the more conservative "never has a benchmark concept" answer, matching
+	/// ADR-0022's fail-closed posture for ambiguous catalog state) rather than
+	/// guessing.
+	/// </summary>
+	Task<string?> GetComponentContentKindAsync(Guid catalogComponentId, CancellationToken cancellationToken);
 }

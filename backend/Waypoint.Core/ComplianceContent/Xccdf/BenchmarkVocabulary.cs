@@ -79,6 +79,39 @@ public static class BenchmarkMappingStatuses
 }
 
 /// <summary>
+/// Issue #1002: the closed set of DERIVED, read-only mapping alert/state values a
+/// caller can observe on <see cref="Waypoint.Api.Contracts.BenchmarkMappingResponse"/>
+/// on top of the stored <see cref="BenchmarkMappingStatuses"/> value. Neither value is
+/// ever written to <c>benchmark_component_mappings</c> -- both are computed at read
+/// time from the component's bound catalog content kind (<see cref="Waypoint.Core.ComplianceContent.CatalogKinds"/>)
+/// and its current mapping row, never stored, never admin-settable, and never
+/// auto-suggested by the mapping matcher.
+/// </summary>
+public static class BenchmarkMappingDerivedStates
+{
+	/// <summary>
+	/// The component's bound catalog content kind is <c>srg</c> (migration 0050): SRG
+	/// content has no XCCDF/benchmark concept at all (ADR-0022 "An SRG has no XCCDF or
+	/// CKL"), so it never participates in benchmark mapping. Replaces migration 0052's
+	/// admin-stated <c>is_srg_no_benchmark</c> flag, dropped by migration 0071.
+	/// </summary>
+	public const string NotApplicableSrg = "not_applicable_srg";
+
+	/// <summary>
+	/// The component's bound catalog content kind is <c>stig</c> and its CURRENT
+	/// mapping has no benchmark revision (status is <see cref="BenchmarkMappingStatuses.Unmapped"/>,
+	/// <see cref="BenchmarkMappingStatuses.Suggested"/>, or
+	/// <see cref="BenchmarkMappingStatuses.Ambiguous"/>, or no mapping decision has ever
+	/// been recorded at all) -- a persistent, honest, OPEN alert (issue #1002 "STIG
+	/// without a benchmark = approvable, scannable, with a STANDING OPEN ALERT") until
+	/// an XCCDF is mapped. Never blocks baseline activation or scan planning by itself
+	/// -- see <see cref="Waypoint.Infrastructure.Runs.ScanPlannerService"/>'s
+	/// pre-existing, already-non-blocking <c>unmapped_benchmark</c> per-component skip.
+	/// </summary>
+	public const string BenchmarkMissing = "benchmark_missing";
+}
+
+/// <summary>
 /// Fail-closed validation for the benchmark vocabulary, mirroring
 /// <see cref="CatalogVocabularyValidator"/>'s convention: every write path validates
 /// before it reaches storage so a rejection is an actionable message naming the field,

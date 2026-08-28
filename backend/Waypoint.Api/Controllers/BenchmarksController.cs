@@ -111,7 +111,21 @@ public sealed class BenchmarksController : ControllerBase
 	public async Task<ActionResult<BenchmarkMappingCoverageResponse>> ListMappingCoverage(CancellationToken cancellationToken)
 	{
 		IReadOnlyList<BenchmarkComponentMapping> current = await _benchmarks.ListCurrentMappingsAsync(cancellationToken).ConfigureAwait(false);
-		return Ok(BenchmarkMappingCoverageResponse.FromDomain(current));
+
+		// Issue #1002: resolve each distinct component's derived state once (a coverage
+		// report can list many components; avoid a redundant kind lookup per row when
+		// several rows -- there is at most one CURRENT row per component today, but this
+		// stays a dictionary keyed by component id for clarity and future-proofing).
+		Dictionary<Guid, string?> derivedStates = [];
+		foreach (BenchmarkComponentMapping mapping in current)
+		{
+			if (!derivedStates.ContainsKey(mapping.CatalogComponentId))
+			{
+				derivedStates[mapping.CatalogComponentId] = await ResolveDerivedStateAsync(mapping, cancellationToken).ConfigureAwait(false);
+			}
+		}
+
+		return Ok(BenchmarkMappingCoverageResponse.FromDomain(current, m => derivedStates[m.CatalogComponentId]));
 	}
 
 	/// <summary>
@@ -131,7 +145,8 @@ public sealed class BenchmarksController : ControllerBase
 			throw new ApiException(HttpStatusCode.NotFound, "not_found", $"No mapping decision has ever been recorded for catalog component '{catalogComponentId}'.");
 		}
 
-		return Ok(BenchmarkMappingResponse.FromDomain(mapping));
+		string? derivedState = await ResolveDerivedStateAsync(mapping, cancellationToken).ConfigureAwait(false);
+		return Ok(BenchmarkMappingResponse.FromDomain(mapping, derivedState));
 	}
 
 	/// <summary>
@@ -149,7 +164,18 @@ public sealed class BenchmarksController : ControllerBase
 	public async Task<ActionResult<IReadOnlyList<BenchmarkMappingResponse>>> GetMappingHistory(Guid catalogComponentId, CancellationToken cancellationToken)
 	{
 		IReadOnlyList<BenchmarkComponentMapping> history = await _benchmarks.GetMappingHistoryAsync(catalogComponentId, cancellationToken).ConfigureAwait(false);
-		return Ok(history.Select(BenchmarkMappingResponse.FromDomain).ToArray());
+		if (history.Count == 0)
+		{
+			return Ok(Array.Empty<BenchmarkMappingResponse>());
+		}
+
+		// Every history row is the SAME catalog component, so its derived catalog
+		// content kind is a single lookup shared across every row -- only the current
+		// row's mapping-derived state (benchmark_missing) can legitimately differ row
+		// to row, and BenchmarkMappingDerivedStates.NotApplicableSrg depends only on the
+		// component's kind, never on which row is current.
+		string? kind = await _benchmarks.GetComponentContentKindAsync(catalogComponentId, cancellationToken).ConfigureAwait(false);
+		return Ok(history.Select(m => BenchmarkMappingResponse.FromDomain(m, DeriveState(m, kind))).ToArray());
 	}
 
 	/// <summary>
@@ -159,13 +185,21 @@ public sealed class BenchmarksController : ControllerBase
 	/// true</c> and this caller's identity as <c>actor</c> -- the prior current row (if
 	/// any) is superseded, never overwritten (PR #828's existing model, unchanged
 	/// here). 404 when <paramref name="catalogComponentId"/> does not name a real
-	/// catalog component; 400 when the body fails the closed mapping vocabulary or the
-	/// SRG/revision mutual-exclusion the repository itself enforces (issue #730 AC
-	/// "SRG 'no published benchmark' is explicit, never inferred" -- this endpoint
-	/// requires the caller to state <see cref="BenchmarkMappingOverrideRequest.IsSrgNoBenchmark"/>
-	/// explicitly, it is never derived from the request shape); 404 when
-	/// <see cref="BenchmarkMappingOverrideRequest.BenchmarkRevisionId"/> names an
+	/// catalog component; 400 when the body fails the closed mapping vocabulary; 404
+	/// when <see cref="BenchmarkMappingOverrideRequest.BenchmarkRevisionId"/> names an
 	/// unknown revision.
+	///
+	/// Issue #1002: this endpoint no longer accepts an "SRG has no published
+	/// benchmark" declaration -- migration 0071 dropped the column
+	/// <c>is_srg_no_benchmark</c> backed. SRG participation is now DERIVED from the
+	/// component's bound catalog content kind (see <c>GET</c> responses'
+	/// <c>derived_state</c>), never admin-stated. Following this repo's
+	/// fail-closed-with-actionable-message convention (matching every other rejected
+	/// shape on this same endpoint) rather than silently ignoring a caller still
+	/// sending the old field: a request that sends <c>is_srg_no_benchmark: true</c> is
+	/// rejected with 400 naming the replacement; sending it absent, null, or false is
+	/// accepted (a legacy client that always echoed a previously-read `false` value
+	/// back should not break).
 	/// </summary>
 	[HttpPut("benchmark-mappings/{catalogComponentId:guid}")]
 	[RequireAdminRole]
@@ -176,6 +210,14 @@ public sealed class BenchmarksController : ControllerBase
 		Guid catalogComponentId, [FromBody] BenchmarkMappingOverrideRequest request, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(request);
+
+		if (request.IsSrgNoBenchmarkRemoved)
+		{
+			throw new ApiException(
+				HttpStatusCode.BadRequest, "validation_failed",
+				"'is_srg_no_benchmark' was removed (issue #1002): SRG participation in benchmark mapping is now derived automatically "
+					+ "from the component's bound catalog content kind and can no longer be admin-stated. Omit this field.");
+		}
 
 		if (!await _benchmarks.ComponentExistsAsync(catalogComponentId, cancellationToken).ConfigureAwait(false))
 		{
@@ -205,13 +247,6 @@ public sealed class BenchmarksController : ControllerBase
 			benchmarkRevisionId = parsedRevisionId;
 		}
 
-		if (request.IsSrgNoBenchmark && benchmarkRevisionId is not null)
-		{
-			throw new ApiException(
-				HttpStatusCode.BadRequest, "validation_failed",
-				"A mapping cannot both declare 'SRG has no published benchmark' and reference a benchmark revision.");
-		}
-
 		string actor = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
 
 		try
@@ -220,20 +255,20 @@ public sealed class BenchmarksController : ControllerBase
 				catalogComponentId,
 				benchmarkRevisionId,
 				request.Status,
-				request.IsSrgNoBenchmark,
 				isAdminOverride: true,
 				ambiguousCandidateCount: 0,
 				request.Reason,
 				actor,
 				cancellationToken).ConfigureAwait(false);
-			return Ok(BenchmarkMappingResponse.FromDomain(mapping));
+			string? derivedState = await ResolveDerivedStateAsync(mapping, cancellationToken).ConfigureAwait(false);
+			return Ok(BenchmarkMappingResponse.FromDomain(mapping, derivedState));
 		}
 		catch (ArgumentException ex)
 		{
-			// The repository itself fail-closed validates the same closed vocabulary and
-			// SRG/revision exclusivity this action pre-checks above (defense in depth
-			// against a future caller bypassing this HTTP layer) -- surface any remaining
-			// case (e.g. status 'mapped' requiring a non-null revision) as 400, not 500.
+			// The repository itself fail-closed validates the same closed vocabulary
+			// this action pre-checks above (defense in depth against a future caller
+			// bypassing this HTTP layer) -- surface any remaining case (e.g. status
+			// 'mapped' requiring a non-null revision) as 400, not 500.
 			throw new ApiException(HttpStatusCode.BadRequest, "validation_failed", ex.Message);
 		}
 	}
@@ -247,5 +282,43 @@ public sealed class BenchmarksController : ControllerBase
 		}
 
 		return revision;
+	}
+
+	/// <summary>
+	/// Issue #1002: resolves <paramref name="mapping"/>'s derived state by looking up
+	/// its component's bound catalog content kind. Single-mapping convenience wrapper
+	/// over <see cref="DeriveState"/> for the single-component read endpoints; the
+	/// coverage/history endpoints batch or reuse the kind lookup instead of calling
+	/// this once per row.
+	/// </summary>
+	private async Task<string?> ResolveDerivedStateAsync(BenchmarkComponentMapping mapping, CancellationToken cancellationToken)
+	{
+		string? kind = await _benchmarks.GetComponentContentKindAsync(mapping.CatalogComponentId, cancellationToken).ConfigureAwait(false);
+		return DeriveState(mapping, kind);
+	}
+
+	/// <summary>
+	/// Issue #1002 item 1/2: the pure derivation rule shared by every read path.
+	/// <paramref name="kind"/> is <see cref="Waypoint.Core.ComplianceContent.CatalogKinds.Srg"/>
+	/// when the component has no benchmark concept at all (never
+	/// <see cref="BenchmarkMappingDerivedStates.BenchmarkMissing"/> regardless of
+	/// mapping status -- SRG is not "missing" a benchmark, it never has one).
+	/// <paramref name="kind"/> is <see cref="Waypoint.Core.ComplianceContent.CatalogKinds.Stig"/>
+	/// (or <see langword="null"/> -- no execution profile staged/activated yet, treated
+	/// the same as stig since a benchmark concept is still possible once one is) with
+	/// no benchmark revision on the CURRENT mapping: a persistent, non-blocking,
+	/// visible alert. A stig component with a mapped benchmark revision has nothing to
+	/// surface -- <see langword="null"/>.
+	/// </summary>
+	private static string? DeriveState(BenchmarkComponentMapping mapping, string? kind)
+	{
+		if (kind == CatalogKinds.Srg)
+		{
+			return BenchmarkMappingDerivedStates.NotApplicableSrg;
+		}
+
+		return mapping.IsCurrent && mapping.BenchmarkRevisionId is null
+			? BenchmarkMappingDerivedStates.BenchmarkMissing
+			: null;
 	}
 }
