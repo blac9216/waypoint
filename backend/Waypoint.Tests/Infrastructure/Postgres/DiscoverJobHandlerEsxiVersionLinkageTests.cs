@@ -101,13 +101,16 @@ public sealed class DiscoverJobHandlerEsxiVersionLinkageTests : IAsyncLifetime
 	}
 
 	/// <summary>
-	/// Resolves the real migration-0064-seeded 'vsphere'/'8.0.3'/'esxi' catalog
-	/// component id. Re-applies 0064's raw SQL directly against the given connection
-	/// first (bypassing the schema_migrations tracking table) -- see this class's own
-	/// doc comment: a sibling Postgres-collection test may have TRUNCATEd the catalog
-	/// identity tree since some earlier test's migrator run already marked 0064
-	/// applied, so relying on <see cref="NpgsqlSchemaMigrator.ApplyAsync"/> alone would
-	/// silently resolve nothing here.
+	/// Resolves the real migration-seeded 'vsphere'/'8.0'/'esxi' catalog component id
+	/// (issue #998's CORRECTED owner decision: the catalog key is the vendor's declared
+	/// version scope verbatim -- "8.0" -- reconciled from migration 0064's original
+	/// "8.0.3" seed by migration 0070). Re-applies 0064's and 0070's raw SQL directly
+	/// against the given connection first (bypassing the schema_migrations tracking
+	/// table) -- see this class's own doc comment: a sibling Postgres-collection test
+	/// may have TRUNCATEd the catalog identity tree since some earlier test's migrator
+	/// run already marked these migrations applied, so relying on
+	/// <see cref="NpgsqlSchemaMigrator.ApplyAsync"/> alone would silently resolve
+	/// nothing here.
 	/// </summary>
 	private static async Task<Guid> GetSeededEsxiCatalogComponentIdAsync(NpgsqlConnection connection)
 	{
@@ -119,22 +122,25 @@ public sealed class DiscoverJobHandlerEsxiVersionLinkageTests : IAsyncLifetime
 			FROM catalog_components cc
 			JOIN catalog_product_versions pv ON pv.id = cc.product_version_id
 			JOIN catalog_products p ON p.id = pv.product_id
-			WHERE p.product_key = 'vsphere' AND pv.version_key = '8.0.3' AND cc.component_key = 'esxi'
+			WHERE p.product_key = 'vsphere' AND pv.version_key = '8.0' AND cc.component_key = 'esxi'
 			""", connection);
 		object? result = await command.ExecuteScalarAsync();
-		Assert.NotNull(result); // Migration 0064 must have seeded exactly this row on main.
+		Assert.NotNull(result); // Migrations 0064+0070 must have seeded exactly this row on main.
 		return (Guid)result!;
 	}
 
 	private static async Task ReapplySeedMigrationAsync(NpgsqlConnection connection)
 	{
-		System.Reflection.Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
-		string resourceName = assembly.GetManifestResourceNames().Single(n => n.EndsWith("0064_execution_catalog_seed.sql", StringComparison.Ordinal));
-		await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
-		using StreamReader reader = new(stream);
-		string sql = await reader.ReadToEndAsync();
-		await using NpgsqlCommand reapply = new(sql, connection);
-		await reapply.ExecuteNonQueryAsync();
+		foreach (string fileName in new[] { "0064_execution_catalog_seed.sql", "0070_declared_scope_version_keys.sql" })
+		{
+			System.Reflection.Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
+			string resourceName = assembly.GetManifestResourceNames().Single(n => n.EndsWith(fileName, StringComparison.Ordinal));
+			await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+			using StreamReader reader = new(stream);
+			string sql = await reader.ReadToEndAsync();
+			await using NpgsqlCommand reapply = new(sql, connection);
+			await reapply.ExecuteNonQueryAsync();
+		}
 	}
 
 	/// <summary>

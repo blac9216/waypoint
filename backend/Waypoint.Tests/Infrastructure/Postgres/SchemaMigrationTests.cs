@@ -246,7 +246,7 @@ public sealed class SchemaMigrationTests
 	/// invented-from-documentation/idempotent-ON-CONFLICT/no-new-grants pattern as
 	/// 0064/0067 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 68;
+	private const int ExpectedMigrationCount = 69;
 
 	private readonly PostgresFixture _fixture;
 

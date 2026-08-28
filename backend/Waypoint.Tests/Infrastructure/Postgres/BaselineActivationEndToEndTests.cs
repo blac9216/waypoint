@@ -187,8 +187,14 @@ public sealed class BaselineActivationEndToEndTests : IAsyncLifetime
 		return request;
 	}
 
+	// Issue #998's CORRECTED owner decision: the catalog product-version key is the
+	// vendor's declared version scope, VERBATIM (the content directory segment itself,
+	// e.g. "8.0" for a `vsphere/8.0/...` layout) -- never a patch-level triple. "8.0.3"
+	// would now be an unrecognized key form and fail every VersionScopeMatcher lookup
+	// closed, so this fixture's path/key both use the realistic minor-scoped directory
+	// literal a real vsphere/8.0 tree declares.
 	private static SemanticCandidate VCenterCandidate() => new(
-		"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", "vsphere", "8.0.3", "stig", "vcenter", "vCenter Server",
+		"vsphere/8.0/v2r3-stig/inspec/baseline/vcenter", "vsphere", "8.0", "stig", "vcenter", "vCenter Server",
 		"vmware", "vcenter", null,
 		IsAggregate: false, Title: "vCenter STIG", ManifestVersion: "2.3.0",
 		Inputs: [], Supports: [], Depends: [], ContentDigest: "invented0000000000000000000000000000000000000000000000000000");
@@ -197,8 +203,8 @@ public sealed class BaselineActivationEndToEndTests : IAsyncLifetime
 		SourceRevisionKey: "compliance-content",
 		Vendor: "VMware vSphere",
 		ProductDisplayName: "VMware vSphere",
-		ProductVersionDisplayName: "vSphere 8.0 Update 3",
-		ContentReleaseDisplayName: "stig 8.0.3",
+		ProductVersionDisplayName: "vSphere 8.0",
+		ContentReleaseDisplayName: "stig 8.0",
 		ReportGroupKey: "vcenter-stig",
 		ReportGroupDisplayName: "vCenter STIG",
 		ReportGroupPriority: 3,
@@ -289,8 +295,12 @@ object scopeBody = new
 		Assert.True(previewBody.RootElement.GetProperty("is_runnable").GetBoolean());
 	}
 
+	// Issue #998 (rebase reconciliation with #1003): same declared-scope correction as
+	// VCenterCandidate above -- "8.0.3" is an unrecognized key form under
+	// VersionScopeMatcher and would fail every configured-fact lookup closed, so the
+	// candidate declares the verbatim minor-scoped "8.0" a real vsphere/8.0 tree does.
 	private static SemanticCandidate VmCandidate() => new(
-		"vsphere/8.0.3/v2r3-stig/inspec/baseline/vm", "vsphere", "8.0.3", "stig", "vm", "Virtual Machine",
+		"vsphere/8.0/v2r3-stig/inspec/baseline/vm", "vsphere", "8.0", "stig", "vm", "Virtual Machine",
 		"vmware", "vm", null,
 		IsAggregate: false, Title: "VM STIG", ManifestVersion: "2.3.0",
 		Inputs: [], Supports: [], Depends: [], ContentDigest: "invented0000000000000000000000000000000000000000000000000003");
@@ -299,8 +309,8 @@ object scopeBody = new
 		SourceRevisionKey: "compliance-content",
 		Vendor: "VMware vSphere",
 		ProductDisplayName: "VMware vSphere",
-		ProductVersionDisplayName: "vSphere 8.0 Update 3",
-		ContentReleaseDisplayName: "stig 8.0.3",
+		ProductVersionDisplayName: "vSphere 8.0",
+		ContentReleaseDisplayName: "stig 8.0",
 		ReportGroupKey: "vm-stig",
 		ReportGroupDisplayName: "VM STIG",
 		ReportGroupPriority: 3,
@@ -407,7 +417,14 @@ object scopeBody = new
 		Assert.True(previewBody.RootElement.GetProperty("is_runnable").GetBoolean());
 	}
 
-	/// <summary>Same proof, for a VM component -- issue #1000's other named-impacted component (#740).</summary>
+	/// <summary>
+	/// Same proof, for a VM component -- issue #1000's other named-impacted component
+	/// (#740). Issue #998's rebase reconciliation strengthens this beyond self-equality:
+	/// the Admin configures a PATCH-LEVEL version ("8.0.3") while the catalog key is the
+	/// declared minor scope ("8.0") -- the shared resolver must link them via
+	/// VersionScopeMatcher's scope test, proving the CONFIGURED path scope-matches
+	/// exactly like the discovered path, never byte-equality.
+	/// </summary>
 	[Fact]
 	public async Task ConfiguredExactVersion_OnVm_LinksAndMatcherReportsCompatible()
 	{
@@ -418,7 +435,8 @@ object scopeBody = new
 		CatalogExecutionProfileDetail? profileDetail = await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None);
 		Assert.NotNull(profileDetail);
 		Guid catalogComponentId = profileDetail!.Component.Id;
-		string exactVersionKey = profileDetail.ProductVersion.VersionKey;
+		Assert.Equal("8.0", profileDetail.ProductVersion.VersionKey); // Declared minor scope, per VmCandidate.
+		const string configuredPatchLevelVersion = "8.0.3"; // Invented full observed-style version within that scope.
 
 		ContentRevision revision = await _baselines.RecordStagedRevisionAsync(
 			"commit-1000-vm", "digest-1000-vm", "revisions/1000-vm", CancellationToken.None);
@@ -436,12 +454,13 @@ object scopeBody = new
 		Assert.Null(beforeConfigure.CatalogComponentId);
 
 		HttpRequestMessage putRequest = WithRole(HttpMethod.Put, $"/api/v1/components/{beforeConfigure.Id}", "Admin");
-		putRequest.Content = JsonContent.Create(new { exact_version = exactVersionKey }, options: Waypoint.Core.Serialization.WaypointJsonOptions.Default);
+		putRequest.Content = JsonContent.Create(new { exact_version = configuredPatchLevelVersion }, options: Waypoint.Core.Serialization.WaypointJsonOptions.Default);
 		HttpResponseMessage putResponse = await _client.SendAsync(putRequest);
 		Assert.Equal(HttpStatusCode.OK, putResponse.StatusCode);
 
 		Component afterConfigure = (await _components.GetAsync(beforeConfigure.Id, CancellationToken.None))!;
 		Assert.Equal(catalogComponentId, afterConfigure.CatalogComponentId);
+		Assert.Equal(configuredPatchLevelVersion, afterConfigure.ConfiguredFact?.ExactVersion); // Stored fact stays the full configured value, never rewritten to the scope key.
 
 		IReadOnlyList<CatalogExecutionProfileDetail> profiles =
 			await _catalog.ListExecutionProfilesByComponentAsync(catalogComponentId, CancellationToken.None);
@@ -459,7 +478,13 @@ object scopeBody = new
 	public async Task ConfiguredExactVersion_AmbiguousAcrossProducts_StaysUnlinked()
 	{
 		string sharedComponentKey = $"ambiguous-1000-{Guid.NewGuid():N}";
-		string sharedVersion = "1.2.3";
+		// Issue #998 (rebase reconciliation): "1.2.3" would be an unrecognized key form
+		// under VersionScopeMatcher and stay unlinked for the WRONG reason (fail-closed
+		// key form, zero matches -- not ambiguity). "1.2" is a valid minor-scoped key,
+		// so both seeded products genuinely match and this test keeps proving the
+		// AMBIGUITY branch of the shared resolver, same as its discovered-path sibling
+		// (DiscoverJobHandlerCatalogLinkageTests).
+		string sharedVersion = "1.2";
 		await SeedTopLevelCatalogComponentAsync("vendor-a-1000", $"product-a-{Guid.NewGuid():N}", sharedVersion, sharedComponentKey);
 		await SeedTopLevelCatalogComponentAsync("vendor-b-1000", $"product-b-{Guid.NewGuid():N}", sharedVersion, sharedComponentKey);
 

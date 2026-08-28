@@ -73,15 +73,15 @@ public sealed class ExecutionCatalogSeedTests
 		await ReapplySeedMigrationAsync(connection);
 
 		// vSphere object-kind split (vmware transport, no selector_name).
-		await AssertLinkableComponentAsync(connection, "vsphere", "8.0.3", "vcenter", "vmware", "vcenter");
-		await AssertLinkableComponentAsync(connection, "vsphere", "8.0.3", "esxi", "vmware", "esxi");
-		await AssertLinkableComponentAsync(connection, "vsphere", "8.0.3", "vm", "vmware", "vm");
+		await AssertLinkableComponentAsync(connection, "vsphere", "8.0", "vcenter", "vmware", "vcenter");
+		await AssertLinkableComponentAsync(connection, "vsphere", "8.0", "esxi", "vmware", "esxi");
+		await AssertLinkableComponentAsync(connection, "vsphere", "8.0", "vm", "vmware", "vm");
 
 		// VCSA named-service split (ssh transport, selector_name required).
-		await AssertLinkableComponentAsync(connection, "vsphere", "8.0.3", "eam", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "8.0", "eam", "ssh", "service");
 
 		// NSX named-function split (nsx-api transport).
-		await AssertLinkableComponentAsync(connection, "nsx", "4.1.2", "manager", "nsx-api", "service");
+		await AssertLinkableComponentAsync(connection, "nsx", "4.x", "manager", "nsx-api", "service");
 
 		// Whole-appliance (ssh/target, no selector_name).
 		await AssertLinkableComponentAsync(connection, "photon", "5.0", "photon", "ssh", "target");
@@ -151,9 +151,12 @@ public sealed class ExecutionCatalogSeedTests
 	/// <summary>Re-applies 0064's embedded raw SQL directly against <paramref name="connection"/>, bypassing <c>schema_migrations</c> tracking entirely.</summary>
 	private static async Task ReapplySeedMigrationAsync(NpgsqlConnection connection)
 	{
-		string sql = await ReadEmbeddedMigrationAsync("0064_execution_catalog_seed.sql");
-		await using NpgsqlCommand reapply = new(sql, connection);
-		await reapply.ExecuteNonQueryAsync();
+		foreach (string fileName in new[] { "0064_execution_catalog_seed.sql", "0070_declared_scope_version_keys.sql" })
+		{
+			string sql = await ReadEmbeddedMigrationAsync(fileName);
+			await using NpgsqlCommand reapply = new(sql, connection);
+			await reapply.ExecuteNonQueryAsync();
+		}
 	}
 
 	private static async Task<long> CountAsync(NpgsqlConnection connection, string sql)
@@ -202,30 +205,30 @@ public sealed class ExecutionCatalogSeedExpansionTests
 		await ReapplySeedMigrationsAsync(connection);
 
 		// vSphere 9-0 SRG: vmware object-kind row.
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "vcenter", "vmware", "vcenter");
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "esxi", "vmware", "esxi");
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "vm", "vmware", "vm");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "vcenter", "vmware", "vcenter");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "esxi", "vmware", "esxi");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "vm", "vmware", "vm");
 
 		// vSphere 9-0 SRG: VCSA named-service row.
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "envoy", "ssh", "service");
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "postgresql", "ssh", "service");
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "vami", "ssh", "service");
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0.0", "photon", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "envoy", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "postgresql", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "vami", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "photon", "ssh", "service");
 
 		// NSX 9-x SRG: named-function row.
-		await AssertLinkableComponentAsync(connection, "nsx", "9.0.0", "manager", "nsx-api", "service");
-		await AssertLinkableComponentAsync(connection, "nsx", "9.0.0", "routing", "nsx-api", "service");
+		await AssertLinkableComponentAsync(connection, "nsx", "9.x", "manager", "nsx-api", "service");
+		await AssertLinkableComponentAsync(connection, "nsx", "9.x", "routing", "nsx-api", "service");
 
 		// Aria Operations / Aria Automation / Aria Suite Lifecycle / Workspace ONE
 		// Access SRG: whole-appliance rows.
-		await AssertLinkableComponentAsync(connection, "aria-operations", "8.0.0", "aria-operations", "ssh", "target");
-		await AssertLinkableComponentAsync(connection, "aria-automation", "8.0.0", "aria-automation", "ssh", "target");
-		await AssertLinkableComponentAsync(connection, "aria-suite-lifecycle", "8.0.0", "aria-suite-lifecycle", "ssh", "target");
-		await AssertLinkableComponentAsync(connection, "vidm", "3.3.0", "vidm", "ssh", "target");
+		await AssertLinkableComponentAsync(connection, "aria-operations", "8.x", "aria-operations", "ssh", "target");
+		await AssertLinkableComponentAsync(connection, "aria-automation", "8.x", "aria-automation", "ssh", "target");
+		await AssertLinkableComponentAsync(connection, "aria-suite-lifecycle", "8.x", "aria-suite-lifecycle", "ssh", "target");
+		await AssertLinkableComponentAsync(connection, "vidm", "3.3.x", "vidm", "ssh", "target");
 
 		// VCF 9-x SRG: ssh named-service row (spot-check a representative subset).
-		await AssertLinkableComponentAsync(connection, "vcf", "9.0.0", "sddc-manager-nginx", "ssh", "service");
-		await AssertLinkableComponentAsync(connection, "vcf", "9.0.0", "operations-networks-ubuntu", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vcf", "9.x", "sddc-manager-nginx", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vcf", "9.x", "operations-networks-ubuntu", "ssh", "service");
 	}
 
 	/// <summary>
@@ -247,8 +250,8 @@ public sealed class ExecutionCatalogSeedExpansionTests
 
 		await ReapplySeedMigrationsAsync(connection);
 
-		await AssertLinkableComponentAsync(connection, "vcf", "9.0.0", "sddc-manager-api", "vcf-api", "service");
-		await AssertLinkableComponentAsync(connection, "vcf", "9.0.0", "automation-api", "vcf-api", "service");
+		await AssertLinkableComponentAsync(connection, "vcf", "9.x", "sddc-manager-api", "vcf-api", "service");
+		await AssertLinkableComponentAsync(connection, "vcf", "9.x", "automation-api", "vcf-api", "service");
 
 		await using NpgsqlCommand command = new(
 			"""
@@ -297,7 +300,11 @@ public sealed class ExecutionCatalogSeedExpansionTests
 	/// </summary>
 	private static async Task ReapplySeedMigrationsAsync(NpgsqlConnection connection)
 	{
-		foreach (string fileName in new[] { "0064_execution_catalog_seed.sql", "0067_execution_catalog_seed_expansion.sql", "0069_vcf_api_credential_purpose.sql" })
+		foreach (string fileName in new[]
+		{
+			"0064_execution_catalog_seed.sql", "0067_execution_catalog_seed_expansion.sql",
+			"0069_vcf_api_credential_purpose.sql", "0070_declared_scope_version_keys.sql",
+		})
 		{
 			string sql = await ReadEmbeddedMigrationAsync(fileName);
 			await using NpgsqlCommand reapply = new(sql, connection);
@@ -445,13 +452,13 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 		string migration0069 = ReadRepoFile("backend", "Waypoint.Infrastructure", "Data", "Migrations", "0069_vcf_api_credential_purpose.sql");
 
 		// 0064's original slice.
-		AssertRowCoveredCorrectly(rows, migration0064, "vSphere `8-0`", "STIG", "vmware",
+		AssertRowCoveredCorrectly(rows, migration0064, "vSphere `8.0`", "STIG", "vmware",
 			seededComponentKeys: ["vcenter", "esxi", "vm"], expectedOutputKind: "hdf_ckl");
-		AssertRowCoveredCorrectly(rows, migration0064, "vSphere `8-0`", "STIG", "ssh",
+		AssertRowCoveredCorrectly(rows, migration0064, "vSphere `8.0`", "STIG", "ssh",
 			seededComponentKeys: ["eam", "lookup", "postgresql", "vami"], expectedOutputKind: "hdf_ckl");
-		AssertRowCoveredCorrectly(rows, migration0064, "NSX `4-x`", "STIG", "nsx-api",
+		AssertRowCoveredCorrectly(rows, migration0064, "NSX `4.x`", "STIG", "nsx-api",
 			seededComponentKeys: ["manager", "distributed-firewall"], expectedOutputKind: "hdf_ckl");
-		AssertRowCoveredCorrectly(rows, migration0064, "Photon OS `5-0`", "SRG", "ssh",
+		AssertRowCoveredCorrectly(rows, migration0064, "Photon OS `5.0`", "SRG", "ssh",
 			seededComponentKeys: ["photon"], expectedOutputKind: "hdf");
 
 		// 0067's expansion (issue #967). Unlike 0064, every 0067 execution-profile row is
@@ -461,21 +468,21 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 		// component-key tuple in 0067's own catalog_execution_profiles VALUES list
 		// instead of reusing 0064's per-tuple output_kind regex (which assumes an
 		// inline output_kind column 0067 does not have).
-		AssertRowComponentsSeededAsHdf(rows, migration0067, "vSphere `9-0`", "SRG", "vmware",
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "vSphere `9.0`", "SRG", "vmware",
 			seededComponentKeys: ["vcenter", "esxi", "vm"]);
-		AssertRowComponentsSeededAsHdf(rows, migration0067, "vSphere `9-0`", "SRG", "ssh",
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "vSphere `9.0`", "SRG", "ssh",
 			seededComponentKeys: ["envoy", "postgresql", "vami", "photon"]);
-		AssertRowComponentsSeededAsHdf(rows, migration0067, "NSX `9-x`", "SRG", "nsx-api",
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "NSX `9.x`", "SRG", "nsx-api",
 			seededComponentKeys: ["manager", "routing"]);
-		AssertRowComponentsSeededAsHdf(rows, migration0067, "Aria Operations `8-x`", "SRG", "ssh",
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "Aria Operations `8.x`", "SRG", "ssh",
 			seededComponentKeys: ["aria-operations"]);
-		AssertRowComponentsSeededAsHdf(rows, migration0067, "Aria Automation `8-x`", "SRG", "ssh",
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "Aria Automation `8.x`", "SRG", "ssh",
 			seededComponentKeys: ["aria-automation"]);
-		AssertRowComponentsSeededAsHdf(rows, migration0067, "Aria Suite Lifecycle `8-x`", "SRG", "ssh",
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "Aria Suite Lifecycle `8.x`", "SRG", "ssh",
 			seededComponentKeys: ["aria-suite-lifecycle"]);
-		AssertRowComponentsSeededAsHdf(rows, migration0067, "Workspace ONE Access `3-3-x`", "SRG", "ssh",
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "Workspace ONE Access `3.3.x`", "SRG", "ssh",
 			seededComponentKeys: ["vidm"]);
-		AssertRowComponentsSeededAsHdf(rows, migration0067, "VCF `9-x`", "SRG", "ssh",
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "VCF `9.x`", "SRG", "ssh",
 			seededComponentKeys: [
 				"sddc-manager-nginx", "sddc-manager-postgresql", "sddc-manager-photon",
 				"operations-httpd", "operations-postgresql", "operations-photon",
@@ -483,9 +490,9 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 				"operations-networks-nginx-platform", "operations-networks-ubuntu"]);
 
 		// 0069's addition (issue #977): the 13th and final provenance-matrix row, VCF
-		// 9-x's `vcf-api` named-service split -- same SRG/hdf-by-construction shape as
+		// 9.x's `vcf-api` named-service split -- same SRG/hdf-by-construction shape as
 		// 0067's rows.
-		AssertRowComponentsSeededAsHdf(rows, migration0069, "VCF `9-x`", "SRG", "vcf-api",
+		AssertRowComponentsSeededAsHdf(rows, migration0069, "VCF `9.x`", "SRG", "vcf-api",
 			seededComponentKeys: ["sddc-manager-api", "automation-api"]);
 	}
 
@@ -532,19 +539,19 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 
 		HashSet<(string, string, string)> coveredRows = new()
 		{
-			("vSphere `8-0`", "STIG", "vmware"),
-			("vSphere `8-0`", "STIG", "ssh"),
-			("NSX `4-x`", "STIG", "nsx-api"),
-			("Photon OS `5-0`", "SRG", "ssh"),
-			("vSphere `9-0`", "SRG", "vmware"),
-			("vSphere `9-0`", "SRG", "ssh"),
-			("NSX `9-x`", "SRG", "nsx-api"),
-			("Aria Operations `8-x`", "SRG", "ssh"),
-			("Aria Automation `8-x`", "SRG", "ssh"),
-			("Aria Suite Lifecycle `8-x`", "SRG", "ssh"),
-			("Workspace ONE Access `3-3-x`", "SRG", "ssh"),
-			("VCF `9-x`", "SRG", "ssh"),
-			("VCF `9-x`", "SRG", "vcf-api"),
+			("vSphere `8.0`", "STIG", "vmware"),
+			("vSphere `8.0`", "STIG", "ssh"),
+			("NSX `4.x`", "STIG", "nsx-api"),
+			("Photon OS `5.0`", "SRG", "ssh"),
+			("vSphere `9.0`", "SRG", "vmware"),
+			("vSphere `9.0`", "SRG", "ssh"),
+			("NSX `9.x`", "SRG", "nsx-api"),
+			("Aria Operations `8.x`", "SRG", "ssh"),
+			("Aria Automation `8.x`", "SRG", "ssh"),
+			("Aria Suite Lifecycle `8.x`", "SRG", "ssh"),
+			("Workspace ONE Access `3.3.x`", "SRG", "ssh"),
+			("VCF `9.x`", "SRG", "ssh"),
+			("VCF `9.x`", "SRG", "vcf-api"),
 		};
 
 		Assert.Equal(13, coveredRows.Count);

@@ -382,23 +382,35 @@ public sealed class CatalogRepository : ICatalogRepository
 		ArgumentException.ThrowIfNullOrWhiteSpace(catalogComponentKey);
 		ArgumentException.ThrowIfNullOrWhiteSpace(exactVersion);
 
+		// Issue #998's CORRECTED owner decision: the catalog's version_key is the
+		// vendor's declared version scope, VERBATIM (e.g. minor-scoped "8.0" or
+		// major-line-scoped "9.x") -- never the byte-for-byte observed fact. A plain SQL
+		// equality predicate on pv.version_key can therefore never express the closed
+		// two-form scope test (Waypoint.Core.Components.VersionScopeMatcher); this reads
+		// every top-level component sharing the component key (component_key is a small,
+		// closed vocabulary -- see docs/compliance-parity.md's Selector row -- so this is
+		// not an unbounded scan) and filters in code, exactly like
+		// ComponentCapabilityMatcher does one layer up for an already-linked component.
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT cc.id, cc.product_version_id, cc.parent_component_id, cc.component_key, cc.display_name, cc.transport, cc.selector_kind, cc.selector_name, cc.created_at
+			SELECT cc.id, cc.product_version_id, cc.parent_component_id, cc.component_key, cc.display_name, cc.transport, cc.selector_kind, cc.selector_name, cc.created_at, pv.version_key
 			FROM catalog_components cc
 			JOIN catalog_product_versions pv ON pv.id = cc.product_version_id
-			WHERE cc.parent_component_id IS NULL AND cc.component_key = $1 AND pv.version_key = $2
+			WHERE cc.parent_component_id IS NULL AND cc.component_key = $1
 			ORDER BY cc.id
 			""", connection);
 		command.Parameters.AddWithValue(catalogComponentKey);
-		command.Parameters.AddWithValue(exactVersion);
 
 		List<CatalogComponent> components = [];
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
 		{
-			components.Add(MapComponent(reader, 0));
+			string versionKey = reader.GetString(9);
+			if (Waypoint.Core.Components.VersionScopeMatcher.Matches(exactVersion, versionKey))
+			{
+				components.Add(MapComponent(reader, 0));
+			}
 		}
 
 		return components;
