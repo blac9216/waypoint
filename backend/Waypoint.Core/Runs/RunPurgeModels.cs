@@ -57,6 +57,14 @@ public enum RunPurgeOutcome
 	/// still committed; nothing already deleted is re-deleted on retry.
 	/// </summary>
 	Failed,
+
+	/// <summary>
+	/// Issue #784: the run carries an active Admin retention hold -- 409, run left
+	/// untouched. Checked before every purge attempt (fresh or resumed), so a hold
+	/// placed mid-purge also blocks further progress. Remove the hold
+	/// (<c>DELETE /runs/{id}/retention-hold</c>) to make the run purge-eligible again.
+	/// </summary>
+	Held,
 }
 
 /// <summary>Return shape for <see cref="Waypoint.Infrastructure.Runs.RunPurgeService.PurgeRunAsync"/>.</summary>

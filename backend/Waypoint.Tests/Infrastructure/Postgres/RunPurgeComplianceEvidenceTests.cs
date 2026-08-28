@@ -43,6 +43,7 @@ public sealed class RunPurgeComplianceEvidenceTests : IAsyncLifetime
 	private JobQueueRepository _jobs = null!;
 	private RunPurgeRepository _purges = null!;
 	private AttestationSnapshotRepository _attestationSnapshots = null!;
+	private RunRetentionHoldRepository _retentionHolds = null!;
 	private RunPurgeService _service = null!;
 	private ComponentResultRepository _componentResults = null!;
 	private CatalogRepository _catalog = null!;
@@ -71,7 +72,8 @@ public sealed class RunPurgeComplianceEvidenceTests : IAsyncLifetime
 		_jobs = new JobQueueRepository(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
 		_purges = new RunPurgeRepository(_fixture.ConnectionString);
 		_attestationSnapshots = new AttestationSnapshotRepository(_fixture.ConnectionString);
-		_service = new RunPurgeService(_jobs, _purges, _attestationSnapshots, _fixture.ConnectionString);
+		_retentionHolds = new RunRetentionHoldRepository(_fixture.ConnectionString);
+		_service = new RunPurgeService(_jobs, _purges, _attestationSnapshots, _retentionHolds, _fixture.ConnectionString);
 		_componentResults = new ComponentResultRepository(_fixture.ConnectionString);
 		_catalog = new CatalogRepository(_fixture.ConnectionString);
 		_scanPlans = new ScanPlanRepository(_fixture.ConnectionString);

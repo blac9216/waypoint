@@ -59,34 +59,32 @@ namespace Waypoint.Infrastructure.Runs;
 /// </summary>
 public sealed class RunPurgeService
 {
-	/// <summary>The three terminal <c>runs.state</c> values a purge is allowed against (docs/api-contract.md's run state machine).</summary>
-	private static readonly HashSet<string> TerminalRunStates = new(StringComparer.Ordinal)
-	{
-		"completed", "completed_with_failures", "aborted",
-	};
-
 	/// <summary>Same low-urgency tier as an ordinary artifact download / tool-install (issue #39's <c>ToolInstallPriority</c>) -- a purge must never starve a scan.</summary>
 	private const short PurgePriority = 6;
 
 	private readonly IJobControlRepository _jobs;
 	private readonly IRunPurgeRepository _purges;
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
+	private readonly IRunRetentionHoldRepository _retentionHolds;
 	private readonly string _connectionString;
 
 	public RunPurgeService(
 		IJobControlRepository jobs,
 		IRunPurgeRepository purges,
 		AttestationSnapshotRepository attestationSnapshots,
+		IRunRetentionHoldRepository retentionHolds,
 		string connectionString)
 	{
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(purges);
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
+		ArgumentNullException.ThrowIfNull(retentionHolds);
 		ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 
 		_jobs = jobs;
 		_purges = purges;
 		_attestationSnapshots = attestationSnapshots;
+		_retentionHolds = retentionHolds;
 		_connectionString = connectionString;
 	}
 
@@ -121,6 +119,20 @@ public sealed class RunPurgeService
 			return new RunPurgeResult(RunPurgeOutcome.AlreadyPurged, ToStatus(existingTombstone));
 		}
 
+		// Issue #784: a held run's evidence graph must never be purged -- checked on
+		// EVERY call (not just the first), so placing a hold after a purge is already
+		// in flight (db_phase_done but the artifact job not yet finalized) also blocks
+		// further progress, not just a fresh start. A completed purge is unaffected
+		// (the tombstone check above already returned by that point -- nothing left to
+		// protect once the graph is gone). #1062's future sweep must call this SAME
+		// entry point rather than re-implement the check, so the exclusion has exactly
+		// one enforcement point for both the manual admin action and the automated
+		// sweep.
+		if (await _retentionHolds.GetAsync(runId, cancellationToken).ConfigureAwait(false) is not null)
+		{
+			return new RunPurgeResult(RunPurgeOutcome.Held);
+		}
+
 		RunPurgeStatus? inFlight = await _purges.GetStatusAsync(runId, cancellationToken).ConfigureAwait(false);
 		if (inFlight is not null)
 		{
@@ -133,7 +145,7 @@ public sealed class RunPurgeService
 			return new RunPurgeResult(RunPurgeOutcome.RunNotFound);
 		}
 
-		if (!TerminalRunStates.Contains(run.State))
+		if (!RunLifecycle.TerminalRunStates.Contains(run.State))
 		{
 			return new RunPurgeResult(RunPurgeOutcome.RunNotTerminal);
 		}
