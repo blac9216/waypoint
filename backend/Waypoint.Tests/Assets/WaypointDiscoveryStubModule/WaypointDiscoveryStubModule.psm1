@@ -42,6 +42,18 @@
 #                  discovery-meta marker with Complete = $false and a fabricated
 #                  error message. DiscoverJobHandler must upsert/refresh the seen
 #                  objects but NOT mark host-12 removed/absent.
+#
+# Issue #995 adds a dedicated pass for the empty-string-Version regression:
+#   'empty-version' -- a cluster with one host reporting a real semantic Version
+#                  (matches migration 0064's seeded 'vsphere'/'8.0.3' row, so it can
+#                  link) and one powered-off/disconnected host reporting Version as
+#                  an EMPTY STRING ("", not $null -- exactly what a real
+#                  powered-off/disconnected/connecting ESXi host returns). Before
+#                  #995's fix, the empty-version host's "" slipped past
+#                  ResolveCatalogLinkageAsync's `is null` guard and reached
+#                  CatalogRepository's ArgumentException.ThrowIfNullOrWhiteSpace,
+#                  aborting the WHOLE job -- so this pass proves one bad host no
+#                  longer zeroes out the target's components.
 
 function Invoke-WaypointDiscovery {
 	[CmdletBinding()]
@@ -72,6 +84,24 @@ function Invoke-WaypointDiscovery {
 	if (-not $Pass) { $Pass = '1' }
 
 	if ($Pass -eq 'empty') {
+		Write-Information 'Discovery complete.'
+		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
+		return
+	}
+
+	if ($Pass -eq '995-empty-version') {
+		# Issue #995: one linkable host (real seeded semantic Version) plus one
+		# powered-off/disconnected host reporting Version as an EMPTY STRING (never
+		# $null) -- the exact shape a real vSphere host in that power/connection state
+		# returns. No cluster/vm rows needed; this pass isolates the regression.
+		[pscustomobject]@{
+			Type = 'host'; MoRef = 'host-995-linkable'; Name = 'esxi-11.example.internal'
+			ParentMoRef = $null; Build = '99.0.11111111'; Version = '8.0.3'; MaintenanceMode = $false
+		}
+		[pscustomobject]@{
+			Type = 'host'; MoRef = 'host-995-empty-version'; Name = 'esxi-12.example.internal'
+			ParentMoRef = $null; Build = '99.0.22222222'; Version = ''; MaintenanceMode = $false
+		}
 		Write-Information 'Discovery complete.'
 		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
 		return

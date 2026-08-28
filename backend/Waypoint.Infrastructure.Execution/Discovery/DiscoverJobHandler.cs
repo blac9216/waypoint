@@ -297,23 +297,25 @@ public sealed class DiscoverJobHandler : IJobHandler
 		// re-links (or honestly unlinks) rather than keeping a stale id (see
 		// ResolveCatalogLinkageAsync's own doc comment for the exact-match/ambiguity
 		// rules -- ADR-0022 never guesses).
-		(IReadOnlyList<DiscoveredComponent> linkedComponentItems, IReadOnlyList<string> linkageAmbiguities) =
+		(IReadOnlyList<DiscoveredComponent> linkedComponentItems, IReadOnlyList<string> linkageWarnings) =
 			await ResolveCatalogLinkageAsync(_catalog, componentItems, cancellationToken).ConfigureAwait(false);
 
 		ComponentUpsertOutcome componentOutcome = await _components
 			.UpsertDiscoveredAsync(targetId, linkedComponentItems, cancellationToken, advanceAbsence).ConfigureAwait(false);
 
-		if (linkageAmbiguities.Count > 0)
+		if (linkageWarnings.Count > 0)
 		{
 			// Same job.log severity idiom issue #865 uses for a partial-enumeration
-			// warning (PowerShellExecutor.Emit) -- an ambiguous catalog match is not a
-			// job failure (ADR-0022: stay unlinked, never guess), but it IS an
-			// actionable condition an operator should see against this job's history,
-			// not just a silent null in the components table.
-			string ambiguitySummary = string.Join("; ", linkageAmbiguities);
-			string ambiguityPayload = JsonSerializer.Serialize(new { severity = "warning", line = $"discover: catalog linkage ambiguous for one or more components -- left unlinked. {ambiguitySummary}" });
+			// warning (PowerShellExecutor.Emit). Issue #995 widened this from
+			// "ambiguous match only" to "any per-component linkage condition worth an
+			// operator's attention" (ambiguous match, or an unexpected repository fault
+			// caught per-item below) -- neither is a job failure (this component simply
+			// stays unlinked), but both ARE actionable/loud, never a silent null in the
+			// components table.
+			string warningSummary = string.Join("; ", linkageWarnings);
+			string warningPayload = JsonSerializer.Serialize(new { severity = "warning", line = $"discover: catalog linkage warning(s) for one or more components -- left unlinked. {warningSummary}" });
 			await context.Events
-				.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, ambiguityPayload, cancellationToken)
+				.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, warningPayload, cancellationToken)
 				.ConfigureAwait(false);
 		}
 
@@ -486,9 +488,15 @@ public sealed class DiscoverJobHandler : IJobHandler
 				// NOT passed as ExactVersion here (that would misrepresent a guest property
 				// as the component's own compliance-relevant version); VMs have no
 				// analogous Version field either, so they keep ExactVersion=null.
+				// Issue #995: a powered-off/disconnected/connecting host reports Version as
+				// an EMPTY STRING, not null -- string.IsNullOrWhiteSpace normalizes that (and
+				// whitespace-only) to null right here, at the mapping boundary, so "version
+				// unavailable this pass" has exactly one representation (ExactVersion=null)
+				// for every downstream consumer, never a "" that looks falsy to a human but
+				// is non-null to an `is null` guard.
 				ParentVendorIdentity: null,
 				CatalogComponentId: null,
-				ExactVersion: item.Type == InventoryItemTypes.Host ? item.Version : null));
+				ExactVersion: item.Type == InventoryItemTypes.Host && !string.IsNullOrWhiteSpace(item.Version) ? item.Version : null));
 		}
 
 		return components;
@@ -540,15 +548,21 @@ public sealed class DiscoverJobHandler : IJobHandler
 	/// never an arbitrary "first match wins."</item>
 	/// </list>
 	/// </summary>
-	internal static async Task<(IReadOnlyList<DiscoveredComponent> Items, IReadOnlyList<string> Ambiguities)> ResolveCatalogLinkageAsync(
+	internal static async Task<(IReadOnlyList<DiscoveredComponent> Items, IReadOnlyList<string> Warnings)> ResolveCatalogLinkageAsync(
 		ICatalogRepository catalog, IReadOnlyList<DiscoveredComponent> items, CancellationToken cancellationToken)
 	{
 		List<DiscoveredComponent> resolved = [];
-		List<string> ambiguities = [];
+		List<string> warnings = [];
 
 		foreach (DiscoveredComponent item in items)
 		{
-			if (item.ExactVersion is null)
+			// Issue #995: guard on IsNullOrWhiteSpace, not `is null`, so this stays
+			// fail-closed even if some future caller ever constructs a DiscoveredComponent
+			// directly with an empty/whitespace ExactVersion instead of going through
+			// MapToComponents' own (now-normalizing) mapping -- belt-and-braces so this
+			// method's fail-closed claim is actually true regardless of caller discipline,
+			// not merely true for today's one call site.
+			if (string.IsNullOrWhiteSpace(item.ExactVersion))
 			{
 				// No exact fact this pass (unavailable, or a component kind -- e.g. the
 				// synthetic vcenter root, or a VM -- that never carries one): stays
@@ -560,9 +574,34 @@ public sealed class DiscoverJobHandler : IJobHandler
 				continue;
 			}
 
-			IReadOnlyList<Waypoint.Core.ComplianceContent.CatalogComponent> candidates = await catalog
-				.FindTopLevelComponentsByKeyAndVersionAsync(item.CatalogComponentKey, item.ExactVersion, cancellationToken)
-				.ConfigureAwait(false);
+			IReadOnlyList<Waypoint.Core.ComplianceContent.CatalogComponent> candidates;
+			try
+			{
+				candidates = await catalog
+					.FindTopLevelComponentsByKeyAndVersionAsync(item.CatalogComponentKey, item.ExactVersion, cancellationToken)
+					.ConfigureAwait(false);
+			}
+			catch (Exception exception) when (exception is not OperationCanceledException)
+			{
+				// Issue #995 (defense-in-depth against the CLASS of bug, not just this one
+				// instance): a linkage-time repository fault for ONE component (a transient
+				// DB error, or -- belt-and-braces alongside the IsNullOrWhiteSpace guard
+				// above -- a still-unanticipated ArgumentException from the repository)
+				// must not abort the whole discovery job the way #995 did. Every other
+				// per-item outcome in this loop (no-match, ambiguous) already fails THAT
+				// component closed and keeps going; matching that established posture, this
+				// component is logged loudly (never silently swallowed -- it IS surfaced,
+				// same channel as the ambiguity warning below) and left unlinked, while
+				// every other component in this batch still gets its own honest linkage
+				// result. This is deliberately narrower than a blanket catch: it wraps only
+				// the repository call, so a bug in this method's own logic still throws and
+				// still fails the job.
+				resolved.Add(item with { CatalogComponentId = null });
+				warnings.Add(
+					$"catalog linkage lookup for component key '{item.CatalogComponentKey}' version '{item.ExactVersion}' " +
+					$"failed unexpectedly ({exception.GetType().Name}: {exception.Message}); left unlinked rather than failing the whole discovery job.");
+				continue;
+			}
 
 			if (candidates.Count == 1)
 			{
@@ -584,13 +623,13 @@ public sealed class DiscoverJobHandler : IJobHandler
 				// case above) because it signals a catalog data condition an operator
 				// or catalog author should investigate, not a routine "not yet covered."
 				resolved.Add(item with { CatalogComponentId = null });
-				ambiguities.Add(
+				warnings.Add(
 					$"component key '{item.CatalogComponentKey}' version '{item.ExactVersion}' matched {candidates.Count} catalog components " +
 					$"across different products ({string.Join(", ", candidates.Select(c => c.Id))}); left unlinked rather than guessing.");
 			}
 		}
 
-		return (resolved, ambiguities);
+		return (resolved, warnings);
 	}
 
 	/// <summary>
