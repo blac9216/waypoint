@@ -1177,7 +1177,7 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		string suffix = Guid.NewGuid().ToString("N")[..8];
 		SemanticCandidate candidate = new(
 			$"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter-{suffix}", "vsphere", $"8.0.3-{suffix}", "stig", $"vcenter-{suffix}",
-			"vCenter Server", "vmware", "vcenter", null,
+			"v2r3-stig", "vCenter Server", "vmware", "vcenter", null,
 			IsAggregate: false, Title: "vCenter STIG", ManifestVersion: "2.3.0",
 			Inputs: [new InspecManifestInput("vcenter_host", "string", true)],
 			Supports: [], Depends: [], ContentDigest: "deadbeef00000000000000000000000000000000000000000000000000000");

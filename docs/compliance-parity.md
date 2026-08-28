@@ -59,6 +59,50 @@ table rule above -- this table only grows when a new row is added here first and
 interpreter's family table is updated to match (issue #959's fix for the defect class
 where the interpreter's table drifted from upstream layout with no test catching it).
 
+## Release ordering and newest-release-wins
+
+Issue #986 (owner decision, 2026-08-28): a live round-5 pull showed the upstream
+repository shipping MULTIPLE releases of the same (product-version, kind, component)
+scope side by side (e.g. `v2r2-stig` and `v2r3-stig` both present under one baseline).
+Before this decision the importer collapsed every additional release onto the same
+`component_key` and quarantined ALL of them as colliding, rejecting content a lab
+actually needs. The resolution: within one declared version scope, the **newest
+release** promotes as the pending-approval candidate; every older release quarantines
+with an honest `superseded by release '<release>' (profile '<profile-key>')` reason
+naming the winner, and the winner itself flows through the normal promotion path (it is
+not merely accepted-but-not-promoted). Side-by-side releases occur only on an initial or
+long-stale pull, so the operator-facing approval flow is unchanged: whatever is newest
+is what shows up pending approval.
+
+Release ordering is a pure, closed two-form parser/comparator
+(`Waypoint.Core.ComplianceContent.SemanticImport.VendorReleaseOrder`), never a general
+version-string heuristic:
+
+| Form | Shape | Ordering key | Example |
+|---|---|---|---|
+| `V#R#` | vendor's own STIG/SRG version-and-release numbering, with an optional `-stig`/`-srg` kind suffix | `(major, release)` numeric compare | `v2r3-stig` |
+| `Y##M##-srg` | vendor's year/month SRG generation numbering | `(year, month)` numeric compare | `Y26M05-srg` |
+
+A release segment that matches NEITHER closed form fails closed: the whole scope
+quarantines every candidate (the original `component_key ... collides` reason, now
+naming which release could not be parsed) rather than guessing an order. Two candidates
+that tie under the same form's ordering (including two profiles literally sharing one
+release key) also fail closed the same way -- "newest wins" presumes a strict order, and
+a tie is a genuine shape ambiguity, not a supersession.
+
+**Cross-form ruling.** Every documented family in the provenance matrix below uses
+exactly one form consistently for a given generation of content (the STIG-era releases
+are all `V#R#`; the 9.x/SRG generation is all `Y##M##-srg`) -- the matrix never
+documents a scope mixing both forms. Whether a single declared version scope could
+genuinely contain a `V#R#` release AND a `Y##M##-srg` release at once is therefore an
+open design question this issue deliberately does NOT answer with an invented ordering:
+there is no principled way to say a year/month SRG generation is "newer" or "older" than
+a vendor STIG revision number. `VendorReleaseOrder.Compare` throws rather than compare
+across forms, and the reconciler treats that as a fail-closed collision (reason names
+the ambiguity as `cross-form ... issue #986`) for every candidate in that tie, exactly
+like an unparseable release. If a future real pull ever proves this scenario occurs, it
+needs its own owner decision, not a guess baked into this importer.
+
 ## Sibling source-capability provenance matrix
 
 The entries below enumerate every scan component in the sibling catalog at the source

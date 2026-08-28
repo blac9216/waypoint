@@ -194,7 +194,7 @@ public sealed class BaselineActivationEndToEndTests : IAsyncLifetime
 	// closed, so this fixture's path/key both use the realistic minor-scoped directory
 	// literal a real vsphere/8.0 tree declares.
 	private static SemanticCandidate VCenterCandidate() => new(
-		"vsphere/8.0/v2r3-stig/inspec/baseline/vcenter", "vsphere", "8.0", "stig", "vcenter", "vCenter Server",
+		"vsphere/8.0/v2r3-stig/inspec/baseline/vcenter", "vsphere", "8.0", "stig", "vcenter", "v2r3-stig", "vCenter Server",
 		"vmware", "vcenter", null,
 		IsAggregate: false, Title: "vCenter STIG", ManifestVersion: "2.3.0",
 		Inputs: [], Supports: [], Depends: [], ContentDigest: "invented0000000000000000000000000000000000000000000000000000");
@@ -300,7 +300,7 @@ object scopeBody = new
 	// VersionScopeMatcher and would fail every configured-fact lookup closed, so the
 	// candidate declares the verbatim minor-scoped "8.0" a real vsphere/8.0 tree does.
 	private static SemanticCandidate VmCandidate() => new(
-		"vsphere/8.0/v2r3-stig/inspec/baseline/vm", "vsphere", "8.0", "stig", "vm", "Virtual Machine",
+		"vsphere/8.0/v2r3-stig/inspec/baseline/vm", "vsphere", "8.0", "stig", "vm", "v2r3-stig", "Virtual Machine",
 		"vmware", "vm", null,
 		IsAggregate: false, Title: "VM STIG", ManifestVersion: "2.3.0",
 		Inputs: [], Supports: [], Depends: [], ContentDigest: "invented0000000000000000000000000000000000000000000000000003");

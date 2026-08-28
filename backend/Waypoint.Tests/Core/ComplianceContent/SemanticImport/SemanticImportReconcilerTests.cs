@@ -95,7 +95,9 @@ public sealed class SemanticImportReconcilerTests
 	{
 		// Two distinct profile keys that (by construction of a hypothetical future
 		// family bug) resolve to the same (product-version, kind, component_key) scope
-		// must never silently let one shadow the other -- both are quarantined.
+		// AND the same release must never silently let one shadow the other -- both are
+		// quarantined. Same-release collisions are a genuine shape ambiguity, distinct
+		// from the cross-release "newest wins" case below.
 		VendorContentEntry a = Leaf("vsphere/8-0/v2r3-stig/inspec/base-one/vcenter", Manifest("vcenter"), "controls/a.rb");
 		VendorContentEntry b = Leaf("vsphere/8-0/v2r3-stig/inspec/base-two/vcenter", Manifest("vcenter"), "controls/b.rb");
 
@@ -104,6 +106,108 @@ public sealed class SemanticImportReconcilerTests
 		Assert.Empty(report.Accepted);
 		Assert.Equal(2, report.Rejected.Count);
 		Assert.All(report.Rejected, r => Assert.Contains("collides with", r.Reason));
+	}
+
+	[Fact]
+	public void Reconcile_TwoReleasesSameScope_NewestPromotesOldestSupersededQuarantined()
+	{
+		// Issue #986 (owner decision 2026-08-28, "newest release wins"): round-5 live
+		// data showed the SAME component across two releases of one declared version
+		// scope collapsing into the pre-#986 collision path, which quarantined BOTH ever.
+		// This is the failing-test-first proof: before #986's fix this asserts the OLD
+		// (both-rejected) behavior; after the fix, the newest release's profile is
+		// promoted and the older one is quarantined by name.
+		VendorContentEntry older = Leaf("vsphere/8-0/v2r2-stig/inspec/base/vcenter", Manifest("vcenter", "vCenter STIG", "2.2.0"), "controls/a.rb");
+		VendorContentEntry newer = Leaf("vsphere/8-0/v2r3-stig/inspec/base/vcenter", Manifest("vcenter", "vCenter STIG", "2.3.0"), "controls/a.rb");
+
+		SemanticImportReport report = ReconcileAll([older, newer]);
+
+		SemanticImportAccepted winner = Assert.Single(report.Accepted);
+		Assert.Equal(newer.ProfileKey, winner.Candidate.ProfileKey);
+		Assert.Equal("v2r3-stig", winner.Candidate.ReleaseKey);
+
+		SemanticImportRejected loser = Assert.Single(report.Rejected);
+		Assert.Equal(older.ProfileKey, loser.ProfileKey);
+		Assert.Equal("superseded by release 'v2r3-stig' (profile 'vsphere/8-0/v2r3-stig/inspec/base/vcenter') -- newest release wins within one declared version scope (issue #986)", loser.Reason);
+	}
+
+	[Fact]
+	public void Reconcile_ThreeReleasesSameScope_OnlyNewestWins()
+	{
+		VendorContentEntry oldest = Leaf("photon/5-0/v1r3-srg/inspec/base", Manifest("base", version: "1.3"), "controls/a.rb");
+		VendorContentEntry middle = Leaf("photon/5-0/v2r1-srg/inspec/base", Manifest("base", version: "2.1"), "controls/a.rb");
+		VendorContentEntry newest = Leaf("photon/5-0/v3r1-srg/inspec/base", Manifest("base", version: "3.1"), "controls/a.rb");
+
+		SemanticImportReport report = ReconcileAll([oldest, middle, newest]);
+
+		SemanticImportAccepted winner = Assert.Single(report.Accepted);
+		Assert.Equal(newest.ProfileKey, winner.Candidate.ProfileKey);
+		Assert.Equal(2, report.Rejected.Count);
+		Assert.All(report.Rejected, r => Assert.Contains("superseded by release 'v3r1-srg'", r.Reason));
+	}
+
+	[Fact]
+	public void Reconcile_UnknownReleaseForm_FailsClosedQuarantinesAllInScope()
+	{
+		// A release segment that does not parse under either closed form (V#R# or
+		// Y##M##[-srg]) cannot be ordered, so the whole scope fails closed rather than
+		// guessing a winner. (ParseReleaseSegment's own -stig/-srg suffix gate already
+		// rejects segments with no suffix at all, so this drives an entry whose suffix IS
+		// recognized but whose ordering prefix is NOT one of the two closed forms.)
+		VendorContentEntry weird = Leaf("photon/5-0/weird-release-srg/inspec/base", Manifest("base"), "controls/a.rb");
+		VendorContentEntry normal = Leaf("photon/5-0/v1r3-srg/inspec/base", Manifest("base"), "controls/a.rb");
+
+		SemanticImportReport report = ReconcileAll([weird, normal]);
+
+		Assert.Empty(report.Accepted);
+		Assert.Equal(2, report.Rejected.Count);
+		Assert.All(report.Rejected, r => Assert.Contains("release ordering", r.Reason, StringComparison.OrdinalIgnoreCase));
+	}
+
+	[Fact]
+	public void Reconcile_CrossFormTieWithinSameScope_FailsClosedAsCollision()
+	{
+		// A V#R# release and a Y##M##-srg release both present in the SAME declared
+		// version scope/kind/component is a design hole the owner decision explicitly
+		// declined to resolve with an invented cross-form ordering: fail closed into
+		// quarantine for both, naming the ambiguity, rather than guessing which form is
+        // "newer".
+		VendorContentEntry vForm = Leaf("photon/5-0/v3r3-srg/inspec/base", Manifest("base"), "controls/a.rb");
+		VendorContentEntry yForm = Leaf("photon/5-0/Y26M05-srg/inspec/base", Manifest("base"), "controls/a.rb");
+
+		SemanticImportReport report = ReconcileAll([vForm, yForm]);
+
+		Assert.Empty(report.Accepted);
+		Assert.Equal(2, report.Rejected.Count);
+		Assert.All(report.Rejected, r => Assert.Contains("cross-form", r.Reason, StringComparison.OrdinalIgnoreCase));
+	}
+
+	[Fact]
+	public void Reconcile_SingleRelease_UnchangedBehavior()
+	{
+		VendorContentEntry only = Leaf("photon/5-0/v3r3-srg/inspec/base", Manifest("base"), "controls/a.rb");
+
+		SemanticImportReport report = ReconcileAll([only]);
+
+		Assert.Single(report.Accepted);
+		Assert.Empty(report.Rejected);
+	}
+
+	[Fact]
+	public void Reconcile_DeterministicUnderShuffledEnumeration_SameWinnerRegardlessOfOrder()
+	{
+		VendorContentEntry r1 = Leaf("photon/5-0/v1r3-srg/inspec/base", Manifest("base"), "controls/a.rb");
+		VendorContentEntry r2 = Leaf("photon/5-0/v2r1-srg/inspec/base", Manifest("base"), "controls/a.rb");
+		VendorContentEntry r3 = Leaf("photon/5-0/v3r1-srg/inspec/base", Manifest("base"), "controls/a.rb");
+
+		SemanticImportReport forward = ReconcileAll([r1, r2, r3]);
+		SemanticImportReport shuffled = ReconcileAll([r3, r1, r2]);
+		SemanticImportReport reversed = ReconcileAll([r3, r2, r1]);
+
+		Assert.Equal(forward.Accepted.Single().Candidate.ProfileKey, shuffled.Accepted.Single().Candidate.ProfileKey);
+		Assert.Equal(forward.Accepted.Single().Candidate.ProfileKey, reversed.Accepted.Single().Candidate.ProfileKey);
+		Assert.Equal(forward.SourceDigest, shuffled.SourceDigest);
+		Assert.Equal(forward.SourceDigest, reversed.SourceDigest);
 	}
 
 	[Fact]

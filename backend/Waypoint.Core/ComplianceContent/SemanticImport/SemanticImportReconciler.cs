@@ -67,7 +67,10 @@ public static class SemanticImportReconciler
 		// derivation must never collapse two DISTINCT profiles onto one key within the
 		// same scope. If it does, that is an interpreter-shape ambiguity, not a
 		// catalog-authority decision, so both are quarantined rather than one silently
-		// shadowing the other.
+		// shadowing the other -- UNLESS the collision is entirely explained by the
+		// candidates being DIFFERENT releases of the SAME component, in which case issue
+		// #986's owner decision applies (see ResolveScope below): the newest release
+		// promotes and older releases quarantine by name rather than both being rejected.
 		Dictionary<(string ProductVersionKey, string Kind, string ComponentKey), List<SemanticCandidate>> byScope = new();
 		foreach (SemanticCandidate candidate in interpretation.Candidates)
 		{
@@ -81,15 +84,36 @@ public static class SemanticImportReconciler
 			list.Add(candidate);
 		}
 
+		// Resolve each multi-candidate scope ONCE (not per-candidate) so the winner is
+		// determined deterministically regardless of the outer profile-key iteration
+		// order below; the result is a lookup from ProfileKey to its resolution.
+		Dictionary<string, ScopeResolution> resolutionsByProfileKey = new(StringComparer.Ordinal);
+		foreach (KeyValuePair<(string ProductVersionKey, string Kind, string ComponentKey), List<SemanticCandidate>> scope in byScope)
+		{
+			if (scope.Value.Count <= 1)
+			{
+				continue;
+			}
+
+			foreach ((string profileKey, ScopeResolution resolution) in ResolveScope(scope.Key.ComponentKey, scope.Value))
+			{
+				resolutionsByProfileKey[profileKey] = resolution;
+			}
+		}
+
 		foreach (SemanticCandidate candidate in interpretation.Candidates.OrderBy(c => c.ProfileKey, StringComparer.Ordinal))
 		{
-			(string, string, string) scopeKey = (candidate.ProductVersionKey, candidate.Kind, candidate.ComponentKey);
-			if (byScope[scopeKey].Count > 1)
+			if (resolutionsByProfileKey.TryGetValue(candidate.ProfileKey, out ScopeResolution resolution))
 			{
-				rejected.Add(new SemanticImportRejected(candidate.ProfileKey,
-					$"component_key '{candidate.ComponentKey}' collides with {byScope[scopeKey].Count - 1} other profile(s) in the same product-version/kind scope: " +
-					string.Join(", ", byScope[scopeKey].Select(c => c.ProfileKey).Where(k => k != candidate.ProfileKey).OrderBy(k => k, StringComparer.Ordinal))));
-				continue;
+				if (resolution.Reason is not null)
+				{
+					rejected.Add(new SemanticImportRejected(candidate.ProfileKey, resolution.Reason));
+					continue;
+				}
+
+				// Winner: falls through to the normal vocabulary/structure gates below so
+				// it flows through the SAME promotion path as any non-colliding candidate
+				// (issue #986 AC "the chosen release must actually promote").
 			}
 
 			IReadOnlyList<string> vocabularyErrors = CatalogVocabularyValidator.ValidateComponent(candidate.Transport, candidate.SelectorKind, candidate.SelectorName);
@@ -168,4 +192,108 @@ public static class SemanticImportReconciler
 		byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()));
 		return Convert.ToHexString(hash).ToLowerInvariant();
 	}
+
+	/// <summary>
+	/// Resolves one multi-candidate (product-version, kind, component_key) scope per
+	/// issue #986's owner decision (2026-08-28): if every candidate's release parses
+	/// under the closed <see cref="VendorReleaseOrder"/> vocabulary and all releases
+	/// share the same form, the newest release wins -- it is returned with a
+	/// <see langword="null"/> rejection reason (so it falls through to the normal
+	/// promotion gates) and every older release is returned with a "superseded by"
+	/// reason. If ANY release fails to parse, or the releases present span both closed
+	/// forms (an unresolved cross-form design hole -- see <see cref="VendorReleaseOrder"/>
+	/// remarks), the whole scope fails closed into the original generic
+	/// component_key-collides reason for every candidate, exactly as before issue #986.
+	/// Deterministic regardless of the input list's order: candidates are re-sorted by
+	/// ProfileKey before any tie-break.
+	/// </summary>
+	private static Dictionary<string, ScopeResolution> ResolveScope(string componentKey, IReadOnlyList<SemanticCandidate> scopeCandidates)
+	{
+		List<SemanticCandidate> ordered = [.. scopeCandidates.OrderBy(c => c.ProfileKey, StringComparer.Ordinal)];
+		Dictionary<string, ScopeResolution> result = new(StringComparer.Ordinal);
+
+		List<(SemanticCandidate Candidate, ParsedRelease Release)> parsed = [];
+		foreach (SemanticCandidate candidate in ordered)
+		{
+			if (!VendorReleaseOrder.TryParse(candidate.ReleaseKey, out ParsedRelease release))
+			{
+				return GenericCollision(componentKey, ordered,
+					$"release '{candidate.ReleaseKey}' does not match either closed release-ordering form (V#R# or Y##M##-srg) -- release ordering cannot be determined, quarantined");
+			}
+
+			parsed.Add((candidate, release));
+		}
+
+		bool mixedForms = parsed.Select(p => p.Release.Form).Distinct().Count() > 1;
+		if (mixedForms)
+		{
+			return GenericCollision(componentKey, ordered,
+				"cross-form release tie within the same product-version/kind/component scope (both V#R# and Y##M##-srg releases present) -- " +
+				"cross-form release ordering is an unresolved design hole (issue #986), quarantined rather than guessed");
+		}
+
+		(SemanticCandidate Candidate, ParsedRelease Release) winner = parsed[0];
+		foreach ((SemanticCandidate Candidate, ParsedRelease Release) candidate in parsed.Skip(1))
+		{
+			int comparison = VendorReleaseOrder.Compare(candidate.Release, winner.Release);
+			if (comparison == 0)
+			{
+				// Two DISTINCT profiles resolving to the same (product-version, kind,
+				// component_key) scope AND the same ordering position (whether the
+				// literal release key is identical or two different keys parse to an
+				// equal ordinal position) is a genuine shape ambiguity, not a
+				// release-supersession case -- "newest wins" presumes a total order
+				// with no ties. Fail closed exactly like the pre-#986 behavior rather
+				// than picking an arbitrary winner.
+				return GenericCollision(componentKey, ordered,
+					$"releases '{candidate.Candidate.ReleaseKey}' and '{winner.Candidate.ReleaseKey}' tie under release ordering -- " +
+					"newest-release-wins requires a strict order, quarantined rather than picking an arbitrary winner");
+			}
+
+			if (comparison > 0)
+			{
+				winner = candidate;
+			}
+		}
+
+		result[winner.Candidate.ProfileKey] = new ScopeResolution(null);
+		foreach ((SemanticCandidate Candidate, ParsedRelease Release) candidate in parsed)
+		{
+			if (candidate.Candidate.ProfileKey == winner.Candidate.ProfileKey)
+			{
+				continue;
+			}
+
+			result[candidate.Candidate.ProfileKey] = new ScopeResolution(
+				$"superseded by release '{winner.Candidate.ReleaseKey}' (profile '{winner.Candidate.ProfileKey}') -- newest release wins within one declared version scope (issue #986)");
+		}
+
+		return result;
+	}
+
+	/// <summary>
+	/// Fail-closed fallback preserving the original (pre-#986) collision reason for every
+	/// candidate in the scope, used when release ordering cannot be determined at all
+	/// (unparseable form or cross-form tie).
+	/// </summary>
+	private static Dictionary<string, ScopeResolution> GenericCollision(string componentKey, IReadOnlyList<SemanticCandidate> ordered, string detail)
+	{
+		Dictionary<string, ScopeResolution> result = new(StringComparer.Ordinal);
+		foreach (SemanticCandidate candidate in ordered)
+		{
+			IEnumerable<string> others = ordered.Select(c => c.ProfileKey).Where(k => k != candidate.ProfileKey).OrderBy(k => k, StringComparer.Ordinal);
+			result[candidate.ProfileKey] = new ScopeResolution(
+				$"component_key '{componentKey}' collides with {ordered.Count - 1} other profile(s) in the same product-version/kind scope: {string.Join(", ", others)} ({detail})");
+		}
+
+		return result;
+	}
+
+	/// <summary>
+	/// One candidate's resolution within a multi-candidate scope: <see cref="Reason"/>
+	/// null means this candidate is the scope's winner (falls through to normal
+	/// promotion gates); non-null is the quarantine reason for a superseded/colliding
+	/// candidate.
+	/// </summary>
+	private readonly record struct ScopeResolution(string? Reason);
 }

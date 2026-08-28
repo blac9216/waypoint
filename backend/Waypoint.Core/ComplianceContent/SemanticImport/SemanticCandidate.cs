@@ -32,6 +32,7 @@ public sealed record SemanticCandidate(
 	string ProductVersionKey,
 	string Kind,
 	string ComponentKey,
+	string ReleaseKey,
 	string DisplayName,
 	string Transport,
 	string SelectorKind,
