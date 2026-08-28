@@ -203,12 +203,18 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 	/// <summary>Resolves the header row for a job's highest <c>attempt_number</c> -- shared by both new read methods so "latest attempt" is defined in exactly one place.</summary>
 	private static async Task<ComponentResultHeader?> GetLatestHeaderAsync(NpgsqlConnection connection, Guid jobId, CancellationToken cancellationToken)
 	{
+		// Issue #743: output_kind is LEFT JOINed from the frozen scan_plan_items row so
+		// the read APIs can attach the SRG-vs-STIG statement from the plan's own frozen
+		// catalog kind (never the target's connection kind). LEFT (not INNER) so a
+		// result whose plan row was purged still reads back -- OutputKind then honestly
+		// null rather than the whole result vanishing.
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT id, run_id, job_id, scan_plan_item_id, component_id, attempt_number, status, detail
-			FROM component_results
-			WHERE job_id = $1
-			ORDER BY attempt_number DESC
+			SELECT r.id, r.run_id, r.job_id, r.scan_plan_item_id, r.component_id, r.attempt_number, r.status, r.detail, i.output_kind
+			FROM component_results r
+			LEFT JOIN scan_plan_items i ON i.id = r.scan_plan_item_id
+			WHERE r.job_id = $1
+			ORDER BY r.attempt_number DESC
 			LIMIT 1
 			""", connection);
 		command.Parameters.AddWithValue(jobId);
@@ -226,7 +232,8 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 			ComponentId: reader.GetGuid(4),
 			AttemptNumber: reader.GetInt32(5),
 			Status: reader.GetString(6),
-			Detail: reader.IsDBNull(7) ? null : reader.GetString(7));
+			Detail: reader.IsDBNull(7) ? null : reader.GetString(7),
+			OutputKind: reader.IsDBNull(8) ? null : reader.GetString(8));
 	}
 
 	public async Task<ComponentResultFindingsPage> GetLatestFindingsAsync(Guid jobId, int limit, int offset, CancellationToken cancellationToken)

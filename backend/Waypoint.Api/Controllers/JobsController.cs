@@ -330,6 +330,8 @@ public sealed class JobsController : ControllerBase
 			JobId: id.ToString(),
 			AttemptNumber: page.Result?.AttemptNumber,
 			ComponentResultStatus: page.Result?.Status,
+			OutputKind: page.Result?.OutputKind,
+			StandardsNote: ResolveStandardsNote(page.Result?.OutputKind),
 			Items: [.. page.Items.Select(f => new ComponentResultFindingResponse(
 				ControlId: f.ControlId,
 				RuleId: f.RuleId,
@@ -368,10 +370,24 @@ public sealed class JobsController : ControllerBase
 			JobId: id.ToString(),
 			AttemptNumber: list.Result?.AttemptNumber,
 			ComponentResultStatus: list.Result?.Status,
+			OutputKind: list.Result?.OutputKind,
+			StandardsNote: ResolveStandardsNote(list.Result?.OutputKind),
 			Items: [.. list.Items.Select(a => new ComponentResultArtifactResponse(
 				Kind: a.Kind,
 				Path: a.Path,
 				Digest: a.Digest,
 				SizeBytes: a.SizeBytes))]));
 	}
+
+	/// <summary>
+	/// Issue #743 AC "SRG results clearly state they are not DISA-published STIG
+	/// results": the fixed statement for a result whose FROZEN plan item's catalog
+	/// output kind is SRG (<c>hdf</c>); null for STIG (<c>hdf_ckl</c>) results and for
+	/// legacy results with no plan linkage. Keyed on the frozen catalog kind, never the
+	/// target's connection kind.
+	/// </summary>
+	private static string? ResolveStandardsNote(string? outputKind) =>
+		string.Equals(outputKind, Waypoint.Core.ComplianceContent.CatalogOutputKinds.Hdf, StringComparison.Ordinal)
+			? Waypoint.Core.Scans.SrgResultStatements.NotDisaPublished
+			: null;
 }

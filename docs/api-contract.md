@@ -447,7 +447,12 @@ response header, never in the body — no list endpoint in this API carries an
 in-body count. Response body: `job_id`, `attempt_number`/`component_result_status`
 (both null when the job has no recorded attempt at all — never claimed yet, a legacy
 non-component job, or a purged run's evidence, all indistinguishable and all
-honest-empty), `items` (`control_id`, `rule_id`?, `title`?, `severity`, `status`,
+honest-empty), `output_kind`/`standards_note` (issue #743: the frozen plan item's
+catalog output kind joined from `scan_plan_items`; for an SRG (`hdf`) result
+`standards_note` carries the fixed "not DISA-published STIG results" statement —
+derived from the frozen catalog kind, never the target's connection kind; both null
+for a legacy result with no plan linkage, and `standards_note` null for STIG),
+`items` (`control_id`, `rule_id`?, `title`?, `severity`, `status`,
 `evidence`?), `limit`, `offset`. 404 only when the job itself does not exist; a job
 with zero findings (or zero recorded attempts) is 200 with `items: []` and
 `X-Total-Count: 0`, matching `GetUploadAttempts`/`GetComponentResultsSummary`'s
@@ -462,7 +467,8 @@ other three recorded kinds (`hdf_raw` vs. `hdf_attested` distinction, `summary`,
 `log`) is undocumented and remains a remainder. Unpaged — bounded by the closed
 5-value `ComponentResultArtifactKinds` vocabulary per attempt. Response: `job_id`,
 `attempt_number`/`component_result_status` (both null, same honest-empty convention
-as the findings endpoint above), `items`. 404 only when the job does not exist.
+as the findings endpoint above), `output_kind`/`standards_note` (same issue #743 SRG
+statement as the findings endpoint), `items`. 404 only when the job does not exist.
 
 `/jobs/{id}/artifacts/receipts` (planned, #744/#745, ADR-0025): direct STIG Manager
 upload receipts for an eligible CKL — `destination`/`collection`, `benchmark_revision`,
