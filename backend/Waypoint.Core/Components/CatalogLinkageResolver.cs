@@ -24,9 +24,18 @@ namespace Waypoint.Core.Components;
 /// reuses unchanged for the configured-fact path
 /// (<see cref="Waypoint.Infrastructure.Components.ComponentRepository.SetConfiguredFactAsync"/>).
 /// One place decides "does this (key, version) resolve to exactly one catalog
-/// component" so both provenances share identical exact-match/ambiguity/fail-closed
+/// component" so both provenances share identical match/ambiguity/fail-closed
 /// semantics (ADR-0022 "never guesses a winner"; ADR-0023 "[Waypoint] never guesses a
 /// winner" for facts generally) -- neither path forks its own copy of this rule.
+///
+/// Issue #998's CORRECTED owner decision: the version match this resolver delegates to
+/// <see cref="ICatalogRepository.FindTopLevelComponentsByKeyAndVersionAsync"/> is
+/// <see cref="VersionScopeMatcher"/>'s closed two-form DECLARED-SCOPE test (an observed
+/// or Admin-configured full version like "8.0.3" matches a minor-scoped catalog key
+/// "8.0"; any version under a major matches a major-line-scoped "9.x"; unknown key
+/// forms fail closed), never byte-for-byte equality -- and because BOTH the discovered
+/// and configured fact paths flow through this one resolver, both scope-match
+/// identically by construction.
 /// </summary>
 public static class CatalogLinkageResolver
 {
