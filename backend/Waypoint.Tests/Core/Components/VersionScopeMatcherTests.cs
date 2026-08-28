@@ -71,7 +71,7 @@ public sealed class VersionScopeMatcherTests
 	[InlineData("9.0", "9.x")]
 	[InlineData("9.0.0", "9.x")]
 	[InlineData("9", "9.x")]
-	[InlineData("9.5.2.100", "9.x")]
+	[InlineData("9.5.2.10000", "9.x")]
 	public void Matches_NxKey_HitsAnyMinorUnderThatMajor(string observed, string key)
 	{
 		Assert.True(VersionScopeMatcher.Matches(observed, key));
@@ -101,7 +101,7 @@ public sealed class VersionScopeMatcherTests
 	[Theory]
 	[InlineData("3.3.0", "3.3.x")]
 	[InlineData("3.3", "3.3.x")]
-	[InlineData("3.3.5.1", "3.3.x")]
+	[InlineData("3.3.5.9999", "3.3.x")]
 	public void Matches_MultiSegmentXKey_HitsMatchingLeadingSegments(string observed, string key)
 	{
 		Assert.True(VersionScopeMatcher.Matches(observed, key));
