@@ -53,8 +53,14 @@ public sealed class JobsController : ControllerBase
 		["ckl"] = "application/xml",
 	};
 
+	/// <summary>Bounds for the findings page-size query param (issue #745) -- same clamp shape as every other limit/offset reader in this API.</summary>
+	private const int MinFindingsLimit = 1;
+	private const int MaxFindingsLimit = 500;
+	private const int DefaultFindingsLimit = 100;
+
 	private readonly IJobControlRepository _repository;
 	private readonly IJobRunnerRepository _jobRunnerRepository;
+	private readonly IComponentResultRepository _componentResults;
 	private readonly IOptions<ScanOptions> _scanOptions;
 	private readonly TargetRepository _targets;
 	private readonly ScanUploadCoordinator _upload;
@@ -62,17 +68,20 @@ public sealed class JobsController : ControllerBase
 	public JobsController(
 		IJobControlRepository repository,
 		IJobRunnerRepository jobRunnerRepository,
+		IComponentResultRepository componentResults,
 		IOptions<ScanOptions> scanOptions,
 		TargetRepository targets,
 		ScanUploadCoordinator upload)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(jobRunnerRepository);
+		ArgumentNullException.ThrowIfNull(componentResults);
 		ArgumentNullException.ThrowIfNull(scanOptions);
 		ArgumentNullException.ThrowIfNull(targets);
 		ArgumentNullException.ThrowIfNull(upload);
 		_repository = repository;
 		_jobRunnerRepository = jobRunnerRepository;
+		_componentResults = componentResults;
 		_scanOptions = scanOptions;
 		_targets = targets;
 		_upload = upload;
@@ -268,5 +277,98 @@ public sealed class JobsController : ControllerBase
 			Status: a.Status,
 			ErrorDetail: a.ErrorDetail,
 			AttemptedAt: a.AttemptedAt)).ToArray());
+	}
+
+	/// <summary>
+	/// Issue #745 remainder: the per-component finding list for a job's LATEST
+	/// <c>component_results</c> attempt (migration 0063). Viewer+, matching every other
+	/// run/job read. Statuses pass through exactly as recorded -- epic #726 §6's
+	/// "failed, skipped, excluded, not-applicable, open, and passed states are not
+	/// conflated" and the exactly-once <c>Not_Reviewed</c> rule hold because this
+	/// endpoint performs no re-derivation, it only reads back what
+	/// <c>HdfFindingsParser</c>/<c>ComponentResultRecordingService</c> already wrote.
+	/// Limit/offset paged (<paramref name="limit"/> 1-500, default 100; <paramref name="offset"/>
+	/// &gt;= 0) -- one attempt's finding count is bounded by one benchmark's control
+	/// count, not an unboundedly growing history, so this follows `GET /runs`'s
+	/// bounded-list idiom rather than `/runs/{id}/events/history`'s cursor. A job that
+	/// exists but has no recorded component-result attempt at all (not yet claimed,
+	/// legacy non-component job, or its evidence was purged) returns
+	/// <c>items: []</c>/<c>total_count: 0</c> with null attempt fields -- honest-empty,
+	/// never a 404 -- because only the job's own existence is this endpoint's
+	/// precondition, matching <see cref="GetUploadAttempts"/> and
+	/// <see cref="RunsController.GetComponentResultsSummary"/>.
+	/// </summary>
+	[HttpGet("{id:guid}/component-results/findings")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(ComponentResultFindingsResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<ComponentResultFindingsResponse>> GetComponentResultFindings(
+		Guid id, [FromQuery] int limit = DefaultFindingsLimit, [FromQuery] int offset = 0, CancellationToken cancellationToken = default)
+	{
+		if (limit < MinFindingsLimit || limit > MaxFindingsLimit)
+		{
+			throw ApiException.Validation(
+				"limit must be between 1 and 500.", $"'{limit}' is out of range.");
+		}
+
+		if (offset < 0)
+		{
+			throw ApiException.Validation("offset must be zero or greater.", $"'{offset}' is negative.");
+		}
+
+		JobSummary? job = await _repository.GetJobAsync(id, cancellationToken).ConfigureAwait(false);
+		if (job is null)
+		{
+			throw ApiException.NotFound("Job not found.", $"Job '{id}' does not exist.");
+		}
+
+		ComponentResultFindingsPage page = await _componentResults.GetLatestFindingsAsync(id, limit, offset, cancellationToken).ConfigureAwait(false);
+		return Ok(new ComponentResultFindingsResponse(
+			JobId: id.ToString(),
+			AttemptNumber: page.Result?.AttemptNumber,
+			ComponentResultStatus: page.Result?.Status,
+			Items: [.. page.Items.Select(f => new ComponentResultFindingResponse(
+				ControlId: f.ControlId,
+				RuleId: f.RuleId,
+				Title: f.Title,
+				Severity: f.Severity,
+				Status: f.Status,
+				Evidence: f.Evidence))],
+			TotalCount: page.TotalCount,
+			Limit: limit,
+			Offset: offset));
+	}
+
+	/// <summary>
+	/// Issue #745 remainder: artifact metadata (kind/path/digest/size) for a job's
+	/// LATEST <c>component_results</c> attempt (migration 0063's
+	/// <c>component_result_artifacts</c>). Viewer+. Metadata-only -- this endpoint never
+	/// streams artifact bytes; byte download for the two downloadable kinds (`hdf`,
+	/// `ckl`) remains <see cref="GetArtifact"/>. Unpaged (bounded by the closed 5-value
+	/// <see cref="ComponentResultArtifactKinds"/> vocabulary). Same honest-empty
+	/// convention as <see cref="GetComponentResultFindings"/>: job exists, no attempt
+	/// recorded (or purged) yet -&gt; <c>items: []</c> with null attempt fields, not a
+	/// 404.
+	/// </summary>
+	[HttpGet("{id:guid}/component-results/artifacts")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(ComponentResultArtifactsResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<ComponentResultArtifactsResponse>> GetComponentResultArtifacts(Guid id, CancellationToken cancellationToken)
+	{
+		JobSummary? job = await _repository.GetJobAsync(id, cancellationToken).ConfigureAwait(false);
+		if (job is null)
+		{
+			throw ApiException.NotFound("Job not found.", $"Job '{id}' does not exist.");
+		}
+
+		ComponentResultArtifactsList list = await _componentResults.GetLatestArtifactsAsync(id, cancellationToken).ConfigureAwait(false);
+		return Ok(new ComponentResultArtifactsResponse(
+			JobId: id.ToString(),
+			AttemptNumber: list.Result?.AttemptNumber,
+			ComponentResultStatus: list.Result?.Status,
+			Items: [.. list.Items.Select(a => new ComponentResultArtifactResponse(
+				Kind: a.Kind,
+				Path: a.Path,
+				Digest: a.Digest,
+				SizeBytes: a.SizeBytes))]));
 	}
 }

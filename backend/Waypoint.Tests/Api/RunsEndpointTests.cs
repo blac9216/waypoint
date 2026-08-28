@@ -1725,6 +1725,26 @@ public sealed class FakeComponentResultRepository : Waypoint.Core.Scans.ICompone
 		LastRollupRunId = runId;
 		return Task.FromResult(NextRollup with { RunId = runId });
 	}
+
+	public Waypoint.Core.Scans.ComponentResultFindingsPage NextFindingsPage { get; set; } = new(null, [], 0);
+
+	public Guid? LastFindingsJobId { get; private set; }
+
+	public Task<Waypoint.Core.Scans.ComponentResultFindingsPage> GetLatestFindingsAsync(Guid jobId, int limit, int offset, CancellationToken cancellationToken)
+	{
+		LastFindingsJobId = jobId;
+		return Task.FromResult(NextFindingsPage);
+	}
+
+	public Waypoint.Core.Scans.ComponentResultArtifactsList NextArtifactsList { get; set; } = new(null, []);
+
+	public Guid? LastArtifactsJobId { get; private set; }
+
+	public Task<Waypoint.Core.Scans.ComponentResultArtifactsList> GetLatestArtifactsAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		LastArtifactsJobId = jobId;
+		return Task.FromResult(NextArtifactsList);
+	}
 }
 
 /// <summary>

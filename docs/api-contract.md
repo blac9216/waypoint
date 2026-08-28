@@ -429,6 +429,38 @@ work that never became executable) remain aggregated separately and are never mi
 into the control-level `findings` projection, so a clean `findings` result cannot
 conceal missing coverage.
 
+✅ **`GET /jobs/{id}/component-results/findings`** (issue #745, migration 0063's
+`component_result_findings`): the per-component finding list for a job's LATEST
+`component_results` attempt (highest `attempt_number` — mirrors
+`/runs/{id}/component-results/summary`'s own "latest attempt wins" rule, ADR-0024).
+Viewer+. Statuses/severities pass through exactly as recorded — epic #726 §6's closed
+six-value finding vocabulary (`passed`\|`failed`\|`not_applicable`\|`not_reviewed`\|
+`execution_error`\|`skipped`) is never re-bucketed or collapsed, and the exactly-once
+`not_reviewed` rule for an applicable-but-unexecuted control holds because this
+endpoint performs no re-derivation. Limit/offset paged (`limit` 1–500 default 100,
+`offset` ≥ 0, 400 `validation_error` outside those bounds) — one attempt's finding
+count is bounded by one benchmark's control count, not an unboundedly growing
+history, so this follows `GET /runs`'s bounded-list `?limit&offset` idiom rather than
+`/runs/{id}/events/history`'s cursor. Response: `job_id`, `attempt_number`/
+`component_result_status` (both null when the job has no recorded attempt at all —
+never claimed yet, a legacy non-component job, or a purged run's evidence, all
+indistinguishable and all honest-empty), `items` (`control_id`, `rule_id`?, `title`?,
+`severity`, `status`, `evidence`?), `total_count`, `limit`, `offset`. 404 only when the
+job itself does not exist; a job with zero findings (or zero recorded attempts) is 200
+with `items: []`, matching `GetUploadAttempts`/`GetComponentResultsSummary`'s
+"resource exists, evidence may not yet" convention.
+
+✅ **`GET /jobs/{id}/component-results/artifacts`** (issue #745, migration 0063's
+`component_result_artifacts`): artifact METADATA (`kind`, `path` — bare filename, never
+a directory path, `digest`, `size_bytes`) for a job's LATEST attempt. Viewer+. Never
+streams bytes — byte download for the two downloadable kinds (`hdf`, `ckl`) stays on
+the existing `GET /jobs/{id}/artifacts/{kind}` route; a byte-download route for the
+other three recorded kinds (`hdf_raw` vs. `hdf_attested` distinction, `summary`,
+`log`) is undocumented and remains a remainder. Unpaged — bounded by the closed
+5-value `ComponentResultArtifactKinds` vocabulary per attempt. Response: `job_id`,
+`attempt_number`/`component_result_status` (both null, same honest-empty convention
+as the findings endpoint above), `items`. 404 only when the job does not exist.
+
 `/jobs/{id}/artifacts/receipts` (planned, #744/#745, ADR-0025): direct STIG Manager
 upload receipts for an eligible CKL — `destination`/`collection`, `benchmark_revision`,
 run/component/attempt/artifact identity, `request_attempt`, `status`

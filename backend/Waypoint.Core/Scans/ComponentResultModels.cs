@@ -140,3 +140,47 @@ public sealed record RunResultRollup(
 	Guid RunId,
 	int PlannedComponentCount,
 	IReadOnlyList<RunResultRollupRow> ByStatus);
+
+/// <summary>
+/// The immutable header of one job's latest <c>component_results</c> attempt --
+/// issue #745's finding-list/artifact read surfaces are job-scoped and always resolve
+/// to this attempt (highest <c>attempt_number</c> for the job), mirroring
+/// <see cref="IComponentResultRepository.GetRunRollupAsync"/>'s own "the latest attempt
+/// supplies the current component result" rule (ADR-0024).
+/// </summary>
+public sealed record ComponentResultHeader(
+	Guid Id,
+	Guid RunId,
+	Guid JobId,
+	Guid ScanPlanItemId,
+	Guid ComponentId,
+	int AttemptNumber,
+	string Status,
+	string? Detail);
+
+/// <summary>One persisted <c>component_result_findings</c> row read back, control identity and status intact and unaltered (epic #726 §6 -- findings pass through the API exactly as recorded, never re-derived or re-bucketed).</summary>
+public sealed record ComponentResultFindingRecord(
+	string ControlId,
+	string? RuleId,
+	string? Title,
+	string Severity,
+	string Status,
+	string? Evidence);
+
+/// <summary>One page of a job's latest-attempt findings -- limit/offset paged (bounded, single-attempt scope; not the growing-history cursor idiom <c>/runs/{id}/events/history</c> uses).</summary>
+public sealed record ComponentResultFindingsPage(
+	ComponentResultHeader? Result,
+	IReadOnlyList<ComponentResultFindingRecord> Items,
+	int TotalCount);
+
+/// <summary>One persisted <c>component_result_artifacts</c> row read back -- metadata only (kind/path/digest/size), never the artifact bytes themselves.</summary>
+public sealed record ComponentResultArtifactRecord(
+	string Kind,
+	string Path,
+	string Digest,
+	long SizeBytes);
+
+/// <summary>A job's latest-attempt artifact metadata list -- always small (bounded by the closed <see cref="ComponentResultArtifactKinds"/> vocabulary), so no paging.</summary>
+public sealed record ComponentResultArtifactsList(
+	ComponentResultHeader? Result,
+	IReadOnlyList<ComponentResultArtifactRecord> Items);
