@@ -57,6 +57,7 @@ public sealed class RunsController : ControllerBase
 	private readonly RunControlService _runControl;
 	private readonly RunPurgeService _runPurge;
 	private readonly RunHistoryDeletionService _historyDeletion;
+	private readonly RunRetentionHoldService _retentionHold;
 	private readonly IJobEventHistoryReader _eventHistory;
 	private readonly IComponentJobRepository _componentJobs;
 	private readonly IComponentResultRepository _componentResults;
@@ -72,6 +73,7 @@ public sealed class RunsController : ControllerBase
 		RunControlService runControl,
 		RunPurgeService runPurge,
 		RunHistoryDeletionService historyDeletion,
+		RunRetentionHoldService retentionHold,
 		IJobEventHistoryReader eventHistory,
 		IComponentJobRepository componentJobs,
 		IComponentResultRepository componentResults)
@@ -86,6 +88,7 @@ public sealed class RunsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(runControl);
 		ArgumentNullException.ThrowIfNull(runPurge);
 		ArgumentNullException.ThrowIfNull(historyDeletion);
+		ArgumentNullException.ThrowIfNull(retentionHold);
 		ArgumentNullException.ThrowIfNull(eventHistory);
 		ArgumentNullException.ThrowIfNull(componentJobs);
 		ArgumentNullException.ThrowIfNull(componentResults);
@@ -99,6 +102,7 @@ public sealed class RunsController : ControllerBase
 		_runControl = runControl;
 		_runPurge = runPurge;
 		_historyDeletion = historyDeletion;
+		_retentionHold = retentionHold;
 		_eventHistory = eventHistory;
 		_componentJobs = componentJobs;
 		_componentResults = componentResults;
@@ -1211,6 +1215,11 @@ public sealed class RunsController : ControllerBase
 				throw new ApiException(
 					System.Net.HttpStatusCode.Conflict, "run_not_terminal",
 					"Run cannot be purged.", $"Run '{id}' is not in a terminal state (completed, completed_with_failures, or aborted).");
+			case RunPurgeOutcome.Held:
+				throw new ApiException(
+					System.Net.HttpStatusCode.Conflict, "run_retention_held",
+					"Run cannot be purged while a retention hold is active.",
+					$"Run '{id}' has an active Admin retention hold. Remove it via DELETE /runs/{id}/retention-hold first.");
 			case RunPurgeOutcome.Completed:
 			case RunPurgeOutcome.AlreadyPurged:
 				return Ok(MapPurgeStatus(id, result));
@@ -1308,6 +1317,108 @@ public sealed class RunsController : ControllerBase
 		}
 
 		return Ok(MapHistoryDeletionStatus(id, RunHistoryDeletionOutcome.AlreadyDeleted.ToString(), tombstone));
+	}
+
+	/// <summary>
+	/// Issue #784: places an Admin-only, reasoned retention hold on a completed
+	/// compliance run (AC1). While active, <see cref="PurgeRun"/> (and, per the
+	/// issue's owner ruling, issue #1062's future graph-wide sweep, which calls the
+	/// SAME <see cref="RunPurgeService.PurgeRunAsync"/> entry point) refuses to purge
+	/// this run's evidence graph -- 409 <c>run_retention_held</c>. 409
+	/// <c>unsupported_run_type</c> when the run is not a compliance run type
+	/// (<c>scan</c>/<c>remediate</c>); 409 <c>run_not_terminal</c> when not yet
+	/// completed; 404 when the run does not exist. Placing a hold twice is a
+	/// no-op that returns the EXISTING hold (first-writer wins; the second reason is
+	/// not recorded) rather than erroring, matching purge/history-deletion's own
+	/// idempotent-by-design precedent.
+	/// </summary>
+	[HttpPost("{id:guid}/retention-hold")]
+	[RequireAdminRole]
+	[ProducesResponseType(typeof(RunRetentionHoldResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunRetentionHoldResponse>> PlaceRetentionHold(Guid id, [FromBody] RunRetentionHoldRequest? request, CancellationToken cancellationToken)
+	{
+		string? reason = request?.Reason?.Trim();
+		if (string.IsNullOrEmpty(reason))
+		{
+			throw ApiException.Validation("A retention hold requires a non-blank reason.", "Set a non-empty \"reason\" in the request body.");
+		}
+
+		string actor = User.GetRequiredUsername();
+		PlaceRetentionHoldResult result = await _retentionHold.PlaceHoldAsync(id, reason, actor, cancellationToken).ConfigureAwait(false);
+
+		switch (result.Outcome)
+		{
+			case PlaceRetentionHoldOutcome.RunNotFound:
+				throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+			case PlaceRetentionHoldOutcome.UnsupportedRunType:
+				throw new ApiException(
+					System.Net.HttpStatusCode.Conflict, "unsupported_run_type",
+					"Run cannot carry a retention hold.", $"Run '{id}' is not a compliance run (scan/remediate); a retention hold only protects a compliance evidence graph.");
+			case PlaceRetentionHoldOutcome.RunNotTerminal:
+				throw new ApiException(
+					System.Net.HttpStatusCode.Conflict, "run_not_terminal",
+					"Run cannot be held.", $"Run '{id}' is not in a terminal state (completed, completed_with_failures, or aborted).");
+			case PlaceRetentionHoldOutcome.AlreadyHeld:
+			case PlaceRetentionHoldOutcome.Placed:
+			default:
+				return Ok(MapRetentionHold(id, result.Hold));
+		}
+	}
+
+	/// <summary>
+	/// Issue #784: removes an Admin's retention hold (AC4), after which normal
+	/// retention eligibility resumes -- <see cref="RunPurgeService.PurgeRunAsync"/>
+	/// re-reads hold state fresh on every call, so nothing else needs to change for
+	/// the run to become purge-eligible again. 404 <c>not_held</c> when the run has
+	/// no active hold; 404 (generic) when the run does not exist. Reasoned like
+	/// placement (AC5: every transition -- both directions -- is audited with actor,
+	/// time, reason).
+	/// </summary>
+	[HttpDelete("{id:guid}/retention-hold")]
+	[RequireAdminRole]
+	[ProducesResponseType(typeof(RunRetentionHoldResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunRetentionHoldResponse>> RemoveRetentionHold(Guid id, [FromBody] RunRetentionHoldRequest? request, CancellationToken cancellationToken)
+	{
+		string? reason = request?.Reason?.Trim();
+		if (string.IsNullOrEmpty(reason))
+		{
+			throw ApiException.Validation("Removing a retention hold requires a non-blank reason.", "Set a non-empty \"reason\" in the request body.");
+		}
+
+		string actor = User.GetRequiredUsername();
+		RemoveRetentionHoldResult result = await _retentionHold.RemoveHoldAsync(id, reason, actor, cancellationToken).ConfigureAwait(false);
+
+		switch (result.Outcome)
+		{
+			case RemoveRetentionHoldOutcome.RunNotFound:
+				throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+			case RemoveRetentionHoldOutcome.NotHeld:
+				throw new ApiException(
+					System.Net.HttpStatusCode.NotFound, "not_held",
+					"Run has no active retention hold.", $"Run '{id}' is not currently held.");
+			case RemoveRetentionHoldOutcome.Removed:
+			default:
+				return Ok(MapRetentionHold(id, hold: null));
+		}
+	}
+
+	/// <summary>
+	/// Reads current hold status for a run (issue #784 AC "hold status readable in
+	/// run details") -- a dedicated, linked read endpoint beside <see cref="GetRun"/>
+	/// rather than a field on <see cref="RunResponse"/>, mirroring
+	/// <see cref="GetPurgeStatus"/>/<see cref="GetRunHistoryDeletionStatus"/>'s own
+	/// precedent (ADR-0019 decision 4). Always 200 -- <c>active: false</c> for a run
+	/// that was never held or whose hold was removed, never 404, so the run-details
+	/// surface can unconditionally display hold status without a prior existence
+	/// check.
+	/// </summary>
+	[HttpGet("{id:guid}/retention-hold")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(RunRetentionHoldResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunRetentionHoldResponse>> GetRetentionHold(Guid id, CancellationToken cancellationToken)
+	{
+		RunRetentionHold? hold = await _retentionHold.GetHoldAsync(id, cancellationToken).ConfigureAwait(false);
+		return Ok(MapRetentionHold(id, hold));
 	}
 
 	/// <summary>
@@ -1472,6 +1583,22 @@ public sealed class RunsController : ControllerBase
 			Actor: tombstone?.Actor ?? string.Empty,
 			PriorState: tombstone?.PriorState ?? string.Empty,
 			OccurredAt: tombstone?.OccurredAt.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
+
+	/// <summary>
+	/// <paramref name="hold"/> is null both for "never held" and for the just-removed
+	/// case (<see cref="RemoveRetentionHold"/> intentionally reports the post-removal
+	/// state, not the removed hold's own former reason) -- both render identically as
+	/// <c>active: false</c> with no reason/actor/time, which is the correct "not
+	/// currently held" projection either way. The full audit trail (who placed/removed
+	/// it and why, across every past transition) remains queryable via the existing
+	/// <c>GET /audit</c> endpoint (<c>run_id</c> filter), not reproduced here.
+	/// </summary>
+	private static RunRetentionHoldResponse MapRetentionHold(Guid runId, RunRetentionHold? hold) => new(
+		RunId: runId.ToString(),
+		Active: hold is not null,
+		Reason: hold?.Reason,
+		PlacedBy: hold?.PlacedBy,
+		PlacedAt: hold?.PlacedAt.ToString("O", CultureInfo.InvariantCulture));
 
 	private static RunResponse MapRun(RunSummary run)
 	{
