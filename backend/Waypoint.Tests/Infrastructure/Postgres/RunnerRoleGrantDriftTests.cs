@@ -1459,7 +1459,7 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		Guid siteId = await SeedSiteAsync();
 		Guid targetId = await SeedTargetAsync(siteId);
 
-		ComponentRepository runnerComponents = new(_complianceRunnerConnectionString);
+		ComponentRepository runnerComponents = new(_complianceRunnerConnectionString, new CatalogRepository(_complianceRunnerConnectionString));
 		Waypoint.Core.Components.DiscoveredComponent[] items =
 		[
 			new("esxi", "role-grant-drift-host-1", "esxi-01.example.internal", null, null, "8.0.3"),
@@ -1477,7 +1477,7 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 			await runnerComponents.UpsertDiscoveredAsync(targetId, [], CancellationToken.None);
 		Assert.Equal(1, absentOutcome.MarkedAbsent);
 
-		ComponentRepository ownerComponents = new(_fixture.ConnectionString);
+		ComponentRepository ownerComponents = new(_fixture.ConnectionString, new CatalogRepository(_fixture.ConnectionString));
 		Waypoint.Core.Components.Component onlyComponent =
 			Assert.Single(await ownerComponents.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None));
 		Assert.Equal(Waypoint.Core.Components.ComponentLifecycleStates.Absent, onlyComponent.Lifecycle);
@@ -1496,7 +1496,7 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	{
 		Guid siteId = await SeedSiteAsync();
 		Guid targetId = await SeedTargetAsync(siteId);
-		ComponentRepository ownerComponents = new(_fixture.ConnectionString);
+		ComponentRepository ownerComponents = new(_fixture.ConnectionString, new CatalogRepository(_fixture.ConnectionString));
 		await ownerComponents.UpsertDiscoveredAsync(
 			targetId,
 			[new Waypoint.Core.Components.DiscoveredComponent("esxi", "role-grant-drift-host-2", "esxi-02.example.internal", null, null, "8.0.3")],
@@ -1522,7 +1522,7 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	{
 		Guid siteId = await SeedSiteAsync();
 		Guid targetId = await SeedTargetAsync(siteId);
-		ComponentRepository ownerComponents = new(_fixture.ConnectionString);
+		ComponentRepository ownerComponents = new(_fixture.ConnectionString, new CatalogRepository(_fixture.ConnectionString));
 		await ownerComponents.UpsertDiscoveredAsync(
 			targetId,
 			[new Waypoint.Core.Components.DiscoveredComponent("esxi", "role-grant-drift-host-3", "esxi-03.example.internal", null, null, "8.0.3")],

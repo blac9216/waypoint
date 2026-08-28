@@ -102,21 +102,21 @@ public sealed class ComponentsController : ControllerBase
 	/// <summary>
 	/// Admin-only: sets <c>configured_fact</c> (the exact product version/capability
 	/// Waypoint cannot discover) -- never lifecycle or identity, which stay discovery/
-	/// refresh-owned (docs/api-contract.md).
+	/// refresh-owned (docs/api-contract.md). Issue #1000: a null/whitespace/omitted
+	/// <c>exact_version</c> is an explicit CLEAR, not a validation error -- ADR-0023's
+	/// requirement that clearing the configured fact "honestly unlinks" needs a real
+	/// way to clear it, which this endpoint never had before (every prior body had to
+	/// supply a non-empty value). <see cref="IComponentRepository.SetConfiguredFactAsync"/>
+	/// re-resolves catalog linkage either way -- from the new value, or (on clear) from
+	/// whatever discovered fact remains.
 	/// </summary>
 	[HttpPut("api/v1/components/{id:guid}")]
 	[RequireAdminRole]
 	[ProducesResponseType(typeof(ComponentResponse), StatusCodes.Status200OK)]
-	[ProducesResponseType(StatusCodes.Status400BadRequest)]
 	[ProducesResponseType(StatusCodes.Status404NotFound)]
 	public async Task<ActionResult<ComponentResponse>> Put(Guid id, [FromBody] ComponentConfiguredFactBody request, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(request);
-
-		if (string.IsNullOrWhiteSpace(request.ExactVersion))
-		{
-			throw new ApiException(HttpStatusCode.BadRequest, "validation_failed", "'exact_version' is required.");
-		}
 
 		ComponentWriteOutcome outcome = await _components.SetConfiguredFactAsync(id, request.ExactVersion, cancellationToken).ConfigureAwait(false);
 		if (outcome == ComponentWriteOutcome.NotFound)

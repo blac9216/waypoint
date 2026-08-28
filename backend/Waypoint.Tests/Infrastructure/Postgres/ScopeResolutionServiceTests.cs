@@ -65,7 +65,7 @@ public sealed class ScopeResolutionServiceTests : IAsyncLifetime
 		await migrator.ApplyAsync();
 		await ResetDataAsync();
 
-		_components = new ComponentRepository(_fixture.ConnectionString);
+		_components = new ComponentRepository(_fixture.ConnectionString, new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(_fixture.ConnectionString));
 		_sites = new SiteRepository(_fixture.ConnectionString);
 		_targets = new TargetRepository(_fixture.ConnectionString);
 		_catalog = new CatalogRepository(_fixture.ConnectionString);
@@ -314,10 +314,20 @@ public sealed class ScopeResolutionServiceTests : IAsyncLifetime
 	{
 		// Determinism: naming the same id twice must not produce two resolved rows
 		// (a downstream persisted array/audit-history join expects distinct ids).
+		//
+		// Issue #1000: the configured-fact exact version here is deliberately "9.9.9"
+		// (SeedComponentAsync's own default "8.0.3" literal happens to byte-for-byte
+		// match migration 0064's REAL esxi/8.0.3 catalog seed row, which this test does
+		// not truncate away -- since #1000 wired SetConfiguredFactAsync to actually
+		// resolve catalog linkage, "8.0.3" here would now genuinely link and resolve
+		// compatible, breaking this test's real point, which is duplicate-id dedup in
+		// the OMISSION list, not catalog compatibility). "9.9.9" has no catalog coverage
+		// anywhere in this suite, so it stays an honest catalog_incompatible omission
+		// either way, exactly like the comment below always intended.
 		Guid siteId = await SeedSiteAsync();
 		Guid targetId = await SeedTargetAsync(siteId, "vcenter-a");
-		Guid componentId = await SeedComponentAsync(targetId, "host-1001");
-		await _components.SetConfiguredFactAsync(componentId, "8.0.3", CancellationToken.None); // still no catalog link -> omission either way
+		Guid componentId = await SeedComponentAsync(targetId, "host-1001", exactVersion: "9.9.9");
+		await _components.SetConfiguredFactAsync(componentId, "9.9.9", CancellationToken.None); // still no catalog link -> omission either way
 
 		ResolvedTargetScope resolved = await _resolution.ResolveAsync(
 			siteId, new TargetScopeRequest(TargetScopeModes.Explicit, null, [componentId, componentId]), CancellationToken.None);

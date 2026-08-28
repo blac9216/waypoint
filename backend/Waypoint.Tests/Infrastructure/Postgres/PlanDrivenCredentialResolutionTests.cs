@@ -89,7 +89,7 @@ public sealed class PlanDrivenCredentialResolutionTests : IAsyncLifetime
 				services.AddSingleton(new TargetCredentialBindingRepository(_connectionString));
 				services.AddSingleton(new Waypoint.Infrastructure.Secrets.CredentialRepository(_connectionString));
 				services.AddSingleton<IProfileRepository>(new ProfileRepository(_connectionString));
-				services.AddSingleton<IComponentRepository>(new ComponentRepository(_connectionString));
+				services.AddSingleton<IComponentRepository>(new ComponentRepository(_connectionString, new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(_connectionString)));
 				services.AddSingleton<ICatalogRepository>(new CatalogRepository(_connectionString));
 				services.AddSingleton<ScopeResolutionService>();
 				services.AddSingleton<IRunScopeSnapshotRepository>(new RunScopeSnapshotRepository(_connectionString));
@@ -170,7 +170,7 @@ public sealed class PlanDrivenCredentialResolutionTests : IAsyncLifetime
 
 		_factory = new PlanCredentialApiFactory(_fixture.ConnectionString, keyPath);
 		_client = _factory.CreateClient();
-		_components = new ComponentRepository(_fixture.ConnectionString);
+		_components = new ComponentRepository(_fixture.ConnectionString, new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(_fixture.ConnectionString));
 		_catalog = new CatalogRepository(_fixture.ConnectionString);
 		_baselines = new BaselineRepository(_fixture.ConnectionString);
 
