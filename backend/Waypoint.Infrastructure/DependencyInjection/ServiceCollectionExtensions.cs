@@ -300,6 +300,13 @@ public static class ServiceCollectionExtensions
 				new Waypoint.Infrastructure.ComplianceContent.ProfileRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.ComplianceContent.IProfileControlRepository>(
 				new Waypoint.Infrastructure.ComplianceContent.ProfileControlRepository(connectionString));
+			// Issue #1016 (epic #726): fan-out/reconcile linkage for the content-pull
+			// check phase's queue-based parallelism (migration 0073). Same connection
+			// string as every other compliance-content repository above -- the runner
+			// role's grants (migration 0073) are what actually narrow what the
+			// compliance-runner process can do with it.
+			services.AddSingleton<Waypoint.Core.ComplianceContent.IContentPullCheckFanOutRepository>(
+				new Waypoint.Infrastructure.ComplianceContent.ContentPullCheckFanOutRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.ComplianceContent.ICatalogRepository>(
 				new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(connectionString));
 			// Issue #730: immutable XCCDF/STIG benchmark revisions, rules, and the

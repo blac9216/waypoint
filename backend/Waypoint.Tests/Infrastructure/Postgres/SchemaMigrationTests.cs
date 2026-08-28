@@ -278,8 +278,14 @@ public sealed class SchemaMigrationTests
 	/// external tables that reference them (components, benchmark_component_mappings,
 	/// baselines, scan_plan_items, config_docs), deterministic adopt-or-drop per table,
 	/// no other schema changes, no new runner grants, issue #1007 --
+	/// 0073 (issue #1016, epic #726; slot verified free against both the migrations
+	/// directory and open PRs at this migration's own commit time): adds
+	/// content_pull_checks/content_pull_check_results (the content-pull check-phase
+	/// fan-out/reconcile linkage, owner decision 2026-08-28: reuse the job-queue's
+	/// existing parallelism) and 'content-check' to jobs_job_type_check, no other
+	/// schema changes --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 71;
+	private const int ExpectedMigrationCount = 72;
 
 	private readonly PostgresFixture _fixture;
 

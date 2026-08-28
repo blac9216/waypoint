@@ -148,6 +148,16 @@ public static class ServiceCollectionExtensions
 		// JobCapabilities.Compliance.
 		services.AddSingleton<IJobHandler, ComplianceContent.ContentPullJobHandler>();
 
+		// Issue #1016 (epic #726): content-check is the fanned-out chunk job phase
+		// content-pull now delegates its `inspec check` phase to, plus the completion
+		// step (ContentPullReconcileService) and its periodic sweep -- all compliance-
+		// runner only (same content-volume access ADR-0017 already grants this process),
+		// registered here rather than the API for exactly that reason.
+		services.AddSingleton<IJobHandler, ComplianceContent.ContentCheckJobHandler>();
+		services.AddSingleton<ComplianceContent.ContentPullReconcileService>();
+		services.Configure<ComplianceContent.ContentPullReconcileOptions>(configuration.GetSection("ContentPullReconcile"));
+		services.AddHostedService<ComplianceContent.ContentPullReconcileHostedService>();
+
 		// Issue #594 (epic #577): purge deletes a terminal run's on-disk scan-artifact
 		// files -- compliance-runner only, see JobCapabilities.Compliance's doc comment.
 		services.AddSingleton<IJobHandler, Scans.PurgeJobHandler>();

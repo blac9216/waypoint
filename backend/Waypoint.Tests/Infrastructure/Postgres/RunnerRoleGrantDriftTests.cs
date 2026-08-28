@@ -1393,6 +1393,88 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		await command.ExecuteNonQueryAsync();
 	}
 
+	/// <summary>
+	/// Issue #1016 / PR #1017 review round 1 finding 1, added per this file's standing
+	/// "a new runner-executed table without a role-contract test ships grant drift
+	/// silently" lesson: the full content-pull-check fan-out/reconcile protocol
+	/// migration 0073 grants must succeed as the REAL compliance-runner role --
+	/// RecordFanOutAsync (INSERT content_pull_checks, ContentPullJobHandler),
+	/// RecordEmptyFanOutAsync (the zero-profile marker INSERT), the readiness read,
+	/// and MarkReconciledAsync (UPDATE status; the reconcile sweep also runs inside
+	/// compliance-runner). Every pre-fix test ran these through the full-privilege
+	/// owner connection or a fake repository, which is exactly how finding 1's 42501
+	/// shipped past green tests.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_ContentPullCheckFanOutProtocol_Succeeds()
+	{
+		Guid runId = await SeedRunAsync();
+		Guid contentPullJobId = await SeedJobAsync(runId);
+		Guid checkJobId = await SeedJobAsync(runId);
+		Guid emptyPullJobId = await SeedJobAsync(runId);
+
+		ContentPullCheckFanOutRepository runnerRepository = new(_complianceRunnerConnectionString);
+
+		await runnerRepository.RecordFanOutAsync(
+			runId, contentPullJobId, checkJobId, "invented-commit-grant-drift",
+			[new ContentCheckProfileDirectory("invented/profile", "/invented/profile")], CancellationToken.None);
+		await runnerRepository.RecordEmptyFanOutAsync(runId, emptyPullJobId, "invented-commit-empty", CancellationToken.None);
+
+		ContentPullCheckReconcileReadiness readiness = await runnerRepository.GetReconcileReadinessAsync(contentPullJobId, CancellationToken.None);
+		Assert.Equal(1, readiness.TotalCheckJobs);
+
+		// The zero-chunk marker is trivially ready: a row exists, no check jobs remain.
+		ContentPullCheckReconcileReadiness markerReadiness = await runnerRepository.GetReconcileReadinessAsync(emptyPullJobId, CancellationToken.None);
+		Assert.True(markerReadiness.AllTerminal);
+		Assert.Equal(0, markerReadiness.TotalCheckJobs);
+
+		await runnerRepository.MarkReconciledAsync(contentPullJobId, CancellationToken.None);
+
+		IReadOnlyList<ContentPullCheckFanOut> fanOuts = await runnerRepository.ListFanOutsForContentPullJobAsync(contentPullJobId, CancellationToken.None);
+		Assert.Equal("reconciled", Assert.Single(fanOuts).Status);
+	}
+
+	/// <summary>
+	/// PR #1017 review round 1 finding 1's exact repro, fixed: RecordCheckResultAsync
+	/// is INSERT ... ON CONFLICT DO UPDATE, and migration 0073 originally granted the
+	/// runner only SELECT+INSERT on content_pull_check_results -- so the FIRST write
+	/// succeeded and the conflicting re-write (any lease-recovery requeue / retry
+	/// re-executing the same (check_job_id, profile_key) pair) failed
+	/// <c>42501: permission denied</c>, rolling back the re-run's terminal write. The
+	/// column-scoped UPDATE grant closes it; this test proves the conflict path
+	/// genuinely updates as the real role, not merely avoids throwing.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_RecordCheckResult_OnConflictReRun_UpdatesWithoutPermissionDenied()
+	{
+		Guid runId = await SeedRunAsync();
+		Guid checkJobId = await SeedJobAsync(runId);
+
+		ContentPullCheckFanOutRepository runnerRepository = new(_complianceRunnerConnectionString);
+
+		await runnerRepository.RecordCheckResultAsync(
+			checkJobId,
+			new ContentCheckResultRecord(
+				"invented/profile", "name: invented-first-attempt", HasControlsDirectory: true, HasFilesDirectory: false,
+				ControlFileNames: ["a.rb"], InspecCheckRan: false, InspecCheckPassed: false, InspecCheckDetail: null),
+			CancellationToken.None);
+
+		// The conflict path: same (check_job_id, profile_key), new payload -- the
+		// re-executed check job's honest overwrite.
+		await runnerRepository.RecordCheckResultAsync(
+			checkJobId,
+			new ContentCheckResultRecord(
+				"invented/profile", "name: invented-re-run", HasControlsDirectory: true, HasFilesDirectory: false,
+				ControlFileNames: ["a.rb"], InspecCheckRan: true, InspecCheckPassed: true, InspecCheckDetail: null),
+			CancellationToken.None);
+
+		IReadOnlyList<ContentCheckResultRecord> results = await runnerRepository.ListCheckResultsAsync([checkJobId], CancellationToken.None);
+		ContentCheckResultRecord stored = Assert.Single(results);
+		Assert.Equal("name: invented-re-run", stored.RawYaml);
+		Assert.True(stored.InspecCheckRan, "expected the ON CONFLICT DO UPDATE path to have genuinely replaced the row's payload as the runner role.");
+		Assert.True(stored.InspecCheckPassed);
+	}
+
 	private async Task<Guid> SeedCredentialAsync()
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);

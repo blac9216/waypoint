@@ -61,6 +61,11 @@ public static class JobResourceProfiles
 		// filesystem walk for profile discovery, similar shape to catalog-index.
 		["content-pull"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024),
 		["content-import"] = Default,
+		// content-check (issue #1016): one chunk's bounded `inspec check` pass
+		// (cinc/ruby cold-start per profile, ADR-0020 capacity pool schedules many of
+		// these concurrently) -- similar shape to a single scan component job, lighter
+		// than the flat legacy scan weight above.
+		["content-check"] = new JobResourceProfile(CpuCores: 0.5, MemoryBytes: 256L * 1024 * 1024),
 		// purge: deletes up to three small files per job on local disk -- pure I/O,
 		// negligible CPU/memory, similar shape to discover/credential-test.
 		["purge"] = new JobResourceProfile(CpuCores: 0.25, MemoryBytes: 128L * 1024 * 1024),

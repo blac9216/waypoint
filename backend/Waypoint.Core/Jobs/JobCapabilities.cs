@@ -57,6 +57,7 @@ public static class JobCapabilities
 		"remediate",
 		"content-pull",
 		"content-import",
+		"content-check",
 		"purge"
 	};
 

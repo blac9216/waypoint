@@ -39,86 +39,65 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// (issue #40 AC "who/when/commit") always reflects what actually happened, including
 /// a failed run, rather than only successes.
 ///
-/// Issue #729 (epic #726 Wave 1 remainder): a successful pull additionally runs the
-/// validated <see cref="VendorHierarchyInterpreter"/>/<see cref="SemanticImportReconciler"/>
-/// pipeline (PR #823) over the same checkout's <c>ContentEntries</c> (raw inspec.yml
-/// text plus controls/files structural facts, added to the PowerShell module's output
-/// alongside the pre-existing <c>Profiles</c>/<c>Controls</c> shape this handler already
-/// consumes for <c>profiles</c>/<c>profile_controls</c> -- issue #598's job-engine
-/// boundary/stage-marker/lease/cancellation contract, ADR-0013/0014, is unchanged; this
-/// is additional work inside the SAME job attempt, not a new job type or stage). The
-/// resulting <see cref="SemanticImportReport"/> is persisted (migration 0051) and every
-/// accepted executable-leaf candidate whose bounded <c>inspec check</c> genuinely ran
-/// and passed is promoted into the migration 0050 catalog tables plus its declared
-/// inputs -- additive ingestion only (ADR-0022): promotion upserts by natural key and
-/// never mutates an already-active execution profile's identity. An accepted candidate
-/// that failed (or never ran) its <c>inspec check</c> is quarantined with the check's
-/// own diagnostics instead of promoted (issue #729 remainder deliverable 3, fail
-/// closed; sibling candidates are unaffected -- per-entry containment). This pass never
-/// fails the overall pull outcome: a semantic-import or inspec-check problem is
-/// captured as a rejected/warning report entry, exactly like the pre-existing
-/// per-profile/per-control parsing tolerance below.
+/// Issue #729 (epic #726 Wave 1 remainder): a successful pull runs the validated
+/// <see cref="VendorHierarchyInterpreter"/>/<see cref="SemanticImportReconciler"/>
+/// pipeline over the checkout's content entries and promotes every accepted
+/// executable-leaf candidate whose bounded <c>inspec check</c> genuinely ran and passed
+/// into the migration 0050 catalog tables -- but issue #1016 (epic #726, owner decision
+/// 2026-08-28) moved WHERE that check runs and WHERE that pipeline executes: this
+/// handler's own job only performs phase 1 (git clone/fetch/checkout + directory
+/// enumeration, ComplianceContentOptions.ContentSyncTimeout-bounded) and then fans out
+/// one <c>content-check</c> job per chunk of discovered profiles onto its own run,
+/// through the ordinary queue and ADR-0020's capacity pool, instead of running every
+/// chunk's `inspec check` itself in one long-lived invocation. The semantic-import/
+/// promotion pipeline, revision staging (issue #731), and pull-history recording all
+/// still happen exactly as before -- just inside <c>ContentPullReconcileService</c>,
+/// run once every fanned-out check job for this pull has reached a terminal state
+/// (see that type's doc comment for the reconcile/partial-failure contract). This
+/// handler's own job reports <see cref="JobOutcomeKind.Succeeded"/> once sync+fan-out
+/// complete; that is deliberately NOT the same moment the pull as a whole is done.
 /// </summary>
 public sealed class ContentPullJobHandler : IJobHandler
 {
 	private const string SyncCommand = "Sync-WaypointComplianceContentTree";
-	private const string EntriesCommand = "Get-WaypointComplianceContentEntries";
 
 	/// <summary>
-	/// Classification facts issue #729's interpreter needs but the raw import evidence
-	/// cannot supply on its own (docs/compliance-parity.md's catalog-authored
-	/// vendor/kind naming) -- kept as one small closed table here (not the importer,
-	/// which only proves shape/vocabulary) exactly like <see cref="CatalogPromotionRequest"/>'s
-	/// doc comment describes.
+	/// Issue #1016 (epic #726), owner decision 2026-08-28: priority for a fanned-out
+	/// <c>content-check</c> chunk job. Carries no per-target work either (same
+	/// reasoning as <c>ComplianceContentController.ContentPullPriority</c>) -- highest
+	/// priority so a pull's checks are not starved behind unrelated scan/download
+	/// traffic once the capacity pool has room for them.
 	/// </summary>
-	private static readonly Dictionary<string, string> VendorDisplayNames = new(StringComparer.OrdinalIgnoreCase)
-	{
-		["vsphere"] = "VMware vSphere",
-		["vcsa"] = "VMware vCenter Server Appliance",
-		["nsx"] = "VMware NSX",
-		["photon"] = "VMware Photon OS",
-		["aria-operations"] = "VMware Aria Operations",
-		["aria-automation"] = "VMware Aria Automation",
-		["aria-suite-lifecycle"] = "VMware Aria Suite Lifecycle",
-		["vidm"] = "VMware Workspace ONE Access",
-	};
+	internal const short ContentCheckPriority = 1;
 
 	private readonly IPowerShellExecutor _executor;
 	private readonly IComplianceContentRepository _content;
 	private readonly IProfileRepository _profiles;
-	private readonly IProfileControlRepository _profileControls;
-	private readonly ICatalogRepository _catalog;
 	private readonly IJobRunnerRepository _jobs;
 	private readonly IOptions<ComplianceContentOptions> _options;
-	private readonly IContentRevisionStager _revisionStager;
+	private readonly IContentPullCheckFanOutRepository _checkFanOut;
 
 	public ContentPullJobHandler(
 		IPowerShellExecutor executor,
 		IComplianceContentRepository content,
 		IProfileRepository profiles,
-		IProfileControlRepository profileControls,
-		ICatalogRepository catalog,
 		IJobRunnerRepository jobs,
 		IOptions<ComplianceContentOptions> options,
-		IContentRevisionStager revisionStager)
+		IContentPullCheckFanOutRepository checkFanOut)
 	{
 		ArgumentNullException.ThrowIfNull(executor);
 		ArgumentNullException.ThrowIfNull(content);
 		ArgumentNullException.ThrowIfNull(profiles);
-		ArgumentNullException.ThrowIfNull(profileControls);
-		ArgumentNullException.ThrowIfNull(catalog);
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(options);
-		ArgumentNullException.ThrowIfNull(revisionStager);
+		ArgumentNullException.ThrowIfNull(checkFanOut);
 
 		_executor = executor;
 		_content = content;
 		_profiles = profiles;
-		_profileControls = profileControls;
-		_catalog = catalog;
 		_jobs = jobs;
 		_options = options;
-		_revisionStager = revisionStager;
+		_checkFanOut = checkFanOut;
 	}
 
 	public string JobType => "content-pull";
@@ -173,273 +152,89 @@ public sealed class ContentPullJobHandler : IJobHandler
 			return JobExecutionOutcome.Failed(note);
 		}
 
-		// Issue #993: phase 2 runs the bounded per-leaf `inspec check` (issue #989's
-		// per-unit protection, unchanged) in CHUNKS of ComplianceContentOptions
-		// .ContentPullChunkSize leaves per invocation, each sized to exactly that
-		// chunk's own worst case (chunk size x per-check timeout + fixed overhead) --
-		// never the whole tree's. The cancellation check between chunks is what makes a
-		// run-abort (ADR-0008) honored PROMPTLY: a stop request simply skips starting
-		// the next chunk rather than trying to interrupt one already in flight, so the
-		// "ignored Stop() for 5s; runspace poisoned" failure mode this issue closes
-		// cannot recur here -- each chunk call is its own bounded, independently
-		// completing PowerShellExecutor.ExecuteAsync invocation.
-		List<VendorContentEntry> contentEntries = new(profileDirectories.Count);
-		Dictionary<string, IReadOnlyList<ProfileControlUpsert>> controlsByProfileKey = new(StringComparer.Ordinal);
-		int chunkSize = Math.Max(1, _options.Value.ContentPullChunkSize);
-		TimeSpan chunkTimeout = TimeSpan.FromSeconds(
-			(chunkSize * (double)_options.Value.InspecCheckTimeoutSeconds) + _options.Value.ContentPullChunkOverheadSeconds);
+		await _profiles.ReplaceAllAsync(discoveredProfiles, cancellationToken).ConfigureAwait(false);
 
+		// Issue #1016 (epic #726), owner decision 2026-08-28: phase 2 no longer runs the
+		// bounded per-leaf `inspec check` (issue #989's per-unit protection, unchanged)
+		// itself. It instead fans out one 'content-check' job per CHUNK of
+		// ComplianceContentOptions.ContentPullChunkSize leaves onto this job's OWN run,
+		// through the ordinary queue -- the same capacity-pool-admitted parallelism
+		// (ADR-0020) scan's component jobs already use, instead of one long-lived
+		// invocation running every chunk sequentially in-process. A pull that
+		// discovered zero profiles fans out zero check jobs but still records one
+		// zero-chunk MARKER row (RecordEmptyFanOutAsync below, after the loop) so the
+		// reconcile sweep -- whose worklist is content_pull_checks alone -- still
+		// discovers it and completes/records the pull immediately (PR #1017 review
+		// round 1 finding 2: without the marker, a zero-profile pull was stuck
+		// "awaiting reconcile" forever, breaking issue #40's "every attempt recorded"
+		// invariant).
+		if (context.Job.RunId is not Guid runId)
+		{
+			const string note = "content-pull job has no run id; cannot fan out check jobs.";
+			await _content.RecordPullAsync(
+				context.Job.Id, config.RefType, config.RefValue, commit: null,
+				ComplianceContentPullStatuses.Failed, note, actor, cancellationToken).ConfigureAwait(false);
+			return JobExecutionOutcome.Failed(note);
+		}
+
+		int chunkSize = Math.Max(1, _options.Value.ContentPullChunkSize);
+		int expectedCheckJobCount = 0;
 		for (int offset = 0; offset < profileDirectories.Count; offset += chunkSize)
 		{
 			cancellationToken.ThrowIfCancellationRequested();
 
 			IReadOnlyList<ProfileDirectoryEntry> chunk = profileDirectories.Skip(offset).Take(chunkSize).ToList();
-			Dictionary<string, object?> profileKeysByDirectory = new(StringComparer.Ordinal);
-			foreach (ProfileDirectoryEntry entry in chunk)
-			{
-				profileKeysByDirectory[entry.ProfileDirectory] = entry.ProfileKey;
-			}
+			JobSpec checkSpec = new("content-check", ContentCheckPriority, TargetName: "compliance-content-check");
+			IReadOnlyList<Guid> checkJobIds = await _jobs
+				.FanOutAdditionalJobsAsync(runId, [checkSpec], actor, cancellationToken)
+				.ConfigureAwait(false);
+			Guid checkJobId = checkJobIds[0];
 
-			Dictionary<string, object?> entriesParameters = new(StringComparer.Ordinal)
-			{
-				["ProfileDirectories"] = chunk.Select(p => p.ProfileDirectory).ToArray(),
-				["ProfileKeysByDirectory"] = profileKeysByDirectory,
-				["InspecCheckTimeoutSeconds"] = _options.Value.InspecCheckTimeoutSeconds,
-			};
+			await _checkFanOut.RecordFanOutAsync(
+				runId, context.Job.Id, checkJobId, commit,
+				chunk.Select(p => new ContentCheckProfileDirectory(p.ProfileKey, p.ProfileDirectory)).ToList(),
+				cancellationToken).ConfigureAwait(false);
 
-			PowerShellRequest entriesRequest = new(
-				EntriesCommand, PowerShellRequestKind.Command, entriesParameters, context.Job.Id, context.Job.RunId,
-				Timeout: chunkTimeout);
-			PowerShellExecutionResult entriesResult = await _executor.ExecuteAsync(entriesRequest, cancellationToken).ConfigureAwait(false);
-
-			if (!entriesResult.Succeeded)
-			{
-				// Issue #993 AC 3: a genuine overrun (a chunk whose leaves collectively
-				// exceed even this scaled bound -- e.g. a pathological profile that
-				// somehow evades #989's own per-check bound) is an honest, actionable job
-				// failure, not a silent 0-profile discard: nothing has been staged yet
-				// (profiles/controls/catalog all still commit atomically below), so this
-				// return leaves the prior pull's staged state completely untouched.
-				string note = entriesResult.FailureReason
-					?? $"content-pull entries invocation failed with no failure reason (chunk starting at offset {offset}).";
-				await _content.RecordPullAsync(
-					context.Job.Id, config.RefType, config.RefValue, commit: null,
-					ComplianceContentPullStatuses.Failed, note, actor, cancellationToken).ConfigureAwait(false);
-				return JobExecutionOutcome.Failed(note);
-			}
-
-			foreach (object? item in entriesResult.Output)
-			{
-				VendorContentEntry? entry = TryParseContentEntry(item);
-				if (entry is null)
-				{
-					continue;
-				}
-
-				contentEntries.Add(entry);
-				controlsByProfileKey[entry.ProfileKey] = TryParseControls(item);
-			}
+			expectedCheckJobCount++;
 		}
 
-		await _profiles.ReplaceAllAsync(discoveredProfiles, cancellationToken).ConfigureAwait(false);
-
-		// Controls are keyed to the profile's surrogate id, which ReplaceAllAsync just
-		// assigned (or preserved, for an already-existing profile_key) -- re-read the
-		// inventory rather than threading ids back out of the upsert, mirroring how
-		// this handler already treats the profile list as the source of truth after a
-		// replace. One profile's control-parse failure (empty Controls) must not touch
-		// any other profile's already-stored controls -- ReplaceForProfileAsync is
-		// scoped per profile_id for exactly this reason.
-		IReadOnlyList<Profile> storedProfiles = await _profiles.ListAsync(cancellationToken).ConfigureAwait(false);
-		foreach (Profile profile in storedProfiles)
+		if (expectedCheckJobCount == 0)
 		{
-			if (controlsByProfileKey.TryGetValue(profile.ProfileKey, out IReadOnlyList<ProfileControlUpsert>? controls))
-			{
-				await _profileControls.ReplaceForProfileAsync(profile.Id, controls, cancellationToken).ConfigureAwait(false);
-			}
+			// Zero discovered profiles: no check jobs exist, so record the zero-chunk
+			// marker the reconcile sweep needs to still see (and immediately complete)
+			// this pull -- see the fan-out comment above and RecordEmptyFanOutAsync's
+			// own doc comment.
+			await _checkFanOut.RecordEmptyFanOutAsync(runId, context.Job.Id, commit, cancellationToken).ConfigureAwait(false);
 		}
 
-		(int promotedCount, string contentDigest) = await RunSemanticImportAsync(commit, contentEntries, cancellationToken).ConfigureAwait(false);
-
-		// Issue #731: stage an immutable digest-addressed snapshot of the working tree
-		// content-pull just checked out. This happens AFTER every prior step (git
-		// checkout, profile/control replace, semantic import/promotion) succeeded, and
-		// staging itself never touches any existing active baseline -- a failure in any
-		// EARLIER step already returned Failed above without reaching here, and this
-		// step's own failure (e.g. a filesystem error) throws out of ExecuteAsync
-		// entirely rather than recording a success, so neither path can leave a
-		// partially-staged revision recorded as staged.
-		ContentRevision revision = await _revisionStager
-			.StageAsync(_options.Value.ContentPath, commit, contentDigest, cancellationToken)
-			.ConfigureAwait(false);
-
-		await _content.RecordPullAsync(
-			context.Job.Id, config.RefType, config.RefValue, commit,
-			ComplianceContentPullStatuses.Succeeded, note: null, actor, cancellationToken).ConfigureAwait(false);
-
-		string progressPayload = JsonSerializer.Serialize(new
+		string fanOutProgressPayload = JsonSerializer.Serialize(new
 		{
 			commit,
 			profile_count = discoveredProfiles.Count,
-			catalog_promoted_count = promotedCount,
-			staged_revision_id = revision.Id,
+			check_job_count = expectedCheckJobCount,
 		});
 		await context.Events
-			.EmitAsync(JobEventTypes.RunProgress, null, context.Job.RunId, progressPayload, cancellationToken)
+			.EmitAsync(JobEventTypes.RunProgress, null, context.Job.RunId, fanOutProgressPayload, cancellationToken)
 			.ConfigureAwait(false);
 
+		// This job's own row now reports Succeeded ("sync + fan-out completed"), but the
+		// PULL as a whole (pull history, semantic import/promotion, revision staging) is
+		// deliberately NOT recorded as complete here -- ContentPullReconcileService
+		// (hosted in this same COMPLIANCE-RUNNER process by
+		// ContentPullReconcileHostedService; structurally mirrors
+		// RunPurgeFinalizeHostedService's sweep shape but runs runner-side because
+		// revision staging touches the content volume only this process mounts,
+		// ADR-0017) performs that once every
+		// fanned-out content-check job for this pull has reached a terminal state,
+		// exactly the same atomic staging/promotion RunSemanticImportAsync always
+		// performed, just moved to run once the check phase's parallel jobs finish
+		// instead of inline at the end of one long-lived invocation. A reader of pull
+		// history sees no new row until reconcile actually lands one -- the previous
+		// pull's history stays the honest "last known" state during the fan-out window,
+		// same "no partial success recorded" discipline the old single-pass code had.
 		return JobExecutionOutcome.Succeeded(
-			$"Pulled '{config.RefValue}' at {commit}; {discoveredProfiles.Count} profile(s) found; {promotedCount} catalog execution profile(s) promoted; staged revision {revision.Id}.");
-	}
-
-	/// <summary>
-	/// Runs the semantic-import pipeline (interpretation, closed-vocabulary
-	/// reconciliation, bounded structure validation already folded into
-	/// <see cref="SemanticImportReconciler"/>) over this pull's content entries,
-	/// persists the resulting <see cref="SemanticImportReport"/> (migration 0051), and
-	/// promotes every accepted executable-leaf candidate into the catalog. Returns the
-	/// number of candidates successfully promoted plus the report's deterministic
-	/// <see cref="SemanticImportReport.SourceDigest"/> (issue #731 reuses this same
-	/// digest as the staged <see cref="ContentRevision.ContentDigest"/> -- one
-	/// deterministic whole-import digest, not two independently-computed ones that
-	/// could silently diverge). Never throws for a bad INPUT -- interpretation/
-	/// reconciliation already quarantine malformed entries into the report's own
-	/// rejected list (issue #729's whole design point); this method's job is purely to
-	/// persist that report and act on its accepted list.
-	/// </summary>
-	private async Task<(int PromotedCount, string ContentDigest)> RunSemanticImportAsync(string sourceCommit, IReadOnlyList<VendorContentEntry> contentEntries, CancellationToken cancellationToken)
-	{
-		VendorHierarchyInterpretation interpretation = VendorHierarchyInterpreter.Interpret(contentEntries);
-		SemanticImportReport report = SemanticImportReconciler.Reconcile(sourceCommit, interpretation, contentEntries);
-
-		// Issue #729 deliverable 3: the reconciler's structural checks are I/O-free and
-		// already ran above; the bounded `inspec check` result was computed in
-		// PowerShell (Test-WaypointInspecCheck) while the checkout's real directory
-		// still existed and is carried on each VendorContentEntry. First-writer-wins
-		// dedup mirrors SemanticImportReconciler's own defensive lookup build -- a
-		// duplicate ProfileKey in the raw entry list must not throw here either.
-		Dictionary<string, VendorContentEntry> entriesByKey = new(StringComparer.Ordinal);
-		foreach (VendorContentEntry entry in contentEntries)
-		{
-			entriesByKey.TryAdd(entry.ProfileKey, entry);
-		}
-
-		CatalogImportReport persistedReport = await _catalog.RecordImportReportAsync(
-			report.SourceCommit, report.SourceDigest, report.Accepted.Count, report.Warnings.Count, report.Rejected.Count, cancellationToken)
-			.ConfigureAwait(false);
-
-		int promotedCount = 0;
-		foreach (SemanticImportAccepted accepted in report.Accepted)
-		{
-			Guid? executionProfileId = null;
-			string? rejectionReason;
-
-			// Fail closed (issue #729 AC): an executable-leaf candidate is promoted only
-			// when its bounded `inspec check` genuinely ran and passed. A candidate whose
-			// check never ran (no inspec binary staged, or an aggregate that was never
-			// checked at all) or that ran and failed is quarantined here with the check's
-			// own diagnostics -- structurally valid enough to survive reconciliation, but
-			// not structurally valid enough to run. This mirrors, at the execution-boundary
-			// layer, the same "quarantine with actionable diagnostics rather than guessed"
-			// discipline reconciliation already applies at the I/O-free layer. A sibling
-			// candidate's check outcome never affects this one (per-entry containment).
-			bool hasInspecEntry = entriesByKey.TryGetValue(accepted.Candidate.ProfileKey, out VendorContentEntry? contentEntry);
-			if (accepted.Candidate.IsExecutableLeaf && (!hasInspecEntry || !contentEntry!.InspecCheckRan || !contentEntry.InspecCheckPassed))
-			{
-				string detail = hasInspecEntry && contentEntry is not null && !string.IsNullOrWhiteSpace(contentEntry.InspecCheckDetail)
-					? contentEntry.InspecCheckDetail!
-					: "inspec check did not run for this candidate";
-				rejectionReason = $"inspec check failed structure validation, quarantined rather than promoted: {Truncate(detail)}";
-			}
-			else
-			{
-				// PromoteCandidateAsync itself rejects a non-executable-leaf (aggregate)
-				// candidate with an actionable reason (issue #729 AC "aggregate ...
-				// profiles cannot be selected for execution") -- called unconditionally
-				// here rather than pre-filtering on IsExecutableLeaf so that reason always
-				// lands on the persisted report entry, not just in a code comment.
-				CatalogPromotionRequest promotionRequest = BuildPromotionRequest(accepted.Candidate);
-				CatalogPromotionOutcome outcome = await _catalog.PromoteCandidateAsync(accepted.Candidate, promotionRequest, cancellationToken).ConfigureAwait(false);
-				executionProfileId = outcome.ExecutionProfileId;
-				rejectionReason = outcome.RejectionReason;
-			}
-
-			if (executionProfileId is not null)
-			{
-				promotedCount++;
-			}
-
-			// The report entry's disposition stays "accepted" regardless of whether THIS
-			// candidate was itself promoted -- an aggregate candidate (never promoted,
-			// rejectionReason explains why) or a promotion-time vocabulary rejection
-			// (defence-in-depth only, should not fire in normal operation -- reconciliation
-			// already proved the vocabulary before marking this candidate accepted) are
-			// both still legitimately "this candidate passed semantic import", distinct
-			// from a candidate reconciliation itself rejected (recorded separately below).
-			await _catalog.RecordImportReportEntryAsync(
-				persistedReport.Id, CatalogImportEntryDispositions.Accepted, accepted.Candidate.ProfileKey, rejectionReason, executionProfileId, cancellationToken).ConfigureAwait(false);
-		}
-
-		foreach (SemanticImportWarning warning in report.Warnings)
-		{
-			await _catalog.RecordImportReportEntryAsync(
-				persistedReport.Id, CatalogImportEntryDispositions.Warning, warning.ProfileKey, warning.Message, executionProfileId: null, cancellationToken).ConfigureAwait(false);
-		}
-
-		foreach (SemanticImportRejected rejected in report.Rejected)
-		{
-			await _catalog.RecordImportReportEntryAsync(
-				persistedReport.Id, CatalogImportEntryDispositions.Rejected, rejected.ProfileKey, rejected.Reason, executionProfileId: null, cancellationToken).ConfigureAwait(false);
-		}
-
-		return (promotedCount, report.SourceDigest);
-	}
-
-	/// <summary>
-	/// Builds the catalog-authored classification facts (vendor natural key, product/
-	/// content-release display names, report group, output kind) a candidate's own
-	/// evidence does not carry -- see <see cref="CatalogPromotionRequest"/>'s doc
-	/// comment. Report-group priority/key and output kind follow
-	/// docs/compliance-parity.md's documented table (NSX STIG 1 / VCSA STIG 2 / vCenter
-	/// STIG 3 / ESXi STIG 4 / VM STIG 5 / every SRG 6; STIG emits hdf_ckl, SRG emits hdf
-	/// -- SRGs are never CKL/upload-eligible, ADR-0022).
-	///
-	/// Issue #1007: <see cref="CatalogPromotionRequest.Vendor"/> is the
-	/// <c>catalog_products.vendor</c> NATURAL-KEY value (<see cref="CatalogVendors.VMware"/>,
-	/// the literal the seed migrations write), never the human-readable display string --
-	/// passing the display name here previously created a second <c>catalog_products</c>
-	/// row (and therefore an entire parallel product/version/component tree) under the
-	/// same <c>product_key</c> but a different <c>vendor</c> string, defeating the
-	/// <c>catalog_products_vendor_key_unique</c> upsert this promotion path relies on to
-	/// attach to the seeded catalog instead of duplicating it. The display string is kept
-	/// ONLY for <see cref="CatalogPromotionRequest.ProductDisplayName"/>, which is cosmetic
-	/// and never part of any natural key.
-	/// </summary>
-	private static CatalogPromotionRequest BuildPromotionRequest(SemanticCandidate candidate)
-	{
-		string vendorDisplayName = VendorDisplayNames.TryGetValue(candidate.VendorFamily, out string? name) ? name : candidate.VendorFamily;
-		bool isStig = candidate.Kind == CatalogKinds.Stig;
-
-		(string groupKey, string groupDisplayName, int priority) = (candidate.VendorFamily, candidate.SelectorKind) switch
-		{
-			("nsx", _) when isStig => ("nsx-stig", "NSX STIG", 1),
-			("vcsa", _) when isStig => ("vcsa-stig", "VCSA STIG", 2),
-			(_, CatalogSelectorKinds.VCenter) when isStig => ("vcenter-stig", "vCenter STIG", 3),
-			(_, CatalogSelectorKinds.Esxi) when isStig => ("esxi-stig", "ESXi STIG", 4),
-			(_, CatalogSelectorKinds.Vm) when isStig => ("vm-stig", "VM STIG", 5),
-			_ => ("srg", "SRG", 6),
-		};
-
-		return new CatalogPromotionRequest(
-			SourceRevisionKey: "compliance-content",
-			Vendor: CatalogVendors.VMware,
-			ProductDisplayName: vendorDisplayName,
-			ProductVersionDisplayName: candidate.ProductVersionKey,
-			ContentReleaseDisplayName: $"{candidate.Kind} {candidate.ProductVersionKey}",
-			ReportGroupKey: groupKey,
-			ReportGroupDisplayName: groupDisplayName,
-			ReportGroupPriority: priority,
-			OutputKind: isStig ? CatalogOutputKinds.HdfAndCkl : CatalogOutputKinds.Hdf);
+			$"Pulled '{config.RefValue}' at {commit}; {discoveredProfiles.Count} profile(s) found; "
+			+ $"{expectedCheckJobCount} check job(s) fanned out; awaiting reconcile.");
 	}
 
 	/// <summary>
@@ -515,48 +310,6 @@ public sealed class ContentPullJobHandler : IJobHandler
 		return (null, [], []);
 	}
 
-	/// <summary>
-	/// Parses one <c>ContentEntries</c> row (issue #729: the module's
-	/// <c>Get-WaypointComplianceContentRawManifest</c>/<c>Get-WaypointComplianceContentControlFileNames</c>
-	/// additions) into a <see cref="VendorContentEntry"/> for the semantic importer. A
-	/// missing/blank ProfileKey drops the row rather than failing the whole pull -- same
-	/// "one malformed row must not fail the whole pull" discipline as
-	/// <see cref="TryParseProfile"/>.
-	/// </summary>
-	private static VendorContentEntry? TryParseContentEntry(object? item)
-	{
-		if (item is not System.Management.Automation.PSObject psObject)
-		{
-			return null;
-		}
-
-		string? profileKey = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["ProfileKey"]?.Value);
-		if (string.IsNullOrWhiteSpace(profileKey))
-		{
-			return null;
-		}
-
-		string? rawYaml = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["RawYaml"]?.Value);
-		bool hasControlsDirectory = PowerShellValueUnwrap.Unwrap(psObject.Properties["HasControlsDirectory"]?.Value) is true;
-		bool hasFilesDirectory = PowerShellValueUnwrap.Unwrap(psObject.Properties["HasFilesDirectory"]?.Value) is true;
-		bool inspecCheckRan = PowerShellValueUnwrap.Unwrap(psObject.Properties["InspecCheckRan"]?.Value) is true;
-		bool inspecCheckPassed = PowerShellValueUnwrap.Unwrap(psObject.Properties["InspecCheckPassed"]?.Value) is true;
-		string? inspecCheckDetail = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["InspecCheckDetail"]?.Value);
-
-		List<string> controlFileNames = [];
-		foreach (object? rawName in PowerShellValueUnwrap.UnwrapEach(psObject.Properties["ControlFileNames"]?.Value))
-		{
-			if (rawName is string name && !string.IsNullOrWhiteSpace(name))
-			{
-				controlFileNames.Add(name);
-			}
-		}
-
-		return new VendorContentEntry(
-			profileKey, rawYaml, hasControlsDirectory, hasFilesDirectory, controlFileNames,
-			inspecCheckRan, inspecCheckPassed, inspecCheckDetail);
-	}
-
 	private static ProfileUpsert? TryParseProfile(object? item, string commit, string state)
 	{
 		if (item is not System.Management.Automation.PSObject psObject)
@@ -577,54 +330,6 @@ public sealed class ContentPullJobHandler : IJobHandler
 		string? version = PowerShellValueUnwrap.UnwrapAs<string>(psObject.Properties["Version"]?.Value);
 		return new ProfileUpsert(profileKey, string.IsNullOrWhiteSpace(name) ? profileKey : name, version, commit, state);
 	}
-
-	/// <summary>
-	/// Parses a profile row's Controls array. A missing Controls property (e.g. an
-	/// older module build, or a profile with no controls/ directory at all) yields an
-	/// empty list, not a failure -- issue #598 AC "empty vs. no-content distinction" is
-	/// the API's job to surface, not this parser's.
-	/// </summary>
-	private static List<ProfileControlUpsert> TryParseControls(object? item)
-	{
-		List<ProfileControlUpsert> controls = [];
-		if (item is not System.Management.Automation.PSObject psObject)
-		{
-			return controls;
-		}
-
-		foreach (object? rawControl in PowerShellValueUnwrap.UnwrapEach(psObject.Properties["Controls"]?.Value))
-		{
-			if (rawControl is not System.Management.Automation.PSObject controlObject)
-			{
-				// One malformed control row must not fail the whole pull -- same
-				// "individual failures don't halt the batch" principle as profile rows.
-				continue;
-			}
-
-			string? controlId = PowerShellValueUnwrap.UnwrapAs<string>(controlObject.Properties["ControlId"]?.Value);
-			if (string.IsNullOrWhiteSpace(controlId))
-			{
-				continue;
-			}
-
-			string? title = PowerShellValueUnwrap.UnwrapAs<string>(controlObject.Properties["Title"]?.Value);
-			string? severity = PowerShellValueUnwrap.UnwrapAs<string>(controlObject.Properties["Severity"]?.Value);
-			controls.Add(new ProfileControlUpsert(
-				controlId,
-				string.IsNullOrWhiteSpace(title) ? null : title,
-				string.IsNullOrWhiteSpace(severity) ? null : severity));
-		}
-
-		return controls;
-	}
-
-	/// <summary>
-	/// Bounds a persisted rejection reason's length (issue #729 AC "bounded runner
-	/// work" extends to what gets stored, not just what gets executed) -- an
-	/// <c>inspec check</c> JSON diagnostic can be large; <see cref="CatalogImportReportEntry.Reason"/>
-	/// is an operator-facing diagnostic column, not a full artifact store.
-	/// </summary>
-	private static string Truncate(string text) => text.Length <= 1000 ? text : text[..1000] + "... [truncated]";
 
 	private async Task<string> ResolveActorAsync(Guid? runId, CancellationToken cancellationToken)
 	{
