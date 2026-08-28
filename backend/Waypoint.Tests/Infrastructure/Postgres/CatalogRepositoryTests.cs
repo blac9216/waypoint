@@ -536,7 +536,7 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 
 	private static CatalogPromotionRequest PromotionRequest() => new(
 		SourceRevisionKey: "compliance-content",
-		Vendor: "VMware vSphere",
+		Vendor: CatalogVendors.VMware,
 		ProductDisplayName: "VMware vSphere",
 		ProductVersionDisplayName: "vSphere 8.0 Update 3",
 		ContentReleaseDisplayName: "stig 8.0.3",
@@ -810,5 +810,85 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 		object? found = await command.ExecuteScalarAsync();
 
 		Assert.NotNull(found);
+	}
+
+	// --- issue #1007: importer registers a parallel catalog tree ---
+
+	/// <summary>
+	/// Failing-test-first repro of issue #1007's exact round-7 shape: a seeded product
+	/// row exists under the canonical vendor natural key ('vmware'), then a promotion
+	/// arrives with a DISPLAY STRING ("VMware vSphere") in the <c>Vendor</c> field --
+	/// the bug <see cref="Waypoint.Infrastructure.Execution.ComplianceContent.ContentPullJobHandler.BuildPromotionRequest"/>
+	/// had before this PR's fix. Before the fix this created a SECOND catalog_products
+	/// row (same product_key, different vendor), and therefore a second whole
+	/// product_version/component/execution_profile tree; after the fix
+	/// <see cref="CatalogVocabularyValidator.ValidateVendor"/> rejects a non-canonical
+	/// vendor value before any SQL runs, so promotion never has the chance to create the
+	/// duplicate in the first place.
+	/// </summary>
+	[Fact]
+	public async Task PromoteCandidate_NonCanonicalVendorValue_FailsClosed_NeverCreatesADuplicateProductTree()
+	{
+		Guid seedRevisionId = await SeedSourceRevisionAsync("seed-revision");
+		await _repository.UpsertProductAsync(seedRevisionId, CatalogVendors.VMware, "vsphere", "VMware vSphere", CancellationToken.None);
+
+		SemanticCandidate candidate = ExecutableLeafCandidate();
+		CatalogPromotionRequest displayStringVendorRequest = PromotionRequest() with { Vendor = "VMware vSphere" };
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(candidate, displayStringVendorRequest, CancellationToken.None);
+
+		Assert.Null(outcome.ExecutionProfileId);
+		Assert.NotNull(outcome.RejectionReason);
+		Assert.Contains("vendor", outcome.RejectionReason, StringComparison.OrdinalIgnoreCase);
+
+		IReadOnlyList<CatalogProduct> products = await _repository.ListProductsAsync(CancellationToken.None);
+		CatalogProduct onlyVsphereProduct = Assert.Single(products, p => p.ProductKey == "vsphere");
+		Assert.Equal(CatalogVendors.VMware, onlyVsphereProduct.Vendor);
+	}
+
+	/// <summary>
+	/// The additive-ingestion happy path issue #1007 exists to restore: a promotion
+	/// using the CORRECT canonical vendor natural key attaches its execution profile to
+	/// the EXISTING seeded product/version/component tree -- one catalog_products row,
+	/// one catalog_product_versions row, one catalog_components row -- rather than
+	/// creating a parallel tree, and a discovered/configured fact for that same
+	/// (component_key, version) therefore resolves through
+	/// <see cref="Waypoint.Core.Components.CatalogLinkageResolver"/> to exactly ONE
+	/// candidate, never the "matched 2 catalog components ... left unlinked" ambiguity
+	/// warning issue #1007's own evidence quotes verbatim.
+	/// </summary>
+	[Fact]
+	public async Task PromoteCandidate_CanonicalVendorValue_AttachesToExistingSeededTree_LinkageResolvesToOne()
+	{
+		Guid seedRevisionId = await SeedSourceRevisionAsync("seed-revision");
+		CatalogProduct seededProduct = await _repository.UpsertProductAsync(seedRevisionId, CatalogVendors.VMware, "vsphere", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion seededVersion = await _repository.UpsertProductVersionAsync(seededProduct.Id, "8.0", "vSphere 8.0", CancellationToken.None);
+		await _repository.UpsertComponentAsync(
+			seededVersion.Id, new CatalogComponentDefinition("vcenter", "vCenter Server", CatalogTransports.VMware, CatalogSelectorKinds.VCenter, null, null), CancellationToken.None);
+
+		// Issue #998's post-fix importer already derives the DECLARED-SCOPE version key
+		// ("8.0", matching the seed migrations' reconciled form, migration 0070) rather
+		// than a patch-level literal -- this candidate mirrors that real shape so the
+		// promotion attaches to the SAME catalog_product_versions row the seed created,
+		// not a sibling keyed under a different literal.
+		SemanticCandidate candidate = ExecutableLeafCandidate(productVersionKey: "8.0");
+		CatalogPromotionRequest request = PromotionRequest();
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(candidate, request, CancellationToken.None);
+
+		Assert.NotNull(outcome.ExecutionProfileId);
+		Assert.Null(outcome.RejectionReason);
+
+		IReadOnlyList<CatalogProduct> products = await _repository.ListProductsAsync(CancellationToken.None);
+		CatalogProduct onlyVsphereProduct = Assert.Single(products, p => p.ProductKey == "vsphere");
+		Assert.Equal(seededProduct.Id, onlyVsphereProduct.Id);
+
+		IReadOnlyList<CatalogProductVersion> versions = await _repository.ListProductVersionsAsync(onlyVsphereProduct.Id, CancellationToken.None);
+		CatalogProductVersion onlyVersion = Assert.Single(versions);
+		Assert.Equal(seededVersion.Id, onlyVersion.Id);
+
+		IReadOnlyList<CatalogComponent> topLevelVcenterCandidates = await _repository.FindTopLevelComponentsByKeyAndVersionAsync("vcenter", "8.0.3", CancellationToken.None);
+		CatalogComponent onlyCandidate = Assert.Single(topLevelVcenterCandidates);
+		Assert.Equal(seededVersion.Id, onlyCandidate.ProductVersionId);
 	}
 }

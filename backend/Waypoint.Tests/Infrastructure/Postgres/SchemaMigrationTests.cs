@@ -266,8 +266,20 @@ public sealed class SchemaMigrationTests
 	/// its own free-text `reason` column BEFORE the column drops, so an old mapping
 	/// decision's audit trail still explains itself; no new runner grants, no other
 	/// schema changes, issue #1002 --
+	///
+	/// 0072 (issue #1007, epic #726; slot verified free against both the migrations
+	/// directory and open PRs at this migration's own commit time): merges a
+	/// duplicate catalog PRODUCT tree the content-pull importer's pre-fix bug created
+	/// (ContentPullJobHandler passed a display string instead of the seed migrations'
+	/// literal 'vmware' as catalog_products.vendor, defeating the
+	/// catalog_products_vendor_key_unique upsert) back onto the canonical
+	/// 'vmware'-vendor row -- re-points every dependent table down through
+	/// catalog_product_versions/catalog_components/catalog_execution_profiles AND the
+	/// external tables that reference them (components, benchmark_component_mappings,
+	/// baselines, scan_plan_items, config_docs), deterministic adopt-or-drop per table,
+	/// no other schema changes, no new runner grants, issue #1007 --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 70;
+	private const int ExpectedMigrationCount = 71;
 
 	private readonly PostgresFixture _fixture;
 
@@ -1105,6 +1117,291 @@ public sealed class SchemaMigrationTests
 		string existingReasonResult = (string)(await selectExistingReason.ExecuteScalarAsync())!;
 		Assert.StartsWith("SRG content has no published DISA benchmark", existingReasonResult, StringComparison.Ordinal);
 		Assert.Contains("[historical: recorded is_srg_no_benchmark=true", existingReasonResult, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1007's migration replay proof: reconstructs the exact real-world
+	/// two-tree state a pre-fix content pull left behind (a seeded 'vmware'-vendor
+	/// vsphere/8.0 tree with an active baseline, PLUS a second 'VMware vSphere'-vendor
+	/// vsphere/8.0 tree the importer's bug created with its OWN component, execution
+	/// profile, and a discovered instance component already linked to it), then runs
+	/// migration 0072's own embedded SQL text against that reconstructed pre-state --
+	/// the same "run the real migration text" idiom
+	/// <see cref="Migration0071_BackfillsReasonBeforeDroppingColumn_PreservingHistoryHonestly"/>
+	/// already establishes. Asserts: exactly one catalog_products/catalog_product_versions/
+	/// catalog_components row survives per natural key, the discovered component's
+	/// catalog_component_id is re-pointed onto the surviving canonical component (proving
+	/// CatalogLinkageResolver would now find exactly one candidate, not two), the
+	/// duplicate's execution profile's declared input/credential requirement/baseline
+	/// were preserved by re-pointing rather than silently dropped, and re-running the
+	/// same SQL text a second time (replay-safety) is a clean no-op.
+	/// </summary>
+	[Fact]
+	public async Task Migration0072_MergesDuplicateVendorProductTree_ReattachesChildren_IdempotentOnReplay()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// Canonical (seeded) tree: vendor = 'vmware', matching every seed migration's
+		// literal.
+		Guid seedRevisionId = await InsertSourceRevisionAsync(connection, "migration-0072-seed");
+		Guid canonicalProductId = await InsertProductAsync(connection, seedRevisionId, "vmware", "migration-0072-test", "Test Product");
+		Guid canonicalVersionId = await InsertProductVersionAsync(connection, canonicalProductId, "8.0", "Test Product 8.0");
+		Guid canonicalComponentId = await InsertComponentAsync(connection, canonicalVersionId, "vcenter", "vCenter Server");
+		Guid canonicalReleaseId = await InsertContentReleaseAsync(connection, "stig", "migration-0072-test:stig:release-1", "Test STIG Release");
+		Guid canonicalGroupId = await InsertReportGroupAsync(connection, "migration-0072-vcenter-stig", "vCenter STIG", 3);
+		Guid canonicalProfileId = await InsertExecutionProfileAsync(connection, canonicalComponentId, canonicalReleaseId, canonicalGroupId, "v1", "hdf_ckl");
+		Guid canonicalContentRevisionId = await InsertContentRevisionAsync(connection, "migration-0072-canonical-commit", "migration-0072-canonical-digest");
+		Guid canonicalBaselineId = await InsertActiveBaselineAsync(connection, canonicalContentRevisionId, canonicalProfileId);
+
+		// Duplicate (importer pre-fix) tree: SAME product_key, DIFFERENT vendor value
+		// (the display string the bug passed) -- its own product/version/component/
+		// execution-profile/baseline, plus a discovered instance component already
+		// linked to the duplicate's catalog component (the round-7 shape: discovery
+		// ran against the bad tree before this migration ever got a chance to run).
+		Guid importRevisionId = await InsertSourceRevisionAsync(connection, "compliance-content");
+		Guid duplicateProductId = await InsertProductAsync(connection, importRevisionId, "VMware vSphere", "migration-0072-test", "Test Product");
+		Guid duplicateVersionId = await InsertProductVersionAsync(connection, duplicateProductId, "8.0", "8.0");
+		Guid duplicateComponentId = await InsertComponentAsync(connection, duplicateVersionId, "vcenter", "vCenter Server");
+		Guid duplicateReleaseId = await InsertContentReleaseAsync(connection, "stig", "migration-0072-test:stig:release-2", "Test STIG Release 2");
+		Guid duplicateGroupId = await InsertReportGroupAsync(connection, "migration-0072-vcenter-stig-2", "vCenter STIG 2", 3);
+		Guid duplicateProfileId = await InsertExecutionProfileAsync(connection, duplicateComponentId, duplicateReleaseId, duplicateGroupId, "v2", "hdf_ckl");
+		await InsertCredentialRequirementAsync(connection, duplicateProfileId, "vsphere-api");
+		await InsertDeclaredInputAsync(connection, duplicateProfileId, "vcenter_host", "string");
+
+		Guid targetId = await InsertTargetAsync(connection, "migration-0072-test-target");
+		Guid discoveredComponentId = await InsertDiscoveredComponentAsync(connection, targetId, duplicateComponentId, "vcenter");
+
+		// Sanity check the pre-state genuinely has two trees before merging.
+		Assert.Equal(2, await CountAsync(connection, $"SELECT count(*) FROM catalog_products WHERE product_key = 'migration-0072-test'"));
+		Assert.Equal(2, await CountAsync(connection, $"SELECT count(*) FROM catalog_components WHERE component_key = 'vcenter' AND product_version_id IN ('{canonicalVersionId}', '{duplicateVersionId}')"));
+
+		string migration0072 = await ReadMigrationSqlAsync("0072_merge_duplicate_catalog_product_trees.sql");
+		await using (NpgsqlCommand applyMigration0072 = new(migration0072, connection))
+		{
+			await applyMigration0072.ExecuteNonQueryAsync();
+		}
+
+		// Exactly one product/version/component per natural key now.
+		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM catalog_products WHERE product_key = 'migration-0072-test'"));
+		await using (NpgsqlCommand selectSurvivingProduct = new(
+			"SELECT id, vendor FROM catalog_products WHERE product_key = 'migration-0072-test'", connection))
+		await using (NpgsqlDataReader reader = await selectSurvivingProduct.ExecuteReaderAsync())
+		{
+			Assert.True(await reader.ReadAsync());
+			Assert.Equal(canonicalProductId, reader.GetGuid(0));
+			Assert.Equal("vmware", reader.GetString(1));
+			Assert.False(await reader.ReadAsync());
+		}
+
+		Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM catalog_product_versions WHERE product_id = '{canonicalProductId}' AND version_key = '8.0'"));
+		Assert.Equal(0, await CountAsync(connection, $"SELECT count(*) FROM catalog_product_versions WHERE id = '{duplicateVersionId}'"));
+
+		Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM catalog_components WHERE product_version_id = '{canonicalVersionId}' AND component_key = 'vcenter'"));
+		Assert.Equal(0, await CountAsync(connection, $"SELECT count(*) FROM catalog_components WHERE id = '{duplicateComponentId}'"));
+
+		// The discovered instance component, previously linked to the now-deleted
+		// duplicate catalog component, is re-pointed onto the surviving canonical one --
+		// CatalogLinkageResolver now finds exactly one candidate for this component key
+		// under this scope, not two.
+		await using (NpgsqlCommand selectDiscovered = new(
+			"SELECT catalog_component_id FROM components WHERE id = $1", connection))
+		{
+			selectDiscovered.Parameters.AddWithValue(discoveredComponentId);
+			Assert.Equal(canonicalComponentId, (Guid)(await selectDiscovered.ExecuteScalarAsync())!);
+		}
+
+		// The duplicate's execution profile (a genuinely different content release --
+		// release-2, not a re-promotion of the canonical's release-1) survives, re-pointed
+		// onto the canonical component rather than dropped, with its own children intact.
+		await using (NpgsqlCommand selectMergedProfile = new(
+			"SELECT component_id FROM catalog_execution_profiles WHERE id = $1", connection))
+		{
+			selectMergedProfile.Parameters.AddWithValue(duplicateProfileId);
+			Assert.Equal(canonicalComponentId, (Guid)(await selectMergedProfile.ExecuteScalarAsync())!);
+		}
+
+		Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM catalog_credential_requirements WHERE execution_profile_id = '{duplicateProfileId}'"));
+		Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM catalog_declared_inputs WHERE execution_profile_id = '{duplicateProfileId}'"));
+
+		// The canonical tree's own active baseline is untouched (no competing active
+		// baseline existed on the duplicate's profile in this fixture, so there is
+		// nothing to supersede).
+		await using (NpgsqlCommand selectBaselineStatus = new(
+			"SELECT status FROM baselines WHERE id = $1", connection))
+		{
+			selectBaselineStatus.Parameters.AddWithValue(canonicalBaselineId);
+			Assert.Equal("active", (string)(await selectBaselineStatus.ExecuteScalarAsync())!);
+		}
+
+		// Replay-safety: running the exact same SQL text again against the now-merged
+		// state finds zero remaining non-'vmware' duplicates for this product_key and is
+		// a clean no-op (SchemaMigrationTests.Migrations_ApplyFreshThenReapplyAllViaRunnerAndRawSql_AreAllIdempotent
+		// already proves this for the full embedded set; this asserts it directly for
+		// 0072's own text against a state that has already been merged once).
+		await using (NpgsqlCommand replayMigration0072 = new(migration0072, connection))
+		{
+			await replayMigration0072.ExecuteNonQueryAsync();
+		}
+
+		Assert.Equal(1, await CountAsync(connection, "SELECT count(*) FROM catalog_products WHERE product_key = 'migration-0072-test'"));
+		Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM catalog_components WHERE product_version_id = '{canonicalVersionId}' AND component_key = 'vcenter'"));
+	}
+
+	private static async Task<Guid> InsertSourceRevisionAsync(NpgsqlConnection connection, string revisionKey)
+	{
+		await using NpgsqlCommand command = new(
+			"INSERT INTO catalog_source_revisions (revision_key) VALUES ($1) ON CONFLICT (revision_key) DO UPDATE SET revision_key = EXCLUDED.revision_key RETURNING id", connection);
+		command.Parameters.AddWithValue(revisionKey);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<Guid> InsertProductAsync(NpgsqlConnection connection, Guid sourceRevisionId, string vendor, string productKey, string displayName)
+	{
+		await using NpgsqlCommand command = new(
+			"INSERT INTO catalog_products (source_revision_id, vendor, product_key, display_name) VALUES ($1, $2, $3, $4) RETURNING id", connection);
+		command.Parameters.AddWithValue(sourceRevisionId);
+		command.Parameters.AddWithValue(vendor);
+		command.Parameters.AddWithValue(productKey);
+		command.Parameters.AddWithValue(displayName);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<Guid> InsertProductVersionAsync(NpgsqlConnection connection, Guid productId, string versionKey, string displayName)
+	{
+		await using NpgsqlCommand command = new(
+			"INSERT INTO catalog_product_versions (product_id, version_key, display_name) VALUES ($1, $2, $3) RETURNING id", connection);
+		command.Parameters.AddWithValue(productId);
+		command.Parameters.AddWithValue(versionKey);
+		command.Parameters.AddWithValue(displayName);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<Guid> InsertComponentAsync(NpgsqlConnection connection, Guid productVersionId, string componentKey, string displayName)
+	{
+		await using NpgsqlCommand command = new(
+			"INSERT INTO catalog_components (product_version_id, component_key, display_name, transport, selector_kind) VALUES ($1, $2, $3, 'vmware', 'vcenter') RETURNING id", connection);
+		command.Parameters.AddWithValue(productVersionId);
+		command.Parameters.AddWithValue(componentKey);
+		command.Parameters.AddWithValue(displayName);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<Guid> InsertContentReleaseAsync(NpgsqlConnection connection, string kind, string releaseKey, string displayName)
+	{
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO catalog_content_releases (source_revision_id, kind, release_key, display_name)
+			VALUES ((SELECT id FROM catalog_source_revisions ORDER BY recorded_at LIMIT 1), $1, $2, $3)
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(kind);
+		command.Parameters.AddWithValue(releaseKey);
+		command.Parameters.AddWithValue(displayName);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<Guid> InsertReportGroupAsync(NpgsqlConnection connection, string groupKey, string displayName, int priority)
+	{
+		await using NpgsqlCommand command = new(
+			"INSERT INTO catalog_report_groups (group_key, display_name, priority) VALUES ($1, $2, $3) RETURNING id", connection);
+		command.Parameters.AddWithValue(groupKey);
+		command.Parameters.AddWithValue(displayName);
+		command.Parameters.AddWithValue(priority);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<Guid> InsertExecutionProfileAsync(NpgsqlConnection connection, Guid componentId, Guid contentReleaseId, Guid reportGroupId, string profileVersion, string outputKind)
+	{
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO catalog_execution_profiles (component_id, content_release_id, report_group_id, profile_version, output_kind)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(componentId);
+		command.Parameters.AddWithValue(contentReleaseId);
+		command.Parameters.AddWithValue(reportGroupId);
+		command.Parameters.AddWithValue(profileVersion);
+		command.Parameters.AddWithValue(outputKind);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task InsertCredentialRequirementAsync(NpgsqlConnection connection, Guid executionProfileId, string purpose)
+	{
+		await using NpgsqlCommand command = new(
+			"INSERT INTO catalog_credential_requirements (execution_profile_id, purpose) VALUES ($1, $2)", connection);
+		command.Parameters.AddWithValue(executionProfileId);
+		command.Parameters.AddWithValue(purpose);
+		await command.ExecuteNonQueryAsync();
+	}
+
+	private static async Task InsertDeclaredInputAsync(NpgsqlConnection connection, Guid executionProfileId, string name, string inputType)
+	{
+		await using NpgsqlCommand command = new(
+			"INSERT INTO catalog_declared_inputs (execution_profile_id, name, input_type, is_required) VALUES ($1, $2, $3, true)", connection);
+		command.Parameters.AddWithValue(executionProfileId);
+		command.Parameters.AddWithValue(name);
+		command.Parameters.AddWithValue(inputType);
+		await command.ExecuteNonQueryAsync();
+	}
+
+	private static async Task<Guid> InsertContentRevisionAsync(NpgsqlConnection connection, string sourceCommit, string contentDigest)
+	{
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO content_revisions (source_commit, content_digest, staged_relative_path, status)
+			VALUES ($1, $2, $3, 'activated')
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(sourceCommit);
+		command.Parameters.AddWithValue(contentDigest);
+		command.Parameters.AddWithValue($"migration-0072-test/{contentDigest}");
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<Guid> InsertActiveBaselineAsync(NpgsqlConnection connection, Guid contentRevisionId, Guid executionProfileId)
+	{
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO baselines (content_revision_id, catalog_execution_profile_id, status, activated_at, activated_by)
+			VALUES ($1, $2, 'active', now(), 'migration-0072-test')
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(contentRevisionId);
+		command.Parameters.AddWithValue(executionProfileId);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<Guid> InsertTargetAsync(NpgsqlConnection connection, string name)
+	{
+		await using NpgsqlCommand insertSite = new(
+			"INSERT INTO sites (name) VALUES ($1) RETURNING id", connection);
+		insertSite.Parameters.AddWithValue($"{name}-site");
+		Guid siteId = (Guid)(await insertSite.ExecuteScalarAsync())!;
+
+		await using NpgsqlCommand command = new(
+			"INSERT INTO targets (site_id, name, kind) VALUES ($1, $2, 'vsphere') RETURNING id", connection);
+		command.Parameters.AddWithValue(siteId);
+		command.Parameters.AddWithValue(name);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<Guid> InsertDiscoveredComponentAsync(NpgsqlConnection connection, Guid targetId, Guid catalogComponentId, string catalogComponentKey)
+	{
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO components (parent_target_id, catalog_component_id, catalog_component_key, display_name)
+			VALUES ($1, $2, $3, 'vCenter Server')
+			RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(targetId);
+		command.Parameters.AddWithValue(catalogComponentId);
+		command.Parameters.AddWithValue(catalogComponentKey);
+		return (Guid)(await command.ExecuteScalarAsync())!;
 	}
 
 	private static async Task<bool> ColumnExistsAsync(NpgsqlConnection connection, string table, string column)
