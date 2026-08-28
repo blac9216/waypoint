@@ -29,7 +29,8 @@ public sealed record BenchmarkImportCandidate(
 	string Version,
 	string Release,
 	string ContentDigest,
-	IReadOnlyList<XccdfRule> Rules);
+	IReadOnlyList<XccdfRule> Rules,
+	string SourceEntryPath = "");
 
 /// <summary>
 /// The outcome of <see cref="BenchmarkImporter"/> attempting one package: either a
@@ -49,10 +50,18 @@ public sealed record BenchmarkImportResult(BenchmarkImportCandidate? Candidate, 
 
 /// <summary>
 /// Safely imports a DISA XCCDF/STIG package -- either a raw XCCDF XML document or a
-/// STIG distribution zip containing one -- into a <see cref="BenchmarkImportCandidate"/>.
-/// This is the single entry point <c>IBenchmarkRepository</c> consumers (manual Admin
-/// upload, and the future STIG Manager sync source under #729) both call, so the
-/// untrusted-input discipline lives in exactly one place.
+/// STIG distribution zip containing one or more (issue #1073: flat multi-XCCDF,
+/// nested-directory multi-XCCDF, and zip-of-zips packages all yield N candidates, one
+/// per benchmark the package actually contains) -- into
+/// <see cref="BenchmarkImportCandidate"/>s. This is the single entry point
+/// <c>IBenchmarkRepository</c> consumers (manual Admin upload, and the future STIG
+/// Manager sync source under #729) both call, so the untrusted-input discipline lives
+/// in exactly one place. There is no production HTTP/sync caller wired to this yet
+/// (deferred to #730's mapping-write remainder / #1074's repo-shipped-source
+/// ingestion); the intended calling pattern is one <c>IBenchmarkRepository
+/// .ImportRevisionAsync</c> call per <see cref="BenchmarkImportResult.Candidate"/>
+/// returned here -- that repository method is already idempotent per
+/// (benchmark_key, content_digest), so re-importing the same package is safe.
 /// </summary>
 public static class BenchmarkImporter
 {
@@ -60,7 +69,7 @@ public static class BenchmarkImporter
 	/// Imports a raw XCCDF XML document (e.g. already extracted upstream, or a
 	/// STIG Manager API response body).
 	/// </summary>
-	public static BenchmarkImportResult ImportXml(string? xmlText)
+	public static BenchmarkImportResult ImportXml(string? xmlText, string sourceEntryPath = "(direct XML import)")
 	{
 		XccdfDocument? document = XccdfParser.TryParse(xmlText, out string? error);
 		if (document is null)
@@ -68,22 +77,36 @@ public static class BenchmarkImporter
 			return BenchmarkImportResult.Fail(error ?? "unknown XCCDF parse failure");
 		}
 
-		return BuildCandidate(document);
+		return BuildCandidate(document, sourceEntryPath);
 	}
 
-	/// <summary>Imports a STIG distribution zip (Admin manual upload's expected shape).</summary>
-	public static BenchmarkImportResult ImportZip(byte[]? zipBytes)
+	/// <summary>
+	/// Imports a STIG distribution zip (Admin manual upload's expected shape),
+	/// returning one <see cref="BenchmarkImportResult"/> per XCCDF entry the package
+	/// (recursively) contains. A single top-level failure (oversized/malformed/unsafe
+	/// package, or no XCCDF entry found at all) collapses to a one-element list; a
+	/// malformed individual XCCDF entry inside an otherwise-good multi-benchmark
+	/// package fails only that one entry's result, never the sibling entries --
+	/// issue #1073 AC "ambiguity must be resolved per benchmark, not by refusing the
+	/// package".
+	/// </summary>
+	public static IReadOnlyList<BenchmarkImportResult> ImportZip(byte[]? zipBytes)
 	{
-		string? xmlText = StigZipReader.TryReadXccdfEntry(zipBytes, out string? zipError);
-		if (xmlText is null)
+		if (!StigZipReader.TryReadXccdfEntries(zipBytes, out IReadOnlyList<XccdfZipEntry> zipEntries, out string? zipError))
 		{
-			return BenchmarkImportResult.Fail(zipError ?? "unknown STIG package read failure");
+			return [BenchmarkImportResult.Fail(zipError ?? "unknown STIG package read failure")];
 		}
 
-		return ImportXml(xmlText);
+		List<BenchmarkImportResult> results = new(zipEntries.Count);
+		foreach (XccdfZipEntry zipEntry in zipEntries)
+		{
+			results.Add(ImportXml(zipEntry.XmlText, zipEntry.EntryPath));
+		}
+
+		return results;
 	}
 
-	private static BenchmarkImportResult BuildCandidate(XccdfDocument document)
+	private static BenchmarkImportResult BuildCandidate(XccdfDocument document, string sourceEntryPath)
 	{
 		string digest = ComputeDigest(document);
 		return BenchmarkImportResult.Ok(new BenchmarkImportCandidate(
@@ -92,7 +115,8 @@ public static class BenchmarkImporter
 			document.Version,
 			document.Release,
 			digest,
-			document.Rules));
+			document.Rules,
+			sourceEntryPath));
 	}
 
 	/// <summary>
