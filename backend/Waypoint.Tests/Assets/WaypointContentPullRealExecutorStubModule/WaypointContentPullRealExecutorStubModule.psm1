@@ -16,40 +16,50 @@
 # Get-WaypointComplianceContentProfiles / Get-WaypointComplianceContentRawManifest /
 # Get-WaypointComplianceContentControlFileNames / Get-WaypointComplianceContentControls
 # helpers unmodified (they are not the suspect -- issue #972 proved those already work),
-# and only replaces Invoke-WaypointComplianceContentPull's git clone/fetch/checkout steps
+# and only replaces Sync-WaypointComplianceContentTree's git clone/fetch/checkout steps
 # with a no-op over a pre-built invented fixture tree, so this drives the SAME assembly
-# path (ContentEntries built via Get-Content -Raw inside a [PSCustomObject] literal) that
-# lost RawYaml, through the SAME real PowerShellExecutor/WaypointRunspacePool the runner
-# uses -- without a real git remote or the real (unavailable, licensed-tool-adjacent)
-# inspec binary.
+# path through the SAME real PowerShellExecutor/WaypointRunspacePool the runner uses --
+# without a real git remote or the real (unavailable, licensed-tool-adjacent) inspec
+# binary.
 #
-# Issue #984: InspecCheckRan/Passed now also call the REAL WaypointComplianceContent.psm1
-# Test-WaypointInspecCheck (not a hand-stubbed true) for controls/-bearing profiles, so
-# this end-to-end fixture chain exercises the exact bounded-check path issue #984 fixed
-# (System.Diagnostics.Process, no Start-Job/Wait-Job) under the real in-process SMA host.
-# ContentPullJobHandlerTests.Execute_RealExecutor_FixtureContentTree_StagesAndPromotesProfiles
-# puts an invented stub "inspec" executable on PATH before calling this, so the check
-# genuinely runs (and completes well inside its bound) rather than reporting "not found".
+# Issue #984: InspecCheckRan/Passed call the REAL WaypointComplianceContent.psm1
+# Test-WaypointInspecCheck (not a hand-stubbed true) for controls/-bearing profiles.
+#
+# Issue #993: the real module split into Sync-WaypointComplianceContentTree (phase 1:
+# git + enumerate) and Get-WaypointComplianceContentEntries (phase 2: chunked, bounded
+# per-leaf checks) so ContentPullJobHandler could bound each PowerShell invocation to
+# its own chunk's worst case instead of the whole tree. This stub mirrors that same
+# two-function split -- ContentPullJobHandler issues both commands by their REAL names
+# now (Sync-WaypointComplianceContentTree / Get-WaypointComplianceContentEntries), so
+# this test no longer needs a remapping adapter for the command NAME, only for skipping
+# git (ContentPath here is a pre-built fixture tree, not a live clone target).
 #
 # The real WaypointComplianceContent.psm1 is imported separately, alongside this stub,
 # via PowerShellOptions.ModulePreloadPaths (both land in the same InitialSessionState),
 # so this module calls its exported Get-WaypointComplianceContent* functions directly
-# rather than reaching across a relative build-output path of its own.
+# rather than reaching across a relative build-output path of its own. Exporting THIS
+# stub's functions under the REAL module's own names would collide at import time (both
+# modules import into the same InitialSessionState) -- instead this stub keeps its own
+# distinct names and ContentPullJobHandlerTests' RemappingExecutor maps the handler's
+# real command names onto these stub names, exactly like the pre-#993 single-function
+# version did.
 
-function Invoke-WaypointContentPullRealExecutorStub {
+function Invoke-WaypointContentPullRealExecutorSyncStub {
 	<#
 	.SYNOPSIS
-	    Issue #972: same ContentEntries/Profiles assembly as the real module's
-	    Invoke-WaypointComplianceContentPull, over a pre-built fixture tree instead of a
-	    live git checkout.
+	    Issue #993 (originally #972): same Profiles enumeration as the real module's
+	    Sync-WaypointComplianceContentTree, over a pre-built fixture tree instead of a
+	    live git checkout -- no `inspec check` here, matching the real function's own
+	    phase-1 scope.
 
 	.PARAMETER ContentPath
 	    Root of an already-materialized invented fixture tree (inspec.yml/controls
 	    directories already on disk -- this function does no git operations at all).
 
 	.PARAMETER Commit
-	    A fabricated commit sha this stub returns as-is (issue #972's ParseOutput needs
-	    a non-empty Commit to proceed past its own "no commit" guard).
+	    A fabricated commit sha this stub returns as-is (ContentPullJobHandler's
+	    ParseSyncOutput needs a non-empty Commit to proceed past its own "no commit"
+	    guard).
 	#>
 	[CmdletBinding()]
 	param(
@@ -59,44 +69,10 @@ function Invoke-WaypointContentPullRealExecutorStub {
 
 	$profiles = @(Get-WaypointComplianceContentProfiles -ContentPath $ContentPath -Commit $Commit)
 
-	# Same assembly shape as the real module (WaypointComplianceContent.psm1 lines
-	# ~131-156): RawYaml comes from Get-Content -Raw inside a [PSCustomObject] literal
-	# built inside a foreach inside an @() array subexpression -- the exact nesting
-	# issue #972 proved loses the string without PowerShellValueUnwrap.
-	$entries = @(foreach ($p in $profiles) {
-			$hasControlsDirectory = Test-Path (Join-Path $p._ProfileDirectory 'controls')
-			# Issue #984: run the REAL bounded check (not a hand-stubbed true) so this
-			# end-to-end chain exercises the exact path issue #984 fixed, under the real
-			# in-process SMA host -- the caller puts an invented stub "inspec" executable
-			# on PATH so this genuinely runs and completes well inside its bound.
-			$inspecCheck = if ($hasControlsDirectory) {
-				Test-WaypointInspecCheck -ProfileDirectory $p._ProfileDirectory -TimeoutSeconds 30
-			}
-			else {
-				[PSCustomObject]@{ Ran = $false; Passed = $false; Detail = 'no controls/ directory -- not an executable-leaf candidate, inspec check skipped' }
-			}
-			[PSCustomObject]@{
-				ProfileKey            = $p.ProfileKey
-				RawYaml               = Get-WaypointComplianceContentRawManifest -ProfileDirectory $p._ProfileDirectory
-				HasControlsDirectory  = $hasControlsDirectory
-				HasFilesDirectory     = Test-Path (Join-Path $p._ProfileDirectory 'files')
-				ControlFileNames      = @(Get-WaypointComplianceContentControlFileNames -ProfileDirectory $p._ProfileDirectory)
-				InspecCheckRan        = $inspecCheck.Ran
-				InspecCheckPassed     = $inspecCheck.Passed
-				InspecCheckDetail     = $inspecCheck.Detail
-			}
-		})
-
-	foreach ($p in $profiles) {
-		$p | Add-Member -NotePropertyName Controls -NotePropertyValue @(Get-WaypointComplianceContentControls -ProfileDirectory $p._ProfileDirectory)
-		$p.PSObject.Properties.Remove('_ProfileDirectory')
-	}
-
 	[PSCustomObject]@{
-		Commit         = $Commit
-		Profiles       = $profiles
-		ContentEntries = $entries
+		Commit   = $Commit
+		Profiles = $profiles
 	}
 }
 
-Export-ModuleMember -Function Invoke-WaypointContentPullRealExecutorStub
+Export-ModuleMember -Function Invoke-WaypointContentPullRealExecutorSyncStub

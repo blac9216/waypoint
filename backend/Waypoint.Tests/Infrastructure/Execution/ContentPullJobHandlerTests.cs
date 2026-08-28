@@ -50,18 +50,45 @@ public sealed class ContentPullJobHandlerTests
 
 	// --- fakes -----------------------------------------------------------------
 
+	/// <summary>
+	/// Issue #993: <see cref="ContentPullJobHandler"/> now issues TWO distinct commands
+	/// per pull -- <c>Sync-WaypointComplianceContentTree</c> (phase 1: git + directory
+	/// enumeration) and one-or-more <c>Get-WaypointComplianceContentEntries</c> calls
+	/// (phase 2: chunked, bounded per-leaf checks) -- so the fake executor dispatches by
+	/// <see cref="PowerShellRequest.Command"/> rather than returning one canned result
+	/// regardless of which command was invoked. <see cref="EntriesResult"/> defaults to
+	/// an empty successful result (no content entries) so tests that only care about the
+	/// sync/profile path do not need to set it up explicitly.
+	/// </summary>
 	private sealed class FakePowerShellExecutor : IPowerShellExecutor
 	{
-		private readonly PowerShellExecutionResult _result;
+		private readonly PowerShellExecutionResult _syncResult;
 
-		public FakePowerShellExecutor(PowerShellExecutionResult result) => _result = result;
+		public FakePowerShellExecutor(PowerShellExecutionResult syncResult) => _syncResult = syncResult;
 
-		public PowerShellRequest? LastRequest { get; private set; }
+		public PowerShellExecutionResult EntriesResult { get; set; } = Ok();
+
+		public List<PowerShellRequest> Requests { get; } = [];
+
+		/// <summary>Issue #993: fires after each entries-chunk call is recorded but before its result is returned -- lets a test cancel a shared token mid-loop to prove the NEXT chunk is never started (cooperative cancellation between bounded units).</summary>
+		public Action? OnEntriesCall { get; set; }
+
+		public PowerShellRequest? LastRequest => Requests.Count == 0 ? null : Requests[^1];
+
+		public PowerShellRequest? LastSyncRequest => Requests.LastOrDefault(r => r.Command == "Sync-WaypointComplianceContentTree");
+
+		public List<PowerShellRequest> EntriesRequests => [.. Requests.Where(r => r.Command == "Get-WaypointComplianceContentEntries")];
 
 		public Task<PowerShellExecutionResult> ExecuteAsync(PowerShellRequest request, CancellationToken cancellationToken)
 		{
-			LastRequest = request;
-			return Task.FromResult(_result);
+			Requests.Add(request);
+			if (request.Command == "Get-WaypointComplianceContentEntries")
+			{
+				OnEntriesCall?.Invoke();
+				return Task.FromResult(EntriesResult);
+			}
+
+			return Task.FromResult(_syncResult);
 		}
 	}
 
@@ -426,12 +453,18 @@ public sealed class ContentPullJobHandlerTests
 			CreatedAt: DateTimeOffset.UtcNow, UpdatedAt: DateTimeOffset.UtcNow);
 
 	private static (ContentPullJobHandler Handler, JobExecutionContext Context, RecordingEventPublisher Events,
-		FakeContentRepository Content, FakeProfileRepository Profiles, FakeProfileControlRepository ProfileControls, FakeCatalogRepository Catalog) Build(
-			PowerShellExecutionResult psResult,
+		FakeContentRepository Content, FakeProfileRepository Profiles, FakeProfileControlRepository ProfileControls, FakeCatalogRepository Catalog, FakePowerShellExecutor Executor) BuildWithExecutor(
+			PowerShellExecutionResult syncResult,
 			ComplianceContentConfig? config,
-			string? initiatedBy = "admin@example.internal")
+			string? initiatedBy = "admin@example.internal",
+			PowerShellExecutionResult? entriesResult = null)
 	{
-		FakePowerShellExecutor executor = new(psResult);
+		FakePowerShellExecutor executor = new(syncResult);
+		if (entriesResult is not null)
+		{
+			executor.EntriesResult = entriesResult;
+		}
+
 		FakeContentRepository content = new(config);
 		FakeProfileRepository profiles = new();
 		FakeProfileControlRepository profileControls = new();
@@ -448,9 +481,28 @@ public sealed class ContentPullJobHandlerTests
 		RecordingEventPublisher events = new();
 		JobExecutionContext context = new(job, "worker-1", events, jobs, JobShape.Simple);
 
+		return (handler, context, events, content, profiles, profileControls, catalog, executor);
+	}
+
+	private static (ContentPullJobHandler Handler, JobExecutionContext Context, RecordingEventPublisher Events,
+		FakeContentRepository Content, FakeProfileRepository Profiles, FakeProfileControlRepository ProfileControls, FakeCatalogRepository Catalog) Build(
+			PowerShellExecutionResult psResult,
+			ComplianceContentConfig? config,
+			string? initiatedBy = "admin@example.internal",
+			PowerShellExecutionResult? entriesResult = null)
+	{
+		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events, FakeContentRepository content,
+			FakeProfileRepository profiles, FakeProfileControlRepository profileControls, FakeCatalogRepository catalog, _) =
+			BuildWithExecutor(psResult, config, initiatedBy, entriesResult);
 		return (handler, context, events, content, profiles, profileControls, catalog);
 	}
 
+	/// <summary>
+	/// Issue #993: the phase-1 <c>Sync-WaypointComplianceContentTree</c> output shape --
+	/// Commit + Profiles only (no ContentEntries/Controls; those now come from phase 2's
+	/// chunked <c>Get-WaypointComplianceContentEntries</c> calls, built with
+	/// <see cref="EntriesResult"/>/<see cref="ContentEntryObject"/> below).
+	/// </summary>
 	private static PSObject Success(string commit, params PSObject[] profiles)
 	{
 		PSObject root = new();
@@ -460,31 +512,33 @@ public sealed class ContentPullJobHandlerTests
 	}
 
 	/// <summary>
-	/// Issue #729: same shape as <see cref="Success"/> plus the module's
-	/// <c>ContentEntries</c> array -- the raw-manifest/structural-fact rows the
-	/// semantic-import pass consumes, independent of the pre-existing
-	/// <c>Profiles</c>/<c>Controls</c> shape.
+	/// Issue #993: phase 2's <c>Get-WaypointComplianceContentEntries</c> returns a flat
+	/// array of entry rows directly (no wrapping root object, unlike phase 1's
+	/// Commit/Profiles shape) -- this builds that <see cref="PowerShellExecutionResult"/>
+	/// for <see cref="FakePowerShellExecutor.EntriesResult"/>.
 	/// </summary>
-	private static PSObject SuccessWithContentEntries(string commit, PSObject[] profiles, params PSObject[] contentEntries)
-	{
-		PSObject root = Success(commit, profiles);
-		root.Properties.Add(new PSNoteProperty("ContentEntries", contentEntries));
-		return root;
-	}
+	private static PowerShellExecutionResult EntriesOk(params PSObject[] entries) => Ok([.. entries]);
 
 	/// <summary>
 	/// Issue #729 remainder: <paramref name="inspecCheckRan"/>/<paramref name="inspecCheckPassed"/>
 	/// default to a genuinely-ran, passing check -- the common fixture shape for a
 	/// content entry that is expected to promote. A test asserting the quarantine path
 	/// passes <c>inspecCheckPassed: false</c> (or <c>inspecCheckRan: false</c>)
-	/// explicitly.
+	/// explicitly. Issue #993: <c>Controls</c> now lives on this row (moved from
+	/// <see cref="ProfileObject"/>/<see cref="ProfileObjectWithControls"/>) since it is
+	/// phase 2's <c>Get-WaypointComplianceContentEntries</c>, not phase 1's sync call,
+	/// that walks controls/*.rb.
 	/// </summary>
 	private static PSObject ContentEntryObject(
 		string profileKey, string? rawYaml, bool hasControlsDirectory, params string[] controlFileNames) =>
-		ContentEntryObject(profileKey, rawYaml, hasControlsDirectory, inspecCheckRan: true, inspecCheckPassed: true, controlFileNames);
+		ContentEntryObject(profileKey, rawYaml, hasControlsDirectory, inspecCheckRan: true, inspecCheckPassed: true, controls: [], controlFileNames);
 
 	private static PSObject ContentEntryObject(
-		string profileKey, string? rawYaml, bool hasControlsDirectory, bool inspecCheckRan, bool inspecCheckPassed, params string[] controlFileNames)
+		string profileKey, string? rawYaml, bool hasControlsDirectory, bool inspecCheckRan, bool inspecCheckPassed, params string[] controlFileNames) =>
+		ContentEntryObject(profileKey, rawYaml, hasControlsDirectory, inspecCheckRan, inspecCheckPassed, controls: [], controlFileNames);
+
+	private static PSObject ContentEntryObject(
+		string profileKey, string? rawYaml, bool hasControlsDirectory, bool inspecCheckRan, bool inspecCheckPassed, PSObject[] controls, params string[] controlFileNames)
 	{
 		PSObject entry = new();
 		entry.Properties.Add(new PSNoteProperty("ProfileKey", profileKey));
@@ -492,6 +546,7 @@ public sealed class ContentPullJobHandlerTests
 		entry.Properties.Add(new PSNoteProperty("HasControlsDirectory", hasControlsDirectory));
 		entry.Properties.Add(new PSNoteProperty("HasFilesDirectory", false));
 		entry.Properties.Add(new PSNoteProperty("ControlFileNames", controlFileNames));
+		entry.Properties.Add(new PSNoteProperty("Controls", controls));
 		entry.Properties.Add(new PSNoteProperty("InspecCheckRan", inspecCheckRan));
 		entry.Properties.Add(new PSNoteProperty("InspecCheckPassed", inspecCheckPassed));
 		entry.Properties.Add(new PSNoteProperty("InspecCheckDetail", inspecCheckRan && !inspecCheckPassed ? "inspec check exited non-zero (invented fixture detail)" : null));
@@ -508,19 +563,19 @@ public sealed class ContentPullJobHandlerTests
 		    required: true
 		""";
 
+	/// <summary>
+	/// Issue #993: carries <c>_ProfileDirectory</c> -- the real directory phase 1's sync
+	/// call discovers and phase 2's chunked entries calls need -- defaulting to a
+	/// synthetic-but-unique path derived from ProfileKey so tests that never touch the
+	/// filesystem still exercise the C#-side directory plumbing between phases.
+	/// </summary>
 	private static PSObject ProfileObject(string? profileKey, string? name, string? version)
 	{
 		PSObject profile = new();
 		profile.Properties.Add(new PSNoteProperty("ProfileKey", profileKey));
 		profile.Properties.Add(new PSNoteProperty("Name", name));
 		profile.Properties.Add(new PSNoteProperty("Version", version));
-		return profile;
-	}
-
-	private static PSObject ProfileObjectWithControls(string profileKey, string name, params PSObject[] controls)
-	{
-		PSObject profile = ProfileObject(profileKey, name, version: null);
-		profile.Properties.Add(new PSNoteProperty("Controls", controls));
+		profile.Properties.Add(new PSNoteProperty("_ProfileDirectory", profileKey is null ? null : $"/invented/{profileKey}"));
 		return profile;
 	}
 
@@ -597,20 +652,23 @@ public sealed class ContentPullJobHandlerTests
 		Assert.Equal(ProfileStates.Pinned, Assert.Single(profiles.Replaced!).State);
 	}
 
-	/// <summary>Issue #598: a successful pull persists each profile's parsed controls, keyed by that profile's (fake-repository-assigned) id.</summary>
+	/// <summary>Issue #598: a successful pull persists each profile's parsed controls, keyed by that profile's (fake-repository-assigned) id. Issue #993: Controls now travel on the phase-2 entries row, not the phase-1 profile row.</summary>
 	[Fact]
 	public async Task Execute_Success_PersistsControlsPerProfile()
 	{
 		PSObject output = Success(
 			"commitC",
-			ProfileObjectWithControls("profile-a", "Profile A",
-				ControlObject("V-1001", "First control", "medium"),
-				ControlObject("V-1002", "Second control", "high")),
-			ProfileObjectWithControls("profile-b", "Profile B",
-				ControlObject("V-2001", "Other profile's control", "low")));
+			ProfileObject("profile-a", "Profile A", null),
+			ProfileObject("profile-b", "Profile B", null));
+		PSObject entryA = ContentEntryObject(
+			"profile-a", rawYaml: null, hasControlsDirectory: true, inspecCheckRan: false, inspecCheckPassed: false,
+			controls: [ControlObject("V-1001", "First control", "medium"), ControlObject("V-1002", "Second control", "high")]);
+		PSObject entryB = ContentEntryObject(
+			"profile-b", rawYaml: null, hasControlsDirectory: true, inspecCheckRan: false, inspecCheckPassed: false,
+			controls: [ControlObject("V-2001", "Other profile's control", "low")]);
 
 		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(entryA, entryB));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
@@ -634,10 +692,13 @@ public sealed class ContentPullJobHandlerTests
 	[Fact]
 	public async Task Execute_ProfileWithNoControlsProperty_PersistsEmptyControlSet()
 	{
-		PSObject output = Success("commitD", ProfileObject("no-controls-profile", "No Controls", version: null));
+		PSObject profile = ProfileObject("no-controls-profile", "No Controls", version: null);
+		PSObject output = Success("commitD", profile);
+		PSObject entry = ContentEntryObject(
+			"no-controls-profile", rawYaml: null, hasControlsDirectory: false, inspecCheckRan: false, inspecCheckPassed: false, controls: []);
 
 		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(entry));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
@@ -654,12 +715,15 @@ public sealed class ContentPullJobHandlerTests
 		PSObject blankIdControl = ControlObject(controlId: null, "Dropped: no id", "low");
 
 		PSObject profile = ProfileObject("profile-c", "Profile C", version: null);
-		profile.Properties.Add(new PSNoteProperty("Controls", new object?[] { goodControl, blankIdControl, "not-a-psobject" }));
+		PSObject entry = ContentEntryObject(
+			"profile-c", rawYaml: null, hasControlsDirectory: true, inspecCheckRan: false, inspecCheckPassed: false, controls: []);
+		entry.Properties.Remove("Controls");
+		entry.Properties.Add(new PSNoteProperty("Controls", new object?[] { goodControl, blankIdControl, "not-a-psobject" }));
 
 		PSObject output = Success("commitE", profile);
 
 		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(entry));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
@@ -673,11 +737,14 @@ public sealed class ContentPullJobHandlerTests
 	[Fact]
 	public async Task Execute_ControlWithBlankTitleAndSeverity_NormalizesToNull()
 	{
-		PSObject profile = ProfileObjectWithControls("profile-d", "Profile D", ControlObject("V-4001", "   ", ""));
+		PSObject profile = ProfileObject("profile-d", "Profile D", version: null);
+		PSObject entry = ContentEntryObject(
+			"profile-d", rawYaml: null, hasControlsDirectory: true, inspecCheckRan: false, inspecCheckPassed: false,
+			controls: [ControlObject("V-4001", "   ", "")]);
 		PSObject output = Success("commitF", profile);
 
 		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(entry));
 
 		await handler.ExecuteAsync(context, CancellationToken.None);
 
@@ -828,13 +895,14 @@ public sealed class ContentPullJobHandlerTests
 
 		await handler.ExecuteAsync(context, CancellationToken.None);
 
-		Assert.NotNull(executor.LastRequest);
-		Assert.Equal("Invoke-WaypointComplianceContentPull", executor.LastRequest!.Command);
-		Assert.Equal(PowerShellRequestKind.Command, executor.LastRequest.Kind);
-		Assert.Equal(RepositoryUrl, executor.LastRequest.Parameters!["RepositoryUrl"]);
-		Assert.Equal(ComplianceContentRefTypes.Tag, executor.LastRequest.Parameters!["RefType"]);
-		Assert.Equal("v2", executor.LastRequest.Parameters!["RefValue"]);
-		Assert.Equal(ContentPath, executor.LastRequest.Parameters!["ContentPath"]);
+		PowerShellRequest? syncRequest = executor.LastSyncRequest;
+		Assert.NotNull(syncRequest);
+		Assert.Equal("Sync-WaypointComplianceContentTree", syncRequest!.Command);
+		Assert.Equal(PowerShellRequestKind.Command, syncRequest.Kind);
+		Assert.Equal(RepositoryUrl, syncRequest.Parameters!["RepositoryUrl"]);
+		Assert.Equal(ComplianceContentRefTypes.Tag, syncRequest.Parameters!["RefType"]);
+		Assert.Equal("v2", syncRequest.Parameters!["RefValue"]);
+		Assert.Equal(ContentPath, syncRequest.Parameters!["ContentPath"]);
 	}
 
 	[Fact]
@@ -878,10 +946,10 @@ public sealed class ContentPullJobHandlerTests
 		PSObject profile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", "vCenter STIG", "2.3.0");
 		PSObject contentEntry = ContentEntryObject(
 			"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", ValidVCenterManifest, hasControlsDirectory: true, "vcenter_control.rb");
-		PSObject output = SuccessWithContentEntries("commitG", [profile], contentEntry);
+		PSObject output = Success("commitG", profile);
 
 		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events, _, _, _, FakeCatalogRepository catalog) =
-			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(contentEntry));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
@@ -924,10 +992,10 @@ public sealed class ContentPullJobHandlerTests
 			"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", ValidVCenterManifest, hasControlsDirectory: true, "vcenter_control.rb");
 		PSObject badEntry = ContentEntryObject("totally-unrecognized-shape", ValidVCenterManifest, hasControlsDirectory: true, "control.rb");
 
-		PSObject output = SuccessWithContentEntries("commitH", [goodProfile, badProfile], goodEntry, badEntry);
+		PSObject output = Success("commitH", goodProfile, badProfile);
 
 		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
-			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(goodEntry, badEntry));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
@@ -965,10 +1033,10 @@ public sealed class ContentPullJobHandlerTests
 			"vsphere/8.0.3/v2r3-stig/inspec/baseline/esxi", ValidVCenterManifest.Replace("vcenter", "esxi", StringComparison.Ordinal), hasControlsDirectory: true,
 			inspecCheckRan: true, inspecCheckPassed: false, "esxi_control.rb");
 
-		PSObject output = SuccessWithContentEntries("commitJ", [passingProfile, failingProfile], passingEntry, failingEntry);
+		PSObject output = Success("commitJ", passingProfile, failingProfile);
 
 		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
-			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(passingEntry, failingEntry));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
@@ -1009,10 +1077,10 @@ public sealed class ContentPullJobHandlerTests
 			"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", ValidVCenterManifest, hasControlsDirectory: true,
 			inspecCheckRan: false, inspecCheckPassed: false, "vcenter_control.rb");
 
-		PSObject output = SuccessWithContentEntries("commitK", [profile], entry);
+		PSObject output = Success("commitK", profile);
 
 		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
-			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(entry));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
@@ -1055,10 +1123,10 @@ public sealed class ContentPullJobHandlerTests
 		// for execution").
 		PSObject profile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline", "vSphere (aggregate)", null);
 		PSObject contentEntry = ContentEntryObject("vsphere/8.0.3/v2r3-stig/inspec/baseline", ValidVCenterManifest, hasControlsDirectory: false);
-		PSObject output = SuccessWithContentEntries("commitJ", [profile], contentEntry);
+		PSObject output = Success("commitJ", profile);
 
 		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
-			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(contentEntry));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
@@ -1189,13 +1257,17 @@ public sealed class ContentPullJobHandlerTests
 	/// exit-code convention, never real InSpec/cinc-auditor bytes -- docs/testing.md's CI
 	/// stub discipline) so <c>Test-WaypointInspecCheck</c> genuinely runs during this
 	/// end-to-end test instead of reporting "inspec executable not found on PATH".
+	/// Issue #993: <paramref name="sleepSeconds"/> lets the chunking tests simulate a
+	/// realistic per-check duration (mirroring the live-proven ~20s real checks) without
+	/// waiting anywhere near that long in CI.
 	/// </summary>
-	private static void WriteStubInspec(string directory, int exitCode)
+	private static void WriteStubInspec(string directory, int exitCode, int sleepSeconds = 0)
 	{
 		string stubPath = Path.Combine(directory, "inspec");
 		string script = "#!/bin/sh\n"
 			+ "# Invented stub for issue #984's real-executor end-to-end test -- mirrors\n"
 			+ "# `inspec check <path> --format json`'s argument contract only.\n"
+			+ $"sleep {sleepSeconds}\n"
 			+ "echo '{\"controls\": []}'\n"
 			+ $"exit {exitCode}\n";
 		File.WriteAllText(stubPath, script.ReplaceLineEndings("\n"));
@@ -1209,18 +1281,229 @@ public sealed class ContentPullJobHandlerTests
 #pragma warning restore CA1416
 	}
 
-	/// <summary>Records job.log events without a real IJobLogBuffer backend -- this test only needs the real executor to run, not to inspect its stream output.</summary>
-	private sealed class RecordingJobLogBuffer : IJobLogBuffer
+	// --- issue #993: chunked-pipeline-budget tests -----------------------------
+
+	/// <summary>
+	/// Issue #993's central negative proof: N executable-leaf profiles whose AGGREGATE
+	/// check time exceeds a small whole-pipeline-style budget, while each individual
+	/// check comfortably fits the (also small) per-check bound -- exactly the shape that
+	/// broke on main once #989 made checks genuinely run to completion. On CURRENT MAIN
+	/// (one monolithic <c>Invoke-WaypointComplianceContentPull</c> invocation bounded by
+	/// a single fixed <c>PowerShellRequest.Timeout</c>/<c>DefaultInvocationTimeout</c>
+	/// covering the WHOLE tree), a timeout this small relative to 5 leaves x 2s would force-stop
+	/// the single pipeline mid-run and promote ZERO profiles -- this test's own inline
+	/// comment below captures the exact revert-and-rerun negative proof for the PR body.
+	/// With this issue's chunked fix (5 leaves split across
+	/// <see cref="ComplianceContentOptions.ContentPullChunkSize"/>-sized chunks, each
+	/// chunk's own <c>PowerShellRequest.Timeout</c> sized to THAT chunk only), the run
+	/// completes and promotes every leaf.
+	/// </summary>
+	[Fact]
+	public async Task Execute_RealExecutor_AggregateExceedsSmallBudget_ButChunkedFix_PromotesAllLeaves()
 	{
-		public bool TryEnqueue(string eventType, Guid? jobId, Guid? runId, string payloadJson) => true;
+		const int leafCount = 5;
+		const int perCheckSleepSeconds = 2;
+		string fixtureRoot = Directory.CreateTempSubdirectory("wp-993-chunk-tree").FullName;
+		string stubInspecDir = Directory.CreateTempSubdirectory("wp-993-inspec-stub").FullName;
+		string originalPath = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+		try
+		{
+			// Issue #993: uses the VCSA named-service-split family (vcsa/<version>/
+			// <release>/inspec/<baseline>/<any-leaf-name>) rather than vSphere's
+			// object-kind split (vcenter/esxi/vm ONLY) -- that lets 5 DISTINCT leaf names
+			// all classify as real executable-leaf candidates instead of colliding on the
+			// same 3 fixed object-kind selectors.
+			for (int i = 0; i < leafCount; i++)
+			{
+				string profileDir = Path.Combine(fixtureRoot, "vcsa", "8.0.3", "v2r3-stig", "inspec", "baseline", $"leaf{i}");
+				Directory.CreateDirectory(profileDir);
+				Directory.CreateDirectory(Path.Combine(profileDir, "controls"));
+				await File.WriteAllTextAsync(Path.Combine(profileDir, "inspec.yml"), ValidVCenterManifest.Replace("vcenter", $"leaf{i}", StringComparison.Ordinal));
+				await File.WriteAllTextAsync(
+					Path.Combine(profileDir, "controls", $"leaf{i}_control.rb"),
+					$"control 'V-00000{i}' do\n  title 'Invented fixture control {i}'\n  impact 0.7\nend\n");
+			}
+
+			// Each check sleeps 2s (comfortably inside its own per-check bound below); the
+			// AGGREGATE across all 5 leaves is >= 10s -- bigger than the tiny
+			// whole-pipeline-style budget the assertion comment below documents as the
+			// pre-fix failure mode.
+			WriteStubInspec(stubInspecDir, exitCode: 0, sleepSeconds: perCheckSleepSeconds);
+			Environment.SetEnvironmentVariable("PATH", stubInspecDir + Path.PathSeparator + originalPath);
+
+			string stubModulePath = Path.Combine(
+				AppContext.BaseDirectory, "Assets", "WaypointContentPullRealExecutorStubModule", "WaypointContentPullRealExecutorStubModule.psm1");
+			string realModulePath = Path.Combine(
+				AppContext.BaseDirectory, "PowerShell", "Modules", "WaypointComplianceContent", "WaypointComplianceContent.psm1");
+			Assert.True(File.Exists(realModulePath), $"real module not found at '{realModulePath}'.");
+
+			PowerShellOptions psOptions = new()
+			{
+				MaxRunspaces = 1,
+				// Issue #993 negative proof, spelled out: on current main, this exact
+				// value (5s) is what CURRENT MAIN would pass as the SINGLE monolithic
+				// invocation's own timeout for the WHOLE tree -- 5 leaves x 2s = >=10s
+				// aggregate blows straight through it, and the single pipeline gets
+				// force-stopped ("ignored Stop(); runspace poisoned") with ZERO profiles
+				// promoted (the exact issue #993 failure mode). This fix's chunking
+                                // means NEITHER phase-1 sync NOR any phase-2 chunk call ever uses this
+				// default -- each carries its own explicitly-computed PowerShellRequest.Timeout
+				// (ComplianceContentOptions.ContentSyncTimeout for sync; chunk-size x
+				// per-check-timeout + overhead for entries) -- so this small default is
+				// deliberately left in place as the negative-proof control value, not
+				// raised to "fix" anything.
+				DefaultInvocationTimeout = TimeSpan.FromSeconds(5),
+				StopGracePeriod = TimeSpan.FromSeconds(2),
+			};
+			psOptions.ModulePreloadPaths.Add(realModulePath);
+			psOptions.ModulePreloadPaths.Add(stubModulePath);
+			IOptions<PowerShellOptions> wrappedPsOptions = Options.Create(psOptions);
+
+			using RealWaypointRunspacePool pool = new(wrappedPsOptions, NullLogger<RealWaypointRunspacePool>.Instance);
+			RecordingJobLogBuffer logBuffer = new();
+			RealPowerShellExecutor realExecutor = new(pool, logBuffer, wrappedPsOptions, NullLogger<RealPowerShellExecutor>.Instance);
+			RemappingExecutor executor = new(realExecutor, fixtureRoot);
+
+			FakeContentRepository content = new(Config(ComplianceContentRefTypes.Branch, "main"));
+			FakeProfileRepository profiles = new();
+			FakeProfileControlRepository profileControls = new();
+			FakeCatalogRepository catalog = new();
+			FakeJobRunnerRepository jobs = new("admin@example.internal");
+			// Issue #993 fix under test: chunk size 2 (so 5 leaves span 3 chunks: 2+2+1)
+			// x a per-check timeout comfortably above the stub's 2s sleep, plus overhead --
+			// each CHUNK's own PowerShellRequest.Timeout is therefore a few chunk-leaves x
+			// per-check-seconds, structurally independent of the FULL 5-leaf tree's
+			// aggregate runtime, which is exactly the "scales with chunk size, not tree
+			// size" property this issue requires.
+			IOptions<ComplianceContentOptions> contentOptions = Options.Create(new ComplianceContentOptions
+			{
+				ContentPath = fixtureRoot,
+				InspecCheckTimeoutSeconds = 10,
+				ContentPullChunkSize = 2,
+				ContentPullChunkOverheadSeconds = 5,
+				ContentSyncTimeout = TimeSpan.FromMinutes(1),
+			});
+
+			ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, contentOptions, new FakeContentRevisionStager());
+
+			Guid jobId = Guid.NewGuid();
+			Guid runId = Guid.NewGuid();
+			ClaimedJob job = new(jobId, runId, "content-pull", TargetId: null, TargetName: null, CredentialId: null,
+				Priority: 5, Payload: "{}", AttemptCount: 0, MaxAttempts: 1);
+			RecordingEventPublisher events = new();
+			JobExecutionContext context = new(job, "worker-1", events, jobs, JobShape.Simple);
+
+			JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+
+			// The central assertion: with the chunked fix, the run SUCCEEDS and promotes
+			// every leaf, despite the aggregate check time exceeding what a single
+			// monolithic invocation bounded at DefaultInvocationTimeout=5s could ever
+			// finish inside. Reverting ContentPullJobHandler to issue one
+			// Invoke-WaypointComplianceContentPull call (pre-#993 shape) against this
+			// same fixture/stub/options reproduces the ORIGINAL failure this test guards
+			// against: outcome.Kind == Failed, a "timeout"/"Stop()" FailureReason, and
+			// catalog.Entries empty (0 profiles promoted) -- the exact issue #993 symptom.
+			Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+			Assert.Equal(leafCount, profiles.Replaced!.Count);
+
+			CatalogImportReport report = Assert.Single(catalog.Reports);
+			Assert.Equal(leafCount, report.AcceptedCount);
+			Assert.Equal(0, report.RejectedCount);
+
+			Assert.Equal(leafCount, catalog.Entries.Count);
+			Assert.All(catalog.Entries, e =>
+			{
+				Assert.Equal(CatalogImportEntryDispositions.Accepted, e.Disposition);
+				Assert.NotNull(e.ExecutionProfileId);
+			});
+			Assert.Contains($"{leafCount} catalog execution profile(s) promoted", outcome.Note, StringComparison.Ordinal);
+
+			// Issue #993 AC 3 cooperative-cancel-adjacent signal: no "runspace poisoned"
+			// log line should ever have been produced for a run that completed
+			// successfully via bounded, independently-completing chunk calls.
+			Assert.DoesNotContain(logBuffer.Payloads, p => p.Contains("poisoned", StringComparison.OrdinalIgnoreCase));
+		}
+		finally
+		{
+			Environment.SetEnvironmentVariable("PATH", originalPath);
+			Directory.Delete(fixtureRoot, recursive: true);
+			Directory.Delete(stubInspecDir, recursive: true);
+		}
 	}
 
 	/// <summary>
-	/// Adapts <see cref="ContentPullJobHandler"/>'s fixed
-	/// <c>Invoke-WaypointComplianceContentPull</c> command name onto this test's
-	/// git-free stub command, while still routing the ACTUAL invocation through the
-	/// real <see cref="RealPowerShellExecutor.ExecuteAsync"/> --
-	/// only the command name/parameters are remapped, nothing about output handling.
+	/// Issue #993 AC 3 (cooperative cancellation): a stop request (the job's own
+	/// CancellationToken, cancelled on run-abort per ADR-0008) that lands BETWEEN two
+	/// chunk calls is honored promptly -- the loop simply never starts the next chunk,
+	/// rather than trying to interrupt one already in flight. This is what makes the
+	/// "ignored Stop() for 5s; runspace poisoned" failure mode structurally unreachable
+	/// for this fix: cancellation is observed between bounded units, never as an
+	/// in-flight Stop() on a pipeline blocked inside a native WaitForExit.
+	/// </summary>
+	[Fact]
+	public async Task Execute_CancellationBetweenChunks_ThrowsPromptly_WithoutInvokingRemainingChunks()
+	{
+		FakePowerShellExecutor executor = new(Ok(Success(
+			"commitCancel",
+			ProfileObject("p0", "P0", null),
+			ProfileObject("p1", "P1", null),
+			ProfileObject("p2", "P2", null),
+			ProfileObject("p3", "P3", null))));
+		FakeContentRepository content = new(Config(ComplianceContentRefTypes.Branch, "main"));
+		FakeProfileRepository profiles = new();
+		FakeProfileControlRepository profileControls = new();
+		FakeCatalogRepository catalog = new();
+		FakeJobRunnerRepository jobs = new("admin@example.internal");
+		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions
+		{
+			ContentPath = ContentPath,
+			ContentPullChunkSize = 1, // one profile per chunk -> 4 chunk calls total
+		});
+		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options, new FakeContentRevisionStager());
+
+		ClaimedJob job = new(Guid.NewGuid(), Guid.NewGuid(), "content-pull", null, null, null, 5, "{}", 0, 1);
+		RecordingEventPublisher events = new();
+		JobExecutionContext context = new(job, "worker-1", events, jobs, JobShape.Simple);
+
+		using CancellationTokenSource cts = new();
+		executor.OnEntriesCall = () =>
+		{
+			// Cancel after the FIRST chunk call has already started/returned -- the
+			// second chunk call must never be attempted.
+			if (executor.EntriesRequests.Count == 1)
+			{
+				cts.Cancel();
+			}
+		};
+
+		await Assert.ThrowsAsync<OperationCanceledException>(
+			() => handler.ExecuteAsync(context, cts.Token));
+
+		// Exactly one chunk call happened before the cancellation was observed; the
+		// remaining three profiles' chunks were never started.
+		Assert.Single(executor.EntriesRequests);
+		Assert.Null(profiles.Replaced); // nothing was staged -- cancellation happened before the atomic ReplaceAllAsync commit.
+	}
+
+	/// <summary>Records job.log events without a real IJobLogBuffer backend -- this test only needs the real executor to run, not to inspect its stream output.</summary>
+	private sealed class RecordingJobLogBuffer : IJobLogBuffer
+	{
+		public List<string> Payloads { get; } = [];
+
+		public bool TryEnqueue(string eventType, Guid? jobId, Guid? runId, string payloadJson)
+		{
+			Payloads.Add(payloadJson);
+			return true;
+		}
+	}
+
+	/// <summary>
+	/// Issue #993: <see cref="ContentPullJobHandler"/> now issues its REAL phase-1/
+	/// phase-2 command names (<c>Sync-WaypointComplianceContentTree</c> /
+	/// <c>Get-WaypointComplianceContentEntries</c>), so only the phase-1 sync call needs
+	/// remapping onto this test's git-free stub (<c>Invoke-WaypointContentPullRealExecutorSyncStub</c>)
+	/// -- phase 2 is the real module's own function (no git involved at all) and passes
+	/// straight through to <see cref="RealPowerShellExecutor.ExecuteAsync"/> unmodified.
 	/// </summary>
 	private sealed class RemappingExecutor : IPowerShellExecutor
 	{
@@ -1235,9 +1518,14 @@ public sealed class ContentPullJobHandlerTests
 
 		public Task<PowerShellExecutionResult> ExecuteAsync(PowerShellRequest request, CancellationToken cancellationToken)
 		{
+			if (request.Command != "Sync-WaypointComplianceContentTree")
+			{
+				return _inner.ExecuteAsync(request, cancellationToken);
+			}
+
 			PowerShellRequest remapped = request with
 			{
-				Command = "Invoke-WaypointContentPullRealExecutorStub",
+				Command = "Invoke-WaypointContentPullRealExecutorSyncStub",
 				Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
 				{
 					["ContentPath"] = _contentPath,

@@ -77,12 +77,38 @@
 # *title* parsing, not key uniqueness, which must hold today regardless). The profile's
 # real, already-known directory (not a path recomputed from the key) is threaded
 # straight into control discovery so nested controls/*.rb resolve regardless of depth.
+#
+# Issue #993 (epic #726, live-proven): #989 made each `inspec check` genuinely complete
+# (~20s each), which exposed the NEXT bound -- the whole pull, including every leaf's
+# check, used to run as ONE PowerShell invocation under PowerShellExecutor's fixed
+# 00:30:00 DefaultInvocationTimeout (PowerShellOptions.cs). The real content tree's
+# aggregate check time (hundreds of leaves x ~20s) exceeds that wall clock by a wide
+# margin; the pipeline is force-stopped, Stop() is ignored (a WaitForExit/Process.Kill
+# in flight cannot be pre-empted instantly), and the runspace is poisoned -- while
+# ContentPullJobHandler stages atomically at the end, so the force-stop discards
+# everything (0 profiles/benchmarks/baselines).
+#
+# Fix shape: split the single monolithic invocation into a git-only sync/enumerate call
+# (Sync-WaypointComplianceContentTree, cheap and leaf-count-independent) plus N
+# per-CHUNK check-and-assemble calls (Get-WaypointComplianceContentEntries) that
+# ContentPullJobHandler drives directly. Each chunk call's own PowerShellRequest.Timeout
+# is sized as (chunk leaf count x per-check TimeoutSeconds) + a fixed overhead -- NOT a
+# bigger magic constant on the whole tree -- so the bound is structurally sufficient for
+# any content size: doubling the number of leaves doubles the number of (still small,
+# fixed-size) chunk calls, never the size of any single bounded invocation. The
+# C#-side loop checks the job's own CancellationToken between chunks (ADR-0008 run-abort
+# cancellation), so a stop request is honored between bounded units -- the same
+# "ignored Stop() for 5s; poisoned" fallout literally cannot recur, because a stop is
+# observed as "do not start the next chunk", not as an in-flight Stop() on a pipeline
+# that is blocked inside a native WaitForExit. Atomicity is unchanged: the job handler
+# still stages/promotes once, after every chunk has returned, exactly like before.
 
-function Invoke-WaypointComplianceContentPull {
+function Sync-WaypointComplianceContentTree {
 	<#
 	.SYNOPSIS
 	    Clones or updates the compliance-content working tree to RefValue and returns
-	    the resolved commit plus the discovered profile inventory.
+	    the resolved commit plus the discovered profile inventory (directories only --
+	    no `inspec check` is run here; see Get-WaypointComplianceContentEntries).
 
 	.PARAMETER RepositoryUrl
 	    The upstream compliance-content repository URL.
@@ -95,6 +121,13 @@ function Invoke-WaypointComplianceContentPull {
 
 	.PARAMETER ContentPath
 	    Local working-tree root (a compliance-runner-only persistent mount, ADR-0017).
+
+	.OUTPUTS
+	    [PSCustomObject] with Commit (string) and Profiles (array of ProfileKey/Name/
+	    Version/_ProfileDirectory -- the internal directory field a subsequent
+	    Get-WaypointComplianceContentEntries call needs; ContentPullJobHandler never
+	    sees this function's raw output directly, only via the job handler's own
+	    orchestration, so _ProfileDirectory does not need stripping here).
 	#>
 	[CmdletBinding()]
 	param(
@@ -135,16 +168,50 @@ function Invoke-WaypointComplianceContentPull {
 	}
 
 	$commit = (& git -C $ContentPath rev-parse HEAD).Trim()
-
 	$profiles = @(Get-WaypointComplianceContentProfiles -ContentPath $ContentPath -Commit $commit)
-	# Issue #729: capture the raw inspec.yml text and controls/*.rb filenames per
-	# profile BEFORE _ProfileDirectory is stripped below -- ContentPullJobHandler's
-	# semantic-import pass (VendorContentEntry) needs the untrusted manifest text and
-	# structural facts the C#-side InspecManifestParser/VendorHierarchyInterpreter
-	# reconcile against the closed catalog vocabulary; this module only reads and
-	# forwards bytes, it never interprets them.
-	$entries = @(foreach ($p in $profiles) {
-			$hasControlsDirectory = Test-Path (Join-Path $p._ProfileDirectory 'controls')
+
+	[PSCustomObject]@{
+		Commit   = $commit
+		Profiles = $profiles
+	}
+}
+
+function Get-WaypointComplianceContentEntries {
+	<#
+	.SYNOPSIS
+	    Issue #993 bounded chunk unit: builds one ContentEntries row (raw manifest text,
+	    controls/files structural facts, bounded `inspec check` result) PLUS the
+	    corresponding profile's Controls array, for each profile directory in
+	    ProfileDirectories -- the per-chunk work ContentPullJobHandler drives across
+	    multiple bounded PowerShellRequest invocations instead of one whole-tree call.
+
+	.PARAMETER ProfileDirectories
+	    Absolute directories of the profiles in THIS chunk only (a small slice of the
+	    full inventory -- the caller sizes chunks and this invocation's own timeout so
+	    that even every leaf in the chunk hitting the per-check bound still finishes
+	    within the request's PowerShellRequest.Timeout).
+
+	.PARAMETER ProfileKeysByDirectory
+	    A hashtable mapping each directory in ProfileDirectories to its already-computed
+	    ProfileKey (issue #617's content-root-relative path) -- computed once by the
+	    caller from Sync-WaypointComplianceContentTree's output so this function never
+	    needs ContentPath to recompute keys itself.
+
+	.PARAMETER InspecCheckTimeoutSeconds
+	    Forwarded to Test-WaypointInspecCheck for every executable-leaf candidate in
+	    this chunk -- the per-check bound issue #989 introduced, unchanged by this
+	    issue's chunking fix.
+	#>
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)][string[]]$ProfileDirectories,
+		[Parameter(Mandatory)][hashtable]$ProfileKeysByDirectory,
+		[int]$InspecCheckTimeoutSeconds = 60
+	)
+
+	@(foreach ($profileDirectory in $ProfileDirectories) {
+			$profileKey = $ProfileKeysByDirectory[$profileDirectory]
+			$hasControlsDirectory = Test-Path (Join-Path $profileDirectory 'controls')
 			# Issue #729: bounded `inspec check` only runs against a profile that already
 			# looks like an executable leaf (has a controls/ directory) -- an aggregate
 			# profile (no controls/) is never a candidate for structure validation, it is
@@ -152,39 +219,24 @@ function Invoke-WaypointComplianceContentPull {
 			# running the (real, non-trivial) inspec binary against it would be wasted
 			# bounded runner work on content that can never be promoted regardless.
 			$inspecCheck = if ($hasControlsDirectory) {
-				Test-WaypointInspecCheck -ProfileDirectory $p._ProfileDirectory
+				Test-WaypointInspecCheck -ProfileDirectory $profileDirectory -TimeoutSeconds $InspecCheckTimeoutSeconds
 			}
 			else {
 				[PSCustomObject]@{ Ran = $false; Passed = $false; Detail = 'no controls/ directory -- not an executable-leaf candidate, inspec check skipped' }
 			}
 
 			[PSCustomObject]@{
-				ProfileKey            = $p.ProfileKey
-				RawYaml               = Get-WaypointComplianceContentRawManifest -ProfileDirectory $p._ProfileDirectory
-				HasControlsDirectory  = $hasControlsDirectory
-				HasFilesDirectory     = Test-Path (Join-Path $p._ProfileDirectory 'files')
-				ControlFileNames      = @(Get-WaypointComplianceContentControlFileNames -ProfileDirectory $p._ProfileDirectory)
-				InspecCheckRan        = $inspecCheck.Ran
-				InspecCheckPassed     = $inspecCheck.Passed
-				InspecCheckDetail     = $inspecCheck.Detail
+				ProfileKey           = $profileKey
+				RawYaml              = Get-WaypointComplianceContentRawManifest -ProfileDirectory $profileDirectory
+				HasControlsDirectory = $hasControlsDirectory
+				HasFilesDirectory    = Test-Path (Join-Path $profileDirectory 'files')
+				ControlFileNames     = @(Get-WaypointComplianceContentControlFileNames -ProfileDirectory $profileDirectory)
+				Controls             = @(Get-WaypointComplianceContentControls -ProfileDirectory $profileDirectory)
+				InspecCheckRan       = $inspecCheck.Ran
+				InspecCheckPassed    = $inspecCheck.Passed
+				InspecCheckDetail    = $inspecCheck.Detail
 			}
 		})
-
-	foreach ($p in $profiles) {
-		# Issue #617: use the profile's real directory (carried through as
-		# _ProfileDirectory by Get-WaypointComplianceContentProfiles), not a path
-		# reconstructed from ProfileKey/basename -- the real repo's profiles are nested
-		# many levels below ContentPath, so Join-Path $ContentPath $p.ProfileKey would
-		# only work by coincidence at depth 1.
-		$p | Add-Member -NotePropertyName Controls -NotePropertyValue @(Get-WaypointComplianceContentControls -ProfileDirectory $p._ProfileDirectory)
-		$p.PSObject.Properties.Remove('_ProfileDirectory')
-	}
-
-	[PSCustomObject]@{
-		Commit          = $commit
-		Profiles        = $profiles
-		ContentEntries  = $entries
-	}
 }
 
 function Get-WaypointComplianceContentRawManifest {
@@ -397,9 +449,10 @@ function Get-WaypointComplianceContentProfiles {
 	    collapses distinct profiles under profiles.profile_key's UNIQUE constraint.
 	    Name still falls back to the basename, which stays display-friendly. The
 	    profile's real, absolute directory is carried on the returned object as
-	    _ProfileDirectory (an internal/private property, stripped by
-	    Invoke-WaypointComplianceContentPull before the object is handed to the job
-	    handler) so control discovery never has to reconstruct that path from the key.
+	    _ProfileDirectory (an internal/private property) -- issue #993:
+	    Sync-WaypointComplianceContentTree returns it as-is (no longer stripped here),
+	    since ContentPullJobHandler's phase 2 needs each directory to drive its
+	    chunked Get-WaypointComplianceContentEntries calls.
 	#>
 	[CmdletBinding()]
 	param(
@@ -498,4 +551,4 @@ function Get-WaypointComplianceContentControls {
 	}
 }
 
-Export-ModuleMember -Function Invoke-WaypointComplianceContentPull, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls, Get-WaypointComplianceContentRawManifest, Get-WaypointComplianceContentControlFileNames, Test-WaypointInspecCheck
+Export-ModuleMember -Function Sync-WaypointComplianceContentTree, Get-WaypointComplianceContentEntries, Get-WaypointComplianceContentProfiles, Get-WaypointComplianceContentControls, Get-WaypointComplianceContentRawManifest, Get-WaypointComplianceContentControlFileNames, Test-WaypointInspecCheck

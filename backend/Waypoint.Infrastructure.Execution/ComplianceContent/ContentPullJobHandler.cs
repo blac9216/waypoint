@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.ComplianceContent;
@@ -60,7 +61,8 @@ namespace Waypoint.Infrastructure.Execution.ComplianceContent;
 /// </summary>
 public sealed class ContentPullJobHandler : IJobHandler
 {
-	private const string InvocationCommand = "Invoke-WaypointComplianceContentPull";
+	private const string SyncCommand = "Sync-WaypointComplianceContentTree";
+	private const string EntriesCommand = "Get-WaypointComplianceContentEntries";
 
 	/// <summary>
 	/// Classification facts issue #729's interpreter needs but the raw import evidence
@@ -133,7 +135,12 @@ public sealed class ContentPullJobHandler : IJobHandler
 
 		string actor = await ResolveActorAsync(context.Job.RunId, cancellationToken).ConfigureAwait(false);
 
-		Dictionary<string, object?> parameters = new(StringComparer.Ordinal)
+		// Issue #993: phase 1 is a small, content-size-INDEPENDENT invocation (git
+		// clone/fetch/checkout + directory enumeration, no `inspec check` at all) --
+		// bounded by ComplianceContentOptions.ContentSyncTimeout, not the fixed
+		// 00:30:00 PowerShellOptions.DefaultInvocationTimeout that used to also have to
+		// cover every leaf's check on top of this.
+		Dictionary<string, object?> syncParameters = new(StringComparer.Ordinal)
 		{
 			["RepositoryUrl"] = config.RepositoryUrl,
 			["RefType"] = config.RefType,
@@ -141,27 +148,97 @@ public sealed class ContentPullJobHandler : IJobHandler
 			["ContentPath"] = _options.Value.ContentPath,
 		};
 
-		PowerShellRequest request = new(InvocationCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
-		PowerShellExecutionResult result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+		PowerShellRequest syncRequest = new(
+			SyncCommand, PowerShellRequestKind.Command, syncParameters, context.Job.Id, context.Job.RunId,
+			Timeout: _options.Value.ContentSyncTimeout);
+		PowerShellExecutionResult syncResult = await _executor.ExecuteAsync(syncRequest, cancellationToken).ConfigureAwait(false);
 
-		if (!result.Succeeded)
+		if (!syncResult.Succeeded)
 		{
-			string note = result.FailureReason ?? "content-pull invocation failed with no failure reason.";
+			string note = syncResult.FailureReason ?? "content-pull sync invocation failed with no failure reason.";
 			await _content.RecordPullAsync(
 				context.Job.Id, config.RefType, config.RefValue, commit: null,
 				ComplianceContentPullStatuses.Failed, note, actor, cancellationToken).ConfigureAwait(false);
 			return JobExecutionOutcome.Failed(note);
 		}
 
-		(string? commit, IReadOnlyList<ProfileUpsert> discoveredProfiles, IReadOnlyDictionary<string, IReadOnlyList<ProfileControlUpsert>> controlsByProfileKey, IReadOnlyList<VendorContentEntry> contentEntries) =
-			ParseOutput(result.Output, config);
+		(string? commit, IReadOnlyList<ProfileUpsert> discoveredProfiles, IReadOnlyList<ProfileDirectoryEntry> profileDirectories) =
+			ParseSyncOutput(syncResult.Output, config);
 		if (commit is null)
 		{
-			const string note = "content-pull invocation returned no commit.";
+			const string note = "content-pull sync invocation returned no commit.";
 			await _content.RecordPullAsync(
 				context.Job.Id, config.RefType, config.RefValue, commit: null,
 				ComplianceContentPullStatuses.Failed, note, actor, cancellationToken).ConfigureAwait(false);
 			return JobExecutionOutcome.Failed(note);
+		}
+
+		// Issue #993: phase 2 runs the bounded per-leaf `inspec check` (issue #989's
+		// per-unit protection, unchanged) in CHUNKS of ComplianceContentOptions
+		// .ContentPullChunkSize leaves per invocation, each sized to exactly that
+		// chunk's own worst case (chunk size x per-check timeout + fixed overhead) --
+		// never the whole tree's. The cancellation check between chunks is what makes a
+		// run-abort (ADR-0008) honored PROMPTLY: a stop request simply skips starting
+		// the next chunk rather than trying to interrupt one already in flight, so the
+		// "ignored Stop() for 5s; runspace poisoned" failure mode this issue closes
+		// cannot recur here -- each chunk call is its own bounded, independently
+		// completing PowerShellExecutor.ExecuteAsync invocation.
+		List<VendorContentEntry> contentEntries = new(profileDirectories.Count);
+		Dictionary<string, IReadOnlyList<ProfileControlUpsert>> controlsByProfileKey = new(StringComparer.Ordinal);
+		int chunkSize = Math.Max(1, _options.Value.ContentPullChunkSize);
+		TimeSpan chunkTimeout = TimeSpan.FromSeconds(
+			(chunkSize * (double)_options.Value.InspecCheckTimeoutSeconds) + _options.Value.ContentPullChunkOverheadSeconds);
+
+		for (int offset = 0; offset < profileDirectories.Count; offset += chunkSize)
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+
+			IReadOnlyList<ProfileDirectoryEntry> chunk = profileDirectories.Skip(offset).Take(chunkSize).ToList();
+			Dictionary<string, object?> profileKeysByDirectory = new(StringComparer.Ordinal);
+			foreach (ProfileDirectoryEntry entry in chunk)
+			{
+				profileKeysByDirectory[entry.ProfileDirectory] = entry.ProfileKey;
+			}
+
+			Dictionary<string, object?> entriesParameters = new(StringComparer.Ordinal)
+			{
+				["ProfileDirectories"] = chunk.Select(p => p.ProfileDirectory).ToArray(),
+				["ProfileKeysByDirectory"] = profileKeysByDirectory,
+				["InspecCheckTimeoutSeconds"] = _options.Value.InspecCheckTimeoutSeconds,
+			};
+
+			PowerShellRequest entriesRequest = new(
+				EntriesCommand, PowerShellRequestKind.Command, entriesParameters, context.Job.Id, context.Job.RunId,
+				Timeout: chunkTimeout);
+			PowerShellExecutionResult entriesResult = await _executor.ExecuteAsync(entriesRequest, cancellationToken).ConfigureAwait(false);
+
+			if (!entriesResult.Succeeded)
+			{
+				// Issue #993 AC 3: a genuine overrun (a chunk whose leaves collectively
+				// exceed even this scaled bound -- e.g. a pathological profile that
+				// somehow evades #989's own per-check bound) is an honest, actionable job
+				// failure, not a silent 0-profile discard: nothing has been staged yet
+				// (profiles/controls/catalog all still commit atomically below), so this
+				// return leaves the prior pull's staged state completely untouched.
+				string note = entriesResult.FailureReason
+					?? $"content-pull entries invocation failed with no failure reason (chunk starting at offset {offset}).";
+				await _content.RecordPullAsync(
+					context.Job.Id, config.RefType, config.RefValue, commit: null,
+					ComplianceContentPullStatuses.Failed, note, actor, cancellationToken).ConfigureAwait(false);
+				return JobExecutionOutcome.Failed(note);
+			}
+
+			foreach (object? item in entriesResult.Output)
+			{
+				VendorContentEntry? entry = TryParseContentEntry(item);
+				if (entry is null)
+				{
+					continue;
+				}
+
+				contentEntries.Add(entry);
+				controlsByProfileKey[entry.ProfileKey] = TryParseControls(item);
+			}
 		}
 
 		await _profiles.ReplaceAllAsync(discoveredProfiles, cancellationToken).ConfigureAwait(false);
@@ -355,6 +432,17 @@ public sealed class ContentPullJobHandler : IJobHandler
 	}
 
 	/// <summary>
+	/// One profile directory discovered by the phase-1 sync call: <see cref="ProfileKey"/>
+	/// is issue #617's content-root-relative identity, <see cref="ProfileDirectory"/> is
+	/// the real absolute directory phase 2's chunked
+	/// <c>Get-WaypointComplianceContentEntries</c> calls need to run the bounded
+	/// <c>inspec check</c> and read manifest/control files -- carried across the two
+	/// invocations explicitly (rather than recomputed) because it is the sync call's own
+	/// filesystem walk that discovered it.
+	/// </summary>
+	private sealed record ProfileDirectoryEntry(string ProfileKey, string ProfileDirectory);
+
+	/// <summary>
 	/// Every profile discovered by a successful pull is labeled
 	/// <see cref="ProfileStates.Pinned"/> when the config tracks a tag,
 	/// <see cref="ProfileStates.Current"/> when it tracks a branch (issue #40 AC
@@ -363,9 +451,15 @@ public sealed class ContentPullJobHandler : IJobHandler
 	/// predates the latest available upstream commit, a comparison this slice's
 	/// GET /compliance-content/check (part of the same PR's API surface) computes by
 	/// diffing against upstream without mutating stored rows.
+	///
+	/// Issue #993: this now parses <c>Sync-WaypointComplianceContentTree</c>'s output
+	/// only (Commit + Profiles, no ContentEntries/Controls -- those come from phase 2's
+	/// chunked <c>Get-WaypointComplianceContentEntries</c> calls instead). Each parsed
+	/// profile's real directory is returned alongside its <see cref="ProfileUpsert"/> so
+	/// the caller can drive phase 2 without recomputing paths from profile_key.
 	/// </summary>
-	private static (string? Commit, IReadOnlyList<ProfileUpsert> Profiles, IReadOnlyDictionary<string, IReadOnlyList<ProfileControlUpsert>> ControlsByProfileKey, IReadOnlyList<VendorContentEntry> ContentEntries)
-		ParseOutput(IReadOnlyList<object?> output, ComplianceContentConfig config)
+	private static (string? Commit, IReadOnlyList<ProfileUpsert> Profiles, IReadOnlyList<ProfileDirectoryEntry> ProfileDirectories)
+		ParseSyncOutput(IReadOnlyList<object?> output, ComplianceContentConfig config)
 	{
 		string state = config.RefType == ComplianceContentRefTypes.Tag ? ProfileStates.Pinned : ProfileStates.Current;
 
@@ -383,31 +477,31 @@ public sealed class ContentPullJobHandler : IJobHandler
 			}
 
 			List<ProfileUpsert> profiles = [];
-			Dictionary<string, IReadOnlyList<ProfileControlUpsert>> controlsByProfileKey = new(StringComparer.Ordinal);
+			List<ProfileDirectoryEntry> directories = [];
 			foreach (object? rawProfile in PowerShellValueUnwrap.UnwrapEach(psObject.Properties["Profiles"]?.Value))
 			{
 				ProfileUpsert? parsed = TryParseProfile(rawProfile, commit, state);
-				if (parsed is not null)
+				if (parsed is null)
 				{
-					profiles.Add(parsed);
-					controlsByProfileKey[parsed.ProfileKey] = TryParseControls(rawProfile);
+					continue;
+				}
+
+				profiles.Add(parsed);
+
+				if (rawProfile is System.Management.Automation.PSObject profileObject)
+				{
+					string? profileDirectory = PowerShellValueUnwrap.UnwrapAs<string>(profileObject.Properties["_ProfileDirectory"]?.Value);
+					if (!string.IsNullOrWhiteSpace(profileDirectory))
+					{
+						directories.Add(new ProfileDirectoryEntry(parsed.ProfileKey, profileDirectory));
+					}
 				}
 			}
 
-			List<VendorContentEntry> contentEntries = [];
-			foreach (object? rawEntry in PowerShellValueUnwrap.UnwrapEach(psObject.Properties["ContentEntries"]?.Value))
-			{
-				VendorContentEntry? parsed = TryParseContentEntry(rawEntry);
-				if (parsed is not null)
-				{
-					contentEntries.Add(parsed);
-				}
-			}
-
-			return (commit, profiles, controlsByProfileKey, contentEntries);
+			return (commit, profiles, directories);
 		}
 
-		return (null, [], new Dictionary<string, IReadOnlyList<ProfileControlUpsert>>(StringComparer.Ordinal), []);
+		return (null, [], []);
 	}
 
 	/// <summary>
