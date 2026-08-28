@@ -59,7 +59,13 @@ namespace Waypoint.Infrastructure.Runs;
 /// <b>Skip vs. integrity-failure (the second, distinct axis):</b> the skip path above is
 /// only for the ARCHITECTURALLY SKIPPABLE states epic #726 §3/§5 enumerate -- an
 /// operator-fixable gap in an otherwise-consistent catalog (unsupported capability, no
-/// active baseline yet, unmapped benchmark; #736/#753 add missing input/credential).
+/// active baseline yet; #736/#753 add missing input/credential). An unmapped STIG
+/// benchmark is deliberately NOT in this set (issue #1021 retired it as a skip reason):
+/// per the owner correction on #730 and the decided lifecycle in #1002, execution
+/// requires only the approved profile baseline -- the XCCDF is optional CKL-metadata
+/// enrichment, never an execution gate -- so a STIG execution profile's active baseline
+/// with no mapped benchmark revision plans normally with <see cref="ScanPlanItem.IsBenchmarkMissing"/>
+/// set, surfacing the gap as a non-blocking annotation instead of a dead end.
 /// A PLANNER-INTEGRITY failure -- corrupt/inconsistent catalog state the planner cannot
 /// validate, e.g. an SRG execution profile whose active baseline unexpectedly carries a
 /// benchmark revision -- is NOT a skip. Epic §3/§5 never sanction silently dropping a
@@ -140,9 +146,11 @@ public sealed class ScanPlannerService
 
 	/// <summary>
 	/// Plans one already-eligible component. An operator-fixable per-component gap
-	/// (unsupported / no-active-baseline / unmapped-benchmark -- the architecturally
-	/// skippable states epic #726 §3/§5 sanction) is an explicit <see cref="ScanPlanSkip"/>,
-	/// never an exception, so its siblings still plan. This method throws only for a
+	/// (unsupported / no-active-baseline -- the architecturally skippable states epic
+	/// #726 §3/§5 sanction) is an explicit <see cref="ScanPlanSkip"/>, never an
+	/// exception, so its siblings still plan. An unmapped STIG benchmark is NOT one of
+	/// these gaps (issue #1021/#1002): it plans as an accepted item with
+	/// <see cref="ScanPlanItem.IsBenchmarkMissing"/> set. This method throws only for a
 	/// caller programming error (null argument) or a data-integrity violation the planner
 	/// cannot validate (<see cref="ScanPlanIntegrityException"/>, e.g. an SRG profile
 	/// whose active baseline carries a benchmark revision) -- corrupt catalog state that
@@ -204,12 +212,26 @@ public sealed class ScanPlannerService
 				continue;
 			}
 
+			// Owner correction on #730 (2026-08-28) and the decided lifecycle in #1002:
+			// "execution requires the approved PROFILE baseline; the XCCDF is optional
+			// enrichment -- a CKL is produced from the profile alone, and the
+			// XCCDF/STIG-Manager connection enriches CKL metadata for uploadability." A
+			// STIG execution profile's active baseline with no mapped benchmark revision
+			// is therefore RUNNABLE, not a planning dead-end (issue #1021: the prior
+			// `unmapped_benchmark` skip here made the component permanently unplannable
+			// the instant an Admin activated STIG content ahead of #730's XCCDF ledger,
+			// even with a perfectly runnable SRG baseline coexisting -- there was no
+			// fallback and no recovery). This item plans exactly like a mapped STIG item
+			// (BenchmarkRevisionId stays null, matching an SRG item's shape); the item's
+			// own computed ScanPlanItem.IsBenchmarkMissing flags the gap so callers can
+			// surface #1002's standing "benchmark missing -- add and re-approve with
+			// matching data" alert without treating it as blocking. ExecuteConvertStageAsync
+			// (ScanJobHandler, issue #744) already tolerates a null BenchmarkRevisionId on
+			// the job payload -- rule-identity correction is skipped and the CKL falls back
+			// to ScanOptions.BenchmarkMetadata, exactly the "profile-only CKL, XCCDF
+			// enriches metadata" contract the owner described; there is no CKL-generation
+			// change needed here.
 			bool isStig = profile.BenchmarkReference is not null;
-			if (isStig && active.BenchmarkRevisionId is null)
-			{
-				return (null, new ScanPlanSkip(componentId, ScanPlanSkipReasons.UnmappedBenchmark,
-					$"Component '{componentId}' resolves to a STIG execution profile ('{profile.ExecutionProfile.Id}') whose active baseline has no benchmark revision mapped."));
-			}
 
 			if (!isStig && active.BenchmarkRevisionId is not null)
 			{

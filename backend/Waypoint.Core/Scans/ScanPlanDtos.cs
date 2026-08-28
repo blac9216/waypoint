@@ -75,12 +75,18 @@ public static class ScanPlanSchema
 ///
 /// <b>Every value in this set is "architecturally skippable per epic #726 §3/§5":</b> an
 /// operator-fixable gap in an otherwise-consistent catalog (an unsupported capability, a
-/// component with no active baseline yet, an unmapped benchmark, a missing
-/// input/credential). ADR-0023 ("Missing facts/baselines skip only the affected
-/// component") and ADR-0024 ("A missing, incompatible, or ambiguous credential affects
-/// only components requiring that purpose... The run is incomplete, not rejected
-/// wholesale") sanction skip-and-continue for exactly these states: the affected
-/// component is recorded as a skip and its siblings still plan.
+/// component with no active baseline yet, a missing input/credential). ADR-0023
+/// ("Missing facts/baselines skip only the affected component") and ADR-0024 ("A
+/// missing, incompatible, or ambiguous credential affects only components requiring
+/// that purpose... The run is incomplete, not rejected wholesale") sanction
+/// skip-and-continue for exactly these states: the affected component is recorded as a
+/// skip and its siblings still plan.
+///
+/// An unmapped STIG benchmark is deliberately NOT one of these skippable gaps (issue
+/// #1021 retired <see cref="UnmappedBenchmark"/> as a producible reason): per the owner
+/// correction on #730 and the decided lifecycle in #1002, the XCCDF is optional
+/// CKL-metadata enrichment, never an execution gate, so that state plans as an accepted
+/// item with <see cref="ScanPlanItem.IsBenchmarkMissing"/> set instead.
 ///
 /// A <b>planner-integrity failure</b> -- corrupt/inconsistent catalog state that the
 /// planner could not validate (e.g. an SRG execution profile whose active baseline
@@ -100,7 +106,19 @@ public static class ScanPlanSkipReasons
 	/// <summary>The component's compatible execution profile has no active baseline (ADR-0023 "Each component is ready only with one exact catalog product-version entry and exactly one active, approved compatible baseline").</summary>
 	public const string NoActiveBaseline = "no_active_baseline";
 
-	/// <summary>A STIG execution profile's benchmark reference has no corresponding imported <c>benchmark_revisions</c> row, or no current component-to-benchmark-revision mapping exists (ADR-0022/#730).</summary>
+	/// <summary>
+	/// RETIRED as a producible skip reason (issue #1021): a STIG execution profile's
+	/// active baseline with no mapped benchmark revision no longer skips. Per the owner
+	/// correction on #730 (2026-08-28) and the decided lifecycle in #1002, execution
+	/// requires only the approved profile baseline -- the XCCDF is optional CKL-metadata
+	/// enrichment, never an execution gate -- so <see cref="ScanPlannerService"/> now
+	/// plans this state as an accepted <see cref="ScanPlanItem"/> with
+	/// <see cref="ScanPlanItem.IsBenchmarkMissing"/> set instead of this skip. The
+	/// constant is retained (never removed, and deliberately excluded from
+	/// <see cref="All"/>) only so historical <c>scan_plans.skips_json</c> rows persisted
+	/// before this fix (ADR-0023 "immutable plans") still deserialize and display
+	/// honestly; no code path can produce a new row with this reason anymore.
+	/// </summary>
 	public const string UnmappedBenchmark = "unmapped_benchmark";
 
 	/// <summary>
@@ -138,7 +156,11 @@ public static class ScanPlanSkipReasons
 	/// </summary>
 	public const string CredentialedTransportWithNoRequirement = "credentialed_transport_with_no_requirement";
 
-	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, UnmappedBenchmark, MissingRequiredInput, CredentialedTransportWithNoRequirement];
+	/// <summary>
+	/// The closed, PRODUCIBLE set (issue #1021: <see cref="UnmappedBenchmark"/> is
+	/// deliberately excluded -- it is retired/historical-only, see its own doc comment).
+	/// </summary>
+	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, MissingRequiredInput, CredentialedTransportWithNoRequirement];
 }
 
 /// <summary>
@@ -156,11 +178,13 @@ public sealed record ScanPlanSkip(Guid ComponentId, string Reason, string Detail
 /// One frozen, accepted execution item (migration 0057's <c>scan_plan_items</c>;
 /// ADR-0023 "Immutable plans"; ADR-0024's <c>PlannedComponentItem</c>). Every field is
 /// resolved once, at plan-compile time, from data-driven catalog/baseline/component
-/// state -- never re-derived by a later reader. <see cref="BaselineId"/> and
-/// <see cref="BenchmarkRevisionId"/> are null for an SRG execution profile (no XCCDF
-/// benchmark concept, ADR-0022) and non-null for a compatible STIG profile with an
-/// active baseline (a STIG profile lacking either is a <see cref="ScanPlanSkip"/>, not
-/// a partially-populated item -- see <see cref="ScanPlannerService"/>).
+/// state -- never re-derived by a later reader. <see cref="BaselineId"/> is always
+/// non-null for an accepted item (an unplannable component is a <see cref="ScanPlanSkip"/>,
+/// never a partially-populated item). <see cref="BenchmarkRevisionId"/> is null for an
+/// SRG execution profile (no XCCDF benchmark concept, ADR-0022) -- and, since issue
+/// #1021, ALSO null for a STIG execution profile whose active baseline has no benchmark
+/// mapped yet (<see cref="IsBenchmarkMissing"/> distinguishes the two null cases: false
+/// for SRG, true for an unmapped STIG baseline running profile-only).
 /// </summary>
 /// <summary>
 /// <see cref="InputResolutions"/> and <see cref="AttestationResolution"/> are the
@@ -192,6 +216,23 @@ public sealed record ScanPlanItem(
 {
 	/// <summary>Never-null convenience accessor -- callers iterate this instead of null-checking <see cref="InputResolutions"/> everywhere.</summary>
 	public IReadOnlyList<PlanInputResolution> InputResolutionsOrEmpty => InputResolutions ?? [];
+
+	/// <summary>
+	/// Issue #1021: true for a STIG execution profile (<see cref="OutputKind"/> ==
+	/// <see cref="Waypoint.Core.ComplianceContent.CatalogOutputKinds.HdfAndCkl"/>) whose
+	/// active baseline had no benchmark revision mapped at plan-compile time
+	/// (<see cref="BenchmarkRevisionId"/> is null). A COMPUTED accessor, not a stored
+	/// column -- it is a pure function of two fields already frozen at plan-compile time
+	/// and already persisted (<c>scan_plan_items.output_kind</c>/<c>benchmark_revision_id</c>),
+	/// so no migration/new column is needed and there is no way for a stored flag to ever
+	/// drift out of sync with the fields it describes. False for an SRG item, whose null
+	/// <see cref="BenchmarkRevisionId"/> means "no benchmark concept" rather than
+	/// "benchmark missing" (ADR-0022) -- callers surface this as the #1002
+	/// <c>benchmark_missing</c> non-blocking alert on the plan/scan, never as a skip.
+	/// </summary>
+	public bool IsBenchmarkMissing =>
+		string.Equals(OutputKind, Waypoint.Core.ComplianceContent.CatalogOutputKinds.HdfAndCkl, StringComparison.Ordinal)
+		&& BenchmarkRevisionId is null;
 }
 
 /// <summary>

@@ -37,14 +37,17 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// identifiers only (CLAUDE.md sanitization policy).
 ///
 /// Covers issue #734's plan matrix: catalog-compatible-with-active-baseline (STIG and
-/// SRG), no-active-baseline skip, unmapped-benchmark skip, unsupported (no catalog
-/// link) skip, the "some skip, siblings still plan" isolation ADR-0023/0024 require,
-/// the all-skip => unrunnable-plan case, and determinism/digest-parity across repeated
-/// compiles of the same resolved set. Also covers the skip-vs-integrity-failure split
-/// (round-2 review of PR #857): the enumerated architecturally-skippable reasons
-/// skip-and-continue, but a data-integrity violation (an SRG profile whose active
-/// baseline carries a benchmark revision) throws <see cref="ScanPlanIntegrityException"/>
-/// and fails the whole plan closed rather than silently dropping the component.
+/// SRG), no-active-baseline skip, unsupported (no catalog link) skip, the "some skip,
+/// siblings still plan" isolation ADR-0023/0024 require, the all-skip =>
+/// unrunnable-plan case, and determinism/digest-parity across repeated compiles of the
+/// same resolved set. Also covers the skip-vs-integrity-failure split (round-2 review
+/// of PR #857): the enumerated architecturally-skippable reasons skip-and-continue, but
+/// a data-integrity violation (an SRG profile whose active baseline carries a benchmark
+/// revision) throws <see cref="ScanPlanIntegrityException"/> and fails the whole plan
+/// closed rather than silently dropping the component. Issue #1021: an unmapped STIG
+/// benchmark is no longer in the skippable set at all -- it plans profile-only with
+/// <see cref="ScanPlanItem.IsBenchmarkMissing"/> set (see the coexisting-SRG repro test,
+/// the issue's own live-lab scenario).
 /// </summary>
 [Collection("Postgres")]
 public sealed class ScanPlannerServiceTests : IAsyncLifetime
@@ -376,11 +379,17 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 	}
 
 	[Fact]
-	public async Task CompileAsync_UnmappedStigBenchmark_IsSkippedNotFailed()
+	public async Task CompileAsync_UnmappedStigBenchmark_PlansProfileOnlyWithBenchmarkMissingAnnotation()
 	{
-		// A STIG execution profile (has a CatalogBenchmarkReference) whose ACTIVE
-		// baseline was staged with no benchmark_revision_id -- a data-integrity gap
-		// distinct from "no active baseline at all."
+		// Issue #1021: a STIG execution profile (has a CatalogBenchmarkReference) whose
+		// ACTIVE baseline was staged with no benchmark_revision_id used to be an
+		// unmapped_benchmark SKIP -- a permanent planning dead-end per the issue. Per the
+		// owner correction on #730 (2026-08-28) and the decided lifecycle in #1002,
+		// execution requires only the approved profile baseline; the XCCDF is optional
+		// CKL-metadata enrichment, never an execution gate. This now plans normally
+		// (profile-only semantics: BenchmarkRevisionId stays null, matching an SRG item's
+		// shape) with IsBenchmarkMissing surfacing the standing #1002 alert as a
+		// non-blocking annotation instead of a skip.
 		Guid targetId = await SeedSiteAndTargetAsync();
 		Guid executionProfileId = await SeedExecutionProfileAsync("unmapped", "8.0.3", withBenchmark: "vmware-esxi-8-stig-unmapped");
 		await ActivateBaselineAsync(executionProfileId, "unmapped", benchmarkRevisionId: null);
@@ -389,9 +398,70 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 
 		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
 
-		Assert.Empty(plan.Items);
-		ScanPlanSkip skip = Assert.Single(plan.Skips);
-		Assert.Equal(ScanPlanSkipReasons.UnmappedBenchmark, skip.Reason);
+		Assert.True(plan.IsRunnable);
+		Assert.Empty(plan.Skips);
+		ScanPlanItem item = Assert.Single(plan.Items);
+		Assert.Equal(executionProfileId, item.CatalogExecutionProfileId);
+		Assert.Null(item.BenchmarkRevisionId);
+		Assert.True(item.IsBenchmarkMissing);
+	}
+
+	/// <summary>
+	/// Issue #1021's exact live-lab repro: an operator activates BOTH a runnable SRG
+	/// baseline (priority 6) and a STIG baseline whose XCCDF is not yet mapped (lower/
+	/// higher-precedence priority, so the pre-#1021 tiebreak picked it first and then
+	/// skipped `unmapped_benchmark` immediately, never falling through to the coexisting
+	/// SRG baseline). On main (pre-fix) this produced `is_runnable=false` with a single
+	/// `unmapped_benchmark` skip and the SRG baseline never considered at all -- captured
+	/// as the failing-test-first proof for this issue. Post-fix, the STIG profile is
+	/// preferred by the SAME documented-priority tiebreak (issue #1012) but now RUNS
+	/// profile-only instead of dead-ending: one accepted item, zero skips,
+	/// IsBenchmarkMissing true, the coexisting SRG baseline correctly left unused (the
+	/// tiebreak is harmless now that the higher-priority choice always executes).
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_CoexistingSrgAndUnmappedStigBaselines_PlansStigProfileOnlyInsteadOfDeadEnding()
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+
+		CatalogSourceRevision sourceRevision = await _catalog.UpsertSourceRevisionAsync("source-1021", null, CancellationToken.None);
+		CatalogProduct product = await _catalog.UpsertProductAsync(sourceRevision.Id, "VMware", "vsphere-1021", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
+		CatalogComponent component = await _catalog.UpsertComponentAsync(
+			productVersion.Id, new CatalogComponentDefinition("esxi-1021", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
+
+		// Coexisting, perfectly runnable SRG baseline (priority 6, per
+		// docs/compliance-parity.md -- every SRG report group sorts below every STIG one).
+		CatalogContentRelease srgRelease = await _catalog.UpsertContentReleaseAsync(sourceRevision.Id, CatalogKinds.Srg, "release-srg-1021", "Test SRG Release", CancellationToken.None);
+		CatalogReportGroup srgGroup = await _catalog.UpsertReportGroupAsync("srg-1021", "SRG", 6, CancellationToken.None);
+		CatalogExecutionProfile srgProfile = await _catalog.CreateExecutionProfileAsync(component.Id, srgRelease.Id, srgGroup.Id, "1.0.0", CatalogOutputKinds.Hdf, CancellationToken.None);
+		await _catalog.AddCredentialRequirementAsync(srgProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
+		await ActivateBaselineAsync(srgProfile.Id, "1021-srg", benchmarkRevisionId: null);
+
+		// STIG baseline, XCCDF NOT yet mapped (the normal pre-#730 state) -- higher
+		// precedence priority than SRG, so the tiebreak picks this one first.
+		CatalogContentRelease stigRelease = await _catalog.UpsertContentReleaseAsync(sourceRevision.Id, CatalogKinds.Stig, "release-stig-1021", "Test STIG Release", CancellationToken.None);
+		CatalogReportGroup stigGroup = await _catalog.UpsertReportGroupAsync("esxi-stig-1021", "ESXi STIG", 4, CancellationToken.None);
+		CatalogExecutionProfile stigProfile = await _catalog.CreateExecutionProfileAsync(component.Id, stigRelease.Id, stigGroup.Id, "1.0.0", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		await _catalog.AddCredentialRequirementAsync(stigProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
+		await _catalog.SetBenchmarkReferenceAsync(stigProfile.Id, "vmware-esxi-8-1021-unmapped", "V1R1", CancellationToken.None);
+		await ActivateBaselineAsync(stigProfile.Id, "1021-stig", benchmarkRevisionId: null);
+
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, component.Id, "8.0.3", "host-1021-9001");
+
+		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+
+		// Failing-test-first proof (pre-fix, this asserted the opposite): the component
+		// is RUNNABLE via the STIG profile, profile-only, with the gap surfaced as a
+		// non-blocking annotation -- never a dead end, never falling back to the SRG
+		// baseline (the tiebreak result is unchanged, only its consequence is).
+		Assert.True(plan.IsRunnable);
+		Assert.Empty(plan.Skips);
+		ScanPlanItem item = Assert.Single(plan.Items);
+		Assert.Equal(stigProfile.Id, item.CatalogExecutionProfileId);
+		Assert.Equal(CatalogOutputKinds.HdfAndCkl, item.OutputKind);
+		Assert.Null(item.BenchmarkRevisionId);
+		Assert.True(item.IsBenchmarkMissing);
 	}
 
 	[Fact]
@@ -498,11 +568,13 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 	public async Task CompileAsync_EveryLegitimateSkipReason_SkipsAndContinuesWithoutFailingThePlan()
 	{
 		// The counterpart pin to the integrity-failure test above: the enumerated
-		// architecturally-skippable reasons (unsupported, no_active_baseline,
-		// unmapped_benchmark -- the closed ScanPlanSkipReasons.All set after #857 round 2
-		// removed invalid_baseline) must ALL skip-and-continue, never fail the plan,
-		// alongside a healthy sibling that still plans (ADR-0023/0024 per-component
-		// isolation). One candidate per reason, plus one good component.
+		// architecturally-skippable reasons (unsupported, no_active_baseline -- the closed
+		// ScanPlanSkipReasons.All set after issue #1021 also retired unmapped_benchmark as
+		// a producible reason) must ALL skip-and-continue, never fail the plan, alongside
+		// healthy siblings that still plan (ADR-0023/0024 per-component isolation). One
+		// candidate per skip reason, plus one good (SRG) component and one
+		// unmapped-benchmark STIG component that now plans profile-only instead of
+		// skipping (issue #1021/#1002).
 		Guid targetId = await SeedSiteAndTargetAsync();
 
 		// Good sibling (SRG, active baseline) -> accepted item.
@@ -519,7 +591,8 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		Guid noBaselineCatalogComponentId = (await _catalog.GetExecutionProfileAsync(noBaselineProfileId, CancellationToken.None))!.Component.Id;
 		Guid noBaselineComponent = await SeedComponentLinkedToAsync(targetId, noBaselineCatalogComponentId, "8.0.3", "host-legit-nobaseline");
 
-		// unmapped_benchmark: STIG profile, active baseline with no benchmark revision.
+		// Issue #1021: STIG profile, active baseline with no benchmark revision -- now an
+		// ACCEPTED, profile-only item (IsBenchmarkMissing), never a skip.
 		Guid unmappedProfileId = await SeedExecutionProfileAsync("legit-unmapped", "8.0.3", withBenchmark: "invented-legit-unmapped-stig");
 		await ActivateBaselineAsync(unmappedProfileId, "legit-unmapped", benchmarkRevisionId: null);
 		Guid unmappedCatalogComponentId = (await _catalog.GetExecutionProfileAsync(unmappedProfileId, CancellationToken.None))!.Component.Id;
@@ -528,20 +601,25 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		ScanPlan plan = await _planner.CompileAsync(
 			null, [goodComponent, unsupportedComponent, noBaselineComponent, unmappedComponent], CancellationToken.None);
 
-		// The plan compiled (did not throw): the good sibling planned, every skippable
-		// reason produced a skip row and its siblings still proceeded.
+		// The plan compiled (did not throw): both healthy siblings planned (the SRG good
+		// component and the profile-only unmapped-STIG component), every remaining
+		// skippable reason produced a skip row and its siblings still proceeded.
 		Assert.True(plan.IsRunnable);
-		ScanPlanItem accepted = Assert.Single(plan.Items);
-		Assert.Equal(goodComponent, accepted.ComponentId);
+		Assert.Equal(2, plan.Items.Count);
+		Assert.Contains(plan.Items, i => i.ComponentId == goodComponent);
+		ScanPlanItem unmappedItem = Assert.Single(plan.Items, i => i.ComponentId == unmappedComponent);
+		Assert.True(unmappedItem.IsBenchmarkMissing);
+		Assert.Null(unmappedItem.BenchmarkRevisionId);
 
-		Assert.Equal(3, plan.Skips.Count);
+		Assert.Equal(2, plan.Skips.Count);
 		Assert.Contains(plan.Skips, s => s.ComponentId == unsupportedComponent && s.Reason == ScanPlanSkipReasons.Unsupported);
 		Assert.Contains(plan.Skips, s => s.ComponentId == noBaselineComponent && s.Reason == ScanPlanSkipReasons.NoActiveBaseline);
-		Assert.Contains(plan.Skips, s => s.ComponentId == unmappedComponent && s.Reason == ScanPlanSkipReasons.UnmappedBenchmark);
 
-		// Every skip reason emitted here is a member of the closed skippable set; none is
-		// the integrity code (that path throws, proven separately above).
+		// Every skip reason emitted here is a member of the closed PRODUCIBLE set; none is
+		// the integrity code (that path throws, proven separately above), and
+		// unmapped_benchmark never appears (issue #1021 retired it as producible).
 		Assert.All(plan.Skips, s => Assert.Contains(s.Reason, ScanPlanSkipReasons.All));
+		Assert.DoesNotContain(plan.Skips, s => s.Reason == ScanPlanSkipReasons.UnmappedBenchmark);
 	}
 
 	private async Task<Waypoint.Core.ComplianceContent.Xccdf.BenchmarkRevision> ImportBenchmarkAsync(string benchmarkKey)

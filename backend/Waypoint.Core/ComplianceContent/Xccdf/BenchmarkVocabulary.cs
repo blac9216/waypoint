@@ -104,9 +104,11 @@ public static class BenchmarkMappingDerivedStates
 	/// <see cref="BenchmarkMappingStatuses.Ambiguous"/>, or no mapping decision has ever
 	/// been recorded at all) -- a persistent, honest, OPEN alert (issue #1002 "STIG
 	/// without a benchmark = approvable, scannable, with a STANDING OPEN ALERT") until
-	/// an XCCDF is mapped. Never blocks baseline activation or scan planning by itself
-	/// -- see <see cref="Waypoint.Infrastructure.Runs.ScanPlannerService"/>'s
-	/// pre-existing, already-non-blocking <c>unmapped_benchmark</c> per-component skip.
+	/// an XCCDF is mapped. Never blocks baseline activation or scan planning: issue
+	/// #1021 fixed <see cref="Waypoint.Infrastructure.Runs.ScanPlannerService"/> so this
+	/// state plans the STIG execution profile profile-only (<see cref="Waypoint.Core.Scans.ScanPlanItem.IsBenchmarkMissing"/>
+	/// set, no benchmark revision on the item) instead of the pre-#1021
+	/// <c>unmapped_benchmark</c> skip that made the component permanently unplannable.
 	/// </summary>
 	public const string BenchmarkMissing = "benchmark_missing";
 }
