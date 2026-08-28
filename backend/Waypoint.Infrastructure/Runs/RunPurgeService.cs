@@ -143,6 +143,35 @@ public sealed class RunPurgeService
 	}
 
 	/// <summary>
+	/// Issue #1013: drives finalization the instant the async artifact-purge job
+	/// reports its own outcome, so a run with on-disk artifacts finalizes in the SAME
+	/// operator action that started the purge rather than requiring a manual re-POST.
+	/// <see cref="Waypoint.Infrastructure.Scans.PurgeJobHandler"/> (compliance-runner)
+	/// calls this immediately after <see cref="IRunPurgeRepository.ReportArtifactOutcomeAsync"/>
+	/// commits -- same process, same call stack, no separate reconciler/sweep needed.
+	/// Re-reads status fresh from <c>run_purges</c> rather than trusting any
+	/// caller-held copy, so it observes the <c>artifacts_phase = 'done'</c> the report
+	/// just committed. A failed artifact report leaves <c>artifacts_phase = 'failed'</c>,
+	/// which <see cref="ResumeAsync"/> re-enqueues rather than finalizes -- this class's
+	/// retry contract is unchanged: only a genuinely successful artifact pass finalizes
+	/// here, a failure still needs (and gets) a retryable re-POST. A missing
+	/// <c>run_purges</c> row (defensive -- should not happen, since
+	/// <see cref="IRunPurgeRepository.ReportArtifactOutcomeAsync"/> was just called for
+	/// this same run id) is a silent no-op: the job's own outcome is already durably
+	/// recorded either way.
+	/// </summary>
+	public async Task FinalizeAfterArtifactOutcomeAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		RunPurgeStatus? status = await _purges.GetStatusAsync(runId, cancellationToken).ConfigureAwait(false);
+		if (status is null)
+		{
+			return;
+		}
+
+		await ResumeAsync(status, cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>
 	/// Advances an in-flight <c>run_purges</c> row by exactly one phase per call: the
 	/// database phase if not yet done, then the artifact phase (enqueue if never
 	/// started, or re-enqueue if the last attempt failed), then completion if both

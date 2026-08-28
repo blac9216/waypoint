@@ -12,14 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Runs;
+using Waypoint.Core.Scans;
 using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Runs;
+using Waypoint.Infrastructure.Scans;
 using Waypoint.Tests.Support;
 using Xunit;
 
@@ -34,9 +39,10 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 /// running a real dispatcher loop), and idempotent re-invocation.
 /// </summary>
 [Collection("Postgres")]
-public sealed class RunPurgeServiceTests : IAsyncLifetime
+public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 {
 	private readonly PostgresFixture _fixture;
+	private readonly string _artifactRoot = Directory.CreateTempSubdirectory("waypoint-run-purge-service-artifacts-").FullName;
 	private JobQueueRepository _jobs = null!;
 	private RunPurgeRepository _purges = null!;
 	private AttestationSnapshotRepository _attestationSnapshots = null!;
@@ -56,6 +62,66 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
+
+	public void Dispose()
+	{
+		try
+		{
+			Directory.Delete(_artifactRoot, recursive: true);
+		}
+		catch (IOException)
+		{
+			// Best-effort cleanup only -- CI temp-dir sweep handles anything left over.
+		}
+	}
+
+	private sealed class FakeEventPublisher : IJobEventPublisher
+	{
+		public Task EmitAsync(string eventType, Guid? jobId, Guid? runId, string payloadJson, CancellationToken cancellationToken) => Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Claims and hands the real, enqueued artifact-purge job to a real
+	/// <see cref="PurgeJobHandler"/> -- the same handler compliance-runner runs,
+	/// against the actual queued <c>purge</c> job row <see cref="RunPurgeService"/>
+	/// created, rather than short-circuiting straight to
+	/// <see cref="IRunPurgeRepository.ReportArtifactOutcomeAsync"/> the way the older
+	/// tests in this file do. This is the layer issue #1013's bug actually lives at:
+	/// only by running the real handler does <see cref="RunPurgeService.FinalizeAfterArtifactOutcomeAsync"/>
+	/// get exercised the way production actually calls it.
+	/// </summary>
+	private async Task<JobExecutionOutcome> RunArtifactPurgeJobAsync(Guid targetRunId, CancellationToken cancellationToken)
+	{
+		RunPurgeStatus? status = await _purges.GetStatusAsync(targetRunId, cancellationToken);
+		Assert.NotNull(status);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync(cancellationToken);
+		await using NpgsqlCommand claim = new(
+			"SELECT id, run_id, job_type, target_id, target_name, credential_id, priority, payload::text, attempt_count, max_attempts FROM jobs WHERE job_type = 'purge' ORDER BY created_at DESC LIMIT 1",
+			connection);
+		await using NpgsqlDataReader reader = await claim.ExecuteReaderAsync(cancellationToken);
+		Assert.True(await reader.ReadAsync(cancellationToken));
+		ClaimedJob job = new(
+			Id: reader.GetGuid(0),
+			RunId: reader.GetGuid(1),
+			JobType: reader.GetString(2),
+			TargetId: reader.IsDBNull(3) ? null : reader.GetGuid(3),
+			TargetName: reader.IsDBNull(4) ? null : reader.GetString(4),
+			CredentialId: reader.IsDBNull(5) ? null : reader.GetGuid(5),
+			Priority: reader.GetInt16(6),
+			Payload: reader.GetString(7),
+			AttemptCount: reader.GetInt32(8),
+			MaxAttempts: reader.GetInt32(9));
+		await reader.CloseAsync();
+
+		JobExecutionContext context = new(
+			job, "worker-test", new FakeEventPublisher(),
+			new JobQueueRepository(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance), JobShape.Simple);
+		ScanOptions scanOptions = new() { ArtifactStorePath = _artifactRoot };
+		PurgeJobHandler handler = new(_purges, _service, Options.Create(scanOptions), NullLogger<PurgeJobHandler>.Instance);
+		return await handler.ExecuteAsync(context, cancellationToken);
+	}
 
 	[Theory]
 	[InlineData("completed")]
@@ -146,6 +212,67 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime
 		Assert.True(await ScanJobRowExistsAsync(scanJobId));
 	}
 
+	/// <summary>
+	/// Issue #1013 -- failing-test-first proof. Before the fix, this asserted the bug:
+	/// a single <c>POST</c> plus the artifact job actually completing (via the real
+	/// <see cref="PurgeJobHandler"/>, not a direct repository call) left
+	/// <c>runs.purged_at</c> NULL, no tombstone, and <c>GET /runs/{id}/purge</c>
+	/// (<see cref="RunPurgeService.GetStatusAsync"/>) reporting <see cref="RunPurgeOutcome.InProgress"/>
+	/// forever -- exactly the round-8 live-proven stuck state, requiring a manual
+	/// re-POST (<see cref="PurgeRunAsync_PartialFailureThenRetry_EventuallyCompletesWithoutDoubleReporting"/>
+	/// and the older <see cref="PurgeRunAsync_FullFlow_DeletesProjectionsAndRecordsTombstone"/>
+	/// simulate that same manual second call -- this test proves it is no longer
+	/// necessary). This is now a passing regression test: the SAME operator action
+	/// (one <see cref="RunPurgeService.PurgeRunAsync"/> call plus the artifact job
+	/// completing under its own steam) reaches <see cref="RunPurgeOutcome.Completed"/>
+	/// with no second call into <see cref="RunPurgeService"/> at all.
+	/// </summary>
+	[Fact]
+	public async Task PurgeRunAsync_RunWithArtifacts_FinalizesInOneOperatorActionWithoutASecondPurgeCall()
+	{
+		Guid runId = await SeedRunAsync("completed");
+		Guid scanJobId = await InsertScanJobAsync(runId);
+		WriteArtifactFiles(scanJobId);
+
+		// The one and only call into RunPurgeService this test makes.
+		RunPurgeResult inProgress = await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
+		Assert.Equal(RunPurgeOutcome.InProgress, inProgress.Outcome);
+
+		// The artifact-purge job completing under its own steam -- exactly what
+		// compliance-runner's JobDispatcherHostedService does in production, never a
+		// second call into RunPurgeService/PurgeRunAsync.
+		JobExecutionOutcome jobOutcome = await RunArtifactPurgeJobAsync(runId, CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.Succeeded, jobOutcome.Kind);
+
+		Assert.False(File.Exists(ScanArtifactPaths.RawHdf(_artifactRoot, scanJobId)));
+		Assert.False(File.Exists(ScanArtifactPaths.AttestedHdf(_artifactRoot, scanJobId)));
+		Assert.False(File.Exists(ScanArtifactPaths.Ckl(_artifactRoot, scanJobId)));
+
+		// GET /runs/{id}/purge (RunPurgeService.GetStatusAsync) -- no POST issued again.
+		RunPurgeResult? status = await _service.GetStatusAsync(runId, CancellationToken.None);
+		Assert.NotNull(status);
+		Assert.Equal(RunPurgeOutcome.Completed, status!.Outcome);
+		Assert.NotNull(status.Status);
+		Assert.Equal("done", status.Status!.ArtifactsPhase);
+
+		Assert.Null(await _purges.GetStatusAsync(runId, CancellationToken.None));
+		RunPurgeTombstone? tombstone = await _purges.GetTombstoneAsync(runId, CancellationToken.None);
+		Assert.NotNull(tombstone);
+		Assert.Equal("completed", tombstone!.Outcome);
+		Assert.NotNull(await GetRunPurgedAtAsync(runId));
+
+		// The evidence-table read surfaces (#961/#1010) must render honest-empty --
+		// the component-result rows this run's evidence deletion (ADR-0019) removed
+		// stay removed; this run never had any inserted (SeedRunAsync/InsertScanJobAsync
+		// do not create component_results rows), so "honest empty" here means the
+		// finalize path did not somehow resurrect or leave dangling evidence.
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand countResults = new("SELECT COUNT(*) FROM component_results WHERE run_id = $1", connection);
+		countResults.Parameters.AddWithValue(runId);
+		Assert.Equal(0L, (long)(await countResults.ExecuteScalarAsync())!);
+	}
+
 	[Fact]
 	public async Task PurgeRunAsync_PartialFailureThenRetry_EventuallyCompletesWithoutDoubleReporting()
 	{
@@ -181,6 +308,87 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime
 		await using NpgsqlCommand count = new("SELECT COUNT(*) FROM run_purge_tombstones WHERE run_id = $1", connection);
 		count.Parameters.AddWithValue(runId);
 		Assert.Equal(1L, (long)(await count.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// Issue #1013: pins the retry path end-to-end through the REAL
+	/// <see cref="PurgeJobHandler"/> (not a direct repository report) for a genuine
+	/// mid-phase failure -- the handler itself hits an undeletable file, reports
+	/// failure, and <see cref="RunPurgeService.FinalizeAfterArtifactOutcomeAsync"/>
+	/// (called from inside the handler on every outcome path) must NOT finalize on
+	/// that failed report; the purge must be left honestly
+	/// <see cref="RunPurgeOutcome.Failed"/>/in-flight, not silently completed. Only
+	/// after a genuine operator retry (permissions fixed, purge re-POSTed) does the
+	/// artifact job re-run, succeed, and finalize.
+	/// </summary>
+	[Fact]
+	public async Task PurgeRunAsync_RealHandlerMidPhaseFailure_LeavesHonestlyInProgressThenRetryCompletes()
+	{
+		if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+		{
+			// Same POSIX-permission-shaped skip as PurgeJobHandlerTests -- this repo's
+			// CI targets Linux containers (deploy/*, docs/testing.md).
+			return;
+		}
+
+		Guid runId = await SeedRunAsync("completed");
+		Guid scanJobId = await InsertScanJobAsync(runId);
+		string rawHdfPath = ScanArtifactPaths.RawHdf(_artifactRoot, scanJobId);
+		File.WriteAllText(rawHdfPath, "{}");
+
+		string lockedDirectory = Path.Combine(_artifactRoot, $"locked-{Guid.NewGuid():N}");
+		Directory.CreateDirectory(lockedDirectory);
+
+		RunPurgeResult inProgress = await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
+		Assert.Equal(RunPurgeOutcome.InProgress, inProgress.Outcome);
+
+		// Force the handler's own deletion to fail: lock the (test-specific, shared
+		// ScanOptions.ArtifactStorePath) root itself down to read-only-execute so
+		// File.Delete on the raw HDF underneath it throws.
+		File.SetUnixFileMode(_artifactRoot, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+		try
+		{
+			JobExecutionOutcome failedJobOutcome = await RunArtifactPurgeJobAsync(runId, CancellationToken.None);
+			Assert.Equal(JobOutcomeKind.Failed, failedJobOutcome.Kind);
+		}
+		finally
+		{
+			File.SetUnixFileMode(_artifactRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
+		}
+
+		// Honestly in-progress/failed -- NOT silently finalized by the handler's own
+		// post-report finalize call (which only fires on the success path).
+		RunPurgeResult? afterFailure = await _service.GetStatusAsync(runId, CancellationToken.None);
+		Assert.NotNull(afterFailure);
+		Assert.Equal(RunPurgeOutcome.Failed, afterFailure!.Outcome);
+		Assert.Null(await _purges.GetTombstoneAsync(runId, CancellationToken.None));
+		Assert.Null(await GetRunPurgedAtAsync(runId));
+
+		// Retry: operator re-POSTs; RunPurgeService re-enqueues a fresh artifact job.
+		RunPurgeResult retried = await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
+		Assert.Equal(RunPurgeOutcome.InProgress, retried.Outcome);
+		Assert.Equal("running", retried.Status!.ArtifactsPhase);
+
+		// This time deletion succeeds -- the handler's own post-report finalize call
+		// must complete the purge without any further RunPurgeService call.
+		JobExecutionOutcome retryJobOutcome = await RunArtifactPurgeJobAsync(runId, CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.Succeeded, retryJobOutcome.Kind);
+
+		RunPurgeResult? completed = await _service.GetStatusAsync(runId, CancellationToken.None);
+		Assert.NotNull(completed);
+		Assert.Equal(RunPurgeOutcome.Completed, completed!.Outcome);
+		Assert.NotNull(await GetRunPurgedAtAsync(runId));
+
+		RunPurgeTombstone? tombstone = await _purges.GetTombstoneAsync(runId, CancellationToken.None);
+		Assert.NotNull(tombstone);
+		Assert.Equal("completed", tombstone!.Outcome);
+	}
+
+	private void WriteArtifactFiles(Guid scanJobId)
+	{
+		File.WriteAllText(ScanArtifactPaths.RawHdf(_artifactRoot, scanJobId), "{}");
+		File.WriteAllText(ScanArtifactPaths.AttestedHdf(_artifactRoot, scanJobId), "{}");
+		File.WriteAllText(ScanArtifactPaths.Ckl(_artifactRoot, scanJobId), "<CHECKLIST/>");
 	}
 
 	[Fact]

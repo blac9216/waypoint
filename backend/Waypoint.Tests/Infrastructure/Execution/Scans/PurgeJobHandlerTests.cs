@@ -19,7 +19,9 @@ using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Runs;
 using Waypoint.Core.Scans;
+using Waypoint.Infrastructure.ConfigDocs;
 using Waypoint.Infrastructure.Jobs;
+using Waypoint.Infrastructure.Runs;
 using Waypoint.Infrastructure.Scans;
 using Xunit;
 
@@ -98,10 +100,45 @@ public sealed class PurgeJobHandlerTests : IDisposable
 		public Task EmitAsync(string eventType, Guid? jobId, Guid? runId, string payloadJson, CancellationToken cancellationToken) => Task.CompletedTask;
 	}
 
+	/// <summary>
+	/// Issue #1013: <see cref="PurgeJobHandler"/> now takes a
+	/// <see cref="RunPurgeService"/> to finalize the purge right after reporting a
+	/// successful artifact outcome. None of these tests exercise a real
+	/// <c>run_purges</c> row (<see cref="FakeRunPurgeRepository.GetStatusAsync"/> always
+	/// returns <c>null</c>), so <c>FinalizeAfterArtifactOutcomeAsync</c>'s "no row"
+	/// branch always short-circuits before touching <see cref="IJobControlRepository"/>
+	/// -- every member here throws to prove that.
+	/// </summary>
+	private sealed class NotImplementedJobControlRepository : IJobControlRepository
+	{
+		private static InvalidOperationException NotExpected() => new("Not expected to be called in this unit test.");
+
+		public Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<RunSummary?> GetRunAsync(Guid runId, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<RunListResult> ListRunsAsync(int limit, int offset, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<RunHistoryPage> ListRunHistoryAsync(RunHistoryQuery query, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<IReadOnlyList<JobSummary>> GetJobsForRunAsync(Guid runId, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<JobSummary?> GetJobAsync(Guid jobId, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<Guid> CreateRunAsync(string runType, string scopeJson, Guid? credentialId, string? initiatedBy, CancellationToken cancellationToken, Guid? scheduleId = null) => throw NotExpected();
+		public Task<IReadOnlyList<Guid>> FanOutJobsAsync(Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<bool> ResumeRunAsync(Guid runId, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<AbortRunResult> AbortRunAsync(Guid runId, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<JobCancelOutcome> CancelJobAsync(Guid jobId, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<JobRetryOutcome> RetryJobAsync(Guid jobId, string actor, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<BulkJobActionResult<JobCancelOutcome>> BulkCancelJobsAsync(Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<BulkJobActionResult<JobRetryOutcome>> BulkRetryJobsAsync(Guid runId, IReadOnlyList<Guid> jobIds, string actor, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<CredentialUnblockResult> UnblockCredentialAsync(Guid credentialId, string? reason, CancellationToken cancellationToken) => throw NotExpected();
+		public Task<CredentialSwapResult> SwapAndResumeBlockedCredentialAsync(Guid runId, Guid replacementCredentialId, string actor, string? reason, CancellationToken cancellationToken) => throw NotExpected();
+	}
+
 	private PurgeJobHandler CreateHandler(FakeRunPurgeRepository purges)
 	{
 		ScanOptions scanOptions = new() { ArtifactStorePath = _artifactRoot };
-		return new PurgeJobHandler(purges, Options.Create(scanOptions), NullLogger<PurgeJobHandler>.Instance);
+		RunPurgeService purgeService = new(
+			new NotImplementedJobControlRepository(), purges, new AttestationSnapshotRepository("Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x"),
+			"Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x");
+		return new PurgeJobHandler(purges, purgeService, Options.Create(scanOptions), NullLogger<PurgeJobHandler>.Instance);
 	}
 
 	private static JobExecutionContext ContextFor(Guid purgeJobId, string payload)
@@ -211,7 +248,10 @@ public sealed class PurgeJobHandlerTests : IDisposable
 			ScanOptions scanOptions = new() { ArtifactStorePath = lockedDirectory };
 			Guid targetRunId = Guid.NewGuid();
 			FakeRunPurgeRepository purges = new() { RunIdForArtifactJob = targetRunId };
-			PurgeJobHandler handler = new(purges, Options.Create(scanOptions), NullLogger<PurgeJobHandler>.Instance);
+			RunPurgeService purgeService = new(
+				new NotImplementedJobControlRepository(), purges, new AttestationSnapshotRepository("Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x"),
+				"Host=127.0.0.1;Port=1;Database=x;Username=x;Password=x");
+			PurgeJobHandler handler = new(purges, purgeService, Options.Create(scanOptions), NullLogger<PurgeJobHandler>.Instance);
 
 			string payload = JsonSerializer.Serialize(new { job_ids = new[] { scanJobId.ToString() } });
 			JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(Guid.NewGuid(), payload), CancellationToken.None);
