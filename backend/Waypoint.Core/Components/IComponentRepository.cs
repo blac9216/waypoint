@@ -59,6 +59,29 @@ public interface IComponentRepository
 		Guid targetId, IReadOnlyList<DiscoveredComponent> items, CancellationToken cancellationToken, bool advanceAbsence = true);
 
 	/// <summary>
+	/// Issue #741 (ADR-0023 "For a catalog-declared service with no independent
+	/// upstream object, parent identity plus catalog component key is authoritative"):
+	/// reconciles the catalog-declared child component set beneath one parent component
+	/// against <paramref name="declared"/> (the linked catalog release's own declared
+	/// service list, selected by <see cref="CatalogDeclaredServiceComponents.SelectDeclaredServiceChildren"/>
+	/// -- never a hard-coded list). Each declared child upserts by
+	/// (parent target, parent component, catalog component key) with a NULL vendor
+	/// identity -- reconnecting an absent/retired row rather than creating a sibling --
+	/// and always re-asserts <see cref="Component.CatalogComponentId"/> from the
+	/// declared entry (the expansion IS the linkage authority for these rows; there is
+	/// no independent fact to resolve against). A previously-declared child no longer
+	/// in <paramref name="declared"/> (catalog change, or the parent losing its link --
+	/// callers pass an empty list for an unlinked parent) is marked
+	/// <see cref="ComponentLifecycleStates.Absent"/>, never deleted and never left
+	/// silently active. No version fact is ever written on a child row -- facts are
+	/// inherited live from the parent at match time (<see cref="ComponentFactInheritance"/>).
+	/// Runs as a single transaction, same durability contract as
+	/// <see cref="UpsertDiscoveredAsync"/>.
+	/// </summary>
+	Task<CatalogDeclaredChildSyncOutcome> SyncCatalogDeclaredChildrenAsync(
+		Guid targetId, Guid parentComponentId, IReadOnlyList<CatalogDeclaredChild> declared, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Admin configured-fact write (docs/api-contract.md <c>PUT /components/{id}</c>:
 	/// "configured_fact only ... never lifecycle or identity"). Recomputes
 	/// <see cref="Component.FactConflict"/> against any existing discovered fact and

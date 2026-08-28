@@ -97,6 +97,7 @@ public sealed class ScopeResolutionService
 		// several components under the same target should not re-fetch that target
 		// once per component.
 		Dictionary<Guid, Target?> targetCache = [];
+		Dictionary<Guid, Component?> parentCache = [];
 
 		foreach (Guid componentId in componentIds.Distinct())
 		{
@@ -123,7 +124,7 @@ public sealed class ScopeResolutionService
 				continue;
 			}
 
-			await EvaluateComponentAsync(component, resolved, omissions, cancellationToken).ConfigureAwait(false);
+			await EvaluateComponentAsync(component, resolved, omissions, parentCache, cancellationToken).ConfigureAwait(false);
 		}
 
 		resolved.Sort();
@@ -171,12 +172,13 @@ public sealed class ScopeResolutionService
 			targets = resolvedTargets;
 		}
 
+		Dictionary<Guid, Component?> parentCache = [];
 		foreach (Target target in targets)
 		{
 			IReadOnlyList<Component> components = await _components.ListForTargetAsync(target.Id, includeRetired: true, cancellationToken).ConfigureAwait(false);
 			foreach (Component component in components)
 			{
-				await EvaluateComponentAsync(component, resolved, omissions, cancellationToken).ConfigureAwait(false);
+				await EvaluateComponentAsync(component, resolved, omissions, parentCache, cancellationToken).ConfigureAwait(false);
 			}
 		}
 
@@ -194,8 +196,33 @@ public sealed class ScopeResolutionService
 	/// <see cref="ScopeOmission"/> is appended, never both and never neither.
 	/// </summary>
 	private async Task EvaluateComponentAsync(
-		Component component, List<Guid> resolved, List<ScopeOmission> omissions, CancellationToken cancellationToken)
+		Component component, List<Guid> resolved, List<ScopeOmission> omissions, Dictionary<Guid, Component?> parentCache, CancellationToken cancellationToken)
 	{
+		// Issue #741: a catalog-declared child (a named VCSA service -- no vendor
+		// identity, parented beneath the appliance's root connection component) stores
+		// no version fact of its own; the appliance's facts ARE its facts, inherited
+		// live at every evaluation via the single shared rule
+		// (ComponentFactInheritance) rather than a persisted third copy that could
+		// drift. Lifecycle below stays the CHILD's own (its absent/retired state is
+		// reconciled by the declared-children sync); only version facts and the
+		// conflict flag inherit. A missing parent row (should not happen -- children
+		// are only ever created beneath an existing parent, ON DELETE RESTRICT) leaves
+		// the child's own empty facts in place, which fails closed in the matcher as
+		// "no configured or discovered exact product version".
+		if (ComponentFactInheritance.IsCatalogDeclaredChild(component) && component.ParentComponentId is { } parentComponentId)
+		{
+			if (!parentCache.TryGetValue(parentComponentId, out Component? parent))
+			{
+				parent = await _components.GetAsync(parentComponentId, cancellationToken).ConfigureAwait(false);
+				parentCache[parentComponentId] = parent;
+			}
+
+			if (parent is not null)
+			{
+				component = ComponentFactInheritance.WithInheritedFacts(component, parent);
+			}
+		}
+
 		if (component.Lifecycle == ComponentLifecycleStates.Retired)
 		{
 			omissions.Add(new ScopeOmission(

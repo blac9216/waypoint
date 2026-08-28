@@ -77,6 +77,14 @@ public interface ICatalogRepository
 	Task<IReadOnlyList<CatalogComponent>> ListComponentsAsync(Guid productVersionId, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Single catalog component by id, or null when unknown (issue #741: the
+	/// catalog-declared service expansion reads a linked root component's own catalog
+	/// row to reach its owning <see cref="CatalogComponent.ProductVersionId"/> before
+	/// listing that version's declared service set).
+	/// </summary>
+	Task<CatalogComponent?> GetComponentAsync(Guid componentId, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Issue #985: every top-level (<c>parent_component_id IS NULL</c>) catalog component
 	/// across ALL products whose own <see cref="CatalogComponent.ComponentKey"/> equals
 	/// <paramref name="catalogComponentKey"/> and whose product version's

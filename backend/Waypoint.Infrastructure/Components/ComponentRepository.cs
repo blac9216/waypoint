@@ -290,8 +290,19 @@ public sealed class ComponentRepository : IComponentRepository
 		int markedAbsent = 0;
 		if (advanceAbsence)
 		{
+			// Issue #741: catalog-declared children (vendor_identity IS NULL beneath a
+			// parent component -- the named VCSA service rows) are excluded from this
+			// sweep. A discovery boundary structurally never enumerates them (no MoRef,
+			// no upstream object), so "not reported this pass" is not evidence of
+			// absence for them; their lifecycle is owned by
+			// SyncCatalogDeclaredChildrenAsync's catalog-vs-linkage reconciliation, which
+			// the discovery handler runs right after this upsert.
 			await using NpgsqlCommand loadCandidates = new(
-				"SELECT id, vendor_identity, catalog_component_key, parent_component_id FROM components WHERE parent_target_id = $1 AND lifecycle <> 'retired'",
+				"""
+				SELECT id, vendor_identity, catalog_component_key, parent_component_id FROM components
+				WHERE parent_target_id = $1 AND lifecycle <> 'retired'
+				  AND NOT (vendor_identity IS NULL AND parent_component_id IS NOT NULL)
+				""",
 				connection, transaction);
 			loadCandidates.Parameters.AddWithValue(targetId);
 			List<(Guid Id, string? VendorIdentity, string CatalogKey, Guid? ParentComponentId)> candidates = [];
@@ -340,6 +351,117 @@ public sealed class ComponentRepository : IComponentRepository
 		return new ComponentUpsertOutcome(upserted, markedAbsent, reconnected);
 	}
 
+	public async Task<CatalogDeclaredChildSyncOutcome> SyncCatalogDeclaredChildrenAsync(
+		Guid targetId, Guid parentComponentId, IReadOnlyList<CatalogDeclaredChild> declared, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(declared);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		CatalogDeclaredChildSyncOutcome outcome = await SyncCatalogDeclaredChildrenCoreAsync(
+			connection, transaction, targetId, parentComponentId, declared, cancellationToken).ConfigureAwait(false);
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		return outcome;
+	}
+
+	/// <summary>
+	/// Issue #741: the shared transactional body of
+	/// <see cref="SyncCatalogDeclaredChildrenAsync"/> -- also invoked inside
+	/// <see cref="SetConfiguredFactAsync"/>'s own transaction when a root connection
+	/// component's linkage changes, so a configured-version write and its declared-child
+	/// consequence commit or roll back together. Upserts bind to migration 0054's
+	/// <c>idx_components_no_vendor_identity_unique</c> partial index (the exact
+	/// no-vendor-identity identity case ADR-0023 defines for catalog-declared services),
+	/// same as <see cref="UpsertDiscoveredAsync"/>'s NULL-identity branch. No
+	/// <c>discovered_fact</c>/<c>configured_fact</c> is ever written here: a declared
+	/// child's version facts are the parent appliance's, inherited at match time
+	/// (<see cref="ComponentFactInheritance"/>), never a stored third copy.
+	/// </summary>
+	private static async Task<CatalogDeclaredChildSyncOutcome> SyncCatalogDeclaredChildrenCoreAsync(
+		NpgsqlConnection connection,
+		NpgsqlTransaction transaction,
+		Guid targetId,
+		Guid parentComponentId,
+		IReadOnlyList<CatalogDeclaredChild> declared,
+		CancellationToken cancellationToken)
+	{
+		int upserted = 0;
+		int reconnected = 0;
+		foreach (CatalogDeclaredChild child in declared)
+		{
+			await using NpgsqlCommand upsert = new(
+				"""
+				WITH prior AS (
+				    SELECT lifecycle FROM components
+				    WHERE parent_target_id = $1
+				      AND COALESCE(parent_component_id, '00000000-0000-0000-0000-000000000000'::uuid) = $2
+				      AND catalog_component_key = $3
+				      AND vendor_identity IS NULL
+				)
+				INSERT INTO components (parent_target_id, parent_component_id, catalog_component_id, catalog_component_key,
+				                         vendor_identity, display_name, lifecycle, last_seen_at)
+				VALUES ($1, $2, $4, $3, NULL, $5, 'active', now())
+				ON CONFLICT (parent_target_id, COALESCE(parent_component_id, '00000000-0000-0000-0000-000000000000'::uuid), catalog_component_key)
+				    WHERE vendor_identity IS NULL
+				    DO UPDATE SET
+				        catalog_component_id = EXCLUDED.catalog_component_id,
+				        display_name = EXCLUDED.display_name,
+				        lifecycle = 'active',
+				        last_seen_at = now(),
+				        continuous_absence_since = NULL,
+				        retired_at = NULL
+				RETURNING id, (SELECT lifecycle FROM prior) AS prior_lifecycle
+				""", connection, transaction);
+			upsert.Parameters.AddWithValue(targetId);
+			upsert.Parameters.AddWithValue(parentComponentId);
+			upsert.Parameters.AddWithValue(child.CatalogComponentKey);
+			upsert.Parameters.AddWithValue(child.CatalogComponentId);
+			upsert.Parameters.AddWithValue(child.DisplayName);
+
+			await using NpgsqlDataReader reader = await upsert.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+			string? priorLifecycle = reader.IsDBNull(1) ? null : reader.GetString(1);
+			if (priorLifecycle is not null && priorLifecycle != Waypoint.Core.Components.ComponentLifecycleStates.Active)
+			{
+				reconnected++;
+			}
+			else if (priorLifecycle is null)
+			{
+				upserted++;
+			}
+		}
+
+		// A child the catalog no longer declares (or every child, when the parent has
+		// lost its catalog link and the caller passed an empty declared set) becomes
+		// absent -- retained identity, never deleted, honest omission on the next scope
+		// resolution (ADR-0023 lifecycle). Unlike the discovery sweep, retired rows are
+		// also left retired here; only the declared upsert above reconnects one.
+		int markedAbsent;
+		{
+			string[] declaredKeys = [.. declared.Select(c => c.CatalogComponentKey)];
+			await using NpgsqlCommand markAbsent = new(
+				"""
+				UPDATE components
+				SET lifecycle = 'absent',
+				    continuous_absence_since = COALESCE(continuous_absence_since, now())
+				WHERE parent_target_id = $1
+				  AND parent_component_id = $2
+				  AND vendor_identity IS NULL
+				  AND lifecycle = 'active'
+				  AND NOT (catalog_component_key = ANY($3))
+				""", connection, transaction);
+			markAbsent.Parameters.AddWithValue(targetId);
+			markAbsent.Parameters.AddWithValue(parentComponentId);
+			markAbsent.Parameters.AddWithValue(declaredKeys);
+			markedAbsent = await markAbsent.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		return new CatalogDeclaredChildSyncOutcome(upserted, reconnected, markedAbsent);
+	}
+
 	/// <summary>
 	/// Admin configured-fact write. <paramref name="exactVersion"/> null/whitespace
 	/// CLEARS the configured fact (issue #1000 AC "clearing the configured version must
@@ -386,11 +508,13 @@ public sealed class ComponentRepository : IComponentRepository
 		// needed to compute the effective version for linkage and to know whether this
 		// write disagrees with an existing discovered fact.
 		await using NpgsqlCommand select = new(
-			"SELECT catalog_component_key, discovered_fact->>'exact_version' FROM components WHERE id = $1 FOR UPDATE",
+			"SELECT catalog_component_key, discovered_fact->>'exact_version', parent_target_id, parent_component_id, vendor_identity FROM components WHERE id = $1 FOR UPDATE",
 			connection, transaction);
 		select.Parameters.AddWithValue(componentId);
 		string? catalogComponentKey = null;
 		string? discoveredExactVersion = null;
+		Guid parentTargetId = Guid.Empty;
+		bool isRootConnectionComponent = false;
 		bool found = false;
 		await using (NpgsqlDataReader existing = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
 		{
@@ -399,6 +523,12 @@ public sealed class ComponentRepository : IComponentRepository
 				found = true;
 				catalogComponentKey = existing.GetString(0);
 				discoveredExactVersion = existing.IsDBNull(1) ? null : existing.GetString(1);
+				parentTargetId = existing.GetGuid(2);
+
+				// Issue #741: a target's ROOT connection component (no parent, no vendor
+				// identity -- e.g. the synthetic vcenter root) is the anchor for
+				// catalog-declared service expansion below.
+				isRootConnectionComponent = existing.IsDBNull(3) && existing.IsDBNull(4);
 			}
 		}
 
@@ -458,6 +588,33 @@ public sealed class ComponentRepository : IComponentRepository
 			observation.Parameters.AddWithValue(factJson);
 			observation.Parameters.AddWithValue(conflict ? "conflict" : "recorded");
 			await observation.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// Issue #741: a root connection component's linkage change re-derives its
+		// catalog-declared service children in the SAME transaction -- the configured
+		// vCenter version PUT is exactly how a VCSA appliance's link is established in
+		// practice (discovery never observes the vCenter's own version), so this write
+		// is the moment the catalog release's declared VCSA service set becomes (or
+		// stops being) this appliance's discoverable component list. Linked: the linked
+		// catalog component's product version declares the set; unlinked (cleared/
+		// conflicted/no match): an empty declared set marks every previously-derived
+		// child absent -- honest, never silently retained as scannable.
+		if (isRootConnectionComponent)
+		{
+			IReadOnlyList<CatalogDeclaredChild> declared = [];
+			if (catalogComponentId is { } linkedCatalogComponentId)
+			{
+				CatalogComponent? linkedComponent = await _catalog.GetComponentAsync(linkedCatalogComponentId, cancellationToken).ConfigureAwait(false);
+				if (linkedComponent is not null)
+				{
+					IReadOnlyList<CatalogComponent> versionComponents = await _catalog
+						.ListComponentsAsync(linkedComponent.ProductVersionId, cancellationToken).ConfigureAwait(false);
+					declared = CatalogDeclaredServiceComponents.SelectDeclaredServiceChildren(versionComponents, linkedCatalogComponentId);
+				}
+			}
+
+			await SyncCatalogDeclaredChildrenCoreAsync(
+				connection, transaction, parentTargetId, componentId, declared, cancellationToken).ConfigureAwait(false);
 		}
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
