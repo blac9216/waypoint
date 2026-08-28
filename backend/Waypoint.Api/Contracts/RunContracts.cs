@@ -951,3 +951,102 @@ public sealed record RunResultRollupResponse(
 
 	[property: JsonPropertyName("by_status")]
 	IReadOnlyList<RunResultRollupStatusResponse> ByStatus);
+
+/// <summary>
+/// One <c>component_result_findings</c> row for <c>GET /api/v1/jobs/{id}/component-results/findings</c>
+/// (issue #745). Status/severity pass through exactly as recorded (epic #726 §6) --
+/// never re-bucketed, never collapsed. <see cref="RuleId"/>/<see cref="Title"/>/
+/// <see cref="Evidence"/> are omitted (not a blank string) when the parser had no
+/// XCCDF rule identity, title, or evidence text for this control.
+/// </summary>
+public sealed record ComponentResultFindingResponse(
+	[property: JsonPropertyName("control_id")]
+	string ControlId,
+
+	[property: JsonPropertyName("rule_id")]
+	string? RuleId,
+
+	[property: JsonPropertyName("title")]
+	string? Title,
+
+	[property: JsonPropertyName("severity")]
+	string Severity,
+
+	[property: JsonPropertyName("status")]
+	string Status,
+
+	[property: JsonPropertyName("evidence")]
+	string? Evidence);
+
+/// <summary>
+/// Response body for <c>GET /api/v1/jobs/{id}/component-results/findings</c>. Limit/
+/// offset paged -- a single attempt's finding count is bounded by one benchmark's
+/// control count (never an unboundedly growing history), so this endpoint uses the
+/// same <c>?limit&amp;offset</c> + <c>X-Total-Count</c> HEADER idiom as
+/// <c>GET /runs</c> (docs/api-contract.md Conventions; see
+/// <see cref="Waypoint.Core.Pagination.PageRequest"/>'s doc comment) rather than the
+/// cursor idiom `/runs/{id}/events/history` uses for genuinely unbounded history. The
+/// total matching-finding count travels ONLY in the <c>X-Total-Count</c> response
+/// header, never in this body -- no list endpoint in this API carries an in-body
+/// count. <see cref="AttemptNumber"/>/<see cref="ComponentResultStatus"/> describe
+/// WHICH attempt these findings belong to (always the job's latest) so a caller never
+/// has to guess. <c>null</c> attempt fields mean the job has no recorded
+/// component-result attempt at all yet -- honest-empty, distinct from "attempt
+/// exists, zero findings".
+/// </summary>
+public sealed record ComponentResultFindingsResponse(
+	[property: JsonPropertyName("job_id")]
+	string JobId,
+
+	[property: JsonPropertyName("attempt_number")]
+	int? AttemptNumber,
+
+	[property: JsonPropertyName("component_result_status")]
+	string? ComponentResultStatus,
+
+	[property: JsonPropertyName("items")]
+	IReadOnlyList<ComponentResultFindingResponse> Items,
+
+	[property: JsonPropertyName("limit")]
+	int Limit,
+
+	[property: JsonPropertyName("offset")]
+	int Offset);
+
+/// <summary>
+/// One <c>component_result_artifacts</c> row for <c>GET /api/v1/jobs/{id}/component-results/artifacts</c>
+/// (issue #745). Metadata only -- digest/size as recorded at write time; this endpoint
+/// never streams the artifact's bytes (that stays on the existing
+/// <c>GET /jobs/{id}/artifacts/{kind}</c> route, which serves only the two byte-
+/// downloadable kinds `hdf`/`ckl` documented in docs/api-contract.md today).
+/// </summary>
+public sealed record ComponentResultArtifactResponse(
+	[property: JsonPropertyName("kind")]
+	string Kind,
+
+	[property: JsonPropertyName("path")]
+	string Path,
+
+	[property: JsonPropertyName("digest")]
+	string Digest,
+
+	[property: JsonPropertyName("size_bytes")]
+	long SizeBytes);
+
+/// <summary>
+/// Response body for <c>GET /api/v1/jobs/{id}/component-results/artifacts</c>. Unpaged
+/// -- bounded by the closed 5-value artifact-kind vocabulary per attempt. Same
+/// "describes which attempt" honesty as <see cref="ComponentResultFindingsResponse"/>.
+/// </summary>
+public sealed record ComponentResultArtifactsResponse(
+	[property: JsonPropertyName("job_id")]
+	string JobId,
+
+	[property: JsonPropertyName("attempt_number")]
+	int? AttemptNumber,
+
+	[property: JsonPropertyName("component_result_status")]
+	string? ComponentResultStatus,
+
+	[property: JsonPropertyName("items")]
+	IReadOnlyList<ComponentResultArtifactResponse> Items);

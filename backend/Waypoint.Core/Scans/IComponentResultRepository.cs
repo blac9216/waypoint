@@ -46,4 +46,23 @@ public interface IComponentResultRepository
 	/// idiom).
 	/// </summary>
 	Task<RunResultRollup> GetRunRollupAsync(Guid runId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// A page of a job's LATEST-attempt findings (issue #745), paged by the bounded
+	/// <c>limit</c>/<c>offset</c> idiom (a single attempt's finding count is bounded by
+	/// one benchmark's control count, never an unboundedly growing history -- unlike
+	/// <c>/runs/{id}/events/history</c>'s cursor paging). <see cref="ComponentResultFindingsPage.Result"/>
+	/// is null when the job has no recorded attempt at all (honest-empty, distinct from
+	/// "attempt exists, zero findings").
+	/// </summary>
+	Task<ComponentResultFindingsPage> GetLatestFindingsAsync(Guid jobId, int limit, int offset, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Artifact metadata (kind/path/digest/size) for a job's LATEST attempt (issue
+	/// #745). Never streams bytes -- this is a metadata-only read; byte download stays
+	/// on the existing <c>GET /jobs/{id}/artifacts/{kind}</c> route. Unpaged: bounded by
+	/// the closed <see cref="ComponentResultArtifactKinds"/> vocabulary (5 kinds max per
+	/// attempt).
+	/// </summary>
+	Task<ComponentResultArtifactsList> GetLatestArtifactsAsync(Guid jobId, CancellationToken cancellationToken);
 }

@@ -199,4 +199,115 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 
 		return new RunResultRollup(runId, plannedCount, rows);
 	}
+
+	/// <summary>Resolves the header row for a job's highest <c>attempt_number</c> -- shared by both new read methods so "latest attempt" is defined in exactly one place.</summary>
+	private static async Task<ComponentResultHeader?> GetLatestHeaderAsync(NpgsqlConnection connection, Guid jobId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlCommand command = new(
+			"""
+			SELECT id, run_id, job_id, scan_plan_item_id, component_id, attempt_number, status, detail
+			FROM component_results
+			WHERE job_id = $1
+			ORDER BY attempt_number DESC
+			LIMIT 1
+			""", connection);
+		command.Parameters.AddWithValue(jobId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			return null;
+		}
+
+		return new ComponentResultHeader(
+			Id: reader.GetGuid(0),
+			RunId: reader.GetGuid(1),
+			JobId: reader.GetGuid(2),
+			ScanPlanItemId: reader.GetGuid(3),
+			ComponentId: reader.GetGuid(4),
+			AttemptNumber: reader.GetInt32(5),
+			Status: reader.GetString(6),
+			Detail: reader.IsDBNull(7) ? null : reader.GetString(7));
+	}
+
+	public async Task<ComponentResultFindingsPage> GetLatestFindingsAsync(Guid jobId, int limit, int offset, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		ComponentResultHeader? header = await GetLatestHeaderAsync(connection, jobId, cancellationToken).ConfigureAwait(false);
+		if (header is null)
+		{
+			return new ComponentResultFindingsPage(Result: null, Items: [], TotalCount: 0);
+		}
+
+		int total;
+		await using (NpgsqlCommand countCommand = new("SELECT count(*) FROM component_result_findings WHERE component_result_id = $1", connection))
+		{
+			countCommand.Parameters.AddWithValue(header.Id);
+			total = (int)(long)(await countCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+		}
+
+		List<ComponentResultFindingRecord> findings = [];
+		await using (NpgsqlCommand command = new(
+			"""
+			SELECT control_id, rule_id, title, severity, status, evidence
+			FROM component_result_findings
+			WHERE component_result_id = $1
+			ORDER BY control_id
+			LIMIT $2 OFFSET $3
+			""", connection))
+		{
+			command.Parameters.AddWithValue(header.Id);
+			command.Parameters.AddWithValue(limit);
+			command.Parameters.AddWithValue(offset);
+			await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				findings.Add(new ComponentResultFindingRecord(
+					ControlId: reader.GetString(0),
+					RuleId: reader.IsDBNull(1) ? null : reader.GetString(1),
+					Title: reader.IsDBNull(2) ? null : reader.GetString(2),
+					Severity: reader.GetString(3),
+					Status: reader.GetString(4),
+					Evidence: reader.IsDBNull(5) ? null : reader.GetString(5)));
+			}
+		}
+
+		return new ComponentResultFindingsPage(header, findings, total);
+	}
+
+	public async Task<ComponentResultArtifactsList> GetLatestArtifactsAsync(Guid jobId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		ComponentResultHeader? header = await GetLatestHeaderAsync(connection, jobId, cancellationToken).ConfigureAwait(false);
+		if (header is null)
+		{
+			return new ComponentResultArtifactsList(Result: null, Items: []);
+		}
+
+		List<ComponentResultArtifactRecord> artifacts = [];
+		await using (NpgsqlCommand command = new(
+			"""
+			SELECT kind, path, digest, size_bytes
+			FROM component_result_artifacts
+			WHERE component_result_id = $1
+			ORDER BY kind
+			""", connection))
+		{
+			command.Parameters.AddWithValue(header.Id);
+			await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+			while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				artifacts.Add(new ComponentResultArtifactRecord(
+					Kind: reader.GetString(0),
+					Path: reader.GetString(1),
+					Digest: reader.GetString(2),
+					SizeBytes: reader.GetInt64(3)));
+			}
+		}
+
+		return new ComponentResultArtifactsList(header, artifacts);
+	}
 }
