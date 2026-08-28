@@ -1608,6 +1608,16 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 			}
 			services.AddSingleton<Waypoint.Core.Runs.IRunHistoryDeletionRepository>(HistoryDeletionRepository);
 
+			// Issue #784: same fake-swap pattern as IRunPurgeRepository above, for
+			// RunPurgeService's new IRunRetentionHoldRepository dependency (the
+			// purge-exclusion check) AND RunRetentionHoldService's own dependency.
+			var retentionHoldRepositoryDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(Waypoint.Core.Runs.IRunRetentionHoldRepository));
+			if (retentionHoldRepositoryDescriptor != null)
+			{
+				services.Remove(retentionHoldRepositoryDescriptor);
+			}
+			services.AddSingleton<Waypoint.Core.Runs.IRunRetentionHoldRepository>(RetentionHoldRepository);
+
 			// Issue #581: GetEventHistory resolves IJobEventHistoryReader through
 			// RunsController -- same fake-swap pattern as every other dependency above,
 			// so role-guard/happy-path tests never touch Postgres.
@@ -1645,6 +1655,8 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 	public FakeRunPurgeRepository PurgeRepository { get; } = new();
 
 	public FakeRunHistoryDeletionRepository HistoryDeletionRepository { get; } = new();
+
+	public FakeRunRetentionHoldRepository RetentionHoldRepository { get; } = new();
 
 	public FakeJobEventHistoryReader EventHistory { get; } = new();
 
@@ -2171,5 +2183,49 @@ public sealed class FakeRunHistoryDeletionRepository : IRunHistoryDeletionReposi
 		_ = cancellationToken;
 		LastRolloffQuery = (olderThan, limit);
 		return Task.FromResult(RolloffCandidates);
+	}
+}
+
+/// <summary>
+/// Issue #784: minimal in-memory fake for <see cref="IRunRetentionHoldRepository"/>,
+/// mirroring <see cref="FakeRunPurgeRepository"/>'s shape -- avoids a live Postgres
+/// connection attempt so both <c>RunPurgeService</c>'s new hold-exclusion check and
+/// the retention-hold endpoints' own controller-level role/reason/not-found mapping
+/// can be exercised without Postgres. The full place/remove/audit/grant-drift/
+/// purge-exclusion behavior against a real schema is
+/// <c>RunRetentionHoldTests</c>/<c>RunPurgeComplianceEvidenceTests</c>' job.
+/// </summary>
+public sealed class FakeRunRetentionHoldRepository : IRunRetentionHoldRepository
+{
+	private readonly Dictionary<Guid, RunRetentionHold> _holds = new();
+
+	public Task<RunRetentionHold?> GetAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult(_holds.TryGetValue(runId, out RunRetentionHold? hold) ? hold : null);
+	}
+
+	public Task<IReadOnlyList<Guid>> ListHeldRunIdsAsync(CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult<IReadOnlyList<Guid>>([.. _holds.Keys]);
+	}
+
+	public Task<bool> TryInsertAsync(Guid runId, string reason, string actor, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		if (_holds.ContainsKey(runId))
+		{
+			return Task.FromResult(false);
+		}
+
+		_holds[runId] = new RunRetentionHold(runId, reason, actor, DateTimeOffset.UtcNow);
+		return Task.FromResult(true);
+	}
+
+	public Task<bool> TryRemoveAsync(Guid runId, string reason, string actor, CancellationToken cancellationToken)
+	{
+		_ = (reason, actor, cancellationToken);
+		return Task.FromResult(_holds.Remove(runId));
 	}
 }
