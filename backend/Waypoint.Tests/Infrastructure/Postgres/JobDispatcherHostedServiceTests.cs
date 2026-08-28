@@ -392,6 +392,7 @@ public sealed class JobDispatcherHostedServiceTests : IAsyncLifetime
 		public Task<IReadOnlyList<UploadAttemptRecord>> GetUploadAttemptsAsync(Guid jobId, CancellationToken cancellationToken) => inner.GetUploadAttemptsAsync(jobId, cancellationToken);
 
 		public Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken) => inner.GetJobCredentialBindingsAsync(jobId, cancellationToken);
+		public Task<IReadOnlyList<Guid>> FanOutAdditionalJobsAsync(Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken) => inner.FanOutAdditionalJobsAsync(runId, specs, createdBy, cancellationToken);
 	}
 
 	[Fact]

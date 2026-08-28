@@ -781,6 +781,66 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		return jobIds;
 	}
 
+	/// <summary>
+	/// Issue #1016: see <see cref="IJobRunnerRepository.FanOutAdditionalJobsAsync"/>.
+	/// Requires <c>runs.state = 'running'</c> (the counterpart guard to
+	/// <see cref="FanOutJobsAsync"/>'s <c>'pending'</c> guard) so a caller can never
+	/// silently add jobs to a run that has not started, already finished, or was
+	/// aborted out from under it.
+	/// </summary>
+	public async Task<IReadOnlyList<Guid>> FanOutAdditionalJobsAsync(
+		Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(specs);
+		if (specs.Count == 0)
+		{
+			throw new ArgumentException("Fanning out additional jobs requires at least one spec.", nameof(specs));
+		}
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		await using (NpgsqlCommand lockRun = new("SELECT state FROM runs WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockRun.Parameters.AddWithValue(runId);
+			object? state = await lockRun.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+			if (state is not string runState || !string.Equals(runState, "running", StringComparison.Ordinal))
+			{
+				throw new InvalidOperationException(
+					string.Format(CultureInfo.InvariantCulture, "Run '{0}' is not running; cannot fan out additional jobs to it.", runId));
+			}
+		}
+
+		List<Guid> jobIds = new(specs.Count);
+		foreach (JobSpec spec in specs)
+		{
+			await using NpgsqlCommand insertJob = new(
+				"""
+				INSERT INTO jobs (run_id, job_type, target_id, target_name, credential_id, priority, payload, created_by, state, has_run_secret, scan_plan_item_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued', $9, $10)
+				RETURNING id
+				""", connection, transaction);
+			insertJob.Parameters.AddWithValue(runId);
+			insertJob.Parameters.AddWithValue(spec.JobType);
+			insertJob.Parameters.AddWithValue((object?)spec.TargetId ?? DBNull.Value);
+			insertJob.Parameters.AddWithValue((object?)spec.TargetName ?? DBNull.Value);
+			insertJob.Parameters.AddWithValue((object?)spec.CredentialId ?? DBNull.Value);
+			insertJob.Parameters.AddWithValue(spec.Priority);
+			insertJob.Parameters.AddWithValue(string.IsNullOrWhiteSpace(spec.Payload) ? "{}" : spec.Payload);
+			insertJob.Parameters.AddWithValue((object?)createdBy ?? DBNull.Value);
+			insertJob.Parameters.AddWithValue(spec.HasRunSecret);
+			insertJob.Parameters.AddWithValue((object?)spec.ScanPlanItemId ?? DBNull.Value);
+
+			object? jobId = await insertJob.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+			jobIds.Add((Guid)jobId!);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+		LogFannedOutJobs(runId, jobIds.Count);
+		return jobIds;
+	}
+
 	public async Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

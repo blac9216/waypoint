@@ -13,36 +13,30 @@
 // limitations under the License.
 
 using System.Management.Automation;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.ComplianceContent;
-using Waypoint.Core.ComplianceContent.SemanticImport;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.PowerShell;
 using Waypoint.Infrastructure.Execution.ComplianceContent;
 using Xunit;
-using RealPowerShellExecutor = Waypoint.Infrastructure.PowerShell.PowerShellExecutor;
-using RealWaypointRunspacePool = Waypoint.Infrastructure.PowerShell.WaypointRunspacePool;
 
 namespace Waypoint.Tests.Infrastructure.Execution;
 
 /// <summary>
-/// Issue #40: unit coverage of <see cref="ContentPullJobHandler.ExecuteAsync"/> in
-/// isolation, driving the handler with an in-memory fake <see cref="IPowerShellExecutor"/>
-/// (the precedent <c>DownloadJobHandlerEndToEndTests</c> exercises the real executor with
-/// a stub module through the whole job engine; this class instead pins the handler's own
-/// branch logic without Postgres). Proves the AC's central promise -- a failed pull STILL
-/// lands in pull history -- across the config-missing, invocation-failure, no-commit,
-/// success, and tag-vs-branch state paths, plus the <c>ParseOutput</c>/<c>TryParseProfile</c>
-/// parsing (including malformed rows that must not fail the whole pull).
-///
-/// <see cref="InspecCheckPathMutationCollection"/> serializes
-/// <see cref="Execute_RealExecutor_FixtureContentTree_StagesAndPromotesProfiles"/> against
-/// <c>InspecCheckRealExecutorTests</c> -- both mutate the process-wide <c>PATH</c>
-/// environment variable to resolve <c>Get-Command inspec</c> onto an invented stub, which
-/// is unsafe under xUnit's default class-level parallelism without a shared collection.
+/// Issue #1016 (epic #726), owner decision 2026-08-28: unit coverage of
+/// <see cref="ContentPullJobHandler.ExecuteAsync"/>'s NARROWED contract -- phase 1 sync
+/// (unchanged from issue #993) plus fan-out of one <c>content-check</c> job per chunk
+/// (new). The semantic-import/promotion/staging pipeline this handler used to run
+/// inline moved to <see cref="Waypoint.Infrastructure.Execution.ComplianceContent.ContentPullReconcileService"/>
+/// (see <c>ContentPullReconcileServiceTests</c>) and the chunked `inspec check` pass
+/// moved to <c>ContentCheckJobHandler</c> (see <c>ContentCheckJobHandlerTests</c>,
+/// including the real-executor fixture equivalence proof). This class proves: config/
+/// sync failure paths still record honest pull-history failures exactly as before,
+/// profile-inventory replace still happens at sync time, and a successful sync fans out
+/// the expected number of <c>content-check</c> jobs (respecting <c>ContentPullChunkSize</c>)
+/// with the exact profile-directory chunks recorded for each -- WITHOUT recording a
+/// pull-history success itself (that is reconcile's job now).
 /// </summary>
-[Collection("InspecCheckPathMutation")]
 public sealed class ContentPullJobHandlerTests
 {
 	private const string RepositoryUrl = "https://git.example.internal/dod/compliance-content.git";
@@ -50,44 +44,19 @@ public sealed class ContentPullJobHandlerTests
 
 	// --- fakes -----------------------------------------------------------------
 
-	/// <summary>
-	/// Issue #993: <see cref="ContentPullJobHandler"/> now issues TWO distinct commands
-	/// per pull -- <c>Sync-WaypointComplianceContentTree</c> (phase 1: git + directory
-	/// enumeration) and one-or-more <c>Get-WaypointComplianceContentEntries</c> calls
-	/// (phase 2: chunked, bounded per-leaf checks) -- so the fake executor dispatches by
-	/// <see cref="PowerShellRequest.Command"/> rather than returning one canned result
-	/// regardless of which command was invoked. <see cref="EntriesResult"/> defaults to
-	/// an empty successful result (no content entries) so tests that only care about the
-	/// sync/profile path do not need to set it up explicitly.
-	/// </summary>
 	private sealed class FakePowerShellExecutor : IPowerShellExecutor
 	{
 		private readonly PowerShellExecutionResult _syncResult;
 
 		public FakePowerShellExecutor(PowerShellExecutionResult syncResult) => _syncResult = syncResult;
 
-		public PowerShellExecutionResult EntriesResult { get; set; } = Ok();
-
 		public List<PowerShellRequest> Requests { get; } = [];
 
-		/// <summary>Issue #993: fires after each entries-chunk call is recorded but before its result is returned -- lets a test cancel a shared token mid-loop to prove the NEXT chunk is never started (cooperative cancellation between bounded units).</summary>
-		public Action? OnEntriesCall { get; set; }
-
-		public PowerShellRequest? LastRequest => Requests.Count == 0 ? null : Requests[^1];
-
 		public PowerShellRequest? LastSyncRequest => Requests.LastOrDefault(r => r.Command == "Sync-WaypointComplianceContentTree");
-
-		public List<PowerShellRequest> EntriesRequests => [.. Requests.Where(r => r.Command == "Get-WaypointComplianceContentEntries")];
 
 		public Task<PowerShellExecutionResult> ExecuteAsync(PowerShellRequest request, CancellationToken cancellationToken)
 		{
 			Requests.Add(request);
-			if (request.Command == "Get-WaypointComplianceContentEntries")
-			{
-				OnEntriesCall?.Invoke();
-				return Task.FromResult(EntriesResult);
-			}
-
 			return Task.FromResult(_syncResult);
 		}
 	}
@@ -103,8 +72,7 @@ public sealed class ContentPullJobHandlerTests
 
 		public List<RecordedPull> Pulls { get; } = [];
 
-		public Task<ComplianceContentConfig?> GetConfigAsync(CancellationToken cancellationToken) =>
-			Task.FromResult(_config);
+		public Task<ComplianceContentConfig?> GetConfigAsync(CancellationToken cancellationToken) => Task.FromResult(_config);
 
 		public Task<ComplianceContentConfig> PutConfigAsync(string repositoryUrl, string refType, string refValue, CancellationToken cancellationToken) =>
 			throw new NotSupportedException();
@@ -120,285 +88,54 @@ public sealed class ContentPullJobHandlerTests
 			throw new NotSupportedException();
 	}
 
-	/// <summary>
-	/// <see cref="ListAsync"/> synthesizes a stable id per <see cref="ProfileUpsert.ProfileKey"/>
-	/// (a dictionary keyed on the string, not a fresh guid per call) so the handler's
-	/// post-replace "re-read profiles, look up each by key" control-persistence step
-	/// (issue #598) sees the SAME id across the ReplaceAllAsync call and the subsequent
-	/// ListAsync call within one ExecuteAsync -- exactly what the real Postgres-backed
-	/// repository guarantees (a profile_key's row keeps its id across an upsert).
-	/// </summary>
 	private sealed class FakeProfileRepository : IProfileRepository
 	{
-		private readonly Dictionary<string, Guid> _idsByKey = new(StringComparer.Ordinal);
-
 		public IReadOnlyList<ProfileUpsert>? Replaced { get; private set; }
 
-		public Task<IReadOnlyList<Profile>> ListAsync(CancellationToken cancellationToken)
-		{
-			if (Replaced is null)
-			{
-				return Task.FromResult<IReadOnlyList<Profile>>([]);
-			}
+		public Task<IReadOnlyList<Profile>> ListAsync(CancellationToken cancellationToken) =>
+			Task.FromResult<IReadOnlyList<Profile>>([]);
 
-			IReadOnlyList<Profile> profiles = [.. Replaced.Select(p => new Profile(IdFor(p.ProfileKey), p.ProfileKey, p.Name, p.Version, p.Commit, p.State, DateTimeOffset.UtcNow))];
-			return Task.FromResult(profiles);
-		}
-
-		public Task<Profile?> GetAsync(Guid id, CancellationToken cancellationToken) =>
-			throw new NotSupportedException();
+		public Task<Profile?> GetAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
 
 		public Task ReplaceAllAsync(IReadOnlyList<ProfileUpsert> profiles, CancellationToken cancellationToken)
 		{
 			Replaced = profiles;
 			return Task.CompletedTask;
 		}
-
-		private Guid IdFor(string profileKey)
-		{
-			if (!_idsByKey.TryGetValue(profileKey, out Guid id))
-			{
-				id = Guid.NewGuid();
-				_idsByKey[profileKey] = id;
-			}
-
-			return id;
-		}
 	}
 
-	private sealed class FakeProfileControlRepository : IProfileControlRepository
-	{
-		public Dictionary<Guid, IReadOnlyList<ProfileControlUpsert>> ReplacedByProfileId { get; } = [];
-
-		public Task<IReadOnlyList<ProfileControl>> ListByProfileAsync(Guid profileId, CancellationToken cancellationToken) =>
-			throw new NotSupportedException();
-
-		public Task ReplaceForProfileAsync(Guid profileId, IReadOnlyList<ProfileControlUpsert> controls, CancellationToken cancellationToken)
-		{
-			ReplacedByProfileId[profileId] = controls;
-			return Task.CompletedTask;
-		}
-	}
-
-	/// <summary>
-	/// An in-memory <see cref="ICatalogRepository"/> covering exactly the surface
-	/// <see cref="ContentPullJobHandler"/>'s issue #729 semantic-import pass exercises
-	/// (record report/entries, promote candidates, upsert declared inputs) -- the real
-	/// Postgres-backed repository's contract is proven separately by
-	/// <c>CatalogRepositoryTests</c>. Every upsert-by-natural-key method here mirrors the
-	/// real repository's additive/dedup semantics closely enough to prove the handler's
-	/// own promotion-count and report-shape behavior in isolation, without Postgres.
-	/// </summary>
-	private sealed class FakeCatalogRepository : ICatalogRepository
-	{
-		private readonly Dictionary<string, CatalogSourceRevision> _sourceRevisions = new(StringComparer.Ordinal);
-		private readonly Dictionary<(string Vendor, string ProductKey), CatalogProduct> _products = new();
-		private readonly Dictionary<(Guid ProductId, string VersionKey), CatalogProductVersion> _productVersions = new();
-		private readonly Dictionary<(Guid ProductVersionId, Guid? ParentId, string ComponentKey), CatalogComponent> _components = new();
-		private readonly Dictionary<(string Kind, string ReleaseKey), CatalogContentRelease> _contentReleases = new();
-		private readonly Dictionary<string, CatalogReportGroup> _reportGroups = new(StringComparer.Ordinal);
-		private readonly Dictionary<(Guid ComponentId, Guid ContentReleaseId), CatalogExecutionProfile> _executionProfiles = new();
-		private readonly Dictionary<(Guid ExecutionProfileId, string Name), CatalogDeclaredInput> _declaredInputs = new();
-
-		public List<CatalogImportReport> Reports { get; } = [];
-
-		public List<CatalogImportReportEntry> Entries { get; } = [];
-
-		public Task<CatalogSourceRevision> UpsertSourceRevisionAsync(string revisionKey, string? description, CancellationToken cancellationToken)
-		{
-			if (!_sourceRevisions.TryGetValue(revisionKey, out CatalogSourceRevision? revision))
-			{
-				revision = new CatalogSourceRevision(Guid.NewGuid(), revisionKey, description, DateTimeOffset.UtcNow);
-				_sourceRevisions[revisionKey] = revision;
-			}
-
-			return Task.FromResult(revision);
-		}
-
-		public Task<CatalogProduct> UpsertProductAsync(Guid sourceRevisionId, string vendor, string productKey, string displayName, CancellationToken cancellationToken)
-		{
-			(string vendor, string productKey) key = (vendor, productKey);
-			if (!_products.TryGetValue(key, out CatalogProduct? product))
-			{
-				product = new CatalogProduct(Guid.NewGuid(), sourceRevisionId, vendor, productKey, displayName, DateTimeOffset.UtcNow);
-				_products[key] = product;
-			}
-
-			return Task.FromResult(product);
-		}
-
-		public Task<CatalogProductVersion> UpsertProductVersionAsync(Guid productId, string versionKey, string displayName, CancellationToken cancellationToken)
-		{
-			(Guid productId, string versionKey) key = (productId, versionKey);
-			if (!_productVersions.TryGetValue(key, out CatalogProductVersion? version))
-			{
-				version = new CatalogProductVersion(Guid.NewGuid(), productId, versionKey, displayName, DateTimeOffset.UtcNow);
-				_productVersions[key] = version;
-			}
-
-			return Task.FromResult(version);
-		}
-
-		public Task<CatalogContentRelease> UpsertContentReleaseAsync(Guid sourceRevisionId, string kind, string releaseKey, string displayName, CancellationToken cancellationToken)
-		{
-			(string kind, string releaseKey) key = (kind, releaseKey);
-			if (!_contentReleases.TryGetValue(key, out CatalogContentRelease? release))
-			{
-				release = new CatalogContentRelease(Guid.NewGuid(), sourceRevisionId, kind, releaseKey, displayName, DateTimeOffset.UtcNow);
-				_contentReleases[key] = release;
-			}
-
-			return Task.FromResult(release);
-		}
-
-		public Task<CatalogComponent> UpsertComponentAsync(Guid productVersionId, CatalogComponentDefinition definition, CancellationToken cancellationToken)
-		{
-			(Guid productVersionId, Guid? ParentComponentId, string ComponentKey) key = (productVersionId, definition.ParentComponentId, definition.ComponentKey);
-			if (!_components.TryGetValue(key, out CatalogComponent? component))
-			{
-				component = new CatalogComponent(
-					Guid.NewGuid(), productVersionId, definition.ParentComponentId, definition.ComponentKey, definition.DisplayName,
-					definition.Transport, definition.SelectorKind, definition.SelectorName, DateTimeOffset.UtcNow);
-				_components[key] = component;
-			}
-
-			return Task.FromResult(component);
-		}
-
-		public Task<CatalogReportGroup> UpsertReportGroupAsync(string groupKey, string displayName, int priority, CancellationToken cancellationToken)
-		{
-			if (!_reportGroups.TryGetValue(groupKey, out CatalogReportGroup? group))
-			{
-				group = new CatalogReportGroup(Guid.NewGuid(), groupKey, displayName, priority, DateTimeOffset.UtcNow);
-				_reportGroups[groupKey] = group;
-			}
-
-			return Task.FromResult(group);
-		}
-
-		public Task<CatalogExecutionProfile> CreateExecutionProfileAsync(Guid componentId, Guid contentReleaseId, Guid reportGroupId, string profileVersion, string outputKind, CancellationToken cancellationToken)
-		{
-			(Guid componentId, Guid contentReleaseId) key = (componentId, contentReleaseId);
-			if (_executionProfiles.ContainsKey(key))
-			{
-				throw new InvalidOperationException("an execution profile already exists for this (component, content release) pair.");
-			}
-
-			CatalogExecutionProfile profile = new(Guid.NewGuid(), componentId, contentReleaseId, reportGroupId, profileVersion, false, outputKind, DateTimeOffset.UtcNow);
-			_executionProfiles[key] = profile;
-			return Task.FromResult(profile);
-		}
-
-		public Task<CatalogCredentialRequirement> AddCredentialRequirementAsync(Guid executionProfileId, string purpose, bool isRequired, CancellationToken cancellationToken) =>
-			throw new NotSupportedException();
-
-		public Task<CatalogBenchmarkReference> SetBenchmarkReferenceAsync(Guid executionProfileId, string benchmarkKey, string benchmarkVersion, CancellationToken cancellationToken) =>
-			throw new NotSupportedException();
-
-		public Task<CatalogRemediationDefinition> SetRemediationDefinitionAsync(Guid executionProfileId, bool isSupported, string? mechanismNote, CancellationToken cancellationToken) =>
-			throw new NotSupportedException();
-
-		public Task<IReadOnlyList<CatalogProduct>> ListProductsAsync(CancellationToken cancellationToken) =>
-			Task.FromResult<IReadOnlyList<CatalogProduct>>([.. _products.Values]);
-
-		public Task<IReadOnlyList<CatalogProductVersion>> ListProductVersionsAsync(Guid productId, CancellationToken cancellationToken) =>
-			Task.FromResult<IReadOnlyList<CatalogProductVersion>>([.. _productVersions.Values.Where(v => v.ProductId == productId)]);
-
-		public Task<IReadOnlyList<CatalogComponent>> ListComponentsAsync(Guid productVersionId, CancellationToken cancellationToken) =>
-			Task.FromResult<IReadOnlyList<CatalogComponent>>([.. _components.Values.Where(c => c.ProductVersionId == productVersionId)]);
-
-		public Task<IReadOnlyList<CatalogComponent>> FindTopLevelComponentsByKeyAndVersionAsync(string catalogComponentKey, string exactVersion, CancellationToken cancellationToken) =>
-			Task.FromResult<IReadOnlyList<CatalogComponent>>([.. _components.Values.Where(c =>
-				c.ParentComponentId is null &&
-				c.ComponentKey == catalogComponentKey &&
-				_productVersions.Values.Any(v => v.Id == c.ProductVersionId && v.VersionKey == exactVersion))]);
-
-		public Task<IReadOnlyList<CatalogExecutionProfileDetail>> ListExecutionProfilesByComponentAsync(Guid componentId, CancellationToken cancellationToken) =>
-			throw new NotSupportedException();
-
-		public Task<CatalogExecutionProfileDetail?> GetExecutionProfileAsync(Guid executionProfileId, CancellationToken cancellationToken) =>
-			throw new NotSupportedException();
-
-		public Task<IReadOnlyList<CatalogExecutionProfileDetail>> ListAllExecutionProfilesAsync(CancellationToken cancellationToken) =>
-			throw new NotSupportedException();
-
-		public Task<CatalogDeclaredInput> UpsertDeclaredInputAsync(Guid executionProfileId, string name, string? inputType, bool isRequired, CancellationToken cancellationToken)
-		{
-			(Guid executionProfileId, string name) key = (executionProfileId, name);
-			CatalogDeclaredInput input = new(Guid.NewGuid(), executionProfileId, name, inputType, isRequired, DateTimeOffset.UtcNow);
-			_declaredInputs[key] = input;
-			return Task.FromResult(input);
-		}
-
-		public Task<IReadOnlyList<CatalogDeclaredInput>> ListDeclaredInputsAsync(Guid executionProfileId, CancellationToken cancellationToken) =>
-			Task.FromResult<IReadOnlyList<CatalogDeclaredInput>>([.. _declaredInputs.Values.Where(i => i.ExecutionProfileId == executionProfileId).OrderBy(i => i.Name, StringComparer.Ordinal)]);
-
-		public Task<CatalogImportReport> RecordImportReportAsync(string sourceCommit, string sourceDigest, int acceptedCount, int warningCount, int rejectedCount, CancellationToken cancellationToken)
-		{
-			CatalogImportReport report = new(Guid.NewGuid(), sourceCommit, sourceDigest, acceptedCount, warningCount, rejectedCount, DateTimeOffset.UtcNow);
-			Reports.Add(report);
-			return Task.FromResult(report);
-		}
-
-		public Task<CatalogImportReportEntry> RecordImportReportEntryAsync(Guid reportId, string disposition, string profileKey, string? reason, Guid? executionProfileId, CancellationToken cancellationToken)
-		{
-			CatalogImportReportEntry entry = new(Guid.NewGuid(), reportId, disposition, profileKey, reason, executionProfileId, DateTimeOffset.UtcNow);
-			Entries.Add(entry);
-			return Task.FromResult(entry);
-		}
-
-		public Task<IReadOnlyList<CatalogImportReport>> ListImportReportsAsync(int limit, CancellationToken cancellationToken) =>
-			Task.FromResult<IReadOnlyList<CatalogImportReport>>([.. Reports.OrderByDescending(r => r.RecordedAt).Take(limit)]);
-
-		public Task<IReadOnlyList<CatalogImportReportEntry>> ListImportReportEntriesAsync(Guid reportId, CancellationToken cancellationToken) =>
-			Task.FromResult<IReadOnlyList<CatalogImportReportEntry>>([.. Entries.Where(e => e.ReportId == reportId).OrderBy(e => e.ProfileKey, StringComparer.Ordinal)]);
-
-		public Task<string?> GetProfileKeyForExecutionProfileAsync(Guid executionProfileId, CancellationToken cancellationToken) =>
-			Task.FromResult(Entries
-				.Where(e => e.ExecutionProfileId == executionProfileId)
-				.OrderByDescending(e => e.CreatedAt)
-				.Select(e => (string?)e.ProfileKey)
-				.FirstOrDefault());
-
-		public async Task<CatalogPromotionOutcome> PromoteCandidateAsync(SemanticCandidate candidate, CatalogPromotionRequest request, CancellationToken cancellationToken)
-		{
-			if (!candidate.IsExecutableLeaf)
-			{
-				return new CatalogPromotionOutcome(null, "candidate is an aggregate profile");
-			}
-
-			CatalogSourceRevision sourceRevision = await UpsertSourceRevisionAsync(request.SourceRevisionKey, null, cancellationToken);
-			CatalogProduct product = await UpsertProductAsync(sourceRevision.Id, request.Vendor, candidate.VendorFamily, request.ProductDisplayName, cancellationToken);
-			CatalogProductVersion productVersion = await UpsertProductVersionAsync(product.Id, candidate.ProductVersionKey, request.ProductVersionDisplayName, cancellationToken);
-			CatalogComponentDefinition definition = new(candidate.ComponentKey, candidate.DisplayName, candidate.Transport, candidate.SelectorKind, candidate.SelectorName, null);
-			CatalogComponent component = await UpsertComponentAsync(productVersion.Id, definition, cancellationToken);
-			CatalogContentRelease contentRelease = await UpsertContentReleaseAsync(sourceRevision.Id, candidate.Kind, $"{candidate.ProductVersionKey}:{candidate.Kind}:{candidate.ContentDigest[..12]}", request.ContentReleaseDisplayName, cancellationToken);
-			CatalogReportGroup reportGroup = await UpsertReportGroupAsync(request.ReportGroupKey, request.ReportGroupDisplayName, request.ReportGroupPriority, cancellationToken);
-
-			(Guid ComponentId, Guid ContentReleaseId) key = (component.Id, contentRelease.Id);
-			if (!_executionProfiles.TryGetValue(key, out CatalogExecutionProfile? profile))
-			{
-				profile = await CreateExecutionProfileAsync(component.Id, contentRelease.Id, reportGroup.Id, candidate.ManifestVersion ?? "unknown", request.OutputKind, cancellationToken);
-			}
-
-			foreach (InspecManifestInput input in candidate.Inputs)
-			{
-				await UpsertDeclaredInputAsync(profile.Id, input.Name, input.Type, input.Required, cancellationToken);
-			}
-
-			return new CatalogPromotionOutcome(profile.Id, null);
-		}
-	}
-
-	/// <summary>Only <see cref="GetRunQueueStateAsync"/> is exercised by the handler (via ResolveActorAsync).</summary>
+	/// <summary>Only <see cref="GetRunQueueStateAsync"/> and <see cref="FanOutAdditionalJobsAsync"/> are exercised by this handler.</summary>
 	private sealed class FakeJobRunnerRepository : IJobRunnerRepository
 	{
 		private readonly string? _initiatedBy;
+		private int _nextJobIdSeed;
 
 		public FakeJobRunnerRepository(string? initiatedBy) => _initiatedBy = initiatedBy;
 
+		public List<(Guid RunId, IReadOnlyList<JobSpec> Specs, string? CreatedBy)> FanOutCalls { get; } = [];
+
+		/// <summary>Set to force <see cref="FanOutAdditionalJobsAsync"/> to throw, simulating a run that stopped being 'running' mid-fan-out.</summary>
+		public bool ThrowOnFanOut { get; set; }
+
 		public Task<RunQueueState?> GetRunQueueStateAsync(Guid runId, CancellationToken cancellationToken) =>
 			Task.FromResult<RunQueueState?>(new RunQueueState("running", Paused: false, Blocked: false, BlockedReason: null, InitiatedBy: _initiatedBy));
+
+		public Task<IReadOnlyList<Guid>> FanOutAdditionalJobsAsync(Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken)
+		{
+			if (ThrowOnFanOut)
+			{
+				throw new InvalidOperationException("run is not running (invented test fixture failure).");
+			}
+
+			FanOutCalls.Add((runId, specs, createdBy));
+			List<Guid> ids = [];
+			foreach (JobSpec _ in specs)
+			{
+				ids.Add(new Guid($"00000000-0000-0000-0000-{(++_nextJobIdSeed):D12}"));
+			}
+
+			return Task.FromResult<IReadOnlyList<Guid>>(ids);
+		}
 
 		public Task<ClaimedJob?> ClaimJobAsync(string workerId, TimeSpan leaseDuration, IReadOnlySet<string> allowedJobTypes, CancellationToken cancellationToken) => throw new NotSupportedException();
 		public Task<bool> RenewLeaseAsync(Guid jobId, string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken) => throw new NotSupportedException();
@@ -411,28 +148,28 @@ public sealed class ContentPullJobHandlerTests
 		public Task SetUploadStatusAsync(Guid jobId, string uploadStatus, string? detail, CancellationToken cancellationToken) => throw new NotSupportedException();
 		public Task RecordUploadAttemptAsync(Guid jobId, string? endpoint, string? collection, string uploadStatus, string? detail, CancellationToken cancellationToken) => throw new NotSupportedException();
 		public Task<IReadOnlyList<UploadAttemptRecord>> GetUploadAttemptsAsync(Guid jobId, CancellationToken cancellationToken) => throw new NotSupportedException();
-
 		public Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<JobCredentialBinding>>([]);
 	}
 
-	/// <summary>
-	/// Issue #731: a no-filesystem fake so these handler-level tests stay pure --
-	/// staging's real filesystem behavior is covered by
-	/// <c>Infrastructure/Postgres/ContentRevisionStagerTests</c> (real temp
-	/// directories) and <c>BaselineRepositoryTests</c> (real Postgres). This fake just
-	/// proves the handler calls staging with the report's digest and surfaces
-	/// whatever <see cref="ContentRevision"/> the stager returns.
-	/// </summary>
-	private sealed class FakeContentRevisionStager : IContentRevisionStager
+	private sealed class FakeCheckFanOutRepository : IContentPullCheckFanOutRepository
 	{
-		public List<(string ContentPath, string SourceCommit, string ContentDigest)> Calls { get; } = [];
+		public List<(Guid RunId, Guid ContentPullJobId, Guid CheckJobId, string SourceCommit, IReadOnlyList<ContentCheckProfileDirectory> ProfileDirectories)> RecordedFanOuts { get; } = [];
 
-		public Task<ContentRevision> StageAsync(string contentPath, string sourceCommit, string contentDigest, CancellationToken cancellationToken)
+		public Task RecordFanOutAsync(
+			Guid runId, Guid contentPullJobId, Guid checkJobId, string sourceCommit,
+			IReadOnlyList<ContentCheckProfileDirectory> profileDirectories, CancellationToken cancellationToken)
 		{
-			Calls.Add((contentPath, sourceCommit, contentDigest));
-			return Task.FromResult(new ContentRevision(
-				Guid.NewGuid(), sourceCommit, contentDigest, Path.Combine("revisions", contentDigest), ContentRevisionStatuses.Staged, GcEligible: false, DateTimeOffset.UtcNow));
+			RecordedFanOuts.Add((runId, contentPullJobId, checkJobId, sourceCommit, profileDirectories));
+			return Task.CompletedTask;
 		}
+
+		public Task<ContentPullCheckFanOut?> GetFanOutForCheckJobAsync(Guid checkJobId, CancellationToken cancellationToken) => throw new NotSupportedException();
+		public Task RecordCheckResultAsync(Guid checkJobId, ContentCheckResultRecord result, CancellationToken cancellationToken) => throw new NotSupportedException();
+		public Task<IReadOnlyList<Guid>> ListPendingReconcileContentPullJobIdsAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+		public Task<IReadOnlyList<ContentPullCheckFanOut>> ListFanOutsForContentPullJobAsync(Guid contentPullJobId, CancellationToken cancellationToken) => throw new NotSupportedException();
+		public Task<ContentPullCheckReconcileReadiness> GetReconcileReadinessAsync(Guid contentPullJobId, CancellationToken cancellationToken) => throw new NotSupportedException();
+		public Task<IReadOnlyList<ContentCheckResultRecord>> ListCheckResultsAsync(IReadOnlyList<Guid> checkJobIds, CancellationToken cancellationToken) => throw new NotSupportedException();
+		public Task MarkReconciledAsync(Guid contentPullJobId, CancellationToken cancellationToken) => throw new NotSupportedException();
 	}
 
 	private sealed class RecordingEventPublisher : IJobEventPublisher
@@ -453,56 +190,36 @@ public sealed class ContentPullJobHandlerTests
 			CreatedAt: DateTimeOffset.UtcNow, UpdatedAt: DateTimeOffset.UtcNow);
 
 	private static (ContentPullJobHandler Handler, JobExecutionContext Context, RecordingEventPublisher Events,
-		FakeContentRepository Content, FakeProfileRepository Profiles, FakeProfileControlRepository ProfileControls, FakeCatalogRepository Catalog, FakePowerShellExecutor Executor) BuildWithExecutor(
+		FakeContentRepository Content, FakeProfileRepository Profiles, FakeJobRunnerRepository Jobs, FakeCheckFanOutRepository CheckFanOut, Guid RunId) Build(
 			PowerShellExecutionResult syncResult,
 			ComplianceContentConfig? config,
 			string? initiatedBy = "admin@example.internal",
-			PowerShellExecutionResult? entriesResult = null)
+			int chunkSize = 25,
+			Guid? runIdOverride = null)
 	{
 		FakePowerShellExecutor executor = new(syncResult);
-		if (entriesResult is not null)
-		{
-			executor.EntriesResult = entriesResult;
-		}
-
 		FakeContentRepository content = new(config);
 		FakeProfileRepository profiles = new();
-		FakeProfileControlRepository profileControls = new();
-		FakeCatalogRepository catalog = new();
 		FakeJobRunnerRepository jobs = new(initiatedBy);
-		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions { ContentPath = ContentPath });
+		FakeCheckFanOutRepository checkFanOut = new();
+		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions
+		{
+			ContentPath = ContentPath,
+			ContentPullChunkSize = chunkSize,
+		});
 
-		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options, new FakeContentRevisionStager());
+		ContentPullJobHandler handler = new(executor, content, profiles, jobs, options, checkFanOut);
 
 		Guid jobId = Guid.NewGuid();
-		Guid runId = Guid.NewGuid();
+		Guid runId = runIdOverride ?? Guid.NewGuid();
 		ClaimedJob job = new(jobId, runId, "content-pull", TargetId: null, TargetName: null, CredentialId: null,
 			Priority: 5, Payload: "{}", AttemptCount: 0, MaxAttempts: 1);
 		RecordingEventPublisher events = new();
 		JobExecutionContext context = new(job, "worker-1", events, jobs, JobShape.Simple);
 
-		return (handler, context, events, content, profiles, profileControls, catalog, executor);
+		return (handler, context, events, content, profiles, jobs, checkFanOut, runId);
 	}
 
-	private static (ContentPullJobHandler Handler, JobExecutionContext Context, RecordingEventPublisher Events,
-		FakeContentRepository Content, FakeProfileRepository Profiles, FakeProfileControlRepository ProfileControls, FakeCatalogRepository Catalog) Build(
-			PowerShellExecutionResult psResult,
-			ComplianceContentConfig? config,
-			string? initiatedBy = "admin@example.internal",
-			PowerShellExecutionResult? entriesResult = null)
-	{
-		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events, FakeContentRepository content,
-			FakeProfileRepository profiles, FakeProfileControlRepository profileControls, FakeCatalogRepository catalog, _) =
-			BuildWithExecutor(psResult, config, initiatedBy, entriesResult);
-		return (handler, context, events, content, profiles, profileControls, catalog);
-	}
-
-	/// <summary>
-	/// Issue #993: the phase-1 <c>Sync-WaypointComplianceContentTree</c> output shape --
-	/// Commit + Profiles only (no ContentEntries/Controls; those now come from phase 2's
-	/// chunked <c>Get-WaypointComplianceContentEntries</c> calls, built with
-	/// <see cref="EntriesResult"/>/<see cref="ContentEntryObject"/> below).
-	/// </summary>
 	private static PSObject Success(string commit, params PSObject[] profiles)
 	{
 		PSObject root = new();
@@ -511,64 +228,6 @@ public sealed class ContentPullJobHandlerTests
 		return root;
 	}
 
-	/// <summary>
-	/// Issue #993: phase 2's <c>Get-WaypointComplianceContentEntries</c> returns a flat
-	/// array of entry rows directly (no wrapping root object, unlike phase 1's
-	/// Commit/Profiles shape) -- this builds that <see cref="PowerShellExecutionResult"/>
-	/// for <see cref="FakePowerShellExecutor.EntriesResult"/>.
-	/// </summary>
-	private static PowerShellExecutionResult EntriesOk(params PSObject[] entries) => Ok([.. entries]);
-
-	/// <summary>
-	/// Issue #729 remainder: <paramref name="inspecCheckRan"/>/<paramref name="inspecCheckPassed"/>
-	/// default to a genuinely-ran, passing check -- the common fixture shape for a
-	/// content entry that is expected to promote. A test asserting the quarantine path
-	/// passes <c>inspecCheckPassed: false</c> (or <c>inspecCheckRan: false</c>)
-	/// explicitly. Issue #993: <c>Controls</c> now lives on this row (moved from
-	/// <see cref="ProfileObject"/>/<see cref="ProfileObjectWithControls"/>) since it is
-	/// phase 2's <c>Get-WaypointComplianceContentEntries</c>, not phase 1's sync call,
-	/// that walks controls/*.rb.
-	/// </summary>
-	private static PSObject ContentEntryObject(
-		string profileKey, string? rawYaml, bool hasControlsDirectory, params string[] controlFileNames) =>
-		ContentEntryObject(profileKey, rawYaml, hasControlsDirectory, inspecCheckRan: true, inspecCheckPassed: true, controls: [], controlFileNames);
-
-	private static PSObject ContentEntryObject(
-		string profileKey, string? rawYaml, bool hasControlsDirectory, bool inspecCheckRan, bool inspecCheckPassed, params string[] controlFileNames) =>
-		ContentEntryObject(profileKey, rawYaml, hasControlsDirectory, inspecCheckRan, inspecCheckPassed, controls: [], controlFileNames);
-
-	private static PSObject ContentEntryObject(
-		string profileKey, string? rawYaml, bool hasControlsDirectory, bool inspecCheckRan, bool inspecCheckPassed, PSObject[] controls, params string[] controlFileNames)
-	{
-		PSObject entry = new();
-		entry.Properties.Add(new PSNoteProperty("ProfileKey", profileKey));
-		entry.Properties.Add(new PSNoteProperty("RawYaml", rawYaml));
-		entry.Properties.Add(new PSNoteProperty("HasControlsDirectory", hasControlsDirectory));
-		entry.Properties.Add(new PSNoteProperty("HasFilesDirectory", false));
-		entry.Properties.Add(new PSNoteProperty("ControlFileNames", controlFileNames));
-		entry.Properties.Add(new PSNoteProperty("Controls", controls));
-		entry.Properties.Add(new PSNoteProperty("InspecCheckRan", inspecCheckRan));
-		entry.Properties.Add(new PSNoteProperty("InspecCheckPassed", inspecCheckPassed));
-		entry.Properties.Add(new PSNoteProperty("InspecCheckDetail", inspecCheckRan && !inspecCheckPassed ? "inspec check exited non-zero (invented fixture detail)" : null));
-		return entry;
-	}
-
-	private const string ValidVCenterManifest = """
-		name: vsphere-8-vcenter-stig-baseline
-		title: vCenter STIG
-		version: 2.3.0
-		inputs:
-		  - name: vcenter_host
-		    type: string
-		    required: true
-		""";
-
-	/// <summary>
-	/// Issue #993: carries <c>_ProfileDirectory</c> -- the real directory phase 1's sync
-	/// call discovers and phase 2's chunked entries calls need -- defaulting to a
-	/// synthetic-but-unique path derived from ProfileKey so tests that never touch the
-	/// filesystem still exercise the C#-side directory plumbing between phases.
-	/// </summary>
 	private static PSObject ProfileObject(string? profileKey, string? name, string? version)
 	{
 		PSObject profile = new();
@@ -577,15 +236,6 @@ public sealed class ContentPullJobHandlerTests
 		profile.Properties.Add(new PSNoteProperty("Version", version));
 		profile.Properties.Add(new PSNoteProperty("_ProfileDirectory", profileKey is null ? null : $"/invented/{profileKey}"));
 		return profile;
-	}
-
-	private static PSObject ControlObject(string? controlId, string? title, string? severity)
-	{
-		PSObject control = new();
-		control.Properties.Add(new PSNoteProperty("ControlId", controlId));
-		control.Properties.Add(new PSNoteProperty("Title", title));
-		control.Properties.Add(new PSNoteProperty("Severity", severity));
-		return control;
 	}
 
 	private static PowerShellExecutionResult Ok(params object?[] output) =>
@@ -597,297 +247,196 @@ public sealed class ContentPullJobHandlerTests
 	// --- tests -----------------------------------------------------------------
 
 	[Fact]
-	public async Task Execute_Success_ReplacesProfiles_RecordsSucceededPull_EmitsProgress()
-	{
-		PSObject output = Success(
-			"deadbeefcafe",
-			ProfileObject("dod-vsphere-8-esxi-stig", "vSphere 8 ESXi STIG", "1.2"),
-			ProfileObject("dod-vsphere-8-vcsa-stig", "vSphere 8 vCSA STIG", "1.0"));
-		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events,
-			FakeContentRepository content, FakeProfileRepository profiles, _, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-
-		Assert.NotNull(profiles.Replaced);
-		Assert.Equal(2, profiles.Replaced!.Count);
-		Assert.Collection(profiles.Replaced,
-			p => Assert.Equal("dod-vsphere-8-esxi-stig", p.ProfileKey),
-			p => Assert.Equal("dod-vsphere-8-vcsa-stig", p.ProfileKey));
-		Assert.All(profiles.Replaced, p => Assert.Equal("deadbeefcafe", p.Commit));
-
-		RecordedPull pull = Assert.Single(content.Pulls);
-		Assert.Equal(ComplianceContentPullStatuses.Succeeded, pull.Status);
-		Assert.Equal("deadbeefcafe", pull.Commit);
-		Assert.Null(pull.Note);
-		Assert.Equal("admin@example.internal", pull.InitiatedBy);
-
-		(string EventType, Guid? JobId, Guid? RunId, string Payload) progress =
-			Assert.Single(events.Events, e => e.EventType == JobEventTypes.RunProgress);
-		Assert.Contains("deadbeefcafe", progress.Payload, StringComparison.Ordinal);
-		Assert.Contains("\"profile_count\":2", progress.Payload, StringComparison.Ordinal);
-	}
-
-	[Fact]
-	public async Task Execute_BranchConfig_LabelsProfilesCurrent()
-	{
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, _, _) =
-		Build(Ok(Success("c1", ProfileObject("p1", "P1", null))), Config(ComplianceContentRefTypes.Branch, "main"));
-
-		await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(ProfileStates.Current, Assert.Single(profiles.Replaced!).State);
-	}
-
-	[Fact]
-	public async Task Execute_TagConfig_LabelsProfilesPinned()
-	{
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, _, _) =
-		Build(Ok(Success("c1", ProfileObject("p1", "P1", null))), Config(ComplianceContentRefTypes.Tag, "v1.2.3"));
-
-		await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(ProfileStates.Pinned, Assert.Single(profiles.Replaced!).State);
-	}
-
-	/// <summary>Issue #598: a successful pull persists each profile's parsed controls, keyed by that profile's (fake-repository-assigned) id. Issue #993: Controls now travel on the phase-2 entries row, not the phase-1 profile row.</summary>
-	[Fact]
-	public async Task Execute_Success_PersistsControlsPerProfile()
-	{
-		PSObject output = Success(
-			"commitC",
-			ProfileObject("profile-a", "Profile A", null),
-			ProfileObject("profile-b", "Profile B", null));
-		PSObject entryA = ContentEntryObject(
-			"profile-a", rawYaml: null, hasControlsDirectory: true, inspecCheckRan: false, inspecCheckPassed: false,
-			controls: [ControlObject("V-1001", "First control", "medium"), ControlObject("V-1002", "Second control", "high")]);
-		PSObject entryB = ContentEntryObject(
-			"profile-b", rawYaml: null, hasControlsDirectory: true, inspecCheckRan: false, inspecCheckPassed: false,
-			controls: [ControlObject("V-2001", "Other profile's control", "low")]);
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(entryA, entryB));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-		Assert.Equal(2, profileControls.ReplacedByProfileId.Count);
-
-		IReadOnlyList<Profile> stored = await profiles.ListAsync(CancellationToken.None);
-		Profile profileA = Assert.Single(stored, p => p.ProfileKey == "profile-a");
-		Profile profileB = Assert.Single(stored, p => p.ProfileKey == "profile-b");
-
-		IReadOnlyList<ProfileControlUpsert> controlsA = profileControls.ReplacedByProfileId[profileA.Id];
-		Assert.Equal(2, controlsA.Count);
-		Assert.Contains(controlsA, c => c.ControlId == "V-1001" && c.Title == "First control" && c.Severity == "medium");
-		Assert.Contains(controlsA, c => c.ControlId == "V-1002" && c.Title == "Second control" && c.Severity == "high");
-
-		ProfileControlUpsert controlB = Assert.Single(profileControls.ReplacedByProfileId[profileB.Id]);
-		Assert.Equal("V-2001", controlB.ControlId);
-	}
-
-	/// <summary>Issue #598 AC: a profile with no Controls property (older module output, or genuinely zero controls/*.rb files) persists an empty control set rather than failing the pull.</summary>
-	[Fact]
-	public async Task Execute_ProfileWithNoControlsProperty_PersistsEmptyControlSet()
-	{
-		PSObject profile = ProfileObject("no-controls-profile", "No Controls", version: null);
-		PSObject output = Success("commitD", profile);
-		PSObject entry = ContentEntryObject(
-			"no-controls-profile", rawYaml: null, hasControlsDirectory: false, inspecCheckRan: false, inspecCheckPassed: false, controls: []);
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(entry));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-		Profile stored = Assert.Single(await profiles.ListAsync(CancellationToken.None));
-		Assert.Empty(profileControls.ReplacedByProfileId[stored.Id]);
-	}
-
-	/// <summary>Issue #598 AC: a malformed control row (missing ControlId, or a non-PSObject entry) is dropped, not fatal to the pull or to its sibling controls.</summary>
-	[Fact]
-	public async Task Execute_MalformedControlRows_AreSkipped_WithoutFailingThePull()
-	{
-		PSObject goodControl = ControlObject("V-3001", "Kept", "critical");
-		PSObject blankIdControl = ControlObject(controlId: null, "Dropped: no id", "low");
-
-		PSObject profile = ProfileObject("profile-c", "Profile C", version: null);
-		PSObject entry = ContentEntryObject(
-			"profile-c", rawYaml: null, hasControlsDirectory: true, inspecCheckRan: false, inspecCheckPassed: false, controls: []);
-		entry.Properties.Remove("Controls");
-		entry.Properties.Add(new PSNoteProperty("Controls", new object?[] { goodControl, blankIdControl, "not-a-psobject" }));
-
-		PSObject output = Success("commitE", profile);
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(entry));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-		Profile stored = Assert.Single(await profiles.ListAsync(CancellationToken.None));
-		ProfileControlUpsert survivor = Assert.Single(profileControls.ReplacedByProfileId[stored.Id]);
-		Assert.Equal("V-3001", survivor.ControlId);
-	}
-
-	/// <summary>A control with an empty/blank Title or Severity normalizes to null rather than storing whitespace (mirrors TryParseProfile's Name fallback discipline).</summary>
-	[Fact]
-	public async Task Execute_ControlWithBlankTitleAndSeverity_NormalizesToNull()
-	{
-		PSObject profile = ProfileObject("profile-d", "Profile D", version: null);
-		PSObject entry = ContentEntryObject(
-			"profile-d", rawYaml: null, hasControlsDirectory: true, inspecCheckRan: false, inspecCheckPassed: false,
-			controls: [ControlObject("V-4001", "   ", "")]);
-		PSObject output = Success("commitF", profile);
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository _, FakeProfileRepository profiles, FakeProfileControlRepository profileControls, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(entry));
-
-		await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Profile stored = Assert.Single(await profiles.ListAsync(CancellationToken.None));
-		ProfileControlUpsert control = Assert.Single(profileControls.ReplacedByProfileId[stored.Id]);
-		Assert.Null(control.Title);
-		Assert.Null(control.Severity);
-	}
-
-	[Fact]
 	public async Task Execute_MissingConfig_FailsWithoutInvokingExecutor_AndRecordsNoPull()
 	{
-		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events,
-			FakeContentRepository content, FakeProfileRepository profiles, _, _) =
-		Build(Ok(), config: null);
+		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, _, _, _, _) =
+			Build(Ok(), config: null);
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
-		Assert.Contains("No compliance-content repository is configured", outcome.Note, StringComparison.Ordinal);
-		// No config -> no pull history row and no profile mutation (nothing was even attempted).
 		Assert.Empty(content.Pulls);
-		Assert.Null(profiles.Replaced);
-		Assert.Empty(events.Events);
 	}
 
 	[Fact]
-	public async Task Execute_ExecutorFailure_StillRecordsFailedPull_WithReason()
+	public async Task Execute_ExecutorFailure_RecordsFailedPull_WithReason()
 	{
-		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events,
-			FakeContentRepository content, FakeProfileRepository profiles, _, _) =
-		Build(Fail("git checkout failed: ref not found"), Config(ComplianceContentRefTypes.Branch, "main"));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
-		// The AC's central promise: a failed pull STILL lands in history.
-		RecordedPull pull = Assert.Single(content.Pulls);
-		Assert.Equal(ComplianceContentPullStatuses.Failed, pull.Status);
-		Assert.Null(pull.Commit);
-		Assert.Equal("git checkout failed: ref not found", pull.Note);
-		Assert.Null(profiles.Replaced);
-		Assert.DoesNotContain(events.Events, e => e.EventType == JobEventTypes.RunProgress);
-	}
-
-	[Fact]
-	public async Task Execute_ExecutorFailure_WithNoReason_RecordsFallbackNote()
-	{
-		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, _, _, _) =
-		Build(Fail(reason: null), Config(ComplianceContentRefTypes.Branch, "main"));
+		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, _, _, _, _) =
+			Build(Fail("git clone failed (invented fixture reason)"), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
 		RecordedPull pull = Assert.Single(content.Pulls);
 		Assert.Equal(ComplianceContentPullStatuses.Failed, pull.Status);
-		Assert.Contains("no failure reason", pull.Note, StringComparison.Ordinal);
+		Assert.Contains("invented fixture reason", pull.Note, StringComparison.Ordinal);
 	}
 
 	[Fact]
 	public async Task Execute_NoCommitInOutput_RecordsFailedPull_AndSkipsProfileReplace()
 	{
-		// Executor "succeeded" but produced no PSObject carrying a Commit -> unchanged/no-commit path.
-		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events,
-			FakeContentRepository content, FakeProfileRepository profiles, _, _) =
-		Build(Ok("just a string, not a PSObject"), Config(ComplianceContentRefTypes.Branch, "main"));
+		PSObject output = new();
+		output.Properties.Add(new PSNoteProperty("Commit", null));
+		output.Properties.Add(new PSNoteProperty("Profiles", Array.Empty<PSObject>()));
+
+		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, FakeProfileRepository profiles, _, _, _) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.Null(profiles.Replaced);
 		RecordedPull pull = Assert.Single(content.Pulls);
 		Assert.Equal(ComplianceContentPullStatuses.Failed, pull.Status);
-		Assert.Contains("no commit", pull.Note, StringComparison.Ordinal);
-		Assert.Null(profiles.Replaced);
-		Assert.DoesNotContain(events.Events, e => e.EventType == JobEventTypes.RunProgress);
 	}
 
 	[Fact]
-	public async Task Execute_BlankCommit_TreatedAsNoCommit()
+	public async Task Execute_Success_ReplacesProfileInventory_AtSyncTime()
 	{
-		PSObject output = new();
-		output.Properties.Add(new PSNoteProperty("Commit", "   "));
-		output.Properties.Add(new PSNoteProperty("Profiles", Array.Empty<PSObject>()));
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, FakeProfileRepository profiles, _, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+		PSObject output = Success(
+			"deadbeefcafe",
+			ProfileObject("dod-vsphere-8-esxi-stig", "vSphere 8 ESXi STIG", "1.2"),
+			ProfileObject("dod-vsphere-8-vcsa-stig", "vSphere 8 vCSA STIG", "1.0"));
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, _, _, _) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
-		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
-		Assert.Equal(ComplianceContentPullStatuses.Failed, Assert.Single(content.Pulls).Status);
-		Assert.Null(profiles.Replaced);
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.NotNull(profiles.Replaced);
+		Assert.Equal(2, profiles.Replaced!.Count);
+	}
+
+	[Fact]
+	public async Task Execute_Success_DoesNotRecordPullHistory_ReconcileOwnsThatNow()
+	{
+		PSObject output = Success("deadbeefcafe", ProfileObject("p0", "P0", null));
+		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, _, _, _, _) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.Empty(content.Pulls);
+	}
+
+	[Fact]
+	public async Task Execute_Success_FansOutOneCheckJobPerChunk()
+	{
+		PSObject output = Success(
+			"commitFanOut",
+			ProfileObject("p0", "P0", null),
+			ProfileObject("p1", "P1", null),
+			ProfileObject("p2", "P2", null),
+			ProfileObject("p3", "P3", null),
+			ProfileObject("p4", "P4", null));
+
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, FakeJobRunnerRepository jobs, FakeCheckFanOutRepository checkFanOut, Guid runId) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), chunkSize: 2);
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+
+		// 5 profiles / chunk size 2 -> ceil(5/2) = 3 fanned-out content-check jobs.
+		Assert.Equal(3, jobs.FanOutCalls.Count);
+		Assert.All(jobs.FanOutCalls, call => Assert.Equal(runId, call.RunId));
+		Assert.All(jobs.FanOutCalls, call => Assert.Equal("content-check", Assert.Single(call.Specs).JobType));
+
+		Assert.Equal(3, checkFanOut.RecordedFanOuts.Count);
+		Assert.Equal(2, checkFanOut.RecordedFanOuts[0].ProfileDirectories.Count);
+		Assert.Equal(2, checkFanOut.RecordedFanOuts[1].ProfileDirectories.Count);
+		Assert.Single(checkFanOut.RecordedFanOuts[2].ProfileDirectories);
+		Assert.All(checkFanOut.RecordedFanOuts, f => Assert.Equal("commitFanOut", f.SourceCommit));
+
+		// Every profile is covered by exactly one chunk (no gaps, no overlaps).
+		HashSet<string> coveredKeys = [.. checkFanOut.RecordedFanOuts.SelectMany(f => f.ProfileDirectories).Select(p => p.ProfileKey)];
+		Assert.Equal(["p0", "p1", "p2", "p3", "p4"], coveredKeys.Order(StringComparer.Ordinal));
+
+		Assert.Contains("3 check job(s) fanned out", outcome.Note, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task Execute_NoProfilesDiscovered_FansOutZeroCheckJobs_StillSucceeds()
+	{
+		PSObject output = Success("commitEmpty");
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, FakeJobRunnerRepository jobs, FakeCheckFanOutRepository checkFanOut, _) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		Assert.Empty(jobs.FanOutCalls);
+		Assert.Empty(checkFanOut.RecordedFanOuts);
+		Assert.Contains("0 check job(s) fanned out", outcome.Note, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task Execute_EmitsFanOutProgressEvent_WithCommitAndCheckJobCount()
+	{
+		PSObject output = Success("commitProgress", ProfileObject("p0", "P0", null));
+		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events, _, _, _, _, _) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+
+		await handler.ExecuteAsync(context, CancellationToken.None);
+
+		var progress = Assert.Single(events.Events, e => e.EventType == JobEventTypes.RunProgress);
+		Assert.Contains("commitProgress", progress.Payload, StringComparison.Ordinal);
+		Assert.Contains("check_job_count", progress.Payload, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task Execute_BranchConfig_LabelsProfilesCurrent()
+	{
+		PSObject output = Success("c1", ProfileObject("p0", "P0", null));
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, _, _, _) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+
+		await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Assert.Equal(ProfileStates.Current, profiles.Replaced![0].State);
+	}
+
+	[Fact]
+	public async Task Execute_TagConfig_LabelsProfilesPinned()
+	{
+		PSObject output = Success("c1", ProfileObject("p0", "P0", null));
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, _, _, _) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Tag, "v1.0"));
+
+		await handler.ExecuteAsync(context, CancellationToken.None);
+
+		Assert.Equal(ProfileStates.Pinned, profiles.Replaced![0].State);
 	}
 
 	[Fact]
 	public async Task Execute_MalformedProfileRows_AreSkipped_WithoutFailingThePull()
 	{
-		// A missing-key profile and a non-PSObject row must both be dropped; the valid one survives.
-		PSObject output = Success(
-			"commit9",
-			ProfileObject(profileKey: null, "no key", "1.0"), // dropped: blank ProfileKey
-			ProfileObject("good-profile", name: null, version: null)); // name defaults to key
+		PSObject malformed = new();
+		malformed.Properties.Add(new PSNoteProperty("ProfileKey", null));
+		PSObject output = Success("c1", malformed, ProfileObject("p-good", "Good", null));
 
-		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, FakeProfileRepository profiles, _, _) =
-		Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, _, _, _) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
 
 		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
 
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-		ProfileUpsert survivor = Assert.Single(profiles.Replaced!);
-		Assert.Equal("good-profile", survivor.ProfileKey);
-		Assert.Equal("good-profile", survivor.Name); // blank Name falls back to the key
-		Assert.Null(survivor.Version);
-		Assert.Equal(ComplianceContentPullStatuses.Succeeded, Assert.Single(content.Pulls).Status);
+		Assert.Single(profiles.Replaced!);
+		Assert.Equal("p-good", profiles.Replaced![0].ProfileKey);
 	}
 
 	[Fact]
-	public async Task Execute_MalformedProfileInEnumerable_NonPsObjectRowIsSkipped()
+	public async Task Execute_ForwardsConfiguredParametersToSyncExecutor()
 	{
-		PSObject root = new();
-		root.Properties.Add(new PSNoteProperty("Commit", "commitX"));
-		root.Properties.Add(new PSNoteProperty("Profiles", new object?[] { "not-a-psobject", ProfileObject("kept", "Kept", "9") }));
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, FakeProfileRepository profiles, _, _) =
-		Build(Ok(root), Config(ComplianceContentRefTypes.Branch, "main"));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-		Assert.Equal("kept", Assert.Single(profiles.Replaced!).ProfileKey);
-	}
-
-	[Fact]
-	public async Task Execute_ForwardsConfiguredParametersToExecutor()
-	{
-		FakePowerShellExecutor executor = new(Ok(Success("c1")));
-		FakeContentRepository content = new(Config(ComplianceContentRefTypes.Tag, "v2"));
+		PSObject output = Success("c1");
+		FakePowerShellExecutor executor = new(Ok(output));
+		FakeContentRepository content = new(Config(ComplianceContentRefTypes.Branch, "release/2026"));
 		FakeProfileRepository profiles = new();
-		FakeProfileControlRepository profileControls = new();
-		FakeCatalogRepository catalog = new();
 		FakeJobRunnerRepository jobs = new("admin@example.internal");
+		FakeCheckFanOutRepository checkFanOut = new();
 		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions { ContentPath = ContentPath });
-		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options, new FakeContentRevisionStager());
+		ContentPullJobHandler handler = new(executor, content, profiles, jobs, options, checkFanOut);
 
 		ClaimedJob job = new(Guid.NewGuid(), Guid.NewGuid(), "content-pull", null, null, null, 5, "{}", 0, 1);
 		RecordingEventPublisher events = new();
@@ -897,642 +446,39 @@ public sealed class ContentPullJobHandlerTests
 
 		PowerShellRequest? syncRequest = executor.LastSyncRequest;
 		Assert.NotNull(syncRequest);
-		Assert.Equal("Sync-WaypointComplianceContentTree", syncRequest!.Command);
-		Assert.Equal(PowerShellRequestKind.Command, syncRequest.Kind);
-		Assert.Equal(RepositoryUrl, syncRequest.Parameters!["RepositoryUrl"]);
-		Assert.Equal(ComplianceContentRefTypes.Tag, syncRequest.Parameters!["RefType"]);
-		Assert.Equal("v2", syncRequest.Parameters!["RefValue"]);
-		Assert.Equal(ContentPath, syncRequest.Parameters!["ContentPath"]);
+		Assert.Equal(RepositoryUrl, syncRequest!.Parameters!["RepositoryUrl"]);
+		Assert.Equal(ComplianceContentRefTypes.Branch, syncRequest.Parameters["RefType"]);
+		Assert.Equal("release/2026", syncRequest.Parameters["RefValue"]);
+		Assert.Equal(ContentPath, syncRequest.Parameters["ContentPath"]);
 	}
 
 	[Fact]
 	public async Task Execute_NullInitiatedBy_ResolvesActorToSystem()
 	{
-		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, _, _, _) =
-		Build(Ok(Success("c1", ProfileObject("p1", "P1", null))), Config(ComplianceContentRefTypes.Branch, "main"), initiatedBy: null);
+		PSObject output = Success("c1", ProfileObject("p0", "P0", null));
+		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, FakeJobRunnerRepository jobs, _, _) =
+			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), initiatedBy: null);
 
 		await handler.ExecuteAsync(context, CancellationToken.None);
 
-		Assert.Equal("system", Assert.Single(content.Pulls).InitiatedBy);
+		Assert.All(jobs.FanOutCalls, call => Assert.Equal("system", call.CreatedBy));
 	}
 
 	[Fact]
-	public async Task Execute_NullRunId_ResolvesActorToSystem_WithoutQueryingRunState()
+	public async Task Execute_FanOutThrows_RecordsFailedPull_DoesNotPropagateUnhandled()
 	{
-		FakePowerShellExecutor executor = new(Ok(Success("c1", ProfileObject("p1", "P1", null))));
-		FakeContentRepository content = new(Config(ComplianceContentRefTypes.Branch, "main"));
-		FakeProfileRepository profiles = new();
-		FakeProfileControlRepository profileControls = new();
-		FakeCatalogRepository catalog = new();
-		FakeJobRunnerRepository jobs = new("admin@example.internal");
-		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions { ContentPath = ContentPath });
-		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options, new FakeContentRevisionStager());
-
-		// A job with no run id: ResolveActorAsync short-circuits to "system" without a run-state read.
-		ClaimedJob job = new(Guid.NewGuid(), RunId: null, "content-pull", null, null, null, 5, "{}", 0, 1);
-		RecordingEventPublisher events = new();
-		JobExecutionContext context = new(job, "worker-1", events, jobs, JobShape.Simple);
-
-		await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal("system", Assert.Single(content.Pulls).InitiatedBy);
-	}
-
-	// --- issue #729: semantic-import wiring (job claim -> import -> report persisted) ---
-
-	[Fact]
-	public async Task Execute_Success_RunsSemanticImport_PersistsReportAndPromotesAcceptedLeaf()
-	{
-		PSObject profile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", "vCenter STIG", "2.3.0");
-		PSObject contentEntry = ContentEntryObject(
-			"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", ValidVCenterManifest, hasControlsDirectory: true, "vcenter_control.rb");
-		PSObject output = Success("commitG", profile);
-
-		(ContentPullJobHandler handler, JobExecutionContext context, RecordingEventPublisher events, _, _, _, FakeCatalogRepository catalog) =
-			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(contentEntry));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-
-		CatalogImportReport report = Assert.Single(catalog.Reports);
-		Assert.Equal("commitG", report.SourceCommit);
-		Assert.Equal(1, report.AcceptedCount);
-		Assert.Equal(0, report.RejectedCount);
-
-		CatalogImportReportEntry entry = Assert.Single(catalog.Entries);
-		Assert.Equal(CatalogImportEntryDispositions.Accepted, entry.Disposition);
-		Assert.Equal("vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", entry.ProfileKey);
-		Assert.NotNull(entry.ExecutionProfileId);
-
-		IReadOnlyList<CatalogDeclaredInput> declaredInputs = await catalog.ListDeclaredInputsAsync(entry.ExecutionProfileId!.Value, CancellationToken.None);
-		Assert.Single(declaredInputs, i => i.Name == "vcenter_host");
-
-		(string EventType, Guid? JobId, Guid? RunId, string Payload) progress =
-			Assert.Single(events.Events, e => e.EventType == JobEventTypes.RunProgress);
-		Assert.Contains("\"catalog_promoted_count\":1", progress.Payload, StringComparison.Ordinal);
-		Assert.Contains("1 catalog execution profile(s) promoted", outcome.Note, StringComparison.Ordinal);
-	}
-
-	/// <summary>
-	/// Issue #729 deliverable: "unknown/new layouts are quarantined with actionable
-	/// diagnostics rather than guessed" -- one malformed content entry (an unrecognized
-	/// vendor family directory) must be rejected into the report WITHOUT preventing its
-	/// sibling entry from being interpreted, reconciled, and promoted. Mirrors the
-	/// pre-existing "one bad profile/control row must not fail the whole pull"
-	/// discipline this handler already applies one level up (profiles/controls).
-	/// </summary>
-	[Fact]
-	public async Task Execute_OneBadContentEntry_QuarantinesIt_SiblingStillPromotes()
-	{
-		PSObject goodProfile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", "vCenter STIG", "2.3.0");
-		PSObject badProfile = ProfileObject("totally-unrecognized-shape", "Bad", null);
-
-		PSObject goodEntry = ContentEntryObject(
-			"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", ValidVCenterManifest, hasControlsDirectory: true, "vcenter_control.rb");
-		PSObject badEntry = ContentEntryObject("totally-unrecognized-shape", ValidVCenterManifest, hasControlsDirectory: true, "control.rb");
-
-		PSObject output = Success("commitH", goodProfile, badProfile);
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
-			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(goodEntry, badEntry));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-
-		CatalogImportReport report = Assert.Single(catalog.Reports);
-		Assert.Equal(1, report.AcceptedCount);
-		Assert.Equal(1, report.RejectedCount);
-
-		Assert.Contains(catalog.Entries, e => e.Disposition == CatalogImportEntryDispositions.Accepted && e.ProfileKey == "vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter");
-		CatalogImportReportEntry rejected = Assert.Single(catalog.Entries, e => e.Disposition == CatalogImportEntryDispositions.Rejected);
-		Assert.Equal("totally-unrecognized-shape", rejected.ProfileKey);
-		Assert.NotNull(rejected.Reason);
-	}
-
-	/// <summary>
-	/// Issue #729 remainder deliverable 3, fail-closed AC: an accepted executable-leaf
-	/// candidate whose bounded <c>inspec check</c> genuinely ran and FAILED must be
-	/// quarantined -- the report entry stays disposition "accepted" (reconciliation's
-	/// structural/vocabulary checks legitimately passed) but is never promoted, and the
-	/// check's own diagnostic detail lands as the entry's rejection reason. A sibling
-	/// candidate whose check passed is unaffected (per-entry containment, same
-	/// discipline as <see cref="Execute_OneBadContentEntry_QuarantinesIt_SiblingStillPromotes"/>).
-	/// </summary>
-	[Fact]
-	public async Task Execute_AcceptedCandidateFailsInspecCheck_QuarantinedNotPromoted_SiblingStillPromotes()
-	{
-		PSObject passingProfile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", "vCenter STIG", "2.3.0");
-		PSObject failingProfile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline/esxi", "ESXi STIG", "2.3.0");
-
-		PSObject passingEntry = ContentEntryObject(
-			"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", ValidVCenterManifest, hasControlsDirectory: true,
-			inspecCheckRan: true, inspecCheckPassed: true, "vcenter_control.rb");
-		PSObject failingEntry = ContentEntryObject(
-			"vsphere/8.0.3/v2r3-stig/inspec/baseline/esxi", ValidVCenterManifest.Replace("vcenter", "esxi", StringComparison.Ordinal), hasControlsDirectory: true,
-			inspecCheckRan: true, inspecCheckPassed: false, "esxi_control.rb");
-
-		PSObject output = Success("commitJ", passingProfile, failingProfile);
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
-			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(passingEntry, failingEntry));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-
-		// Both candidates reconciled/accepted (2 accepted entries in the report), but
-		// only the passing one was actually promoted to an execution profile.
-		CatalogImportReport report = Assert.Single(catalog.Reports);
-		Assert.Equal(2, report.AcceptedCount);
-		Assert.Equal(0, report.RejectedCount);
-
-		CatalogImportReportEntry promoted = Assert.Single(
-			catalog.Entries, e => e.ProfileKey == "vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter");
-		Assert.Equal(CatalogImportEntryDispositions.Accepted, promoted.Disposition);
-		Assert.NotNull(promoted.ExecutionProfileId);
-		Assert.Null(promoted.Reason);
-
-		CatalogImportReportEntry quarantined = Assert.Single(
-			catalog.Entries, e => e.ProfileKey == "vsphere/8.0.3/v2r3-stig/inspec/baseline/esxi");
-		Assert.Equal(CatalogImportEntryDispositions.Accepted, quarantined.Disposition);
-		Assert.Null(quarantined.ExecutionProfileId);
-		Assert.NotNull(quarantined.Reason);
-		Assert.Contains("inspec check", quarantined.Reason, StringComparison.OrdinalIgnoreCase);
-		Assert.Contains("inspec check exited non-zero", quarantined.Reason, StringComparison.Ordinal);
-	}
-
-	/// <summary>
-	/// Issue #729 remainder, "did not run" fail-closed AC: a candidate whose check
-	/// never ran at all (e.g. no <c>inspec</c> binary staged in the runner image) must
-	/// be treated exactly like a failed check -- "unproven" is never conflated with
-	/// "proven valid."
-	/// </summary>
-	[Fact]
-	public async Task Execute_AcceptedCandidateInspecCheckNeverRan_QuarantinedNotPromoted()
-	{
-		PSObject profile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", "vCenter STIG", "2.3.0");
-		PSObject entry = ContentEntryObject(
-			"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", ValidVCenterManifest, hasControlsDirectory: true,
-			inspecCheckRan: false, inspecCheckPassed: false, "vcenter_control.rb");
-
-		PSObject output = Success("commitK", profile);
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
-			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(entry));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-		CatalogImportReportEntry quarantined = Assert.Single(catalog.Entries);
-		Assert.Equal(CatalogImportEntryDispositions.Accepted, quarantined.Disposition);
-		Assert.Null(quarantined.ExecutionProfileId);
-		Assert.NotNull(quarantined.Reason);
-		Assert.Contains("did not run", quarantined.Reason, StringComparison.OrdinalIgnoreCase);
-	}
-
-	[Fact]
-	public async Task Execute_NoContentEntries_StillSucceeds_RecordsEmptyReport()
-	{
-		// A module build that has not yet added ContentEntries (or a checkout with no
-		// discoverable inspec.yml at all) must not fail the pull -- semantic import over
-		// zero entries is a legitimate (if unhelpful) empty report.
-		PSObject output = Success("commitI", ProfileObject("p1", "P1", null));
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
+		PSObject output = Success("c1", ProfileObject("p0", "P0", null));
+		(ContentPullJobHandler handler, JobExecutionContext context, _, FakeContentRepository content, _, FakeJobRunnerRepository jobs, _, _) =
 			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"));
+		jobs.ThrowOnFanOut = true;
 
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
+		await Assert.ThrowsAsync<InvalidOperationException>(() => handler.ExecuteAsync(context, CancellationToken.None));
 
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-		CatalogImportReport report = Assert.Single(catalog.Reports);
-		Assert.Equal(0, report.AcceptedCount);
-		Assert.Equal(0, report.WarningCount);
-		Assert.Equal(0, report.RejectedCount);
-		Assert.Empty(catalog.Entries);
-	}
-
-	[Fact]
-	public async Task Execute_AggregateCandidate_IsAcceptedButNeverPromoted()
-	{
-		// The baseline directory itself (no object-kind/service leaf segment) is the
-		// vSphere aggregate parent -- accepted by semantic import (it is a legitimate,
-		// if non-executable, classification) but never promoted into a catalog
-		// execution profile (issue #729 AC "aggregate ... profiles cannot be selected
-		// for execution").
-		PSObject profile = ProfileObject("vsphere/8.0.3/v2r3-stig/inspec/baseline", "vSphere (aggregate)", null);
-		PSObject contentEntry = ContentEntryObject("vsphere/8.0.3/v2r3-stig/inspec/baseline", ValidVCenterManifest, hasControlsDirectory: false);
-		PSObject output = Success("commitJ", profile);
-
-		(ContentPullJobHandler handler, JobExecutionContext context, _, _, _, _, FakeCatalogRepository catalog) =
-			Build(Ok(output), Config(ComplianceContentRefTypes.Branch, "main"), entriesResult: EntriesOk(contentEntry));
-
-		JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-		CatalogImportReportEntry entry = Assert.Single(catalog.Entries);
-		Assert.Equal(CatalogImportEntryDispositions.Accepted, entry.Disposition);
-		Assert.Null(entry.ExecutionProfileId);
-		Assert.Contains("aggregate", entry.Reason, StringComparison.OrdinalIgnoreCase);
-	}
-
-	// --- issue #972: real-executor end-to-end (the exact chain #972 blocked) ---------
-
-	/// <summary>
-	/// Issue #972 end-to-end proof: an invented, recognized-layout fixture content tree
-	/// (a real <c>inspec.yml</c> + <c>controls/*.rb</c> on disk) flows through the REAL
-	/// <see cref="RealPowerShellExecutor"/> (real in-process SMA
-	/// runspace pool, real <c>Get-Content -Raw</c> cmdlet output, the SAME
-	/// <c>ContentEntries</c> assembly shape as the deployed
-	/// <c>WaypointComplianceContent.psm1</c>) into <see cref="ContentPullJobHandler.ExecuteAsync"/>
-	/// and yields at least one staged/promoted profile with a manifest that parsed
-	/// (non-null <c>ExecutionProfileId</c>) -- the exact chain #972 blocked end to end
-	/// (315 recognized profiles all rejected "empty or missing" despite a real,
-	/// non-empty <c>inspec.yml</c> on disk). Pre-fix, this test fails the same way: zero
-	/// profiles promoted, because <c>RawYaml</c> never reaches
-	/// <c>InspecManifestParser.TryParse</c> as a non-empty string.
-	///
-	/// Issue #984: this chain now also exercises the real bounded
-	/// <c>Test-WaypointInspecCheck</c> (see
-	/// <c>WaypointContentPullRealExecutorStubModule.psm1</c>'s issue #984 note) -- an
-	/// invented stub "inspec" executable is put on PATH for the duration of this test so
-	/// the check genuinely runs (via the SAME System.Diagnostics.Process bound issue #984
-	/// introduced, replacing Start-Job/Wait-Job) rather than reporting "not found", and
-	/// promotion depends on it reporting Passed=true within its bound.
-	/// </summary>
-	[Fact]
-	public async Task Execute_RealExecutor_FixtureContentTree_StagesAndPromotesProfiles()
-	{
-		string fixtureRoot = Directory.CreateTempSubdirectory("wp-972-content-tree").FullName;
-		string stubInspecDir = Directory.CreateTempSubdirectory("wp-984-inspec-stub").FullName;
-		string originalPath = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-		try
-		{
-			string profileDir = Path.Combine(fixtureRoot, "vsphere", "8.0.3", "v2r3-stig", "inspec", "baseline", "vcenter");
-			Directory.CreateDirectory(profileDir);
-			Directory.CreateDirectory(Path.Combine(profileDir, "controls"));
-			await File.WriteAllTextAsync(Path.Combine(profileDir, "inspec.yml"), ValidVCenterManifest);
-			await File.WriteAllTextAsync(
-				Path.Combine(profileDir, "controls", "vcenter_control.rb"),
-				"control 'V-000001' do\n  title 'Invented fixture control'\n  impact 0.7\nend\n");
-
-			WriteStubInspec(stubInspecDir, exitCode: 0);
-			Environment.SetEnvironmentVariable("PATH", stubInspecDir + Path.PathSeparator + originalPath);
-
-			string stubModulePath = Path.Combine(
-				AppContext.BaseDirectory, "Assets", "WaypointContentPullRealExecutorStubModule", "WaypointContentPullRealExecutorStubModule.psm1");
-			string realModulePath = Path.Combine(
-				AppContext.BaseDirectory, "PowerShell", "Modules", "WaypointComplianceContent", "WaypointComplianceContent.psm1");
-			Assert.True(File.Exists(realModulePath), $"real module not found at '{realModulePath}' -- Waypoint.Infrastructure.Execution's PowerShell\\Modules content did not copy into the test output.");
-
-			PowerShellOptions options = new()
-			{
-				MaxRunspaces = 1,
-				DefaultInvocationTimeout = TimeSpan.FromMinutes(1),
-				StopGracePeriod = TimeSpan.FromSeconds(2),
-			};
-			options.ModulePreloadPaths.Add(realModulePath);
-			options.ModulePreloadPaths.Add(stubModulePath);
-			IOptions<PowerShellOptions> wrappedOptions = Options.Create(options);
-
-			using RealWaypointRunspacePool pool = new(wrappedOptions, NullLogger<RealWaypointRunspacePool>.Instance);
-			RecordingJobLogBuffer logBuffer = new();
-			RealPowerShellExecutor realExecutor = new(pool, logBuffer, wrappedOptions, NullLogger<RealPowerShellExecutor>.Instance);
-
-			FakeContentRepository content = new(Config(ComplianceContentRefTypes.Branch, "main"));
-			FakeProfileRepository profiles = new();
-			FakeProfileControlRepository profileControls = new();
-			FakeCatalogRepository catalog = new();
-			FakeJobRunnerRepository jobs = new("admin@example.internal");
-			IOptions<ComplianceContentOptions> contentOptions =
-				Options.Create(new ComplianceContentOptions { ContentPath = fixtureRoot });
-
-			// A thin executor adapter: ContentPullJobHandler always invokes the fixed
-			// command name "Invoke-WaypointComplianceContentPull" -- this test's stub
-			// intentionally has a DIFFERENT name (it skips git entirely, so it is not a
-			// drop-in replacement for the real command's parameter contract) and is
-			// invoked here as the same PowerShellRequest.Command the handler issues,
-			// remapped to the stub's own command/parameters, still through the REAL
-			// PowerShellExecutor.ExecuteAsync path end to end.
-			RemappingExecutor executor = new(realExecutor, fixtureRoot);
-
-			ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, contentOptions, new FakeContentRevisionStager());
-
-			Guid jobId = Guid.NewGuid();
-			Guid runId = Guid.NewGuid();
-			ClaimedJob job = new(jobId, runId, "content-pull", TargetId: null, TargetName: null, CredentialId: null,
-				Priority: 5, Payload: "{}", AttemptCount: 0, MaxAttempts: 1);
-			RecordingEventPublisher events = new();
-			JobExecutionContext context = new(job, "worker-1", events, jobs, JobShape.Simple);
-
-			JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-			Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-
-			CatalogImportReport report = Assert.Single(catalog.Reports);
-			Assert.True(report.AcceptedCount > 0, "semantic import accepted zero candidates -- RawYaml likely did not survive the real executor boundary.");
-			Assert.Equal(0, report.RejectedCount);
-
-			CatalogImportReportEntry entry = Assert.Single(catalog.Entries);
-			Assert.Equal(CatalogImportEntryDispositions.Accepted, entry.Disposition);
-			Assert.Equal("vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", entry.ProfileKey);
-			Assert.NotNull(entry.ExecutionProfileId);
-			Assert.Null(entry.Reason);
-
-			Assert.Contains(profiles.Replaced!, p => p.ProfileKey == "vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter");
-			Assert.Contains("1 catalog execution profile(s) promoted", outcome.Note, StringComparison.Ordinal);
-		}
-		finally
-		{
-			Environment.SetEnvironmentVariable("PATH", originalPath);
-			Directory.Delete(fixtureRoot, recursive: true);
-			Directory.Delete(stubInspecDir, recursive: true);
-		}
-	}
-
-	/// <summary>
-	/// Issue #984: an invented stub "inspec" executable (a throwaway shell script,
-	/// faithful only to `inspec check &lt;path&gt; --format json`'s argument contract and
-	/// exit-code convention, never real InSpec/cinc-auditor bytes -- docs/testing.md's CI
-	/// stub discipline) so <c>Test-WaypointInspecCheck</c> genuinely runs during this
-	/// end-to-end test instead of reporting "inspec executable not found on PATH".
-	/// Issue #993: <paramref name="sleepSeconds"/> lets the chunking tests simulate a
-	/// realistic per-check duration (mirroring the live-proven ~20s real checks) without
-	/// waiting anywhere near that long in CI.
-	/// </summary>
-	private static void WriteStubInspec(string directory, int exitCode, int sleepSeconds = 0)
-	{
-		string stubPath = Path.Combine(directory, "inspec");
-		string script = "#!/bin/sh\n"
-			+ "# Invented stub for issue #984's real-executor end-to-end test -- mirrors\n"
-			+ "# `inspec check <path> --format json`'s argument contract only.\n"
-			+ $"sleep {sleepSeconds}\n"
-			+ "echo '{\"controls\": []}'\n"
-			+ $"exit {exitCode}\n";
-		File.WriteAllText(stubPath, script.ReplaceLineEndings("\n"));
-
-#pragma warning disable CA1416 // Linux-only test asset; this repo's CI and runners are both Linux.
-		File.SetUnixFileMode(
-			stubPath,
-			UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
-				| UnixFileMode.GroupRead | UnixFileMode.GroupExecute
-				| UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
-#pragma warning restore CA1416
-	}
-
-	// --- issue #993: chunked-pipeline-budget tests -----------------------------
-
-	/// <summary>
-	/// Issue #993's central negative proof: N executable-leaf profiles whose AGGREGATE
-	/// check time exceeds a small whole-pipeline-style budget, while each individual
-	/// check comfortably fits the (also small) per-check bound -- exactly the shape that
-	/// broke on main once #989 made checks genuinely run to completion. On CURRENT MAIN
-	/// (one monolithic <c>Invoke-WaypointComplianceContentPull</c> invocation bounded by
-	/// a single fixed <c>PowerShellRequest.Timeout</c>/<c>DefaultInvocationTimeout</c>
-	/// covering the WHOLE tree), a timeout this small relative to 5 leaves x 2s would force-stop
-	/// the single pipeline mid-run and promote ZERO profiles -- this test's own inline
-	/// comment below captures the exact revert-and-rerun negative proof for the PR body.
-	/// With this issue's chunked fix (5 leaves split across
-	/// <see cref="ComplianceContentOptions.ContentPullChunkSize"/>-sized chunks, each
-	/// chunk's own <c>PowerShellRequest.Timeout</c> sized to THAT chunk only), the run
-	/// completes and promotes every leaf.
-	/// </summary>
-	[Fact]
-	public async Task Execute_RealExecutor_AggregateExceedsSmallBudget_ButChunkedFix_PromotesAllLeaves()
-	{
-		const int leafCount = 5;
-		const int perCheckSleepSeconds = 2;
-		string fixtureRoot = Directory.CreateTempSubdirectory("wp-993-chunk-tree").FullName;
-		string stubInspecDir = Directory.CreateTempSubdirectory("wp-993-inspec-stub").FullName;
-		string originalPath = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-		try
-		{
-			// Issue #993: uses the VCSA named-service-split family (vcsa/<version>/
-			// <release>/inspec/<baseline>/<any-leaf-name>) rather than vSphere's
-			// object-kind split (vcenter/esxi/vm ONLY) -- that lets 5 DISTINCT leaf names
-			// all classify as real executable-leaf candidates instead of colliding on the
-			// same 3 fixed object-kind selectors.
-			for (int i = 0; i < leafCount; i++)
-			{
-				string profileDir = Path.Combine(fixtureRoot, "vcsa", "8.0.3", "v2r3-stig", "inspec", "baseline", $"leaf{i}");
-				Directory.CreateDirectory(profileDir);
-				Directory.CreateDirectory(Path.Combine(profileDir, "controls"));
-				await File.WriteAllTextAsync(Path.Combine(profileDir, "inspec.yml"), ValidVCenterManifest.Replace("vcenter", $"leaf{i}", StringComparison.Ordinal));
-				await File.WriteAllTextAsync(
-					Path.Combine(profileDir, "controls", $"leaf{i}_control.rb"),
-					$"control 'V-00000{i}' do\n  title 'Invented fixture control {i}'\n  impact 0.7\nend\n");
-			}
-
-			// Each check sleeps 2s (comfortably inside its own per-check bound below); the
-			// AGGREGATE across all 5 leaves is >= 10s -- bigger than the tiny
-			// whole-pipeline-style budget the assertion comment below documents as the
-			// pre-fix failure mode.
-			WriteStubInspec(stubInspecDir, exitCode: 0, sleepSeconds: perCheckSleepSeconds);
-			Environment.SetEnvironmentVariable("PATH", stubInspecDir + Path.PathSeparator + originalPath);
-
-			string stubModulePath = Path.Combine(
-				AppContext.BaseDirectory, "Assets", "WaypointContentPullRealExecutorStubModule", "WaypointContentPullRealExecutorStubModule.psm1");
-			string realModulePath = Path.Combine(
-				AppContext.BaseDirectory, "PowerShell", "Modules", "WaypointComplianceContent", "WaypointComplianceContent.psm1");
-			Assert.True(File.Exists(realModulePath), $"real module not found at '{realModulePath}'.");
-
-			PowerShellOptions psOptions = new()
-			{
-				MaxRunspaces = 1,
-				// Issue #993 negative proof, spelled out: on current main, this exact
-				// value (5s) is what CURRENT MAIN would pass as the SINGLE monolithic
-				// invocation's own timeout for the WHOLE tree -- 5 leaves x 2s = >=10s
-				// aggregate blows straight through it, and the single pipeline gets
-				// force-stopped ("ignored Stop(); runspace poisoned") with ZERO profiles
-				// promoted (the exact issue #993 failure mode). This fix's chunking
-                                // means NEITHER phase-1 sync NOR any phase-2 chunk call ever uses this
-				// default -- each carries its own explicitly-computed PowerShellRequest.Timeout
-				// (ComplianceContentOptions.ContentSyncTimeout for sync; chunk-size x
-				// per-check-timeout + overhead for entries) -- so this small default is
-				// deliberately left in place as the negative-proof control value, not
-				// raised to "fix" anything.
-				DefaultInvocationTimeout = TimeSpan.FromSeconds(5),
-				StopGracePeriod = TimeSpan.FromSeconds(2),
-			};
-			psOptions.ModulePreloadPaths.Add(realModulePath);
-			psOptions.ModulePreloadPaths.Add(stubModulePath);
-			IOptions<PowerShellOptions> wrappedPsOptions = Options.Create(psOptions);
-
-			using RealWaypointRunspacePool pool = new(wrappedPsOptions, NullLogger<RealWaypointRunspacePool>.Instance);
-			RecordingJobLogBuffer logBuffer = new();
-			RealPowerShellExecutor realExecutor = new(pool, logBuffer, wrappedPsOptions, NullLogger<RealPowerShellExecutor>.Instance);
-			RemappingExecutor executor = new(realExecutor, fixtureRoot);
-
-			FakeContentRepository content = new(Config(ComplianceContentRefTypes.Branch, "main"));
-			FakeProfileRepository profiles = new();
-			FakeProfileControlRepository profileControls = new();
-			FakeCatalogRepository catalog = new();
-			FakeJobRunnerRepository jobs = new("admin@example.internal");
-			// Issue #993 fix under test: chunk size 2 (so 5 leaves span 3 chunks: 2+2+1)
-			// x a per-check timeout comfortably above the stub's 2s sleep, plus overhead --
-			// each CHUNK's own PowerShellRequest.Timeout is therefore a few chunk-leaves x
-			// per-check-seconds, structurally independent of the FULL 5-leaf tree's
-			// aggregate runtime, which is exactly the "scales with chunk size, not tree
-			// size" property this issue requires.
-			IOptions<ComplianceContentOptions> contentOptions = Options.Create(new ComplianceContentOptions
-			{
-				ContentPath = fixtureRoot,
-				InspecCheckTimeoutSeconds = 10,
-				ContentPullChunkSize = 2,
-				ContentPullChunkOverheadSeconds = 5,
-				ContentSyncTimeout = TimeSpan.FromMinutes(1),
-			});
-
-			ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, contentOptions, new FakeContentRevisionStager());
-
-			Guid jobId = Guid.NewGuid();
-			Guid runId = Guid.NewGuid();
-			ClaimedJob job = new(jobId, runId, "content-pull", TargetId: null, TargetName: null, CredentialId: null,
-				Priority: 5, Payload: "{}", AttemptCount: 0, MaxAttempts: 1);
-			RecordingEventPublisher events = new();
-			JobExecutionContext context = new(job, "worker-1", events, jobs, JobShape.Simple);
-
-			JobExecutionOutcome outcome = await handler.ExecuteAsync(context, CancellationToken.None);
-
-			// The central assertion: with the chunked fix, the run SUCCEEDS and promotes
-			// every leaf, despite the aggregate check time exceeding what a single
-			// monolithic invocation bounded at DefaultInvocationTimeout=5s could ever
-			// finish inside. Reverting ContentPullJobHandler to issue one
-			// Invoke-WaypointComplianceContentPull call (pre-#993 shape) against this
-			// same fixture/stub/options reproduces the ORIGINAL failure this test guards
-			// against: outcome.Kind == Failed, a "timeout"/"Stop()" FailureReason, and
-			// catalog.Entries empty (0 profiles promoted) -- the exact issue #993 symptom.
-			Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
-			Assert.Equal(leafCount, profiles.Replaced!.Count);
-
-			CatalogImportReport report = Assert.Single(catalog.Reports);
-			Assert.Equal(leafCount, report.AcceptedCount);
-			Assert.Equal(0, report.RejectedCount);
-
-			Assert.Equal(leafCount, catalog.Entries.Count);
-			Assert.All(catalog.Entries, e =>
-			{
-				Assert.Equal(CatalogImportEntryDispositions.Accepted, e.Disposition);
-				Assert.NotNull(e.ExecutionProfileId);
-			});
-			Assert.Contains($"{leafCount} catalog execution profile(s) promoted", outcome.Note, StringComparison.Ordinal);
-
-			// Issue #993 AC 3 cooperative-cancel-adjacent signal: no "runspace poisoned"
-			// log line should ever have been produced for a run that completed
-			// successfully via bounded, independently-completing chunk calls.
-			Assert.DoesNotContain(logBuffer.Payloads, p => p.Contains("poisoned", StringComparison.OrdinalIgnoreCase));
-		}
-		finally
-		{
-			Environment.SetEnvironmentVariable("PATH", originalPath);
-			Directory.Delete(fixtureRoot, recursive: true);
-			Directory.Delete(stubInspecDir, recursive: true);
-		}
-	}
-
-	/// <summary>
-	/// Issue #993 AC 3 (cooperative cancellation): a stop request (the job's own
-	/// CancellationToken, cancelled on run-abort per ADR-0008) that lands BETWEEN two
-	/// chunk calls is honored promptly -- the loop simply never starts the next chunk,
-	/// rather than trying to interrupt one already in flight. This is what makes the
-	/// "ignored Stop() for 5s; runspace poisoned" failure mode structurally unreachable
-	/// for this fix: cancellation is observed between bounded units, never as an
-	/// in-flight Stop() on a pipeline blocked inside a native WaitForExit.
-	/// </summary>
-	[Fact]
-	public async Task Execute_CancellationBetweenChunks_ThrowsPromptly_WithoutInvokingRemainingChunks()
-	{
-		FakePowerShellExecutor executor = new(Ok(Success(
-			"commitCancel",
-			ProfileObject("p0", "P0", null),
-			ProfileObject("p1", "P1", null),
-			ProfileObject("p2", "P2", null),
-			ProfileObject("p3", "P3", null))));
-		FakeContentRepository content = new(Config(ComplianceContentRefTypes.Branch, "main"));
-		FakeProfileRepository profiles = new();
-		FakeProfileControlRepository profileControls = new();
-		FakeCatalogRepository catalog = new();
-		FakeJobRunnerRepository jobs = new("admin@example.internal");
-		IOptions<ComplianceContentOptions> options = Options.Create(new ComplianceContentOptions
-		{
-			ContentPath = ContentPath,
-			ContentPullChunkSize = 1, // one profile per chunk -> 4 chunk calls total
-		});
-		ContentPullJobHandler handler = new(executor, content, profiles, profileControls, catalog, jobs, options, new FakeContentRevisionStager());
-
-		ClaimedJob job = new(Guid.NewGuid(), Guid.NewGuid(), "content-pull", null, null, null, 5, "{}", 0, 1);
-		RecordingEventPublisher events = new();
-		JobExecutionContext context = new(job, "worker-1", events, jobs, JobShape.Simple);
-
-		using CancellationTokenSource cts = new();
-		executor.OnEntriesCall = () =>
-		{
-			// Cancel after the FIRST chunk call has already started/returned -- the
-			// second chunk call must never be attempted.
-			if (executor.EntriesRequests.Count == 1)
-			{
-				cts.Cancel();
-			}
-		};
-
-		await Assert.ThrowsAsync<OperationCanceledException>(
-			() => handler.ExecuteAsync(context, cts.Token));
-
-		// Exactly one chunk call happened before the cancellation was observed; the
-		// remaining three profiles' chunks were never started.
-		Assert.Single(executor.EntriesRequests);
-		Assert.Null(profiles.Replaced); // nothing was staged -- cancellation happened before the atomic ReplaceAllAsync commit.
-	}
-
-	/// <summary>Records job.log events without a real IJobLogBuffer backend -- this test only needs the real executor to run, not to inspect its stream output.</summary>
-	private sealed class RecordingJobLogBuffer : IJobLogBuffer
-	{
-		public List<string> Payloads { get; } = [];
-
-		public bool TryEnqueue(string eventType, Guid? jobId, Guid? runId, string payloadJson)
-		{
-			Payloads.Add(payloadJson);
-			return true;
-		}
-	}
-
-	/// <summary>
-	/// Issue #993: <see cref="ContentPullJobHandler"/> now issues its REAL phase-1/
-	/// phase-2 command names (<c>Sync-WaypointComplianceContentTree</c> /
-	/// <c>Get-WaypointComplianceContentEntries</c>), so only the phase-1 sync call needs
-	/// remapping onto this test's git-free stub (<c>Invoke-WaypointContentPullRealExecutorSyncStub</c>)
-	/// -- phase 2 is the real module's own function (no git involved at all) and passes
-	/// straight through to <see cref="RealPowerShellExecutor.ExecuteAsync"/> unmodified.
-	/// </summary>
-	private sealed class RemappingExecutor : IPowerShellExecutor
-	{
-		private readonly IPowerShellExecutor _inner;
-		private readonly string _contentPath;
-
-		public RemappingExecutor(IPowerShellExecutor inner, string contentPath)
-		{
-			_inner = inner;
-			_contentPath = contentPath;
-		}
-
-		public Task<PowerShellExecutionResult> ExecuteAsync(PowerShellRequest request, CancellationToken cancellationToken)
-		{
-			if (request.Command != "Sync-WaypointComplianceContentTree")
-			{
-				return _inner.ExecuteAsync(request, cancellationToken);
-			}
-
-			PowerShellRequest remapped = request with
-			{
-				Command = "Invoke-WaypointContentPullRealExecutorSyncStub",
-				Parameters = new Dictionary<string, object?>(StringComparer.Ordinal)
-				{
-					["ContentPath"] = _contentPath,
-					["Commit"] = "invented0000000000000000000000000000abcd",
-				},
-			};
-			return _inner.ExecuteAsync(remapped, cancellationToken);
-		}
+		// The dispatcher (not this handler) turns an unhandled exception into a Failed
+		// outcome + job.log entry (JobDispatcherHostedService's catch-all) -- this
+		// handler itself does not swallow a fan-out failure into a fabricated success,
+		// so pull history stays untouched at this layer (same "nothing partially
+		// recorded" discipline the pre-#1016 handler had for its own atomic steps).
+		Assert.Empty(content.Pulls);
 	}
 }

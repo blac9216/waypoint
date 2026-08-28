@@ -196,4 +196,23 @@ public interface IJobRunnerRepository
 	/// updated by the API-side credential swap (#146) and terminal-history detach (#593).
 	/// </summary>
 	Task<IReadOnlyList<JobCredentialBinding>> GetJobCredentialBindingsAsync(Guid jobId, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Issue #1016 (epic #726), owner decision 2026-08-28: inserts
+	/// <paramref name="specs"/> onto an ALREADY-RUNNING run -- the second-wave
+	/// counterpart to <see cref="IJobControlRepository.FanOutJobsAsync"/>, which only
+	/// ever fans out a run's FIRST wave of jobs and requires <c>runs.state = 'pending'</c>.
+	/// Called from inside a runner-executed handler (<c>ContentPullJobHandler</c>) to
+	/// enqueue its own sibling <c>content-check</c> chunk jobs onto the same run its own
+	/// job belongs to, so the ordinary claim/admission/capacity-pool machinery (ADR-0020)
+	/// schedules them exactly like any other queued job -- no in-process concurrency, no
+	/// new scheduler. Deliberately narrower than <c>FanOutJobsAsync</c>: no credential
+	/// bindings, no queue-halt/blocked coercion (a content-check job carries no
+	/// credential, so migration 0005's halt trigger never applies to it), and it
+	/// requires <c>runs.state = 'running'</c> instead of <c>'pending'</c> -- throws
+	/// <see cref="InvalidOperationException"/> if the run is not currently running (e.g.
+	/// it was aborted between the caller's own claim and this call).
+	/// </summary>
+	Task<IReadOnlyList<Guid>> FanOutAdditionalJobsAsync(
+		Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken);
 }
