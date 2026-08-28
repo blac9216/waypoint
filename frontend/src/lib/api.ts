@@ -80,7 +80,9 @@ export interface ScanPlanItem {
 /**
  * One candidate component that did not become an accepted `ScanPlanItem`
  * (`Waypoint.Core.Scans.ScanPlanSkip` on the wire) — `reason` is the closed
- * `unsupported` / `no_active_baseline` / `unmapped_benchmark` set, never free text.
+ * `unsupported` / `no_active_baseline` / `unmapped_benchmark` /
+ * `missing_required_input` / `credentialed_transport_with_no_requirement` set
+ * (issue #1012 added the last one), never free text.
  */
 export interface ScanPlanSkip {
 	component_id: string;

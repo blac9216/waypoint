@@ -174,10 +174,29 @@ public sealed class ScanPlannerService
 		// the one with an active baseline; if more than one has an active baseline
 		// (should not happen given one-active-per-execution-profile, but each profile is
 		// a distinct id so it is possible for two DIFFERENT profiles of the same
-		// component to each have their own active baseline), the lowest execution
-        // profile id wins so this method is deterministic without depending on
-		// insertion order.
-		foreach (CatalogExecutionProfileDetail profile in profiles.OrderBy(p => p.ExecutionProfile.Id))
+		// component to each have their own active baseline), the docs/compliance-
+		// parity.md "Priority" row (NSX STIG 1 ... every SRG 6, i.e. every STIG report
+		// group sorts strictly below every SRG group) breaks the tie first -- issue
+		// #1012 (round-8 report): the prior lowest-execution-profile-id-only tiebreak
+		// let an imported, credential-less SRG profile beat a seeded, credential-
+		// bearing STIG profile for the exact same component purely on insertion order,
+		// which is not a documented preference at all. Report-group priority IS
+		// documented catalog data (CatalogReportGroup.Priority, migration 0050), so
+		// preferring the lower (higher-precedence) priority is a doc-grounded rule, not
+		// an invented one. Execution profile id remains the final tiebreaker beneath
+		// priority so the method stays fully deterministic. NOTE (flagged for
+		// reviewer/owner): docs/compliance-parity.md's Priority row documents STIG-
+		// before-SRG ordering for REPORT SEQUENCING across different components, not
+		// explicitly for choosing between two co-existing profiles of the SAME
+		// component -- no ADR states that preference directly. This PR treats "prefer
+		// the lower documented priority" as the most defensible reading (STIG is
+		// always the more complete, credential-bearing, upload-eligible content for a
+		// component that has both), but if the owner intends a different rule (e.g.
+		// seed-provenance always wins over imported, regardless of priority), that
+		// should be recorded as its own decision and this ordering revisited.
+		foreach (CatalogExecutionProfileDetail profile in profiles
+			.OrderBy(p => p.ReportGroup.Priority)
+			.ThenBy(p => p.ExecutionProfile.Id))
 		{
 			Baseline? active = await _baselines.GetActiveBaselineAsync(profile.ExecutionProfile.Id, cancellationToken).ConfigureAwait(false);
 			if (active is null)
@@ -216,6 +235,42 @@ public sealed class ScanPlannerService
 				.Where(r => r.IsRequired)
 				.Select(r => r.Purpose)
 				.OrderBy(p => p, StringComparer.Ordinal)];
+
+			// Issue #1012 defense-in-depth: every transport in docs/compliance-parity.md's
+			// closed vocabulary that a runner path can actually DISPATCH today (vmware,
+			// ssh, nsx-api) implies at least one required credential purpose per the
+			// provenance matrix's Purpose column -- there is no documented credential-free
+			// dispatchable transport. A resolved profile whose requirement set is
+			// nonetheless empty is exactly the silent-dispatch hole the round-8 report
+			// found (an importer-promoted profile with zero catalog_credential_requirements
+			// rows): with an empty RequiredPurposes, RunCreationService's credential
+			// resolution has nothing to check, finds no gap, and the job fans out with no
+			// credential and no preview-time warning. Surface it here, at plan-compile
+			// time, as an explicit skip instead -- this is a safety net beneath
+			// CredentialRequirementDerivation (which now makes this state unreachable for
+			// every documented shape at promotion time), not the primary fix.
+			//
+			// vcf-api is deliberately EXCLUDED from this guard: ADR-0024/CredentialPurposes
+			// (Waypoint.Core.Secrets.CredentialPurposes.VcfApi's own doc comment) records
+			// vcf-api as catalog-declared but not yet resolvable -- no CredentialTypes
+			// value satisfies it in CredentialPurposeMatrix.SatisfyingCredentialTypes, and
+			// ScanComponentNarrowing gates every vcf-api component into an unnarrowed
+			// placeholder job no runner path executes yet (#807/#977 residual, tracked
+			// separately). Guarding it here would treat an already-tracked, already-inert
+			// architectural gap as this issue's silent-dispatch hole, which it structurally
+			// cannot be (nothing dispatches a vcf-api scan with a live credential need
+			// today) -- CredentialRequirementDerivation still WRITES the vcf-api
+			// requirement at promotion time (doc-authority correctness for when a runner
+			// path lands), this planner guard simply does not additionally gate on it
+			// being empty in the meantime.
+			bool transportCanDispatchToday = !string.Equals(profile.Component.Transport, CatalogTransports.VcfApi, StringComparison.Ordinal);
+			if (purposes.Count == 0 && transportCanDispatchToday)
+			{
+				return (null, new ScanPlanSkip(componentId, ScanPlanSkipReasons.CredentialedTransportWithNoRequirement,
+					$"Component '{componentId}' resolves to execution profile '{profile.ExecutionProfile.Id}' (transport '{profile.Component.Transport}'), " +
+						"which requires a credential per the closed transport vocabulary but carries zero catalog_credential_requirements rows. " +
+						"This indicates incomplete catalog content; no scan attempt was created for this component."));
+			}
 
 			// Carry the catalog's required/optional flag through (issue #735 Finding 1):
 			// a bare name list would discard IsRequired, which is exactly what let a

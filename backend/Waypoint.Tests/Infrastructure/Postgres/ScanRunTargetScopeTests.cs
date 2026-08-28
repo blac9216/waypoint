@@ -233,7 +233,12 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 	/// an accepted plan item, or run creation now rejects it with
 	/// <c>no_plannable_component</c>). SRG (no benchmark reference) keeps this fixture
 	/// minimal; the STIG/benchmark-mapping paths are covered by
-	/// <c>ScanPlannerServiceTests</c>.
+	/// <c>ScanPlannerServiceTests</c>. Issue #1012: carries the real <c>vsphere-api</c>
+	/// requirement a vmware-transport component always has per docs/compliance-parity.md
+	/// (see <c>RunPlanPreviewTests.SeedCompatibleCatalogComponentAsync</c>'s identical
+	/// remark) -- without it, ScanPlannerService's own defense-in-depth would skip this
+	/// fixture's plan item instead of exercising this file's actual target-scope-shape
+	/// assertions.
 	/// </summary>
 	private async Task<Guid> SeedCompatibleCatalogComponentAsync()
 	{
@@ -248,6 +253,7 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		CatalogReportGroup reportGroup = await catalog.UpsertReportGroupAsync($"group-{Guid.NewGuid():N}", "Test Group", 1, CancellationToken.None);
 		CatalogExecutionProfile executionProfile = await catalog.CreateExecutionProfileAsync(
 			catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		await catalog.AddCredentialRequirementAsync(executionProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
 
 		ContentRevision revision = await baselines.RecordStagedRevisionAsync(
 			$"commit-{Guid.NewGuid():N}", $"digest-{Guid.NewGuid():N}", $"revisions/{Guid.NewGuid():N}", CancellationToken.None);

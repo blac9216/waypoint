@@ -800,6 +800,29 @@ public sealed class CatalogRepository : ICatalogRepository
 			await UpsertDeclaredInputAsync(executionProfile.Id, input.Name, input.Type, input.Required, cancellationToken).ConfigureAwait(false);
 		}
 
+		// Issue #1012: this is the ONLY promotion-time write of
+		// catalog_credential_requirements -- before this fix, seed migrations
+		// (0064/0067/0069) were the sole writers of that table, so every
+		// importer-promoted profile had ZERO requirement rows, ScanPlannerService
+		// derived an empty RequiredPurposes, and every fanned-out scan job failed at
+		// execution with no preview-time gap. CredentialRequirementDerivation is a
+		// literal C# port of those same seed migrations' own derivation rule (doc-
+		// authority: docs/compliance-parity.md's provenance-matrix Purpose column),
+		// so an imported profile of the same (product family, transport, selector kind)
+		// shape as a seeded one carries IDENTICAL requirements. Fail-closed: an
+		// unmapped shape derives an empty set here -- never an invented purpose -- and
+		// promotion still proceeds (never quarantined solely for this) because
+		// ScanPlannerService's own defense-in-depth (issue #1012 half 2) refuses to
+		// treat an empty requirement set on a known-credentialed transport as "no gap"
+		// at preview time, so a profile that reaches this fail-closed branch can still
+		// never silently dispatch a credential-less scan job.
+		IReadOnlyList<string> derivedPurposes = CredentialRequirementDerivation.DeriveRequiredPurposes(
+			candidate.VendorFamily, candidate.Transport, candidate.SelectorKind);
+		foreach (string purpose in derivedPurposes)
+		{
+			await AddCredentialRequirementAsync(executionProfile.Id, purpose, isRequired: true, cancellationToken).ConfigureAwait(false);
+		}
+
 		return new CatalogPromotionOutcome(executionProfile.Id, null);
 	}
 
