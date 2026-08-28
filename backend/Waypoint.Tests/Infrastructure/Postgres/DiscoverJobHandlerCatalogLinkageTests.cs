@@ -187,6 +187,45 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// Issue #995 belt-and-braces: even though <see cref="DiscoverJobHandler.MapToComponents"/>
+	/// now normalizes an empty/whitespace Version to null before this method ever runs,
+	/// this guard is hardened to <c>string.IsNullOrWhiteSpace</c> (not <c>is null</c>) so
+	/// a <see cref="DiscoveredComponent"/> constructed directly with ExactVersion = ""
+	/// (bypassing MapToComponents entirely, as this suite's other tests already do) never
+	/// reaches <see cref="ICatalogRepository.FindTopLevelComponentsByKeyAndVersionAsync"/>
+	/// -- which throws ArgumentException on an empty/whitespace value -- and instead stays
+	/// unlinked, exactly like the already-covered null case.
+	/// </summary>
+	[Fact]
+	public async Task DiscoveredComponent_WithEmptyStringExactVersion_NeverLooksUp_StaysUnlinked_NeverThrows()
+	{
+		DiscoveredComponent hostMapping = new(
+			CatalogComponentKey: "esxi", VendorIdentity: "host-995-empty-version", DisplayName: "esxi-05.example.internal",
+			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: string.Empty);
+
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> warnings) =
+			await DiscoverJobHandler.ResolveCatalogLinkageAsync(_catalog, [hostMapping], CancellationToken.None);
+
+		Assert.Empty(warnings);
+		Assert.Null(linked.Single().CatalogComponentId);
+	}
+
+	/// <summary>Same as above, for a whitespace-only ExactVersion.</summary>
+	[Fact]
+	public async Task DiscoveredComponent_WithWhitespaceOnlyExactVersion_NeverLooksUp_StaysUnlinked_NeverThrows()
+	{
+		DiscoveredComponent hostMapping = new(
+			CatalogComponentKey: "esxi", VendorIdentity: "host-995-whitespace-version", DisplayName: "esxi-06.example.internal",
+			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: "   ");
+
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> warnings) =
+			await DiscoverJobHandler.ResolveCatalogLinkageAsync(_catalog, [hostMapping], CancellationToken.None);
+
+		Assert.Empty(warnings);
+		Assert.Null(linked.Single().CatalogComponentId);
+	}
+
+	/// <summary>
 	/// Ambiguous match: two distinct products both seed a top-level component sharing
 	/// the same component_key + exact version -- structurally possible since discovery
 	/// supplies no product context. Must stay unlinked with an honest reason, never an

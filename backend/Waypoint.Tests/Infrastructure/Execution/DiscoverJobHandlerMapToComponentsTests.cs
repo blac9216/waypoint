@@ -64,6 +64,49 @@ public sealed class DiscoverJobHandlerMapToComponentsTests
 		Assert.Null(hostComponent.ExactVersion);
 	}
 
+	/// <summary>
+	/// Issue #995: a powered-off/disconnected/connecting ESXi host reports Version as an
+	/// EMPTY STRING, not null. Before this fix, that "" slipped past the `is null` guard
+	/// one layer up in <see cref="DiscoverJobHandler.ResolveCatalogLinkageAsync"/> and
+	/// reached <c>CatalogRepository.FindTopLevelComponentsByKeyAndVersionAsync</c>'s
+	/// <c>ArgumentException.ThrowIfNullOrWhiteSpace</c>, aborting the whole discovery
+	/// job. MapToComponents must normalize "" to null right here -- the exact same
+	/// fail-closed outcome as the already-covered null-Version case above -- so an
+	/// empty-string host is indistinguishable from a null-version host to every
+	/// downstream consumer.
+	/// </summary>
+	[Fact]
+	public void Host_WithEmptyStringVersionReported_ResolvesExactVersionToNull_FailClosed_NeverThrows()
+	{
+		DiscoveredInventoryItem host = new(
+			InventoryItemTypes.Host, "host-3", "esxi-03.example.internal", ParentMoref: null,
+			Build: InventedBuildNumber, MaintenanceMode: false, Version: string.Empty);
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([host]);
+
+		DiscoveredComponent hostComponent = components.Single(c => c.VendorIdentity == "host-3");
+		Assert.Null(hostComponent.ExactVersion);
+	}
+
+	/// <summary>
+	/// Same as the empty-string case above, for a whitespace-only Version (e.g. a single
+	/// space) -- string.IsNullOrWhiteSpace, not string.IsNullOrEmpty, is the correct
+	/// normalization at this boundary since that is also what
+	/// ArgumentException.ThrowIfNullOrWhiteSpace guards on downstream.
+	/// </summary>
+	[Fact]
+	public void Host_WithWhitespaceOnlyVersionReported_ResolvesExactVersionToNull_FailClosed_NeverThrows()
+	{
+		DiscoveredInventoryItem host = new(
+			InventoryItemTypes.Host, "host-4", "esxi-04.example.internal", ParentMoref: null,
+			Build: InventedBuildNumber, MaintenanceMode: false, Version: "   ");
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([host]);
+
+		DiscoveredComponent hostComponent = components.Single(c => c.VendorIdentity == "host-4");
+		Assert.Null(hostComponent.ExactVersion);
+	}
+
 	[Fact]
 	public void Vm_AlwaysResolvesExactVersionToNull_RegardlessOfBuildOrVersion()
 	{

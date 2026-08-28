@@ -327,6 +327,65 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		await AssertComponentAbsentAsync(targetId, "host-12");
 	}
 
+	/// <summary>
+	/// Issue #995's failing-test-first proof: a real vSphere discovery batch containing
+	/// ONE host reporting Version as an empty string (powered-off/disconnected) alongside
+	/// one normal linkable host must not crash the whole job. Before the fix, the
+	/// empty-version host's "" slipped past <see cref="DiscoverJobHandler.ResolveCatalogLinkageAsync"/>'s
+	/// `is null` guard and reached <c>CatalogRepository.FindTopLevelComponentsByKeyAndVersionAsync</c>'s
+	/// <c>ArgumentException.ThrowIfNullOrWhiteSpace</c> unhandled, aborting the entire
+	/// discovery job (job state 'failed', components = 0, evidence in issue #995). This
+	/// test fails on pre-fix main with exactly that ArgumentException; after the fix the
+	/// job succeeds, the linkable host links against the real migration 0064 seed, and
+	/// the empty-version host persists unlinked (its own component row untouched,
+	/// discovered_fact absent) rather than blocking the other host or the job.
+	/// </summary>
+	[Fact]
+	public async Task DiscoveryBatch_WithOneEmptyVersionHost_Succeeds_LinkableHostLinks_EmptyVersionHostStaysUnlinked()
+	{
+		await using (NpgsqlConnection seedConnection = new(_fixture.ConnectionString))
+		{
+			await seedConnection.OpenAsync();
+			await ReapplySeedMigrationAsync(seedConnection);
+		}
+
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-995-empty-version-canary");
+
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "995-empty-version");
+		Guid runId = await RunDiscoverOnceAsync(targetId);
+
+		Guid jobId = await GetJobIdForRunAsync(runId);
+		Assert.Equal("done", await GetJobFieldAsync(jobId, "state"));
+		string note = await GetJobNoteAsync(jobId);
+		Assert.DoesNotContain("ArgumentException", note, StringComparison.Ordinal);
+		Assert.DoesNotContain("exactVersion", note, StringComparison.Ordinal);
+
+		// root vcenter + host-995-linkable + host-995-empty-version -- neither host is
+		// dropped from materialization; only catalog linkage differs between them.
+		await AssertComponentCountAsync(targetId, expectedActive: 3);
+
+		Waypoint.Core.Components.Component linkable = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
+			.Single(c => c.VendorIdentity == "host-995-linkable");
+		Assert.Equal("8.0.3", linkable.DiscoveredFact?.ExactVersion);
+		Assert.NotNull(linkable.CatalogComponentId);
+
+		Waypoint.Core.Components.Component emptyVersionHost = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
+			.Single(c => c.VendorIdentity == "host-995-empty-version");
+		Assert.Null(emptyVersionHost.DiscoveredFact); // ExactVersion normalized to null -- no discovered_fact recorded, same as a null-Version host.
+		Assert.Null(emptyVersionHost.CatalogComponentId); // Fail-closed: never linked, never guessed.
+	}
+
+	private static async Task ReapplySeedMigrationAsync(NpgsqlConnection connection)
+	{
+		System.Reflection.Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
+		string resourceName = assembly.GetManifestResourceNames().Single(n => n.EndsWith("0064_execution_catalog_seed.sql", StringComparison.Ordinal));
+		await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+		using StreamReader reader = new(stream);
+		string sql = await reader.ReadToEndAsync();
+		await using NpgsqlCommand reapply = new(sql, connection);
+		await reapply.ExecuteNonQueryAsync();
+	}
+
 	[Fact]
 	public async Task TargetWithNoCredential_FailsCleanly_WithoutThrowing()
 	{
