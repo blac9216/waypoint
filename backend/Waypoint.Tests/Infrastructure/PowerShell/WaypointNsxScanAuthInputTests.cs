@@ -200,6 +200,22 @@ public sealed class WaypointNsxScanAuthInputTests : IDisposable
 		return profileDir;
 	}
 
+	/// <summary>
+	/// Issue #1071: writes an <c>inspec.yml</c> whose body is given verbatim rather
+	/// than templated, so a test can exercise a specific manifest SHAPE (column-0
+	/// sequence entries, a column-0 comment inside the <c>inputs:</c> block, a
+	/// trailing comment on a <c>- name:</c> line, or a nested <c>name:</c> key under
+	/// an input's <c>value:</c> mapping) instead of the indented style
+	/// <see cref="WriteProfileFixture"/> always emits. All content is invented.
+	/// </summary>
+	private string WriteProfileFixtureRaw(string dirName, string inspecYmlContent)
+	{
+		string profileDir = Path.Combine(_fixtureRoot, dirName);
+		Directory.CreateDirectory(profileDir);
+		File.WriteAllText(Path.Combine(profileDir, "inspec.yml"), inspecYmlContent);
+		return profileDir;
+	}
+
 	private async Task<(System.Management.Automation.PSObject Result, string? AuthBlock)> RunNsxScanAsync(string profileDir)
 	{
 		(string commonPath, string nsxApiPath) = WriteFakeSiblingScripts();
@@ -336,5 +352,156 @@ public sealed class WaypointNsxScanAuthInputTests : IDisposable
 		Assert.False(File.Exists(Path.Combine(_fixtureRoot, "token-calls.txt")),
 			"Get-NsxSessionToken must not be called for an unreachable manager");
 		Assert.Null(authBlock);
+	}
+
+	/// <summary>
+	/// Issue #1071 shape 1: every shipped NSX 4.x/3.x manifest declares its
+	/// <c>inputs:</c> entries as column-0 <c>- name:</c> sequence items (no leading
+	/// indent), not the indented style <see cref="WriteProfileFixture"/> emits. The
+	/// pre-fix helper scoped the block by "next column-0 line", so these entries were
+	/// all silently missed and the profile resolved to the 4.x legacy defaults instead
+	/// of its own declared 9.x names.
+	/// </summary>
+	[Fact]
+	public async Task ColumnZeroSequenceEntries_AreDiscovered()
+	{
+		string profileDir = WriteProfileFixtureRaw("profile-column0-sequence", """
+			name: invented-nsx-fixture-profile
+			title: Invented NSX baseline (test fixture)
+			version: 1.0.0
+			depends:
+			- name: invented-shared-helper
+			  path: ../invented-shared
+			inputs:
+			- name: nsx_managerAddress
+			  description: invented fixture input
+			  sensitive: true
+			- name: nsx_sessionToken
+			  description: invented fixture input
+			  sensitive: true
+			- name: nsx_sessionCookieId
+			  description: invented fixture input
+			  sensitive: true
+			""");
+
+		(System.Management.Automation.PSObject outcome, string? authBlock) = await RunNsxScanAsync(profileDir);
+
+		Assert.True(OutcomeSucceeded(outcome), outcome.Properties["FailureReason"].Value?.ToString());
+		string[] lines = AuthBlockLines(authBlock);
+		Assert.Contains($"nsx_managerAddress: '{InventedManager}'", lines);
+		Assert.Contains($"nsx_sessionToken: '{InventedToken}'", lines);
+		Assert.Contains($"nsx_sessionCookieId: '{InventedCookie}'", lines);
+	}
+
+	/// <summary>
+	/// Issue #1071 shape 2: a column-0 <c>#</c> comment inside the <c>inputs:</c>
+	/// block must not terminate discovery -- the pre-fix helper treated ANY column-0
+	/// line as closing the block, comments included, so entries declared after the
+	/// comment were silently missed.
+	/// </summary>
+	[Fact]
+	public async Task ColumnZeroCommentInsideInputsBlock_DoesNotTerminateDiscovery()
+	{
+		string profileDir = WriteProfileFixtureRaw("profile-column0-comment", """
+			name: invented-nsx-fixture-profile
+			title: Invented NSX baseline (test fixture)
+			version: 1.0.0
+			depends:
+			  - name: invented-shared-helper
+			    path: ../invented-shared
+			inputs:
+			  - name: nsx_managerAddress
+			    description: invented fixture input
+			    sensitive: true
+			# an invented column-0 comment inside the inputs block
+			  - name: nsx_sessionToken
+			    description: invented fixture input
+			    sensitive: true
+			  - name: nsx_sessionCookieId
+			    description: invented fixture input
+			    sensitive: true
+			""");
+
+		(System.Management.Automation.PSObject outcome, string? authBlock) = await RunNsxScanAsync(profileDir);
+
+		Assert.True(OutcomeSucceeded(outcome), outcome.Properties["FailureReason"].Value?.ToString());
+		string[] lines = AuthBlockLines(authBlock);
+		Assert.Contains($"nsx_managerAddress: '{InventedManager}'", lines);
+		Assert.Contains($"nsx_sessionToken: '{InventedToken}'", lines);
+		Assert.Contains($"nsx_sessionCookieId: '{InventedCookie}'", lines);
+	}
+
+	/// <summary>
+	/// Issue #1071 shape 3: a trailing comment on the name line itself
+	/// (<c>- name: nsx_managerAddress  # ...</c>) must not fold into the captured
+	/// name -- the pre-fix helper captured the comment text as part of the value, so
+	/// the name never matched either known key and the slot was silently missed.
+	/// </summary>
+	[Fact]
+	public async Task TrailingCommentOnNameLine_DoesNotLoseTheSlot()
+	{
+		string profileDir = WriteProfileFixtureRaw("profile-trailing-comment", """
+			name: invented-nsx-fixture-profile
+			title: Invented NSX baseline (test fixture)
+			version: 1.0.0
+			depends:
+			  - name: invented-shared-helper
+			    path: ../invented-shared
+			inputs:
+			  - name: nsx_managerAddress  # invented trailing comment
+			    description: invented fixture input
+			    sensitive: true
+			  - name: nsx_sessionToken  # another invented trailing comment
+			    description: invented fixture input
+			    sensitive: true
+			  - name: nsx_sessionCookieId
+			    description: invented fixture input
+			    sensitive: true
+			""");
+
+		(System.Management.Automation.PSObject outcome, string? authBlock) = await RunNsxScanAsync(profileDir);
+
+		Assert.True(OutcomeSucceeded(outcome), outcome.Properties["FailureReason"].Value?.ToString());
+		string[] lines = AuthBlockLines(authBlock);
+		Assert.Contains($"nsx_managerAddress: '{InventedManager}'", lines);
+		Assert.Contains($"nsx_sessionToken: '{InventedToken}'", lines);
+		Assert.Contains($"nsx_sessionCookieId: '{InventedCookie}'", lines);
+	}
+
+	/// <summary>
+	/// Issue #1071 shape 4: a nested <c>name:</c> key under an input's own
+	/// <c>value:</c> mapping must NOT be treated as a sequence-entry name -- the
+	/// pre-fix helper matched <c>name:</c> anywhere inside the open block regardless
+	/// of nesting, so this nested key was a false positive that could silently steer
+	/// the resolved manager key away from the profile's actually-declared name.
+	/// The top-level declared name (<c>invented_other_input</c>) is not a recognized
+	/// auth key, so a correct helper resolves the manager slot to null and the caller
+	/// falls back to the 4.x legacy <c>nsxManager</c> name; a false positive would
+	/// instead emit <c>nsx_managerAddress</c> (the nested value).
+	/// </summary>
+	[Fact]
+	public async Task NestedNameKeyUnderValueMapping_IsNotFalsePositive()
+	{
+		string profileDir = WriteProfileFixtureRaw("profile-nested-name", """
+			name: invented-nsx-fixture-profile
+			title: Invented NSX baseline (test fixture)
+			version: 1.0.0
+			depends:
+			  - name: invented-shared-helper
+			    path: ../invented-shared
+			inputs:
+			  - name: invented_other_input
+			    description: invented fixture input whose value mapping nests a name key
+			    value:
+			      name: nsx_managerAddress
+			      kind: invented
+			""");
+
+		(System.Management.Automation.PSObject outcome, string? authBlock) = await RunNsxScanAsync(profileDir);
+
+		Assert.True(OutcomeSucceeded(outcome), outcome.Properties["FailureReason"].Value?.ToString());
+		string[] lines = AuthBlockLines(authBlock);
+		Assert.Contains($"nsxManager: '{InventedManager}'", lines);
+		Assert.DoesNotContain(lines, line => line.StartsWith("nsx_managerAddress:", StringComparison.Ordinal));
 	}
 }

@@ -661,15 +661,47 @@ function Get-WaypointNsxProfileAuthInputKeySet {
 	$DeclaredNames = [System.Collections.Generic.List[string]]::new()
 	$ManifestPath = Join-Path $ProfilePath 'inspec.yml'
 	if (Test-Path -Path $ManifestPath -PathType Leaf) {
+		# Issue #1071: the block is scoped by INDENTATION DEPTH, not by "next
+		# column-0 line" -- a column-0 `- name:` sequence entry (every shipped NSX
+		# 4.x/3.x manifest's style) is a MEMBER of the open `inputs:` block, while a
+		# column-0 *mapping* key (e.g. `depends:`) closes it. Comment-only lines
+		# (first non-space char `#`, at any indentation) never affect block state.
 		$InInputsBlock = $false
 		foreach ($Line in [System.IO.File]::ReadAllLines($ManifestPath)) {
-			if ($Line -match '^\S') {
-				# A column-0 line starts a new top-level key; only `inputs:` opens the block.
-				$InInputsBlock = $Line -match '^inputs\s*:'
+			if ($Line -notmatch '^(\s*)(\S.*)$') {
+				# Blank (or whitespace-only) line: never affects block state.
 				continue
 			}
-			if ($InInputsBlock -and $Line -match '^\s*-?\s*name\s*:\s*(.+?)\s*$') {
+			$Indent = $Matches[1].Length
+			$Content = $Matches[2]
+
+			if ($Content.StartsWith('#')) {
+				continue
+			}
+
+			if ($Indent -eq 0 -and -not $Content.StartsWith('-')) {
+				# A column-0 mapping key (not a sequence entry) starts a new
+				# top-level key; only `inputs:` (re)opens the discovery block.
+				$InInputsBlock = $Content -match '^inputs\s*:'
+				continue
+			}
+
+			if (-not $InInputsBlock) {
+				continue
+			}
+
+			# Only a `name:` key at the SEQUENCE-ENTRY level (the line's content
+			# begins with the `-` list marker) counts -- never a bare nested `name:`
+			# key inside an input's own `value:` mapping (issue #1071 shape 4).
+			if ($Content -match '^-\s*name\s*:\s*(.+?)\s*$') {
 				$Name = $Matches[1]
+				# Strip a trailing ` #...` comment (issue #1071 shape 3) before any
+				# quote-stripping, so a quoted name with a trailing comment resolves
+				# correctly too.
+				$CommentIndex = $Name.IndexOf(' #')
+				if ($CommentIndex -ge 0) {
+					$Name = $Name.Substring(0, $CommentIndex).TrimEnd()
+				}
 				if ($Name.Length -ge 2 -and (($Name[0] -eq "'" -and $Name[-1] -eq "'") -or ($Name[0] -eq '"' -and $Name[-1] -eq '"'))) {
 					$Name = $Name.Substring(1, $Name.Length - 2)
 				}
