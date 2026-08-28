@@ -105,6 +105,14 @@ public sealed class CredentialRequirementDerivationDriftGuardTests
 		Assert.Empty(CredentialRequirementDerivation.DeriveRequiredPurposes("photon", CatalogTransports.Ssh, CatalogSelectorKinds.Service));
 		Assert.Empty(CredentialRequirementDerivation.DeriveRequiredPurposes("aria-operations", CatalogTransports.Ssh, CatalogSelectorKinds.Service));
 
+		// Issue #1064 (owner decision): 'vcsa' is NOT a product family -- the importer
+		// maps the `vcsa/` directory literal to family 'vsphere', whose ssh/service row
+		// above derives vsphere-api + vcsa-ssh. This pin proves the derivation never
+		// grows a separate 'vcsa' row (which would silently re-legitimize promoting a
+		// separate credential-less vcsa product); any caller still passing the literal
+		// fails closed instead.
+		Assert.Empty(CredentialRequirementDerivation.DeriveRequiredPurposes("vcsa", CatalogTransports.Ssh, CatalogSelectorKinds.Service));
+
 		// ssh/vcenter (or any generic object-kind selector) is not a documented ssh
 		// shape at all -- only vmware transport uses the object-kind selectors.
 		Assert.Empty(CredentialRequirementDerivation.DeriveRequiredPurposes("vsphere", CatalogTransports.Ssh, CatalogSelectorKinds.VCenter));

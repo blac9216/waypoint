@@ -64,15 +64,12 @@ public sealed class ParityMatrixCompletenessTests
 		List<string> uncovered = [];
 		foreach (DocRow docRow in docRows)
 		{
-			// docs/compliance-parity.md's "vSphere" product name covers TWO distinct
-			// vendor families once split by transport (issue #729's VendorHierarchyInterpreter
-			// family table: `vmware` transport is the "vsphere" family, `ssh` transport is
-			// the separate "vcsa" family) -- exactly the doc's own header note "the two
-			// vSphere nodes are each split by transport (four rows instead of two)".
-			string productName = docRow.ProductVersionKey.Split('`')[0].Trim().ToLowerInvariant();
-			string vendorFamily = productName == "vsphere" && docRow.Transport == "ssh"
-				? "vcsa"
-				: MapProductNameToFamily(docRow.ProductVersionKey);
+			// Issue #1064: docs/compliance-parity.md's "vSphere" product rows all map to
+			// the single "vsphere" family regardless of transport (the vcsa/ directory
+			// literal now promotes into the vsphere product per the owner decision on
+			// #1064) -- the doc's four vSphere rows stay distinct in the coverage key
+			// via their transport component, not via a separate family.
+			string vendorFamily = MapProductNameToFamily(docRow.ProductVersionKey);
 			string versionKey = NormalizeVersionKey(docRow.ProductVersionKey);
 			string key = FormatKey((vendorFamily, versionKey, docRow.Kind, docRow.Transport));
 

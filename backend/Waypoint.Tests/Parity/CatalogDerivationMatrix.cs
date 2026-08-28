@@ -51,7 +51,7 @@ public static class CatalogDerivationMatrix
 			"VCF 9-x ssh/named-service row (SDDC Manager nginx/PostgreSQL/Photon; Operations " +
 			"httpd/PostgreSQL/Photon; Operations HCX httpd/Photon; Operations Networks nginx " +
 			"platform/Ubuntu): VendorHierarchyInterpreter's closed family table (PR #823) does not " +
-			"yet include a 'vcf' family -- only vsphere/vcsa/nsx/photon/aria-*/vidm are recognized. " +
+			"yet include a 'vcf' family -- only vsphere/nsx/photon/aria-*/vidm are recognized as families (issue #1064 folded vcsa into vsphere). " +
 			"Adding it is #729/#730 catalog-authority follow-up work, not this contract-test slice.",
 		["vcf-9-x-vcf-api"] =
 			"VCF 9-x vcf-api/named-service row (SDDC Manager application; Automation application): " +
@@ -59,7 +59,7 @@ public static class CatalogDerivationMatrix
 			"(ADR-0024) and seeded this row's identity tree (migration 0069). This TEST-ONLY " +
 			"catalog/importer-parity slice is still exempted for a separate reason: " +
 			"VendorHierarchyInterpreter's closed family table (PR #823) does not yet include a " +
-			"'vcf' family -- only vsphere/vcsa/nsx/photon/aria-*/vidm are recognized, so this " +
+			"'vcf' family -- only vsphere/nsx/photon/aria-*/vidm are recognized as families (issue #1064 folded vcsa into vsphere), so this " +
 			"contract-test slice cannot derive an on-disk-import-driven tuple for it. Adding the " +
 			"family is #729/#730 catalog-authority follow-up work.",
 	};
@@ -101,7 +101,12 @@ public static class CatalogDerivationMatrix
 			new CatalogParityRow(
 				MatrixRowId: "vsphere-8-0-stig-vcsa-ssh",
 				ProductVersionKey: "8.0",
-				VendorFamily: "vcsa",
+				// Issue #1064: the vcsa/ directory literal promotes into the vsphere
+				// product (owner decision -- VCSA services are implied subcomponents of
+				// the vCenter appliance), so the expected product_key is "vsphere"
+				// while the fixture still writes a top-level vcsa/ tree.
+				VendorFamily: "vsphere",
+				DirectoryLiteral: "vcsa",
 				Kind: CatalogKinds.Stig,
 				ReleaseKey: "v2r3-stig",
 				Transport: CatalogTransports.Ssh,
@@ -142,7 +147,8 @@ public static class CatalogDerivationMatrix
 			new CatalogParityRow(
 				MatrixRowId: "vsphere-9-0-srg-vcsa-ssh",
 				ProductVersionKey: "9.0",
-				VendorFamily: "vcsa",
+				VendorFamily: "vsphere", // issue #1064, same as the 8.0 VCSA ssh row above
+				DirectoryLiteral: "vcsa",
 				Kind: CatalogKinds.Srg,
 				ReleaseKey: "Y26M05-srg",
 				Transport: CatalogTransports.Ssh,

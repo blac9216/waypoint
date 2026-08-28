@@ -88,6 +88,12 @@ public sealed class VendorHierarchyInterpreterTests
 
 		Assert.Empty(result.Rejections);
 		SemanticCandidate eamCandidate = Assert.Single(result.Candidates, c => c.ComponentKey == "eam");
+		// Issue #1064 (owner decision): VCSA services are implied subcomponents of the
+		// vCenter appliance, so the `vcsa/` directory literal maps to the `vsphere`
+		// family (same pattern as `vcf` -> `vsphere`, issue #959) -- they promote under
+		// the vSphere product, where the vsphere ssh/service derivation row
+		// (vsphere-api + vcsa-ssh) and #741's catalog-declared expansion engage.
+		Assert.Equal("vsphere", eamCandidate.VendorFamily);
 		Assert.Equal(CatalogTransports.Ssh, eamCandidate.Transport);
 		Assert.Equal(CatalogSelectorKinds.Service, eamCandidate.SelectorKind);
 		Assert.Equal("eam", eamCandidate.SelectorName);
@@ -398,18 +404,49 @@ public sealed class VendorHierarchyInterpreterTests
 			"vsphere/8-0/v2r3-stig/vsphere/inspec/vsphere-8-0-stig-baseline/vcenter",
 			Manifest("vcenter", "vSphere 8.0 vCenter STIG", "2.3.0"),
 			"controls/vc-000001.rb");
-		VendorContentEntry vcsaObjectKind = Leaf(
-			"vsphere/8-0/v2r3-stig/vcsa/inspec/vsphere-8-0-vcsa-object-stig-baseline/vcenter",
-			Manifest("vcenter", "vSphere 8.0 VCSA-object STIG", "2.3.0"),
-			"controls/vcsa-000001.rb");
+		VendorContentEntry esxi = Leaf(
+			"vsphere/8-0/v2r3-stig/vsphere/inspec/vsphere-8-0-stig-baseline/esxi",
+			Manifest("esxi", "vSphere 8.0 ESXi STIG", "2.3.0"),
+			"controls/esxi-000001.rb");
 
-		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([vcenter, vcsaObjectKind]);
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([vcenter, esxi]);
 
 		Assert.Empty(result.Rejections);
 		Assert.Equal(2, result.Candidates.Count);
 		Assert.All(result.Candidates, c => Assert.Equal("vsphere", c.VendorFamily));
 		Assert.All(result.Candidates, c => Assert.Equal(CatalogTransports.VMware, c.Transport));
-		Assert.All(result.Candidates, c => Assert.Equal(CatalogSelectorKinds.VCenter, c.SelectorKind));
+	}
+
+	[Fact]
+	public void VcsaObjectKindBeforeInspec_ServiceLeaves_ImportAsVsphereSshServices()
+	{
+		// Issue #1064: the `vcsa` subtree of the object-kind-before-inspec vsphere
+		// layout -- vsphere/<version>/<release>/vcsa/inspec/<baseline>/<service> --
+		// carries named VCSA service leaves (EAM, Lookup, PostgreSQL, ...), NOT the
+		// vcenter/esxi/vm object-kind vocabulary, so before this fix every such leaf
+		// quarantined. Per the owner decision on #1064 these are implied subcomponents
+		// of the vCenter appliance: they import as vsphere-family ssh/service
+		// candidates, exactly like the top-level `vcsa/` tree's leaves.
+		VendorContentEntry eam = Leaf(
+			"vsphere/8-0/v2r3-stig/vcsa/inspec/vsphere-8-0-vcsa-stig-baseline/eam",
+			Manifest("eam", "VCSA EAM STIG", "2.3.0"),
+			"controls/eam-000001.rb");
+		VendorContentEntry lookup = Leaf(
+			"vsphere/8-0/v2r3-stig/vcsa/inspec/vsphere-8-0-vcsa-stig-baseline/lookup",
+			Manifest("lookup", "VCSA Lookup STIG", "2.3.0"),
+			"controls/lookup-000001.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([eam, lookup]);
+
+		Assert.Empty(result.Rejections);
+		Assert.Equal(2, result.Candidates.Count);
+		Assert.All(result.Candidates, c => Assert.Equal("vsphere", c.VendorFamily));
+		Assert.All(result.Candidates, c => Assert.Equal(CatalogTransports.Ssh, c.Transport));
+		Assert.All(result.Candidates, c => Assert.Equal(CatalogSelectorKinds.Service, c.SelectorKind));
+
+		SemanticCandidate eamCandidate = Assert.Single(result.Candidates, c => c.ComponentKey == "eam");
+		Assert.Equal("eam", eamCandidate.SelectorName);
+		Assert.True(eamCandidate.IsExecutableLeaf);
 	}
 
 	[Fact]

@@ -61,4 +61,16 @@ public sealed record CatalogParityRow(
 	bool HasBenchmark,
 	string OutputKind,
 	bool RemediationSupported,
-	IReadOnlyList<CatalogParityComponent> Components);
+	IReadOnlyList<CatalogParityComponent> Components,
+	string? DirectoryLiteral = null)
+{
+	/// <summary>
+	/// The top-level vendor-repository directory literal the fixture builder writes for
+	/// this row. Issue #1064: the literal and the promoted family are no longer always
+	/// the same string -- the `vcsa/` directory maps to family (product) `vsphere`, so
+	/// the two VCSA ssh rows set <see cref="DirectoryLiteral"/> = "vcsa" while their
+	/// <see cref="VendorFamily"/> (the expected promoted product_key) is "vsphere".
+	/// Every other row's literal equals its family.
+	/// </summary>
+	public string FixtureDirectoryLiteral => DirectoryLiteral ?? VendorFamily;
+}
