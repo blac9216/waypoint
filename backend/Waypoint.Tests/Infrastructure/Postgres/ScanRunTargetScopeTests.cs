@@ -83,7 +83,7 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 				services.AddSingleton(new Waypoint.Infrastructure.Secrets.CredentialRepository(_connectionString));
 				services.AddSingleton<Waypoint.Core.ComplianceContent.IProfileRepository>(
 					new Waypoint.Infrastructure.ComplianceContent.ProfileRepository(_connectionString));
-				services.AddSingleton<IComponentRepository>(new ComponentRepository(_connectionString));
+				services.AddSingleton<IComponentRepository>(new ComponentRepository(_connectionString, new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(_connectionString)));
 				services.AddSingleton<ICatalogRepository>(new CatalogRepository(_connectionString));
 				services.AddSingleton<ScopeResolutionService>();
 				services.AddSingleton<IRunScopeSnapshotRepository>(new RunScopeSnapshotRepository(_connectionString));
@@ -141,7 +141,7 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 
 		_factory = new TargetScopeApiFactory(_fixture.ConnectionString);
 		_client = _factory.CreateClient();
-		_components = new ComponentRepository(_fixture.ConnectionString);
+		_components = new ComponentRepository(_fixture.ConnectionString, new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(_fixture.ConnectionString));
 
 		_profiles = new ProfileRepository(_fixture.ConnectionString);
 		await _profiles.ReplaceAllAsync(

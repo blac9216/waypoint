@@ -69,7 +69,7 @@ public sealed class PlannerParityContractTests : IAsyncLifetime
 		await migrator.ApplyAsync();
 		await ResetDataAsync();
 
-		_components = new ComponentRepository(_fixture.ConnectionString);
+		_components = new ComponentRepository(_fixture.ConnectionString, new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(_fixture.ConnectionString));
 		_catalog = new CatalogRepository(_fixture.ConnectionString);
 		_baselines = new BaselineRepository(_fixture.ConnectionString);
 		_benchmarks = new BenchmarkRepository(_fixture.ConnectionString);

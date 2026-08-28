@@ -277,9 +277,17 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(new InventoryRepository(connectionString));
 			// Issue #732: stable compliance endpoint/component identity beneath a
 			// top-level target (migration 0054) -- distinct from InventoryRepository's
-			// flat cluster/host/VM cache above.
+			// flat cluster/host/VM cache above. Issue #1000: ComponentRepository now
+			// also needs ICatalogRepository (to resolve catalog linkage from the
+			// configured fact, mirroring DiscoverJobHandler's discovered-fact linkage)
+			// -- constructed inline here, ahead of the CatalogRepository registration
+			// below, rather than reordering that registration; both wrap the same
+			// connection string and CatalogRepository has no other dependency, so a
+			// second lightweight instance here costs nothing and keeps this
+			// registration self-contained.
 			services.AddSingleton<Waypoint.Core.Components.IComponentRepository>(
-				new Waypoint.Infrastructure.Components.ComponentRepository(connectionString));
+				new Waypoint.Infrastructure.Components.ComponentRepository(
+					connectionString, new Waypoint.Infrastructure.ComplianceContent.CatalogRepository(connectionString)));
 			services.AddSingleton(new ConfigDocRepository(connectionString));
 			services.AddSingleton(new AttestationSnapshotRepository(connectionString));
 			services.AddSingleton(new StigManager.StigManagerRepository(connectionString));

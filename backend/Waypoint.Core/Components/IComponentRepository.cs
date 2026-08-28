@@ -64,9 +64,20 @@ public interface IComponentRepository
 	/// <see cref="Component.FactConflict"/> against any existing discovered fact and
 	/// records a <see cref="ComponentObservation"/> with outcome
 	/// <see cref="ComponentObservationOutcomes.Conflict"/> when they now disagree,
-	/// <see cref="ComponentObservationOutcomes.Recorded"/> otherwise.
+	/// <see cref="ComponentObservationOutcomes.Recorded"/> otherwise. A null/whitespace
+	/// <paramref name="exactVersion"/> clears the configured fact.
+	///
+	/// Issue #1000: also (re-)resolves <see cref="Component.CatalogComponentId"/> from
+	/// the effective exact version -- configured when present, discovered when
+	/// configured is absent/cleared, unlinked on a configured/discovered conflict --
+	/// the same precedence <see cref="ComponentCapabilityMatcher"/> already applies to
+	/// the FACT, reused here for the LINK via the shared
+	/// <see cref="CatalogLinkageResolver"/> (never a forked copy of the exact-
+	/// match/ambiguity rule), so an Admin-configured version participates in catalog
+	/// linkage exactly like a discovered one. Clearing the configured fact honestly
+	/// re-resolves the link from whatever remains (a discovered fact, or nothing).
 	/// </summary>
-	Task<ComponentWriteOutcome> SetConfiguredFactAsync(Guid componentId, string exactVersion, CancellationToken cancellationToken);
+	Task<ComponentWriteOutcome> SetConfiguredFactAsync(Guid componentId, string? exactVersion, CancellationToken cancellationToken);
 
 	/// <summary>
 	/// Moves every component under any target whose <see cref="Component.ContinuousAbsenceSince"/>

@@ -556,76 +556,20 @@ public sealed class DiscoverJobHandler : IJobHandler
 
 		foreach (DiscoveredComponent item in items)
 		{
-			// Issue #995: guard on IsNullOrWhiteSpace, not `is null`, so this stays
-			// fail-closed even if some future caller ever constructs a DiscoveredComponent
-			// directly with an empty/whitespace ExactVersion instead of going through
-			// MapToComponents' own (now-normalizing) mapping -- belt-and-braces so this
-			// method's fail-closed claim is actually true regardless of caller discipline,
-			// not merely true for today's one call site.
-			if (string.IsNullOrWhiteSpace(item.ExactVersion))
-			{
-				// No exact fact this pass (unavailable, or a component kind -- e.g. the
-				// synthetic vcenter root, or a VM -- that never carries one): stays
-				// unlinked, no lookup attempted, no ambiguity to report. A null here
-				// still overwrites any prior link on upsert (see ComponentRepository's
-				// #985 note) -- this is not itself a stale link, it is this pass's
-				// honest re-evaluation.
-				resolved.Add(item with { CatalogComponentId = null });
-				continue;
-			}
+			// Issue #1000: the exact-match/ambiguity/fail-closed rule itself now lives in
+			// the shared Waypoint.Core.Components.CatalogLinkageResolver -- extracted
+			// verbatim from this loop -- so the configured-fact path
+			// (ComponentRepository.SetConfiguredFactAsync) resolves linkage the identical
+			// way rather than forking its own copy. Guarding on IsNullOrWhiteSpace (issue
+			// #995) still happens inside the shared resolver.
+			(Guid? catalogComponentId, string? warning) = await CatalogLinkageResolver
+				.ResolveAsync(catalog, item.CatalogComponentKey, item.ExactVersion, cancellationToken)
+				.ConfigureAwait(false);
 
-			IReadOnlyList<Waypoint.Core.ComplianceContent.CatalogComponent> candidates;
-			try
+			resolved.Add(item with { CatalogComponentId = catalogComponentId });
+			if (warning is not null)
 			{
-				candidates = await catalog
-					.FindTopLevelComponentsByKeyAndVersionAsync(item.CatalogComponentKey, item.ExactVersion, cancellationToken)
-					.ConfigureAwait(false);
-			}
-			catch (Exception exception) when (exception is not OperationCanceledException)
-			{
-				// Issue #995 (defense-in-depth against the CLASS of bug, not just this one
-				// instance): a linkage-time repository fault for ONE component (a transient
-				// DB error, or -- belt-and-braces alongside the IsNullOrWhiteSpace guard
-				// above -- a still-unanticipated ArgumentException from the repository)
-				// must not abort the whole discovery job the way #995 did. Every other
-				// per-item outcome in this loop (no-match, ambiguous) already fails THAT
-				// component closed and keeps going; matching that established posture, this
-				// component is logged loudly (never silently swallowed -- it IS surfaced,
-				// same channel as the ambiguity warning below) and left unlinked, while
-				// every other component in this batch still gets its own honest linkage
-				// result. This is deliberately narrower than a blanket catch: it wraps only
-				// the repository call, so a bug in this method's own logic still throws and
-				// still fails the job.
-				resolved.Add(item with { CatalogComponentId = null });
-				warnings.Add(
-					$"catalog linkage lookup for component key '{item.CatalogComponentKey}' version '{item.ExactVersion}' " +
-					$"failed unexpectedly ({exception.GetType().Name}: {exception.Message}); left unlinked rather than failing the whole discovery job.");
-				continue;
-			}
-
-			if (candidates.Count == 1)
-			{
-				resolved.Add(item with { CatalogComponentId = candidates[0].Id });
-			}
-			else if (candidates.Count == 0)
-			{
-				// Honest "no catalog coverage" -- not an error, just unlinked (ADR-0022:
-				// never substitute a nearest baseline). ComponentCapabilityMatcher
-				// reports its own "not linked to a known catalog component" reason
-				// downstream; no separate log entry needed for the common no-match case.
-				resolved.Add(item with { CatalogComponentId = null });
-			}
-			else
-			{
-				// Ambiguous: more than one product's catalog component shares this exact
-				// (component_key, version) pair. Never guess a winner (ADR-0022) --
-				// stays unlinked, but this IS surfaced (unlike the honest zero-match
-				// case above) because it signals a catalog data condition an operator
-				// or catalog author should investigate, not a routine "not yet covered."
-				resolved.Add(item with { CatalogComponentId = null });
-				warnings.Add(
-					$"component key '{item.CatalogComponentKey}' version '{item.ExactVersion}' matched {candidates.Count} catalog components " +
-					$"across different products ({string.Join(", ", candidates.Select(c => c.Id))}); left unlinked rather than guessing.");
+				warnings.Add(warning);
 			}
 		}
 

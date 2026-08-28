@@ -14,6 +14,7 @@
 
 using System.Text.Json;
 using Npgsql;
+using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Components;
 
 namespace Waypoint.Infrastructure.Components;
@@ -36,11 +37,21 @@ public sealed class ComponentRepository : IComponentRepository
 	private static readonly JsonSerializerOptions FactSerializerOptions = new(JsonSerializerDefaults.Web);
 
 	private readonly string _connectionString;
+	private readonly ICatalogRepository _catalog;
 
-	public ComponentRepository(string connectionString)
+	/// <summary>
+	/// Issue #1000: <paramref name="catalog"/> is required so <see cref="SetConfiguredFactAsync"/>
+	/// can resolve catalog linkage from the Admin-configured exact version the same way
+	/// <see cref="Waypoint.Infrastructure.Execution.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync"/>
+	/// already does for the discovered fact -- both now call the same
+	/// <see cref="Waypoint.Core.Components.CatalogLinkageResolver"/>.
+	/// </summary>
+	public ComponentRepository(string connectionString, ICatalogRepository catalog)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+		ArgumentNullException.ThrowIfNull(catalog);
 		_connectionString = connectionString;
+		_catalog = catalog;
 	}
 
 	public async Task<IReadOnlyList<Component>> ListForTargetAsync(Guid targetId, bool includeRetired, CancellationToken cancellationToken)
@@ -140,6 +151,22 @@ public sealed class ComponentRepository : IComponentRepository
 			// change that newly fails to link (or that now resolves to a different
 			// catalog component) must overwrite a stale id rather than have COALESCE
 			// preserve it forever once first set.
+			//
+			// Issue #1000: that "always overwrite" rule is only honest when discovery
+			// actually rendered a version opinion this pass (item.ExactVersion is
+			// non-null -- today, only esxi hosts). A component discovery can never
+			// version (the synthetic vcenter root, any vm) always reports
+			// ExactVersion=null/CatalogComponentId=null by construction
+			// (DiscoverJobHandler.MapToComponents), so an unconditional EXCLUDED
+			// assignment would clobber a link the CONFIGURED-fact path
+			// (ComponentRepository.SetConfiguredFactAsync) may have independently
+			// established -- exactly the permanent-catalog_incompatible bug #1000
+			// reports. The CASE below preserves the existing catalog_component_id
+			// whenever this pass has no discovered exact version to relink/unlink from;
+			// when discovery DOES have a version this pass, #985's original
+			// always-overwrite semantics (relink or honestly unlink on a version
+			// change) are unchanged.
+			bool discoveryHasVersionOpinion = factJson is not null;
 			Guid rowId;
 			bool wasReconnect;
 			if (item.VendorIdentity is not null)
@@ -154,7 +181,7 @@ public sealed class ComponentRepository : IComponentRepository
 					                         vendor_identity, display_name, lifecycle, discovered_fact, last_seen_at)
 					VALUES ($1, $2, $3, $4, $5, $6, 'active', $7::jsonb, now())
 					ON CONFLICT (parent_target_id, catalog_component_key, vendor_identity) DO UPDATE SET
-					    catalog_component_id = EXCLUDED.catalog_component_id,
+					    catalog_component_id = CASE WHEN $8 THEN EXCLUDED.catalog_component_id ELSE components.catalog_component_id END,
 					    display_name = EXCLUDED.display_name,
 					    lifecycle = 'active',
 					    discovered_fact = COALESCE(EXCLUDED.discovered_fact, components.discovered_fact),
@@ -172,6 +199,7 @@ public sealed class ComponentRepository : IComponentRepository
 				upsert.Parameters.AddWithValue(item.VendorIdentity);
 				upsert.Parameters.AddWithValue(item.DisplayName);
 				upsert.Parameters.AddWithValue((object?)factJson ?? DBNull.Value);
+				upsert.Parameters.AddWithValue(discoveryHasVersionOpinion);
 
 				await using NpgsqlDataReader reader = await upsert.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 				await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -196,7 +224,7 @@ public sealed class ComponentRepository : IComponentRepository
 					ON CONFLICT (parent_target_id, COALESCE(parent_component_id, '00000000-0000-0000-0000-000000000000'::uuid), catalog_component_key)
 					    WHERE vendor_identity IS NULL
 					    DO UPDATE SET
-					        catalog_component_id = EXCLUDED.catalog_component_id,
+					        catalog_component_id = CASE WHEN $7 THEN EXCLUDED.catalog_component_id ELSE components.catalog_component_id END,
 					        display_name = EXCLUDED.display_name,
 					        lifecycle = 'active',
 					        discovered_fact = COALESCE(EXCLUDED.discovered_fact, components.discovered_fact),
@@ -213,6 +241,7 @@ public sealed class ComponentRepository : IComponentRepository
 				upsert.Parameters.AddWithValue(item.DisplayName);
 				upsert.Parameters.AddWithValue((object?)factJson ?? DBNull.Value);
 				upsert.Parameters.AddWithValue((object?)item.CatalogComponentId ?? DBNull.Value);
+				upsert.Parameters.AddWithValue(discoveryHasVersionOpinion);
 
 				await using NpgsqlDataReader reader = await upsert.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 				await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -311,45 +340,125 @@ public sealed class ComponentRepository : IComponentRepository
 		return new ComponentUpsertOutcome(upserted, markedAbsent, reconnected);
 	}
 
-	public async Task<ComponentWriteOutcome> SetConfiguredFactAsync(Guid componentId, string exactVersion, CancellationToken cancellationToken)
+	/// <summary>
+	/// Admin configured-fact write. <paramref name="exactVersion"/> null/whitespace
+	/// CLEARS the configured fact (issue #1000 AC "clearing the configured version must
+	/// honestly unlink") -- the caller (<see cref="Waypoint.Api.Controllers.ComponentsController.Put"/>)
+	/// is responsible for rejecting an empty body outright; this method's own null
+	/// handling exists for that clear path specifically, not as another way to send an
+	/// empty string through.
+	///
+	/// Issue #1000: this now also resolves <c>catalog_component_id</c> the same way
+	/// <see cref="Waypoint.Infrastructure.Execution.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync"/>
+	/// resolves it for the discovered fact -- both call the shared
+	/// <see cref="Waypoint.Core.Components.CatalogLinkageResolver"/>, never a forked
+	/// copy of the exact-match/ambiguity rule. Runs here, at write time, rather than
+	/// only at matcher time: PUT is this fact's ONLY writer (unlike discovery, which
+	/// re-runs on a schedule and so gets #985's "re-evaluate every pass" self-healing
+	/// for free), so resolving once at write time is the only point that will ever
+	/// evaluate a call that never repeats -- deferring to a read-time/matcher-time
+	/// resolution would leave a component that is never rediscovered permanently
+	/// unlinked even after an Admin sets a now-matching configured version.
+	///
+	/// Precedence when a discovered fact also exists (ADR-0023: two independent
+	/// provenances, "[Waypoint] ... never guesses a winner"), mirroring exactly the
+	/// effective-version rule <see cref="Waypoint.Core.Components.ComponentCapabilityMatcher"/>
+	/// already applies for the FACT (this is that same rule, reused for the LINK): if
+	/// discovered and configured agree, the shared value drives linkage; if they
+	/// disagree (<c>fact_conflict</c>), linkage resolves to unlinked -- not a guess at
+	/// which provenance wins, and consistent with the matcher's own hard fail on
+	/// <c>FactConflict</c> regardless of any link value; if only the configured fact is
+	/// present (the vCenter root, VMs -- discovery structurally never supplies one),
+	/// the configured value alone drives linkage, which is this issue's actual fix.
+	/// </summary>
+	public async Task<ComponentWriteOutcome> SetConfiguredFactAsync(Guid componentId, string? exactVersion, CancellationToken cancellationToken)
 	{
-		ArgumentException.ThrowIfNullOrWhiteSpace(exactVersion);
-
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-		string factJson = JsonSerializer.Serialize(new { exact_version = exactVersion, observed_at = DateTimeOffset.UtcNow }, FactSerializerOptions);
+		bool clearing = string.IsNullOrWhiteSpace(exactVersion);
+		string? factJson = clearing
+			? null
+			: JsonSerializer.Serialize(new { exact_version = exactVersion, observed_at = DateTimeOffset.UtcNow }, FactSerializerOptions);
+
+		// Read the row's identity key and current discovered fact BEFORE this write --
+		// needed to compute the effective version for linkage and to know whether this
+		// write disagrees with an existing discovered fact.
+		await using NpgsqlCommand select = new(
+			"SELECT catalog_component_key, discovered_fact->>'exact_version' FROM components WHERE id = $1 FOR UPDATE",
+			connection, transaction);
+		select.Parameters.AddWithValue(componentId);
+		string? catalogComponentKey = null;
+		string? discoveredExactVersion = null;
+		bool found = false;
+		await using (NpgsqlDataReader existing = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+		{
+			if (await existing.ReadAsync(cancellationToken).ConfigureAwait(false))
+			{
+				found = true;
+				catalogComponentKey = existing.GetString(0);
+				discoveredExactVersion = existing.IsDBNull(1) ? null : existing.GetString(1);
+			}
+		}
+
+		if (!found)
+		{
+			// The reader above is fully disposed by the `await using` block's own
+			// closing brace before this runs -- rolling back while it was still open
+			// (the original bug here) throws NpgsqlOperationInProgressException, since
+			// Npgsql allows only one in-flight command per connection at a time.
+			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+			return ComponentWriteOutcome.NotFound;
+		}
+
+		bool conflict = !clearing && discoveredExactVersion is not null
+			&& !string.Equals(discoveredExactVersion, exactVersion, StringComparison.Ordinal);
+
+		// Same effective-version rule as ComponentCapabilityMatcher.ResolveExactVersion:
+		// both present and agreeing -> that value; both present and conflicting -> no
+		// effective version (unlinked); only one present -> that one; neither -> none.
+		string? effectiveVersion = conflict
+			? null
+			: (clearing ? null : exactVersion) ?? discoveredExactVersion;
+
+		// An ambiguous-match warning has no PUT-time delivery channel analogous to
+		// DiscoverJobHandler's job.log event (there is no in-flight job here) --
+		// resolving to unlinked is still the correct, honest outcome (ADR-0022 "never
+		// guesses a winner"), and GET /components/{id}/capability already reports "not
+		// linked to a known catalog component" for it, same as the routine zero-match
+		// case. Discarded rather than invented a new delivery path out of scope for
+		// this issue.
+		(Guid? catalogComponentId, string? _) = await CatalogLinkageResolver
+			.ResolveAsync(_catalog, catalogComponentKey!, effectiveVersion, cancellationToken)
+			.ConfigureAwait(false);
 
 		await using NpgsqlCommand update = new(
 			"""
 			UPDATE components
 			SET configured_fact = $2::jsonb,
-			    fact_conflict = (discovered_fact IS NOT NULL AND discovered_fact->>'exact_version' <> $3)
+			    fact_conflict = $3,
+			    catalog_component_id = $4
 			WHERE id = $1
-			RETURNING fact_conflict
 			""", connection, transaction);
 		update.Parameters.AddWithValue(componentId);
-		update.Parameters.AddWithValue(factJson);
-		update.Parameters.AddWithValue(exactVersion);
+		update.Parameters.AddWithValue((object?)factJson ?? DBNull.Value);
+		update.Parameters.AddWithValue(conflict);
+		update.Parameters.AddWithValue((object?)catalogComponentId ?? DBNull.Value);
+		await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
-		object? result = await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-		if (result is null)
+		if (factJson is not null)
 		{
-			await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-			return ComponentWriteOutcome.NotFound;
+			await using NpgsqlCommand observation = new(
+				"""
+				INSERT INTO component_observations (component_id, source, observed_fact, outcome)
+				VALUES ($1, 'configured', $2::jsonb, $3)
+				""", connection, transaction);
+			observation.Parameters.AddWithValue(componentId);
+			observation.Parameters.AddWithValue(factJson);
+			observation.Parameters.AddWithValue(conflict ? "conflict" : "recorded");
+			await observation.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 		}
-
-		bool conflict = (bool)result;
-		await using NpgsqlCommand observation = new(
-			"""
-			INSERT INTO component_observations (component_id, source, observed_fact, outcome)
-			VALUES ($1, 'configured', $2::jsonb, $3)
-			""", connection, transaction);
-		observation.Parameters.AddWithValue(componentId);
-		observation.Parameters.AddWithValue(factJson);
-		observation.Parameters.AddWithValue(conflict ? "conflict" : "recorded");
-		await observation.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
 		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 		return ComponentWriteOutcome.Ok;

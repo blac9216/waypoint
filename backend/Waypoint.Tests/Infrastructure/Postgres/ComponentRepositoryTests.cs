@@ -17,6 +17,7 @@ using Npgsql;
 using Waypoint.Core.Components;
 using Waypoint.Core.Sites;
 using Waypoint.Infrastructure.Components;
+using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Infrastructure.Sites;
 using Xunit;
@@ -53,7 +54,7 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
 		await migrator.ApplyAsync();
 		await ResetDataAsync();
-		_repository = new ComponentRepository(_fixture.ConnectionString);
+		_repository = new ComponentRepository(_fixture.ConnectionString, new CatalogRepository(_fixture.ConnectionString));
 		_sites = new SiteRepository(_fixture.ConnectionString);
 		_targets = new TargetRepository(_fixture.ConnectionString);
 	}

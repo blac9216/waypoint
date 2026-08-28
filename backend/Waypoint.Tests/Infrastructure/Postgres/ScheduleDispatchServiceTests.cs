@@ -93,7 +93,7 @@ public sealed class ScheduleDispatchServiceTests : IAsyncLifetime, IDisposable
 			CancellationToken.None);
 		_profileId = (await _profiles.ListAsync(CancellationToken.None)).Single().Id;
 
-		Waypoint.Infrastructure.Components.ComponentRepository componentRepository = new(_fixture.ConnectionString);
+		Waypoint.Infrastructure.Components.ComponentRepository componentRepository = new(_fixture.ConnectionString, new CatalogRepository(_fixture.ConnectionString));
 		CatalogRepository catalogRepository = new(_fixture.ConnectionString);
 		BaselineRepository baselineRepository = new(_fixture.ConnectionString);
 		Waypoint.Infrastructure.ConfigDocs.ConfigDocRepository configDocRepository = new(_fixture.ConnectionString);
