@@ -49,5 +49,15 @@ CREATE TABLE IF NOT EXISTS run_retention_holds (
 -- before any runner-side purge job is ever enqueued. Withholding both roles' grants
 -- here mirrors appliance_state's existing "API/Settings-only singleton" posture
 -- (migration 0025's header). RunnerRoleGrantDriftTests-style coverage in
--- RunRetentionHoldGrantDriftTests proves this table is unreachable (42501) under
--- the REAL waypoint_compliance_runner role, not just under the migration owner.
+-- RunRetentionHoldTests.ComplianceRunnerRole_CannotReadOrWriteRunRetentionHolds and
+-- RunRetentionHoldTests.DownloadRunnerRole_CannotReadOrWriteRunRetentionHolds proves
+-- this table is unreachable (42501) under BOTH REAL runner roles -- the two roles
+-- this header withholds grants from -- not just under the migration owner.
+--
+-- Consequence the hold model has to live with (issue #784): because the
+-- compliance-runner cannot read this table, a purge's artifact-deletion job cannot
+-- re-check the hold when it claims. A hold that lands after that job was enqueued is
+-- therefore honoured API-side instead, by cancelling the job
+-- (RunRetentionHoldService.HaltInFlightArtifactDeletionAsync) and by refusing to
+-- finalize (RunPurgeService.FinalizePendingAsync). See RunPurgeOutcome.Held for the
+-- exact mid-purge boundary that buys.

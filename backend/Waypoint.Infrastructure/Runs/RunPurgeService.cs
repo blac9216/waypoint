@@ -121,13 +121,16 @@ public sealed class RunPurgeService
 
 		// Issue #784: a held run's evidence graph must never be purged -- checked on
 		// EVERY call (not just the first), so placing a hold after a purge is already
-		// in flight (db_phase_done but the artifact job not yet finalized) also blocks
-		// further progress, not just a fresh start. A completed purge is unaffected
-		// (the tombstone check above already returned by that point -- nothing left to
-		// protect once the graph is gone). #1062's future sweep must call this SAME
-		// entry point rather than re-implement the check, so the exclusion has exactly
-		// one enforcement point for both the manual admin action and the automated
-		// sweep.
+		// in flight blocks further progress here too, not just a fresh start. This is
+		// one of THREE places the hold is honoured, because this method is not the only
+		// path that can reach a deletion: FinalizePendingAsync (the background finalize
+		// sweep) re-checks it independently, and RunRetentionHoldService.PlaceHoldAsync
+		// cancels an already-enqueued artifact-deletion job so the runner never claims
+		// it. A completed purge is unaffected (the tombstone check above already
+		// returned by that point -- nothing left to protect once the graph is gone).
+		// #1062's future sweep must call this SAME entry point rather than re-implement
+		// the check, so the exclusion has exactly one enforcement point for both the
+		// manual admin action and the automated sweep.
 		if (await _retentionHolds.GetAsync(runId, cancellationToken).ConfigureAwait(false) is not null)
 		{
 			return new RunPurgeResult(RunPurgeOutcome.Held);
@@ -177,11 +180,27 @@ public sealed class RunPurgeService
 	/// retryable operator re-POST. A concurrently-vanished <c>run_purges</c> row (an
 	/// operator re-POST finalized it between the sweep's list and this call) is a
 	/// silent no-op.
+	///
+	/// Issue #784: this method is the OTHER way into <see cref="ResumeAsync"/>, so it
+	/// re-checks the retention hold itself rather than relying on
+	/// <see cref="PurgeRunAsync"/>'s check. Without this a run held after its purge
+	/// started would still be tombstoned (and <c>runs.purged_at</c> set) by the
+	/// background sweep -- the partially-preserved-graph outcome #784's Risk section
+	/// names. A held run therefore keeps an un-finalized <c>run_purges</c> row for as
+	/// long as the hold stands; that is deliberate (the partially-purged state stays
+	/// visible via <c>GET /runs/{id}/purge</c> instead of being presented as complete),
+	/// and the ONLY thing that clears it is removing the hold and re-POSTing purge.
+	/// See <see cref="RunPurgeOutcome.Held"/> for the full mid-purge boundary.
 	/// </summary>
 	public async Task<bool> FinalizePendingAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		RunPurgeStatus? status = await _purges.GetStatusAsync(runId, cancellationToken).ConfigureAwait(false);
 		if (status is null || !status.DbPhaseDone || status.ArtifactsPhase != "done")
+		{
+			return false;
+		}
+
+		if (await _retentionHolds.GetAsync(runId, cancellationToken).ConfigureAwait(false) is not null)
 		{
 			return false;
 		}

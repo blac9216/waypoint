@@ -73,6 +73,9 @@ public sealed class PurgeJobHandlerTests : IDisposable
 
 		public Task<Guid?> FindRunIdByArtifactJobIdAsync(Guid artifactJobId, CancellationToken cancellationToken) => Task.FromResult(RunIdForArtifactJob);
 
+		public Task<Guid?> GetArtifactJobIdAsync(Guid runId, CancellationToken cancellationToken) =>
+			throw new InvalidOperationException("Not expected to be called by PurgeJobHandler.");
+
 		public Task<RunPurgeStatus> CreateAsync(Guid runId, string requestedBy, string priorState, CancellationToken cancellationToken) =>
 			throw new InvalidOperationException("Not expected to be called by PurgeJobHandler.");
 

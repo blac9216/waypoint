@@ -2097,6 +2097,19 @@ public sealed class FakeRunPurgeRepository : IRunPurgeRepository
 		return Task.FromResult<Guid?>(null);
 	}
 
+	/// <summary>
+	/// Issue #784: the artifact-deletion job RunRetentionHoldService cancels when a
+	/// hold lands mid-purge. Null by default (no purge in flight); tests that need the
+	/// cancel path to fire set it.
+	/// </summary>
+	public Guid? ArtifactJobId { get; set; }
+
+	public Task<Guid?> GetArtifactJobIdAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		_ = (runId, cancellationToken);
+		return Task.FromResult(ArtifactJobId);
+	}
+
 	public Task<RunPurgeStatus> CreateAsync(Guid runId, string requestedBy, string priorState, CancellationToken cancellationToken)
 	{
 		_ = cancellationToken;
@@ -2203,12 +2216,6 @@ public sealed class FakeRunRetentionHoldRepository : IRunRetentionHoldRepository
 	{
 		_ = cancellationToken;
 		return Task.FromResult(_holds.TryGetValue(runId, out RunRetentionHold? hold) ? hold : null);
-	}
-
-	public Task<IReadOnlyList<Guid>> ListHeldRunIdsAsync(CancellationToken cancellationToken)
-	{
-		_ = cancellationToken;
-		return Task.FromResult<IReadOnlyList<Guid>>([.. _holds.Keys]);
 	}
 
 	public Task<bool> TryInsertAsync(Guid runId, string reason, string actor, CancellationToken cancellationToken)

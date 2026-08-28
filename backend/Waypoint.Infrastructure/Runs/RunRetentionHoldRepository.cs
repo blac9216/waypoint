@@ -48,21 +48,6 @@ public sealed class RunRetentionHoldRepository : IRunRetentionHoldRepository
 		return Read(reader);
 	}
 
-	public async Task<IReadOnlyList<Guid>> ListHeldRunIdsAsync(CancellationToken cancellationToken)
-	{
-		await using NpgsqlConnection connection = new(_connectionString);
-		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-		await using NpgsqlCommand command = new("SELECT run_id FROM run_retention_holds", connection);
-		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-		List<Guid> runIds = [];
-		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-		{
-			runIds.Add(reader.GetGuid(0));
-		}
-
-		return runIds;
-	}
-
 	public async Task<bool> TryInsertAsync(Guid runId, string reason, string actor, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(reason);

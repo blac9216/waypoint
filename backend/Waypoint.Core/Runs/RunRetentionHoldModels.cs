@@ -76,20 +76,19 @@ public sealed record RemoveRetentionHoldResult(RemoveRetentionHoldOutcome Outcom
 /// (<c>RunsController</c>, via <see cref="Waypoint.Infrastructure.Runs.RunRetentionHoldService"/>)
 /// and <see cref="Waypoint.Infrastructure.Runs.RunPurgeService"/>'s own exclusion
 /// check need it.
+///
+/// Deliberately carries NO bulk "list every held run id" read. Issue #1062's sweep
+/// excludes held runs in its OWN candidate query with a SQL anti-join
+/// (<c>WHERE NOT EXISTS (SELECT 1 FROM run_retention_holds h WHERE h.run_id = r.id)</c>),
+/// which needs no C# surface here and does not depend on the held set being small
+/// enough to materialise in the API process; <see cref="Waypoint.Infrastructure.Runs.RunPurgeService.PurgeRunAsync"/>'s
+/// refusal remains the backstop that makes the exclusion correct even if a candidate
+/// query ever forgets the anti-join.
 /// </summary>
 public interface IRunRetentionHoldRepository
 {
 	/// <summary>Current hold for a run, or <c>null</c> if the run is not held. Backs the purge-exclusion check and <c>GET /runs/{id}/retention-hold</c>.</summary>
 	Task<RunRetentionHold?> GetAsync(Guid runId, CancellationToken cancellationToken);
-
-	/// <summary>
-	/// Issue #1062's stated requirement -- "design the exemption surface so the sweep
-	/// can query it directly" -- rather than the future sweep re-checking one run at a
-	/// time via <see cref="GetAsync"/> in a loop. Not yet called by anything in THIS
-	/// change (the sweep itself is #1062's remainder); exposed now so #1062 can filter
-	/// its candidate query against held run ids directly.
-	/// </summary>
-	Task<IReadOnlyList<Guid>> ListHeldRunIdsAsync(CancellationToken cancellationToken);
 
 	/// <summary>
 	/// Inserts the hold row and the <c>retention_hold_placed</c> audit_log row in one

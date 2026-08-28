@@ -23,19 +23,30 @@ namespace Waypoint.Infrastructure.Runs;
 /// state, compliance run type); the actual insert/delete + audit write is
 /// <see cref="IRunRetentionHoldRepository"/>'s job, mirroring the
 /// <see cref="RunPurgeService"/>/<see cref="IRunPurgeRepository"/> split.
+///
+/// Placing a hold is not only a database write: it must also STOP a purge that is
+/// already in flight, because the artifact-deletion job may already be sitting in the
+/// queue by the time the hold lands and the compliance-runner cannot re-check the hold
+/// itself (migration 0075 withholds every grant on <c>run_retention_holds</c> from both
+/// runner roles, deliberately). <see cref="PlaceHoldAsync"/> therefore cancels that job
+/// at hold time -- see <see cref="RunPurgeOutcome.Held"/> for the exact, and
+/// deliberately limited, mid-purge guarantee this buys.
 /// </summary>
 public sealed class RunRetentionHoldService
 {
 	private readonly IJobControlRepository _jobs;
 	private readonly IRunRetentionHoldRepository _holds;
+	private readonly IRunPurgeRepository _purges;
 
-	public RunRetentionHoldService(IJobControlRepository jobs, IRunRetentionHoldRepository holds)
+	public RunRetentionHoldService(IJobControlRepository jobs, IRunRetentionHoldRepository holds, IRunPurgeRepository purges)
 	{
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(holds);
+		ArgumentNullException.ThrowIfNull(purges);
 
 		_jobs = jobs;
 		_holds = holds;
+		_purges = purges;
 	}
 
 	public Task<RunRetentionHold?> GetHoldAsync(Guid runId, CancellationToken cancellationToken) =>
@@ -71,6 +82,11 @@ public sealed class RunRetentionHoldService
 		}
 
 		bool inserted = await _holds.TryInsertAsync(runId, reason, actor, cancellationToken).ConfigureAwait(false);
+		if (inserted)
+		{
+			await HaltInFlightArtifactDeletionAsync(runId, cancellationToken).ConfigureAwait(false);
+		}
+
 		RunRetentionHold? hold = await _holds.GetAsync(runId, cancellationToken).ConfigureAwait(false);
 		return new PlaceRetentionHoldResult(inserted ? PlaceRetentionHoldOutcome.Placed : PlaceRetentionHoldOutcome.AlreadyHeld, hold);
 	}
@@ -94,5 +110,43 @@ public sealed class RunRetentionHoldService
 
 		bool removed = await _holds.TryRemoveAsync(runId, reason, actor, cancellationToken).ConfigureAwait(false);
 		return new RemoveRetentionHoldResult(removed ? RemoveRetentionHoldOutcome.Removed : RemoveRetentionHoldOutcome.NotHeld);
+	}
+
+	/// <summary>
+	/// Issue #784: the third enforcement point for a hold, alongside
+	/// <see cref="RunPurgeService.PurgeRunAsync"/> (fresh/resumed API call) and
+	/// <see cref="RunPurgeService.FinalizePendingAsync"/> (background finalize sweep).
+	/// Those two stop the API process from advancing a purge, but neither stops an
+	/// artifact-deletion job that <see cref="RunPurgeService"/> ALREADY enqueued: that
+	/// job runs on the compliance-runner, which has no grant on
+	/// <c>run_retention_holds</c> (migration 0075) and therefore cannot re-check the
+	/// hold when it claims the job. The hold is honoured at claim time by cancelling
+	/// the job here instead, using the same
+	/// <see cref="IJobControlRepository.CancelJobAsync"/> primitive
+	/// <c>DELETE /downloads/{id}</c> already uses: a still-queued job moves straight to
+	/// <c>cancelled</c> in one DB-authoritative statement, so no runner ever claims it;
+	/// an already-claimed one gets <c>cancel_requested</c> and the dispatcher's
+	/// heartbeat cooperatively cancels the handler mid-flight.
+	///
+	/// Best-effort by design, and honestly so: this cannot un-delete a file the handler
+	/// already removed, nor the database rows the purge's first phase already committed.
+	/// What it does guarantee is that no FURTHER deletion happens and that the purge is
+	/// never completed while the hold stands -- the tombstone is withheld by
+	/// <see cref="RunPurgeService.FinalizePendingAsync"/>'s own hold check, so the
+	/// partially-purged state stays visible via <c>GET /runs/{id}/purge</c> rather than
+	/// being reported as a finished purge. The outcome of the cancel is deliberately
+	/// not surfaced to the caller: <see cref="PlaceRetentionHoldOutcome.Placed"/> means
+	/// "the hold is in force from now on", which is true regardless of whether there
+	/// was a job to cancel, whether it was still queued, or whether it had already run.
+	/// </summary>
+	private async Task HaltInFlightArtifactDeletionAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		Guid? artifactJobId = await _purges.GetArtifactJobIdAsync(runId, cancellationToken).ConfigureAwait(false);
+		if (artifactJobId is null)
+		{
+			return;
+		}
+
+		await _jobs.CancelJobAsync(artifactJobId.Value, cancellationToken).ConfigureAwait(false);
 	}
 }

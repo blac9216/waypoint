@@ -423,11 +423,18 @@ public static class ServiceCollectionExtensions
 			// table today per migration 0075's withheld-grants note, but registering it
 			// here keeps every Runs-domain repository in one place).
 			services.AddSingleton<Waypoint.Core.Runs.IRunRetentionHoldRepository>(new Runs.RunRetentionHoldRepository(connectionString));
+			services.AddSingleton<Waypoint.Core.Runs.IRunPurgeRepository>(new Runs.RunPurgeRepository(connectionString));
+
+			// RunRetentionHoldService takes IRunPurgeRepository too: placing a hold must
+			// cancel an artifact-deletion job the purge already enqueued (see that
+			// service's HaltInFlightArtifactDeletionAsync). The dependency runs one way
+			// only -- RunPurgeService reads holds, RunRetentionHoldService reads the
+			// purge REPOSITORY, never the purge service -- so there is no cycle here.
 			services.AddSingleton(serviceProvider => new Runs.RunRetentionHoldService(
 				serviceProvider.GetRequiredService<IJobControlRepository>(),
-				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunRetentionHoldRepository>()));
+				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunRetentionHoldRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunPurgeRepository>()));
 
-			services.AddSingleton<Waypoint.Core.Runs.IRunPurgeRepository>(new Runs.RunPurgeRepository(connectionString));
 			services.AddSingleton(serviceProvider => new Runs.RunPurgeService(
 				serviceProvider.GetRequiredService<IJobControlRepository>(),
 				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunPurgeRepository>(),

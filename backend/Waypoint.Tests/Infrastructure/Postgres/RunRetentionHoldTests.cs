@@ -41,8 +41,10 @@ public sealed class RunRetentionHoldTests : IAsyncLifetime
 	private readonly PostgresFixture _fixture;
 	private JobQueueRepository _jobs = null!;
 	private RunRetentionHoldRepository _holds = null!;
+	private RunPurgeRepository _purges = null!;
 	private RunRetentionHoldService _service = null!;
 	private string _complianceRunnerConnectionString = string.Empty;
+	private string _downloadRunnerConnectionString = string.Empty;
 
 	public RunRetentionHoldTests(PostgresFixture fixture) => _fixture = fixture;
 
@@ -58,7 +60,8 @@ public sealed class RunRetentionHoldTests : IAsyncLifetime
 
 		_jobs = new JobQueueRepository(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
 		_holds = new RunRetentionHoldRepository(_fixture.ConnectionString);
-		_service = new RunRetentionHoldService(_jobs, _holds);
+		_purges = new RunPurgeRepository(_fixture.ConnectionString);
+		_service = new RunRetentionHoldService(_jobs, _holds, _purges);
 
 		NpgsqlConnectionStringBuilder runnerBuilder = new(_fixture.ConnectionString)
 		{
@@ -66,6 +69,13 @@ public sealed class RunRetentionHoldTests : IAsyncLifetime
 			Password = "waypoint_test",
 		};
 		_complianceRunnerConnectionString = runnerBuilder.ConnectionString;
+
+		NpgsqlConnectionStringBuilder downloadBuilder = new(_fixture.ConnectionString)
+		{
+			Username = "waypoint_download_runner",
+			Password = "waypoint_test",
+		};
+		_downloadRunnerConnectionString = downloadBuilder.ConnectionString;
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
@@ -134,18 +144,34 @@ public sealed class RunRetentionHoldTests : IAsyncLifetime
 
 	/// <summary>
 	/// Migration 0075 deliberately withholds every grant on <c>run_retention_holds</c>
-	/// from <c>waypoint_compliance_runner</c> -- neither reading nor writing this
-	/// table is ever a runner-side operation. Proven against the REAL role, not the
-	/// migration owner: a bare SELECT/INSERT/DELETE as that role must fail
-	/// <c>42501</c>, the exact class of drift this repository's own
-	/// <c>RunnerRoleGrantDriftTests</c> convention exists to catch before it ships.
+	/// from BOTH runner roles -- neither reading nor writing this table is ever a
+	/// runner-side operation. Proven against the REAL roles, not the migration owner: a
+	/// bare SELECT/INSERT/DELETE as either role must fail <c>42501</c>, the exact class
+	/// of drift this repository's own <c>RunnerRoleGrantDriftTests</c> convention exists
+	/// to catch before it ships. Both roles are covered because the migration header
+	/// claims both -- <c>RunnerRoleGrantDriftTests</c> sets that same precedent by
+	/// covering <c>waypoint_download_runner</c> for its own tables.
+	///
+	/// This denial is also the reason the hold needs a third enforcement point: the
+	/// compliance-runner literally cannot re-check a hold when it claims an
+	/// artifact-deletion job, so <see cref="RunRetentionHoldService.PlaceHoldAsync"/>
+	/// cancels that job API-side instead (pinned by
+	/// <c>RunPurgeServiceTests.PlaceHoldAsync_WithArtifactJobStillQueued_CancelsItSoTheRunnerNeverClaimsIt</c>).
 	/// </summary>
 	[Fact]
-	public async Task ComplianceRunnerRole_CannotReadOrWriteRunRetentionHolds()
+	public Task ComplianceRunnerRole_CannotReadOrWriteRunRetentionHolds() =>
+		AssertRoleCannotReachRunRetentionHoldsAsync(_complianceRunnerConnectionString);
+
+	/// <inheritdoc cref="ComplianceRunnerRole_CannotReadOrWriteRunRetentionHolds"/>
+	[Fact]
+	public Task DownloadRunnerRole_CannotReadOrWriteRunRetentionHolds() =>
+		AssertRoleCannotReachRunRetentionHoldsAsync(_downloadRunnerConnectionString);
+
+	private async Task AssertRoleCannotReachRunRetentionHoldsAsync(string runnerConnectionString)
 	{
 		Guid runId = await SeedRunAsync("scan", "completed");
 
-		await using NpgsqlConnection connection = new(_complianceRunnerConnectionString);
+		await using NpgsqlConnection connection = new(runnerConnectionString);
 		await connection.OpenAsync();
 
 		await using (NpgsqlCommand select = new("SELECT run_id FROM run_retention_holds WHERE run_id = $1", connection))

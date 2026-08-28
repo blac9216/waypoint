@@ -48,6 +48,7 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 	private RunPurgeRepository _purges = null!;
 	private AttestationSnapshotRepository _attestationSnapshots = null!;
 	private RunRetentionHoldRepository _retentionHolds = null!;
+	private RunRetentionHoldService _holdService = null!;
 	private RunPurgeService _service = null!;
 
 	public RunPurgeServiceTests(PostgresFixture fixture) => _fixture = fixture;
@@ -62,6 +63,7 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		_attestationSnapshots = new AttestationSnapshotRepository(_fixture.ConnectionString);
 		_retentionHolds = new RunRetentionHoldRepository(_fixture.ConnectionString);
 		_service = new RunPurgeService(_jobs, _purges, _attestationSnapshots, _retentionHolds, _fixture.ConnectionString);
+		_holdService = new RunRetentionHoldService(_jobs, _retentionHolds, _purges);
 
 		// Issue #1013 round-2: the artifact-purge handler must run under the REAL
 		// least-privilege compliance-runner role, not the owner connection -- running
@@ -478,6 +480,118 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 
 		// The row is untouched -- still visible, still finalizable API-side.
 		Assert.NotNull(await _purges.GetStatusAsync(runId, CancellationToken.None));
+	}
+
+	/// <summary>
+	/// Issue #784 round-2 finding 2 -- the resumed/finalize path. The hold refusal in
+	/// <see cref="RunPurgeService.PurgeRunAsync"/> is NOT the only gate that matters,
+	/// because <see cref="RunPurgeFinalizeHostedService"/> reaches the same resume
+	/// logic through <see cref="RunPurgeService.FinalizePendingAsync"/> on a timer,
+	/// with no operator involved. Without a hold check there, a run held while its
+	/// purge was in flight would still be tombstoned and have <c>runs.purged_at</c>
+	/// set by a background sweep -- the "partially preserved graph, then silently
+	/// finished anyway" outcome #784 exists to prevent.
+	///
+	/// The semantics this pins, stated as the code actually behaves: the halt is not a
+	/// rollback (the artifact files this test's real handler already deleted stay
+	/// deleted, and the database phase stays committed), but nothing FURTHER happens
+	/// and the purge is never presented as complete -- no tombstone, no
+	/// <c>runs.purged_at</c>, and the <c>run_purges</c> row survives so
+	/// <c>GET /runs/{id}/purge</c> keeps reporting the partially-purged state
+	/// honestly. Removing the hold is the only thing that lets the next sweep pass
+	/// finish the job.
+	/// </summary>
+	[Fact]
+	public async Task FinalizePendingAsync_HeldRun_RefusesAndLeavesThePartiallyPurgedStateVisible()
+	{
+		Guid runId = await SeedRunAsync("completed");
+		Guid scanJobId = await InsertScanJobAsync(runId);
+		WriteArtifactFiles(scanJobId);
+
+		RunPurgeResult inProgress = await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
+		Assert.Equal(RunPurgeOutcome.InProgress, inProgress.Outcome);
+
+		// The runner's artifact job completes under its own steam and reports done --
+		// the exact state (db_phase_done + artifacts_phase = 'done') the background
+		// finalize sweep selects on.
+		JobExecutionOutcome jobOutcome = await RunArtifactPurgeJobAsync(runId, CancellationToken.None);
+		Assert.Equal(JobOutcomeKind.Succeeded, jobOutcome.Kind);
+
+		// The hold lands after all that -- the worst case for the refusal.
+		PlaceRetentionHoldResult placed = await _holdService.PlaceHoldAsync(runId, "invented-legal-hold-reason", "admin-alice", CancellationToken.None);
+		Assert.Equal(PlaceRetentionHoldOutcome.Placed, placed.Outcome);
+
+		// Both automatic paths must refuse: the sweep's own entry point, and the sweep.
+		Assert.False(await _service.FinalizePendingAsync(runId, CancellationToken.None));
+		await SweepPendingFinalizeAsync(CancellationToken.None);
+
+		Assert.Null(await _purges.GetTombstoneAsync(runId, CancellationToken.None));
+		Assert.Null(await GetRunPurgedAtAsync(runId));
+
+		// Visible, not silently abandoned: the run_purges row survives, so the
+		// partially-purged state is still readable rather than being reported as
+		// either untouched or complete.
+		RunPurgeStatus? stillInFlight = await _purges.GetStatusAsync(runId, CancellationToken.None);
+		Assert.NotNull(stillInFlight);
+		Assert.True(stillInFlight!.DbPhaseDone);
+		Assert.Equal("done", stillInFlight.ArtifactsPhase);
+
+		// An operator re-POST is refused for the same reason, so there is no way
+		// around the hold at all while it stands.
+		Assert.Equal(RunPurgeOutcome.Held, (await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None)).Outcome);
+
+		// Removing the hold is the ONLY thing that clears the stuck row: the next
+		// sweep pass finalizes with no other state change.
+		Assert.Equal(RemoveRetentionHoldOutcome.Removed, (await _holdService.RemoveHoldAsync(runId, "invented-unhold-reason", "admin-alice", CancellationToken.None)).Outcome);
+		await SweepPendingFinalizeAsync(CancellationToken.None);
+
+		Assert.NotNull(await _purges.GetTombstoneAsync(runId, CancellationToken.None));
+		Assert.NotNull(await GetRunPurgedAtAsync(runId));
+	}
+
+	/// <summary>
+	/// Issue #784 round-2 finding 2 -- the runner job at claim time. The
+	/// compliance-runner has no grant on <c>run_retention_holds</c> (migration 0075),
+	/// so an artifact-deletion job that is already sitting in the queue when a hold
+	/// lands cannot re-check the hold itself. The hold is honoured by cancelling that
+	/// job API-side instead
+	/// (<c>RunRetentionHoldService.HaltInFlightArtifactDeletionAsync</c>): the job row
+	/// moves to <c>cancelled</c>, so the dispatcher's claim query never selects it and
+	/// the files on disk are never touched.
+	/// </summary>
+	[Fact]
+	public async Task PlaceHoldAsync_WithArtifactJobStillQueued_CancelsItSoTheRunnerNeverClaimsIt()
+	{
+		Guid runId = await SeedRunAsync("completed");
+		Guid scanJobId = await InsertScanJobAsync(runId);
+		WriteArtifactFiles(scanJobId);
+
+		RunPurgeResult inProgress = await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
+		Assert.Equal(RunPurgeOutcome.InProgress, inProgress.Outcome);
+
+		Guid? artifactJobId = await _purges.GetArtifactJobIdAsync(runId, CancellationToken.None);
+		Assert.NotNull(artifactJobId);
+		Assert.Equal("queued", await GetJobStateAsync(artifactJobId!.Value));
+
+		PlaceRetentionHoldResult placed = await _holdService.PlaceHoldAsync(runId, "invented-legal-hold-reason", "admin-alice", CancellationToken.None);
+		Assert.Equal(PlaceRetentionHoldOutcome.Placed, placed.Outcome);
+
+		// The job is off the queue entirely -- no runner can claim it now.
+		Assert.Equal("cancelled", await GetJobStateAsync(artifactJobId.Value));
+
+		// And nothing on disk was deleted.
+		Assert.True(File.Exists(ScanArtifactPaths.RawHdf(_artifactRoot, scanJobId)));
+		Assert.True(File.Exists(ScanArtifactPaths.AttestedHdf(_artifactRoot, scanJobId)));
+		Assert.True(File.Exists(ScanArtifactPaths.Ckl(_artifactRoot, scanJobId)));
+	}
+
+	private async Task<string> GetJobStateAsync(Guid jobId)
+	{
+		await using NpgsqlConnection c = new(_fixture.ConnectionString);
+		await c.OpenAsync();
+		await using NpgsqlCommand q = new("SELECT state FROM jobs WHERE id = $1", c);
+		q.Parameters.AddWithValue(jobId);
+		return (string)(await q.ExecuteScalarAsync())!;
 	}
 
 	private void WriteArtifactFiles(Guid scanJobId)

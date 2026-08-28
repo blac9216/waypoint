@@ -59,10 +59,36 @@ public enum RunPurgeOutcome
 	Failed,
 
 	/// <summary>
-	/// Issue #784: the run carries an active Admin retention hold -- 409, run left
-	/// untouched. Checked before every purge attempt (fresh or resumed), so a hold
-	/// placed mid-purge also blocks further progress. Remove the hold
-	/// (<c>DELETE /runs/{id}/retention-hold</c>) to make the run purge-eligible again.
+	/// Issue #784: the run carries an active Admin retention hold -- 409, and nothing
+	/// further is deleted on this call.
+	///
+	/// What a hold does and does not guarantee, stated exactly (the boundary matters,
+	/// because a purge is not atomic -- see <see cref="Waypoint.Infrastructure.Runs.RunPurgeService"/>'s
+	/// two-phase contract):
+	/// <list type="bullet">
+	/// <item>A hold placed BEFORE a purge starts is fully honoured: no evidence row and
+	/// no artifact file is ever deleted, and no tombstone is written. This is the
+	/// normal case and the one issue #784 AC3 is about.</item>
+	/// <item>A hold placed while a purge is ALREADY IN FLIGHT halts it; it cannot roll
+	/// it back. Whatever the database phase already committed stays deleted -- a hold
+	/// is not an undo. What the hold does guarantee is that no FURTHER deletion and no
+	/// completion happens: <see cref="Waypoint.Infrastructure.Runs.RunRetentionHoldService.PlaceHoldAsync"/>
+	/// cancels the enqueued artifact-deletion job at hold time (a still-queued job
+	/// moves to <c>cancelled</c>, so no runner ever claims it; an already-claimed one
+	/// gets <c>cancel_requested</c> and is cooperatively cancelled by the dispatcher's
+	/// heartbeat), <see cref="Waypoint.Infrastructure.Runs.RunPurgeService.PurgeRunAsync"/>
+	/// refuses, and <see cref="Waypoint.Infrastructure.Runs.RunPurgeService.FinalizePendingAsync"/>
+	/// -- the background finalize sweep's entry point -- refuses too, so the run is
+	/// never tombstoned and <c>runs.purged_at</c> is never set.</item>
+	/// <item>The halted purge stays VISIBLE rather than being silently abandoned: the
+	/// <c>run_purges</c> row survives, so <c>GET /runs/{id}/purge</c> keeps reporting
+	/// the partially-purged state instead of presenting it as either untouched or
+	/// completed. Nothing clears that row on its own -- removing the hold
+	/// (<c>DELETE /runs/{id}/retention-hold</c>) and re-POSTing <c>purge</c> is the
+	/// only thing that resumes and finalizes it.</item>
+	/// <item>A purge that already COMPLETED is unaffected: the tombstone check runs
+	/// first and returns <see cref="AlreadyPurged"/>. There is nothing left to hold.</item>
+	/// </list>
 	/// </summary>
 	Held,
 }
