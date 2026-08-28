@@ -634,6 +634,64 @@ function Set-WaypointCklBenchmarkMetadata {
 # component model does not have an analogous multi-target loop for). If a future
 # measured-performance case justifies a real cross-job cache, it needs its own ADR
 # addressing lease/revocation semantics -- not a change folded into this issue.
+
+# Issue #917 helper (module-private, used only by Invoke-WaypointNsxScan): resolves
+# which NSX auth-input key names the resolved frozen profile itself declares, by
+# reading the declared input names from the profile's inspec.yml. Returns the same
+# { manager, token, cookie } shape the sibling transport's catalog `authInputKeys`
+# map carries, with any undeclared slot left $null so the caller's per-slot 4.x
+# legacy defaulting (taken verbatim from module.transport.nsxapi.ps1) applies.
+#
+# Deliberately line-oriented rather than a full YAML parse -- the same constraint the
+# sibling's Remove-NsxAuthInputKeys documents (no YAML parser module is available in
+# the runner container). Input-name discovery is scoped to the manifest's TOP-LEVEL
+# `inputs:` block: a column-0 line switches the current top-level key, so `- name:`
+# entries under `depends:` (or any other named list) never count as inputs. Only the
+# two known names per auth slot are ever selected, so unrelated declared inputs (or an
+# exotic manifest shape this scan does not understand) can never leak into the auth
+# block; a missing/unreadable inspec.yml simply yields all-$null (legacy defaults).
+function Get-WaypointNsxProfileAuthInputKeySet {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ProfilePath
+	)
+
+	$DeclaredNames = [System.Collections.Generic.List[string]]::new()
+	$ManifestPath = Join-Path $ProfilePath 'inspec.yml'
+	if (Test-Path -Path $ManifestPath -PathType Leaf) {
+		$InInputsBlock = $false
+		foreach ($Line in [System.IO.File]::ReadAllLines($ManifestPath)) {
+			if ($Line -match '^\S') {
+				# A column-0 line starts a new top-level key; only `inputs:` opens the block.
+				$InInputsBlock = $Line -match '^inputs\s*:'
+				continue
+			}
+			if ($InInputsBlock -and $Line -match '^\s*-?\s*name\s*:\s*(.+?)\s*$') {
+				$Name = $Matches[1]
+				if ($Name.Length -ge 2 -and (($Name[0] -eq "'" -and $Name[-1] -eq "'") -or ($Name[0] -eq '"' -and $Name[-1] -eq '"'))) {
+					$Name = $Name.Substring(1, $Name.Length - 2)
+				}
+				$DeclaredNames.Add($Name)
+			}
+		}
+	}
+
+	# Per-slot: whichever of the two known key names (4.x legacy / 9.x SRG) the
+	# profile declares, in the profile's own declaration order; $null when neither is
+	# declared (caller defaults that slot to the 4.x legacy name).
+	$ManagerName = $DeclaredNames | Where-Object { $_ -in @('nsxManager', 'nsx_managerAddress') } | Select-Object -First 1
+	$TokenName = $DeclaredNames | Where-Object { $_ -in @('sessionToken', 'nsx_sessionToken') } | Select-Object -First 1
+	$CookieName = $DeclaredNames | Where-Object { $_ -in @('sessionCookieId', 'nsx_sessionCookieId') } | Select-Object -First 1
+
+	return [pscustomobject]@{
+		manager = $ManagerName
+		token   = $TokenName
+		cookie  = $CookieName
+	}
+}
+
 function Invoke-WaypointNsxScan {
 	<#
 	.SYNOPSIS
@@ -752,6 +810,22 @@ function Invoke-WaypointNsxScan {
 		New-Item -ItemType Directory -Path $ReportDirectory -Force | Out-Null
 	}
 
+	# Issue #917, adopting the sibling nsxapi transport's own precheck (its issue #295;
+	# the same wholesale Test-TargetReachable reuse Invoke-WaypointSrgScan makes for ssh
+	# port 22): a cheap bounded TCP probe on 443 BEFORE the session-token HTTP call, so
+	# an unreachable/hung NSX Manager fails fast with a classified reachability reason
+	# instead of surfacing as an opaque session-token failure after that call's own
+	# timeout -- unreachable-vs-auth-failure must classify crisply. Probe-only, never a
+	# mutation. Test-TargetReachable comes from the already-dot-sourced module.common.ps1.
+	if (-not (Test-TargetReachable -TargetHost $Manager -Port 443 -Source 'nsx')) {
+		return [pscustomobject]@{
+			Success       = $false
+			ExitCode      = $null
+			ReportPath    = $null
+			FailureReason = "NSX Manager $Manager is not reachable on port 443 within the connect timeout; the manager may be down, blocked, or unresolvable -- restore HTTPS access to the manager and retry."
+		}
+	}
+
 	try {
 		# The sibling repo's Get-NsxSessionToken takes a [pscredential]; build one from the decrypted
 		# username/password halves the handler bound as parameters (the password is never
@@ -776,7 +850,28 @@ function Invoke-WaypointNsxScan {
 	# an artifact-store volume the operator already controls access to, same exposure as
 	# any other generated-inputs file the sibling repo's own NSX transport writes.
 	$InputsPath = Join-Path $ReportDirectory "$([Guid]::NewGuid().ToString('N')).nsx-inputs.generated.yml"
-	$InputsContent = "nsxManager: '$Manager'`nsessionToken: '$($Session.Token)'`nsessionCookieId: '$($Session.Cookie)'`n"
+
+	# Issue #917: auth input key names are baseline-specific. NSX 4.x profiles read
+	# nsxManager/sessionToken/sessionCookieId; the VCF 9.x NSX SRG profiles
+	# (products.nsx.9-x -- docs/compliance-parity.md's `NSX 9-x` row) read
+	# nsx_managerAddress/nsx_sessionToken/nsx_sessionCookieId instead. The sibling
+	# transport (module.transport.nsxapi.ps1) resolves the names from its catalog
+	# kind's optional `authInputKeys` map; Waypoint's catalog carries no such signal,
+	# so the equivalent authority here is the RESOLVED FROZEN PROFILE itself:
+	# ProfilePath IS this component's own activated leaf profile
+	# (ComponentProfileRevisionResolver), and its inspec.yml declares exactly which
+	# auth-input names the profile reads -- emitting what the profile declares also
+	# makes any future upstream key-name unification a no-op here. The per-slot
+	# defaulting below is the sibling's resolution verbatim: any slot the profile does
+	# not declare falls back to the 4.x legacy name, so a legacy job shape against a
+	# bare/manifest-less profile keeps the pre-#917 auth block byte-identical. Both key
+	# sets stay reserved on the drop-and-warn side (ScanScopingInputFilter
+	# .ReservedNsxAuthKeys) regardless of which set is emitted.
+	$AuthKeys = Get-WaypointNsxProfileAuthInputKeySet -ProfilePath $ProfilePath
+	$ManagerKey = if ($AuthKeys -and $AuthKeys.manager) { $AuthKeys.manager } else { 'nsxManager' }
+	$TokenKey = if ($AuthKeys -and $AuthKeys.token) { $AuthKeys.token } else { 'sessionToken' }
+	$CookieKey = if ($AuthKeys -and $AuthKeys.cookie) { $AuthKeys.cookie } else { 'sessionCookieId' }
+	$InputsContent = "${ManagerKey}: '$Manager'`n${TokenKey}: '$($Session.Token)'`n${CookieKey}: '$($Session.Cookie)'`n"
 
 	try {
 		# Create the file 0600 (owner read/write only) BEFORE the secret is written, so the
