@@ -49,10 +49,17 @@ public sealed class ScopeResolutionServiceTests : IAsyncLifetime
 	private TargetRepository _targets = null!;
 	private CatalogRepository _catalog = null!;
 
-	/// <summary>A catalog component id whose linked execution profile targets exactly <see cref="CompatibleExactVersion"/> -- see <see cref="SeedCompatibleCatalogComponentAsync"/>.</summary>
+	/// <summary>A catalog component id whose linked execution profile targets the declared scope <see cref="CompatibleCatalogVersionKey"/> -- see <see cref="SeedCompatibleCatalogComponentAsync"/>.</summary>
 	private Guid _compatibleCatalogComponentId;
 
+	// Issue #998's CORRECTED owner decision: the catalog product-version key is the
+	// vendor's declared version scope, VERBATIM (minor-scoped "N.M" here) -- never a
+	// patch-level byte-for-byte identity. CompatibleExactVersion is the fuller
+	// observed/discovered fact a host reports; it matches CompatibleCatalogVersionKey's
+	// declared scope via VersionScopeMatcher ("8.0.3" starts with "8.0."), never plain
+	// string equality.
 	private const string CompatibleExactVersion = "8.0.3";
+	private const string CompatibleCatalogVersionKey = "8.0";
 
 	public ScopeResolutionServiceTests(PostgresFixture fixture)
 	{
@@ -89,16 +96,17 @@ public sealed class ScopeResolutionServiceTests : IAsyncLifetime
 
 	/// <summary>
 	/// Seeds one complete catalog chain (source revision -> product -> product version
-	/// "8.0.3" -> catalog component -> content release -> report group -> execution
-	/// profile) so a component's <see cref="ComponentCapabilityMatcher"/> evaluation can
-	/// actually succeed -- the positive-path tests below link a discovered component to
-	/// this id and give it the matching exact version.
+	/// declared scope "8.0" -> catalog component -> content release -> report group ->
+	/// execution profile) so a component's <see cref="ComponentCapabilityMatcher"/>
+	/// evaluation can actually succeed -- the positive-path tests below link a
+	/// discovered component to this id and give it <see cref="CompatibleExactVersion"/>,
+	/// which falls within this declared scope.
 	/// </summary>
 	private async Task<Guid> SeedCompatibleCatalogComponentAsync()
 	{
 		CatalogSourceRevision source = await _catalog.UpsertSourceRevisionAsync($"rev-{Guid.NewGuid():N}", null, CancellationToken.None);
 		CatalogProduct product = await _catalog.UpsertProductAsync(source.Id, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
-		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, CompatibleExactVersion, CompatibleExactVersion, CancellationToken.None);
+		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, CompatibleCatalogVersionKey, CompatibleCatalogVersionKey, CancellationToken.None);
 		CatalogComponent catalogComponent = await _catalog.UpsertComponentAsync(
 			productVersion.Id, new CatalogComponentDefinition("esxi", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
 		CatalogContentRelease release = await _catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Stig, $"release-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);

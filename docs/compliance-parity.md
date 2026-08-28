@@ -74,31 +74,50 @@ one). These counts are reproducible by counting `stig`/`srg` component keys and 
 parent product/version/kind nodes in `settings/catalog.json`, then counting the table's
 body rows. Remediation nodes and components are excluded from all three counts.
 
-A source key marked `family` records only what the sibling claims; it is never a
-product version and can never identify an executable baseline. A key marked `exact`
-is still source provenance rather than an activation candidate. For every execution,
-Waypoint must resolve an exact observed or Admin-configured product version to a
-catalog entry for that same exact version, then require the exact approved active
-profile baseline (and exact approved XCCDF baseline for STIG). If any exact identity or
-approval is absent, ambiguous, or mismatched, that component is unsupported and does
-not execute. Source families cannot be copied into executable catalog entries,
-expanded by inference, or used for range/nearest-version matching.
+**Catalog product-version key = the vendor's declared version scope, verbatim**
+(issue #998's CORRECTED owner decision, 2026-08-28, superseding an earlier "minor-level
+keys" comment posted prematurely on the same issue). The vendor repo is HETEROGENEOUS:
+some product trees declare a minor-scoped directory (`vsphere/7.0`, `vsphere/8.0`) and
+others declare a major-line-scoped directory (`vcf/9.x`; the vendor's own profile titles
+for NSX/Aria/vIDM literally say "9.X"/"8.X"/"3.3.X"). The "Key form" column below records
+which shape the sibling itself claims for that row (`exact` = the sibling's own directory
+is minor-scoped; `family` = major-line-scoped) -- and the catalog's `Sibling
+product/version key` column is now written in the SAME verbatim form the catalog
+product-version key actually stores (`8.0`, `9.x`, `3.3.x`, ...), not a Waypoint-invented
+patch-level triple. Neither form is a range Waypoint infers or expands: it is exactly
+what the vendor's directory name already declares. Matching an observed/configured exact
+version against a declared-scope key is a CLOSED TWO-FORM scope test performed at lookup
+time (`Waypoint.Core.Components.VersionScopeMatcher`): an observed version matches a
+`N.M` key iff it starts with that exact major.minor; it matches a `N.x` (or `N.M.x`) key
+iff it starts with that key's concrete leading segment(s). No other key forms are
+recognized -- an unrecognized key form, or an unparseable observed version, fails closed
+(matches nothing) rather than guessing. This is vendor-declared range identity, never
+nearest-version inference: Waypoint still resolves to exactly one declared scope per
+execution, then requires the exact approved active profile baseline (and exact approved
+XCCDF baseline for STIG) within that scope. If any exact identity or approval is absent,
+ambiguous, or mismatched, that component is unsupported and does not execute. Source
+families cannot be copied into executable catalog entries, expanded by inference beyond
+their own declared scope, or matched by nearest-version substitution.
+
+Hosts store exactly two facts about their own version: the full observed product version
+and the build number. The declared-scope key lives only on the catalog side; no third,
+derived "scope" fact is ever stored on a host or component row.
 
 | Sibling product/version key | Key form | Kind / source profile revision | Components | Transport / selector | Purpose | Output |
 |---|---|---|---|---|---|---|
-| vSphere `8-0` | exact | STIG / `v2r3-stig` | vCenter; ESXi; VM | `vmware` / object kind | `vsphere-api` | HDF + CKL |
-| vSphere `8-0` | exact | STIG / `v2r3-stig` | VCSA EAM, Lookup, PerfCharts, Photon, PostgreSQL, STS, UI, VAMI, Envoy | `ssh` / named VCSA service | `vsphere-api` + `vcsa-ssh` | HDF + CKL |
-| vSphere `9-0` | exact | SRG / `Y26M05-srg` | vCenter; ESXi; VM | `vmware` / object kind | `vsphere-api` | HDF |
-| vSphere `9-0` | exact | SRG / `Y26M05-srg` | VCSA Envoy, PostgreSQL, VAMI, Photon | `ssh` / named VCSA service | `vsphere-api` + `vcsa-ssh` | HDF |
-| NSX `4-x` | family | STIG / `v1r2-stig` | Manager, distributed firewall, tier-0 firewall, tier-0 router, tier-1 firewall, tier-1 router | `nsx-api` / named function | `nsx-api` | HDF + CKL |
-| NSX `9-x` | family | SRG / `Y26M05-srg` | Manager, routing | `nsx-api` / named function | `nsx-api` | HDF |
-| Aria Operations `8-x` | family | SRG / `v1r4-srg` | Aria Operations | `ssh` / target | `srg-ssh` | HDF |
-| Aria Automation `8-x` | family | SRG / `v1r6-srg` | Aria Automation | `ssh` / target | `srg-ssh` | HDF |
-| Aria Suite Lifecycle `8-x` | family | SRG / `v1r2-srg` | Aria Suite Lifecycle | `ssh` / target | `srg-ssh` | HDF |
-| Workspace ONE Access `3-3-x` | family | SRG / `v1r3-srg` | Workspace ONE Access | `ssh` / target | `srg-ssh` | HDF |
-| Photon OS `5-0` | exact | SRG / `v3r3-srg` | Photon OS | `ssh` / target | `srg-ssh` | HDF |
-| VCF `9-x` | family | SRG / `Y26M05-srg` | SDDC Manager nginx, PostgreSQL, Photon; Operations httpd, PostgreSQL, Photon; Operations HCX httpd, Photon; Operations Networks nginx platform, Ubuntu | `ssh` / named service | `srg-ssh` | HDF |
-| VCF `9-x` | family | SRG / `Y26M05-srg` | SDDC Manager application; Automation application | `vcf-api` / named service | catalog-declared API purpose (#807) | HDF |
+| vSphere `8.0` | exact | STIG / `v2r3-stig` | vCenter; ESXi; VM | `vmware` / object kind | `vsphere-api` | HDF + CKL |
+| vSphere `8.0` | exact | STIG / `v2r3-stig` | VCSA EAM, Lookup, PerfCharts, Photon, PostgreSQL, STS, UI, VAMI, Envoy | `ssh` / named VCSA service | `vsphere-api` + `vcsa-ssh` | HDF + CKL |
+| vSphere `9.0` | exact | SRG / `Y26M05-srg` | vCenter; ESXi; VM | `vmware` / object kind | `vsphere-api` | HDF |
+| vSphere `9.0` | exact | SRG / `Y26M05-srg` | VCSA Envoy, PostgreSQL, VAMI, Photon | `ssh` / named VCSA service | `vsphere-api` + `vcsa-ssh` | HDF |
+| NSX `4.x` | family | STIG / `v1r2-stig` | Manager, distributed firewall, tier-0 firewall, tier-0 router, tier-1 firewall, tier-1 router | `nsx-api` / named function | `nsx-api` | HDF + CKL |
+| NSX `9.x` | family | SRG / `Y26M05-srg` | Manager, routing | `nsx-api` / named function | `nsx-api` | HDF |
+| Aria Operations `8.x` | family | SRG / `v1r4-srg` | Aria Operations | `ssh` / target | `srg-ssh` | HDF |
+| Aria Automation `8.x` | family | SRG / `v1r6-srg` | Aria Automation | `ssh` / target | `srg-ssh` | HDF |
+| Aria Suite Lifecycle `8.x` | family | SRG / `v1r2-srg` | Aria Suite Lifecycle | `ssh` / target | `srg-ssh` | HDF |
+| Workspace ONE Access `3.3.x` | family | SRG / `v1r3-srg` | Workspace ONE Access | `ssh` / target | `srg-ssh` | HDF |
+| Photon OS `5.0` | exact | SRG / `v3r3-srg` | Photon OS | `ssh` / target | `srg-ssh` | HDF |
+| VCF `9.x` | family | SRG / `Y26M05-srg` | SDDC Manager nginx, PostgreSQL, Photon; Operations httpd, PostgreSQL, Photon; Operations HCX httpd, Photon; Operations Networks nginx platform, Ubuntu | `ssh` / named service | `srg-ssh` | HDF |
+| VCF `9.x` | family | SRG / `Y26M05-srg` | SDDC Manager application; Automation application | `vcf-api` / named service | catalog-declared API purpose (#807) | HDF |
 
 Exact XCCDF identities and mappings for each STIG component are baseline data staged
 under ADR-0022, not hard-coded path inference. Version ranges, nearest-version

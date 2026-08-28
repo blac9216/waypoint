@@ -187,8 +187,14 @@ public sealed class BaselineActivationEndToEndTests : IAsyncLifetime
 		return request;
 	}
 
+	// Issue #998's CORRECTED owner decision: the catalog product-version key is the
+	// vendor's declared version scope, VERBATIM (the content directory segment itself,
+	// e.g. "8.0" for a `vsphere/8.0/...` layout) -- never a patch-level triple. "8.0.3"
+	// would now be an unrecognized key form and fail every VersionScopeMatcher lookup
+	// closed, so this fixture's path/key both use the realistic minor-scoped directory
+	// literal a real vsphere/8.0 tree declares.
 	private static SemanticCandidate VCenterCandidate() => new(
-		"vsphere/8.0.3/v2r3-stig/inspec/baseline/vcenter", "vsphere", "8.0.3", "stig", "vcenter", "vCenter Server",
+		"vsphere/8.0/v2r3-stig/inspec/baseline/vcenter", "vsphere", "8.0", "stig", "vcenter", "vCenter Server",
 		"vmware", "vcenter", null,
 		IsAggregate: false, Title: "vCenter STIG", ManifestVersion: "2.3.0",
 		Inputs: [], Supports: [], Depends: [], ContentDigest: "invented0000000000000000000000000000000000000000000000000000");
@@ -197,8 +203,8 @@ public sealed class BaselineActivationEndToEndTests : IAsyncLifetime
 		SourceRevisionKey: "compliance-content",
 		Vendor: "VMware vSphere",
 		ProductDisplayName: "VMware vSphere",
-		ProductVersionDisplayName: "vSphere 8.0 Update 3",
-		ContentReleaseDisplayName: "stig 8.0.3",
+		ProductVersionDisplayName: "vSphere 8.0",
+		ContentReleaseDisplayName: "stig 8.0",
 		ReportGroupKey: "vcenter-stig",
 		ReportGroupDisplayName: "vCenter STIG",
 		ReportGroupPriority: 3,

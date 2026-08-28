@@ -28,7 +28,14 @@ public sealed class ComponentCapabilityMatcherTests
 {
 	private static readonly Guid CatalogComponentId = Guid.NewGuid();
 	private static readonly Guid ProductVersionId = Guid.NewGuid();
+
+	// Issue #998's CORRECTED owner decision: the catalog product-version key is the
+	// vendor's declared version scope, VERBATIM (e.g. minor-scoped "8.0"), never a
+	// patch-level byte-for-byte identity -- ExactVersion is the fuller observed/
+	// configured fact a host actually reports, and CatalogVersionKey is the declared
+	// scope it is matched against via VersionScopeMatcher (never plain string equality).
 	private const string ExactVersion = "8.0.3";
+	private const string CatalogVersionKey = "8.0";
 
 	private static Component MakeComponent(
 		string? configuredVersion = null,
@@ -70,12 +77,12 @@ public sealed class ComponentCapabilityMatcherTests
 	}
 
 	[Fact]
-	public void Match_ExactVersionMatchesLinkedCatalogComponent_IsCompatible()
+	public void Match_ExactVersionWithinLinkedCatalogScope_IsCompatible()
 	{
 		Component component = MakeComponent(discoveredVersion: ExactVersion, catalogComponentId: CatalogComponentId);
-		CatalogExecutionProfileDetail profile = MakeProfile(CatalogComponentId, ProductVersionId, ExactVersion);
+		CatalogExecutionProfileDetail profile = MakeProfile(CatalogComponentId, ProductVersionId, CatalogVersionKey);
 
-		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, ExactVersion, [profile]);
+		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, CatalogVersionKey, [profile]);
 
 		Assert.True(match.IsCompatible);
 		Assert.Single(match.CompatibleProfiles);
@@ -87,7 +94,7 @@ public sealed class ComponentCapabilityMatcherTests
 	{
 		Component component = MakeComponent(catalogComponentId: CatalogComponentId);
 
-		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, ExactVersion, []);
+		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, CatalogVersionKey, []);
 
 		Assert.False(match.IsCompatible);
 		Assert.Empty(match.CompatibleProfiles);
@@ -98,9 +105,9 @@ public sealed class ComponentCapabilityMatcherTests
 	public void Match_FactConflict_FailsClosedBeforeEvaluatingCatalog()
 	{
 		Component component = MakeComponent(configuredVersion: "8.0.2", discoveredVersion: ExactVersion, factConflict: true, catalogComponentId: CatalogComponentId);
-		CatalogExecutionProfileDetail profile = MakeProfile(CatalogComponentId, ProductVersionId, ExactVersion);
+		CatalogExecutionProfileDetail profile = MakeProfile(CatalogComponentId, ProductVersionId, CatalogVersionKey);
 
-		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, ExactVersion, [profile]);
+		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, CatalogVersionKey, [profile]);
 
 		Assert.False(match.IsCompatible);
 		Assert.Contains(match.IncompatibilityReasons, r => r.Contains("configured/discovered product-version conflict", StringComparison.Ordinal));
@@ -118,17 +125,17 @@ public sealed class ComponentCapabilityMatcherTests
 	}
 
 	[Fact]
-	public void Match_ExactVersionDoesNotMatchLinkedCatalogVersion_FailsClosedWithExactReason()
+	public void Match_ExactVersionOutsideLinkedCatalogScope_FailsClosedWithExactReason()
 	{
-		// The component resolved a different exact version than the catalog link it was
-		// (e.g. previously) matched against -- never substitutes the nearest baseline.
-		Component component = MakeComponent(discoveredVersion: "8.0.2", catalogComponentId: CatalogComponentId);
-		CatalogExecutionProfileDetail profile = MakeProfile(CatalogComponentId, ProductVersionId, ExactVersion);
+		// The component resolved a version outside the linked catalog scope's declared
+		// major.minor -- never substitutes the nearest baseline.
+		Component component = MakeComponent(discoveredVersion: "8.1.2", catalogComponentId: CatalogComponentId);
+		CatalogExecutionProfileDetail profile = MakeProfile(CatalogComponentId, ProductVersionId, CatalogVersionKey);
 
-		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, ExactVersion, [profile]);
+		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, CatalogVersionKey, [profile]);
 
 		Assert.False(match.IsCompatible);
-		Assert.Contains(match.IncompatibilityReasons, r => r.Contains("does not match the linked catalog product version", StringComparison.Ordinal));
+		Assert.Contains(match.IncompatibilityReasons, r => r.Contains("is not within the linked catalog product version", StringComparison.Ordinal));
 	}
 
 	[Fact]
@@ -136,7 +143,7 @@ public sealed class ComponentCapabilityMatcherTests
 	{
 		Component component = MakeComponent(discoveredVersion: ExactVersion, catalogComponentId: CatalogComponentId);
 
-		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, ExactVersion, []);
+		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, CatalogVersionKey, []);
 
 		Assert.False(match.IsCompatible);
 		Assert.Contains(match.IncompatibilityReasons, r => r.Contains("no catalog execution profile", StringComparison.Ordinal));
@@ -146,9 +153,25 @@ public sealed class ComponentCapabilityMatcherTests
 	public void Match_ConfiguredAndDiscoveredFactsAgree_UsesAgreedValue()
 	{
 		Component component = MakeComponent(configuredVersion: ExactVersion, discoveredVersion: ExactVersion, catalogComponentId: CatalogComponentId);
-		CatalogExecutionProfileDetail profile = MakeProfile(CatalogComponentId, ProductVersionId, ExactVersion);
+		CatalogExecutionProfileDetail profile = MakeProfile(CatalogComponentId, ProductVersionId, CatalogVersionKey);
 
-		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, ExactVersion, [profile]);
+		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, CatalogVersionKey, [profile]);
+
+		Assert.True(match.IsCompatible);
+	}
+
+	/// <summary>
+	/// Issue #998's declared-scope-key semantics also apply to a major-line-scoped
+	/// catalog key ("9.x") -- proves the matcher is not implicitly assuming minor-scoped
+	/// keys everywhere it is wired.
+	/// </summary>
+	[Fact]
+	public void Match_MajorLineScopedCatalogKey_MatchesAnyMinorUnderThatMajor()
+	{
+		Component component = MakeComponent(discoveredVersion: "9.0.0", catalogComponentId: CatalogComponentId);
+		CatalogExecutionProfileDetail profile = MakeProfile(CatalogComponentId, ProductVersionId, "9.x");
+
+		ComponentCapabilityMatch match = ComponentCapabilityMatcher.Match(component, ProductVersionId, "9.x", [profile]);
 
 		Assert.True(match.IsCompatible);
 	}

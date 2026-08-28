@@ -87,13 +87,19 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 
 	private static async Task ReapplySeedMigrationAsync(NpgsqlConnection connection)
 	{
-		System.Reflection.Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
-		string resourceName = assembly.GetManifestResourceNames().Single(n => n.EndsWith("0064_execution_catalog_seed.sql", StringComparison.Ordinal));
-		await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
-		using StreamReader reader = new(stream);
-		string sql = await reader.ReadToEndAsync();
-		await using NpgsqlCommand reapply = new(sql, connection);
-		await reapply.ExecuteNonQueryAsync();
+		// Issue #998: 0070 reconciles migration 0064's original patch-level "8.0.3" seed
+		// to the declared-scope verbatim key "8.0" -- re-apply both so this suite's real
+		// (non-ambiguity-test) scenarios exercise the real, reconciled catalog on main.
+		foreach (string fileName in new[] { "0064_execution_catalog_seed.sql", "0070_declared_scope_version_keys.sql" })
+		{
+			System.Reflection.Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
+			string resourceName = assembly.GetManifestResourceNames().Single(n => n.EndsWith(fileName, StringComparison.Ordinal));
+			await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+			using StreamReader reader = new(stream);
+			string sql = await reader.ReadToEndAsync();
+			await using NpgsqlCommand reapply = new(sql, connection);
+			await reapply.ExecuteNonQueryAsync();
+		}
 	}
 
 	/// <summary>
@@ -235,7 +241,13 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 	public async Task DiscoveredHost_WithAmbiguousCatalogMatch_StaysUnlinked_ReportsAmbiguity()
 	{
 		string sharedComponentKey = $"ambiguous-{Guid.NewGuid():N}";
-		string sharedVersion = "1.2.3";
+		// Issue #998's CORRECTED owner decision: the catalog key is a declared version
+		// SCOPE, not a byte-for-byte identity -- "1.2" is a valid minor-scoped ("N.M")
+		// key form, and an observed version equal to that same scope string still
+		// matches it (a bare "N.M" observed version starts-with itself). Two products
+		// seeding the identical declared scope for the same component key is still the
+		// structurally-possible ambiguity this test proves stays unlinked.
+		string sharedVersion = "1.2";
 		await SeedTopLevelCatalogComponentAsync("vendor-a", $"product-a-{Guid.NewGuid():N}", sharedVersion, sharedComponentKey);
 		await SeedTopLevelCatalogComponentAsync("vendor-b", $"product-b-{Guid.NewGuid():N}", sharedVersion, sharedComponentKey);
 

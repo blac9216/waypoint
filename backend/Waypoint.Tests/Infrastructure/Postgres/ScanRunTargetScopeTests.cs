@@ -241,7 +241,7 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		BaselineRepository baselines = new(_fixture.ConnectionString);
 		CatalogSourceRevision source = await catalog.UpsertSourceRevisionAsync($"rev-{Guid.NewGuid():N}", null, CancellationToken.None);
 		CatalogProduct product = await catalog.UpsertProductAsync(source.Id, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
-		CatalogProductVersion productVersion = await catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
+		CatalogProductVersion productVersion = await catalog.UpsertProductVersionAsync(product.Id, "8.0", "8.0", CancellationToken.None);
 		CatalogComponent catalogComponent = await catalog.UpsertComponentAsync(
 			productVersion.Id, new CatalogComponentDefinition("esxi", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
 		CatalogContentRelease release = await catalog.UpsertContentReleaseAsync(source.Id, CatalogKinds.Srg, $"release-{Guid.NewGuid():N}", "Test Release", CancellationToken.None);
@@ -332,7 +332,7 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		BenchmarkRepository benchmarks = new(_fixture.ConnectionString);
 		CatalogSourceRevision source = await catalog.UpsertSourceRevisionAsync($"rev-{Guid.NewGuid():N}", null, CancellationToken.None);
 		CatalogProduct product = await catalog.UpsertProductAsync(source.Id, "vmware", "vsphere", "VMware vSphere", CancellationToken.None);
-		CatalogProductVersion productVersion = await catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
+		CatalogProductVersion productVersion = await catalog.UpsertProductVersionAsync(product.Id, "8.0", "8.0", CancellationToken.None);
 		CatalogComponent catalogComponent = await catalog.UpsertComponentAsync(
 			productVersion.Id, new CatalogComponentDefinition("esxi", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
 		// SRG content release => execution profile has NO benchmark reference (SRG).

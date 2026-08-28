@@ -42,7 +42,12 @@ public static class ComponentCapabilityMatcher
 	/// <list type="number">
 	/// <item>the component has an exact resolved fact (see <see cref="ResolveExactVersion"/> -- fails closed on conflict);</item>
 	/// <item>the component is linked to a catalog component at all;</item>
-	/// <item>the linked catalog component's product version's <see cref="CatalogProductVersion.VersionKey"/> equals the resolved exact fact byte-for-byte (no ranges, no nearest-version -- ADR-0022).</item>
+	/// <item>the resolved exact fact falls within the linked catalog product version's
+	/// <see cref="CatalogProductVersion.VersionKey"/> declared scope, per
+	/// <see cref="VersionScopeMatcher"/>'s closed two-form test (issue #998's CORRECTED
+	/// owner decision: the catalog key is the vendor's declared version scope verbatim --
+	/// minor-scoped "N.M" or major-line-scoped "N.x" -- matched at lookup time, never a
+	/// byte-for-byte identity and never nearest-version inference).</item>
 	/// </list>
 	/// Every profile that fails a check contributes its own reason rather than a single
 	/// generic failure, so a caller can render "unsupported because X" instead of a bare
@@ -80,11 +85,12 @@ public static class ComponentCapabilityMatcher
 			return new ComponentCapabilityMatch(component.Id, false, [], reasons);
 		}
 
-		if (!string.Equals(linkedProductVersionKey, exactVersion, StringComparison.Ordinal))
+		if (!VersionScopeMatcher.Matches(exactVersion, linkedProductVersionKey))
 		{
 			reasons.Add(
-				$"component '{component.Id}' resolved exact version '{exactVersion}' does not match the linked catalog product version " +
-				$"'{linkedProductVersionKey}'; Waypoint never substitutes the nearest older/newer baseline (ADR-0022).");
+				$"component '{component.Id}' resolved exact version '{exactVersion}' is not within the linked catalog product version " +
+				$"'{linkedProductVersionKey}''s declared scope; Waypoint never substitutes the nearest older/newer baseline (ADR-0022) " +
+				"and never guesses an unrecognized scope key form (issue #998).");
 			return new ComponentCapabilityMatch(component.Id, false, [], reasons);
 		}
 

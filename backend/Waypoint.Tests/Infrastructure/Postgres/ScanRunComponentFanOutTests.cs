@@ -690,7 +690,7 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 	{
 		CatalogSourceRevision source = await _catalog.UpsertSourceRevisionAsync($"rev-{suffix}-{Guid.NewGuid():N}", null, CancellationToken.None);
 		CatalogProduct product = await _catalog.UpsertProductAsync(source.Id, "vmware", $"vsphere-{suffix}-{Guid.NewGuid():N}", "VMware vSphere", CancellationToken.None);
-		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
+		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, "8.0", "8.0", CancellationToken.None);
 		CatalogComponent catalogComponent = await _catalog.UpsertComponentAsync(
 			productVersion.Id,
 			new CatalogComponentDefinition($"comp-{suffix}", "Component", transport, selectorKind, selectorName, null),
