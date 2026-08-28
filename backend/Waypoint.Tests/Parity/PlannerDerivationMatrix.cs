@@ -111,7 +111,8 @@ public static class PlannerDerivationMatrix
 			// services, each present on one VCSA appliance instance in this fixture.
 			new PlannerParityRow(
 				MatrixRowId: "vsphere-8-0-stig-vcsa-ssh",
-				VendorFamily: "vcsa",
+				// Issue #1064: VCSA named services live under the vsphere product.
+				VendorFamily: "vsphere",
 				ProductVersionKey: "8.0.3",
 				Kind: CatalogKinds.Stig,
 				BenchmarkKey: "invented-vcsa-8-ssh-stig",
@@ -175,7 +176,7 @@ public static class PlannerDerivationMatrix
 			// as the STIG vcsa-ssh row, no benchmark, HDF-only.
 			new PlannerParityRow(
 				MatrixRowId: "vsphere-9-0-srg-vcsa-ssh",
-				VendorFamily: "vcsa",
+				VendorFamily: "vsphere", // issue #1064, same as the 8.0 VCSA ssh row above
 				ProductVersionKey: "9.0.1",
 				Kind: CatalogKinds.Srg,
 				BenchmarkKey: null,

@@ -64,8 +64,10 @@ public sealed partial class ContentPullReconcileService
 	/// </summary>
 	private static readonly Dictionary<string, string> VendorDisplayNames = new(StringComparer.OrdinalIgnoreCase)
 	{
+		// Issue #1064: there is no 'vcsa' key -- the `vcsa/` directory literal maps to
+		// VendorFamily 'vsphere' (VendorHierarchyInterpreter), so VCSA service
+		// candidates promote into the "VMware vSphere" product below.
 		["vsphere"] = "VMware vSphere",
-		["vcsa"] = "VMware vCenter Server Appliance",
 		["nsx"] = "VMware NSX",
 		["photon"] = "VMware Photon OS",
 		["aria-operations"] = "VMware Aria Operations",
@@ -270,7 +272,11 @@ public sealed partial class ContentPullReconcileService
 		(string groupKey, string groupDisplayName, int priority) = (candidate.VendorFamily, candidate.SelectorKind) switch
 		{
 			("nsx", _) when isStig => ("nsx-stig", "NSX STIG", 1),
-			("vcsa", _) when isStig => ("vcsa-stig", "VCSA STIG", 2),
+			// Issue #1064: VCSA named-service candidates now carry VendorFamily
+			// 'vsphere' (owner decision: implied subcomponents of the vCenter
+			// appliance), so the VCSA STIG report group keys on the vsphere family's
+			// ssh/service selector shape rather than the retired 'vcsa' family literal.
+			("vsphere", CatalogSelectorKinds.Service) when isStig => ("vcsa-stig", "VCSA STIG", 2),
 			(_, CatalogSelectorKinds.VCenter) when isStig => ("vcenter-stig", "vCenter STIG", 3),
 			(_, CatalogSelectorKinds.Esxi) when isStig => ("esxi-stig", "ESXi STIG", 4),
 			(_, CatalogSelectorKinds.Vm) when isStig => ("vm-stig", "VM STIG", 5),

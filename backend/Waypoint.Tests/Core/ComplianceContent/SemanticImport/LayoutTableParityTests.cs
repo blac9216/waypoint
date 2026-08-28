@@ -109,7 +109,10 @@ public sealed class LayoutTableParityTests
 	/// The issue's two rejection classes reproduced exactly (the 156-count `vcf` tree
 	/// and the 111-count object-kind-before-inspec tree) must now import cleanly end to
 	/// end -- not just via the generic per-row fixture above, but as a literal repro of
-	/// the issue text's disposition breakdown.
+	/// the issue text's disposition breakdown. Issue #1064 extends the repro with the
+	/// third rejection class it fixed: a named VCSA service leaf inside the
+	/// object-kind-before-inspec tree's `vcsa` subtree, which previously quarantined
+	/// because it was forced through the vcenter/esxi/vm object-kind vocabulary.
 	/// </summary>
 	[Fact]
 	public void IssueDisposition_VcfTreeAndObjectKindBeforeInspecTree_NowImportCleanly()
@@ -122,11 +125,18 @@ public sealed class LayoutTableParityTests
 			"vsphere/8-0/v2r3-stig/vsphere/inspec/vsphere-8-0-stig-baseline/esxi",
 			Manifest("esxi", "vSphere 8.0 ESXi STIG", "2.3.0"),
 			"controls/esxi-000001.rb");
+		// Issue #1064: the vcsa subtree of the same object-kind-before-inspec tree
+		// carries named VCSA service leaves -- previously quarantined wholesale because
+		// they were forced through the vcenter/esxi/vm object-kind vocabulary.
+		VendorContentEntry vcsaServiceLeaf = Leaf(
+			"vsphere/8-0/v2r3-stig/vcsa/inspec/vsphere-8-0-vcsa-stig-baseline/eam",
+			Manifest("eam", "VCSA EAM STIG", "2.3.0"),
+			"controls/eam-000001.rb");
 
-		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([vcfVCenter, vsphereObjectKindBeforeInspec]);
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([vcfVCenter, vsphereObjectKindBeforeInspec, vcsaServiceLeaf]);
 
 		Assert.Empty(result.Rejections);
-		Assert.Equal(2, result.Candidates.Count);
+		Assert.Equal(3, result.Candidates.Count);
 
 		SemanticCandidate vcf = Assert.Single(result.Candidates, c => c.ComponentKey == "vcenter");
 		Assert.Equal("vsphere", vcf.VendorFamily);
@@ -136,12 +146,22 @@ public sealed class LayoutTableParityTests
 		SemanticCandidate objectKindBeforeInspec = Assert.Single(result.Candidates, c => c.ComponentKey == "esxi");
 		Assert.Equal("vsphere", objectKindBeforeInspec.VendorFamily);
 		Assert.Equal(CatalogSelectorKinds.Esxi, objectKindBeforeInspec.SelectorKind);
+
+		SemanticCandidate vcsaService = Assert.Single(result.Candidates, c => c.ComponentKey == "eam");
+		Assert.Equal("vsphere", vcsaService.VendorFamily);
+		Assert.Equal(CatalogTransports.Ssh, vcsaService.Transport);
+		Assert.Equal(CatalogSelectorKinds.Service, vcsaService.SelectorKind);
+		Assert.Equal("eam", vcsaService.SelectorName);
 	}
 
 	private static VendorContentEntry BuildFixtureFor(DocumentedLayoutRow row)
 	{
+		// Issue #1064: the object-kind-before-inspec fixture drives the `vsphere`
+		// subtree (object-kind leaves); the `vcsa` subtree carries named SERVICE leaves
+		// instead and is covered explicitly by
+		// IssueDisposition_VcfTreeAndObjectKindBeforeInspecTree_NowImportCleanly below.
 		string profileKey = row.IsObjectKindBeforeInspec
-			? $"{row.DirectoryLiteral}/1-0/v1r1-stig/vcsa/inspec/{row.DirectoryLiteral}-baseline/vcenter"
+			? $"{row.DirectoryLiteral}/1-0/v1r1-stig/vsphere/inspec/{row.DirectoryLiteral}-baseline/vcenter"
 			: $"{row.DirectoryLiteral}/1-0/v1r1-srg/inspec/{row.DirectoryLiteral}-baseline";
 
 		return Leaf(profileKey, Manifest($"{row.DirectoryLiteral}-baseline"), "controls/x.rb");

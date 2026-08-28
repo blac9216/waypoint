@@ -15,6 +15,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.ComplianceContent.SemanticImport;
 using Waypoint.Core.Components;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Scans;
@@ -387,5 +388,70 @@ public sealed class CatalogDeclaredServiceExpansionTests : IAsyncLifetime
 			ScopeOmission omission = Assert.Single(resolved.Omissions, o => o.ComponentId == child.Id);
 			Assert.Equal(ScopeOmissionReasons.FactConflict, omission.Reason);
 		}
+	}
+
+	/// <summary>
+	/// Issue #1064 end to end: content imported from the top-level `vcsa/` vendor tree
+	/// promotes INTO the seeded vSphere product version (owner decision: VCSA services
+	/// are implied subcomponents of the vCenter appliance, never a separate `vcsa`
+	/// product), carries the doc-derived vsphere-api + vcsa-ssh requirements at
+	/// promotion time (the issue's empty-requirement half), and -- because it now lives
+	/// on the linked product version -- materializes as a declared service child under
+	/// a vSphere-linked root exactly like a seeded service (#741's expansion, the
+	/// issue's invisible-to-expansion half). Every path and manifest is INVENTED.
+	/// </summary>
+	[Fact]
+	public async Task ImporterPromotedVcsaService_JoinsVsphereProduct_AndMaterializesAsDeclaredChild()
+	{
+		VendorContentEntry lookup = new(
+			$"vcsa/{DeclaredScopeVersionKey}/v2r3-stig/inspec/invented-vcsa-stig-baseline/lookup",
+			"name: lookup\ntitle: VCSA Lookup Service STIG\nversion: 2.3.0\n",
+			HasControlsDirectory: true,
+			HasFilesDirectory: false,
+			ControlFileNames: ["lookup-000001.rb"]);
+
+		VendorHierarchyInterpretation interpretation = VendorHierarchyInterpreter.Interpret([lookup]);
+		Assert.Empty(interpretation.Rejections);
+		SemanticCandidate candidate = Assert.Single(interpretation.Candidates);
+		Assert.Equal("vsphere", candidate.VendorFamily);
+
+		SemanticImportReport report = SemanticImportReconciler.Reconcile("invented-commit-1064", interpretation, [lookup]);
+		Assert.Empty(report.Rejected);
+		SemanticImportAccepted accepted = Assert.Single(report.Accepted);
+
+		CatalogPromotionOutcome outcome = await _catalog.PromoteCandidateAsync(
+			accepted.Candidate,
+			new CatalogPromotionRequest(
+				SourceRevisionKey: "compliance-content",
+				Vendor: CatalogVendors.VMware,
+				ProductDisplayName: "VMware vSphere",
+				ProductVersionDisplayName: DeclaredScopeVersionKey,
+				ContentReleaseDisplayName: $"stig {DeclaredScopeVersionKey}",
+				ReportGroupKey: "vcsa-stig",
+				ReportGroupDisplayName: "VCSA STIG",
+				ReportGroupPriority: 2,
+				OutputKind: CatalogOutputKinds.HdfAndCkl),
+			CancellationToken.None);
+		Assert.Null(outcome.RejectionReason);
+		Assert.NotNull(outcome.ExecutionProfileId);
+
+		// Promotion-time credential derivation (the issue's first half): the imported
+		// service carries the vSphere ssh/service row's documented purposes, not an
+		// empty fail-closed set.
+		CatalogExecutionProfileDetail? detail = await _catalog.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		Assert.Equal("vsphere", detail!.Product.ProductKey);
+		Assert.Equal(DeclaredScopeVersionKey, detail.ProductVersion.VersionKey);
+		Assert.Equal(2, detail.CredentialRequirements.Count);
+		Assert.Contains(detail.CredentialRequirements, r => r.Purpose == CredentialPurposes.VSphereApi);
+		Assert.Contains(detail.CredentialRequirements, r => r.Purpose == CredentialPurposes.VcsaSsh);
+
+		// Expansion visibility (the issue's second half): the imported service now
+		// materializes beneath a linked appliance root alongside the seeded ones.
+		(Guid targetId, Guid rootId) = await SeedTargetWithRootAsync();
+		await _components.SetConfiguredFactAsync(rootId, ApplianceExactVersion, CancellationToken.None);
+
+		IReadOnlyList<Component> children = await ListChildrenAsync(targetId, rootId);
+		Assert.Equal(["eam", "lookup", "postgresql"], children.Select(c => c.CatalogComponentKey).ToArray());
 	}
 }

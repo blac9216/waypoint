@@ -58,7 +58,17 @@ public static class VendorHierarchyInterpreter
 	{
 		["vsphere"] = new VendorFamily("vsphere", VendorFamilyShape.ObjectKindSplit),
 		["vcf"] = new VendorFamily("vsphere", VendorFamilyShape.ObjectKindSplit),
-		["vcsa"] = new VendorFamily("vcsa", VendorFamilyShape.NamedServiceSplit),
+		// Issue #1064 (owner decision, epic #726): VCSA services (EAM, Lookup,
+		// PostgreSQL, VAMI, ...) are implied subcomponents of every vCenter appliance,
+		// defined by the benchmarks and scanned over the parent's SSH credential -- so
+		// the `vcsa/` directory literal maps to the `vsphere` VendorFamily.Name (the
+		// promoted catalog product), exactly as `vcf` -> `vsphere` above. Before this
+		// fix the literal invented its own `vcsa` product, whose profiles derived an
+		// EMPTY credential-requirement set (CredentialRequirementDerivation has no
+		// `vcsa` row) and were invisible to #741's catalog-declared service expansion
+		// (which only sees components of the linked vSphere product version). The shape
+		// is unchanged: named-service leaves, `ssh` transport.
+		["vcsa"] = new VendorFamily("vsphere", VendorFamilyShape.NamedServiceSplit),
 		["nsx"] = new VendorFamily("nsx", VendorFamilyShape.NamedFunctionSplit),
 		["photon"] = new VendorFamily("photon", VendorFamilyShape.WholeAppliance),
 		["aria-operations"] = new VendorFamily("aria-operations", VendorFamilyShape.WholeAppliance),
@@ -167,19 +177,31 @@ public static class VendorHierarchyInterpreter
 			return;
 		}
 
-		// Issue #959: the vsphere family (both its `vsphere` and consolidated `vcf`
-		// directory literals) additionally accepts an object-kind segment
+		// Issue #959: the vsphere object-kind-split trees (the `vsphere` and consolidated
+		// `vcf` directory literals) additionally accept an object-kind segment
 		// (`vcsa`/`vsphere`) INSERTED before `inspec` --
 		// <family>/<version>/<release>/<object-kind>/inspec/<baseline>[/leaf] -- one
 		// segment deeper than every other documented family. This is still a single
 		// documented, closed shape: an unrecognized segment at that position is a
-		// near-miss and is quarantined below, never guessed into this shape.
+		// near-miss and is quarantined below, never guessed into this shape. The guard
+		// keys on the ObjectKindSplit SHAPE, not the family name, because issue #1064
+		// also maps the top-level `vcsa` literal to family name `vsphere` -- that tree's
+		// documented layout has no inserted object-kind segment, so it must not gain
+		// one here.
+		// Issue #1064: the two inserted object kinds carry DIFFERENT leaf vocabularies.
+		// The `vsphere` subtree holds the vcenter/esxi/vm object-kind leaves (`vmware`
+		// transport); the `vcsa` subtree holds named VCSA service leaves (EAM, Lookup,
+		// PostgreSQL, ..., `ssh` transport) -- the same named-service-split shape as the
+		// top-level `vcsa/` tree, and previously quarantined wholesale because its
+		// leaves were forced through the object-kind vocabulary.
 		int inspecIndex = 3;
-		if (string.Equals(family.Name, "vsphere", StringComparison.OrdinalIgnoreCase)
+		bool vcsaServiceSubtree = false;
+		if (family.Shape == VendorFamilyShape.ObjectKindSplit
 			&& !string.Equals(segments[3], "inspec", StringComparison.OrdinalIgnoreCase)
 			&& ObjectKindBeforeInspecSegments.Contains(segments[3]))
 		{
 			inspecIndex = 4;
+			vcsaServiceSubtree = string.Equals(segments[3], "vcsa", StringComparison.OrdinalIgnoreCase);
 			if (segments.Length < MinimumSegments + 1)
 			{
 				rejections.Add(new SemanticImportRejection(entry.ProfileKey,
@@ -221,6 +243,10 @@ public static class VendorHierarchyInterpreter
 		SemanticCandidate? candidate = family.Shape switch
 		{
 			VendorFamilyShape.WholeAppliance => BuildWholeAppliance(entry, family, productVersionKey, kind, releaseKey!, manifest, tail),
+			// Issue #1064: the `vcsa` object-kind-before-inspec subtree carries named
+			// VCSA service leaves, not vcenter/esxi/vm -- route it through the same
+			// named-service-split builder as the top-level `vcsa/` tree.
+			VendorFamilyShape.ObjectKindSplit when vcsaServiceSubtree => BuildNamedSplit(entry, family, productVersionKey, kind, releaseKey!, manifest, tail, CatalogTransports.Ssh),
 			VendorFamilyShape.ObjectKindSplit => BuildObjectKindSplit(entry, family, productVersionKey, kind, releaseKey!, manifest, tail),
 			VendorFamilyShape.NamedServiceSplit => BuildNamedSplit(entry, family, productVersionKey, kind, releaseKey!, manifest, tail, CatalogTransports.Ssh),
 			VendorFamilyShape.NamedFunctionSplit => BuildNamedSplit(entry, family, productVersionKey, kind, releaseKey!, manifest, tail, CatalogTransports.NsxApi),

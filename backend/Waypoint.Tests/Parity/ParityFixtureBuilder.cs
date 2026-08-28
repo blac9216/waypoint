@@ -57,8 +57,8 @@ public static class ParityFixtureBuilder
 		{
 			string leafSegment = component.SelectorName ?? component.ComponentKey;
 			string profileKey = isWholeAppliance
-				? $"{row.VendorFamily}/{row.ProductVersionKey}/{row.ReleaseKey}/inspec/{BaselineDirectory}"
-				: $"{row.VendorFamily}/{row.ProductVersionKey}/{row.ReleaseKey}/inspec/{BaselineDirectory}/{leafSegment}";
+				? $"{row.FixtureDirectoryLiteral}/{row.ProductVersionKey}/{row.ReleaseKey}/inspec/{BaselineDirectory}"
+				: $"{row.FixtureDirectoryLiteral}/{row.ProductVersionKey}/{row.ReleaseKey}/inspec/{BaselineDirectory}/{leafSegment}";
 
 			string[] controls = [$"{component.ComponentKey}-control-1.rb", $"{component.ComponentKey}-control-2.rb"];
 			string manifestVersion = row.ReleaseKey;
