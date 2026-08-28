@@ -561,7 +561,8 @@ public sealed class ScanJobHandler : IJobHandler
 
 			PowerShellRequest request = new(
 				invocationCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
-			result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+			result = await ExecuteOrSyntheticFailureAsync(
+				() => _executor.ExecuteAsync(request, cancellationToken), cancellationToken).ConfigureAwait(false);
 		}
 		finally
 		{
@@ -791,7 +792,8 @@ public sealed class ScanJobHandler : IJobHandler
 			};
 
 			PowerShellRequest request = new(AttestCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
-			PowerShellExecutionResult result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+			PowerShellExecutionResult result = await ExecuteOrSyntheticFailureAsync(
+				() => _executor.ExecuteAsync(request, cancellationToken), cancellationToken).ConfigureAwait(false);
 
 			if (!result.Succeeded)
 			{
@@ -987,7 +989,8 @@ public sealed class ScanJobHandler : IJobHandler
 		}
 
 		PowerShellRequest request = new(ConvertCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);
-		PowerShellExecutionResult result = await _executor.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+		PowerShellExecutionResult result = await ExecuteOrSyntheticFailureAsync(
+			() => _executor.ExecuteAsync(request, cancellationToken), cancellationToken).ConfigureAwait(false);
 
 		if (!result.Succeeded)
 		{
@@ -1047,6 +1050,49 @@ public sealed class ScanJobHandler : IJobHandler
 
 		return JobExecutionOutcome.Succeeded(
 			$"CKL persisted at '{output.CklPath}' (benchmark metadata applied: {output.MetadataApplied}; {uploadNote}).");
+	}
+
+	/// <summary>
+	/// Issue #1020 retry-honesty backstop: runs <paramref name="invoke"/> (an
+	/// <see cref="IPowerShellExecutor.ExecuteAsync"/> call) and converts any exception
+	/// that escapes it into a synthetic failed <see cref="PowerShellExecutionResult"/>
+	/// instead of letting it propagate. Before this, a throw from runspace/module
+	/// INIT -- e.g. the pool's <c>AnalysisCache</c> race (the crash this issue exists
+	/// to prevent) or any other transient the pool surfaces as an exception rather
+	/// than a result -- skipped every stage's existing "<c>!result.Succeeded</c> -&gt;
+	/// <see cref="FailScanAsync"/>" classification entirely and reached the job
+	/// dispatcher's generic handler-threw catch instead: the job still ended up
+	/// Failed (retryable, per ADR-0012), but with no <c>component_results</c> row
+	/// recorded (<see cref="FailScanAsync"/> never ran) and a raw "Unhandled
+	/// exception: ..." note rather than the documented, redacted execution_error
+	/// shape round-9's crashed jobs were supposed to produce. The primary fix is
+	/// prevention (the pool no longer races); this backstop makes any residual
+	/// exception from that layer honest rather than a raw crash, matching every
+	/// other transport-level failure this handler already classifies.
+	/// Cancellation is deliberately NOT caught here -- it must keep propagating so
+	/// the dispatcher's own cancellation handling (job -&gt; Cancelled) still applies.
+	/// </summary>
+	private static async Task<PowerShellExecutionResult> ExecuteOrSyntheticFailureAsync(
+		Func<Task<PowerShellExecutionResult>> invoke, CancellationToken cancellationToken)
+	{
+		try
+		{
+			return await invoke().ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+		{
+			throw;
+		}
+		catch (Exception exception)
+		{
+			return new PowerShellExecutionResult(
+				Succeeded: false,
+				Output: [],
+				HadErrors: true,
+				TimedOut: false,
+				FailureReason: $"PowerShell invocation threw during execution: {exception.Message}",
+				NativeExitCode: null);
+		}
 	}
 
 	/// <summary>

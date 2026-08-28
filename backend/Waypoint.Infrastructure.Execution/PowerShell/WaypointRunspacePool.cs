@@ -43,6 +43,24 @@ public sealed partial class WaypointRunspacePool : IDisposable
 	private readonly SemaphoreSlim _slots;
 	private readonly ConcurrentBag<Runspace> _idle = new();
 	private readonly CancellationTokenSource _disposalCts = new();
+
+	// Issue #1020: PowerShell's module AnalysisCache is process-global and not
+	// concurrency-safe against simultaneous cold imports -- InitialSessionState.
+	// ImportPSModule/RunspaceFactory.CreateRunspace(...).Open() race each other
+	// inside System.Management.Automation.AnalysisCache.CacheModuleExports, throwing
+	// "Collection was modified; enumeration operation may not execute." Round-9 live
+	// evidence: 12 concurrent scan jobs cold-started (empty idle bag, MaxRunspaces=4
+	// slots free) and 5 crashed in exactly this call stack. _slots already bounds how
+	// many CreateRunspace calls are in flight at once, but does nothing to order them
+	// relative to each other -- multiple callers can hold a slot and be inside
+	// CreateRunspace concurrently. This gate serializes ONLY the import/open phase
+	// (module registration into the process-global cache), never full request
+	// execution: a warm rent that hits the idle bag never touches this gate at all,
+	// so steady-state concurrency is unaffected -- only the cold-start window (the
+	// first MaxRunspaces creations after process start, or after enough poisoning to
+	// need replacements) pays a short serialization cost, once, in exchange for
+	// making concurrent job starts safe by construction rather than by retry.
+	private readonly SemaphoreSlim _moduleImportGate = new(1, 1);
 	private long _poisonedTotal;
 	private long _createdTotal;
 	private volatile bool _disposed;
@@ -111,7 +129,7 @@ public sealed partial class WaypointRunspacePool : IDisposable
 
 			if (!_idle.TryTake(out Runspace? runspace))
 			{
-				runspace = CreateRunspace();
+				runspace = await CreateRunspaceAsync(linked.Token).ConfigureAwait(false);
 			}
 
 			return new RunspaceLease(this, runspace);
@@ -127,30 +145,47 @@ public sealed partial class WaypointRunspacePool : IDisposable
 		}
 	}
 
-	private Runspace CreateRunspace()
+	/// <summary>
+	/// Creates and opens a new runspace, importing its modules. Issue #1020: the
+	/// import/open phase is serialized process-wide via <see cref="_moduleImportGate"/>
+	/// -- see that field's remarks for why. The gate is acquired/released here rather
+	/// than around the whole <see cref="RentAsync"/> call so a caller that hits the
+	/// idle bag (the common warm-pool case) never waits on it, and so at most one
+	/// cold create is ever in flight at a time regardless of how many callers race to
+	/// create simultaneously.
+	/// </summary>
+	private async Task<Runspace> CreateRunspaceAsync(CancellationToken cancellationToken)
 	{
-		InitialSessionState sessionState = InitialSessionState.CreateDefault2();
-		foreach (string modulePath in _options.Value.ModulePreloadPaths)
+		await _moduleImportGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+		try
 		{
-			sessionState.ImportPSModule(modulePath);
-		}
+			InitialSessionState sessionState = InitialSessionState.CreateDefault2();
+			foreach (string modulePath in _options.Value.ModulePreloadPaths)
+			{
+				sessionState.ImportPSModule(modulePath);
+			}
 
-		// Issue #629/#618: by-name imports (e.g. VMware.PowerCLI) resolved via
-		// PSModulePath, imported into the same initial session state as the disk-path
-		// modules above. The full PowerCLI meta-module MUST be imported here rather than
-		// left to first-cmdlet autoload: in the runner's in-process host a partially
-		// autoloaded PowerCLI hydrates discovery pscustomobjects whose NoteProperties do
-		// not survive the executor's output capture, silently storing zero inventory.
-		if (_options.Value.ModulePreloadNames.Count > 0)
+			// Issue #629/#618: by-name imports (e.g. VMware.PowerCLI) resolved via
+			// PSModulePath, imported into the same initial session state as the disk-path
+			// modules above. The full PowerCLI meta-module MUST be imported here rather than
+			// left to first-cmdlet autoload: in the runner's in-process host a partially
+			// autoloaded PowerCLI hydrates discovery pscustomobjects whose NoteProperties do
+			// not survive the executor's output capture, silently storing zero inventory.
+			if (_options.Value.ModulePreloadNames.Count > 0)
+			{
+				sessionState.ImportPSModule([.. _options.Value.ModulePreloadNames]);
+			}
+
+			Runspace runspace = RunspaceFactory.CreateRunspace(sessionState);
+			runspace.Open();
+			long createdTotal = Interlocked.Increment(ref _createdTotal);
+			LogRunspaceCreated(createdTotal);
+			return runspace;
+		}
+		finally
 		{
-			sessionState.ImportPSModule([.. _options.Value.ModulePreloadNames]);
+			_moduleImportGate.Release();
 		}
-
-		Runspace runspace = RunspaceFactory.CreateRunspace(sessionState);
-		runspace.Open();
-		long createdTotal = Interlocked.Increment(ref _createdTotal);
-		LogRunspaceCreated(createdTotal);
-		return runspace;
 	}
 
 	private void Return(Runspace runspace, bool poisoned)
@@ -252,6 +287,13 @@ public sealed partial class WaypointRunspacePool : IDisposable
 		// leaving it for the GC to collect is a correct, deterministic trade against
 		// an indeterministic disposal race with no first-class fix in the BCL.
 		_disposalCts.Dispose();
+
+		// Unlike _slots (see the long comment above), _moduleImportGate has no
+		// #343-shaped hazard: nothing parks on it indefinitely -- the only holder is
+		// CreateRunspaceAsync, which always releases in its own finally within one
+		// module-import/open call, never across an externally-controlled wait. Safe to
+		// dispose synchronously here.
+		_moduleImportGate.Dispose();
 
 		while (_idle.TryTake(out Runspace? runspace))
 		{

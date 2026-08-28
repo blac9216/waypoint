@@ -69,6 +69,16 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	private JobQueueRepository _repository = null!;
 	private BufferedJobEventWriter _logBuffer = null!;
 	private WaypointRunspacePool _pool = null!;
+	/// <summary>
+	/// Issue #1020's <c>PoolThrowsDuringRent_...</c> test disposes <see cref="_pool"/>
+	/// itself mid-test (to force RentAsync to throw). WaypointRunspacePool.Dispose is
+	/// not idempotent -- a second call faults on its already-disposed
+	/// CancellationTokenSource -- so this guard is test-harness bookkeeping only,
+	/// not a statement about production disposal semantics (nothing in production
+	/// disposes the pool twice; DI owns it as a singleton disposed exactly once at
+	/// host shutdown).
+	/// </summary>
+	private bool _poolDisposedByTest;
 	private CredentialRepository _credentials = null!;
 	private CredentialSecretStore _secretStore = null!;
 	private SiteRepository _sites = null!;
@@ -183,7 +193,10 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	public async Task DisposeAsync()
 	{
 		await _logBuffer.StopAsync(CancellationToken.None);
-		_pool.Dispose();
+		if (!_poolDisposedByTest)
+		{
+			_pool.Dispose();
+		}
 	}
 
 	public void Dispose()
@@ -1742,6 +1755,59 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		}
 
 		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+	}
+
+	/// <summary>
+	/// Issue #1020 retry-honesty backstop: an exception thrown from BELOW
+	/// <see cref="ScanJobHandler"/> -- here, disposing the runspace pool out from
+	/// under it, so <see cref="PowerShellExecutor.ExecuteAsync"/>'s
+	/// <c>_pool.RentAsync</c> throws <see cref="ObjectDisposedException"/> instead of
+	/// returning a result -- must still classify through the SAME path as an ordinary
+	/// InSpec/transport failure (<c>failed</c>, log-tail event, no thrown exception
+	/// out of the handler) rather than reaching the job dispatcher's generic
+	/// handler-threw catch as a raw "Unhandled exception" note. This is the shape
+	/// round-9's crashed jobs actually hit (a throw from runspace/module init, before
+	/// any InSpec invocation ran) -- ObjectDisposedException stands in for "the pool
+	/// threw during RentAsync" generically; the fix (module-import serialization in
+	/// <see cref="WaypointRunspacePool"/>) targets the AnalysisCache race specifically,
+	/// but this backstop must catch ANY such throw, not just that one exception type.
+	/// </summary>
+	[Fact]
+	public async Task PoolThrowsDuringRent_ClassifiesAsFailed_NotAnUnhandledDispatcherCrash()
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		(Guid targetId, Guid credentialId) = await SeedVsphereTargetAsync("invented-pool-throw-canary");
+
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		string payload = JsonSerializer.Serialize(new { target_id = targetId });
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 3, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		// Disposed BEFORE the dispatcher ever claims the job, so the very first
+		// RentAsync call the handler's InSpec-stage invocation makes throws
+		// ObjectDisposedException -- deterministic, no timing window needed.
+		_pool.Dispose();
+		_poolDisposedByTest = true;
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		// The honest outcome: failed (retryable per ADR-0012), classified through
+		// FailScanAsync exactly like any other transport-level failure -- never left
+		// at `running` and never surfaced only as a dispatcher-level "Unhandled
+		// exception" note with no job.log tail.
+		Assert.Equal("failed", await GetJobFieldAsync(jobIds[0], "state"));
+		Assert.True(await EventTypeExistsAsync(JobEventTypes.JobLog, jobIds[0]));
+		string note = await GetJobFieldAsync(jobIds[0], "note");
+		Assert.DoesNotContain("Unhandled exception", note, StringComparison.Ordinal);
 	}
 
 	/// <summary>A non-auth InSpec/transport failure maps to `failed` with a log-tail job event, never a thrown exception.</summary>
