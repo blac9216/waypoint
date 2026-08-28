@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.IO.Compression;
+using System.Text;
 using Waypoint.Core.ComplianceContent.Xccdf;
 using Xunit;
 
@@ -102,9 +104,61 @@ public sealed class BenchmarkImporterTests
 	[Fact]
 	public void ImportZip_MalformedZip_FailsClosedWithoutThrowing()
 	{
-		BenchmarkImportResult result = BenchmarkImporter.ImportZip([1, 2, 3, 4]);
+		IReadOnlyList<BenchmarkImportResult> results = BenchmarkImporter.ImportZip([1, 2, 3, 4]);
 
+		BenchmarkImportResult result = Assert.Single(results);
 		Assert.False(result.Succeeded);
 		Assert.Contains("not a valid zip archive", result.Error);
+	}
+
+	/// <summary>
+	/// Issue #1073: a multi-XCCDF package fans out to one <see cref="BenchmarkImportResult"/>
+	/// per benchmark it contains, each independently digest-addressed from its own
+	/// parsed metadata -- never one-or-error, and never picking one entry and
+	/// discarding the rest.
+	/// </summary>
+	[Fact]
+	public void ImportZip_MultiXccdfPackage_ProducesOneSucceededResultPerBenchmark()
+	{
+		byte[] zipBytes = BuildZip(
+			("First-xccdf.xml", DocumentA),
+			("Second-xccdf.xml", DocumentBDifferentRuleTitle));
+
+		IReadOnlyList<BenchmarkImportResult> results = BenchmarkImporter.ImportZip(zipBytes);
+
+		Assert.Equal(2, results.Count);
+		Assert.All(results, r => Assert.True(r.Succeeded));
+		Assert.All(results, r => Assert.False(string.IsNullOrWhiteSpace(r.Candidate!.SourceEntryPath)));
+	}
+
+	[Fact]
+	public void ImportZip_OneMalformedEntryAmongMultipleGood_FailsOnlyThatEntry()
+	{
+		byte[] zipBytes = BuildZip(
+			("Good-xccdf.xml", DocumentA),
+			("Bad-xccdf.xml", "<Benchmark><unclosed"));
+
+		IReadOnlyList<BenchmarkImportResult> results = BenchmarkImporter.ImportZip(zipBytes);
+
+		Assert.Equal(2, results.Count);
+		Assert.Single(results, r => r.Succeeded);
+		Assert.Single(results, r => !r.Succeeded);
+	}
+
+	private static byte[] BuildZip(params (string Name, string Content)[] entries)
+	{
+		using MemoryStream stream = new();
+		using (ZipArchive archive = new(stream, ZipArchiveMode.Create, leaveOpen: true))
+		{
+			foreach ((string name, string content) in entries)
+			{
+				ZipArchiveEntry entry = archive.CreateEntry(name, CompressionLevel.Fastest);
+				using Stream entryStream = entry.Open();
+				byte[] bytes = Encoding.UTF8.GetBytes(content);
+				entryStream.Write(bytes, 0, bytes.Length);
+			}
+		}
+
+		return stream.ToArray();
 	}
 }
