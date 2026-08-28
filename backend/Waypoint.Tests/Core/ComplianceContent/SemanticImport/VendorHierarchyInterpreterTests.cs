@@ -366,20 +366,22 @@ public sealed class VendorHierarchyInterpreterTests
 	[Fact]
 	public void VcfConsolidatedTree_ClassifiesAsVsphereFamily_ObjectKindSplit()
 	{
-		// Issue #959: upstream `master` now nests the 9.x vSphere/vCenter/ESXi/VM
-		// baselines under a consolidated vcf/<major>.x/... tree instead of a top-level
-		// vsphere/9-0/... tree. Same vsphere product family, same object-kind-split
-		// shape -- only the top-level directory literal differs.
+		// Issue #1079 (supersedes issue #959's assumption): upstream `master` nests the
+		// 9.x vSphere/vCenter/ESXi/VM baselines under a consolidated vcf/<major>.x/...
+		// tree, but with an EXTRA `vsphere/` grouping segment between the baseline
+		// directory and the object-kind leaf, and the ESXi leaf literal is `esx`, not
+		// `esxi` (normalized to `esxi` on import). Same vsphere product family, same
+		// object-kind vocabulary otherwise.
 		VendorContentEntry vcenter = Leaf(
-			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/vcenter",
+			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/vsphere/vcenter",
 			Manifest("vcenter", "VCF 9.0 vCenter SRG", "1.0.0"),
 			"controls/vc-000001.rb");
 		VendorContentEntry esxi = Leaf(
-			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/esxi",
-			Manifest("esxi", "VCF 9.0 ESXi SRG", "1.0.0"),
+			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/vsphere/esx",
+			Manifest("esx", "VCF 9.0 ESXi SRG", "1.0.0"),
 			"controls/esxi-000001.rb");
 		VendorContentEntry vm = Leaf(
-			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/vm",
+			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/vsphere/vm",
 			Manifest("vm", "VCF 9.0 VM SRG", "1.0.0"),
 			"controls/vm-000001.rb");
 
@@ -390,6 +392,7 @@ public sealed class VendorHierarchyInterpreterTests
 		Assert.All(result.Candidates, c => Assert.Equal("vsphere", c.VendorFamily));
 		Assert.All(result.Candidates, c => Assert.Equal(CatalogTransports.VMware, c.Transport));
 		Assert.All(result.Candidates, c => Assert.Equal(CatalogKinds.Srg, c.Kind));
+		Assert.Contains(result.Candidates, c => c.ComponentKey == "esxi");
 		Assert.Equal("9-0", result.Candidates[0].ProductVersionKey);
 	}
 

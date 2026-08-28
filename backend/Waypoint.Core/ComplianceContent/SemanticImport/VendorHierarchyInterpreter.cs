@@ -57,7 +57,16 @@ public static class VendorHierarchyInterpreter
 	private static readonly Dictionary<string, VendorFamily> Families = new Dictionary<string, VendorFamily>(StringComparer.OrdinalIgnoreCase)
 	{
 		["vsphere"] = new VendorFamily("vsphere", VendorFamilyShape.ObjectKindSplit),
-		["vcf"] = new VendorFamily("vsphere", VendorFamilyShape.ObjectKindSplit),
+		// Issue #1079 (epic #726, live validation round 11): a real content pull proved
+		// upstream `master`'s `vcf/9.x` tree is NOT the flat ObjectKindSplit shape this
+		// row previously claimed -- it inserts an extra grouping segment
+		// (`vsphere/`, `nsx/`) between the baseline directory and the object-kind/
+		// function leaf, spreads content across several sibling
+		// `vmware-cloud-foundation-*-stig-baseline` directories, and names the ESXi
+		// leaf `esx`, not `esxi`. Every single vcf/9.x profile quarantined under the
+		// old row. See VendorFamilyShape.VcfGrouped / BuildVcfGrouped below for the
+		// corrected shape.
+		["vcf"] = new VendorFamily("vcf", VendorFamilyShape.VcfGrouped),
 		// Issue #1064 (owner decision, epic #726): VCSA services (EAM, Lookup,
 		// PostgreSQL, VAMI, ...) are implied subcomponents of every vCenter appliance,
 		// defined by the benchmarks and scanned over the parent's SSH credential -- so
@@ -93,6 +102,37 @@ public static class VendorHierarchyInterpreter
 	// near-miss and is quarantined, never guessed.
 	private static readonly HashSet<string> ObjectKindBeforeInspecSegments =
 		new(StringComparer.OrdinalIgnoreCase) { "vcsa", "vsphere" };
+
+	// Issue #1079: the real `vcf/9.x/<release>/inspec/<baseline>/` tree's object-kind
+	// and named-function leaves both sit one segment BELOW the baseline directory,
+	// under a closed grouping-segment vocabulary -- `vsphere/[vcenter|esx|vm]` and
+	// `nsx/<function-name>`. `esx` (not `esxi`) is the vendor's own ESXi leaf literal;
+	// it normalizes to the same `esxi` component key/selector every other vSphere
+	// object-kind row already uses.
+	private static readonly Dictionary<string, string> VcfGroupedVSphereSelectorKinds =
+		new(StringComparer.OrdinalIgnoreCase)
+		{
+			["vcenter"] = CatalogSelectorKinds.VCenter,
+			["esx"] = CatalogSelectorKinds.Esxi,
+			["vm"] = CatalogSelectorKinds.Vm,
+		};
+
+	// Issue #1079: named VCF-native service leaves that sit directly under a
+	// `vmware-cloud-foundation-*-stig-baseline` directory (no grouping segment). Two
+	// disjoint, closed leaf-name sets distinguish transport, matching each leaf's own
+	// real inspec.yml inputs: the six API/token-authenticated application profiles
+	// (hostname/apitoken/sessionToken/url inputs, no ssh-oriented input) under the
+	// umbrella `vmware-cloud-foundation-stig-baseline` use `vcf-api`
+	// (docs/compliance-parity.md "VCF `9.x` ... vcf-api / named service" row); every
+	// other named VCF service leaf (SDDC Manager nginx/PostgreSQL, Operations
+	// httpd/PostgreSQL, Operations HCX httpd, Operations Networks nginx-platform, ...,
+	// each under its own distinctly-named baseline directory) is a local system service
+	// reached over `ssh` (the sibling "ssh / named service" row). Neither name overlaps
+	// the other set -- this is a closed, documented two-way split, never a guess.
+	private static readonly HashSet<string> VcfApiNamedServiceLeaves = new(StringComparer.OrdinalIgnoreCase)
+	{
+		"application", "automation", "operations", "opshcx", "opsnet", "sddcmgr",
+	};
 
 	/// <summary>
 	/// Interprets every discovered <paramref name="entries"/> against the documented
@@ -250,6 +290,7 @@ public static class VendorHierarchyInterpreter
 			VendorFamilyShape.ObjectKindSplit => BuildObjectKindSplit(entry, family, productVersionKey, kind, releaseKey!, manifest, tail),
 			VendorFamilyShape.NamedServiceSplit => BuildNamedSplit(entry, family, productVersionKey, kind, releaseKey!, manifest, tail, CatalogTransports.Ssh),
 			VendorFamilyShape.NamedFunctionSplit => BuildNamedSplit(entry, family, productVersionKey, kind, releaseKey!, manifest, tail, CatalogTransports.NsxApi),
+			VendorFamilyShape.VcfGrouped => BuildVcfGrouped(entry, productVersionKey, kind, releaseKey!, manifest, tail),
 			_ => null,
 		};
 
@@ -337,6 +378,62 @@ public static class VendorHierarchyInterpreter
 			CatalogSelectorKinds.Service, selectorName, isAggregate: false);
 	}
 
+	/// <summary>
+	/// Issue #1079: the real `vcf/&lt;version&gt;/&lt;release&gt;/inspec/&lt;baseline&gt;/` tree, one
+	/// documented shape with three tail dispositions -- an empty tail is the umbrella
+	/// baseline's aggregate parent (never independently executable, same disposition
+	/// as every other family's bare-baseline-directory profile); a single-segment tail
+	/// is a named VCF-native service leaf (family <c>vcf</c>, transport chosen from the
+	/// closed <see cref="VcfApiNamedServiceLeaves"/> split); a two-segment tail is a
+	/// closed grouping-segment leaf (`vsphere/&lt;object-kind&gt;` promotes to the
+	/// `vsphere` family/`vmware` transport; `nsx/&lt;function-name&gt;` promotes to the
+	/// `nsx` family/`nsx-api` transport). Anything else is a near-miss and is
+	/// quarantined, never guessed.
+	/// </summary>
+	private static SemanticCandidate? BuildVcfGrouped(
+		VendorContentEntry entry, string productVersionKey, string kind, string releaseKey,
+		InspecManifest manifest, string[] tail)
+	{
+		if (tail.Length == 0)
+		{
+			return NewCandidate(entry, VsphereAggregateFamily, productVersionKey, kind, releaseKey, manifest,
+				componentKey: "aggregate", manifest.Title ?? "vSphere (aggregate)", CatalogTransports.VMware,
+				CatalogSelectorKinds.VCenter, selectorName: null, isAggregate: true);
+		}
+
+		if (tail.Length == 1)
+		{
+			string leaf = tail[0].ToLowerInvariant();
+			string transport = VcfApiNamedServiceLeaves.Contains(leaf) ? CatalogTransports.VcfApi : CatalogTransports.Ssh;
+			return NewCandidate(entry, VcfFamily, productVersionKey, kind, releaseKey, manifest,
+				componentKey: leaf, manifest.Title ?? tail[0], transport, CatalogSelectorKinds.Service, leaf, isAggregate: false);
+		}
+
+		if (tail.Length == 2 && string.Equals(tail[0], "vsphere", StringComparison.OrdinalIgnoreCase)
+			&& VcfGroupedVSphereSelectorKinds.TryGetValue(tail[1], out string? selectorKind))
+		{
+			string componentKey = string.Equals(tail[1], "esx", StringComparison.OrdinalIgnoreCase) ? "esxi" : tail[1].ToLowerInvariant();
+			return NewCandidate(entry, VsphereAggregateFamily, productVersionKey, kind, releaseKey, manifest,
+				componentKey, manifest.Title ?? tail[1], CatalogTransports.VMware, selectorKind, selectorName: null, isAggregate: false);
+		}
+
+		if (tail.Length == 2 && string.Equals(tail[0], "nsx", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(tail[1]))
+		{
+			string selectorName = tail[1].ToLowerInvariant();
+			return NewCandidate(entry, NsxFamily, productVersionKey, kind, releaseKey, manifest,
+				componentKey: selectorName, manifest.Title ?? tail[1], CatalogTransports.NsxApi, CatalogSelectorKinds.Service, selectorName, isAggregate: false);
+		}
+
+		return null;
+	}
+
+	// Small fixed VendorFamily instances BuildVcfGrouped resolves its actual product
+	// family from per-branch (the top-level "vcf" Families entry's own name/shape is
+	// deliberately generic -- see its comment); Shape is unused by NewCandidate.
+	private static readonly VendorFamily VsphereAggregateFamily = new("vsphere", VendorFamilyShape.ObjectKindSplit);
+	private static readonly VendorFamily VcfFamily = new("vcf", VendorFamilyShape.VcfGrouped);
+	private static readonly VendorFamily NsxFamily = new("nsx", VendorFamilyShape.NamedFunctionSplit);
+
 	private static SemanticCandidate NewCandidate(
 		VendorContentEntry entry, VendorFamily family, string productVersionKey, string kind, string releaseKey,
 		InspecManifest manifest, string componentKey, string displayName, string transport, string selectorKind,
@@ -421,5 +518,6 @@ public static class VendorHierarchyInterpreter
 		ObjectKindSplit,
 		NamedServiceSplit,
 		NamedFunctionSplit,
+		VcfGrouped,
 	}
 }

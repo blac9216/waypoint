@@ -15,6 +15,7 @@
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using Waypoint.Core.Components;
 using Waypoint.Infrastructure.Data;
 using Xunit;
 
@@ -205,15 +206,15 @@ public sealed class ExecutionCatalogSeedExpansionTests
 		await ReapplySeedMigrationsAsync(connection);
 
 		// vSphere 9-0 SRG: vmware object-kind row.
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "vcenter", "vmware", "vcenter");
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "esxi", "vmware", "esxi");
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "vm", "vmware", "vm");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.x", "vcenter", "vmware", "vcenter");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.x", "esxi", "vmware", "esxi");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.x", "vm", "vmware", "vm");
 
 		// vSphere 9-0 SRG: VCSA named-service row.
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "envoy", "ssh", "service");
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "postgresql", "ssh", "service");
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "vami", "ssh", "service");
-		await AssertLinkableComponentAsync(connection, "vsphere", "9.0", "photon", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.x", "envoy", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.x", "postgresql", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.x", "vami", "ssh", "service");
+		await AssertLinkableComponentAsync(connection, "vsphere", "9.x", "photon", "ssh", "service");
 
 		// NSX 9-x SRG: named-function row.
 		await AssertLinkableComponentAsync(connection, "nsx", "9.x", "manager", "nsx-api", "service");
@@ -268,6 +269,43 @@ public sealed class ExecutionCatalogSeedExpansionTests
 		Assert.Equal("vcf-api", reader.GetString(0));
 	}
 
+	/// <summary>
+	/// Issue #1080's drift guard: the vSphere 9.x row's SEEDED key (queried straight
+	/// from Postgres, not the doc or the migration source text) must actually match the
+	/// version FORM real discovery reports for a 9.1 host -- an observed
+	/// <c>Version</c>/build fact like the one #1080's live round measured, never a
+	/// hand-picked value chosen to make the assertion pass. If a future migration
+	/// re-seeds this row under a key form that stops matching real 9.1.x-shaped
+	/// observed versions (a return to an exact '9.0' key, a typo, an unrecognized key
+	/// shape), this test fails -- the same defect class #1080 itself was.
+	/// </summary>
+	[Fact]
+	public async Task VSphere9xSeededKey_MatchesTheVersionFormRealDiscoveryReports()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await ReapplySeedMigrationsAsync(connection);
+
+		await using NpgsqlCommand command = new(
+			"SELECT pv.version_key FROM catalog_product_versions pv JOIN catalog_products p ON p.id = pv.product_id WHERE p.product_key = 'vsphere' AND pv.version_key LIKE '9.%'",
+			connection);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		bool found = await reader.ReadAsync();
+		Assert.True(found, "Expected a seeded vSphere product-version row for the 9.x line.");
+		string seededKey = reader.GetString(0);
+
+		// Invented: not a real host's version -- a real VCF 9.1 ESXi host reports its
+		// exact observed version in this shape (issue #1080's discovery evidence).
+		const string realWorldObservedShape = "9.1.0";
+		Assert.True(
+			VersionScopeMatcher.Matches(realWorldObservedShape, seededKey),
+			$"Seeded vSphere 9.x key '{seededKey}' does not match an observed version shaped like '{realWorldObservedShape}' -- this is issue #1080's defect class.");
+	}
+
 	[Fact]
 	public async Task ReapplyingExpansionSeedSql_Directly_IsIdempotent()
 	{
@@ -304,6 +342,7 @@ public sealed class ExecutionCatalogSeedExpansionTests
 		{
 			"0064_execution_catalog_seed.sql", "0067_execution_catalog_seed_expansion.sql",
 			"0069_vcf_api_credential_purpose.sql", "0070_declared_scope_version_keys.sql",
+			"0076_vsphere_9x_declared_scope_rekey.sql",
 		})
 		{
 			string sql = await ReadEmbeddedMigrationAsync(fileName);
@@ -468,9 +507,9 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 		// component-key tuple in 0067's own catalog_execution_profiles VALUES list
 		// instead of reusing 0064's per-tuple output_kind regex (which assumes an
 		// inline output_kind column 0067 does not have).
-		AssertRowComponentsSeededAsHdf(rows, migration0067, "vSphere `9.0`", "SRG", "vmware",
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "vSphere `9.x`", "SRG", "vmware",
 			seededComponentKeys: ["vcenter", "esxi", "vm"]);
-		AssertRowComponentsSeededAsHdf(rows, migration0067, "vSphere `9.0`", "SRG", "ssh",
+		AssertRowComponentsSeededAsHdf(rows, migration0067, "vSphere `9.x`", "SRG", "ssh",
 			seededComponentKeys: ["envoy", "postgresql", "vami", "photon"]);
 		AssertRowComponentsSeededAsHdf(rows, migration0067, "NSX `9.x`", "SRG", "nsx-api",
 			seededComponentKeys: ["manager", "routing"]);
@@ -543,8 +582,8 @@ public sealed class ExecutionCatalogSeedDriftGuardTests
 			("vSphere `8.0`", "STIG", "ssh"),
 			("NSX `4.x`", "STIG", "nsx-api"),
 			("Photon OS `5.0`", "SRG", "ssh"),
-			("vSphere `9.0`", "SRG", "vmware"),
-			("vSphere `9.0`", "SRG", "ssh"),
+			("vSphere `9.x`", "SRG", "vmware"),
+			("vSphere `9.x`", "SRG", "ssh"),
 			("NSX `9.x`", "SRG", "nsx-api"),
 			("Aria Operations `8.x`", "SRG", "ssh"),
 			("Aria Automation `8.x`", "SRG", "ssh"),

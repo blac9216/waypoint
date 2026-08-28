@@ -36,7 +36,10 @@ namespace Waypoint.Tests.Core.ComplianceContent.SemanticImport;
 /// </summary>
 public sealed class LayoutTableParityTests
 {
-	private sealed record DocumentedLayoutRow(string DirectoryLiteral, string MapsToFamily, bool IsObjectKindBeforeInspec);
+	private sealed record DocumentedLayoutRow(string DirectoryLiteral, string MapsToFamily, string? Variant)
+	{
+		public bool IsObjectKindBeforeInspec => string.Equals(Variant, "object-kind-before-inspec", StringComparison.Ordinal);
+	}
 
 	[Fact]
 	public void EveryDocumentedLayoutRow_ClassifiesIntoItsDocumentedFamily()
@@ -106,11 +109,12 @@ public sealed class LayoutTableParityTests
 	}
 
 	/// <summary>
-	/// The issue's two rejection classes reproduced exactly (the 156-count `vcf` tree
-	/// and the 111-count object-kind-before-inspec tree) must now import cleanly end to
-	/// end -- not just via the generic per-row fixture above, but as a literal repro of
-	/// the issue text's disposition breakdown. Issue #1064 extends the repro with the
-	/// third rejection class it fixed: a named VCSA service leaf inside the
+	/// The issue's rejection classes reproduced exactly -- the real `vcf/9.x` tree
+	/// (issue #1079: grouped `vsphere/esx` leaf, ESXi literal `esx` not `esxi`) and the
+	/// 111-count object-kind-before-inspec tree -- must now import cleanly end to end,
+	/// not just via the generic per-row fixture above, but as a literal repro of the
+	/// issues' disposition breakdowns. Issue #1064 extends the repro with the third
+	/// rejection class it fixed: a named VCSA service leaf inside the
 	/// object-kind-before-inspec tree's `vcsa` subtree, which previously quarantined
 	/// because it was forced through the vcenter/esxi/vm object-kind vocabulary.
 	/// </summary>
@@ -118,7 +122,7 @@ public sealed class LayoutTableParityTests
 	public void IssueDisposition_VcfTreeAndObjectKindBeforeInspecTree_NowImportCleanly()
 	{
 		VendorContentEntry vcfVCenter = Leaf(
-			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/vcenter",
+			"vcf/9-0/y26m05-srg/inspec/vcf-9-0-srg-baseline/vsphere/vcenter",
 			Manifest("vcenter", "VCF 9.0 vCenter SRG", "1.0.0"),
 			"controls/vc-000001.rb");
 		VendorContentEntry vsphereObjectKindBeforeInspec = Leaf(
@@ -160,9 +164,22 @@ public sealed class LayoutTableParityTests
 		// subtree (object-kind leaves); the `vcsa` subtree carries named SERVICE leaves
 		// instead and is covered explicitly by
 		// IssueDisposition_VcfTreeAndObjectKindBeforeInspecTree_NowImportCleanly below.
-		string profileKey = row.IsObjectKindBeforeInspec
-			? $"{row.DirectoryLiteral}/1-0/v1r1-stig/vsphere/inspec/{row.DirectoryLiteral}-baseline/vcenter"
-			: $"{row.DirectoryLiteral}/1-0/v1r1-srg/inspec/{row.DirectoryLiteral}-baseline";
+		//
+		// Issue #1079: the `vcf` row now has three qualifiers sharing one directory
+		// literal -- "grouped-baseline" needs the extra `vsphere/` or `nsx/` grouping
+		// segment its documented family determines (a `vsphere`-mapped row exercises
+		// the `vsphere/vcenter` leaf; an `nsx`-mapped row exercises `nsx/<function>`);
+		// "named-service" exercises the single-segment named-leaf shape directly under
+		// the baseline directory (no grouping segment).
+		string profileKey = row.Variant switch
+		{
+			"object-kind-before-inspec" => $"{row.DirectoryLiteral}/1-0/v1r1-stig/vsphere/inspec/{row.DirectoryLiteral}-baseline/vcenter",
+			"grouped-baseline" when string.Equals(row.MapsToFamily, "nsx", StringComparison.Ordinal) =>
+				$"{row.DirectoryLiteral}/1-0/v1r1-srg/inspec/{row.DirectoryLiteral}-baseline/nsx/manager",
+			"grouped-baseline" => $"{row.DirectoryLiteral}/1-0/v1r1-srg/inspec/{row.DirectoryLiteral}-baseline/vsphere/vcenter",
+			"named-service" => $"{row.DirectoryLiteral}/1-0/v1r1-srg/inspec/{row.DirectoryLiteral}-baseline/some-service",
+			_ => $"{row.DirectoryLiteral}/1-0/v1r1-srg/inspec/{row.DirectoryLiteral}-baseline",
+		};
 
 		return Leaf(profileKey, Manifest($"{row.DirectoryLiteral}-baseline"), "controls/x.rb");
 	}
@@ -186,12 +203,58 @@ public sealed class LayoutTableParityTests
 		foreach (Match rowMatch in Regex.Matches(section, @"^\| `([^`]+)`(?:\s*\(([^)]+)\))? \| `([^`]+)` \|", RegexOptions.Multiline))
 		{
 			string directoryLiteral = rowMatch.Groups[1].Value;
-			bool isObjectKindBeforeInspec = string.Equals(rowMatch.Groups[2].Value, "object-kind-before-inspec", StringComparison.Ordinal);
+			string? variant = rowMatch.Groups[2].Success ? rowMatch.Groups[2].Value : null;
 			string mapsToFamily = rowMatch.Groups[3].Value;
-			rows.Add(new DocumentedLayoutRow(directoryLiteral, mapsToFamily, isObjectKindBeforeInspec));
+			rows.Add(new DocumentedLayoutRow(directoryLiteral, mapsToFamily, variant));
 		}
 
 		return rows;
+	}
+
+	/// <summary>
+	/// Issue #1079: the real `vcf/9.x` tree's three sub-shapes, all in one fixture --
+	/// the `esx` leaf literal (normalized to component key `esxi`), the `nsx/` grouping
+	/// segment promoting to the `nsx` family, and the closed vcf-api/ssh named-service
+	/// split for leaves with no grouping segment.
+	/// </summary>
+	[Fact]
+	public void VcfGroupedTree_EsxLeafNormalizes_NsxGroupPromotes_NamedServicesSplitByTransport()
+	{
+		VendorContentEntry esx = Leaf(
+			"vcf/9-x/y26m05-srg/inspec/vmware-cloud-foundation-stig-baseline/vsphere/esx",
+			Manifest("esx", "VCF 9.X ESXi SRG"), "controls/esx-000001.rb");
+		VendorContentEntry nsxManager = Leaf(
+			"vcf/9-x/y26m05-srg/inspec/vmware-cloud-foundation-stig-baseline/nsx/manager",
+			Manifest("manager", "VCF 9.X NSX Manager SRG"), "controls/nsx-000001.rb");
+		VendorContentEntry automation = Leaf(
+			"vcf/9-x/y26m05-srg/inspec/vmware-cloud-foundation-stig-baseline/automation",
+			Manifest("automation", "VCF 9.X Automation Application SRG"), "controls/auto-000001.rb");
+		VendorContentEntry sddcmgrNginx = Leaf(
+			"vcf/9-x/y26m05-srg/inspec/vmware-cloud-foundation-sddcmgr-stig-baseline/nginx",
+			Manifest("nginx", "VCF 9.X SDDC Manager Nginx SRG"), "controls/nginx-000001.rb");
+
+		VendorHierarchyInterpretation result = VendorHierarchyInterpreter.Interpret([esx, nsxManager, automation, sddcmgrNginx]);
+
+		Assert.Empty(result.Rejections);
+		Assert.Equal(4, result.Candidates.Count);
+
+		SemanticCandidate esxCandidate = Assert.Single(result.Candidates, c => c.ComponentKey == "esxi");
+		Assert.Equal("vsphere", esxCandidate.VendorFamily);
+		Assert.Equal(CatalogTransports.VMware, esxCandidate.Transport);
+		Assert.Equal(CatalogSelectorKinds.Esxi, esxCandidate.SelectorKind);
+
+		SemanticCandidate nsxCandidate = Assert.Single(result.Candidates, c => c.ComponentKey == "manager");
+		Assert.Equal("nsx", nsxCandidate.VendorFamily);
+		Assert.Equal(CatalogTransports.NsxApi, nsxCandidate.Transport);
+		Assert.Equal(CatalogSelectorKinds.Service, nsxCandidate.SelectorKind);
+
+		SemanticCandidate automationCandidate = Assert.Single(result.Candidates, c => c.ComponentKey == "automation");
+		Assert.Equal("vcf", automationCandidate.VendorFamily);
+		Assert.Equal(CatalogTransports.VcfApi, automationCandidate.Transport);
+
+		SemanticCandidate nginxCandidate = Assert.Single(result.Candidates, c => c.ComponentKey == "nginx");
+		Assert.Equal("vcf", nginxCandidate.VendorFamily);
+		Assert.Equal(CatalogTransports.Ssh, nginxCandidate.Transport);
 	}
 
 	private static string ReadDocFile()

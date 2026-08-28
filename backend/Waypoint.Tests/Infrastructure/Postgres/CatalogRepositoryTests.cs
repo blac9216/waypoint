@@ -1070,6 +1070,7 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 		{
 			"0064_execution_catalog_seed.sql", "0067_execution_catalog_seed_expansion.sql",
 			"0069_vcf_api_credential_purpose.sql", "0070_declared_scope_version_keys.sql",
+			"0076_vsphere_9x_declared_scope_rekey.sql",
 		})
 		{
 			string seedSql = await ReadEmbeddedMigrationAsync(fileName);
@@ -1085,7 +1086,7 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 			JOIN catalog_components cc ON cc.id = ep.component_id
 			JOIN catalog_product_versions pv ON pv.id = cc.product_version_id
 			JOIN catalog_products p ON p.id = pv.product_id
-			WHERE p.product_key = 'vsphere' AND pv.version_key = '9.0' AND cc.component_key = 'envoy'
+			WHERE p.product_key = 'vsphere' AND pv.version_key = '9.x' AND cc.component_key = 'envoy'
 			ORDER BY r.purpose
 			""", connection);
 		List<string> seededPurposes = [];
