@@ -216,6 +216,19 @@ public sealed class WaypointNsxScanAuthInputTests : IDisposable
 		return profileDir;
 	}
 
+	/// <summary>
+	/// Issue #1071 (round-1 review, re #1077): the raw-verbatim writer above inherits
+	/// this source file's LF line endings, so nothing pins the CRLF case. This variant
+	/// rewrites the same invented body with CRLF endings before writing it verbatim --
+	/// vendor manifests are not guaranteed LF, and a helper that scoped by a regex
+	/// leaving a stray CR on the captured name would silently miss every slot.
+	/// </summary>
+	private string WriteProfileFixtureRawCrlf(string dirName, string inspecYmlContent)
+	{
+		string crlf = inspecYmlContent.Replace("\r\n", "\n").Replace("\n", "\r\n");
+		return WriteProfileFixtureRaw(dirName, crlf);
+	}
+
 	private async Task<(System.Management.Automation.PSObject Result, string? AuthBlock)> RunNsxScanAsync(string profileDir)
 	{
 		(string commonPath, string nsxApiPath) = WriteFakeSiblingScripts();
@@ -503,5 +516,182 @@ public sealed class WaypointNsxScanAuthInputTests : IDisposable
 		string[] lines = AuthBlockLines(authBlock);
 		Assert.Contains($"nsxManager: '{InventedManager}'", lines);
 		Assert.DoesNotContain(lines, line => line.StartsWith("nsx_managerAddress:", StringComparison.Ordinal));
+	}
+
+	/// <summary>
+	/// Issue #1071 round-1 review finding 1 (the blocker): a sequence entry whose
+	/// <c>name:</c> is NOT the entry's first key -- here <c>description:</c> comes
+	/// first and <c>name:</c> follows on the next line, a perfectly ordinary mapping
+	/// since YAML mapping keys are unordered. The first fix attempt decided
+	/// "entry level" by the literal <c>-</c> prefix on the line, so this shape
+	/// resolved to all-null and the 9.x profile silently fell back to the 4.x legacy
+	/// names -- issue #917's exact defect (a scan that authenticates with no session),
+	/// newly introduced. The accept rule must be structural: <c>name:</c> at the
+	/// ENTRY'S OWN KEY COLUMN counts, whatever its position within the entry.
+	/// </summary>
+	[Fact]
+	public async Task NameKeyAfterAnotherEntryKey_IsDiscovered()
+	{
+		string profileDir = WriteProfileFixtureRaw("profile-description-first", """
+			name: invented-nsx-fixture-profile
+			title: Invented NSX baseline (test fixture)
+			version: 1.0.0
+			depends:
+			  - name: invented-shared-helper
+			    path: ../invented-shared
+			inputs:
+			  - description: invented NSX manager address input
+			    name: nsx_managerAddress
+			    sensitive: true
+			  - description: invented session token input
+			    name: nsx_sessionToken
+			  - description: invented session cookie input
+			    name: nsx_sessionCookieId
+			""");
+
+		(System.Management.Automation.PSObject outcome, string? authBlock) = await RunNsxScanAsync(profileDir);
+
+		Assert.True(OutcomeSucceeded(outcome), outcome.Properties["FailureReason"].Value?.ToString());
+		string[] lines = AuthBlockLines(authBlock);
+		Assert.Contains($"nsx_managerAddress: '{InventedManager}'", lines);
+		Assert.Contains($"nsx_sessionToken: '{InventedToken}'", lines);
+		Assert.Contains($"nsx_sessionCookieId: '{InventedCookie}'", lines);
+		Assert.DoesNotContain(lines, line => line.StartsWith("nsxManager:", StringComparison.Ordinal));
+		Assert.DoesNotContain(lines, line => line.StartsWith("sessionToken:", StringComparison.Ordinal));
+		Assert.DoesNotContain(lines, line => line.StartsWith("sessionCookieId:", StringComparison.Ordinal));
+	}
+
+	/// <summary>
+	/// Issue #1071 round-1 review finding 1, column-0 variant: the same
+	/// not-the-first-key shape written in the column-0 sequence style every shipped
+	/// NSX 4.x/3.x manifest uses -- the two hazards this issue is about, combined.
+	/// Missed by BOTH the pre-#1071 helper and the first fix attempt.
+	/// </summary>
+	[Fact]
+	public async Task ColumnZeroEntry_WithNameKeyAfterAnotherEntryKey_IsDiscovered()
+	{
+		string profileDir = WriteProfileFixtureRaw("profile-column0-description-first", """
+			name: invented-nsx-fixture-profile
+			version: 1.0.0
+			depends:
+			- name: invented-shared-helper
+			  path: ../invented-shared
+			inputs:
+			- description: invented NSX manager address input
+			  name: nsx_managerAddress
+			- description: invented session token input
+			  name: nsx_sessionToken
+			- description: invented session cookie input
+			  name: nsx_sessionCookieId
+			""");
+
+		(System.Management.Automation.PSObject outcome, string? authBlock) = await RunNsxScanAsync(profileDir);
+
+		Assert.True(OutcomeSucceeded(outcome), outcome.Properties["FailureReason"].Value?.ToString());
+		string[] lines = AuthBlockLines(authBlock);
+		Assert.Contains($"nsx_managerAddress: '{InventedManager}'", lines);
+		Assert.Contains($"nsx_sessionToken: '{InventedToken}'", lines);
+		Assert.Contains($"nsx_sessionCookieId: '{InventedCookie}'", lines);
+	}
+
+	/// <summary>
+	/// Issue #1071 round-1 review finding 1, CRLF coverage (the #1077 note): the raw
+	/// fixture writer inherits LF, so this rewrites the entry shapes above with CRLF
+	/// endings. A manifest is vendor content and its line endings are not this
+	/// repository's to assume; a captured name carrying a stray CR matches neither
+	/// known key and silently loses the slot.
+	/// </summary>
+	[Fact]
+	public async Task CrlfManifest_EntryShapes_AreDiscovered()
+	{
+		string profileDir = WriteProfileFixtureRawCrlf("profile-crlf-entry-shapes", """
+			name: invented-nsx-fixture-profile
+			version: 1.0.0
+			depends:
+			- name: invented-shared-helper
+			  path: ../invented-shared
+			inputs:
+			- description: invented NSX manager address input
+			  name: nsx_managerAddress
+			- name: nsx_sessionToken  # invented trailing comment
+			- name: 'nsx_sessionCookieId'
+			""");
+
+		// Guard the fixture itself: the shape under test IS the line endings, so a
+		// writer that normalized them would make this test silently vacuous.
+		string raw = await File.ReadAllTextAsync(Path.Combine(profileDir, "inspec.yml"));
+		Assert.Contains("\r\n", raw, StringComparison.Ordinal);
+		Assert.DoesNotContain("\n", raw.Replace("\r\n", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+
+		(System.Management.Automation.PSObject outcome, string? authBlock) = await RunNsxScanAsync(profileDir);
+
+		Assert.True(OutcomeSucceeded(outcome), outcome.Properties["FailureReason"].Value?.ToString());
+		string[] lines = AuthBlockLines(authBlock);
+		Assert.Contains($"nsx_managerAddress: '{InventedManager}'", lines);
+		Assert.Contains($"nsx_sessionToken: '{InventedToken}'", lines);
+		Assert.Contains($"nsx_sessionCookieId: '{InventedCookie}'", lines);
+	}
+
+	/// <summary>
+	/// Issue #1071 round-1 review finding 2: AC 4's false-positive class in its
+	/// SEQUENCE form -- an input whose <c>value:</c> holds a LIST of mappings, one of
+	/// which carries a <c>name:</c> key. That nested <c>- name:</c> is not an input
+	/// name; only entries at the input sequence's own dash column are. A false
+	/// positive would emit <c>nsx_managerAddress</c> here, steering the manager slot
+	/// away from what the profile actually declares.
+	/// </summary>
+	[Fact]
+	public async Task NestedNameKeyUnderValueSequence_IsNotFalsePositive()
+	{
+		string profileDir = WriteProfileFixtureRaw("profile-nested-name-sequence", """
+			name: invented-nsx-fixture-profile
+			version: 1.0.0
+			inputs:
+			  - name: invented_other_input
+			    description: invented input whose value is a list of mappings
+			    value:
+			      - name: nsx_managerAddress
+			        kind: invented
+			      - name: nsx_sessionToken
+			        kind: invented
+			""");
+
+		(System.Management.Automation.PSObject outcome, string? authBlock) = await RunNsxScanAsync(profileDir);
+
+		Assert.True(OutcomeSucceeded(outcome), outcome.Properties["FailureReason"].Value?.ToString());
+		string[] lines = AuthBlockLines(authBlock);
+		Assert.Contains($"nsxManager: '{InventedManager}'", lines);
+		Assert.Contains($"sessionToken: '{InventedToken}'", lines);
+		Assert.DoesNotContain(lines, line => line.StartsWith("nsx_", StringComparison.Ordinal));
+	}
+
+	/// <summary>
+	/// Issue #1071 round-1 review finding 3: a column-0 <c>---</c> document marker is
+	/// a document boundary, not a sequence entry, so it must CLOSE an open
+	/// <c>inputs:</c> block. Entries after it belong to a different document and must
+	/// not be discovered -- here the manager slot (declared before the marker)
+	/// resolves while the token slot (after it) falls back to the 4.x legacy name.
+	/// </summary>
+	[Fact]
+	public async Task DocumentMarker_ClosesTheInputsBlock()
+	{
+		string profileDir = WriteProfileFixtureRaw("profile-doc-marker", """
+			name: invented-nsx-fixture-profile
+			version: 1.0.0
+			inputs:
+			  - name: nsx_managerAddress
+			    description: invented fixture input
+			---
+			  - name: nsx_sessionToken
+			    description: invented input in a second document
+			""");
+
+		(System.Management.Automation.PSObject outcome, string? authBlock) = await RunNsxScanAsync(profileDir);
+
+		Assert.True(OutcomeSucceeded(outcome), outcome.Properties["FailureReason"].Value?.ToString());
+		string[] lines = AuthBlockLines(authBlock);
+		Assert.Contains($"nsx_managerAddress: '{InventedManager}'", lines);
+		Assert.Contains($"sessionToken: '{InventedToken}'", lines);
+		Assert.DoesNotContain(lines, line => line.StartsWith("nsx_sessionToken:", StringComparison.Ordinal));
 	}
 }
