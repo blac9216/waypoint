@@ -255,6 +255,104 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		Assert.NotNull(item.BaselineId);
 	}
 
+	/// <summary>
+	/// Issue #1012 (round-8 report): before this fix, two co-existing execution
+	/// profiles for the SAME catalog component -- an imported, credential-less SRG
+	/// profile and a seeded, credential-bearing STIG profile -- were tiebroken purely
+	/// by the lowest <c>ExecutionProfile.Id</c>, which is insertion order, not a
+	/// documented preference. This is the exact shape the round-8 live evidence
+	/// describes: the imported profile happened to have the lower id and won, so every
+	/// scan job fanned out with no credential. The fix orders by
+	/// docs/compliance-parity.md's documented report-group Priority column first (STIG
+	/// priorities 1-5 all sort below every SRG's priority 6), so the STIG profile wins
+	/// regardless of which one was inserted first -- this seeds the STIG profile with
+	/// the HIGHER id specifically to prove the ordering is priority-driven, not an
+	/// accidental id coincidence.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_TwoProfilesForSameComponent_PrefersLowerDocumentedPriorityOverInsertionOrder()
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+
+		CatalogSourceRevision sourceRevision = await _catalog.UpsertSourceRevisionAsync("source-tiebreak", null, CancellationToken.None);
+		CatalogProduct product = await _catalog.UpsertProductAsync(sourceRevision.Id, "VMware", "vsphere-tiebreak", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
+		CatalogComponent component = await _catalog.UpsertComponentAsync(
+			productVersion.Id, new CatalogComponentDefinition("esxi-tiebreak", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
+
+		// Imported (SRG, priority 6, no benchmark) profile created FIRST -- lower id --
+		// with ONLY vsphere-api required (matches what CredentialRequirementDerivation
+		// now derives for a vmware-transport component).
+		CatalogContentRelease srgRelease = await _catalog.UpsertContentReleaseAsync(sourceRevision.Id, CatalogKinds.Srg, "release-srg-tiebreak", "Test SRG Release", CancellationToken.None);
+		CatalogReportGroup srgGroup = await _catalog.UpsertReportGroupAsync("srg-tiebreak", "SRG", 6, CancellationToken.None);
+		CatalogExecutionProfile srgProfile = await _catalog.CreateExecutionProfileAsync(component.Id, srgRelease.Id, srgGroup.Id, "1.0.0", CatalogOutputKinds.Hdf, CancellationToken.None);
+		await _catalog.AddCredentialRequirementAsync(srgProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
+		await ActivateBaselineAsync(srgProfile.Id, "tiebreak-srg", benchmarkRevisionId: null);
+
+		// Seeded (STIG, priority 4 -- ESXi STIG) profile created SECOND -- higher id --
+		// with vsphere-api required, mirroring a real seed row.
+		CatalogContentRelease stigRelease = await _catalog.UpsertContentReleaseAsync(sourceRevision.Id, CatalogKinds.Stig, "release-stig-tiebreak", "Test STIG Release", CancellationToken.None);
+		CatalogReportGroup stigGroup = await _catalog.UpsertReportGroupAsync("esxi-stig-tiebreak", "ESXi STIG", 4, CancellationToken.None);
+		CatalogExecutionProfile stigProfile = await _catalog.CreateExecutionProfileAsync(component.Id, stigRelease.Id, stigGroup.Id, "1.0.0", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		await _catalog.AddCredentialRequirementAsync(stigProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
+		Waypoint.Core.ComplianceContent.Xccdf.BenchmarkRevision benchmarkRevision = await ImportBenchmarkAsync("tiebreak-stig-benchmark");
+		await _catalog.SetBenchmarkReferenceAsync(stigProfile.Id, "tiebreak-stig-benchmark", "V1R1", CancellationToken.None);
+		await ActivateBaselineAsync(stigProfile.Id, "tiebreak-stig", benchmarkRevision.Id);
+
+		Assert.True(srgProfile.Id.CompareTo(stigProfile.Id) < 0 || srgProfile.CreatedAt <= stigProfile.CreatedAt,
+			"Test setup invariant: the SRG profile must be created (and therefore ordered) before the STIG profile for this to actually exercise the tiebreak.");
+
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, component.Id, "8.0.3", "host-tiebreak-9001");
+
+		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+
+		ScanPlanItem item = Assert.Single(plan.Items);
+		Assert.Equal(stigProfile.Id, item.CatalogExecutionProfileId);
+		Assert.NotNull(item.BenchmarkRevisionId);
+		Assert.Empty(plan.Skips);
+	}
+
+	/// <summary>
+	/// Issue #1012 defense-in-depth: a resolved execution profile on a documented
+	/// credentialed transport (vmware) whose <c>catalog_credential_requirements</c>
+	/// resolved to an EMPTY set -- the exact round-8 shape an importer-promoted profile
+	/// could reach before <see cref="Waypoint.Core.ComplianceContent.CredentialRequirementDerivation"/>
+	/// existed -- is skipped at PLAN-COMPILE time with an honest, previewable reason,
+	/// never silently accepted with a zero-length RequiredPurposes that would let
+	/// RunCreationService find no credential gap and fan out a credential-less job.
+	/// This test builds the execution profile directly through
+	/// <see cref="ICatalogRepository.CreateExecutionProfileAsync"/> WITHOUT calling
+	/// AddCredentialRequirementAsync at all -- reproducing exactly the pre-#1012
+	/// catalog state (zero requirement rows) regardless of how it got there.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_VmwareTransportProfileWithZeroCredentialRequirements_IsSkippedAtPreviewTime_NeverSilentlyAccepted()
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+
+		CatalogSourceRevision sourceRevision = await _catalog.UpsertSourceRevisionAsync("source-nocred", null, CancellationToken.None);
+		CatalogProduct product = await _catalog.UpsertProductAsync(sourceRevision.Id, "VMware", "vsphere-nocred", "VMware vSphere", CancellationToken.None);
+		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, "8.0.3", "8.0.3", CancellationToken.None);
+		CatalogComponent component = await _catalog.UpsertComponentAsync(
+			productVersion.Id, new CatalogComponentDefinition("esxi-nocred", "ESXi Host", CatalogTransports.VMware, CatalogSelectorKinds.Esxi, null, null), CancellationToken.None);
+		CatalogContentRelease release = await _catalog.UpsertContentReleaseAsync(sourceRevision.Id, CatalogKinds.Srg, "release-nocred", "Test Release", CancellationToken.None);
+		CatalogReportGroup reportGroup = await _catalog.UpsertReportGroupAsync("group-nocred", "Test Group", 6, CancellationToken.None);
+		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(component.Id, release.Id, reportGroup.Id, "1.0.0", CatalogOutputKinds.Hdf, CancellationToken.None);
+		// Deliberately NO AddCredentialRequirementAsync call -- reproduces the pre-#1012
+		// importer-promoted state directly, independent of the promotion-path fix.
+		await ActivateBaselineAsync(executionProfile.Id, "nocred", benchmarkRevisionId: null);
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, component.Id, "8.0.3", "host-nocred-9002");
+
+		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+
+		Assert.Empty(plan.Items);
+		ScanPlanSkip skip = Assert.Single(plan.Skips);
+		Assert.Equal(componentId, skip.ComponentId);
+		Assert.Equal(ScanPlanSkipReasons.CredentialedTransportWithNoRequirement, skip.Reason);
+		Assert.Contains(executionProfile.Id.ToString(), skip.Detail, StringComparison.Ordinal);
+		Assert.False(plan.IsRunnable);
+	}
+
 	[Fact]
 	public async Task CompileAsync_NoActiveBaseline_IsSkippedNotFailed()
 	{

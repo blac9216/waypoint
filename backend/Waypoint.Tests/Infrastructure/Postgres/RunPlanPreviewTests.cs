@@ -337,6 +337,15 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 		(Guid catalogComponentId, Guid executionProfileId) = await SeedCompatibleCatalogComponentWithDeclaredInputAsync();
 		await SaveInputConfigDocAsync(executionProfileId, "target_ip: 192.0.2.77\n");
 
+		// Issue #1012: SeedCompatibleCatalogComponentWithDeclaredInputAsync's execution
+		// profile now carries a real vsphere-api requirement (the vmware-transport
+		// component always needs one) -- this test is about the config-doc digest fold,
+		// not credential resolution. CreateTargetAsync already mirrors its seeded
+		// credential_ref into a real target_credential_bindings row for the target
+		// kind's default purpose (TargetRepository.CreateAsync's own dual-write --
+		// vsphere-api for a vsphere target), so the item stays runnable with no extra
+		// binding needed here.
+
 		await _components.UpsertDiscoveredAsync(
 			targetId, [new DiscoveredComponent("esxi", "host-9100", "esxi-preview-cfg.example.internal", null, catalogComponentId, "8.0.3")], CancellationToken.None);
 		Component seeded = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None)).Single();
@@ -524,7 +533,17 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 		ErrorEnvelopeAssertions.AssertEnvelope(await response.Content.ReadAsStringAsync(), "validation_error");
 	}
 
-	/// <summary>Mirrors <see cref="ScanRunTargetScopeTests.SeedCompatibleCatalogComponentAsync"/> -- SRG chain, no credential requirement.</summary>
+	/// <summary>
+	/// Mirrors <see cref="ScanRunTargetScopeTests.SeedCompatibleCatalogComponentAsync"/>
+	/// -- SRG chain. Issue #1012: a vmware-transport component always requires
+	/// <c>vsphere-api</c> per docs/compliance-parity.md's provenance matrix (the exact
+	/// purpose <see cref="Waypoint.Core.ComplianceContent.CredentialRequirementDerivation"/>
+	/// now derives for this shape at real promotion time) -- ScanPlannerService's own
+	/// issue #1012 defense-in-depth would otherwise skip this fixture's plan item as
+	/// <c>credentialed_transport_with_no_requirement</c> instead of the digest/
+	/// resolvability/run-creation behavior these tests actually exercise, so this
+	/// fixture now carries the real requirement a genuine catalog entry would have.
+	/// </summary>
 	private async Task<Guid> SeedCompatibleCatalogComponentAsync()
 	{
 		CatalogRepository catalog = new(_fixture.ConnectionString);
@@ -538,6 +557,7 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 		CatalogReportGroup reportGroup = await catalog.UpsertReportGroupAsync($"group-{Guid.NewGuid():N}", "Test Group", 1, CancellationToken.None);
 		CatalogExecutionProfile executionProfile = await catalog.CreateExecutionProfileAsync(
 			catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		await catalog.AddCredentialRequirementAsync(executionProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
 
 		ContentRevision revision = await baselines.RecordStagedRevisionAsync(
 			$"commit-{Guid.NewGuid():N}", $"digest-{Guid.NewGuid():N}", $"revisions/{Guid.NewGuid():N}", CancellationToken.None);
@@ -592,6 +612,9 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 	/// non-empty config snapshot the digest folds -- and, being optional, it never trips the
 	/// missing-required-input skip when the doc is present anyway. Returns both the catalog
 	/// component id and the execution profile id the config doc keys against (issue #735).
+	/// Issue #1012: also carries the real <c>vsphere-api</c> requirement a vmware-transport
+	/// component always has (see <see cref="SeedCompatibleCatalogComponentAsync"/>'s
+	/// identical remark).
 	/// </summary>
 	private async Task<(Guid CatalogComponentId, Guid ExecutionProfileId)> SeedCompatibleCatalogComponentWithDeclaredInputAsync()
 	{
@@ -606,6 +629,7 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 		CatalogReportGroup reportGroup = await catalog.UpsertReportGroupAsync($"group-{Guid.NewGuid():N}", "Test Group", 1, CancellationToken.None);
 		CatalogExecutionProfile executionProfile = await catalog.CreateExecutionProfileAsync(
 			catalogComponent.Id, release.Id, reportGroup.Id, "v1", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+		await catalog.AddCredentialRequirementAsync(executionProfile.Id, "vsphere-api", isRequired: true, CancellationToken.None);
 		await catalog.UpsertDeclaredInputAsync(executionProfile.Id, "target_ip", "string", isRequired: false, CancellationToken.None);
 
 		ContentRevision revision = await baselines.RecordStagedRevisionAsync(

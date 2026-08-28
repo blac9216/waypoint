@@ -115,7 +115,30 @@ public static class ScanPlanSkipReasons
 	/// </summary>
 	public const string MissingRequiredInput = "missing_required_input";
 
-	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, UnmappedBenchmark, MissingRequiredInput];
+	/// <summary>
+	/// Issue #1012 defense-in-depth: the resolved execution profile's own catalog
+	/// transport is one of docs/compliance-parity.md's closed transport vocabulary --
+	/// EVERY documented transport (<c>vmware</c>, <c>ssh</c>, <c>nsx-api</c>,
+	/// <c>vcf-api</c>) implies at least one required credential purpose per the
+	/// provenance matrix's Purpose column -- yet the profile's
+	/// <c>catalog_credential_requirements</c> resolved to an EMPTY set. Before this
+	/// issue, an importer-promoted profile could reach this state (root cause: only
+	/// seed migrations wrote that table) and the planner treated the empty set as
+	/// nothing-to-resolve, so <see cref="Waypoint.Infrastructure.Runs.RunCreationService"/>
+	/// found no gap and the job fanned out with no credential at all, failing only at
+	/// execution with no preview-time warning. This skip makes that state visible
+	/// AT PLAN-COMPILE TIME, before any run/job row exists -- the round-8 report's core
+	/// complaint was exactly "no preview-time gap" for this scenario. Issue #1012 also
+	/// fixes the root cause (catalog promotion now derives and writes the same
+	/// requirements a seed row of the identical shape would carry -- see
+	/// <see cref="Waypoint.Core.ComplianceContent.CredentialRequirementDerivation"/>),
+	/// so this skip is a safety net for any catalog state this fix did not anticipate
+	/// (a future promotion path, a hand-edited row, a not-yet-covered shape), never the
+	/// primary defense.
+	/// </summary>
+	public const string CredentialedTransportWithNoRequirement = "credentialed_transport_with_no_requirement";
+
+	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, UnmappedBenchmark, MissingRequiredInput, CredentialedTransportWithNoRequirement];
 }
 
 /// <summary>

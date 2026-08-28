@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.ComplianceContent.SemanticImport;
+using Waypoint.Core.Secrets;
 using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
 using Xunit;
@@ -890,5 +891,242 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 		IReadOnlyList<CatalogComponent> topLevelVcenterCandidates = await _repository.FindTopLevelComponentsByKeyAndVersionAsync("vcenter", "8.0.3", CancellationToken.None);
 		CatalogComponent onlyCandidate = Assert.Single(topLevelVcenterCandidates);
 		Assert.Equal(seededVersion.Id, onlyCandidate.ProductVersionId);
+	}
+
+	// --- issue #1012: importer-promoted profiles must carry credential requirements ---
+
+	/// <summary>
+	/// Failing-test-first repro of issue #1012's exact round-8 root cause: BEFORE this
+	/// issue's fix, <see cref="ICatalogRepository.PromoteCandidateAsync"/> never wrote
+	/// <c>catalog_credential_requirements</c> at all -- only the hand-curated seed
+	/// migrations (0064/0067/0069) did. A vmware-transport vCenter candidate (the
+	/// round-8 report's own example: "a vmware-transport ESXi/vCenter SRG scan still
+	/// needs vsphere-api") therefore promoted with ZERO requirement rows, and
+	/// <c>ScanPlannerService</c> derived an empty <c>RequiredPurposes</c> for it -- no
+	/// preview-time gap, no demotion, a credential-less job fan-out. This test would
+	/// have failed against pre-fix <c>PromoteCandidateAsync</c> (0 requirements) and
+	/// passes now that promotion derives them via
+	/// <see cref="CredentialRequirementDerivation"/>.
+	/// </summary>
+	[Fact]
+	public async Task PromoteCandidate_VmwareTransport_DerivesVsphereApiRequirement()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate();
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(candidate, PromotionRequest(), CancellationToken.None);
+
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		CatalogCredentialRequirement requirement = Assert.Single(detail!.CredentialRequirements);
+		Assert.Equal(CredentialPurposes.VSphereApi, requirement.Purpose);
+		Assert.True(requirement.IsRequired);
+	}
+
+	/// <summary>
+	/// The doc's VCSA named-service row ("VCSA EAM, Lookup, PerfCharts, Photon,
+	/// PostgreSQL, STS, UI, VAMI, Envoy | ssh / named VCSA service | vsphere-api +
+	/// vcsa-ssh") requires BOTH purposes, exactly like migration 0067's own seeded
+	/// vsphere VCSA rows -- an imported VCSA service profile must match.
+	/// </summary>
+	[Fact]
+	public async Task PromoteCandidate_VsphereVcsaNamedService_DerivesBothVsphereApiAndVcsaSshRequirements()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate(
+			profileKey: "vsphere/8.0.3/v2r3-stig/inspec/baseline/eam", componentKey: "eam", transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Service)
+			with
+		{ SelectorName = "eam" };
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(candidate, PromotionRequest(), CancellationToken.None);
+
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		Assert.Equal(2, detail!.CredentialRequirements.Count);
+		Assert.Contains(detail.CredentialRequirements, r => r.Purpose == CredentialPurposes.VSphereApi);
+		Assert.Contains(detail.CredentialRequirements, r => r.Purpose == CredentialPurposes.VcsaSsh);
+	}
+
+	/// <summary>Doc row: NSX named-function -&gt; nsx-api only.</summary>
+	[Fact]
+	public async Task PromoteCandidate_NsxApiTransport_DerivesNsxApiRequirement()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate(
+			profileKey: "nsx/4.1.2/v1r2-stig/inspec/baseline/manager", componentKey: "manager", transport: CatalogTransports.NsxApi, selectorKind: CatalogSelectorKinds.Service)
+			with
+		{ VendorFamily = "nsx", SelectorName = "manager" };
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(candidate, PromotionRequest(), CancellationToken.None);
+
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		CatalogCredentialRequirement requirement = Assert.Single(detail!.CredentialRequirements);
+		Assert.Equal(CredentialPurposes.NsxApi, requirement.Purpose);
+	}
+
+	/// <summary>Doc row: whole-appliance ssh/target (Aria/vIDM/Photon) -&gt; srg-ssh only.</summary>
+	[Fact]
+	public async Task PromoteCandidate_SshTargetWholeAppliance_DerivesSrgSshRequirement()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate(
+			profileKey: "photon/5.0/v3r3-srg/inspec/baseline", componentKey: "photon", kind: CatalogKinds.Srg, transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Target)
+			with
+		{ VendorFamily = "photon" };
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(candidate, PromotionRequest() with { OutputKind = CatalogOutputKinds.Hdf }, CancellationToken.None);
+
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		CatalogCredentialRequirement requirement = Assert.Single(detail!.CredentialRequirements);
+		Assert.Equal(CredentialPurposes.SrgSsh, requirement.Purpose);
+	}
+
+	/// <summary>Doc row: VCF ssh named-service -&gt; srg-ssh only (NOT vsphere-api, unlike the vsphere VCSA row -- VCF appliances are not vCenter-managed).</summary>
+	[Fact]
+	public async Task PromoteCandidate_VcfSshNamedService_DerivesSrgSshOnly_NeverVsphereApi()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate(
+			profileKey: "vcf/9.0.0/Y26M05-srg/inspec/baseline/sddc-manager-nginx", componentKey: "sddc-manager-nginx", kind: CatalogKinds.Srg,
+			transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Service)
+			with
+		{ VendorFamily = "vcf", SelectorName = "sddc-manager-nginx" };
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(candidate, PromotionRequest() with { OutputKind = CatalogOutputKinds.Hdf }, CancellationToken.None);
+
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		CatalogCredentialRequirement requirement = Assert.Single(detail!.CredentialRequirements);
+		Assert.Equal(CredentialPurposes.SrgSsh, requirement.Purpose);
+	}
+
+	/// <summary>Doc row: VCF vcf-api named-service (issue #977/ADR-0024) -&gt; vcf-api only.</summary>
+	[Fact]
+	public async Task PromoteCandidate_VcfApiTransport_DerivesVcfApiRequirement()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate(
+			profileKey: "vcf/9.0.0/Y26M05-srg/inspec/baseline/sddc-manager-api", componentKey: "sddc-manager-api", kind: CatalogKinds.Srg,
+			transport: CatalogTransports.VcfApi, selectorKind: CatalogSelectorKinds.Service)
+			with
+		{ VendorFamily = "vcf", SelectorName = "sddc-manager-api" };
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(candidate, PromotionRequest() with { OutputKind = CatalogOutputKinds.Hdf }, CancellationToken.None);
+
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		CatalogCredentialRequirement requirement = Assert.Single(detail!.CredentialRequirements);
+		Assert.Equal(CredentialPurposes.VcfApi, requirement.Purpose);
+	}
+
+	/// <summary>
+	/// Fail-closed (issue #1012 AC): a well-formed, vocabulary-VALID transport/selector
+	/// combination this derivation does not document (ssh/service under a product
+	/// family that is neither vsphere nor vcf -- e.g. a hypothetical future named-
+	/// service family) derives NO purposes at all rather than guessing one. Promotion
+	/// still succeeds (never quarantined for this alone -- see
+	/// <see cref="Waypoint.Core.ComplianceContent.CredentialRequirementDerivation"/>'s
+	/// own doc comment for why: <c>ScanPlannerService</c>'s defense-in-depth refuses to
+	/// treat the resulting empty set as "no gap" at preview time), but this promotion
+	/// path itself never invents a purpose.
+	/// </summary>
+	[Fact]
+	public async Task PromoteCandidate_SshServiceUnderUndocumentedFamily_DerivesNoRequirements_FailsClosed()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate(
+			profileKey: "vidm/3.3.0/v1r3-srg/inspec/baseline/some-service", componentKey: "some-service", kind: CatalogKinds.Srg,
+			transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Service)
+			with
+		{ VendorFamily = "vidm", SelectorName = "some-service" };
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(candidate, PromotionRequest() with { OutputKind = CatalogOutputKinds.Hdf }, CancellationToken.None);
+
+		Assert.NotNull(outcome.ExecutionProfileId);
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		Assert.Empty(detail!.CredentialRequirements);
+	}
+
+	/// <summary>
+	/// Doc-authority parity, proven against the REAL seed migrations rather than just
+	/// the doc text: promoting an imported candidate of the exact same (product family,
+	/// transport, selector kind) shape as migration 0067's seeded vSphere 9.0 VCSA
+	/// "envoy" row must derive the IDENTICAL requirement set the seed wrote for that
+	/// row -- the seed is the reference implementation issue #1012's task brief calls
+	/// out by name.
+	/// </summary>
+	[Fact]
+	public async Task PromoteCandidate_SameShapeAsSeededRow_DerivesIdenticalRequirementsToTheSeed()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// This class's own InitializeAsync TRUNCATEs the whole catalog identity tree for
+		// isolation (see ResetDataAsync above) -- schema_migrations already marks
+		// 0064/0067/0069/0070 applied from an earlier Postgres-collection test's
+		// migrator run, so NpgsqlSchemaMigrator.ApplyAsync() alone would be a no-op here
+		// and the seed rows this test compares against would not exist. Re-apply their
+		// raw SQL directly, in order, bypassing schema_migrations tracking entirely --
+		// the exact idiom and ordering ExecutionCatalogSeedTests.ReapplySeedMigrationsAsync
+		// already establishes (0067's execution-profile insert needs 0064's
+		// catalog_report_groups 'srg' row to already exist).
+		foreach (string fileName in new[]
+		{
+			"0064_execution_catalog_seed.sql", "0067_execution_catalog_seed_expansion.sql",
+			"0069_vcf_api_credential_purpose.sql", "0070_declared_scope_version_keys.sql",
+		})
+		{
+			string seedSql = await ReadEmbeddedMigrationAsync(fileName);
+			await using NpgsqlCommand reapply = new(seedSql, connection);
+			await reapply.ExecuteNonQueryAsync();
+		}
+
+		await using NpgsqlCommand seededQuery = new(
+			"""
+			SELECT r.purpose
+			FROM catalog_credential_requirements r
+			JOIN catalog_execution_profiles ep ON ep.id = r.execution_profile_id
+			JOIN catalog_components cc ON cc.id = ep.component_id
+			JOIN catalog_product_versions pv ON pv.id = cc.product_version_id
+			JOIN catalog_products p ON p.id = pv.product_id
+			WHERE p.product_key = 'vsphere' AND pv.version_key = '9.0' AND cc.component_key = 'envoy'
+			ORDER BY r.purpose
+			""", connection);
+		List<string> seededPurposes = [];
+		await using (NpgsqlDataReader reader = await seededQuery.ExecuteReaderAsync())
+		{
+			while (await reader.ReadAsync())
+			{
+				seededPurposes.Add(reader.GetString(0));
+			}
+		}
+
+		Assert.NotEmpty(seededPurposes);
+
+		// productVersionKey "9.0" (not "9.0.0") matches migration 0070's declared-scope
+		// rewrite for this exact seeded row (issue #998: the catalog product-version key
+		// is the vendor's declared version scope, verbatim -- "9.0" is vSphere 9.0's
+		// minor-scoped declared form) -- an importer promoting real content for the same
+		// product version resolves to the SAME declared-scope key the seed uses, per
+		// issue #1007/#998's own fix, so this attaches to the SAME catalog_product_versions
+		// row rather than a sibling.
+		SemanticCandidate candidate = ExecutableLeafCandidate(
+			profileKey: "vsphere/9.0/Y26M05-srg/inspec/baseline/envoy", productVersionKey: "9.0", kind: CatalogKinds.Srg,
+			componentKey: "envoy", transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Service)
+			with
+		{ SelectorName = "envoy" };
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(
+			candidate, PromotionRequest() with { OutputKind = CatalogOutputKinds.Hdf }, CancellationToken.None);
+
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		List<string> derivedPurposes = [.. detail!.CredentialRequirements.Select(r => r.Purpose).OrderBy(p => p, StringComparer.Ordinal)];
+		Assert.Equal(seededPurposes, derivedPurposes);
+	}
+
+	/// <summary>Reads a seed migration's raw SQL out of the embedded manifest resources (same idiom as <c>ExecutionCatalogSeedTests</c>).</summary>
+	private static async Task<string> ReadEmbeddedMigrationAsync(string fileName)
+	{
+		System.Reflection.Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
+		string resourceName = assembly.GetManifestResourceNames().Single(n => n.EndsWith(fileName, StringComparison.Ordinal));
+		await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+		using StreamReader reader = new(stream);
+		return await reader.ReadToEndAsync();
 	}
 }
