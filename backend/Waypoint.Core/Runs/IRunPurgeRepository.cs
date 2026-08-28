@@ -41,6 +41,18 @@ public interface IRunPurgeRepository
 	Task<RunPurgeTombstone?> GetTombstoneAsync(Guid runId, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Issue #1013: run ids of every <c>run_purges</c> row whose two phases are both
+	/// durably done (<c>db_phase_done AND artifacts_phase = 'done'</c>) but which has
+	/// not been finalized (the row still exists -- finalization deletes it). These are
+	/// exactly the purges stuck one step short of their tombstone because the async
+	/// artifact-purge job completed after the operator's original request returned.
+	/// Consumed by the API-side <c>RunPurgeFinalizeHostedService</c> sweep; a
+	/// <c>failed</c> artifacts phase is deliberately NOT selected -- that state is an
+	/// operator-retryable failure, not a pending finalization.
+	/// </summary>
+	Task<IReadOnlyList<Guid>> ListPendingFinalizeRunIdsAsync(CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Creates the <c>run_purges</c> row for a newly-requested purge. Idempotent by
 	/// primary key: if a row already exists (a prior partially-completed attempt) this
 	/// leaves it untouched and returns the existing row rather than overwriting its

@@ -143,6 +143,42 @@ public sealed class RunPurgeService
 	}
 
 	/// <summary>
+	/// Issue #1013: finalizes a purge whose two phases are both already durably done,
+	/// so a run with on-disk artifacts finalizes from the SAME operator action that
+	/// started the purge rather than requiring a manual re-POST. Called by
+	/// <see cref="RunPurgeFinalizeHostedService"/>'s API-side sweep -- NOT by the
+	/// compliance-runner's <c>PurgeJobHandler</c>, deliberately: migration 0042 grants
+	/// <c>waypoint_compliance_runner</c> only SELECT + a column-limited UPDATE on
+	/// <c>run_purges</c>; INSERT on <c>run_purge_tombstones</c> and DELETE on
+	/// <c>run_purges</c> are API-only by security posture ("nothing runner-side ever
+	/// removes a run_purges row", that migration's grant header), so finalization must
+	/// run in the API process under the owner connection, exactly like
+	/// <see cref="PurgeRunAsync"/> itself.
+	/// Re-reads status fresh from <c>run_purges</c> rather than trusting any
+	/// caller-held copy, so it observes the <c>artifacts_phase = 'done'</c> the
+	/// runner's outcome report committed. Guarded to the <c>done</c> phase only: a
+	/// <c>failed</c> report is never selected by the sweep
+	/// (<see cref="IRunPurgeRepository.ListPendingFinalizeRunIdsAsync"/>) and is
+	/// re-checked here anyway so this method can never auto-re-enqueue or finalize a
+	/// failed pass -- this class's retry contract is unchanged: only a genuinely
+	/// successful artifact pass finalizes here; a failure still needs (and gets) a
+	/// retryable operator re-POST. A concurrently-vanished <c>run_purges</c> row (an
+	/// operator re-POST finalized it between the sweep's list and this call) is a
+	/// silent no-op.
+	/// </summary>
+	public async Task<bool> FinalizePendingAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		RunPurgeStatus? status = await _purges.GetStatusAsync(runId, cancellationToken).ConfigureAwait(false);
+		if (status is null || !status.DbPhaseDone || status.ArtifactsPhase != "done")
+		{
+			return false;
+		}
+
+		RunPurgeResult result = await ResumeAsync(status, cancellationToken).ConfigureAwait(false);
+		return result.Outcome == RunPurgeOutcome.Completed;
+	}
+
+	/// <summary>
 	/// Advances an in-flight <c>run_purges</c> row by exactly one phase per call: the
 	/// database phase if not yet done, then the artifact phase (enqueue if never
 	/// started, or re-enqueue if the last attempt failed), then completion if both

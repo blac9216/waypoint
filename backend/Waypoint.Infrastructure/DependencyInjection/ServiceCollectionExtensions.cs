@@ -133,6 +133,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<Waypoint.Core.Runs.RunHistoryRolloffOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.Runs.RunHistoryRolloffOptions.SectionName));
 
+		services.AddOptions<Waypoint.Core.Runs.RunPurgeFinalizeOptions>()
+			.Bind(configuration.GetSection(Waypoint.Core.Runs.RunPurgeFinalizeOptions.SectionName));
+
 		services.AddOptions<Waypoint.Core.SystemState.WorkerRegistryOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.SystemState.WorkerRegistryOptions.SectionName));
 
@@ -464,6 +467,14 @@ public static class ServiceCollectionExtensions
 		// hosted service itself no-ops immediately when disabled rather than this call
 		// site needing to know that.
 		services.AddHostedService<Runs.RunHistoryRolloffHostedService>();
+
+		// Issue #1013: finalizes run purges whose async artifact-purge job has
+		// reported done -- tombstone + purged_at + in-flight-row deletion are API-only
+		// writes (migration 0042's least-privilege grants keep them off the runner
+		// roles, the same reason THIS registration is API-surface-only: a runner host
+		// starting this sweep would permission-fail every tick, the exact issue #443
+		// failure class this method's doc comment documents).
+		services.AddHostedService<Runs.RunPurgeFinalizeHostedService>();
 
 		// Issue #31: control-plane schedule dispatch. API-surface only -- see this
 		// method's own doc comment for why a runner host (which also calls

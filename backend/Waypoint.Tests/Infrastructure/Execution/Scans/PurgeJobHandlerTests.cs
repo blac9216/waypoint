@@ -69,6 +69,8 @@ public sealed class PurgeJobHandlerTests : IDisposable
 
 		public Task<RunPurgeTombstone?> GetTombstoneAsync(Guid runId, CancellationToken cancellationToken) => Task.FromResult<RunPurgeTombstone?>(null);
 
+		public Task<IReadOnlyList<Guid>> ListPendingFinalizeRunIdsAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<Guid>>([]);
+
 		public Task<Guid?> FindRunIdByArtifactJobIdAsync(Guid artifactJobId, CancellationToken cancellationToken) => Task.FromResult(RunIdForArtifactJob);
 
 		public Task<RunPurgeStatus> CreateAsync(Guid runId, string requestedBy, string priorState, CancellationToken cancellationToken) =>

@@ -2072,6 +2072,12 @@ public sealed class FakeRunPurgeRepository : IRunPurgeRepository
 		return Task.FromResult<RunPurgeTombstone?>(null);
 	}
 
+	public Task<IReadOnlyList<Guid>> ListPendingFinalizeRunIdsAsync(CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult<IReadOnlyList<Guid>>([]);
+	}
+
 	public Task<Guid?> FindRunIdByArtifactJobIdAsync(Guid artifactJobId, CancellationToken cancellationToken)
 	{
 		_ = (artifactJobId, cancellationToken);
