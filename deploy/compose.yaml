@@ -35,6 +35,9 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+      # why: docs/rationale/deploy.md#kcrealmreconcile-why-needed
+      keycloak-realm-reconcile:
+        condition: service_completed_successfully
     # Long syntax: published: aliases https-port.
     # why: docs/rationale/deploy.md#compose-ports-long-syntax
     ports:
@@ -190,6 +193,28 @@ services:
       retries: 6
       start_period: 60s
     restart: unless-stopped
+
+  # --- keycloak-realm-reconcile ---
+  # One-shot, every `up`: force-updates the waypoint-backend/waypoint-frontend
+  # clients' rootUrl/redirectUris/webOrigins to the CURRENT WAYPOINT_PUBLIC_URL,
+  # regardless of whether `--import-realm` actually imported this boot.
+  # why: docs/rationale/deploy.md#kcrealmreconcile-why-needed
+  keycloak-realm-reconcile:
+    build:
+      context: ./keycloak-realm-reconcile
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD_FILE: /run/secrets/keycloak-bootstrap-admin-password
+      # why: docs/rationale/deploy.md#compose-public-url-single-origin
+      WAYPOINT_PUBLIC_URL: *public-url
+    secrets:
+      - keycloak-bootstrap-admin-password
+    networks:
+      - internal
+    restart: "no"
 
   # --- compliance-runner ---
   # One replica by default.
