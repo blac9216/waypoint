@@ -339,6 +339,58 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 	}
 
 	/// <summary>
+	/// Issue #1063 (round-1 review, blocker 1) -- the two-pass case, and the only
+	/// sequence in which this issue's honest-degradation rule can actually be wrong.
+	/// Pass 1 derives and links two VMs from a linked vCenter root fact; pass 2
+	/// re-discovers the SAME target with the same VM MoRefs and no `vcenter` row at
+	/// all (issue #1115's shape). The derived fact must be CLEARED, not retained:
+	/// <c>UpsertDiscoveredAsync</c>'s COALESCE keeps a directly OBSERVED fact across a
+	/// pass that could not observe it (issue #1000, deliberately unchanged), but a
+	/// derived fact has no independent observation to fall back on -- retaining it
+	/// would leave the VM stamped `derived_from_parent: true` and catalog-linked (so
+	/// still plannable, against a possibly-wrong baseline) off a parent fact this pass
+	/// could not see. Epic #726 section 3: absent facts stay honestly absent.
+	/// </summary>
+	[Fact]
+	public async Task Vm_WhenParentFactDisappearsOnALaterPass_ClearsTheDerivedFactAndItsLink()
+	{
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-1063-two-pass-canary");
+
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1063-bulk-derivation");
+		await RunDiscoverOnceAsync(targetId);
+
+		IReadOnlyList<Waypoint.Core.Components.Component> afterPass1 =
+			await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		foreach (string moref in new[] { "vm-1063-bulk-a", "vm-1063-bulk-b" })
+		{
+			Waypoint.Core.Components.Component derived = afterPass1.Single(c => c.VendorIdentity == moref);
+			Assert.Equal("8.0.3", derived.DiscoveredFact?.ExactVersion);
+			Assert.True(derived.DiscoveredFact!.DerivedFromParent);
+			Assert.NotNull(derived.CatalogComponentId);
+		}
+
+		// Pass 2 on the SAME target: same VM MoRefs, no `vcenter` row this time.
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1063-parent-fact-lost");
+		await RunDiscoverOnceAsync(targetId);
+
+		IReadOnlyList<Waypoint.Core.Components.Component> afterPass2 =
+			await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		foreach (string moref in new[] { "vm-1063-bulk-a", "vm-1063-bulk-b" })
+		{
+			Waypoint.Core.Components.Component cleared = afterPass2.Single(c => c.VendorIdentity == moref);
+			Assert.Null(cleared.DiscoveredFact); // Version-absent: no stale derived version survives.
+			Assert.Null(cleared.CatalogComponentId); // Unlinked: no longer plannable off a fact this pass could not see.
+			Assert.False(cleared.FactConflict);
+		}
+
+		// The host's OWN directly-observed fact is untouched by the derived-fact clear
+		// -- issue #1000's retain-last-known behaviour for observed facts is unchanged.
+		Waypoint.Core.Components.Component host = afterPass2.Single(c => c.VendorIdentity == "host-1063-bulk");
+		Assert.Equal("8.0.3", host.DiscoveredFact?.ExactVersion);
+		Assert.False(host.DiscoveredFact!.DerivedFromParent);
+	}
+
+	/// <summary>
 	/// Issue #1063's honest-degradation AC, and issue #1115's exact concrete case
 	/// (no session matched the target by name, so the pass never emitted a `vcenter`
 	/// row at all): a VM discovered under a root with no version fact this pass must

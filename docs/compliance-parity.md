@@ -178,8 +178,15 @@ fact is marked `derived_from_parent = true` in the VM's `discovered_fact` JSONB
 observed fact -- provenance stays visible and snapshotted, per section 3's own rule.
 When the parent has no version fact this pass (`content.about` unavailable, or issue
 #1115's exact-name-only Enhanced Linked Mode session-match miss), every VM under it
-stays honestly version-absent and unlinked: never a guess, never inherited from an
-earlier pass. Each VM's vSphere instance UUID (`inventory_items.instance_uuid`,
+ends the pass version-absent and unlinked: never a guess, and never left holding a
+derived fact from an earlier pass. That second half is enforced at the write, not just
+at the mapping -- `ComponentRepository.UpsertDiscoveredAsync` normally RETAINS a
+component's last known discovered fact and catalog link across a pass that rendered no
+version opinion (issue #1000, last-known-good for a fact that was genuinely observed on
+that component at least once), but a fact marked `derived_from_parent` is instead
+CLEARED, because it is a copy of a parent fact that this pass no longer has. A VM whose
+`configured_fact` an Admin set keeps that fact and the link resolved from it; only the
+derived discovered fact is cleared. Each VM's vSphere instance UUID (`inventory_items.instance_uuid`,
 migration 0079) is recorded alongside its existing moref-keyed identity so identically
 named VMs stay deconflictable across discovery passes -- component identity itself
 remains keyed on moref, unchanged by this issue.

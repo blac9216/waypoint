@@ -284,8 +284,12 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 
 	/// <summary>
 	/// Issue #1063: a directly observed fact (a host's, or the vcenter root's own) is
-	/// never marked derived -- both the explicit false and the JSONB-field-omitted
-	/// shape (an older fact recorded before this field existed) read back false.
+	/// never marked derived -- both the explicit false this writer emits and the
+	/// JSONB-field-OMITTED shape (a fact recorded before this field existed, which no
+	/// migration rewrites) read back false. The omitted shape cannot be produced by the
+	/// repository's own writer, so the second half rewrites the stored fact to the
+	/// pre-#1063 form with raw SQL and reads it back through the repository -- proving
+	/// the reader treats an absent key exactly like false rather than assuming it.
 	/// </summary>
 	[Fact]
 	public async Task UpsertDiscoveredAsync_WithoutDerivedFromParent_DiscoveredFactStaysFalse()
@@ -298,6 +302,24 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 
 		Assert.NotNull(component.DiscoveredFact);
 		Assert.False(component.DiscoveredFact!.DerivedFromParent);
+
+		// The legacy shape: exact_version/observed_at only, no derived_from_parent key.
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync(CancellationToken.None);
+			await using NpgsqlCommand rewrite = new(
+				"""
+				UPDATE components
+				SET discovered_fact = jsonb_build_object('exact_version', '8.0.3', 'observed_at', now())
+				WHERE id = $1
+				""", connection);
+			rewrite.Parameters.AddWithValue(component.Id);
+			await rewrite.ExecuteNonQueryAsync(CancellationToken.None);
+		}
+
+		Component legacy = Assert.Single(await _repository.ListForTargetAsync(target, includeRetired: true, CancellationToken.None));
+		Assert.Equal("8.0.3", legacy.DiscoveredFact?.ExactVersion);
+		Assert.False(legacy.DiscoveredFact!.DerivedFromParent);
 	}
 
 	[Fact]

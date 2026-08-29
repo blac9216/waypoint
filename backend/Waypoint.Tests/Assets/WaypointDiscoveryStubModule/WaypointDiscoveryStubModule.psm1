@@ -174,6 +174,33 @@ function Invoke-WaypointDiscovery {
 		return
 	}
 
+	if ($Pass -eq '1063-parent-fact-lost') {
+		# Issue #1063 (round-1 review, blocker 1): the SECOND pass of the two-pass
+		# regression -- the exact same target and the exact same VM MoRefs the
+		# '1063-bulk-derivation' pass above emitted, but with NO 'vcenter' row at
+		# all (issue #1115's exact-name-only session-match miss, or any boundary
+		# where content.about could not be observed). The VMs' previously DERIVED
+		# facts must be cleared rather than retained: a derived fact must never
+		# outlive the parent fact it was copied from.
+		[pscustomobject]@{
+			Type = 'host'; MoRef = 'host-1063-bulk'; Name = 'esxi-22.example.internal'
+			ParentMoRef = $null; Build = '99.0.88888888'; Version = '8.0.3'; MaintenanceMode = $false
+		}
+		[pscustomobject]@{
+			Type = 'vm'; MoRef = 'vm-1063-bulk-a'; Name = 'duplicate-vm-name'
+			ParentMoRef = 'host-1063-bulk'; Build = $null; Version = $null; MaintenanceMode = $null
+			InstanceUuid = 'vm-instance-uuid-1063-bulk-a'
+		}
+		[pscustomobject]@{
+			Type = 'vm'; MoRef = 'vm-1063-bulk-b'; Name = 'duplicate-vm-name'
+			ParentMoRef = 'host-1063-bulk'; Build = $null; Version = $null; MaintenanceMode = $null
+			InstanceUuid = 'vm-instance-uuid-1063-bulk-b'
+		}
+		Write-Information 'Discovery complete.'
+		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
+		return
+	}
+
 	if ($Pass -eq '1063-no-parent-version') {
 		# Issue #1063's honest-degradation case (issue #1115's exact-name-only
 		# session-match miss, or any other boundary where the appliance's own

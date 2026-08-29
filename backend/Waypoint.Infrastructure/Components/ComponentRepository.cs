@@ -181,6 +181,38 @@ public sealed class ComponentRepository : IComponentRepository
 			// change) are unchanged.
 			bool discoveryHasVersionOpinion = factJson is not null;
 
+			// Issue #1063 (round-1 review, blocker 1): both DO UPDATE branches below add
+			// ONE narrow exception to the two retain-last-known rules above -- the
+			// COALESCE that keeps a prior discovered_fact across a pass with no version
+			// opinion, and #1000's CASE that keeps the catalog link with it. A fact
+			// carrying `derived_from_parent: true` (only ever a VM's, copied from this
+			// same pass's `vcenter` root fact -- see DiscoverJobHandler.MapToComponents)
+			// is CLEARED instead when the pass produced no fact for it, rather than
+			// retained:
+			//   * A directly OBSERVED fact (an esxi host's, the vcenter root's own) was
+			//     genuinely measured on that component at least once, so retaining it
+			//     across a boundary that could not re-observe it is last-known-good --
+			//     #1000's rationale, deliberately UNCHANGED here.
+			//   * A DERIVED fact never was. It is a copy of a parent fact, and when the
+			//     parent has no fact this pass (issue #1115's exact-name-only Enhanced
+			//     Linked Mode session-match miss, or any boundary where the appliance's
+			//     `content.about` was unavailable) there is nothing left it is a copy
+			//     OF. Retaining it would leave the VM version-present, still stamped
+			//     `derived_from_parent: true` -- indistinguishable on the wire from a
+			//     fresh derivation, `observed_at` the only tell -- and still catalog
+			//     linked, i.e. still selectable and PLANNABLE against a baseline the
+			//     current parent version may no longer support. Epic #726 section 3:
+			//     absent facts stay honestly absent, and provenance never misrepresents
+			//     when a fact was derived.
+			// The clear is expressed on the stored row's own flag rather than on
+			// anything about this pass's item, so it is exactly as narrow as the
+			// provenance flag itself: no observed fact can ever match it. The link is
+			// cleared only when no configured_fact exists -- an Admin PUT resolves
+			// linkage from its own version (SetConfiguredFactAsync), and #1000's whole
+			// point is that a discovery pass with no version opinion must not clobber
+			// it. fact_conflict clears with the fact, since a removed discovered fact
+			// cannot disagree with anything.
+
 			// Issue #1081 (round-1 review, blocker 1): a ROOT component that was
 			// previously discovered WITHOUT an identity and is now discovered WITH one
 			// must be ADOPTED in place, not duplicated. The two upsert branches below
@@ -255,12 +287,18 @@ public sealed class ComponentRepository : IComponentRepository
 					                         vendor_identity, display_name, lifecycle, discovered_fact, last_seen_at)
 					VALUES ($1, $2, $3, $4, $5, $6, 'active', $7::jsonb, now())
 					ON CONFLICT (parent_target_id, catalog_component_key, vendor_identity) DO UPDATE SET
-					    catalog_component_id = CASE WHEN $8 THEN EXCLUDED.catalog_component_id ELSE components.catalog_component_id END,
+					    catalog_component_id = CASE WHEN $8 THEN EXCLUDED.catalog_component_id
+					                                 WHEN components.discovered_fact->>'derived_from_parent' = 'true' AND components.configured_fact IS NULL THEN NULL
+					                                 ELSE components.catalog_component_id END,
 					    display_name = EXCLUDED.display_name,
 					    lifecycle = 'active',
-					    discovered_fact = COALESCE(EXCLUDED.discovered_fact, components.discovered_fact),
-					    fact_conflict = CASE WHEN EXCLUDED.discovered_fact IS NULL THEN components.fact_conflict
-					                          ELSE (components.configured_fact IS NOT NULL AND components.configured_fact->>'exact_version' <> EXCLUDED.discovered_fact->>'exact_version')
+					    discovered_fact = CASE WHEN EXCLUDED.discovered_fact IS NOT NULL THEN EXCLUDED.discovered_fact
+					                            WHEN components.discovered_fact->>'derived_from_parent' = 'true' THEN NULL
+					                            ELSE components.discovered_fact END,
+					    fact_conflict = CASE WHEN EXCLUDED.discovered_fact IS NOT NULL
+					                              THEN (components.configured_fact IS NOT NULL AND components.configured_fact->>'exact_version' <> EXCLUDED.discovered_fact->>'exact_version')
+					                          WHEN components.discovered_fact->>'derived_from_parent' = 'true' THEN false
+					                          ELSE components.fact_conflict
 					                     END,
 					    last_seen_at = now(),
 					    continuous_absence_since = NULL
@@ -298,12 +336,18 @@ public sealed class ComponentRepository : IComponentRepository
 					ON CONFLICT (parent_target_id, COALESCE(parent_component_id, '00000000-0000-0000-0000-000000000000'::uuid), catalog_component_key)
 					    WHERE vendor_identity IS NULL
 					    DO UPDATE SET
-					        catalog_component_id = CASE WHEN $7 THEN EXCLUDED.catalog_component_id ELSE components.catalog_component_id END,
+					        catalog_component_id = CASE WHEN $7 THEN EXCLUDED.catalog_component_id
+					                                     WHEN components.discovered_fact->>'derived_from_parent' = 'true' AND components.configured_fact IS NULL THEN NULL
+					                                     ELSE components.catalog_component_id END,
 					        display_name = EXCLUDED.display_name,
 					        lifecycle = 'active',
-					        discovered_fact = COALESCE(EXCLUDED.discovered_fact, components.discovered_fact),
-					        fact_conflict = CASE WHEN EXCLUDED.discovered_fact IS NULL THEN components.fact_conflict
-					                              ELSE (components.configured_fact IS NOT NULL AND components.configured_fact->>'exact_version' <> EXCLUDED.discovered_fact->>'exact_version')
+					        discovered_fact = CASE WHEN EXCLUDED.discovered_fact IS NOT NULL THEN EXCLUDED.discovered_fact
+					                                WHEN components.discovered_fact->>'derived_from_parent' = 'true' THEN NULL
+					                                ELSE components.discovered_fact END,
+					        fact_conflict = CASE WHEN EXCLUDED.discovered_fact IS NOT NULL
+					                                  THEN (components.configured_fact IS NOT NULL AND components.configured_fact->>'exact_version' <> EXCLUDED.discovered_fact->>'exact_version')
+					                              WHEN components.discovered_fact->>'derived_from_parent' = 'true' THEN false
+					                              ELSE components.fact_conflict
 					                         END,
 					        last_seen_at = now(),
 					        continuous_absence_since = NULL
