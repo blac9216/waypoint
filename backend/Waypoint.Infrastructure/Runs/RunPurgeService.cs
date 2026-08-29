@@ -122,15 +122,18 @@ public sealed class RunPurgeService
 		// Issue #784: a held run's evidence graph must never be purged -- checked on
 		// EVERY call (not just the first), so placing a hold after a purge is already
 		// in flight blocks further progress here too, not just a fresh start. This is
-		// one of THREE places the hold is honoured, because this method is not the only
-		// path that can reach a deletion: FinalizePendingAsync (the background finalize
-		// sweep) re-checks it independently, and RunRetentionHoldService.PlaceHoldAsync
-		// cancels an already-enqueued artifact-deletion job so the runner never claims
-		// it. A completed purge is unaffected (the tombstone check above already
-		// returned by that point -- nothing left to protect once the graph is gone).
+		// one of FOUR places the hold is honoured, because this method is not the only
+		// path that can reach a deletion: ResumeAsync re-checks it again immediately
+		// before enqueueing the artifact job (this check happens before the database
+		// phase, which is not instantaneous), FinalizePendingAsync (the background
+		// finalize sweep) re-checks it independently, and
+		// RunRetentionHoldService.PlaceHoldAsync cancels an already-enqueued
+		// artifact-deletion job so the runner never claims it. A completed purge is
+		// unaffected (the tombstone check above already returned by that point --
+		// nothing left to protect once the graph is gone).
 		// #1062's future sweep must call this SAME entry point rather than re-implement
-		// the check, so the exclusion has exactly one enforcement point for both the
-		// manual admin action and the automated sweep.
+		// the check, so the exclusion is enforced by exactly this one set of checks for
+		// both the manual admin action and the automated sweep.
 		if (await _retentionHolds.GetAsync(runId, cancellationToken).ConfigureAwait(false) is not null)
 		{
 			return new RunPurgeResult(RunPurgeOutcome.Held);
@@ -222,6 +225,24 @@ public sealed class RunPurgeService
 			await RunDatabasePhaseAsync(status.RunId, cancellationToken).ConfigureAwait(false);
 			await _purges.MarkDbPhaseDoneAsync(status.RunId, cancellationToken).ConfigureAwait(false);
 			status = status with { DbPhaseDone = true };
+		}
+
+		// Issue #784, pre-enqueue re-check: the caller's hold check (PurgeRunAsync's, or
+		// FinalizePendingAsync's) happened BEFORE the database phase above, which is not
+		// instantaneous. A hold that lands during that span would otherwise be invisible
+		// to this call -- RunRetentionHoldService.PlaceHoldAsync would find no
+		// run_purges.artifact_job_id to cancel (it has not been written yet) and this
+		// call would then enqueue the artifact-deletion job AFTER the hold was already in
+		// force, so a runner would claim it and delete every HDF/CKL file of a held run.
+		// Re-reading the hold here, immediately before the only two irreversible things
+		// left (enqueueing the artifact job, and writing the tombstone), closes that
+		// window: past this point a hold is either already in force -- and refused here
+		// -- or it lands after artifact_job_id exists, where PlaceHoldAsync's cancel
+		// finds it. One extra indexed single-row read per purge advance, on an
+		// admin-initiated action; the cost is irrelevant next to deleting held evidence.
+		if (await _retentionHolds.GetAsync(status.RunId, cancellationToken).ConfigureAwait(false) is not null)
+		{
+			return new RunPurgeResult(RunPurgeOutcome.Held, status);
 		}
 
 		if (status.ArtifactsPhase is "pending" or "failed")

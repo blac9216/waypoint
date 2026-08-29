@@ -47,6 +47,15 @@ namespace Waypoint.Infrastructure.Scans;
 /// walk outside the artifact store. Missing files (a job that never reached the attest
 /// or convert stage, or files already removed by a prior partial run of this same
 /// handler) are tolerated, not treated as failures -- see <see cref="TryDeleteIfPresent"/>.
+///
+/// Cancellation (issue #784): the per-target-job loop checks the execution token before
+/// each job id's files, so a retention hold placed after this job was already claimed --
+/// which can only reach the runner as a cooperative <c>cancel_requested</c> -- stops the
+/// remaining deletions. This narrows, it does not close, that window: whatever was
+/// deleted before the checkpoint is gone. A cancelled pass still reports its outcome
+/// (<c>artifacts_phase = 'failed'</c>, retryable) so the partial deletion is visible
+/// rather than leaving <c>run_purges</c> stuck at <c>running</c>. See
+/// <see cref="RunPurgeOutcome.Held"/> for the full, case-by-case boundary.
 /// </summary>
 public sealed partial class PurgeJobHandler : IJobHandler
 {
@@ -105,8 +114,26 @@ public sealed partial class PurgeJobHandler : IJobHandler
 		int failed = 0;
 		List<string> errors = [];
 
+		bool cancelled = false;
+
 		foreach (string rawJobId in payload.JobIds)
 		{
+			// Issue #784: cooperative cancellation checkpoint. A retention hold placed
+			// while this job is ALREADY CLAIMED cancels the job DB-side
+			// (RunRetentionHoldService.PlaceHoldAsync -> cancel_requested), which the
+			// dispatcher turns into a cancelled token at its next heartbeat tick.
+			// Observing that token here stops the remaining files from being deleted.
+			// It NARROWS -- it cannot close -- the window: the checkpoint is per target
+			// job id, so files already deleted before it is reached are gone, and a hold
+			// that lands mid-deletion is not seen until the next heartbeat. That residue
+			// is stated as-is in RunPurgeOutcome.Held; it is not claimed away.
+			if (cancellationToken.IsCancellationRequested)
+			{
+				cancelled = true;
+				errors.Add("purge cancelled before all artifact files were deleted (retention hold placed, or job cancelled).");
+				break;
+			}
+
 			if (!Guid.TryParse(rawJobId, out Guid jobId))
 			{
 				failed++;
@@ -134,7 +161,13 @@ public sealed partial class PurgeJobHandler : IJobHandler
 			}
 		}
 
-		Guid? targetRunId = await FindRunIdForJobAsync(context.Job.Id, cancellationToken).ConfigureAwait(false);
+		// A cancelled pass still reports its outcome, and does so on an uncancelled token:
+		// the report is what makes the partial deletion visible (artifacts_phase =
+		// 'failed', retryable) instead of leaving run_purges stuck at 'running' forever
+		// with no record of how far the deletion got.
+		CancellationToken reportToken = cancelled ? CancellationToken.None : cancellationToken;
+
+		Guid? targetRunId = await FindRunIdForJobAsync(context.Job.Id, reportToken).ConfigureAwait(false);
 		if (targetRunId is null)
 		{
 			// The run_purges row this job belongs to was not found by
@@ -145,9 +178,15 @@ public sealed partial class PurgeJobHandler : IJobHandler
 				$"No run_purges row references purge job '{context.Job.Id}' as its artifact_job_id -- outcome could not be recorded.");
 		}
 
-		bool succeeded = failed == 0;
+		bool succeeded = failed == 0 && !cancelled;
 		await _purges.ReportArtifactOutcomeAsync(
-			targetRunId.Value, succeeded, deleted, succeeded ? null : string.Join("; ", errors), cancellationToken).ConfigureAwait(false);
+			targetRunId.Value, succeeded, deleted, succeeded ? null : string.Join("; ", errors), reportToken).ConfigureAwait(false);
+
+		if (cancelled)
+		{
+			LogCancelled(_logger, context.Job.Id, deleted);
+			return JobExecutionOutcome.Failed($"purge cancelled after deleting {deleted} artifact file(s); the remaining files were left in place.");
+		}
 
 		if (!succeeded)
 		{
@@ -209,6 +248,9 @@ public sealed partial class PurgeJobHandler : IJobHandler
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "purge job {JobId} deleted {Deleted} artifact file(s) but failed on {Failed}: {Errors}")]
 	private static partial void LogPartialFailure(ILogger logger, Guid jobId, int deleted, int failed, string errors);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "purge job {JobId} was cancelled after deleting {Deleted} artifact file(s); remaining files left in place")]
+	private static partial void LogCancelled(ILogger logger, Guid jobId, int deleted);
 
 	private sealed record PurgePayload(List<string>? JobIds);
 }

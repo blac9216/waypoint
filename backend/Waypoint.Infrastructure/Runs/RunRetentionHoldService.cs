@@ -29,8 +29,10 @@ namespace Waypoint.Infrastructure.Runs;
 /// queue by the time the hold lands and the compliance-runner cannot re-check the hold
 /// itself (migration 0075 withholds every grant on <c>run_retention_holds</c> from both
 /// runner roles, deliberately). <see cref="PlaceHoldAsync"/> therefore cancels that job
-/// at hold time -- see <see cref="RunPurgeOutcome.Held"/> for the exact, and
-/// deliberately limited, mid-purge guarantee this buys.
+/// at hold time. That cancel is fully effective only while the job is still QUEUED; once
+/// a runner has claimed it, cancellation is cooperative and best-effort -- see
+/// <see cref="RunPurgeOutcome.Held"/> for the exact, and deliberately limited, mid-purge
+/// guarantee, case by case.
 /// </summary>
 public sealed class RunRetentionHoldService
 {
@@ -113,25 +115,39 @@ public sealed class RunRetentionHoldService
 	}
 
 	/// <summary>
-	/// Issue #784: the third enforcement point for a hold, alongside
-	/// <see cref="RunPurgeService.PurgeRunAsync"/> (fresh/resumed API call) and
+	/// Issue #784: the runner-side enforcement point for a hold, alongside the three
+	/// API-side ones -- <see cref="RunPurgeService.PurgeRunAsync"/>'s entry check
+	/// (fresh/resumed API call), <see cref="RunPurgeService"/>'s pre-enqueue re-check
+	/// (immediately before the artifact job is created), and
 	/// <see cref="RunPurgeService.FinalizePendingAsync"/> (background finalize sweep).
-	/// Those two stop the API process from advancing a purge, but neither stops an
+	/// Those three stop the API process from advancing a purge, but neither stops an
 	/// artifact-deletion job that <see cref="RunPurgeService"/> ALREADY enqueued: that
 	/// job runs on the compliance-runner, which has no grant on
 	/// <c>run_retention_holds</c> (migration 0075) and therefore cannot re-check the
 	/// hold when it claims the job. The hold is honoured at claim time by cancelling
 	/// the job here instead, using the same
 	/// <see cref="IJobControlRepository.CancelJobAsync"/> primitive
-	/// <c>DELETE /downloads/{id}</c> already uses: a still-queued job moves straight to
-	/// <c>cancelled</c> in one DB-authoritative statement, so no runner ever claims it;
-	/// an already-claimed one gets <c>cancel_requested</c> and the dispatcher's
-	/// heartbeat cooperatively cancels the handler mid-flight.
+	/// <c>DELETE /downloads/{id}</c> already uses.
 	///
-	/// Best-effort by design, and honestly so: this cannot un-delete a file the handler
-	/// already removed, nor the database rows the purge's first phase already committed.
-	/// What it does guarantee is that no FURTHER deletion happens and that the purge is
-	/// never completed while the hold stands -- the tombstone is withheld by
+	/// Effective in full only for a job that is still QUEUED: that case moves to
+	/// <c>cancelled</c> in one DB-authoritative statement, so no runner ever claims it
+	/// and no artifact file is deleted. Once a runner has CLAIMED the job this is
+	/// best-effort, and honestly so: the cancel records <c>cancel_requested</c>, the
+	/// dispatcher cancels the handler's token at its next heartbeat tick, and
+	/// <c>PurgeJobHandler</c> stops at its next per-target-job checkpoint -- files
+	/// deleted before that point, possibly all of them, are already gone and cannot be
+	/// restored. Nor can this un-delete the database rows the purge's first phase
+	/// already committed.
+	///
+	/// The window BEFORE the job exists is closed elsewhere rather than here: a hold
+	/// landing while the purge's database phase is still running finds no
+	/// <c>artifact_job_id</c> to cancel, so <see cref="RunPurgeService"/> re-reads the
+	/// hold immediately before enqueueing and refuses instead -- otherwise this method
+	/// would silently cancel nothing and the in-flight purge would enqueue the deletion
+	/// job after the hold was already in force.
+	///
+	/// What holds unconditionally, in every case: the purge is never COMPLETED while the
+	/// hold stands -- the tombstone is withheld by
 	/// <see cref="RunPurgeService.FinalizePendingAsync"/>'s own hold check, so the
 	/// partially-purged state stays visible via <c>GET /runs/{id}/purge</c> rather than
 	/// being reported as a finished purge. The outcome of the cancel is deliberately

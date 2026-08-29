@@ -585,6 +585,118 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		Assert.True(File.Exists(ScanArtifactPaths.Ckl(_artifactRoot, scanJobId)));
 	}
 
+	/// <summary>
+	/// Issue #784 round-2 blocker, window 1: the hold lands DURING the purge's database
+	/// phase, before <c>run_purges.artifact_job_id</c> exists. That is the one moment
+	/// <c>RunRetentionHoldService.PlaceHoldAsync</c>'s cancel is powerless --
+	/// <c>GetArtifactJobIdAsync</c> returns null, so it cancels nothing -- and the
+	/// in-flight purge call would, without the pre-enqueue re-check, go on to enqueue
+	/// the artifact-deletion job AFTER the hold was already in force, whereupon a runner
+	/// would claim it and delete every HDF/CKL file of a held run.
+	///
+	/// Simulated deterministically rather than by racing threads: the hold repository is
+	/// wrapped so that <c>PurgeRunAsync</c>'s entry check reads "not held" (the true
+	/// state at that instant) and the real hold is committed immediately afterwards,
+	/// i.e. while the database phase is running. Every later read -- including the
+	/// pre-enqueue re-check -- goes to the real table and sees the real hold.
+	///
+	/// What this pins: no artifact-deletion job is enqueued at all for a held run, no
+	/// file is touched, no tombstone is written -- and the partially-purged state stays
+	/// visible and resumable, so removing the hold and re-POSTing finishes the job.
+	/// </summary>
+	[Fact]
+	public async Task PurgeRunAsync_HoldLandsDuringTheDatabasePhase_EnqueuesNoArtifactJobAndDeletesNoFile()
+	{
+		Guid runId = await SeedRunAsync("completed");
+		Guid scanJobId = await InsertScanJobAsync(runId);
+		WriteArtifactFiles(scanJobId);
+
+		HoldLandsDuringDatabasePhaseRepository racingHolds = new(
+			_retentionHolds,
+			() => _holdService.PlaceHoldAsync(runId, "invented-legal-hold-reason", "admin-alice", CancellationToken.None));
+		RunPurgeService racingService = new(_jobs, _purges, _attestationSnapshots, racingHolds, _fixture.ConnectionString);
+
+		RunPurgeResult result = await racingService.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
+
+		// The pre-enqueue re-check caught it: refused, not enqueued.
+		Assert.Equal(RunPurgeOutcome.Held, result.Outcome);
+		Assert.Null(await _purges.GetArtifactJobIdAsync(runId, CancellationToken.None));
+		Assert.Equal(0, await CountPurgeJobsAsync());
+
+		// Nothing on disk was touched -- the whole point of the window.
+		Assert.True(File.Exists(ScanArtifactPaths.RawHdf(_artifactRoot, scanJobId)));
+		Assert.True(File.Exists(ScanArtifactPaths.AttestedHdf(_artifactRoot, scanJobId)));
+		Assert.True(File.Exists(ScanArtifactPaths.Ckl(_artifactRoot, scanJobId)));
+
+		// The purge is halted, not completed, and stays honestly visible: the database
+		// phase it already committed is done (a hold is not an undo), the artifact phase
+		// never started, and there is no tombstone.
+		RunPurgeStatus? halted = await _purges.GetStatusAsync(runId, CancellationToken.None);
+		Assert.NotNull(halted);
+		Assert.True(halted!.DbPhaseDone);
+		Assert.Equal("pending", halted.ArtifactsPhase);
+		Assert.Null(await _purges.GetTombstoneAsync(runId, CancellationToken.None));
+		Assert.Null(await GetRunPurgedAtAsync(runId));
+
+		// Neither automatic path can get around it while the hold stands.
+		Assert.False(await _service.FinalizePendingAsync(runId, CancellationToken.None));
+		Assert.Equal(RunPurgeOutcome.Held, (await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None)).Outcome);
+		Assert.Equal(0, await CountPurgeJobsAsync());
+
+		// Removing the hold resumes it: only now is the artifact job enqueued.
+		Assert.Equal(RemoveRetentionHoldOutcome.Removed, (await _holdService.RemoveHoldAsync(runId, "invented-unhold-reason", "admin-alice", CancellationToken.None)).Outcome);
+		Assert.Equal(RunPurgeOutcome.InProgress, (await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None)).Outcome);
+		Assert.NotNull(await _purges.GetArtifactJobIdAsync(runId, CancellationToken.None));
+		Assert.Equal(1, await CountPurgeJobsAsync());
+	}
+
+	/// <summary>
+	/// Deterministic stand-in for "the hold commits between the purge's entry check and
+	/// its pre-enqueue re-check". The FIRST <see cref="GetAsync"/> -- PurgeRunAsync's
+	/// entry check -- reports "not held" and then commits the real hold through the real
+	/// service (whose own cancel attempt correctly finds no artifact job to cancel,
+	/// exactly as it would live). Every subsequent call delegates to the real
+	/// repository, so the pre-enqueue re-check reads real committed state, not a fake.
+	/// </summary>
+	private sealed class HoldLandsDuringDatabasePhaseRepository : IRunRetentionHoldRepository
+	{
+		private readonly IRunRetentionHoldRepository _inner;
+		private readonly Func<Task<PlaceRetentionHoldResult>> _placeHold;
+		private int _getCalls;
+
+		public HoldLandsDuringDatabasePhaseRepository(IRunRetentionHoldRepository inner, Func<Task<PlaceRetentionHoldResult>> placeHold)
+		{
+			_inner = inner;
+			_placeHold = placeHold;
+		}
+
+		public async Task<RunRetentionHold?> GetAsync(Guid runId, CancellationToken cancellationToken)
+		{
+			if (Interlocked.Increment(ref _getCalls) == 1)
+			{
+				PlaceRetentionHoldResult placed = await _placeHold();
+				Assert.Equal(PlaceRetentionHoldOutcome.Placed, placed.Outcome);
+				return null;
+			}
+
+			return await _inner.GetAsync(runId, cancellationToken);
+		}
+
+		public Task<bool> TryInsertAsync(Guid runId, string reason, string actor, CancellationToken cancellationToken) =>
+			_inner.TryInsertAsync(runId, reason, actor, cancellationToken);
+
+		public Task<bool> TryRemoveAsync(Guid runId, string reason, string actor, CancellationToken cancellationToken) =>
+			_inner.TryRemoveAsync(runId, reason, actor, cancellationToken);
+	}
+
+	private async Task<int> CountPurgeJobsAsync()
+	{
+		await using NpgsqlConnection c = new(_fixture.ConnectionString);
+		await c.OpenAsync();
+		await using NpgsqlCommand q = new("SELECT count(*) FROM jobs WHERE job_type = 'purge'", c);
+		return (int)(long)(await q.ExecuteScalarAsync())!;
+	}
+
 	private async Task<string> GetJobStateAsync(Guid jobId)
 	{
 		await using NpgsqlConnection c = new(_fixture.ConnectionString);

@@ -71,15 +71,30 @@ public enum RunPurgeOutcome
 	/// normal case and the one issue #784 AC3 is about.</item>
 	/// <item>A hold placed while a purge is ALREADY IN FLIGHT halts it; it cannot roll
 	/// it back. Whatever the database phase already committed stays deleted -- a hold
-	/// is not an undo. What the hold does guarantee is that no FURTHER deletion and no
-	/// completion happens: <see cref="Waypoint.Infrastructure.Runs.RunRetentionHoldService.PlaceHoldAsync"/>
-	/// cancels the enqueued artifact-deletion job at hold time (a still-queued job
-	/// moves to <c>cancelled</c>, so no runner ever claims it; an already-claimed one
-	/// gets <c>cancel_requested</c> and is cooperatively cancelled by the dispatcher's
-	/// heartbeat), <see cref="Waypoint.Infrastructure.Runs.RunPurgeService.PurgeRunAsync"/>
-	/// refuses, and <see cref="Waypoint.Infrastructure.Runs.RunPurgeService.FinalizePendingAsync"/>
+	/// is not an undo. Nothing is ever COMPLETED while a hold stands:
+	/// <see cref="Waypoint.Infrastructure.Runs.RunPurgeService.PurgeRunAsync"/> refuses,
+	/// and <see cref="Waypoint.Infrastructure.Runs.RunPurgeService.FinalizePendingAsync"/>
 	/// -- the background finalize sweep's entry point -- refuses too, so the run is
-	/// never tombstoned and <c>runs.purged_at</c> is never set.</item>
+	/// never tombstoned and <c>runs.purged_at</c> is never set. What happens to the
+	/// ARTIFACT FILES depends on exactly when the hold lands, and the three cases differ:
+	/// <list type="bullet">
+	/// <item>During the purge's database phase, before the artifact-deletion job is
+	/// enqueued: fully honoured. <c>RunPurgeService</c> re-reads the hold immediately
+	/// before enqueueing (its pre-enqueue re-check), so no artifact-deletion job is ever
+	/// enqueued for a held run and no file is deleted.</item>
+	/// <item>After the job is enqueued but before a runner claims it: fully honoured.
+	/// <see cref="Waypoint.Infrastructure.Runs.RunRetentionHoldService.PlaceHoldAsync"/>
+	/// moves the still-queued job straight to <c>cancelled</c> in one DB-authoritative
+	/// statement, so no runner ever claims it and no file is deleted.</item>
+	/// <item>After a runner has already claimed the job: BEST-EFFORT ONLY, and this
+	/// residual window is real. The cancel can only record <c>cancel_requested</c>;
+	/// cancellation reaches the handler at the dispatcher's next heartbeat tick, and
+	/// <c>PurgeJobHandler</c> observes it at its next per-target-job checkpoint. Files
+	/// deleted before that point -- possibly all of them, if the pass is short -- are
+	/// gone, and the hold cannot restore them. A cancelled pass reports
+	/// <c>artifacts_phase = 'failed'</c> so how far it got stays visible and the purge
+	/// stays retryable.</item>
+	/// </list></item>
 	/// <item>The halted purge stays VISIBLE rather than being silently abandoned: the
 	/// <c>run_purges</c> row survives, so <c>GET /runs/{id}/purge</c> keeps reporting
 	/// the partially-purged state instead of presenting it as either untouched or

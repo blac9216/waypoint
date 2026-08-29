@@ -145,6 +145,50 @@ public sealed class PurgeJobHandlerTests : IDisposable
 		Assert.Equal(3, purges.LastArtifactsDeleted);
 	}
 
+	/// <summary>
+	/// Issue #784 round-2 finding: the residual mid-flight window, pinned as the code
+	/// actually behaves. A retention hold placed AFTER a runner has claimed the
+	/// artifact job can only reach the runner as a cooperative cancel, so the handler
+	/// checks its token before each target job's files. Here the token is already
+	/// cancelled when the pass starts, so no file is deleted and the pass reports a
+	/// retryable failure rather than a success -- <c>run_purges</c> never reads as a
+	/// finished artifact phase off a cancelled pass. This NARROWS the window; it does not close it -- a hold that lands after
+	/// the checkpoint but before a file is deleted still loses that file, which is why
+	/// <see cref="RunPurgeOutcome.Held"/> states this case as best-effort.
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_CancelledBeforeDeleting_StopsAndReportsARetryableFailure()
+	{
+		Guid scanJobId = Guid.NewGuid();
+		File.WriteAllText(ScanArtifactPaths.RawHdf(_artifactRoot, scanJobId), "{}");
+		File.WriteAllText(ScanArtifactPaths.AttestedHdf(_artifactRoot, scanJobId), "{}");
+		File.WriteAllText(ScanArtifactPaths.Ckl(_artifactRoot, scanJobId), "<CHECKLIST/>");
+
+		Guid targetRunId = Guid.NewGuid();
+		FakeRunPurgeRepository purges = new() { RunIdForArtifactJob = targetRunId };
+		PurgeJobHandler handler = CreateHandler(purges);
+
+		using CancellationTokenSource cancelled = new();
+		await cancelled.CancelAsync();
+
+		string payload = JsonSerializer.Serialize(new { job_ids = new[] { scanJobId.ToString() } });
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(Guid.NewGuid(), payload), cancelled.Token);
+
+		// Nothing was deleted, and the outcome is a retryable failure -- not a silent
+		// success that would let the purge finalize as if the files were gone.
+		Assert.Equal(JobOutcomeKind.Failed, outcome.Kind);
+		Assert.True(File.Exists(ScanArtifactPaths.RawHdf(_artifactRoot, scanJobId)));
+		Assert.True(File.Exists(ScanArtifactPaths.AttestedHdf(_artifactRoot, scanJobId)));
+		Assert.True(File.Exists(ScanArtifactPaths.Ckl(_artifactRoot, scanJobId)));
+
+		// The outcome is still REPORTED (on an uncancelled token), so run_purges records
+		// artifacts_phase = 'failed' instead of being stranded at 'running'.
+		Assert.Equal(1, purges.ReportCount);
+		Assert.False(purges.LastSucceeded);
+		Assert.Equal(0, purges.LastArtifactsDeleted);
+		Assert.Contains("cancelled", purges.LastError, StringComparison.Ordinal);
+	}
+
 	[Fact]
 	public async Task ExecuteAsync_JobNeverReachedAttestOrConvert_MissingFilesAreNotFailures()
 	{
