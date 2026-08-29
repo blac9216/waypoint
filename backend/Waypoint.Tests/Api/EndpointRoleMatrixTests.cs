@@ -294,6 +294,15 @@ public sealed class EndpointRoleMatrixTests
 		["RunsController.RemoveRetentionHold"] = WaypointRole.Admin,
 		["RunsController.GetRetentionHold"] = WaypointRole.Viewer,
 
+		// RetentionPolicyController -- issue #1062 (epic #726 section 7: "only Admin
+		// manages retention administration"). Both view and set are Admin-only, unlike
+		// GetRetentionHold's per-run Viewer+ read floor above: this is appliance-wide
+		// policy configuration, the same floor section 7 already gives target/
+		// component persistent configuration (ComponentsController.Put) and the
+		// retention-hold WRITE actions themselves.
+		["RetentionPolicyController.Get"] = WaypointRole.Admin,
+		["RetentionPolicyController.Put"] = WaypointRole.Admin,
+
 		// SchedulesController -- reads Viewer+; writes are Cyber+ at the attribute floor
 		// (the coarse "lowest schedulable role"), refined per-job_type in-action by
 		// ScheduleJobTypes.RequiredRole -- see class doc comment and Schedule.cs.

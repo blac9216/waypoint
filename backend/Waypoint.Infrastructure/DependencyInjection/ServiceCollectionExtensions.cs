@@ -136,6 +136,12 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<Waypoint.Core.Runs.RunPurgeFinalizeOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.Runs.RunPurgeFinalizeOptions.SectionName));
 
+		// Issue #1062 (epic #726 sections 6/7): Admin-configurable evidence retention
+		// sweep. Same conservative default-off posture as RunHistoryRolloffOptions
+		// above -- see EvidenceRetentionSweepOptions' own doc comment.
+		services.AddOptions<Waypoint.Core.Runs.EvidenceRetentionSweepOptions>()
+			.Bind(configuration.GetSection(Waypoint.Core.Runs.EvidenceRetentionSweepOptions.SectionName));
+
 		services.AddOptions<Waypoint.Core.SystemState.WorkerRegistryOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.SystemState.WorkerRegistryOptions.SectionName));
 
@@ -450,6 +456,19 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton(serviceProvider => new Runs.RunHistoryDeletionService(
 				serviceProvider.GetRequiredService<IJobControlRepository>(),
 				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunHistoryDeletionRepository>()));
+
+			// Issue #1062 (epic #726 sections 6/7): Admin-configurable evidence
+			// retention policy (migration 0078) and the sweep's own candidate query.
+			// Both registered here, same connection-string-gated composition root as
+			// every other Runs-domain repository above -- RetentionPolicyController
+			// resolves RetentionPolicyService, EvidenceRetentionSweepHostedService
+			// (registered API-surface-only below, same reasoning as
+			// RunHistoryRolloffHostedService) resolves the other two plus the EXISTING
+			// RunPurgeService above -- it drives deletion through that one entry point
+			// rather than a second path.
+			services.AddSingleton<Waypoint.Core.Runs.IRetentionPolicyRepository>(new Runs.RetentionPolicyRepository(connectionString));
+			services.AddSingleton<Runs.RetentionPolicyService>();
+			services.AddSingleton<Waypoint.Core.Runs.IEvidenceRetentionSweepRepository>(new Runs.EvidenceRetentionSweepRepository(connectionString));
 		}
 
 		return services;
@@ -502,6 +521,17 @@ public static class ServiceCollectionExtensions
 		// starting this sweep would permission-fail every tick, the exact issue #443
 		// failure class this method's doc comment documents).
 		services.AddHostedService<Runs.RunPurgeFinalizeHostedService>();
+
+		// Issue #1062 (epic #726 sections 6/7): the Admin-configurable evidence
+		// retention sweep. API-surface only, same reasoning as
+		// RunHistoryRolloffHostedService/RunPurgeFinalizeHostedService above -- a
+		// runner host starting this sweep would call RunPurgeService and
+		// IRetentionPolicyRepository, both registered only in the connection-string-
+		// gated block of AddWaypointInfrastructure that this method's own doc comment
+		// already explains is API-surface-shaped. Disabled by default
+		// (EvidenceRetentionSweepOptions.Enabled); the hosted service itself no-ops
+		// immediately when disabled rather than this call site needing to know that.
+		services.AddHostedService<Runs.EvidenceRetentionSweepHostedService>();
 
 		// Issue #31: control-plane schedule dispatch. API-surface only -- see this
 		// method's own doc comment for why a runner host (which also calls
