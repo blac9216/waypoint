@@ -28,6 +28,14 @@ public enum SetRetentionPolicyOutcome
 	/// <summary><paramref name="EvidenceRetentionDays"/>-style value was not a positive integer.</summary>
 	InvalidRetentionDays,
 
+	/// <summary>
+	/// Value was positive but below <see cref="Waypoint.Infrastructure.Runs.RetentionPolicyService.MinimumEvidenceRetentionDays"/>
+	/// -- issue #1109: the floor a typo (a dropped trailing zero, "1" instead of
+	/// "180") would otherwise sail through, given the sweep re-reads this value fresh
+	/// every pass with no restart and no confirmation step.
+	/// </summary>
+	BelowMinimum,
+
 	/// <summary>Policy updated.</summary>
 	Updated,
 }
@@ -51,6 +59,13 @@ public interface IRetentionPolicyRepository
 	/// </summary>
 	Task<RetentionPolicy?> GetAsync(CancellationToken cancellationToken);
 
-	/// <summary>Updates the singleton row's retention period, actor, and timestamp in one statement.</summary>
+	/// <summary>
+	/// Updates the singleton row's retention period, actor, and timestamp in one
+	/// statement, and writes one <c>audit_log</c> row for the attempt in the same
+	/// transaction -- issue #1109: every retention-period change (including a no-op
+	/// PUT that resubmits the current value) leaves a durable, actor-attributed
+	/// record, matching the bar <c>RunRetentionHoldRepository</c> (issue #784) already
+	/// set for the hold's own transitions.
+	/// </summary>
 	Task<RetentionPolicy> SetAsync(int evidenceRetentionDays, string actor, CancellationToken cancellationToken);
 }
