@@ -993,6 +993,14 @@ public sealed record ComponentResultFindingResponse(
 /// has to guess. <c>null</c> attempt fields mean the job has no recorded
 /// component-result attempt at all yet -- honest-empty, distinct from "attempt
 /// exists, zero findings".
+///
+/// <see cref="OutputKind"/>/<see cref="StandardsNote"/> (issue #743): the frozen plan
+/// item's catalog <c>output_kind</c> and, when that kind is SRG (<c>hdf</c>), the fixed
+/// <see cref="Waypoint.Core.Scans.SrgResultStatements.NotDisaPublished"/> statement --
+/// SRG results must clearly state they are not DISA-published STIG results, derived
+/// from the FROZEN catalog kind, never from the target's connection kind. Both null
+/// for a legacy result with no plan linkage; <c>standards_note</c> is additionally
+/// null for a STIG (<c>hdf_ckl</c>) result.
 /// </summary>
 public sealed record ComponentResultFindingsResponse(
 	[property: JsonPropertyName("job_id")]
@@ -1003,6 +1011,12 @@ public sealed record ComponentResultFindingsResponse(
 
 	[property: JsonPropertyName("component_result_status")]
 	string? ComponentResultStatus,
+
+	[property: JsonPropertyName("output_kind")]
+	string? OutputKind,
+
+	[property: JsonPropertyName("standards_note")]
+	string? StandardsNote,
 
 	[property: JsonPropertyName("items")]
 	IReadOnlyList<ComponentResultFindingResponse> Items,
@@ -1036,7 +1050,8 @@ public sealed record ComponentResultArtifactResponse(
 /// <summary>
 /// Response body for <c>GET /api/v1/jobs/{id}/component-results/artifacts</c>. Unpaged
 /// -- bounded by the closed 5-value artifact-kind vocabulary per attempt. Same
-/// "describes which attempt" honesty as <see cref="ComponentResultFindingsResponse"/>.
+/// "describes which attempt" honesty as <see cref="ComponentResultFindingsResponse"/>,
+/// including its issue #743 <c>output_kind</c>/<c>standards_note</c> SRG statement.
 /// </summary>
 public sealed record ComponentResultArtifactsResponse(
 	[property: JsonPropertyName("job_id")]
@@ -1047,6 +1062,12 @@ public sealed record ComponentResultArtifactsResponse(
 
 	[property: JsonPropertyName("component_result_status")]
 	string? ComponentResultStatus,
+
+	[property: JsonPropertyName("output_kind")]
+	string? OutputKind,
+
+	[property: JsonPropertyName("standards_note")]
+	string? StandardsNote,
 
 	[property: JsonPropertyName("items")]
 	IReadOnlyList<ComponentResultArtifactResponse> Items);

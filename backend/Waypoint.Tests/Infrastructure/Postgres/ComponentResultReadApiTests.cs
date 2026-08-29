@@ -188,8 +188,14 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 		return (Guid)(await command.ExecuteScalarAsync())!;
 	}
 
-	/// <summary>Full 0050 identity tree + one scan_plans row carrying one item -- mirrors ComponentResultRepositoryTests' own seeding.</summary>
-	private async Task<(Guid RunId, Guid ComponentId, Guid ScanPlanItemId)> SeedPlanItemAsync(string suffix)
+	/// <summary>
+	/// Full 0050 identity tree + one scan_plans row carrying one item -- mirrors
+	/// ComponentResultRepositoryTests' own seeding. <paramref name="outputKind"/> (issue
+	/// #743) is the item's FROZEN catalog output kind, which is what the read APIs must
+	/// derive their SRG-vs-STIG statement from.
+	/// </summary>
+	private async Task<(Guid RunId, Guid ComponentId, Guid ScanPlanItemId)> SeedPlanItemAsync(
+		string suffix, string outputKind = CatalogOutputKinds.HdfAndCkl)
 	{
 		Guid runId = await SeedRunAsync();
 
@@ -232,12 +238,12 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 		CatalogContentRelease release = await _catalog.UpsertContentReleaseAsync(sourceRevision.Id, CatalogKinds.Srg, $"release-{suffix}", "Test Release", CancellationToken.None);
 		CatalogReportGroup reportGroup = await _catalog.UpsertReportGroupAsync($"group-{suffix}", "Test Group", 2, CancellationToken.None);
 		CatalogExecutionProfile executionProfile = await _catalog.CreateExecutionProfileAsync(
-			catalogComponent.Id, release.Id, reportGroup.Id, "1.0.0", CatalogOutputKinds.HdfAndCkl, CancellationToken.None);
+			catalogComponent.Id, release.Id, reportGroup.Id, "1.0.0", outputKind, CancellationToken.None);
 
 		ScanPlanItem item = new(
 			componentId, executionProfile.Id, BaselineId: null, BenchmarkRevisionId: null,
 			Transport: CatalogTransports.VMware, SelectorKind: CatalogSelectorKinds.Esxi, SelectorName: null,
-			ReportGroupKey: $"group-{suffix}", Priority: 2, OutputKind: CatalogOutputKinds.HdfAndCkl,
+			ReportGroupKey: $"group-{suffix}", Priority: 2, OutputKind: outputKind,
 			RequiredPurposes: ["vsphere-api"], DeclaredInputNames: ["target_ip"]);
 
 		ScanPlan plan = new(runId, ScanPlanSchema.CurrentVersion, [item], [], $"digest-{suffix}", "1 of 1 accepted");
@@ -492,6 +498,60 @@ public sealed class ComponentResultReadApiTests : IAsyncLifetime
 		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/jobs/{jobId}/component-results/findings", role: null);
 
 		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	/// <summary>
+	/// Issue #743 AC "SRG results clearly state they are not DISA-published STIG
+	/// results": an SRG (frozen catalog output_kind `hdf`) result carries the fixed
+	/// standards statement plus its output kind; a STIG (`hdf_ckl`) result carries the
+	/// kind but NO statement. Both derive from the FROZEN plan item, never from the
+	/// target's connection kind -- both fixtures here sit on the SAME `vsphere`-kind
+	/// target, so a target-kind-derived implementation could not tell them apart.
+	/// </summary>
+	[Theory]
+	[InlineData(CatalogOutputKinds.Hdf, true)]
+	[InlineData(CatalogOutputKinds.HdfAndCkl, false)]
+	public async Task GetFindings_StandardsNote_ComesFromFrozenCatalogOutputKind_NotTargetKind(string outputKind, bool expectSrgStatement)
+	{
+		(Guid runId, Guid componentId, Guid scanPlanItemId) = await SeedPlanItemAsync($"srg-note-{outputKind}", outputKind);
+		Guid jobId = await SeedJobAsync(runId, scanPlanItemId);
+		await _componentResults.RecordAsync(CompletedRecord(runId, jobId, scanPlanItemId, componentId, attempt: 1), CancellationToken.None);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/jobs/{jobId}/component-results/findings", "Viewer");
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = document.RootElement;
+		Assert.Equal(outputKind, root.GetProperty("output_kind").GetString());
+		if (expectSrgStatement)
+		{
+			Assert.Equal(SrgResultStatements.NotDisaPublished, root.GetProperty("standards_note").GetString());
+			Assert.Contains("not DISA-published STIG results", root.GetProperty("standards_note").GetString());
+		}
+		else
+		{
+			// The API omits null properties entirely (WaypointJsonOptions'
+			// WhenWritingNull), so "no statement" reads as absent-or-null here.
+			Assert.True(
+				!root.TryGetProperty("standards_note", out JsonElement note) || note.ValueKind == JsonValueKind.Null,
+				"a STIG result must carry no SRG standards statement.");
+		}
+	}
+
+	/// <summary>The artifacts endpoint carries the same issue #743 statement as findings.</summary>
+	[Fact]
+	public async Task GetArtifacts_SrgResult_CarriesTheSameNotDisaPublishedStatement()
+	{
+		(Guid runId, Guid componentId, Guid scanPlanItemId) = await SeedPlanItemAsync("srg-note-artifacts", CatalogOutputKinds.Hdf);
+		Guid jobId = await SeedJobAsync(runId, scanPlanItemId);
+		await _componentResults.RecordAsync(CompletedRecord(runId, jobId, scanPlanItemId, componentId, attempt: 1), CancellationToken.None);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/jobs/{jobId}/component-results/artifacts", "Viewer");
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal(CatalogOutputKinds.Hdf, document.RootElement.GetProperty("output_kind").GetString());
+		Assert.Equal(SrgResultStatements.NotDisaPublished, document.RootElement.GetProperty("standards_note").GetString());
 	}
 
 	// -- GET /jobs/{id}/component-results/artifacts -----------------------------------

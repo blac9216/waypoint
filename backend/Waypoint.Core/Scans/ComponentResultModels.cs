@@ -147,6 +147,10 @@ public sealed record RunResultRollup(
 /// to this attempt (highest <c>attempt_number</c> for the job), mirroring
 /// <see cref="IComponentResultRepository.GetRunRollupAsync"/>'s own "the latest attempt
 /// supplies the current component result" rule (ADR-0024).
+/// <see cref="OutputKind"/> (issue #743) is the FROZEN plan item's catalog
+/// <c>output_kind</c>, joined at read time from <c>scan_plan_items</c> -- the
+/// authoritative SRG-vs-STIG signal for this result (never the target's connection
+/// kind); null only if the plan row was purged out from under the result.
 /// </summary>
 public sealed record ComponentResultHeader(
 	Guid Id,
@@ -156,7 +160,24 @@ public sealed record ComponentResultHeader(
 	Guid ComponentId,
 	int AttemptNumber,
 	string Status,
-	string? Detail);
+	string? Detail,
+	string? OutputKind = null);
+
+/// <summary>
+/// Issue #743 AC "SRG results clearly state they are not DISA-published STIG results":
+/// the single shared statement the read APIs attach to any result whose frozen plan
+/// item's catalog <c>output_kind</c> is <see cref="Waypoint.Core.ComplianceContent.CatalogOutputKinds.Hdf"/>
+/// (an SRG closure -- epic #726 §6: "SRGs remain HDF-only unless a future exact STIG
+/// mapping is introduced through the content workflow"). One constant so every surface
+/// says exactly the same thing; derived from the FROZEN plan-item output kind, never
+/// from the target's connection kind.
+/// </summary>
+public static class SrgResultStatements
+{
+	public const string NotDisaPublished =
+		"SRG-derived results: generated from vendor SRG readiness content, not DISA-published STIG results. "
+		+ "No CKL or STIG Manager upload is produced for this component.";
+}
 
 /// <summary>One persisted <c>component_result_findings</c> row read back, control identity and status intact and unaltered (epic #726 §6 -- findings pass through the API exactly as recorded, never re-derived or re-bucketed).</summary>
 public sealed record ComponentResultFindingRecord(
