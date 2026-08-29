@@ -1,7 +1,7 @@
 # Bug Issue Template
 
 Use when something is broken or not working as expected. Apply the `bug` label
-plus a `severity:*` label at creation.
+plus a `severity:*` label and at least one `area:*` label at creation.
 
 ```markdown
 ## Description
@@ -25,4 +25,18 @@ What is affected (features, output, user experience, other components).
 ## Possible Fixes
 - Option A: Description of approach and trade-offs
 - Option B: Alternative approach if applicable
+
+## Done when
+- [ ] The described failure no longer reproduces: <the exact command/test the reviewer runs>
+- [ ] Root cause addressed, with a regression test
+
+## Home
+`Part of #<epic>` — or `Milestone: <story>` when it sits directly under a story — or
+`standalone` (board only). Labels at filing: type, ≥1 `area:*`, `priority:*` if known;
+`deferred` + `concern:*` when filed out of scope. Sequencing (dependencies, final
+priority) is the orchestrator's at triage — do not guess it here.
+
+## Verified expectation
+`n/a` — review proves everything here | `pending-live` — <what only the real stack can
+prove>. The PR repeats this line; the reviewer sets the board field from it.
 ```

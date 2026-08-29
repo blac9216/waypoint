@@ -1,7 +1,7 @@
 # Chore Issue Template
 
 Use for dependency bumps, infrastructure changes, no-behavior-change refactors,
-formatting passes, and other maintenance work. Apply the `chore` label at creation.
+formatting passes, and other maintenance work. Apply the `chore` label and at least one `area:*` label at creation.
 
 ```markdown
 ## Summary
@@ -24,4 +24,14 @@ What is being changed and why. Keep this short — chores should be small.
 How to confirm the chore changed only what was intended (e.g., behavior tests
 still pass, dependency lockfile diff matches expected upgrade, formatter output
 is clean).
+
+## Home
+`Part of #<epic>` — or `Milestone: <story>` when it sits directly under a story — or
+`standalone` (board only). Labels at filing: type, ≥1 `area:*`, `priority:*` if known;
+`deferred` + `concern:*` when filed out of scope. Sequencing (dependencies, final
+priority) is the orchestrator's at triage — do not guess it here.
+
+## Verified expectation
+`n/a` — review proves everything here | `pending-live` — <what only the real stack can
+prove>. The PR repeats this line; the reviewer sets the board field from it.
 ```

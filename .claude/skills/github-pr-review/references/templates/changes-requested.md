@@ -16,12 +16,33 @@ One paragraph: what was reviewed and the overall state.
 ### Issue Coverage
 | Requirement (from #X) | Status | Notes |
 | --------------------- | ------ | ----- |
-| <criterion> | met / unmet | ... |
+| <criterion> | met / unmet / pending-live | ... (ticked on the issue when met) |
 
-### Findings
-| # | Severity | Location | Problem | Required change |
-| - | -------- | -------- | ------- | --------------- |
-| 1 | blocker / major / minor | `path:line` | ... | ... |
+### Findings — Spec (does not do what was asked / does more)
+| # | Severity | Confidence | Location (permalink) | Problem | Required change |
+| - | -------- | ---------- | -------------------- | ------- | --------------- |
+| 1 | blocker / major / minor | ≥80 | `https://github.com/…/blob/<sha>/path#L…-L…` | ... | ... |
+
+### Findings — Standards (how it is written)
+| # | Severity | Confidence | Location (permalink) | Problem | Required change |
+| - | -------- | ---------- | -------------------- | ------- | --------------- |
+
+### Attack list
+| Probe | Result |
+| ----- | ------ |
+| Spec fidelity / scope | probed / n-a / not probed (why) |
+| Correctness | |
+| Silent failures | |
+| Behavioural tests | |
+| Concurrency / ordering | |
+| Security surface | |
+| Drift guards | |
+| History (blame, prior PRs) | |
+| Comments match code | |
+| Standards & smells | |
+
+### Notes (not required — confidence < 80)
+- ...
 
 ### Test Results
 - CI: <status>

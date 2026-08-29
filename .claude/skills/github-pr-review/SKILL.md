@@ -10,9 +10,10 @@ An independent review of a pull request created through the [github-workflow](..
 
 ## Your Role
 
-- You are a fresh reviewer. You did **not** write this PR and have no knowledge of the author's intent.
-- The PR description, the linked issue, the diff, and the existing PR/issue comments are your **only** source of truth.
-- Do not assume the author's choices were correct — verify them.
+- You are a fresh, **adversarial** reviewer. Assume the PR has defects and that your job is to find them; an approval is the exception and must be earned with evidence. The author's report is a set of claims, not facts. You did **not** write this PR and have no knowledge of the author's intent.
+- The PR description, the linked issue, the diff, and the existing PR/issue comments are your **only** source of truth. Do not assume the author's choices were correct — verify them.
+- A review that finds nothing must say what it probed and why nothing was found (the attack list in Step 3 makes that concrete). "Looks good" is not a verdict.
+- You may spawn helper subagents only on **Haiku or a tier cheaper than your own** — the pre-flight and the confidence scorer below. Never your own tier or above; never delegate the review itself.
 - **You are the only party that lands this PR.** The conversation that wrote the code does not approve or merge its own work — that separation is the rule that keeps everyone honest, and it holds because you and the author both follow it, not because of any tooling limitation. You record your verdict by posting the `## PR Review — …` comment and, on a clean review, performing the squash-merge yourself. The comment plus the merge are the approval of record; there is no separate formal "approve" step.
 - **Never merge a PR that still has unresolved findings.** Merge only after a clean review.
 
@@ -42,6 +43,10 @@ Read the full mapping and its caveats once at the start: **[../github-workflow/r
 
 A single review round should not exceed ~10 minutes of wall-clock work. If you are spending materially longer than that, the PR is too large — go to the size sanity check in Step 3 and request decomposition instead of dragging the review out.
 
+## Step 0 — Pre-flight (Haiku)
+
+Before spending your own context, a Haiku helper checks and returns one line: is the PR closed, a draft, already carrying an unanswered `## PR Review — …` comment, or at the three-round cap? If any is true, stop and report that instead of reviewing. Also have it return the list of `docs/process/*.md` and `*.local.md` files in the repo — you read those next.
+
 ## Step 1 — Gather Context
 
 Read everything before forming an opinion:
@@ -51,17 +56,17 @@ Read everything before forming an opinion:
 - **Determine the review round.** Count existing `## PR Review — Changes Requested` and `## PR Review — Decomposition Requested` comments. This review is round `count + 1`. A round counts only when one of those comments was posted — pushes to the branch without a review comment do not increment the round.
 - If 3 review rounds already exist, do not start a 4th — go straight to **Escalation** below.
 
-## Step 2 — Check Out the PR
+## Step 2 — Check Out the PR and Claim the Column
 
-Work in a dedicated worktree so the author's worktree is never disturbed (`git` is the same in both environments):
+Set the linked issue's board Status to **In review** now — you own that column; the dispatch tells you the field and option ids. Then work in a dedicated worktree under the repo's documented worktree root (`docs/process/maintenance.md`; never `/tmp` if the repo says containers cannot see it) so the author's worktree is never disturbed:
 
 ```bash
 git fetch origin
-git worktree add /tmp/review-pr<N> origin/<headRefName>
-cd /tmp/review-pr<N>
+git worktree add <worktree root>/review-pr<N> origin/<headRefName>
+cd <worktree root>/review-pr<N>
 ```
 
-Remove it when the review is done: `git worktree remove /tmp/review-pr<N>`.
+Verify the branch is not stale-based before anything else: two-dot `git diff origin/main..HEAD --diff-filter=D --stat` must be **empty** and `git merge-base --is-ancestor origin/main HEAD` true. A stale base is a finding that requires a rebase (never a merge of main into the branch). Remove the worktree when the review is done.
 
 ## Step 2.5 — Check CI Status First
 
@@ -71,15 +76,22 @@ Before running anything locally, check the PR's CI status (`pull_request_read` `
 - If CI is **green**, still run the suggested test steps locally — CI may not cover everything (especially network-gated or platform-specific paths).
 - If CI is **missing** for a change that should have it (the project has a CI workflow and this PR did not trigger it), that itself is a finding.
 
-## Step 3 — Review the Diff
+## Step 3 — Review the Diff: the attack list
 
-Read every changed file (`pull_request_read` `get_diff`, or `gh pr diff <N>`). Check for:
+Read every changed file (`pull_request_read` `get_diff`, or `gh pr diff <N>`). Then work the attack list. Every probe is reported in the verdict as **probed / not applicable / not probed (why)** — the list is what makes "found nothing" mean something:
 
-- **Correctness** — does the code do what the issue requires, with no logic errors?
-- **Security** — no injection, secret leakage, or unsafe input handling.
-- **Conventions** — matches the surrounding codebase and project `CLAUDE.md`.
-- **Scope** — no unrelated changes; no half-finished or dead code.
-- **Tests** — new/changed behavior has matching tests.
+1. **Spec fidelity** — every acceptance criterion, and nothing beyond the issue (scope creep is a finding).
+2. **Correctness on the changed lines** — logic, null/empty, boundaries, off-by-one.
+3. **Silent failures** — catch blocks that swallow, fallbacks that hide, log-and-continue, broad exception types, defaults on error.
+4. **Tests cover behaviour** — negative cases, error paths; would a regression of this change be caught, or do the tests mirror the implementation?
+5. **Concurrency / ordering** — races, retries, idempotency, partial failure, boot-order assumptions.
+6. **Security surface** — injection, secrets in argv/logs/env, permissions and grants, trust of inputs, anything the repo's sanitization rule forbids.
+7. **Drift guards** — closed sets copied from old sources, migrations/ledgers, convention tests that should enumerate reality and do not.
+8. **History** — `git blame` on the touched code, and comments on prior PRs that touched the same files (prior findings recur).
+9. **Comments and docs match the code** — stale comments are findings when the PR touched the line.
+10. **Standards and smells** — the repo's documented standards first (a documented standard overrides any baseline); then the usual smells (duplication, mysterious names, feature envy, speculative generality) as *labelled heuristics*, never hard violations.
+
+Separate what you find into **Spec** findings (the PR does not do what was asked, or does more) and **Standards** findings (how it is written), and report them under those headings — one axis must not mask the other.
 
 ### Size Sanity
 
@@ -112,14 +124,14 @@ The follow-up review round must verify all three were done. If a later round fin
 
 Every requirement in the linked issue must be satisfied:
 
-- **Enhancement / Chore issues:** each Acceptance Criteria checkbox is genuinely met.
+- **Enhancement / Chore issues:** each Acceptance Criteria checkbox is genuinely met — and **tick the box on the issue** when you prove it (native checkboxes are the coverage record; the table in your comment mirrors them).
 - **Bug issues:** the described failure no longer reproduces and the root cause is addressed.
 
-Record each requirement as met or unmet — an unmet requirement is a blocker finding.
+Record each requirement as met or unmet — an unmet requirement is a blocker finding. A criterion that can only be proven on the real environment is **not unmet**: note it as `pending-live`, and confirm the PR's *Verified expectation* line says so. Acceptance criteria are supposed to be provable at merge; if an issue's criteria are largely unprovable, say so — that is a planning defect worth an issue.
 
 ## Step 5 — Run Tests
 
-Run every test suite you can. If the project has a project-local testing skill, follow it.
+Run every test suite you can, with the commands and environment from the repo's `docs/process/testing.md` and `*.local.md` (the dispatch copies them in). If the project has a project-local testing skill, follow it.
 
 **Unit tests** mock external dependencies; **integration tests** exercise real code against real dependencies (real network, filesystem, services, etc.). Both must pass. How the project separates them is up to its testing skill (if any), `CLAUDE.md`, or convention.
 
@@ -148,6 +160,20 @@ The PR body contains a **Suggested Test Steps** section specific to these change
 
 If the PR has no Suggested Test Steps section, that itself is a finding — the author must add one.
 
+## Step 6.5 — Calibrate the findings (Haiku)
+
+Give the full findings list, the diff and the repo's standards files to a Haiku helper with this rubric verbatim, and have it score each finding 0–100 for confidence that it is real and matters:
+
+- 0: false positive on light scrutiny, or pre-existing on lines the PR did not touch.
+- 25: might be real, could not be verified; stylistic and not in a documented standard.
+- 50: verified real but a nitpick or rare in practice; not important relative to the PR.
+- 75: double-checked, very likely hit in practice, materially affects functionality, or an explicit documented-standard violation.
+- 100: confirmed, frequent, evidence directly shows it.
+
+Findings scoring **below 80 leave the Findings table** and go to a *Notes (not required)* section. Severity (blocker/major/minor) is yours; the score is the gate on whether it blocks. This is what keeps a four-finding review from being one real finding and three restatements of taste.
+
+Cite every finding with a **full-SHA permalink** (`https://github.com/<o>/<r>/blob/<40-char sha>/<path>#L<a>-L<b>`, one line of context each side) so it is clickable on GitHub.
+
 ## Step 7 — Verdict
 
 **Decomposition Requested** if size sanity triggered in Step 3.
@@ -159,11 +185,14 @@ If the PR has no Suggested Test Steps section, that itself is a finding — the 
 - Coverage regressed or is below 80% with no valid waiver.
 - Any issue requirement is unmet.
 - Any suggested test step failed, or the section is missing.
-- Required PR body sections (Summary, Risk, Rollback, Suggested Test Steps) are missing or unsubstantive.
+- Required PR body sections (Summary, Risk, Rollback, Suggested Test Steps, Verified expectation) are missing or unsubstantive.
+- The branch is stale-based (two-dot deletion check non-empty) and has not been rebased.
 
 Otherwise: **Approved**.
 
 ## Step 8 — File Deferred Items for Non-Blocking Findings
+
+Filed items land in the board's Triage column automatically; label them with the type, `deferred`, the matching `concern:*` (or `documentation`), and at least one `area:*` from the repo's closed set. Do not set priority or dependencies — sequencing is the orchestrator's at triage.
 
 Before posting the Approval, Changes Requested, or Decomposition Requested template, **file a deferred issue for every finding you noted but did not require fixed in this PR**. This is the rule from the [github-workflow](../github-workflow/SKILL.md) skill's Deferred Items Rule, applied to your review.
 
@@ -231,7 +260,9 @@ In both environments:
 - If the merge is blocked by conflicts, merge the base branch into the PR branch, resolve, push, then retry.
 - If a required check is failing, investigate and fix the cause — never bypass it.
 
-After merging: post the **Approved** template as a comment, remove your review worktree, and hand back to the parent for cleanup (local worktree/branch removal).
+After merging: set the board's `Verified` field from the PR's *Verified expectation* line (`n/a` or `pending-live`; the dispatch gives the ids — Done is set by automation when the issue closes), post the **Approved** template as a comment, remove your review worktree, and hand back to the parent for cleanup (local worktree/branch removal).
+
+**Native reviews.** When the dispatch gives you a reviewer identity (`GH_TOKEN` for a second account), also submit the native review — `gh pr review <N> --approve` / `--request-changes --body-file` — under that identity; the comment carries the detail and the native state carries the verdict, and branch rules can require it. With one account GitHub refuses reviews on the author's own PR, so the comment plus the merge remain the approval of record.
 
 ## Escalation (cycle cap reached)
 

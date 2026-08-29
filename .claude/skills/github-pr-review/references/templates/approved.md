@@ -13,7 +13,24 @@ for worktree/branch cleanup.
 **Verdict**: Approved — merged
 
 ### Issue Coverage
-All requirements from #X verified resolved.
+All requirements from #X verified resolved and ticked on the issue; pending-live: <list or none>.
+
+### Attack list
+| Probe | Result |
+| ----- | ------ |
+| Spec fidelity / scope | probed — <what was checked> |
+| Correctness | |
+| Silent failures | |
+| Behavioural tests | |
+| Concurrency / ordering | |
+| Security surface | |
+| Drift guards | |
+| History (blame, prior PRs) | |
+| Comments match code | |
+| Standards & smells | |
+
+### Notes (not required — confidence < 80)
+- ...
 
 ### Test Results
 - CI: green
@@ -28,5 +45,5 @@ All requirements from #X verified resolved.
 - #<n>: <short title> — filed during this review
 - *(none)* if nothing was deferred
 
-Squash-merged; remote branch deletion verified. Handing back to parent for cleanup.
+Squash-merged; remote branch deletion verified. Board: Verified = <n/a | pending-live>. [Native review: approved under <reviewer account>.] Handing back to parent for cleanup.
 ```
