@@ -44,8 +44,8 @@ Fixes required in the next design iteration:
 ## 🚧 Architecture realignment (epic #726) — read before designing any compliance screen
 
 Status: **planned**. The prototype's compliance screens (Start a Scan, Live Run/Live
-Jobs scan detail, Compliance Results, Benchmarks) were designed against the scan-slice and identity stories'
-scan slice: a caller-selected profile, one job per top-level target, and
+Jobs scan detail, Compliance Results, Benchmarks) were designed against the shipped
+scan-slice model: a caller-selected profile, one job per top-level target, and
 whole-profile config documents. [Epic #726](https://github.com/blac9216/waypoint/issues/726)
 replaces that model with a closed catalog of exact-version baselines, stable
 component identity, immutable plans, component jobs with ordered attempts, and

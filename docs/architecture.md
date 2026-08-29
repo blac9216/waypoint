@@ -1,10 +1,11 @@
 # Waypoint — System Architecture
 
-Status: **living document, approved architecture ahead of implementation** (the first four
-delivery stories are built; the remaining stories are design intent — see [`roadmap.md`](roadmap.md)). This describes the
+Status: **living document, approved architecture ahead of implementation** (the seven closed
+delivery stories — milestones 3–9 — are built; the open stories are design intent until
+their domain epics land — see [`roadmap.md`](roadmap.md)). This describes the
 target-state system; decisions are recorded as ADRs in [`adr/`](adr/). Sections below
-are marked ✅ **Built** (shipped by the closed delivery stories, epics
-[#1](https://github.com/blac9216/waypoint/issues/1)/[#13](https://github.com/blac9216/waypoint/issues/13)/[#14](https://github.com/blac9216/waypoint/issues/14)),
+are marked ✅ **Built** (shipped by a closed delivery story — the section names
+which; the full list of stories and their epics is in [`roadmap.md`](roadmap.md)),
 🚧 **In transition** (approved replacement is not yet implemented), or
 📋 **Planned** (later stories) so a reader can tell what exists from what is still design intent.
 Do not read a 📋 marker as license to change the described design without an ADR.

@@ -213,7 +213,7 @@ real-world importance:
 2. **Never in process arguments.** Anything in argv is world-readable via
    `/proc/<pid>/cmdline`. Remediation's child `pwsh` processes (and any other child)
    receive secrets via stdin or an inherited file descriptor — never argv, and never
-   in URLs. *(Audit the existing remediation module's credential passing in the *Remediation* story.)*
+   in URLs. *(Audit the existing remediation module's credential passing in the Remediation story.)*
 3. **Write-only API, enforced at the serialization layer.** Secret material is absent
    from every response DTO — not masked; masking means the value entered the response
    pipeline. The UI renders metadata only: name, type, owner, last-rotated.
