@@ -189,6 +189,105 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 	}
 
 	[Fact]
+	public async Task CreateScanRun_WithExplicitEmptyTargetScope_OnFreshlyDiscoveredSite_CompletesAnEmptyRun_LeavingNoStrandedRunRow()
+	{
+		// Issue #1122 (round-1 review, finding 1): the deliberately-empty explicit scope
+		// on a site with NOTHING else to do. The sibling test above passes only by
+		// accident of its fixture -- its vSphere target has never been refreshed, so
+		// BuildStaleDiscoverSpecsAsync contributes one discover spec and the run fans
+		// out non-empty regardless. Here last_refreshed is set to now, so the run's spec
+		// list is genuinely empty: pre-fix this reached FanOutJobsAsync with zero specs,
+		// which throws ArgumentException AFTER the run row was inserted -- HTTP 500
+		// internal_error plus a run stranded in `pending` with zero jobs and nothing
+		// that could ever complete it. ADR-0023 §3 ("an honest plan with no executable
+		// items rather than widening") makes the honest outcome an accepted run that is
+		// immediately terminal, not an error and not a queued run: the scope snapshot is
+		// still recorded for history/audit, and the run row is `completed` with zero
+		// jobs. Asserted on the ROW STATE, not merely the status code.
+		Guid siteId = await CreateSiteAsync("empty-explicit-fresh-site");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-fresh", """{"host":"vcsa-fresh.example.internal"}""");
+		await MarkTargetFreshlyRefreshedAsync(targetId);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "explicit", component_ids = Array.Empty<Guid>() },
+		});
+
+		// Asserted BEFORE the status code deliberately: the pre-fix defect leaves a
+		// `pending` run row behind, and this is the assertion that pins THAT rather than
+		// merely the opaque 500 the request also returned. (Reverting the fix fails here
+		// with 1 stranded non-terminal run; the 500 has no run_id to look the row up by.)
+		Assert.Equal(0, await CountNonTerminalRunsForSiteAsync(siteId));
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		// No jobs at all -- not the widened legacy whole-target job this issue removes,
+		// and not a piggybacked discover job either (the target is fresh).
+		Assert.Equal(0, await CountJobsForRunAsync(runId));
+
+		// The run is honestly terminal, never left stranded in `pending`.
+		(string state, bool hasCompletedAt) = await ReadRunTerminalityAsync(runId);
+		Assert.Equal("completed", state);
+		Assert.True(hasCompletedAt);
+
+		// The scope snapshot is still frozen for history/audit (issue #733's AC).
+		RunScopeSnapshotRepository snapshots = new(_fixture.ConnectionString);
+		RunScopeSnapshot? snapshot = await snapshots.GetForRunAsync(runId, CancellationToken.None);
+		Assert.NotNull(snapshot);
+		Assert.Equal("explicit", snapshot!.RequestedMode);
+		Assert.Empty(snapshot.ResolvedComponentIds);
+	}
+
+	/// <summary>
+	/// Stamps <c>targets.last_refreshed</c> to now so
+	/// <c>RunCreationService.BuildStaleDiscoverSpecsAsync</c> contributes NO discover
+	/// spec for this target -- the fixture condition that makes an empty explicit scope
+	/// produce a genuinely empty spec list (issue #1122 round-1 review, finding 1).
+	/// </summary>
+	private async Task MarkTargetFreshlyRefreshedAsync(Guid targetId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("UPDATE targets SET last_refreshed = now() WHERE id = $1", connection);
+		command.Parameters.AddWithValue(targetId);
+		Assert.Equal(1, await command.ExecuteNonQueryAsync());
+	}
+
+	private async Task<int> CountJobsForRunAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT COUNT(*) FROM jobs WHERE run_id = $1", connection);
+		command.Parameters.AddWithValue(runId);
+		return Convert.ToInt32((long)(await command.ExecuteScalarAsync())!);
+	}
+
+	private async Task<(string State, bool HasCompletedAt)> ReadRunTerminalityAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT state, completed_at IS NOT NULL FROM runs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(runId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		return (reader.GetString(0), reader.GetBoolean(1));
+	}
+
+	private async Task<int> CountNonTerminalRunsForSiteAsync(Guid siteId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT COUNT(*) FROM runs WHERE scope->>'site_id' = $1 AND state NOT IN ('completed', 'completed_with_failures', 'aborted')",
+			connection);
+		command.Parameters.AddWithValue(siteId.ToString());
+		return Convert.ToInt32((long)(await command.ExecuteScalarAsync())!);
+	}
+
+	[Fact]
 	public async Task CreateScanRun_WithExplicitScopeNamingAResolvableComponent_PersistsRequestedAndResolvedScope()
 	{
 		Guid siteId = await CreateSiteAsync("resolvable-site");
@@ -359,6 +458,142 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 		await baselines.ActivateAsync(staged.Id, "test-fixture", CancellationToken.None);
 
 		return catalogComponent.Id;
+	}
+
+	[Fact]
+	public async Task CreateScanRun_WithExplicitSingleComponentScope_NeverFansOutLegacyJobToUnselectedTarget()
+	{
+		// Issue #1122 (round-12 live validation): the failing-test-first proof. Two
+		// targets exist in the site; the request explicitly scopes to ONE component on
+		// target B only. On unfixed main this asserts false -- RunCreationService's
+		// per-target loop falls every target absent from planRequirementsByTarget
+		// (target A here) through to BuildLegacyTargetJobSpec, producing an extra scan
+		// job against A that the operator never selected, carries no baseline, and runs
+		// the pre-catalog hardcoded-profile path (ADR-0023 "explicit subsets never
+		// widen silently", issue #733 AC).
+		Guid siteId = await CreateSiteAsync("legacy-fanout-site");
+		Guid targetA = await CreateTargetAsync(siteId, "vsphere", "vcsa-a", """{"host":"vcsa-a.example.internal"}""");
+		Guid targetB = await CreateTargetAsync(siteId, "vsphere", "vcsa-b", """{"host":"vcsa-b.example.internal"}""");
+
+		Guid catalogComponentId = await SeedCompatibleCatalogComponentAsync();
+		await _components.UpsertDiscoveredAsync(
+			targetB, [new DiscoveredComponent("esxi", "host-b-9001", "esxi-b.example.internal", null, catalogComponentId, "8.0.3")], CancellationToken.None);
+		Component seeded = (await _components.ListForTargetAsync(targetB, includeRetired: true, CancellationToken.None)).Single();
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		(Guid TargetId, string JobType)[] scanJobs = await ReadScanJobTargetsAsync(runId);
+
+		// Exactly one scan job, naming target B (the selected component's owner) --
+		// never target A.
+		Assert.Single(scanJobs);
+		Assert.Equal(targetB, scanJobs[0].TargetId);
+		Assert.DoesNotContain(scanJobs, job => job.TargetId == targetA);
+	}
+
+	[Fact]
+	public async Task CreateScanRun_WithExplicitMultiComponentScopeOnOneTarget_FansOutOnlyThoseComponents()
+	{
+		// Explicit scope naming two components on the SAME target must fan out exactly
+		// two scan jobs, both against that target -- never a third (legacy) job, and
+		// never touching a second, unselected target in the same site.
+		Guid siteId = await CreateSiteAsync("multi-component-site");
+		Guid targetA = await CreateTargetAsync(siteId, "vsphere", "vcsa-multi", """{"host":"vcsa-multi.example.internal"}""");
+		Guid untouchedTarget = await CreateTargetAsync(siteId, "vsphere", "vcsa-untouched", """{"host":"vcsa-untouched.example.internal"}""");
+
+		Guid catalogComponentId = await SeedCompatibleCatalogComponentAsync();
+		await _components.UpsertDiscoveredAsync(
+			targetA,
+			[
+				new DiscoveredComponent("esxi", "host-multi-9001", "esxi-multi-01.example.internal", null, catalogComponentId, "8.0.3"),
+				new DiscoveredComponent("esxi", "host-multi-9002", "esxi-multi-02.example.internal", null, catalogComponentId, "8.0.3"),
+			],
+			CancellationToken.None);
+		Guid[] seededIds = (await _components.ListForTargetAsync(targetA, includeRetired: true, CancellationToken.None))
+			.Select(component => component.Id).ToArray();
+		Assert.Equal(2, seededIds.Length);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "explicit", component_ids = seededIds },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		(Guid TargetId, string JobType)[] scanJobs = await ReadScanJobTargetsAsync(runId);
+
+		Assert.Equal(2, scanJobs.Length);
+		Assert.All(scanJobs, job => Assert.Equal(targetA, job.TargetId));
+		Assert.DoesNotContain(scanJobs, job => job.TargetId == untouchedTarget);
+	}
+
+	[Fact]
+	public async Task CreateScanRun_WithAllModeScope_StillFansOutDiscoveredComponents_AndNeverLegacyFansOutAnUnplannableTarget()
+	{
+		// Requirement 2: the legitimate "all" case must still expand and fan out
+		// correctly against refreshed inventory (ADR-0023 §3), while a second target
+		// in the same site with no catalog-compatible component gets NO job at all --
+		// not the legacy whole-target fallback either. "all" is target_scope-shaped
+		// too (ScopeResolutionService.ResolveAsync), so the same per-request gate this
+		// issue adds applies to it, not only to "explicit".
+		Guid siteId = await CreateSiteAsync("all-mode-site");
+		Guid plannableTarget = await CreateTargetAsync(siteId, "vsphere", "vcsa-plannable", """{"host":"vcsa-plannable.example.internal"}""");
+		Guid unplannableTarget = await CreateTargetAsync(siteId, "vsphere", "vcsa-unplannable", """{"host":"vcsa-unplannable.example.internal"}""");
+
+		Guid catalogComponentId = await SeedCompatibleCatalogComponentAsync();
+		await _components.UpsertDiscoveredAsync(
+			plannableTarget, [new DiscoveredComponent("esxi", "host-all-9001", "esxi-all-01.example.internal", null, catalogComponentId, "8.0.3")], CancellationToken.None);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		(Guid TargetId, string JobType)[] scanJobs = await ReadScanJobTargetsAsync(runId);
+
+		Assert.Single(scanJobs);
+		Assert.Equal(plannableTarget, scanJobs[0].TargetId);
+		Assert.DoesNotContain(scanJobs, job => job.TargetId == unplannableTarget);
+	}
+
+	/// <summary>
+	/// Reads (target_id, job_type) for every <c>scan</c>-typed job row on
+	/// <paramref name="runId"/> directly from Postgres -- the failing-test-first proof
+	/// for issue #1122 needs the raw row set, not the HTTP jobs-list projection,
+	/// because the defect is an EXTRA row the API would otherwise just as faithfully
+	/// echo back.
+	/// </summary>
+	private async Task<(Guid TargetId, string JobType)[]> ReadScanJobTargetsAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT target_id, job_type FROM jobs WHERE run_id = $1 AND job_type = 'scan' ORDER BY target_id", connection);
+		command.Parameters.AddWithValue(runId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		List<(Guid, string)> rows = [];
+		while (await reader.ReadAsync())
+		{
+			rows.Add((reader.GetGuid(0), reader.GetString(1)));
+		}
+
+		return [.. rows];
 	}
 
 	[Fact]

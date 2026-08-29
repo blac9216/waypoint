@@ -552,6 +552,29 @@ public sealed class RunCreationService
 				continue;
 			}
 
+			// Issue #1122 (round-12 live validation): the guard above is per-TARGET
+			// (planRequirementsByTarget.ContainsKey), not per-REQUEST -- a target that
+			// is absent from the resolved plan falls through to here whether or not the
+			// caller supplied target_scope at all. That is correct for a genuinely
+			// legacy request (no target_scope: `targets` and `planRequirementsByTarget`
+			// come from entirely separate resolution paths, so nothing "planned" this
+			// target and the whole-target legacy job IS the intended execution), but
+			// wrong for a target_scope request: `resolvedTargetScope` already reflects
+			// EVERY target/component the operator's scope names or "all" expands to
+			// (ScopeResolutionService.ResolveAsync), so a target reaching this point
+			// under target_scope is one the operator did not select at all -- ADR-0023
+			// "explicit subsets never widen silently" (issue #733 AC) applies equally to
+			// "all", which must expand against refreshed inventory, not against every
+			// target that exists regardless of scope. Emitting nothing here (rather than
+			// the legacy uncatalogued whole-target job) is the fix: no baseline, no
+			// catalog execution profile, no plan row -- exactly the un-attributable
+			// execution epic #726 exists to eliminate. See
+			// ScanRunTargetScopeTests for the failing-test-first proof.
+			if (resolvedTargetScope is not null)
+			{
+				continue;
+			}
+
 			specs.Add(BuildLegacyTargetJobSpec(target, siteId, profile, useRunSecret, resolvedBindings, adHocByTarget));
 		}
 
@@ -563,7 +586,16 @@ public sealed class RunCreationService
 		// exactly one job per resolved target regardless of plan-item credential
 		// demotion. Reject cleanly here, before FanOutJobsAsync's own (less specific)
 		// "a run must fan out to at least one job" guard would otherwise fire.
-		if (specs.Count == 0)
+		//
+		// Issue #1122: gated to a resolved scope that actually named at least one
+		// component (resolvedTargetScope.ResolvedComponentIds.Count > 0). A
+		// deliberately empty explicit request resolves zero components by design
+		// (ADR-0023 "No scan silently falls back from an empty explicit selection to
+		// the whole site" -- issue #733 AC) and is an intentional zero-scan-job run,
+		// not an error: with the #1122 fix above no longer emitting a legacy job for
+		// every unscoped target, that honest empty case now legitimately reaches this
+		// point with specs.Count == 0 and must NOT be rejected.
+		if (specs.Count == 0 && resolvedTargetScope is { ResolvedComponentIds.Count: > 0 })
 		{
 			throw new ApiException(
 				System.Net.HttpStatusCode.BadRequest,
@@ -573,6 +605,26 @@ public sealed class RunCreationService
 					+ "Assign the missing/compatible bindings or resolve the reported gaps before starting this scan.");
 		}
 
+		// Issue #1122 (round-1 review, finding 2): deliberately still the WHOLE site's
+		// targets, not just the ones the resolved scope names -- a scoped run may
+		// therefore refresh inventory on a vSphere target the operator did not select.
+		// That is not the widening #1122 is about and is not a defect:
+		//   * these are `discover` jobs, not `scan` jobs -- no baseline, no catalog
+		//     execution profile, no plan item, no compliance result is attributed to
+		//     the unselected target, so nothing un-attributable executes against it
+		//     (that is exactly the property the scan-job gate above restores);
+		//   * ResolvedTargetScope carries component ids only (ScopeResolution.cs), and
+		//     a target with NO discovered components yet resolves to no component at
+		//     all -- so narrowing the refresh set to the resolved scope would make
+		//     `all` unable to ever bootstrap a newly added target, breaking ADR-0023
+		//     §3's "`all` includes newly discovered compatible components on those
+		//     boundaries" (`all` must expand against REFRESHED inventory, which
+		//     presupposes the refresh);
+		//   * staleness, not scope, is the gate (BuildStaleDiscoverSpecsAsync only
+		//     emits for a vSphere target past DiscoveryOptions.StaleAfterMinutes), so
+		//     this adds no work a plain discovery run would not also do.
+		// Narrowing refresh to a scope is a separate policy question about inventory
+		// freshness, tracked outside this bug fix.
 		specs.AddRange(await BuildStaleDiscoverSpecsAsync(targets, useRunSecret ? null : resolvedBindings, cancellationToken).ConfigureAwait(false));
 
 		Guid runId = await _repository.CreateRunAsync(ScanRunType, scopeJson, credentialId, initiatedBy, cancellationToken, scheduleId)
@@ -660,6 +712,26 @@ public sealed class RunCreationService
 			await _runSecrets.StoreAsync(
 				runId, RunSecretKey.For(targetId, purpose), runSecretCredential, initiatedBy, _runSecretOptions.Value.Expiry, cancellationToken)
 				.ConfigureAwait(false);
+		}
+
+		// Issue #1122 (round-1 review, finding 1): a deliberately empty explicit
+		// target_scope is the ONE request shape that legitimately reaches here with no
+		// specs at all -- every other empty shape was already rejected before the run
+		// row existed (a non-empty scope resolving to zero components -> 400
+		// no_runnable_component; a resolved scope that compiles to no runnable plan ->
+		// 400 no_plannable_component; a legacy request -> "Site has no targets to
+		// scan"). Before this gate that request reached FanOutJobsAsync with zero
+		// specs, which throws ArgumentException AFTER CreateRunAsync above already
+		// inserted the row: an opaque 500 plus a run stranded in `pending` forever
+		// (nothing would ever flip it -- run completion is driven by a job's terminal
+		// write, and there is no job). ADR-0023 §3 calls for "an honest plan with no
+		// executable items rather than widening", so the run is real (its scope
+		// snapshot and plan are recorded above, for history/audit) and is moved
+		// straight to its honest terminal state instead of being queued or rejected.
+		if (specs.Count == 0)
+		{
+			await _repository.CompleteEmptyRunAsync(runId, cancellationToken).ConfigureAwait(false);
+			return runId;
 		}
 
 		await _repository.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);

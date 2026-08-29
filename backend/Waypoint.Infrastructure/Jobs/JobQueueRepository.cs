@@ -782,6 +782,57 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	}
 
 	/// <summary>
+	/// Issue #1122: see <see cref="IJobControlRepository.CompleteEmptyRunAsync"/>. The
+	/// <c>SELECT ... FOR UPDATE</c> plus the <c>pending</c> guard is the same
+	/// serialization <see cref="FanOutJobsAsync"/> uses, so a concurrent abort/pause of
+	/// the same run either lands entirely before this (and this returns false) or
+	/// entirely after it.
+	/// </summary>
+	public async Task<bool> CompleteEmptyRunAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+		await using (NpgsqlCommand lockRun = new("SELECT state FROM runs WHERE id = $1 FOR UPDATE", connection, transaction))
+		{
+			lockRun.Parameters.AddWithValue(runId);
+			object? currentState = await lockRun.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+			if (currentState is not string state || !string.Equals(state, "pending", StringComparison.Ordinal))
+			{
+				return false;
+			}
+		}
+
+		await using (NpgsqlCommand anyJob = new("SELECT 1 FROM jobs WHERE run_id = $1 LIMIT 1", connection, transaction))
+		{
+			anyJob.Parameters.AddWithValue(runId);
+			if (await anyJob.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null)
+			{
+				throw new InvalidOperationException(string.Format(
+					CultureInfo.InvariantCulture, "Run '{0}' has jobs; complete it through job terminal transitions, not as an empty run.", runId));
+			}
+		}
+
+		await using (NpgsqlCommand complete = new(
+			"UPDATE runs SET state = 'completed', started_at = COALESCE(started_at, now()), completed_at = now() WHERE id = $1",
+			connection, transaction))
+		{
+			complete.Parameters.AddWithValue(runId);
+			await complete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		// Issue #434's contract: the run secret dies in the same transaction as the
+		// terminal transition, exactly as TryCompleteRunAsync/AbortRunAsync do.
+		await DeleteRunSecretIfPresentAsync(runId, connection, transaction, cancellationToken).ConfigureAwait(false);
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+		LogRunCompleted(runId, "completed");
+		await EmitRunCompletedAsync(new RunCompletionResult(runId, "completed", 0), cancellationToken).ConfigureAwait(false);
+		return true;
+	}
+
+	/// <summary>
 	/// Issue #1016: see <see cref="IJobRunnerRepository.FanOutAdditionalJobsAsync"/>.
 	/// Requires <c>runs.state = 'running'</c> (the counterpart guard to
 	/// <see cref="FanOutJobsAsync"/>'s <c>'pending'</c> guard) so a caller can never

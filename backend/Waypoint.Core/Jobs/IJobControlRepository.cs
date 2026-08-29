@@ -102,6 +102,27 @@ public interface IJobControlRepository
 	/// </summary>
 	Task<IReadOnlyList<Guid>> FanOutJobsAsync(Guid runId, IReadOnlyList<JobSpec> specs, string? createdBy, CancellationToken cancellationToken);
 
+	/// <summary>
+	/// Issue #1122: terminates a <c>pending</c> run that legitimately fans out to ZERO
+	/// jobs, without ever passing an empty spec list to <see cref="FanOutJobsAsync"/>
+	/// (which rejects that shape outright). The only producer of such a run is a
+	/// deliberately empty explicit <c>target_scope</c>: ADR-0023 §3 says an explicit
+	/// selection never widens and that a scope with nothing runnable in it yields "an
+	/// honest plan with no executable items rather than widening", so the run exists
+	/// (with its scope snapshot and plan, for history/audit) but has nothing to
+	/// execute. Rather than leaving that run stranded in <c>pending</c> forever -- it
+	/// has no job whose terminal write would ever flip it -- this moves it straight to
+	/// <c>completed</c> with <c>completed_at</c> set, the same terminal shape a run
+	/// whose every job succeeded reaches, and deletes any run secret in the SAME
+	/// transaction (issue #434's "terminal completion deletes the secret" contract --
+	/// an empty run may still have stored an ad hoc secret before fan-out was skipped).
+	/// Returns false when the run is not <c>pending</c> (already terminal, aborted, or
+	/// absent). Throws when the run actually has jobs -- that run belongs to the normal
+	/// job-driven completion path (<c>TryCompleteRunAsync</c>) and must never be
+	/// short-circuited here.
+	/// </summary>
+	Task<bool> CompleteEmptyRunAsync(Guid runId, CancellationToken cancellationToken);
+
 	/// <summary>Pauses dispatch for a pending or running run; in-flight work continues.</summary>
 	Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken);
 
