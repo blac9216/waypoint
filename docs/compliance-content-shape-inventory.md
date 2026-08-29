@@ -62,13 +62,22 @@ the guard twice:
   Enforcing the vocabulary (above) still let a cell say `Accepted` for a shape whose
   fixture asserts rejection -- a doc-only edit that silently disarmed the differential
   for that shape while the suite stayed green at 27/27 (issue #1121). Each
-  `*ShapeInventoryTests` class now names the shape IDs its `ShapeIsRejected` fixtures
-  cover (e.g. `StigZipReaderShapeInventoryTests.RejectedShapeIds`) and
-  `ShapeInventoryDoc.AssertCompleteness` cross-checks every row's classified verdict
-  against that set: a row saying `Accepted` for a shape whose fixture rejects it, or
-  `Rejected` for one whose fixture accepts it, fails the build. This closes the
-  specific channel PR #1098's own merged fix left open, and moves "the verdict word
-  agrees with the fixture" from review-enforced to machine-enforced.
+  `*ShapeInventoryTests` class now declares a single table of per-shape expectations
+  (`StigZipReaderShapeInventoryTests.ShapeExpectations`; for `InspecManifestParser`,
+  whose shapes are all accept-flavoured, `ImplementedShapeIds` together with
+  `NoInputShapeIds`) and derives every shape list it uses from that one table: the
+  shape IDs it implements, the reject set handed to
+  `ShapeInventoryDoc.AssertCompleteness`, and the `[MemberData]` rows of its
+  `ShapeIsAccepted`/`ShapeIsRejected` theories. `AssertCompleteness` cross-checks every
+  row's classified verdict against that reject set: a row saying `Accepted` for a shape
+  whose fixture rejects it, or `Rejected` for one whose fixture accepts it, fails the
+  build. Because the set and the theory rows have one source, the set cannot lie about
+  the fixtures either -- dropping a shape from the reject set does not leave its
+  rejection case standing, it moves that shape into `ShapeIsAccepted`, which then fails
+  against a parser that really does reject it, and deleting the shape outright fails the
+  completeness assertion. This closes the specific channel PR #1098's own merged fix
+  left open, and moves "the verdict word agrees with the fixture" from review-enforced
+  to machine-enforced.
 - **The C# and script column splits cannot drift.** Previously the C# reader walked a
   row back to its last *unescaped* pipe while `scripts/parser-shape-diff.sh` split on
   every `|`, so a self-contradictory cell containing a literal escaped pipe --

@@ -31,41 +31,85 @@ namespace Waypoint.Tests.Core.ComplianceContent.Xccdf;
 /// </summary>
 public sealed class StigZipReaderShapeInventoryTests
 {
-	/// <summary>Shape IDs this class implements, in the order the inventory doc documents them.</summary>
-	public static readonly string[] ImplementedShapeIds =
+	/// <summary>
+	/// The single source of truth for what this class asserts about each documented shape, in the order the
+	/// inventory doc documents them. Every other list in this class -- <see cref="ImplementedShapeIds"/>, the
+	/// reject set fed to <see cref="ShapeInventoryDoc.AssertCompleteness"/>, and the theory rows of
+	/// <see cref="ShapeIsAccepted"/>/<see cref="ShapeIsRejected"/> -- is derived from this table, so a shape
+	/// cannot be dropped from the reject set while a fixture two dozen lines away still asserts rejection
+	/// (issue #1121 round-1 review). A row with a non-null <c>ExpectedErrorSubstring</c> IS a
+	/// <see cref="ShapeIsRejected"/> case; a row with a null one IS a <see cref="ShapeIsAccepted"/> case
+	/// asserting <c>ExpectedEntryCount</c> entries.
+	/// </summary>
+	private static readonly (string ShapeId, int ExpectedEntryCount, string? ExpectedErrorSubstring)[] ShapeExpectations =
 	[
-		"single-benchmark",
-		"flat-multi-xccdf",
-		"nested-directory-multi-xccdf",
-		"zip-of-zips",
-		"zip-of-zips-depth-boundary",
-		"zip-of-zips-beyond-depth-boundary",
-		"case-insensitive-xccdf-suffix",
-		"non-xccdf-siblings-ignored",
-		"zip-slip-entry-name",
-		"no-xccdf-entry",
+		("single-benchmark", 1, null),
+		("flat-multi-xccdf", 2, null),
+		("nested-directory-multi-xccdf", 2, null),
+		("zip-of-zips", 1, null),
+		("zip-of-zips-depth-boundary", 1, null),
+		("zip-of-zips-beyond-depth-boundary", 0, "recursion bound"),
+		("case-insensitive-xccdf-suffix", 1, null),
+		("non-xccdf-siblings-ignored", 1, null),
+		("zip-slip-entry-name", 0, "unsafe path"),
+		("no-xccdf-entry", 0, "does not contain any entry ending in '-xccdf.xml'"),
 	];
 
+	/// <summary>Shape IDs this class implements, in the order the inventory doc documents them.</summary>
+	public static readonly string[] ImplementedShapeIds = ShapeExpectations.Select(shape => shape.ShapeId).ToArray();
+
 	/// <summary>
-	/// Shape IDs whose documented expectation is rejection rather than acceptance -- i.e. the shape IDs
-	/// covered by <see cref="ShapeIsRejected"/> rather than <see cref="ShapeIsAccepted"/>. Fed to
-	/// <see cref="ShapeInventoryDoc.AssertCompleteness"/> so the doc's Expected verdict word for each row is
-	/// bound to what this class's fixture actually asserts (issue #1121) -- this set is no longer dead code.
+	/// Shape IDs whose fixture asserts rejection -- derived from <see cref="ShapeExpectations"/>, hence from the
+	/// very rows <see cref="ShapeIsRejected"/> runs. Fed to <see cref="ShapeInventoryDoc.AssertCompleteness"/> so
+	/// the doc's Expected verdict word for each row is bound to what this class's fixture actually asserts
+	/// (issue #1121). Removing a shape from this set is not a local edit: it moves that shape into
+	/// <see cref="ShapeIsAccepted"/>, which then fails because the reader really does reject it.
 	/// </summary>
-	private static readonly HashSet<string> RejectedShapeIds = new(["zip-of-zips-beyond-depth-boundary", "zip-slip-entry-name", "no-xccdf-entry"], StringComparer.Ordinal);
+	private static readonly HashSet<string> RejectedShapeIds =
+		new(ShapeExpectations.Where(shape => shape.ExpectedErrorSubstring is not null).Select(shape => shape.ShapeId), StringComparer.Ordinal);
+
+	/// <summary>Theory rows for <see cref="ShapeIsAccepted"/>: every shape in <see cref="ShapeExpectations"/> with no expected error.</summary>
+	public static TheoryData<string, int> AcceptedShapes
+	{
+		get
+		{
+			TheoryData<string, int> data = [];
+			foreach ((string shapeId, int expectedCount, string? expectedError) in ShapeExpectations)
+			{
+				if (expectedError is null)
+				{
+					data.Add(shapeId, expectedCount);
+				}
+			}
+
+			return data;
+		}
+	}
+
+	/// <summary>Theory rows for <see cref="ShapeIsRejected"/>: every shape in <see cref="ShapeExpectations"/> with an expected error.</summary>
+	public static TheoryData<string, string> RejectedShapes
+	{
+		get
+		{
+			TheoryData<string, string> data = [];
+			foreach ((string shapeId, _, string? expectedError) in ShapeExpectations)
+			{
+				if (expectedError is not null)
+				{
+					data.Add(shapeId, expectedError);
+				}
+			}
+
+			return data;
+		}
+	}
 
 	[Fact]
 	public void InventoryIsComplete() =>
 		ShapeInventoryDoc.AssertCompleteness("`StigZipReader` (`backend/Waypoint.Core/ComplianceContent/Xccdf/StigZipReader.cs`)", ImplementedShapeIds, RejectedShapeIds);
 
 	[Theory]
-	[InlineData("single-benchmark", 1)]
-	[InlineData("flat-multi-xccdf", 2)]
-	[InlineData("nested-directory-multi-xccdf", 2)]
-	[InlineData("zip-of-zips", 1)]
-	[InlineData("zip-of-zips-depth-boundary", 1)]
-	[InlineData("case-insensitive-xccdf-suffix", 1)]
-	[InlineData("non-xccdf-siblings-ignored", 1)]
+	[MemberData(nameof(AcceptedShapes))]
 	public void ShapeIsAccepted(string shapeId, int expectedCount)
 	{
 		byte[] zip = BuildZipForShape(shapeId);
@@ -78,9 +122,7 @@ public sealed class StigZipReaderShapeInventoryTests
 	}
 
 	[Theory]
-	[InlineData("zip-of-zips-beyond-depth-boundary", "recursion bound")]
-	[InlineData("zip-slip-entry-name", "unsafe path")]
-	[InlineData("no-xccdf-entry", "does not contain any entry ending in '-xccdf.xml'")]
+	[MemberData(nameof(RejectedShapes))]
 	public void ShapeIsRejected(string shapeId, string expectedErrorSubstring)
 	{
 		byte[] zip = BuildZipForShape(shapeId);
