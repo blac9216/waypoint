@@ -683,7 +683,7 @@ function Set-WaypointCklBenchmarkMetadata {
 # inspec.yml simply yields an empty list -- callers decide what an empty/no-match
 # result means for their own slot (NSX defaults to its 4.x legacy name; vSphere,
 # issue #1123, fails closed instead -- see Get-WaypointVsphereProfileSelectorInputKeySet).
-function Get-WaypointProfileDeclaredInputNames {
+function Get-WaypointProfileDeclaredInputNameSet {
 	[CmdletBinding()]
 	param(
 		[Parameter(Mandatory)]
@@ -800,7 +800,7 @@ function Get-WaypointProfileDeclaredInputNames {
 
 # Issue #917 helper (module-private, used only by Invoke-WaypointNsxScan): resolves
 # which NSX auth-input key names the resolved frozen profile itself declares, from
-# Get-WaypointProfileDeclaredInputNames' shared manifest scan. Returns the same
+# Get-WaypointProfileDeclaredInputNameSet's shared manifest scan. Returns the same
 # { manager, token, cookie } shape the sibling transport's catalog `authInputKeys`
 # map carries, with any undeclared slot left $null so the caller's per-slot 4.x
 # legacy defaulting (taken verbatim from module.transport.nsxapi.ps1) applies.
@@ -812,7 +812,7 @@ function Get-WaypointNsxProfileAuthInputKeySet {
 		[string]$ProfilePath
 	)
 
-	$DeclaredNames = Get-WaypointProfileDeclaredInputNames -ProfilePath $ProfilePath
+	$DeclaredNames = Get-WaypointProfileDeclaredInputNameSet -ProfilePath $ProfilePath
 
 	# Per-slot: whichever of the two known key names (4.x legacy / 9.x SRG) the
 	# profile declares, in the profile's own declaration order; $null when neither is
@@ -831,7 +831,7 @@ function Get-WaypointNsxProfileAuthInputKeySet {
 # Issue #1123 helper (module-private, used only by Invoke-WaypointScan): resolves
 # which vSphere object-narrowing input key name the resolved frozen profile itself
 # declares for the given SelectorKind ('esxi' or 'vm'), from
-# Get-WaypointProfileDeclaredInputNames' shared manifest scan. Unlike the NSX auth-key
+# Get-WaypointProfileDeclaredInputNameSet's shared manifest scan. Unlike the NSX auth-key
 # resolution above, this NEVER defaults an unmatched slot to a hardcoded name -- epic
 # #726 Wave 2's "never guess" rule applies to a scoping key exactly as it does to
 # object identity: a profile that declares neither the 8.0 name nor the VCF 9.x SRG
@@ -851,7 +851,7 @@ function Get-WaypointVsphereProfileSelectorInputKeySet {
 		[string]$SelectorKind
 	)
 
-	$DeclaredNames = Get-WaypointProfileDeclaredInputNames -ProfilePath $ProfilePath
+	$DeclaredNames = Get-WaypointProfileDeclaredInputNameSet -ProfilePath $ProfilePath
 
 	# Known name pairs per selector kind: 8.0 STIG baseline (esxi/vmhostName,
 	# vm/vmName) and the VCF 9.x SRG baselines (esxi/esx_vmhostName, vm/vm_Name --
