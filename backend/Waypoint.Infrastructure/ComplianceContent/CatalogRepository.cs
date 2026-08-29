@@ -203,10 +203,46 @@ public sealed class CatalogRepository : ICatalogRepository
 			? "(product_version_id, component_key) WHERE parent_component_id IS NULL"
 			: "(product_version_id, parent_component_id, component_key)";
 
+		// Issue #1094: the insert column list is derived from ComponentColumnNames
+		// (the SAME list MapComponent reads back), minus the two columns Postgres
+		// supplies itself (id, created_at), rather than a second hand-typed list --
+		// exactly the "one authoritative column list" #1089 established for the read
+		// projections, now extended to the write path that was this issue's actual
+		// defect: requires_sudo/sudo_requires_password were columns MapComponent read
+		// but the INSERT never named, so every imported row silently took the table's
+		// DEFAULT instead of definition's declared policy. insertValuesByColumn is
+		// keyed by column name (not position), so a future reordering of
+		// ComponentColumnNames cannot silently swap two values the way issue #1100
+		// describes for the read side -- and a column added to ComponentColumnNames
+		// with no corresponding entry here throws (KeyNotFoundException) instead of
+		// silently defaulting again.
+		//
+		// requires_sudo/sudo_requires_password are deliberately NOT in the ON CONFLICT
+		// DO UPDATE clause: a content re-pull must never overwrite an existing
+		// component's sudo policy (migration-seeded or otherwise) with an imported
+		// definition's default (issue #1094 AC) -- the two columns are write-once, at
+		// first creation only, exactly like migration 0074's own seed UPDATEs are the
+		// only writer for the seeded rows today.
+		Dictionary<string, object?> insertValuesByColumn = new(StringComparer.Ordinal)
+		{
+			["product_version_id"] = productVersionId,
+			["parent_component_id"] = (object?)definition.ParentComponentId ?? DBNull.Value,
+			["component_key"] = definition.ComponentKey,
+			["display_name"] = definition.DisplayName,
+			["transport"] = definition.Transport,
+			["selector_kind"] = definition.SelectorKind,
+			["selector_name"] = (object?)definition.SelectorName ?? DBNull.Value,
+			["requires_sudo"] = definition.RequiresSudo,
+			["sudo_requires_password"] = definition.SudoRequiresPassword,
+		};
+		string[] insertColumns = [.. ComponentColumnNames.Where(column => column is not ("id" or "created_at"))];
+		string insertColumnList = string.Join(", ", insertColumns);
+		string insertPlaceholders = string.Join(", ", Enumerable.Range(1, insertColumns.Length).Select(index => "$" + index));
+
 		await using NpgsqlCommand upsert = new(
 			$"""
-			INSERT INTO catalog_components (product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO catalog_components ({insertColumnList})
+			VALUES ({insertPlaceholders})
 			ON CONFLICT {conflictTarget} DO UPDATE SET
 				display_name = EXCLUDED.display_name,
 				transport = EXCLUDED.transport,
@@ -214,13 +250,10 @@ public sealed class CatalogRepository : ICatalogRepository
 				selector_name = EXCLUDED.selector_name
 			RETURNING {ComponentColumns()}
 			""", connection);
-		upsert.Parameters.AddWithValue(productVersionId);
-		upsert.Parameters.AddWithValue((object?)definition.ParentComponentId ?? DBNull.Value);
-		upsert.Parameters.AddWithValue(definition.ComponentKey);
-		upsert.Parameters.AddWithValue(definition.DisplayName);
-		upsert.Parameters.AddWithValue(definition.Transport);
-		upsert.Parameters.AddWithValue(definition.SelectorKind);
-		upsert.Parameters.AddWithValue((object?)definition.SelectorName ?? DBNull.Value);
+		foreach (string column in insertColumns)
+		{
+			upsert.Parameters.AddWithValue(insertValuesByColumn[column]!);
+		}
 
 		await using NpgsqlDataReader upsertReader = await upsert.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		await upsertReader.ReadAsync(cancellationToken).ConfigureAwait(false);

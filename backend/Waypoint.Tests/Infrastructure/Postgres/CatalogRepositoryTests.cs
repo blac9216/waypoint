@@ -1121,6 +1121,111 @@ public sealed class CatalogRepositoryTests : IAsyncLifetime
 		Assert.Equal(seededPurposes, derivedPurposes);
 	}
 
+	/// <summary>
+	/// Issue #1094: the actual red-on-main defect. Migration 0074's column DEFAULTs are
+	/// (requires_sudo = false, sudo_requires_password = true); this component declares
+	/// the OPPOSITE of both (mirroring the sibling catalog's real Photon shape: sudo
+	/// enabled, passwordless) so a passing assertion can only mean the INSERT actually
+	/// wrote the declared values rather than silently falling through to the table
+	/// DEFAULT. Before this fix (pre-#1094 <c>UpsertComponentAsync</c>, which names
+	/// neither column in its INSERT), this component would persist as
+	/// (false, true) -- the DEFAULT -- regardless of what the definition declared, and
+	/// this assertion would fail.
+	/// </summary>
+	[Fact]
+	public async Task UpsertComponent_DeclaredSudoPolicy_PersistsExactlyAsDeclared_NotTheColumnDefault()
+	{
+		Guid sourceRevisionId = await SeedSourceRevisionAsync();
+		CatalogProduct product = await _repository.UpsertProductAsync(sourceRevisionId, "vmware", "photon", "VMware Photon OS", CancellationToken.None);
+		CatalogProductVersion version = await _repository.UpsertProductVersionAsync(product.Id, "5.0", "Photon OS 5.0", CancellationToken.None);
+
+		CatalogComponent photon = await _repository.UpsertComponentAsync(
+			version.Id,
+			new CatalogComponentDefinition(
+				"photon", "Photon OS", CatalogTransports.Ssh, CatalogSelectorKinds.Target, null, null,
+				RequiresSudo: true, SudoRequiresPassword: false),
+			CancellationToken.None);
+
+		Assert.True(photon.RequiresSudo);
+		Assert.False(photon.SudoRequiresPassword);
+
+		// Re-reading via the list projection (a separate query, same MapComponent
+		// reader) proves the values actually landed in the row rather than merely
+		// echoing the RETURNING clause's in-memory parameters back.
+		CatalogComponent reread = Assert.Single(await _repository.ListComponentsAsync(version.Id, CancellationToken.None));
+		Assert.True(reread.RequiresSudo);
+		Assert.False(reread.SudoRequiresPassword);
+	}
+
+	/// <summary>
+	/// Issue #1094 AC "a content re-pull never overwrites a seeded or operator-supplied
+	/// sudo policy with an unknown one": simulates a migration-seeded (or previously
+	/// operator-declared) component's sudo policy surviving a re-pull whose
+	/// <see cref="CatalogComponentDefinition"/> carries only the record's own defaults
+	/// (i.e. the re-pull's candidate does not declare a policy). The ON CONFLICT DO
+	/// UPDATE clause must not name requires_sudo/sudo_requires_password, or this would
+	/// silently clobber the seeded (true, true) with the defaulted (false, true).
+	/// </summary>
+	[Fact]
+	public async Task UpsertComponent_Repull_NeverOverwritesExistingSudoPolicy_WithDefault()
+	{
+		Guid sourceRevisionId = await SeedSourceRevisionAsync();
+		CatalogProduct product = await _repository.UpsertProductAsync(sourceRevisionId, "vmware", "vidm", "Workspace ONE Access", CancellationToken.None);
+		CatalogProductVersion version = await _repository.UpsertProductVersionAsync(product.Id, "3.3.7", "Workspace ONE Access 3.3.7", CancellationToken.None);
+
+		// First write ("seeded"/declared): sudo enabled, password required.
+		CatalogComponent seeded = await _repository.UpsertComponentAsync(
+			version.Id,
+			new CatalogComponentDefinition(
+				"vidm", "Workspace ONE Access", CatalogTransports.Ssh, CatalogSelectorKinds.Target, null, null,
+				RequiresSudo: true, SudoRequiresPassword: true),
+			CancellationToken.None);
+		Assert.True(seeded.RequiresSudo);
+		Assert.True(seeded.SudoRequiresPassword);
+
+		// Second write ("re-pull"): same natural key, but this time the caller passes
+		// the record's own default (no declared policy) -- the shape an importer that
+		// has no sudo signal for this component would produce.
+		CatalogComponent repulled = await _repository.UpsertComponentAsync(
+			version.Id,
+			new CatalogComponentDefinition(
+				"vidm", "Workspace ONE Access (re-pulled)", CatalogTransports.Ssh, CatalogSelectorKinds.Target, null, null),
+			CancellationToken.None);
+
+		Assert.Equal(seeded.Id, repulled.Id);
+		Assert.Equal("Workspace ONE Access (re-pulled)", repulled.DisplayName); // other fields DO still re-assert on conflict.
+		Assert.True(repulled.RequiresSudo, "re-pull must not clobber an existing declared sudo policy with the default.");
+		Assert.True(repulled.SudoRequiresPassword);
+	}
+
+	/// <summary>
+	/// Issue #1094: documents the current, deliberate importer behavior -- the vendor
+	/// content <see cref="SemanticImportReconciler"/>/<see cref="ICatalogRepository.PromoteCandidateAsync"/>
+	/// consume carries no sudo signal, so a promoted component's sudo policy is the
+	/// <see cref="CatalogComponentDefinition"/> default (no sudo), written explicitly
+	/// now rather than falling through to the table DEFAULT. This pins that "zero real
+	/// imported components change policy under this fix" is correct: the fix changes
+	/// HOW the default reaches the row (explicit code vs. accidental table DEFAULT),
+	/// not WHICH value an import with no available signal receives.
+	/// </summary>
+	[Fact]
+	public async Task PromoteCandidate_NoSudoSignalInVendorContent_PersistsExplicitDefault_NotSudo()
+	{
+		SemanticCandidate candidate = ExecutableLeafCandidate(
+			profileKey: "vsphere/9.0/Y26M05-srg/inspec/baseline/envoy", productVersionKey: "9.0", kind: CatalogKinds.Srg,
+			componentKey: "envoy", transport: CatalogTransports.Ssh, selectorKind: CatalogSelectorKinds.Service)
+			with
+		{ SelectorName = "envoy" };
+
+		CatalogPromotionOutcome outcome = await _repository.PromoteCandidateAsync(
+			candidate, PromotionRequest() with { OutputKind = CatalogOutputKinds.Hdf }, CancellationToken.None);
+
+		CatalogExecutionProfileDetail? detail = await _repository.GetExecutionProfileAsync(outcome.ExecutionProfileId!.Value, CancellationToken.None);
+		Assert.NotNull(detail);
+		Assert.False(detail!.Component.RequiresSudo);
+		Assert.True(detail.Component.SudoRequiresPassword);
+	}
+
 	/// <summary>Reads a seed migration's raw SQL out of the embedded manifest resources (same idiom as <c>ExecutionCatalogSeedTests</c>).</summary>
 	private static async Task<string> ReadEmbeddedMigrationAsync(string fileName)
 	{

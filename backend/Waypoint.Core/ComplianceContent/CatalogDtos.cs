@@ -107,10 +107,35 @@ public sealed record CatalogExecutionProfileDetail(
 /// <see cref="CatalogVocabularyValidator.ValidateComponent"/> checks before it ever
 /// reaches storage.
 /// </summary>
+/// <remarks>
+/// Issue #1094: <see cref="RequiresSudo"/>/<see cref="SudoRequiresPassword"/> are the
+/// declared sudo policy this definition carries into
+/// <see cref="ICatalogRepository.UpsertComponentAsync"/>'s <c>INSERT</c> (see that
+/// method's remarks). Defaults ((false, true)) intentionally match
+/// <see cref="CatalogComponent"/>'s own defaults and migration 0074's column defaults --
+/// no behavior changes for a caller that does not set them.
+///
+/// The importer (<see cref="ICatalogRepository.PromoteCandidateAsync"/>, fed by
+/// <see cref="Waypoint.Core.ComplianceContent.SemanticImport.SemanticCandidate"/>) never
+/// sets these: the vendor content the importer
+/// parses (the dod-compliance-and-automation profile tree -- <c>inspec.yml</c>,
+/// control files, directory layout) carries no sudo field anywhere, so there is
+/// nothing to derive from at promotion time today. That is a deliberate, documented
+/// decision for THIS issue's scope, not an oversight -- the sibling per-component sudo
+/// declaration migration 0074 seeded from (settings/catalog.json) lives in a different
+/// sibling repository the importer does not read. An imported component therefore
+/// takes this record's explicit default (no sudo) the same way it did before this fix,
+/// except now via a real, tested code path rather than an accidental table DEFAULT
+/// (issue #1094's actual defect). Whether/how to represent a genuine "policy unknown"
+/// tri-state, or to derive policy from an admin-declared fact instead, is future work
+/// this issue does not resolve -- see issue #1094's discussion.
+/// </remarks>
 public sealed record CatalogComponentDefinition(
 	string ComponentKey,
 	string DisplayName,
 	string Transport,
 	string SelectorKind,
 	string? SelectorName,
-	Guid? ParentComponentId);
+	Guid? ParentComponentId,
+	bool RequiresSudo = false,
+	bool SudoRequiresPassword = true);
