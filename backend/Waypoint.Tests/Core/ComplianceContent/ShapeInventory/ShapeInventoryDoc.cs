@@ -200,8 +200,12 @@ public static class ShapeInventoryDoc
 	/// Splits a table row's remainder (everything after the shape-ID column, minus the closing
 	/// pipe) on its last UNESCAPED pipe, so a description containing a literal <c>\|</c> -- as
 	/// the block-scalar row does -- does not shift which column is read as Expected.
+	/// Internal rather than private so <c>ShapeInventoryDocColumnSplitTests</c> can cover the
+	/// escape-aware walk-back directly: no row of the live inventory carries a <c>\|</c> in its
+	/// Expected cell, so without those tests this guard's escape handling could be deleted with
+	/// the suite green (issue #1120 AC3, PR #1126 round-2 review).
 	/// </summary>
-	private static string LastColumn(string rowRemainder)
+	internal static string LastColumn(string rowRemainder)
 	{
 		for (int i = rowRemainder.Length - 1; i >= 0; i--)
 		{

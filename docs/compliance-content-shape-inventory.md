@@ -89,7 +89,16 @@ the guard twice:
   `AssertExpectedVocabulary`/`AssertCompleteness` already assert against) to JSON when
   `WAYPOINT_SHAPE_EXPECTED_DUMP_PATH` is set, and the script reads that JSON instead of
   re-parsing markdown. One classification, read by both checks, replaces two
-  implementations that happened to agree.
+  implementations that happened to agree. That single split
+  (`ShapeInventoryDoc.LastColumn`) has its own direct coverage in
+  `ShapeInventoryDocColumnSplitTests`, because no row of the tables below carries a
+  `\|` in its *Expected* cell -- the only escaped pipe in the inventory sits in
+  `block-scalar-literal-description`'s *Scenario* cell, which is not the last pipe on
+  its line and so cannot tell the escape-aware walk-back from a naive last-pipe search.
+  Those tests assert the walk-back over synthetic row remainders -- including the
+  self-contradictory `Rejected ... \| Accepted ...` cell above -- so the escape
+  handling cannot be deleted with the suite green, and the coverage does not depend on
+  the wording of any row.
 
 **NOT machine-enforced (review-enforced only -- this is where you must add a row by
 hand):**
