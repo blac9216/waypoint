@@ -50,3 +50,20 @@ An append to Consequences must:
 | [0023](0023-compliance-inventory-and-immutable-plans.md) | Stable compliance inventory and immutable component plans | Accepted (planned) |
 | [0024](0024-compliance-execution-attempts-credentials-and-settings.md) | Compliance execution items, attempts, credentials, and control settings | Accepted (planned); supersedes parts of 0021 |
 | [0025](0025-compliance-trust-cleanup-and-evidence.md) | Compliance trust, temporary access cleanup, and evidence lifecycle | Accepted (planned) |
+
+## Former milestone numbering
+
+Accepted ADRs are immutable, so the ones written before 2026-08-29 still refer to
+milestones by number. The stories they mean (see
+[`../process/work-tracking.md`](../process/work-tracking.md) and the GitHub milestones):
+
+| Old label | Delivery story |
+|---|---|
+| M0 | Design & contracts (planning phase; no milestone) |
+| M1 | [Foundation & download slice](https://github.com/blac9216/waypoint/milestone/3) |
+| M2 | [Sites, credentials & STIG scan slice](https://github.com/blac9216/waypoint/milestone/4) — followed by [Runner realignment](https://github.com/blac9216/waypoint/milestone/5) |
+| M3 | [Identity, RBAC & scheduling](https://github.com/blac9216/waypoint/milestone/6) |
+| M4 | [Remediation](https://github.com/blac9216/waypoint/milestone/12) |
+| M5 | [Download & depot parity](https://github.com/blac9216/waypoint/milestone/11) |
+| M6 | [Transfer & enclave modes](https://github.com/blac9216/waypoint/milestone/13) |
+| M7 | [Self-update & appliance packaging](https://github.com/blac9216/waypoint/milestone/14) |

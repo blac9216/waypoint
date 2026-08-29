@@ -6,7 +6,7 @@ one doc-comment sanitization, both noted below and in `NOTICE`) from the sibling
 per [ADR-0013](../../../docs/adr/0013-control-plane-and-runners.md) and
 [ADR-0015](../../../docs/adr/0015-source-build-and-operator-export.md).
 
-Only the files the M2 discover/credential-test/scan call graph needs are imported --
+Only the files the original scan-slice discover/credential-test/scan call graph needs are imported --
 this is not a full port of the sibling repo. The call graph was inventoried from the
 Waypoint-owned shim modules that dot-source these files
 (`backend/Waypoint.Infrastructure/PowerShell/Modules/Waypoint{Discovery,Scan,

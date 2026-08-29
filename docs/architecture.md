@@ -1,12 +1,13 @@
 # Waypoint — System Architecture
 
-Status: **living document, approved architecture ahead of implementation** (M0–M3 are
-built; M4+ remain design intent — see [`roadmap.md`](roadmap.md)). This describes the
+Status: **living document, approved architecture ahead of implementation** (the seven closed
+delivery stories — milestones 3–9 — are built; the open stories are design intent until
+their domain epics land — see [`roadmap.md`](roadmap.md)). This describes the
 target-state system; decisions are recorded as ADRs in [`adr/`](adr/). Sections below
-are marked ✅ **Built** (shipped in M1–M3, epics
-[#1](https://github.com/blac9216/waypoint/issues/1)/[#13](https://github.com/blac9216/waypoint/issues/13)/[#14](https://github.com/blac9216/waypoint/issues/14)),
+are marked ✅ **Built** (shipped by a closed delivery story — the section names
+which; the full list of stories and their epics is in [`roadmap.md`](roadmap.md)),
 🚧 **In transition** (approved replacement is not yet implemented), or
-📋 **Planned** (M4+) so a reader can tell what exists from what is still design intent.
+📋 **Planned** (later stories) so a reader can tell what exists from what is still design intent.
 Do not read a 📋 marker as license to change the described design without an ADR.
 
 ## What Waypoint is
@@ -22,9 +23,9 @@ cross-enclave transfer; it does not execute domain tools (ADR-0013).
 
 ## Deployment topology: one appliance, two modes
 
-📋 **Planned (M6, epic [#17](https://github.com/blac9216/waypoint/issues/17)).** Today
+📋 **Planned (*Transfer & enclave modes*, epic [#17](https://github.com/blac9216/waypoint/issues/17)).** Today
 there is one mode: a single connected-style dev/compose deployment, now with Keycloak
-OIDC as the production sign-in path (M3). Mode enforcement, the disconnected variant,
+OIDC as the production sign-in path (*Identity, RBAC & scheduling*). Mode enforcement, the disconnected variant,
 and transfer bundles are not yet built.
 
 The same operator-built Compose topology deploys on both sides of the air gap
@@ -43,15 +44,15 @@ availability derives from the mode — there is one codebase and one image, neve
 
 ## Component view
 
-✅ **Built**: nginx, frontend, Postgres, the STIG Manager connection (M1/M2), the
+✅ **Built**: nginx, frontend, Postgres, the STIG Manager connection (foundation and scan-slice stories), the
 split of the once-combined backend into a control-plane API plus dedicated
 `compliance-runner` and `download-runner` services (ADRs 0013/0014, issue #443) — the
 API process references neither the PowerShell SDK nor any job handler at build time
 (`backend/Waypoint.Infrastructure.Execution` is a separate project only the two
-runners reference) — and Keycloak as the IdP (M3, epic #14): its own Postgres
+runners reference) — and Keycloak as the IdP (*Identity, RBAC & scheduling*, epic #14): its own Postgres
 database, scripted realm bootstrap, and OIDC bearer-token validation/PKCE login
 wired through nginx and the backend. 📋 **Planned**: updater/exporter and transfer
-automation (M6/M7).
+automation (*Transfer & enclave modes* / *Self-update & appliance packaging*).
 
 ```mermaid
 flowchart TB
@@ -85,10 +86,10 @@ flowchart TB
 
 ## The job engine (the heart of the product)
 
-✅ **Built** (M1/M2, ADRs 0013/0014, issue #443): queue, dispatcher, priority,
+✅ **Built** (foundation and scan-slice stories, ADRs 0013/0014, issue #443): queue, dispatcher, priority,
 in-process PowerShell runspace hosting, SSE streaming, and the per-target state
-machine below are live, serving `catalog-index`/`download` (M1) and discovery/scan/
-NSX/SRG job types (M2). Cooperative per-job cancellation (issue #234) and
+machine below are live, serving `catalog-index`/`download` (foundation story) and discovery/scan/
+NSX/SRG job types (scan-slice story). Cooperative per-job cancellation (issue #234) and
 lease-recovery sweeps also shipped. Execution ownership is now the two long-lived
 runners' alone: each runner atomically claims only its allowlisted job types, owns the
 lease and cancellation for work it executes, and writes structured events directly to
@@ -96,7 +97,7 @@ Postgres. `Waypoint.Api` retains the durable queue/state/event contracts —
 enqueue/control/query, migrations, and the SSE feed the UI reads from persisted
 events — but hosts no dispatcher, no PowerShell, and no domain handler. Scheduling
 (cron-style, read-only job types only, per-job-type minimum-role floors) is ✅ **built**
-(M3, epic #14).
+(*Identity, RBAC & scheduling*, epic #14).
 
 Everything long-running is a **job**: a scan of a site, a remediation of a component, an
 artifact download, an inventory discovery, a bundle export/import, a catalog index. One
@@ -141,7 +142,7 @@ Deletion follows the same boundary ([ADR-0019](adr/0019-global-job-observability
 ## Compliance inventory, discovery, and planning
 
 🚧 **In transition** (planned by epic
-[#726](https://github.com/blac9216/waypoint/issues/726)). M2 shipped a manual,
+[#726](https://github.com/blac9216/waypoint/issues/726)). The scan-slice story shipped a manual,
 vSphere-only `discover` job and a cache of cluster/host/VM rows keyed by vCenter
 managed-object reference. It does not yet schedule discovery, refresh at scan start,
 materialize every catalog component, or compile the immutable plans below.
@@ -387,7 +388,7 @@ depth; #784 remains the optional graph-wide hold.
 
 ## Identity & authorization
 
-✅ **Built** (M3, epic #14). Keycloak is the IdP
+✅ **Built** (*Identity, RBAC & scheduling*, epic #14). Keycloak is the IdP
 ([ADR-0004](adr/0004-identity-keycloak.md)), deployed in the Compose stack on its own
 Postgres database with a scripted realm bootstrap (four role groups, example LDAP
 federation config, CAC/PIV x.509 flow documented for site enablement). The backend is
@@ -397,7 +398,7 @@ issue #842 — decoupled from `Oidc:Authority`'s internal discovery address so a
 browser-minted token validates correctly behind nginx's `/auth/` proxy; the legacy
 `Oidc:ValidIssuer`/`ValidIssuers` settings are read only when `PublicUrl` is unset)
 and fail-closed role-claim mapping. The SPA runs a hand-rolled authorization-code + PKCE login flow (no
-external OIDC libraries), replacing the M1 local-auth form; local auth survives only as
+external OIDC libraries), replacing the foundation story's local-auth form; local auth survives only as
 an off-by-default dev-flag (`LocalAuth:Enabled`) for e2e/smoke-test paths, not a
 supported deployment configuration. Live-verified end to end: a real browser-path PKCE
 login returns a token that `GET /auth/me` accepts with the correct role claim.
@@ -419,9 +420,9 @@ picture.
 
 ## Secrets
 
-✅ **Built** (M1, epic #1; extended M2, epic #13). Envelope encryption, write-only
+✅ **Built** (*Foundation & download slice*, epic #1; extended by the scan-slice story, epic #13). Envelope encryption, write-only
 API, and the shared/service credential store are live; personal (ad hoc) credentials
-per ADR-0011 shipped in M2 (issue #276).
+per ADR-0011 shipped in the scan-slice story (issue #276).
 
 Envelope encryption in Postgres, AWX-style ([ADR-0005](adr/0005-secrets.md)): per-secret
 data keys wrapped by a master key mounted as a file/Docker secret. Secrets are
@@ -434,7 +435,7 @@ pluggable option — not v1.
 
 ## Self-update
 
-📋 **Planned (M7, epic [#18](https://github.com/blac9216/waypoint/issues/18)).** Not
+📋 **Planned (*Self-update & appliance packaging*, epic [#18](https://github.com/blac9216/waypoint/issues/18)).** Not
 yet built.
 
 Operators build Waypoint images from the public source repository (ADR-0015). A future
@@ -446,7 +447,7 @@ flow from ADR-0009.
 
 ## Cross-enclave transfer
 
-📋 **Planned (M6, epic [#17](https://github.com/blac9216/waypoint/issues/17)).** Not
+📋 **Planned (*Transfer & enclave modes*, epic [#17](https://github.com/blac9216/waypoint/issues/17)).** Not
 yet built.
 
 The predecessor transfer convention becomes a first-class feature: the connected

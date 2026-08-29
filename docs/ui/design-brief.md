@@ -24,7 +24,7 @@ drawer) and recorded these decisions:
 - **Mode badge is read-only in production**; mode changes are a redeploy, not a toggle.
 - **Expired attestations are not applied** — control reports Open, run logs a WARN,
   Results lists them.
-- The remediation typed-confirmation modal is deliberately undesigned until M4.
+- The remediation typed-confirmation modal is deliberately undesigned until the *Remediation* story.
 
 Fixes required in the next design iteration:
 
@@ -44,8 +44,8 @@ Fixes required in the next design iteration:
 ## 🚧 Architecture realignment (epic #726) — read before designing any compliance screen
 
 Status: **planned**. The prototype's compliance screens (Start a Scan, Live Run/Live
-Jobs scan detail, Compliance Results, Benchmarks) were designed against the M2/M3
-scan slice: a caller-selected profile, one job per top-level target, and
+Jobs scan detail, Compliance Results, Benchmarks) were designed against the shipped
+scan-slice model: a caller-selected profile, one job per top-level target, and
 whole-profile config documents. [Epic #726](https://github.com/blac9216/waypoint/issues/726)
 replaces that model with a closed catalog of exact-version baselines, stable
 component identity, immutable plans, component jobs with ordered attempts, and
@@ -60,7 +60,7 @@ that assume the old model (a profile picker, one job per target, a single
 mutable config document) are superseded by this section and by the 🚧-marked notes
 inline in the Screens list below. Every 🚧 marker in this document follows the
 convention already used in `../roadmap.md` and `../api-contract.md`: planned,
-not yet shipped, and never to be conflated with the M2/M3 behavior it replaces.
+not yet shipped, and never to be conflated with the earlier scan-slice behavior it replaces.
 
 ### Benchmarks — source-of-truth entity/action map
 
@@ -217,7 +217,7 @@ snapshot` (applied at plan/attempt time, immutable per run) → `upload receipt`
   retained artifact without rescanning (Admin-only retry; destination change is
   a distinct future workflow).
 - Remediate findings entry point (Admin-only, typed confirmation) — unchanged
-  from the existing decision, still deliberately undesigned until M4.
+  from the existing decision, still deliberately undesigned until the *Remediation* story.
 - Purge a terminal run's evidence graph (Admin-only, typed confirmation,
   idempotent/retryable) — distinct from generic operational-history deletion,
   which defers to this domain purge for compliance-owned runs.
@@ -367,5 +367,5 @@ ESXi 8.0U3 patch bundles).
 - Design workflows, not features; the seven screens above carry the product.
 - Timebox: reach "I can see the product," extract the data ledger, move on — pixel
   polish comes after data flows.
-- Keep the ledger current; it becomes the API contract in M0/M1 (see
+- Keep the ledger current; it becomes the API contract in the design phase and foundation story (see
   [`../roadmap.md`](../roadmap.md)).

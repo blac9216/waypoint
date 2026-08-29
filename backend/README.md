@@ -93,7 +93,7 @@ dotnet run --project Waypoint.Api --no-launch-profile --urls http://127.0.0.1:52
 
 ## Database & schema (issue #4)
 
-The M1 subset of the schema — `credentials`, `credential_secrets`, `runs`, `jobs`,
+The foundation-story subset of the schema — `credentials`, `credential_secrets`, `runs`, `jobs`,
 `job_events`, `depot_artifacts`, `downloads`, `audit_log`, `appliance_state` — is the
 contract in [`docs/api-contract.md`](../docs/api-contract.md) ("Postgres schema
 sketch"); this section is a pointer, not a duplicate. ADR-0002 (Postgres), ADR-0005
@@ -126,13 +126,13 @@ that shape.
   backend's connection string too; both containers move together.
 - **Deviations from the contract sketch**:
   - `jobs.run_id` is **nullable**. Only the scan/remediate job types are ever fanned
-    out from a Run (ADR-0008); the M1 download vertical slice's job types
+    out from a Run (ADR-0008); the foundation story's download vertical slice job types
     (`download`, `catalog-index`, ...) are queued as standalone jobs per the
     per-endpoint "202 → `<type>` job" notes in the API contract.
   - `runs.site_id` and `jobs.target_id` remain **plain UUID columns with no FK**, even
     though `sites`/`targets` now exist (migration 0009, issue #19) — adding one now
     would be an unrelated schema change to tables issue #19 doesn't otherwise touch, and
-    the M2 run/scan slice that actually populates `runs.site_id`/`jobs.target_id` is
+    the scan-slice story that actually populates `runs.site_id`/`jobs.target_id` is
     better placed to decide the FK's `ON DELETE` behavior alongside that work.
     `jobs.target_name` carries a human-readable label for job types with no target row
     at all (e.g. a depot artifact name for a `download` job).
@@ -243,7 +243,7 @@ docker build -f backend/Dockerfile -t waypoint-api \
 docker run --rm -p 8080:8080 -e LocalAuth__AdminPasswordHash=<hash> waypoint-api
 ```
 
-The compose stack that wires this image together with Postgres, Keycloak (M3+), and
+The compose stack that wires this image together with Postgres, Keycloak (from the identity story on), and
 nginx lives under [`deploy/`](../deploy/).
 
 ### Container health — the convention for every Waypoint service image

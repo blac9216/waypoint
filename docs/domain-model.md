@@ -37,7 +37,7 @@ specific wins (see STIG configuration documents below). Maps closely to today's
 `site.json` schema 2.0 rows.
 
 ### Target
-An Admin-configured connection and policy boundary within a site. The shipped M2 slice
+An Admin-configured connection and policy boundary within a site. The shipped scan-slice story
 also treats it as the scannable endpoint. Kinds (from the existing catalog/router):
 
 | Kind | Examples | Notes |
@@ -50,7 +50,7 @@ Each target references a **service credential** (`credentialRef`, as today). Dis
 ESXi hosts and VMs are cached inventory under a `vsphere` target, not standalone targets.
 
 🚧 **Planned compliance inventory model (epic #726).** The paragraph above
-describes the shipped M2 shortcut. In the planned model, `Target` remains the
+describes the shipped scan-slice shortcut. In the planned model, `Target` remains the
 Admin-configured connection/policy boundary; execution resolves stable `Component`
 records beneath it. A directly configured appliance still has a component distinct
 from its connection record.
