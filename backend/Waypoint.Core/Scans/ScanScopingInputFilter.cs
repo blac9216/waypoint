@@ -66,10 +66,15 @@ public static class ScanScopingInputFilter
 	/// <summary>
 	/// The platform selector-scoping keys (<c>WaypointScan.psm1</c>'s generated
 	/// <c>$InputsPath</c> file) that an operator config-doc-derived inputs body must
-	/// never be allowed to redefine.
+	/// never be allowed to redefine. Issue #1123: includes both the 8.0 STIG names
+	/// (<c>vmhostName</c>/<c>vmName</c>) and the VCF 9.x SRG names
+	/// (<c>esx_vmhostName</c>/<c>vm_Name</c>) -- a given component's resolved profile
+	/// only ever declares/uses one pair, but reserving both means an operator
+	/// config-doc author can never smuggle either content generation's scoping key
+	/// past the filter regardless of which baseline the component happens to run.
 	/// </summary>
 	public static readonly IReadOnlyCollection<string> ReservedScopingKeys =
-		["vsphereSelectorKind", "vmhostName", "vmName"];
+		["vsphereSelectorKind", "vmhostName", "vmName", "esx_vmhostName", "vm_Name"];
 
 	/// <summary>
 	/// Issue #742: the NSX session-authentication input keys -- secret-carrying

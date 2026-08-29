@@ -115,11 +115,14 @@ public sealed class ScanScopingInputFilterTests
 	public void ReservedScopingKeys_MatchesWaypointScanPsm1sGeneratedScopingFileKeys()
 	{
 		// Pins the closed set this filter guards -- must stay in lockstep with
-		// WaypointScan.psm1's own generated $InputsContent keys
-		// (vsphereSelectorKind/vmhostName/vmName) or the filter silently stops
-		// protecting a real platform scoping key.
+		// WaypointScan.psm1's own generated $InputsContent keys. Issue #1123: the
+		// 8.0 STIG names (vmhostName/vmName) and the VCF 9.x SRG names
+		// (esx_vmhostName/vm_Name) are BOTH reserved -- a component's resolved
+		// profile only ever emits one pair, but an operator config-doc author must
+		// never be able to smuggle either content generation's scoping key past the
+		// filter regardless of which baseline the component happens to run.
 		Assert.Equal(
-			new HashSet<string> { "vsphereSelectorKind", "vmhostName", "vmName" },
+			new HashSet<string> { "vsphereSelectorKind", "vmhostName", "vmName", "esx_vmhostName", "vm_Name" },
 			new HashSet<string>(ScanScopingInputFilter.ReservedScopingKeys));
 	}
 
