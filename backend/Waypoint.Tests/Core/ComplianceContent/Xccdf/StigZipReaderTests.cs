@@ -235,43 +235,10 @@ public sealed class StigZipReaderTests
 		Assert.Contains("cumulative decompressed bound", error);
 	}
 
-	/// <summary>
-	/// Real-package sanity check (issue #1073): every <c>*.zip</c> under the local
-	/// vendor compliance-content clone's <c>docs/</c> directories parses to at least
-	/// one benchmark with no reader error. This is NOT a CI-required assertion -- the
-	/// clone is never present in CI (vendor/DISA content is never committed to or
-	/// fetched by this repository), so the test is a no-op skip whenever the path is
-	/// absent. It exists purely so a developer with the sibling clone checked out can
-	/// verify this reader against the real shapes measured in issue #1073's evidence
-	/// table without ever reading real STIG bytes into a fixture here.
-	/// </summary>
-	[Fact]
-	public void TryReadXccdfEntries_RealVendorContentRepoPackages_AllParseWithoutError()
-	{
-		const string VendorContentRepoRoot = "/workspaces/git/dod-compliance-and-automation";
-		if (!Directory.Exists(VendorContentRepoRoot))
-		{
-			return;
-		}
-
-		string[] realPackages = Directory.GetFiles(VendorContentRepoRoot, "*.zip", SearchOption.AllDirectories)
-			.Where(path => path.Contains($"{Path.DirectorySeparatorChar}docs{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-			.ToArray();
-		Assert.NotEmpty(realPackages);
-
-		List<string> failures = [];
-		foreach (string packagePath in realPackages)
-		{
-			byte[] zipBytes = File.ReadAllBytes(packagePath);
-			bool ok = StigZipReader.TryReadXccdfEntries(zipBytes, out IReadOnlyList<XccdfZipEntry> entries, out string? error);
-			if (!ok || entries.Count == 0)
-			{
-				failures.Add($"{packagePath}: ok={ok} count={entries.Count} error={error}");
-			}
-		}
-
-		Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
-	}
+	// The real-vendor-content sanity check formerly here has moved to
+	// Waypoint.Tests.Core.ComplianceContent.ShapeInventory.RealContentConformanceTests
+	// (issue #1077), which reports accept/reject counts for every vendor-content
+	// parser from one place rather than one ad hoc pass-fail check per parser.
 
 	private static string InventedBenchmark(string suffix) => $$"""
 		<Benchmark id="xccdf_invented.example_benchmark_{{suffix}}_EX-1-0_STIG">
