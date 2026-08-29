@@ -52,24 +52,43 @@ public sealed class InspecManifestShapeInventoryTests
 		"crlf-line-endings",
 	];
 
-	/// <summary>Shape IDs whose expectation is "resolves zero inputs, no error" rather than "resolves the named input".</summary>
+	/// <summary>
+	/// Shape IDs whose expectation is "resolves zero inputs, no error" rather than "resolves the named input".
+	/// The single source of truth for which of the two theories below runs a given shape: both
+	/// <see cref="DeclaredInputShapes"/> and <see cref="ZeroInputShapes"/> are derived from this set together
+	/// with <see cref="ImplementedShapeIds"/>, so the theory rows cannot drift from it (issue #1121 round-1
+	/// review). Both theories are accept-flavoured -- this parser has no reject fixtures -- so this class
+	/// passes no reject set to <see cref="ShapeInventoryDoc.AssertCompleteness"/>, which then asserts that
+	/// every row of its doc section reads <c>Accepted</c> and fails closed the moment a reject row is added.
+	/// </summary>
 	private static readonly HashSet<string> NoInputShapeIds = new(["empty-inputs-sequence", "missing-inputs-key"], StringComparer.Ordinal);
+
+	/// <summary>Theory rows for <see cref="ShapeResolvesTheDeclaredInput"/>: every implemented shape outside <see cref="NoInputShapeIds"/>.</summary>
+	public static TheoryData<string> DeclaredInputShapes => ShapesWhere(id => !NoInputShapeIds.Contains(id));
+
+	/// <summary>Theory rows for <see cref="ShapeResolvesToZeroInputs_NotAnError"/>: every implemented shape in <see cref="NoInputShapeIds"/>.</summary>
+	public static TheoryData<string> ZeroInputShapes => ShapesWhere(NoInputShapeIds.Contains);
+
+	private static TheoryData<string> ShapesWhere(Func<string, bool> predicate)
+	{
+		TheoryData<string> data = [];
+		foreach (string shapeId in ImplementedShapeIds)
+		{
+			if (predicate(shapeId))
+			{
+				data.Add(shapeId);
+			}
+		}
+
+		return data;
+	}
 
 	[Fact]
 	public void InventoryIsComplete() =>
 		ShapeInventoryDoc.AssertCompleteness("`InspecManifestParser` (`backend/Waypoint.Core/ComplianceContent/SemanticImport/InspecManifest.cs`)", ImplementedShapeIds);
 
 	[Theory]
-	[InlineData("indented-dash-sequence")]
-	[InlineData("column0-dash-sequence")]
-	[InlineData("name-not-first-key")]
-	[InlineData("attributes-legacy-alias")]
-	[InlineData("column0-comment-between-entries")]
-	[InlineData("trailing-inline-comment")]
-	[InlineData("block-scalar-folded-description")]
-	[InlineData("block-scalar-literal-description")]
-	[InlineData("nested-extra-keys-ignored")]
-	[InlineData("crlf-line-endings")]
+	[MemberData(nameof(DeclaredInputShapes))]
 	public void ShapeResolvesTheDeclaredInput(string shapeId)
 	{
 		string yaml = BuildYaml(shapeId);
@@ -82,8 +101,7 @@ public sealed class InspecManifestShapeInventoryTests
 	}
 
 	[Theory]
-	[InlineData("empty-inputs-sequence")]
-	[InlineData("missing-inputs-key")]
+	[MemberData(nameof(ZeroInputShapes))]
 	public void ShapeResolvesToZeroInputs_NotAnError(string shapeId)
 	{
 		string yaml = BuildYaml(shapeId);

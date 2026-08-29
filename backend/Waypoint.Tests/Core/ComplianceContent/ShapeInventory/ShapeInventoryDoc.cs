@@ -59,7 +59,18 @@ public static class ShapeInventoryDoc
 	/// exactly the set documented under <paramref name="sectionHeading"/> -- neither a
 	/// documented row missing a fixture, nor a fixture with no documented row.
 	/// </summary>
-	public static void AssertCompleteness(string sectionHeading, IEnumerable<string> implementedShapeIds)
+	/// <param name="sectionHeading">The doc section to check, as in <see cref="ParseShapeIds"/>.</param>
+	/// <param name="implementedShapeIds">Every shape ID this parser's test class has a fixture/assertion for.</param>
+	/// <param name="rejectedShapeIds">
+	/// The subset of <paramref name="implementedShapeIds"/> whose fixture actually asserts rejection (a
+	/// <c>ShapeIsRejected</c>-style theory case), e.g. <c>StigZipReaderShapeInventoryTests.RejectedShapeIds</c>.
+	/// Every other implemented shape is assumed to assert acceptance. Defaults to empty for parsers with no
+	/// reject fixtures at all. Binds the doc's Expected verdict word to what the fixture actually does (issue
+	/// #1121): a row whose word says "Accepted" while its fixture is listed here, or vice versa, fails the
+	/// build -- so a documentation-only edit to the Expected cell can no longer disarm a shape's protection
+	/// while leaving the suite green.
+	/// </param>
+	public static void AssertCompleteness(string sectionHeading, IEnumerable<string> implementedShapeIds, IReadOnlySet<string>? rejectedShapeIds = null)
 	{
 		AssertExpectedVocabulary(sectionHeading);
 
@@ -77,6 +88,51 @@ public static class ShapeInventoryDoc
 			"Shape inventory drift under '" + sectionHeading + "':" +
 			(documentedButNotImplemented.Count > 0 ? $"\n  documented but no fixture: {string.Join(", ", documentedButNotImplemented)}" : string.Empty) +
 			(implementedButNotDocumented.Count > 0 ? $"\n  fixture but not documented: {string.Join(", ", implementedButNotDocumented)}" : string.Empty));
+
+		AssertVerdictMatchesFixtures(sectionHeading, rejectedShapeIds ?? new HashSet<string>(StringComparer.Ordinal));
+	}
+
+	/// <summary>
+	/// Asserts that every row's classified Expected verdict (<c>ClassifyExpectedCell</c>) agrees with whether
+	/// its shape ID is a member of <paramref name="rejectedShapeIds"/> -- i.e. with what the corresponding
+	/// <c>ShapeIsAccepted</c>/<c>ShapeIsRejected</c> fixture actually asserts. See <see cref="AssertCompleteness"/>.
+	/// </summary>
+	private static void AssertVerdictMatchesFixtures(string sectionHeading, IReadOnlySet<string> rejectedShapeIds)
+	{
+		List<string> mismatches = [];
+		foreach ((string shapeId, string? verdict) in ClassifyShapes(sectionHeading))
+		{
+			string expectedVerdict = rejectedShapeIds.Contains(shapeId) ? "reject" : "accept";
+			if (verdict != expectedVerdict)
+			{
+				mismatches.Add($"{shapeId}: doc's Expected cell reads '{verdict ?? "unclassifiable"}', but its fixture asserts '{expectedVerdict}'");
+			}
+		}
+
+		Assert.True(
+			mismatches.Count == 0,
+			"Shape inventory Expected verdict does not match what the fixture actually asserts under '" + sectionHeading + "' -- " +
+			"a documentation-only edit to the Expected cell must not be able to disarm a shape's protection. Offending row(s):\n  " +
+			string.Join("\n  ", mismatches));
+	}
+
+	/// <summary>
+	/// Classifies every row's Expected cell under <paramref name="sectionHeading"/> as <c>"accept"</c>,
+	/// <c>"reject"</c>, or <c>null</c> (see <see cref="ClassifyExpectedCell"/>), keyed by shape ID. This is the
+	/// single authoritative classification: <c>ShapeVerdictDump</c> serializes it to JSON so
+	/// <c>scripts/parser-shape-diff.sh</c> reads the SAME column split and classification this class uses,
+	/// rather than re-parsing the markdown table with an independent (and, per issue #1120, subtly different)
+	/// implementation.
+	/// </summary>
+	public static Dictionary<string, string?> ClassifyShapes(string sectionHeading)
+	{
+		Dictionary<string, string?> result = new(StringComparer.Ordinal);
+		foreach ((string shapeId, string expectedCell) in EnumerateExpectedCells(sectionHeading))
+		{
+			result[shapeId] = ClassifyExpectedCell(expectedCell);
+		}
+
+		return result;
 	}
 
 	/// <summary>
@@ -91,13 +147,9 @@ public static class ShapeInventoryDoc
 	/// </summary>
 	public static void AssertExpectedVocabulary(string sectionHeading)
 	{
-		string section = ReadSection(sectionHeading);
-
 		List<string> malformed = [];
-		foreach (Match rowMatch in Regex.Matches(section, @"^\| `([a-z0-9-]+)` \|(.*)\|[^\S\n]*$", RegexOptions.Multiline))
+		foreach ((string shapeId, string expectedCell) in EnumerateExpectedCells(sectionHeading))
 		{
-			string shapeId = rowMatch.Groups[1].Value;
-			string expectedCell = LastColumn(rowMatch.Groups[2].Value);
 			if (ClassifyExpectedCell(expectedCell) is null)
 			{
 				malformed.Add($"{shapeId}: \"{expectedCell.Trim()}\"");
@@ -130,11 +182,30 @@ public static class ShapeInventoryDoc
 	}
 
 	/// <summary>
+	/// Yields each row's shape ID and Expected-cell text under <paramref name="sectionHeading"/>, splitting
+	/// each row on its last UNESCAPED pipe (see <see cref="LastColumn"/>). The single place both
+	/// <see cref="AssertExpectedVocabulary"/> and <see cref="ClassifyShapes"/> read the table from, so the two
+	/// cannot drift on how a row is split into columns.
+	/// </summary>
+	private static IEnumerable<(string ShapeId, string ExpectedCell)> EnumerateExpectedCells(string sectionHeading)
+	{
+		string section = ReadSection(sectionHeading);
+		foreach (Match rowMatch in Regex.Matches(section, @"^\| `([a-z0-9-]+)` \|(.*)\|[^\S\n]*$", RegexOptions.Multiline))
+		{
+			yield return (rowMatch.Groups[1].Value, LastColumn(rowMatch.Groups[2].Value));
+		}
+	}
+
+	/// <summary>
 	/// Splits a table row's remainder (everything after the shape-ID column, minus the closing
 	/// pipe) on its last UNESCAPED pipe, so a description containing a literal <c>\|</c> -- as
 	/// the block-scalar row does -- does not shift which column is read as Expected.
+	/// Internal rather than private so <c>ShapeInventoryDocColumnSplitTests</c> can cover the
+	/// escape-aware walk-back directly: no row of the live inventory carries a <c>\|</c> in its
+	/// Expected cell, so without those tests this guard's escape handling could be deleted with
+	/// the suite green (issue #1120 AC3, PR #1126 round-2 review).
 	/// </summary>
-	private static string LastColumn(string rowRemainder)
+	internal static string LastColumn(string rowRemainder)
 	{
 		for (int i = rowRemainder.Length - 1; i >= 0; i--)
 		{

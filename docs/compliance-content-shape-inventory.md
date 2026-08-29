@@ -58,6 +58,47 @@ the guard twice:
   direction. (PR #1098's round-2 review defeated the earlier version of this by
   bolding the word in a reject row, which downgraded a dropped zip-slip check to a
   soft note with exit 0.)
+- **The Expected verdict word is bound to what the fixture actually asserts.**
+  Enforcing the vocabulary (above) still let a cell say `Accepted` for a shape whose
+  fixture asserts rejection -- a doc-only edit that silently disarmed the differential
+  for that shape while the suite stayed green at 27/27 (issue #1121). Each
+  `*ShapeInventoryTests` class now declares a single table of per-shape expectations
+  (`StigZipReaderShapeInventoryTests.ShapeExpectations`; for `InspecManifestParser`,
+  whose shapes are all accept-flavoured, `ImplementedShapeIds` together with
+  `NoInputShapeIds`) and derives every shape list it uses from that one table: the
+  shape IDs it implements, the reject set handed to
+  `ShapeInventoryDoc.AssertCompleteness`, and the `[MemberData]` rows of its
+  `ShapeIsAccepted`/`ShapeIsRejected` theories. `AssertCompleteness` cross-checks every
+  row's classified verdict against that reject set: a row saying `Accepted` for a shape
+  whose fixture rejects it, or `Rejected` for one whose fixture accepts it, fails the
+  build. Because the set and the theory rows have one source, the set cannot lie about
+  the fixtures either -- dropping a shape from the reject set does not leave its
+  rejection case standing, it moves that shape into `ShapeIsAccepted`, which then fails
+  against a parser that really does reject it, and deleting the shape outright fails the
+  completeness assertion. This closes the specific channel PR #1098's own merged fix
+  left open, and moves "the verdict word agrees with the fixture" from review-enforced
+  to machine-enforced.
+- **The C# and script column splits cannot drift.** Previously the C# reader walked a
+  row back to its last *unescaped* pipe while `scripts/parser-shape-diff.sh` split on
+  every `|`, so a self-contradictory cell containing a literal escaped pipe --
+  `Rejected with an unsafe-path error \| Accepted only for entries already
+  normalized.` -- classified as rejected in the test suite but as accepted in the
+  script, printing `NOTE`/exit 0 for a dropped zip-slip check (issue #1120). The script
+  no longer parses the table itself: `ShapeVerdictDump` now also dumps
+  `ShapeInventoryDoc.ClassifyShapes`'s per-shape verdicts (the same code
+  `AssertExpectedVocabulary`/`AssertCompleteness` already assert against) to JSON when
+  `WAYPOINT_SHAPE_EXPECTED_DUMP_PATH` is set, and the script reads that JSON instead of
+  re-parsing markdown. One classification, read by both checks, replaces two
+  implementations that happened to agree. That single split
+  (`ShapeInventoryDoc.LastColumn`) has its own direct coverage in
+  `ShapeInventoryDocColumnSplitTests`, because no row of the tables below carries a
+  `\|` in its *Expected* cell -- the only escaped pipe in the inventory sits in
+  `block-scalar-literal-description`'s *Scenario* cell, which is not the last pipe on
+  its line and so cannot tell the escape-aware walk-back from a naive last-pipe search.
+  Those tests assert the walk-back over synthetic row remainders -- including the
+  self-contradictory `Rejected ... \| Accepted ...` cell above -- so the escape
+  handling cannot be deleted with the suite green, and the coverage does not depend on
+  the wording of any row.
 
 **NOT machine-enforced (review-enforced only -- this is where you must add a row by
 hand):**
