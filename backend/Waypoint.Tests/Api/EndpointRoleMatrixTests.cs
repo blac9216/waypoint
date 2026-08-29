@@ -248,6 +248,9 @@ public sealed class EndpointRoleMatrixTests
 		["RunsController.PreviewPlan"] = WaypointRole.Cyber,
 		["RunsController.ListRuns"] = WaypointRole.Viewer,
 		["RunsController.GetRun"] = WaypointRole.Viewer,
+		// Issue #1125: the frozen scan plan for an already-created run -- Viewer+,
+		// matching every other run read (GetRun immediately above).
+		["RunsController.GetPlan"] = WaypointRole.Viewer,
 		["RunsController.GetJobs"] = WaypointRole.Viewer,
 		// Issue #757 (epic #726 §7, ADR-0024's 10,000+-job scale contract): the
 		// run-scoped component-job grouped-counts/paged-list read surface is Viewer+,

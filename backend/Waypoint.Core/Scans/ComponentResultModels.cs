@@ -126,7 +126,36 @@ public sealed record RunResultRollupRow(
 	int PassedCount,
 	int NotApplicableCount,
 	int NotReviewedCount,
-	int SkippedCount);
+	int SkippedCount,
+	int EvaluatedZeroComponentCount)
+{
+	/// <summary>
+	/// Issue #1132: how many COMPONENTS in this status bucket produced NO verdict --
+	/// zero passed and zero open (failed) findings. Counted PER COMPONENT by
+	/// <see cref="IComponentResultRepository.GetRunRollupAsync"/>'s <c>count(*)
+	/// FILTER</c>, never re-derived from this row's summed counts: the sums cannot
+	/// express it, because a mixed bucket (one component that evaluated nothing,
+	/// others evaluated normally) aggregates to a healthy-looking
+	/// <c>PassedCount &gt; 0</c> and would read as fully evaluated.
+	///
+	/// Counted shapes include the all-<see cref="ComponentFindingStatuses.NotReviewed"/>
+	/// scan (round-12's), the all-<see cref="ComponentFindingStatuses.Skipped"/> one, an
+	/// all-<see cref="ComponentFindingStatuses.ExecutionError"/> component, and a
+	/// component that produced no findings at all -- the last two land in no count
+	/// column (see issue #1144) and so read as all-zero here.
+	///
+	/// The one zero-verdict shape deliberately NOT counted is the genuinely, entirely
+	/// <see cref="ComponentFindingStatuses.NotApplicable"/> component: "nothing here
+	/// applies" is a determinate outcome, not a failure to evaluate. Known gap, not
+	/// closed at this grain: a component mixing <c>not_applicable</c> with only
+	/// <c>execution_error</c> findings is indistinguishable from that genuine case,
+	/// because <c>execution_error</c> is counted nowhere -- issue #1144 is the fix.
+	/// </summary>
+	public int EvaluatedZeroComponentCount { get; init; } = EvaluatedZeroComponentCount;
+
+	/// <summary>True when AT LEAST ONE component in this bucket produced no verdict (see <see cref="EvaluatedZeroComponentCount"/>) -- the boolean form of the same per-component signal.</summary>
+	public bool EvaluatedZeroControls => EvaluatedZeroComponentCount > 0;
+}
 
 /// <summary>
 /// The full run-level rollup -- <c>GET /runs/{id}/component-results/summary</c>.

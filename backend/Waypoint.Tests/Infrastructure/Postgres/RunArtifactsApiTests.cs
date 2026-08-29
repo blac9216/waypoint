@@ -165,11 +165,39 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 		Assert.Equal(2, row.GetProperty("cat_i_open").GetInt32());
 		Assert.Equal(1, row.GetProperty("cat_ii_open").GetInt32());
 		Assert.Equal(0, row.GetProperty("cat_iii_open").GetInt32());
+		// Issue #1132: every WriteHdf-generated control is "failed" (open), so all 3 are evaluated.
+		Assert.Equal(3, row.GetProperty("controls_total").GetInt32());
+		Assert.Equal(3, row.GetProperty("controls_evaluated").GetInt32());
 		string[] kinds = row.GetProperty("artifact_kinds").EnumerateArray().Select(k => k.GetString()!).ToArray();
 		Assert.Contains("hdf", kinds);
 		Assert.Contains("ckl", kinds);
 		Assert.Equal("uploaded", row.GetProperty("upload_status").GetString());
 		_ = siteId;
+	}
+
+	[Fact]
+	public async Task GetArtifacts_AllControlsSkipped_ReportsZeroEvaluatedDenominatorNotClean()
+	{
+		// Issue #1132: the round-12 shape -- every control skipped because the target
+		// could not be reached. CAT counts alone (all zero) render identically to a
+		// genuinely clean scan; the evaluated denominator must expose the difference.
+		(_, Guid targetId) = await CreateSiteAndTargetAsync("all-skipped-target");
+		Guid runId = await CreateRunAsync();
+		Guid jobId = await FanOutScanJobAsync(runId, targetId, state: "uploaded");
+
+		WriteAllSkippedHdf(jobId, controlCount: 69);
+
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/artifacts", "Viewer", body: null);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement row = document.RootElement.EnumerateArray().Single();
+		Assert.True(row.GetProperty("counts_available").GetBoolean());
+		Assert.Equal(0, row.GetProperty("cat_i_open").GetInt32());
+		Assert.Equal(0, row.GetProperty("cat_ii_open").GetInt32());
+		Assert.Equal(0, row.GetProperty("cat_iii_open").GetInt32());
+		Assert.Equal(69, row.GetProperty("controls_total").GetInt32());
+		Assert.Equal(0, row.GetProperty("controls_evaluated").GetInt32());
 	}
 
 	[Fact]
@@ -189,6 +217,8 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 		Assert.False(row.TryGetProperty("cat_i_open", out _));
 		Assert.False(row.TryGetProperty("cat_ii_open", out _));
 		Assert.False(row.TryGetProperty("cat_iii_open", out _));
+		Assert.False(row.TryGetProperty("controls_total", out _));
+		Assert.False(row.TryGetProperty("controls_evaluated", out _));
 		Assert.Empty(row.GetProperty("artifact_kinds").EnumerateArray());
 		Assert.Equal("pending", row.GetProperty("upload_status").GetString());
 	}
@@ -472,6 +502,34 @@ public sealed class RunArtifactsApiTests : IAsyncLifetime, IDisposable
 		for (int i = 0; i < catIII; i++)
 		{
 			controls.Add(new { tags = new { severity = "low" }, results = new[] { new { status = "failed" } } });
+		}
+
+		object hdf = new
+		{
+			platform = new { name = "vmware_vsphere", release = "invented" },
+			profiles = new[] { new { name = "invented-stub-profile", version = "0.0.0", controls = controls.ToArray() } },
+		};
+
+		string path = Path.Combine(_artifactStorePath, $"{jobId:N}.json");
+		File.WriteAllText(path, JsonSerializer.Serialize(hdf));
+	}
+
+	private void WriteAllSkippedHdf(Guid jobId, int controlCount)
+	{
+		// Issue #1132: an applicable control that could not execute -- every result
+		// row "skipped", carrying a skip_message, same InSpec shape #1124 fixed the
+		// finding-status mapping for. This helper does not model impact/genuine-NA at
+		// all (HdfSeverityCounter is impact-blind by design; that distinction lives
+		// only in HdfFindingsParser's persisted findings).
+		List<object> controls = [];
+		for (int i = 0; i < controlCount; i++)
+		{
+			controls.Add(new
+			{
+				id = $"invented-control-{i:000}",
+				tags = new { severity = "medium" },
+				results = new[] { new { status = "skipped", skip_message = "invented: target unreachable, skipping test." } },
+			});
 		}
 
 		object hdf = new

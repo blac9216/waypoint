@@ -30,6 +30,10 @@ public sealed record RunArtifactRow(
 	int? CatIOpen,
 	int? CatIIOpen,
 	int? CatIIIOpen,
+	/// <summary>Issue #1132: total controls this HDF describes, null exactly when <see cref="CountsAvailable"/> is false.</summary>
+	int? ControlsTotal,
+	/// <summary>Issue #1132: controls that produced a real pass/fail outcome -- see <see cref="Waypoint.Core.Scans.HdfSeverityCounts.NoControlsEvaluated"/>. A Results-table reader must check this, not just the CAT counts, before reading a row as clean.</summary>
+	int? ControlsEvaluated,
 	IReadOnlyList<string> ArtifactKinds,
 	string UploadStatus,
 	string? UploadDetail);
@@ -129,6 +133,8 @@ public sealed class RunArtifactProjectionService
 			CatIOpen: counts?.CatIOpen,
 			CatIIOpen: counts?.CatIIOpen,
 			CatIIIOpen: counts?.CatIIIOpen,
+			ControlsTotal: counts?.ControlsTotal,
+			ControlsEvaluated: counts?.ControlsEvaluated,
 			ArtifactKinds: kinds,
 			UploadStatus: StigManagerUploadStatus(job),
 			UploadDetail: job.UploadStatus is null ? null : job.UploadDetail);

@@ -285,6 +285,214 @@ public sealed class ComponentResultRepositoryTests : IAsyncLifetime
 		Assert.Equal(0, rollup.ByStatus.Sum(r => r.CatIIOpen));
 	}
 
+	/// <summary>
+	/// Issue #1132 (round-2 finding): a MIXED status bucket -- one component that ran
+	/// but evaluated nothing (all not_reviewed) alongside two that evaluated normally,
+	/// all three <c>completed</c>. The evaluated-zero signal must be PER COMPONENT: an
+	/// aggregate-only test (sum passed &gt; 0) would read this run as fully evaluated
+	/// and hide the component that produced no evaluation at all.
+	/// </summary>
+	[Fact]
+	public async Task GetRunRollupAsync_MixedBucket_FlagsTheComponentThatEvaluatedNothing()
+	{
+		Guid runId = await SeedRunAsync();
+		IReadOnlyList<(Guid ComponentId, Guid ScanPlanItemId)> seeded =
+			await SeedPlanItemsAsync(runId, ["mixed-unevaluated", "mixed-evaluated-a", "mixed-evaluated-b"]);
+
+		// C1: completed, but every control came back not_reviewed -- evaluated nothing.
+		(Guid unevaluatedComponentId, Guid unevaluatedItemId) = seeded[0];
+		Guid unevaluatedJobId = await SeedJobAsync(runId, unevaluatedItemId);
+		await _repository.RecordAsync(
+			new ComponentResultRecord(
+				runId, unevaluatedJobId, unevaluatedItemId, unevaluatedComponentId, AttemptNumber: 1,
+				Status: ComponentResultStatuses.Completed, Detail: null,
+				Findings:
+				[
+					new ComponentResultFinding("SV-100", null, "invented control 100", ComponentFindingSeverities.CatI, ComponentFindingStatuses.NotReviewed, "invented: control could not execute"),
+					new ComponentResultFinding("SV-101", null, "invented control 101", ComponentFindingSeverities.CatII, ComponentFindingStatuses.NotReviewed, "invented: control could not execute"),
+					new ComponentResultFinding("SV-102", null, "invented control 102", ComponentFindingSeverities.CatIII, ComponentFindingStatuses.NotReviewed, "invented: control could not execute"),
+				],
+				Artifacts: []),
+			CancellationToken.None);
+
+		// C2 and C3: completed and genuinely evaluated (one failed CAT I, one passed each).
+		foreach ((Guid componentId, Guid itemId) in seeded.Skip(1))
+		{
+			Guid jobId = await SeedJobAsync(runId, itemId);
+			await _repository.RecordAsync(CompletedRecord(runId, jobId, itemId, componentId, attempt: 1), CancellationToken.None);
+		}
+
+		RunResultRollup rollup = await _repository.GetRunRollupAsync(runId, CancellationToken.None);
+		RunResultRollupRow row = Assert.Single(rollup.ByStatus);
+		Assert.Equal(ComponentResultStatuses.Completed, row.Status);
+
+		// The aggregate looks healthy -- 3 components, 2 passed, 2 open CAT I.
+		Assert.Equal(3, row.ComponentCount);
+		Assert.Equal(2, row.PassedCount);
+		Assert.Equal(2, row.CatIOpen);
+		Assert.Equal(3, row.NotReviewedCount);
+
+		// ...but exactly one component evaluated nothing, and the signal must say so.
+		Assert.Equal(1, row.EvaluatedZeroComponentCount);
+		Assert.True(row.EvaluatedZeroControls);
+	}
+
+	/// <summary>
+	/// Round 2 finding 1(a): a component whose controls ALL came back
+	/// <c>execution_error</c>. <c>HdfFindingsParser.MapStatus</c> maps any
+	/// <c>status: "error"</c> (and any unrecognized result shape) there, and
+	/// <c>ComponentFindingStatuses.IsOpen</c> is <c>Failed</c>-only, so such findings
+	/// land in NO count column at all (issue #1144) -- the row reads all-zero. Seeded
+	/// in a MIXED bucket alongside two components that evaluated normally, so the
+	/// summed counts look healthy and only the per-component filter can tell the truth.
+	/// </summary>
+	[Fact]
+	public async Task GetRunRollupAsync_MixedBucketAllExecutionError_FlagsTheComponentThatEvaluatedNothing()
+	{
+		Guid runId = await SeedRunAsync();
+		IReadOnlyList<(Guid ComponentId, Guid ScanPlanItemId)> seeded =
+			await SeedPlanItemsAsync(runId, ["mixed-errored", "mixed-errored-evaluated-a", "mixed-errored-evaluated-b"]);
+
+		(Guid erroredComponentId, Guid erroredItemId) = seeded[0];
+		Guid erroredJobId = await SeedJobAsync(runId, erroredItemId);
+		await _repository.RecordAsync(
+			new ComponentResultRecord(
+				runId, erroredJobId, erroredItemId, erroredComponentId, AttemptNumber: 1,
+				Status: ComponentResultStatuses.Completed, Detail: null,
+				Findings:
+				[
+					new ComponentResultFinding("SV-200", null, "invented control 200", ComponentFindingSeverities.CatI, ComponentFindingStatuses.ExecutionError, "invented: control raised an error"),
+					new ComponentResultFinding("SV-201", null, "invented control 201", ComponentFindingSeverities.CatII, ComponentFindingStatuses.ExecutionError, "invented: control raised an error"),
+				],
+				Artifacts: []),
+			CancellationToken.None);
+
+		foreach ((Guid componentId, Guid itemId) in seeded.Skip(1))
+		{
+			Guid jobId = await SeedJobAsync(runId, itemId);
+			await _repository.RecordAsync(CompletedRecord(runId, jobId, itemId, componentId, attempt: 1), CancellationToken.None);
+		}
+
+		RunResultRollup rollup = await _repository.GetRunRollupAsync(runId, CancellationToken.None);
+		RunResultRollupRow row = Assert.Single(rollup.ByStatus);
+
+		// Every count column reads healthy -- the errored component contributes to none
+		// of them, so a summed-counts predicate sees a fully evaluated bucket.
+		Assert.Equal(3, row.ComponentCount);
+		Assert.Equal(2, row.PassedCount);
+		Assert.Equal(2, row.CatIOpen);
+		Assert.Equal(0, row.NotReviewedCount);
+		Assert.Equal(0, row.SkippedCount);
+		Assert.Equal(0, row.NotApplicableCount);
+
+		Assert.Equal(1, row.EvaluatedZeroComponentCount);
+		Assert.True(row.EvaluatedZeroControls);
+	}
+
+	/// <summary>
+	/// Round 2 finding 1(b): a component that produced NO findings at all --
+	/// <c>HdfFindingsParser</c> treats an empty <c>controls</c> array as a genuine
+	/// success, and the recording service stores it as <c>completed</c> with every
+	/// count zero. Seeded in a MIXED bucket, same masking mode as (a).
+	/// </summary>
+	[Fact]
+	public async Task GetRunRollupAsync_MixedBucketZeroFindings_FlagsTheComponentThatEvaluatedNothing()
+	{
+		Guid runId = await SeedRunAsync();
+		IReadOnlyList<(Guid ComponentId, Guid ScanPlanItemId)> seeded =
+			await SeedPlanItemsAsync(runId, ["mixed-no-findings", "mixed-no-findings-evaluated"]);
+
+		(Guid emptyComponentId, Guid emptyItemId) = seeded[0];
+		Guid emptyJobId = await SeedJobAsync(runId, emptyItemId);
+		await _repository.RecordAsync(
+			new ComponentResultRecord(
+				runId, emptyJobId, emptyItemId, emptyComponentId, AttemptNumber: 1,
+				Status: ComponentResultStatuses.Completed, Detail: null,
+				Findings: [],
+				Artifacts: []),
+			CancellationToken.None);
+
+		(Guid evaluatedComponentId, Guid evaluatedItemId) = seeded[1];
+		Guid evaluatedJobId = await SeedJobAsync(runId, evaluatedItemId);
+		await _repository.RecordAsync(
+			CompletedRecord(runId, evaluatedJobId, evaluatedItemId, evaluatedComponentId, attempt: 1),
+			CancellationToken.None);
+
+		RunResultRollup rollup = await _repository.GetRunRollupAsync(runId, CancellationToken.None);
+		RunResultRollupRow row = Assert.Single(rollup.ByStatus);
+
+		Assert.Equal(2, row.ComponentCount);
+		Assert.Equal(1, row.PassedCount);
+		Assert.Equal(1, row.CatIOpen);
+		Assert.Equal(0, row.NotReviewedCount);
+
+		Assert.Equal(1, row.EvaluatedZeroComponentCount);
+		Assert.True(row.EvaluatedZeroControls);
+	}
+
+	/// <summary>
+	/// The widened predicate's exclusion, pinned at the SQL grain: a component that is
+	/// genuinely, entirely <c>not_applicable</c> is a determinate outcome, not a
+	/// failure to evaluate, and must stay unflagged even though it too has zero passed
+	/// and zero open findings. Seeded in a mixed bucket so the guard is non-vacuous.
+	/// </summary>
+	[Fact]
+	public async Task GetRunRollupAsync_MixedBucketGenuinelyAllNotApplicable_IsNotFlagged()
+	{
+		Guid runId = await SeedRunAsync();
+		IReadOnlyList<(Guid ComponentId, Guid ScanPlanItemId)> seeded =
+			await SeedPlanItemsAsync(runId, ["mixed-all-na", "mixed-all-na-evaluated"]);
+
+		(Guid naComponentId, Guid naItemId) = seeded[0];
+		Guid naJobId = await SeedJobAsync(runId, naItemId);
+		await _repository.RecordAsync(
+			new ComponentResultRecord(
+				runId, naJobId, naItemId, naComponentId, AttemptNumber: 1,
+				Status: ComponentResultStatuses.Completed, Detail: null,
+				Findings:
+				[
+					new ComponentResultFinding("SV-300", null, "invented control 300", ComponentFindingSeverities.CatI, ComponentFindingStatuses.NotApplicable, "invented: does not apply to this component"),
+					new ComponentResultFinding("SV-301", null, "invented control 301", ComponentFindingSeverities.CatII, ComponentFindingStatuses.NotApplicable, "invented: does not apply to this component"),
+				],
+				Artifacts: []),
+			CancellationToken.None);
+
+		(Guid evaluatedComponentId, Guid evaluatedItemId) = seeded[1];
+		Guid evaluatedJobId = await SeedJobAsync(runId, evaluatedItemId);
+		await _repository.RecordAsync(
+			CompletedRecord(runId, evaluatedJobId, evaluatedItemId, evaluatedComponentId, attempt: 1),
+			CancellationToken.None);
+
+		RunResultRollup rollup = await _repository.GetRunRollupAsync(runId, CancellationToken.None);
+		RunResultRollupRow row = Assert.Single(rollup.ByStatus);
+
+		Assert.Equal(2, row.ComponentCount);
+		Assert.Equal(2, row.NotApplicableCount);
+		Assert.Equal(0, row.EvaluatedZeroComponentCount);
+		Assert.False(row.EvaluatedZeroControls);
+	}
+
+	/// <summary>Regression guard for the same fix: a bucket in which EVERY component genuinely evaluated must stay unflagged -- the per-component filter must not make healthy runs look incomplete.</summary>
+	[Fact]
+	public async Task GetRunRollupAsync_AllComponentsEvaluated_ReportsNoEvaluatedZeroComponents()
+	{
+		Guid runId = await SeedRunAsync();
+		IReadOnlyList<(Guid ComponentId, Guid ScanPlanItemId)> seeded =
+			await SeedPlanItemsAsync(runId, ["all-evaluated-a", "all-evaluated-b"]);
+
+		foreach ((Guid componentId, Guid itemId) in seeded)
+		{
+			Guid jobId = await SeedJobAsync(runId, itemId);
+			await _repository.RecordAsync(CompletedRecord(runId, jobId, itemId, componentId, attempt: 1), CancellationToken.None);
+		}
+
+		RunResultRollup rollup = await _repository.GetRunRollupAsync(runId, CancellationToken.None);
+		RunResultRollupRow row = Assert.Single(rollup.ByStatus);
+		Assert.Equal(2, row.ComponentCount);
+		Assert.Equal(0, row.EvaluatedZeroComponentCount);
+		Assert.False(row.EvaluatedZeroControls);
+	}
+
 	/// <summary>A plan item with NO component_results row at all (never claimed) is coverage that is simply absent -- never fabricated into any status bucket.</summary>
 	[Fact]
 	public async Task GetRunRollupAsync_PlanItemWithNoResultRow_IsNotFabricatedIntoAnyStatus()
