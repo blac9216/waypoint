@@ -7,7 +7,7 @@ You are a fix-round subagent for PR #<P> in <owner>/<repo> (<sanitization rule
 pointer>). Work in the existing author worktree <worktree root>/issue-<N> (branch
 <branch>). HARD RULE: the Agent/Task tools are OFF-LIMITS — do everything yourself;
 plain foreground calls only. Do NOT review/merge/touch the main checkout. Be terse.
-Board: set issue #<N> to **In progress** now (<item-edit command>).
+Board: ensure #<N> is assigned to the acting account and set it to **In progress** now (<item-edit command>).
 
 Read the round-<R> `## PR Review — Changes Requested` comment and fix EVERY finding:
 1. <finding → the fix expected, incl. the class-killing guard when the finding is an

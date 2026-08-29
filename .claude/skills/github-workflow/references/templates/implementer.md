@@ -17,7 +17,7 @@ Do NOT review or merge. Do NOT touch the main checkout at <path>.
 Worktree: `git -C <repo> worktree add <worktree root>/issue-<N> -b <N>-<slug>` (or
 `gh issue develop <N> --name <N>-<slug>` then add the worktree). Rebase on origin/main
 before pushing. Commits `AI:` prefix; commit early and often.
-Board: set issue #<N> to **In progress** now: `gh project item-edit --project-id <id>
+Board: assign #<N> to yourself (`gh issue edit <N> --add-assignee @me`) and set it to **In progress** now: `gh project item-edit --project-id <id>
 --id <item id> --field-id <status field> --single-select-option-id <in-progress id>`.
 Claim: this work is under claim <claim id>. [Other live claims / parallel agents:
 <claim id> owns area:<x> (#…) — do not touch <files/areas>; keep shared-file edits

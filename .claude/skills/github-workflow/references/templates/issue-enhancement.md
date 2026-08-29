@@ -44,6 +44,11 @@ Anything that could go wrong, break existing behavior, or needs special attentio
 `deferred` + `concern:*` when filed out of scope. Sequencing (dependencies, final
 priority) is the orchestrator's at triage — do not guess it here.
 
+## Estimate
+Size: S (≤100 net LOC) | M (≤400) | L (must be split before filing). Est. cycle: <days,
+from the calibration table for this area × size, or the default>. Est. completion:
+<date, from sequencing — rough; the workflow re-projects at each session start>.
+
 ## Verified expectation
 `n/a` — review proves everything here | `pending-live` — <what only the real stack can
 prove>. The PR repeats this line; the reviewer sets the board field from it.
