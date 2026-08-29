@@ -295,6 +295,10 @@ public sealed class ContentPullReconcileServiceTests
 				c.ComponentKey == catalogComponentKey &&
 				_productVersions.Values.Any(v => v.Id == c.ProductVersionId && v.VersionKey == exactVersion))]);
 
+		public Task<IReadOnlyList<CatalogComponent>> ListTopLevelComponentsByKeyAsync(string catalogComponentKey, CancellationToken cancellationToken) =>
+			Task.FromResult<IReadOnlyList<CatalogComponent>>([.. _components.Values.Where(c =>
+				c.ParentComponentId is null && c.ComponentKey == catalogComponentKey)]);
+
 		public Task<IReadOnlyList<CatalogExecutionProfileDetail>> ListExecutionProfilesByComponentAsync(Guid componentId, CancellationToken cancellationToken) => throw new NotSupportedException();
 		public Task<CatalogExecutionProfileDetail?> GetExecutionProfileAsync(Guid executionProfileId, CancellationToken cancellationToken) => throw new NotSupportedException();
 		public Task<IReadOnlyList<CatalogExecutionProfileDetail>> ListAllExecutionProfilesAsync(CancellationToken cancellationToken) => throw new NotSupportedException();

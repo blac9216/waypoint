@@ -21,10 +21,51 @@ namespace Waypoint.Infrastructure.ComplianceContent;
 /// <inheritdoc cref="ICatalogRepository"/>
 public sealed class CatalogRepository : ICatalogRepository
 {
-	private const string ExecutionProfileDetailProjectionSql = """
+	/// <summary>
+	/// The <c>catalog_components</c> column list, in the EXACT index order
+	/// <see cref="MapComponent"/> reads it back (one entry per positional parameter of
+	/// <see cref="CatalogComponent"/>). Every projection in this class whose reader is
+	/// handed to <see cref="MapComponent"/> is built from this one list rather than
+	/// spelling a column list out again.
+	///
+	/// Issue #743 review: hand-written duplicates of this list are a silent-at-compile,
+	/// 500-at-runtime defect class. PR #1076 widened both the table and the mapper from
+	/// 9 to 11 columns (<c>requires_sudo</c>, <c>sudo_requires_password</c>); one
+	/// projection kept its 9-column list, and because the two edits sit in different
+	/// regions of this file the merge/rebase was clean and the compiler had nothing to
+	/// object to (<see cref="MapComponent"/> reads by ordinal, and the widened record's
+	/// new parameters are defaulted). The mismatch only surfaced as an
+	/// IndexOutOfRangeException -- an HTTP 500 -- on the one endpoint that used it.
+	/// A single source for the list makes that drift unrepresentable;
+	/// CatalogComponentProjectionParityTests guards the remaining seam (this list versus
+	/// the record the mapper fills).
+	/// </summary>
+	internal static readonly string[] ComponentColumnNames =
+	[
+		"id",
+		"product_version_id",
+		"parent_component_id",
+		"component_key",
+		"display_name",
+		"transport",
+		"selector_kind",
+		"selector_name",
+		"created_at",
+		"requires_sudo",
+		"sudo_requires_password",
+	];
+
+	/// <summary>
+	/// Renders <see cref="ComponentColumnNames"/> as a SQL select list, optionally
+	/// prefixed with a table alias (<c>"c."</c>) for the joined projections.
+	/// </summary>
+	private static string ComponentColumns(string alias = "") =>
+		string.Join(", ", ComponentColumnNames.Select(column => alias + column));
+
+	private static readonly string ExecutionProfileDetailProjectionSql = $"""
 		SELECT
 			ep.id, ep.component_id, ep.content_release_id, ep.report_group_id, ep.profile_version, ep.is_operator_override, ep.output_kind, ep.created_at,
-			c.id, c.product_version_id, c.parent_component_id, c.component_key, c.display_name, c.transport, c.selector_kind, c.selector_name, c.created_at, c.requires_sudo, c.sudo_requires_password,
+			{ComponentColumns("c.")},
 			pv.id, pv.product_id, pv.version_key, pv.display_name, pv.created_at,
 			p.id, p.source_revision_id, p.vendor, p.product_key, p.display_name, p.created_at,
 			cr.id, cr.source_revision_id, cr.kind, cr.release_key, cr.display_name, cr.created_at,
@@ -171,7 +212,7 @@ public sealed class CatalogRepository : ICatalogRepository
 				transport = EXCLUDED.transport,
 				selector_kind = EXCLUDED.selector_kind,
 				selector_name = EXCLUDED.selector_name
-			RETURNING id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at, requires_sudo, sudo_requires_password
+			RETURNING {ComponentColumns()}
 			""", connection);
 		upsert.Parameters.AddWithValue(productVersionId);
 		upsert.Parameters.AddWithValue((object?)definition.ParentComponentId ?? DBNull.Value);
@@ -358,8 +399,8 @@ public sealed class CatalogRepository : ICatalogRepository
 	{
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
-			"""
-			SELECT id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at, requires_sudo, sudo_requires_password
+			$"""
+			SELECT {ComponentColumns()}
 			FROM catalog_components
 			WHERE product_version_id = $1
 			ORDER BY component_key
@@ -380,8 +421,8 @@ public sealed class CatalogRepository : ICatalogRepository
 	{
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
-			"""
-			SELECT id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at, requires_sudo, sudo_requires_password
+			$"""
+			SELECT {ComponentColumns()}
 			FROM catalog_components
 			WHERE id = $1
 			""", connection);
@@ -408,8 +449,8 @@ public sealed class CatalogRepository : ICatalogRepository
 		// ComponentCapabilityMatcher does one layer up for an already-linked component.
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
-			"""
-			SELECT cc.id, cc.product_version_id, cc.parent_component_id, cc.component_key, cc.display_name, cc.transport, cc.selector_kind, cc.selector_name, cc.created_at, cc.requires_sudo, cc.sudo_requires_password, pv.version_key
+			$"""
+			SELECT {ComponentColumns("cc.")}, pv.version_key
 			FROM catalog_components cc
 			JOIN catalog_product_versions pv ON pv.id = cc.product_version_id
 			WHERE cc.parent_component_id IS NULL AND cc.component_key = $1
@@ -426,6 +467,37 @@ public sealed class CatalogRepository : ICatalogRepository
 			{
 				components.Add(MapComponent(reader, 0));
 			}
+		}
+
+		return components;
+	}
+
+	public async Task<IReadOnlyList<CatalogComponent>> ListTopLevelComponentsByKeyAsync(
+		string catalogComponentKey, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(catalogComponentKey);
+
+		// Issue #743: the version-free sibling of FindTopLevelComponentsByKeyAndVersionAsync
+		// above -- the declared-root provisioning path (POST /targets/{id}/components)
+		// validates an Admin-selected product key against the catalog BEFORE any version
+		// is configured, so it needs every top-level component sharing the key across all
+		// product versions (the same bounded, closed-vocabulary scan the version-matched
+		// lookup already performs; only the in-code version filter is absent).
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			$"""
+			SELECT {ComponentColumns()}
+			FROM catalog_components
+			WHERE parent_component_id IS NULL AND component_key = $1
+			ORDER BY id
+			""", connection);
+		command.Parameters.AddWithValue(catalogComponentKey);
+
+		List<CatalogComponent> components = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			components.Add(MapComponent(reader, 0));
 		}
 
 		return components;

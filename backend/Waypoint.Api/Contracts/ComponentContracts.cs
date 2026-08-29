@@ -73,6 +73,17 @@ public sealed record ComponentResponse(
 /// <summary>Admin configured-fact write body (docs/api-contract.md: "configured_fact only").</summary>
 public sealed record ComponentConfiguredFactBody(string? ExactVersion);
 
+/// <summary>
+/// Issue #743: Admin declared-root creation body (<c>POST /targets/{id}/components</c>)
+/// for target kinds with no discovery operation (today: <c>ssh</c> whole-appliance SRG
+/// products). <see cref="CatalogComponentKey"/> is the EXPLICIT product selection --
+/// generic SSH never guesses a product; it must name a top-level catalog component in
+/// the closed <c>ssh</c>/<c>target</c> shape. <see cref="ExactVersion"/> optionally
+/// configures the exact product version in the same write, flowing through the shared
+/// configured-fact/linkage path (<c>PUT /components/{id}</c> semantics, issue #1000).
+/// </summary>
+public sealed record ComponentDeclareRootBody(string? CatalogComponentKey, string? ExactVersion);
+
 /// <summary>One immutable observation-history row (docs/api-contract.md <c>/components/{id}/observations</c>).</summary>
 public sealed record ComponentObservationResponse(string Id, string ComponentId, string Source, ComponentFactResponse ObservedFact, string Outcome, DateTimeOffset ObservedAt)
 {

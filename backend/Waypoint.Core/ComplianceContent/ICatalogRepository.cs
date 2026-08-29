@@ -103,6 +103,22 @@ public interface ICatalogRepository
 		string catalogComponentKey, string exactVersion, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Issue #743: the version-free sibling of
+	/// <see cref="FindTopLevelComponentsByKeyAndVersionAsync"/> -- every top-level
+	/// catalog component across ALL product versions whose
+	/// <see cref="CatalogComponent.ComponentKey"/> equals
+	/// <paramref name="catalogComponentKey"/>. The declared-root provisioning path
+	/// (<c>POST /targets/{id}/components</c>) validates an Admin-selected product key
+	/// against the catalog's closed transport/selector vocabulary BEFORE any exact
+	/// version is configured, so it cannot use the version-matched lookup; actual
+	/// catalog LINKAGE still happens only later, through the shared
+	/// <see cref="Waypoint.Core.Components.CatalogLinkageResolver"/> path, when a
+	/// version fact exists.
+	/// </summary>
+	Task<IReadOnlyList<CatalogComponent>> ListTopLevelComponentsByKeyAsync(
+		string catalogComponentKey, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Every execution profile for one component, fully joined for planner/UI
 	/// consumption. Multiple rows mean multiple content releases target the same
 	/// component (issue #728 AC "multi-release components").

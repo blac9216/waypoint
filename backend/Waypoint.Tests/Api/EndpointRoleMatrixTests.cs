@@ -111,6 +111,10 @@ public sealed class EndpointRoleMatrixTests
 		// Cyber+ (audit/troubleshooting read) per docs/api-contract.md, matching
 		// AuditController.List's floor for the same reason.
 		["ComponentsController.ListForTarget"] = WaypointRole.Viewer,
+		// Issue #743: declared-root creation is target/component persistent
+		// configuration -- epic #726 §7: "Only Admin manages ... target/component
+		// persistent configuration", same floor as the configured-fact Put.
+		["ComponentsController.DeclareRoot"] = WaypointRole.Admin,
 		["ComponentsController.Get"] = WaypointRole.Viewer,
 		["ComponentsController.Put"] = WaypointRole.Admin,
 		["ComponentsController.Delete"] = WaypointRole.Admin,

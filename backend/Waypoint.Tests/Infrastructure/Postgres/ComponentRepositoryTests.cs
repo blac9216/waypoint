@@ -79,6 +79,74 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 		return targetId!.Value;
 	}
 
+	/// <summary>
+	/// Issue #743: an ssh target has no discovery operation, so its ROOT component is
+	/// Admin-declared. The created row is UNLINKED (no catalog_component_id, no facts) --
+	/// declaration establishes IDENTITY only; catalog linkage happens later through the
+	/// shared configured-fact path, never guessed at declaration time.
+	/// </summary>
+	[Fact]
+	public async Task CreateDeclaredRootAsync_CreatesUnlinkedFactlessActiveRoot()
+	{
+		Guid targetId = await SeedTargetAsync("declared-root-target");
+
+		Guid? componentId = await _repository.CreateDeclaredRootAsync(targetId, "photon", "Photon OS", CancellationToken.None);
+
+		Assert.NotNull(componentId);
+		Component created = (await _repository.GetAsync(componentId!.Value, CancellationToken.None))!;
+		Assert.Equal(targetId, created.ParentTargetId);
+		Assert.Equal("photon", created.CatalogComponentKey);
+		Assert.Equal("Photon OS", created.DisplayName);
+		Assert.Null(created.ParentComponentId);
+		Assert.Null(created.VendorIdentity);
+		Assert.Null(created.CatalogComponentId);
+		Assert.Null(created.ConfiguredFact);
+		Assert.Null(created.DiscoveredFact);
+		Assert.Equal(ComponentLifecycleStates.Active, created.Lifecycle);
+	}
+
+	/// <summary>
+	/// Issue #743: declaration is creation-only. A second declaration of the same key
+	/// under the same target returns null (the caller surfaces a 409) and never mutates,
+	/// relinks, or duplicates the existing row -- the multi-product case is served by
+	/// DISTINCT keys under one target, not by re-declaring one.
+	/// </summary>
+	[Fact]
+	public async Task CreateDeclaredRootAsync_DuplicateKey_ReturnsNullAndLeavesTheExistingRowIntact()
+	{
+		Guid targetId = await SeedTargetAsync("declared-root-duplicate");
+		Guid first = (await _repository.CreateDeclaredRootAsync(targetId, "vidm", "Workspace ONE Access", CancellationToken.None))!.Value;
+
+		Guid? second = await _repository.CreateDeclaredRootAsync(targetId, "vidm", "A Different Display Name", CancellationToken.None);
+
+		Assert.Null(second);
+		IReadOnlyList<Component> components = await _repository.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		Component only = Assert.Single(components);
+		Assert.Equal(first, only.Id);
+		Assert.Equal("Workspace ONE Access", only.DisplayName);
+	}
+
+	/// <summary>
+	/// Issue #743 AC "multiple components on one appliance are independently
+	/// represented": two DIFFERENT catalog products declared on the same ssh target are
+	/// two independent root rows, with no hard-coded product branching anywhere -- the
+	/// keys are catalog data.
+	/// </summary>
+	[Fact]
+	public async Task CreateDeclaredRootAsync_TwoDistinctProductsOnOneTarget_AreIndependentRoots()
+	{
+		Guid targetId = await SeedTargetAsync("declared-root-multi");
+
+		Guid photon = (await _repository.CreateDeclaredRootAsync(targetId, "photon", "Photon OS", CancellationToken.None))!.Value;
+		Guid aria = (await _repository.CreateDeclaredRootAsync(targetId, "aria-operations", "Aria Operations", CancellationToken.None))!.Value;
+
+		Assert.NotEqual(photon, aria);
+		IReadOnlyList<Component> components = await _repository.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		Assert.Equal(2, components.Count);
+		Assert.Contains(components, c => c.CatalogComponentKey == "photon");
+		Assert.Contains(components, c => c.CatalogComponentKey == "aria-operations");
+	}
+
 	[Fact]
 	public async Task UpsertDiscoveredAsync_TwoLinkedVCenters_KeepIndependentComponentTrees()
 	{

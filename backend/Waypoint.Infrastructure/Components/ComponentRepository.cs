@@ -462,6 +462,41 @@ public sealed class ComponentRepository : IComponentRepository
 		return new CatalogDeclaredChildSyncOutcome(upserted, reconnected, markedAbsent);
 	}
 
+	/// <inheritdoc />
+	public async Task<Guid?> CreateDeclaredRootAsync(
+		Guid targetId, string catalogComponentKey, string displayName, CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(catalogComponentKey);
+		ArgumentException.ThrowIfNullOrWhiteSpace(displayName);
+
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		// Issue #743: an Admin-declared root row -- no parent, no vendor identity, no
+		// facts, UNLINKED (catalog_component_id null). Identity binds to migration
+		// 0054's idx_components_no_vendor_identity_unique partial index, the same
+		// no-vendor-identity case the declared-children sync uses one tier down. ON
+		// CONFLICT DO NOTHING (never DO UPDATE): declaration is creation-only -- an
+		// existing row (any lifecycle) is never mutated, reconnected, or relinked by a
+		// second declaration; the null return lets the caller surface an honest 409.
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO components (parent_target_id, parent_component_id, catalog_component_id, catalog_component_key,
+			                         vendor_identity, display_name, lifecycle, last_seen_at)
+			VALUES ($1, NULL, NULL, $2, NULL, $3, 'active', now())
+			ON CONFLICT (parent_target_id, COALESCE(parent_component_id, '00000000-0000-0000-0000-000000000000'::uuid), catalog_component_key)
+			    WHERE vendor_identity IS NULL
+			    DO NOTHING
+			RETURNING id
+			""", connection);
+		insert.Parameters.AddWithValue(targetId);
+		insert.Parameters.AddWithValue(catalogComponentKey);
+		insert.Parameters.AddWithValue(displayName);
+
+		object? inserted = await insert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		return inserted is Guid id ? id : null;
+	}
+
 	/// <summary>
 	/// Admin configured-fact write. <paramref name="exactVersion"/> null/whitespace
 	/// CLEARS the configured fact (issue #1000 AC "clearing the configured version must

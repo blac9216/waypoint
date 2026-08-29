@@ -103,6 +103,24 @@ public interface IComponentRepository
 	Task<ComponentWriteOutcome> SetConfiguredFactAsync(Guid componentId, string? exactVersion, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Issue #743: Admin-declared ROOT component creation for a target kind that has no
+	/// discovery operation (the <c>ssh</c> whole-appliance SRG products -- Photon, the
+	/// Aria family, Workspace ONE Access). Discovery materializes the root for
+	/// <c>vsphere</c> targets; an <c>ssh</c> target's product is not derivable from its
+	/// connection ("generic SSH does not guess a product" -- #743 AC), so the Admin
+	/// declares it explicitly by catalog component key and the row is created UNLINKED
+	/// (<see cref="Component.CatalogComponentId"/> null, no facts) -- catalog linkage
+	/// happens only through the shared configured-fact path
+	/// (<see cref="SetConfiguredFactAsync"/>/<see cref="CatalogLinkageResolver"/>) once
+	/// an exact version is configured, identical semantics to every other provenance.
+	/// Identity binds to migration 0054's no-vendor-identity partial unique index (the
+	/// same identity case as a catalog-declared service child, at the root tier):
+	/// returns null when a root with this key already exists under the target (the
+	/// caller surfaces a 409; the existing row is never mutated).
+	/// </summary>
+	Task<Guid?> CreateDeclaredRootAsync(Guid targetId, string catalogComponentKey, string displayName, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Moves every component under any target whose <see cref="Component.ContinuousAbsenceSince"/>
 	/// is at least <paramref name="threshold"/> old and is not already retired to
 	/// <see cref="ComponentLifecycleStates.Retired"/>. Returns the count retired. Global
