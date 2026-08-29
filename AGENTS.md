@@ -132,8 +132,15 @@ full format and a filled example.
 
 ## Workflow
 
-- All work is issue-driven via the `github-workflow` skill; PRs are reviewed with the
-  `github-pr-review` skill. Consult `github-workflow` before writing code.
+- All work is issue-driven via the `github-workflow` skill (Project board → delivery-story
+  milestones → domain epics → issues); PRs are reviewed with the `github-pr-review`
+  skill; repository fixtures are provisioned and audited by `configure-workflow`.
+  Consult `github-workflow` before writing code.
+- **Repo-specific process lives in [`docs/process/`](docs/process/)** — the shape as
+  adopted here, the label/area set, test commands, validation and maintenance settings,
+  overnight limits, and observed failure modes. The skills are general; when they say
+  "the repo's …", that directory is where it is. Environment-specific and sensitive-
+  adjacent guidance lives in untracked `*.local.md` files (`docs/testing.local.md`).
 - Planning-phase deliverables are docs: keep ADRs short and numbered; supersede rather
   than rewrite accepted ones (see `docs/adr/README.md` for what may be amended).
 

@@ -106,3 +106,19 @@ implied by *Done*; *Verified* tracks only post-merge live proof.
 Earlier revisions of `roadmap.md` numbered the stories M0–M7. The mapping is kept in
 [`../adr/README.md`](../adr/README.md#former-milestone-numbering) because accepted ADRs
 still use those labels and are immutable.
+
+## Board and identity (configure-workflow)
+
+Project: [Waypoint #5](https://github.com/users/blac9216/projects/5) — owner `blac9216`; automation account `machine-blac9216` (collaborator write, Project admin). Project node id `PVT_kwHOBk6Ni84Bh1KM`.
+
+Board field ids (for scripts and dispatch prompts):
+- Status: `PVTSSF_lAHOBk6Ni84Bh1KMzhgvbx0` — Triage `ba46c696` · Backlog `cf9d586a` · Ready `fbc01657` · In progress `dd3068fc` · In review `8e6f938a` · Done `ba1cea35`
+- Verified: `PVTSSF_lAHOBk6Ni84Bh1KMzhgvyCs` — n/a `65ec945a` · pending-live `12747daa` · live-verified `fa561fb5` · live-failed `6d630399`
+- Claimed by: `PVTF_lAHOBk6Ni84Bh1KMzhgxG-o` (text; `waypoint-NN @ <ISO timestamp>`)
+
+Reviewer identity: none — single account; the `## PR Review — …` comment plus the merge are the verdict of record.
+
+Default branch: protected by an owner-managed ruleset (require PR; required check `secret + identifier scan`); the automation account cannot read or edit it.
+
+Local deviations from the skill's defaults: none.
+
