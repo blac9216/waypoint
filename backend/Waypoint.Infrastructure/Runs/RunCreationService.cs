@@ -418,16 +418,28 @@ public sealed class RunCreationService
 		// come from the post-demotion plan.Items, or a credential-demoted item would be
 		// fanned out as a job anyway with no way to resolve its own binding.
 		Dictionary<Guid, Guid> targetIdByComponentId = [];
-		// Issue #737 item-4: the discovered component's own vendor identity (ESXi
-		// hostname / VM identity, ADR-0023 "identity is never display name") is what a
-		// NARROWED vSphere scan scopes InSpec to -- frozen into the narrowed job's
-		// payload here (component_id -> vendor identity) so the runner scans exactly THAT
-		// host/VM's controls, not the whole vCenter, and two sibling ESXi jobs carry
-		// distinct selectors. A component with no vendor identity (a catalog-declared
-		// service with no independent upstream object) is never narrowable anyway
+		// Issue #737 item-4, value fixed by #1123: a NARROWED vSphere scan scopes
+		// InSpec to one esxi/vm object via a profile-declared input whose VALUE the
+		// target profile matches by NAME, not by the vCenter managed-object reference
+		// (MoRef) -- frozen into the narrowed job's payload here (component_id ->
+		// display name) so the runner scans exactly THAT host/VM's controls, not the
+		// whole vCenter, and two sibling ESXi jobs carry distinct selectors. This is
+		// deliberately the component's DisplayName (the discovered vendor name/FQDN),
+		// NOT its VendorIdentity (the MoRef, e.g. `host-12`) that #1123 found written
+		// here pre-fix -- a real 9.x/8.0 profile's `vmhostName`/`esx_vmhostName`
+		// input never matches a MoRef, so every narrowed vSphere scan evaluated zero
+		// controls. Using DisplayName here is NOT a re-introduction of ADR-0023's
+		// "identity is never display name" risk: that rule governs COMPONENT
+		// IDENTITY/dedup (ComponentRepository's own upsert key, untouched by this),
+		// not the separate question of what value an already-identified component's
+		// OWN scan invocation passes to the target profile it is being scoped to. A
+		// component with no vendor identity (a catalog-declared service with no
+		// independent upstream object) is never narrowable anyway
 		// (ScanComponentNarrowing.CanNarrow is false for the service selector), so its
-		// absence from this map is expected, not a gap.
-		Dictionary<Guid, string> vendorIdentityByComponentId = [];
+		// absence from this map is expected, not a gap -- gating on VendorIdentity
+		// (not DisplayName) being present keeps that same "independently discoverable
+		// object" condition; DisplayName itself is a non-nullable Component field.
+		Dictionary<Guid, string> narrowingSelectorNameByComponentId = [];
 		foreach ((Guid targetId, PlanTargetRequirement requirement) in planRequirementsByTarget)
 		{
 			foreach (Waypoint.Core.Scans.ScanPlanItem item in requirement.Items)
@@ -437,7 +449,7 @@ public sealed class RunCreationService
 					await _components.GetAsync(item.ComponentId, cancellationToken).ConfigureAwait(false);
 				if (!string.IsNullOrWhiteSpace(component?.VendorIdentity))
 				{
-					vendorIdentityByComponentId[item.ComponentId] = component!.VendorIdentity!;
+					narrowingSelectorNameByComponentId[item.ComponentId] = component!.DisplayName;
 				}
 			}
 		}
@@ -515,9 +527,9 @@ public sealed class RunCreationService
 					foreach (Waypoint.Core.Scans.ScanPlanItem item in narrowable)
 					{
 						planItemSpecPositions.Add((specs.Count, item.ComponentId));
-						vendorIdentityByComponentId.TryGetValue(item.ComponentId, out string? vendorIdentity);
+						narrowingSelectorNameByComponentId.TryGetValue(item.ComponentId, out string? narrowingSelectorName);
 						specs.Add(BuildPlanItemJobSpec(
-							item, vendorIdentity, target, siteId, profile, useRunSecret, resolvedBindings, adHocByTarget));
+							item, narrowingSelectorName, target, siteId, profile, useRunSecret, resolvedBindings, adHocByTarget));
 					}
 
 					if (remainder.Count > 0)
@@ -681,7 +693,7 @@ public sealed class RunCreationService
 	/// </summary>
 	private static JobSpec BuildPlanItemJobSpec(
 		Waypoint.Core.Scans.ScanPlanItem item,
-		string? vendorIdentity,
+		string? narrowingSelectorName,
 		Target target,
 		Guid siteId,
 		Profile? profile,
@@ -698,13 +710,16 @@ public sealed class RunCreationService
 		// plan item row, so it must be readable straight from the claimed job without
 		// a database round trip.
 		//
-		// Issue #737 item-4: this method is only ever called for a NARROWABLE item
-		// (ScanComponentNarrowing.CanNarrow == true -- the caller partitioned the
-		// remainder off to BuildUnnarrowedTargetJobSpec). `selector_kind` is the item's
-		// catalog object kind (vcenter/esxi/vm/service/target); `selector_name` is either
-		// the discovered component's own VENDOR IDENTITY (esxi/vm -- the ESXi hostname /
-		// VM identity that scopes the InSpec vmware invocation to that one object) or,
-		// for an ssh `service` selector (#741), the catalog's own named-service identity
+		// Issue #737 item-4, value fixed by #1123: this method is only ever called for
+		// a NARROWABLE item (ScanComponentNarrowing.CanNarrow == true -- the caller
+		// partitioned the remainder off to BuildUnnarrowedTargetJobSpec).
+		// `selector_kind` is the item's catalog object kind
+		// (vcenter/esxi/vm/service/target); `selector_name` is either the discovered
+		// component's own DISPLAY NAME (esxi/vm -- the ESXi hostname / VM name the
+		// target profile's own declared input matches on; NOT the component's
+		// VendorIdentity/MoRef, which #1123 found written here pre-fix and which no
+		// vSphere profile's object-scoping input ever matches) or, for an ssh
+		// `service` selector (#741), the catalog's own named-service identity
 		// (e.g. `envoy`, `postgresql` -- there is no separate discovered vendor identity
 		// per VCSA sub-service, the catalog name IS the stable identity). A vcenter or
 		// ssh `target` selector has no object identity below the appliance/vCenter
@@ -742,7 +757,7 @@ public sealed class RunCreationService
 				// discovered component happens to have its own vendor identity recorded.
 				CatalogSelectorKinds.Service => item.SelectorName,
 				CatalogSelectorKinds.Target or CatalogSelectorKinds.VCenter => null,
-				_ => vendorIdentity,
+				_ => narrowingSelectorName,
 			},
 			catalog_execution_profile_id = item.CatalogExecutionProfileId,
 			baseline_id = item.BaselineId,

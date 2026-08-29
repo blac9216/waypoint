@@ -61,12 +61,16 @@ function Invoke-WaypointScan {
 	    whole-target remainder job).
 
 	.PARAMETER SelectorName
-	    The object identity a narrowed esxi/vm scan scopes to (the discovered component's
-	    vendor identity: the ESXi hostname / VM identity). A vcenter SelectorKind needs
-	    no name (the whole vCenter IS the object). Passed to InSpec as a generated
-	    --input-file (the same non-argv, owner-only-0600 discipline Invoke-WaypointNsxScan
-	    uses for its session token), so the object identity never lands on the process
-	    command line.
+	    The identity a narrowed esxi/vm scan scopes to -- the HOST/VM NAME the target
+	    profile matches on (issue #1123: the discovered component's DisplayName, not
+	    its VendorIdentity/MoRef -- the profile's InSpec resource matches by name, not
+	    by vCenter managed-object reference). A vcenter SelectorKind needs no name (the
+	    whole vCenter IS the object). Passed to InSpec as a generated --input-file (the
+	    same non-argv, owner-only-0600 discipline Invoke-WaypointNsxScan uses for its
+	    session token), so the object identity never lands on the process command
+	    line, under the key name the resolved frozen profile itself declares (issue
+	    #1123, Get-WaypointVsphereProfileSelectorInputKeySet) -- never a hardcoded 8.0
+	    or VCF 9.x name.
 
 	.PARAMETER VmwareStigDockerCommonPath
 	    Path to the sibling repo's unmodified module.common.ps1,
@@ -172,28 +176,49 @@ function Invoke-WaypointScan {
 		$InspecArguments += " --input-file `"$InputsFilePath`""
 	}
 
-	# Issue #737 item-4: a narrowed scan scopes InSpec to one component object rather
-	# than the whole vCenter. The narrowing selector is written into a generated
-	# --input-file (created 0600 BEFORE the value is written, the same owner-only,
-	# non-argv discipline Invoke-WaypointNsxScan uses for its session token), so the
-	# object identity never appears on the process command line. Absent SelectorKind =
-	# whole-target scan (the pre-#737 InSpec args, unchanged). The input keys mirror the
-	# vmware STIG profile's documented object-scoping inputs (vmhostName for an esxi
-	# host, vmName for a vm); a vcenter selector scopes to the vCenter itself and carries
-	# no object name. Appended LAST (issue #911) so the platform's own scoping always
-	# wins InSpec's last-`--input-file`-key-wins resolution over the operator inputs
-	# file above.
+	# Issue #737 item-4, key names fixed by #1123: a narrowed scan scopes InSpec to one
+	# component object rather than the whole vCenter. The narrowing selector is
+	# written into a generated --input-file (created 0600 BEFORE the value is
+	# written, the same owner-only, non-argv discipline Invoke-WaypointNsxScan uses
+	# for its session token), so the object identity never appears on the process
+	# command line. Absent SelectorKind = whole-target scan (the pre-#737 InSpec args,
+	# unchanged). A vcenter selector scopes to the vCenter itself and carries no
+	# object name.
+	#
+	# Issue #1123: the esxi/vm object-scoping key name is no longer hardcoded to the
+	# 8.0 STIG names (vmhostName/vmName) -- it is resolved from the RESOLVED FROZEN
+	# PROFILE's own declared inputs (Get-WaypointVsphereProfileSelectorInputKeySet,
+	# the same #917-derived approach Invoke-WaypointNsxScan already uses for its NSX
+	# auth-input keys), because the VCF 9.x SRG baselines declare a different,
+	# per-selector-kind prefixed name (esx_vmhostName / vm_Name) that the 8.0 name
+	# never matches. Unlike the NSX helper, an unmatched slot here is NOT defaulted to
+	# the legacy name -- epic #726's "never guess" rule means a profile declaring
+	# neither known name fails this scan closed (below) rather than silently emitting
+	# an unscoped or mis-scoped narrowing input, which is the exact #1123 defect.
+	# Appended LAST (issue #911) so the platform's own scoping always wins InSpec's
+	# last-`--input-file`-key-wins resolution over the operator inputs file above.
 	$InputsPath = $null
 	if ($SelectorKind) {
-		$InputsPath = Join-Path $ReportDirectory "$([Guid]::NewGuid().ToString('N')).vsphere-scope.generated.yml"
 		$InputsContent = "vsphereSelectorKind: '$SelectorKind'`n"
 		if ($SelectorName) {
-			switch ($SelectorKind) {
-				'esxi' { $InputsContent += "vmhostName: '$SelectorName'`n" }
-				'vm'   { $InputsContent += "vmName: '$SelectorName'`n" }
+			if ($SelectorKind -notin @('esxi', 'vm')) {
+				throw "WaypointScan: SelectorName was supplied for SelectorKind '$SelectorKind', which carries no object-scoping input (only 'esxi'/'vm' do)."
 			}
+
+			$ResolvedKey = Get-WaypointVsphereProfileSelectorInputKeySet -ProfilePath $ProfilePath -SelectorKind $SelectorKind
+			if (-not $ResolvedKey) {
+				return [pscustomobject]@{
+					Success       = $false
+					ExitCode      = $null
+					ReportPath    = $null
+					FailureReason = "WaypointScan: resolved profile at '$ProfilePath' declares no recognized '$SelectorKind' object-scoping input (checked both the 8.0 STIG and VCF 9.x SRG names) -- refusing to guess a key name and silently scope this narrowed scan to nothing. Verify the frozen profile's inspec.yml declares the expected input, or file the profile's own key name as a catalog gap."
+				}
+			}
+
+			$InputsContent += "${ResolvedKey}: '$SelectorName'`n"
 		}
 
+		$InputsPath = Join-Path $ReportDirectory "$([Guid]::NewGuid().ToString('N')).vsphere-scope.generated.yml"
 		New-Item -ItemType File -Path $InputsPath -Force -ErrorAction Stop | Out-Null
 		if (-not $IsWindows) {
 			[System.IO.File]::SetUnixFileMode(
@@ -635,12 +660,16 @@ function Set-WaypointCklBenchmarkMetadata {
 # measured-performance case justifies a real cross-job cache, it needs its own ADR
 # addressing lease/revocation semantics -- not a change folded into this issue.
 
-# Issue #917 helper (module-private, used only by Invoke-WaypointNsxScan): resolves
-# which NSX auth-input key names the resolved frozen profile itself declares, by
-# reading the declared input names from the profile's inspec.yml. Returns the same
-# { manager, token, cookie } shape the sibling transport's catalog `authInputKeys`
-# map carries, with any undeclared slot left $null so the caller's per-slot 4.x
-# legacy defaulting (taken verbatim from module.transport.nsxapi.ps1) applies.
+# Issue #917/#1071 helper, generalized by #1123 (module-private): reads the TOP-LEVEL
+# `inputs:` block of a resolved frozen profile's inspec.yml and returns every declared
+# input name, in declaration order. Both Get-WaypointNsxProfileAuthInputKeySet (NSX
+# session auth keys) and Get-WaypointVsphereProfileSelectorInputKeySet (vSphere
+# esxi/vm narrowing keys, issue #1123) resolve their own known-name pairs from this
+# ONE shared scan -- the structural guard against a fourth "input key names hardcoded
+# to one content generation" instance (#917 NSX, #1123 vSphere, and the parsing
+# follow-up #1071): any future transport that needs a profile-declared input name
+# reads it from here rather than growing its own hardcoded map or its own manifest
+# scan.
 #
 # Deliberately line-oriented rather than a full YAML parse -- the same constraint the
 # sibling's Remove-NsxAuthInputKeys documents (no YAML parser module is available in
@@ -650,11 +679,11 @@ function Set-WaypointCklBenchmarkMetadata {
 # `- name:` sequence entry is a MEMBER of it; within the block a `name:` counts only
 # at the input entry's OWN key level. So `- name:` entries under `depends:` (or any
 # other named list) never count as inputs, and neither does a `name:` nested inside
-# an input's own `value:` mapping or `value:` sequence. Only the two known names per
-# auth slot are ever selected, so unrelated declared inputs (or an exotic manifest
-# shape this scan does not understand) can never leak into the auth block; a
-# missing/unreadable inspec.yml simply yields all-$null (legacy defaults).
-function Get-WaypointNsxProfileAuthInputKeySet {
+# an input's own `value:` mapping or `value:` sequence. A missing/unreadable
+# inspec.yml simply yields an empty list -- callers decide what an empty/no-match
+# result means for their own slot (NSX defaults to its 4.x legacy name; vSphere,
+# issue #1123, fails closed instead -- see Get-WaypointVsphereProfileSelectorInputKeySet).
+function Get-WaypointProfileDeclaredInputNames {
 	[CmdletBinding()]
 	param(
 		[Parameter(Mandatory)]
@@ -766,6 +795,25 @@ function Get-WaypointNsxProfileAuthInputKeySet {
 		}
 	}
 
+	return $DeclaredNames
+}
+
+# Issue #917 helper (module-private, used only by Invoke-WaypointNsxScan): resolves
+# which NSX auth-input key names the resolved frozen profile itself declares, from
+# Get-WaypointProfileDeclaredInputNames' shared manifest scan. Returns the same
+# { manager, token, cookie } shape the sibling transport's catalog `authInputKeys`
+# map carries, with any undeclared slot left $null so the caller's per-slot 4.x
+# legacy defaulting (taken verbatim from module.transport.nsxapi.ps1) applies.
+function Get-WaypointNsxProfileAuthInputKeySet {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ProfilePath
+	)
+
+	$DeclaredNames = Get-WaypointProfileDeclaredInputNames -ProfilePath $ProfilePath
+
 	# Per-slot: whichever of the two known key names (4.x legacy / 9.x SRG) the
 	# profile declares, in the profile's own declaration order; $null when neither is
 	# declared (caller defaults that slot to the 4.x legacy name).
@@ -777,6 +825,42 @@ function Get-WaypointNsxProfileAuthInputKeySet {
 		manager = $ManagerName
 		token   = $TokenName
 		cookie  = $CookieName
+	}
+}
+
+# Issue #1123 helper (module-private, used only by Invoke-WaypointScan): resolves
+# which vSphere object-narrowing input key name the resolved frozen profile itself
+# declares for the given SelectorKind ('esxi' or 'vm'), from
+# Get-WaypointProfileDeclaredInputNames' shared manifest scan. Unlike the NSX auth-key
+# resolution above, this NEVER defaults an unmatched slot to a hardcoded name -- epic
+# #726 Wave 2's "never guess" rule applies to a scoping key exactly as it does to
+# object identity: a profile that declares neither the 8.0 name nor the VCF 9.x SRG
+# name for this SelectorKind gets $null back, and the caller must fail the scan
+# closed (a diagnosable failure) rather than silently emit an unscoped or
+# wrongly-scoped narrowing input -- the exact #1123 defect (the 8.0-only key written
+# against a 9.x profile silently scoped nothing).
+function Get-WaypointVsphereProfileSelectorInputKeySet {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ProfilePath,
+
+		[Parameter(Mandatory)]
+		[ValidateSet('esxi', 'vm')]
+		[string]$SelectorKind
+	)
+
+	$DeclaredNames = Get-WaypointProfileDeclaredInputNames -ProfilePath $ProfilePath
+
+	# Known name pairs per selector kind: 8.0 STIG baseline (esxi/vmhostName,
+	# vm/vmName) and the VCF 9.x SRG baselines (esxi/esx_vmhostName, vm/vm_Name --
+	# note the two content generations do NOT share a common prefix scheme between
+	# selector kinds, which is exactly why this must be discovered per profile rather
+	# than templated from a version conditional).
+	switch ($SelectorKind) {
+		'esxi' { return $DeclaredNames | Where-Object { $_ -in @('vmhostName', 'esx_vmhostName') } | Select-Object -First 1 }
+		'vm'   { return $DeclaredNames | Where-Object { $_ -in @('vmName', 'vm_Name') } | Select-Object -First 1 }
 	}
 }
 

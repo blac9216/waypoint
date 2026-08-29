@@ -464,6 +464,68 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Assert.Equal("envoy", sshPayload.RootElement.GetProperty("selector_name").GetString());
 	}
 
+	/// <summary>
+	/// Issue #1123 (found by epic #726 live validation round 12): a narrowed esxi/vm
+	/// job's payload <c>selector_name</c> -- passed straight to
+	/// <c>Invoke-WaypointScan -SelectorName</c>, the value written into the InSpec
+	/// object-scoping input -- must be the discovered component's DISPLAY NAME (the
+	/// host/VM name the target profile matches on), never its VendorIdentity (the
+	/// vCenter managed-object reference, e.g. <c>host-12</c>). Pre-fix,
+	/// <c>BuildPlanItemJobSpec</c> wrote the MoRef here: a real 9.x/8.0 profile's
+	/// object-scoping input never matches a MoRef, so every narrowed vSphere scan
+	/// evaluated zero controls even once the key-name defect (also #1123) is fixed.
+	/// <see cref="SeedComponentWithRequirementsAsync"/> seeds VendorIdentity and
+	/// DisplayName as deliberately DIFFERENT strings (DisplayName is VendorIdentity
+	/// plus an <c>.example.internal</c> suffix), so this test fails on pre-fix main
+	/// (payload selector_name equals the bare VendorIdentity) and passes post-fix
+	/// (payload selector_name equals DisplayName).
+	/// </summary>
+	[Fact]
+	public async Task CreateScanRun_NarrowedEsxiAndVmComponents_JobPayloadSelectorNameIsDisplayName_NotVendorIdentityMoRef()
+	{
+		Guid siteId = await CreateSiteAsync("fanout-vsphere-selector-value");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
+		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+
+		Guid esxiComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "esxi-value", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware, selectorKind: CatalogSelectorKinds.Esxi);
+		Guid vmComponentId = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-value", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware, selectorKind: CatalogSelectorKinds.Vm);
+
+		Component esxiComponent = await _components.GetAsync(esxiComponentId, CancellationToken.None)
+			?? throw new InvalidOperationException("seeded esxi component must exist");
+		Component vmComponent = await _components.GetAsync(vmComponentId, CancellationToken.None)
+			?? throw new InvalidOperationException("seeded vm component must exist");
+
+		// Sanity-check the fixture itself: VendorIdentity and DisplayName must be
+		// DIFFERENT strings, or this test could pass by accident regardless of which
+		// one the payload actually carries.
+		Assert.NotNull(esxiComponent.VendorIdentity);
+		Assert.NotEqual(esxiComponent.VendorIdentity, esxiComponent.DisplayName);
+		Assert.NotNull(vmComponent.VendorIdentity);
+		Assert.NotEqual(vmComponent.VendorIdentity, vmComponent.DisplayName);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		Guid esxiJobId = await ReadJobIdForComponentAsync(runId, esxiComponentId);
+		using JsonDocument esxiPayload = JsonDocument.Parse(await ReadJobPayloadAsync(esxiJobId));
+		Assert.Equal(esxiComponent.DisplayName, esxiPayload.RootElement.GetProperty("selector_name").GetString());
+		Assert.NotEqual(esxiComponent.VendorIdentity, esxiPayload.RootElement.GetProperty("selector_name").GetString());
+
+		Guid vmJobId = await ReadJobIdForComponentAsync(runId, vmComponentId);
+		using JsonDocument vmPayload = JsonDocument.Parse(await ReadJobPayloadAsync(vmJobId));
+		Assert.Equal(vmComponent.DisplayName, vmPayload.RootElement.GetProperty("selector_name").GetString());
+		Assert.NotEqual(vmComponent.VendorIdentity, vmPayload.RootElement.GetProperty("selector_name").GetString());
+	}
+
 	[Fact]
 	public async Task CreateScanRun_MixedNarrowableAndGated_FansOutPerNarrowablePlusExactlyOneCollapsed()
 	{
