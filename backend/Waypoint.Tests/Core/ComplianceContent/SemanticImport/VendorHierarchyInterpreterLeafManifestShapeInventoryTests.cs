@@ -199,4 +199,20 @@ public sealed class VendorHierarchyInterpreterLeafManifestShapeInventoryTests
 
 		assertBehavior(interpret());
 	}
+
+	/// <summary>
+	/// Whether interpreting the invented fixture for <paramref name="shapeId"/> resolves -- the
+	/// differential harness's boolean resolved/null signal for this dimension (<see cref="ShapeVerdictDump"/>).
+	/// "Resolved" here means the interpreter produced at least one <see cref="SemanticCandidate"/> and
+	/// rejected nothing: the leaf-manifest analogue of a parser returning a non-null document, since this
+	/// interpreter's failure mode is a rejection row rather than a null return.
+	/// </summary>
+	public static bool Resolves(string shapeId)
+	{
+		(_, Func<VendorHierarchyInterpretation> interpret, _) =
+			ShapeExpectations.Single(shape => shape.ShapeId == shapeId);
+
+		VendorHierarchyInterpretation result = interpret();
+		return result.Rejections.Count == 0 && result.Candidates.Count > 0;
+	}
 }

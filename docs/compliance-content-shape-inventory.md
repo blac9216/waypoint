@@ -37,7 +37,7 @@ vocabulary check, and its Expected-verdict-vs-fixture reconciliation (the analog
 `ShapeInventoryDoc.AssertExpectedVocabulary` / `AssertVerdictMatchesFixtures`, so a
 documentation-only edit cannot disarm a shape) are all asserted inside that same Pester
 run, not by `ShapeInventoryDoc` -- `ShapeInventoryDoc` only reads C# fixture classes. `scripts/parser-shape-diff.sh` still diffs this parser's corpus old-ref-vs-new-ref
-alongside the two C# parsers: see "Real-content conformance and differential checks" below
+alongside the C# corpora: see "Real-content conformance and differential checks" below
 for how the PowerShell side of that harness works.
 
 This inventory only grows when a new shape is discovered (typically via the opt-in
@@ -168,13 +168,23 @@ round-2 review recorded on issue #1077: a real-content conformance check alone w
 **not** have caught a fix that silently stopped resolving a shape no shipped manifest
 happens to use today.
 
-- **Opt-in real-content conformance** (`RealContentConformanceTests` for the two C#
-  parsers; `WaypointScan.RealContentConformance.Tests.ps1` (Pester) for
+- **Opt-in real-content conformance** (`RealContentConformanceTests` for the three C#
+  parsers `InspecManifestParser`/`StigZipReader`/`XccdfParser`;
+  `WaypointScan.RealContentConformance.Tests.ps1` (Pester) for
   `Get-WaypointProfileDeclaredInputNameSet`): walks a locally cloned vendor content
   repository at `/workspaces/git/dod-compliance-and-automation` (read-only) and
   reports, per parser, how many real artifacts it accepts versus rejects. Skips
   cleanly (no assertion, no failure -- `Set-ItResult -Skipped` on the Pester side) when
   that path does not exist, so CI never depends on vendor content.
+
+  **Gap, tracked in #1213:** the `VendorHierarchyInterpreter` leaf-manifest section
+  below has NO real-content conformance check. That interpreter consumes
+  `VendorContentEntry` rows and no C# production code builds one from disk (the
+  directory walk lives in `WaypointScan.psm1`'s
+  `Get-WaypointComplianceContentEntries`), so a conformance check there is a
+  from-scratch walker rather than a reuse of the three checks above. That dimension is
+  covered by its documented rows, invented fixtures, bidirectional completeness, and
+  the differential harness below -- but not by real content.
 - **Differential harness** (`scripts/parser-shape-diff.sh`): runs the *same* shape
   corpus defined below through an old ref's parser code and the working tree's parser
   code, and fails on any shape that resolved under the old ref but no longer does
