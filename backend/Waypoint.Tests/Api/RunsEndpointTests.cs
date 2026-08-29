@@ -2134,6 +2134,12 @@ public sealed class FakeJobQueueRepository : IJobControlRepository, IJobRunnerRe
 		return Task.FromResult<IReadOnlyList<Guid>>([]);
 	}
 
+	public Task<bool> CompleteEmptyRunAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		_ = (runId, cancellationToken);
+		return Task.FromResult(true);
+	}
+
 	public Task<bool> PauseRunAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		_ = cancellationToken;

@@ -189,6 +189,105 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 	}
 
 	[Fact]
+	public async Task CreateScanRun_WithExplicitEmptyTargetScope_OnFreshlyDiscoveredSite_CompletesAnEmptyRun_LeavingNoStrandedRunRow()
+	{
+		// Issue #1122 (round-1 review, finding 1): the deliberately-empty explicit scope
+		// on a site with NOTHING else to do. The sibling test above passes only by
+		// accident of its fixture -- its vSphere target has never been refreshed, so
+		// BuildStaleDiscoverSpecsAsync contributes one discover spec and the run fans
+		// out non-empty regardless. Here last_refreshed is set to now, so the run's spec
+		// list is genuinely empty: pre-fix this reached FanOutJobsAsync with zero specs,
+		// which throws ArgumentException AFTER the run row was inserted -- HTTP 500
+		// internal_error plus a run stranded in `pending` with zero jobs and nothing
+		// that could ever complete it. ADR-0023 §3 ("an honest plan with no executable
+		// items rather than widening") makes the honest outcome an accepted run that is
+		// immediately terminal, not an error and not a queued run: the scope snapshot is
+		// still recorded for history/audit, and the run row is `completed` with zero
+		// jobs. Asserted on the ROW STATE, not merely the status code.
+		Guid siteId = await CreateSiteAsync("empty-explicit-fresh-site");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-fresh", """{"host":"vcsa-fresh.example.internal"}""");
+		await MarkTargetFreshlyRefreshedAsync(targetId);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "explicit", component_ids = Array.Empty<Guid>() },
+		});
+
+		// Asserted BEFORE the status code deliberately: the pre-fix defect leaves a
+		// `pending` run row behind, and this is the assertion that pins THAT rather than
+		// merely the opaque 500 the request also returned. (Reverting the fix fails here
+		// with 1 stranded non-terminal run; the 500 has no run_id to look the row up by.)
+		Assert.Equal(0, await CountNonTerminalRunsForSiteAsync(siteId));
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		// No jobs at all -- not the widened legacy whole-target job this issue removes,
+		// and not a piggybacked discover job either (the target is fresh).
+		Assert.Equal(0, await CountJobsForRunAsync(runId));
+
+		// The run is honestly terminal, never left stranded in `pending`.
+		(string state, bool hasCompletedAt) = await ReadRunTerminalityAsync(runId);
+		Assert.Equal("completed", state);
+		Assert.True(hasCompletedAt);
+
+		// The scope snapshot is still frozen for history/audit (issue #733's AC).
+		RunScopeSnapshotRepository snapshots = new(_fixture.ConnectionString);
+		RunScopeSnapshot? snapshot = await snapshots.GetForRunAsync(runId, CancellationToken.None);
+		Assert.NotNull(snapshot);
+		Assert.Equal("explicit", snapshot!.RequestedMode);
+		Assert.Empty(snapshot.ResolvedComponentIds);
+	}
+
+	/// <summary>
+	/// Stamps <c>targets.last_refreshed</c> to now so
+	/// <c>RunCreationService.BuildStaleDiscoverSpecsAsync</c> contributes NO discover
+	/// spec for this target -- the fixture condition that makes an empty explicit scope
+	/// produce a genuinely empty spec list (issue #1122 round-1 review, finding 1).
+	/// </summary>
+	private async Task MarkTargetFreshlyRefreshedAsync(Guid targetId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("UPDATE targets SET last_refreshed = now() WHERE id = $1", connection);
+		command.Parameters.AddWithValue(targetId);
+		Assert.Equal(1, await command.ExecuteNonQueryAsync());
+	}
+
+	private async Task<int> CountJobsForRunAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT COUNT(*) FROM jobs WHERE run_id = $1", connection);
+		command.Parameters.AddWithValue(runId);
+		return Convert.ToInt32((long)(await command.ExecuteScalarAsync())!);
+	}
+
+	private async Task<(string State, bool HasCompletedAt)> ReadRunTerminalityAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new("SELECT state, completed_at IS NOT NULL FROM runs WHERE id = $1", connection);
+		command.Parameters.AddWithValue(runId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		Assert.True(await reader.ReadAsync());
+		return (reader.GetString(0), reader.GetBoolean(1));
+	}
+
+	private async Task<int> CountNonTerminalRunsForSiteAsync(Guid siteId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT COUNT(*) FROM runs WHERE scope->>'site_id' = $1 AND state NOT IN ('completed', 'completed_with_failures', 'aborted')",
+			connection);
+		command.Parameters.AddWithValue(siteId.ToString());
+		return Convert.ToInt32((long)(await command.ExecuteScalarAsync())!);
+	}
+
+	[Fact]
 	public async Task CreateScanRun_WithExplicitScopeNamingAResolvableComponent_PersistsRequestedAndResolvedScope()
 	{
 		Guid siteId = await CreateSiteAsync("resolvable-site");
