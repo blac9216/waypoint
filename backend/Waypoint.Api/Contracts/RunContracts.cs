@@ -492,6 +492,20 @@ public sealed record RunArtifactResponse(
 	[property: JsonPropertyName("cat_iii_open")]
 	int? CatIIIOpen,
 
+	/// <summary>
+	/// Issue #1132: total controls this HDF describes, null exactly when
+	/// <c>counts_available</c> is false. A wholly-unevaluated scan renders
+	/// <c>cat_i_open</c>/<c>cat_ii_open</c>/<c>cat_iii_open</c> as <c>0</c> the same
+	/// as a genuinely clean one -- a caller must compare this against
+	/// <c>controls_evaluated</c>, never read the CAT counts alone as "clean".
+	/// </summary>
+	[property: JsonPropertyName("controls_total")]
+	int? ControlsTotal,
+
+	/// <summary>Issue #1132: controls that produced a real pass/fail outcome (excludes skipped/not-applicable/absent). <c>controls_total &gt; 0</c> with <c>controls_evaluated == 0</c> means this component evaluated nothing -- not evaluated, not clean.</summary>
+	[property: JsonPropertyName("controls_evaluated")]
+	int? ControlsEvaluated,
+
 	/// <summary>Which of <c>hdf</c>/<c>ckl</c> currently have a file on disk for this job -- what <c>GET /jobs/{id}/artifacts/{kind}</c> can actually serve.</summary>
 	[property: JsonPropertyName("artifact_kinds")]
 	IReadOnlyList<string> ArtifactKinds,
@@ -932,7 +946,17 @@ public sealed record RunResultRollupStatusResponse(
 	int NotReviewedCount,
 
 	[property: JsonPropertyName("skipped_count")]
-	int SkippedCount);
+	int SkippedCount,
+
+	/// <summary>
+	/// Issue #1132: true when every component in this status bucket has zero passed
+	/// and zero open (failed/error) findings while still carrying at least one
+	/// <c>not_reviewed</c> finding -- "this bucket ran but evaluated nothing", the
+	/// same false-clean shape #1124 fixed the per-finding mapping for. Never true for
+	/// a bucket that is genuinely all not-applicable (no execution failure occurred).
+	/// </summary>
+	[property: JsonPropertyName("evaluated_zero_controls")]
+	bool EvaluatedZeroControls);
 
 /// <summary>
 /// Response body for <c>GET /api/v1/runs/{id}/component-results/summary</c>.
@@ -941,6 +965,18 @@ public sealed record RunResultRollupStatusResponse(
 /// <c>sum(by_status[].component_count) vs. planned_component_count</c>; the gap
 /// (planned but no result row at all yet) is components still queued/running/legacy,
 /// never fabricated into any status bucket.
+///
+/// Issue #1125: <see cref="RequestedComponentCount"/>/<see cref="OmittedComponentCount"/>
+/// fold in the run's frozen <c>scan_plans.skips_json</c> (plan-time coverage
+/// omissions -- components that never became a plan item at all, e.g.
+/// <c>no_active_baseline</c>) alongside the already-planned coverage above, so a
+/// caller reads the FULL requested-vs-delivered picture from this one endpoint.
+/// <see cref="CoverageIncomplete"/> is true when either half of the false-clean
+/// family applies: a plan-time omission (<see cref="OmittedComponentCount"/> &gt; 0)
+/// or an execution-time one (any <see cref="RunResultRollupStatusResponse.EvaluatedZeroControls"/>
+/// bucket) -- epic #726 §3/§6 "coverage omissions still make the run incomplete".
+/// Full per-omission detail (component, reason, ADR-0022/0024 explanation) is NOT
+/// repeated here to keep this endpoint's shape stable -- see <c>GET /runs/{id}/plan</c>.
 /// </summary>
 public sealed record RunResultRollupResponse(
 	[property: JsonPropertyName("run_id")]
@@ -949,8 +985,50 @@ public sealed record RunResultRollupResponse(
 	[property: JsonPropertyName("planned_component_count")]
 	int PlannedComponentCount,
 
+	[property: JsonPropertyName("requested_component_count")]
+	int RequestedComponentCount,
+
+	[property: JsonPropertyName("omitted_component_count")]
+	int OmittedComponentCount,
+
+	[property: JsonPropertyName("coverage_incomplete")]
+	bool CoverageIncomplete,
+
 	[property: JsonPropertyName("by_status")]
 	IReadOnlyList<RunResultRollupStatusResponse> ByStatus);
+
+/// <summary>
+/// Response body for <c>GET /api/v1/runs/{id}/plan</c> (issue #1125): the frozen
+/// scan plan for an already-created run -- the same data <c>POST /runs/plan-preview</c>
+/// shows before creation (<see cref="RunPlanPreviewResponse"/>), now readable
+/// afterwards. <see cref="Skips"/> carries the per-omission detail already frozen at
+/// plan-compile time (component, reason, ADR-0022/0024 explanation) verbatim from
+/// <c>scan_plans.skips_json</c> -- not just a count.
+/// </summary>
+public sealed record RunPlanResponse(
+	[property: JsonPropertyName("run_id")]
+	string RunId,
+
+	[property: JsonPropertyName("plan_schema_version")]
+	int PlanSchemaVersion,
+
+	[property: JsonPropertyName("plan_digest")]
+	string PlanDigest,
+
+	[property: JsonPropertyName("explanation")]
+	string Explanation,
+
+	[property: JsonPropertyName("accepted_component_count")]
+	int AcceptedComponentCount,
+
+	[property: JsonPropertyName("omitted_component_count")]
+	int OmittedComponentCount,
+
+	[property: JsonPropertyName("coverage_incomplete")]
+	bool CoverageIncomplete,
+
+	[property: JsonPropertyName("skips")]
+	IReadOnlyList<Waypoint.Core.Scans.ScanPlanSkip> Skips);
 
 /// <summary>
 /// One <c>component_result_findings</c> row for <c>GET /api/v1/jobs/{id}/component-results/findings</c>

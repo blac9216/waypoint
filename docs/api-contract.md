@@ -403,8 +403,10 @@ remains accurate for every other job family, which keeps the shipped single-atte
 shape). A component job may retry only when it has no currently active attempt — one
 active attempt per component job is the execution invariant (ADR-0024); this does not
 decide whether a separate run may overlap the same target, which remains #649.
-| `/runs/{id}/artifacts` · `/jobs/{id}/artifacts/{kind}` | GET | Per-target rows + CKL/HDF download; `?bundle=zip` for the export button. Row CAT counts are **nullable** and gated by `counts_available` — see below. |
+| `/runs/{id}/artifacts` · `/jobs/{id}/artifacts/{kind}` | GET | Per-target rows + CKL/HDF download; `?bundle=zip` for the export button. Row CAT counts are **nullable** and gated by `counts_available`, and (issue #1132) carry an evaluated-control denominator — see below. |
 | `/runs/{id}/attestations-applied` | GET | Waivers that fired: control, scope, justification, author/version, expired-skips. **Persisted at-scan-time ledger, immutable per run** — see below. |
+| `/runs/{id}/plan` | GET | Issue #1125: the frozen scan plan for an already-created run — `plan_schema_version`, `plan_digest`, `explanation`, `accepted_component_count`, and `skips` (one row per plan-time coverage omission: `component_id`, `reason`, `detail`, verbatim from `scan_plans.skips_json`). 404 for a run with no recorded plan (predates issue #734, or a legacy request shape with no `target_scope`) — never a zeroed/empty plan. Same data `POST /runs/plan-preview` shows before creation, now readable afterwards. |
+| `/runs/{id}/component-results/summary` | GET | Issue #745's per-status rollup, extended (issue #1125/#1132): `requested_component_count`/`omitted_component_count` fold in the plan's frozen skips alongside the already-planned `planned_component_count`, and `coverage_incomplete` (bool) is true when either the plan omitted a requested component OR any `by_status` bucket's `evaluated_zero_controls` is true (a bucket with zero passed/open findings but at least one `not_reviewed` one — "ran, evaluated nothing"). See below. |
 | `/runs/{id}/events/history` | GET | Issue #581 (ADR-0019): bounded, cursor-paged historical read over the run's persisted `job_events` — the complement to `/runs/{id}/events` SSE (below): SSE is the live/replay transport for an open connection, this is a single bounded page for a client that wants completed-run (or completed-so-far) history without holding a stream open. Viewer+, same floor as every other run read — visibility of operational history is not a domain action (ADR-0019 decision 6), so there is no ownership scoping. Query params: `job_id` (narrow to one job), `kind` (comma-separated allow-list of `job_events.event_type`, 400 on an unrecognized value), `level` (comma-separated allow-list of `job.log` payload `severity` — `information`/`warning`/`error`/`verbose`/`debug`; meaningless but harmless on event types with no `severity` field), `cursor` (opaque, from a previous response's `next_cursor`), `limit` (1–500, default 100). 404 for a run that does not exist; an existing run with no matching events (including none yet) is 200 with `items: []` and no `next_cursor` — distinct from 404, so empty history is never confused with "no such run". A garbage `cursor` or an unrecognized `kind`/`level` value or malformed `job_id` is 400 `validation_error`, never a 500. Response body: `items` (array of the same per-event envelope shape SSE sends — `seq`, `ts`, `type`, `run_id`, `job_id`, `data`; `data` is the same already-redacted `payload` column SSE streams, embedded as-is — this endpoint performs no additional transform and introduces no new leak surface) and `next_cursor` (opaque string, present only when the page was truncated by `limit` with more matching rows remaining — a page never silently truncates a large history without saying so; absent, never a bare `null`, once history is exhausted, matching every other nullable field in this API). Ordering is the same commit-order `seq` SSE uses (migration 0001/0104's `trg_job_events_assign_seq`), so a client can page history and then attach to `/runs/{id}/events` with `Last-Event-ID` set to the last `seq` it saw with no gap or duplicate at the seam. |
 
 #### `/runs/{id}/artifacts` — countability is explicit (issue #299)
@@ -414,7 +416,18 @@ Each row carries `counts_available` (bool). The CAT counts (`cat_i_open`, `cat_i
 omits null properties) whenever the HDF report is absent OR present-but-unparseable — in that
 case `counts_available` is `false`. A consumer MUST gate on `counts_available` before trusting
 the counts: a corrupt HDF is reported as *uncountable* (counts absent), never as a
-compliant-looking `0/0/0`. `artifact_kinds` reflects file *presence* on disk (so a
+compliant-looking `0/0/0`.
+
+**Issue #1132**: when `counts_available` is `true`, the row also carries
+`controls_total` and `controls_evaluated` (both nullable integers, null exactly when
+`counts_available` is `false`). `controls_evaluated` counts only controls that
+produced a real pass/fail outcome — a component whose scan ran but every control
+came back skipped (an execution failure, not a genuine "not applicable") reports
+`cat_i_open`/`cat_ii_open`/`cat_iii_open` all `0`, identically to a fully passing
+component. A consumer MUST compare `controls_evaluated` against `controls_total`
+before reading an all-zero CAT row as "clean" — `controls_total > 0` with
+`controls_evaluated == 0` means nothing was evaluated, not that nothing failed.
+`artifact_kinds` reflects file *presence* on disk (so a
 present-but-corrupt HDF still lists `hdf`), which is independent of *countability*.
 
 🚧 **Superseded/extended result semantics (planned, ADRs 0024–0025).** Once component

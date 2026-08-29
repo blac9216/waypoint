@@ -61,6 +61,7 @@ public sealed class RunsController : ControllerBase
 	private readonly IJobEventHistoryReader _eventHistory;
 	private readonly IComponentJobRepository _componentJobs;
 	private readonly IComponentResultRepository _componentResults;
+	private readonly IScanPlanRepository _scanPlans;
 
 	public RunsController(
 		IJobControlRepository repository,
@@ -76,7 +77,8 @@ public sealed class RunsController : ControllerBase
 		RunRetentionHoldService retentionHold,
 		IJobEventHistoryReader eventHistory,
 		IComponentJobRepository componentJobs,
-		IComponentResultRepository componentResults)
+		IComponentResultRepository componentResults,
+		IScanPlanRepository scanPlans)
 	{
 		ArgumentNullException.ThrowIfNull(repository);
 		ArgumentNullException.ThrowIfNull(configDocs);
@@ -92,6 +94,7 @@ public sealed class RunsController : ControllerBase
 		ArgumentNullException.ThrowIfNull(eventHistory);
 		ArgumentNullException.ThrowIfNull(componentJobs);
 		ArgumentNullException.ThrowIfNull(componentResults);
+		ArgumentNullException.ThrowIfNull(scanPlans);
 		_repository = repository;
 		_configDocs = configDocs;
 		_attestationSnapshots = attestationSnapshots;
@@ -106,6 +109,7 @@ public sealed class RunsController : ControllerBase
 		_eventHistory = eventHistory;
 		_componentJobs = componentJobs;
 		_componentResults = componentResults;
+		_scanPlans = scanPlans;
 	}
 
 	/// <summary>
@@ -576,6 +580,46 @@ public sealed class RunsController : ControllerBase
 	}
 
 	/// <summary>
+	/// Issue #1125: the frozen scan plan for an already-created run -- the same data
+	/// <c>POST /runs/plan-preview</c> shows before creation, now readable afterwards
+	/// (<see cref="IScanPlanRepository.GetForRunAsync"/> reads <c>scan_plans</c>/
+	/// <c>scan_plan_items</c>, which have had a writer since #737 but no post-creation
+	/// reader until this endpoint). Viewer+, matching every other run read. A run
+	/// created before plan recording existed, or from a legacy request shape with no
+	/// <c>target_scope</c>, has no persisted plan at all -- 404, never a
+	/// zeroed/empty plan (there genuinely is nothing frozen for it).
+	/// </summary>
+	[HttpGet("{id:guid}/plan")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(RunPlanResponse), StatusCodes.Status200OK)]
+	public async Task<ActionResult<RunPlanResponse>> GetPlan(Guid id, CancellationToken cancellationToken)
+	{
+		RunSummary? run = await _repository.GetRunAsync(id, cancellationToken).ConfigureAwait(false);
+		if (run is null)
+		{
+			throw ApiException.NotFound("Run not found.", $"Run '{id}' does not exist.");
+		}
+
+		ScanPlan? plan = await _scanPlans.GetForRunAsync(id, cancellationToken).ConfigureAwait(false);
+		if (plan is null)
+		{
+			throw ApiException.NotFound(
+				"This run has no recorded plan.",
+				$"Run '{id}' predates plan recording (issue #734) or was created from a legacy request shape with no target_scope.");
+		}
+
+		return Ok(new RunPlanResponse(
+			RunId: id.ToString(),
+			PlanSchemaVersion: plan.PlanSchemaVersion,
+			PlanDigest: plan.PlanDigest,
+			Explanation: plan.Explanation,
+			AcceptedComponentCount: plan.Items.Count,
+			OmittedComponentCount: plan.Skips.Count,
+			CoverageIncomplete: plan.Skips.Count > 0,
+			Skips: plan.Skips));
+	}
+
+	/// <summary>
 	/// List all jobs belonging to a run. Viewer+.
 	/// </summary>
 	[HttpGet("{id:guid}/jobs")]
@@ -991,9 +1035,23 @@ public sealed class RunsController : ControllerBase
 		}
 
 		RunResultRollup rollup = await _componentResults.GetRunRollupAsync(id, cancellationToken).ConfigureAwait(false);
+
+		// Issue #1125: fold the run's frozen plan-time omissions (scan_plans.skips_json)
+		// into this endpoint's coverage picture -- a run whose plan skipped requested
+		// components must not read as fully covered just because every ACCEPTED
+		// component completed. GetForRunAsync returns null for a run with no recorded
+		// plan (predates #734, or a legacy request shape); treated as zero omissions,
+		// same as a run whose plan genuinely accepted everything requested.
+		ScanPlan? plan = await _scanPlans.GetForRunAsync(id, cancellationToken).ConfigureAwait(false);
+		int omittedComponentCount = plan?.Skips.Count ?? 0;
+		bool coverageIncomplete = omittedComponentCount > 0 || rollup.ByStatus.Any(row => row.EvaluatedZeroControls);
+
 		return Ok(new RunResultRollupResponse(
 			RunId: rollup.RunId.ToString(),
 			PlannedComponentCount: rollup.PlannedComponentCount,
+			RequestedComponentCount: rollup.PlannedComponentCount + omittedComponentCount,
+			OmittedComponentCount: omittedComponentCount,
+			CoverageIncomplete: coverageIncomplete,
 			ByStatus: [.. rollup.ByStatus.Select(row => new RunResultRollupStatusResponse(
 				Status: row.Status,
 				ComponentCount: row.ComponentCount,
@@ -1003,7 +1061,8 @@ public sealed class RunsController : ControllerBase
 				PassedCount: row.PassedCount,
 				NotApplicableCount: row.NotApplicableCount,
 				NotReviewedCount: row.NotReviewedCount,
-				SkippedCount: row.SkippedCount))]));
+				SkippedCount: row.SkippedCount,
+				EvaluatedZeroControls: row.EvaluatedZeroControls))]));
 	}
 
 	/// <summary>
@@ -1641,6 +1700,8 @@ public sealed class RunsController : ControllerBase
 			CatIOpen: row.CatIOpen,
 			CatIIOpen: row.CatIIOpen,
 			CatIIIOpen: row.CatIIIOpen,
+			ControlsTotal: row.ControlsTotal,
+			ControlsEvaluated: row.ControlsEvaluated,
 			ArtifactKinds: row.ArtifactKinds,
 			UploadStatus: row.UploadStatus,
 			UploadDetail: row.UploadDetail);

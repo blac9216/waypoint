@@ -126,7 +126,20 @@ public sealed record RunResultRollupRow(
 	int PassedCount,
 	int NotApplicableCount,
 	int NotReviewedCount,
-	int SkippedCount);
+	int SkippedCount)
+{
+	/// <summary>
+	/// Issue #1132: true when every component in this status bucket produced NO
+	/// passed and NO open (failed/error) outcome, yet DOES carry at least one
+	/// <c>Not_Reviewed</c> finding -- the aggregate signature of "ran, but evaluated
+	/// nothing" (round-12's all-<c>Not_Reviewed</c> scan). Deliberately requires
+	/// <see cref="NotReviewedCount"/> &gt; 0 rather than firing on PassedCount/open
+	/// alone, so a bucket whose components are genuinely, entirely
+	/// <see cref="ComponentFindingStatuses.NotApplicable"/> (a legitimate "nothing here
+	/// applies" outcome, not an execution failure) is never misreported as incomplete.
+	/// </summary>
+	public bool EvaluatedZeroControls => NotReviewedCount > 0 && PassedCount + CatIOpen + CatIIOpen + CatIIIOpen == 0;
+}
 
 /// <summary>
 /// The full run-level rollup -- <c>GET /runs/{id}/component-results/summary</c>.

@@ -540,6 +540,168 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		Assert.Equal(0, doc.RootElement.GetProperty("by_status").GetArrayLength());
 	}
 
+	// -- issue #1125/#1132: plan-time and execution-time coverage omissions ---------
+
+	[Fact]
+	public async Task GetComponentResultsSummary_PlanHasOmissions_ReportsCoverageIncomplete()
+	{
+		// Round-12 shape: 1 of 3 requested components accepted; 2 skipped no_active_baseline.
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.ComponentResults.NextRollup = new Waypoint.Core.Scans.RunResultRollup(
+			runId,
+			PlannedComponentCount: 1,
+			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 10, NotApplicableCount: 0, NotReviewedCount: 0, SkippedCount: 0)]);
+		_factory.ScanPlans.NextPlan = new Waypoint.Core.Scans.ScanPlan(
+			runId, Waypoint.Core.Scans.ScanPlanSchema.CurrentVersion, Items: [],
+			Skips:
+			[
+				new Waypoint.Core.Scans.ScanPlanSkip(Guid.NewGuid(), Waypoint.Core.Scans.ScanPlanSkipReasons.NoActiveBaseline, "invented: no active baseline; an Admin must activate one (ADR-0022)."),
+				new Waypoint.Core.Scans.ScanPlanSkip(Guid.NewGuid(), Waypoint.Core.Scans.ScanPlanSkipReasons.NoActiveBaseline, "invented: no active baseline; an Admin must activate one (ADR-0022)."),
+			],
+			PlanDigest: "invented-digest", Explanation: "1 of 3 requested component(s) accepted into the plan; 2 skipped (2 no_active_baseline).");
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/component-results/summary");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = doc.RootElement;
+		Assert.Equal(1, root.GetProperty("planned_component_count").GetInt32());
+		Assert.Equal(3, root.GetProperty("requested_component_count").GetInt32());
+		Assert.Equal(2, root.GetProperty("omitted_component_count").GetInt32());
+		Assert.True(root.GetProperty("coverage_incomplete").GetBoolean());
+	}
+
+	[Fact]
+	public async Task GetComponentResultsSummary_ComponentEvaluatedZeroControls_ReportsCoverageIncomplete()
+	{
+		// Round-12 shape: the scanned component ran but every control came back
+		// Not_Reviewed -- zero passed, zero open, all not_reviewed. No plan omissions.
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.ComponentResults.NextRollup = new Waypoint.Core.Scans.RunResultRollup(
+			runId,
+			PlannedComponentCount: 1,
+			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 0, NotApplicableCount: 0, NotReviewedCount: 138, SkippedCount: 0)]);
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/component-results/summary");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = doc.RootElement;
+		Assert.Equal(0, root.GetProperty("omitted_component_count").GetInt32());
+		Assert.True(root.GetProperty("coverage_incomplete").GetBoolean());
+		JsonElement completedRow = root.GetProperty("by_status").EnumerateArray().Single();
+		Assert.True(completedRow.GetProperty("evaluated_zero_controls").GetBoolean());
+	}
+
+	[Fact]
+	public async Task GetComponentResultsSummary_GenuinelyComplete_ReportsCoverageComplete()
+	{
+		// Regression guard: a fully covered, fully evaluated run must NOT be flagged
+		// incomplete -- the fix must not make every run look incomplete.
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.ComponentResults.NextRollup = new Waypoint.Core.Scans.RunResultRollup(
+			runId,
+			PlannedComponentCount: 1,
+			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 10, NotApplicableCount: 2, NotReviewedCount: 0, SkippedCount: 0)]);
+		_factory.ScanPlans.NextPlan = new Waypoint.Core.Scans.ScanPlan(
+			runId, Waypoint.Core.Scans.ScanPlanSchema.CurrentVersion, Items: [], Skips: [],
+			PlanDigest: "invented-digest", Explanation: "1 of 1 requested component(s) accepted into the plan.");
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/component-results/summary");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = doc.RootElement;
+		Assert.Equal(0, root.GetProperty("omitted_component_count").GetInt32());
+		Assert.False(root.GetProperty("coverage_incomplete").GetBoolean());
+		Assert.False(root.GetProperty("by_status").EnumerateArray().Single().GetProperty("evaluated_zero_controls").GetBoolean());
+	}
+
+	[Fact]
+	public async Task GetPlan_UnknownRun_Returns404()
+	{
+		Guid runId = Guid.NewGuid();
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/plan");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetPlan_NoAuthHeader_Returns401()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage response = await client.GetAsync($"/api/v1/runs/{runId}/plan");
+
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetPlan_RunExistsButHasNoRecordedPlan_Returns404()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.ScanPlans.NextPlan = null;
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/plan");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetPlan_ViewerRole_ReturnsFrozenSkipsWithDetail()
+	{
+		Guid runId = Guid.NewGuid();
+		Guid skippedComponentId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.ScanPlans.NextPlan = new Waypoint.Core.Scans.ScanPlan(
+			runId, Waypoint.Core.Scans.ScanPlanSchema.CurrentVersion, Items: [],
+			Skips: [new Waypoint.Core.Scans.ScanPlanSkip(skippedComponentId, Waypoint.Core.Scans.ScanPlanSkipReasons.NoActiveBaseline, "invented: no active baseline; an Admin must activate one (ADR-0022).")],
+			PlanDigest: "invented-digest", Explanation: "1 of 2 requested component(s) accepted into the plan; 1 skipped (1 no_active_baseline).");
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/plan");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = doc.RootElement;
+		Assert.Equal(runId.ToString(), root.GetProperty("run_id").GetString());
+		Assert.Equal("invented-digest", root.GetProperty("plan_digest").GetString());
+		Assert.Equal(0, root.GetProperty("accepted_component_count").GetInt32());
+		Assert.Equal(1, root.GetProperty("omitted_component_count").GetInt32());
+		Assert.True(root.GetProperty("coverage_incomplete").GetBoolean());
+
+		JsonElement skip = root.GetProperty("skips").EnumerateArray().Single();
+		Assert.Equal(skippedComponentId.ToString(), skip.GetProperty("component_id").GetString());
+		Assert.Equal(Waypoint.Core.Scans.ScanPlanSkipReasons.NoActiveBaseline, skip.GetProperty("reason").GetString());
+		Assert.Contains("ADR-0022", skip.GetProperty("detail").GetString(), StringComparison.Ordinal);
+
+		Assert.Equal(runId, _factory.ScanPlans.LastGetForRunId);
+	}
+
 	// -- issue #592 (epic #588, last child): generic operational-history deletion ---
 
 	[Theory]
@@ -1872,6 +2034,17 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 				services.Remove(componentResultsDescriptor);
 			}
 			services.AddSingleton<Waypoint.Core.Scans.IComponentResultRepository>(ComponentResults);
+
+			// Issue #1125: GetPlan and the coverage fields on GetComponentResultsSummary
+			// resolve IScanPlanRepository through RunsController -- same fake-swap
+			// pattern as every other dependency above, so role-guard/happy-path tests
+			// never touch Postgres.
+			var scanPlansDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(Waypoint.Core.Scans.IScanPlanRepository));
+			if (scanPlansDescriptor != null)
+			{
+				services.Remove(scanPlansDescriptor);
+			}
+			services.AddSingleton<Waypoint.Core.Scans.IScanPlanRepository>(ScanPlans);
 		});
 	}
 
@@ -1886,6 +2059,8 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 	public FakeComponentJobRepository ComponentJobs { get; } = new();
 
 	public FakeComponentResultRepository ComponentResults { get; } = new();
+
+	public FakeScanPlanRepository ScanPlans { get; } = new();
 }
 
 /// <summary>
@@ -1979,6 +2154,31 @@ public sealed class FakeComponentResultRepository : Waypoint.Core.Scans.ICompone
 	{
 		LastArtifactsJobId = jobId;
 		return Task.FromResult(NextArtifactsList);
+	}
+}
+
+/// <summary>
+/// Minimal fake <see cref="Waypoint.Core.Scans.IScanPlanRepository"/> for
+/// controller-level tests (issue #1125): <see cref="RecordAsync"/> is never called
+/// through <c>RunsController</c> (only <c>RunCreationService</c> writes plans), so it
+/// is a no-op; <see cref="GetForRunAsync"/> returns a settable canned plan (null by
+/// default -- "no recorded plan") so <c>GetPlan</c>/<c>GetComponentResultsSummary</c>
+/// tests can pin the 200/404/coverage mapping without Postgres. SQL correctness lives
+/// in <c>Waypoint.Tests.Infrastructure.Postgres.ScanPlanRepositoryTests</c>.
+/// </summary>
+public sealed class FakeScanPlanRepository : Waypoint.Core.Scans.IScanPlanRepository
+{
+	public Waypoint.Core.Scans.ScanPlan? NextPlan { get; set; }
+
+	public Guid? LastGetForRunId { get; private set; }
+
+	public Task<IReadOnlyDictionary<Guid, Guid>> RecordAsync(Guid runId, Guid? runScopeSnapshotId, Waypoint.Core.Scans.ScanPlan plan, CancellationToken cancellationToken) =>
+		Task.FromResult<IReadOnlyDictionary<Guid, Guid>>(new Dictionary<Guid, Guid>());
+
+	public Task<Waypoint.Core.Scans.ScanPlan?> GetForRunAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		LastGetForRunId = runId;
+		return Task.FromResult(NextPlan);
 	}
 }
 

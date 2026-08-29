@@ -16,10 +16,25 @@ using System.Text.Json;
 
 namespace Waypoint.Core.Scans;
 
-/// <summary>CAT I/II/III open (failed) finding counts for one HDF report -- <c>GET /runs/{id}/artifacts</c> (issue #299).</summary>
-public sealed record HdfSeverityCounts(int CatIOpen, int CatIIOpen, int CatIIIOpen)
+/// <summary>
+/// CAT I/II/III open (failed) finding counts for one HDF report -- <c>GET /runs/{id}/artifacts</c>
+/// (issue #299), plus (issue #1132) the evaluated-control denominator: <see cref="ControlsTotal"/>
+/// is every control this report describes, <see cref="ControlsEvaluated"/> is the subset that
+/// actually produced a real outcome (open, i.e. failed/error, or genuinely passed) rather than
+/// being skipped/not-applicable/absent. <see cref="NoControlsEvaluated"/> is the "this looks
+/// clean because nothing ran" signal a Results-table reader must not miss: a report with
+/// controls present but zero of them evaluated renders identically to a fully-passing one on
+/// the CAT counts alone (all zero either way), so a caller MUST check this denominator before
+/// reading <c>0/0/0</c> as "clean" rather than "not evaluated". <see cref="Zero"/> is a
+/// genuinely empty report (no controls at all, e.g. the scan stub's own fixture shape) --
+/// <see cref="NoControlsEvaluated"/> is false for it, since there is nothing to have evaluated.
+/// </summary>
+public sealed record HdfSeverityCounts(int CatIOpen, int CatIIOpen, int CatIIIOpen, int ControlsTotal, int ControlsEvaluated)
 {
-	public static readonly HdfSeverityCounts Zero = new(0, 0, 0);
+	public static readonly HdfSeverityCounts Zero = new(0, 0, 0, 0, 0);
+
+	/// <summary>True when this report describes at least one control but none of them produced a real pass/fail outcome (issue #1132) -- distinct from a genuinely empty report.</summary>
+	public bool NoControlsEvaluated => ControlsTotal > 0 && ControlsEvaluated == 0;
 }
 
 /// <summary>
@@ -89,7 +104,7 @@ public static class HdfSeverityCounter
 
 	private static HdfSeverityCounts? CountOpenFindings(JsonElement root)
 	{
-		int catI = 0, catII = 0, catIII = 0;
+		int catI = 0, catII = 0, catIII = 0, total = 0, evaluated = 0;
 
 		if (!root.TryGetProperty("profiles", out JsonElement profiles) || profiles.ValueKind != JsonValueKind.Array)
 		{
@@ -106,28 +121,34 @@ public static class HdfSeverityCounter
 
 			foreach (JsonElement control in controls.EnumerateArray())
 			{
-				if (!IsOpen(control))
-				{
-					continue;
-				}
+				total++;
 
-				switch (Severity(control))
+				bool open = IsOpen(control);
+				if (open)
 				{
-					case CriticalSeverity:
-					case HighSeverity:
-						catI++;
-						break;
-					case MediumSeverity:
-						catII++;
-						break;
-					default:
-						catIII++;
-						break;
+					evaluated++;
+					switch (Severity(control))
+					{
+						case CriticalSeverity:
+						case HighSeverity:
+							catI++;
+							break;
+						case MediumSeverity:
+							catII++;
+							break;
+						default:
+							catIII++;
+							break;
+					}
+				}
+				else if (HasPassedResult(control))
+				{
+					evaluated++;
 				}
 			}
 		}
 
-		return new HdfSeverityCounts(catI, catII, catIII);
+		return new HdfSeverityCounts(catI, catII, catIII, total, evaluated);
 	}
 
 	private static bool IsOpen(JsonElement control)
@@ -143,6 +164,34 @@ public static class HdfSeverityCounter
 				? statusElement.GetString()
 				: null;
 			if (status is not (PassedStatus or SkippedStatus or NotApplicableStatus) && status is not null)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/// <summary>
+	/// Issue #1132: true when at least one result on this control genuinely
+	/// <c>passed</c> -- the other half of "evaluated" alongside <see cref="IsOpen"/>
+	/// (failed/error). A control whose only results are <c>skipped</c>/
+	/// <c>not_applicable</c>, or with no results at all, contributes to neither and is
+	/// therefore counted in <see cref="HdfSeverityCounts.ControlsTotal"/> but not
+	/// <see cref="HdfSeverityCounts.ControlsEvaluated"/>.
+	/// </summary>
+	private static bool HasPassedResult(JsonElement control)
+	{
+		if (!control.TryGetProperty("results", out JsonElement results) || results.ValueKind != JsonValueKind.Array)
+		{
+			return false;
+		}
+
+		foreach (JsonElement result in results.EnumerateArray())
+		{
+			if (result.TryGetProperty("status", out JsonElement statusElement)
+				&& statusElement.ValueKind == JsonValueKind.String
+				&& string.Equals(statusElement.GetString(), PassedStatus, StringComparison.Ordinal))
 			{
 				return true;
 			}
