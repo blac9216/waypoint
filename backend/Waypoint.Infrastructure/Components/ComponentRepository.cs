@@ -567,20 +567,25 @@ public sealed class ComponentRepository : IComponentRepository
 				parentTargetId = existing.GetGuid(2);
 
 				// Issue #741: a target's ROOT connection component (no parent) is the
-				// anchor for catalog-declared service expansion below.
+				// anchor for catalog-declared service expansion below. A null vendor
+				// identity still identifies most roots -- issue #743's Admin-declared
+				// ssh/target roots (Photon, Aria, ...) never carry one, same as a
+				// catalog-declared CHILD (also null, but excluded by the
+				// parent_component_id check above).
 				//
-				// Issue #1081: this used to also require a null vendor_identity (the
-				// vcenter root's identity was always absent). It no longer can -- the
-				// root now carries the appliance's own authoritative vendor identity
-				// once discovery observes it, and a null-vendor-identity test alone
-				// could never distinguish it from a catalog-declared CHILD anyway
-				// (also null, but excluded here by the parent_component_id check).
-				// CatalogComponentKey is the field that is always exactly `vcenter` for
-				// the root and never for a discovered esxi/vm sibling (which also has
-				// parent_component_id null under this flattened-parentage model -- see
-				// DiscoverJobHandler.MapToComponents), so it is the correct discriminator.
+				// Issue #1081: that null-vendor-identity test alone is no longer
+				// SUFFICIENT for the vcenter root specifically -- it now carries the
+				// appliance's own authoritative vendor identity once discovery observes
+				// it, which would otherwise make this false exactly when a
+				// discovery-linked vCenter's Admin PUT should still sync its declared
+				// VCSA children. CatalogComponentKey == `vcenter` is always true for
+				// that root and never for a discovered esxi/vm sibling (which also has
+				// parent_component_id null under the flattened-parentage model -- see
+				// DiscoverJobHandler.MapToComponents), so it is added as an explicit
+				// OR rather than replacing the null-vendor-identity test outright.
 				isRootConnectionComponent = existing.IsDBNull(3) &&
-					string.Equals(catalogComponentKey, Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter, StringComparison.Ordinal);
+					(existing.IsDBNull(4) ||
+						string.Equals(catalogComponentKey, Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter, StringComparison.Ordinal));
 			}
 		}
 
