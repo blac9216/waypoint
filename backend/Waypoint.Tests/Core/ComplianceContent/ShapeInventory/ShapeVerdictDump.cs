@@ -85,6 +85,19 @@ public sealed class ShapeVerdictDump
 			expected[$"StigZipReader/{shapeId}"] = verdict;
 		}
 
+		// Issue #1099: Get-WaypointProfileDeclaredInputNameSet (WaypointScan.psm1) is
+		// PowerShell, not C#, so this dump does not run its parser -- only the doc's
+		// classification of each row's Expected cell. The RESOLVED half of that
+		// parser's verdicts comes from scripts/dump-waypoint-scan-shape-verdicts.ps1
+		// instead, and scripts/parser-shape-diff.sh merges the two before diffing, so
+		// this parser's classification still comes from the SAME ShapeInventoryDoc
+		// code every other parser's does (issue #1120's "one classification, read by
+		// both checks" property), even though nothing here executes it.
+		foreach ((string shapeId, string? verdict) in ShapeInventoryDoc.ClassifyShapes("`Get-WaypointProfileDeclaredInputNameSet` (`WaypointScan.psm1`)"))
+		{
+			expected[$"Get-WaypointProfileDeclaredInputNameSet/{shapeId}"] = verdict;
+		}
+
 		WriteJson(expectedPath, expected);
 	}
 
