@@ -84,6 +84,76 @@ public sealed class RealContentConformanceTests
 	}
 
 	/// <summary>
+	/// Issue #1099's third acceptance criterion ("the real-content conformance check
+	/// reports per-parser counts for all three [remaining parsers]"), extended to
+	/// <see cref="XccdfParser"/>: every real XCCDF XML entry <see cref="StigZipReader"/>
+	/// already resolves out of a real vendor package should also parse cleanly through
+	/// <see cref="XccdfParser"/> into at least one rule -- exercising the real-content
+	/// side of the namespace/prefix/encoding shapes this PR's new inventory section
+	/// documents, at effectively no extra traversal cost by reusing the entries
+	/// <see cref="StigZipReader_RealVendorPackages_AcceptRejectCounts"/> above already reads.
+	/// </summary>
+	[Fact]
+	public void XccdfParser_RealVendorBenchmarks_AcceptRejectCounts()
+	{
+		if (!Directory.Exists(VendorContentRepoRoot))
+		{
+			_output.WriteLine($"Skipping: vendor content clone not present at {VendorContentRepoRoot}.");
+			return;
+		}
+
+		string[] packages = Directory.GetFiles(VendorContentRepoRoot, "*.zip", SearchOption.AllDirectories)
+			.Where(path => path.Contains($"{Path.DirectorySeparatorChar}docs{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+			.ToArray();
+		Assert.NotEmpty(packages);
+
+		int accepted = 0;
+		int totalEntries = 0;
+		int skippedMacResourceForkEntries = 0;
+		List<string> rejected = [];
+		foreach (string packagePath in packages)
+		{
+			byte[] zipBytes = File.ReadAllBytes(packagePath);
+			if (!StigZipReader.TryReadXccdfEntries(zipBytes, out IReadOnlyList<XccdfZipEntry> entries, out _))
+			{
+				continue;
+			}
+
+			foreach (XccdfZipEntry entry in entries)
+			{
+				// A handful of real vendor zips carry macOS "AppleDouble" resource-fork
+				// junk entries (`__MACOSX/.../._Some-xccdf.xml`) that happen to satisfy
+				// StigZipReader's name-suffix match but contain binary metadata, not XML
+				// -- StigZipReader itself does not validate entry CONTENT (only the
+				// entry NAME), so these are a pre-existing StigZipReader gap, not an
+				// XccdfParser shape this PR is scoped to fix (filed as issue #1207).
+				// Excluded here so this floor check measures genuine benchmark entries.
+				if (entry.EntryPath.Contains("__MACOSX/", StringComparison.Ordinal) ||
+					Path.GetFileName(entry.EntryPath).StartsWith('.'))
+				{
+					skippedMacResourceForkEntries++;
+					continue;
+				}
+
+				totalEntries++;
+				XccdfDocument? document = XccdfParser.TryParse(entry.XmlText, out string? error);
+				if (document is not null && document.Rules.Count > 0)
+				{
+					accepted++;
+				}
+				else
+				{
+					rejected.Add($"{packagePath}!{entry.EntryPath}: error={error} ruleCount={document?.Rules.Count ?? -1}");
+				}
+			}
+		}
+
+		_output.WriteLine($"XccdfParser: {accepted}/{totalEntries} real benchmark entries accepted, {rejected.Count} rejected " +
+			$"({skippedMacResourceForkEntries} macOS resource-fork junk entries excluded).");
+		Assert.True(rejected.Count == 0, "XccdfParser rejected real vendor benchmark entries:\n" + string.Join("\n", rejected));
+	}
+
+	/// <summary>
 	/// Issue #1071's evidence, reproduced live: every real <c>inspec.yml</c> under the
 	/// vendor clone should resolve at least as many declared inputs as it has
 	/// <c>inputs:</c>/<c>attributes:</c> entries in the manifest text (a rough but
