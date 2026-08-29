@@ -55,6 +55,6 @@ jq -r '.views.nodes[].name' <<<"$live" | while IFS= read -r n; do jq -e --arg n 
 wf=$(gh api graphql -F id="$PID" -f query='query($id:ID!){node(id:$id){... on ProjectV2{workflows(first:30){nodes{name enabled}}}}}' --jq .data.node)
 jq -r '.workflows[]' "$M" | while IFS= read -r n; do en=$(jq -r --arg n "$n" '.workflows.nodes[]|select(.name==$n)|.enabled' <<<"$wf"); [ "$en" = true ] || { drift; say "workflow NOT enabled: $n"; }; done
 say ""; say "UI checklist (cannot be set via API) — Project ▸ … ▸ Workflows / each view's ▾ menu:"
-say "  workflows: $(jq -r '.workflows|join(" · ")' "$M"); 'Item added' → Triage; 'Item closed' → Done; 'Item reopened' → Triage"
+say "  workflows: $(jq -r '.workflows|join(" · ")' "$M"); 'Item added' → Triage; 'Item closed' → Done (reopened issues are re-triaged by maintenance)"
 jq -r '.views[]|select((.group_by|length)>0 or (.board_columns|length)>0 or (.sort|length)>0)|"  view \(.name): group-by=\(.group_by|join(","))\(if (.board_columns|length)>0 then " board-columns="+(.board_columns|join(",")) else "" end)\(if (.sort|length)>0 then " sort="+(.sort|join(",")) else "" end)"' "$M" >&2
 [ ! -s "$DRIFT" ] && say "project: in sync" || { [ $AUDIT = 1 ] && exit 1; say "project: applied (verify the UI checklist)"; }

@@ -12,7 +12,8 @@ default_area_color=$(jq -r '.area_prefix.default_color' "$MANIFESTS/labels.json"
 if [ -f "$AREAS" ]; then
   areas=$(grep -E '^\|\s*area:' "$AREAS" | sed -E 's/^\|//; s/\|$//' | awk -F'|' -v c="$default_area_color" '{gsub(/^ +| +$/,"",$1); gsub(/^ +| +$/,"",$2); gsub(/^ +| +$/,"",$3); if($2=="")$2=c; printf "{\"name\":\"%s\",\"color\":\"%s\",\"description\":\"%s\"}\n",$1,$2,$3}')
   want=$(printf '%s\n%s\n' "$want" "$areas")
-else say "note: $AREAS not found — no area:* labels applied (create the table first; see the skill)"; fi
+else say "note: $AREAS not found — area:* labels are neither applied nor pruned (create the table first; see the skill)"; AREAS_KNOWN=0; fi
+AREAS_KNOWN=${AREAS_KNOWN:-1}
 have=$(gh label list --repo "$REPO" --limit 300 --json name,color,description | jq -c '.[]')
 drift=0
 while IFS= read -r l; do [ -n "$l" ] || continue
@@ -26,6 +27,7 @@ if [ $PRUNE = 1 ]; then
   wanted_names=$(jq -r .name <<<"$want" | sort)
   while IFS= read -r n; do [ -n "$n" ] || continue
     if ! grep -qx "$n" <<<"$wanted_names"; then
+      case $n in area:*) [ $AREAS_KNOWN = 1 ] || { say "KEEP    $n — areas file absent, not pruning area labels"; continue; };; esac
       open=$(gh issue list --repo "$REPO" --state open --label "$n" --limit 1 --json number --jq length)
       if [ "$open" = 0 ]; then drift=1; say "prune   $n (unused)"; [ $AUDIT = 1 ] || run gh label delete "$n" --repo "$REPO" --yes
       else drift=1; say "KEEP    $n — non-canonical but on open issues; retag them first"; fi

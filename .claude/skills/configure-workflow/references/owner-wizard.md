@@ -17,8 +17,7 @@ Project **⋯** → **Workflows**:
   Shared board: one auto-add entry per repository.
 - **Item added to project** → Status = **Triage** → on.
 - **Item closed** → Status = **Done** → on.
-- **Item reopened** → Status = **Triage** → on.
-- Leave the pull-request and auto-archive workflows off.
+- Leave the pull-request and auto-archive workflows off. (There is no "Item reopened" workflow on personal-account Projects; a reopened issue sits in Done until the maintenance state audit moves it to Triage.)
 
 ## View group-by and sort (UI only) — from the checklist `project.sh` prints
 Open the view → **▾** → *Group by* / *Sort by*. Typical: Board grouped by Status (board

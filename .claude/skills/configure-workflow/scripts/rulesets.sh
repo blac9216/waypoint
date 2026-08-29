@@ -24,5 +24,12 @@ if ! list=$(gh api "repos/$REPO/rulesets" 2>&1); then
   say "$list"; exit 1; fi
 existing=$(jq -r ".[]|select(.name==\"$NAME\")|.id" <<<"$list")
 if [ -z "$existing" ]; then say "create ruleset $NAME (checks: $(jq -r 'map(.context)|join(", ")' <<<"$checks"))"; [ $AUDIT = 1 ] && exit 1; run gh api -X POST "repos/$REPO/rulesets" --input - <<<"$body" --jq '.id' >/dev/null
-else say "update ruleset $NAME ($existing)"; [ $AUDIT = 1 ] && exit 0; run gh api -X PUT "repos/$REPO/rulesets/$existing" --input - <<<"$body" --jq '.id' >/dev/null; fi
+else
+  live=$(gh api "repos/$REPO/rulesets/$existing")
+  want_sig=$(jq -S '{types:[.rules[].type]|sort, checks:([.rules[]|select(.type=="required_status_checks")|.parameters.required_status_checks[].context]|sort), approvals:([.rules[]|select(.type=="pull_request")|.parameters.required_approving_review_count][0]), enforcement}' <<<"$body")
+  live_sig=$(jq -S '{types:[.rules[].type]|sort, checks:([.rules[]|select(.type=="required_status_checks")|.parameters.required_status_checks[].context]|sort), approvals:([.rules[]|select(.type=="pull_request")|.parameters.required_approving_review_count][0]), enforcement}' <<<"$live")
+  if [ "$want_sig" = "$live_sig" ]; then say "ruleset $NAME: in sync"; exit 0; fi
+  say "ruleset $NAME drift:"; diff <(echo "$live_sig") <(echo "$want_sig") >&2 || true
+  [ $AUDIT = 1 ] && exit 1
+  run gh api -X PUT "repos/$REPO/rulesets/$existing" --input - <<<"$body" --jq '.id' >/dev/null; fi
 say "ruleset applied. Reminder: every required check must ALWAYS report on PRs (path-filtered workflows need an always-report job) or merges block forever."
