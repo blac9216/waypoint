@@ -14,7 +14,7 @@ Estimate: <size class> · <est. cycle> · <est. completion date> → Actual: sta
 +<add>/−<del> in <files> files. Deferred issues spawned: <list | none>.
 
 <!-- metrics {"issue":<N>,"pr":<P>,"estimate":{"size":"S|M|L","cycle_days":<x>,"due":"<date>"},
-"started":"<ISO>","start_source":"assigned|first-commit|pr-open","pr_opened":"<ISO>","merged":"<ISO>",
+"started":"<ISO>","start_source":"assigned|first-commit|pr-open|issue-created","pr_opened":"<ISO>","merged":"<ISO>",
 "rounds":<n>,"findings":[<per round>],"additions":<a>,"deletions":<d>,"files":<f>,"ci_seconds":<s>,
 "roles":{"implementer":{"model":"…","tokens":<t>,"seconds":<s>},"fix":{…},"reviewer":{…}},
 "dispatch_to_pr_seconds":<s>,"deferred":[<issue numbers>],"verified":"n/a|pending-live"} -->

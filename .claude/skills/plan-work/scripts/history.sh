@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # history.sh — build the estimation calibration table from repository history. READ-ONLY.
-# Usage: history.sh [--repo owner/name] [--since YYYY-MM-DD] [--out <dir>]   (uses REST only)
+# Usage: history.sh [--repo owner/name] [--since YYYY-MM-DD (default: 90 days ago; full history is ~1h and near the hourly API limit)] [--adoption-date YYYY-MM-DD] [--out <dir>]   (REST GET only)
 # Output: <out>/issues.jsonl (one record per closed issue with a merged PR), <out>/calibration.json, <out>/calibration.md
 set -euo pipefail
-REPO=""; SINCE="2000-01-01"; OUT="${TMPDIR:-/tmp}/plan-work-history"
-while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --since) SINCE=$2; shift 2;; --out) OUT=$2; shift 2;; *) echo "unknown arg $1" >&2; exit 2;; esac; done
+REPO=""; SINCE=$(date -u -d "90 days ago" +%F 2>/dev/null || date -u -v-90d +%F); ADOPT=""; OUT="${TMPDIR:-/tmp}/plan-work-history"
+while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --since) SINCE=$2; shift 2;; --adoption-date) ADOPT=$2; shift 2;; --out) OUT=$2; shift 2;; *) echo "unknown arg $1" >&2; exit 2;; esac; done
 [ -n "$REPO" ] || REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 mkdir -p "$OUT"; : > "$OUT/issues.jsonl"
 say(){ printf '%s\n' "$*" >&2; }
@@ -30,20 +30,20 @@ while IFS= read -r pr; do
     est=$(jq -r '.body|capture("## Estimate\\s*\\n(?<e>[^#]*)")|.e' <<<"$iss" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g' || true)
     size=$(grep -oE 'Size: *[SML]' <<<"$est" | head -1 | grep -oE '[SML]' || true)
     parent=$(gh api "repos/$REPO/issues/$i" --jq '.parent_issue_url//empty' 2>/dev/null | grep -oE '[0-9]+$' || true)
-    jq -nc --argjson pr "$pr" --argjson prf "$prf" --argjson iss "$iss" --arg assigned "$assigned" --argjson xref "$xref" --argjson metrics "$metrics" --arg est "$est" --arg size "$size" --arg parent "$parent" --argjson rounds "$rounds" --argjson findings "$findings" --argjson i "$i" '
+    jq -nc --argjson pr "$pr" --argjson prf "$prf" --argjson iss "$iss" --arg assigned "$assigned" --argjson xref "$xref" --argjson metrics "$metrics" --arg est "$est" --arg size "$size" --arg parent "$parent" --arg adopt "$ADOPT" --argjson rounds "$rounds" --argjson findings "$findings" --argjson i "$i" '
       ($iss.labels|map(select(startswith("area:")))) as $areas |
       ($iss.labels|map(select(.=="bug" or .=="enhancement" or .=="chore" or .=="epic"))|.[0]) as $type |
       (if $assigned!="" then $assigned elif $pr.created!=null then $pr.created else $iss.created end) as $start |
       {issue:$i, title:$iss.title, pr:$pr.pr, type:$type, areas:$areas, severity:($iss.labels|map(select(startswith("severity:")))|.[0]), priority:($iss.labels|map(select(startswith("priority:")))|.[0]),
        milestone:$iss.milestone, parent:($parent|if .=="" then null else tonumber end),
-       created:$iss.created, started:$start, start_source:(if $assigned!="" then "assigned" elif $pr.created!=null then "pr-open" else "created" end),
+       created:$iss.created, started:$start, start_source:(if $assigned!="" then "assigned" elif $pr.created!=null then "pr-open" else "issue-created" end),
        pr_opened:$pr.created, merged:$pr.merged, closed:$iss.closed,
        cycle_hours:(((($pr.merged|fromdate)-($start|fromdate))/3600*10|round)/10),
        cycle_days:(((($pr.merged|fromdate)-($start|fromdate))/86400*100|round)/100),
        rounds:$rounds, findings:$findings, additions:$prf.additions, deletions:$prf.deletions, files:$prf.changed_files,
        net_loc:($prf.additions-$prf.deletions|if .<0 then -. else . end),
        size_est:(if $size!="" then $size else null end), estimate_text:(if $est!="" then $est else null end), metrics:$metrics,
-       deferred:$xref, era:(if $iss.created>="2026-08-29" then "post-adoption" else "pre-adoption" end)}' >> "$OUT/issues.jsonl"
+       deferred:$xref, era:(if $adopt=="" then null elif $iss.created>=$adopt then "post-adoption" else "pre-adoption" end)}' >> "$OUT/issues.jsonl"
   done
 done < "$OUT/prs.jsonl"
 say "$(wc -l < "$OUT/issues.jsonl") issue records → $OUT/issues.jsonl"

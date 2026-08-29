@@ -50,8 +50,9 @@ doubt, the heavier path; complexity discovered mid-way upgrades it, never downgr
    area and size, projected dates with sample sizes) and confirms before anything is
    released.
 
-`--resequence`: skip to step 5 for the milestones the owner names — the same logic re-places
-them when priorities change or a new story slots in ahead.
+Flags: `--research` forces the research phase even for a bounded ask (the owner wants facts
+before deciding); `--resequence` skips to step 5 for the milestones the owner names — the
+same logic re-places them when priorities change or a new story slots in ahead.
 
 ## Rules
 
@@ -65,5 +66,6 @@ them when priorities change or a new story slots in ahead.
 
 Templates: [references/templates/](references/templates/) — research epic and lane,
 lane findings, composite findings, sign-off request, plan summary. Scripts:
-`scripts/history.sh` (calibration from repository history, read-only),
-`scripts/timeline.sh` (milestone placement proposal, read-only; the agent applies).
+`scripts/history.sh` (calibration from repository history; GET-only; last 90 days by default),
+`scripts/timeline.sh` (milestone placement proposal from issue estimates and dependencies;
+GET-only; writes `timeline.md` — the agent applies `due_on` after the owner confirms).

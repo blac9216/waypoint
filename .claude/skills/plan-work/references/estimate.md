@@ -5,8 +5,7 @@ per issue; everything else is derived.
 
 ## Calibration — `scripts/history.sh`
 
-Read-only. For every closed issue with a merged PR it collects: start (first `assigned`
-timeline event → first branch commit → PR opened, whichever exists first), PR opened,
+Read-only, GET-only. Defaults to the last 90 days (`--since` to widen; the full history of a busy repository takes about an hour and approaches the hourly API limit). `--adoption-date` tags records pre/post the workflow adoption so the table can be filtered once the post-adoption sample is large enough. For every closed issue with a merged PR it collects: start (`start_source` = `assigned` from the first `assigned` timeline event before the merge → `pr-open` → `issue-created`; a `first-commit` source is planned once branch data is joined), PR opened,
 merged, review rounds (count of `## PR Review — Changes Requested|Decomposition
 Requested` comments), findings per round, additions/deletions/files, labels (area, type,
 severity, priority), parent epic, milestone, the filed **Estimate** (size, cycle, due) if

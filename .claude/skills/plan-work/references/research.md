@@ -1,8 +1,7 @@
 # Research phase
 
 Research exists to replace assumptions with facts before decisions are made on them.
-It follows the pattern that worked for the download-parity research epic: findings live
-on issues, the owner signs off before anything is built on them.
+Findings live on issues; the owner signs off before anything is built on them.
 
 1. **Decide the lanes.** One lane per independent question (a vendor tool's real command
    surface; an API contract; what the predecessor system does; a security constraint).
