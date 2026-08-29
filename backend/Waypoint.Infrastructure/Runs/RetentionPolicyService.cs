@@ -25,6 +25,19 @@ namespace Waypoint.Infrastructure.Runs;
 /// </summary>
 public sealed class RetentionPolicyService
 {
+	/// <summary>
+	/// Issue #1109: the floor below which <see cref="SetRetentionAsync"/> refuses a
+	/// value with <see cref="SetRetentionPolicyOutcome.BelowMinimum"/>. 30 days --
+	/// conservative enough to catch the realistic typo class this issue targets (a
+	/// dropped trailing zero: "1", "3", "18" instead of "180"), without blocking any
+	/// plausible legitimate short-retention deployment. This PR settles the
+	/// mechanism (a hard floor, not a confirmation flag -- simpler, and a
+	/// reflexively-passed confirmation parameter would not have caught the typo this
+	/// issue exists for); the exact number is a policy call the repository owner may
+	/// want to revisit.
+	/// </summary>
+	public const int MinimumEvidenceRetentionDays = 30;
+
 	private readonly IRetentionPolicyRepository _policy;
 
 	public RetentionPolicyService(IRetentionPolicyRepository policy)
@@ -41,7 +54,12 @@ public sealed class RetentionPolicyService
 	/// </summary>
 	public Task<RetentionPolicy?> GetAsync(CancellationToken cancellationToken) => _policy.GetAsync(cancellationToken);
 
-	/// <summary>Sets the retention period. Rejects a non-positive day count before ever reaching the repository.</summary>
+	/// <summary>
+	/// Sets the retention period. Rejects a non-positive day count, then a positive
+	/// count below <see cref="MinimumEvidenceRetentionDays"/> (issue #1109), before
+	/// ever reaching the repository -- an audit_log row is written only once the
+	/// value clears both checks and the repository's own transaction runs.
+	/// </summary>
 	public async Task<SetRetentionPolicyResult> SetRetentionAsync(int evidenceRetentionDays, string actor, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(actor);
@@ -49,6 +67,11 @@ public sealed class RetentionPolicyService
 		if (evidenceRetentionDays <= 0)
 		{
 			return new SetRetentionPolicyResult(SetRetentionPolicyOutcome.InvalidRetentionDays);
+		}
+
+		if (evidenceRetentionDays < MinimumEvidenceRetentionDays)
+		{
+			return new SetRetentionPolicyResult(SetRetentionPolicyOutcome.BelowMinimum);
 		}
 
 		RetentionPolicy updated = await _policy.SetAsync(evidenceRetentionDays, actor, cancellationToken).ConfigureAwait(false);

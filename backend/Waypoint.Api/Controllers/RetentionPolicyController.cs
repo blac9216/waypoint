@@ -67,7 +67,11 @@ public sealed class RetentionPolicyController : ControllerBase
 	/// Sets the evidence retention period (AC1). <see cref="EvidenceRetentionSweepHostedService"/>
 	/// re-reads this value fresh at the start of every sweep pass, so a change here
 	/// takes effect on the sweep's next tick with no restart. Rejects a non-positive
-	/// day count with 422.
+	/// day count, and (issue #1109) a positive count below
+	/// <see cref="RetentionPolicyService.MinimumEvidenceRetentionDays"/> -- both 400
+	/// <c>validation_error</c>. Every accepted change, including a no-op that
+	/// resubmits the current value, writes one <c>audit_log</c> row (issue #1109) in
+	/// <see cref="RetentionPolicyRepository.SetAsync"/>, atomically with the update.
 	/// </summary>
 	[HttpPut]
 	[RequireAdminRole]
@@ -90,6 +94,13 @@ public sealed class RetentionPolicyController : ControllerBase
 				throw ApiException.Validation(
 					"Retention period must be a positive number of days.",
 					"Set \"evidence_retention_days\" to a positive integer in the request body.");
+			case SetRetentionPolicyOutcome.BelowMinimum:
+				// Issue #1109: below the floor, most likely a typo (a dropped digit)
+				// rather than an intentional short-retention choice -- the sweep would
+				// otherwise act on it immediately, with no confirmation step.
+				throw ApiException.Validation(
+					$"Retention period must be at least {RetentionPolicyService.MinimumEvidenceRetentionDays} days.",
+					$"Set \"evidence_retention_days\" to {RetentionPolicyService.MinimumEvidenceRetentionDays} or more. If this value is intentional, contact the appliance owner -- this floor is a deliberate guard against a mistyped, near-zero retention period.");
 			case SetRetentionPolicyOutcome.Updated:
 			default:
 				return Ok(Map(result.Policy!));

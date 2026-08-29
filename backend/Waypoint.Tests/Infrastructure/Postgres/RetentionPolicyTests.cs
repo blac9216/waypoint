@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Runs;
@@ -33,6 +34,15 @@ namespace Waypoint.Tests.Infrastructure.Postgres;
 public sealed class RetentionPolicyTests : IAsyncLifetime
 {
 	private readonly PostgresFixture _fixture;
+
+	// Issue #1109: audit_log is append-only (a DB trigger rejects DELETE), and it is
+	// shared appliance-wide by the whole "Postgres" xunit collection (one fixture,
+	// many test classes/methods interleaved). Rather than truncate it, every actor
+	// name this class writes is suffixed with a run-unique id, and
+	// ReadRetentionAuditRowsAsync filters by actor -- so each test only ever sees the
+	// rows it wrote itself, regardless of what earlier tests left behind.
+	private readonly string _runId = Guid.NewGuid().ToString("N");
+
 	private RetentionPolicyRepository _repository = null!;
 	private RetentionPolicyService _service = null!;
 	private string _complianceRunnerConnectionString = string.Empty;
@@ -107,7 +117,8 @@ public sealed class RetentionPolicyTests : IAsyncLifetime
 	[InlineData(-5)]
 	public async Task SetRetentionAsync_NonPositiveDays_RejectedWithoutTouchingTheRow(int invalidDays)
 	{
-		SetRetentionPolicyResult result = await _service.SetRetentionAsync(invalidDays, "admin-alice", CancellationToken.None);
+		string actor = $"admin-alice-{_runId}";
+		SetRetentionPolicyResult result = await _service.SetRetentionAsync(invalidDays, actor, CancellationToken.None);
 
 		Assert.Equal(SetRetentionPolicyOutcome.InvalidRetentionDays, result.Outcome);
 		Assert.Null(result.Policy);
@@ -115,6 +126,107 @@ public sealed class RetentionPolicyTests : IAsyncLifetime
 		RetentionPolicy? unchanged = await _repository.GetAsync(CancellationToken.None);
 		Assert.Equal(180, unchanged!.EvidenceRetentionDays);
 		Assert.Null(unchanged.UpdatedBy);
+
+		Assert.Empty(await ReadRetentionAuditRowsAsync(actor));
+	}
+
+	/// <summary>
+	/// Issue #1109: a positive value below the floor is exactly the typo class this
+	/// issue targets (a dropped trailing zero) -- rejected before the repository (and
+	/// therefore before any audit_log write), same as the non-positive case above.
+	/// </summary>
+	[Theory]
+	[InlineData(1)]
+	[InlineData(18)]
+	[InlineData(29)]
+	public async Task SetRetentionAsync_BelowMinimumDays_RejectedWithoutTouchingTheRowOrAuditLog(int belowFloor)
+	{
+		string actor = $"admin-alice-{_runId}";
+		SetRetentionPolicyResult result = await _service.SetRetentionAsync(belowFloor, actor, CancellationToken.None);
+
+		Assert.Equal(SetRetentionPolicyOutcome.BelowMinimum, result.Outcome);
+		Assert.Null(result.Policy);
+
+		RetentionPolicy? unchanged = await _repository.GetAsync(CancellationToken.None);
+		Assert.Equal(180, unchanged!.EvidenceRetentionDays);
+		Assert.Null(unchanged.UpdatedBy);
+
+		Assert.Empty(await ReadRetentionAuditRowsAsync(actor));
+	}
+
+	/// <summary>The floor itself (30) is accepted -- BelowMinimum only rejects values strictly under it.</summary>
+	[Fact]
+	public async Task SetRetentionAsync_ExactlyMinimumDays_Accepted()
+	{
+		SetRetentionPolicyResult result = await _service.SetRetentionAsync(30, $"admin-alice-{_runId}", CancellationToken.None);
+
+		Assert.Equal(SetRetentionPolicyOutcome.Updated, result.Outcome);
+		Assert.Equal(30, result.Policy!.EvidenceRetentionDays);
+	}
+
+	/// <summary>
+	/// Issue #1109 AC1/AC2: every accepted PUT writes one audit_log row, atomically
+	/// with the retention_policy UPDATE, carrying the actor and both the previous and
+	/// new day counts.
+	/// </summary>
+	[Fact]
+	public async Task SetRetentionAsync_Change_WritesAuditRowWithActorAndBothValues()
+	{
+		string actor = $"admin-alice-{_runId}";
+		SetRetentionPolicyResult result = await _service.SetRetentionAsync(90, actor, CancellationToken.None);
+		Assert.Equal(SetRetentionPolicyOutcome.Updated, result.Outcome);
+
+		List<(string EventType, string Actor, JsonElement Detail)> rows = await ReadRetentionAuditRowsAsync(actor);
+		(string EventType, string Actor, JsonElement Detail) row = Assert.Single(rows);
+
+		Assert.Equal("retention_policy.updated", row.EventType);
+		Assert.Equal(actor, row.Actor);
+		Assert.Equal(180, row.Detail.GetProperty("previous_evidence_retention_days").GetInt32());
+		Assert.Equal(90, row.Detail.GetProperty("new_evidence_retention_days").GetInt32());
+		Assert.True(row.Detail.GetProperty("changed").GetBoolean());
+	}
+
+	/// <summary>
+	/// Issue #1109 AC3: a PUT that resubmits the current value is not silently
+	/// dropped and not silently misreported as a real change -- it still writes an
+	/// audit_log row, honestly marked `changed: false`.
+	/// </summary>
+	[Fact]
+	public async Task SetRetentionAsync_NoOpSameValue_WritesAuditRowMarkedUnchanged()
+	{
+		string actor = $"admin-alice-{_runId}";
+		SetRetentionPolicyResult first = await _service.SetRetentionAsync(90, actor, CancellationToken.None);
+		Assert.Equal(SetRetentionPolicyOutcome.Updated, first.Outcome);
+
+		SetRetentionPolicyResult second = await _service.SetRetentionAsync(90, actor, CancellationToken.None);
+		Assert.Equal(SetRetentionPolicyOutcome.Updated, second.Outcome);
+
+		List<(string EventType, string Actor, JsonElement Detail)> rows = await ReadRetentionAuditRowsAsync(actor);
+		Assert.Equal(2, rows.Count);
+
+		(string EventType, string Actor, JsonElement Detail) noOpRow = rows[1];
+		Assert.Equal(actor, noOpRow.Actor);
+		Assert.Equal(90, noOpRow.Detail.GetProperty("previous_evidence_retention_days").GetInt32());
+		Assert.Equal(90, noOpRow.Detail.GetProperty("new_evidence_retention_days").GetInt32());
+		Assert.False(noOpRow.Detail.GetProperty("changed").GetBoolean());
+	}
+
+	private async Task<List<(string EventType, string Actor, JsonElement Detail)>> ReadRetentionAuditRowsAsync(string actor)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT event_type, actor, detail FROM audit_log WHERE event_type = 'retention_policy.updated' AND actor = $1 ORDER BY occurred_at", connection);
+		command.Parameters.AddWithValue(actor);
+
+		List<(string, string, JsonElement)> rows = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		while (await reader.ReadAsync())
+		{
+			rows.Add((reader.GetString(0), reader.GetString(1), JsonDocument.Parse(reader.GetString(2)).RootElement));
+		}
+
+		return rows;
 	}
 
 	/// <summary>
