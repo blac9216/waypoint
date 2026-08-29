@@ -1,7 +1,8 @@
 # PR Body Template
 
 The **Suggested Test Steps**, **Risk**, and **Rollback** sections are required. If
-the PR is part of an epic, reference it (`Part of #<epic>`) below the `Closes` line.
+the PR is part of an epic, reference it (`Part of #<epic>`) below the `Closes` line. Closing keywords go on their
+own line at the top — never inside prose, where they close the wrong things at merge.
 
 ```markdown
 Closes #<issue>
@@ -25,4 +26,8 @@ align these 1:1 with the issue's Acceptance Criteria.
 
 1. <step> — expected: <result>
 2. <step> — expected: <result>
+
+## Verified expectation
+`n/a` | `pending-live` — <what only the real stack can prove>. Copied from the issue;
+the reviewer sets the board's `Verified` field from this line at merge.
 ```

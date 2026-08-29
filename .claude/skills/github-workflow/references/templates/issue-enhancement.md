@@ -1,7 +1,7 @@
 # Enhancement Issue Template
 
 Use for new features, improvements, or refactoring requested by the user. Apply
-the `enhancement` label at creation.
+the `enhancement` label and at least one `area:*` label at creation.
 
 Keep each enhancement scoped so its PR lands within the review budget (≤ ~400 net
 LOC / ≤ 15 files). If the work is bigger than that, it belongs under an **epic** —
@@ -28,16 +28,23 @@ How things work today (if applicable). What is missing or insufficient.
 | `path/to/file` | Why this file is involved |
 
 ## Acceptance Criteria
-- [ ] Criterion 1
+- [ ] Criterion 1 — provable by the reviewer at merge (test, command, observable output)
 - [ ] Criterion 2
 
-(Each acceptance criterion should map 1:1 to a Suggested Test Step in the PR
-body — keep the wording aligned so reviewers can verify them directly.)
+Every box must be checkable by a reviewer on their machine. Anything that needs the real
+environment is not a criterion — it is the Verified expectation below. Each criterion maps
+1:1 to a Suggested Test Step in the PR.
 
 ## Risks / Considerations
 Anything that could go wrong, break existing behavior, or needs special attention.
 
-## Epic
-Link the parent epic issue if this is part of multi-issue work (`Part of #<epic>`),
-or state "standalone" if it is not.
+## Home
+`Part of #<epic>` — or `Milestone: <story>` when it sits directly under a story — or
+`standalone` (board only). Labels at filing: type, ≥1 `area:*`, `priority:*` if known;
+`deferred` + `concern:*` when filed out of scope. Sequencing (dependencies, final
+priority) is the orchestrator's at triage — do not guess it here.
+
+## Verified expectation
+`n/a` — review proves everything here | `pending-live` — <what only the real stack can
+prove>. The PR repeats this line; the reviewer sets the board field from it.
 ```

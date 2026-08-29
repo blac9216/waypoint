@@ -80,3 +80,25 @@ default for this project's automated work.
    `sub_issue_write` and the `gh api …/sub_issues` body take the child issue's
    database **`id`** (read it from `issue_read` `get` on the child — the `id`
    field), not its `#number`. Mixing them up links the wrong issue or errors.
+
+## Additions for the four-layer shape
+
+| Operation | Local — `gh` | Cloud — GitHub MCP |
+| --------- | ------------ | ------------------ |
+| Read board items / fields | `gh project item-list <N> --owner <o> --format json` (filter or paginate — large boards burn API points); field ids via `gh project field-list` | _(no first-class tool — treat as local-only; the orchestrator runs locally)_ |
+| Move a column / set a field | `gh project item-edit --project-id <pid> --id <item> --field-id <fid> --single-select-option-id <oid>` (text fields: `--text`) | local-only |
+| Add an issue to the board | `gh project item-add <N> --owner <o> --url <issue url>` (auto-add covers new issues) | local-only |
+| Milestone create / edit description | `gh api repos/{o}/{r}/milestones -f title=… -F description=@file` / `-X PATCH …/milestones/<n>` | local-only |
+| Assign a milestone | `gh issue edit <N> --milestone "<title>"` | `issue_write` `update` (`milestone`) |
+| Move a sub-issue to another parent | `gh api -X POST repos/{o}/{r}/issues/<new parent>/sub_issues -F sub_issue_id=<id> -F replace_parent=true` | `sub_issue_write` `add` with `replace_parent` |
+| Dependencies (blocked by) | `gh api repos/{o}/{r}/issues/<N>/dependencies/blocked_by` (GET / POST `-F issue_id=<id>`) | local-only |
+| Close with a reason | `gh issue close <N> --reason completed|"not planned"`; duplicate via `gh api -X PATCH …/issues/<N> -f state=closed -f state_reason=duplicate` | `issue_write` `update` (`state`, `state_reason`) |
+| Linked branch | `gh issue develop <N> --name <branch>` | local-only |
+| Native review (second account) | `GH_TOKEN=<reviewer token> gh pr review <P> --approve|--request-changes --body-file …` | `create_pending_pull_request_review` + `submit_pending_pull_request_review` under the reviewer identity |
+| Project status update (brief, optional) | `gh api graphql` `createProjectV2StatusUpdate` | local-only |
+
+Caveat 7: **an account cannot review its own PR** (approve or request changes → 422).
+Native reviews therefore need a second account; with one account the verdict of record
+stays the `## PR Review — …` comment plus the merge. Caveat 8: **`gh auth switch` is
+global** — never switch accounts mid-session; give the reviewer its identity via
+`GH_TOKEN` in its own process.
