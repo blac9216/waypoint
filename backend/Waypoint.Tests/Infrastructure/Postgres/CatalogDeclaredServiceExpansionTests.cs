@@ -207,6 +207,41 @@ public sealed class CatalogDeclaredServiceExpansionTests : IAsyncLifetime
 		Assert.DoesNotContain(children, c => c.CatalogComponentKey is "manager" or "photon" or "esxi");
 	}
 
+	/// <summary>
+	/// Issue #1081 regression pin: before this issue, the vcenter root's vendor
+	/// identity was ALWAYS null, so <see cref="ComponentRepository.SetConfiguredFactAsync"/>
+	/// could identify "this is the root" purely from a null vendor_identity. Once
+	/// discovery gives the root a real vendor identity (the appliance's instance
+	/// UUID), that test alone would wrongly say "not the root" and silently stop
+	/// triggering declared-service sync on an Admin's configured-fact PUT to an
+	/// already-discovered vCenter. This seeds the root WITH a vendor identity (as a
+	/// post-#1081 discovery pass would leave it) and proves the PUT path still
+	/// materializes the declared children.
+	/// </summary>
+	[Fact]
+	public async Task SetConfiguredFact_OnDiscoveredRootWithVendorIdentity_StillMaterializesDeclaredServiceChildren()
+	{
+		Guid siteId = (await _sites.CreateAsync($"site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.VSphere, $"vcsa-{Guid.NewGuid():N}.example.internal", "{}", null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+
+		await _components.UpsertDiscoveredAsync(
+			targetId!.Value,
+			[new DiscoveredComponent("vcenter", "vcenter-instance-discovered-abc", "vCenter Server", null, null, null)],
+			CancellationToken.None);
+		Component root = Assert.Single(await _components.ListForTargetAsync(targetId.Value, includeRetired: true, CancellationToken.None));
+		Assert.Equal("vcenter-instance-discovered-abc", root.VendorIdentity); // sanity: this fixture models a real discovered identity, not the old null-identity shape.
+
+		ComponentWriteOutcome writeOutcome = await _components.SetConfiguredFactAsync(root.Id, ApplianceExactVersion, CancellationToken.None);
+		Assert.Equal(ComponentWriteOutcome.Ok, writeOutcome);
+
+		IReadOnlyList<Component> children = await ListChildrenAsync(targetId.Value, root.Id);
+		Assert.Equal(2, children.Count);
+		Assert.Contains(children, c => c.CatalogComponentKey == "eam");
+		Assert.Contains(children, c => c.CatalogComponentKey == "postgresql");
+	}
+
 	[Fact]
 	public async Task SetConfiguredFact_Cleared_MarksDeclaredChildrenAbsent()
 	{

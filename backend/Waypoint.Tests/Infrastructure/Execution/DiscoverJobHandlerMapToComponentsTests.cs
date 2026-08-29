@@ -108,10 +108,26 @@ public sealed class DiscoverJobHandlerMapToComponentsTests
 	}
 
 	[Fact]
+	public void Host_WithBuildReported_CarriesBuildOntoTheComponentFact()
+	{
+		// Issue #1081: the ESXi component fact previously kept only ExactVersion and
+		// silently dropped the Build discovery DID observe.
+		DiscoveredInventoryItem host = new(
+			InventoryItemTypes.Host, "host-5", "esxi-05.example.internal", ParentMoref: null,
+			Build: InventedBuildNumber, MaintenanceMode: false, Version: InventedSemanticVersion);
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([host]);
+
+		DiscoveredComponent hostComponent = components.Single(c => c.VendorIdentity == "host-5");
+		Assert.Equal(InventedBuildNumber, hostComponent.Build);
+	}
+
+	[Fact]
 	public void Vm_AlwaysResolvesExactVersionToNull_RegardlessOfBuildOrVersion()
 	{
-		// A VM's Build carries VMware Tools version (never a product-version fact for
-		// the VM itself); VMs have no analogous semantic Version field either.
+		// A VM's Build is never carried onto the component fact (issue #1081: it used
+		// to carry the VMware Tools version, never a product-version fact for the VM
+		// itself); VMs have no analogous semantic Version field either.
 		DiscoveredInventoryItem vm = new(
 			InventoryItemTypes.Vm, "vm-1", "stub-vm-01", ParentMoref: "host-1",
 			Build: "12345", MaintenanceMode: null, Version: null);
@@ -120,6 +136,7 @@ public sealed class DiscoverJobHandlerMapToComponentsTests
 
 		DiscoveredComponent vmComponent = components.Single(c => c.VendorIdentity == "vm-1");
 		Assert.Null(vmComponent.ExactVersion);
+		Assert.Null(vmComponent.Build);
 	}
 
 	[Fact]
@@ -131,7 +148,80 @@ public sealed class DiscoverJobHandlerMapToComponentsTests
 
 		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([cluster]);
 
-		// Only the synthetic vcenter root -- no component for the cluster grouping row.
+		// Only the vcenter root -- no component for the cluster grouping row.
 		Assert.DoesNotContain(components, c => c.VendorIdentity == "domain-c1");
+	}
+
+	/// <summary>
+	/// Issue #1081's core acceptance: a `vcenter`-type row (the appliance's own
+	/// `content.about`-derived identity/version/build) becomes the ROOT component's
+	/// own facts -- never a sibling component, and never dropped.
+	/// </summary>
+	[Fact]
+	public void VCenterItem_BecomesRootIdentityAndVersionFact_NeverASiblingComponent()
+	{
+		DiscoveredInventoryItem vcenterItem = new(
+			InventoryItemTypes.VCenter, "vcenter-instance-abc123", "vcsa-01.example.internal", ParentMoref: null,
+			Build: InventedBuildNumber, MaintenanceMode: null, Version: InventedSemanticVersion);
+		DiscoveredInventoryItem host = new(
+			InventoryItemTypes.Host, "host-6", "esxi-06.example.internal", ParentMoref: null,
+			Build: InventedBuildNumber, MaintenanceMode: false, Version: InventedSemanticVersion);
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([vcenterItem, host]);
+
+		DiscoveredComponent root = Assert.Single(components, c => c.CatalogComponentKey == Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter);
+		Assert.Equal("vcenter-instance-abc123", root.VendorIdentity);
+		Assert.Equal("vcsa-01.example.internal", root.DisplayName);
+		Assert.Equal(InventedSemanticVersion, root.ExactVersion);
+		Assert.Equal(InventedBuildNumber, root.Build);
+		Assert.Null(root.ParentVendorIdentity);
+
+		// Never also materialized as a discovered sibling component.
+		Assert.DoesNotContain(components, c => c.VendorIdentity == "vcenter-instance-abc123" && c.CatalogComponentKey != Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter);
+		Assert.Equal(2, components.Count); // root + host-6 only.
+	}
+
+	/// <summary>
+	/// Issue #1081 fail-closed fallback: a pass that reports no `vcenter` row at all
+	/// (a pre-#1081 module/stub, or a boundary that genuinely could not observe the
+	/// appliance's own identity) leaves the root exactly as before -- no vendor
+	/// identity, no version/build -- honestly absent, never guessed from the target's
+	/// connection host/FQDN/display name.
+	/// </summary>
+	[Fact]
+	public void NoVCenterItemReported_RootStaysIdentityAndVersionAbsent_FailClosed()
+	{
+		DiscoveredInventoryItem host = new(
+			InventoryItemTypes.Host, "host-7", "esxi-07.example.internal", ParentMoref: null,
+			Build: InventedBuildNumber, MaintenanceMode: false, Version: InventedSemanticVersion);
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([host]);
+
+		DiscoveredComponent root = Assert.Single(components, c => c.CatalogComponentKey == Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter);
+		Assert.Null(root.VendorIdentity);
+		Assert.Null(root.ExactVersion);
+		Assert.Null(root.Build);
+		Assert.Equal("vCenter Server", root.DisplayName);
+	}
+
+	/// <summary>
+	/// Issue #995's empty-string normalization precedent, proven for the vcenter row
+	/// too: a genuinely blank (never $null) Version/Name must not leak a "" fact or
+	/// display name through to the root component.
+	/// </summary>
+	[Fact]
+	public void VCenterItem_WithBlankVersionAndName_NormalizesToNull_AndDefaultDisplayName()
+	{
+		DiscoveredInventoryItem vcenterItem = new(
+			InventoryItemTypes.VCenter, "vcenter-instance-blank", "   ", ParentMoref: null,
+			Build: null, MaintenanceMode: null, Version: "");
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([vcenterItem]);
+
+		DiscoveredComponent root = Assert.Single(components, c => c.CatalogComponentKey == Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter);
+		Assert.Equal("vcenter-instance-blank", root.VendorIdentity); // MoRef itself is never blank-normalized (TryParseItem already guarantees non-blank).
+		Assert.Null(root.ExactVersion);
+		Assert.Null(root.Build);
+		Assert.Equal("vCenter Server", root.DisplayName);
 	}
 }

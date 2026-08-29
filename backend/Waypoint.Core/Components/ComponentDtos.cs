@@ -84,8 +84,14 @@ public static class ComponentObservationOutcomes
 /// evidence this fact was derived from (e.g. a discovery-refresh observation id),
 /// never the raw evidence itself, matching the rest of this codebase's "reference, not
 /// embed" convention for anything that could grow unbounded or carry sensitive detail.
+/// <see cref="Build"/> (issue #1081) is the observed raw build number alongside the
+/// mandatory <see cref="ExactVersion"/> -- docs/compliance-parity.md: "hosts store
+/// exactly two facts about their own version: the full observed product version and
+/// the build number." Optional/nullable: a discovery pass that could not observe a
+/// build (or an Admin-configured fact, which never carries one) leaves it honestly
+/// absent rather than guessed.
 /// </summary>
-public sealed record ComponentFact(string ExactVersion, DateTimeOffset ObservedAt, string? RawEvidenceReference);
+public sealed record ComponentFact(string ExactVersion, DateTimeOffset ObservedAt, string? RawEvidenceReference, string? Build = null);
 
 /// <summary>
 /// A stable compliance endpoint/component (migration 0054's <c>components</c> table;
@@ -132,7 +138,8 @@ public sealed record DiscoveredComponent(
 	string DisplayName,
 	string? ParentVendorIdentity,
 	Guid? CatalogComponentId,
-	string? ExactVersion);
+	string? ExactVersion,
+	string? Build = null);
 
 /// <summary>Outcome of one discovery-boundary reconciliation pass (mirrors <see cref="Waypoint.Core.Discovery.InventoryUpsertOutcome"/>).</summary>
 public sealed record ComponentUpsertOutcome(int Upserted, int MarkedAbsent, int Reconnected);

@@ -152,7 +152,7 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 
 		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1");
 		Guid firstRunId = await RunDiscoverOnceAsync(targetId);
-		await AssertInventoryCountAsync(targetId, expectedActive: 4); // cluster + 2 hosts + 1 vm
+		await AssertInventoryCountAsync(targetId, expectedActive: 5); // vcenter + cluster + 2 hosts + 1 vm
 		Assert.True(await EventTypeExistsAsync(JobEventTypes.DiscoverProgress, firstRunId));
 		Assert.Equal(TargetDiscoveryStatuses.Discovered, (await _targets.GetAsync(targetId, CancellationToken.None))!.DiscoveryStatus);
 		Assert.NotNull((await _targets.GetAsync(targetId, CancellationToken.None))!.LastRefreshed);
@@ -185,7 +185,7 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 
 		// Re-discover with the SAME pass: same identities upsert in place, not duplicated.
 		await RunDiscoverOnceAsync(targetId);
-		await AssertInventoryCountAsync(targetId, expectedActive: 4);
+		await AssertInventoryCountAsync(targetId, expectedActive: 5);
 		await AssertComponentCountAsync(targetId, expectedActive: 4);
 
 		// Pass 2: host-12 is no longer reported -- removal detection marks it (and its
@@ -196,7 +196,7 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		// the same fail-closed absence rule as inventory, proven independently.
 		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "2");
 		await RunDiscoverOnceAsync(targetId);
-		await AssertInventoryCountAsync(targetId, expectedActive: 3);
+		await AssertInventoryCountAsync(targetId, expectedActive: 4);
 		await AssertItemRemovedAsync(targetId, "host-12");
 		Guid removedHostId = (await GetItemByMorefAsync(targetId, "host-12"))!.Id;
 		await AssertComponentCountAsync(targetId, expectedActive: 3); // root + host-11 + vm-101
@@ -207,7 +207,7 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		// than insert a duplicate -- same row id, active again, count back to 4.
 		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1");
 		await RunDiscoverOnceAsync(targetId);
-		await AssertInventoryCountAsync(targetId, expectedActive: 4);
+		await AssertInventoryCountAsync(targetId, expectedActive: 5);
 		InventoryItem revived = (await GetItemByMorefAsync(targetId, "host-12"))!;
 		Assert.Equal(removedHostId, revived.Id); // no duplicate -- same row un-deleted
 		Assert.Null(revived.RemovedAt);
@@ -215,6 +215,68 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		await AssertComponentReconnectedAsync(targetId, "host-12");
 
 		await AssertCanaryNeverLeakedAsync(canary, credentialId);
+	}
+
+	/// <summary>
+	/// Issue #1081's own end-to-end proof, through the REAL loop (stub PowerShell pass
+	/// '1081-linked', which reports the appliance's `content.about`-style identity
+	/// exactly as the real module now does): the discovered vCenter component carries
+	/// an authoritative stable vendor identifier and a version fact with provenance
+	/// (never absent, never guessed from FQDN/IP/display name), the appliance's own
+	/// `inventory_items` row exists, AND -- because the version fact matches migration
+	/// 0064's real seeded 'vsphere'/'8.0.3' row -- the root LINKS against the catalog
+	/// and issue #741's catalog-declared VCSA service expansion actually fires. Epic
+	/// #726's round-11 live validation found this whole chain broken
+	/// (`declared_services_upserted: 0`, "never exercised against a real appliance");
+	/// this test is the first to exercise it end to end.
+	/// </summary>
+	[Fact]
+	public async Task VCenterRoot_GetsVendorIdentityAndVersionFact_LinksToCatalog_AndDeclaredServicesExpand()
+	{
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-1081-vcenter-canary");
+
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1081-linked");
+		Guid runId = await RunDiscoverOnceAsync(targetId);
+
+		Guid jobId = await GetJobIdForRunAsync(runId);
+		Assert.Equal("done", await GetJobFieldAsync(jobId, "state"));
+
+		// The appliance's own inventory_items row exists -- deliverable #2: previously
+		// there was no inventory_items row of any vCenter/appliance type at all.
+		InventoryItem? vcenterItem = await GetItemByMorefAsync(targetId, "vcenter-instance-1081-linked");
+		Assert.NotNull(vcenterItem);
+		Assert.Equal(InventoryItemTypes.VCenter, vcenterItem!.Type);
+		Assert.Equal("8.0.3", vcenterItem.Version);
+		Assert.Equal("99.0.87654321", vcenterItem.Build);
+		Assert.Null(vcenterItem.ParentId); // top-level, same as the root component below.
+
+		// The root component carries a real vendor identity (never null/absent) and a
+		// discovered fact with both exact_version and build -- deliverable #1 and #4.
+		Waypoint.Core.Components.Component root = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
+			.Single(c => c.CatalogComponentKey == Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter);
+		Assert.Equal("vcenter-instance-1081-linked", root.VendorIdentity);
+		Assert.NotNull(root.DiscoveredFact);
+		Assert.Equal("8.0.3", root.DiscoveredFact!.ExactVersion);
+		Assert.Equal("99.0.87654321", root.DiscoveredFact.Build);
+
+		// The version fact matches a real seeded catalog row -- the root LINKS, unlike
+		// before this issue where it could never carry a version at all.
+		Assert.NotNull(root.CatalogComponentId);
+
+		// #1065's catalog-declared VCSA service expansion (eam/lookup/postgresql/vami
+		// under migration 0064's seeded vsphere/8.0.3 product version) now fires off
+		// the linked root -- proven both via the components it materialized and via
+		// the discover.progress event's own declared_services_upserted counter, the
+		// exact field round-11 observed stuck at zero.
+		IReadOnlyList<Waypoint.Core.Components.Component> declaredChildren = (await _components
+			.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
+			.Where(c => c.ParentComponentId == root.Id)
+			.ToList();
+		Assert.NotEmpty(declaredChildren);
+		Assert.All(declaredChildren, c => Assert.Null(c.VendorIdentity));
+
+		JsonElement progress = await GetDiscoverProgressPayloadAsync(runId);
+		Assert.True(progress.GetProperty("declared_services_upserted").GetInt32() > 0);
 	}
 
 	/// <summary>
@@ -278,7 +340,7 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		// host-12 as a previously-seen, currently-active row/component.
 		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1");
 		await RunDiscoverOnceAsync(targetId);
-		await AssertInventoryCountAsync(targetId, expectedActive: 4);
+		await AssertInventoryCountAsync(targetId, expectedActive: 5);
 		await AssertComponentCountAsync(targetId, expectedActive: 4);
 
 		// Pass 2: 'partial' -- host-12 is not reported (its subtree "failed"), and the
@@ -292,7 +354,7 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 
 		// host-12 must still be active/not-removed on BOTH paths -- absence was not
 		// advanced despite this pass not reporting it.
-		await AssertInventoryCountAsync(targetId, expectedActive: 4);
+		await AssertInventoryCountAsync(targetId, expectedActive: 5);
 		InventoryItem host12AfterPartial = (await GetItemByMorefAsync(targetId, "host-12"))!;
 		Assert.Null(host12AfterPartial.RemovedAt);
 		await AssertComponentCountAsync(targetId, expectedActive: 4);
@@ -321,7 +383,7 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		// to advance absence normally -- the gate is per-pass, not sticky.
 		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "2");
 		await RunDiscoverOnceAsync(targetId);
-		await AssertInventoryCountAsync(targetId, expectedActive: 3);
+		await AssertInventoryCountAsync(targetId, expectedActive: 4);
 		await AssertItemRemovedAsync(targetId, "host-12");
 		await AssertComponentCountAsync(targetId, expectedActive: 3);
 		await AssertComponentAbsentAsync(targetId, "host-12");
@@ -662,6 +724,20 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		query.Parameters.AddWithValue(eventType);
 		query.Parameters.AddWithValue(runId);
 		return (long)(await query.ExecuteScalarAsync())! > 0;
+	}
+
+	/// <summary>The single discover.progress event payload for a run, parsed (issue #1081: asserting declared_services_upserted).</summary>
+	private async Task<JsonElement> GetDiscoverProgressPayloadAsync(Guid runId)
+	{
+		await Task.Delay(TimeSpan.FromMilliseconds(300)); // BufferedJobEventWriter flush window.
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"SELECT e.payload::text FROM job_events e JOIN jobs j ON j.id = e.job_id WHERE j.run_id = $1 AND e.event_type = $2", connection);
+		query.Parameters.AddWithValue(runId);
+		query.Parameters.AddWithValue(JobEventTypes.DiscoverProgress);
+		string payload = (string)(await query.ExecuteScalarAsync())!;
+		return JsonDocument.Parse(payload).RootElement;
 	}
 
 	private async Task<string> GetJobFieldAsync(Guid jobId, string field)

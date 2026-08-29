@@ -162,6 +162,14 @@ Hosts store exactly two facts about their own version: the full observed product
 and the build number. The declared-scope key lives only on the catalog side; no third,
 derived "scope" fact is ever stored on a host or component row.
 
+Issue #1081 (live validation round 11): the discovered vCenter component now stores the
+identical two facts -- its authoritative instance UUID as vendor identity, and the same
+observed-version/build pair a host reports, sourced from vSphere's `content.about` -- so
+it is never `absent-by-omission`-only-plannable-by-hand the way it was before. A VM's
+`inventory_items.build` column, previously overloaded with the VMware Tools version, is
+now honestly left unpopulated rather than misrepresented as a platform fact; deriving a
+VM's own platform version fact is issue #1063's separately-owned work.
+
 | Sibling product/version key | Key form | Kind / source profile revision | Components | Transport / selector | Purpose | Output |
 |---|---|---|---|---|---|---|
 | vSphere `8.0` | exact | STIG / `v2r3-stig` | vCenter; ESXi; VM | `vmware` / object kind | `vsphere-api` | HDF + CKL |

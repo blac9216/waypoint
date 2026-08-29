@@ -51,15 +51,26 @@ function Invoke-WaypointDiscovery {
 	    to bring Connect-StigVIServer into scope.
 
 	.OUTPUTS
-	    One [pscustomobject] per discovered item: Type ('cluster'|'host'|'vm'), MoRef,
-	    Name, ParentMoRef (nullable), Build (nullable), Version (nullable),
-	    MaintenanceMode (nullable bool). Clusters and hosts are emitted before their
-	    children.
+	    One [pscustomobject] per discovered item: Type ('vcenter'|'cluster'|'host'|'vm'),
+	    MoRef, Name, ParentMoRef (nullable), Build (nullable), Version (nullable),
+	    MaintenanceMode (nullable bool). The 'vcenter' row (issue #1081) is always
+	    first; clusters and hosts are emitted before their children.
 
 	    Issue #974: Version is the host's semantic vSphere product version
 	    ($VMHost.Version, e.g. "8.0.3") -- populated only for 'host' rows, alongside
 	    (never instead of) Build, which continues to be captured/reported exactly as
 	    before. 'cluster'/'vm' rows always report Version = $null.
+
+	    Issue #1081: the 'vcenter' row reports the appliance's own identity/version --
+	    MoRef is $Session.InstanceUuid (vSphere's `content.about.instanceUuid`, the
+	    only authoritative, stable identifier the appliance itself exposes -- the same
+	    property module.targets.ps1 already keys linked-vCenter claims on), Version/
+	    Build are $Session.Version/.Build (`content.about.version`/`.build`). Emitted
+	    for the ONE session matching the requested -VCenter (never every AllLinked
+	    sibling, which would misattribute another vCenter's identity to this target's
+	    root). A 'vm' row's Build is always $null -- it used to carry the VMware Tools
+	    version, which is not a product-version fact for the VM itself and would
+	    mislead anything reading Build as a platform fact.
 
 	    Issue #865 (ADR-0023 completeness gap): the default $ErrorActionPreference is
 	    'Continue', so a non-terminating PowerCLI error on one subtree (an unreachable
@@ -116,6 +127,32 @@ function Invoke-WaypointDiscovery {
 	# never succeed in the noninteractive compliance runner.
 	$Connection = Connect-StigVIServer -VCenter $VCenter -VSphereCredential $Credential -SkipVCSACredential -Source 'Discovery'
 
+	# Issue #1081: the appliance's own identity/version fact. $Session.InstanceUuid is
+	# vSphere's authoritative, stable instance identifier (content.about.instanceUuid)
+	# -- the same property module.targets.ps1 already keys linked-vCenter claims on --
+	# and $Session.Version/.Build are the appliance's own semantic version/build
+	# (content.about.version/.build), never the ESXi hosts' values. Only the ONE
+	# session matching the requested -VCenter is used: -AllLinked can return sibling
+	# vCenters too, and attributing one of THEIR identities to THIS target's root would
+	# be exactly the guessed-identity failure ADR-0023 forbids. Falls back to the first
+	# session only if none match by name (e.g. -VCenter given as an IP while the
+	# session reports its FQDN, or vice versa) -- a real vCenter connection always has
+	# at least one session, so this never leaves $PrimarySession null.
+	$PrimarySession = @($Connection.Sessions | Where-Object { $_.Name -eq $VCenter }) | Select-Object -First 1
+	if (-not $PrimarySession) {
+		$PrimarySession = @($Connection.Sessions) | Select-Object -First 1
+	}
+
+	[pscustomobject]@{
+		Type            = 'vcenter'
+		MoRef           = $PrimarySession.InstanceUuid
+		Name            = $PrimarySession.Name
+		ParentMoRef     = $null
+		Build           = $PrimarySession.Build
+		Version         = $PrimarySession.Version
+		MaintenanceMode = $null
+	}
+
 	# Issue #865: collected per-subtree failure messages, surfaced verbatim (already
 	# PowerCLI's own text, no secrets ever flow through this path) in the trailing
 	# discovery-meta record so DiscoverJobHandler can raise them as the pass's
@@ -162,7 +199,10 @@ function Invoke-WaypointDiscovery {
 									MoRef           = $VM.ExtensionData.MoRef.Value
 									Name            = $VM.Name
 									ParentMoRef     = $VMHost.ExtensionData.MoRef.Value
-									Build           = $VM.Guest.ToolsVersion
+									# Issue #1081: never the VMware Tools version -- not a product-version
+									# fact for the VM itself; would mislead anything reading Build as a
+									# platform fact. Deriving a VM's own platform version is #1063's work.
+									Build           = $null
 									Version         = $null
 									MaintenanceMode = $null
 								}
@@ -198,7 +238,8 @@ function Invoke-WaypointDiscovery {
 								MoRef           = $VM.ExtensionData.MoRef.Value
 								Name            = $VM.Name
 								ParentMoRef     = $VMHost.ExtensionData.MoRef.Value
-								Build           = $VM.Guest.ToolsVersion
+								# Issue #1081: never the VMware Tools version -- see comment above.
+								Build           = $null
 								Version         = $null
 								MaintenanceMode = $null
 							}

@@ -120,9 +120,13 @@ public sealed class ComponentRepository : IComponentRepository
 				parentComponentId = resolvedParentId;
 			}
 
+			// Issue #1081: build rides alongside exact_version in the same JSONB fact --
+			// still only written when this pass actually rendered a version opinion
+			// (never a build-only fact), and honestly null when the pass could not
+			// observe a build (e.g. a vm, which never carries one at all).
 			string? factJson = item.ExactVersion is null
 				? null
-				: JsonSerializer.Serialize(new { exact_version = item.ExactVersion, observed_at = DateTimeOffset.UtcNow }, FactSerializerOptions);
+				: JsonSerializer.Serialize(new { exact_version = item.ExactVersion, observed_at = DateTimeOffset.UtcNow, build = item.Build }, FactSerializerOptions);
 
 			// Issue #840: a single atomic statement replaces the former check-then-insert
 			// (a separate existence SELECT, a separate lifecycle SELECT, then a branch to
@@ -154,8 +158,10 @@ public sealed class ComponentRepository : IComponentRepository
 			//
 			// Issue #1000: that "always overwrite" rule is only honest when discovery
 			// actually rendered a version opinion this pass (item.ExactVersion is
-			// non-null -- today, only esxi hosts). A component discovery can never
-			// version (the synthetic vcenter root, any vm) always reports
+			// non-null -- esxi hosts, and, since issue #1081, the vcenter root when the
+			// pass observed the appliance's own `content.about` version). A component
+			// discovery can never version (any vm, or the vcenter root on a pass that
+			// could not observe its own identity/version) always reports
 			// ExactVersion=null/CatalogComponentId=null by construction
 			// (DiscoverJobHandler.MapToComponents), so an unconditional EXCLUDED
 			// assignment would clobber a link the CONFIGURED-fact path
@@ -560,10 +566,21 @@ public sealed class ComponentRepository : IComponentRepository
 				discoveredExactVersion = existing.IsDBNull(1) ? null : existing.GetString(1);
 				parentTargetId = existing.GetGuid(2);
 
-				// Issue #741: a target's ROOT connection component (no parent, no vendor
-				// identity -- e.g. the synthetic vcenter root) is the anchor for
-				// catalog-declared service expansion below.
-				isRootConnectionComponent = existing.IsDBNull(3) && existing.IsDBNull(4);
+				// Issue #741: a target's ROOT connection component (no parent) is the
+				// anchor for catalog-declared service expansion below.
+				//
+				// Issue #1081: this used to also require a null vendor_identity (the
+				// vcenter root's identity was always absent). It no longer can -- the
+				// root now carries the appliance's own authoritative vendor identity
+				// once discovery observes it, and a null-vendor-identity test alone
+				// could never distinguish it from a catalog-declared CHILD anyway
+				// (also null, but excluded here by the parent_component_id check).
+				// CatalogComponentKey is the field that is always exactly `vcenter` for
+				// the root and never for a discovered esxi/vm sibling (which also has
+				// parent_component_id null under this flattened-parentage model -- see
+				// DiscoverJobHandler.MapToComponents), so it is the correct discriminator.
+				isRootConnectionComponent = existing.IsDBNull(3) &&
+					string.Equals(catalogComponentKey, Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter, StringComparison.Ordinal);
 			}
 		}
 
@@ -751,7 +768,13 @@ public sealed class ComponentRepository : IComponentRepository
 			? parsed
 			: DateTimeOffset.UtcNow;
 		string? rawEvidenceReference = root.TryGetProperty("raw_evidence_reference", out JsonElement evidenceElement) ? evidenceElement.GetString() : null;
+		// Issue #1081: optional -- absent entirely on a configured fact (which never
+		// carries a build) or on an older discovered fact recorded before this field
+		// existed; both read back as honestly null, never a parse failure.
+		string? build = root.TryGetProperty("build", out JsonElement buildElement) && buildElement.ValueKind != JsonValueKind.Null
+			? buildElement.GetString()
+			: null;
 
-		return new ComponentFact(exactVersion, observedAt, rawEvidenceReference);
+		return new ComponentFact(exactVersion, observedAt, rawEvidenceReference, build);
 	}
 }

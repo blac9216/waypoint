@@ -94,6 +94,15 @@ function Invoke-WaypointDiscovery {
 		# powered-off/disconnected host reporting Version as an EMPTY STRING (never
 		# $null) -- the exact shape a real vSphere host in that power/connection state
 		# returns. No cluster/vm rows needed; this pass isolates the regression.
+		#
+		# Issue #1081: an unseeded vcenter identity/version -- present (so the root
+		# component still gets vendor identity/version, matching every other pass) but
+		# deliberately not matching any real catalog row, so this pass's own linkage
+		# assertions stay about the two HOSTS, not the root.
+		[pscustomobject]@{
+			Type = 'vcenter'; MoRef = 'vcenter-instance-995'; Name = 'vcsa-01.example.internal'
+			ParentMoRef = $null; Build = '00000000'; Version = '0.0.0-invented-unseeded'; MaintenanceMode = $null
+		}
 		[pscustomobject]@{
 			Type = 'host'; MoRef = 'host-995-linkable'; Name = 'esxi-11.example.internal'
 			ParentMoRef = $null; Build = '99.0.11111111'; Version = '8.0.3'; MaintenanceMode = $false
@@ -117,6 +126,33 @@ function Invoke-WaypointDiscovery {
 		Write-Information 'Discovery complete.'
 		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
 		return
+	}
+
+	if ($Pass -eq '1081-linked') {
+		# Issue #1081's own linkage/declared-service proof: an vcenter identity/version
+		# that DOES match a real seeded catalog row (migration 0064's 'vsphere'/'8.0.3',
+		# same seed DiscoverJobHandlerEndToEndTests already links host-11 against),
+		# proving the whole chain discovery -> component fact -> catalog linkage ->
+		# declared-service expansion actually fires for the vcenter root, the exact
+		# gap epic #726's round-11 live validation found ("declared_services_upserted:
+		# 0 ... never exercised against a real appliance").
+		[pscustomobject]@{
+			Type = 'vcenter'; MoRef = 'vcenter-instance-1081-linked'; Name = 'vcsa-01.example.internal'
+			ParentMoRef = $null; Build = '99.0.87654321'; Version = '8.0.3'; MaintenanceMode = $null
+		}
+		Write-Information 'Discovery complete.'
+		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
+		return
+	}
+
+	# Issue #1081: the appliance's own identity/version, present on every pass below
+	# this point (1, 2, partial) -- deliberately an UNSEEDED version (no real catalog
+	# row matches it) so these general-purpose passes' component-count assertions stay
+	# unaffected by catalog linkage/declared-service expansion; see the '1081-linked'
+	# pass above for that proof.
+	[pscustomobject]@{
+		Type = 'vcenter'; MoRef = 'vcenter-instance-e2e'; Name = 'vcsa-01.example.internal'
+		ParentMoRef = $null; Build = '00000000'; Version = '0.0.0-invented-unseeded'; MaintenanceMode = $null
 	}
 
 	[pscustomobject]@{

@@ -163,7 +163,7 @@ next sign-in would silently reuse the still-live Keycloak session.
 |---|---|---|
 | `/sites` · `/sites/{id}` | GET, POST, PUT, DELETE | Admin writes. Site: name, description, stigman_override?. |
 | `/sites/{id}/targets` · `/targets/{id}` | GET, POST, PUT, DELETE | kind (`vsphere`\|`nsx-api`\|`ssh`), connection.host, credential_ref, discovery_status, last_refreshed. |
-| `/targets/{id}/inventory` | GET | Cached hosts/VMs tree (cluster → host → vm), build info, semantic version (issue #974, host rows only), maintenance_mode. |
+| `/targets/{id}/inventory` | GET | Cached hosts/VMs tree (cluster → host → vm), plus a top-level `vcenter` row for the appliance itself (issue #1081), build info, semantic version (issue #974, host and vcenter rows only), maintenance_mode. |
 | `/targets/{id}/discover` | POST | 202 → `discover` job. |
 
 🚧 **Planned cached component inventory (epic #726, [ADR-0023](adr/0023-compliance-inventory-and-immutable-plans.md)).**
@@ -173,9 +173,10 @@ component-identity collection once #732–#734 land. Every row is a stable
 authoritative vendor identity)` — never hostname/IP/display-name/tree-position),
 `catalog_component_key`, `parent_component_id?`, `lifecycle`
 (`active`\|`absent`\|`retired`), `configured_fact`/`discovered_fact` (each an
-independent, timestamped exact-version/capability observation; both present, one, or
-neither), `fact_conflict` (bool — true when configured and discovered disagree; never
-silently resolved by the API), `first_seen_at`, `last_seen_at`,
+independent, timestamped exact-version/capability observation, optionally carrying a
+`build` alongside the mandatory `exact_version` — issue #1081, e.g. an esxi host or the
+vcenter root; both present, one, or neither), `fact_conflict` (bool — true when
+configured and discovered disagree; never silently resolved by the API), `first_seen_at`, `last_seen_at`,
 `continuous_absence_since?`, and `baseline_ready` (bool — one exact catalog
 product-version entry plus exactly one active approved baseline under ADR-0022;
 `false` is not an error, it is a readiness fact the plan preview reads). Retired
