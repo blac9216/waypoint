@@ -552,6 +552,29 @@ public sealed class RunCreationService
 				continue;
 			}
 
+			// Issue #1122 (round-12 live validation): the guard above is per-TARGET
+			// (planRequirementsByTarget.ContainsKey), not per-REQUEST -- a target that
+			// is absent from the resolved plan falls through to here whether or not the
+			// caller supplied target_scope at all. That is correct for a genuinely
+			// legacy request (no target_scope: `targets` and `planRequirementsByTarget`
+			// come from entirely separate resolution paths, so nothing "planned" this
+			// target and the whole-target legacy job IS the intended execution), but
+			// wrong for a target_scope request: `resolvedTargetScope` already reflects
+			// EVERY target/component the operator's scope names or "all" expands to
+			// (ScopeResolutionService.ResolveAsync), so a target reaching this point
+			// under target_scope is one the operator did not select at all -- ADR-0023
+			// "explicit subsets never widen silently" (issue #733 AC) applies equally to
+			// "all", which must expand against refreshed inventory, not against every
+			// target that exists regardless of scope. Emitting nothing here (rather than
+			// the legacy uncatalogued whole-target job) is the fix: no baseline, no
+			// catalog execution profile, no plan row -- exactly the un-attributable
+			// execution epic #726 exists to eliminate. See
+			// RunCreationServiceScopedFanOutTests for the failing-test-first proof.
+			if (resolvedTargetScope is not null)
+			{
+				continue;
+			}
+
 			specs.Add(BuildLegacyTargetJobSpec(target, siteId, profile, useRunSecret, resolvedBindings, adHocByTarget));
 		}
 

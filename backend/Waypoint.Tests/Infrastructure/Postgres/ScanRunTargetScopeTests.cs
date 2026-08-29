@@ -362,6 +362,142 @@ public sealed class ScanRunTargetScopeTests : IAsyncLifetime
 	}
 
 	[Fact]
+	public async Task CreateScanRun_WithExplicitSingleComponentScope_NeverFansOutLegacyJobToUnselectedTarget()
+	{
+		// Issue #1122 (round-12 live validation): the failing-test-first proof. Two
+		// targets exist in the site; the request explicitly scopes to ONE component on
+		// target B only. On unfixed main this asserts false -- RunCreationService's
+		// per-target loop falls every target absent from planRequirementsByTarget
+		// (target A here) through to BuildLegacyTargetJobSpec, producing an extra scan
+		// job against A that the operator never selected, carries no baseline, and runs
+		// the pre-catalog hardcoded-profile path (ADR-0023 "explicit subsets never
+		// widen silently", issue #733 AC).
+		Guid siteId = await CreateSiteAsync("legacy-fanout-site");
+		Guid targetA = await CreateTargetAsync(siteId, "vsphere", "vcsa-a", """{"host":"vcsa-a.example.internal"}""");
+		Guid targetB = await CreateTargetAsync(siteId, "vsphere", "vcsa-b", """{"host":"vcsa-b.example.internal"}""");
+
+		Guid catalogComponentId = await SeedCompatibleCatalogComponentAsync();
+		await _components.UpsertDiscoveredAsync(
+			targetB, [new DiscoveredComponent("esxi", "host-b-9001", "esxi-b.example.internal", null, catalogComponentId, "8.0.3")], CancellationToken.None);
+		Component seeded = (await _components.ListForTargetAsync(targetB, includeRetired: true, CancellationToken.None)).Single();
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "explicit", component_ids = new[] { seeded.Id } },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		(Guid TargetId, string JobType)[] scanJobs = await ReadScanJobTargetsAsync(runId);
+
+		// Exactly one scan job, naming target B (the selected component's owner) --
+		// never target A.
+		Assert.Single(scanJobs);
+		Assert.Equal(targetB, scanJobs[0].TargetId);
+		Assert.DoesNotContain(scanJobs, job => job.TargetId == targetA);
+	}
+
+	[Fact]
+	public async Task CreateScanRun_WithExplicitMultiComponentScopeOnOneTarget_FansOutOnlyThoseComponents()
+	{
+		// Explicit scope naming two components on the SAME target must fan out exactly
+		// two scan jobs, both against that target -- never a third (legacy) job, and
+		// never touching a second, unselected target in the same site.
+		Guid siteId = await CreateSiteAsync("multi-component-site");
+		Guid targetA = await CreateTargetAsync(siteId, "vsphere", "vcsa-multi", """{"host":"vcsa-multi.example.internal"}""");
+		Guid untouchedTarget = await CreateTargetAsync(siteId, "vsphere", "vcsa-untouched", """{"host":"vcsa-untouched.example.internal"}""");
+
+		Guid catalogComponentId = await SeedCompatibleCatalogComponentAsync();
+		await _components.UpsertDiscoveredAsync(
+			targetA,
+			[
+				new DiscoveredComponent("esxi", "host-multi-9001", "esxi-multi-01.example.internal", null, catalogComponentId, "8.0.3"),
+				new DiscoveredComponent("esxi", "host-multi-9002", "esxi-multi-02.example.internal", null, catalogComponentId, "8.0.3"),
+			],
+			CancellationToken.None);
+		Guid[] seededIds = (await _components.ListForTargetAsync(targetA, includeRetired: true, CancellationToken.None))
+			.Select(component => component.Id).ToArray();
+		Assert.Equal(2, seededIds.Length);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "explicit", component_ids = seededIds },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		(Guid TargetId, string JobType)[] scanJobs = await ReadScanJobTargetsAsync(runId);
+
+		Assert.Equal(2, scanJobs.Length);
+		Assert.All(scanJobs, job => Assert.Equal(targetA, job.TargetId));
+		Assert.DoesNotContain(scanJobs, job => job.TargetId == untouchedTarget);
+	}
+
+	[Fact]
+	public async Task CreateScanRun_WithAllModeScope_StillFansOutDiscoveredComponents_AndNeverLegacyFansOutAnUnplannableTarget()
+	{
+		// Requirement 2: the legitimate "all" case must still expand and fan out
+		// correctly against refreshed inventory (ADR-0023 §3), while a second target
+		// in the same site with no catalog-compatible component gets NO job at all --
+		// not the legacy whole-target fallback either. "all" is target_scope-shaped
+		// too (ScopeResolutionService.ResolveAsync), so the same per-request gate this
+		// issue adds applies to it, not only to "explicit".
+		Guid siteId = await CreateSiteAsync("all-mode-site");
+		Guid plannableTarget = await CreateTargetAsync(siteId, "vsphere", "vcsa-plannable", """{"host":"vcsa-plannable.example.internal"}""");
+		Guid unplannableTarget = await CreateTargetAsync(siteId, "vsphere", "vcsa-unplannable", """{"host":"vcsa-unplannable.example.internal"}""");
+
+		Guid catalogComponentId = await SeedCompatibleCatalogComponentAsync();
+		await _components.UpsertDiscoveredAsync(
+			plannableTarget, [new DiscoveredComponent("esxi", "host-all-9001", "esxi-all-01.example.internal", null, catalogComponentId, "8.0.3")], CancellationToken.None);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Guid runId = created.RootElement.GetProperty("run_id").GetGuid();
+
+		(Guid TargetId, string JobType)[] scanJobs = await ReadScanJobTargetsAsync(runId);
+
+		Assert.Single(scanJobs);
+		Assert.Equal(plannableTarget, scanJobs[0].TargetId);
+		Assert.DoesNotContain(scanJobs, job => job.TargetId == unplannableTarget);
+	}
+
+	/// <summary>
+	/// Reads (target_id, job_type) for every <c>scan</c>-typed job row on
+	/// <paramref name="runId"/> directly from Postgres -- the failing-test-first proof
+	/// for issue #1122 needs the raw row set, not the HTTP jobs-list projection,
+	/// because the defect is an EXTRA row the API would otherwise just as faithfully
+	/// echo back.
+	/// </summary>
+	private async Task<(Guid TargetId, string JobType)[]> ReadScanJobTargetsAsync(Guid runId)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"SELECT target_id, job_type FROM jobs WHERE run_id = $1 AND job_type = 'scan' ORDER BY target_id", connection);
+		command.Parameters.AddWithValue(runId);
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+		List<(Guid, string)> rows = [];
+		while (await reader.ReadAsync())
+		{
+			rows.Add((reader.GetGuid(0), reader.GetString(1)));
+		}
+
+		return [.. rows];
+	}
+
+	[Fact]
 	public async Task CreateScanRun_WithInvalidTargetScopeMode_Returns400ValidationError()
 	{
 		Guid siteId = await CreateSiteAsync("bad-mode-site");
