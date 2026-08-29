@@ -280,6 +280,80 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 	}
 
 	/// <summary>
+	/// Issue #1081 (round-1 review, blocker 1) -- the MIGRATION case, and the one that
+	/// decides whether this issue is actually fixed on the deployment it was filed
+	/// from. Every target discovered before #1081 already carries a `vcenter` root with
+	/// `vendor_identity IS NULL`, because the pre-#1081 module reported no appliance
+	/// identity at all. Giving the root a real identity also moves its upsert from the
+	/// null-identity partial index to `components_vendor_identity_unique` -- a
+	/// DIFFERENT ON CONFLICT target, which does not see the existing row. Both
+	/// constraints permit the result, so the pass inserted a SECOND root; the
+	/// declared-service lookup then resolved the tie by `created_at` and picked the
+	/// older, unlinked, identity-less one, leaving `declared_services_upserted: 0`
+	/// forever -- the single metric this issue exists to move -- while any children
+	/// #741 had already materialized were marked absent.
+	///
+	/// This test seeds the pre-#1081 shape FIRST and then runs the real pass, so it
+	/// starts from the real deployment's state rather than a fresh target (which is
+	/// why the sibling test above cannot catch this: every stub pass there emits an
+	/// identity, so only one root is ever created). The bar is one root, adopted in
+	/// place -- same row id, its history intact -- identified, linked, expanding.
+	/// </summary>
+	[Fact]
+	public async Task PreExistingNullIdentityVCenterRoot_IsAdoptedInPlace_NotDuplicated_AndDeclaredServicesExpand()
+	{
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-1081-adoption-canary");
+
+		// The pre-#1081 shape, exactly as the old module produced it: a vcenter root
+		// with no vendor identity and no version opinion, hence no catalog linkage.
+		await _components.UpsertDiscoveredAsync(
+			targetId,
+			[new Waypoint.Core.Components.DiscoveredComponent(
+				Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter,
+				VendorIdentity: null,
+				DisplayName: "vCenter Server",
+				ParentVendorIdentity: null,
+				CatalogComponentId: null,
+				ExactVersion: null)],
+			CancellationToken.None);
+
+		Waypoint.Core.Components.Component legacyRoot = Assert.Single(
+			(await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
+				.Where(c => c.CatalogComponentKey == Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter));
+		Assert.Null(legacyRoot.VendorIdentity);
+		Assert.Null(legacyRoot.CatalogComponentId);
+
+		// Now the post-#1081 pass runs against that pre-existing state.
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1081-linked");
+		Guid runId = await RunDiscoverOnceAsync(targetId);
+		Assert.Equal("done", await GetJobFieldAsync(await GetJobIdForRunAsync(runId), "state"));
+
+		// ONE root, not two -- including retired rows, so a "dedupe by retiring the
+		// loser" implementation could not pass this by hiding the duplicate.
+		IReadOnlyList<Waypoint.Core.Components.Component> all = await _components
+			.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		Waypoint.Core.Components.Component root = Assert.Single(
+			all.Where(c => c.ParentComponentId is null
+				&& c.CatalogComponentKey == Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter));
+
+		// ADOPTED, not replaced: the same row the legacy pass created now carries the
+		// identity. This is what preserves first_seen_at, any Admin configured_fact,
+		// and the parent_component_id FKs of children already materialized under it.
+		Assert.Equal(legacyRoot.Id, root.Id);
+		Assert.Equal("vcenter-instance-1081-linked", root.VendorIdentity);
+		Assert.Equal(Waypoint.Core.Components.ComponentLifecycleStates.Active, root.Lifecycle);
+		Assert.Equal("8.0.3", root.DiscoveredFact?.ExactVersion);
+		Assert.NotNull(root.CatalogComponentId);
+
+		// And the consequence the issue was actually filed for: the expansion fires.
+		Assert.NotEmpty(all.Where(c => c.ParentComponentId == root.Id));
+		JsonElement progress = await GetDiscoverProgressPayloadAsync(runId);
+		Assert.True(
+			progress.GetProperty("declared_services_upserted").GetInt32() > 0,
+			"declared_services_upserted must move on a target discovered BEFORE this shipped -- that is the whole point of #1081.");
+	}
+
+	/// <summary>
 	/// Issue #732's fail-closed requirement (ADR-0023: "a failed or partial boundary...
 	/// neither claims completeness nor advances absence"): a malformed discovery result
 	/// must fail the job BEFORE either inventory or component materialization runs --

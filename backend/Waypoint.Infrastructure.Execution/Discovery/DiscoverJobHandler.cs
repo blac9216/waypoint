@@ -601,9 +601,26 @@ public sealed class DiscoverJobHandler : IJobHandler
 	{
 		IReadOnlyList<Component> current = await _components
 			.ListForTargetAsync(targetId, includeRetired: true, cancellationToken).ConfigureAwait(false);
-		Component? root = current.FirstOrDefault(c =>
-			c.ParentComponentId is null &&
-			string.Equals(c.CatalogComponentKey, Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter, StringComparison.Ordinal));
+		// Issue #1081 (round-1 review, blocker 1): ComponentRepository now adopts a
+		// pre-existing null-identity root in place, so in the normal case there is
+		// exactly one candidate here and this ordering is inert. It is still stated
+		// explicitly rather than left to ListForTargetAsync's `ORDER BY
+		// catalog_component_key, created_at`, because that ordering resolves a tie by
+		// AGE -- the worst possible tiebreak for this lookup. On an appliance that
+		// already carries two roots from a build that shipped the identity change
+		// without the adoption fix, created_at picks the older, retired, unlinked,
+		// identity-less row, `root.CatalogComponentId` is null, the declared set comes
+		// back empty, and every child #741 previously materialized is marked absent.
+		// Preferring live-over-retired and then identified-over-anonymous makes the
+		// winner a property of the rows themselves and lets such an appliance
+		// self-heal on its next pass.
+		Component? root = current
+			.Where(c =>
+				c.ParentComponentId is null &&
+				string.Equals(c.CatalogComponentKey, Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter, StringComparison.Ordinal))
+			.OrderBy(c => string.Equals(c.Lifecycle, Waypoint.Core.Components.ComponentLifecycleStates.Retired, StringComparison.Ordinal) ? 1 : 0)
+			.ThenBy(c => c.VendorIdentity is null ? 1 : 0)
+			.FirstOrDefault();
 		if (root is null)
 		{
 			return new CatalogDeclaredChildSyncOutcome(0, 0, 0);

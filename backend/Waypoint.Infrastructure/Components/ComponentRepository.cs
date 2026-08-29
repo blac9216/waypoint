@@ -173,6 +173,67 @@ public sealed class ComponentRepository : IComponentRepository
 			// always-overwrite semantics (relink or honestly unlink on a version
 			// change) are unchanged.
 			bool discoveryHasVersionOpinion = factJson is not null;
+
+			// Issue #1081 (round-1 review, blocker 1): a ROOT component that was
+			// previously discovered WITHOUT an identity and is now discovered WITH one
+			// must be ADOPTED in place, not duplicated. The two upsert branches below
+			// bind to two DIFFERENT unique constraints
+			// (components_vendor_identity_unique vs the null-identity partial index), so
+			// once a pass starts supplying an identity for a key it had previously left
+			// null -- exactly what #1081 does for the `vcenter` root -- the identity
+			// branch's ON CONFLICT simply does not see the pre-existing null-identity
+			// row, and BOTH constraints happily permit a second root alongside it. The
+			// consequence is not cosmetic: DiscoverJobHandler's declared-service root
+			// lookup would then have two candidates and resolve the tie by created_at,
+			// picking the older, unlinked, absent one and reporting
+			// declared_services_upserted: 0 forever on every target discovered before
+			// this shipped.
+			//
+			// Adoption (an UPDATE that stamps the identity onto the existing row) is
+			// chosen over post-hoc dedup or a data migration because it is the only
+			// option that preserves the row's whole history: first_seen_at, any
+			// Admin-set configured_fact, the catalog_component_id the configured-fact
+			// path may have established, every component_observations row, and -- most
+			// importantly -- the parent_component_id FKs of children already
+			// materialized under it (#741/#743's declared services). A dedup would have
+			// to re-point all of those by hand; a migration cannot run at all, because
+			// the identity is not knowable at migration time -- it is only learned from
+			// the appliance at discovery time.
+			//
+			// Deliberately scoped to ROOTS (parentComponentId is null). A root is a
+			// singleton per (target, catalog_component_key) -- one appliance per target
+			// -- so "the null-identity row for this key" is unambiguously the same
+			// entity that just reported an identity. Non-root siblings (several esxi
+			// hosts under one target) have no such guarantee: an arbitrary identified
+			// sibling must not swallow the shared null-identity placeholder, so they
+			// keep the previous behaviour untouched.
+			//
+			// The NOT EXISTS guard keeps this safe on an appliance that already ran a
+			// build carrying #1081's identity change WITHOUT this fix and so already has
+			// both rows on disk: adoption would violate components_vendor_identity_unique
+			// there, so it is skipped and the stale placeholder is retired instead by the
+			// statement that runs after the upsert below.
+			if (item.VendorIdentity is not null && parentComponentId is null)
+			{
+				await using NpgsqlCommand adopt = new(
+					"""
+					UPDATE components SET vendor_identity = $3
+					WHERE parent_target_id = $1
+					  AND parent_component_id IS NULL
+					  AND catalog_component_key = $2
+					  AND vendor_identity IS NULL
+					  AND NOT EXISTS (
+					      SELECT 1 FROM components existing
+					      WHERE existing.parent_target_id = $1
+					        AND existing.catalog_component_key = $2
+					        AND existing.vendor_identity = $3)
+					""", connection, transaction);
+				adopt.Parameters.AddWithValue(targetId);
+				adopt.Parameters.AddWithValue(item.CatalogComponentKey);
+				adopt.Parameters.AddWithValue(item.VendorIdentity);
+				await adopt.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			}
+
 			Guid rowId;
 			bool wasReconnect;
 			if (item.VendorIdentity is not null)
@@ -254,6 +315,28 @@ public sealed class ComponentRepository : IComponentRepository
 				rowId = reader.GetGuid(0);
 				string? priorLifecycle = reader.IsDBNull(1) ? null : reader.GetString(1);
 				wasReconnect = priorLifecycle is not null && priorLifecycle != Waypoint.Core.Components.ComponentLifecycleStates.Active;
+			}
+
+			// Issue #1081 (round-1 review, blocker 1), second half: on an appliance that
+			// already has BOTH shapes on disk the adoption above is correctly skipped,
+			// which would leave the stale null-identity root visible to the
+			// declared-service root lookup (which reads includeRetired: true). Retire it
+			// so exactly one root remains a live candidate. A no-op in the normal case,
+			// because adoption already left no null-identity root behind.
+			if (item.VendorIdentity is not null && parentComponentId is null)
+			{
+				await using NpgsqlCommand retireStale = new(
+					"""
+					UPDATE components SET lifecycle = 'retired', continuous_absence_since = COALESCE(continuous_absence_since, now())
+					WHERE parent_target_id = $1
+					  AND parent_component_id IS NULL
+					  AND catalog_component_key = $2
+					  AND vendor_identity IS NULL
+					  AND lifecycle <> 'retired'
+					""", connection, transaction);
+				retireStale.Parameters.AddWithValue(targetId);
+				retireStale.Parameters.AddWithValue(item.CatalogComponentKey);
+				await retireStale.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 			}
 
 			if (factJson is not null)

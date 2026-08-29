@@ -68,7 +68,13 @@ function Invoke-WaypointDiscovery {
 	    Build are $Session.Version/.Build (`content.about.version`/`.build`). Emitted
 	    for the ONE session matching the requested -VCenter (never every AllLinked
 	    sibling, which would misattribute another vCenter's identity to this target's
-	    root). A 'vm' row's Build is always $null -- it used to carry the VMware Tools
+	    root), and ONLY when that session actually supplies a non-blank InstanceUuid
+	    and Name. When it cannot -- or when no session matches by name and more than
+	    one linked session makes "which one is ours" a guess -- no 'vcenter' row is
+	    emitted at all: the root stays honestly identity- and version-absent and the
+	    rest of the pass is unaffected, rather than a blank MoRef/Name failing the
+	    whole discovery job through TryParseItem/ParseDiscoveredItems (#618).
+	    A 'vm' row's Build is always $null -- it used to carry the VMware Tools
 	    version, which is not a product-version fact for the VM itself and would
 	    mislead anything reading Build as a platform fact.
 
@@ -134,23 +140,46 @@ function Invoke-WaypointDiscovery {
 	# (content.about.version/.build), never the ESXi hosts' values. Only the ONE
 	# session matching the requested -VCenter is used: -AllLinked can return sibling
 	# vCenters too, and attributing one of THEIR identities to THIS target's root would
-	# be exactly the guessed-identity failure ADR-0023 forbids. Falls back to the first
-	# session only if none match by name (e.g. -VCenter given as an IP while the
-	# session reports its FQDN, or vice versa) -- a real vCenter connection always has
-	# at least one session, so this never leaves $PrimarySession null.
+	# be exactly the guessed-identity failure ADR-0023 forbids.
+	#
+	# Issue #1081 (round-1 review, major 3): the row is emitted ONLY when the identity
+	# and name are both actually present, and it is the LAST thing decided rather than
+	# an unconditional emission. Two reasons, both fail-closed:
+	#
+	#   * TryParseItem rejects a blank MoRef/Name and ParseDiscoveredItems counts that
+	#     as malformed, which DiscoverJobHandler turns into a FAILED discovery job
+	#     (issue #618's no-silent-success rule). Emitting the row unconditionally
+	#     therefore meant an appliance that reported a blank instanceUuid would take
+	#     the WHOLE pass down -- cluster/host/VM inventory included -- rather than
+	#     leaving the root honestly identity-less. Epic #726 section 3 wants an absent
+	#     fact to be absent and the component skipped, never a failed pass, so a
+	#     $PrimarySession that cannot supply both fields yields NO vcenter row at all
+	#     (which the mapper already handles: the root simply stays identity- and
+	#     version-absent, and everything else about the pass is unaffected).
+	#
+	#   * When no session matches the requested -VCenter by name (e.g. -VCenter given
+	#     as an IP while the session reports its FQDN), a single session is still
+	#     unambiguously THIS target's appliance and is used. More than one session and
+	#     no name match is a genuine ambiguity under -AllLinked -- "first session" would
+	#     be a guess at which linked vCenter is ours -- so nothing is emitted instead.
 	$PrimarySession = @($Connection.Sessions | Where-Object { $_.Name -eq $VCenter }) | Select-Object -First 1
 	if (-not $PrimarySession) {
-		$PrimarySession = @($Connection.Sessions) | Select-Object -First 1
+		$UnmatchedSessions = @($Connection.Sessions)
+		if ($UnmatchedSessions.Count -eq 1) {
+			$PrimarySession = $UnmatchedSessions[0]
+		}
 	}
 
-	[pscustomobject]@{
-		Type            = 'vcenter'
-		MoRef           = $PrimarySession.InstanceUuid
-		Name            = $PrimarySession.Name
-		ParentMoRef     = $null
-		Build           = $PrimarySession.Build
-		Version         = $PrimarySession.Version
-		MaintenanceMode = $null
+	if ($PrimarySession -and -not [string]::IsNullOrWhiteSpace($PrimarySession.InstanceUuid) -and -not [string]::IsNullOrWhiteSpace($PrimarySession.Name)) {
+		[pscustomobject]@{
+			Type            = 'vcenter'
+			MoRef           = $PrimarySession.InstanceUuid
+			Name            = $PrimarySession.Name
+			ParentMoRef     = $null
+			Build           = $PrimarySession.Build
+			Version         = $PrimarySession.Version
+			MaintenanceMode = $null
+		}
 	}
 
 	# Issue #865: collected per-subtree failure messages, surfaced verbatim (already

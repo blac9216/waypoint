@@ -311,13 +311,16 @@ public sealed class SchemaMigrationTests
 	/// '9.1.0' matches via VersionScopeMatcher's existing closed two-form test -- no
 	/// schema shape changes, no new runner grants, reuses migration 0070's own
 	/// idempotent-merge idiom --
+	/// 0077 (issue #1081, epic #726 section 3): widens the inventory_items type check
+	/// constraint to admit 'vcenter' so the appliance itself gets an inventory row --
+	/// idempotent DROP IF EXISTS + re-ADD, no column change, no new runner grants --
 	/// 0078 (issue #1062, epic #726 sections 6/7; slot 0077 claimed and unpushed by
 	/// issue #1081 at this migration's own commit time): adds retention_policy -- the
 	/// singleton (mirrors appliance_state) Admin-configurable evidence-retention-period
 	/// row (default 180 days / ~6 months) backing the new automated purge sweep, no new
 	/// runner grants (API-only, same posture as run_retention_holds) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 76;
+	private const int ExpectedMigrationCount = 77;
 
 	private readonly PostgresFixture _fixture;
 

@@ -61,7 +61,24 @@ function Connect-VIServer {
 		throw "WaypointVsphereTransportFake: no vSphere API credential supplied for '$Server'."
 	}
 
-	return @([pscustomobject]@{ Name = $Server })
+	# Issue #1081 (round-1 review, major 3): an invented test knob so a test can pin
+	# the SHIPPED module's vcenter-row emission against session shapes a real
+	# appliance can produce -- a blank/absent instanceUuid, or several -AllLinked
+	# sibling sessions none of which match the requested -VCenter by name. Unset (the
+	# default), this behaves exactly as before: one session named after the server.
+	# The default now also carries an InstanceUuid/Version/Build, because a real
+	# session always does and the emission guard is only meaningful against a fake
+	# that can supply one.
+	if ($null -ne $Global:WaypointVsphereTransportFakeSessions) {
+		return @($Global:WaypointVsphereTransportFakeSessions)
+	}
+
+	return @([pscustomobject]@{
+		Name         = $Server
+		InstanceUuid = 'vcenter-instance-fake-0001'
+		Version      = '0.0.0-invented-unseeded'
+		Build        = 'invented-build-0001'
+	})
 }
 
 function Disconnect-VIServer {
@@ -72,7 +89,18 @@ function Disconnect-VIServer {
 # Invoke-WaypointDiscovery walks Get-Cluster/Get-VMHost/Get-VM after connecting;
 # an empty inventory is sufficient to pin this issue's noninteractive contract (the
 # fix is about what happens BEFORE/DURING connect, not what discovery enumerates).
-function Get-Cluster { param($Server); return @() }
+# Issue #1081 (round-1 review, major 3): $Global:WaypointVsphereTransportFakeClusters
+# lets a test put ONE ordinary cluster into the walk, so "a session that cannot supply
+# an identity suppresses only the vcenter row and leaves the rest of the pass intact"
+# is provable rather than vacuous against an empty inventory. Unset, unchanged.
+function Get-Cluster {
+	param($Server)
+	if ($null -ne $Global:WaypointVsphereTransportFakeClusters) {
+		return @($Global:WaypointVsphereTransportFakeClusters)
+	}
+
+	return @()
+}
 function Get-VMHost { param($Server, $Location); return @() }
 function Get-VM { param($Server, $Location); return @() }
 

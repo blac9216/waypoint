@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Linq;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.PowerShell;
@@ -228,5 +229,159 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 		Assert.False(result.Succeeded);
 		Assert.NotNull(result.FailureReason);
 		Assert.DoesNotContain("Get-Credential", result.FailureReason, StringComparison.Ordinal);
+	}
+	/// <summary>
+	/// Runs the REAL <c>Invoke-WaypointDiscovery</c> with the fake transport's session
+	/// list overridden for the duration of this one pipeline, and returns the emitted
+	/// item objects. Issue #1081's emission guard can only be pinned against a session
+	/// shape a real appliance can produce, and the transport fake is where that shape
+	/// is decided.
+	/// </summary>
+	private static async Task<(bool Succeeded, string? FailureReason, IReadOnlyList<System.Management.Automation.PSObject> Items)>
+		RunDiscoveryWithSessionsAsync(PowerShellExecutor executor, string vCenter, string sessionsExpression)
+	{
+		PowerShellExecutionResult result = await executor.ExecuteAsync(
+			new PowerShellRequest(
+				$$"""
+				$Global:WaypointVsphereTransportFakeSessions = {{sessionsExpression}}
+				$Global:WaypointVsphereTransportFakeClusters = @([pscustomobject]@{
+					Name = 'cluster-alpha'
+					ExtensionData = [pscustomobject]@{ MoRef = [pscustomobject]@{ Value = 'domain-c101' } }
+				})
+				try {
+					Invoke-WaypointDiscovery -VCenter '{{vCenter}}' -Username 'administrator@example.internal' -Password 'invented-test-password'
+				} finally {
+					$Global:WaypointVsphereTransportFakeSessions = $null
+					$Global:WaypointVsphereTransportFakeClusters = $null
+				}
+				""",
+				PowerShellRequestKind.Script),
+			CancellationToken.None);
+
+		List<System.Management.Automation.PSObject> items = result.Output
+			.Where(o => o is not null)
+			.Select(o => System.Management.Automation.PSObject.AsPSObject(o!))
+			.ToList();
+		return (result.Succeeded, result.FailureReason, items);
+	}
+
+	private static List<System.Management.Automation.PSObject> OfType(
+		IReadOnlyList<System.Management.Automation.PSObject> items, string type)
+		=> items.Where(i => string.Equals(i.Properties["Type"]?.Value as string, type, StringComparison.Ordinal)).ToList();
+
+	/// <summary>
+	/// Issue #1081 (round-1 review, major 3). The happy path on the SHIPPED module:
+	/// a session that supplies a real instanceUuid produces exactly one 'vcenter' row
+	/// carrying it, alongside the ordinary inventory walk. This is the control the two
+	/// absence tests below are read against -- without it, "no vcenter row" would
+	/// prove nothing, because a fixture that never emits one looks identical.
+	/// </summary>
+	[Fact]
+	public async Task Discovery_WhenTheSessionSuppliesAnInstanceUuid_EmitsExactlyOneIdentifiedVcenterRow()
+	{
+		PowerShellExecutor executor = CreateExecutor();
+		var run = await RunDiscoveryWithSessionsAsync(
+			executor,
+			"vcsa-01.example.internal",
+			"""
+			@([pscustomobject]@{ Name = 'vcsa-01.example.internal'; InstanceUuid = 'vcenter-instance-aaaa-0001'; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0001' })
+			""");
+
+		Assert.True(run.Succeeded, run.FailureReason);
+		System.Management.Automation.PSObject vcenter = Assert.Single(OfType(run.Items, "vcenter"));
+		Assert.Equal("vcenter-instance-aaaa-0001", vcenter.Properties["MoRef"]?.Value as string);
+		Assert.Equal("vcsa-01.example.internal", vcenter.Properties["Name"]?.Value as string);
+		Assert.Equal("0.0.0-invented-unseeded", vcenter.Properties["Version"]?.Value as string);
+		Assert.Single(OfType(run.Items, "cluster"));
+	}
+
+	/// <summary>
+	/// Issue #1081 (round-1 review, major 3): the honest-absence path on the SHIPPED
+	/// module, not on a pre-#1081 stub. Before the guard the 'vcenter' row was emitted
+	/// unconditionally, so a blank instanceUuid produced a row with a blank MoRef --
+	/// which <c>DiscoverJobHandler.TryParseItem</c> rejects and
+	/// <c>ParseDiscoveredItems</c> counts as malformed, failing the ENTIRE discovery
+	/// job under issue #618's no-silent-success rule and taking cluster/host/VM
+	/// inventory down with it. Epic #726 section 3 wants an unobservable fact to be
+	/// absent and the component skipped, never a failed pass: no vcenter row is
+	/// emitted, nothing malformed is produced, and the cluster row still arrives.
+	/// </summary>
+	[Fact]
+	public async Task Discovery_WhenTheSessionCannotSupplyAnInstanceUuid_EmitsNoVcenterRow_AndTheRestOfThePassSurvives()
+	{
+		PowerShellExecutor executor = CreateExecutor();
+		var run = await RunDiscoveryWithSessionsAsync(
+			executor,
+			"vcsa-01.example.internal",
+			"""
+			@([pscustomobject]@{ Name = 'vcsa-01.example.internal'; InstanceUuid = '   '; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0001' })
+			""");
+
+		Assert.True(run.Succeeded, run.FailureReason);
+		Assert.Empty(OfType(run.Items, "vcenter"));
+
+		// The whole point: suppressing the identity-less root costs nothing else.
+		Assert.Single(OfType(run.Items, "cluster"));
+		System.Management.Automation.PSObject meta = Assert.Single(OfType(run.Items, "discovery-meta"));
+		Assert.True(meta.Properties["Complete"]?.Value is true);
+
+		// Nothing emitted carries a blank MoRef/Name, i.e. nothing here can be counted
+		// malformed one layer up.
+		Assert.All(
+			run.Items.Where(i => (i.Properties["Type"]?.Value as string) != "discovery-meta"),
+			item =>
+			{
+				Assert.False(string.IsNullOrWhiteSpace(item.Properties["MoRef"]?.Value as string));
+				Assert.False(string.IsNullOrWhiteSpace(item.Properties["Name"]?.Value as string));
+			});
+	}
+
+	/// <summary>
+	/// Issue #1081 (round-1 review, finding (a) folded into major 3): under -AllLinked
+	/// the transport can return sibling vCenters. When none matches the requested
+	/// -VCenter by name, "first session" would be a GUESS at which linked appliance is
+	/// this target's -- attributing a sibling's instanceUuid to this root, exactly the
+	/// guessed-identity failure ADR-0023 forbids. Emit nothing instead.
+	/// </summary>
+	[Fact]
+	public async Task Discovery_WhenNoLinkedSessionMatchesByName_EmitsNoVcenterRow_RatherThanGuessingASibling()
+	{
+		PowerShellExecutor executor = CreateExecutor();
+		var run = await RunDiscoveryWithSessionsAsync(
+			executor,
+			"vcsa-01.example.internal",
+			"""
+			@(
+				[pscustomobject]@{ Name = 'vcsa-77.example.internal'; InstanceUuid = 'vcenter-instance-sibling-0077'; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0077' },
+				[pscustomobject]@{ Name = 'vcsa-78.example.internal'; InstanceUuid = 'vcenter-instance-sibling-0078'; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0078' }
+			)
+			""");
+
+		Assert.True(run.Succeeded, run.FailureReason);
+		Assert.Empty(OfType(run.Items, "vcenter"));
+		Assert.DoesNotContain(run.Items, i => (i.Properties["MoRef"]?.Value as string)?.Contains("sibling", StringComparison.Ordinal) is true);
+	}
+
+	/// <summary>
+	/// The counterpart to the test above: a SINGLE session that does not match by name
+	/// is not ambiguous at all -- there is only one appliance on the other end of this
+	/// connection, and -VCenter given as an IP while the session reports its FQDN (or
+	/// vice versa) is an ordinary, expected mismatch. Adopting it keeps issue #1081
+	/// working on those deployments instead of silently losing the root.
+	/// </summary>
+	[Fact]
+	public async Task Discovery_WhenTheOnlySessionDoesNotMatchByName_StillEmitsItsIdentity()
+	{
+		PowerShellExecutor executor = CreateExecutor();
+		var run = await RunDiscoveryWithSessionsAsync(
+			executor,
+			"192.0.2.10",
+			"""
+			@([pscustomobject]@{ Name = 'vcsa-01.example.internal'; InstanceUuid = 'vcenter-instance-solo-0001'; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0001' })
+			""");
+
+		Assert.True(run.Succeeded, run.FailureReason);
+		System.Management.Automation.PSObject vcenter = Assert.Single(OfType(run.Items, "vcenter"));
+		Assert.Equal("vcenter-instance-solo-0001", vcenter.Properties["MoRef"]?.Value as string);
 	}
 }
