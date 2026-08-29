@@ -40,6 +40,15 @@ public sealed record HdfSeverityCounts(int CatIOpen, int CatIIOpen, int CatIIIOp
 /// not count" distinctly from "zero open findings" -- a corrupt HDF must never render as
 /// a clean, compliant row (issue #299 round-1 blocker). This is a best-effort summary for
 /// the Results table, not a compliance authority.
+///
+/// <b>Issue #1124</b>: a <c>skipped</c> control (including an applicable one that
+/// could not execute) deliberately does NOT count as open here, same as it does not
+/// count as open in the findings vocabulary (<see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>)
+/// -- Not_Reviewed is "not evaluated", not "failed", so it must not inflate the CAT
+/// open counts either. This preview intentionally does not distinguish genuine
+/// not-applicable from could-not-execute (that distinction lives in
+/// <see cref="HdfFindingsParser"/>'s persisted findings, which this narrow CAT-only
+/// preview does not read); do not "fix" that here by making skipped count as open.
 /// </summary>
 public static class HdfSeverityCounter
 {

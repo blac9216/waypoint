@@ -53,10 +53,19 @@ public sealed record HdfParseResult(bool Success, IReadOnlyList<ComponentResultF
 /// Not_Applicable" rule, reconciled with the fact that InSpec's OWN
 /// <c>not_applicable</c> impact-zero controls are genuinely <see cref="ComponentFindingStatuses.NotApplicable"/>
 /// (a real, intentional skip decided by the profile's own control logic, not a
-/// failure to execute) -- the two are told apart by whether <c>results</c> is
-/// non-empty: InSpec always emits at least one result row (impact 0 controls
-/// included) when the control's `describe` block actually ran, so an empty array is
-/// the "never ran" signal, not a fourth spelling of not_applicable.
+/// failure to execute).
+///
+/// <b>Issue #1124</b>: an empty/missing <c>results</c> array is not the only "never
+/// ran" shape. A control whose <c>describe</c> block bailed out at runtime (an
+/// unresolved target, a guarded selector, a permissions gap) emits a NON-empty
+/// <c>results</c> array with <c>status: "skipped"</c> and a <c>skip_message</c> --
+/// indistinguishable, by status string alone, from a genuine impact-0.0
+/// not-applicable control, which also reports every result row as <c>skipped</c>.
+/// The two are told apart by the control's own <c>impact</c>: <c>0.0</c> is the
+/// profile's own affirmative "does not apply" decision (Not_Applicable); anything
+/// else -- including a missing/malformed <c>impact</c>, which is never assumed to
+/// mean "does not apply" -- is an applicable control that could not execute
+/// (Not_Reviewed), carrying the <c>skip_message</c> as evidence.
 /// </summary>
 public static class HdfFindingsParser
 {
@@ -150,7 +159,14 @@ public static class HdfFindingsParser
 				continue;
 			}
 
-			rows.Add((ReadString(result, "status"), ReadString(result, "code_desc") ?? ReadString(result, "message")));
+			string? resultStatus = ReadString(result, "status");
+			// InSpec carries the "why" for a skipped result in skip_message, not
+			// code_desc/message -- prefer it for skipped rows so the could-not-execute
+			// evidence (issue #1124) is the actual reason, not the assertion's title.
+			string? resultMessage = string.Equals(resultStatus, "skipped", StringComparison.Ordinal)
+				? ReadString(result, "skip_message") ?? ReadString(result, "code_desc") ?? ReadString(result, "message")
+				: ReadString(result, "code_desc") ?? ReadString(result, "message");
+			rows.Add((resultStatus, resultMessage));
 		}
 
 		if (rows.Count == 0)
@@ -158,7 +174,8 @@ public static class HdfFindingsParser
 			return new ComponentResultFinding(controlId, ruleId, title, severity, ComponentFindingStatuses.NotReviewed, "No results reported for this control.");
 		}
 
-		string status = MapStatus(rows);
+		double? impact = ReadDouble(control, "impact");
+		string status = MapStatus(rows, impact);
 		string? evidence = BuildEvidence(rows);
 
 		return new ComponentResultFinding(controlId, ruleId, title, severity, status, evidence);
@@ -171,9 +188,13 @@ public static class HdfFindingsParser
 	/// first row's own status (passed/skipped/not_applicable) applies -- InSpec never
 	/// mixes passed and not_applicable rows for the same control, and a genuinely
 	/// mixed or unrecognized status string is treated as ExecutionError rather than
-	/// silently defaulting to Passed (never a fabricated clean result).
+	/// silently defaulting to Passed (never a fabricated clean result). An all-skipped
+	/// result set is split by <paramref name="impact"/> per issue #1124: impact 0.0 is
+	/// the profile's own not-applicable decision; anything else -- including a
+	/// missing/malformed impact, never assumed to mean "does not apply" -- is an
+	/// applicable control that could not execute.
 	/// </summary>
-	private static string MapStatus(List<(string? Status, string? Message)> rows)
+	private static string MapStatus(List<(string? Status, string? Message)> rows, double? impact)
 	{
 		bool anyError = rows.Any(r => string.Equals(r.Status, "error", StringComparison.Ordinal));
 		if (anyError)
@@ -194,7 +215,7 @@ public static class HdfFindingsParser
 
 		if (rows.All(r => string.Equals(r.Status, "skipped", StringComparison.Ordinal)))
 		{
-			return ComponentFindingStatuses.NotApplicable;
+			return impact is 0.0 ? ComponentFindingStatuses.NotApplicable : ComponentFindingStatuses.NotReviewed;
 		}
 
 		// Any other shape (unknown status string, or a mix this parser does not
@@ -229,6 +250,11 @@ public static class HdfFindingsParser
 	private static string? ReadString(JsonElement element, string propertyName) =>
 		element.TryGetProperty(propertyName, out JsonElement value) && value.ValueKind == JsonValueKind.String
 			? value.GetString()
+			: null;
+
+	private static double? ReadDouble(JsonElement element, string propertyName) =>
+		element.TryGetProperty(propertyName, out JsonElement value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out double parsed)
+			? parsed
 			: null;
 
 	private static string? ReadTagString(JsonElement control, string propertyName) =>

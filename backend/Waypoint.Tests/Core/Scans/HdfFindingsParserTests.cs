@@ -112,12 +112,74 @@ public sealed class HdfFindingsParserTests
 		Assert.Equal(ComponentFindingStatuses.ExecutionError, Assert.Single(result.Findings).Status);
 	}
 
+	/// <summary>
+	/// A genuine profile-declared not-applicable control: <c>impact 0.0</c>, all results
+	/// skipped. This is the ONLY case that maps to Not_Applicable -- an affirmative
+	/// "this requirement does not apply to this asset" -- and must stay that way even
+	/// after the issue #1124 fix below (an all-skipped result set is not automatically
+	/// Not_Reviewed).
+	/// </summary>
 	[Fact]
-	public void Parse_AllSkippedResults_IsNotApplicable()
+	public void Parse_AllSkippedResults_ImpactZero_IsNotApplicable()
 	{
-		string hdf = BuildHdf([ControlJson(InventedControlId, "low", [("skipped", "invented n/a reason")])]);
+		string hdf = BuildHdf([ControlJson(InventedControlId, "low", [("skipped", "invented n/a reason")], impact: 0.0)]);
 		HdfParseResult result = HdfFindingsParser.Parse(hdf);
 		Assert.Equal(ComponentFindingStatuses.NotApplicable, Assert.Single(result.Findings).Status);
+	}
+
+	/// <summary>
+	/// Issue #1124: an APPLICABLE control (impact &gt; 0) whose entire result set is
+	/// "skipped" is a control that could not execute -- e.g. InSpec's
+	/// <c>skip_message</c> naming an unresolved target -- not a genuine not-applicable
+	/// decision. Before the fix, <c>MapStatus</c> mapped this to Not_Applicable
+	/// regardless of impact, which is exactly the round-12 "scan evaluated nothing,
+	/// reported clean" defect. Uses an invented target string (AGENTS.md: no real
+	/// hostnames/IPs), matching the shape of the real skip_message without being one.
+	/// </summary>
+	[Fact]
+	public void Parse_AllSkippedResults_ApplicableImpact_IsNotReviewed()
+	{
+		string hdf = """
+			{"profiles": [{"controls": [{"id": "invented-control-01", "impact": 0.5,
+			"tags": {"severity": "medium"},
+			"results": [{"status": "skipped", "skip_message": "No hosts found by name or in target vCenter invented-target...skipping test."}]}]}]}
+			""";
+		HdfParseResult result = HdfFindingsParser.Parse(hdf);
+		Assert.True(result.Success);
+		ComponentResultFinding finding = Assert.Single(result.Findings);
+		Assert.Equal(ComponentFindingStatuses.NotReviewed, finding.Status);
+		Assert.Contains("No hosts found by name or in target vCenter", finding.Evidence);
+	}
+
+	/// <summary>Missing/malformed <c>impact</c> on an all-skipped control must never be silently treated as the genuine not-applicable case -- the safe default (matching this file's "never a fabricated clean result" discipline) is Not_Reviewed.</summary>
+	[Fact]
+	public void Parse_AllSkippedResults_MissingImpact_IsNotReviewed()
+	{
+		string hdf = BuildHdf([ControlJson(InventedControlId, "low", [("skipped", "invented reason")])]);
+		HdfParseResult result = HdfFindingsParser.Parse(hdf);
+		Assert.Equal(ComponentFindingStatuses.NotReviewed, Assert.Single(result.Findings).Status);
+	}
+
+	/// <summary>
+	/// Both shapes in the SAME parsed result, proving they are told apart per-control
+	/// rather than one setting winning for the whole document -- required proof for
+	/// issue #1124 (a genuine Not_Applicable control must not be swept into
+	/// Not_Reviewed by a fix aimed at the opposite mistake).
+	/// </summary>
+	[Fact]
+	public void Parse_MultipleControls_GenuineNotApplicableAndCouldNotExecute_AreDistinguished()
+	{
+		string hdf = BuildHdf(
+		[
+			ControlJson("SV-applicable-but-unreachable", "medium", [("skipped", "invented could-not-execute reason")], impact: 0.5),
+			ControlJson("SV-genuinely-not-applicable", "low", [("skipped", "invented n/a reason")], impact: 0.0),
+		]);
+
+		HdfParseResult result = HdfFindingsParser.Parse(hdf);
+		Assert.True(result.Success);
+		Assert.Equal(2, result.Findings.Count);
+		Assert.Equal(ComponentFindingStatuses.NotReviewed, result.Findings.Single(f => f.ControlId == "SV-applicable-but-unreachable").Status);
+		Assert.Equal(ComponentFindingStatuses.NotApplicable, result.Findings.Single(f => f.ControlId == "SV-genuinely-not-applicable").Status);
 	}
 
 	[Fact]
@@ -215,10 +277,11 @@ public sealed class HdfFindingsParserTests
 	private static string BuildHdf(IReadOnlyList<string> controlsJson) =>
 		"""{"profiles": [{"controls": [""" + string.Join(",", controlsJson) + "]}]}";
 
-	private static string ControlJson(string controlId, string? severity, IReadOnlyList<(string Status, string Message)> results)
+	private static string ControlJson(string controlId, string? severity, IReadOnlyList<(string Status, string Message)> results, double? impact = null)
 	{
 		string severityJson = severity is null ? "null" : $"\"{severity}\"";
 		string resultsJson = string.Join(",", results.Select(r => $$"""{"status": "{{r.Status}}", "code_desc": "{{r.Message}}"}"""));
-		return $$"""{"id": "{{controlId}}", "title": "invented title", "tags": {"severity": {{severityJson}}}, "results": [{{resultsJson}}]}""";
+		string impactJson = impact is null ? string.Empty : $$""", "impact": {{impact.Value}}""";
+		return $$"""{"id": "{{controlId}}", "title": "invented title", "tags": {"severity": {{severityJson}}}, "results": [{{resultsJson}}]{{impactJson}}}""";
 	}
 }
