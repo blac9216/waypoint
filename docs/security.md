@@ -52,7 +52,7 @@ The design goals that follow are:
 Personal credentials are the user's own AD/vCenter password. Ad hoc runs are
 interactive by definition and scheduling always uses service credentials, so no
 workflow ever schedules a persisted personal credential. What changed under issue #434:
-the M2-era in-memory-only handoff (`IEphemeralCredentialCache`, single process) could
+the scan-slice-era in-memory-only handoff (`IEphemeralCredentialCache`, single process) could
 not survive an API restart before a runner claimed the job, and a dedicated compliance
 runner (ADR-0013/0014) shares no process memory with the API at all. The replacement
 (`run_secrets`, one encrypted row per run, migration 0023) keeps ADR-0011's headline
@@ -213,7 +213,7 @@ real-world importance:
 2. **Never in process arguments.** Anything in argv is world-readable via
    `/proc/<pid>/cmdline`. Remediation's child `pwsh` processes (and any other child)
    receive secrets via stdin or an inherited file descriptor — never argv, and never
-   in URLs. *(Audit the existing remediation module's credential passing at M4.)*
+   in URLs. *(Audit the existing remediation module's credential passing in the *Remediation* story.)*
 3. **Write-only API, enforced at the serialization layer.** Secret material is absent
    from every response DTO — not masked; masking means the value entered the response
    pipeline. The UI renders metadata only: name, type, owner, last-rotated.

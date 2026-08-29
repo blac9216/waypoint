@@ -617,7 +617,7 @@ measured 2026-08-08 at commit `f2aadfe`):
 | frontend | line | 88.0% | 90.12% (165/165 tests) | ~2 points |
 
 The backend floor was set from the codebase's *current* coverage, not an older
-high-water mark: 91.92% was measured at `f2aadfe`, but ~78 M2 commits landed
+high-water mark: 91.92% was measured at `f2aadfe`, but ~78 scan-slice commits landed
 between then and the gate going live and moved the real number to 88.84%. The gate
 is baselined at reality (adding it changed no product code), so this is not a
 lowered floor accommodating a regression.
@@ -1201,12 +1201,12 @@ in its own README as it lands:
 - **`deploy/`** — bring-up and the SSE `proxy_buffering off` requirement from
   [ADR-0003](adr/0003-reverse-proxy-nginx.md). See `deploy/README.md`.
 
-## Fresh-stack M1/M2 parity matrix (issue #444, epic #433)
+## Fresh-stack foundation/scan-slice parity matrix (issue #444, epic #433)
 
-Epic #433 replaced the M1/M2 backend's in-process dispatch with the runner topology
+Epic #433 replaced the original combined backend's in-process dispatch with the runner topology
 (ADRs 0013/0014/0015): `Waypoint.Api` enqueues and answers queries only,
 `compliance-runner`/`download-runner` claim, execute, and own leases/events. Issue
-#444 is the closing proof that every M1/M2-delivered workflow still works end to end
+#444 is the closing proof that every workflow delivered by the first two stories still works end to end
 on that topology, and that a missing runner or a missing operator-gated tool fails
 **honestly** (a clear error, not a hang or a silent no-op) rather than passing
 undetected. This section maps each acceptance-matrix item to where it is proven —

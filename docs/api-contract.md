@@ -1,7 +1,7 @@
-# Waypoint — API Contract & Data Ledger (M0 output)
+# Waypoint — API Contract & Data Ledger (design-phase output)
 
-Status: **draft v1 — closes milestone M0**. Derived from the UI prototype
-(`ui/prototype/`) reconciled against `domain-model.md`. This is the contract the M1
+Status: **draft v1 — closes the design phase**. Derived from the UI prototype
+(`ui/prototype/`) reconciled against `domain-model.md`. This is the contract the foundation story
 backend implements and the frontend consumes; refine it in PRs, don't fork it in code.
 Endpoint shapes are planning-grade — field lists name the load-bearing data, not every
 column.
@@ -9,8 +9,8 @@ column.
 ## Conventions
 
 - Base path `/api/v1`, JSON bodies, `snake_case` fields.
-- **Auth**: OIDC bearer token (Keycloak; local-auth issuer in M1 — ADR-0004). Role
-  claims map to Viewer / Cyber / Operator / Admin — see `### Auth` below for the M1
+- **Auth**: OIDC bearer token (Keycloak; local-auth issuer in the foundation story — ADR-0004). Role
+  claims map to Viewer / Cyber / Operator / Admin — see `### Auth` below for the foundation-story
   local-auth endpoints and the exact (PascalCase) wire values — the API enforces role
   guards server-side (the UI's disabled-with-reason treatment is presentation only).
 - **Mode**: every response is mode-aware; endpoints unavailable in the instance mode
@@ -338,7 +338,7 @@ this endpoint yet (frontend remainder).
 
 🚧 **Superseded scan-creation contract (epic #726, ADRs 0022–0024).** The `/runs` POST
 row above — `scope.profile_id` selecting an installed profile, and target-granular
-`job_credential_bindings` — describes the shipped M2/M3 scan model. It is retained on
+`job_credential_bindings` — describes the shipped scan-slice model. It is retained on
 the wire only for the one legacy-migration window ADR-0025 describes (see Legacy
 scan migration below) and is never dual-written alongside the model that follows.
 Once #732–#737 land, a scan run's `scope` no longer accepts `profile_id`: the caller

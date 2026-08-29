@@ -54,13 +54,14 @@ Postgres jobs and host PowerShell in-process (ADRs 0013/0014). The same Compose
 topology deploys on both sides of an air gap — a **connected** instance builds signed
 export bundles and **disconnected** instances consume them.
 
-**Current status: architecture realignment before milestone M3 continues.** M1 (foundation + download vertical
-slice, epic [#1](https://github.com/blac9216/waypoint/issues/1)) and M2 (sites,
-credentials & STIG scan slice, epic [#13](https://github.com/blac9216/waypoint/issues/13))
-are both closed, but their backend-hosted execution packaging is being replaced by the
-runner topology approved in ADRs 0013–0015. M3 (identity/RBAC/scheduling, epic
-[#14](https://github.com/blac9216/waypoint/issues/14)) follows that realignment — see
-`docs/roadmap.md` for what's built vs. still planned. Planning (M0) is complete:
+**Current status: the two feature-parity stories are in flight.** Work is tracked as
+delivery-story milestones (see `docs/process/work-tracking.md`). Closed stories:
+*Foundation & download slice*, *Sites, credentials & STIG scan slice*, *Runner
+realignment* (the runner topology of ADRs 0013–0015), *Identity, RBAC & scheduling*,
+*Scan & download readiness*, *Download-tool verification*, and *Compose & deploy
+overhaul*. Open: *Compliance parity* and *Download & depot parity*, then
+*Remediation*, *Transfer & enclave modes*, and *Self-update & appliance packaging* —
+see `docs/roadmap.md` for what's built vs. still planned. The design phase is complete:
 architecture, decisions, security model, UI prototype, and the API contract live in
 `docs/` — read `docs/architecture.md`, `docs/api-contract.md`, and the ADRs in
 `docs/adr/` before building anything, and keep them updated as decisions evolve. Do
@@ -103,7 +104,7 @@ written before posting it. Do not duplicate the recipe here — it drifts; go re
 ├── LICENSE              # Apache-2.0 (see License & Borrowing Policy below)
 ├── docs/
 │   ├── architecture.md  # System architecture: components, job engine, modes, update flow
-│   ├── api-contract.md  # M0 output: REST resources, SSE events, state machines, schema, data ledger
+│   ├── api-contract.md  # design-phase output: REST resources, SSE events, state machines, schema, data ledger
 │   ├── domain-model.md  # Sites, targets, credentials, runs, roles, open questions
 │   ├── security.md      # Secrets threat model + mandatory leakage controls
 │   ├── roadmap.md       # Build sequencing (what gets built first and why)
@@ -112,7 +113,7 @@ written before posting it. Do not duplicate the recipe here — it drifts; go re
 │   │   └── prototype/       # High-fidelity interactive HTML prototype + design handoff
 │   └── adr/             # Architecture Decision Records (numbered, immutable once accepted)
 ├── backend/             # today: combined API/worker; target: API + shared runner + two runner hosts (ADRs 0013/0014)
-├── frontend/            # React + TypeScript PWA (M1/M2 screens delivered; M3 auth/RBAC UI in progress)
+├── frontend/            # React + TypeScript PWA (foundation, scan-slice and auth/RBAC screens delivered; parity-story screens in progress)
 ├── deploy/              # today: three-service dev stack; target adds runners, updater, and bundle tooling
 ├── .agents/skills       # Codex discovery link to the repository skills
 └── .claude/skills/      # Canonical github-workflow + github-pr-review skill sources
