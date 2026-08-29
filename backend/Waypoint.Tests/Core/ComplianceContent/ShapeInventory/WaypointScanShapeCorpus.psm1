@@ -39,19 +39,14 @@ $script:DependsOnlyName = 'some_other_profile'
 #   'empty'            -- the returned set must be empty.
 #   'declared-exclude-depends' -- $script:TargetName must be a member AND
 #                          $script:DependsOnlyName must NOT be a member.
-#   'declared-known-miss' -- $script:TargetName is asserted a member (the CORRECT
-#                          expected behavior per issue #1099's requirement to assert
-#                          the correct expectation, not the current behavior), but the
-#                          parser is KNOWN to currently fail this -- see the doc row's
-#                          "Finding" note. This intentionally reproduces red until the
-#                          parser is fixed under a separate issue.
 $script:ShapeExpectations = @(
 	[ordered]@{ ShapeId = 'indented-dash-sequence';            Kind = 'declared' }
 	[ordered]@{ ShapeId = 'column0-dash-sequence';              Kind = 'declared' }
 	[ordered]@{ ShapeId = 'name-not-first-key';                 Kind = 'declared' }
 	[ordered]@{ ShapeId = 'column0-comment-between-entries';    Kind = 'declared' }
 	[ordered]@{ ShapeId = 'trailing-inline-comment';            Kind = 'declared' }
-	[ordered]@{ ShapeId = 'trailing-comment-tab-separator';     Kind = 'declared-known-miss' }
+	[ordered]@{ ShapeId = 'trailing-comment-tab-separator';     Kind = 'declared' }
+	[ordered]@{ ShapeId = 'trailing-comment-multi-space-separator'; Kind = 'declared' }
 	[ordered]@{ ShapeId = 'block-scalar-folded-description';    Kind = 'declared' }
 	[ordered]@{ ShapeId = 'block-scalar-literal-description';   Kind = 'declared' }
 	[ordered]@{ ShapeId = 'nested-extra-keys-ignored';          Kind = 'declared' }
@@ -102,6 +97,9 @@ function New-WaypointScanShapeFixtureContent {
 		}
 		'trailing-comment-tab-separator' {
 			return "name: invented-profile`ninputs:`n  - name: nsx_manager_address`t# legacy 3.x key retained for compatibility`n    type: String`n"
+		}
+		'trailing-comment-multi-space-separator' {
+			return "name: invented-profile`ninputs:`n  - name: nsx_manager_address   # legacy 3.x key retained for compatibility`n    type: String`n"
 		}
 		'block-scalar-folded-description' {
 			return "name: invented-profile`ninputs:`n  - name: nsx_manager_address`n    description: >`n      The NSX manager address used to authenticate the scan.`n      Spans multiple folded lines.`n    type: String`n"
@@ -202,7 +200,6 @@ function Test-WaypointScanShapeResolution {
 		switch ($expectation.Kind) {
 			'empty' { return ($null -eq $declared -or @($declared).Count -eq 0) }
 			'declared' { return (@($declared) -contains $script:TargetName) }
-			'declared-known-miss' { return (@($declared) -contains $script:TargetName) }
 			'declared-exclude-depends' {
 				return ((@($declared) -contains $script:TargetName) -and -not (@($declared) -contains $script:DependsOnlyName))
 			}

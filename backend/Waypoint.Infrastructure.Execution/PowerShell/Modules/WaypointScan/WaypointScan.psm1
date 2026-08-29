@@ -780,15 +780,29 @@ function Get-WaypointProfileDeclaredInputNameSet {
 
 			if ($null -ne $NameCandidate) {
 				$Name = $NameCandidate
-				# Strip a trailing ` #...` comment (issue #1071 shape 3) before any
-				# quote-stripping, so a quoted name with a trailing comment resolves
-				# correctly too.
-				$CommentIndex = $Name.IndexOf(' #')
-				if ($CommentIndex -ge 0) {
-					$Name = $Name.Substring(0, $CommentIndex).TrimEnd()
-				}
-				if ($Name.Length -ge 2 -and (($Name[0] -eq "'" -and $Name[-1] -eq "'") -or ($Name[0] -eq '"' -and $Name[-1] -eq '"'))) {
-					$Name = $Name.Substring(1, $Name.Length - 2)
+				if ($Name.Length -ge 2 -and ($Name[0] -eq "'" -or $Name[0] -eq '"')) {
+					# Quoted name: take ONLY the quoted content. Anything after the
+					# closing quote (a trailing `#...` comment, separated by any run
+					# of whitespace) is discarded without ever treating a `#` INSIDE
+					# the quotes as a comment introducer -- issue #1136's adjacent
+					# concern, which this change does not attempt to fix but must not
+					# regress further.
+					$QuoteChar = $Name[0]
+					$ClosingIndex = $Name.IndexOf($QuoteChar, 1)
+					if ($ClosingIndex -gt 0) {
+						$Name = $Name.Substring(1, $ClosingIndex - 1)
+					}
+				} else {
+					# Strip a trailing `#...` comment (issue #1071 shape 3) separated
+					# by ANY run of whitespace -- issue #1152: the previous match
+					# required a literal single space immediately before `#` (`' #'`),
+					# so a tab (or more than one space) before the `#` left the
+					# comment text folded into the captured name, which then never
+					# matched a known auth-key name.
+					$CommentMatch = [regex]::Match($Name, '\s#')
+					if ($CommentMatch.Success) {
+						$Name = $Name.Substring(0, $CommentMatch.Index).TrimEnd()
+					}
 				}
 				$DeclaredNames.Add($Name)
 			}
