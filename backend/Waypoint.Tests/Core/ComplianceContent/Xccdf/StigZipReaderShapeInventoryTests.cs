@@ -46,12 +46,17 @@ public sealed class StigZipReaderShapeInventoryTests
 		"no-xccdf-entry",
 	];
 
-	/// <summary>Shape IDs whose documented expectation is rejection rather than acceptance.</summary>
+	/// <summary>
+	/// Shape IDs whose documented expectation is rejection rather than acceptance -- i.e. the shape IDs
+	/// covered by <see cref="ShapeIsRejected"/> rather than <see cref="ShapeIsAccepted"/>. Fed to
+	/// <see cref="ShapeInventoryDoc.AssertCompleteness"/> so the doc's Expected verdict word for each row is
+	/// bound to what this class's fixture actually asserts (issue #1121) -- this set is no longer dead code.
+	/// </summary>
 	private static readonly HashSet<string> RejectedShapeIds = new(["zip-of-zips-beyond-depth-boundary", "zip-slip-entry-name", "no-xccdf-entry"], StringComparer.Ordinal);
 
 	[Fact]
 	public void InventoryIsComplete() =>
-		ShapeInventoryDoc.AssertCompleteness("`StigZipReader` (`backend/Waypoint.Core/ComplianceContent/Xccdf/StigZipReader.cs`)", ImplementedShapeIds);
+		ShapeInventoryDoc.AssertCompleteness("`StigZipReader` (`backend/Waypoint.Core/ComplianceContent/Xccdf/StigZipReader.cs`)", ImplementedShapeIds, RejectedShapeIds);
 
 	[Theory]
 	[InlineData("single-benchmark", 1)]

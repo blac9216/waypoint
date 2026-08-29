@@ -58,6 +58,29 @@ the guard twice:
   direction. (PR #1098's round-2 review defeated the earlier version of this by
   bolding the word in a reject row, which downgraded a dropped zip-slip check to a
   soft note with exit 0.)
+- **The Expected verdict word is bound to what the fixture actually asserts.**
+  Enforcing the vocabulary (above) still let a cell say `Accepted` for a shape whose
+  fixture asserts rejection -- a doc-only edit that silently disarmed the differential
+  for that shape while the suite stayed green at 27/27 (issue #1121). Each
+  `*ShapeInventoryTests` class now names the shape IDs its `ShapeIsRejected` fixtures
+  cover (e.g. `StigZipReaderShapeInventoryTests.RejectedShapeIds`) and
+  `ShapeInventoryDoc.AssertCompleteness` cross-checks every row's classified verdict
+  against that set: a row saying `Accepted` for a shape whose fixture rejects it, or
+  `Rejected` for one whose fixture accepts it, fails the build. This closes the
+  specific channel PR #1098's own merged fix left open, and moves "the verdict word
+  agrees with the fixture" from review-enforced to machine-enforced.
+- **The C# and script column splits cannot drift.** Previously the C# reader walked a
+  row back to its last *unescaped* pipe while `scripts/parser-shape-diff.sh` split on
+  every `|`, so a self-contradictory cell containing a literal escaped pipe --
+  `Rejected with an unsafe-path error \| Accepted only for entries already
+  normalized.` -- classified as rejected in the test suite but as accepted in the
+  script, printing `NOTE`/exit 0 for a dropped zip-slip check (issue #1120). The script
+  no longer parses the table itself: `ShapeVerdictDump` now also dumps
+  `ShapeInventoryDoc.ClassifyShapes`'s per-shape verdicts (the same code
+  `AssertExpectedVocabulary`/`AssertCompleteness` already assert against) to JSON when
+  `WAYPOINT_SHAPE_EXPECTED_DUMP_PATH` is set, and the script reads that JSON instead of
+  re-parsing markdown. One classification, read by both checks, replaces two
+  implementations that happened to agree.
 
 **NOT machine-enforced (review-enforced only -- this is where you must add a row by
 hand):**

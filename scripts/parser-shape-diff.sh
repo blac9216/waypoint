@@ -56,7 +56,7 @@ trap 'rm -rf "$SCRATCH_ROOT"; git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1
 export PATH="$HOME/.dotnet:$PATH"
 
 dump_ref() {
-	local ref="$1" label="$2" out_json="$3"
+	local ref="$1" label="$2" out_json="$3" out_expected_json="${4:-}"
 	local wt_dir="$SCRATCH_ROOT/wt-$label"
 
 	git -C "$REPO_ROOT" worktree add --detach "$wt_dir" "$ref" >/dev/null
@@ -66,85 +66,80 @@ dump_ref() {
 		exit 3
 	fi
 
-	WAYPOINT_SHAPE_DUMP_PATH="$out_json" dotnet test "$wt_dir/backend/Waypoint.Tests/Waypoint.Tests.csproj" \
-		--filter "FullyQualifiedName~ShapeVerdictDump" \
-		--nologo -v quiet >&2
+	if [[ -n "$out_expected_json" ]]; then
+		WAYPOINT_SHAPE_DUMP_PATH="$out_json" WAYPOINT_SHAPE_EXPECTED_DUMP_PATH="$out_expected_json" \
+			dotnet test "$wt_dir/backend/Waypoint.Tests/Waypoint.Tests.csproj" \
+			--filter "FullyQualifiedName~ShapeVerdictDump" \
+			--nologo -v quiet >&2
+	else
+		WAYPOINT_SHAPE_DUMP_PATH="$out_json" dotnet test "$wt_dir/backend/Waypoint.Tests/Waypoint.Tests.csproj" \
+			--filter "FullyQualifiedName~ShapeVerdictDump" \
+			--nologo -v quiet >&2
+	fi
 
 	if [[ ! -f "$out_json" ]]; then
 		echo "error: dump did not produce $out_json for ref '$ref'" >&2
+		exit 3
+	fi
+
+	if [[ -n "$out_expected_json" && ! -f "$out_expected_json" ]]; then
+		echo "error: dump did not produce $out_expected_json for ref '$ref' -- this script can only diff refs at or after issue #1120's shared classification dump landed." >&2
 		exit 3
 	fi
 }
 
 OLD_JSON="$SCRATCH_ROOT/old.json"
 NEW_JSON="$SCRATCH_ROOT/new.json"
+NEW_EXPECTED_JSON="$SCRATCH_ROOT/new-expected.json"
 
 echo "== dumping verdicts for old ref: $OLD_REF ==" >&2
 dump_ref "$OLD_REF" old "$OLD_JSON"
 
-DOC_RELATIVE_PATH="docs/compliance-content-shape-inventory.md"
-
 if [[ -n "$NEW_REF" ]]; then
 	echo "== dumping verdicts for new ref: $NEW_REF ==" >&2
-	dump_ref "$NEW_REF" new "$NEW_JSON"
-	NEW_DOC="$SCRATCH_ROOT/wt-new/$DOC_RELATIVE_PATH"
+	dump_ref "$NEW_REF" new "$NEW_JSON" "$NEW_EXPECTED_JSON"
 else
 	echo "== dumping verdicts for working tree ==" >&2
-	WAYPOINT_SHAPE_DUMP_PATH="$NEW_JSON" dotnet test "$REPO_ROOT/backend/Waypoint.Tests/Waypoint.Tests.csproj" \
+	WAYPOINT_SHAPE_DUMP_PATH="$NEW_JSON" WAYPOINT_SHAPE_EXPECTED_DUMP_PATH="$NEW_EXPECTED_JSON" \
+		dotnet test "$REPO_ROOT/backend/Waypoint.Tests/Waypoint.Tests.csproj" \
 		--filter "FullyQualifiedName~ShapeVerdictDump" \
 		--nologo -v quiet >&2
-	NEW_DOC="$REPO_ROOT/$DOC_RELATIVE_PATH"
 fi
 
-if [[ ! -f "$NEW_DOC" ]]; then
-	echo "error: shape inventory doc not found at $NEW_DOC -- the differential needs it to tell a documented-accept shape from a documented-reject one." >&2
+if [[ ! -f "$NEW_EXPECTED_JSON" ]]; then
+	echo "error: shape classification dump not found at $NEW_EXPECTED_JSON -- the differential needs it to tell a documented-accept shape from a documented-reject one." >&2
 	exit 3
 fi
 
-python3 - "$OLD_JSON" "$NEW_JSON" "$NEW_DOC" <<'PYEOF'
+python3 - "$OLD_JSON" "$NEW_JSON" "$NEW_EXPECTED_JSON" <<'PYEOF'
 import json
-import re
 import sys
 
 old = json.load(open(sys.argv[1]))
 new = json.load(open(sys.argv[2]))
-doc_text = open(sys.argv[3], encoding="utf-8").read()
 
 # The inventory doc's "Expected" column is the authority on whether a shape is
 # supposed to be ACCEPTED or REJECTED. A documented-reject shape turning into an
 # accepted one means a protection (zip-slip, the recursion bound, the XCCDF
-# requirement) was dropped -- that is a regression, not a note. Sections are keyed by
-# the first backtick-quoted token of each `## ` heading, which is the parser name the
-# dump keys use.
+# requirement) was dropped -- that is a regression, not a note.
 #
-# Classification FAILS CLOSED (PR #1098 round-2 review): the cell's leading word is
-# normalized (leading whitespace and markdown emphasis/backticks stripped, case-folded)
-# and must be "accepted" or "rejected". Anything else -- reworded, mistyped, or absent
-# -- yields no classification, and an unclassified rejected->accepted flip is reported
-# as UNVERIFIABLE with exit 1, exactly as a missing row is. Previously an unrecognized
-# cell silently defaulted to "accept", so bolding the word in a reject row downgraded a
-# dropped protection to a NOTE with exit 0. The vocabulary itself is asserted by
-# ShapeInventoryDoc.AssertExpectedVocabulary, so a malformed cell fails the test suite
-# before it can ever reach this script.
-def classify(expected_cell):
-    token = re.match(r"[A-Za-z]+", expected_cell.lstrip().lstrip("*_` "))
-    if token is None:
-        return None
-    return {"accepted": "accept", "rejected": "reject"}.get(token.group(0).lower())
-
-
-expectation = {}
-parser = None
-for line in doc_text.splitlines():
-    heading = re.match(r"^## `([A-Za-z0-9_]+)`", line)
-    if heading:
-        parser = heading.group(1)
-        continue
-    row = re.match(r"^\| `([a-z0-9-]+)` \|(.*)\|([^|]*)\|\s*$", line)
-    if row and parser:
-        verdict = classify(row.group(3))
-        if verdict is not None:
-            expectation[f"{parser}/{row.group(1)}"] = verdict
+# `expectation` is produced by ShapeInventoryDoc.ClassifyShapes (via ShapeVerdictDump,
+# WAYPOINT_SHAPE_EXPECTED_DUMP_PATH) -- the SAME code that splits each row into columns
+# and classifies its Expected cell for ShapeInventoryDoc.AssertExpectedVocabulary /
+# AssertCompleteness. This script no longer re-parses the markdown table with an
+# independent implementation: issue #1120 found the two readers split a row's columns
+# differently (the C# walked back to the last UNESCAPED pipe; this script treated every
+# `|` as a delimiter), so a cell engineered to contain a literal escaped pipe --
+# `Rejected ... \| Accepted ...` -- classified as REJECTED in the test suite but as
+# ACCEPTED here, printing NOTE/exit 0 for a dropped protection. Reading the classification
+# from one shared, already-tested definition instead of a second parser removes that
+# class of drift entirely, rather than just patching this script's regex to match.
+#
+# Classification FAILS CLOSED (PR #1098 round-2 review, preserved by ClassifyShapes):
+# a cell whose leading word does not normalize to "accepted"/"rejected" yields `null`
+# here, and an unclassified rejected->accepted flip is reported as UNVERIFIABLE with
+# exit 1, exactly as a missing row is.
+expectation = json.load(open(sys.argv[3]))
 
 regressions = []
 dropped_protections = []

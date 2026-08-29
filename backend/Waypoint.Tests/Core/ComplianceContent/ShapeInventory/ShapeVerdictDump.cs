@@ -34,6 +34,13 @@ namespace Waypoint.Tests.Core.ComplianceContent.ShapeInventory;
 ///
 /// When the env var is unset (the normal `dotnet test` run), this is a clean no-op --
 /// it never affects the pass/fail of a regular test run.
+///
+/// When <c>WAYPOINT_SHAPE_EXPECTED_DUMP_PATH</c> is also set, additionally writes a JSON map of
+/// <c>"&lt;parser&gt;/&lt;shape-id&gt;" -&gt; "accept" | "reject" | null</c>, sourced from
+/// <see cref="ShapeInventoryDoc.ClassifyShapes"/> -- the SAME doc-row classification
+/// <c>ShapeInventoryDoc.AssertExpectedVocabulary</c>/<c>AssertCompleteness</c> already assert against. The
+/// differential script reads this instead of re-parsing the markdown table itself, so the two readers cannot
+/// split a row into columns differently (issue #1120).
 /// </summary>
 public sealed class ShapeVerdictDump
 {
@@ -59,12 +66,36 @@ public sealed class ShapeVerdictDump
 			verdicts[$"StigZipReader/{shapeId}"] = StigZipReaderShapeInventoryTests.Resolves(shapeId);
 		}
 
+		WriteJson(path, verdicts);
+
+		string? expectedPath = Environment.GetEnvironmentVariable("WAYPOINT_SHAPE_EXPECTED_DUMP_PATH");
+		if (string.IsNullOrWhiteSpace(expectedPath))
+		{
+			return;
+		}
+
+		Dictionary<string, string?> expected = [];
+		foreach ((string shapeId, string? verdict) in ShapeInventoryDoc.ClassifyShapes("`InspecManifestParser` (`backend/Waypoint.Core/ComplianceContent/SemanticImport/InspecManifest.cs`)"))
+		{
+			expected[$"InspecManifestParser/{shapeId}"] = verdict;
+		}
+
+		foreach ((string shapeId, string? verdict) in ShapeInventoryDoc.ClassifyShapes("`StigZipReader` (`backend/Waypoint.Core/ComplianceContent/Xccdf/StigZipReader.cs`)"))
+		{
+			expected[$"StigZipReader/{shapeId}"] = verdict;
+		}
+
+		WriteJson(expectedPath, expected);
+	}
+
+	private static void WriteJson<TValue>(string path, Dictionary<string, TValue> content)
+	{
 		string? directory = Path.GetDirectoryName(path);
 		if (!string.IsNullOrEmpty(directory))
 		{
 			Directory.CreateDirectory(directory);
 		}
 
-		File.WriteAllText(path, JsonSerializer.Serialize(verdicts, IndentedJson));
+		File.WriteAllText(path, JsonSerializer.Serialize(content, IndentedJson));
 	}
 }
