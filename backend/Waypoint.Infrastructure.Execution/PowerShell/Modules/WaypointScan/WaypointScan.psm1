@@ -645,11 +645,15 @@ function Set-WaypointCklBenchmarkMetadata {
 # Deliberately line-oriented rather than a full YAML parse -- the same constraint the
 # sibling's Remove-NsxAuthInputKeys documents (no YAML parser module is available in
 # the runner container). Input-name discovery is scoped to the manifest's TOP-LEVEL
-# `inputs:` block: a column-0 line switches the current top-level key, so `- name:`
-# entries under `depends:` (or any other named list) never count as inputs. Only the
-# two known names per auth slot are ever selected, so unrelated declared inputs (or an
-# exotic manifest shape this scan does not understand) can never leak into the auth
-# block; a missing/unreadable inspec.yml simply yields all-$null (legacy defaults).
+# `inputs:` block by INDENTATION/STRUCTURE (issue #1071): a column-0 *mapping* key
+# (e.g. `depends:`) or a document marker (`---`) closes the block, while a column-0
+# `- name:` sequence entry is a MEMBER of it; within the block a `name:` counts only
+# at the input entry's OWN key level. So `- name:` entries under `depends:` (or any
+# other named list) never count as inputs, and neither does a `name:` nested inside
+# an input's own `value:` mapping or `value:` sequence. Only the two known names per
+# auth slot are ever selected, so unrelated declared inputs (or an exotic manifest
+# shape this scan does not understand) can never leak into the auth block; a
+# missing/unreadable inspec.yml simply yields all-$null (legacy defaults).
 function Get-WaypointNsxProfileAuthInputKeySet {
 	[CmdletBinding()]
 	param(
@@ -661,15 +665,99 @@ function Get-WaypointNsxProfileAuthInputKeySet {
 	$DeclaredNames = [System.Collections.Generic.List[string]]::new()
 	$ManifestPath = Join-Path $ProfilePath 'inspec.yml'
 	if (Test-Path -Path $ManifestPath -PathType Leaf) {
+		# Issue #1071: the block is scoped by INDENTATION/STRUCTURE, not by "next
+		# column-0 line" -- a column-0 `- name:` sequence entry (every shipped NSX
+		# 4.x/3.x manifest's style) is a MEMBER of the open `inputs:` block, while a
+		# column-0 *mapping* key (e.g. `depends:`) or a `---` document marker closes
+		# it. Within the block the FIRST sequence entry fixes the input entries' dash
+		# column, and each entry's own key column follows from its dash line, so a
+		# `name:` is accepted on an entry's dash line OR on any later line at that
+		# entry's key column -- and never when nested deeper (inside an input's own
+		# `value:` mapping or `value:` sequence). Comment-only lines (first non-space
+		# char `#`, at any indentation) never affect block state.
 		$InInputsBlock = $false
+		$EntryDashColumn = -1
+		$EntryKeyColumn = -1
 		foreach ($Line in [System.IO.File]::ReadAllLines($ManifestPath)) {
-			if ($Line -match '^\S') {
-				# A column-0 line starts a new top-level key; only `inputs:` opens the block.
-				$InInputsBlock = $Line -match '^inputs\s*:'
+			if ($Line -notmatch '^(\s*)(\S.*)$') {
+				# Blank (or whitespace-only) line: never affects block state.
 				continue
 			}
-			if ($InInputsBlock -and $Line -match '^\s*-?\s*name\s*:\s*(.+?)\s*$') {
-				$Name = $Matches[1]
+			$Indent = $Matches[1].Length
+			$Content = $Matches[2]
+
+			if ($Content.StartsWith('#')) {
+				continue
+			}
+
+			# A `-` list marker only opens a sequence entry when followed by
+			# whitespace or end-of-line -- `---` (document marker) is NOT an entry.
+			$IsSequenceEntry = $Content -match '^-(\s|$)'
+
+			if (-not $IsSequenceEntry -and $Indent -eq 0) {
+				# A column-0 mapping key (or a document marker) starts a new
+				# top-level scope; only `inputs:` (re)opens the discovery block.
+				$InInputsBlock = $Content -match '^inputs\s*:'
+				$EntryDashColumn = -1
+				$EntryKeyColumn = -1
+				continue
+			}
+
+			if (-not $InInputsBlock) {
+				continue
+			}
+
+			$NameCandidate = $null
+			if ($IsSequenceEntry) {
+				if ($EntryDashColumn -lt 0 -or $Indent -lt $EntryDashColumn) {
+					$EntryDashColumn = $Indent
+				}
+				if ($Indent -gt $EntryDashColumn) {
+					# A sequence nested under one of this input's own keys (e.g. a
+					# `value:` list of mappings) -- never an input entry.
+					continue
+				}
+				if ($Content -match '^-(\s+)(\S.*)$') {
+					# The entry's keys sit at the column of its first inline key.
+					$EntryKeyColumn = $Indent + 1 + $Matches[1].Length
+					$EntryBody = $Matches[2]
+					if ($EntryBody -match '^name\s*:\s*(.+?)\s*$') {
+						$NameCandidate = $Matches[1]
+					}
+				} else {
+					# A bare `-`: this entry's key column is not known until its
+					# first key line appears.
+					$EntryKeyColumn = -1
+				}
+			} else {
+				if ($EntryDashColumn -lt 0) {
+					# A mapping key inside `inputs:` before any sequence entry --
+					# not an input entry's key.
+					continue
+				}
+				if ($EntryKeyColumn -lt 0 -and $Indent -gt $EntryDashColumn) {
+					$EntryKeyColumn = $Indent
+				}
+				if ($Indent -ne $EntryKeyColumn) {
+					# Deeper than the entry's key column (nested under one of its
+					# keys), or shallower (a stray/malformed line) -- not an input
+					# entry's `name:`.
+					continue
+				}
+				if ($Content -match '^name\s*:\s*(.+?)\s*$') {
+					$NameCandidate = $Matches[1]
+				}
+			}
+
+			if ($null -ne $NameCandidate) {
+				$Name = $NameCandidate
+				# Strip a trailing ` #...` comment (issue #1071 shape 3) before any
+				# quote-stripping, so a quoted name with a trailing comment resolves
+				# correctly too.
+				$CommentIndex = $Name.IndexOf(' #')
+				if ($CommentIndex -ge 0) {
+					$Name = $Name.Substring(0, $CommentIndex).TrimEnd()
+				}
 				if ($Name.Length -ge 2 -and (($Name[0] -eq "'" -and $Name[-1] -eq "'") -or ($Name[0] -eq '"' -and $Name[-1] -eq '"'))) {
 					$Name = $Name.Substring(1, $Name.Length - 2)
 				}
