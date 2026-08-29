@@ -475,6 +475,15 @@ public sealed class DiscoverJobHandler : IJobHandler
 	/// are declared by the catalog release the root resolved to. NSX functional
 	/// components and whole-appliance SSH component sets remain future work on their own
 	/// target kinds (#742/#743).
+	///
+	/// Issue #1063: a `vm` component's <see cref="DiscoveredComponent.ExactVersion"/>/
+	/// <see cref="DiscoveredComponent.Build"/> are DERIVED from this same root fact
+	/// (never observed on the VM itself -- vSphere exposes no independent VM platform
+	/// version) and stamped <see cref="DiscoveredComponent.DerivedFromParent"/> = true,
+	/// so downstream consumers can tell a VM's fact apart from a directly observed one
+	/// (epic #726 section 3, "Provenance is visible and snapshotted"). When the root has
+	/// no fact this pass, every VM's version stays honestly null and unlinked -- never a
+	/// guess, never carried over from an earlier pass.
 	/// </summary>
 	internal static IReadOnlyList<DiscoveredComponent> MapToComponents(IReadOnlyList<DiscoveredInventoryItem> items)
 	{
@@ -544,27 +553,48 @@ public sealed class DiscoverJobHandler : IJobHandler
 				// host's catalog match is keyed on. A host whose Version is unavailable
 				// this pass gets ExactVersion=null -- fail-closed, per ADR-0023: never
 				// substitute or infer a version from Build.
-				// A VM's Build (issue #1081) is never populated here -- the module no
-				// longer reports the VMware Tools version on this field at all (it is not
-				// a product-version fact for the VM itself, and would mislead anything
-				// reading `Build` as a platform fact); VMs have no analogous Version field
-				// either, so they keep ExactVersion=null and Build=null. Deriving a VM's
-				// own platform version is #1063's separately-owned work.
-				// Issue #995: a powered-off/disconnected/connecting host reports Version as
-				// an EMPTY STRING, not null -- string.IsNullOrWhiteSpace normalizes that (and
-				// whitespace-only) to null right here, at the mapping boundary, so "version
-				// unavailable this pass" has exactly one representation (ExactVersion=null)
-				// for every downstream consumer, never a "" that looks falsy to a human but
-				// is non-null to an `is null` guard.
+				// A VM's own Build/Version fields (issue #1081) are never read here -- the
+				// module no longer reports the VMware Tools version on Build at all (not a
+				// product-version fact for the VM itself), and VMs have no analogous
+				// Version field either. Issue #995: a powered-off/disconnected/connecting
+				// host reports Version as an EMPTY STRING, not null --
+				// string.IsNullOrWhiteSpace normalizes that (and whitespace-only) to null
+				// right here, at the mapping boundary, so "version unavailable this pass"
+				// has exactly one representation (ExactVersion=null) for every downstream
+				// consumer, never a "" that looks falsy to a human but is non-null to an
+				// `is null` guard.
 				ParentVendorIdentity: null,
 				CatalogComponentId: null,
-				ExactVersion: item.Type == InventoryItemTypes.Host && !string.IsNullOrWhiteSpace(item.Version) ? item.Version : null,
+				// Issue #1063: a VM's platform version fact is DERIVED from its managing
+				// vCenter's own fact (rootExactVersion, computed above from this pass's
+				// `vcenter` row) -- epic #726 section 3: the vSphere VM STIG's scope follows
+				// the platform version. Honest degradation, never a guess: when the root has
+				// no version fact this pass (a pre-#1081 module, a boundary that could not
+				// observe `content.about`, or issue #1115's exact-name-only session-match
+				// miss), rootExactVersion is null and the VM's version stays null too --
+				// never inherited from an earlier pass, never falls back to the VM's own
+				// Build/Version (which the module never reports anyway). A host's own
+				// directly-observed fact above is untouched by this branch.
+				ExactVersion: item.Type == InventoryItemTypes.Host && !string.IsNullOrWhiteSpace(item.Version)
+					? item.Version
+					: item.Type == InventoryItemTypes.Vm ? rootExactVersion : null,
 				// Issue #1081: the ESXi component fact previously kept only ExactVersion
 				// and silently dropped the Build discovery DID observe (retained on the
 				// inventory_items row but never carried onto the component fact) --
 				// docs/compliance-parity.md's "hosts store exactly two facts" now holds on
-				// both sides. A VM's Build is intentionally never carried here (see above).
-				Build: item.Type == InventoryItemTypes.Host && !string.IsNullOrWhiteSpace(item.Build) ? item.Build : null));
+				// both sides. Issue #1063: a VM's Build is derived alongside ExactVersion
+				// from the same parent fact, never from the VM's own (never-populated)
+				// Build field.
+				Build: item.Type == InventoryItemTypes.Host && !string.IsNullOrWhiteSpace(item.Build)
+					? item.Build
+					: item.Type == InventoryItemTypes.Vm ? rootBuild : null,
+				// Issue #1063 (epic #726 section 3, "Provenance is visible and
+				// snapshotted"): a VM's fact is derived-from-parent whenever the root
+				// actually supplied one this pass -- a VM with no derivable version
+				// (rootExactVersion null) is never marked derived, since there is no
+				// provenance to record for a fact that does not exist. A host's own fact is
+				// always directly observed (false).
+				DerivedFromParent: item.Type == InventoryItemTypes.Vm && rootExactVersion is not null));
 		}
 
 		return components;
@@ -787,7 +817,13 @@ public sealed class DiscoverJobHandler : IJobHandler
 		// proves this field survives non-null.
 		string? version = GetProperty<string>(psObject, "Version");
 
-		return new DiscoveredInventoryItem(type!, moRef, name, parentMoRef, build, maintenanceMode, version);
+		// Issue #1063: the VM's authoritative vSphere instance UUID -- optional, same
+		// silent-null-on-absent convention as every other GetProperty read here (an
+		// older/stub module that does not emit this property yet, or a non-vm row,
+		// reads back honestly null rather than throwing).
+		string? instanceUuid = GetProperty<string>(psObject, "InstanceUuid");
+
+		return new DiscoveredInventoryItem(type!, moRef, name, parentMoRef, build, maintenanceMode, version, instanceUuid);
 	}
 
 	private static T? GetProperty<T>(System.Management.Automation.PSObject psObject, string name)

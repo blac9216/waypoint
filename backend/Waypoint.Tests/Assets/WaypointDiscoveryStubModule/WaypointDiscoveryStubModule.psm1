@@ -145,6 +145,83 @@ function Invoke-WaypointDiscovery {
 		return
 	}
 
+	if ($Pass -eq '1063-bulk-derivation') {
+		# Issue #1063's bulk-stamping/name-collision proof: a linked vcenter fact
+		# (real seeded 'vsphere'/'8.0.3', same seed the '1081-linked' pass above
+		# uses) plus TWO identically named VMs under it -- both must derive the
+		# SAME version/build from the root and be recorded as distinct components
+		# via their distinct InstanceUuid/MoRef despite the shared display name.
+		[pscustomobject]@{
+			Type = 'vcenter'; MoRef = 'vcenter-instance-1063-bulk'; Name = 'vcsa-01.example.internal'
+			ParentMoRef = $null; Build = '99.0.87654321'; Version = '8.0.3'; MaintenanceMode = $null
+		}
+		[pscustomobject]@{
+			Type = 'host'; MoRef = 'host-1063-bulk'; Name = 'esxi-22.example.internal'
+			ParentMoRef = $null; Build = '99.0.88888888'; Version = '8.0.3'; MaintenanceMode = $false
+		}
+		[pscustomobject]@{
+			Type = 'vm'; MoRef = 'vm-1063-bulk-a'; Name = 'duplicate-vm-name'
+			ParentMoRef = 'host-1063-bulk'; Build = $null; Version = $null; MaintenanceMode = $null
+			InstanceUuid = 'vm-instance-uuid-1063-bulk-a'
+		}
+		[pscustomobject]@{
+			Type = 'vm'; MoRef = 'vm-1063-bulk-b'; Name = 'duplicate-vm-name'
+			ParentMoRef = 'host-1063-bulk'; Build = $null; Version = $null; MaintenanceMode = $null
+			InstanceUuid = 'vm-instance-uuid-1063-bulk-b'
+		}
+		Write-Information 'Discovery complete.'
+		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
+		return
+	}
+
+	if ($Pass -eq '1063-parent-fact-lost') {
+		# Issue #1063 (round-1 review, blocker 1): the SECOND pass of the two-pass
+		# regression -- the exact same target and the exact same VM MoRefs the
+		# '1063-bulk-derivation' pass above emitted, but with NO 'vcenter' row at
+		# all (issue #1115's exact-name-only session-match miss, or any boundary
+		# where content.about could not be observed). The VMs' previously DERIVED
+		# facts must be cleared rather than retained: a derived fact must never
+		# outlive the parent fact it was copied from.
+		[pscustomobject]@{
+			Type = 'host'; MoRef = 'host-1063-bulk'; Name = 'esxi-22.example.internal'
+			ParentMoRef = $null; Build = '99.0.88888888'; Version = '8.0.3'; MaintenanceMode = $false
+		}
+		[pscustomobject]@{
+			Type = 'vm'; MoRef = 'vm-1063-bulk-a'; Name = 'duplicate-vm-name'
+			ParentMoRef = 'host-1063-bulk'; Build = $null; Version = $null; MaintenanceMode = $null
+			InstanceUuid = 'vm-instance-uuid-1063-bulk-a'
+		}
+		[pscustomobject]@{
+			Type = 'vm'; MoRef = 'vm-1063-bulk-b'; Name = 'duplicate-vm-name'
+			ParentMoRef = 'host-1063-bulk'; Build = $null; Version = $null; MaintenanceMode = $null
+			InstanceUuid = 'vm-instance-uuid-1063-bulk-b'
+		}
+		Write-Information 'Discovery complete.'
+		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
+		return
+	}
+
+	if ($Pass -eq '1063-no-parent-version') {
+		# Issue #1063's honest-degradation case (issue #1115's exact-name-only
+		# session-match miss, or any other boundary where the appliance's own
+		# content.about could not be observed): no 'vcenter' row at all, matching
+		# WaypointDiscovery.psm1's real fail-closed emission guard. A VM discovered
+		# under this root must stay honestly version-absent -- never inherit a value
+		# from a prior pass, never guess.
+		[pscustomobject]@{
+			Type = 'host'; MoRef = 'host-1063-no-parent'; Name = 'esxi-21.example.internal'
+			ParentMoRef = $null; Build = '99.0.99999999'; Version = '8.0.3'; MaintenanceMode = $false
+		}
+		[pscustomobject]@{
+			Type = 'vm'; MoRef = 'vm-1063-no-parent'; Name = 'stub-vm-21'
+			ParentMoRef = 'host-1063-no-parent'; Build = $null; Version = $null; MaintenanceMode = $null
+			InstanceUuid = 'vm-instance-uuid-1063-no-parent'
+		}
+		Write-Information 'Discovery complete.'
+		[pscustomobject]@{ Type = 'discovery-meta'; Complete = $true; Errors = @() }
+		return
+	}
+
 	# Issue #1081: the appliance's own identity/version, present on every pass below
 	# this point (1, 2, partial) -- deliberately an UNSEEDED version (no real catalog
 	# row matches it) so these general-purpose passes' component-count assertions stay
@@ -168,8 +245,15 @@ function Invoke-WaypointDiscovery {
 		ParentMoRef = 'domain-c1'; Build = '99.0.12345678'; Version = '8.0.3'; MaintenanceMode = $false
 	}
 	[pscustomobject]@{
+		# Issue #1063: InstanceUuid is a fabricated, migration-stable identifier
+		# distinct from the MoRef -- DiscoverJobHandlerEndToEndTests asserts it lands
+		# on the inventory_items row and that this VM's component fact is DERIVED
+		# from the vcenter root above (root/vm here share the deliberately unseeded
+		# '0.0.0-invented-unseeded' version -- see the general-purpose-pass comment
+		# above this function).
 		Type = 'vm'; MoRef = 'vm-101'; Name = 'stub-vm-01'
 		ParentMoRef = 'host-11'; Build = '12345'; Version = $null; MaintenanceMode = $null
+		InstanceUuid = 'vm-instance-uuid-101'
 	}
 
 	if ($Pass -eq '1' -or $Pass -eq 'partial') {

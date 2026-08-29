@@ -53,8 +53,9 @@ function Invoke-WaypointDiscovery {
 	.OUTPUTS
 	    One [pscustomobject] per discovered item: Type ('vcenter'|'cluster'|'host'|'vm'),
 	    MoRef, Name, ParentMoRef (nullable), Build (nullable), Version (nullable),
-	    MaintenanceMode (nullable bool). The 'vcenter' row (issue #1081) is always
-	    first; clusters and hosts are emitted before their children.
+	    MaintenanceMode (nullable bool), InstanceUuid (nullable, issue #1063, 'vm' rows
+	    only). The 'vcenter' row (issue #1081) is always first; clusters and hosts are
+	    emitted before their children.
 
 	    Issue #974: Version is the host's semantic vSphere product version
 	    ($VMHost.Version, e.g. "8.0.3") -- populated only for 'host' rows, alongside
@@ -76,7 +77,14 @@ function Invoke-WaypointDiscovery {
 	    whole discovery job through TryParseItem/ParseDiscoveredItems (#618).
 	    A 'vm' row's Build is always $null -- it used to carry the VMware Tools
 	    version, which is not a product-version fact for the VM itself and would
-	    mislead anything reading Build as a platform fact.
+	    mislead anything reading Build as a platform fact; the VM's own platform
+	    version fact is derived from its parent vcenter row by
+	    DiscoverJobHandler.MapToComponents (issue #1063), never reported here.
+
+	    Issue #1063: a 'vm' row's InstanceUuid is vSphere's
+	    `Config.InstanceUuid` -- the appliance-assigned, migration-stable identifier
+	    that deconflicts identically named VMs across discovery passes. $null for
+	    every non-'vm' row.
 
 	    Issue #865 (ADR-0023 completeness gap): the default $ErrorActionPreference is
 	    'Continue', so a non-terminating PowerCLI error on one subtree (an unreachable
@@ -230,9 +238,17 @@ function Invoke-WaypointDiscovery {
 									ParentMoRef     = $VMHost.ExtensionData.MoRef.Value
 									# Issue #1081: never the VMware Tools version -- not a product-version
 									# fact for the VM itself; would mislead anything reading Build as a
-									# platform fact. Deriving a VM's own platform version is #1063's work.
+									# platform fact. The VM's own platform version is derived from its
+									# parent vcenter's fact by DiscoverJobHandler.MapToComponents (#1063),
+									# never reported here.
 									Build           = $null
 									Version         = $null
+									# Issue #1063: the VM's authoritative, migration-stable vSphere instance
+									# UUID -- deconflicts identically named VMs across discovery passes.
+									# $VM.ExtensionData.Config can legitimately be $null for some VM states
+									# (e.g. an invalid/orphaned object); property access on $null returns
+									# $null here rather than throwing (no Set-StrictMode in this module).
+									InstanceUuid    = $VM.ExtensionData.Config.InstanceUuid
 									MaintenanceMode = $null
 								}
 							}
@@ -270,6 +286,8 @@ function Invoke-WaypointDiscovery {
 								# Issue #1081: never the VMware Tools version -- see comment above.
 								Build           = $null
 								Version         = $null
+								# Issue #1063: see comment above.
+								InstanceUuid    = $VM.ExtensionData.Config.InstanceUuid
 								MaintenanceMode = $null
 							}
 						}

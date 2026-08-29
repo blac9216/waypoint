@@ -182,6 +182,18 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		Waypoint.Core.Components.Component host11Component = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
 			.Single(c => c.VendorIdentity == "host-11");
 		Assert.Equal("8.0.3", host11Component.DiscoveredFact?.ExactVersion);
+		Assert.False(host11Component.DiscoveredFact!.DerivedFromParent); // A host's fact is always directly observed.
+
+		// Issue #1063: vm-101's own inventory_items row records its authoritative
+		// instance UUID, and its component-level fact is DERIVED from this pass's own
+		// (deliberately unseeded) vcenter root fact -- see the stub module's own
+		// comment on vm-101 for why root and vm share the same unseeded version.
+		InventoryItem vm101Item = (await GetItemByMorefAsync(targetId, "vm-101"))!;
+		Assert.Equal("vm-instance-uuid-101", vm101Item.InstanceUuid);
+		Waypoint.Core.Components.Component vm101Component = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
+			.Single(c => c.VendorIdentity == "vm-101");
+		Assert.Equal("0.0.0-invented-unseeded", vm101Component.DiscoveredFact?.ExactVersion);
+		Assert.True(vm101Component.DiscoveredFact!.DerivedFromParent);
 
 		// Re-discover with the SAME pass: same identities upsert in place, not duplicated.
 		await RunDiscoverOnceAsync(targetId);
@@ -277,6 +289,130 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 
 		JsonElement progress = await GetDiscoverProgressPayloadAsync(runId);
 		Assert.True(progress.GetProperty("declared_services_upserted").GetInt32() > 0);
+	}
+
+	/// <summary>
+	/// Issue #1063's core acceptance, through the real loop: two identically NAMED
+	/// VMs under a linked vCenter both derive the SAME exact_version/build from the
+	/// root's own discovered fact -- bulk stamping, zero per-VM configuration -- and
+	/// remain two DISTINCT components because their identity is keyed on MoRef, with
+	/// their vSphere instance UUID (deconfliction fact, issue #1063's other AC)
+	/// recorded on the `inventory_items` row. The derived fact is marked
+	/// <see cref="Waypoint.Core.Components.ComponentFact.DerivedFromParent"/> = true,
+	/// distinguishing it from the root's own directly-observed fact (epic #726
+	/// section 3, "Provenance is visible and snapshotted") -- proven end-to-end
+	/// through the real DB round trip, not just the pure MapToComponents unit tests.
+	/// </summary>
+	[Fact]
+	public async Task Vm_WithLinkedParentVersion_DerivesFactInBulk_AndRecordsDistinctUuidsForDuplicateNames()
+	{
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-1063-bulk-canary");
+
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1063-bulk-derivation");
+		await RunDiscoverOnceAsync(targetId);
+
+		InventoryItem vmA = (await GetItemByMorefAsync(targetId, "vm-1063-bulk-a"))!;
+		InventoryItem vmB = (await GetItemByMorefAsync(targetId, "vm-1063-bulk-b"))!;
+		Assert.Equal("vm-instance-uuid-1063-bulk-a", vmA.InstanceUuid);
+		Assert.Equal("vm-instance-uuid-1063-bulk-b", vmB.InstanceUuid);
+		Assert.NotEqual(vmA.InstanceUuid, vmB.InstanceUuid);
+		Assert.Equal(vmA.Name, vmB.Name); // Identically named, per this test's own name.
+
+		IReadOnlyList<Waypoint.Core.Components.Component> components =
+			await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		Waypoint.Core.Components.Component root = components.Single(c => c.CatalogComponentKey == Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter);
+		Waypoint.Core.Components.Component vmComponentA = components.Single(c => c.VendorIdentity == "vm-1063-bulk-a");
+		Waypoint.Core.Components.Component vmComponentB = components.Single(c => c.VendorIdentity == "vm-1063-bulk-b");
+
+		// Two distinct components -- never collapsed by the shared display name.
+		Assert.NotEqual(vmComponentA.Id, vmComponentB.Id);
+
+		foreach (Waypoint.Core.Components.Component vmComponent in new[] { vmComponentA, vmComponentB })
+		{
+			Assert.Equal(root.DiscoveredFact!.ExactVersion, vmComponent.DiscoveredFact?.ExactVersion);
+			Assert.Equal(root.DiscoveredFact.Build, vmComponent.DiscoveredFact?.Build);
+			Assert.True(vmComponent.DiscoveredFact!.DerivedFromParent, "a VM's fact must be recorded as derived-from-parent, never indistinguishable from a directly observed one.");
+		}
+
+		// The root's OWN fact is directly observed, never derived.
+		Assert.False(root.DiscoveredFact!.DerivedFromParent);
+	}
+
+	/// <summary>
+	/// Issue #1063 (round-1 review, blocker 1) -- the two-pass case, and the only
+	/// sequence in which this issue's honest-degradation rule can actually be wrong.
+	/// Pass 1 derives and links two VMs from a linked vCenter root fact; pass 2
+	/// re-discovers the SAME target with the same VM MoRefs and no `vcenter` row at
+	/// all (issue #1115's shape). The derived fact must be CLEARED, not retained:
+	/// <c>UpsertDiscoveredAsync</c>'s COALESCE keeps a directly OBSERVED fact across a
+	/// pass that could not observe it (issue #1000, deliberately unchanged), but a
+	/// derived fact has no independent observation to fall back on -- retaining it
+	/// would leave the VM stamped `derived_from_parent: true` and catalog-linked (so
+	/// still plannable, against a possibly-wrong baseline) off a parent fact this pass
+	/// could not see. Epic #726 section 3: absent facts stay honestly absent.
+	/// </summary>
+	[Fact]
+	public async Task Vm_WhenParentFactDisappearsOnALaterPass_ClearsTheDerivedFactAndItsLink()
+	{
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-1063-two-pass-canary");
+
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1063-bulk-derivation");
+		await RunDiscoverOnceAsync(targetId);
+
+		IReadOnlyList<Waypoint.Core.Components.Component> afterPass1 =
+			await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		foreach (string moref in new[] { "vm-1063-bulk-a", "vm-1063-bulk-b" })
+		{
+			Waypoint.Core.Components.Component derived = afterPass1.Single(c => c.VendorIdentity == moref);
+			Assert.Equal("8.0.3", derived.DiscoveredFact?.ExactVersion);
+			Assert.True(derived.DiscoveredFact!.DerivedFromParent);
+			Assert.NotNull(derived.CatalogComponentId);
+		}
+
+		// Pass 2 on the SAME target: same VM MoRefs, no `vcenter` row this time.
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1063-parent-fact-lost");
+		await RunDiscoverOnceAsync(targetId);
+
+		IReadOnlyList<Waypoint.Core.Components.Component> afterPass2 =
+			await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None);
+		foreach (string moref in new[] { "vm-1063-bulk-a", "vm-1063-bulk-b" })
+		{
+			Waypoint.Core.Components.Component cleared = afterPass2.Single(c => c.VendorIdentity == moref);
+			Assert.Null(cleared.DiscoveredFact); // Version-absent: no stale derived version survives.
+			Assert.Null(cleared.CatalogComponentId); // Unlinked: no longer plannable off a fact this pass could not see.
+			Assert.False(cleared.FactConflict);
+		}
+
+		// The host's OWN directly-observed fact is untouched by the derived-fact clear
+		// -- issue #1000's retain-last-known behaviour for observed facts is unchanged.
+		Waypoint.Core.Components.Component host = afterPass2.Single(c => c.VendorIdentity == "host-1063-bulk");
+		Assert.Equal("8.0.3", host.DiscoveredFact?.ExactVersion);
+		Assert.False(host.DiscoveredFact!.DerivedFromParent);
+	}
+
+	/// <summary>
+	/// Issue #1063's honest-degradation AC, and issue #1115's exact concrete case
+	/// (no session matched the target by name, so the pass never emitted a `vcenter`
+	/// row at all): a VM discovered under a root with no version fact this pass must
+	/// stay honestly version-absent -- no discovered_fact recorded at all, never a
+	/// guess and never a stale/default value.
+	/// </summary>
+	[Fact]
+	public async Task Vm_WithNoParentVersionFact_StaysHonestlyVersionAbsent()
+	{
+		(Guid targetId, _) = await SeedVsphereTargetAsync("invented-1063-no-parent-canary");
+
+		Environment.SetEnvironmentVariable("WAYPOINT_DISCOVERY_STUB_PASS", "1063-no-parent-version");
+		await RunDiscoverOnceAsync(targetId);
+
+		Waypoint.Core.Components.Component vmComponent = (await _components
+			.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
+			.Single(c => c.VendorIdentity == "vm-1063-no-parent");
+		Assert.Null(vmComponent.DiscoveredFact);
+		Assert.Null(vmComponent.CatalogComponentId); // Never links with no exact version.
+
+		InventoryItem vmItem = (await GetItemByMorefAsync(targetId, "vm-1063-no-parent"))!;
+		Assert.Equal("vm-instance-uuid-1063-no-parent", vmItem.InstanceUuid); // Still recorded even though version is absent.
 	}
 
 	/// <summary>

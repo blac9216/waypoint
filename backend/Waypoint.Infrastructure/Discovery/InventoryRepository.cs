@@ -24,7 +24,7 @@ namespace Waypoint.Infrastructure.Discovery;
 public sealed class InventoryRepository
 {
 	private const string ProjectionSql = """
-		SELECT id, target_id, parent_id, type, moref, name, build, maintenance_mode, last_seen_at, removed_at, created_at, updated_at, version
+		SELECT id, target_id, parent_id, type, moref, name, build, maintenance_mode, last_seen_at, removed_at, created_at, updated_at, version, instance_uuid
 		FROM inventory_items
 		""";
 
@@ -121,8 +121,8 @@ public sealed class InventoryRepository
 
 			await using NpgsqlCommand upsert = new(
 				"""
-				INSERT INTO inventory_items (target_id, parent_id, type, moref, name, build, maintenance_mode, last_seen_at, removed_at, version)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, now(), NULL, $8)
+				INSERT INTO inventory_items (target_id, parent_id, type, moref, name, build, maintenance_mode, last_seen_at, removed_at, version, instance_uuid)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, now(), NULL, $8, $9)
 				ON CONFLICT (target_id, moref) DO UPDATE SET
 					parent_id = EXCLUDED.parent_id,
 					type = EXCLUDED.type,
@@ -131,7 +131,8 @@ public sealed class InventoryRepository
 					maintenance_mode = EXCLUDED.maintenance_mode,
 					last_seen_at = now(),
 					removed_at = NULL,
-					version = EXCLUDED.version
+					version = EXCLUDED.version,
+					instance_uuid = EXCLUDED.instance_uuid
 				RETURNING id
 				""", connection, transaction);
 			upsert.Parameters.AddWithValue(targetId);
@@ -142,6 +143,7 @@ public sealed class InventoryRepository
 			upsert.Parameters.AddWithValue((object?)item.Build ?? DBNull.Value);
 			upsert.Parameters.AddWithValue((object?)item.MaintenanceMode ?? DBNull.Value);
 			upsert.Parameters.AddWithValue((object?)item.Version ?? DBNull.Value);
+			upsert.Parameters.AddWithValue((object?)item.InstanceUuid ?? DBNull.Value);
 
 			object? result = await upsert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 			if (result is Guid rowId)
@@ -195,6 +197,7 @@ public sealed class InventoryRepository
 			reader.IsDBNull(9) ? null : reader.GetFieldValue<DateTimeOffset>(9),
 			reader.GetFieldValue<DateTimeOffset>(10),
 			reader.GetFieldValue<DateTimeOffset>(11),
-			reader.IsDBNull(12) ? null : reader.GetString(12));
+			reader.IsDBNull(12) ? null : reader.GetString(12),
+			reader.IsDBNull(13) ? null : reader.GetString(13));
 	}
 }

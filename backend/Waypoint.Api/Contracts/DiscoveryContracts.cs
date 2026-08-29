@@ -56,7 +56,12 @@ public sealed record InventoryItemResponse(
 	// alongside Build -- present only for `host` rows where discovery could report it;
 	// Build is unchanged and always still reported when known.
 	[property: JsonPropertyName("version")]
-	string? Version = null)
+	string? Version = null,
+
+	// Issue #1063: the VM's authoritative vSphere instance UUID, present only for `vm`
+	// rows -- deconflicts identically named VMs across discovery passes.
+	[property: JsonPropertyName("instance_uuid")]
+	string? InstanceUuid = null)
 {
 	public static InventoryItemResponse FromDomain(InventoryItem item, IReadOnlyList<InventoryItemResponse> children)
 	{
@@ -64,7 +69,7 @@ public sealed record InventoryItemResponse(
 		ArgumentNullException.ThrowIfNull(children);
 		return new InventoryItemResponse(
 			item.Id, item.Type, item.Moref, item.Name, item.Build, item.MaintenanceMode,
-			item.LastSeenAt, item.RemovedAt is not null, children, item.Version);
+			item.LastSeenAt, item.RemovedAt is not null, children, item.Version, item.InstanceUuid);
 	}
 }
 

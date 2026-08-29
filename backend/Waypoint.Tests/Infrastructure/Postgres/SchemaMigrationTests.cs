@@ -319,8 +319,13 @@ public sealed class SchemaMigrationTests
 	/// singleton (mirrors appliance_state) Admin-configurable evidence-retention-period
 	/// row (default 180 days / ~6 months) backing the new automated purge sweep, no new
 	/// runner grants (API-only, same posture as run_retention_holds) --
+	/// 0079 (issue #1063, epic #726 section 3): adds
+	/// <c>inventory_items.instance_uuid</c> -- a VM's authoritative vSphere instance
+	/// UUID, recorded alongside the existing moref-keyed identity so identically named
+	/// VMs stay deconflictable across discovery passes -- no new runner grants (the
+	/// table's existing grants already cover the new column) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 77;
+	private const int ExpectedMigrationCount = 78;
 
 	private readonly PostgresFixture _fixture;
 

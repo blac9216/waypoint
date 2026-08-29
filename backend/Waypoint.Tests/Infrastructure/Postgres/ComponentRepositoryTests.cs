@@ -262,6 +262,66 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 		Assert.Null(component.DiscoveredFact!.Build);
 	}
 
+	/// <summary>
+	/// Issue #1063: <see cref="ComponentFact.DerivedFromParent"/> round-trips through
+	/// the real JSONB discovered_fact column, same as <see cref="ComponentFact.Build"/>
+	/// above -- distinguishing a VM's parent-derived fact from a directly observed one
+	/// (epic #726 section 3, "Provenance is visible and snapshotted") survives the
+	/// write/read boundary, not just the in-memory DTO.
+	/// </summary>
+	[Fact]
+	public async Task UpsertDiscoveredAsync_WithDerivedFromParent_RoundTripsOnTheDiscoveredFact()
+	{
+		Guid target = await SeedTargetAsync("vm-derived-roundtrip");
+		DiscoveredComponent[] items = [new("vm", "vm-9201", "stub-vm-01", null, null, "8.0.3", "99.0.12345678", DerivedFromParent: true)];
+
+		await _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		Component component = Assert.Single(await _repository.ListForTargetAsync(target, includeRetired: true, CancellationToken.None));
+
+		Assert.NotNull(component.DiscoveredFact);
+		Assert.True(component.DiscoveredFact!.DerivedFromParent);
+	}
+
+	/// <summary>
+	/// Issue #1063: a directly observed fact (a host's, or the vcenter root's own) is
+	/// never marked derived -- both the explicit false this writer emits and the
+	/// JSONB-field-OMITTED shape (a fact recorded before this field existed, which no
+	/// migration rewrites) read back false. The omitted shape cannot be produced by the
+	/// repository's own writer, so the second half rewrites the stored fact to the
+	/// pre-#1063 form with raw SQL and reads it back through the repository -- proving
+	/// the reader treats an absent key exactly like false rather than assuming it.
+	/// </summary>
+	[Fact]
+	public async Task UpsertDiscoveredAsync_WithoutDerivedFromParent_DiscoveredFactStaysFalse()
+	{
+		Guid target = await SeedTargetAsync("host-not-derived-roundtrip");
+		DiscoveredComponent[] items = [new("esxi", "host-9202", "esxi-03.example.internal", null, null, "8.0.3")];
+
+		await _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		Component component = Assert.Single(await _repository.ListForTargetAsync(target, includeRetired: true, CancellationToken.None));
+
+		Assert.NotNull(component.DiscoveredFact);
+		Assert.False(component.DiscoveredFact!.DerivedFromParent);
+
+		// The legacy shape: exact_version/observed_at only, no derived_from_parent key.
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync(CancellationToken.None);
+			await using NpgsqlCommand rewrite = new(
+				"""
+				UPDATE components
+				SET discovered_fact = jsonb_build_object('exact_version', '8.0.3', 'observed_at', now())
+				WHERE id = $1
+				""", connection);
+			rewrite.Parameters.AddWithValue(component.Id);
+			await rewrite.ExecuteNonQueryAsync(CancellationToken.None);
+		}
+
+		Component legacy = Assert.Single(await _repository.ListForTargetAsync(target, includeRetired: true, CancellationToken.None));
+		Assert.Equal("8.0.3", legacy.DiscoveredFact?.ExactVersion);
+		Assert.False(legacy.DiscoveredFact!.DerivedFromParent);
+	}
+
 	[Fact]
 	public async Task UpsertDiscoveredAsync_ComponentNoLongerReported_BecomesAbsentThenRetiresPastThreshold()
 	{

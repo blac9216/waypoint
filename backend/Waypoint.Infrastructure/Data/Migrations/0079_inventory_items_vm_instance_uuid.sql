@@ -1,0 +1,17 @@
+-- Issue #1063 (epic #726 section 3), on top of #1107/#1081's discovered vCenter
+-- identity/version fact: records each VM's vSphere instance UUID
+-- (`ExtensionData.Config.InstanceUuid`) alongside the existing MoRef-keyed identity
+-- row -- an additional, migration-stable identifier that deconflicts identically
+-- named VMs across discovery passes (ADR-0023 "authoritative stable vendor
+-- identifiers"). Additive only: `moref` remains the upsert key `inventory_items`
+-- already reconciles discovery passes against; this column is a recorded fact, not a
+-- new identity path.
+--
+-- No new runner grant required: migration 0025 already grants
+-- `waypoint_compliance_runner` SELECT, INSERT, UPDATE, DELETE on the whole
+-- `inventory_items` table (a Postgres table-level GRANT covers every column,
+-- including one added after the GRANT ran).
+--
+-- Idempotent by construction (IF NOT EXISTS), matching every prior migration in this
+-- directory.
+ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS instance_uuid TEXT NULL;
