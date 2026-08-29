@@ -29,6 +29,16 @@ public sealed class RunPurgeRepository : IRunPurgeRepository
 		_connectionString = connectionString;
 	}
 
+	public async Task<Guid?> GetArtifactJobIdAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		await using NpgsqlConnection connection = new(_connectionString);
+		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new("SELECT artifact_job_id FROM run_purges WHERE run_id = $1", connection);
+		command.Parameters.AddWithValue(runId);
+		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		return result is Guid jobId ? jobId : null;
+	}
+
 	public async Task<Guid?> FindRunIdByArtifactJobIdAsync(Guid artifactJobId, CancellationToken cancellationToken)
 	{
 		await using NpgsqlConnection connection = new(_connectionString);

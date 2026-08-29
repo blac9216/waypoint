@@ -59,34 +59,32 @@ namespace Waypoint.Infrastructure.Runs;
 /// </summary>
 public sealed class RunPurgeService
 {
-	/// <summary>The three terminal <c>runs.state</c> values a purge is allowed against (docs/api-contract.md's run state machine).</summary>
-	private static readonly HashSet<string> TerminalRunStates = new(StringComparer.Ordinal)
-	{
-		"completed", "completed_with_failures", "aborted",
-	};
-
 	/// <summary>Same low-urgency tier as an ordinary artifact download / tool-install (issue #39's <c>ToolInstallPriority</c>) -- a purge must never starve a scan.</summary>
 	private const short PurgePriority = 6;
 
 	private readonly IJobControlRepository _jobs;
 	private readonly IRunPurgeRepository _purges;
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
+	private readonly IRunRetentionHoldRepository _retentionHolds;
 	private readonly string _connectionString;
 
 	public RunPurgeService(
 		IJobControlRepository jobs,
 		IRunPurgeRepository purges,
 		AttestationSnapshotRepository attestationSnapshots,
+		IRunRetentionHoldRepository retentionHolds,
 		string connectionString)
 	{
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(purges);
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
+		ArgumentNullException.ThrowIfNull(retentionHolds);
 		ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 
 		_jobs = jobs;
 		_purges = purges;
 		_attestationSnapshots = attestationSnapshots;
+		_retentionHolds = retentionHolds;
 		_connectionString = connectionString;
 	}
 
@@ -121,6 +119,26 @@ public sealed class RunPurgeService
 			return new RunPurgeResult(RunPurgeOutcome.AlreadyPurged, ToStatus(existingTombstone));
 		}
 
+		// Issue #784: a held run's evidence graph must never be purged -- checked on
+		// EVERY call (not just the first), so placing a hold after a purge is already
+		// in flight blocks further progress here too, not just a fresh start. This is
+		// one of FOUR places the hold is honoured, because this method is not the only
+		// path that can reach a deletion: ResumeAsync re-checks it again immediately
+		// before enqueueing the artifact job (this check happens before the database
+		// phase, which is not instantaneous), FinalizePendingAsync (the background
+		// finalize sweep) re-checks it independently, and
+		// RunRetentionHoldService.PlaceHoldAsync cancels an already-enqueued
+		// artifact-deletion job so the runner never claims it. A completed purge is
+		// unaffected (the tombstone check above already returned by that point --
+		// nothing left to protect once the graph is gone).
+		// #1062's future sweep must call this SAME entry point rather than re-implement
+		// the check, so the exclusion is enforced by exactly this one set of checks for
+		// both the manual admin action and the automated sweep.
+		if (await _retentionHolds.GetAsync(runId, cancellationToken).ConfigureAwait(false) is not null)
+		{
+			return new RunPurgeResult(RunPurgeOutcome.Held);
+		}
+
 		RunPurgeStatus? inFlight = await _purges.GetStatusAsync(runId, cancellationToken).ConfigureAwait(false);
 		if (inFlight is not null)
 		{
@@ -133,7 +151,7 @@ public sealed class RunPurgeService
 			return new RunPurgeResult(RunPurgeOutcome.RunNotFound);
 		}
 
-		if (!TerminalRunStates.Contains(run.State))
+		if (!RunLifecycle.TerminalRunStates.Contains(run.State))
 		{
 			return new RunPurgeResult(RunPurgeOutcome.RunNotTerminal);
 		}
@@ -165,11 +183,27 @@ public sealed class RunPurgeService
 	/// retryable operator re-POST. A concurrently-vanished <c>run_purges</c> row (an
 	/// operator re-POST finalized it between the sweep's list and this call) is a
 	/// silent no-op.
+	///
+	/// Issue #784: this method is the OTHER way into <see cref="ResumeAsync"/>, so it
+	/// re-checks the retention hold itself rather than relying on
+	/// <see cref="PurgeRunAsync"/>'s check. Without this a run held after its purge
+	/// started would still be tombstoned (and <c>runs.purged_at</c> set) by the
+	/// background sweep -- the partially-preserved-graph outcome #784's Risk section
+	/// names. A held run therefore keeps an un-finalized <c>run_purges</c> row for as
+	/// long as the hold stands; that is deliberate (the partially-purged state stays
+	/// visible via <c>GET /runs/{id}/purge</c> instead of being presented as complete),
+	/// and the ONLY thing that clears it is removing the hold and re-POSTing purge.
+	/// See <see cref="RunPurgeOutcome.Held"/> for the full mid-purge boundary.
 	/// </summary>
 	public async Task<bool> FinalizePendingAsync(Guid runId, CancellationToken cancellationToken)
 	{
 		RunPurgeStatus? status = await _purges.GetStatusAsync(runId, cancellationToken).ConfigureAwait(false);
 		if (status is null || !status.DbPhaseDone || status.ArtifactsPhase != "done")
+		{
+			return false;
+		}
+
+		if (await _retentionHolds.GetAsync(runId, cancellationToken).ConfigureAwait(false) is not null)
 		{
 			return false;
 		}
@@ -191,6 +225,24 @@ public sealed class RunPurgeService
 			await RunDatabasePhaseAsync(status.RunId, cancellationToken).ConfigureAwait(false);
 			await _purges.MarkDbPhaseDoneAsync(status.RunId, cancellationToken).ConfigureAwait(false);
 			status = status with { DbPhaseDone = true };
+		}
+
+		// Issue #784, pre-enqueue re-check: the caller's hold check (PurgeRunAsync's, or
+		// FinalizePendingAsync's) happened BEFORE the database phase above, which is not
+		// instantaneous. A hold that lands during that span would otherwise be invisible
+		// to this call -- RunRetentionHoldService.PlaceHoldAsync would find no
+		// run_purges.artifact_job_id to cancel (it has not been written yet) and this
+		// call would then enqueue the artifact-deletion job AFTER the hold was already in
+		// force, so a runner would claim it and delete every HDF/CKL file of a held run.
+		// Re-reading the hold here, immediately before the only two irreversible things
+		// left (enqueueing the artifact job, and writing the tombstone), closes that
+		// window: past this point a hold is either already in force -- and refused here
+		// -- or it lands after artifact_job_id exists, where PlaceHoldAsync's cancel
+		// finds it. One extra indexed single-row read per purge advance, on an
+		// admin-initiated action; the cost is irrelevant next to deleting held evidence.
+		if (await _retentionHolds.GetAsync(status.RunId, cancellationToken).ConfigureAwait(false) is not null)
+		{
+			return new RunPurgeResult(RunPurgeOutcome.Held, status);
 		}
 
 		if (status.ArtifactsPhase is "pending" or "failed")

@@ -206,9 +206,13 @@ Changes are prospective, versioned, audited, and visible before processing. A ru
 every graph member become eligible and purge as one logical unit; cleanup is retryable
 but readers never observe retained rows pointing to missing graph members. A durable
 `CompliancePurgeTombstone` records identity, policy version, trigger/actor, time, and
-outcome. Optional `RetentionHold` remains #784 and, if implemented, covers this entire
-root rather than fragments. Wire shape: `docs/api-contract.md`'s
-`/system/compliance-retention` and `/compliance-retention/sweep-status`.
+outcome. `RetentionHold` (issue #784, shipped) covers this entire root rather than
+fragments: while active on a `scan`/`remediate` run, `POST /runs/{id}/purge` refuses
+the run outright, so the same one-call purge path both future automated sweeps
+(issue #1062) and today's manual purge already share is the single enforcement point
+for the exclusion — no separate hold-aware deletion path exists. Wire shape:
+`docs/api-contract.md`'s `/system/compliance-retention`,
+`/compliance-retention/sweep-status`, and `/runs/{id}/retention-hold`.
 
 The one legacy transition preserves historical runs as legacy evidence and includes
 configured schedules/saved intent. It deterministically translates one only when its

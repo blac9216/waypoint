@@ -37,6 +37,21 @@ public interface IRunPurgeRepository
 	/// </summary>
 	Task<Guid?> FindRunIdByArtifactJobIdAsync(Guid artifactJobId, CancellationToken cancellationToken);
 
+	/// <summary>
+	/// Issue #784: the forward direction of <see cref="FindRunIdByArtifactJobIdAsync"/> --
+	/// the <c>run_purges.artifact_job_id</c> currently recorded for a target run, or
+	/// <c>null</c> when no purge was requested or no artifact job has been enqueued yet.
+	/// Exists so <see cref="Waypoint.Infrastructure.Runs.RunRetentionHoldService.PlaceHoldAsync"/>
+	/// can cancel an already-enqueued artifact-deletion job the moment a hold lands,
+	/// which is the only way to stop that job before the compliance-runner claims it
+	/// (the runner has no grant on <c>run_retention_holds</c> -- migration 0075 --
+	/// so it structurally cannot re-check the hold itself). Deliberately NOT surfaced
+	/// on <see cref="RunPurgeStatus"/>: that record is the wire shape of
+	/// <c>GET /runs/{id}/purge</c>, and the internal job id is not part of that
+	/// operator-facing contract.
+	/// </summary>
+	Task<Guid?> GetArtifactJobIdAsync(Guid runId, CancellationToken cancellationToken);
+
 	/// <summary>The completed tombstone for a run, or <c>null</c> if purge never completed.</summary>
 	Task<RunPurgeTombstone?> GetTombstoneAsync(Guid runId, CancellationToken cancellationToken);
 

@@ -229,6 +229,229 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 	}
 
+	// -- issue #784 (epic #726): retention holds ------------------------------
+
+	[Theory]
+	[InlineData(null)]
+	[InlineData("")]
+	[InlineData("   ")]
+	public async Task PlaceRetentionHold_WithoutReason_Returns400(string? reason)
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+
+		HttpResponseMessage response = await SendRetentionHoldAsync(HttpMethod.Post, runId, "Admin", reason);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData(null)]
+	[InlineData("")]
+	[InlineData("   ")]
+	public async Task RemoveRetentionHold_WithoutReason_Returns400(string? reason)
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+
+		HttpResponseMessage response = await SendRetentionHoldAsync(HttpMethod.Delete, runId, "Admin", reason);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData("Viewer")]
+	[InlineData("Cyber")]
+	[InlineData("Operator")]
+	public async Task PlaceRetentionHold_BelowAdmin_Returns403(string role)
+	{
+		// AC2: non-Admins cannot place a hold. [RequireAdminRole] rejects before the
+		// action's own reason validation runs, so a well-formed body still gets 403 --
+		// the role gate is the floor, not the body check (same proof shape as
+		// PurgeRun_BelowAdmin_Returns403). Cyber is included deliberately: section 7's
+		// "controls scans it initiated" ownership does NOT extend to retention holds.
+		HttpResponseMessage response = await SendRetentionHoldAsync(HttpMethod.Post, Guid.NewGuid(), role, "invented-legal-hold-reason");
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData("Viewer")]
+	[InlineData("Cyber")]
+	[InlineData("Operator")]
+	public async Task RemoveRetentionHold_BelowAdmin_Returns403(string role)
+	{
+		HttpResponseMessage response = await SendRetentionHoldAsync(HttpMethod.Delete, Guid.NewGuid(), role, "invented-unhold-reason");
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task GetRetentionHold_Unauthenticated_Returns401()
+	{
+		// The read is [RequireViewerRole] -- the lowest role there is -- so "below
+		// Viewer" is "no authenticated principal at all". Proves the read is not
+		// anonymous even though it never 404s.
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage response = await client.GetAsync($"/api/v1/runs/{Guid.NewGuid()}/retention-hold");
+
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task PlaceRetentionHold_UnknownRun_Returns404()
+	{
+		HttpResponseMessage response = await SendRetentionHoldAsync(HttpMethod.Post, Guid.NewGuid(), "Admin", "invented-legal-hold-reason");
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task PlaceRetentionHold_NonTerminalRun_Returns409()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("running", false, false, null, "alice"));
+
+		HttpResponseMessage response = await SendRetentionHoldAsync(HttpMethod.Post, runId, "Admin", "invented-legal-hold-reason");
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		Assert.Contains("run_not_terminal", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task PlaceRetentionHold_NonComplianceRunType_Returns409()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.Repository.SetRunType(runId, "download");
+
+		HttpResponseMessage response = await SendRetentionHoldAsync(HttpMethod.Post, runId, "Admin", "invented-legal-hold-reason");
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		Assert.Contains("unsupported_run_type", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task RemoveRetentionHold_NeverHeld_Returns404NotHeld()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+
+		HttpResponseMessage response = await SendRetentionHoldAsync(HttpMethod.Delete, runId, "Admin", "invented-unhold-reason");
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+		// Distinct from the generic run-not-found 404 -- the run exists, the hold does not.
+		Assert.Contains("not_held", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task GetRetentionHold_NeverHeld_Returns200WithActiveFalse()
+	{
+		// Suggested test step 7: the read NEVER 404s, so a run-details surface can ask
+		// "is this run held" unconditionally. An id that was never held -- and indeed
+		// no run row at all -- still renders the honest-empty projection.
+		Guid runId = Guid.NewGuid();
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/retention-hold");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Equal(runId.ToString(), body.RootElement.GetProperty("run_id").GetString());
+		Assert.False(body.RootElement.GetProperty("active").GetBoolean());
+		// The API serializer omits null members, so "no reason/actor/time" renders as
+		// absent-or-null rather than as an empty string -- either way the surface
+		// carries no stale hold detail for a run that is not held.
+		AssertAbsentOrNull(body.RootElement, "reason");
+		AssertAbsentOrNull(body.RootElement, "placed_by");
+		AssertAbsentOrNull(body.RootElement, "placed_at");
+	}
+
+	[Fact]
+	public async Task PlaceThenGetThenRemoveRetentionHold_ReportsReasonActorAndTimeThenGoesInactive()
+	{
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+
+		HttpResponseMessage placed = await SendRetentionHoldAsync(HttpMethod.Post, runId, "Admin", "invented-legal-hold-reason");
+		Assert.Equal(HttpStatusCode.OK, placed.StatusCode);
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage read = new(HttpMethod.Get, $"/api/v1/runs/{runId}/retention-hold");
+		read.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+		HttpResponseMessage held = await client.SendAsync(read);
+
+		Assert.Equal(HttpStatusCode.OK, held.StatusCode);
+		using (JsonDocument body = JsonDocument.Parse(await held.Content.ReadAsStringAsync()))
+		{
+			Assert.True(body.RootElement.GetProperty("active").GetBoolean());
+			Assert.Equal("invented-legal-hold-reason", body.RootElement.GetProperty("reason").GetString());
+			// TestAuthHandler's principal -- proves the actor comes from the caller's
+			// identity, not from the request body.
+			Assert.Equal("test-user", body.RootElement.GetProperty("placed_by").GetString());
+			Assert.NotNull(body.RootElement.GetProperty("placed_at").GetString());
+		}
+
+		// AC4: removal returns the POST-removal state (active:false), not the removed
+		// hold's former reason -- see MapRetentionHold's doc comment.
+		HttpResponseMessage removed = await SendRetentionHoldAsync(HttpMethod.Delete, runId, "Admin", "invented-unhold-reason");
+		Assert.Equal(HttpStatusCode.OK, removed.StatusCode);
+		using (JsonDocument body = JsonDocument.Parse(await removed.Content.ReadAsStringAsync()))
+		{
+			Assert.False(body.RootElement.GetProperty("active").GetBoolean());
+		}
+
+		// And the read agrees afterwards -- still 200, now inactive.
+		HttpRequestMessage reread = new(HttpMethod.Get, $"/api/v1/runs/{runId}/retention-hold");
+		reread.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+		HttpResponseMessage after = await client.SendAsync(reread);
+		Assert.Equal(HttpStatusCode.OK, after.StatusCode);
+		using (JsonDocument body = JsonDocument.Parse(await after.Content.ReadAsStringAsync()))
+		{
+			Assert.False(body.RootElement.GetProperty("active").GetBoolean());
+		}
+	}
+
+	[Fact]
+	public async Task PurgeRun_HeldRun_Returns409RunRetentionHeld()
+	{
+		// The controller-level half of AC3: the hold and the purge endpoint compose --
+		// the evidence graph actually surviving is RunPurgeComplianceEvidenceTests' job.
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		Assert.Equal(HttpStatusCode.OK, (await SendRetentionHoldAsync(HttpMethod.Post, runId, "Admin", "invented-legal-hold-reason")).StatusCode);
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Post, $"/api/v1/runs/{runId}/purge");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Admin");
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { confirmation = "PURGE" }),
+			System.Text.Encoding.UTF8, "application/json");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+		Assert.Contains("run_retention_held", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+	}
+
+	private static void AssertAbsentOrNull(JsonElement element, string propertyName) =>
+		Assert.True(
+			!element.TryGetProperty(propertyName, out JsonElement value) || value.ValueKind == JsonValueKind.Null,
+			$"expected '{propertyName}' to be absent or null");
+
+	private async Task<HttpResponseMessage> SendRetentionHoldAsync(HttpMethod method, Guid runId, string role, string? reason)
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(method, $"/api/v1/runs/{runId}/retention-hold");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+		request.Content = new StringContent(
+			JsonSerializer.Serialize(new { reason }),
+			System.Text.Encoding.UTF8, "application/json");
+		return await client.SendAsync(request);
+	}
+
 	// -- issue #745: GET /runs/{id}/component-results/summary -----------------------
 
 	[Fact]
@@ -1608,6 +1831,16 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 			}
 			services.AddSingleton<Waypoint.Core.Runs.IRunHistoryDeletionRepository>(HistoryDeletionRepository);
 
+			// Issue #784: same fake-swap pattern as IRunPurgeRepository above, for
+			// RunPurgeService's new IRunRetentionHoldRepository dependency (the
+			// purge-exclusion check) AND RunRetentionHoldService's own dependency.
+			var retentionHoldRepositoryDescriptor = services.FirstOrDefault(d => d.ServiceType == typeof(Waypoint.Core.Runs.IRunRetentionHoldRepository));
+			if (retentionHoldRepositoryDescriptor != null)
+			{
+				services.Remove(retentionHoldRepositoryDescriptor);
+			}
+			services.AddSingleton<Waypoint.Core.Runs.IRunRetentionHoldRepository>(RetentionHoldRepository);
+
 			// Issue #581: GetEventHistory resolves IJobEventHistoryReader through
 			// RunsController -- same fake-swap pattern as every other dependency above,
 			// so role-guard/happy-path tests never touch Postgres.
@@ -1645,6 +1878,8 @@ public sealed class RunsTestApiFactory : WaypointApiFactory
 	public FakeRunPurgeRepository PurgeRepository { get; } = new();
 
 	public FakeRunHistoryDeletionRepository HistoryDeletionRepository { get; } = new();
+
+	public FakeRunRetentionHoldRepository RetentionHoldRepository { get; } = new();
 
 	public FakeJobEventHistoryReader EventHistory { get; } = new();
 
@@ -2085,6 +2320,19 @@ public sealed class FakeRunPurgeRepository : IRunPurgeRepository
 		return Task.FromResult<Guid?>(null);
 	}
 
+	/// <summary>
+	/// Issue #784: the artifact-deletion job RunRetentionHoldService cancels when a
+	/// hold lands mid-purge. Null by default (no purge in flight); tests that need the
+	/// cancel path to fire set it.
+	/// </summary>
+	public Guid? ArtifactJobId { get; set; }
+
+	public Task<Guid?> GetArtifactJobIdAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		_ = (runId, cancellationToken);
+		return Task.FromResult(ArtifactJobId);
+	}
+
 	public Task<RunPurgeStatus> CreateAsync(Guid runId, string requestedBy, string priorState, CancellationToken cancellationToken)
 	{
 		_ = cancellationToken;
@@ -2171,5 +2419,43 @@ public sealed class FakeRunHistoryDeletionRepository : IRunHistoryDeletionReposi
 		_ = cancellationToken;
 		LastRolloffQuery = (olderThan, limit);
 		return Task.FromResult(RolloffCandidates);
+	}
+}
+
+/// <summary>
+/// Issue #784: minimal in-memory fake for <see cref="IRunRetentionHoldRepository"/>,
+/// mirroring <see cref="FakeRunPurgeRepository"/>'s shape -- avoids a live Postgres
+/// connection attempt so both <c>RunPurgeService</c>'s new hold-exclusion check and
+/// the retention-hold endpoints' own controller-level role/reason/not-found mapping
+/// can be exercised without Postgres. The full place/remove/audit/grant-drift/
+/// purge-exclusion behavior against a real schema is
+/// <c>RunRetentionHoldTests</c>/<c>RunPurgeComplianceEvidenceTests</c>' job.
+/// </summary>
+public sealed class FakeRunRetentionHoldRepository : IRunRetentionHoldRepository
+{
+	private readonly Dictionary<Guid, RunRetentionHold> _holds = new();
+
+	public Task<RunRetentionHold?> GetAsync(Guid runId, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult(_holds.TryGetValue(runId, out RunRetentionHold? hold) ? hold : null);
+	}
+
+	public Task<bool> TryInsertAsync(Guid runId, string reason, string actor, CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		if (_holds.ContainsKey(runId))
+		{
+			return Task.FromResult(false);
+		}
+
+		_holds[runId] = new RunRetentionHold(runId, reason, actor, DateTimeOffset.UtcNow);
+		return Task.FromResult(true);
+	}
+
+	public Task<bool> TryRemoveAsync(Guid runId, string reason, string actor, CancellationToken cancellationToken)
+	{
+		_ = (reason, actor, cancellationToken);
+		return Task.FromResult(_holds.Remove(runId));
 	}
 }

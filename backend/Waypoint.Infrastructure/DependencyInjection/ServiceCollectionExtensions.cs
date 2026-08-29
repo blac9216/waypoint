@@ -415,11 +415,31 @@ public static class ServiceCollectionExtensions
 			// because both the API (RunsController, via RunPurgeService) and the
 			// compliance-runner (PurgeJobHandler, reporting its own outcome) need it --
 			// AddWaypointInfrastructure is the one composition root both hosts call.
+			// Issue #784: real (non-stub) Admin retention-hold model, registered before
+			// RunPurgeService below since that service now depends on it for its
+			// purge-exclusion check -- same connection-string-gated composition root,
+			// same "both API and any future runner-side reader need it" reasoning as
+			// IRunPurgeRepository's own comment (nothing runner-side reads/writes this
+			// table today per migration 0075's withheld-grants note, but registering it
+			// here keeps every Runs-domain repository in one place).
+			services.AddSingleton<Waypoint.Core.Runs.IRunRetentionHoldRepository>(new Runs.RunRetentionHoldRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Runs.IRunPurgeRepository>(new Runs.RunPurgeRepository(connectionString));
+
+			// RunRetentionHoldService takes IRunPurgeRepository too: placing a hold must
+			// cancel an artifact-deletion job the purge already enqueued (see that
+			// service's HaltInFlightArtifactDeletionAsync). The dependency runs one way
+			// only -- RunPurgeService reads holds, RunRetentionHoldService reads the
+			// purge REPOSITORY, never the purge service -- so there is no cycle here.
+			services.AddSingleton(serviceProvider => new Runs.RunRetentionHoldService(
+				serviceProvider.GetRequiredService<IJobControlRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunRetentionHoldRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunPurgeRepository>()));
+
 			services.AddSingleton(serviceProvider => new Runs.RunPurgeService(
 				serviceProvider.GetRequiredService<IJobControlRepository>(),
 				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunPurgeRepository>(),
 				serviceProvider.GetRequiredService<AttestationSnapshotRepository>(),
+				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunRetentionHoldRepository>(),
 				connectionString));
 
 			// Issue #592 (epic #588, last child): admin-only generic operational-history
