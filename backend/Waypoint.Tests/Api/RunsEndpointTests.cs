@@ -588,6 +588,16 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 			PlannedComponentCount: 1,
 			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 0, NotApplicableCount: 0, NotReviewedCount: 138, SkippedCount: 0, EvaluatedZeroComponentCount: 1)]);
 
+		// A recorded plan that omitted NOTHING, set explicitly rather than inherited
+		// from whatever a sibling test left on the shared class-fixture fake. Without
+		// it this test rides the plan_recorded:false branch, which would satisfy
+		// coverage_incomplete on its own and prove nothing about the evaluated-nothing
+		// branch it exists to cover.
+		_factory.ScanPlans.NextPlan = new Waypoint.Core.Scans.ScanPlan(
+			runId, Waypoint.Core.Scans.ScanPlanSchema.CurrentVersion, Items: [],
+			Skips: [],
+			PlanDigest: "invented-digest", Explanation: "1 of 1 requested component(s) accepted into the plan; 0 skipped.");
+
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/component-results/summary");
 		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
@@ -595,7 +605,11 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		HttpResponseMessage response = await client.SendAsync(request);
 		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		JsonElement root = doc.RootElement;
+		// plan_recorded is true and nothing was omitted, so coverage_incomplete can
+		// only be coming from the evaluated-nothing branch.
+		Assert.True(root.GetProperty("plan_recorded").GetBoolean());
 		Assert.Equal(0, root.GetProperty("omitted_component_count").GetInt32());
+		Assert.Equal(1, root.GetProperty("evaluated_zero_component_count").GetInt32());
 		Assert.True(root.GetProperty("coverage_incomplete").GetBoolean());
 		JsonElement completedRow = root.GetProperty("by_status").EnumerateArray().Single();
 		Assert.True(completedRow.GetProperty("evaluated_zero_controls").GetBoolean());

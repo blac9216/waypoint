@@ -139,10 +139,24 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 	///
 	/// Issue #1132: <c>evaluated_zero_component_count</c> is a <c>count(*) FILTER</c>
 	/// evaluated PER COMPONENT ROW inside the bucket, not re-derived from the summed
-	/// counts. The sums cannot express it -- a mixed bucket (one component all
-	/// not_reviewed, others evaluated normally) aggregates to passed &gt; 0 and would
-	/// read as fully evaluated, which is exactly the false-clean shape #1132 exists
-	/// to close.
+	/// counts. The sums cannot express it -- a mixed bucket (one component that
+	/// evaluated nothing, others evaluated normally) aggregates to passed &gt; 0 and
+	/// would read as fully evaluated, which is exactly the false-clean shape #1132
+	/// exists to close.
+	///
+	/// The predicate is "produced no verdict": zero passed AND zero open (failed)
+	/// findings, EXCEPT when the component is genuinely, entirely
+	/// <c>not_applicable</c> -- N/A is a determinate outcome, not a failure to
+	/// evaluate. Expressed positively, a zero-verdict component is counted when it
+	/// carries a <c>not_reviewed</c> or <c>skipped</c> finding, or when it has no
+	/// <c>not_applicable</c> finding at all (which covers the all-<c>execution_error</c>
+	/// component and the zero-findings component, since <c>execution_error</c> is
+	/// counted in no column here -- issue #1144).
+	///
+	/// Known gap, NOT closed here: a component mixing <c>not_applicable</c> with only
+	/// <c>execution_error</c> findings is indistinguishable from a genuine
+	/// all-<c>not_applicable</c> one at this grain, because <c>execution_error</c>
+	/// findings land in no count column. Issue #1144 is the durable fix.
 	/// </summary>
 	public async Task<RunResultRollup> GetRunRollupAsync(Guid runId, CancellationToken cancellationToken)
 	{
@@ -183,8 +197,8 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 				coalesce(sum(not_reviewed_count), 0),
 				coalesce(sum(skipped_count), 0),
 				count(*) FILTER (
-					WHERE not_reviewed_count > 0
-					  AND passed_count + cat_i_open + cat_ii_open + cat_iii_open = 0
+					WHERE passed_count + cat_i_open + cat_ii_open + cat_iii_open = 0
+					  AND (not_reviewed_count > 0 OR skipped_count > 0 OR not_applicable_count = 0)
 				) AS evaluated_zero_component_count
 			FROM latest
 			GROUP BY status

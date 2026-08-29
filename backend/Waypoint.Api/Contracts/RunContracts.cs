@@ -949,19 +949,23 @@ public sealed record RunResultRollupStatusResponse(
 	int SkippedCount,
 
 	/// <summary>
-	/// Issue #1132: how many COMPONENTS in this bucket ran but evaluated nothing --
-	/// zero passed and zero open (failed) findings while still carrying at least one
-	/// <c>not_reviewed</c> one, the same false-clean shape #1124 fixed the per-finding
-	/// mapping for. Counted per component by the rollup SQL's <c>count(*) FILTER</c>,
-	/// so a MIXED bucket (one component evaluated nothing, others evaluated normally)
-	/// still reports it -- the summed counts alone cannot express that case. Never
-	/// counts a component that is genuinely all not-applicable (no execution failure
-	/// occurred).
+	/// Issue #1132: how many COMPONENTS in this bucket produced NO verdict -- zero
+	/// passed and zero open (failed) findings, the same false-clean shape #1124 fixed
+	/// the per-finding mapping for. Counted per component by the rollup SQL's
+	/// <c>count(*) FILTER</c>, so a MIXED bucket (one component that evaluated
+	/// nothing, others evaluated normally) still reports it -- the summed counts alone
+	/// cannot express that case. Covers the all-<c>not_reviewed</c>, all-<c>skipped</c>,
+	/// all-<c>execution_error</c> and zero-findings shapes. Deliberately does NOT count
+	/// a component that is genuinely all not-applicable: N/A is a determinate outcome,
+	/// not a failure to evaluate. Known gap: a component mixing <c>not_applicable</c>
+	/// with only <c>execution_error</c> findings is indistinguishable from that genuine
+	/// case here, because <c>execution_error</c> findings are counted in no column --
+	/// issue #1144.
 	/// </summary>
 	[property: JsonPropertyName("evaluated_zero_component_count")]
 	int EvaluatedZeroComponentCount,
 
-	/// <summary>Boolean form of <see cref="EvaluatedZeroComponentCount"/>: true when at least one component in this bucket evaluated nothing.</summary>
+	/// <summary>Boolean form of <see cref="EvaluatedZeroComponentCount"/>: true when at least one component in this bucket produced no verdict.</summary>
 	[property: JsonPropertyName("evaluated_zero_controls")]
 	bool EvaluatedZeroControls);
 
@@ -983,7 +987,9 @@ public sealed record RunResultRollupStatusResponse(
 /// execution-time one (<see cref="EvaluatedZeroComponentCount"/> &gt; 0 -- counted
 /// per component, so a mixed status bucket cannot mask it), or an UNKNOWN one
 /// (<see cref="PlanRecorded"/> false) -- epic #726 §3/§6 "coverage omissions still
-/// make the run incomplete".
+/// make the run incomplete". The execution-time signal detects the zero-verdict
+/// component (zero passed, zero open) in every shape except one: mixed
+/// <c>not_applicable</c> + <c>execution_error</c>, which issue #1144 covers.
 ///
 /// <see cref="PlanRecorded"/> is false for a run with no recorded
 /// <c>scan_plans</c> row (predates issue #734, or a legacy request shape --
@@ -1020,7 +1026,15 @@ public sealed record RunResultRollupResponse(
 	[property: JsonPropertyName("omitted_component_count")]
 	int? OmittedComponentCount,
 
-	/// <summary>False only when a plan IS recorded, it omitted nothing, and every component evaluated at least one control.</summary>
+	/// <summary>
+	/// False only when a plan IS recorded, it omitted nothing, and no component was
+	/// counted by <see cref="EvaluatedZeroComponentCount"/> -- i.e. every reported
+	/// component produced at least one passed or open (failed) finding, or was
+	/// genuinely all not-applicable. It is NOT a claim that every component evaluated
+	/// at least one control: a component whose findings are all <c>execution_error</c>
+	/// alongside at least one <c>not_applicable</c> one still reads complete, because
+	/// <c>execution_error</c> findings are counted in no column (issue #1144).
+	/// </summary>
 	[property: JsonPropertyName("coverage_incomplete")]
 	bool CoverageIncomplete,
 

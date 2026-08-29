@@ -130,24 +130,30 @@ public sealed record RunResultRollupRow(
 	int EvaluatedZeroComponentCount)
 {
 	/// <summary>
-	/// Issue #1132: how many COMPONENTS in this status bucket ran but evaluated
-	/// nothing -- zero passed and zero open (failed) findings, yet at least one
-	/// <c>not_reviewed</c> one (round-12's all-<c>Not_Reviewed</c> scan). Counted
-	/// PER COMPONENT by <see cref="IComponentResultRepository.GetRunRollupAsync"/>'s
-	/// <c>count(*) FILTER</c>, never re-derived from this row's summed counts: the
-	/// sums cannot express it, because a mixed bucket (one component evaluated
-	/// nothing, others evaluated normally) aggregates to a healthy-looking
+	/// Issue #1132: how many COMPONENTS in this status bucket produced NO verdict --
+	/// zero passed and zero open (failed) findings. Counted PER COMPONENT by
+	/// <see cref="IComponentResultRepository.GetRunRollupAsync"/>'s <c>count(*)
+	/// FILTER</c>, never re-derived from this row's summed counts: the sums cannot
+	/// express it, because a mixed bucket (one component that evaluated nothing,
+	/// others evaluated normally) aggregates to a healthy-looking
 	/// <c>PassedCount &gt; 0</c> and would read as fully evaluated.
 	///
-	/// The per-component predicate deliberately requires a <c>not_reviewed</c>
-	/// finding rather than firing on passed/open alone, so a component that is
-	/// genuinely, entirely <see cref="ComponentFindingStatuses.NotApplicable"/>
-	/// (a legitimate "nothing here applies" outcome, not an execution failure) is
-	/// never misreported as incomplete.
+	/// Counted shapes include the all-<see cref="ComponentFindingStatuses.NotReviewed"/>
+	/// scan (round-12's), the all-<see cref="ComponentFindingStatuses.Skipped"/> one, an
+	/// all-<see cref="ComponentFindingStatuses.ExecutionError"/> component, and a
+	/// component that produced no findings at all -- the last two land in no count
+	/// column (see issue #1144) and so read as all-zero here.
+	///
+	/// The one zero-verdict shape deliberately NOT counted is the genuinely, entirely
+	/// <see cref="ComponentFindingStatuses.NotApplicable"/> component: "nothing here
+	/// applies" is a determinate outcome, not a failure to evaluate. Known gap, not
+	/// closed at this grain: a component mixing <c>not_applicable</c> with only
+	/// <c>execution_error</c> findings is indistinguishable from that genuine case,
+	/// because <c>execution_error</c> is counted nowhere -- issue #1144 is the fix.
 	/// </summary>
 	public int EvaluatedZeroComponentCount { get; init; } = EvaluatedZeroComponentCount;
 
-	/// <summary>True when AT LEAST ONE component in this bucket evaluated nothing (see <see cref="EvaluatedZeroComponentCount"/>) -- the boolean form of the same per-component signal.</summary>
+	/// <summary>True when AT LEAST ONE component in this bucket produced no verdict (see <see cref="EvaluatedZeroComponentCount"/>) -- the boolean form of the same per-component signal.</summary>
 	public bool EvaluatedZeroControls => EvaluatedZeroComponentCount > 0;
 }
 
