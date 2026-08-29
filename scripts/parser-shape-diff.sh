@@ -34,6 +34,11 @@
 #     protection -- zip-slip, the recursion bound, the XCCDF requirement).
 # A documented-ACCEPT shape that was rejected under old-ref and resolves under new-ref
 # is the intentional-fix direction and is reported as a NOTE, not a failure.
+#
+# The accept/reject verdict comes from the leading word of the inventory row's Expected
+# column. A flip whose row is missing, or whose Expected cell does not start with a
+# recognizable "Accepted"/"Rejected", is UNVERIFIABLE and also exits non-zero -- this
+# classification fails closed in both directions.
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
@@ -111,6 +116,23 @@ doc_text = open(sys.argv[3], encoding="utf-8").read()
 # requirement) was dropped -- that is a regression, not a note. Sections are keyed by
 # the first backtick-quoted token of each `## ` heading, which is the parser name the
 # dump keys use.
+#
+# Classification FAILS CLOSED (PR #1098 round-2 review): the cell's leading word is
+# normalized (leading whitespace and markdown emphasis/backticks stripped, case-folded)
+# and must be "accepted" or "rejected". Anything else -- reworded, mistyped, or absent
+# -- yields no classification, and an unclassified rejected->accepted flip is reported
+# as UNVERIFIABLE with exit 1, exactly as a missing row is. Previously an unrecognized
+# cell silently defaulted to "accept", so bolding the word in a reject row downgraded a
+# dropped protection to a NOTE with exit 0. The vocabulary itself is asserted by
+# ShapeInventoryDoc.AssertExpectedVocabulary, so a malformed cell fails the test suite
+# before it can ever reach this script.
+def classify(expected_cell):
+    token = re.match(r"[A-Za-z]+", expected_cell.lstrip().lstrip("*_` "))
+    if token is None:
+        return None
+    return {"accepted": "accept", "rejected": "reject"}.get(token.group(0).lower())
+
+
 expectation = {}
 parser = None
 for line in doc_text.splitlines():
@@ -120,8 +142,9 @@ for line in doc_text.splitlines():
         continue
     row = re.match(r"^\| `([a-z0-9-]+)` \|(.*)\|([^|]*)\|\s*$", line)
     if row and parser:
-        expected_cell = row.group(3).strip().lower()
-        expectation[f"{parser}/{row.group(1)}"] = "reject" if expected_cell.startswith("rejected") else "accept"
+        verdict = classify(row.group(3))
+        if verdict is not None:
+            expectation[f"{parser}/{row.group(1)}"] = verdict
 
 regressions = []
 dropped_protections = []
@@ -165,9 +188,10 @@ if dropped_protections:
 
 if unclassified:
     print()
-    print(f"UNVERIFIABLE: {len(unclassified)} shape(s) flipped from rejected to accepted but have no Expected column in the inventory doc:")
+    print(f"UNVERIFIABLE: {len(unclassified)} shape(s) flipped from rejected to accepted but have no inventory row whose Expected column starts with a recognized 'Accepted'/'Rejected' verdict:")
     for shape_id in sorted(unclassified):
         print(f"  - {shape_id}")
+    print("Without a classifiable Expected cell this script cannot tell a dropped protection from an intentional fix, so it fails closed. Add the row, or restore its Expected column to begin with 'Accepted' or 'Rejected'.")
     failed = True
 
 if failed:

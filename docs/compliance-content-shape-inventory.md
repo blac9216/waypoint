@@ -44,6 +44,20 @@ the guard twice:
   documented-accept shape stops resolving between two refs, and when a
   documented-reject shape starts being accepted (a dropped zip-slip check, recursion
   bound, or XCCDF requirement).
+- **The Expected column is machine-parsed, and its vocabulary is enforced.** The
+  script tells those two cases apart by reading the **leading word of each row's
+  Expected cell**, normalized (leading whitespace and markdown emphasis/backticks
+  stripped, case-folded) and required to be `Accepted` or `Rejected`; everything after
+  that word is prose for humans. The wording is not left to chance: the completeness
+  assertion (`ShapeInventoryDoc.AssertExpectedVocabulary`, run from
+  `AssertCompleteness`) fails the build on any row whose Expected cell does not open
+  with one of those two words -- so a reworded cell cannot silently reach the script.
+  If one ever does, the script **fails closed**: a rejected-to-accepted flip it cannot
+  classify is reported as `UNVERIFIABLE` with exit 1, the same as a flip with no row
+  at all. Both the missing-row and the unrecognized-wording paths fail in the safe
+  direction. (PR #1098's round-2 review defeated the earlier version of this by
+  bolding the word in a reject row, which downgraded a dropped zip-slip check to a
+  soft note with exit 0.)
 
 **NOT machine-enforced (review-enforced only -- this is where you must add a row by
 hand):**
@@ -61,9 +75,10 @@ hand):**
   differential -- which diffs the corpus against itself -- can never report it as a
   regression. If no shipped content happens to use it either, the real-content check
   is blind to it as well. PR #1098's review demonstrated exactly this: dropping input
-  names carried by a *quoted* YAML scalar passed all three guards (27/27 per-shape
-  assertions, `385/385 real manifests accepted, 0 rejected`, and `No regressions`,
-  exit 0). Growing the inventory is a deliberate human act; the machinery only keeps
+  names carried by a *quoted* YAML scalar passed all three guards (the targeted
+  suite green at 27/27 -- the per-shape theories plus the completeness, real-content
+  and dump facts -- `385/385 real manifests accepted, 0 rejected`, and
+  `No regressions`, exit 0). Growing the inventory is a deliberate human act; the machinery only keeps
   it from shrinking.
 
 The practical rule: this file is worth exactly what the last engineer put into it.
@@ -104,18 +119,18 @@ because fixing it (PR #1084) silently broke another one.
 
 | Shape ID | Description | Expected |
 |---|---|---|
-| `indented-dash-sequence` | `inputs:` entries as an indented `  - name: ...` sequence (the shape every existing test used before this inventory). | Resolves the input by name. |
-| `column0-dash-sequence` | `inputs:` entries as a column-0 `- name: ...` sequence (no indentation before the dash) -- the shape every shipped NSX manifest actually used per issue #1071. | Resolves the input by name. |
-| `name-not-first-key` | An entry mapping lists `description:` before `name:` -- the shape PR #1084's first fix commit silently stopped resolving (issue #1077's motivating regression). | Resolves the input by name regardless of key order. |
-| `attributes-legacy-alias` | Manifest uses the legacy `attributes:` key instead of `inputs:`. | Resolves via the alias exactly as `inputs:` would. |
-| `column0-comment-between-entries` | A `#`-prefixed comment at column 0 between two input entries. | Both entries resolve; the comment has no effect. |
-| `trailing-inline-comment` | An entry's `name:` value carries a trailing inline `# comment`. | Resolves; the input name excludes the comment text. |
-| `block-scalar-folded-description` | An entry's `description:` uses a folded block scalar (`>`) spanning multiple lines. | Parses without error; the input still resolves by name. |
-| `block-scalar-literal-description` | An entry's `description:` uses a literal block scalar (`\|`) spanning multiple lines. | Parses without error; the input still resolves by name. |
-| `nested-extra-keys-ignored` | An entry carries extra nested keys (`sensitive:`, a nested `value:` mapping) beyond `name`/`type`/`required`. | Resolves name/type/required; extra keys are ignored, not errors. |
-| `empty-inputs-sequence` | `inputs: []`. | Resolves to zero inputs; not an error. |
-| `missing-inputs-key` | No `inputs:` or `attributes:` key present at all. | Resolves to zero inputs; not an error. |
-| `crlf-line-endings` | The whole document (indented-dash-sequence shape) uses CRLF line endings throughout. | Resolves identically to its LF counterpart -- CRLF is a known untested gap (PR #1084 finding: `WriteProfileFixtureRaw` fixtures inherit LF). |
+| `indented-dash-sequence` | `inputs:` entries as an indented `  - name: ...` sequence (the shape every existing test used before this inventory). | Accepted; resolves the input by name. |
+| `column0-dash-sequence` | `inputs:` entries as a column-0 `- name: ...` sequence (no indentation before the dash) -- the shape every shipped NSX manifest actually used per issue #1071. | Accepted; resolves the input by name. |
+| `name-not-first-key` | An entry mapping lists `description:` before `name:` -- the shape PR #1084's first fix commit silently stopped resolving (issue #1077's motivating regression). | Accepted; resolves the input by name regardless of key order. |
+| `attributes-legacy-alias` | Manifest uses the legacy `attributes:` key instead of `inputs:`. | Accepted; resolves via the alias exactly as `inputs:` would. |
+| `column0-comment-between-entries` | A `#`-prefixed comment at column 0 between two input entries. | Accepted; both entries resolve and the comment has no effect. |
+| `trailing-inline-comment` | An entry's `name:` value carries a trailing inline `# comment`. | Accepted; resolves, and the input name excludes the comment text. |
+| `block-scalar-folded-description` | An entry's `description:` uses a folded block scalar (`>`) spanning multiple lines. | Accepted; parses without error and the input still resolves by name. |
+| `block-scalar-literal-description` | An entry's `description:` uses a literal block scalar (`\|`) spanning multiple lines. | Accepted; parses without error and the input still resolves by name. |
+| `nested-extra-keys-ignored` | An entry carries extra nested keys (`sensitive:`, a nested `value:` mapping) beyond `name`/`type`/`required`. | Accepted; resolves name/type/required, and extra keys are ignored rather than errors. |
+| `empty-inputs-sequence` | `inputs: []`. | Accepted; resolves to zero inputs, not an error. |
+| `missing-inputs-key` | No `inputs:` or `attributes:` key present at all. | Accepted; resolves to zero inputs, not an error. |
+| `crlf-line-endings` | The whole document (indented-dash-sequence shape) uses CRLF line endings throughout. | Accepted; resolves identically to its LF counterpart -- CRLF is a known untested gap (PR #1084 finding: `WriteProfileFixtureRaw` fixtures inherit LF). |
 
 ## `StigZipReader` (`backend/Waypoint.Core/ComplianceContent/Xccdf/StigZipReader.cs`)
 
