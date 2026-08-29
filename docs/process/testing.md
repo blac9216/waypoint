@@ -17,8 +17,8 @@ Path-filtered jobs — `build, test, coverage` (backend/**), `build, test, lint`
 | backend build (CI parity) | `dotnet build backend/Waypoint.sln -warnaserror` | same PATH |
 | frontend unit | `cd frontend && npm ci && npm test` | Node per `frontend/.nvmrc` / README |
 | frontend build + air-gap guard | `cd frontend && npm run build` | must fail on any external asset (ADR-0007) |
-| lint | backend: `dotnet format backend/Waypoint.sln --verify-no-changes`; frontend: `cd frontend && npx oxlint`; shell: `shellcheck deploy/scripts/*.sh scripts/*.sh` | |
-| coverage | `dotnet test … --collect:"XPlat Code Coverage"` then `python3 scripts/check-coverage-floor.py`; frontend `npm run test:coverage` | gate: committed floor in `scripts/check-coverage-floor.py`; no regression vs base |
+| lint | backend: `dotnet format backend/Waypoint.sln --verify-no-changes`; frontend: `cd frontend && npx oxlint`; shell (same set as CI): `find deploy scripts -type f -name "*.sh" -print0 \| xargs -0 --no-run-if-empty shellcheck` | |
+| coverage | backend: `dotnet test backend/Waypoint.sln --collect:"XPlat Code Coverage"` then `python3 scripts/check-coverage-floor.py --report "backend/TestResults/**/coverage.cobertura.xml" --format cobertura --floor 88.0 --metric line`; frontend: `cd frontend && npm run test:coverage` then the same script with `--format json-summary` and the floor from `.github/workflows/frontend.yml` | gate: floors live in the workflow YAML (backend 88.0 line), not in the script; no regression vs base |
 | sanitize scan | `gitleaks detect --source . --no-banner` and `python3 .github/sanitize/scan_repo_specific.py` | the CI hard gate; run before every push |
 | e2e (synthetic, Playwright) | `cd deploy && ./scripts/e2e-playwright.sh <slug> <port>` | unique slug + port; tears down itself |
 | smoke | `cd deploy && ./scripts/fresh-stack-smoke-test.sh <slug> <port>` | same |
