@@ -24,6 +24,52 @@ This inventory only grows when a new shape is discovered (typically via the opt-
 real-content conformance check below) and added here first, with its fixture and
 assertion added alongside in the same change.
 
+## What this guard does and does not cover
+
+Read this before trusting the sections below to tell you a parser is safe. The
+guard is strong **over the shapes enumerated in this file** and has no reach at all
+outside them. Stated precisely, and verified by PR #1098's round-1 review defeating
+the guard twice:
+
+**Machine-enforced (the build fails):**
+
+- **Doc row <-> fixture, both directions.** `ShapeInventoryDoc.AssertCompleteness`
+  compares the rows parsed out of this file against each `*ShapeInventoryTests`
+  class's `ImplementedShapeIds`. A row with no fixture fails; a fixture with no row
+  fails.
+- **Per-shape behaviour.** Every row has an invented fixture asserting the row's
+  documented Expected result -- for a reject row, a specific error substring, so a
+  malformed fixture cannot masquerade as a shape rejection.
+- **Regression on an enumerated shape.** `scripts/parser-shape-diff.sh` fails when a
+  documented-accept shape stops resolving between two refs, and when a
+  documented-reject shape starts being accepted (a dropped zip-slip check, recursion
+  bound, or XCCDF requirement).
+
+**NOT machine-enforced (review-enforced only -- this is where you must add a row by
+hand):**
+
+- **Parser branches are not bound to rows.** The completeness assertion binds this
+  document to the fixture set, *not* to the parser's code. A new parser branch --
+  a new accepted key, a new archive layout, a new fallback -- can be added with no
+  row and no fixture and the suite stays green. Issue #1077's framing ("a parser that
+  gains a branch without a corresponding inventory row ... fails the build") is the
+  intent, not what is implemented; static analysis of parser branches was judged not
+  reasonably implementable. **If you touch a parser listed here, add the row
+  yourself.**
+- **Unenumerated shapes are invisible to every guard here.** A shape that is not a row
+  is not in the corpus, so the per-shape assertions never exercise it and the
+  differential -- which diffs the corpus against itself -- can never report it as a
+  regression. If no shipped content happens to use it either, the real-content check
+  is blind to it as well. PR #1098's review demonstrated exactly this: dropping input
+  names carried by a *quoted* YAML scalar passed all three guards (27/27 per-shape
+  assertions, `385/385 real manifests accepted, 0 rejected`, and `No regressions`,
+  exit 0). Growing the inventory is a deliberate human act; the machinery only keeps
+  it from shrinking.
+
+The practical rule: this file is worth exactly what the last engineer put into it.
+Discovering new shapes remains the job of pointing the real-content check at fresh
+upstream content, and of review reading the parser diff against this table.
+
 ## Real-content conformance and differential checks
 
 Two guards live alongside the per-shape assertions above, for the reasons the PR #1084
@@ -38,10 +84,16 @@ happens to use today.
   CI never depends on vendor content.
 - **Differential harness** (`scripts/parser-shape-diff.sh`): runs the *same* shape
   corpus defined below through an old ref's parser code and the working tree's parser
-  code, and flags any shape that resolved under the old ref but no longer does under
-  the new one. This is the check that catches a fix silently losing a shape no current
-  real content happens to exercise -- conformance against today's content cannot see
-  that class of regression at all.
+  code, and fails on any shape that resolved under the old ref but no longer does
+  under the new one, or that the table below documents as **rejected** and the new ref
+  now accepts (a dropped zip-slip check, recursion bound, or XCCDF requirement). This
+  is the check that catches a fix silently losing an **enumerated** shape that no
+  current real content happens to exercise -- conformance against today's content
+  cannot see that class of regression at all.
+
+  Its reach stops at the table. The corpus it diffs *is* this inventory, so a shape
+  nobody wrote down is absent from both sides of the diff and can never be reported
+  as a regression; see "What this guard does and does not cover" above.
 
 ## `InspecManifestParser` (`backend/Waypoint.Core/ComplianceContent/SemanticImport/InspecManifest.cs`)
 
@@ -82,10 +134,11 @@ Shapes of an uploaded/synchronized DISA STIG `.zip` package (issue #1073).
 | `zip-slip-entry-name` | An entry name contains a `..` traversal segment. | Rejected with an unsafe-path error. |
 | `no-xccdf-entry` | Archive has entries, but none end `-xccdf.xml`. | Rejected as containing no XCCDF entry. |
 
-## Deferred parsers (tracked as issue #1077's enumerated remainder)
+## Deferred parsers (tracked as issue [#1099](https://github.com/blac9216/waypoint/issues/1099))
 
-The following parsers are in issue #1077's scope but not yet covered by this
-inventory: `Get-WaypointNsxProfileAuthInputKeySet` (`WaypointScan.psm1`),
+The remainder of issue #1077's enumerated scope is filed as issue
+[#1099](https://github.com/blac9216/waypoint/issues/1099). The following parsers are
+in issue #1077's scope but not yet covered by this inventory: `Get-WaypointNsxProfileAuthInputKeySet` (`WaypointScan.psm1`),
 `XccdfParser`, and `VendorHierarchyInterpreter` (beyond the layout-table parity guard
 `docs/compliance-parity.md` already provides for its directory-literal dimension --
 this inventory would add the leaf-manifest/encoding dimensions on top of that).

@@ -25,6 +25,12 @@ namespace Waypoint.Tests.Core.ComplianceContent.ShapeInventory;
 /// asserts BOTH that every documented shape ID has an implemented fixture/assertion,
 /// AND that every implemented fixture/assertion has a documented row -- so the two
 /// cannot silently drift apart.
+///
+/// The binding is doc &lt;-&gt; fixture set, NOT doc &lt;-&gt; parser branches: a parser
+/// can gain a branch with no row and no fixture and this assertion stays green (PR
+/// #1098 round-1 review demonstrated it). Keeping the inventory in step with the
+/// parsers is review-enforced; see the "What this guard does and does not cover"
+/// section of <c>docs/compliance-content-shape-inventory.md</c>.
 /// </summary>
 public static class ShapeInventoryDoc
 {

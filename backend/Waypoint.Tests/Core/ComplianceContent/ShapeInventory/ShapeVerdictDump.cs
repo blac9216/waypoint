@@ -29,7 +29,8 @@ namespace Waypoint.Tests.Core.ComplianceContent.ShapeInventory;
 /// the two JSON files -- see that script and the "Real-content conformance and
 /// differential checks" section of <c>docs/compliance-content-shape-inventory.md</c>
 /// for why a differential over a synthetic corpus is a DIFFERENT property from
-/// real-content conformance, and why a silent-miss fix needs both.
+/// real-content conformance, why a silent-miss fix needs both, and why neither can
+/// see a shape that is not already an inventory row.
 ///
 /// When the env var is unset (the normal `dotnet test` run), this is a clean no-op --
 /// it never affects the pass/fail of a regular test run.
