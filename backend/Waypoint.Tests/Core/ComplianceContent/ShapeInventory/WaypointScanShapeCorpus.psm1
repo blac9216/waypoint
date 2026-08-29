@@ -67,13 +67,16 @@ $script:ShapeExpectations = @(
 	[ordered]@{ ShapeId = 'crlf-line-endings';                   Kind = 'declared' }
 )
 
-function Get-WaypointScanShapeExpectations {
+function Get-WaypointScanShapeExpectationTable {
 	[CmdletBinding()]
 	param()
 	return $script:ShapeExpectations
 }
 
 function New-WaypointScanShapeFixtureContent {
+	# Pure function -- builds and returns a string, no state change -- but the 'New'
+	# verb still trips PSUseShouldProcessForStateChangingFunctions.
+	[Diagnostics.CodeAnalysis.SuppressMessage('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Pure builder function; no state is changed.')]
 	[CmdletBinding()]
 	param(
 		[Parameter(Mandatory)]
@@ -150,7 +153,7 @@ function New-WaypointScanShapeFixtureContent {
 # disk, mirroring InspecManifestShapeInventoryTests' WriteProfileFixtureRaw discipline
 # (PR #1084 round-1 review's "fixture-helper quality" note).
 function New-WaypointScanShapeFixture {
-	[CmdletBinding()]
+	[CmdletBinding(SupportsShouldProcess)]
 	param(
 		[Parameter(Mandatory)]
 		[ValidateNotNullOrEmpty()]
@@ -159,6 +162,10 @@ function New-WaypointScanShapeFixture {
 		[ValidateNotNullOrEmpty()]
 		[string]$ProfileRoot
 	)
+
+	if (-not $PSCmdlet.ShouldProcess($ProfileRoot, "Write invented shape fixture '$ShapeId'")) {
+		return
+	}
 
 	New-Item -ItemType Directory -Path $ProfileRoot -Force | Out-Null
 	$content = New-WaypointScanShapeFixtureContent -ShapeId $ShapeId
@@ -172,7 +179,7 @@ function New-WaypointScanShapeFixture {
 # InspecManifestShapeInventoryTests.Resolves. $ScanModule must be a module object from
 # `Import-Module ... -PassThru` (the function is module-private, so it can only be
 # invoked via `& $ScanModule { ... }`, never directly from outside the module).
-function Test-WaypointScanShapeResolves {
+function Test-WaypointScanShapeResolution {
 	[CmdletBinding()]
 	param(
 		[Parameter(Mandatory)]
@@ -208,4 +215,4 @@ function Test-WaypointScanShapeResolves {
 	}
 }
 
-Export-ModuleMember -Function Get-WaypointScanShapeExpectations, New-WaypointScanShapeFixtureContent, New-WaypointScanShapeFixture, Test-WaypointScanShapeResolves
+Export-ModuleMember -Function Get-WaypointScanShapeExpectationTable, New-WaypointScanShapeFixtureContent, New-WaypointScanShapeFixture, Test-WaypointScanShapeResolution

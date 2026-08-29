@@ -146,11 +146,13 @@ round-2 review recorded on issue #1077: a real-content conformance check alone w
 **not** have caught a fix that silently stopped resolving a shape no shipped manifest
 happens to use today.
 
-- **Opt-in real-content conformance** (`RealContentConformanceTests`): walks a locally
-  cloned vendor content repository at `/workspaces/git/dod-compliance-and-automation`
-  (read-only) and reports, per parser, how many real artifacts it accepts versus
-  rejects. Skips cleanly (no assertion, no failure) when that path does not exist, so
-  CI never depends on vendor content.
+- **Opt-in real-content conformance** (`RealContentConformanceTests` for the two C#
+  parsers; `WaypointScan.RealContentConformance.Tests.ps1` (Pester) for
+  `Get-WaypointProfileDeclaredInputNameSet`): walks a locally cloned vendor content
+  repository at `/workspaces/git/dod-compliance-and-automation` (read-only) and
+  reports, per parser, how many real artifacts it accepts versus rejects. Skips
+  cleanly (no assertion, no failure -- `Set-ItResult -Skipped` on the Pester side) when
+  that path does not exist, so CI never depends on vendor content.
 - **Differential harness** (`scripts/parser-shape-diff.sh`): runs the *same* shape
   corpus defined below through an old ref's parser code and the working tree's parser
   code, and fails on any shape that resolved under the old ref but no longer does

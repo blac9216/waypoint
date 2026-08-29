@@ -54,9 +54,9 @@ Import-Module $CorpusPath -Force
 $scanModule = Import-Module $ModulePath -Force -PassThru
 
 $verdicts = [ordered]@{}
-foreach ($expectation in (Get-WaypointScanShapeExpectations)) {
+foreach ($expectation in (Get-WaypointScanShapeExpectationTable)) {
 	$shapeId = $expectation.ShapeId
-	$resolved = Test-WaypointScanShapeResolves -ScanModule $scanModule -ShapeId $shapeId
+	$resolved = Test-WaypointScanShapeResolution -ScanModule $scanModule -ShapeId $shapeId
 	$verdicts["Get-WaypointProfileDeclaredInputNameSet/$shapeId"] = [bool]$resolved
 }
 

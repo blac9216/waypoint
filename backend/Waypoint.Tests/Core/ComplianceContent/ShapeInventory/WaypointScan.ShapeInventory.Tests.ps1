@@ -46,7 +46,7 @@ BeforeAll {
 	# the shape inventory doc -- mirrors ShapeInventoryDoc.ParseShapeIds (C#) closely
 	# enough to catch the same doc<->fixture drift, without depending on the C# test
 	# assembly from a Pester run.
-	function Get-DocumentedShapeIds {
+	function Get-DocumentedShapeId {
 		$doc = Get-Content -Raw -Path $DocPath
 		$headingIndex = $doc.IndexOf('## `Get-WaypointProfileDeclaredInputNameSet`')
 		if ($headingIndex -lt 0) {
@@ -65,8 +65,8 @@ BeforeAll {
 		return $ids
 	}
 
-	$script:DocumentedShapeIds = Get-DocumentedShapeIds
-	$script:CorpusShapeIds = (Get-WaypointScanShapeExpectations) | ForEach-Object { $_.ShapeId }
+	$script:DocumentedShapeIds = Get-DocumentedShapeId
+	$script:CorpusShapeIds = (Get-WaypointScanShapeExpectationTable) | ForEach-Object { $_.ShapeId }
 }
 
 Describe 'Get-WaypointProfileDeclaredInputNameSet shape inventory' {
@@ -82,13 +82,9 @@ Describe 'Get-WaypointProfileDeclaredInputNameSet shape inventory' {
 	}
 
 	Context 'per-shape resolution' {
-		BeforeDiscovery {
-			$shapeIds = (Get-WaypointScanShapeExpectations) | ForEach-Object { $_.ShapeId }
-		}
-
-		It 'resolves shape "<_>" per its documented expectation' -ForEach $shapeIds {
+		It 'resolves shape "<_>" per its documented expectation' -ForEach (Get-WaypointScanShapeExpectationTable | ForEach-Object { $_.ShapeId }) {
 			$shapeId = $_
-			$resolved = Test-WaypointScanShapeResolves -ScanModule $script:ScanModule -ShapeId $shapeId
+			$resolved = Test-WaypointScanShapeResolution -ScanModule $script:ScanModule -ShapeId $shapeId
 			$resolved | Should -BeTrue -Because "shape '$shapeId' is documented as Accepted in docs/compliance-content-shape-inventory.md"
 		}
 	}
