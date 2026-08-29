@@ -949,12 +949,19 @@ public sealed record RunResultRollupStatusResponse(
 	int SkippedCount,
 
 	/// <summary>
-	/// Issue #1132: true when every component in this status bucket has zero passed
-	/// and zero open (failed/error) findings while still carrying at least one
-	/// <c>not_reviewed</c> finding -- "this bucket ran but evaluated nothing", the
-	/// same false-clean shape #1124 fixed the per-finding mapping for. Never true for
-	/// a bucket that is genuinely all not-applicable (no execution failure occurred).
+	/// Issue #1132: how many COMPONENTS in this bucket ran but evaluated nothing --
+	/// zero passed and zero open (failed) findings while still carrying at least one
+	/// <c>not_reviewed</c> one, the same false-clean shape #1124 fixed the per-finding
+	/// mapping for. Counted per component by the rollup SQL's <c>count(*) FILTER</c>,
+	/// so a MIXED bucket (one component evaluated nothing, others evaluated normally)
+	/// still reports it -- the summed counts alone cannot express that case. Never
+	/// counts a component that is genuinely all not-applicable (no execution failure
+	/// occurred).
 	/// </summary>
+	[property: JsonPropertyName("evaluated_zero_component_count")]
+	int EvaluatedZeroComponentCount,
+
+	/// <summary>Boolean form of <see cref="EvaluatedZeroComponentCount"/>: true when at least one component in this bucket evaluated nothing.</summary>
 	[property: JsonPropertyName("evaluated_zero_controls")]
 	bool EvaluatedZeroControls);
 
@@ -971,10 +978,30 @@ public sealed record RunResultRollupStatusResponse(
 /// omissions -- components that never became a plan item at all, e.g.
 /// <c>no_active_baseline</c>) alongside the already-planned coverage above, so a
 /// caller reads the FULL requested-vs-delivered picture from this one endpoint.
-/// <see cref="CoverageIncomplete"/> is true when either half of the false-clean
-/// family applies: a plan-time omission (<see cref="OmittedComponentCount"/> &gt; 0)
-/// or an execution-time one (any <see cref="RunResultRollupStatusResponse.EvaluatedZeroControls"/>
-/// bucket) -- epic #726 §3/§6 "coverage omissions still make the run incomplete".
+/// <see cref="CoverageIncomplete"/> is true when any of the false-clean family
+/// applies: a plan-time omission (<see cref="OmittedComponentCount"/> &gt; 0), an
+/// execution-time one (<see cref="EvaluatedZeroComponentCount"/> &gt; 0 -- counted
+/// per component, so a mixed status bucket cannot mask it), or an UNKNOWN one
+/// (<see cref="PlanRecorded"/> false) -- epic #726 §3/§6 "coverage omissions still
+/// make the run incomplete".
+///
+/// <see cref="PlanRecorded"/> is false for a run with no recorded
+/// <c>scan_plans</c> row (predates issue #734, or a legacy request shape --
+/// <c>GET /runs/{id}/plan</c> 404s for exactly these runs). There is then no frozen
+/// requested-component set to compare delivered coverage against, so
+/// <see cref="RequestedComponentCount"/> and <see cref="OmittedComponentCount"/> are
+/// NULL -- and because the API omits null properties
+/// (<c>WaypointJsonOptions.DefaultIgnoreCondition</c>), ABSENT from the JSON rather
+/// than present as a misleading zero -- and <see cref="CoverageIncomplete"/> is true:
+/// unknown coverage is not a completeness claim.
+///
+/// NOT folded into <see cref="CoverageIncomplete"/>: plan items with no
+/// component_results row at all (<see cref="PlannedComponentCount"/> greater than the
+/// sum of <c>by_status[].component_count</c>) -- components still queued/running or
+/// never claimed. Those are visible as the arithmetic gap between the two numbers and
+/// deliberately left to the caller, since "not reported yet" is not the same claim as
+/// "omitted" or "evaluated nothing".
+///
 /// Full per-omission detail (component, reason, ADR-0022/0024 explanation) is NOT
 /// repeated here to keep this endpoint's shape stable -- see <c>GET /runs/{id}/plan</c>.
 /// </summary>
@@ -985,14 +1012,25 @@ public sealed record RunResultRollupResponse(
 	[property: JsonPropertyName("planned_component_count")]
 	int PlannedComponentCount,
 
+	/// <summary>Total components the run REQUESTED (accepted plan items + frozen plan skips). Null when no plan was recorded -- unknown, never zero.</summary>
 	[property: JsonPropertyName("requested_component_count")]
-	int RequestedComponentCount,
+	int? RequestedComponentCount,
 
+	/// <summary>Components requested but omitted from the plan (frozen <c>scan_plans.skips_json</c>). Null when no plan was recorded -- unknown, never zero.</summary>
 	[property: JsonPropertyName("omitted_component_count")]
-	int OmittedComponentCount,
+	int? OmittedComponentCount,
 
+	/// <summary>False only when a plan IS recorded, it omitted nothing, and every component evaluated at least one control.</summary>
 	[property: JsonPropertyName("coverage_incomplete")]
 	bool CoverageIncomplete,
+
+	/// <summary>Whether this run has a frozen scan plan at all. False = the requested-vs-delivered comparison is unavailable (see <see cref="CoverageIncomplete"/>).</summary>
+	[property: JsonPropertyName("plan_recorded")]
+	bool PlanRecorded,
+
+	/// <summary>Run-level total of <see cref="RunResultRollupStatusResponse.EvaluatedZeroComponentCount"/> across every status bucket -- how many components ran but evaluated nothing, readable without walking <c>by_status</c>.</summary>
+	[property: JsonPropertyName("evaluated_zero_component_count")]
+	int EvaluatedZeroComponentCount,
 
 	[property: JsonPropertyName("by_status")]
 	IReadOnlyList<RunResultRollupStatusResponse> ByStatus);

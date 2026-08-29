@@ -136,6 +136,13 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 	/// the status GROUP BY (a row with no component_results at all has no status to
 	/// group under). Bounded by the closed status vocabulary (3 rows max), never by
 	/// component/job count -- issue #941's grouped-counts idiom.
+	///
+	/// Issue #1132: <c>evaluated_zero_component_count</c> is a <c>count(*) FILTER</c>
+	/// evaluated PER COMPONENT ROW inside the bucket, not re-derived from the summed
+	/// counts. The sums cannot express it -- a mixed bucket (one component all
+	/// not_reviewed, others evaluated normally) aggregates to passed &gt; 0 and would
+	/// read as fully evaluated, which is exactly the false-clean shape #1132 exists
+	/// to close.
 	/// </summary>
 	public async Task<RunResultRollup> GetRunRollupAsync(Guid runId, CancellationToken cancellationToken)
 	{
@@ -174,7 +181,11 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 				coalesce(sum(passed_count), 0),
 				coalesce(sum(not_applicable_count), 0),
 				coalesce(sum(not_reviewed_count), 0),
-				coalesce(sum(skipped_count), 0)
+				coalesce(sum(skipped_count), 0),
+				count(*) FILTER (
+					WHERE not_reviewed_count > 0
+					  AND passed_count + cat_i_open + cat_ii_open + cat_iii_open = 0
+				) AS evaluated_zero_component_count
 			FROM latest
 			GROUP BY status
 			ORDER BY status
@@ -193,7 +204,8 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 					PassedCount: (int)reader.GetInt64(5),
 					NotApplicableCount: (int)reader.GetInt64(6),
 					NotReviewedCount: (int)reader.GetInt64(7),
-					SkippedCount: (int)reader.GetInt64(8)));
+					SkippedCount: (int)reader.GetInt64(8),
+					EvaluatedZeroComponentCount: (int)reader.GetInt64(9)));
 			}
 		}
 

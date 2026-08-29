@@ -1040,18 +1040,29 @@ public sealed class RunsController : ControllerBase
 		// into this endpoint's coverage picture -- a run whose plan skipped requested
 		// components must not read as fully covered just because every ACCEPTED
 		// component completed. GetForRunAsync returns null for a run with no recorded
-		// plan (predates #734, or a legacy request shape); treated as zero omissions,
-		// same as a run whose plan genuinely accepted everything requested.
+		// plan (predates #734, or a legacy request shape) -- there is then no frozen
+		// requested set to compare against, so the omission counts are reported as
+		// NULL (unknown) and coverage_incomplete is TRUE: unknown coverage is not a
+		// completeness claim (the same runs /runs/{id}/plan 404s for).
 		ScanPlan? plan = await _scanPlans.GetForRunAsync(id, cancellationToken).ConfigureAwait(false);
-		int omittedComponentCount = plan?.Skips.Count ?? 0;
-		bool coverageIncomplete = omittedComponentCount > 0 || rollup.ByStatus.Any(row => row.EvaluatedZeroControls);
+		int? omittedComponentCount = plan?.Skips.Count;
+
+		// Issue #1132: the evaluated-nothing signal is a PER-COMPONENT count carried up
+		// from the rollup SQL's count(*) FILTER -- summing it here (rather than testing
+		// each bucket's aggregate counts) is what keeps a mixed bucket, in which one
+		// component evaluated nothing while others evaluated normally, from reading as
+		// fully evaluated.
+		int evaluatedZeroComponentCount = rollup.ByStatus.Sum(row => row.EvaluatedZeroComponentCount);
+		bool coverageIncomplete = plan is null || omittedComponentCount > 0 || evaluatedZeroComponentCount > 0;
 
 		return Ok(new RunResultRollupResponse(
 			RunId: rollup.RunId.ToString(),
 			PlannedComponentCount: rollup.PlannedComponentCount,
-			RequestedComponentCount: rollup.PlannedComponentCount + omittedComponentCount,
+			RequestedComponentCount: plan is null ? null : rollup.PlannedComponentCount + omittedComponentCount,
 			OmittedComponentCount: omittedComponentCount,
 			CoverageIncomplete: coverageIncomplete,
+			PlanRecorded: plan is not null,
+			EvaluatedZeroComponentCount: evaluatedZeroComponentCount,
 			ByStatus: [.. rollup.ByStatus.Select(row => new RunResultRollupStatusResponse(
 				Status: row.Status,
 				ComponentCount: row.ComponentCount,
@@ -1062,6 +1073,7 @@ public sealed class RunsController : ControllerBase
 				NotApplicableCount: row.NotApplicableCount,
 				NotReviewedCount: row.NotReviewedCount,
 				SkippedCount: row.SkippedCount,
+				EvaluatedZeroComponentCount: row.EvaluatedZeroComponentCount,
 				EvaluatedZeroControls: row.EvaluatedZeroControls))]));
 	}
 

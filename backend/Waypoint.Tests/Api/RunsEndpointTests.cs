@@ -490,8 +490,8 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 			PlannedComponentCount: 3,
 			ByStatus:
 			[
-				new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 2, CatIOpen: 1, CatIIOpen: 0, CatIIIOpen: 2, PassedCount: 10, NotApplicableCount: 1, NotReviewedCount: 0, SkippedCount: 0),
-				new Waypoint.Core.Scans.RunResultRollupRow("execution_error", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 0, NotApplicableCount: 0, NotReviewedCount: 1, SkippedCount: 0),
+				new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 2, CatIOpen: 1, CatIIOpen: 0, CatIIIOpen: 2, PassedCount: 10, NotApplicableCount: 1, NotReviewedCount: 0, SkippedCount: 0, EvaluatedZeroComponentCount: 0),
+				new Waypoint.Core.Scans.RunResultRollupRow("execution_error", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 0, NotApplicableCount: 0, NotReviewedCount: 1, SkippedCount: 0, EvaluatedZeroComponentCount: 1),
 			]);
 
 		HttpClient client = _factory.CreateClient();
@@ -551,7 +551,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		_factory.ComponentResults.NextRollup = new Waypoint.Core.Scans.RunResultRollup(
 			runId,
 			PlannedComponentCount: 1,
-			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 10, NotApplicableCount: 0, NotReviewedCount: 0, SkippedCount: 0)]);
+			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 10, NotApplicableCount: 0, NotReviewedCount: 0, SkippedCount: 0, EvaluatedZeroComponentCount: 0)]);
 		_factory.ScanPlans.NextPlan = new Waypoint.Core.Scans.ScanPlan(
 			runId, Waypoint.Core.Scans.ScanPlanSchema.CurrentVersion, Items: [],
 			Skips:
@@ -586,7 +586,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		_factory.ComponentResults.NextRollup = new Waypoint.Core.Scans.RunResultRollup(
 			runId,
 			PlannedComponentCount: 1,
-			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 0, NotApplicableCount: 0, NotReviewedCount: 138, SkippedCount: 0)]);
+			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 0, NotApplicableCount: 0, NotReviewedCount: 138, SkippedCount: 0, EvaluatedZeroComponentCount: 1)]);
 
 		HttpClient client = _factory.CreateClient();
 		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/component-results/summary");
@@ -611,7 +611,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		_factory.ComponentResults.NextRollup = new Waypoint.Core.Scans.RunResultRollup(
 			runId,
 			PlannedComponentCount: 1,
-			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 10, NotApplicableCount: 2, NotReviewedCount: 0, SkippedCount: 0)]);
+			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 10, NotApplicableCount: 2, NotReviewedCount: 0, SkippedCount: 0, EvaluatedZeroComponentCount: 0)]);
 		_factory.ScanPlans.NextPlan = new Waypoint.Core.Scans.ScanPlan(
 			runId, Waypoint.Core.Scans.ScanPlanSchema.CurrentVersion, Items: [], Skips: [],
 			PlanDigest: "invented-digest", Explanation: "1 of 1 requested component(s) accepted into the plan.");
@@ -625,7 +625,76 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 		JsonElement root = doc.RootElement;
 		Assert.Equal(0, root.GetProperty("omitted_component_count").GetInt32());
 		Assert.False(root.GetProperty("coverage_incomplete").GetBoolean());
+		Assert.True(root.GetProperty("plan_recorded").GetBoolean());
+		Assert.Equal(0, root.GetProperty("evaluated_zero_component_count").GetInt32());
 		Assert.False(root.GetProperty("by_status").EnumerateArray().Single().GetProperty("evaluated_zero_controls").GetBoolean());
+	}
+
+	[Fact]
+	public async Task GetComponentResultsSummary_MixedBucketOneComponentEvaluatedNothing_ReportsCoverageIncomplete()
+	{
+		// Round-2 finding: 3 components, all `completed`, ONE of which evaluated
+		// nothing (138 not_reviewed) while the other two evaluated normally. The
+		// bucket's SUMS look healthy (90 passed, 4 open), so an aggregate-only signal
+		// would report coverage_incomplete:false for a run a third of which produced
+		// no evaluation at all. The per-component count must surface it.
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.ComponentResults.NextRollup = new Waypoint.Core.Scans.RunResultRollup(
+			runId,
+			PlannedComponentCount: 3,
+			ByStatus: [new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 3, CatIOpen: 2, CatIIOpen: 1, CatIIIOpen: 1, PassedCount: 90, NotApplicableCount: 0, NotReviewedCount: 138, SkippedCount: 0, EvaluatedZeroComponentCount: 1)]);
+		_factory.ScanPlans.NextPlan = new Waypoint.Core.Scans.ScanPlan(
+			runId, Waypoint.Core.Scans.ScanPlanSchema.CurrentVersion, Items: [], Skips: [],
+			PlanDigest: "invented-digest", Explanation: "3 of 3 requested component(s) accepted into the plan.");
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/component-results/summary");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = doc.RootElement;
+		Assert.Equal(0, root.GetProperty("omitted_component_count").GetInt32());
+		Assert.Equal(1, root.GetProperty("evaluated_zero_component_count").GetInt32());
+		Assert.True(root.GetProperty("coverage_incomplete").GetBoolean());
+
+		JsonElement completedRow = root.GetProperty("by_status").EnumerateArray().Single();
+		Assert.Equal(90, completedRow.GetProperty("passed_count").GetInt32());
+		Assert.Equal(1, completedRow.GetProperty("evaluated_zero_component_count").GetInt32());
+		Assert.True(completedRow.GetProperty("evaluated_zero_controls").GetBoolean());
+	}
+
+	[Fact]
+	public async Task GetComponentResultsSummary_NoRecordedPlan_ReportsUnknownCoverageNotComplete()
+	{
+		// A run with no frozen plan (predates #734, or a legacy request shape -- the
+		// same runs GET /runs/{id}/plan 404s for) has no requested-component set to
+		// compare against. Unknown coverage must not read as a completeness claim.
+		Guid runId = Guid.NewGuid();
+		_factory.Repository.SetRun(runId, new RunQueueState("completed", false, false, null, "alice"));
+		_factory.ComponentResults.NextRollup = new Waypoint.Core.Scans.RunResultRollup(runId, PlannedComponentCount: 0, ByStatus: []);
+		_factory.ScanPlans.NextPlan = null;
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, $"/api/v1/runs/{runId}/component-results/summary");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+		using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		JsonElement root = doc.RootElement;
+		Assert.False(root.GetProperty("plan_recorded").GetBoolean());
+		// Both counts are null -- and the API omits null properties globally
+		// (WaypointJsonOptions.DefaultIgnoreCondition), so they are ABSENT rather than
+		// present-and-zero. Absent is the point: no false zero to misread as "nothing
+		// was omitted".
+		Assert.False(root.TryGetProperty("requested_component_count", out _));
+		Assert.False(root.TryGetProperty("omitted_component_count", out _));
+		Assert.True(root.GetProperty("coverage_incomplete").GetBoolean());
 	}
 
 	[Fact]
