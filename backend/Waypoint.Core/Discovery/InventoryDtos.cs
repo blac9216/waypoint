@@ -16,16 +16,20 @@ namespace Waypoint.Core.Discovery;
 
 /// <summary>
 /// The closed set of inventory item types (migration 0011's
-/// <c>inventory_items_type_check</c>) -- the three-level tree api-contract.md names
-/// for the start-a-scan checkbox tree: cluster -&gt; host -&gt; vm.
+/// <c>inventory_items_type_check</c>, widened by migration 0077) -- the three-level
+/// tree api-contract.md names for the start-a-scan checkbox tree (cluster -&gt; host
+/// -&gt; vm), plus <see cref="VCenter"/> (issue #1081): the appliance's own row, giving
+/// its authoritative instance identifier and version/build fact a home in
+/// <c>inventory_items</c>, the same way an <c>esxi</c> row already does for a host.
 /// </summary>
 public static class InventoryItemTypes
 {
 	public const string Cluster = "cluster";
 	public const string Host = "host";
 	public const string Vm = "vm";
+	public const string VCenter = "vcenter";
 
-	public static readonly IReadOnlyCollection<string> All = [Cluster, Host, Vm];
+	public static readonly IReadOnlyCollection<string> All = [Cluster, Host, Vm, VCenter];
 
 	public static bool IsValid(string? type) => type is not null && All.Contains(type);
 }
@@ -78,6 +82,17 @@ public sealed record InventoryItem(
 /// one from the build number -- that inference is precisely what ADR-0022's
 /// byte-for-byte exact-match contract exists to forbid, see issue #974's
 /// options-analysis comment on #967).
+///
+/// Issue #1081: a <see cref="InventoryItemTypes.VCenter"/> row reports the appliance's
+/// OWN identity/version fact -- <see cref="Moref"/> is its authoritative stable
+/// instance identifier (vSphere's <c>content.about.instanceUuid</c>, never the FQDN/IP
+/// used to reach it), <see cref="Version"/>/<see cref="Build"/> are its semantic
+/// version/build (<c>content.about.version</c>/<c>.build</c>), the same two-fact shape
+/// a `host` row already reports for ESXi. A `vm` row's <see cref="Build"/> is never
+/// populated -- it used to carry the VMware Tools version, which is not a product-
+/// version fact for the VM itself and would mislead anything reading `Build` as a
+/// platform fact (issue #1081); deriving a VM's own platform version is #1063's
+/// separately-owned work.
 /// </summary>
 public sealed record DiscoveredInventoryItem(
 	string Type,

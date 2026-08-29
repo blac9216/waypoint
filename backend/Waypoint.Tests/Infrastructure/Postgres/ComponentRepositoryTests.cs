@@ -225,6 +225,43 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 		Assert.Equal(ComponentLifecycleStates.Active, reDiscovered.Lifecycle);
 	}
 
+	/// <summary>
+	/// Issue #1081: <see cref="ComponentFact.Build"/> round-trips through the real
+	/// JSONB discovered_fact column -- both the write (<see cref="ComponentRepository.UpsertDiscoveredAsync"/>)
+	/// and the read (<c>DeserializeFact</c>) sides.
+	/// </summary>
+	[Fact]
+	public async Task UpsertDiscoveredAsync_WithBuild_RoundTripsBuildOnTheDiscoveredFact()
+	{
+		Guid target = await SeedTargetAsync("vcenter-build-roundtrip");
+		DiscoveredComponent[] items = [new("esxi", "host-9101", "esxi-01.example.internal", null, null, "8.0.3", "99.0.12345678")];
+
+		await _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		Component component = Assert.Single(await _repository.ListForTargetAsync(target, includeRetired: true, CancellationToken.None));
+
+		Assert.NotNull(component.DiscoveredFact);
+		Assert.Equal("8.0.3", component.DiscoveredFact!.ExactVersion);
+		Assert.Equal("99.0.12345678", component.DiscoveredFact.Build);
+	}
+
+	/// <summary>
+	/// Issue #1081: a discovered fact with no build observed (e.g. a component whose
+	/// discovery pass could not read it) stores/reads back honestly null -- never a
+	/// parse failure, never a guessed value.
+	/// </summary>
+	[Fact]
+	public async Task UpsertDiscoveredAsync_WithNoBuild_DiscoveredFactBuildStaysNull()
+	{
+		Guid target = await SeedTargetAsync("vcenter-build-absent");
+		DiscoveredComponent[] items = [new("esxi", "host-9102", "esxi-02.example.internal", null, null, "8.0.3")];
+
+		await _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		Component component = Assert.Single(await _repository.ListForTargetAsync(target, includeRetired: true, CancellationToken.None));
+
+		Assert.NotNull(component.DiscoveredFact);
+		Assert.Null(component.DiscoveredFact!.Build);
+	}
+
 	[Fact]
 	public async Task UpsertDiscoveredAsync_ComponentNoLongerReported_BecomesAbsentThenRetiresPastThreshold()
 	{

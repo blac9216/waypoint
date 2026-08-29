@@ -16,13 +16,19 @@ using Waypoint.Core.Components;
 
 namespace Waypoint.Api.Contracts;
 
-/// <summary>One independent, timestamped product-version observation on the wire.</summary>
-public sealed record ComponentFactResponse(string ExactVersion, DateTimeOffset ObservedAt, string? RawEvidenceReference)
+/// <summary>
+/// One independent, timestamped product-version observation on the wire.
+/// <see cref="Build"/> (issue #1081) is the observed raw build number alongside the
+/// mandatory <see cref="ExactVersion"/> -- present for a discovered esxi/vcenter fact,
+/// honestly null for a configured fact (which never carries one) or an older
+/// discovered fact recorded before this field existed.
+/// </summary>
+public sealed record ComponentFactResponse(string ExactVersion, DateTimeOffset ObservedAt, string? RawEvidenceReference, string? Build = null)
 {
 	public static ComponentFactResponse FromDomain(ComponentFact fact)
 	{
 		ArgumentNullException.ThrowIfNull(fact);
-		return new ComponentFactResponse(fact.ExactVersion, fact.ObservedAt, fact.RawEvidenceReference);
+		return new ComponentFactResponse(fact.ExactVersion, fact.ObservedAt, fact.RawEvidenceReference, fact.Build);
 	}
 }
 

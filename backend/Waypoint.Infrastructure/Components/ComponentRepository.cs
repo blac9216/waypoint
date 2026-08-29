@@ -120,9 +120,13 @@ public sealed class ComponentRepository : IComponentRepository
 				parentComponentId = resolvedParentId;
 			}
 
+			// Issue #1081: build rides alongside exact_version in the same JSONB fact --
+			// still only written when this pass actually rendered a version opinion
+			// (never a build-only fact), and honestly null when the pass could not
+			// observe a build (e.g. a vm, which never carries one at all).
 			string? factJson = item.ExactVersion is null
 				? null
-				: JsonSerializer.Serialize(new { exact_version = item.ExactVersion, observed_at = DateTimeOffset.UtcNow }, FactSerializerOptions);
+				: JsonSerializer.Serialize(new { exact_version = item.ExactVersion, observed_at = DateTimeOffset.UtcNow, build = item.Build }, FactSerializerOptions);
 
 			// Issue #840: a single atomic statement replaces the former check-then-insert
 			// (a separate existence SELECT, a separate lifecycle SELECT, then a branch to
@@ -154,8 +158,10 @@ public sealed class ComponentRepository : IComponentRepository
 			//
 			// Issue #1000: that "always overwrite" rule is only honest when discovery
 			// actually rendered a version opinion this pass (item.ExactVersion is
-			// non-null -- today, only esxi hosts). A component discovery can never
-			// version (the synthetic vcenter root, any vm) always reports
+			// non-null -- esxi hosts, and, since issue #1081, the vcenter root when the
+			// pass observed the appliance's own `content.about` version). A component
+			// discovery can never version (any vm, or the vcenter root on a pass that
+			// could not observe its own identity/version) always reports
 			// ExactVersion=null/CatalogComponentId=null by construction
 			// (DiscoverJobHandler.MapToComponents), so an unconditional EXCLUDED
 			// assignment would clobber a link the CONFIGURED-fact path
@@ -167,6 +173,67 @@ public sealed class ComponentRepository : IComponentRepository
 			// always-overwrite semantics (relink or honestly unlink on a version
 			// change) are unchanged.
 			bool discoveryHasVersionOpinion = factJson is not null;
+
+			// Issue #1081 (round-1 review, blocker 1): a ROOT component that was
+			// previously discovered WITHOUT an identity and is now discovered WITH one
+			// must be ADOPTED in place, not duplicated. The two upsert branches below
+			// bind to two DIFFERENT unique constraints
+			// (components_vendor_identity_unique vs the null-identity partial index), so
+			// once a pass starts supplying an identity for a key it had previously left
+			// null -- exactly what #1081 does for the `vcenter` root -- the identity
+			// branch's ON CONFLICT simply does not see the pre-existing null-identity
+			// row, and BOTH constraints happily permit a second root alongside it. The
+			// consequence is not cosmetic: DiscoverJobHandler's declared-service root
+			// lookup would then have two candidates and resolve the tie by created_at,
+			// picking the older, unlinked, absent one and reporting
+			// declared_services_upserted: 0 forever on every target discovered before
+			// this shipped.
+			//
+			// Adoption (an UPDATE that stamps the identity onto the existing row) is
+			// chosen over post-hoc dedup or a data migration because it is the only
+			// option that preserves the row's whole history: first_seen_at, any
+			// Admin-set configured_fact, the catalog_component_id the configured-fact
+			// path may have established, every component_observations row, and -- most
+			// importantly -- the parent_component_id FKs of children already
+			// materialized under it (#741/#743's declared services). A dedup would have
+			// to re-point all of those by hand; a migration cannot run at all, because
+			// the identity is not knowable at migration time -- it is only learned from
+			// the appliance at discovery time.
+			//
+			// Deliberately scoped to ROOTS (parentComponentId is null). A root is a
+			// singleton per (target, catalog_component_key) -- one appliance per target
+			// -- so "the null-identity row for this key" is unambiguously the same
+			// entity that just reported an identity. Non-root siblings (several esxi
+			// hosts under one target) have no such guarantee: an arbitrary identified
+			// sibling must not swallow the shared null-identity placeholder, so they
+			// keep the previous behaviour untouched.
+			//
+			// The NOT EXISTS guard keeps this safe on an appliance that already ran a
+			// build carrying #1081's identity change WITHOUT this fix and so already has
+			// both rows on disk: adoption would violate components_vendor_identity_unique
+			// there, so it is skipped and the stale placeholder is retired instead by the
+			// statement that runs after the upsert below.
+			if (item.VendorIdentity is not null && parentComponentId is null)
+			{
+				await using NpgsqlCommand adopt = new(
+					"""
+					UPDATE components SET vendor_identity = $3
+					WHERE parent_target_id = $1
+					  AND parent_component_id IS NULL
+					  AND catalog_component_key = $2
+					  AND vendor_identity IS NULL
+					  AND NOT EXISTS (
+					      SELECT 1 FROM components existing
+					      WHERE existing.parent_target_id = $1
+					        AND existing.catalog_component_key = $2
+					        AND existing.vendor_identity = $3)
+					""", connection, transaction);
+				adopt.Parameters.AddWithValue(targetId);
+				adopt.Parameters.AddWithValue(item.CatalogComponentKey);
+				adopt.Parameters.AddWithValue(item.VendorIdentity);
+				await adopt.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			}
+
 			Guid rowId;
 			bool wasReconnect;
 			if (item.VendorIdentity is not null)
@@ -248,6 +315,28 @@ public sealed class ComponentRepository : IComponentRepository
 				rowId = reader.GetGuid(0);
 				string? priorLifecycle = reader.IsDBNull(1) ? null : reader.GetString(1);
 				wasReconnect = priorLifecycle is not null && priorLifecycle != Waypoint.Core.Components.ComponentLifecycleStates.Active;
+			}
+
+			// Issue #1081 (round-1 review, blocker 1), second half: on an appliance that
+			// already has BOTH shapes on disk the adoption above is correctly skipped,
+			// which would leave the stale null-identity root visible to the
+			// declared-service root lookup (which reads includeRetired: true). Retire it
+			// so exactly one root remains a live candidate. A no-op in the normal case,
+			// because adoption already left no null-identity root behind.
+			if (item.VendorIdentity is not null && parentComponentId is null)
+			{
+				await using NpgsqlCommand retireStale = new(
+					"""
+					UPDATE components SET lifecycle = 'retired', continuous_absence_since = COALESCE(continuous_absence_since, now())
+					WHERE parent_target_id = $1
+					  AND parent_component_id IS NULL
+					  AND catalog_component_key = $2
+					  AND vendor_identity IS NULL
+					  AND lifecycle <> 'retired'
+					""", connection, transaction);
+				retireStale.Parameters.AddWithValue(targetId);
+				retireStale.Parameters.AddWithValue(item.CatalogComponentKey);
+				await retireStale.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 			}
 
 			if (factJson is not null)
@@ -560,10 +649,26 @@ public sealed class ComponentRepository : IComponentRepository
 				discoveredExactVersion = existing.IsDBNull(1) ? null : existing.GetString(1);
 				parentTargetId = existing.GetGuid(2);
 
-				// Issue #741: a target's ROOT connection component (no parent, no vendor
-				// identity -- e.g. the synthetic vcenter root) is the anchor for
-				// catalog-declared service expansion below.
-				isRootConnectionComponent = existing.IsDBNull(3) && existing.IsDBNull(4);
+				// Issue #741: a target's ROOT connection component (no parent) is the
+				// anchor for catalog-declared service expansion below. A null vendor
+				// identity still identifies most roots -- issue #743's Admin-declared
+				// ssh/target roots (Photon, Aria, ...) never carry one, same as a
+				// catalog-declared CHILD (also null, but excluded by the
+				// parent_component_id check above).
+				//
+				// Issue #1081: that null-vendor-identity test alone is no longer
+				// SUFFICIENT for the vcenter root specifically -- it now carries the
+				// appliance's own authoritative vendor identity once discovery observes
+				// it, which would otherwise make this false exactly when a
+				// discovery-linked vCenter's Admin PUT should still sync its declared
+				// VCSA children. CatalogComponentKey == `vcenter` is always true for
+				// that root and never for a discovered esxi/vm sibling (which also has
+				// parent_component_id null under the flattened-parentage model -- see
+				// DiscoverJobHandler.MapToComponents), so it is added as an explicit
+				// OR rather than replacing the null-vendor-identity test outright.
+				isRootConnectionComponent = existing.IsDBNull(3) &&
+					(existing.IsDBNull(4) ||
+						string.Equals(catalogComponentKey, Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter, StringComparison.Ordinal));
 			}
 		}
 
@@ -751,7 +856,13 @@ public sealed class ComponentRepository : IComponentRepository
 			? parsed
 			: DateTimeOffset.UtcNow;
 		string? rawEvidenceReference = root.TryGetProperty("raw_evidence_reference", out JsonElement evidenceElement) ? evidenceElement.GetString() : null;
+		// Issue #1081: optional -- absent entirely on a configured fact (which never
+		// carries a build) or on an older discovered fact recorded before this field
+		// existed; both read back as honestly null, never a parse failure.
+		string? build = root.TryGetProperty("build", out JsonElement buildElement) && buildElement.ValueKind != JsonValueKind.Null
+			? buildElement.GetString()
+			: null;
 
-		return new ComponentFact(exactVersion, observedAt, rawEvidenceReference);
+		return new ComponentFact(exactVersion, observedAt, rawEvidenceReference, build);
 	}
 }

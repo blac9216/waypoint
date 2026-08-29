@@ -446,14 +446,21 @@ public sealed class DiscoverJobHandler : IJobHandler
 	/// has no "cluster" selector kind) and is never itself an executable compliance
 	/// subject, so it is deliberately dropped rather than materialized.
 	///
-	/// Every mapped component hangs directly off one synthetic per-target `vcenter`
-	/// root component (<see cref="Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter"/>,
-	/// <c>VendorIdentity: null</c> -- this discovery boundary's PowerShell module
-	/// (<c>Invoke-WaypointDiscovery</c>) enumerates only cluster/host/VM objects, never
-	/// a distinct vCenter ServiceInstance MoRef, so there is no independent upstream
-	/// object to key the root on; identity instead falls to the no-vendor-identity
-	/// partial-index case migration 0054 already defines for exactly this shape),
-	/// never through an intermediate cluster component -- a host's or VM's
+	/// Every mapped component hangs directly off one per-target `vcenter` root
+	/// component (<see cref="Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter"/>).
+	/// Issue #1081: the PowerShell module now reports one <see cref="InventoryItemTypes.VCenter"/>
+	/// row alongside cluster/host/VM (vSphere's <c>content.about</c> -- the appliance's
+	/// own authoritative instance UUID identity and semantic version/build), and that
+	/// row -- when present -- becomes the root's <see cref="DiscoveredComponent.VendorIdentity"/>/
+	/// <see cref="DiscoveredComponent.ExactVersion"/>/<see cref="DiscoveredComponent.Build"/>,
+	/// exactly the two-fact shape a discovered `esxi` host already carries (ADR-0023
+	/// "Inventory identity uses authoritative stable vendor identifiers, never
+	/// hostname/IP/display-name inference"). A pass that reports no such row (a
+	/// pre-#1081 module, or a boundary that genuinely could not observe it) falls back
+	/// to the prior synthetic shape -- <c>VendorIdentity: null</c>, no version/build --
+	/// the no-vendor-identity partial-index case migration 0054 already defines,
+	/// honestly absent rather than guessed, never a hard failure. Never through an
+	/// intermediate cluster component -- a host's or VM's
 	/// <see cref="DiscoveredInventoryItem.ParentMoref"/> may point at a cluster
 	/// (dropped, no component) rather than another host, so component parentage is
 	/// deliberately flattened to (root vcenter) -&gt; (esxi | vm) rather than trying to
@@ -473,16 +480,33 @@ public sealed class DiscoverJobHandler : IJobHandler
 	{
 		List<DiscoveredComponent> components = [];
 
-		// The synthetic root has no independent vendor identity (see doc comment above)
-		// and therefore no ParentVendorIdentity of its own -- it is always a top-level
-		// component under the target.
+		// Issue #1081: root identity/version/build come from the pass's own
+		// `vcenter`-type row when the module reported one (see doc comment above).
+		// item.Moref is TryParseItem's non-blank-guaranteed MoRef -- IsNullOrWhiteSpace
+		// here is pure defense in depth, matching the same normalization every other
+		// fact read in this method applies (issue #995's empty-string precedent). At
+		// most one such row is expected per pass; a duplicate would simply mean the
+		// last one wins, matching how nothing here specially guards against duplicate
+		// host/vm morefs either -- that is InventoryRepository/ComponentRepository's
+		// upsert-by-identity concern, not this pure mapping function's.
+		DiscoveredInventoryItem? vcenterFact = items.FirstOrDefault(i => string.Equals(i.Type, InventoryItemTypes.VCenter, StringComparison.Ordinal));
+		string? rootVendorIdentity = vcenterFact is not null && !string.IsNullOrWhiteSpace(vcenterFact.Moref) ? vcenterFact.Moref : null;
+		string rootDisplayName = vcenterFact is not null && !string.IsNullOrWhiteSpace(vcenterFact.Name) ? vcenterFact.Name : "vCenter Server";
+		string? rootExactVersion = vcenterFact is not null && !string.IsNullOrWhiteSpace(vcenterFact.Version) ? vcenterFact.Version : null;
+		string? rootBuild = vcenterFact is not null && !string.IsNullOrWhiteSpace(vcenterFact.Build) ? vcenterFact.Build : null;
+
+		// The root has no independent inventory parent (see doc comment above) and
+		// therefore no ParentVendorIdentity of its own -- it is always a top-level
+		// component under the target, whether or not this pass could observe its own
+		// identity/version.
 		components.Add(new DiscoveredComponent(
 			CatalogComponentKey: Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter,
-			VendorIdentity: null,
-			DisplayName: "vCenter Server",
+			VendorIdentity: rootVendorIdentity,
+			DisplayName: rootDisplayName,
 			ParentVendorIdentity: null,
 			CatalogComponentId: null,
-			ExactVersion: null));
+			ExactVersion: rootExactVersion,
+			Build: rootBuild));
 
 		foreach (DiscoveredInventoryItem item in items)
 		{
@@ -490,7 +514,9 @@ public sealed class DiscoverJobHandler : IJobHandler
 			{
 				InventoryItemTypes.Host => Waypoint.Core.ComplianceContent.CatalogSelectorKinds.Esxi,
 				InventoryItemTypes.Vm => Waypoint.Core.ComplianceContent.CatalogSelectorKinds.Vm,
-				_ => null, // InventoryItemTypes.Cluster and anything else: no component analogue.
+				// InventoryItemTypes.Cluster: no component analogue.
+				// InventoryItemTypes.VCenter: handled as the root above, not a child.
+				_ => null,
 			};
 
 			if (catalogComponentKey is null)
@@ -518,11 +544,12 @@ public sealed class DiscoverJobHandler : IJobHandler
 				// host's catalog match is keyed on. A host whose Version is unavailable
 				// this pass gets ExactVersion=null -- fail-closed, per ADR-0023: never
 				// substitute or infer a version from Build.
-				// A VM's Build carries VMware Tools version in this module's output, which
-				// is not a product-version fact for the VM itself, so it is intentionally
-				// NOT passed as ExactVersion here (that would misrepresent a guest property
-				// as the component's own compliance-relevant version); VMs have no
-				// analogous Version field either, so they keep ExactVersion=null.
+				// A VM's Build (issue #1081) is never populated here -- the module no
+				// longer reports the VMware Tools version on this field at all (it is not
+				// a product-version fact for the VM itself, and would mislead anything
+				// reading `Build` as a platform fact); VMs have no analogous Version field
+				// either, so they keep ExactVersion=null and Build=null. Deriving a VM's
+				// own platform version is #1063's separately-owned work.
 				// Issue #995: a powered-off/disconnected/connecting host reports Version as
 				// an EMPTY STRING, not null -- string.IsNullOrWhiteSpace normalizes that (and
 				// whitespace-only) to null right here, at the mapping boundary, so "version
@@ -531,7 +558,13 @@ public sealed class DiscoverJobHandler : IJobHandler
 				// is non-null to an `is null` guard.
 				ParentVendorIdentity: null,
 				CatalogComponentId: null,
-				ExactVersion: item.Type == InventoryItemTypes.Host && !string.IsNullOrWhiteSpace(item.Version) ? item.Version : null));
+				ExactVersion: item.Type == InventoryItemTypes.Host && !string.IsNullOrWhiteSpace(item.Version) ? item.Version : null,
+				// Issue #1081: the ESXi component fact previously kept only ExactVersion
+				// and silently dropped the Build discovery DID observe (retained on the
+				// inventory_items row but never carried onto the component fact) --
+				// docs/compliance-parity.md's "hosts store exactly two facts" now holds on
+				// both sides. A VM's Build is intentionally never carried here (see above).
+				Build: item.Type == InventoryItemTypes.Host && !string.IsNullOrWhiteSpace(item.Build) ? item.Build : null));
 		}
 
 		return components;
@@ -541,23 +574,53 @@ public sealed class DiscoverJobHandler : IJobHandler
 	/// Issue #741: materializes the catalog release's declared VCSA service set as
 	/// inventory child components beneath this target's root connection component --
 	/// "the catalog release determines the exact VCSA component list" (issue #741 AC),
-	/// never a hard-coded service list. The root (the synthetic no-vendor-identity,
-	/// no-parent <c>vcenter</c> component) anchors the expansion because the declared
-	/// services are OS-level services of the appliance the target's connection reaches;
-	/// discovered objects with their own vendor identity (ESXi hosts, VMs) are never
-	/// expansion anchors. Root unlinked (no version fact yet, cleared, conflicted, or
-	/// ambiguous): the declared set is empty and any previously-derived children are
-	/// marked absent -- honest lifecycle, never a silent stale service list. Fails soft
-	/// on a repository fault the same way per-component linkage does (#995): discovery
-	/// itself already succeeded; a failed expansion pass surfaces as a warning-level
-	/// job.log line and re-heals on the next pass or configured-fact write.
+	/// never a hard-coded service list. The root (the top-level, no-parent
+	/// <c>vcenter</c> component -- see <see cref="MapToComponents"/>) anchors the
+	/// expansion because the declared services are OS-level services of the appliance
+	/// the target's connection reaches; discovered objects with their own vendor
+	/// identity (ESXi hosts, VMs) are never expansion anchors. Root unlinked (no
+	/// version fact yet, cleared, conflicted, or ambiguous): the declared set is empty
+	/// and any previously-derived children are marked absent -- honest lifecycle, never
+	/// a silent stale service list. Fails soft on a repository fault the same way
+	/// per-component linkage does (#995): discovery itself already succeeded; a failed
+	/// expansion pass surfaces as a warning-level job.log line and re-heals on the next
+	/// pass or configured-fact write.
+	///
+	/// Issue #1081: the root is identified by <see cref="Component.CatalogComponentKey"/>
+	/// (<see cref="Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter"/>), not
+	/// by <c>VendorIdentity is null</c> as before -- the root now carries its own
+	/// authoritative vendor identity (the appliance's instance UUID) when discovery
+	/// observed one, so a null-vendor-identity test alone can no longer distinguish it
+	/// from a catalog-declared child (also null) and would never distinguish it from a
+	/// discovered esxi/vm sibling either way, since MapToComponents flattens ALL of
+	/// them to ParentComponentId == null under the target -- CatalogComponentKey is the
+	/// one field that is always exactly `vcenter` for the root and never for a sibling.
 	/// </summary>
 	private async Task<CatalogDeclaredChildSyncOutcome> SyncCatalogDeclaredServiceChildrenAsync(
 		Guid targetId, CancellationToken cancellationToken)
 	{
 		IReadOnlyList<Component> current = await _components
 			.ListForTargetAsync(targetId, includeRetired: true, cancellationToken).ConfigureAwait(false);
-		Component? root = current.FirstOrDefault(c => c.ParentComponentId is null && c.VendorIdentity is null);
+		// Issue #1081 (round-1 review, blocker 1): ComponentRepository now adopts a
+		// pre-existing null-identity root in place, so in the normal case there is
+		// exactly one candidate here and this ordering is inert. It is still stated
+		// explicitly rather than left to ListForTargetAsync's `ORDER BY
+		// catalog_component_key, created_at`, because that ordering resolves a tie by
+		// AGE -- the worst possible tiebreak for this lookup. On an appliance that
+		// already carries two roots from a build that shipped the identity change
+		// without the adoption fix, created_at picks the older, retired, unlinked,
+		// identity-less row, `root.CatalogComponentId` is null, the declared set comes
+		// back empty, and every child #741 previously materialized is marked absent.
+		// Preferring live-over-retired and then identified-over-anonymous makes the
+		// winner a property of the rows themselves and lets such an appliance
+		// self-heal on its next pass.
+		Component? root = current
+			.Where(c =>
+				c.ParentComponentId is null &&
+				string.Equals(c.CatalogComponentKey, Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter, StringComparison.Ordinal))
+			.OrderBy(c => string.Equals(c.Lifecycle, Waypoint.Core.Components.ComponentLifecycleStates.Retired, StringComparison.Ordinal) ? 1 : 0)
+			.ThenBy(c => c.VendorIdentity is null ? 1 : 0)
+			.FirstOrDefault();
 		if (root is null)
 		{
 			return new CatalogDeclaredChildSyncOutcome(0, 0, 0);
