@@ -167,8 +167,22 @@ identical two facts -- its authoritative instance UUID as vendor identity, and t
 observed-version/build pair a host reports, sourced from vSphere's `content.about` -- so
 it is never `absent-by-omission`-only-plannable-by-hand the way it was before. A VM's
 `inventory_items.build` column, previously overloaded with the VMware Tools version, is
-now honestly left unpopulated rather than misrepresented as a platform fact; deriving a
-VM's own platform version fact is issue #1063's separately-owned work.
+now honestly left unpopulated rather than misrepresented as a platform fact.
+
+Issue #1063 (epic #726 section 3, "the vSphere VM STIG's version scope follows the
+platform version"): a VM's own version/build fact is never independently observed --
+vSphere exposes no such thing -- so discovery DERIVES it from the same pass's managing
+vCenter fact and stamps it onto every VM in bulk, no per-VM configuration. The derived
+fact is marked `derived_from_parent = true` in the VM's `discovered_fact` JSONB
+(`ComponentFact.DerivedFromParent`) so it is never indistinguishable from a directly
+observed fact -- provenance stays visible and snapshotted, per section 3's own rule.
+When the parent has no version fact this pass (`content.about` unavailable, or issue
+#1115's exact-name-only Enhanced Linked Mode session-match miss), every VM under it
+stays honestly version-absent and unlinked: never a guess, never inherited from an
+earlier pass. Each VM's vSphere instance UUID (`inventory_items.instance_uuid`,
+migration 0079) is recorded alongside its existing moref-keyed identity so identically
+named VMs stay deconflictable across discovery passes -- component identity itself
+remains keyed on moref, unchanged by this issue.
 
 | Sibling product/version key | Key form | Kind / source profile revision | Components | Transport / selector | Purpose | Output |
 |---|---|---|---|---|---|---|

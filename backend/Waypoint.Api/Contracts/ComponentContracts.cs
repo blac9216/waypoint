@@ -21,14 +21,18 @@ namespace Waypoint.Api.Contracts;
 /// <see cref="Build"/> (issue #1081) is the observed raw build number alongside the
 /// mandatory <see cref="ExactVersion"/> -- present for a discovered esxi/vcenter fact,
 /// honestly null for a configured fact (which never carries one) or an older
-/// discovered fact recorded before this field existed.
+/// discovered fact recorded before this field existed. <see cref="DerivedFromParent"/>
+/// (issue #1063) is true only for a VM's fact, copied from its managing vCenter's own
+/// fact rather than independently observed -- false for every directly observed fact
+/// (epic #726 section 3, "Provenance is visible and snapshotted").
 /// </summary>
-public sealed record ComponentFactResponse(string ExactVersion, DateTimeOffset ObservedAt, string? RawEvidenceReference, string? Build = null)
+public sealed record ComponentFactResponse(
+	string ExactVersion, DateTimeOffset ObservedAt, string? RawEvidenceReference, string? Build = null, bool DerivedFromParent = false)
 {
 	public static ComponentFactResponse FromDomain(ComponentFact fact)
 	{
 		ArgumentNullException.ThrowIfNull(fact);
-		return new ComponentFactResponse(fact.ExactVersion, fact.ObservedAt, fact.RawEvidenceReference, fact.Build);
+		return new ComponentFactResponse(fact.ExactVersion, fact.ObservedAt, fact.RawEvidenceReference, fact.Build, fact.DerivedFromParent);
 	}
 }
 

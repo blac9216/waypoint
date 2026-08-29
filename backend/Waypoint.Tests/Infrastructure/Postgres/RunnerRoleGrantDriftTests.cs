@@ -1566,6 +1566,52 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #1063, added per this file's standing "a new write path without a
+	/// role-contract test ships grant drift silently" lesson: the real
+	/// compliance-runner role must be able to write BOTH new facts this issue adds --
+	/// <see cref="Waypoint.Core.Discovery.InventoryItem.InstanceUuid"/> (a new
+	/// <c>inventory_items</c> column, migration 0079) via
+	/// <see cref="Waypoint.Infrastructure.Discovery.InventoryRepository.UpsertDiscoveryResultsAsync"/>,
+	/// and <see cref="Waypoint.Core.Components.ComponentFact.DerivedFromParent"/> (a
+	/// new field inside the EXISTING <c>discovered_fact</c> JSONB column) via
+	/// <see cref="ComponentRepository.UpsertDiscoveredAsync"/> -- neither needed a new
+	/// GRANT (both ride existing table/column-level grants), but only a real
+	/// role-connection round trip proves that, rather than an unstated assumption.
+	/// </summary>
+	[Fact]
+	public async Task ComplianceRunnerRole_WritesInstanceUuidAndDerivedFromParentFact_WithoutPermissionDenied()
+	{
+		Guid siteId = await SeedSiteAsync();
+		Guid targetId = await SeedTargetAsync(siteId);
+
+		Waypoint.Infrastructure.Discovery.InventoryRepository runnerInventory = new(_complianceRunnerConnectionString);
+		Waypoint.Core.Discovery.DiscoveredInventoryItem[] inventoryItems =
+		[
+			new("vm", "role-grant-drift-vm-1", "role-grant-drift-vm", null, null, null, null, "role-grant-drift-vm-instance-uuid-1"),
+		];
+		await runnerInventory.UpsertDiscoveryResultsAsync(targetId, inventoryItems, CancellationToken.None);
+
+		Waypoint.Infrastructure.Discovery.InventoryRepository ownerInventory = new(_fixture.ConnectionString);
+		Waypoint.Core.Discovery.InventoryItem vmItem = Assert
+			.Single(await ownerInventory.ListAsync(targetId, includeRemoved: false, CancellationToken.None));
+		Assert.Equal("role-grant-drift-vm-instance-uuid-1", vmItem.InstanceUuid);
+
+		ComponentRepository runnerComponents = new(_complianceRunnerConnectionString, new CatalogRepository(_complianceRunnerConnectionString));
+		Waypoint.Core.Components.DiscoveredComponent[] componentItems =
+		[
+			new("vcenter", "role-grant-drift-vcenter-1", "vCenter Server", null, null, "8.0.3", "99.0.11112222"),
+			new("vm", "role-grant-drift-vm-1", "role-grant-drift-vm", null, null, "8.0.3", "99.0.11112222", DerivedFromParent: true),
+		];
+		await runnerComponents.UpsertDiscoveredAsync(targetId, componentItems, CancellationToken.None);
+
+		ComponentRepository ownerComponents = new(_fixture.ConnectionString, new CatalogRepository(_fixture.ConnectionString));
+		Waypoint.Core.Components.Component vmComponent = (await ownerComponents
+			.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
+			.Single(c => c.VendorIdentity == "role-grant-drift-vm-1");
+		Assert.True(vmComponent.DiscoveredFact!.DerivedFromParent);
+	}
+
+	/// <summary>
 	/// Issue #741, added per this file's standing "a new runner-executed write path
 	/// without a role-contract test ships grant drift silently" lesson: the discovery
 	/// job now runs the catalog-declared service expansion

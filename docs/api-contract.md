@@ -163,7 +163,7 @@ next sign-in would silently reuse the still-live Keycloak session.
 |---|---|---|
 | `/sites` · `/sites/{id}` | GET, POST, PUT, DELETE | Admin writes. Site: name, description, stigman_override?. |
 | `/sites/{id}/targets` · `/targets/{id}` | GET, POST, PUT, DELETE | kind (`vsphere`\|`nsx-api`\|`ssh`), connection.host, credential_ref, discovery_status, last_refreshed. |
-| `/targets/{id}/inventory` | GET | Cached hosts/VMs tree (cluster → host → vm), plus a top-level `vcenter` row for the appliance itself (issue #1081), build info, semantic version (issue #974, host and vcenter rows only), maintenance_mode. |
+| `/targets/{id}/inventory` | GET | Cached hosts/VMs tree (cluster → host → vm), plus a top-level `vcenter` row for the appliance itself (issue #1081), build info, semantic version (issue #974, host and vcenter rows only), maintenance_mode, `instance_uuid` (issue #1063, vm rows only — vSphere's authoritative instance UUID, deconflicts identically named VMs). |
 | `/targets/{id}/discover` | POST | 202 → `discover` job. |
 
 🚧 **Planned cached component inventory (epic #726, [ADR-0023](adr/0023-compliance-inventory-and-immutable-plans.md)).**
@@ -175,7 +175,10 @@ authoritative vendor identity)` — never hostname/IP/display-name/tree-position
 (`active`\|`absent`\|`retired`), `configured_fact`/`discovered_fact` (each an
 independent, timestamped exact-version/capability observation, optionally carrying a
 `build` alongside the mandatory `exact_version` — issue #1081, e.g. an esxi host or the
-vcenter root; both present, one, or neither), `fact_conflict` (bool — true when
+vcenter root; both present, one, or neither — and a `derived_from_parent` bool, issue
+#1063: true only for a VM's discovered fact, copied from its managing vCenter's own
+fact rather than independently observed; false for every directly observed fact, so
+provenance is never presented as observed when it was actually derived), `fact_conflict` (bool — true when
 configured and discovered disagree; never silently resolved by the API), `first_seen_at`, `last_seen_at`,
 `continuous_absence_since?`, and `baseline_ready` (bool — one exact catalog
 product-version entry plus exactly one active approved baseline under ADR-0022;

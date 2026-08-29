@@ -123,20 +123,139 @@ public sealed class DiscoverJobHandlerMapToComponentsTests
 	}
 
 	[Fact]
-	public void Vm_AlwaysResolvesExactVersionToNull_RegardlessOfBuildOrVersion()
+	public void Vm_IgnoresOwnBuildAndVersionFields_NeverUsesThemDirectly()
 	{
-		// A VM's Build is never carried onto the component fact (issue #1081: it used
-		// to carry the VMware Tools version, never a product-version fact for the VM
-		// itself); VMs have no analogous semantic Version field either.
+		// A VM's own Build/Version fields are never read for its component fact
+		// (issue #1081: Build used to carry the VMware Tools version, never a
+		// product-version fact for the VM itself; VMs have no analogous semantic
+		// Version field either). With no `vcenter` row in this pass, there is also
+		// nothing to derive from, so the VM stays honestly version-absent.
 		DiscoveredInventoryItem vm = new(
 			InventoryItemTypes.Vm, "vm-1", "stub-vm-01", ParentMoref: "host-1",
-			Build: "12345", MaintenanceMode: null, Version: null);
+			Build: "12345", MaintenanceMode: null, Version: "8.0.3");
 
 		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([vm]);
 
 		DiscoveredComponent vmComponent = components.Single(c => c.VendorIdentity == "vm-1");
 		Assert.Null(vmComponent.ExactVersion);
 		Assert.Null(vmComponent.Build);
+		Assert.False(vmComponent.DerivedFromParent);
+	}
+
+	/// <summary>
+	/// Issue #1063's core acceptance: a VM's version fact is DERIVED from the same
+	/// pass's `vcenter` root fact -- never observed on the VM row itself (which the
+	/// module never reports a version/build for) -- and marked
+	/// <see cref="DiscoveredComponent.DerivedFromParent"/> so it is never
+	/// indistinguishable from a directly observed fact (epic #726 section 3).
+	/// </summary>
+	[Fact]
+	public void Vm_WithParentVCenterVersionFact_DerivesExactVersionAndBuild_MarkedDerivedFromParent()
+	{
+		DiscoveredInventoryItem vcenterItem = new(
+			InventoryItemTypes.VCenter, "vcenter-instance-1063", "vcsa-01.example.internal", ParentMoref: null,
+			Build: InventedBuildNumber, MaintenanceMode: null, Version: InventedSemanticVersion);
+		DiscoveredInventoryItem vm = new(
+			InventoryItemTypes.Vm, "vm-2", "stub-vm-02", ParentMoref: "host-1",
+			Build: null, MaintenanceMode: null, Version: null, InstanceUuid: "vm-instance-uuid-2");
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([vcenterItem, vm]);
+
+		DiscoveredComponent vmComponent = components.Single(c => c.VendorIdentity == "vm-2");
+		Assert.Equal(InventedSemanticVersion, vmComponent.ExactVersion);
+		Assert.Equal(InventedBuildNumber, vmComponent.Build);
+		Assert.True(vmComponent.DerivedFromParent);
+	}
+
+	/// <summary>
+	/// Issue #1063's bulk-stamping acceptance: every VM under the same root derives
+	/// the identical parent fact in one pass, with zero per-VM configuration.
+	/// </summary>
+	[Fact]
+	public void MultipleVms_UnderSameParent_AllDeriveTheSameVersionFact()
+	{
+		DiscoveredInventoryItem vcenterItem = new(
+			InventoryItemTypes.VCenter, "vcenter-instance-1063-bulk", "vcsa-01.example.internal", ParentMoref: null,
+			Build: InventedBuildNumber, MaintenanceMode: null, Version: InventedSemanticVersion);
+		DiscoveredInventoryItem vmA = new(
+			InventoryItemTypes.Vm, "vm-3", "duplicate-name", ParentMoref: "host-1",
+			Build: null, MaintenanceMode: null, Version: null, InstanceUuid: "vm-instance-uuid-3");
+		DiscoveredInventoryItem vmB = new(
+			InventoryItemTypes.Vm, "vm-4", "duplicate-name", ParentMoref: "host-1",
+			Build: null, MaintenanceMode: null, Version: null, InstanceUuid: "vm-instance-uuid-4");
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([vcenterItem, vmA, vmB]);
+
+		DiscoveredComponent componentA = components.Single(c => c.VendorIdentity == "vm-3");
+		DiscoveredComponent componentB = components.Single(c => c.VendorIdentity == "vm-4");
+		Assert.Equal(InventedSemanticVersion, componentA.ExactVersion);
+		Assert.Equal(InventedSemanticVersion, componentB.ExactVersion);
+		Assert.True(componentA.DerivedFromParent);
+		Assert.True(componentB.DerivedFromParent);
+		Assert.NotEqual(componentA.VendorIdentity, componentB.VendorIdentity); // Distinct components despite the shared name.
+	}
+
+	/// <summary>
+	/// Issue #1063's honest-degradation acceptance (issue #1115's exact case: no
+	/// session matched the target by name, so no `vcenter` row was emitted at all):
+	/// a VM under a root with no version fact this pass stays honestly version-absent
+	/// -- never a guess, never carried over from an earlier pass.
+	/// </summary>
+	[Fact]
+	public void Vm_WithNoParentVCenterVersionFact_StaysHonestlyVersionAbsent_NotDerived()
+	{
+		DiscoveredInventoryItem vm = new(
+			InventoryItemTypes.Vm, "vm-5", "stub-vm-05", ParentMoref: "host-1",
+			Build: null, MaintenanceMode: null, Version: null, InstanceUuid: "vm-instance-uuid-5");
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([vm]);
+
+		DiscoveredComponent vmComponent = components.Single(c => c.VendorIdentity == "vm-5");
+		Assert.Null(vmComponent.ExactVersion);
+		Assert.Null(vmComponent.Build);
+		Assert.False(vmComponent.DerivedFromParent);
+	}
+
+	/// <summary>
+	/// Same honest-degradation case as above, but for a `vcenter` row that WAS
+	/// reported yet itself has no version fact this pass (e.g. `content.about` was
+	/// unavailable) -- the VM must not derive from a display-name-only root either.
+	/// </summary>
+	[Fact]
+	public void Vm_WithParentVCenterRowButNoVersionFact_StaysHonestlyVersionAbsent_NotDerived()
+	{
+		DiscoveredInventoryItem vcenterItem = new(
+			InventoryItemTypes.VCenter, "vcenter-instance-no-version", "vcsa-01.example.internal", ParentMoref: null,
+			Build: null, MaintenanceMode: null, Version: null);
+		DiscoveredInventoryItem vm = new(
+			InventoryItemTypes.Vm, "vm-6", "stub-vm-06", ParentMoref: "host-1",
+			Build: null, MaintenanceMode: null, Version: null);
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([vcenterItem, vm]);
+
+		DiscoveredComponent vmComponent = components.Single(c => c.VendorIdentity == "vm-6");
+		Assert.Null(vmComponent.ExactVersion);
+		Assert.False(vmComponent.DerivedFromParent);
+	}
+
+	/// <summary>Host component facts are always directly observed, never marked derived.</summary>
+	[Fact]
+	public void Host_Fact_IsNeverMarkedDerivedFromParent()
+	{
+		DiscoveredInventoryItem vcenterItem = new(
+			InventoryItemTypes.VCenter, "vcenter-instance-host-check", "vcsa-01.example.internal", ParentMoref: null,
+			Build: InventedBuildNumber, MaintenanceMode: null, Version: InventedSemanticVersion);
+		DiscoveredInventoryItem host = new(
+			InventoryItemTypes.Host, "host-8", "esxi-08.example.internal", ParentMoref: null,
+			Build: InventedBuildNumber, MaintenanceMode: false, Version: InventedSemanticVersion);
+
+		IReadOnlyList<DiscoveredComponent> components = DiscoverJobHandler.MapToComponents([vcenterItem, host]);
+
+		DiscoveredComponent hostComponent = components.Single(c => c.VendorIdentity == "host-8");
+		Assert.False(hostComponent.DerivedFromParent);
+
+		DiscoveredComponent root = components.Single(c => c.CatalogComponentKey == Waypoint.Core.ComplianceContent.CatalogSelectorKinds.VCenter);
+		Assert.False(root.DerivedFromParent);
 	}
 
 	[Fact]

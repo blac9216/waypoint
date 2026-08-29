@@ -262,6 +262,44 @@ public sealed class ComponentRepositoryTests : IAsyncLifetime
 		Assert.Null(component.DiscoveredFact!.Build);
 	}
 
+	/// <summary>
+	/// Issue #1063: <see cref="ComponentFact.DerivedFromParent"/> round-trips through
+	/// the real JSONB discovered_fact column, same as <see cref="ComponentFact.Build"/>
+	/// above -- distinguishing a VM's parent-derived fact from a directly observed one
+	/// (epic #726 section 3, "Provenance is visible and snapshotted") survives the
+	/// write/read boundary, not just the in-memory DTO.
+	/// </summary>
+	[Fact]
+	public async Task UpsertDiscoveredAsync_WithDerivedFromParent_RoundTripsOnTheDiscoveredFact()
+	{
+		Guid target = await SeedTargetAsync("vm-derived-roundtrip");
+		DiscoveredComponent[] items = [new("vm", "vm-9201", "stub-vm-01", null, null, "8.0.3", "99.0.12345678", DerivedFromParent: true)];
+
+		await _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		Component component = Assert.Single(await _repository.ListForTargetAsync(target, includeRetired: true, CancellationToken.None));
+
+		Assert.NotNull(component.DiscoveredFact);
+		Assert.True(component.DiscoveredFact!.DerivedFromParent);
+	}
+
+	/// <summary>
+	/// Issue #1063: a directly observed fact (a host's, or the vcenter root's own) is
+	/// never marked derived -- both the explicit false and the JSONB-field-omitted
+	/// shape (an older fact recorded before this field existed) read back false.
+	/// </summary>
+	[Fact]
+	public async Task UpsertDiscoveredAsync_WithoutDerivedFromParent_DiscoveredFactStaysFalse()
+	{
+		Guid target = await SeedTargetAsync("host-not-derived-roundtrip");
+		DiscoveredComponent[] items = [new("esxi", "host-9202", "esxi-03.example.internal", null, null, "8.0.3")];
+
+		await _repository.UpsertDiscoveredAsync(target, items, CancellationToken.None);
+		Component component = Assert.Single(await _repository.ListForTargetAsync(target, includeRetired: true, CancellationToken.None));
+
+		Assert.NotNull(component.DiscoveredFact);
+		Assert.False(component.DiscoveredFact!.DerivedFromParent);
+	}
+
 	[Fact]
 	public async Task UpsertDiscoveredAsync_ComponentNoLongerReported_BecomesAbsentThenRetiresPastThreshold()
 	{

@@ -124,9 +124,16 @@ public sealed class ComponentRepository : IComponentRepository
 			// still only written when this pass actually rendered a version opinion
 			// (never a build-only fact), and honestly null when the pass could not
 			// observe a build (e.g. a vm, which never carries one at all).
+			// Issue #1063: derived_from_parent rides alongside exact_version/build in the
+			// same JSONB fact (same additive-field precedent build itself set in #1081) --
+			// true only for a VM component whose fact MapToComponents copied from its
+			// parent vCenter's own fact, false (the default read back by DeserializeFact)
+			// for every directly-observed fact.
 			string? factJson = item.ExactVersion is null
 				? null
-				: JsonSerializer.Serialize(new { exact_version = item.ExactVersion, observed_at = DateTimeOffset.UtcNow, build = item.Build }, FactSerializerOptions);
+				: JsonSerializer.Serialize(
+					new { exact_version = item.ExactVersion, observed_at = DateTimeOffset.UtcNow, build = item.Build, derived_from_parent = item.DerivedFromParent },
+					FactSerializerOptions);
 
 			// Issue #840: a single atomic statement replaces the former check-then-insert
 			// (a separate existence SELECT, a separate lifecycle SELECT, then a branch to
@@ -862,7 +869,12 @@ public sealed class ComponentRepository : IComponentRepository
 		string? build = root.TryGetProperty("build", out JsonElement buildElement) && buildElement.ValueKind != JsonValueKind.Null
 			? buildElement.GetString()
 			: null;
+		// Issue #1063: optional -- absent entirely on a configured fact (never derived)
+		// or on any fact recorded before this field existed; both read back as honestly
+		// false (directly observed), never a parse failure.
+		bool derivedFromParent = root.TryGetProperty("derived_from_parent", out JsonElement derivedElement)
+			&& derivedElement.ValueKind == JsonValueKind.True;
 
-		return new ComponentFact(exactVersion, observedAt, rawEvidenceReference, build);
+		return new ComponentFact(exactVersion, observedAt, rawEvidenceReference, build, derivedFromParent);
 	}
 }

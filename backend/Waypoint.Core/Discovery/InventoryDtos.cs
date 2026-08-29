@@ -45,6 +45,12 @@ public static class InventoryItemTypes
 /// <see cref="Build"/> -- present only for `host` rows; <see cref="Build"/> remains the
 /// raw build number, retained unconditionally as a discovered fact even though (issue
 /// #974) it is no longer what a host's catalog match is keyed on.
+///
+/// <see cref="InstanceUuid"/> (issue #1063) is the VM's authoritative, stable vSphere
+/// instance UUID (<c>ExtensionData.Config.InstanceUuid</c>) -- present only for `vm`
+/// rows, recorded alongside (never instead of) <see cref="Moref"/> so identically
+/// named VMs remain deconflictable across discovery passes (ADR-0023 "authoritative
+/// stable vendor identifiers").
 /// </summary>
 public sealed record InventoryItem(
 	Guid Id,
@@ -59,7 +65,8 @@ public sealed record InventoryItem(
 	DateTimeOffset? RemovedAt,
 	DateTimeOffset CreatedAt,
 	DateTimeOffset UpdatedAt,
-	string? Version = null);
+	string? Version = null,
+	string? InstanceUuid = null);
 
 /// <summary>
 /// One discovered item as reported by the PowerShell discovery invocation, before it
@@ -91,8 +98,14 @@ public sealed record InventoryItem(
 /// a `host` row already reports for ESXi. A `vm` row's <see cref="Build"/> is never
 /// populated -- it used to carry the VMware Tools version, which is not a product-
 /// version fact for the VM itself and would mislead anything reading `Build` as a
-/// platform fact (issue #1081); deriving a VM's own platform version is #1063's
-/// separately-owned work.
+/// platform fact (issue #1081); the VM's own platform version is now derived from its
+/// parent vCenter's fact by <see cref="Waypoint.Infrastructure.Discovery.DiscoverJobHandler.MapToComponents"/>
+/// (issue #1063), never reported by this record itself.
+///
+/// <see cref="InstanceUuid"/> (issue #1063): vSphere's <c>Config.InstanceUuid</c> for a
+/// `vm` row -- the appliance-assigned, migration-stable identifier that deconflicts
+/// identically named VMs across discovery passes -- always <c>null</c> for every other
+/// row type.
 /// </summary>
 public sealed record DiscoveredInventoryItem(
 	string Type,
@@ -101,7 +114,8 @@ public sealed record DiscoveredInventoryItem(
 	string? ParentMoref,
 	string? Build,
 	bool? MaintenanceMode,
-	string? Version = null);
+	string? Version = null,
+	string? InstanceUuid = null);
 
 /// <summary>The full set of items one discovery pass found for a target, in parent-before-child order.</summary>
 public sealed record DiscoveryResult(IReadOnlyList<DiscoveredInventoryItem> Items);

@@ -90,8 +90,18 @@ public static class ComponentObservationOutcomes
 /// the build number." Optional/nullable: a discovery pass that could not observe a
 /// build (or an Admin-configured fact, which never carries one) leaves it honestly
 /// absent rather than guessed.
+///
+/// <see cref="DerivedFromParent"/> (issue #1063): <c>true</c> when this fact was not
+/// itself observed but copied from the managing vCenter's own discovered fact (a VM's
+/// platform version, per epic #726 section 3's vSphere-VM-STIG-follows-the-platform
+/// scoping) -- <c>false</c> (the default) for a fact this component's own discovery
+/// boundary directly observed (a host's `content.about`/`Version`, the vCenter root's
+/// own `content.about`, or any Admin-configured fact). Provenance must stay visible
+/// and never presented as directly observed (epic #726 section 3, "Provenance is
+/// visible and snapshotted").
 /// </summary>
-public sealed record ComponentFact(string ExactVersion, DateTimeOffset ObservedAt, string? RawEvidenceReference, string? Build = null);
+public sealed record ComponentFact(
+	string ExactVersion, DateTimeOffset ObservedAt, string? RawEvidenceReference, string? Build = null, bool DerivedFromParent = false);
 
 /// <summary>
 /// A stable compliance endpoint/component (migration 0054's <c>components</c> table;
@@ -139,7 +149,8 @@ public sealed record DiscoveredComponent(
 	string? ParentVendorIdentity,
 	Guid? CatalogComponentId,
 	string? ExactVersion,
-	string? Build = null);
+	string? Build = null,
+	bool DerivedFromParent = false);
 
 /// <summary>Outcome of one discovery-boundary reconciliation pass (mirrors <see cref="Waypoint.Core.Discovery.InventoryUpsertOutcome"/>).</summary>
 public sealed record ComponentUpsertOutcome(int Upserted, int MarkedAbsent, int Reconnected);
