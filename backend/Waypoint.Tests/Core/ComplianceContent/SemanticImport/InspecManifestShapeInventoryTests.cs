@@ -35,39 +35,87 @@ namespace Waypoint.Tests.Core.ComplianceContent.SemanticImport;
 /// </summary>
 public sealed class InspecManifestShapeInventoryTests
 {
-	/// <summary>Shape IDs this class implements, in the order the inventory doc documents them.</summary>
-	public static readonly string[] ImplementedShapeIds =
+	/// <summary>
+	/// The single source of truth for what this class asserts about each documented shape, in the order the
+	/// inventory doc documents them -- mirrors <c>StigZipReaderShapeInventoryTests.ShapeExpectations</c>
+	/// (issue #1121 round-1 review: one table, everything else derived from it). A row with a non-null
+	/// <c>ExpectedErrorSubstring</c> IS a <see cref="ShapeIsRejected"/> case. A null one is an accept case;
+	/// <c>ZeroInputs</c> then selects which of the two accept-flavoured theories
+	/// (<see cref="ShapeResolvesTheDeclaredInput"/> / <see cref="ShapeResolvesToZeroInputs_NotAnError"/>) runs
+	/// it. Issue #1103 adds the rows from #1077's own follow-up: document markers, a multi-document stream, a
+	/// raw tab used for block indentation (genuinely invalid YAML -- this parser's first reject-flavoured
+	/// shape) versus one used only inside a trailing comment, a nested <c>name:</c> under an entry's
+	/// <c>value:</c> in both mapping and sequence form, <c>inputs:</c> immediately adjacent to <c>depends:</c>,
+	/// and a quoted <c>name:</c> scalar in both double- and single-quote form -- the exact shape PR #1098's
+	/// round-1 review used to defeat this guard (see the doc's "What this guard does and does not cover").
+	/// </summary>
+	private static readonly (string ShapeId, bool ZeroInputs, string? ExpectedErrorSubstring)[] ShapeExpectations =
 	[
-		"indented-dash-sequence",
-		"column0-dash-sequence",
-		"name-not-first-key",
-		"attributes-legacy-alias",
-		"column0-comment-between-entries",
-		"trailing-inline-comment",
-		"block-scalar-folded-description",
-		"block-scalar-literal-description",
-		"nested-extra-keys-ignored",
-		"empty-inputs-sequence",
-		"missing-inputs-key",
-		"crlf-line-endings",
+		("indented-dash-sequence", false, null),
+		("column0-dash-sequence", false, null),
+		("name-not-first-key", false, null),
+		("attributes-legacy-alias", false, null),
+		("column0-comment-between-entries", false, null),
+		("trailing-inline-comment", false, null),
+		("block-scalar-folded-description", false, null),
+		("block-scalar-literal-description", false, null),
+		("nested-extra-keys-ignored", false, null),
+		("empty-inputs-sequence", true, null),
+		("missing-inputs-key", true, null),
+		("crlf-line-endings", false, null),
+		("document-start-end-markers", false, null),
+		("multi-document-stream", false, null),
+		("tab-block-indentation", false, "not valid YAML"),
+		("tab-in-trailing-comment", false, null),
+		("nested-name-under-value-mapping", false, null),
+		("nested-name-under-value-sequence", false, null),
+		("inputs-depends-adjacency", false, null),
+		("quoted-scalar-name-double", false, null),
+		("quoted-scalar-name-single", false, null),
 	];
 
+	/// <summary>Shape IDs this class implements, in the order the inventory doc documents them.</summary>
+	public static readonly string[] ImplementedShapeIds = ShapeExpectations.Select(shape => shape.ShapeId).ToArray();
+
 	/// <summary>
-	/// Shape IDs whose expectation is "resolves zero inputs, no error" rather than "resolves the named input".
-	/// The single source of truth for which of the two theories below runs a given shape: both
-	/// <see cref="DeclaredInputShapes"/> and <see cref="ZeroInputShapes"/> are derived from this set together
-	/// with <see cref="ImplementedShapeIds"/>, so the theory rows cannot drift from it (issue #1121 round-1
-	/// review). Both theories are accept-flavoured -- this parser has no reject fixtures -- so this class
-	/// passes no reject set to <see cref="ShapeInventoryDoc.AssertCompleteness"/>, which then asserts that
-	/// every row of its doc section reads <c>Accepted</c> and fails closed the moment a reject row is added.
+	/// Shape IDs whose fixture asserts rejection -- derived from <see cref="ShapeExpectations"/>. Fed to
+	/// <see cref="ShapeInventoryDoc.AssertCompleteness"/> so the doc's Expected verdict word for each row is
+	/// bound to what this class's fixture actually asserts (issue #1121).
 	/// </summary>
-	private static readonly HashSet<string> NoInputShapeIds = new(["empty-inputs-sequence", "missing-inputs-key"], StringComparer.Ordinal);
+	private static readonly HashSet<string> RejectedShapeIds =
+		new(ShapeExpectations.Where(shape => shape.ExpectedErrorSubstring is not null).Select(shape => shape.ShapeId), StringComparer.Ordinal);
 
-	/// <summary>Theory rows for <see cref="ShapeResolvesTheDeclaredInput"/>: every implemented shape outside <see cref="NoInputShapeIds"/>.</summary>
-	public static TheoryData<string> DeclaredInputShapes => ShapesWhere(id => !NoInputShapeIds.Contains(id));
+	/// <summary>
+	/// Shape IDs whose expectation is "resolves zero inputs, no error" rather than "resolves the named input" --
+	/// derived from <see cref="ShapeExpectations"/> together with <see cref="RejectedShapeIds"/> (a rejected
+	/// shape is never a zero-input accept, regardless of its <c>ZeroInputs</c> flag).
+	/// </summary>
+	private static readonly HashSet<string> NoInputShapeIds =
+		new(ShapeExpectations.Where(shape => shape.ZeroInputs && shape.ExpectedErrorSubstring is null).Select(shape => shape.ShapeId), StringComparer.Ordinal);
 
-	/// <summary>Theory rows for <see cref="ShapeResolvesToZeroInputs_NotAnError"/>: every implemented shape in <see cref="NoInputShapeIds"/>.</summary>
+	/// <summary>Theory rows for <see cref="ShapeResolvesTheDeclaredInput"/>: every accepted shape outside <see cref="NoInputShapeIds"/>.</summary>
+	public static TheoryData<string> DeclaredInputShapes => ShapesWhere(id => !NoInputShapeIds.Contains(id) && !RejectedShapeIds.Contains(id));
+
+	/// <summary>Theory rows for <see cref="ShapeResolvesToZeroInputs_NotAnError"/>: every shape in <see cref="NoInputShapeIds"/>.</summary>
 	public static TheoryData<string> ZeroInputShapes => ShapesWhere(NoInputShapeIds.Contains);
+
+	/// <summary>Theory rows for <see cref="ShapeIsRejected"/>: every shape in <see cref="RejectedShapeIds"/>, paired with its expected error substring.</summary>
+	public static TheoryData<string, string> RejectedShapes
+	{
+		get
+		{
+			TheoryData<string, string> data = [];
+			foreach ((string shapeId, _, string? expectedError) in ShapeExpectations)
+			{
+				if (expectedError is not null)
+				{
+					data.Add(shapeId, expectedError);
+				}
+			}
+
+			return data;
+		}
+	}
 
 	private static TheoryData<string> ShapesWhere(Func<string, bool> predicate)
 	{
@@ -85,7 +133,7 @@ public sealed class InspecManifestShapeInventoryTests
 
 	[Fact]
 	public void InventoryIsComplete() =>
-		ShapeInventoryDoc.AssertCompleteness("`InspecManifestParser` (`backend/Waypoint.Core/ComplianceContent/SemanticImport/InspecManifest.cs`)", ImplementedShapeIds);
+		ShapeInventoryDoc.AssertCompleteness("`InspecManifestParser` (`backend/Waypoint.Core/ComplianceContent/SemanticImport/InspecManifest.cs`)", ImplementedShapeIds, RejectedShapeIds);
 
 	[Theory]
 	[MemberData(nameof(DeclaredInputShapes))]
@@ -111,6 +159,19 @@ public sealed class InspecManifestShapeInventoryTests
 		Assert.NotNull(manifest);
 		Assert.Null(error);
 		Assert.Empty(manifest!.Inputs);
+	}
+
+	[Theory]
+	[MemberData(nameof(RejectedShapes))]
+	public void ShapeIsRejected(string shapeId, string expectedErrorSubstring)
+	{
+		string yaml = BuildYaml(shapeId);
+
+		InspecManifest? manifest = InspecManifestParser.TryParse(yaml, out string? error);
+
+		Assert.Null(manifest);
+		Assert.NotNull(error);
+		Assert.Contains(expectedErrorSubstring, error);
 	}
 
 	/// <summary>
@@ -192,6 +253,67 @@ public sealed class InspecManifestShapeInventoryTests
 		"empty-inputs-sequence" => "name: invented-profile\ninputs: []\n",
 		"missing-inputs-key" => "name: invented-profile\ntitle: Invented Profile\n",
 		"crlf-line-endings" => "name: invented-profile\r\ninputs:\r\n  - name: nsx_manager_address\r\n    type: String\r\n    required: true\r\n",
+		"document-start-end-markers" => """
+			---
+			name: invented-profile
+			inputs:
+			  - name: nsx_manager_address
+			    type: String
+			...
+			""",
+		"multi-document-stream" => """
+			name: invented-profile
+			inputs:
+			  - name: nsx_manager_address
+			    type: String
+			---
+			name: unrelated-second-document
+			inputs:
+			  - name: other_input
+			    type: String
+			""",
+		// A raw tab cannot start a token in block context outside a quoted scalar or comment
+		// (YAML core schema); this is genuinely invalid YAML, not a parser gap.
+		"tab-block-indentation" => "name: invented-profile\ninputs:\n\t- name: nsx_manager_address\n\t  type: String\n",
+		"tab-in-trailing-comment" => "name: invented-profile\ninputs:\n  - name: nsx_manager_address # a comment\twith a tab character\n    type: String\n",
+		"nested-name-under-value-mapping" => """
+			name: invented-profile
+			inputs:
+			  - name: nsx_manager_address
+			    type: String
+			    value:
+			      name: unrelated-nested-name
+			      default: invented.example.internal
+			""",
+		"nested-name-under-value-sequence" => """
+			name: invented-profile
+			inputs:
+			  - name: nsx_manager_address
+			    type: String
+			    value:
+			      - name: unrelated-nested-name
+			        default: invented.example.internal
+			""",
+		"inputs-depends-adjacency" => """
+			name: invented-profile
+			inputs:
+			  - name: nsx_manager_address
+			    type: String
+			depends:
+			  - name: invented-dependency-profile
+			""",
+		"quoted-scalar-name-double" => """
+			name: invented-profile
+			inputs:
+			  - name: "nsx_manager_address"
+			    type: String
+			""",
+		"quoted-scalar-name-single" => """
+			name: invented-profile
+			inputs:
+			  - name: 'nsx_manager_address'
+			    type: String
+			""",
 		_ => throw new ArgumentOutOfRangeException(nameof(shapeId), shapeId, "no fixture builder for this shape ID"),
 	};
 }

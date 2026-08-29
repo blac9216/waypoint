@@ -63,12 +63,12 @@ the guard twice:
   fixture asserts rejection -- a doc-only edit that silently disarmed the differential
   for that shape while the suite stayed green at 27/27 (issue #1121). Each
   `*ShapeInventoryTests` class now declares a single table of per-shape expectations
-  (`StigZipReaderShapeInventoryTests.ShapeExpectations`; for `InspecManifestParser`,
-  whose shapes are all accept-flavoured, `ImplementedShapeIds` together with
-  `NoInputShapeIds`) and derives every shape list it uses from that one table: the
+  (`StigZipReaderShapeInventoryTests.ShapeExpectations`; `InspecManifestShapeInventoryTests.ShapeExpectations`,
+  whose rows are accept-flavoured except `tab-block-indentation`, its one reject case since
+  issue #1103) and derives every shape list it uses from that one table: the
   shape IDs it implements, the reject set handed to
   `ShapeInventoryDoc.AssertCompleteness`, and the `[MemberData]` rows of its
-  `ShapeIsAccepted`/`ShapeIsRejected` theories. `AssertCompleteness` cross-checks every
+  accept/reject theories. `AssertCompleteness` cross-checks every
   row's classified verdict against that reject set: a row saying `Accepted` for a shape
   whose fixture rejects it, or `Rejected` for one whose fixture accepts it, fails the
   build. Because the set and the theory rows have one source, the set cannot lie about
@@ -172,6 +172,15 @@ because fixing it (PR #1084) silently broke another one.
 | `empty-inputs-sequence` | `inputs: []`. | Accepted; resolves to zero inputs, not an error. |
 | `missing-inputs-key` | No `inputs:` or `attributes:` key present at all. | Accepted; resolves to zero inputs, not an error. |
 | `crlf-line-endings` | The whole document (indented-dash-sequence shape) uses CRLF line endings throughout. | Accepted; resolves identically to its LF counterpart -- CRLF is a known untested gap (PR #1084 finding: `WriteProfileFixtureRaw` fixtures inherit LF). |
+| `document-start-end-markers` | The document opens with a `---` marker and closes with a `...` marker. | Accepted; resolves the input exactly as the unmarked document does. |
+| `multi-document-stream` | A `---`-separated multi-document YAML stream; the manifest is the first document, an unrelated second document follows. | Accepted; resolves from the first document only -- the parser reads `stream.Documents[0]` and never looks past it. |
+| `tab-block-indentation` | A raw tab character used for the `inputs:` sequence's block indentation. | Rejected as not valid YAML -- a raw tab cannot start a token in block context outside a quoted scalar or comment (YAML core schema), so this is genuinely invalid input, not a parser gap. |
+| `tab-in-trailing-comment` | A raw tab character inside an entry's trailing `# comment`, not used for indentation. | Accepted; resolves the input, and the tab inside the comment has no effect. |
+| `nested-name-under-value-mapping` | An entry carries a nested `value:` **mapping** that itself has a `name:` key (issue #1103: the shape a "first `name:` wins" scan would trip on). | Accepted; resolves the entry's own top-level `name:`, not the nested one. |
+| `nested-name-under-value-sequence` | An entry carries a nested `value:` **sequence** whose first item is a mapping with a `name:` key. | Accepted; resolves the entry's own top-level `name:`, not the nested one. |
+| `inputs-depends-adjacency` | An `inputs:` block is immediately followed by a `depends:` block at the same indent, with no blank line between them -- the block-scoping boundary case that produced the original defect in the sibling helper (issue #1071). | Accepted; the input entry resolves and is unaffected by the adjacent `depends:` block. |
+| `quoted-scalar-name-double` | An entry's `name:` value is a double-quoted scalar (`name: "nsx_manager_address"`). | Accepted; resolves the input by its unquoted name -- the shape PR #1098's round-1 review used to defeat this guard before this row existed. |
+| `quoted-scalar-name-single` | An entry's `name:` value is a single-quoted scalar (`name: 'nsx_manager_address'`). | Accepted; resolves the input by its unquoted name. |
 
 ## `StigZipReader` (`backend/Waypoint.Core/ComplianceContent/Xccdf/StigZipReader.cs`)
 
