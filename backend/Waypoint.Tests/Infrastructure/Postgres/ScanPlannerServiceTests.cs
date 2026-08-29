@@ -285,6 +285,33 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		Assert.Equal(sudoRequiresPassword, item.SudoRequiresPassword);
 	}
 
+	/// <summary>
+	/// Issue #1094 (AC3): the IMPORTER's shape end to end -- import (a
+	/// <see cref="CatalogComponentDefinition"/> that declares NO sudo policy, which is
+	/// every component the vendor-content importer creates, since that content carries no
+	/// sudo signal to derive one from) through the catalog write path, into the frozen
+	/// plan item. Before #1094 the write path never named the two columns, so the row took
+	/// the table DEFAULT by accident; now the record's explicit, documented default (no
+	/// sudo) is what reaches the plan boundary. Pinning it HERE and not only at the
+	/// catalog read is what protects the live SSH/SRG lab leg: the invocation reads the
+	/// frozen item, not the catalog.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_ImportedSshComponentWithNoDeclaredSudoPolicy_FreezesExplicitDefault()
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+		Guid executionProfileId = await SeedSshTargetExecutionProfileAsync("imported-nosudo", "8.0.3");
+		await ActivateBaselineAsync(executionProfileId, "imported-nosudo", benchmarkRevisionId: null);
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		Guid componentId = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "appliance-imported-nosudo");
+
+		ScanPlan plan = await _planner.CompileAsync(null, [componentId], CancellationToken.None);
+
+		ScanPlanItem item = Assert.Single(plan.Items);
+		Assert.False(item.RequiresSudo);
+		Assert.True(item.SudoRequiresPassword);
+	}
+
 	/// <summary>Issue #743: a vmware-transport item has no sudo concept -- both fields stay null (pre-#743 shape preserved).</summary>
 	[Fact]
 	public async Task CompileAsync_NonSshTransportItem_FreezesNoSudoPolicy()
@@ -332,30 +359,26 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		Assert.NotEqual(before.PlanDigest, after.PlanDigest);
 	}
 
-	/// <summary>Whole-appliance ssh/target execution profile carrying an explicit catalog sudo policy (issue #743, migration 0074).</summary>
-	private async Task<Guid> SeedSshTargetExecutionProfileAsync(string suffix, string exactVersion, bool requiresSudo, bool sudoRequiresPassword)
+	/// <summary>
+	/// Whole-appliance ssh/target execution profile (issue #743, migration 0074).
+	/// The sudo policy is declared on <see cref="CatalogComponentDefinition"/> and written
+	/// by <c>UpsertComponentAsync</c> -- the catalog write path that owns those columns
+	/// since issue #1094 -- so every plan-freeze assertion below depends on that write
+	/// path rather than on a raw <c>UPDATE</c> the production importer never performs.
+	/// Passing no policy (both nulls) reproduces the IMPORTER's shape: a definition that
+	/// declares nothing and therefore takes the record's explicit no-sudo default.
+	/// </summary>
+	private async Task<Guid> SeedSshTargetExecutionProfileAsync(string suffix, string exactVersion, bool? requiresSudo = null, bool? sudoRequiresPassword = null)
 	{
 		CatalogSourceRevision sourceRevision = await _catalog.UpsertSourceRevisionAsync($"source-{suffix}", null, CancellationToken.None);
 		CatalogProduct product = await _catalog.UpsertProductAsync(sourceRevision.Id, "VMware", $"appliance-{suffix}", "Invented SSH Appliance", CancellationToken.None);
 		CatalogProductVersion productVersion = await _catalog.UpsertProductVersionAsync(product.Id, exactVersion, exactVersion, CancellationToken.None);
-		CatalogComponent component = await _catalog.UpsertComponentAsync(
-			productVersion.Id,
-			new CatalogComponentDefinition($"esxi-{suffix}", "Invented SSH Appliance", CatalogTransports.Ssh, CatalogSelectorKinds.Target, null, null),
-			CancellationToken.None);
-
-		// Sudo policy is catalog DATA (migration 0074's columns), written here directly
-		// because the catalog write path that owns it is the seed/importer lane, not this
-		// planner-shape fixture.
-		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
-		{
-			await connection.OpenAsync();
-			await using NpgsqlCommand update = new(
-				"UPDATE catalog_components SET requires_sudo = $2, sudo_requires_password = $3 WHERE id = $1", connection);
-			update.Parameters.AddWithValue(component.Id);
-			update.Parameters.AddWithValue(requiresSudo);
-			update.Parameters.AddWithValue(sudoRequiresPassword);
-			await update.ExecuteNonQueryAsync();
-		}
+		CatalogComponentDefinition definition = requiresSudo is null && sudoRequiresPassword is null
+			? new CatalogComponentDefinition($"esxi-{suffix}", "Invented SSH Appliance", CatalogTransports.Ssh, CatalogSelectorKinds.Target, null, null)
+			: new CatalogComponentDefinition(
+				$"esxi-{suffix}", "Invented SSH Appliance", CatalogTransports.Ssh, CatalogSelectorKinds.Target, null, null,
+				RequiresSudo: requiresSudo!.Value, SudoRequiresPassword: sudoRequiresPassword!.Value);
+		CatalogComponent component = await _catalog.UpsertComponentAsync(productVersion.Id, definition, CancellationToken.None);
 
 		CatalogContentRelease contentRelease = await _catalog.UpsertContentReleaseAsync(
 			sourceRevision.Id, CatalogKinds.Srg, $"release-{suffix}", "Test Release", CancellationToken.None);
