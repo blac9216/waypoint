@@ -114,6 +114,16 @@ public static class ScanPlanDigest
 				builder.Append('-');
 			}
 
+			// Issue #743: the frozen catalog sudo policy is part of what the accepted
+			// item commits to executing (sudo vs. not changes the InSpec invocation
+			// itself), so two otherwise-identical plans compiled across a catalog
+			// sudo-policy change must not collide. "-" for null keeps every pre-#743
+			// item's digest input distinct from an explicit false/true.
+			builder
+				.Append('|')
+				.Append(item.RequiresSudo?.ToString() ?? "-").Append(':')
+				.Append(item.SudoRequiresPassword?.ToString() ?? "-");
+
 			builder.Append(']');
 		}
 

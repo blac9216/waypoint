@@ -749,6 +749,15 @@ public sealed class RunCreationService
 			benchmark_revision_id = item.BenchmarkRevisionId,
 			output_kind = item.OutputKind,
 			input_resolutions = item.InputResolutionsOrEmpty,
+
+			// Issue #743: the frozen catalog sudo policy (migration 0074) -- non-null
+			// only for an ssh-transport item (ScanPlannerService freezes it there and
+			// leaves every other transport null). ScanJobHandler consults it for the
+			// Invoke-WaypointSrgScan Sudo/SudoRequiresPassword parameters; null (any
+			// legacy or non-ssh payload) falls back to the pre-#743 credential-driven
+			// behavior.
+			requires_sudo = item.RequiresSudo,
+			sudo_requires_password = item.SudoRequiresPassword,
 		});
 
 		short priority = ScanTargetPriority.ForPlanItem(item);

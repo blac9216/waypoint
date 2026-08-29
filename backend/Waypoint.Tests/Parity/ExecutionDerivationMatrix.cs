@@ -90,10 +90,13 @@ public static class ExecutionDerivationMatrix
 			"Same rationale as 'aria-operations-8-x-srg' above.",
 		["photon-5-0-srg"] =
 			"Same rationale as 'aria-operations-8-x-srg' above -- ssh/target command " +
-			"construction is transport/selector/sudo-driven; sudo-disabled is already exercised " +
-			"by vidm-3-3-x-srg's own row, and Photon's sudo-enabled/passwordless shape is a " +
-			"credential-tier concern (ResolveCredentialAsync's SudoEnabled field), not a " +
-			"per-vendor command-construction difference this suite has not already asserted.",
+			"construction is transport/selector/sudo-driven, and since issue #743 the sudo " +
+			"policy itself is CATALOG data frozen into the plan item (migration 0074's " +
+			"requires_sudo/sudo_requires_password), never a per-vendor code branch: Photon's " +
+			"sudo-enabled/passwordless shape is exercised directly by " +
+			"ScanJobHandlerEndToEndTests' catalog-sudo-policy test against invented " +
+			"fixtures, so a second full parity row here would duplicate the same " +
+			"command-construction assertions vidm-3-3-x-srg already runs.",
 		["vsphere-9-0-srg-vmware"] =
 			"vSphere 9-0 SRG / vmware transport row: ScanJobHandler's vmware invocation branch " +
 			"(Invoke-WaypointScan, SelectorKind/SelectorName narrowing, the resolved-Input " +

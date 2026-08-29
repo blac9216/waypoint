@@ -31,6 +31,13 @@ public sealed record CatalogContentRelease(Guid Id, Guid SourceRevisionId, strin
 /// <see cref="ParentComponentId"/> builds the named-sub-service tree (e.g. VCSA STIG's
 /// EAM/Lookup/PostgreSQL/... services); <see cref="SelectorName"/> is non-null only
 /// when <see cref="SelectorKind"/> is <see cref="CatalogSelectorKinds.Service"/>.
+/// <see cref="RequiresSudo"/>/<see cref="SudoRequiresPassword"/> (issue #743,
+/// migration 0074) are the catalog-declared ssh sudo policy -- content knowledge the
+/// sibling catalog declares per component (vIDM: sudo with password; Photon:
+/// passwordless sudo; Aria family: no sudo), meaningful only for
+/// <see cref="CatalogTransports.Ssh"/> components and frozen into the plan item at
+/// plan-compile time. Defaults mirror the sibling catalog's own (no sudo; when sudo
+/// is enabled without saying otherwise, assume it prompts for a password).
 /// </summary>
 public sealed record CatalogComponent(
 	Guid Id,
@@ -41,7 +48,9 @@ public sealed record CatalogComponent(
 	string Transport,
 	string SelectorKind,
 	string? SelectorName,
-	DateTimeOffset CreatedAt);
+	DateTimeOffset CreatedAt,
+	bool RequiresSudo = false,
+	bool SudoRequiresPassword = true);
 
 /// <summary>Closed priority/report-group vocabulary row (<c>catalog_report_groups</c>). Priority 1 (NSX STIG) through 6 (every SRG).</summary>
 public sealed record CatalogReportGroup(Guid Id, string GroupKey, string DisplayName, int Priority, DateTimeOffset CreatedAt);

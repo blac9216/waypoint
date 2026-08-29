@@ -1718,6 +1718,28 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>True when any of the job's <c>job.log</c> events contains <paramref name="fragment"/> (the scan stub echoes its resolved selector there).</summary>
+	/// <summary>
+	/// Issue #743: job.log events read STRUCTURALLY rather than by raw-payload LIKE --
+	/// true only when some job.log event carries severity <c>Warning</c> AND a line
+	/// containing <paramref name="fragment"/>, so the assertion proves the severity as
+	/// well as the text and is immune to JSON escaping of the line's own punctuation.
+	/// </summary>
+	private async Task<bool> WarnLogContainsAsync(Guid jobId, string fragment)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand query = new(
+			"""
+			SELECT count(*) FROM job_events
+			WHERE job_id = $1 AND event_type = 'job.log'
+				AND payload::jsonb ->> 'severity' = 'Warning'
+				AND payload::jsonb ->> 'line' LIKE '%' || $2 || '%'
+			""", connection);
+		query.Parameters.AddWithValue(jobId);
+		query.Parameters.AddWithValue(fragment);
+		return (long)(await query.ExecuteScalarAsync())! >= 1;
+	}
+
 	private async Task<bool> ScanLogContainsAsync(Guid jobId, string fragment)
 	{
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
@@ -2345,6 +2367,72 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 			"SELECT count(*) FROM job_events WHERE job_id = $1 AND event_type = 'job.log' AND payload::text LIKE '%sudo=True%'", connection);
 		query.Parameters.AddWithValue(jobIds[0]);
 		Assert.True((long)(await query.ExecuteScalarAsync())! >= 1, "expected the stub's sudo=True Information line in job.log.");
+	}
+
+	/// <summary>
+	/// Issue #743 AC "resolved inputs and sudo settings reach the invocation": sudo
+	/// policy comes from the CATALOG (frozen on the plan item, migration 0074), not from
+	/// the credential row and not from the target kind. Each case seeds a credential
+	/// whose own <c>sudo_enabled</c> DISAGREES with the catalog policy, so a
+	/// credential-driven implementation would produce the opposite line -- proving the
+	/// catalog is authoritative. Covers the three documented product shapes: Photon
+	/// (sudo, passwordless), vIDM (sudo, password required), Aria (no sudo).
+	/// </summary>
+	[Theory]
+	[InlineData(true, false, false)]  // Photon shape; credential says sudo-disabled, catalog wins.
+	[InlineData(true, true, false)]   // vIDM shape; credential says sudo-disabled, catalog wins.
+	[InlineData(false, true, true)]   // Aria shape; credential says sudo-ENABLED, catalog still wins (no --sudo).
+	public async Task SshProductComponentJob_SudoPolicyComesFromCatalog_NotFromCredential(
+		bool requiresSudo, bool sudoRequiresPassword, bool credentialSudoEnabled)
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		string suffix = $"{requiresSudo}-{sudoRequiresPassword}-{credentialSudoEnabled}";
+		(Guid targetId, Guid credentialId) = await SeedSrgTargetAsync(
+			$"invented-sudo-policy-secret-{suffix}", sudoEnabled: credentialSudoEnabled); // gitleaks:allow -- invented test canary
+		(Guid executionProfileId, Guid baselineId, string _) = await SeedSshCatalogAndBaselineAsync(
+			$"sudo-{suffix}", CatalogSelectorKinds.Target, CatalogOutputKinds.Hdf, selectorName: null, materializeOnDisk: true);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			selector_kind = "target",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = "hdf",
+			requires_sudo = requiresSudo,
+			sudo_requires_password = sudoRequiresPassword,
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId, [new JobSpec("scan", 6, TargetId: targetId, CredentialId: credentialId, Payload: payload)], "tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("done", await GetJobFieldAsync(jobIds[0], "state"));
+		string expected = $"sudo={requiresSudo} sudoRequiresPassword={sudoRequiresPassword}";
+		Assert.True(await ScanLogContainsAsync(jobIds[0], expected),
+			$"expected the ssh invocation to carry the CATALOG sudo policy ('{expected}'), not the credential's own flag.");
+
+		// The operator's ONLY signal for the mismatch case (catalog demands sudo, the
+		// stored credential is marked sudo-disabled): a job.log event at WARNING
+		// severity naming the disagreement. Asserted in BOTH directions -- emitted
+		// exactly when the two disagree that way, and never otherwise -- so the WARN
+		// can neither regress into silence nor become noise on an agreeing pair.
+		bool expectMismatchWarn = requiresSudo && !credentialSudoEnabled;
+		Assert.Equal(
+			expectMismatchWarn,
+			await WarnLogContainsAsync(jobIds[0], "the catalog component requires sudo but the stored ssh credential is marked sudo-disabled"));
 	}
 
 	/// <summary>Same auth-shaped-failure classification as vsphere/nsx, exercised through the SRG (ssh) path.</summary>

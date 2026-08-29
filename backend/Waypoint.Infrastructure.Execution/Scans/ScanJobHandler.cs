@@ -460,6 +460,20 @@ public sealed class ScanJobHandler : IJobHandler
 			}
 			else if (isSrg)
 			{
+				// Issue #743: sudo policy is CONTENT knowledge -- the catalog component
+				// declares whether this profile must run under sudo and whether that sudo
+				// prompts for a password (frozen into the plan item/payload at
+				// plan-compile time, migration 0074), exactly like the sibling repository's
+				// own catalog (`$Comp.sudo`/`$Comp.sudoRequiresPassword`,
+				// module.transport.ssh.ps1). The pre-#743 shape -- Sudo from the resolved
+				// credential's SudoEnabled flag, SudoRequiresPassword hard-coded true --
+				// could not express the documented per-product policies (vIDM: sudo with
+				// password; Photon: passwordless sudo; Aria family: no sudo) and remains
+				// ONLY as the fallback for a legacy/unnarrowed payload carrying no frozen
+				// policy, preserving that shape byte-identically.
+				bool sudo = payload.RequiresSudo ?? resolved.SudoEnabled;
+				bool sudoRequiresPassword = payload.SudoRequiresPassword ?? true;
+
 				invocationCommand = SrgInvocationCommand;
 				parameters = new(StringComparer.Ordinal)
 				{
@@ -469,9 +483,24 @@ public sealed class ScanJobHandler : IJobHandler
 					["ProfilePath"] = profilePath,
 					["ReportPath"] = reportPath,
 					["TimeoutSeconds"] = _scanOptions.Value.TimeoutSeconds,
-					["Sudo"] = resolved.SudoEnabled,
-					["SudoRequiresPassword"] = true,
+					["Sudo"] = sudo,
+					["SudoRequiresPassword"] = sudoRequiresPassword,
 				};
+
+				// Honest signal, not a gate: the catalog says this profile needs sudo but
+				// the STORED credential explicitly declares sudo disabled (#249's typed
+				// flag). The catalog policy still runs (the scan fails honestly at the
+				// appliance if the account genuinely cannot sudo -- silently dropping
+				// --sudo would instead produce quietly wrong results); the WARN gives the
+				// operator the actionable why when it does.
+				if (payload.RequiresSudo == true && !resolved.SudoEnabled && context.Job.CredentialId is not null)
+				{
+					await EmitWarnAsync(
+						context,
+						$"job '{context.Job.Id}': the catalog component requires sudo but the stored ssh credential is marked sudo-disabled; "
+							+ "executing with --sudo per the catalog policy -- update the credential's sudo_enabled flag if elevation fails.",
+						cancellationToken).ConfigureAwait(false);
+				}
 
 				// Issue #741/#743, generalized from the vmware family's #738/#879
 				// mechanism: an ssh-transport narrowed item's (VCSA service or
@@ -1634,6 +1663,14 @@ public sealed class ScanJobHandler : IJobHandler
 				? parsedBenchmarkRevisionId
 				: null;
 
+		// Issue #743: the item's frozen catalog sudo policy (migration 0074) -- present
+		// (non-null) only on an ssh-transport plan-item job (ScanPlannerService freezes
+		// it for ssh only; RunCreationService serializes null for every other
+		// transport). Null on any legacy/unnarrowed payload -- the SRG invocation then
+		// keeps the pre-#743 credential-driven sudo behavior byte-identically.
+		bool? requiresSudo = ReadOptionalBool(root, "requires_sudo");
+		bool? sudoRequiresPassword = ReadOptionalBool(root, "sudo_requires_password");
+
 		List<ScanPayloadInputResolution> inputResolutions = [];
 		if (root.TryGetProperty("input_resolutions", out JsonElement inputResolutionsElement) && inputResolutionsElement.ValueKind == JsonValueKind.Array)
 		{
@@ -1668,12 +1705,19 @@ public sealed class ScanJobHandler : IJobHandler
 			inputResolutions,
 			componentId,
 			outputKind,
-			benchmarkRevisionId);
+			benchmarkRevisionId,
+			requiresSudo,
+			sudoRequiresPassword);
 	}
 
 	private static string? ReadOptionalString(JsonElement root, string property) =>
 		root.TryGetProperty(property, out JsonElement element) && element.ValueKind == JsonValueKind.String
 			? element.GetString()
+			: null;
+
+	private static bool? ReadOptionalBool(JsonElement root, string property) =>
+		root.TryGetProperty(property, out JsonElement element) && element.ValueKind is JsonValueKind.True or JsonValueKind.False
+			? element.GetBoolean()
 			: null;
 
 	private sealed record ScanPayload(
@@ -1688,7 +1732,9 @@ public sealed class ScanJobHandler : IJobHandler
 		IReadOnlyList<ScanPayloadInputResolution>? InputResolutions = null,
 		Guid? ComponentId = null,
 		string? OutputKind = null,
-		Guid? BenchmarkRevisionId = null)
+		Guid? BenchmarkRevisionId = null,
+		bool? RequiresSudo = null,
+		bool? SudoRequiresPassword = null)
 	{
 		public IReadOnlyList<ScanPayloadInputResolution> InputResolutionsOrEmpty => InputResolutions ?? [];
 	}

@@ -74,8 +74,9 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 				INSERT INTO scan_plan_items (
 					scan_plan_id, component_id, catalog_execution_profile_id, baseline_id, benchmark_revision_id,
 					transport, selector_kind, selector_name, report_group_key, priority, output_kind,
-					required_purposes_json, declared_inputs_json, input_resolutions_json, attestation_resolution_json)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb)
+					required_purposes_json, declared_inputs_json, input_resolutions_json, attestation_resolution_json,
+					requires_sudo, sudo_requires_password)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16, $17)
 				RETURNING id
 				""", connection, transaction);
 			itemCommand.Parameters.AddWithValue(planId);
@@ -98,6 +99,8 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 					? JsonSerializer.Serialize(attestation, SerializerOptions)
 					: DBNull.Value,
 			});
+			itemCommand.Parameters.AddWithValue((object?)item.RequiresSudo ?? DBNull.Value);
+			itemCommand.Parameters.AddWithValue((object?)item.SudoRequiresPassword ?? DBNull.Value);
 			Guid planItemId = (Guid)(await itemCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 			planItemIdsByComponentId[item.ComponentId] = planItemId;
 		}
@@ -142,7 +145,8 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 			"""
 			SELECT i.component_id, i.catalog_execution_profile_id, i.baseline_id, i.benchmark_revision_id,
 				i.transport, i.selector_kind, i.selector_name, i.report_group_key, i.priority, i.output_kind,
-				i.required_purposes_json, i.declared_inputs_json, i.input_resolutions_json, i.attestation_resolution_json
+				i.required_purposes_json, i.declared_inputs_json, i.input_resolutions_json, i.attestation_resolution_json,
+				i.requires_sudo, i.sudo_requires_password
 			FROM scan_plan_items i
 			JOIN scan_plans p ON p.id = i.scan_plan_id
 			WHERE p.run_id = $1
@@ -169,7 +173,9 @@ public sealed class ScanPlanRepository : IScanPlanRepository
 					InputResolutions: JsonSerializer.Deserialize<List<PlanInputResolution>>(reader.GetString(12), SerializerOptions) ?? [],
 					AttestationResolution: reader.IsDBNull(13)
 						? null
-						: JsonSerializer.Deserialize<PlanAttestationResolution>(reader.GetString(13), SerializerOptions)));
+						: JsonSerializer.Deserialize<PlanAttestationResolution>(reader.GetString(13), SerializerOptions),
+					RequiresSudo: reader.IsDBNull(14) ? null : reader.GetBoolean(14),
+					SudoRequiresPassword: reader.IsDBNull(15) ? null : reader.GetBoolean(15)));
 			}
 		}
 

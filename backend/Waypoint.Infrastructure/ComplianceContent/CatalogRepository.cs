@@ -24,7 +24,7 @@ public sealed class CatalogRepository : ICatalogRepository
 	private const string ExecutionProfileDetailProjectionSql = """
 		SELECT
 			ep.id, ep.component_id, ep.content_release_id, ep.report_group_id, ep.profile_version, ep.is_operator_override, ep.output_kind, ep.created_at,
-			c.id, c.product_version_id, c.parent_component_id, c.component_key, c.display_name, c.transport, c.selector_kind, c.selector_name, c.created_at,
+			c.id, c.product_version_id, c.parent_component_id, c.component_key, c.display_name, c.transport, c.selector_kind, c.selector_name, c.created_at, c.requires_sudo, c.sudo_requires_password,
 			pv.id, pv.product_id, pv.version_key, pv.display_name, pv.created_at,
 			p.id, p.source_revision_id, p.vendor, p.product_key, p.display_name, p.created_at,
 			cr.id, cr.source_revision_id, cr.kind, cr.release_key, cr.display_name, cr.created_at,
@@ -171,7 +171,7 @@ public sealed class CatalogRepository : ICatalogRepository
 				transport = EXCLUDED.transport,
 				selector_kind = EXCLUDED.selector_kind,
 				selector_name = EXCLUDED.selector_name
-			RETURNING id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
+			RETURNING id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at, requires_sudo, sudo_requires_password
 			""", connection);
 		upsert.Parameters.AddWithValue(productVersionId);
 		upsert.Parameters.AddWithValue((object?)definition.ParentComponentId ?? DBNull.Value);
@@ -359,7 +359,7 @@ public sealed class CatalogRepository : ICatalogRepository
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
+			SELECT id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at, requires_sudo, sudo_requires_password
 			FROM catalog_components
 			WHERE product_version_id = $1
 			ORDER BY component_key
@@ -381,7 +381,7 @@ public sealed class CatalogRepository : ICatalogRepository
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at
+			SELECT id, product_version_id, parent_component_id, component_key, display_name, transport, selector_kind, selector_name, created_at, requires_sudo, sudo_requires_password
 			FROM catalog_components
 			WHERE id = $1
 			""", connection);
@@ -409,7 +409,7 @@ public sealed class CatalogRepository : ICatalogRepository
 		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			SELECT cc.id, cc.product_version_id, cc.parent_component_id, cc.component_key, cc.display_name, cc.transport, cc.selector_kind, cc.selector_name, cc.created_at, pv.version_key
+			SELECT cc.id, cc.product_version_id, cc.parent_component_id, cc.component_key, cc.display_name, cc.transport, cc.selector_kind, cc.selector_name, cc.created_at, cc.requires_sudo, cc.sudo_requires_password, pv.version_key
 			FROM catalog_components cc
 			JOIN catalog_product_versions pv ON pv.id = cc.product_version_id
 			WHERE cc.parent_component_id IS NULL AND cc.component_key = $1
@@ -421,7 +421,7 @@ public sealed class CatalogRepository : ICatalogRepository
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
 		{
-			string versionKey = reader.GetString(9);
+			string versionKey = reader.GetString(11);
 			if (Waypoint.Core.Components.VersionScopeMatcher.Matches(exactVersion, versionKey))
 			{
 				components.Add(MapComponent(reader, 0));
@@ -446,7 +446,7 @@ public sealed class CatalogRepository : ICatalogRepository
 			{
 				CatalogExecutionProfile profile = MapExecutionProfile(reader, 0);
 				profiles.Add(profile);
-				joined[profile.Id] = (MapComponent(reader, 8), MapProductVersion(reader, 17), MapProduct(reader, 22), MapContentRelease(reader, 28), MapReportGroup(reader, 34));
+				joined[profile.Id] = (MapComponent(reader, 8), MapProductVersion(reader, 19), MapProduct(reader, 24), MapContentRelease(reader, 30), MapReportGroup(reader, 36));
 			}
 		}
 
@@ -469,7 +469,7 @@ public sealed class CatalogRepository : ICatalogRepository
 			}
 
 			profile = MapExecutionProfile(reader, 0);
-			joined = (MapComponent(reader, 8), MapProductVersion(reader, 17), MapProduct(reader, 22), MapContentRelease(reader, 28), MapReportGroup(reader, 34));
+			joined = (MapComponent(reader, 8), MapProductVersion(reader, 19), MapProduct(reader, 24), MapContentRelease(reader, 30), MapReportGroup(reader, 36));
 		}
 
 		IReadOnlyList<CatalogExecutionProfileDetail> details = await HydrateDetailsAsync(
@@ -491,7 +491,7 @@ public sealed class CatalogRepository : ICatalogRepository
 			{
 				CatalogExecutionProfile profile = MapExecutionProfile(reader, 0);
 				profiles.Add(profile);
-				joined[profile.Id] = (MapComponent(reader, 8), MapProductVersion(reader, 17), MapProduct(reader, 22), MapContentRelease(reader, 28), MapReportGroup(reader, 34));
+				joined[profile.Id] = (MapComponent(reader, 8), MapProductVersion(reader, 19), MapProduct(reader, 24), MapContentRelease(reader, 30), MapReportGroup(reader, 36));
 			}
 		}
 
@@ -923,7 +923,9 @@ public sealed class CatalogRepository : ICatalogRepository
 		reader.GetString(offset + 5),
 		reader.GetString(offset + 6),
 		reader.IsDBNull(offset + 7) ? null : reader.GetString(offset + 7),
-		reader.GetFieldValue<DateTimeOffset>(offset + 8));
+		reader.GetFieldValue<DateTimeOffset>(offset + 8),
+		reader.GetBoolean(offset + 9),
+		reader.GetBoolean(offset + 10));
 
 	private static CatalogProductVersion MapProductVersion(NpgsqlDataReader reader, int offset) => new(
 		reader.GetGuid(offset), reader.GetGuid(offset + 1), reader.GetString(offset + 2), reader.GetString(offset + 3), reader.GetFieldValue<DateTimeOffset>(offset + 4));

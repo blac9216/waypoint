@@ -341,6 +341,14 @@ public sealed class ScanPlannerService
 				}
 			}
 
+			// Issue #743: freeze the catalog component's declared ssh sudo policy into the
+			// immutable plan item (migration 0074) -- content knowledge (vIDM: sudo with
+			// password; Photon: passwordless sudo; Aria family: no sudo), never inferred
+			// from the target kind or the credential row. Frozen only for ssh-transport
+			// items: no other transport's invocation has a sudo concept, and leaving them
+			// null keeps every non-ssh item's digest input byte-identical to pre-#743.
+			bool isSshTransport = string.Equals(profile.Component.Transport, CatalogTransports.Ssh, StringComparison.Ordinal);
+
 			ScanPlanItem item = new(
 				ComponentId: componentId,
 				CatalogExecutionProfileId: profile.ExecutionProfile.Id,
@@ -355,7 +363,9 @@ public sealed class ScanPlannerService
 				RequiredPurposes: purposes,
 				DeclaredInputNames: declaredInputNames,
 				InputResolutions: inputResolutions,
-				AttestationResolution: attestationResolution);
+				AttestationResolution: attestationResolution,
+				RequiresSudo: isSshTransport ? profile.Component.RequiresSudo : null,
+				SudoRequiresPassword: isSshTransport ? profile.Component.SudoRequiresPassword : null);
 
 			return (item, null);
 		}

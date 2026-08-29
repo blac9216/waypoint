@@ -197,6 +197,14 @@ public sealed record ScanPlanSkip(Guid ComponentId, string Reason, string Detail
 /// default to "no resolution attempted" (empty list / null) so a <see cref="ScanPlanItem"/>
 /// built without going through the resolver (e.g. an existing unit test fixture
 /// predating this issue) remains a valid, fully-constructible record.
+///
+/// <see cref="RequiresSudo"/>/<see cref="SudoRequiresPassword"/> (issue #743,
+/// migration 0074) freeze the catalog component's declared ssh sudo policy at
+/// plan-compile time -- meaningful only for
+/// <see cref="Waypoint.Core.ComplianceContent.CatalogTransports.Ssh"/> items, null for
+/// every other transport AND for rows persisted before this issue (execution falls
+/// back to the pre-#743 credential-driven sudo behavior on null, so legacy plans
+/// replay byte-identically).
 /// </summary>
 public sealed record ScanPlanItem(
 	Guid ComponentId,
@@ -212,7 +220,9 @@ public sealed record ScanPlanItem(
 	IReadOnlyList<string> RequiredPurposes,
 	IReadOnlyList<string> DeclaredInputNames,
 	IReadOnlyList<PlanInputResolution>? InputResolutions = null,
-	PlanAttestationResolution? AttestationResolution = null)
+	PlanAttestationResolution? AttestationResolution = null,
+	bool? RequiresSudo = null,
+	bool? SudoRequiresPassword = null)
 {
 	/// <summary>Never-null convenience accessor -- callers iterate this instead of null-checking <see cref="InputResolutions"/> everywhere.</summary>
 	public IReadOnlyList<PlanInputResolution> InputResolutionsOrEmpty => InputResolutions ?? [];
