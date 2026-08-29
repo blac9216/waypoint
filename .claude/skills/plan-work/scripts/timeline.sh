@@ -46,8 +46,8 @@ jq -s --argjson par "$PAR" --argjson hpd "$HOURS_PER_DAY" '
      cross_milestone_deps:($open|map(.blocked_by[]|select($byn[tostring]==null))|length)}
   ) ' "$OUT/issues.jsonl" > "$OUT/projection.json"
 # serial placement proposal: started milestones pinned at their hint, others laid out after the last one, in current due_on order
-jq -s --slurpfile ms "$OUT/milestones.jsonl" '
-  .[0] as $p | ($ms|map({key:(.number|tostring),value:.})|from_entries) as $mm |
+jq --slurpfile ms "$OUT/milestones.jsonl" '
+  . as $p | ($ms|map({key:(.number|tostring),value:.})|from_entries) as $mm |
   ($p|sort_by(($mm[(.milestone|tostring)].due_on // "9999")) ) as $ordered |
   (now) as $today |
   reduce $ordered[] as $m ({cursor:$today, rows:[]};
@@ -56,6 +56,6 @@ jq -s --slurpfile ms "$OUT/milestones.jsonl" '
     ($s + ($m.projected_days*86400)) as $e0 |
     (if $m.started then ([$e0,$today]|max) else $e0 end) as $fin |
     {cursor:(if $m.started then $acc.cursor else $fin end),
-     rows:($acc.rows + [$m + {start:($s|todate|.[0:10]), proposed_due:($fin|todate|.[0:10]), current_due:(($mm[($m.milestone|tostring)].due_on // "")|.[0:10])}])}) | .rows' <(jq -s . "$OUT/projection.json") > "$OUT/placement.json"
+     rows:($acc.rows + [$m + {start:($s|todate|.[0:10]), proposed_due:($fin|todate|.[0:10]), current_due:(($mm[($m.milestone|tostring)].due_on // "")|.[0:10])}])}) | .rows' "$OUT/projection.json" > "$OUT/placement.json"
 { echo "# Timeline proposal — $REPO ($(date -u +%F)) · parallelism $PAR · $HOURS_PER_DAY h/day"; echo; echo "| Milestone | open | critical path (h) | effort (h) | projected (d) | started | start | proposed due | current due | estimate sources |"; echo "|---|---|---|---|---|---|---|---|---|---|"; jq -r '.[]|"| \(.title) (#\(.milestone)) | \(.open) | \(.critical_path_h) | \(.effort_h) | \(.projected_days) | \(.started) | \(.start) | \(.proposed_due) | \(.current_due) | \(.sources) |"' "$OUT/placement.json"; echo; echo "Unstarted milestones are laid out serially in current due-date order; cross-milestone dependencies counted per milestone (see projection.json). Ambiguous order → ask the owner. Apply with: gh api -X PATCH repos/$REPO/milestones/<n> -f due_on=<date>T12:00:00Z"; } > "$OUT/timeline.md"
 say "proposal → $OUT/timeline.md"
