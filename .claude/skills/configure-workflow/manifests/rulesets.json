@@ -1,0 +1,13 @@
+{
+  "note": "Branch ruleset applied to the default branch by scripts/rulesets.sh under the OWNER token. required_checks are repo-specific and are read from docs/process/testing.md (## Required checks) at apply time.",
+  "name": "workflow-main",
+  "target_branch": "default",
+  "rules": {
+    "pull_request": {"required_approving_review_count_single_account": 0, "required_approving_review_count_with_reviewer_account": 1, "dismiss_stale_reviews_on_push": true, "require_last_push_approval": false},
+    "required_status_checks": {"strict_required_status_checks_policy": true},
+    "non_fast_forward": true,
+    "deletion": true,
+    "required_linear_history": true
+  },
+  "bypass": {"repository_role": "admin", "mode": "always"}
+}

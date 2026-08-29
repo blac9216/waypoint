@@ -1,0 +1,28 @@
+{
+  "note": "Canonical label set for the github-workflow skill. Names and colours are the contract. Repo-specific area:* labels come from docs/process/labels.md, not from here.",
+  "area_prefix": {"prefix": "area:", "default_color": "d1e8ff", "rule": "at least one per issue; multiple allowed; closed set per repo"},
+  "labels": [
+    {"name": "bug",               "color": "d73a4a", "description": "Something isn't working"},
+    {"name": "enhancement",       "color": "a2eeef", "description": "New feature or improvement"},
+    {"name": "chore",             "color": "cfd3d7", "description": "Maintenance — deps, refactor, lint, build, infra"},
+    {"name": "epic",              "color": "5319e7", "description": "Meta-issue tracking a multi-issue / multi-PR goal"},
+    {"name": "documentation",     "color": "0075ca", "description": "Docs-only work, or a found docs gap — coexists with a type"},
+    {"name": "question",          "color": "d876e3", "description": "Further information is requested"},
+    {"name": "help",              "color": "008672", "description": "Requires human intervention — agent is blocked"},
+    {"name": "severity:critical", "color": "b60205", "description": "Breaks runtime, blocks merge, or causes data loss"},
+    {"name": "severity:major",    "color": "d93f0b", "description": "Affects a core path but has a workaround"},
+    {"name": "severity:minor",    "color": "fbca04", "description": "Cosmetic, edge case, or low-frequency"},
+    {"name": "priority:high",     "color": "cf222e", "description": "Sequencing — pull this ahead of other work"},
+    {"name": "priority:medium",   "color": "dbab09", "description": "Sequencing — normal ordering"},
+    {"name": "priority:low",      "color": "0e8a16", "description": "Sequencing — do after higher-priority work"},
+    {"name": "regression",        "color": "e99695", "description": "A previously-fixed issue has returned, or a recent change broke something that worked"},
+    {"name": "backlog",           "color": "bfdadc", "description": "Intentionally shelved; mirrors the board's Backlog column — not sequenced into any milestone"},
+    {"name": "deferred",          "color": "c5def5", "description": "Provenance: filed as out-of-scope by an agent during other work; stays on the issue"},
+    {"name": "concern:style",     "color": "d4c5f9", "description": "Found-issue dimension — style / formatting / naming drift"},
+    {"name": "concern:lint",      "color": "d4c5f9", "description": "Found-issue dimension — linter warning not blocked on"},
+    {"name": "concern:tests",     "color": "d4c5f9", "description": "Found-issue dimension — missing/thin tests or coverage gap"},
+    {"name": "concern:refactor",  "color": "d4c5f9", "description": "Found-issue dimension — code smell, duplication, dead code"},
+    {"name": "concern:perf",      "color": "d4c5f9", "description": "Found-issue dimension — performance / inefficiency"},
+    {"name": "concern:security",  "color": "d4c5f9", "description": "Found-issue dimension — non-blocking or pre-existing security concern"}
+  ]
+}

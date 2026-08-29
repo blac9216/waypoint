@@ -1,0 +1,212 @@
+{
+  "captured_from": {
+    "owner": "blac9216",
+    "project": 5,
+    "title": "Waypoint"
+  },
+  "custom_fields": [
+    {
+      "name": "Status",
+      "dataType": "SINGLE_SELECT",
+      "options": [
+        {
+          "name": "Triage",
+          "color": "GRAY",
+          "description": "Newly filed, not yet sequenced — orchestrator drains this column"
+        },
+        {
+          "name": "Backlog",
+          "color": "PURPLE",
+          "description": "Intentionally shelved; not sequenced into any milestone"
+        },
+        {
+          "name": "Ready",
+          "color": "BLUE",
+          "description": "Sequenced and ready to dispatch"
+        },
+        {
+          "name": "In progress",
+          "color": "YELLOW",
+          "description": "Being worked (incl. fix rounds)"
+        },
+        {
+          "name": "In review",
+          "color": "ORANGE",
+          "description": "PR open, contextless review in flight"
+        },
+        {
+          "name": "Done",
+          "color": "GREEN",
+          "description": "Closed at merge; see Verified for outstanding live proof"
+        }
+      ]
+    },
+    {
+      "name": "Verified",
+      "dataType": "SINGLE_SELECT",
+      "options": [
+        {
+          "name": "n/a",
+          "color": "GRAY",
+          "description": "No proof beyond CI needed"
+        },
+        {
+          "name": "pending-live",
+          "color": "YELLOW",
+          "description": "Merged; live-lab proof outstanding"
+        },
+        {
+          "name": "live-verified",
+          "color": "GREEN",
+          "description": "Proven on the real stack by a validation run"
+        },
+        {
+          "name": "live-failed",
+          "color": "RED",
+          "description": "Validation found it broken; bug filed"
+        }
+      ]
+    },
+    {
+      "name": "Claimed by",
+      "dataType": "TEXT",
+      "options": []
+    }
+  ],
+  "views": [
+    {
+      "name": "All issues",
+      "layout": "TABLE_LAYOUT",
+      "filter": "",
+      "columns": [
+        "Title",
+        "Status",
+        "Linked pull requests",
+        "Milestone",
+        "Sub-issues progress",
+        "Verified",
+        "Claimed by"
+      ],
+      "group_by": [],
+      "board_columns": [],
+      "sort": []
+    },
+    {
+      "name": "Board",
+      "layout": "BOARD_LAYOUT",
+      "filter": "is:open",
+      "columns": [
+        "Title"
+      ],
+      "group_by": [],
+      "board_columns": [
+        "Status"
+      ],
+      "sort": []
+    },
+    {
+      "name": "Triage",
+      "layout": "TABLE_LAYOUT",
+      "filter": "status:Triage",
+      "columns": [
+        "Title",
+        "Labels"
+      ],
+      "group_by": [],
+      "board_columns": [],
+      "sort": []
+    },
+    {
+      "name": "Ready queue",
+      "layout": "TABLE_LAYOUT",
+      "filter": "status:Ready",
+      "columns": [
+        "Title",
+        "Labels"
+      ],
+      "group_by": [],
+      "board_columns": [],
+      "sort": []
+    },
+    {
+      "name": "In flight",
+      "layout": "TABLE_LAYOUT",
+      "filter": "status:\"In progress\",\"In review\"",
+      "columns": [
+        "Title",
+        "Status",
+        "Linked pull requests",
+        "Milestone",
+        "Parent issue",
+        "Claimed by"
+      ],
+      "group_by": [],
+      "board_columns": [],
+      "sort": []
+    },
+    {
+      "name": "Verification ledger",
+      "layout": "TABLE_LAYOUT",
+      "filter": "verified:pending-live,live-failed",
+      "columns": [
+        "Title",
+        "Labels",
+        "Parent issue",
+        "Verified"
+      ],
+      "group_by": [],
+      "board_columns": [],
+      "sort": []
+    },
+    {
+      "name": "Epics",
+      "layout": "TABLE_LAYOUT",
+      "filter": "label:epic is:open",
+      "columns": [
+        "Title",
+        "Status",
+        "Milestone",
+        "Claimed by"
+      ],
+      "group_by": [],
+      "board_columns": [],
+      "sort": []
+    },
+    {
+      "name": "Milestone-less",
+      "layout": "TABLE_LAYOUT",
+      "filter": "no:milestone is:open",
+      "columns": [
+        "Title",
+        "Status",
+        "Claimed by"
+      ],
+      "group_by": [],
+      "board_columns": [],
+      "sort": []
+    },
+    {
+      "name": "Roadmap",
+      "layout": "ROADMAP_LAYOUT",
+      "filter": "",
+      "columns": [
+        "Title",
+        "Assignees",
+        "Status",
+        "Linked pull requests",
+        "Sub-issues progress"
+      ],
+      "group_by": [
+        "Milestone"
+      ],
+      "board_columns": [],
+      "sort": []
+    }
+  ],
+  "workflows": [
+    "Auto-add sub-issues to project",
+    "Auto-add to project",
+    "Item added to project",
+    "Item closed"
+  ]
+}
