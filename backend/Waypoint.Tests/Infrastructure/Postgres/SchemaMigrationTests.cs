@@ -284,8 +284,16 @@ public sealed class SchemaMigrationTests
 	/// fan-out/reconcile linkage, owner decision 2026-08-28: reuse the job-queue's
 	/// existing parallelism) and 'content-check' to jobs_job_type_check, no other
 	/// schema changes --
+	/// 0076 (issue #1080, epic #726; slots 0074/0075 claimed and unpushed by PR #1076
+	/// and issue #784 at this migration's own commit time): re-keys the vSphere 9.x
+	/// catalog_product_versions row from the exact key '9.0' to the major-line-scoped
+	/// key '9.x', matching the vendor's real declared scope (issue #1079 proved there
+	/// is no top-level `vsphere/9.0` vendor directory) so a real observed version like
+	/// '9.1.0' matches via VersionScopeMatcher's existing closed two-form test -- no
+	/// schema shape changes, no new runner grants, reuses migration 0070's own
+	/// idempotent-merge idiom --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 72;
+	private const int ExpectedMigrationCount = 73;
 
 	private readonly PostgresFixture _fixture;
 

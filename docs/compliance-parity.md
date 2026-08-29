@@ -43,7 +43,9 @@ apart again the way they did before issue #959.
 | Vendor directory literal | Maps to family | Path shape | Notes |
 |---|---|---|---|
 | `vsphere` | `vsphere` | `vsphere/<version>/<release>/inspec/<baseline>/[vcenter\|esxi\|vm]` | Object-kind split directly under the baseline directory (vSphere 8.0 and earlier). |
-| `vcf` | `vsphere` | `vcf/<version>/<release>/inspec/<baseline>/[vcenter\|esxi\|vm]` | Issue #959: upstream `master` now nests the 9.x vSphere/vCenter/ESXi/VM baselines under this consolidated tree instead of a top-level `vsphere/9-0` tree. Same vsphere product family and object-kind-split shape, only the top-level directory literal differs. |
+| `vcf` (grouped-baseline) | `vsphere` | `vcf/<version>/<release>/inspec/<baseline>/vsphere/[vcenter\|esx\|vm]` | Issue #1079 (live validation round 11, superseding issue #959's row): upstream `master` nests the 9.x vSphere/vCenter/ESXi/VM baselines under this consolidated tree, but with an EXTRA grouping segment (`vsphere/`) between the baseline directory and the object-kind leaf, and names the ESXi leaf `esx`, not `esxi` (normalized to `esxi` on import). Same vsphere product family and object-kind vocabulary otherwise. |
+| `vcf` (grouped-baseline) | `nsx` | `vcf/<version>/<release>/inspec/<baseline>/nsx/<function-name>` | Issue #1079: the same consolidated `vcf/9.x` tree also carries NSX 9.x named-function content under an `nsx/` grouping segment, one level below the baseline directory -- same nsx product family and named-function shape as the top-level `nsx` row below. |
+| `vcf` (named-service) | `vcf` | `vcf/<version>/<release>/inspec/<baseline>/<service-name>` | Issue #1079: named VCF-native application/service leaves that sit DIRECTLY under a `vmware-cloud-foundation-*-stig-baseline` directory (no grouping segment) -- the six API/token-authenticated app profiles under the umbrella baseline directory (`application`, `automation`, `operations`, `opshcx`, `opsnet`, `sddcmgr`) import as `vcf-api` transport; every other named service leaf (SDDC Manager nginx/PostgreSQL, Operations httpd/PostgreSQL, Operations HCX httpd, Operations Networks nginx-platform, ...), each under its own distinctly-named baseline directory, imports as `ssh` transport. A profile found AT the baseline directory itself (empty tail) is still the aggregate parent, unchanged from every other family. |
 | `vsphere` (object-kind-before-inspec) | `vsphere` | `vsphere/<version>/<release>/<object-kind>/inspec/<baseline>/<leaf>`, `<object-kind>` one of `vcsa`, `vsphere` | Issue #959: the current upstream `vsphere/7.0` and `vsphere/8.0` trees split by object kind ONE segment before `inspec` rather than after the baseline directory. Still the vsphere family; still fails closed if `<object-kind>` is anything other than `vcsa`/`vsphere`. Issue #1064: the two subtrees carry different leaf vocabularies -- the `vsphere` subtree's leaves are `[vcenter\|esxi\|vm]` (`vmware` transport); the `vcsa` subtree's leaves are named VCSA services (`<service-name>`, `ssh` transport, same named-sub-service shape as the top-level `vcsa` row below). |
 | `vcsa` | `vsphere` | `vcsa/<version>/<release>/inspec/<baseline>/<service-name>` | Named-sub-service split, `ssh` transport (EAM, Lookup, PostgreSQL, ...). Issue #1064 (owner decision): VCSA services are implied subcomponents of every vCenter appliance, so this literal promotes into the `vsphere` product exactly as `vcf` -> `vsphere` above -- the provenance matrix's vSphere `ssh` rows (`vsphere-api` + `vcsa-ssh`) and #741's catalog-declared service expansion then apply; a separate `vcsa` product is never created. |
 | `nsx` | `nsx` | `nsx/<version>/<release>/inspec/<baseline>/<function-name>` | Named-function split, `nsx-api` transport. |
@@ -145,6 +147,17 @@ ambiguous, or mismatched, that component is unsupported and does not execute. So
 families cannot be copied into executable catalog entries, expanded by inference beyond
 their own declared scope, or matched by nearest-version substitution.
 
+Issue #1080 (live validation round 11): the vSphere `9.x` rows below were previously
+seeded under the exact key `9.0`, modeled on a top-level `vsphere/9.0` vendor directory
+that issue #1079 proved does not exist -- the 9.x vSphere content actually lives under
+`vcf/9.x`, whose declared scope is the major-line-scoped `9.x`, exactly like the `nsx
+9.x` and `vcf 9.x` rows already below. A real VCF 9.1 host discovers `9.1.0`, which the
+closed two-form matcher above never matched against the exact `9.0` key, so every
+discovered 9.1 component stayed catalog-unlinked. The rows are corrected to `9.x` /
+`family` here; migration `0076_vsphere_9x_declared_scope_rekey.sql` re-keys the seed to
+match, using this same precedented major-line scope-key form -- not a new key form, not
+a version range, not nearest-version fallback.
+
 Hosts store exactly two facts about their own version: the full observed product version
 and the build number. The declared-scope key lives only on the catalog side; no third,
 derived "scope" fact is ever stored on a host or component row.
@@ -153,8 +166,8 @@ derived "scope" fact is ever stored on a host or component row.
 |---|---|---|---|---|---|---|
 | vSphere `8.0` | exact | STIG / `v2r3-stig` | vCenter; ESXi; VM | `vmware` / object kind | `vsphere-api` | HDF + CKL |
 | vSphere `8.0` | exact | STIG / `v2r3-stig` | VCSA EAM, Lookup, PerfCharts, Photon, PostgreSQL, STS, UI, VAMI, Envoy | `ssh` / named VCSA service | `vsphere-api` + `vcsa-ssh` | HDF + CKL |
-| vSphere `9.0` | exact | SRG / `Y26M05-srg` | vCenter; ESXi; VM | `vmware` / object kind | `vsphere-api` | HDF |
-| vSphere `9.0` | exact | SRG / `Y26M05-srg` | VCSA Envoy, PostgreSQL, VAMI, Photon | `ssh` / named VCSA service | `vsphere-api` + `vcsa-ssh` | HDF |
+| vSphere `9.x` | family | SRG / `Y26M05-srg` | vCenter; ESXi; VM | `vmware` / object kind | `vsphere-api` | HDF |
+| vSphere `9.x` | family | SRG / `Y26M05-srg` | VCSA Envoy, PostgreSQL, VAMI, Photon | `ssh` / named VCSA service | `vsphere-api` + `vcsa-ssh` | HDF |
 | NSX `4.x` | family | STIG / `v1r2-stig` | Manager, distributed firewall, tier-0 firewall, tier-0 router, tier-1 firewall, tier-1 router | `nsx-api` / named function | `nsx-api` | HDF + CKL |
 | NSX `9.x` | family | SRG / `Y26M05-srg` | Manager, routing | `nsx-api` / named function | `nsx-api` | HDF |
 | Aria Operations `8.x` | family | SRG / `v1r4-srg` | Aria Operations | `ssh` / target | `srg-ssh` | HDF |
