@@ -46,7 +46,44 @@ BeforeAll {
 	# the shape inventory doc -- mirrors ShapeInventoryDoc.ParseShapeIds (C#) closely
 	# enough to catch the same doc<->fixture drift, without depending on the C# test
 	# assembly from a Pester run.
-	function Get-DocumentedShapeId {
+	# Splits a row's remainder (everything after the shape-ID column, minus the closing
+	# pipe) on its last UNESCAPED pipe, so a description containing a literal `\|` --
+	# as the block-scalar row does -- does not shift which column is read as Expected.
+	# Mirrors ShapeInventoryDoc.LastColumn (C#).
+	function Get-LastColumn {
+		param([Parameter(Mandatory)][AllowEmptyString()][string]$RowRemainder)
+
+		for ($i = $RowRemainder.Length - 1; $i -ge 0; $i--) {
+			if ($RowRemainder[$i] -eq '|' -and ($i -eq 0 -or $RowRemainder[$i - 1] -ne '\')) {
+				return $RowRemainder.Substring($i + 1)
+			}
+		}
+		return $RowRemainder
+	}
+
+	# Classifies an Expected cell as 'accept', 'reject', or $null when its leading word
+	# is neither. Mirrors ShapeInventoryDoc.ClassifyExpectedCell (C#) and the same
+	# normalization scripts/parser-shape-diff.sh applies: strip leading whitespace and
+	# markdown emphasis/backticks, then compare the leading run of letters
+	# case-insensitively.
+	function Get-ExpectedCellVerdict {
+		param([Parameter(Mandatory)][AllowEmptyString()][string]$Cell)
+
+		$token = ([regex]::Match($Cell.TrimStart().TrimStart('*', '_', '`', ' '), '^[A-Za-z]+')).Value.ToLowerInvariant()
+		switch ($token) {
+			'accepted' { return 'accept' }
+			'rejected' { return 'reject' }
+			default { return $null }
+		}
+	}
+
+	# Yields each documented row's shape ID and Expected-cell text under the
+	# "## `Get-WaypointProfileDeclaredInputNameSet`" heading -- mirrors
+	# ShapeInventoryDoc.EnumerateExpectedCells (C#) closely enough to catch the same
+	# doc<->fixture drift, without depending on the C# test assembly from a Pester run.
+	# The single place this file reads the table from, so ID parsing and Expected-cell
+	# parsing cannot drift on how a row is split into columns.
+	function Get-DocumentedShapeRow {
 		$doc = Get-Content -Raw -Path $DocPath
 		$headingIndex = $doc.IndexOf('## `Get-WaypointProfileDeclaredInputNameSet`')
 		if ($headingIndex -lt 0) {
@@ -56,16 +93,20 @@ BeforeAll {
 		$nextHeadingIndex = $rest.IndexOf("`n## ")
 		$section = if ($nextHeadingIndex -ge 0) { $rest.Substring(0, $nextHeadingIndex) } else { $rest }
 
-		$ids = [System.Collections.Generic.List[string]]::new()
+		$rows = [System.Collections.Generic.List[object]]::new()
 		foreach ($line in ($section -split "`n")) {
-			if ($line -match '^\| `([a-z0-9-]+)` \|') {
-				$ids.Add($Matches[1])
+			if ($line -match '^\| `([a-z0-9-]+)` \|(.*)\|\s*$') {
+				$rows.Add([pscustomobject]@{
+						ShapeId      = $Matches[1]
+						ExpectedCell = Get-LastColumn -RowRemainder $Matches[2]
+					})
 			}
 		}
-		return $ids
+		return $rows
 	}
 
-	$script:DocumentedShapeIds = Get-DocumentedShapeId
+	$script:DocumentedShapeRows = Get-DocumentedShapeRow
+	$script:DocumentedShapeIds = $script:DocumentedShapeRows | ForEach-Object { $_.ShapeId }
 	$script:CorpusShapeIds = (Get-WaypointScanShapeExpectationTable) | ForEach-Object { $_.ShapeId }
 }
 
@@ -81,11 +122,39 @@ Describe 'Get-WaypointProfileDeclaredInputNameSet shape inventory' {
 		$implementedButNotDocumented | Should -BeNullOrEmpty -Because 'every corpus fixture needs a documented row'
 	}
 
+	# Issue #1121's anti-disarm property, PowerShell side: without these two assertions
+	# the Expected column is decoration -- the per-shape test's pass/fail is decided
+	# entirely by the corpus's own Kind, a second expectation source, so flipping a doc
+	# row's Expected cell from Accepted to Rejected (or to unclassifiable prose) left
+	# the suite green. The C# sections are protected by
+	# ShapeInventoryDoc.AssertExpectedVocabulary + AssertVerdictMatchesFixtures; these
+	# are their Pester analogues.
+	It 'documents every Expected cell with a classifiable verdict token' {
+		$malformed = $script:DocumentedShapeRows |
+			Where-Object { $null -eq (Get-ExpectedCellVerdict -Cell $_.ExpectedCell) } |
+			ForEach-Object { "$($_.ShapeId): `"$($_.ExpectedCell.Trim())`"" }
+
+		$malformed | Should -BeNullOrEmpty -Because 'every Expected cell must begin with Accepted or Rejected -- scripts/parser-shape-diff.sh parses that token and treats anything else as UNVERIFIABLE'
+	}
+
+	It 'reconciles each documented Expected verdict with what the corpus fixture asserts' {
+		$mismatches = foreach ($row in $script:DocumentedShapeRows) {
+			if ($script:CorpusShapeIds -notcontains $row.ShapeId) { continue }
+			$documented = Get-ExpectedCellVerdict -Cell $row.ExpectedCell
+			$asserted = Get-WaypointScanShapeVerdict -ShapeId $row.ShapeId
+			if ($documented -ne $asserted) {
+				"$($row.ShapeId): doc's Expected cell reads '$(if ($null -eq $documented) { 'unclassifiable' } else { $documented })', but its fixture asserts '$asserted'"
+			}
+		}
+
+		$mismatches | Should -BeNullOrEmpty -Because 'a documentation-only edit to the Expected cell must not be able to disarm a shape while this suite stays green'
+	}
+
 	Context 'per-shape resolution' {
 		It 'resolves shape "<_>" per its documented expectation' -ForEach (Get-WaypointScanShapeExpectationTable | ForEach-Object { $_.ShapeId }) {
 			$shapeId = $_
 			$resolved = Test-WaypointScanShapeResolution -ScanModule $script:ScanModule -ShapeId $shapeId
-			$resolved | Should -BeTrue -Because "shape '$shapeId' is documented as Accepted in docs/compliance-content-shape-inventory.md"
+			$resolved | Should -BeTrue -Because "shape '$shapeId' must behave as its corpus expectation Kind asserts (which the 'reconciles each documented Expected verdict' test binds to the doc's Expected cell)"
 		}
 	}
 }

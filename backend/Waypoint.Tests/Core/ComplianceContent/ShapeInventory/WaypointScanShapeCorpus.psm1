@@ -30,6 +30,10 @@
 
 $script:TargetName = 'nsx_manager_address'
 $script:DependsOnlyName = 'some_other_profile'
+# Issue #1152's third acceptance criterion ("a `#` that is part of a QUOTED name is not
+# treated as a comment introducer") needs a target name that actually contains a `#`, so
+# it cannot reuse $script:TargetName. Invented, like every other fixture value here.
+$script:HashInQuotedName = 'nsx#manager_address'
 
 # One row per documented shape ID, in the order
 # docs/compliance-content-shape-inventory.md documents them under the
@@ -39,6 +43,24 @@ $script:DependsOnlyName = 'some_other_profile'
 #   'empty'            -- the returned set must be empty.
 #   'declared-exclude-depends' -- $script:TargetName must be a member AND
 #                          $script:DependsOnlyName must NOT be a member.
+#   'declared-hash-in-quoted-name' -- $script:HashInQuotedName (a name CONTAINING a
+#                          `#`) must be a member, i.e. the `#` was not treated as a
+#                          comment introducer.
+#
+# Every Kind also carries a documented VERDICT (accept/reject) via
+# $script:KindVerdicts below. WaypointScan.ShapeInventory.Tests.ps1 reconciles that
+# verdict against the doc row's Expected cell, so a documentation-only edit cannot
+# disarm a shape while the suite stays green -- the PowerShell analogue of
+# ShapeInventoryDoc.AssertVerdictMatchesFixtures / AssertExpectedVocabulary (issue
+# #1121). Adding a Kind without adding it here fails the suite rather than defaulting
+# to 'accept'.
+$script:KindVerdicts = @{
+	'declared'                     = 'accept'
+	'empty'                        = 'accept'
+	'declared-exclude-depends'     = 'accept'
+	'declared-hash-in-quoted-name' = 'accept'
+}
+
 $script:ShapeExpectations = @(
 	[ordered]@{ ShapeId = 'indented-dash-sequence';            Kind = 'declared' }
 	[ordered]@{ ShapeId = 'column0-dash-sequence';              Kind = 'declared' }
@@ -55,6 +77,7 @@ $script:ShapeExpectations = @(
 	[ordered]@{ ShapeId = 'document-start-end-markers';         Kind = 'declared' }
 	[ordered]@{ ShapeId = 'quoted-scalar-name-double';          Kind = 'declared' }
 	[ordered]@{ ShapeId = 'quoted-scalar-name-single';          Kind = 'declared' }
+	[ordered]@{ ShapeId = 'quoted-name-containing-hash';        Kind = 'declared-hash-in-quoted-name' }
 	[ordered]@{ ShapeId = 'nested-name-under-value-mapping';    Kind = 'declared' }
 	[ordered]@{ ShapeId = 'nested-name-under-value-sequence';   Kind = 'declared' }
 	[ordered]@{ ShapeId = 'inputs-depends-adjacency';           Kind = 'declared-exclude-depends' }
@@ -66,6 +89,28 @@ function Get-WaypointScanShapeExpectationTable {
 	[CmdletBinding()]
 	param()
 	return $script:ShapeExpectations
+}
+
+# Returns the documented verdict ('accept' or 'reject') a shape's expectation Kind
+# actually asserts. WaypointScan.ShapeInventory.Tests.ps1 reconciles this against the
+# doc row's Expected cell (issue #1121's anti-disarm property, PowerShell side). Throws
+# on an unmapped Kind so a new Kind cannot silently default to 'accept'.
+function Get-WaypointScanShapeVerdict {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ShapeId
+	)
+
+	$expectation = $script:ShapeExpectations | Where-Object { $_.ShapeId -eq $ShapeId } | Select-Object -First 1
+	if (-not $expectation) {
+		throw "WaypointScanShapeCorpus: no expectation registered for shape id '$ShapeId'"
+	}
+	if (-not $script:KindVerdicts.ContainsKey($expectation.Kind)) {
+		throw "WaypointScanShapeCorpus: expectation kind '$($expectation.Kind)' (shape '$ShapeId') has no entry in \$script:KindVerdicts -- add one so the doc's Expected column stays enforceable."
+	}
+	return $script:KindVerdicts[$expectation.Kind]
 }
 
 function New-WaypointScanShapeFixtureContent {
@@ -124,6 +169,9 @@ function New-WaypointScanShapeFixtureContent {
 		}
 		'quoted-scalar-name-single' {
 			return "name: invented-profile`ninputs:`n  - name: 'nsx_manager_address'`n    type: String`n"
+		}
+		'quoted-name-containing-hash' {
+			return "name: invented-profile`ninputs:`n  - name: `"nsx#manager_address`"`n    type: String`n"
 		}
 		'nested-name-under-value-mapping' {
 			return "name: invented-profile`ninputs:`n  - name: nsx_manager_address`n    value:`n      name: nested_should_not_win`n    type: String`n"
@@ -203,6 +251,7 @@ function Test-WaypointScanShapeResolution {
 			'declared-exclude-depends' {
 				return ((@($declared) -contains $script:TargetName) -and -not (@($declared) -contains $script:DependsOnlyName))
 			}
+			'declared-hash-in-quoted-name' { return (@($declared) -contains $script:HashInQuotedName) }
 			default { throw "WaypointScanShapeCorpus: unknown expectation kind '$($expectation.Kind)' for shape id '$ShapeId'" }
 		}
 	} finally {
@@ -212,4 +261,4 @@ function Test-WaypointScanShapeResolution {
 	}
 }
 
-Export-ModuleMember -Function Get-WaypointScanShapeExpectationTable, New-WaypointScanShapeFixtureContent, New-WaypointScanShapeFixture, Test-WaypointScanShapeResolution
+Export-ModuleMember -Function Get-WaypointScanShapeExpectationTable, Get-WaypointScanShapeVerdict, New-WaypointScanShapeFixtureContent, New-WaypointScanShapeFixture, Test-WaypointScanShapeResolution

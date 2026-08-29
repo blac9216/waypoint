@@ -26,10 +26,17 @@ its parser is PowerShell, not C#: it is guarded by
 (Pester), whose per-shape fixtures and expectations come from the single shared table in
 `WaypointScanShapeCorpus.psm1` in the same directory -- the PowerShell analogue of a
 `*ShapeInventoryTests` class's `ShapeExpectations` table. That Pester suite is not part of
-`dotnet test`; run it with `pwsh -NoProfile -Command "Invoke-Pester -Path backend/Waypoint.Tests/Core/ComplianceContent/ShapeInventory/WaypointScan.ShapeInventory.Tests.ps1 -CI"`.
-Its completeness check (doc row <-> corpus entry, both directions) is asserted inside that
-same Pester run, not by `ShapeInventoryDoc` -- `ShapeInventoryDoc` only reads C# fixture
-classes. `scripts/parser-shape-diff.sh` still diffs this parser's corpus old-ref-vs-new-ref
+`dotnet test`; run it locally with `pwsh -NoProfile -Command "Invoke-Pester -Path backend/Waypoint.Tests/Core/ComplianceContent/ShapeInventory/WaypointScan.ShapeInventory.Tests.ps1 -CI"`.
+In CI it is a required gate: `.github/workflows/backend.yml`'s
+`pester: powershell shape inventory` job runs both `*.Tests.ps1` suites in that directory
+and fails the build on any failure, so breaking a shape in `WaypointScan.psm1`, deleting a
+corpus fixture, or deleting or editing a row of the section below turns CI red. That
+workflow's path filter therefore includes this document as well as `backend/**`.
+Its completeness check (doc row <-> corpus entry, both directions), its Expected-column
+vocabulary check, and its Expected-verdict-vs-fixture reconciliation (the analogue of
+`ShapeInventoryDoc.AssertExpectedVocabulary` / `AssertVerdictMatchesFixtures`, so a
+documentation-only edit cannot disarm a shape) are all asserted inside that same Pester
+run, not by `ShapeInventoryDoc` -- `ShapeInventoryDoc` only reads C# fixture classes. `scripts/parser-shape-diff.sh` still diffs this parser's corpus old-ref-vs-new-ref
 alongside the two C# parsers: see "Real-content conformance and differential checks" below
 for how the PowerShell side of that harness works.
 
@@ -112,6 +119,21 @@ the guard twice:
   self-contradictory `Rejected ... \| Accepted ...` cell above -- so the escape
   handling cannot be deleted with the suite green, and the coverage does not depend on
   the wording of any row.
+
+- **The PowerShell section gets the same three properties, in CI.**
+  `Get-WaypointProfileDeclaredInputNameSet`'s section is enforced by Pester rather than
+  by `ShapeInventoryDoc`, but with the same guarantees and in the same place: the
+  `pester: powershell shape inventory` job in `.github/workflows/backend.yml` runs
+  `WaypointScan.ShapeInventory.Tests.ps1` on every PR touching `backend/**` or this
+  document, and fails the build on doc<->corpus drift in either direction, on an
+  Expected cell that does not open with `Accepted`/`Rejected`, on an Expected verdict
+  that disagrees with what the corpus row's expectation `Kind` actually asserts, and on
+  any shape whose fixture stops resolving. `WaypointScanShapeCorpus.psm1` is the single
+  table those checks and `scripts/dump-waypoint-scan-shape-verdicts.ps1` all read, so
+  the Pester suite and the differential harness cannot drift apart either. (Before PR
+  #1151's round-1 review this suite existed but ran nowhere: a guard that only fires
+  when someone remembers to type the command is the same rot that produced issue
+  #1071.)
 
 **NOT machine-enforced (review-enforced only -- this is where you must add a row by
 hand):**
@@ -236,7 +258,7 @@ that set (or, for the two `depends:`-adjacency rows, that a differently-named
 | `name-not-first-key` | An entry mapping lists `description:` before `name:` -- the shape PR #1084's first fix commit silently stopped resolving (its own round-1 review finding, fixed before merge). | Accepted; the name is a member of the declared set regardless of key order. |
 | `column0-comment-between-entries` | A `#`-prefixed comment at column 0 between two input entries. | Accepted; both entries' names are members and the comment has no effect. |
 | `trailing-inline-comment` | An entry's `name:` value carries a trailing ` #`-prefixed inline comment (a literal space before the `#`). | Accepted; the declared name excludes the comment text. |
-| `trailing-comment-tab-separator` | An entry's `name:` value carries a trailing comment separated by a TAB instead of a space before the `#` (no literal `' #'` substring on the line). | Accepted; the name is a member of the declared set with the comment stripped, exactly as the space-separated `trailing-inline-comment` row is. Issue #1099's first extension of this guard to this parser found this row genuinely RED: the comment-stripping match required a literal space immediately before `#`, so the tab and comment text leaked into the captured name and it never matched a known auth-key name -- the parser's fourth defect of this class (issue #1071, PR #1084's own fix, PR #1084's block-scalar false positives, and this one). Filed and fixed as issue #1152 in the same change that added this row: the match now looks for `#` preceded by ANY run of whitespace, and a quoted name's closing quote is located explicitly first so a `#` inside quotes is never treated as a comment introducer (issue #1136's adjacent concern, not fixed here but not worsened). |
+| `trailing-comment-tab-separator` | An entry's `name:` value carries a trailing comment separated by a TAB instead of a space before the `#` (no literal `' #'` substring on the line). | Accepted; the name is a member of the declared set with the comment stripped, exactly as the space-separated `trailing-inline-comment` row is. Issue #1099's first extension of this guard to this parser found this row genuinely RED: the comment-stripping match required a literal space immediately before `#`, so the tab and comment text leaked into the captured name and it never matched a known auth-key name -- the parser's fourth defect of this class (issue #1071, PR #1084's own fix, PR #1084's block-scalar false positives, and this one). Filed and fixed as issue #1152 in the same change that added this row: the match now looks for `#` preceded by ANY run of whitespace, and a quoted name's closing quote is located explicitly first so a `#` inside quotes is never treated as a comment introducer (issue #1152's third acceptance criterion, pinned by the `quoted-name-containing-hash` row below). |
 | `trailing-comment-multi-space-separator` | An entry's `name:` value carries a trailing comment separated by MORE THAN ONE space before the `#`. | Accepted; the name is a member of the declared set with the comment stripped -- the same fix (issue #1152) that made `trailing-comment-tab-separator` accepted covers this shape too, since both are "not exactly one literal space before `#`". |
 | `block-scalar-folded-description` | An entry's `description:` uses a folded block scalar (`>`) spanning multiple lines -- PR #1084 found this shape produced real false positives (a subsequent block-scalar content line briefly misread as an entry key) before its indentation-column tracking was tightened. | Accepted; the name is a member of the declared set. |
 | `block-scalar-literal-description` | An entry's `description:` uses a literal block scalar (`\|`) spanning multiple lines -- same PR #1084 false-positive class as the folded form. | Accepted; the name is a member of the declared set. |
@@ -246,6 +268,7 @@ that set (or, for the two `depends:`-adjacency rows, that a differently-named
 | `document-start-end-markers` | The document opens with a `---` marker and closes with a `...` marker. | Accepted; the name is a member of the declared set exactly as the unmarked document is -- PR #1084 round-1 review's finding 3 (a `---` marker read as a sequence entry, leaving the block open) is closed: the `-` marker only opens a sequence entry when followed by whitespace or end-of-line. |
 | `quoted-scalar-name-double` | An entry's `name:` value is a double-quoted scalar (`name: "nsx_manager_address"`). | Accepted; the declared name excludes the quote characters. |
 | `quoted-scalar-name-single` | An entry's `name:` value is a single-quoted scalar (`name: 'nsx_manager_address'`). | Accepted; the declared name excludes the quote characters. |
+| `quoted-name-containing-hash` | An entry's `name:` value is a quoted scalar whose content CONTAINS a `#` (`name: "nsx#manager_address"`) -- issue #1152's third acceptance criterion. A `#` inside quotes is not a YAML comment introducer, so stripping from it would truncate a legitimate name and produce the same silent-miss class as the tab-separator defect. | Accepted; the declared name is the full quoted content including the `#`, not truncated at it -- the parser locates the closing quote first and only then discards anything after it. |
 | `nested-name-under-value-mapping` | An entry carries a nested `value:` **mapping** that itself has a `name:` key -- PR #1084 round-1 review's finding 1/2 false-positive class. | Accepted; only the entry's own top-level `name:` is a member of the declared set, not the nested one. |
 | `nested-name-under-value-sequence` | An entry carries a nested `value:` **sequence** whose first item is a mapping with a `name:` key -- PR #1084 round-1 review's finding 2 (a false positive present on `origin/main` even after the first fix commit). | Accepted; only the entry's own top-level `name:` is a member of the declared set, not the nested one. |
 | `inputs-depends-adjacency` | An `inputs:` block is immediately followed by a `depends:` block at the same indent, with a DIFFERENTLY-named entry in `depends:` -- the block-scoping boundary case that produced the original defect in this helper (issue #1071). | Accepted; the `inputs:` entry's name is a member of the declared set and the `depends:` entry's name is NOT. |

@@ -784,9 +784,9 @@ function Get-WaypointProfileDeclaredInputNameSet {
 					# Quoted name: take ONLY the quoted content. Anything after the
 					# closing quote (a trailing `#...` comment, separated by any run
 					# of whitespace) is discarded without ever treating a `#` INSIDE
-					# the quotes as a comment introducer -- issue #1136's adjacent
-					# concern, which this change does not attempt to fix but must not
-					# regress further.
+					# the quotes as a comment introducer -- issue #1152's third
+					# acceptance criterion, pinned by the `quoted-name-containing-hash`
+					# row of docs/compliance-content-shape-inventory.md.
 					$QuoteChar = $Name[0]
 					$ClosingIndex = $Name.IndexOf($QuoteChar, 1)
 					if ($ClosingIndex -gt 0) {
