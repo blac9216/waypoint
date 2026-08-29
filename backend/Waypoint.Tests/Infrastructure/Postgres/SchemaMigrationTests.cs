@@ -99,6 +99,7 @@ public sealed class SchemaMigrationTests
 		"component_result_findings",
 		"component_result_artifacts",
 		"run_retention_holds",
+		"retention_policy",
 		"schema_migrations"
 	];
 
@@ -310,8 +311,13 @@ public sealed class SchemaMigrationTests
 	/// '9.1.0' matches via VersionScopeMatcher's existing closed two-form test -- no
 	/// schema shape changes, no new runner grants, reuses migration 0070's own
 	/// idempotent-merge idiom --
+	/// 0078 (issue #1062, epic #726 sections 6/7; slot 0077 claimed and unpushed by
+	/// issue #1081 at this migration's own commit time): adds retention_policy -- the
+	/// singleton (mirrors appliance_state) Admin-configurable evidence-retention-period
+	/// row (default 180 days / ~6 months) backing the new automated purge sweep, no new
+	/// runner grants (API-only, same posture as run_retention_holds) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 75;
+	private const int ExpectedMigrationCount = 76;
 
 	private readonly PostgresFixture _fixture;
 

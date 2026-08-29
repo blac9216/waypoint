@@ -715,33 +715,49 @@ collapsed into one generic "something changed" signal.
 | `/audit` | GET | Cyber+; decrypt events, config versions, run initiations, imports/updates. |
 | `/dashboard` | GET | Aggregate: KPI tiles, site posture, recent runs, attention items. |
 
-🚧 **Superseded compliance retention (planned, [ADR-0025](adr/0025-compliance-trust-cleanup-and-evidence.md)).**
-The shipped `/runs/{id}/purge` (documented above, in Runs & jobs) purges one run's
-compliance projections. ADR-0025 defines the graph-wide policy this per-run action
-composes with:
+**Compliance evidence retention sweep (issue #1062, epic #726 sections 6/7; supersedes
+the sketch previously here — see [ADR-0025](adr/0025-compliance-trust-cleanup-and-evidence.md)
+for the design rationale).** The shipped `/runs/{id}/purge` (documented above, in Runs
+& jobs) purges one run's compliance projections. This is the graph-wide policy that
+composes with it:
 
 | Endpoint | Methods | Notes |
 |---|---|---|
-| `/system/compliance-retention` | GET, PUT | Admin. One appliance-wide setting, `{ retention_months }`, default 6. Changes are prospective, versioned, and audited; `GET` shows current value plus effective-since/by. Never retroactively purges on save — it only changes the eligibility window a future sweep evaluates. |
-| `/compliance-retention/sweep-status` | GET | Viewer+. Last/next scheduled sweep outcome: runs evaluated, purged, failed — each failure raises `retention_purge_failed` (see Alerts). |
+| `/retention-policy` | GET, PUT | Admin. One appliance-wide setting (`retention_policy` singleton, migration 0078), `{ evidence_retention_days }`, default 180 (~6 months). `PUT` body: `{ "evidence_retention_days": <positive integer> }` (422 `validation_error` on a non-positive/missing value). `GET`/`PUT` response (`RetentionPolicyResponse`): `evidence_retention_days`, `updated_by` (`null` until an Admin has ever changed it), `updated_at`. Changes are prospective only — `PUT` never retroactively purges on save, it only changes the age cutoff `EvidenceRetentionSweepHostedService` evaluates on its *next* pass (the sweep re-reads this singleton fresh at the start of every pass rather than caching it, so a change takes effect without a restart). |
 
 Eligibility and purge under this policy cover the **complete evidence graph**
-atomically per run — requested/resolved scope, plan/items, jobs, every attempt,
-findings, attestation snapshots, HDF/CKL artifacts, and upload receipts — reusing the
-exact same `POST /runs/{id}/purge` mechanism the shipped endpoint already provides
-(idempotent, retryable, tombstoned) rather than a second deletion path; the sweep is
-the automatic *trigger*, not a different *operation*. Readers see retained or
-tombstoned, never a partially-missing graph. Per-run retention holds (issue #784,
-`/runs/{id}/retention-hold` above) are a shipped, non-blocking extension that
-protects this same graph rather than a fragment of it: the future sweep this section
-describes MUST exclude held runs by calling the exact same `POST /runs/{id}/purge`
-path (which already refuses a held run with 409 `run_retention_held`) rather than
-re-implementing the exclusion. The sweep should additionally exclude held runs in its
-own candidate query with a SQL anti-join
+atomically per run — reusing the exact same `POST /runs/{id}/purge` mechanism the
+shipped endpoint already provides (idempotent, retryable, tombstoned) rather than a
+second deletion path; the sweep is the automatic *trigger*, not a different
+*operation*, and inherits every guarantee and limit that entry point already
+documents above (including the mid-purge `Held` boundary) — this section claims
+nothing beyond what that call delivers. Readers see retained or tombstoned, never a
+partially-missing graph, **except** the pre-existing partially-purged-but-unfinalized
+window `/runs/{id}/purge` already documents (deferred, tracked as issue #1097 — not
+introduced or widened by this sweep). Per-run retention holds (issue #784,
+`/runs/{id}/retention-hold` above) protect this same graph: the sweep excludes held
+runs in its own candidate query with a SQL anti-join
 (`WHERE NOT EXISTS (SELECT 1 FROM run_retention_holds h WHERE h.run_id = r.id)`), so
 the exclusion scales with the candidate set rather than materialising held ids in the
-API process; the `POST /runs/{id}/purge` refusal remains the backstop that keeps the
-exclusion correct even if a candidate query ever forgets the anti-join.
+API process (a `ListHeldRunIdsAsync`-shaped C# surface was deliberately rejected —
+see issue #1062's history); the `POST /runs/{id}/purge` refusal (409
+`run_retention_held`) remains the backstop that keeps the exclusion correct even if
+the candidate query ever forgets the anti-join, and is what actually protects a run
+held in the narrow window between the candidate query and the purge call.
+
+Policy-driven purges are audited distinctly from operator-initiated ones: every purge
+this sweep requests carries the reserved actor `system:retention-sweep` (never a real
+username) through to `run_purges.requested_by` and the completed
+`run_purge_tombstones.actor` — the same append-only tombstone trail every purge
+already writes, not a second audit table.
+
+`EvidenceRetentionSweepHostedService` runs disabled by default
+(`EvidenceRetentionSweep:Enabled=false`), matching the existing
+`RunHistoryRolloff:Enabled` sweep's own default-off posture; an operator opts in via
+configuration once satisfied with the configured retention period. **Not yet shipped:**
+a dedicated `/retention-policy/sweep-status`-style read endpoint for last/next sweep
+outcome (structured log events are the only visibility today) and the Admin UI
+surface for viewing/setting the period (issue #1062's frontend remainder).
 
 ## Event streams (SSE)
 
