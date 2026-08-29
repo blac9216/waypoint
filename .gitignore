@@ -82,6 +82,9 @@ dev/local/
 bin/
 obj/
 TestResults/
+# Pester's default NUnit output (Invoke-Pester -CI), written at the cwd of
+# whatever ran it -- issue #1099's WaypointScan.ShapeInventory.Tests.ps1 etc.
+testResults.xml
 node_modules/
 dist/
 frontend/build/

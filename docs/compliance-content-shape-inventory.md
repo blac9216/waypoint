@@ -7,7 +7,7 @@ input shapes its author already had in mind. This document is the **authority** 
 the structural shapes each vendor-content parser is known to need to handle. It is not
 descriptive of test code; test code is checked against it.
 
-Each section below is parsed directly out of this file by a matching
+Each C# parser's section below is parsed directly out of this file by a matching
 `*ShapeInventoryTests` class (`backend/Waypoint.Tests/Core/ComplianceContent/...`),
 which:
 
@@ -19,6 +19,26 @@ which:
    layout table and `VendorHierarchyInterpreter` did before issue #959 (see
    `docs/compliance-parity.md`'s "Recognized on-disk import layouts", the pattern this
    document generalizes).
+
+The `Get-WaypointProfileDeclaredInputNameSet` section is a different mechanism, because
+its parser is PowerShell, not C#: it is guarded by
+`backend/Waypoint.Tests/Core/ComplianceContent/ShapeInventory/WaypointScan.ShapeInventory.Tests.ps1`
+(Pester), whose per-shape fixtures and expectations come from the single shared table in
+`WaypointScanShapeCorpus.psm1` in the same directory -- the PowerShell analogue of a
+`*ShapeInventoryTests` class's `ShapeExpectations` table. That Pester suite is not part of
+`dotnet test`; run it locally with `pwsh -NoProfile -Command "Invoke-Pester -Path backend/Waypoint.Tests/Core/ComplianceContent/ShapeInventory/WaypointScan.ShapeInventory.Tests.ps1 -CI"`.
+In CI it is a required gate: `.github/workflows/backend.yml`'s
+`pester: powershell shape inventory` job runs both `*.Tests.ps1` suites in that directory
+and fails the build on any failure, so breaking a shape in `WaypointScan.psm1`, deleting a
+corpus fixture, or deleting or editing a row of the section below turns CI red. That
+workflow's path filter therefore includes this document as well as `backend/**`.
+Its completeness check (doc row <-> corpus entry, both directions), its Expected-column
+vocabulary check, and its Expected-verdict-vs-fixture reconciliation (the analogue of
+`ShapeInventoryDoc.AssertExpectedVocabulary` / `AssertVerdictMatchesFixtures`, so a
+documentation-only edit cannot disarm a shape) are all asserted inside that same Pester
+run, not by `ShapeInventoryDoc` -- `ShapeInventoryDoc` only reads C# fixture classes. `scripts/parser-shape-diff.sh` still diffs this parser's corpus old-ref-vs-new-ref
+alongside the two C# parsers: see "Real-content conformance and differential checks" below
+for how the PowerShell side of that harness works.
 
 This inventory only grows when a new shape is discovered (typically via the opt-in
 real-content conformance check below) and added here first, with its fixture and
@@ -100,6 +120,21 @@ the guard twice:
   handling cannot be deleted with the suite green, and the coverage does not depend on
   the wording of any row.
 
+- **The PowerShell section gets the same three properties, in CI.**
+  `Get-WaypointProfileDeclaredInputNameSet`'s section is enforced by Pester rather than
+  by `ShapeInventoryDoc`, but with the same guarantees and in the same place: the
+  `pester: powershell shape inventory` job in `.github/workflows/backend.yml` runs
+  `WaypointScan.ShapeInventory.Tests.ps1` on every PR touching `backend/**` or this
+  document, and fails the build on doc<->corpus drift in either direction, on an
+  Expected cell that does not open with `Accepted`/`Rejected`, on an Expected verdict
+  that disagrees with what the corpus row's expectation `Kind` actually asserts, and on
+  any shape whose fixture stops resolving. `WaypointScanShapeCorpus.psm1` is the single
+  table those checks and `scripts/dump-waypoint-scan-shape-verdicts.ps1` all read, so
+  the Pester suite and the differential harness cannot drift apart either. (Before PR
+  #1151's round-1 review this suite existed but ran nowhere: a guard that only fires
+  when someone remembers to type the command is the same rot that produced issue
+  #1071.)
+
 **NOT machine-enforced (review-enforced only -- this is where you must add a row by
 hand):**
 
@@ -133,11 +168,13 @@ round-2 review recorded on issue #1077: a real-content conformance check alone w
 **not** have caught a fix that silently stopped resolving a shape no shipped manifest
 happens to use today.
 
-- **Opt-in real-content conformance** (`RealContentConformanceTests`): walks a locally
-  cloned vendor content repository at `/workspaces/git/dod-compliance-and-automation`
-  (read-only) and reports, per parser, how many real artifacts it accepts versus
-  rejects. Skips cleanly (no assertion, no failure) when that path does not exist, so
-  CI never depends on vendor content.
+- **Opt-in real-content conformance** (`RealContentConformanceTests` for the two C#
+  parsers; `WaypointScan.RealContentConformance.Tests.ps1` (Pester) for
+  `Get-WaypointProfileDeclaredInputNameSet`): walks a locally cloned vendor content
+  repository at `/workspaces/git/dod-compliance-and-automation` (read-only) and
+  reports, per parser, how many real artifacts it accepts versus rejects. Skips
+  cleanly (no assertion, no failure -- `Set-ItResult -Skipped` on the Pester side) when
+  that path does not exist, so CI never depends on vendor content.
 - **Differential harness** (`scripts/parser-shape-diff.sh`): runs the *same* shape
   corpus defined below through an old ref's parser code and the working tree's parser
   code, and fails on any shape that resolved under the old ref but no longer does
@@ -154,7 +191,7 @@ happens to use today.
 ## `InspecManifestParser` (`backend/Waypoint.Core/ComplianceContent/SemanticImport/InspecManifest.cs`)
 
 Shapes of the `inputs:` (and legacy `attributes:`) block of an `inspec.yml` manifest.
-Every row here exists because a sibling parser (`Get-WaypointNsxProfileAuthInputKeySet`
+Every row here exists because a sibling parser (`Get-WaypointProfileDeclaredInputNameSet`
 in `WaypointScan.psm1`, issue #1071) missed one of these shapes in real content, or
 because fixing it (PR #1084) silently broke another one.
 
@@ -199,11 +236,51 @@ Shapes of an uploaded/synchronized DISA STIG `.zip` package (issue #1073).
 | `zip-slip-entry-name` | An entry name contains a `..` traversal segment. | Rejected with an unsafe-path error. |
 | `no-xccdf-entry` | Archive has entries, but none end `-xccdf.xml`. | Rejected as containing no XCCDF entry. |
 
+## `Get-WaypointProfileDeclaredInputNameSet` (`WaypointScan.psm1`)
+
+Shapes of the `inputs:` block of an `inspec.yml` manifest, as seen by the shared
+line-oriented PowerShell manifest scanner (PR #1135 extracted this function so both
+the NSX and vSphere scan paths use it). Unlike `InspecManifestParser` this is a
+hand-rolled indentation-tracking scan, not a real YAML parser -- its history is the
+worst in this file: issue #1071 found it silently missed several shapes, PR #1084's
+first fix commit introduced a NEW silent miss (an entry whose `name:` key is not
+first), and PR #1084's round-1 review caught that regression before merge. This
+section exists to keep the corpus that already caught that regression from eroding.
+Every row returns the set of declared input NAMES (a `List[string]`, no per-input
+type/required detail) -- accept rows assert `nsx_manager_address` is a member of
+that set (or, for the two `depends:`-adjacency rows, that a differently-named
+`depends:` entry is NOT a member).
+
+| Shape ID | Description | Expected |
+|---|---|---|
+| `indented-dash-sequence` | `inputs:` entries as an indented `  - name: ...` sequence. | Accepted; the name is a member of the declared set. |
+| `column0-dash-sequence` | `inputs:` entries as a column-0 `- name: ...` sequence (no indentation before the dash) -- the shape every shipped NSX 4.x/3.x manifest actually used per issue #1071. | Accepted; the name is a member of the declared set. |
+| `name-not-first-key` | An entry mapping lists `description:` before `name:` -- the shape PR #1084's first fix commit silently stopped resolving (its own round-1 review finding, fixed before merge). | Accepted; the name is a member of the declared set regardless of key order. |
+| `column0-comment-between-entries` | A `#`-prefixed comment at column 0 between two input entries. | Accepted; both entries' names are members and the comment has no effect. |
+| `trailing-inline-comment` | An entry's `name:` value carries a trailing ` #`-prefixed inline comment (a literal space before the `#`). | Accepted; the declared name excludes the comment text. |
+| `trailing-comment-tab-separator` | An entry's `name:` value carries a trailing comment separated by a TAB instead of a space before the `#` (no literal `' #'` substring on the line). | Accepted; the name is a member of the declared set with the comment stripped, exactly as the space-separated `trailing-inline-comment` row is. Issue #1099's first extension of this guard to this parser found this row genuinely RED: the comment-stripping match required a literal space immediately before `#`, so the tab and comment text leaked into the captured name and it never matched a known auth-key name -- the parser's fourth defect of this class (issue #1071, PR #1084's own fix, PR #1084's block-scalar false positives, and this one). Filed and fixed as issue #1152 in the same change that added this row: the match now looks for `#` preceded by ANY run of whitespace, and a quoted name's closing quote is located explicitly first so a `#` inside quotes is never treated as a comment introducer (issue #1152's third acceptance criterion, pinned by the `quoted-name-containing-hash` row below). |
+| `trailing-comment-multi-space-separator` | An entry's `name:` value carries a trailing comment separated by MORE THAN ONE space before the `#`. | Accepted; the name is a member of the declared set with the comment stripped -- the same fix (issue #1152) that made `trailing-comment-tab-separator` accepted covers this shape too, since both are "not exactly one literal space before `#`". |
+| `block-scalar-folded-description` | An entry's `description:` uses a folded block scalar (`>`) spanning multiple lines -- PR #1084 found this shape produced real false positives (a subsequent block-scalar content line briefly misread as an entry key) before its indentation-column tracking was tightened. | Accepted; the name is a member of the declared set. |
+| `block-scalar-literal-description` | An entry's `description:` uses a literal block scalar (`\|`) spanning multiple lines -- same PR #1084 false-positive class as the folded form. | Accepted; the name is a member of the declared set. |
+| `nested-extra-keys-ignored` | An entry carries extra nested keys (`sensitive:`, a nested `value:` mapping) beyond `name`/`type`/`required`. | Accepted; the name is a member of the declared set. |
+| `empty-inputs-sequence` | `inputs: []`. | Accepted; the declared set is empty, not an error. |
+| `missing-inputs-key` | No `inputs:` key present at all (this scanner has no `attributes:` legacy alias -- unlike `InspecManifestParser`, it only recognizes `inputs:`). | Accepted; the declared set is empty, not an error. |
+| `document-start-end-markers` | The document opens with a `---` marker and closes with a `...` marker. | Accepted; the name is a member of the declared set exactly as the unmarked document is -- PR #1084 round-1 review's finding 3 (a `---` marker read as a sequence entry, leaving the block open) is closed: the `-` marker only opens a sequence entry when followed by whitespace or end-of-line. |
+| `quoted-scalar-name-double` | An entry's `name:` value is a double-quoted scalar (`name: "nsx_manager_address"`). | Accepted; the declared name excludes the quote characters. |
+| `quoted-scalar-name-single` | An entry's `name:` value is a single-quoted scalar (`name: 'nsx_manager_address'`). | Accepted; the declared name excludes the quote characters. |
+| `quoted-name-containing-hash` | An entry's `name:` value is a quoted scalar whose content CONTAINS a `#` (`name: "nsx#manager_address"`) -- issue #1152's third acceptance criterion. A `#` inside quotes is not a YAML comment introducer, so stripping from it would truncate a legitimate name and produce the same silent-miss class as the tab-separator defect. | Accepted; the declared name is the full quoted content including the `#`, not truncated at it -- the parser locates the closing quote first and only then discards anything after it. |
+| `nested-name-under-value-mapping` | An entry carries a nested `value:` **mapping** that itself has a `name:` key -- PR #1084 round-1 review's finding 1/2 false-positive class. | Accepted; only the entry's own top-level `name:` is a member of the declared set, not the nested one. |
+| `nested-name-under-value-sequence` | An entry carries a nested `value:` **sequence** whose first item is a mapping with a `name:` key -- PR #1084 round-1 review's finding 2 (a false positive present on `origin/main` even after the first fix commit). | Accepted; only the entry's own top-level `name:` is a member of the declared set, not the nested one. |
+| `inputs-depends-adjacency` | An `inputs:` block is immediately followed by a `depends:` block at the same indent, with a DIFFERENTLY-named entry in `depends:` -- the block-scoping boundary case that produced the original defect in this helper (issue #1071). | Accepted; the `inputs:` entry's name is a member of the declared set and the `depends:` entry's name is NOT. |
+| `tab-block-indentation` | A raw tab character used for the `inputs:` sequence's block indentation. | Accepted; the name is a member of the declared set -- this scanner treats a raw tab as ordinary block whitespace (`\s` in its indentation regex), unlike `InspecManifestParser`'s underlying real YAML parser, which rejects the same byte sequence as invalid YAML (see that parser's `tab-block-indentation` row). The two parsers reading the SAME shape ID differently is a real, pre-existing divergence between a hand-rolled scanner and a spec-compliant parser, not a defect introduced by this guard. |
+| `crlf-line-endings` | The whole document (indented-dash-sequence shape) uses CRLF line endings throughout. | Accepted; the name is a member of the declared set -- `[System.IO.File]::ReadAllLines` normalizes CRLF, so this parser (unlike `InspecManifestParser` before PR #1084) has no CRLF gap. |
+
 ## Deferred parsers (tracked as issue [#1099](https://github.com/blac9216/waypoint/issues/1099))
 
 The remainder of issue #1077's enumerated scope is filed as issue
-[#1099](https://github.com/blac9216/waypoint/issues/1099). The following parsers are
-in issue #1077's scope but not yet covered by this inventory: `Get-WaypointNsxProfileAuthInputKeySet` (`WaypointScan.psm1`),
-`XccdfParser`, and `VendorHierarchyInterpreter` (beyond the layout-table parity guard
+[#1099](https://github.com/blac9216/waypoint/issues/1099). `Get-WaypointProfileDeclaredInputNameSet`
+is now covered above (PR landing this row). The following parsers remain in #1077's
+scope but are not yet covered by this inventory: `XccdfParser`, and
+`VendorHierarchyInterpreter` (beyond the layout-table parity guard
 `docs/compliance-parity.md` already provides for its directory-literal dimension --
 this inventory would add the leaf-manifest/encoding dimensions on top of that).

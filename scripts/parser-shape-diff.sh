@@ -86,6 +86,42 @@ dump_ref() {
 		echo "error: dump did not produce $out_expected_json for ref '$ref' -- this script can only diff refs at or after issue #1120's shared classification dump landed." >&2
 		exit 3
 	fi
+
+	# Issue #1099: merge in the PowerShell side (Get-WaypointProfileDeclaredInputNameSet,
+	# WaypointScan.psm1) -- a SEPARATE dump because that parser is not C# and cannot run
+	# inside the dotnet test process above. Requires the ref to contain both the target
+	# module and the corpus module the differential exercises; fails closed (matching
+	# the ShapeVerdictDump.cs check above) rather than silently diffing an incomplete
+	# corpus if either is missing.
+	local scan_module="$wt_dir/backend/Waypoint.Infrastructure.Execution/PowerShell/Modules/WaypointScan/WaypointScan.psm1"
+	local corpus_module="$wt_dir/backend/Waypoint.Tests/Core/ComplianceContent/ShapeInventory/WaypointScanShapeCorpus.psm1"
+	local dump_script="$wt_dir/scripts/dump-waypoint-scan-shape-verdicts.ps1"
+
+	if [[ ! -f "$dump_script" || ! -f "$corpus_module" ]]; then
+		echo "error: ref '$ref' does not contain issue #1099's PowerShell shape-inventory differential harness (dump-waypoint-scan-shape-verdicts.ps1 / WaypointScanShapeCorpus.psm1) -- this script can only diff refs at or after that harness landed." >&2
+		exit 3
+	fi
+	if [[ ! -f "$scan_module" ]]; then
+		echo "error: ref '$ref' is missing WaypointScan.psm1 at the expected path." >&2
+		exit 3
+	fi
+
+	local ps_json="$SCRATCH_ROOT/ps-$label.json"
+	pwsh -NoProfile -File "$dump_script" -ModulePath "$scan_module" -CorpusPath "$corpus_module" -OutJson "$ps_json" >&2
+
+	if [[ ! -f "$ps_json" ]]; then
+		echo "error: PowerShell dump did not produce $ps_json for ref '$ref'" >&2
+		exit 3
+	fi
+
+	local merged_json="$SCRATCH_ROOT/merged-$label.json"
+	jq -s '.[0] * .[1]' "$out_json" "$ps_json" > "$merged_json"
+	mv "$merged_json" "$out_json"
+
+	# The PowerShell shapes' EXPECTED classification is already in $out_expected_json
+	# (when requested): ShapeVerdictDump.cs dumps it by reading the doc's
+	# "Get-WaypointProfileDeclaredInputNameSet" section directly, without executing any
+	# PowerShell, so there is nothing further to merge for that file.
 }
 
 OLD_JSON="$SCRATCH_ROOT/old.json"
@@ -104,6 +140,15 @@ else
 		dotnet test "$REPO_ROOT/backend/Waypoint.Tests/Waypoint.Tests.csproj" \
 		--filter "FullyQualifiedName~ShapeVerdictDump" \
 		--nologo -v quiet >&2
+
+	NEW_PS_JSON="$SCRATCH_ROOT/ps-new.json"
+	pwsh -NoProfile -File "$REPO_ROOT/scripts/dump-waypoint-scan-shape-verdicts.ps1" \
+		-ModulePath "$REPO_ROOT/backend/Waypoint.Infrastructure.Execution/PowerShell/Modules/WaypointScan/WaypointScan.psm1" \
+		-CorpusPath "$REPO_ROOT/backend/Waypoint.Tests/Core/ComplianceContent/ShapeInventory/WaypointScanShapeCorpus.psm1" \
+		-OutJson "$NEW_PS_JSON" >&2
+	NEW_MERGED_JSON="$SCRATCH_ROOT/merged-new.json"
+	jq -s '.[0] * .[1]' "$NEW_JSON" "$NEW_PS_JSON" > "$NEW_MERGED_JSON"
+	mv "$NEW_MERGED_JSON" "$NEW_JSON"
 fi
 
 if [[ ! -f "$NEW_EXPECTED_JSON" ]]; then

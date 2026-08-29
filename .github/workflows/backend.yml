@@ -2,15 +2,23 @@ name: backend
 
 # Path-filtered: only backend/** changes (or this workflow file) trigger a
 # build. A docs-only or frontend-only PR never runs this job (see #79).
+#
+# docs/compliance-content-shape-inventory.md is listed too, even though it is a
+# doc: the `pester` job below treats that document as the shape inventory's
+# source of truth and fails when a row is deleted, added without a fixture, or
+# has its Expected verdict edited to disagree with the corpus (issue #1099).
+# Without this path a documentation-only edit could disarm a shape with CI green.
 on:
   pull_request:
     paths:
       - "backend/**"
+      - "docs/compliance-content-shape-inventory.md"
       - ".github/workflows/backend.yml"
   push:
     branches: [main]
     paths:
       - "backend/**"
+      - "docs/compliance-content-shape-inventory.md"
       - ".github/workflows/backend.yml"
 
 concurrency:
@@ -99,3 +107,65 @@ jobs:
           --format cobertura
           --floor 88.0
           --metric line
+
+  # Issue #1099's PowerShell half of the compliance-content shape inventory. The
+  # C# parsers' inventories are enforced by `dotnet test` (the `backend` job
+  # above), but Get-WaypointProfileDeclaredInputNameSet is PowerShell, so its
+  # guard is Pester and nothing in `dotnet test` executes it. Without this job
+  # the entire PowerShell inventory -- doc<->corpus completeness, the Expected
+  # column, issue #1152's regression fixture and all 21 shapes -- would only run
+  # when a human remembered to type the Invoke-Pester line, which is exactly the
+  # rot that let issue #1071 happen (PR #1151 round-1 review, finding 1).
+  #
+  # Separate job rather than a step in `backend`: it needs no .NET SDK, no
+  # restore and no coverage, so it gives its own fast red/green signal.
+  pester:
+    name: "pester: powershell shape inventory"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      # pwsh is preinstalled on ubuntu-latest, but Pester is not shipped with
+      # PowerShell on Linux. Pinned to the same major/minor the suites are
+      # developed against so a gallery release cannot change the gate's meaning
+      # without a deliberate bump here.
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 6.0.1 -Force -Scope CurrentUser -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion 6.0.1
+          "Pester $((Get-Module Pester).Version)"
+
+      # Both suites in one run. The real-content conformance suite is safe here:
+      # it self-skips (Set-ItResult -Skipped) when no local vendor clone is
+      # present, which a GitHub runner never has -- the opt-in semantics the doc
+      # advertises are preserved, and running it keeps the file from rotting
+      # into a syntax error nobody notices.
+      - name: Shape inventory (Pester)
+        shell: pwsh
+        run: |
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'backend/Waypoint.Tests/Core/ComplianceContent/ShapeInventory'
+          $config.Run.PassThru = $true
+          $config.Output.Verbosity = 'Detailed'
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputPath = 'testResults.xml'
+          $result = Invoke-Pester -Configuration $config
+          "Pester: $($result.PassedCount) passed, $($result.FailedCount) failed, $($result.SkippedCount) skipped"
+          if ($result.FailedCount -gt 0) {
+            throw "Pester shape-inventory guard failed: $($result.FailedCount) failed test(s). A broken shape in WaypointScan.psm1, a missing corpus fixture, or a deleted/edited row of docs/compliance-content-shape-inventory.md all surface here."
+          }
+          if ($result.PassedCount -eq 0) {
+            throw "Pester discovered no tests -- the guard is not actually running."
+          }
+
+      - name: Upload Pester results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        continue-on-error: true
+        with:
+          name: pester-shape-inventory
+          path: testResults.xml
+          retention-days: 14
