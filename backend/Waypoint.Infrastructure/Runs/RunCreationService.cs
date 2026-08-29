@@ -586,7 +586,16 @@ public sealed class RunCreationService
 		// exactly one job per resolved target regardless of plan-item credential
 		// demotion. Reject cleanly here, before FanOutJobsAsync's own (less specific)
 		// "a run must fan out to at least one job" guard would otherwise fire.
-		if (specs.Count == 0)
+		//
+		// Issue #1122: gated to a resolved scope that actually named at least one
+		// component (resolvedTargetScope.ResolvedComponentIds.Count > 0). A
+		// deliberately empty explicit request resolves zero components by design
+		// (ADR-0023 "No scan silently falls back from an empty explicit selection to
+		// the whole site" -- issue #733 AC) and is an intentional zero-scan-job run,
+		// not an error: with the #1122 fix above no longer emitting a legacy job for
+		// every unscoped target, that honest empty case now legitimately reaches this
+		// point with specs.Count == 0 and must NOT be rejected.
+		if (specs.Count == 0 && resolvedTargetScope is { ResolvedComponentIds.Count: > 0 })
 		{
 			throw new ApiException(
 				System.Net.HttpStatusCode.BadRequest,
