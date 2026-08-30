@@ -498,16 +498,22 @@ Refs: #498
 
 ### smoke-repo-path-space
 
-Repo path-space content (depot/UMDS/Photon/VMTools/VKS/content-libraries)
-is seeded straight into throwaway Docker volumes before `up`, the same
-trick smoke-seeding-preconditions already uses for `compliance-profiles`
--- nothing in this stack yet produces real repo content (that's later
-lanes), so the smoke test has to plant it itself to prove nginx serves
-what a producer will eventually write. The symlink escape is seeded and
-asserted on both `repo-umds` and `depot` (download-runner's real `/vcf`
-volume, where the runner actually writes UMDS content today) to prove
-`disable_symlinks on` is enforced on every store that carries a symlink,
-not just configured on one placeholder volume.
+Repo path-space content is seeded straight into the throwaway `depot`
+volume before `up`, at exactly the paths the runner writes (`PROD/`,
+`UMDS/`, `Photon/`, `VMTools/`, `VKS/`, `ContentLibrary/`, `Transfer/`)
+-- the same trick smoke-seeding-preconditions already uses for
+`compliance-profiles`. Nothing in this stack yet produces real repo
+content (that's later lanes), so the smoke test has to plant it itself
+to prove nginx serves what a producer will eventually write.
+
+Seeding the real layout rather than a set of separate placeholder volumes
+is what makes the isolation assertions mean anything: the stores overlap
+inside one volume (nginx-repo-store-subtree-aliases), so the test probes
+that pair -- every store subtree 404s through `/repo/depot/` while
+serving through its own location -- instead of two trivially-separate
+volumes. Symlink escapes are seeded in both absolute and relative form,
+on the store location and on `/repo/depot/`, and a hardlink is seeded to
+prove `disable_symlinks on` does not break it.
 
 Refs: #1043, #1502
 
@@ -732,7 +738,36 @@ documented exception -- see nginx-repo-photon-case-sensitive-root) rather
 than mounted at the domain root. SDDC Manager 9.1 supports a non-root
 `basePath`; a pre-5.2 root-only consumer still works against a sub-path
 just fine, but the reverse isn't true, so the location tree must not bake
-in a root-only assumption.
+in a root-only assumption. This is about the URL space only -- the
+filesystem side is nginx-repo-store-subtree-aliases.
+
+Refs: #1043, #1502
+
+### nginx-repo-store-subtree-aliases
+
+The six stores are six subtrees of ONE volume, not six volumes. `depot`
+is download-runner's `/vcf` and the runner writes `UMDS/`, `Photon/`,
+`VKS/`, `VMTools/`, `ContentLibrary/` (plus `VCSA/` and `Transfer/`)
+inside it (`vcf-download-manager.common.ps1`); the backend indexes the
+same share as one depot root (`CatalogOptions.DepotPath`). Splitting the
+stores onto their own volumes would mean repointing the runner's store
+paths and breaking that single-share contract, and Compose
+`volume.subpath` mounts fail closed when the subdirectory does not exist
+yet -- on a fresh stack the runner has written nothing, so nginx would
+refuse to start. So nginx mounts the one volume read-only at `/srv/repo`
+and each location `alias`es its own distinct subtree.
+
+Isolation is therefore enforced at the location layer, and it has to be
+explicit: `/repo/depot/` aliases the store root, so a regex location
+404s `/repo/depot/{UMDS,Photon,VKS,VMTools,ContentLibrary,VCSA,Transfer}`
+before the prefix search can reach it (regex locations are matched ahead
+of the settled prefix match). Without that deny, `/repo/depot/UMDS/`
+would be a second route to a store that owns its own location -- an
+acceptance-criterion failure today and a bypass of #1510's per-location
+auth toggle tomorrow. The deny list is a denylist of the runner's own
+store directory names: a store directory added to `/vcf` later must be
+added here at the same time, which is what the smoke test's cross-store
+isolation assertions exist to catch.
 
 Refs: #1043, #1502
 
@@ -759,13 +794,14 @@ design (VMware's own UMDS layout), and must never be dereferenced outside
 the store root through this proxy. `disable_symlinks on` costs an extra
 `stat` per path component nginx resolves, which is acceptable for a
 read-only, moderate-traffic repo location. Every repo store location
-carries the guard, not only `/repo/umds/`: `depot` is download-runner's
-real `/vcf` volume, and the runner writes the actual UMDS/Photon/VKS/
-VMTools/content-library trees there today (`vcf-download-manager.common.ps1`),
-so `/repo/depot/` needs the same protection `/repo/umds/` has -- a
-symlink written into any store is reachable through more than one
-location in the interim state this PR ships, and none of them is a
-store where dereferencing outside the root is ever wanted.
+carries the guard, not only `/repo/umds/`: all six alias into the one
+runner-owned store root (nginx-repo-store-subtree-aliases), so a symlink
+written anywhere under it must be inert on whichever location reaches
+it, and `/repo/depot/` -- which aliases that root itself -- needs the
+guard most. Both absolute and relative escapes are covered; the guard is
+broader than escapes (in-store symlinks 403, symlinked directory
+components 404) and no lane creates symlinks inside a store. Hardlinks
+are unaffected, so #1490's hardlinked view trees still serve.
 
 Refs: #1043, #1502
 

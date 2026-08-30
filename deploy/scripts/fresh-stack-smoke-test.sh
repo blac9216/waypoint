@@ -133,39 +133,47 @@ docker volume create "${PROJECT}_compliance-profiles" >/dev/null
 docker run --rm -v "${PROJECT}_compliance-profiles:/x" alpine \
 	sh -c "mkdir -p /x/vsphere /x/nsx /x/srg" >/dev/null
 
+# Repo path-space: ONE volume (download-runner's /vcf), seeded at exactly
+# the paths the runner writes, so the isolation assertions in step 14 probe
+# the real overlap and not a pair of trivially-separate volumes.
 # why: docs/rationale/deploy.md#smoke-repo-path-space
-for repo_vol in depot repo-umds repo-photon repo-vmtools repo-vks repo-content-libraries; do
-	docker volume create "${PROJECT}_${repo_vol}" >/dev/null
-done
-docker run --rm -v "${PROJECT}_repo-umds:/x" alpine sh -c "
-	mkdir -p /x/vmware-updates
-	printf 'umds-marker' > /x/vmware-updates/patch1.txt
-	ln -s /etc/passwd /x/vmware-updates/symlink-hostupdate
-"
-# `depot` is download-runner's real /vcf volume -- the same symlink escape
-# has to be proven here too, since this is the store the runner actually
-# writes UMDS content into today (docs/rationale/deploy.md#nginx-repo-umds-disable-symlinks).
+docker volume create "${PROJECT}_depot" >/dev/null
 docker run --rm -v "${PROJECT}_depot:/x" alpine sh -c "
+	# Depot proper: the VCF artifact tree at the store root.
+	mkdir -p /x/PROD/metadata
+	printf 'depot-marker' > /x/PROD/metadata/depot-marker.txt
+	ln -s /etc/passwd            /x/PROD/metadata/symlink-abs
+	ln -s ../../../../etc/passwd /x/PROD/metadata/symlink-rel
+
+	# ESX patch store: absolute AND relative escapes must both stay inert.
 	mkdir -p /x/UMDS/vmware-updates
-	printf 'depot-umds-marker' > /x/UMDS/vmware-updates/patch1.txt
-	ln -s /etc/passwd /x/UMDS/vmware-updates/symlink-hostupdate
-"
-docker run --rm -v "${PROJECT}_repo-photon:/x" alpine sh -c "
-	mkdir -p /x/photon_release_5.0_x86_64/repodata
-	printf 'photon-marker' > /x/photon_release_5.0_x86_64/repodata/marker.txt
-"
-docker run --rm -v "${PROJECT}_repo-vmtools:/x" alpine sh -c "
-	printf 'vmtools-marker' > /x/vmtools-marker.txt
-"
-docker run --rm -v "${PROJECT}_repo-vks:/x" alpine sh -c "
-	printf 'vks-marker' > /x/vks-marker.txt
-"
-docker run --rm -v "${PROJECT}_repo-content-libraries:/x" alpine sh -c "
-	printf 'ovf-content'  > /x/sample.ovf
-	printf 'mf-content'   > /x/sample.mf
-	printf 'vmdk-content' > /x/sample.vmdk
-	printf 'iso-content'  > /x/sample.iso
-	printf 'cert-content' > /x/sample.cert
+	printf 'umds-marker' > /x/UMDS/vmware-updates/patch1.txt
+	ln -s /etc/passwd               /x/UMDS/vmware-updates/symlink-hostupdate
+	ln -s ../../../../etc/passwd    /x/UMDS/vmware-updates/symlink-relative
+
+	mkdir -p /x/Photon/photon_release_5.0_x86_64/repodata
+	printf 'photon-marker' > /x/Photon/photon_release_5.0_x86_64/repodata/marker.txt
+
+	mkdir -p /x/VMTools
+	printf 'vmtools-marker' > /x/VMTools/vmtools-marker.txt
+
+	mkdir -p /x/VKS
+	printf 'vks-marker' > /x/VKS/vks-marker.txt
+
+	mkdir -p /x/ContentLibrary
+	printf 'ovf-content'  > /x/ContentLibrary/sample.ovf
+	printf 'mf-content'   > /x/ContentLibrary/sample.mf
+	printf 'vmdk-content' > /x/ContentLibrary/sample.vmdk
+	printf 'iso-content'  > /x/ContentLibrary/sample.iso
+	printf 'cert-content' > /x/ContentLibrary/sample.cert
+	# Hardlinks must keep serving -- disable_symlinks does not touch them
+	# and #1490's hardlinked view trees depend on that.
+	ln /x/ContentLibrary/sample.mf /x/ContentLibrary/hardlink.mf
+
+	# Air-gap transfer staging: no location serves it, and it must not be
+	# reachable through /repo/depot/ either.
+	mkdir -p /x/Transfer
+	printf 'transfer-marker' > /x/Transfer/transfer-marker.txt
 "
 
 # --- Bring-up (real build, not cached) ----------------------------------
@@ -699,25 +707,32 @@ fi
 UMDS_BODY="$(net_curl "${NET_BASE}/repo/umds/vmware-updates/patch1.txt")"
 if [[ "${UMDS_BODY}" == "umds-marker" ]]; then ok "UMDS store served through its own location"; else bad "UMDS store fetch failed: ${UMDS_BODY}"; fi
 
-SYMLINK_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/umds/vmware-updates/symlink-hostupdate")"
-if [[ "${SYMLINK_CODE}" != "200" ]]; then
-	ok "disable_symlinks blocks the out-of-store symlink on /repo/umds/ (${SYMLINK_CODE}, not 200)"
-else
-	bad "symlink inside the UMDS store was dereferenced through nginx (200) -- disable_symlinks not enforced"
-fi
-
-# `depot` is download-runner's real /vcf volume -- the guard has to hold
-# here too, not only on the placeholder /repo/umds/ volume.
+# Absolute AND relative escapes, on the store location and on the depot
+# location that aliases the store root itself.
 # why: docs/rationale/deploy.md#nginx-repo-umds-disable-symlinks
-DEPOT_BODY="$(net_curl "${NET_BASE}/repo/depot/UMDS/vmware-updates/patch1.txt")"
-if [[ "${DEPOT_BODY}" == "depot-umds-marker" ]]; then ok "depot store served through its own location"; else bad "depot store fetch failed: ${DEPOT_BODY}"; fi
+for probe in \
+	"/repo/umds/vmware-updates/symlink-hostupdate:absolute symlink on /repo/umds/" \
+	"/repo/umds/vmware-updates/symlink-relative:relative symlink on /repo/umds/" \
+	"/repo/depot/PROD/metadata/symlink-abs:absolute symlink on /repo/depot/" \
+	"/repo/depot/PROD/metadata/symlink-rel:relative symlink on /repo/depot/"; do
+	SYMLINK_PATH="${probe%%:*}"
+	SYMLINK_LABEL="${probe#*:}"
+	SYMLINK_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}${SYMLINK_PATH}")"
+	if [[ "${SYMLINK_CODE}" != "200" ]]; then
+		ok "disable_symlinks blocks the ${SYMLINK_LABEL} (${SYMLINK_CODE}, not 200)"
+	else
+		bad "${SYMLINK_LABEL} was dereferenced through nginx (200) -- disable_symlinks not enforced"
+	fi
+done
 
-DEPOT_SYMLINK_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/depot/UMDS/vmware-updates/symlink-hostupdate")"
-if [[ "${DEPOT_SYMLINK_CODE}" != "200" ]]; then
-	ok "disable_symlinks blocks the out-of-store symlink on /repo/depot/ (${DEPOT_SYMLINK_CODE}, not 200)"
-else
-	bad "symlink inside the depot store was dereferenced through nginx (200) -- disable_symlinks not enforced on /repo/depot/"
-fi
+# Depot proper: the VCF artifact tree at the store root serves through
+# /repo/depot/ (the store subtrees under it must not -- asserted below).
+DEPOT_BODY="$(net_curl "${NET_BASE}/repo/depot/PROD/metadata/depot-marker.txt")"
+if [[ "${DEPOT_BODY}" == "depot-marker" ]]; then ok "depot artifact tree served through /repo/depot/"; else bad "depot artifact tree fetch failed: ${DEPOT_BODY}"; fi
+
+# Hardlinks are NOT symlinks: disable_symlinks must leave them serving.
+HARDLINK_BODY="$(net_curl "${NET_BASE}/repo/content-libraries/hardlink.mf")"
+if [[ "${HARDLINK_BODY}" == "mf-content" ]]; then ok "hardlinked file still serves under disable_symlinks on"; else bad "hardlinked file did not serve: ${HARDLINK_BODY}"; fi
 
 PHOTON_BODY="$(net_curl "${NET_BASE}/photon/photon_release_5.0_x86_64/repodata/marker.txt")"
 if [[ "${PHOTON_BODY}" == "photon-marker" ]]; then ok "lowercase /photon/ root served"; else bad "lowercase /photon/ root fetch failed: ${PHOTON_BODY}"; fi
@@ -764,8 +779,37 @@ for ext in "${!EXT_TYPES[@]}"; do
 	fi
 done
 
-# Cross-store isolation: a path seeded only under the UMDS store must not
-# resolve under the content-libraries store's location/volume.
+# Cross-store isolation, probed where the overlap actually is: every store
+# subtree lives inside the same volume /repo/depot/ aliases, so each one
+# must be unreachable through the depot location and reachable only through
+# its own. Transfer is staging no location may serve.
+# why: docs/rationale/deploy.md#nginx-repo-store-subtree-aliases
+for depot_path in \
+	"UMDS/vmware-updates/patch1.txt" \
+	"Photon/photon_release_5.0_x86_64/repodata/marker.txt" \
+	"VKS/vks-marker.txt" \
+	"VMTools/vmtools-marker.txt" \
+	"ContentLibrary/sample.mf" \
+	"Transfer/transfer-marker.txt"; do
+	DEPOT_ISOLATION_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/depot/${depot_path}")"
+	if [[ "${DEPOT_ISOLATION_CODE}" == "404" ]]; then
+		ok "/repo/depot/${depot_path} is not a second route to that store (404)"
+	else
+		bad "/repo/depot/${depot_path} returned ${DEPOT_ISOLATION_CODE} -- the depot location is a superset route, stores are not isolated"
+	fi
+done
+
+# The same denial must hold for a lowercase spelling of the subtree name,
+# so a case-insensitive filesystem cannot reopen the route.
+DEPOT_CASE_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/depot/umds/vmware-updates/patch1.txt")"
+if [[ "${DEPOT_CASE_CODE}" == "404" ]]; then
+	ok "/repo/depot/umds/ (lowercase spelling) is denied too (404)"
+else
+	bad "/repo/depot/umds/ returned ${DEPOT_CASE_CODE}, expected 404"
+fi
+
+# And the reverse direction: a path seeded only under one store must not
+# resolve under another store's location.
 ISOLATION_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/content-libraries/vmware-updates/patch1.txt")"
 if [[ "${ISOLATION_CODE}" == "404" ]]; then
 	ok "UMDS-only path does not resolve under content-libraries (404)"

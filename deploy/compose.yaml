@@ -58,33 +58,13 @@ services:
         read_only: true
         bind:
           create_host_path: false
-      # Repo path-space: one read-only mount per store, no shared root.
-      # `depot` is download-runner's existing artifact store; the rest are
-      # new stores a later lane writes into.
-      # why: docs/rationale/deploy.md#nginx-repo-no-root-mount
+      # Repo path-space: `depot` IS download-runner's /vcf store root, and
+      # the runner writes every store tree inside it. One read-only mount;
+      # each location aliases its own subtree, and /repo/depot/ denies them.
+      # why: docs/rationale/deploy.md#nginx-repo-store-subtree-aliases
       - type: volume
         source: depot
-        target: /srv/repo/depot
-        read_only: true
-      - type: volume
-        source: repo-umds
-        target: /srv/repo/umds
-        read_only: true
-      - type: volume
-        source: repo-photon
-        target: /srv/repo/photon
-        read_only: true
-      - type: volume
-        source: repo-vmtools
-        target: /srv/repo/vmtools
-        read_only: true
-      - type: volume
-        source: repo-vks
-        target: /srv/repo/vks
-        read_only: true
-      - type: volume
-        source: repo-content-libraries
-        target: /srv/repo/content-libraries
+        target: /srv/repo
         read_only: true
     networks:
       - edge
@@ -384,10 +364,3 @@ volumes:
   tool-upload-staging:
   compliance-profiles:
   compliance-content:
-  # Repo path-space stores -- empty until their producing lane lands;
-  # nginx mounts each read-only.
-  repo-umds:
-  repo-photon:
-  repo-vmtools:
-  repo-vks:
-  repo-content-libraries:
