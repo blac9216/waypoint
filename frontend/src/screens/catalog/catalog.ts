@@ -31,6 +31,111 @@ export interface CatalogArtifact {
 	failure_reason?: string;
 }
 
+/**
+ * Product grouping (issue #796): the real Broadcom 9.x catalog is 1,088
+ * entries dominated by the Kubernetes stack (VKR alone is 433; plus
+ * VKS_ and SUPERVISOR_SERVICE_ releases), which drowns the ~40 core-infrastructure
+ * products (VCENTER, ESX_HOST, NSX_T_MANAGER, ...) an operator actually
+ * looks for. Grouping/ordering/collapse-by-default is entirely a frontend
+ * concern — the backend's `product` field is an opaque catalog key with no
+ * type or friendly-name metadata (`VendorProductVersionCatalogParser`
+ * writes only `product`/`version`/`size_bytes`).
+ */
+export type ProductType = "core" | "kubernetes";
+
+/** Friendly names for the catalog keys named in issue #796's discovery
+ * write-up. Unrecognized keys fall back to `humanizeProductKey` below
+ * rather than silently rendering nothing — the full ~49-product catalog is
+ * not enumerated here since the backend carries no display-name field to
+ * validate a hardcoded list against. */
+const KNOWN_PRODUCT_NAMES: Record<string, string> = {
+	VCENTER: "vCenter Server",
+	ESX_HOST: "ESXi",
+	NSX_T_MANAGER: "NSX Manager",
+	SDDC_MANAGER_VCF: "SDDC Manager (VCF)",
+	VROPS: "Aria/vRealize Operations",
+	VRA: "Aria/vRealize Automation",
+	VRSLCM: "Aria/vRealize Suite Lifecycle Manager",
+	HCX: "HCX",
+	VKR: "VKR (Kubernetes Release)",
+};
+
+/** `SUPERVISOR_SERVICE_ABC` -> "Supervisor Service ABC"; short (<=3 char)
+ * segments (version numbers, acronyms) are upper-cased rather than
+ * title-cased. */
+function humanizeProductKey(key: string): string {
+	return key
+		.split("_")
+		.filter(Boolean)
+		.map((word) => (word.length <= 3 ? word.toUpperCase() : word[0] + word.slice(1).toLowerCase()))
+		.join(" ");
+}
+
+export function friendlyProductName(productKey: string): string {
+	return KNOWN_PRODUCT_NAMES[productKey] ?? humanizeProductKey(productKey);
+}
+
+/** VKR itself, every `VKS_*` release, and every `SUPERVISOR_SERVICE_*`
+ * component — the Kubernetes-stack bulk called out in issue #796. */
+export function isKubernetesProduct(productKey: string): boolean {
+	return productKey === "VKR" || productKey.startsWith("VKS_") || productKey.startsWith("SUPERVISOR_SERVICE_");
+}
+
+export function productType(productKey: string): ProductType {
+	return isKubernetesProduct(productKey) ? "kubernetes" : "core";
+}
+
+/** Core-infrastructure products named in issue #796, shown first and in
+ * this order; every other core product follows, alphabetically by friendly
+ * name, then Kubernetes-stack products last, also alphabetically. */
+const CORE_PRODUCT_PRIORITY = ["VCENTER", "ESX_HOST", "NSX_T_MANAGER", "SDDC_MANAGER_VCF", "VROPS", "VRA", "VRSLCM", "HCX"];
+
+export interface ProductGroup {
+	key: string;
+	friendlyName: string;
+	type: ProductType;
+	artifacts: CatalogArtifact[];
+	versionCount: number;
+}
+
+/** Groups artifacts by their `product` catalog key, with a per-group
+ * version count (distinct `version` values) and default ordering:
+ * `CORE_PRODUCT_PRIORITY` first, remaining core products alphabetically by
+ * friendly name, Kubernetes-stack products last, also alphabetically. */
+export function groupArtifactsByProduct(artifacts: CatalogArtifact[]): ProductGroup[] {
+	const byKey = new Map<string, CatalogArtifact[]>();
+	for (const artifact of artifacts) {
+		const list = byKey.get(artifact.product);
+		if (list) {
+			list.push(artifact);
+		} else {
+			byKey.set(artifact.product, [artifact]);
+		}
+	}
+
+	const groups: ProductGroup[] = Array.from(byKey.entries()).map(([key, groupArtifacts]) => ({
+		key,
+		friendlyName: friendlyProductName(key),
+		type: productType(key),
+		artifacts: groupArtifacts,
+		versionCount: new Set(groupArtifacts.map((a) => a.version)).size,
+	}));
+
+	return groups.sort((a, b) => {
+		if (a.type !== b.type) {
+			return a.type === "core" ? -1 : 1;
+		}
+		if (a.type === "core") {
+			const ai = CORE_PRODUCT_PRIORITY.indexOf(a.key);
+			const bi = CORE_PRODUCT_PRIORITY.indexOf(b.key);
+			if (ai !== -1 || bi !== -1) {
+				return (ai === -1 ? CORE_PRODUCT_PRIORITY.length : ai) - (bi === -1 ? CORE_PRODUCT_PRIORITY.length : bi);
+			}
+		}
+		return a.friendlyName.localeCompare(b.friendlyName);
+	});
+}
+
 export interface CatalogArtifactsResponse {
 	artifacts: CatalogArtifact[];
 	/** Last successful `catalog-index` job completion, ISO-8601. Always `null`

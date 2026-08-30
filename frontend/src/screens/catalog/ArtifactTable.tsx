@@ -71,7 +71,11 @@ export function ArtifactTable({
 	onRetry,
 	canQueue,
 }: ArtifactTableProps) {
-	const allSelected = artifacts.length > 0 && selected.size === artifacts.length;
+	// Membership check, not a size comparison: `selected` is shared across
+	// every product group's table (issue #796), so a size match against just
+	// this group's artifact count would be wrong whenever other groups also
+	// have selected rows.
+	const allSelected = artifacts.length > 0 && artifacts.every((a) => selected.has(a.id));
 
 	return (
 		<div className="artifact-table__scroll">

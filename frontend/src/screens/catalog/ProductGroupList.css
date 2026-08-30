@@ -1,0 +1,72 @@
+.product-group-list {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.product-group-list__empty {
+	flex: 1 1 auto;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--txt3);
+	font-size: 11.5px;
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-card);
+	padding: 24px 0;
+}
+
+.product-group {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.product-group__header {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	width: 100%;
+	background: var(--panel2);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-btn);
+	padding: 7px 10px;
+	text-align: left;
+	cursor: pointer;
+	color: var(--txt);
+}
+
+.product-group--kubernetes .product-group__header {
+	color: var(--txt3);
+}
+
+.product-group__chevron {
+	width: 1em;
+	flex: 0 0 auto;
+}
+
+.product-group__name {
+	font-weight: 650;
+	font-size: 12px;
+}
+
+.product-group__key {
+	font-size: 10px;
+	color: var(--txt3);
+}
+
+.product-group__counts {
+	margin-left: auto;
+	font-size: 10.5px;
+	color: var(--txt3);
+	flex: 0 0 auto;
+}
+
+.product-group .artifact-table__scroll {
+	flex: 0 0 auto;
+	max-height: 340px;
+}

@@ -21,18 +21,28 @@ import {
 	formatEta,
 	formatRate,
 	formatTransferEstimate,
+	friendlyProductName,
+	groupArtifactsByProduct,
+	isKubernetesProduct,
 	queueDownloads,
 	syncCatalog,
 	type ArtifactStatus,
 	type CatalogArtifact,
 	type CatalogArtifactsQuery,
 	type DownloadQueueItem,
+	type ProductType,
 } from "./catalog";
 import { useDownloadQueue } from "./useDownloadQueue";
 import { useCatalogPull, type UseCatalogPullResult } from "./useCatalogPull";
-import { ArtifactTable } from "./ArtifactTable";
+import { ProductGroupList } from "./ProductGroupList";
 import { StoresUsagePanel } from "./StoresUsagePanel";
 import "./DownloadCatalogScreen.css";
+
+const TYPE_OPTIONS: { value: ProductType | ""; label: string }[] = [
+	{ value: "", label: "Any type" },
+	{ value: "core", label: "Core infrastructure" },
+	{ value: "kubernetes", label: "Kubernetes" },
+];
 
 const STATUS_OPTIONS: { value: ArtifactStatus | ""; label: string }[] = [
 	{ value: "", label: "Any status" },
@@ -68,6 +78,7 @@ export function DownloadCatalogScreen() {
 	const [product, setProduct] = useState("");
 	const [version, setVersion] = useState("");
 	const [status, setStatus] = useState<ArtifactStatus | "">("");
+	const [type, setType] = useState<ProductType | "">("");
 
 	const [selected, setSelected] = useState<Set<string>>(new Set());
 	const [queueError, setQueueError] = useState<string | null>(null);
@@ -115,13 +126,23 @@ export function DownloadCatalogScreen() {
 
 	const productOptions = useMemo(() => {
 		const set = new Set(artifacts.map((a) => a.product));
-		return Array.from(set).sort();
+		return Array.from(set).sort((a, b) => friendlyProductName(a).localeCompare(friendlyProductName(b)));
 	}, [artifacts]);
 
 	const versionOptions = useMemo(() => {
 		const set = new Set(artifacts.map((a) => a.version));
 		return Array.from(set).sort();
 	}, [artifacts]);
+
+	// Type (core vs. Kubernetes-stack) is a client-side classification of the
+	// catalog key (see catalog.ts's isKubernetesProduct) — the backend has no
+	// such field to filter on server-side.
+	const typedArtifacts = useMemo(
+		() => (type ? artifacts.filter((a) => isKubernetesProduct(a.product) === (type === "kubernetes")) : artifacts),
+		[artifacts, type],
+	);
+
+	const groups = useMemo(() => groupArtifactsByProduct(typedArtifacts), [typedArtifacts]);
 
 	const toggleSelected = useCallback((id: string) => {
 		setSelected((prev) => {
@@ -135,14 +156,22 @@ export function DownloadCatalogScreen() {
 		});
 	}, []);
 
-	const toggleSelectAll = useCallback(() => {
+	// Toggles selection for exactly the given ids (one product group's
+	// artifacts) — selects them all if any is unselected, else clears them.
+	const toggleSelectGroup = useCallback((ids: string[]) => {
 		setSelected((prev) => {
-			if (prev.size === artifacts.length && artifacts.length > 0) {
-				return new Set();
+			const allSelected = ids.length > 0 && ids.every((id) => prev.has(id));
+			const next = new Set(prev);
+			for (const id of ids) {
+				if (allSelected) {
+					next.delete(id);
+				} else {
+					next.add(id);
+				}
 			}
-			return new Set(artifacts.map((a) => a.id));
+			return next;
 		});
-	}, [artifacts]);
+	}, []);
 
 	const clearSelection = useCallback(() => setSelected(new Set()), []);
 
@@ -240,7 +269,7 @@ export function DownloadCatalogScreen() {
 						<option value="">Any product</option>
 						{productOptions.map((p) => (
 							<option key={p} value={p}>
-								{p}
+								{friendlyProductName(p)} ({p})
 							</option>
 						))}
 					</select>
@@ -263,6 +292,13 @@ export function DownloadCatalogScreen() {
 							</option>
 						))}
 					</select>
+					<select value={type} onChange={(e) => setType(e.target.value as ProductType | "")} aria-label="Filter by type">
+						{TYPE_OPTIONS.map((opt) => (
+							<option key={opt.value} value={opt.value}>
+								{opt.label}
+							</option>
+						))}
+					</select>
 					<div className="catalog-filterbar__spacer" />
 					<div className="catalog-filterbar__sync mono">Index synced {formatSyncTime(indexSyncedAt)}</div>
 					<button type="button" onClick={doSync} disabled={syncing} title="Walks the local /vcf filesystem only — no network call, no Broadcom contact.">
@@ -274,12 +310,12 @@ export function DownloadCatalogScreen() {
 
 				<CatalogPullPanel pull={catalogPull} adminGate={adminGate} />
 
-				<ArtifactTable
-					artifacts={artifacts}
+				<ProductGroupList
+					groups={groups}
 					loading={loading}
 					selected={selected}
 					onToggle={toggleSelected}
-					onToggleAll={toggleSelectAll}
+					onToggleGroup={toggleSelectGroup}
 					byArtifact={byArtifact}
 					onRetry={retryArtifact}
 					canQueue={canQueue}

@@ -67,6 +67,44 @@ const ARTIFACTS: CatalogArtifact[] = [
 	},
 ];
 
+/** A dominant-VKR fixture (issue #796's discovery case: VKR is 433 of the
+ * real catalog's 1,088 entries) — two core-infrastructure products plus a
+ * disproportionately large VKR group, to prove the Kubernetes group
+ * collapses by default while core products stay visible without scrolling
+ * past it. */
+function dominantVkrArtifacts(vkrCount: number): CatalogArtifact[] {
+	const vkr: CatalogArtifact[] = Array.from({ length: vkrCount }, (_, i) => ({
+		id: `vkr-${i}`,
+		name: `vkr-release-${i}.tar`,
+		sha256: `${"a".repeat(63)}${(i % 10).toString()}`,
+		product: "VKR",
+		version: `1.${i}.0`,
+		size_bytes: 1_000_000,
+		status: "not_downloaded" as const,
+	}));
+	return [
+		{
+			id: "art-vcenter",
+			name: "VCSA-8.0U3.iso",
+			sha256: "b".repeat(64),
+			product: "VCENTER",
+			version: "8.0U3",
+			size_bytes: 2_000_000,
+			status: "not_downloaded",
+		},
+		{
+			id: "art-esx",
+			name: "ESXi-8.0U3.zip",
+			sha256: "c".repeat(64),
+			product: "ESX_HOST",
+			version: "8.0U3",
+			size_bytes: 1_500_000,
+			status: "not_downloaded",
+		},
+		...vkr,
+	];
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
@@ -87,7 +125,11 @@ describe("DownloadCatalogScreen", () => {
 	let pullStatus: CatalogPullStatus;
 	let pullPostResponse: { status: number; body: unknown };
 
-	function installFetchMock(role: string, initialPullStatus: CatalogPullStatus = READY_PULL_STATUS) {
+	function installFetchMock(
+		role: string,
+		initialPullStatus: CatalogPullStatus = READY_PULL_STATUS,
+		artifacts: CatalogArtifact[] = ARTIFACTS,
+	) {
 		fetchCalls = [];
 		sse = createDriveableSse();
 		pullPostCount = 0;
@@ -111,7 +153,7 @@ describe("DownloadCatalogScreen", () => {
 				// (`return Ok(items...)`), not an envelope with index_synced_at —
 				// see catalog.ts's fetchCatalogArtifacts doc comment (issue #468
 				// found the mismatch live). Mocking the real shape here.
-				return jsonResponse(ARTIFACTS);
+				return jsonResponse(artifacts);
 			}
 			if (url === "/api/v1/catalog/pull" && (!init || init.method === undefined || init.method === "GET")) {
 				return jsonResponse(pullStatus);
@@ -506,6 +548,71 @@ describe("DownloadCatalogScreen", () => {
 		);
 
 		await waitFor(() => expect(screen.getByTitle("verified")).toBeInTheDocument());
+	});
+
+	it("groups artifacts by product with friendly names, catalog keys, and version counts", async () => {
+		installFetchMock("Operator", READY_PULL_STATUS, dominantVkrArtifacts(1));
+		render(
+			<AuthProvider>
+				<SystemProvider>
+					<DownloadCatalogScreen />
+				</SystemProvider>
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("VCSA-8.0U3.iso")).toBeInTheDocument());
+
+		expect(screen.getByText("vCenter Server")).toBeInTheDocument();
+		expect(screen.getAllByText("VCENTER").length).toBeGreaterThan(0);
+		expect(screen.getByText("ESXi")).toBeInTheDocument();
+		expect(screen.getAllByText("ESX_HOST").length).toBeGreaterThan(0);
+		expect(screen.getAllByText("1 version · 1 artifact").length).toBe(3);
+	});
+
+	it("filters to just the Kubernetes-stack products via the type filter", async () => {
+		installFetchMock("Operator", READY_PULL_STATUS, dominantVkrArtifacts(3));
+		render(
+			<AuthProvider>
+				<SystemProvider>
+					<DownloadCatalogScreen />
+				</SystemProvider>
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("vCenter Server")).toBeInTheDocument());
+
+		fireEvent.change(screen.getByLabelText("Filter by type"), { target: { value: "kubernetes" } });
+
+		await waitFor(() => expect(screen.queryByText("vCenter Server")).not.toBeInTheDocument());
+		expect(screen.getByText("VKR (Kubernetes Release)")).toBeInTheDocument();
+
+		fireEvent.change(screen.getByLabelText("Filter by type"), { target: { value: "core" } });
+		await waitFor(() => expect(screen.getByText("vCenter Server")).toBeInTheDocument());
+		expect(screen.queryByText("VKR (Kubernetes Release)")).not.toBeInTheDocument();
+	});
+
+	it("dominant-product case: collapses the 433-strong VKR group by default without hiding core products", async () => {
+		installFetchMock("Operator", READY_PULL_STATUS, dominantVkrArtifacts(40));
+		render(
+			<AuthProvider>
+				<SystemProvider>
+					<DownloadCatalogScreen />
+				</SystemProvider>
+			</AuthProvider>,
+		);
+
+		// Core-infrastructure products are visible without any expand click.
+		await waitFor(() => expect(screen.getByText("VCSA-8.0U3.iso")).toBeInTheDocument());
+		expect(screen.getByText("ESXi-8.0U3.zip")).toBeInTheDocument();
+
+		// The Kubernetes group header shows its true count but its rows are
+		// not rendered until expanded.
+		const kubernetesHeader = screen.getByText("VKR (Kubernetes Release)").closest("button")!;
+		expect(within(kubernetesHeader).getByText("40 versions · 40 artifacts")).toBeInTheDocument();
+		expect(kubernetesHeader).toHaveAttribute("aria-expanded", "false");
+		expect(screen.queryByText("vkr-release-0.tar")).not.toBeInTheDocument();
+
+		fireEvent.click(kubernetesHeader);
+		await waitFor(() => expect(screen.getByText("vkr-release-0.tar")).toBeInTheDocument());
+		expect(kubernetesHeader).toHaveAttribute("aria-expanded", "true");
 	});
 
 	it("mode-gating stub hides the screen when mode=disconnected", async () => {
