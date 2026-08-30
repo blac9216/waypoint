@@ -10,7 +10,7 @@ M="$MANIFESTS/project.json"
 PID=$(gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id}}}' -F o="$OWNER" -F n="$NUM" --jq '.data.user.projectV2.id' 2>/dev/null || true)
 [ -n "$PID" ] || PID=$(gh api graphql -f query='query($o:String!,$n:Int!){organization(login:$o){projectV2(number:$n){id}}}' -F o="$OWNER" -F n="$NUM" --jq '.data.organization.projectV2.id')
 live=$(gh api graphql -F id="$PID" -f query='query($id:ID!){node(id:$id){... on ProjectV2{fields(first:40){nodes{... on ProjectV2FieldCommon{id name dataType} ... on ProjectV2SingleSelectField{options{id name}}}} views(first:30){nodes{id name layout filter fields(first:30){nodes{... on ProjectV2FieldCommon{name}}}}} workflows(first:30){nodes{name enabled}}}}}' --jq .data.node)
-DRIFT=$(mktemp); : > "$DRIFT"
+DRIFT=$(mktemp); trap 'rm -f "$DRIFT"' EXIT; : > "$DRIFT"
 drift(){ echo 1 >> "$DRIFT"; }
 # --- fields
 jq -c '.custom_fields[]' "$M" | while IFS= read -r f; do
@@ -31,7 +31,7 @@ jq -c '.custom_fields[]' "$M" | while IFS= read -r f; do
 done
 # --- views (re-read fields for ids after creation)
 live=$(gh api graphql -F id="$PID" -f query='query($id:ID!){node(id:$id){... on ProjectV2{fields(first:40){nodes{... on ProjectV2FieldCommon{id name}}} views(first:30){nodes{id name layout filter fields(first:30){nodes{... on ProjectV2FieldCommon{name}}}}}}}}' --jq .data.node)
-fid(){ jq -r --arg n "$1" '.fields.nodes[]|select(.name==$n)|.id' <<<"$live"; }
+fid(){ local id; id=$(jq -r --arg n "$1" '.fields.nodes[]|select(.name==$n)|.id' <<<"$live"); [ -n "$id" ] || { say "error: view column '$1' does not match any project field"; exit 1; }; printf '%s\n' "$id"; }
 jq -c '.views[]' "$M" | while IFS= read -r v; do
   name=$(jq -r .name <<<"$v"); layout=$(jq -r .layout <<<"$v"); filter=$(jq -r .filter <<<"$v")
   ids=$(jq -r '.columns[]' <<<"$v" | while read -r c; do fid "$c"; done | jq -R . | jq -sc .)

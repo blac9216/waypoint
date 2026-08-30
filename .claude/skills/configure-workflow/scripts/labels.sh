@@ -28,8 +28,9 @@ if [ $PRUNE = 1 ]; then
   while IFS= read -r n; do [ -n "$n" ] || continue
     if ! grep -qx "$n" <<<"$wanted_names"; then
       case $n in area:*) [ $AREAS_KNOWN = 1 ] || { say "KEEP    $n — areas file absent, not pruning area labels"; continue; };; esac
-      open=$(gh issue list --repo "$REPO" --state open --label "$n" --limit 1 --json number --jq length)
-      if [ "$open" = 0 ]; then drift=1; say "prune   $n (unused)"; [ $AUDIT = 1 ] || run gh label delete "$n" --repo "$REPO" --yes
+      open_issues=$(gh issue list --repo "$REPO" --state open --label "$n" --limit 1 --json number --jq length)
+      open_prs=$(gh pr list --repo "$REPO" --state open --label "$n" --limit 1 --json number --jq length)
+      if [ "$open_issues" = 0 ] && [ "$open_prs" = 0 ]; then drift=1; say "prune   $n (unused)"; [ $AUDIT = 1 ] || run gh label delete "$n" --repo "$REPO" --yes
       else drift=1; say "KEEP    $n — non-canonical but on open issues; retag them first"; fi
     fi
   done <<<"$(jq -r .name <<<"$have")"

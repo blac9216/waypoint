@@ -7,8 +7,12 @@ REPO=""; CHECKS="docs/process/testing.md"; REVIEWER=0; AUDIT=0
 while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --checks) CHECKS=$2; shift 2;; --reviewer-account) REVIEWER=1; shift;; --audit) AUDIT=1; shift;; *) say "unknown arg $1"; exit 2;; esac; done
 [ -n "$REPO" ] || REPO=$(repo_nwo)
 M="$MANIFESTS/rulesets.json"; NAME=$(jq -r .name "$M")
-checks=$(awk '/^## Required checks/{f=1;next} /^## /{f=0} f&&/^- /{sub(/^- /,"");print}' "$CHECKS" 2>/dev/null | jq -R . | jq -sc 'map({context:.})')
-[ "$checks" != "[]" ] || say "warning: no '## Required checks' list in $CHECKS — ruleset will require a PR but no checks"
+if [ -f "$CHECKS" ]; then
+  checks=$(awk '/^## Required checks/{f=1;next} /^## /{f=0} f&&/^- /{sub(/^- /,"");print}' "$CHECKS" | jq -R . | jq -sc 'map({context:.})')
+  [ "$checks" != "[]" ] || say "warning: no '## Required checks' list in $CHECKS — ruleset will require a PR but no checks"
+else
+  say "warning: $CHECKS not found — ruleset will require a PR but no checks"; checks='[]'
+fi
 approvals=$(jq -r ".rules.pull_request.required_approving_review_count_$([ $REVIEWER = 1 ] && echo with_reviewer_account || echo single_account)" "$M")
 body=$(jq -n --arg name "$NAME" --argjson checks "$checks" --argjson approvals "$approvals" --argjson m "$(cat "$M")" '{
   name:$name, target:"branch", enforcement:"active",
@@ -22,7 +26,7 @@ if ! list=$(gh api "repos/$REPO/rulesets" 2>&1); then
   if grep -q "Upgrade to GitHub Pro" <<<"$list"; then say "rulesets are not available on private repositories under the free plan — make the repo public or upgrade; recording as a known gap"; exit 4; fi
   if grep -qE "403|404" <<<"$list"; then say "cannot read rulesets on $REPO — this needs repo admin (owner token)"; exit 5; fi
   say "$list"; exit 1; fi
-existing=$(jq -r ".[]|select(.name==\"$NAME\")|.id" <<<"$list")
+existing=$(jq -r --arg n "$NAME" '.[]|select(.name==$n)|.id' <<<"$list")
 if [ -z "$existing" ]; then say "create ruleset $NAME (checks: $(jq -r 'map(.context)|join(", ")' <<<"$checks"))"; [ $AUDIT = 1 ] && exit 1; run gh api -X POST "repos/$REPO/rulesets" --input - <<<"$body" --jq '.id' >/dev/null
 else
   live=$(gh api "repos/$REPO/rulesets/$existing")
