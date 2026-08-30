@@ -100,7 +100,7 @@ public sealed class ScanComponentNarrowingSelectorNameTests
 	[InlineData("esxi01")]
 	[InlineData("vm_app_01")]
 	[InlineData("VM-App-01")]
-	[InlineData("10.0.0.1")]
+	[InlineData("192.0.2.10")]
 	[InlineData("a")]
 	[InlineData("web-server-2026.dc01.example.internal")]
 	public void DescribeUnsafeSelectorName_AcceptsOrdinaryObjectName(string name)
