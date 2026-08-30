@@ -1016,18 +1016,25 @@ public sealed class ScanJobHandler : IJobHandler
 		// has no MAC source yet (unlike the sibling's live PowerCLI/network discovery),
 		// so --mac is never populated; that is a genuinely missing fact, not an
 		// oversight.
-		parameters["Hostname"] = target.Name;
+		//
+		// PR #1224 review round 1 finding 2: every value crosses the sibling boundary
+		// through CklAssetIdentity first -- the vendored New-CklConvertArgs interpolates
+		// each fact into a double-quoted `saf` argument segment with no escaping, so an
+		// operator-authored target name carrying a `"` could append a second -o flag.
+		// A rejected value is omitted from the command line entirely and reported as a
+		// job.log WARN naming the FIELD, never the value.
+		//
+		// Deliberately NOT normalized here: a `host:port` or bracketed-IPv6
+		// `connection.host` still classifies as Fqdn (IPAddress.TryParse rejects both).
+		// That misclassification is issue #1244's, filed during this review; stripping
+		// a port/brackets here would edit an operator-supplied fact on its way into an
+		// eMASS-visible artifact, which needs #1244's decision, not a silent guess.
+		await AddCklAssetIdentityAsync(context, parameters, "Hostname", target.Name, cancellationToken).ConfigureAwait(false);
 		string? connectionHost = TryGetConnectionHost(target.ConnectionJson);
 		if (!string.IsNullOrWhiteSpace(connectionHost))
 		{
-			if (System.Net.IPAddress.TryParse(connectionHost, out _))
-			{
-				parameters["Ip"] = connectionHost;
-			}
-			else
-			{
-				parameters["Fqdn"] = connectionHost;
-			}
+			string connectionHostField = System.Net.IPAddress.TryParse(connectionHost, out _) ? "Ip" : "Fqdn";
+			await AddCklAssetIdentityAsync(context, parameters, connectionHostField, connectionHost, cancellationToken).ConfigureAwait(false);
 		}
 
 		if (ruleCorrections.Count > 0)
@@ -1407,6 +1414,41 @@ public sealed class ScanJobHandler : IJobHandler
 	{
 		string payload = JsonSerializer.Serialize(new { severity = "Warning", line });
 		await context.Events.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, payload, cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Issue #1068 / PR #1224 review round 1 finding 2: the single chokepoint through
+	/// which a CKL asset-identity fact reaches <c>Invoke-WaypointConvert</c> (and, past
+	/// it, the vendored <c>New-CklConvertArgs</c> argument string). An unacceptable
+	/// value -- see <see cref="CklAssetIdentity"/> -- is never added to
+	/// <paramref name="parameters"/> at all, so the raw text never appears on the
+	/// command line, and the WARN names <paramref name="field"/> only: the value is
+	/// deliberately withheld from the job log because it is the attacker-controlled
+	/// half of an injection attempt and the log is rendered back to operators.
+	/// </summary>
+	private static async Task AddCklAssetIdentityAsync(
+		JobExecutionContext context,
+		Dictionary<string, object?> parameters,
+		string field,
+		string? value,
+		CancellationToken cancellationToken)
+	{
+		if (CklAssetIdentity.TryAccept(value, out string accepted))
+		{
+			parameters[field] = accepted;
+			return;
+		}
+
+		if (string.IsNullOrWhiteSpace(value))
+		{
+			// A genuinely absent fact -- omitted silently, exactly as before.
+			return;
+		}
+
+		await EmitWarnAsync(
+			context,
+			$"CKL asset identity '{field}' omitted: the target fact contains a double quote, a control character, or a leading '-', which cannot be passed safely to `saf convert hdf2ckl`. The value is withheld from this log.",
+			cancellationToken).ConfigureAwait(false);
 	}
 
 	/// <summary>

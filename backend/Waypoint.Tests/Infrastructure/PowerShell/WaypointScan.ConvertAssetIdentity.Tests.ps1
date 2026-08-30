@@ -135,4 +135,39 @@ Describe 'Invoke-WaypointConvert asset-identity flags (issue #1068)' {
 		$ArgsOne | Should -Match '--hostname\s+"target-one"'
 		$ArgsTwo | Should -Match '--hostname\s+"target-two"'
 	}
+
+	# PR #1224 review round 1 finding 2 (argument injection): the vendored
+	# New-CklConvertArgs interpolates each fact into a double-quoted segment with no
+	# escaping, so an operator-authored target name carrying a double quote could close
+	# the segment and append a SECOND -o, redirecting saf's CKL write. The reviewer's
+	# exact payload must be rejected by Get-WaypointSafeCklAssetValue before the builder
+	# ever sees it -- omitted entirely, never stripped into a mangled-but-authoritative
+	# asset name.
+	It 'rejects an injected -o in a target name rather than interpolating it' {
+		$CklOutputPath = Join-Path $TestDrive 'target-injection.ckl'
+
+		$Result = Invoke-WaypointConvert -ConvertInputPath (Join-Path $TestDrive 'input-injection.json') -CklOutputPath $CklOutputPath `
+			-Hostname 'evil" -o "/w/pwned.ckl' `
+			-VmwareStigDockerCommonPath $script:FakeCommonPath -WarningAction SilentlyContinue
+
+		$Result.Success | Should -BeTrue
+		$Global:WaypointTest_LastSafArgs | Should -Not -Match '--hostname'
+		$Global:WaypointTest_LastSafArgs | Should -Not -Match 'pwned\.ckl'
+		$Global:WaypointTest_LastSafArgs | Should -Not -Match 'evil'
+		([regex]::Matches($Global:WaypointTest_LastSafArgs, '-o\s+"')).Count | Should -Be 1
+	}
+
+	It 'rejects a fqdn containing a double quote and an ip beginning with a dash' {
+		$CklOutputPath = Join-Path $TestDrive 'target-injection-conn.ckl'
+
+		$Result = Invoke-WaypointConvert -ConvertInputPath (Join-Path $TestDrive 'input-injection-conn.json') -CklOutputPath $CklOutputPath `
+			-Hostname 'target-safe' -Fqdn 'bad"host.example.internal' -Ip '-o' `
+			-VmwareStigDockerCommonPath $script:FakeCommonPath -WarningAction SilentlyContinue
+
+		$Result.Success | Should -BeTrue
+		$Global:WaypointTest_LastSafArgs | Should -Match '--hostname\s+"target-safe"'
+		$Global:WaypointTest_LastSafArgs | Should -Not -Match '--fqdn'
+		$Global:WaypointTest_LastSafArgs | Should -Not -Match '--ip'
+		([regex]::Matches($Global:WaypointTest_LastSafArgs, '-o\s+"')).Count | Should -Be 1
+	}
 }

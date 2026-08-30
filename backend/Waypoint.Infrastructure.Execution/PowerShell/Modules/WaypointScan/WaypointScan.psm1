@@ -367,6 +367,44 @@ function Invoke-WaypointAttest {
 # `saf convert hdf2ckl`'s asset-identity flags via the vendored New-CklConvertArgs --
 # a missing fact is omitted, never invented.
 # Returns [pscustomobject]: Success, CklPath, MetadataApplied, FailureReason.
+
+# Issue #1068 / PR #1224 review round 1 finding 2 (argument injection): the vendored
+# New-CklConvertArgs interpolates each asset fact into a double-quoted segment of the
+# `saf convert hdf2ckl` argument string with NO escaping --
+#   if ($Hostname) { $CklArgs += " --hostname `"$Hostname`"" }
+# -- so a target named `evil" -o "/w/pwned.ckl` would close the segment and append a
+# SECOND -o, redirecting saf's CKL write inside the runner container. The vendored file
+# is the sibling repo's and is NOT rewritten; this is Waypoint's own guard on its side
+# of the boundary. It is a REJECT, not a sanitizer: an unsafe value is dropped entirely
+# (one fewer asset fact -- a missing fact, never a mangled one that would still look
+# authoritative in an eMASS-visible CKL) and a warning names the FIELD, never the value.
+# ScanJobHandler applies the same rule in C# (CklAssetIdentity); this repeats it at the
+# PowerShell chokepoint so any future non-C# caller is covered too.
+function Get-WaypointSafeCklAssetValue {
+	[CmdletBinding()]
+	param(
+		[Parameter()]
+		[AllowNull()]
+		[string]$Value,
+
+		[Parameter(Mandatory)]
+		[ValidateNotNullOrEmpty()]
+		[string]$FieldName
+	)
+
+	if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+
+	# A double quote closes the builder's quoted segment (the injection vector); a
+	# control character can split or truncate the argument string; a leading '-' is a
+	# value saf would parse as a flag of its own.
+	if (($Value -match '["\x00-\x1f\x7f]') -or ($Value.TrimStart().StartsWith('-'))) {
+		Write-Warning "WaypointScan: CKL asset identity '$FieldName' omitted -- the value contains a double quote, a control character, or a leading '-', which cannot be passed safely to ``saf convert hdf2ckl``. The value is withheld from this log."
+		return ''
+	}
+
+	return $Value
+}
+
 function Invoke-WaypointConvert {
 	[CmdletBinding()]
 	param(
@@ -458,8 +496,14 @@ function Invoke-WaypointConvert {
 		# multi-target CKL disambiguation depend on these host-metadata flags. A
 		# missing fact is omitted (New-CklConvertArgs appends a flag only when
 		# non-empty), never invented.
+		# Review finding 2: every fact passes Get-WaypointSafeCklAssetValue first, so
+		# nothing that could escape the builder's quoting ever reaches the command line.
+		$SafeHostname = Get-WaypointSafeCklAssetValue -Value $Hostname -FieldName 'Hostname'
+		$SafeFqdn = Get-WaypointSafeCklAssetValue -Value $Fqdn -FieldName 'Fqdn'
+		$SafeIp = Get-WaypointSafeCklAssetValue -Value $Ip -FieldName 'Ip'
+		$SafeMac = Get-WaypointSafeCklAssetValue -Value $Mac -FieldName 'Mac'
 		$CklArgs = New-CklConvertArgs -ConvertInputFile $ConvertInputPath -CklStagingPath $CklOutputPath `
-			-Hostname $Hostname -Fqdn $Fqdn -Ip $Ip -Mac $Mac
+			-Hostname $SafeHostname -Fqdn $SafeFqdn -Ip $SafeIp -Mac $SafeMac
 		$null = Invoke-ExternalCommand -Executable 'saf' -Arguments $CklArgs `
 			-TimeoutMilliseconds ($TimeoutSeconds * 1000) -ProcessName 'SAF conversion' `
 			-AllowedExitCodes @(0) -Source 'vsphere' -SurfaceOutputOnFailure
