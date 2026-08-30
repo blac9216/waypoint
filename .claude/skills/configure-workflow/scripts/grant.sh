@@ -9,11 +9,22 @@ while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --owner) OWNER=$2; 
 # project lookup (bad owner login, nonexistent project number, missing 'project'
 # scope, transient 5xx, rate limit) must not abort before the account loop with no
 # grants: summary — it must say so, exit nonzero, and never claim "in sync" (#1331).
-proj=$(gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id viewerCanUpdate}}}' -F o="$OWNER" -F n="$NUM" 2>/dev/null) || proj=""
+# Capture gh's own stderr alongside the named cause: the named message narrows the
+# search (bad owner/number/scope) but gh already knows which one it was, and
+# swallowing that with 2>/dev/null forced the operator to guess (#1337).
+proj_err_file=$(mktemp)
+proj=$(gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id viewerCanUpdate}}}' -F o="$OWNER" -F n="$NUM" 2>"$proj_err_file") || proj=""
+proj_err=$(cat "$proj_err_file" 2>/dev/null || true)
+rm -f "$proj_err_file"
 PID=$(jq -r '.data.user.projectV2.id // empty' <<<"${proj:-null}" 2>/dev/null) || PID=""
 if [ -z "$PID" ]; then
   say "could not resolve project $NUM for owner $OWNER — check the owner login, the project number, and the token's 'project' scope"
-  say "grants: 0 applied, 1 failed"
+  # gh's own CLI errors are already self-prefixed ("gh: Could not resolve …"); echo
+  # the captured text as-is rather than double-prefixing it.
+  [ -n "$proj_err" ] && say "$proj_err"
+  # Audit-mode wording follows the mode all the way through the pre-loop guard too,
+  # so this early-exit path and the end-of-loop summary share one vocabulary (#1337).
+  if [ $AUDIT = 1 ]; then say "grants: 1 unresolved"; else say "grants: 0 applied, 1 failed"; fi
   exit 1
 fi
 VIEWER_CAN_UPDATE=$(jq -r '.data.user.projectV2.viewerCanUpdate' <<<"$proj")
@@ -24,13 +35,13 @@ VIEWER_LOGIN=$(gh api user --jq .login 2>/dev/null || echo "")
 drift=0; applied=0; failed=0
 for acct in $MACHINE $REVIEWER; do
   perm=$(gh api "repos/$REPO/collaborators/$acct/permission" --jq .permission 2>/dev/null || echo none)
-  if [ "$perm" != write ] && [ "$perm" != admin ]; then drift=1; say "collaborator $acct: $perm -> write"; [ $AUDIT = 1 ] || run gh api -X PUT "repos/$REPO/collaborators/$acct" -f permission=push >/dev/null; fi
+  if [ "$perm" != write ] && [ "$perm" != admin ]; then drift=$((drift + 1)); say "collaborator $acct: $perm -> write"; [ $AUDIT = 1 ] || run gh api -X PUT "repos/$REPO/collaborators/$acct" -f permission=push >/dev/null; fi
   # A failed/unresolvable node-id lookup (deleted/renamed login, transient 5xx, rate limit) is a
   # reported, counted outcome — not a mid-loop abort under set -e — so the remaining accounts
   # still get processed and the run still ends with a summary + nonzero exit (#1326).
   uid=$(gh api "users/$acct" --jq .node_id 2>/dev/null) || uid=""
   if [ -z "$uid" ]; then
-    drift=1; failed=$((failed + 1))
+    drift=$((drift + 1)); failed=$((failed + 1))
     say "project admin $acct: could not resolve account node id — skipped (deleted/renamed login, API error, or rate limit)"
     continue
   fi
@@ -50,7 +61,7 @@ for acct in $MACHINE $REVIEWER; do
     # GitHub logins are case-insensitive; fold both sides before comparing so a
     # non-canonical --machine/--reviewer case still narrows correctly (#1332).
     if [ -n "$VIEWER_LOGIN" ] && [ "${acct,,}" = "${VIEWER_LOGIN,,}" ] && [ "$VIEWER_CAN_UPDATE" = "false" ]; then
-      drift=1
+      drift=$((drift + 1))
       say "project admin $acct: missing — viewerCanUpdate=false for this token on project $NUM (see #1218); apply the grant: rerun without --audit"
     else
       say "project admin $acct: unknown — no GraphQL/REST field exposes ProjectV2 collaborator roles (see #1218); verify manually: https://github.com/users/$OWNER/projects/$NUM/settings/access"
@@ -62,7 +73,7 @@ for acct in $MACHINE $REVIEWER; do
     # applied/failed keep it from claiming "applied" for a mutation that did not land — a
     # swallowed failure here would let the numbered owner sequence in SKILL.md walk past a
     # missing Project admin grant (see the round-2 review on #1243).
-    drift=1; say "project admin $acct: unknown -> ADMIN (re-asserted unconditionally; role is unreadable, see #1218)"
+    drift=$((drift + 1)); say "project admin $acct: unknown -> ADMIN (re-asserted unconditionally; role is unreadable, see #1218)"
     if resp=$(gql 'mutation($p:ID!,$u:ID!){updateProjectV2Collaborators(input:{projectId:$p,collaborators:[{userId:$u,role:ADMIN}]}){collaborators(first:100){nodes{__typename ... on User{login} ... on Team{slug}}}}}' "$(jq -n --arg p "$PID" --arg u "$uid" '{p:$p,u:$u}')"); then
       applied=$((applied + 1))
       if [ "$DRY" = 1 ]; then
@@ -85,6 +96,9 @@ say "token scopes needed on the automation account: repo, project, read:org (che
 # for work that did not land. DRY_RUN says "would apply" because it mutated nothing.
 if [ $AUDIT = 1 ]; then
   [ $drift = 0 ] && { say "grants: in sync"; exit 0; }
+  # Every audit-mode termination path gets exactly one grants: line, in audit
+  # vocabulary — never the apply-mode "applied/failed" wording, and never silent (#1337).
+  say "grants: $drift unresolved"
   exit 1
 fi
 if [ $failed -gt 0 ]; then say "grants: $applied applied, $failed failed"; exit 1; fi
