@@ -290,8 +290,10 @@ services:
       ConnectionStrings__Waypoint: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-waypoint};Username=waypoint_download_runner;Password="
       Database__PasswordFile: "${WAYPOINT_DOWNLOAD_DB_PASSWORD_FILE:-/run/db-secret/postgres-download-runner-password}"
       WAYPOINT_MASTER_KEY_FILE: "/run/secrets/waypoint-master-key"
-      PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointCatalogIndex"
-      PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointDownload"
+      # why: docs/rationale/deploy.md#compose-module-preload-order
+      PowerShell__ModulePreloadPaths__0: "/app/PowerShell/Modules/WaypointLogging"
+      PowerShell__ModulePreloadPaths__1: "/app/PowerShell/Modules/WaypointCatalogIndex"
+      PowerShell__ModulePreloadPaths__2: "/app/PowerShell/Modules/WaypointDownload"
       WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH: "/app/PowerShell/project/vcf-download-manager.common.ps1"
     volumes:
       - depot:/vcf

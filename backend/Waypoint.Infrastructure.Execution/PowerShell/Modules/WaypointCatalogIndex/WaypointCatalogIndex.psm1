@@ -23,6 +23,12 @@
 # The depot token parameter below is accepted and threaded through for forward
 # compatibility with a future vendor-catalog-refresh path, but the indexing walk
 # itself never reads it.
+#
+# Issue #719: Get-FileManifest lives in the same vcf-download-manager.common.ps1 file
+# as Save-WebFile, and dot-sourcing it here redefines Write-Log the same way it does
+# for WaypointDownload.psm1 -- see that module's header comment for the full
+# rationale. The override below closes the same gap for this module's own callers
+# (Write-Log calls from Set-Permissions/Get-FileManifest/Remove-EmptyDirectories).
 
 $Script:VcfDownloadManagerCommonPath = $env:WAYPOINT_VCF_DOWNLOAD_MANAGER_COMMON_PATH
 
@@ -71,6 +77,31 @@ function Invoke-WaypointCatalogIndex {
 
 	# Dot-source the unmodified sibling-repository script to bring Get-FileManifest into scope.
 	. $VcfDownloadManagerCommonPath
+
+	# Issue #719: re-define Write-Log again, now that the dot-source above has
+	# shadowed it with the sibling script's own filtered console/file
+	# implementation -- see WaypointDownload.psm1's matching override for the full
+	# rationale. Delegates to the shared WaypointLogging adapter (issue #579,
+	# preloaded ahead of this module -- deploy/compose.yaml's
+	# PowerShell:ModulePreloadPaths for download-runner) so every severity lands
+	# unconditionally on the native stream PowerShellExecutor already captures.
+	function Write-Log {
+		[CmdletBinding()]
+		param(
+			[Parameter(Mandatory, Position = 0)]
+			[AllowEmptyString()]
+			[string]$Message,
+
+			[Parameter()]
+			[ValidateSet('Debug', 'Verbose', 'Info', 'Success', 'Warning', 'Error', 'Critical')]
+			[string]$Severity = 'Info',
+
+			[Parameter()]
+			[string]$Source
+		)
+
+		WaypointLogging\Write-Log -Message $Message -Severity $Severity -Source $Source
+	}
 
 	Write-Information "Indexing depot share: $DepotPath"
 
