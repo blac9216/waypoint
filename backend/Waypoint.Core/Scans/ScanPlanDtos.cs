@@ -157,10 +157,49 @@ public static class ScanPlanSkipReasons
 	public const string CredentialedTransportWithNoRequirement = "credentialed_transport_with_no_requirement";
 
 	/// <summary>
+	/// Issue #1138: two or more narrowable <c>esxi</c>/<c>vm</c> plan items on the SAME
+	/// vSphere target (vCenter) resolved to the SAME component <c>DisplayName</c>.
+	/// Since #1135, a narrowed vSphere job's <c>selector_name</c> is the discovered
+	/// component's DisplayName (the vendor profile matches
+	/// <c>Get-VMHost -Name</c>/<c>Get-VM -Name</c> on it, never the MoRef) -- but a
+	/// name is unique for an ESXi host per vCenter, NOT for a VM: two VMs in different
+	/// folders/datacenters of the same vCenter may share a name. When they do,
+	/// <c>Get-VM -Name &lt;name&gt;</c> returns every same-named object, so each
+	/// sibling narrowed job would evaluate ALL of them and results would be
+	/// cross-attributed with no diagnostic -- a silent widening of an explicitly
+	/// narrowed scope, the same class of contract violation ADR-0023 "explicit scope
+	/// never widens" forbids. <see cref="Waypoint.Infrastructure.Runs.ScanPlannerService"/>
+	/// detects the collision AFTER compiling every candidate's item (so it needs the
+	/// full accepted set to compare across siblings) and demotes EVERY colliding
+	/// component to this skip -- never just one side of the pair, and never a
+	/// disambiguation guess -- so component identity itself (MoRef, ADR-0023) is
+	/// never touched. Component identity keying and the underlying MoRef are
+	/// unaffected; this is purely about the scoping VALUE's ambiguity.
+	/// </summary>
+	public const string AmbiguousSelectorName = "ambiguous_selector_name";
+
+	/// <summary>
+	/// Issue #1138: a narrowable <c>esxi</c>/<c>vm</c> plan item's component
+	/// <c>DisplayName</c> contains whitespace or a quote character (<c>'</c> or
+	/// <c>"</c>). The vendor ESX baseline content interpolates the name UNQUOTED into
+	/// the PowerCLI selector (<c>Get-VMHost -Name #{vmhostName}</c>) -- a name
+	/// containing whitespace breaks that interpolation (the shell/PowerShell
+	/// tokenizer splits it into more than one argument), and a quote character can
+	/// break out of the interpolated string entirely. This is vendor content, not
+	/// Waypoint code, but it constrains what Waypoint can safely pass as
+	/// <c>selector_name</c> -- Waypoint has no way to prove a given release's profile
+	/// quotes the value, so any unsafe name is skipped rather than risking a broken or
+	/// injected PowerCLI invocation. Independent of <see cref="AmbiguousSelectorName"/>:
+	/// a component can have an unsafe name with no collision at all.
+	/// </summary>
+	public const string UnsafeSelectorName = "unsafe_selector_name";
+
+	/// <summary>
 	/// The closed, PRODUCIBLE set (issue #1021: <see cref="UnmappedBenchmark"/> is
 	/// deliberately excluded -- it is retired/historical-only, see its own doc comment).
 	/// </summary>
-	public static readonly IReadOnlyCollection<string> All = [Unsupported, NoActiveBaseline, MissingRequiredInput, CredentialedTransportWithNoRequirement];
+	public static readonly IReadOnlyCollection<string> All =
+		[Unsupported, NoActiveBaseline, MissingRequiredInput, CredentialedTransportWithNoRequirement, AmbiguousSelectorName, UnsafeSelectorName];
 }
 
 /// <summary>

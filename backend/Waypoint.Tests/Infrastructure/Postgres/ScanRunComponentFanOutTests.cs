@@ -25,6 +25,7 @@ using Npgsql;
 using Waypoint.Core.ComplianceContent;
 using Waypoint.Core.Components;
 using Waypoint.Core.Jobs;
+using Waypoint.Core.Scans;
 using Waypoint.Infrastructure.Components;
 using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
@@ -526,6 +527,145 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Assert.NotEqual(vmComponent.VendorIdentity, vmPayload.RootElement.GetProperty("selector_name").GetString());
 	}
 
+	/// <summary>
+	/// Issue #1138: two narrowable VM components on the SAME vSphere target (vCenter)
+	/// whose DisplayName COLLIDES must never both fan out as narrowed jobs -- since
+	/// #1135 the narrowed job's <c>selector_name</c> is DisplayName, and the vendor
+	/// content's <c>Get-VM -Name &lt;name&gt;</c> would resolve to BOTH objects,
+	/// cross-attributing results with no diagnostic. Both colliding components are
+	/// recorded as a <see cref="ScanPlanSkipReasons.AmbiguousSelectorName"/> coverage
+	/// omission (visible on <c>GET /runs/{id}/plan</c>) and get NO job at all, while an
+	/// unrelated, uniquely-named ESXi component on the same target still plans and
+	/// fans out normally -- the ambiguity isolates to exactly the colliding pair.
+	/// </summary>
+	[Fact]
+	public async Task CreateScanRun_CollidingVmDisplayNames_BothSkippedWithAmbiguousSelectorNameReason()
+	{
+		Guid siteId = await CreateSiteAsync("fanout-vm-collision");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
+		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+
+		const string collidingName = "shared-vm-name.example.internal";
+		Guid vmA = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-collide-a", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: collidingName);
+		Guid vmB = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-collide-b", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: collidingName);
+		// A third, uniquely-named component on the SAME target proves the collision
+		// isolates to the colliding pair rather than failing the whole target/run.
+		Guid esxiControl = await SeedComponentWithRequirementsAsync(
+			targetId, "esxi-control", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Esxi);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		// Only the uniquely-named control component gets a job -- neither colliding VM
+		// fans out at all.
+		List<Guid> linkedComponentIds = await ReadLinkedComponentIdsAsync(runId);
+		Assert.Equal([esxiControl], linkedComponentIds);
+
+		using JsonDocument plan = await GetPlanAsync(runId);
+		List<JsonElement> skips = [.. plan.RootElement.GetProperty("skips").EnumerateArray()];
+		Assert.Equal(2, skips.Count);
+		Assert.All(skips, skip => Assert.Equal(ScanPlanSkipReasons.AmbiguousSelectorName, skip.GetProperty("reason").GetString()));
+		HashSet<Guid> skippedComponentIds = [.. skips.Select(skip => Guid.Parse(skip.GetProperty("component_id").GetString()!))];
+		Assert.Equal(new HashSet<Guid> { vmA, vmB }, skippedComponentIds);
+
+		// Each skip's detail names the OTHER colliding component so an operator can
+		// find its sibling without re-deriving the collision.
+		JsonElement vmASkip = skips.Single(skip => skip.GetProperty("component_id").GetString() == vmA.ToString());
+		Assert.Contains(vmB.ToString(), vmASkip.GetProperty("detail").GetString());
+		JsonElement vmBSkip = skips.Single(skip => skip.GetProperty("component_id").GetString() == vmB.ToString());
+		Assert.Contains(vmA.ToString(), vmBSkip.GetProperty("detail").GetString());
+	}
+
+	/// <summary>Issue #1138 non-collision control: distinct DisplayNames on the same target must never trigger the ambiguous-selector-name skip.</summary>
+	[Fact]
+	public async Task CreateScanRun_DistinctVmDisplayNames_BothFanOutIndependently_NoAmbiguousSkip()
+	{
+		Guid siteId = await CreateSiteAsync("fanout-vm-no-collision");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
+		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+
+		Guid vmA = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-distinct-a", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: "vm-distinct-a.example.internal");
+		Guid vmB = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-distinct-b", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: "vm-distinct-b.example.internal");
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		HashSet<Guid> linkedComponentIds = [.. await ReadLinkedComponentIdsAsync(runId)];
+		Assert.Equal(new HashSet<Guid> { vmA, vmB }, linkedComponentIds);
+
+		using JsonDocument plan = await GetPlanAsync(runId);
+		Assert.Empty(plan.RootElement.GetProperty("skips").EnumerateArray());
+	}
+
+	/// <summary>
+	/// Issue #1138's second, related hazard: the vendor ESX baseline interpolates
+	/// <c>selector_name</c> UNQUOTED into <c>Get-VMHost -Name #{vmhostName}</c>, so a
+	/// DisplayName containing whitespace or a quote character is unsafe to pass even
+	/// with no collision at all -- it is skipped with its own
+	/// <see cref="ScanPlanSkipReasons.UnsafeSelectorName"/> reason.
+	/// </summary>
+	[Fact]
+	public async Task CreateScanRun_DisplayNameWithWhitespaceOrQuote_SkippedWithUnsafeSelectorNameReason()
+	{
+		Guid siteId = await CreateSiteAsync("fanout-vm-unsafe-name");
+		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
+		Guid vcenterCred = await SeedCredentialAsync("vcenter");
+		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
+
+		Guid spacedEsxi = await SeedComponentWithRequirementsAsync(
+			targetId, "esxi-spaced", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Esxi, displayName: "esxi host one.example.internal");
+		Guid quotedVm = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-quoted", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: "o'clock-vm.example.internal");
+		Guid safeControl = await SeedComponentWithRequirementsAsync(
+			targetId, "esxi-safe-control", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Esxi);
+
+		HttpResponseMessage response = await PostRunAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		});
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		Guid runId = await ReadRunIdAsync(response);
+
+		// Only the safe-named control component gets a job.
+		List<Guid> linkedComponentIds = await ReadLinkedComponentIdsAsync(runId);
+		Assert.Equal([safeControl], linkedComponentIds);
+
+		using JsonDocument plan = await GetPlanAsync(runId);
+		List<JsonElement> skips = [.. plan.RootElement.GetProperty("skips").EnumerateArray()];
+		Assert.Equal(2, skips.Count);
+		Assert.All(skips, skip => Assert.Equal(ScanPlanSkipReasons.UnsafeSelectorName, skip.GetProperty("reason").GetString()));
+		HashSet<Guid> skippedComponentIds = [.. skips.Select(skip => Guid.Parse(skip.GetProperty("component_id").GetString()!))];
+		Assert.Equal(new HashSet<Guid> { spacedEsxi, quotedVm }, skippedComponentIds);
+	}
+
 	[Fact]
 	public async Task CreateScanRun_MixedNarrowableAndGated_FansOutPerNarrowablePlusExactlyOneCollapsed()
 	{
@@ -748,7 +888,8 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		int priority = 1,
 		string transport = CatalogTransports.VMware,
 		string selectorKind = CatalogSelectorKinds.Esxi,
-		string? selectorName = null)
+		string? selectorName = null,
+		string? displayName = null)
 	{
 		CatalogSourceRevision source = await _catalog.UpsertSourceRevisionAsync($"rev-{suffix}-{Guid.NewGuid():N}", null, CancellationToken.None);
 		CatalogProduct product = await _catalog.UpsertProductAsync(source.Id, "vmware", $"vsphere-{suffix}-{Guid.NewGuid():N}", "VMware vSphere", CancellationToken.None);
@@ -784,8 +925,9 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		// (issue #865) for the same "partial view must not advance absence" rule this
 		// borrows.
 		string vendorIdentity = $"host-{suffix}-{Guid.NewGuid():N}";
+		string resolvedDisplayName = displayName ?? $"{vendorIdentity}.example.internal";
 		await _components.UpsertDiscoveredAsync(
-			targetId, [new DiscoveredComponent("esxi", vendorIdentity, $"{vendorIdentity}.example.internal", null, catalogComponent.Id, "8.0.3")], CancellationToken.None, advanceAbsence: false);
+			targetId, [new DiscoveredComponent("esxi", vendorIdentity, resolvedDisplayName, null, catalogComponent.Id, "8.0.3")], CancellationToken.None, advanceAbsence: false);
 		Component seeded = (await _components.ListForTargetAsync(targetId, includeRetired: true, CancellationToken.None))
 			.Single(c => c.VendorIdentity == vendorIdentity);
 		return seeded.Id;
@@ -801,6 +943,14 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 	{
 		using JsonDocument created = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 		return Guid.Parse(created.RootElement.GetProperty("run_id").GetString()!);
+	}
+
+	/// <summary>Issue #1138: <c>GET /runs/{id}/plan</c> -- the same frozen plan (accepted items + coverage-omission skips) preview showed before creation.</summary>
+	private async Task<JsonDocument> GetPlanAsync(Guid runId)
+	{
+		HttpResponseMessage response = await SendAsync(HttpMethod.Get, $"/api/v1/runs/{runId}/plan", "Viewer", null);
+		response.EnsureSuccessStatusCode();
+		return JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 	}
 
 	private async Task<List<(Guid? ScanPlanItemId, short Priority)>> ReadScanJobsAsync(Guid runId)
