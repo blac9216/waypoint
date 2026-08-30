@@ -45,9 +45,9 @@ reported on stderr; matching zero milestones in total is an error. An empty
 
 | Code | Meaning |
 |---|---|
-| `2` | Argument error — an unrecognized flag, or an empty `--milestones`/`--milestone` value. |
+| `2` | Argument error — an unrecognized flag, a value-taking flag with no following value, or an empty `--milestones`/`--milestone` value. |
 | `3` | A `--milestones`/`--milestone` selection was requested but matched zero open milestones. |
-| `4` | `--parallelism` was given a value that is not a positive number (non-numeric, zero, or negative). |
+| `4` | `--parallelism` was given a value that is not a positive decimal number matching `^[0-9]+([.][0-9]+)?$` (e.g. `0`, `-1`, `abc`, `.5`, `1e2`, and leading/trailing whitespace are all rejected; `0.5` is accepted). A `parallelism.txt` file with the same defect falls back to the 1.5 default instead of erroring. |
 | `5` | A `blocked_by` cycle was detected while computing a milestone's critical path (jq's own error exit surfaces here). |
 
 ## Flags

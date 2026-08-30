@@ -10,29 +10,33 @@
 # milestone is reported on stderr, and matching zero milestones in total is an error (exit 3).
 # --history-dir points at the directory history.sh wrote parallelism.txt into; without it (and without
 # --parallelism) the default --out convention is assumed, and falling back to 1.5 is reported on stderr.
-# A missing, empty, or non-numeric parallelism.txt falls back to 1.5 the same way.
-# Exit codes: 2 = argument error (unknown flag, or an empty --milestones/--milestone value); 3 = a
-# --milestones/--milestone selection was requested but matched zero open milestones; 4 = --parallelism
-# was given a value that is not a positive number; 5 = a blocked_by cycle was detected while computing
-# the critical path (jq's own error exit surfaces here).
+# A missing, empty, non-numeric, zero, or negative parallelism.txt falls back to 1.5 the same way.
+# Exit codes: 2 = argument error (unknown flag, a value-taking flag with no following value, or an empty
+# --milestones/--milestone value); 3 = a --milestones/--milestone selection was requested but matched
+# zero open milestones; 4 = --parallelism was given a value that is not a positive decimal number
+# matching ^[0-9]+([.][0-9]+)?$ (e.g. "0", "-1", "abc", ".5", "1e2" and leading/trailing whitespace are
+# all rejected); 5 = a blocked_by cycle was detected while computing a milestone's critical path (jq's
+# own error exit surfaces here).
 set -euo pipefail
 REPO=""; ONLY=""; PAR=""; HISTORY_DIR=""; DEF="S=2,M=6,L=16"; OUT="${TMPDIR:-/tmp}/plan-work-timeline"; HOURS_PER_DAY=8
 MILESTONE_ARGS=()
+require_arg(){ [ "$#" -ge 2 ] || { echo "timeline.sh: $1 requires a value" >&2; exit 2; }; }
 require_value(){ [ -n "$2" ] || { echo "timeline.sh: $1 requires a non-empty value" >&2; exit 2; }; }
+is_positive_number(){ [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v v="$1" 'BEGIN{exit !(v>0)}'; }
 require_positive_number(){
-  if ! [[ "$2" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v v="$2" 'BEGIN{exit !(v>0)}'; then
-    echo "timeline.sh: $1 \"$2\" is not a positive number" >&2
+  if ! is_positive_number "$2"; then
+    echo "timeline.sh: $1 \"$2\" must be a positive decimal number matching ^[0-9]+([.][0-9]+)?\$" >&2
     exit 4
   fi
 }
 while [ $# -gt 0 ]; do case $1 in
-  --repo) REPO=$2; shift 2;;
-  --milestones) require_value --milestones "$2"; ONLY=$2; shift 2;;
-  --milestone) require_value --milestone "$2"; MILESTONE_ARGS+=("$2"); shift 2;;
-  --parallelism) require_positive_number --parallelism "$2"; PAR=$2; shift 2;;
-  --history-dir) HISTORY_DIR=$2; shift 2;;
-  --defaults) DEF=$2; shift 2;;
-  --out) OUT=$2; shift 2;;
+  --repo) require_arg "$@"; REPO=$2; shift 2;;
+  --milestones) require_arg "$@"; require_value --milestones "$2"; ONLY=$2; shift 2;;
+  --milestone) require_arg "$@"; require_value --milestone "$2"; MILESTONE_ARGS+=("$2"); shift 2;;
+  --parallelism) require_arg "$@"; require_positive_number --parallelism "$2"; PAR=$2; shift 2;;
+  --history-dir) require_arg "$@"; HISTORY_DIR=$2; shift 2;;
+  --defaults) require_arg "$@"; DEF=$2; shift 2;;
+  --out) require_arg "$@"; OUT=$2; shift 2;;
   *) echo "unknown arg $1" >&2; exit 2;;
 esac; done
 [ -n "$REPO" ] || REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
@@ -58,7 +62,7 @@ if [ -n "$PAR" ]; then
 else
   hist_dir="${HISTORY_DIR:-${OUT%/*}/plan-work-history}"
   PAR=$(cat "$hist_dir/parallelism.txt" 2>/dev/null || true)
-  if ! [[ "$PAR" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  if ! is_positive_number "$PAR"; then
     PAR=1.5
     say "parallelism: no history at $hist_dir/parallelism.txt; falling back to default $PAR (pass --history-dir to point at history.sh's --out, or --parallelism to set it explicitly)"
   fi
