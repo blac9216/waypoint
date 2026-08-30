@@ -37,7 +37,7 @@ Read the full mapping and its caveats once at the start: **[../github-workflow/r
 | Comment on the PR | `gh pr comment <N>` | `add_issue_comment` (PR number) |
 | Label the PR / issue | `gh pr edit --add-label` | `issue_write` `update` on the number |
 | Secret scan | _(local scanner, e.g. gitleaks)_ | `run_secret_scanning` |
-| Squash-merge | `gh pr merge <N> --squash` | `merge_pull_request` (`merge_method: squash`) |
+| Squash-merge | `gh pr merge <N> --squash --body-file <file>` (see "If Approved") | `merge_pull_request` (`merge_method: squash`) |
 
 ## Time-Box
 

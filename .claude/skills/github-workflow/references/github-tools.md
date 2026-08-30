@@ -29,7 +29,7 @@ default for this project's automated work.
 | Mark a PR ready (un-draft) | `gh pr ready <N>` | `update_pull_request` with `draft: false` |
 | Edit PR title/body/base | `gh pr edit <N> --title/--body` | `update_pull_request` |
 | **Label a PR** | `gh pr edit <N> --add-label <l>` | `issue_write` method `update`, `issue_number: <N>`, `labels: […]` — see caveat |
-| Squash-merge a PR | `gh pr merge <N> --squash --delete-branch` | `merge_pull_request` with `merge_method: "squash"` — see caveat |
+| Squash-merge a PR | `gh pr merge <N> --squash --delete-branch --body-file <file>` (keeps `Closes` lines; see github-pr-review "If Approved") | `merge_pull_request` with `merge_method: "squash"` — see caveat |
 | Read an issue + comments | `gh issue view <N> --comments` | `issue_read` method `get`, then `get_comments` |
 | Search / list issues (dup scan) | `gh issue list --state open --search "<kw>"` | `search_issues` (query syntax) or `list_issues` (`labels`, `state` filters) |
 | Create an issue | `gh issue create --title … --body … --label …` | `issue_write` method `create` |
