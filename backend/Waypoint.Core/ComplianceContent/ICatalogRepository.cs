@@ -85,6 +85,18 @@ public interface ICatalogRepository
 	Task<CatalogComponent?> GetComponentAsync(Guid componentId, CancellationToken cancellationToken);
 
 	/// <summary>
+	/// Issue #1202 (round-2 review): the batched sibling of <see cref="GetComponentAsync"/>
+	/// -- every catalog component whose id appears in <paramref name="componentIds"/>, in
+	/// ONE read. A list read over a target's components resolves the linked catalog rows
+	/// for the whole page at once; calling <see cref="GetComponentAsync"/> per item opens
+	/// one connection per component -- an N+1 on a hot path that scan-scope resolution
+	/// walks once per target. Ids that name no row are simply absent from the result;
+	/// order is by id and duplicates in the input collapse.
+	/// </summary>
+	Task<IReadOnlyList<CatalogComponent>> ListComponentsByIdsAsync(
+		IReadOnlyCollection<Guid> componentIds, CancellationToken cancellationToken);
+
+	/// <summary>
 	/// Issue #985: every top-level (<c>parent_component_id IS NULL</c>) catalog component
 	/// across ALL products whose own <see cref="CatalogComponent.ComponentKey"/> equals
 	/// <paramref name="catalogComponentKey"/> and whose product version's

@@ -716,6 +716,135 @@ object scopeBody = new
 		Assert.Contains("component_exists", await duplicate.Content.ReadAsStringAsync(), StringComparison.Ordinal);
 	}
 
+	/// <summary>
+	/// Issue #1202: the catalog holds one top-level `photon` component PER product
+	/// version (invented 3.0/4.0/5.0 fixtures here). Declaring with `exact_version:
+	/// "5.0"` must return the 5.0 catalog component's own display name and capability
+	/// -- never an arbitrary sibling version's name (the original bug: whichever
+	/// candidate `ListTopLevelComponentsByKeyAsync` happened to return first, before
+	/// linkage ran). Declaring with no `exact_version` must produce a version-neutral
+	/// name (the unlinked row cannot honestly claim any one version's identity), and a
+	/// later re-link to a DIFFERENT version must re-derive the name rather than keep
+	/// whatever was stored at declaration or first-link time.
+	/// </summary>
+	[Fact]
+	public async Task DeclaredSshProductRoot_MultipleCatalogVersions_DisplayNameMatchesActualLinkedVersion()
+	{
+		await PromotePhotonVersionAsync("3.0", "InSpec Profile VMware Photon OS 3.0 Appliance based deployments");
+		await PromotePhotonVersionAsync("4.0", "InSpec Profile VMware Photon OS 4.0 Appliance based deployments");
+		CatalogPromotionOutcome fiveDotZero = await PromotePhotonVersionAsync(
+			"5.0", "InSpec Profile VMware Photon OS 5.0 Appliance based deployments");
+		CatalogExecutionProfileDetail? fiveDotZeroProfile = await _catalog.GetExecutionProfileAsync(fiveDotZero.ExecutionProfileId!.Value, CancellationToken.None);
+		Guid fiveDotZeroComponentId = fiveDotZeroProfile!.Component.Id;
+
+		Guid siteId = await CreateSiteAsync("1202-multi-version-site");
+		Guid targetId = await CreateTargetAsync(siteId, "ssh", "appliance-1202", """{"host":"appliance-1202.example.internal"}""");
+
+		// Declaring the exact 5.0 version must return (and, on re-read, keep returning)
+		// the 5.0 catalog component's own display name -- not the 3.0 or 4.0 sibling's.
+		HttpRequestMessage declareRequest = WithRole(HttpMethod.Post, $"/api/v1/targets/{targetId}/components", "Admin");
+		declareRequest.Content = JsonContent.Create(
+			new { catalog_component_key = "photon", exact_version = "5.0" }, options: Waypoint.Core.Serialization.WaypointJsonOptions.Default);
+		HttpResponseMessage declareResponse = await _client.SendAsync(declareRequest);
+		Assert.Equal(HttpStatusCode.Created, declareResponse.StatusCode);
+		using JsonDocument declareBody = JsonDocument.Parse(await declareResponse.Content.ReadAsStringAsync());
+		Assert.Equal("InSpec Profile VMware Photon OS 5.0 Appliance based deployments", declareBody.RootElement.GetProperty("display_name").GetString());
+		Guid componentId = declareBody.RootElement.GetProperty("id").GetGuid();
+		Assert.Equal(fiveDotZeroComponentId.ToString(), declareBody.RootElement.GetProperty("catalog_component_id").GetString());
+
+		HttpResponseMessage getResponse = await _client.SendAsync(WithRole(HttpMethod.Get, $"/api/v1/components/{componentId}", "Viewer"));
+		using JsonDocument getBody = JsonDocument.Parse(await getResponse.Content.ReadAsStringAsync());
+		Assert.Equal("InSpec Profile VMware Photon OS 5.0 Appliance based deployments", getBody.RootElement.GetProperty("display_name").GetString());
+
+		// Issue #1202's Impact names the LIST surface ("an operator listing components on
+		// that target ... sees a 4.0 product label"), so prove it on a list that also
+		// holds a vendor-discovered sibling: the declared root must render its linked
+		// catalog version's name, while the discovered vCenter keeps the vendor-observed
+		// hostname discovery reported. Seeded through the repository (not an HTTP route)
+		// because no discovery pass runs in this test; the linkage itself still goes
+		// through the real resolver, exactly as the round-6 rehearsal above does.
+		CatalogPromotionOutcome vcenterPromotion = await _catalog.PromoteCandidateAsync(
+			VCenterCandidate(), VCenterPromotionRequest(), CancellationToken.None);
+		CatalogExecutionProfileDetail? vcenterProfile =
+			await _catalog.GetExecutionProfileAsync(vcenterPromotion.ExecutionProfileId!.Value, CancellationToken.None);
+		DiscoveredComponent discoveredSibling = new(
+			CatalogComponentKey: "vcenter", VendorIdentity: "vcenter-1202", DisplayName: "vcsa-1202.example.internal",
+			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: vcenterProfile!.ProductVersion.VersionKey);
+		(IReadOnlyList<DiscoveredComponent> linkedSibling, IReadOnlyList<string> siblingAmbiguities) =
+			await Waypoint.Infrastructure.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync(
+				_catalog, [discoveredSibling], CancellationToken.None);
+		Assert.Empty(siblingAmbiguities);
+		Assert.NotNull(linkedSibling.Single().CatalogComponentId);
+		await _components.UpsertDiscoveredAsync(targetId, linkedSibling, CancellationToken.None);
+
+		HttpResponseMessage listResponse = await _client.SendAsync(WithRole(HttpMethod.Get, $"/api/v1/targets/{targetId}/components", "Viewer"));
+		Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+		using JsonDocument listBody = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync());
+		Dictionary<string, string> listedNamesByKey = listBody.RootElement.EnumerateArray().ToDictionary(
+			element => element.GetProperty("catalog_component_key").GetString()!,
+			element => element.GetProperty("display_name").GetString()!,
+			StringComparer.Ordinal);
+		Assert.Equal(
+			"InSpec Profile VMware Photon OS 5.0 Appliance based deployments",
+			listedNamesByKey["photon"]);
+		Assert.Equal("vcsa-1202.example.internal", listedNamesByKey["vcenter"]);
+
+		HttpResponseMessage capabilityResponse = await _client.SendAsync(WithRole(HttpMethod.Get, $"/api/v1/components/{componentId}/capability", "Viewer"));
+		Assert.Equal(HttpStatusCode.OK, capabilityResponse.StatusCode);
+		using JsonDocument capabilityBody = JsonDocument.Parse(await capabilityResponse.Content.ReadAsStringAsync());
+		Assert.True(capabilityBody.RootElement.GetProperty("is_compatible").GetBoolean());
+		// `!`: a JSON array element the API contract declares as a string id -- GetString()
+		// is typed `string?` for the null-literal case that cannot occur here, and the
+		// spread into `string[]` is an error (CS8601) without the assertion.
+		string[] compatibleProfileIds = [.. capabilityBody.RootElement.GetProperty("compatible_execution_profile_ids").EnumerateArray().Select(p => p.GetString()!)];
+		Assert.Equal([fiveDotZero.ExecutionProfileId!.Value.ToString()], compatibleProfileIds);
+
+		// Re-link to 4.0 -- the same PUT /components/{id} path a later Admin correction
+		// uses -- must re-derive the name rather than keep the 5.0 name from the first
+		// link.
+		HttpRequestMessage relinkRequest = WithRole(HttpMethod.Put, $"/api/v1/components/{componentId}", "Admin");
+		relinkRequest.Content = JsonContent.Create(
+			new { exact_version = "4.0" }, options: Waypoint.Core.Serialization.WaypointJsonOptions.Default);
+		HttpResponseMessage relinkResponse = await _client.SendAsync(relinkRequest);
+		Assert.Equal(HttpStatusCode.OK, relinkResponse.StatusCode);
+		using JsonDocument relinkBody = JsonDocument.Parse(await relinkResponse.Content.ReadAsStringAsync());
+		Assert.Equal("InSpec Profile VMware Photon OS 4.0 Appliance based deployments", relinkBody.RootElement.GetProperty("display_name").GetString());
+
+		// A fresh declaration with NO exact_version starts unlinked -- its name must be
+		// version-neutral, never a stale/arbitrary sibling version's descriptive name.
+		Guid unversionedTargetId = await CreateTargetAsync(siteId, "ssh", "appliance-1202-unlinked", """{"host":"appliance-1202-unlinked.example.internal"}""");
+		HttpResponseMessage unlinkedDeclareResponse = await DeclareRootAsync(unversionedTargetId, "photon");
+		Assert.Equal(HttpStatusCode.Created, unlinkedDeclareResponse.StatusCode);
+		using JsonDocument unlinkedBody = JsonDocument.Parse(await unlinkedDeclareResponse.Content.ReadAsStringAsync());
+		string unlinkedDisplayName = unlinkedBody.RootElement.GetProperty("display_name").GetString()!;
+		Assert.DoesNotContain("3.0", unlinkedDisplayName, StringComparison.Ordinal);
+		Assert.DoesNotContain("4.0", unlinkedDisplayName, StringComparison.Ordinal);
+		Assert.DoesNotContain("5.0", unlinkedDisplayName, StringComparison.Ordinal);
+		Assert.Equal("photon", unlinkedDisplayName);
+	}
+
+	private async Task<CatalogPromotionOutcome> PromotePhotonVersionAsync(string version, string componentDisplayName)
+	{
+		SemanticCandidate candidate = new(
+			$"photon/{version}/v3r3-srg/inspec/baseline", "photon", version, "srg", "photon", "v3r3-srg", componentDisplayName,
+			CatalogTransports.Ssh, CatalogSelectorKinds.Target, null,
+			IsAggregate: false, Title: "Photon OS SRG", ManifestVersion: "3.3.0",
+			Inputs: [], Supports: [], Depends: [], ContentDigest: $"invented1202{version.Replace(".", "", StringComparison.Ordinal)}".PadRight(64, '0'));
+		CatalogPromotionRequest request = new(
+			SourceRevisionKey: "compliance-content",
+			Vendor: CatalogVendors.VMware,
+			ProductDisplayName: "VMware Photon OS",
+			ProductVersionDisplayName: $"Photon OS {version}",
+			ContentReleaseDisplayName: $"srg {version}",
+			ReportGroupKey: "srg",
+			ReportGroupDisplayName: "SRG",
+			ReportGroupPriority: 6,
+			OutputKind: CatalogOutputKinds.Hdf);
+		CatalogPromotionOutcome outcome = await _catalog.PromoteCandidateAsync(candidate, request, CancellationToken.None);
+		Assert.NotNull(outcome.ExecutionProfileId);
+		return outcome;
+	}
+
 	private async Task<HttpResponseMessage> DeclareRootAsync(Guid targetId, string catalogComponentKey)
 	{
 		HttpRequestMessage request = WithRole(HttpMethod.Post, $"/api/v1/targets/{targetId}/components", "Admin");
