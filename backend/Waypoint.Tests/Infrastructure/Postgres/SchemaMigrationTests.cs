@@ -356,8 +356,24 @@ public sealed class SchemaMigrationTests
 	/// (enabled=false UPDATE, never a DELETE) so a preset's history survives; no new
 	/// runner grant (the sync job that reads this table, #1484, grants itself what it
 	/// needs when it lands) --
+	/// <see cref="Migration0081_PreExistingZeroVerdictCompletedRow_IsBackfilledAfterTheCheckWidens"/> --
+	/// 0100 (issue #1488, epic #1180, split from design record #1038; slots 0099/0117
+	/// claimed by parallel migrations at this migration's own commit time): rekeys
+	/// <c>depot_artifacts</c>'s identity from the two incompatible legacy
+	/// <c>external_id</c> namespaces (offline disk-walk relative path vs. connected-pull
+	/// bare filename) to a single <c>relative_path</c> column via an idempotent
+	/// <c>RENAME COLUMN</c> -- every pre-existing row from EITHER legacy namespace keeps
+	/// its data untouched, no reconciliation between the two namespaces attempted here
+	/// (that is presence-sweep behavior, #1503/#1512). Adds <c>size_bytes</c> (the other
+	/// half of the catalog identity pair) and <c>last_verified_at</c> (presence field),
+	/// both left unset by the generic upsert path in this slice. Adds
+	/// <c>unknown_catalog_files</c> -- files present on disk with no matching catalog
+	/// identity, insert-or-touch-last-seen only, no delete path (design decision Q11:
+	/// alert instead of drop) -- with a new <c>waypoint_download_runner</c> grant
+	/// (SELECT/INSERT/UPDATE, no DELETE) mirroring migration 0025's existing
+	/// <c>depot_artifacts</c> grant to the same role.
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 81;
+	private const int ExpectedMigrationCount = 82;
 
 	private readonly PostgresFixture _fixture;
 

@@ -58,7 +58,7 @@ public sealed class VendorProductVersionCatalogParserTests
 		IReadOnlyList<DepotArtifactUpsert> result = VendorProductVersionCatalogParser.Parse(json);
 
 		Assert.Equal(3, result.Count);
-		DepotArtifactUpsert a = Assert.Single(result, r => r.ExternalId == "a.iso");
+		DepotArtifactUpsert a = Assert.Single(result, r => r.RelativePath == "a.iso");
 		Assert.Equal("aa", a.Sha256);
 		Assert.Equal("indexed", a.Status);
 		Assert.Contains("\"product\":\"VCENTER\"", a.MetadataJson);

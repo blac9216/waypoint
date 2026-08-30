@@ -191,7 +191,32 @@ public sealed class CatalogIndexJobHandler : IJobHandler
 		}
 
 		string metadataJson = JsonSerializer.Serialize(metadata);
-		return new DepotArtifactUpsert(externalId, sha256, status, metadataJson);
+
+		// externalId is passed as RelativePath (migration 0100, issue #1488): the
+		// module's ExternalId property was already a depot-relative path (see this
+		// type's own doc comment), so this is the same value the catalog-identity
+		// column now expects, carried through the explicitly named field instead of
+		// a bare ExternalId string that used to stand in for two different things.
+		return new DepotArtifactUpsert(externalId, sha256, status, metadataJson, TryToInt64(sizeBytes));
+	}
+
+	/// <summary>
+	/// Best-effort conversion of the unwrapped <c>SizeBytes</c> PowerShell property
+	/// value (may arrive as <see cref="long"/>, <see cref="int"/>, or a numeric
+	/// string) into the new <see cref="DepotArtifactUpsert.SizeBytes"/> column
+	/// (migration 0100). Returns null rather than throwing on anything else -- one
+	/// unparsable size must not fail the whole row, matching this handler's existing
+	/// "skip, don't halt" posture for malformed entries.
+	/// </summary>
+	private static long? TryToInt64(object? value)
+	{
+		return value switch
+		{
+			long longValue => longValue,
+			int intValue => intValue,
+			string stringValue when long.TryParse(stringValue, out long parsed) => parsed,
+			_ => null,
+		};
 	}
 
 	private static T? GetProperty<T>(System.Management.Automation.PSObject psObject, string name)
