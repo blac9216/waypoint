@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.PowerShell;
 using Waypoint.Infrastructure.PowerShell;
+using Waypoint.Infrastructure.Scans;
+using Waypoint.Tests.Infrastructure.Execution;
 using Xunit;
 
 namespace Waypoint.Tests.Infrastructure.PowerShell;
@@ -330,5 +333,167 @@ public sealed class WaypointConvertAssetIdentityArgumentTests : IDisposable
 		Assert.DoesNotContain("--fqdn", safArguments, StringComparison.Ordinal);
 		Assert.DoesNotContain("--ip", safArguments, StringComparison.Ordinal);
 		Assert.Single(System.Text.RegularExpressions.Regex.Matches(safArguments, "-o "));
+	}
+
+	/// <summary>
+	/// Review round 2's argv-echo harness. The injection is invisible in the argument
+	/// STRING -- round 1's test counted `-o ` substrings and passed on a payload that
+	/// still produced a second `-o` -- so this writes a tiny shell script that prints
+	/// each argument it receives on its own line, hands the captured saf argument
+	/// string to a REAL <see cref="ProcessStartInfo"/> exactly as
+	/// <c>Invoke-ExternalCommand</c> would (<c>UseShellExecute = false</c>), and returns
+	/// the argv the child process actually saw. It is launched through <c>/bin/sh</c>
+	/// so no chmod is needed; <c>sh</c> passes its positional parameters to the script
+	/// untouched, so the only parsing that happens is .NET's own -- which is the parser
+	/// under test.
+	/// </summary>
+	private string[] ParseArgv(string safArguments)
+	{
+		string scriptPath = Path.Combine(_fixtureRoot, "argv-echo.sh");
+		File.WriteAllText(scriptPath, "for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n");
+
+		ProcessStartInfo startInfo = new()
+		{
+			FileName = "/bin/sh",
+			Arguments = $"{scriptPath} {safArguments}",
+			UseShellExecute = false,
+			RedirectStandardOutput = true,
+			CreateNoWindow = true,
+		};
+
+		using Process process = Process.Start(startInfo)!;
+		string stdout = process.StandardOutput.ReadToEnd();
+		process.WaitForExit(30_000);
+		return stdout.TrimEnd('\n').Split('\n', StringSplitOptions.None);
+	}
+
+	/// <summary>
+	/// Review round 2 blocker, reproduced end to end and then pinned. The reviewer's
+	/// payload -- target name <c>target-a\</c> plus connection host
+	/// <c>x -o /w/pwned.ckl</c> -- carries no quote, no control character and no
+	/// leading dash, so round 1's deny list passed it; the trailing backslash then
+	/// escaped the vendored builder's closing quote and .NET's argument parser handed
+	/// saf a SECOND <c>-o</c>.
+	///
+	/// The assertion is on the parsed argv, counting TOKENS equal to <c>-o</c>, not on
+	/// substrings of the argument string: the string is not where the injection becomes
+	/// visible, which is precisely why round 1's test missed it. Exactly one argv token
+	/// may be <c>-o</c>, no token may name the attacker's path, and neither field may
+	/// be stamped at all (the guard rejects, it does not sanitize).
+	/// </summary>
+	[Fact]
+	public async Task ReviewRound2TrailingBackslashPayload_ProducesExactlyOneOutputFlagInArgv()
+	{
+		(bool success, string safArguments) = await ConvertAsync(
+			"argv-round2",
+			CklAssetIdentityCaseTable.TrailingBackslashHostname,
+			fqdn: CklAssetIdentityCaseTable.SecondOutputFlagHost);
+
+		Assert.True(success);
+
+		// The load-bearing assertion, asserted FIRST: count argv TOKENS equal to "-o".
+		string[] argv = ParseArgv(safArguments);
+		Assert.Equal(1, argv.Count(token => token == "-o"));
+		Assert.DoesNotContain(argv, token => token.Contains("pwned", StringComparison.Ordinal));
+		Assert.DoesNotContain(argv, token => token.Contains(@"target-a\", StringComparison.Ordinal));
+
+		// And the fields are omitted outright rather than stamped in a mangled form.
+		Assert.DoesNotContain("--hostname", safArguments, StringComparison.Ordinal);
+		Assert.DoesNotContain("--fqdn", safArguments, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// The same argv-level assertion for round 1's quote payload, and for a legitimate
+	/// all-facts conversion: whatever the input, saf sees exactly one output flag, and
+	/// the legitimate facts each arrive as a SINGLE argv token (a value with internal
+	/// spaces must not fragment).
+	/// </summary>
+	[Fact]
+	public async Task LegitimateAndRound1Payloads_BothYieldExactlyOneOutputFlagInArgv()
+	{
+		(bool injectionSuccess, string injectionArguments) = await ConvertAsync(
+			"argv-round1", InjectionPayload);
+		Assert.True(injectionSuccess);
+		string[] injectionArgv = ParseArgv(injectionArguments);
+		Assert.Equal(1, injectionArgv.Count(token => token == "-o"));
+		Assert.DoesNotContain(injectionArgv, token => token.Contains("pwned", StringComparison.Ordinal));
+
+		(bool legitimateSuccess, string legitimateArguments) = await ConvertAsync(
+			"argv-legit", "invented host 07", InventedFqdn, InventedIp, InventedMac);
+		Assert.True(legitimateSuccess);
+		string[] legitimateArgv = ParseArgv(legitimateArguments);
+		Assert.Equal(1, legitimateArgv.Count(token => token == "-o"));
+		Assert.Contains("invented host 07", legitimateArgv);
+		Assert.Contains(InventedFqdn, legitimateArgv);
+		Assert.Contains(InventedIp, legitimateArgv);
+		Assert.Contains(InventedMac, legitimateArgv);
+	}
+
+	/// <summary>
+	/// Calls the module-internal <c>Get-WaypointSafeCklAssetValue</c> in the real
+	/// <c>WaypointScan.psm1</c> without widening the module's exported surface: the
+	/// script block runs IN the module's own session state (<c>&amp; (Get-Module ...)</c>),
+	/// so the function under test is the genuine one the module's own
+	/// <c>Invoke-WaypointConvert</c> calls. The candidate value is a BOUND parameter
+	/// (the script's own <c>param($Value, ...)</c> block), never spliced into the script text -- a test for an injection
+	/// guard must not itself concatenate operator-controlled text into code.
+	/// </summary>
+	private const string MirrorProbeScript =
+		"param($Value, $FieldName) " +
+		"& (Get-Module WaypointScan) { param($ProbeValue, $ProbeField) " +
+		"Get-WaypointSafeCklAssetValue -Value $ProbeValue -FieldName $ProbeField -WarningAction SilentlyContinue } " +
+		"$Value $FieldName";
+
+	/// <summary>
+	/// Review round 2 finding 2: the two guards, pinned to each other. Every case in
+	/// <see cref="CklAssetIdentityCaseTable"/> is put through the REAL
+	/// <c>Get-WaypointSafeCklAssetValue</c> in <c>WaypointScan.psm1</c> (loaded by the
+	/// in-process executor, no re-implementation) and its verdict compared with
+	/// <c>CklAssetIdentity.TryAccept</c>'s. A disagreement in either direction fails --
+	/// including the C1 control characters and the backslash that made the round-1
+	/// mirror the weaker half exactly where it is the only half. Comments claiming the
+	/// two rules match are not evidence; this is.
+	/// </summary>
+	[Fact]
+	public async Task PowerShellMirror_AgreesWithCSharpGuard_OnEveryTableCase()
+	{
+		PowerShellExecutor executor = CreateExecutor();
+		List<string> disagreements = [];
+
+		foreach (CklAssetIdentityCaseTable.GuardCase testCase in CklAssetIdentityCaseTable.Cases)
+		{
+			PowerShellExecutionResult result = await executor.ExecuteAsync(
+				new PowerShellRequest(
+					MirrorProbeScript,
+					Kind: PowerShellRequestKind.Script,
+					Parameters: new Dictionary<string, object?>(StringComparer.Ordinal)
+					{
+						["Value"] = testCase.Value,
+						["FieldName"] = "Hostname",
+					}),
+				CancellationToken.None);
+			Assert.True(result.Succeeded, result.FailureReason);
+
+			string powerShellResult = result.Output.Count == 0
+				? string.Empty
+				: System.Management.Automation.LanguagePrimitives.ConvertTo<string>(result.Output[0]) ?? string.Empty;
+			bool powerShellAccepted = powerShellResult.Length > 0;
+
+			bool csharpAccepted = CklAssetIdentity.TryAccept(testCase.Value, out string csharpResult);
+
+			if (powerShellAccepted != testCase.Accepted || csharpAccepted != testCase.Accepted)
+			{
+				disagreements.Add(
+					$"'{testCase.Label}': expected accepted={testCase.Accepted}, C#={csharpAccepted}, PowerShell={powerShellAccepted}");
+				continue;
+			}
+
+			if (testCase.Accepted && !string.Equals(powerShellResult, csharpResult, StringComparison.Ordinal))
+			{
+				disagreements.Add($"'{testCase.Label}': accepted by both but the returned values differ");
+			}
+		}
+
+		Assert.Empty(disagreements);
 	}
 }

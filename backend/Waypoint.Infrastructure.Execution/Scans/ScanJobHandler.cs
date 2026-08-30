@@ -1017,12 +1017,15 @@ public sealed class ScanJobHandler : IJobHandler
 		// so --mac is never populated; that is a genuinely missing fact, not an
 		// oversight.
 		//
-		// PR #1224 review round 1 finding 2: every value crosses the sibling boundary
+		// PR #1224 review rounds 1-2 finding 2: every value crosses the sibling boundary
 		// through CklAssetIdentity first -- the vendored New-CklConvertArgs interpolates
-		// each fact into a double-quoted `saf` argument segment with no escaping, so an
-		// operator-authored target name carrying a `"` could append a second -o flag.
-		// A rejected value is omitted from the command line entirely and reported as a
-		// job.log WARN naming the FIELD, never the value.
+		// each fact into a double-quoted `saf` argument segment with no escaping, and
+		// ProcessStartInfo.Arguments then re-parses that string with Windows-style
+		// quoting, so an operator-authored target name carrying a `"` (round 1) or
+		// ending in a `\` (round 2) could append a second -o flag. CklAssetIdentity is
+		// an allow-list for exactly that reason -- a deny list has to be right about a
+		// parser this repo does not own. A rejected value is omitted from the command
+		// line entirely and reported as a job.log WARN naming the FIELD, never the value.
 		//
 		// Deliberately NOT normalized here: a `host:port` or bracketed-IPv6
 		// `connection.host` still classifies as Fqdn (IPAddress.TryParse rejects both).
@@ -1417,7 +1420,7 @@ public sealed class ScanJobHandler : IJobHandler
 	}
 
 	/// <summary>
-	/// Issue #1068 / PR #1224 review round 1 finding 2: the single chokepoint through
+	/// Issue #1068 / PR #1224 review rounds 1-2 finding 2: the single chokepoint through
 	/// which a CKL asset-identity fact reaches <c>Invoke-WaypointConvert</c> (and, past
 	/// it, the vendored <c>New-CklConvertArgs</c> argument string). An unacceptable
 	/// value -- see <see cref="CklAssetIdentity"/> -- is never added to
@@ -1447,7 +1450,7 @@ public sealed class ScanJobHandler : IJobHandler
 
 		await EmitWarnAsync(
 			context,
-			$"CKL asset identity '{field}' omitted: the target fact contains a double quote, a control character, or a leading '-', which cannot be passed safely to `saf convert hdf2ckl`. The value is withheld from this log.",
+			$"CKL asset identity '{field}' omitted: the target fact contains a character outside the accepted set (letters, digits, '.', '_', '-', ':', space) or begins with '-', so it cannot be passed safely to `saf convert hdf2ckl`. The value is withheld from this log.",
 			cancellationToken).ConfigureAwait(false);
 	}
 

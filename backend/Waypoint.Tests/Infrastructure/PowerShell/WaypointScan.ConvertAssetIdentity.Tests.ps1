@@ -170,4 +170,70 @@ Describe 'Invoke-WaypointConvert asset-identity flags (issue #1068)' {
 		$Global:WaypointTest_LastSafArgs | Should -Not -Match '--ip'
 		([regex]::Matches($Global:WaypointTest_LastSafArgs, '-o\s+"')).Count | Should -Be 1
 	}
+
+	# PR #1224 review round 2 blocker: the round-1 deny list passed a value ENDING in a
+	# backslash (`target-a\`), and .NET's ProcessStartInfo argument parser then treated
+	# the vendored builder's closing quote as escaped -- realigning the quoting so the
+	# NEXT field's contents (`x -o /w/pwned.ckl`) fell out as separate argv tokens, a
+	# second -o reaching saf. The guard is now an allow-list, and the assertion below is
+	# on the argv a REAL process receives, not on substrings of the argument string:
+	# the string is not where this injection is visible.
+	It 'rejects a trailing-backslash target name and leaves exactly one -o in real argv' {
+		$CklOutputPath = Join-Path $TestDrive 'target-backslash.ckl'
+
+		$Result = Invoke-WaypointConvert -ConvertInputPath (Join-Path $TestDrive 'input-backslash.json') -CklOutputPath $CklOutputPath `
+			-Hostname 'target-a\' -Fqdn 'x -o /w/pwned.ckl' `
+			-VmwareStigDockerCommonPath $script:FakeCommonPath -WarningAction SilentlyContinue
+
+		$Result.Success | Should -BeTrue
+		$Global:WaypointTest_LastSafArgs | Should -Not -Match '--hostname'
+		$Global:WaypointTest_LastSafArgs | Should -Not -Match '--fqdn'
+		$Global:WaypointTest_LastSafArgs | Should -Not -Match 'pwned'
+
+		# argv round trip: /bin/sh hands its positional parameters to the script
+		# untouched, so the only parsing applied is .NET's own -- the parser under test.
+		$EchoScript = Join-Path $TestDrive 'argv-echo.sh'
+		Set-Content -Path $EchoScript -Value 'for a in "$@"; do printf ''%s\n'' "$a"; done' -Encoding utf8
+		$StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+		$StartInfo.FileName = '/bin/sh'
+		$StartInfo.Arguments = "$EchoScript $Global:WaypointTest_LastSafArgs"
+		$StartInfo.UseShellExecute = $false
+		$StartInfo.RedirectStandardOutput = $true
+		$Process = [System.Diagnostics.Process]::Start($StartInfo)
+		$Argv = @($Process.StandardOutput.ReadToEnd().TrimEnd("`n") -split "`n")
+		$null = $Process.WaitForExit(30000)
+
+		@($Argv | Where-Object { $_ -eq '-o' }).Count | Should -Be 1
+		@($Argv | Where-Object { $_ -like '*pwned*' }).Count | Should -Be 0
+	}
+
+	# The allow-list itself, at the PowerShell chokepoint. The authoritative pinning of
+	# this rule against the C# guard is the xunit test
+	# WaypointConvertAssetIdentityArgumentTests.PowerShellMirror_AgreesWithCSharpGuard_OnEveryTableCase,
+	# which drives one shared case table through both; these two cases are the
+	# characters a reader of this file most needs to see rejected.
+	It 'rejects values outside the accepted character class' -ForEach @(
+		@{ Value = 'host`name' }
+		@{ Value = 'host$name' }
+		@{ Value = 'domain\host' }
+		@{ Value = "host`u{0085}name" }
+		@{ Value = 'hote-invente' + [char]0x00E9 }
+	) {
+		# The guard is module-internal (not exported): invoke it in the module's own
+		# session state so the function under test is the genuine one.
+		& $script:ScanModule { param($ProbeValue) Get-WaypointSafeCklAssetValue -Value $ProbeValue -FieldName 'Hostname' -WarningAction SilentlyContinue } $Value |
+			Should -BeNullOrEmpty
+	}
+
+	It 'passes a legitimate asset fact through unchanged' -ForEach @(
+		@{ Value = 'invented-target-a' }
+		@{ Value = 'invented-target-a.example.internal' }
+		@{ Value = '198.51.100.10' }
+		@{ Value = '2001:db8::1' }
+		@{ Value = '00:00:5E:00:53:01' }
+		@{ Value = 'invented host 07' }
+	) {
+		& $script:ScanModule { param($ProbeValue) Get-WaypointSafeCklAssetValue -Value $ProbeValue -FieldName 'Hostname' } $Value |
+			Should -BeExactly $Value
+	}
 }
