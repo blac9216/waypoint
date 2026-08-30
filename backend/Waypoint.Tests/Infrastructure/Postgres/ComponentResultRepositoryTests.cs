@@ -387,6 +387,10 @@ public sealed class ComponentResultRepositoryTests : IAsyncLifetime
 
 		Assert.Equal(1, row.EvaluatedZeroComponentCount);
 		Assert.True(row.EvaluatedZeroControls);
+
+		// Issue #1144: the errored component's findings are no longer invisible --
+		// execution_error_count carries them, so the row is not truly all-zero.
+		Assert.Equal(2, row.ExecutionErrorCount);
 	}
 
 	/// <summary>

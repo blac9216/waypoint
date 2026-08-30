@@ -81,6 +81,52 @@ public sealed class HdfSeverityCounterTests
 		Assert.False(counts.NoControlsEvaluated);
 	}
 
+	/// <summary>
+	/// Issue #1144: a control whose only result is <c>error</c> (InSpec's
+	/// resource-raised-an-exception outcome) must NOT count as open -- it used to
+	/// (any non-passed/skipped/not_applicable status counted as open), which
+	/// disagreed with <see cref="ComponentFindingStatuses.IsOpen"/> (<c>failed</c>-only)
+	/// and made the same control read "open" here but "execution_error" on the
+	/// persisted-findings surface. It now counts toward <see cref="HdfSeverityCounts.ControlsExecutionError"/>
+	/// and is excluded from <see cref="HdfSeverityCounts.ControlsEvaluated"/> -- an
+	/// errored control produced no genuine verdict, so it is not "evaluated" either.
+	/// </summary>
+	[Fact]
+	public void CountOpenFindings_ErroredControl_IsExecutionErrorNotOpen()
+	{
+		string hdf = BuildHdf(
+		[
+			ControlJson("invented-control-01", "critical", [("error", "invented: undefined method on nil resource")]),
+			ControlJson("invented-control-02", "high", [("failed", "invented genuine failure")]),
+		]);
+
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(WriteTempHdf(hdf));
+
+		Assert.NotNull(counts);
+		// Only the genuinely-failed control is open -- the errored one is not.
+		Assert.Equal(1, counts.CatIOpen);
+		Assert.Equal(2, counts.ControlsTotal);
+		Assert.Equal(1, counts.ControlsEvaluated);
+		Assert.Equal(1, counts.ControlsExecutionError);
+	}
+
+	/// <summary>Issue #1144: a control with BOTH an error and a failed result is execution-error, not open -- matches HdfFindingsParser.MapStatus's own worst-of priority (error beats failed).</summary>
+	[Fact]
+	public void CountOpenFindings_ControlWithBothErrorAndFailedResults_IsExecutionErrorNotOpen()
+	{
+		string hdf = BuildHdf(
+		[
+			ControlJson("invented-control-01", "high", [("error", "invented: raised mid-check"), ("failed", "invented failure after the error")]),
+		]);
+
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(WriteTempHdf(hdf));
+
+		Assert.NotNull(counts);
+		Assert.Equal(0, counts.CatIOpen);
+		Assert.Equal(1, counts.ControlsExecutionError);
+		Assert.Equal(0, counts.ControlsEvaluated);
+	}
+
 	[Fact]
 	public void CountOpenFindings_MissingFile_ReturnsNullUncountable()
 	{

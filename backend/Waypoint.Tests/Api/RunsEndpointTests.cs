@@ -491,7 +491,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 			ByStatus:
 			[
 				new Waypoint.Core.Scans.RunResultRollupRow("completed", ComponentCount: 2, CatIOpen: 1, CatIIOpen: 0, CatIIIOpen: 2, PassedCount: 10, NotApplicableCount: 1, NotReviewedCount: 0, SkippedCount: 0, EvaluatedZeroComponentCount: 0),
-				new Waypoint.Core.Scans.RunResultRollupRow("execution_error", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 0, NotApplicableCount: 0, NotReviewedCount: 1, SkippedCount: 0, EvaluatedZeroComponentCount: 1),
+				new Waypoint.Core.Scans.RunResultRollupRow("execution_error", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0, PassedCount: 0, NotApplicableCount: 0, NotReviewedCount: 1, SkippedCount: 0, EvaluatedZeroComponentCount: 1, ExecutionErrorCount: 2),
 			]);
 
 		HttpClient client = _factory.CreateClient();
@@ -517,6 +517,7 @@ public sealed class RunsEndpointTests : IClassFixture<RunsTestApiFactory>
 
 		JsonElement errorRow = byStatus.EnumerateArray().Single(e => e.GetProperty("status").GetString() == "execution_error");
 		Assert.Equal(1, errorRow.GetProperty("not_reviewed_count").GetInt32());
+		Assert.Equal(2, errorRow.GetProperty("execution_error_count").GetInt32());
 
 		Assert.Equal(runId, _factory.ComponentResults.LastRollupRunId);
 	}

@@ -502,9 +502,22 @@ public sealed record RunArtifactResponse(
 	[property: JsonPropertyName("controls_total")]
 	int? ControlsTotal,
 
-	/// <summary>Issue #1132: controls that produced a real pass/fail outcome (excludes skipped/not-applicable/absent). <c>controls_total &gt; 0</c> with <c>controls_evaluated == 0</c> means this component evaluated nothing -- not evaluated, not clean.</summary>
+	/// <summary>Issue #1132: controls that produced a real pass/fail outcome (excludes skipped/not-applicable/errored/absent). <c>controls_total &gt; 0</c> with <c>controls_evaluated == 0</c> means this component evaluated nothing -- not evaluated, not clean.</summary>
 	[property: JsonPropertyName("controls_evaluated")]
 	int? ControlsEvaluated,
+
+	/// <summary>
+	/// Issue #1144: controls whose only non-passed/skipped/not_applicable result is
+	/// <c>error</c>, null exactly when <c>counts_available</c> is false. Reconciles
+	/// this endpoint with <c>GET /runs/{id}/component-results/summary</c>'s
+	/// <c>execution_error_count</c>: an errored control is counted here, NOT folded
+	/// into <c>cat_i_open</c>/<c>cat_ii_open</c>/<c>cat_iii_open</c> -- it never
+	/// produced a genuine compliance verdict, so it is not "open", matching
+	/// <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>'s
+	/// <c>failed</c>-only definition exactly.
+	/// </summary>
+	[property: JsonPropertyName("controls_execution_error")]
+	int? ControlsExecutionError,
 
 	/// <summary>Which of <c>hdf</c>/<c>ckl</c> currently have a file on disk for this job -- what <c>GET /jobs/{id}/artifacts/{kind}</c> can actually serve.</summary>
 	[property: JsonPropertyName("artifact_kinds")]
@@ -949,6 +962,20 @@ public sealed record RunResultRollupStatusResponse(
 	int SkippedCount,
 
 	/// <summary>
+	/// Issue #1144 (migration 0080): sum, across this bucket's latest-attempt
+	/// components, of findings mapped to <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.ExecutionError"/>
+	/// -- the count column that was previously missing entirely, which is exactly why
+	/// an all-errored component used to read as all-zero on this endpoint.
+	/// Deliberately NOT folded into <c>cat_i_open</c>/<c>cat_ii_open</c>/<c>cat_iii_open</c>:
+	/// an errored control never produced a genuine compliance verdict, so it is not
+	/// "open" -- matching <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>'s
+	/// <c>failed</c>-only definition, which <c>GET /runs/{id}/artifacts</c>'
+	/// <see cref="Waypoint.Core.Scans.HdfSeverityCounter"/> now agrees with as well.
+	/// </summary>
+	[property: JsonPropertyName("execution_error_count")]
+	int ExecutionErrorCount,
+
+	/// <summary>
 	/// Issue #1132: how many COMPONENTS in this bucket produced NO verdict -- zero
 	/// passed and zero open (failed) findings, the same false-clean shape #1124 fixed
 	/// the per-finding mapping for. Counted per component by the rollup SQL's
@@ -957,10 +984,10 @@ public sealed record RunResultRollupStatusResponse(
 	/// cannot express that case. Covers the all-<c>not_reviewed</c>, all-<c>skipped</c>,
 	/// all-<c>execution_error</c> and zero-findings shapes. Deliberately does NOT count
 	/// a component that is genuinely all not-applicable: N/A is a determinate outcome,
-	/// not a failure to evaluate. Known gap: a component mixing <c>not_applicable</c>
-	/// with only <c>execution_error</c> findings is indistinguishable from that genuine
-	/// case here, because <c>execution_error</c> findings are counted in no column --
-	/// issue #1144.
+	/// not a failure to evaluate. Issue #1144 closed the one gap this used to have: a
+	/// component mixing <c>not_applicable</c> with only <c>execution_error</c> findings
+	/// is now correctly flagged, since <c>execution_error_count</c> (above) is checked
+	/// directly rather than inferred from <c>not_applicable_count = 0</c>.
 	/// </summary>
 	[property: JsonPropertyName("evaluated_zero_component_count")]
 	int EvaluatedZeroComponentCount,
@@ -1030,10 +1057,11 @@ public sealed record RunResultRollupResponse(
 	/// False only when a plan IS recorded, it omitted nothing, and no component was
 	/// counted by <see cref="EvaluatedZeroComponentCount"/> -- i.e. every reported
 	/// component produced at least one passed or open (failed) finding, or was
-	/// genuinely all not-applicable. It is NOT a claim that every component evaluated
-	/// at least one control: a component whose findings are all <c>execution_error</c>
-	/// alongside at least one <c>not_applicable</c> one still reads complete, because
-	/// <c>execution_error</c> findings are counted in no column (issue #1144).
+	/// genuinely all not-applicable. Issue #1144: a component whose findings are all
+	/// <c>execution_error</c> alongside at least one <c>not_applicable</c> one is now
+	/// correctly caught by <see cref="EvaluatedZeroComponentCount"/> (backed by its own
+	/// <c>execution_error_count</c> column, migration 0080) rather than reading as
+	/// complete.
 	/// </summary>
 	[property: JsonPropertyName("coverage_incomplete")]
 	bool CoverageIncomplete,

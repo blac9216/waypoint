@@ -114,6 +114,14 @@ public sealed record ComponentResultRecord(
 	public int NotApplicableCount => Findings.Count(f => f.Status == ComponentFindingStatuses.NotApplicable);
 	public int NotReviewedCount => Findings.Count(f => f.Status == ComponentFindingStatuses.NotReviewed);
 	public int SkippedCount => Findings.Count(f => f.Status == ComponentFindingStatuses.Skipped);
+
+	/// <summary>
+	/// Issue #1144: findings mapped to <see cref="ComponentFindingStatuses.ExecutionError"/>
+	/// -- migration 0080's sixth and final per-finding-status count column. Before this,
+	/// an execution-error finding landed in no <c>component_results</c> column at all,
+	/// so a component whose controls ALL errored read as all-zero on the run rollup.
+	/// </summary>
+	public int ExecutionErrorCount => Findings.Count(f => f.Status == ComponentFindingStatuses.ExecutionError);
 }
 
 /// <summary>One (priority-free) row of the run rollup: counts by component-result status, CAT totals, and coverage.</summary>
@@ -127,7 +135,8 @@ public sealed record RunResultRollupRow(
 	int NotApplicableCount,
 	int NotReviewedCount,
 	int SkippedCount,
-	int EvaluatedZeroComponentCount)
+	int EvaluatedZeroComponentCount,
+	int ExecutionErrorCount = 0)
 {
 	/// <summary>
 	/// Issue #1132: how many COMPONENTS in this status bucket produced NO verdict --
@@ -140,18 +149,30 @@ public sealed record RunResultRollupRow(
 	///
 	/// Counted shapes include the all-<see cref="ComponentFindingStatuses.NotReviewed"/>
 	/// scan (round-12's), the all-<see cref="ComponentFindingStatuses.Skipped"/> one, an
-	/// all-<see cref="ComponentFindingStatuses.ExecutionError"/> component, and a
-	/// component that produced no findings at all -- the last two land in no count
-	/// column (see issue #1144) and so read as all-zero here.
+	/// all-<see cref="ComponentFindingStatuses.ExecutionError"/> component (migration
+	/// 0080's <c>execution_error_count</c>, issue #1144), and a component that
+	/// produced no findings at all.
 	///
 	/// The one zero-verdict shape deliberately NOT counted is the genuinely, entirely
 	/// <see cref="ComponentFindingStatuses.NotApplicable"/> component: "nothing here
-	/// applies" is a determinate outcome, not a failure to evaluate. Known gap, not
-	/// closed at this grain: a component mixing <c>not_applicable</c> with only
-	/// <c>execution_error</c> findings is indistinguishable from that genuine case,
-	/// because <c>execution_error</c> is counted nowhere -- issue #1144 is the fix.
+	/// applies" is a determinate outcome, not a failure to evaluate. Issue #1144
+	/// closed the one gap this used to have at this grain: a component mixing
+	/// <c>not_applicable</c> with only <c>execution_error</c> findings was previously
+	/// indistinguishable from a genuine all-N/A component (both looked like
+	/// <c>not_applicable_count &gt; 0</c>, everything else zero) -- now that
+	/// <c>execution_error_count</c> is its own column, the SQL predicate below counts
+	/// it explicitly rather than relying on <c>not_applicable_count = 0</c>.
 	/// </summary>
 	public int EvaluatedZeroComponentCount { get; init; } = EvaluatedZeroComponentCount;
+
+	/// <summary>
+	/// Issue #1144: how many COMPONENTS in this bucket had EVERY finding map to
+	/// <see cref="ComponentFindingStatuses.ExecutionError"/> -- the run-rollup-visible
+	/// form of the same signal <see cref="ComponentResultRecord.ExecutionErrorCount"/>
+	/// carries per attempt. Summed across the bucket's latest-attempt rows, same
+	/// convention as every other count on this record.
+	/// </summary>
+	public int ExecutionErrorCount { get; init; } = ExecutionErrorCount;
 
 	/// <summary>True when AT LEAST ONE component in this bucket produced no verdict (see <see cref="EvaluatedZeroComponentCount"/>) -- the boolean form of the same per-component signal.</summary>
 	public bool EvaluatedZeroControls => EvaluatedZeroComponentCount > 0;

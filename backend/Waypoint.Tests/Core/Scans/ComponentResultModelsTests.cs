@@ -92,4 +92,39 @@ public sealed class ComponentResultModelsTests
 		Assert.True(row.EvaluatedZeroControls);
 		Assert.Equal(1, row.EvaluatedZeroComponentCount);
 	}
+
+	/// <summary>Issue #1144: <see cref="ComponentResultRecord.ExecutionErrorCount"/> sums exactly the findings mapped to <see cref="ComponentFindingStatuses.ExecutionError"/>, the same "count of this status among Findings" shape every other computed count on the record already follows.</summary>
+	[Fact]
+	public void ComponentResultRecord_ExecutionErrorCount_CountsOnlyExecutionErrorFindings()
+	{
+		ComponentResultRecord record = new(
+			RunId: Guid.NewGuid(), JobId: Guid.NewGuid(), ScanPlanItemId: Guid.NewGuid(), ComponentId: Guid.NewGuid(),
+			AttemptNumber: 1, Status: ComponentResultStatuses.Completed, Detail: null,
+			Findings:
+			[
+				new ComponentResultFinding("SV-1", null, null, ComponentFindingSeverities.CatI, ComponentFindingStatuses.ExecutionError, "invented error"),
+				new ComponentResultFinding("SV-2", null, null, ComponentFindingSeverities.CatII, ComponentFindingStatuses.ExecutionError, "invented error"),
+				new ComponentResultFinding("SV-3", null, null, ComponentFindingSeverities.CatIII, ComponentFindingStatuses.Passed, null),
+				new ComponentResultFinding("SV-4", null, null, ComponentFindingSeverities.CatI, ComponentFindingStatuses.Failed, "invented failure"),
+			],
+			Artifacts: []);
+
+		Assert.Equal(2, record.ExecutionErrorCount);
+		// Not folded into any other column -- an errored finding is not open, not passed.
+		Assert.Equal(1, record.CatIOpen);
+		Assert.Equal(0, record.PassedCount);
+	}
+
+	/// <summary>A component whose findings are ALL execution_error must still surface a non-zero rollup count -- issue #1144's core acceptance criterion, pinned at the model level.</summary>
+	[Fact]
+	public void RunResultRollupRow_AllExecutionErrorComponent_ExecutionErrorCountIsVisible()
+	{
+		RunResultRollupRow row = new(
+			Status: "completed", ComponentCount: 1, CatIOpen: 0, CatIIOpen: 0, CatIIIOpen: 0,
+			PassedCount: 0, NotApplicableCount: 0, NotReviewedCount: 0, SkippedCount: 0,
+			EvaluatedZeroComponentCount: 1, ExecutionErrorCount: 5);
+
+		Assert.Equal(5, row.ExecutionErrorCount);
+		Assert.True(row.EvaluatedZeroControls);
+	}
 }
