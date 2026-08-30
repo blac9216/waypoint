@@ -37,7 +37,18 @@ For a title containing a comma, or one with meaningful leading/trailing whitespa
 pass `--milestone <title>` instead (repeatable, one exact and untrimmed title per
 flag). `--milestones` and `--milestone` combine into one selection. If any selection
 is requested (either flag), a requested name that matches no open milestone is
-reported on stderr; matching zero milestones in total is an error.
+reported on stderr; matching zero milestones in total is an error. An empty
+`--milestones ""` or `--milestone ""` value is rejected outright — it can never mean
+"select every open milestone".
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `2` | Argument error — an unrecognized flag, or an empty `--milestones`/`--milestone` value. |
+| `3` | A `--milestones`/`--milestone` selection was requested but matched zero open milestones. |
+| `4` | `--parallelism` was given a value that is not a positive number (non-numeric, zero, or negative). |
+| `5` | A `blocked_by` cycle was detected while computing a milestone's critical path (jq's own error exit surfaces here). |
 
 ## Flags
 
