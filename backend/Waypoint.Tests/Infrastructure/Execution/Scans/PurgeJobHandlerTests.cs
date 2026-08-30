@@ -142,7 +142,22 @@ public sealed class PurgeJobHandlerTests : IDisposable
 		Assert.False(File.Exists(ScanArtifactPaths.Ckl(_artifactRoot, scanJobId)));
 		Assert.Equal(1, purges.ReportCount);
 		Assert.True(purges.LastSucceeded);
-		Assert.Equal(3, purges.LastArtifactsDeleted);
+		Assert.Equal(ScanArtifactPaths.FilesPerJob, purges.LastArtifactsDeleted);
+	}
+
+	/// <summary>
+	/// Issue #1312: <see cref="PurgeJobHandler"/> iterates <see cref="ScanArtifactPaths.AllForJob"/>
+	/// directly (see the handler's per-job-id loop) rather than a hand-copied path
+	/// array, so <see cref="ScanArtifactPaths.FilesPerJob"/> -- itself derived from
+	/// <c>AllForJob</c>'s length, not a literal -- cannot silently desync from the set
+	/// the handler actually deletes. Adding a fourth path kind to <c>AllForJob</c>
+	/// changes both sides at once; this guard is structural, not a duplicated literal.
+	/// </summary>
+	[Fact]
+	public void FilesPerJob_MatchesAllForJobLength_TheExactSetPurgeJobHandlerDeletes()
+	{
+		string[] allForJob = ScanArtifactPaths.AllForJob(_artifactRoot, Guid.NewGuid());
+		Assert.Equal(allForJob.Length, ScanArtifactPaths.FilesPerJob);
 	}
 
 	/// <summary>
@@ -208,7 +223,7 @@ public sealed class PurgeJobHandlerTests : IDisposable
 
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
 		Assert.True(purges.LastSucceeded);
-		Assert.Equal(3, purges.LastArtifactsDeleted); // deletion is "present and removed OR already absent" -- all three count as handled.
+		Assert.Equal(ScanArtifactPaths.FilesPerJob, purges.LastArtifactsDeleted); // deletion is "present and removed OR already absent" -- all count as handled.
 	}
 
 	[Fact]

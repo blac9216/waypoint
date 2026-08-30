@@ -28,16 +28,17 @@ namespace Waypoint.Core.Scans;
 public static class ScanArtifactPaths
 {
 	/// <summary>
-	/// Issue #1240: the fixed number of on-disk paths (<see cref="RawHdf"/>,
-	/// <see cref="AttestedHdf"/>, <see cref="Ckl"/>) this convention names per scan
-	/// job, regardless of which ones actually exist on disk -- <c>PurgeJobHandler</c>
-	/// attempts all three per job id (a missing file is a tolerated no-op, not a
-	/// skip), so this is the single source of truth for converting a scan-job count
-	/// into the artifact-**file** count the purge lifecycle reports, letting
+	/// Issue #1240 / #1312: the fixed number of on-disk paths this convention names
+	/// per scan job, regardless of which ones actually exist on disk -- derived from
+	/// <see cref="AllForJob"/>'s own length rather than hand-copied, so it cannot
+	/// silently desync from the set <c>PurgeJobHandler</c> actually enumerates and
+	/// deletes (a missing file there is a tolerated no-op, not a skip). This is the
+	/// single source of truth for converting a scan-job count into the
+	/// artifact-**file** count the purge lifecycle reports, letting
 	/// <c>RunPurgeService</c> compute the same unit at enqueue time that the handler
-	/// enumerates and deletes.
+	/// consumes.
 	/// </summary>
-	public const int FilesPerJob = 3;
+	public static readonly int FilesPerJob = AllForJob(string.Empty, Guid.Empty).Length;
 
 	/// <summary>Raw (pre-attest) HDF report path for a job.</summary>
 	public static string RawHdf(string artifactStorePath, Guid jobId) =>
@@ -50,6 +51,20 @@ public static class ScanArtifactPaths
 	/// <summary>CKL checklist path for a job (only exists once the convert stage has run).</summary>
 	public static string Ckl(string artifactStorePath, Guid jobId) =>
 		Path.Combine(artifactStorePath, $"{jobId:N}.ckl");
+
+	/// <summary>
+	/// Issue #1312: every on-disk artifact path this convention names for one job, in
+	/// the exact set <c>PurgeJobHandler</c> iterates to delete them -- the single array
+	/// both that handler and <see cref="FilesPerJob"/> are derived from, so a fourth
+	/// path kind added here changes both by construction instead of requiring a
+	/// hand-copied constant bump.
+	/// </summary>
+	public static string[] AllForJob(string artifactStorePath, Guid jobId) =>
+	[
+		RawHdf(artifactStorePath, jobId),
+		AttestedHdf(artifactStorePath, jobId),
+		Ckl(artifactStorePath, jobId),
+	];
 
 	/// <summary>
 	/// The HDF this job's convert stage actually consumed and the "best available" HDF for

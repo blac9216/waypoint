@@ -810,9 +810,10 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	/// and returns the stub CKL's body. The stub <c>Invoke-WaypointConvert</c> echoes
 	/// <c>hostname=/fqdn=/ip=/mac=</c> exactly so the C# half -- which is what derives
 	/// per-target asset identity -- can be asserted end to end rather than only at the
-	/// PowerShell argument-string layer.
+	/// PowerShell argument-string layer. Issue #1285: also returns the job id so a
+	/// caller can additionally inspect that job's <c>job.log</c> events.
 	/// </summary>
-	private async Task<string> RunScanAndReadStubCklAsync(string caseTag, string targetName, string connectionHost)
+	private async Task<(string Ckl, Guid JobId)> RunScanAndReadStubCklAsync(string caseTag, string targetName, string connectionHost)
 	{
 		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
 		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
@@ -863,7 +864,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
 		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
 		Assert.True(File.Exists(cklPath), $"expected a CKL at '{cklPath}'.");
-		return await File.ReadAllTextAsync(cklPath);
+		return (await File.ReadAllTextAsync(cklPath), jobIds[0]);
 	}
 
 	/// <summary>
@@ -881,7 +882,7 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		const string targetName = "invented-vcsa-fqdn-target";
 		const string connectionHost = "vcsa-fqdn-01.example.internal";
 
-		string ckl = await RunScanAndReadStubCklAsync("assetfqdn", targetName, connectionHost);
+		(string ckl, _) = await RunScanAndReadStubCklAsync("assetfqdn", targetName, connectionHost);
 
 		Assert.Contains($"hostname={targetName}", ckl, StringComparison.Ordinal);
 		Assert.Contains($"fqdn={connectionHost}", ckl, StringComparison.Ordinal);
@@ -902,12 +903,49 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		const string targetName = "invented-vcsa-ip-target";
 		const string connectionHost = "198.51.100.10";
 
-		string ckl = await RunScanAndReadStubCklAsync("assetip", targetName, connectionHost);
+		(string ckl, _) = await RunScanAndReadStubCklAsync("assetip", targetName, connectionHost);
 
 		Assert.Contains($"hostname={targetName}", ckl, StringComparison.Ordinal);
 		Assert.Contains($"ip={connectionHost}", ckl, StringComparison.Ordinal);
 		Assert.Contains("fqdn= ", ckl, StringComparison.Ordinal);
 		Assert.Contains("mac= ", ckl, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1285, the third <c>AddCklAssetIdentityAsync</c> branch (PR #1224's WARN-
+	/// and-omit): a target name outside <see cref="CklAssetIdentity"/>'s allow-list --
+	/// here one carrying a literal double quote, the exact round-1 injection
+	/// character -- is never added to the convert stage's <c>parameters</c>, so the
+	/// stub's echoed CKL shows an empty <c>hostname=</c> rather than the rejected text,
+	/// and a <c>job.log</c> WARN names the field ("Hostname") without ever repeating the
+	/// value. <c>connectionHost</c> stays an ordinary FQDN throughout as a passthrough
+	/// control: only the field CklAssetIdentity actually rejects is omitted, proving the
+	/// drop is value-specific rather than the whole convert-stage identity going dark.
+	/// </summary>
+	[Fact]
+	public async Task ScanJob_TargetNameFailsCklAssetIdentity_OmitsHostnameAndWarnsFieldOnly_NeverTheValue()
+	{
+		const string targetName = "invented-vcsa-quote-target\""; // rejected: literal '"' is round-1's injection character.
+		const string connectionHost = "vcsa-fqdn-warn-01.example.internal"; // passthrough control: still stamped.
+
+		(string ckl, Guid jobId) = await RunScanAndReadStubCklAsync("assetwarn", targetName, connectionHost);
+
+		Assert.Contains("hostname= ", ckl, StringComparison.Ordinal);
+		Assert.DoesNotContain(targetName, ckl, StringComparison.Ordinal);
+		Assert.Contains($"fqdn={connectionHost}", ckl, StringComparison.Ordinal);
+		Assert.Contains("ip= ", ckl, StringComparison.Ordinal);
+		Assert.Contains("mac= ", ckl, StringComparison.Ordinal);
+
+		bool sawFieldWarn = await JobLogContainsSeverityAndFragmentAsync(jobId, "Warning", "Hostname");
+		Assert.True(sawFieldWarn, "expected a job.log WARN naming the rejected field 'Hostname'.");
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand leaked = new(
+			"SELECT count(*) FROM job_events WHERE job_id = $1 AND payload::text LIKE '%' || $2 || '%'", connection);
+		leaked.Parameters.AddWithValue(jobId);
+		leaked.Parameters.AddWithValue(targetName);
+		Assert.Equal(0L, (long)(await leaked.ExecuteScalarAsync())!);
 	}
 
 	/// <summary>

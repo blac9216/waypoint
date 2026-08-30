@@ -141,12 +141,7 @@ public sealed partial class PurgeJobHandler : IJobHandler
 				continue;
 			}
 
-			foreach (string path in new[]
-			{
-				ScanArtifactPaths.RawHdf(artifactRoot, jobId),
-				ScanArtifactPaths.AttestedHdf(artifactRoot, jobId),
-				ScanArtifactPaths.Ckl(artifactRoot, jobId),
-			})
+			foreach (string path in ScanArtifactPaths.AllForJob(artifactRoot, jobId))
 			{
 				(bool ok, string? error) = TryDeleteIfPresent(path, artifactRoot);
 				if (ok)
