@@ -921,17 +921,30 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	/// value. <c>connectionHost</c> stays an ordinary FQDN throughout as a passthrough
 	/// control: only the field CklAssetIdentity actually rejects is omitted, proving the
 	/// drop is value-specific rather than the whole convert-stage identity going dark.
+	/// <para>
+	/// PR #1320 round-1 finding 1: the leak guard searches for <c>LeakToken</c>, the
+	/// distinctive prefix of the rejected name, NOT the whole name. <c>job_events.payload</c>
+	/// is <c>JSONB</c>, so <c>payload::text</c> renders a literal <c>"</c> escaped as
+	/// <c>\"</c> and a LIKE pattern ending in the bare quote could never match even when
+	/// the value IS present -- an inert assertion. The token is letters/digits/<c>-</c>
+	/// only, so it survives JSON escaping byte-for-byte in both the rendered text and any
+	/// decoded value, and both sweeps below bite. Proven by mutation: appending the value
+	/// to <c>AddCklAssetIdentityAsync</c>'s WARN line turns both assertions red.
+	/// </para>
 	/// </summary>
 	[Fact]
 	public async Task ScanJob_TargetNameFailsCklAssetIdentity_OmitsHostnameAndWarnsFieldOnly_NeverTheValue()
 	{
-		const string targetName = "invented-vcsa-quote-target\""; // rejected: literal '"' is round-1's injection character.
+		// Escape-proof: no JSON-escapable character, so it renders identically inside a
+		// JSONB payload's text and inside any decoded string value.
+		const string leakToken = "invented-leak-token-7f3a";
+		const string targetName = leakToken + "\""; // rejected: literal '"' is round-1's injection character.
 		const string connectionHost = "vcsa-fqdn-warn-01.example.internal"; // passthrough control: still stamped.
 
 		(string ckl, Guid jobId) = await RunScanAndReadStubCklAsync("assetwarn", targetName, connectionHost);
 
 		Assert.Contains("hostname= ", ckl, StringComparison.Ordinal);
-		Assert.DoesNotContain(targetName, ckl, StringComparison.Ordinal);
+		Assert.DoesNotContain(leakToken, ckl, StringComparison.Ordinal);
 		Assert.Contains($"fqdn={connectionHost}", ckl, StringComparison.Ordinal);
 		Assert.Contains("ip= ", ckl, StringComparison.Ordinal);
 		Assert.Contains("mac= ", ckl, StringComparison.Ordinal);
@@ -941,11 +954,34 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
-		await using NpgsqlCommand leaked = new(
+
+		// Sweep 1 -- the whole rendered payload of EVERY row for this job.
+		await using NpgsqlCommand rendered = new(
 			"SELECT count(*) FROM job_events WHERE job_id = $1 AND payload::text LIKE '%' || $2 || '%'", connection);
-		leaked.Parameters.AddWithValue(jobId);
-		leaked.Parameters.AddWithValue(targetName);
-		Assert.Equal(0L, (long)(await leaked.ExecuteScalarAsync())!);
+		rendered.Parameters.AddWithValue(jobId);
+		rendered.Parameters.AddWithValue(leakToken);
+		Assert.Equal(0L, (long)(await rendered.ExecuteScalarAsync())!);
+
+		// Sweep 2 -- the DECODED value of every top-level key of every row, so the guard
+		// does not depend on JSONB's text rendering at all.
+		await using NpgsqlCommand decoded = new(
+			"""
+			SELECT count(*) FROM job_events e
+			WHERE e.job_id = $1
+			  AND jsonb_typeof(e.payload) = 'object'
+			  AND EXISTS (SELECT 1 FROM jsonb_each_text(e.payload) kv WHERE kv.value LIKE '%' || $2 || '%')
+			""", connection);
+		decoded.Parameters.AddWithValue(jobId);
+		decoded.Parameters.AddWithValue(leakToken);
+		Assert.Equal(0L, (long)(await decoded.ExecuteScalarAsync())!);
+
+		// Guard the guard: the token must be findable when it IS present, so a green
+		// result above means "absent", never "the pattern cannot match".
+		await using NpgsqlCommand selfCheck = new(
+			"SELECT (jsonb_build_object('line', 'omitted: ' || $1::text)::text LIKE '%' || $2 || '%')", connection);
+		selfCheck.Parameters.AddWithValue(targetName);
+		selfCheck.Parameters.AddWithValue(leakToken);
+		Assert.True((bool)(await selfCheck.ExecuteScalarAsync())!, "the leak pattern must match a payload that really carries the value.");
 	}
 
 	/// <summary>
