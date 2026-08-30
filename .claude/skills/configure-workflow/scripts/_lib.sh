@@ -1,6 +1,14 @@
 # shared helpers — sourced by the other scripts
 # shellcheck shell=bash
 set -euo pipefail
+# Enforce the bash >= 4 floor these scripts rely on (case-folding parameter
+# expansion, e.g. ${var,,}, in grant.sh) with a named failure instead of a bare
+# parse error on bash 3.2 (still the system /bin/bash on macOS) (#1338). The
+# check itself is bash-3-safe: BASH_VERSINFO exists since bash 2.
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  printf '%s\n' "configure-workflow scripts require bash >= 4 (found: ${BASH_VERSION:-unknown}); on macOS install a newer bash (e.g. 'brew install bash') and invoke scripts with that binary" >&2
+  exit 3
+fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2034 # consumed by scripts that source this file (rulesets.sh, project.sh, …), not here
 MANIFESTS="$HERE/../manifests"
