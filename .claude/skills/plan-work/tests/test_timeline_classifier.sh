@@ -103,10 +103,12 @@ fi
 shift
 endpoint=""
 jq_expr=""
+method="GET"
 while [ $# -gt 0 ]; do
   case "$1" in
     --paginate) shift ;;
     --jq) jq_expr="$2"; shift 2 ;;
+    -X|--method) method="$2"; shift 2 ;;
     *) endpoint="$1"; shift ;;
   esac
 done
@@ -116,8 +118,17 @@ case "$endpoint" in
   repos/*/milestones*)                      raw="$MOCK_GH_FIXTURES/milestones.json" ;;
   *) echo "mock gh: unknown endpoint: $endpoint" >&2; exit 1 ;;
 esac
+if [ "$method" != "GET" ]; then
+  echo "mock gh: refusing non-GET method ($method) on $endpoint" >&2
+  exit 1
+fi
 if [ -n "$jq_expr" ]; then
-  jq -c "$jq_expr" "$raw"
+  # -c -r together: -c keeps multi-line object/array results on one line
+  # each (so a downstream `jq -s` sees one JSON doc per line, matching how
+  # gh api --jq actually emits results), and -r additionally strips quotes
+  # from scalar string results, matching `gh api --jq`'s raw-output
+  # behavior for e.g. `.foo//empty`.
+  jq -c -r "$jq_expr" "$raw"
 else
   cat "$raw"
 fi
@@ -127,11 +138,31 @@ chmod +x "$BIN/gh"
 # ---------------------------------------------------------------------------
 # Run the classifier under test against the fixture.
 # ---------------------------------------------------------------------------
+# run_timeline captures timeline.sh's stdout/stderr into logs under $WORK
+# (deleted by the `cleanup` EXIT trap above). If timeline.sh crashes, the
+# uncaught non-zero return would, under this script's own `set -e`, exit
+# test_timeline_classifier.sh immediately — the EXIT trap fires and the logs
+# are gone before anything is printed (see #1350). Capture the exit status
+# with `set +e`/`set -e` around the call and dump both logs on a non-zero
+# exit, before returning control to the (still `set -e`) caller, so the
+# diagnostic is emitted before the trap-triggered deletion rather than
+# racing it.
 run_timeline(){
-  local out_dir="$1"
+  local out_dir="$1" rc=0
+  set +e
   MOCK_GH_FIXTURES="$FIXTURES" PATH="$BIN:$PATH" \
     "$TIMELINE_SH" --repo "$REPO" --milestones "Test Milestone" --out "$out_dir" \
     > "$out_dir.stdout.log" 2> "$out_dir.stderr.log"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    echo "run_timeline: $TIMELINE_SH exited $rc" >&2
+    echo "--- stdout ($out_dir.stdout.log) ---" >&2
+    cat "$out_dir.stdout.log" >&2 || true
+    echo "--- stderr ($out_dir.stderr.log) ---" >&2
+    cat "$out_dir.stderr.log" >&2 || true
+    return "$rc"
+  fi
 }
 
 mkdir -p "$OUT/run"
