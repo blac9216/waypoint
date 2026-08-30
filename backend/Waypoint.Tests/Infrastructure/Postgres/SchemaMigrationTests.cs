@@ -101,6 +101,8 @@ public sealed class SchemaMigrationTests
 		"run_retention_holds",
 		"retention_policy",
 		"esx_acquisition_subscriptions",
+		"download_retention_policies",
+		"download_retained_content_state",
 		"schema_migrations"
 	];
 
@@ -348,11 +350,26 @@ public sealed class SchemaMigrationTests
 	/// <c>JobQueueRepository.RunSummaryProjectionSql</c> needs none either -- no runner
 	/// calls <c>GetRunAsync</c>/<c>ListRunsAsync</c>/<c>ListRunHistoryAsync</c> in
 	/// production (issue #1303). The CHECK widening runs BEFORE the backfill, pinned by
-	/// <see cref="Migration0081_PreExistingZeroVerdictCompletedRow_IsBackfilledAfterTheCheckWidens"/>.
-	/// Migration 0099 (issue #1479, pre-assigned slot -- deliberate gap from 0081, not a
+	/// <see cref="Migration0081_PreExistingZeroVerdictCompletedRow_IsBackfilledAfterTheCheckWidens"/> --
+	/// 0099 (issue #1479, pre-assigned slot -- deliberate gap from 0081, not a
 	/// bug) reserves the <c>binaries-download</c> run/job type in both
 	/// <c>jobs_job_type_check</c> and <c>runs_run_type_check</c>; no new tables, so no
-	/// new runner grants.
+	/// new runner grants --
+	/// 0107 (issue #1406, epic #1182 "Subscriptions, retention & scheduling", split
+	/// from design record #1047, approved design #16 section 2; slot pre-assigned
+	/// 2026-08-30, gap 0082-0106 reserved by concurrently in-flight sibling issues):
+	/// adds <c>download_retention_policies</c> (per-scope grace-window/dial-default
+	/// retention configuration, seeded with a singleton 'default' scope row) and
+	/// <c>download_retained_content_state</c> (per-artifact tracked/grace/pinned/
+	/// pending-purge/purged lifecycle state + pin metadata, FK to
+	/// <c>depot_artifacts</c>) -- the retention DOMAIN MODEL only, no sweep job
+	/// (#1436), manual-download dial (#1440), or API surface (#1453). Distinct
+	/// bounded context from the unrelated compliance-domain <c>retention_policy</c>
+	/// (0078)/<c>run_retention_holds</c> (0075) -- table names prefixed
+	/// <c>download_</c> to disambiguate. No new runner grants (API-process-owned,
+	/// same posture as 0075/0078); state-transition legality is enforced in
+	/// <c>Waypoint.Core.Downloads.RetainedContentStateTransitions</c>, not a DB
+	/// trigger --
 	/// 0117 (pre-assigned slot, issue #1470) adds esx_acquisition_subscriptions --
 	/// named ESX acquisition presets selecting a subset of the
 	/// lcm.esx.supported.host.platforms vendor vocabulary, TEXT[] selection validated
@@ -377,7 +394,7 @@ public sealed class SchemaMigrationTests
 	/// (SELECT/INSERT/UPDATE, no DELETE) mirroring migration 0025's existing
 	/// <c>depot_artifacts</c> grant to the same role.
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 83;
+	private const int ExpectedMigrationCount = 84;
 
 	private readonly PostgresFixture _fixture;
 
