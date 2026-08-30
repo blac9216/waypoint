@@ -21,7 +21,7 @@ nothing and files nothing — it hands plan-work a gap report.
 | a design decision needs writing down; plan-work/interrogate call for an ADR, rationale entry, C4 or glossary change | **author** | [references/authoring.md](references/authoring.md) |
 | "audit the docs", "doc drift", "normalise the ADRs", morning cleanup | **audit** | [references/audit.md](references/audit.md) |
 
-Every mode starts the same way: read `docs/process/documentation.md` if it exists — it is
+Every mode starts the same way: read `docs/doc-manifest.md` if it exists — it is
 the repository's adopted shape (which doc kinds exist, rationale areas, ADR range, Diátaxis
 directories) and overrides the defaults in the standard. If it does not exist, the
 repository has not adopted the framework: **adopt** is the only valid mode, and any other
@@ -72,7 +72,7 @@ design-docs audit ──gap report (scratch)──▶ plan-work ─────�
 ```
 
 The superpowers `brainstorming` architectural path (committed specs → writing-plans) is
-**not** used in repositories that adopt this framework; `documentation.md` says so, and
+**not** used in repositories that adopt this framework; `doc-manifest.md` says so, and
 its useful ideas — the spike/bounded/architectural ratchet, "design it twice", the
 three-part ADR trigger test — live in [references/authoring.md](references/authoring.md).
 

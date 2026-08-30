@@ -1,7 +1,7 @@
 # The design-docs standard
 
-Normative. A repository adopts it by writing `docs/process/documentation.md`
-([../templates/documentation.md](../templates/documentation.md)), which may narrow but not
+Normative. A repository adopts it by writing `docs/doc-manifest.md`
+([../templates/doc-manifest.md](../templates/doc-manifest.md)), which may narrow but not
 contradict what is here. Each section states the rule, then why, then what the audit checks.
 
 Contents: [Design set](#design-set) · [ADRs](#adrs) · [ADR index](#adr-index) ·
@@ -13,7 +13,7 @@ Contents: [Design set](#design-set) · [ADRs](#adrs) · [ADR index](#adr-index) 
 
 The documents this standard governs: ADRs, rationale files, the architecture doc, the
 glossary, the domain model, the security model, the API contract, the roadmap — whatever
-`documentation.md` lists under *design set*. Process docs (`docs/process/`) belong to
+`doc-manifest.md` lists under *design set*. Process docs (`docs/process/`) belong to
 configure-workflow; `AGENTS.md` and testing docs are outside the set but are audited for
 pointer validity because they link into it.
 
@@ -111,7 +111,7 @@ ADR or PR numbers in code. A warning that needs a why ends with a pointer:
 ```
 
 `docs/rationale/<area>.md` — one file per code area (`deploy`, `backend`, `frontend`,
-`ci`…), listed in `documentation.md`. One `##` section per source file or small directory;
+`ci`…), listed in `doc-manifest.md`. One `##` section per source file or small directory;
 one `###` entry per slug. **Slugs are unique across the whole file** (GitHub anchors are
 file-global; a duplicate silently becomes `#slug-1` and the pointer resolves to the wrong
 entry while looking correct in review) — prefix with the service or file
@@ -170,8 +170,9 @@ glossary; glossary entries contain no code paths or type names.
 `explanation/` — plus `adr/`, `rationale/`, `process/`, `images/`. Every markdown file
 under `docs/` (outside `process/`) sits in one of the four and carries `Kind: <kind>` on
 the line after its title. ADRs and rationale are explanation by construction and carry no
-marker. `docs/README.md` indexes by kind (generated tables are welcome; hand-written is
-acceptable because the audit checks it).
+marker. `docs/README.md` and `docs/doc-manifest.md` are exempt, sitting at the docs root
+by design rather than in a kind directory; `docs/README.md` indexes by kind (generated
+tables are welcome; hand-written is acceptable because the audit checks it).
 
 Assignment guide: architecture, domain model, security model, roadmap → explanation;
 API contract, CLI/config references, label catalogues → reference; deploy/upgrade/bring-up
@@ -190,4 +191,4 @@ Design specs, interrogation records, plans, research findings, audit gap reports
 live on GitHub objects (epic threads, issues) or in scratch. The repository holds the
 outcome — an ADR, a rationale entry, an architecture-doc change — never the deliberation.
 An agent that auto-loads a skill wanting `docs/superpowers/specs/` or `docs/design/`
-declines that path; `documentation.md` records the ruling so the decline has a citation.
+declines that path; `doc-manifest.md` records the ruling so the decline has a citation.

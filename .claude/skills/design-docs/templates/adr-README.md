@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Numbered records of the decisions that shape this project, in the MADR frame defined by
-the design-docs standard (`docs/process/documentation.md` records the adopted shape).
+the design-docs standard (`docs/doc-manifest.md` records the adopted shape).
 
 **Read the index first.** Open only the ADRs whose status is Accepted and whose subject
 you need; superseded ADRs are history, cited only to explain a change.

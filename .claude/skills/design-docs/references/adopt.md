@@ -41,7 +41,7 @@ Create only what is missing; never overwrite a file that exists.
 
 | File | From |
 |---|---|
-| `docs/process/documentation.md` | [../templates/documentation.md](../templates/documentation.md), filled with the answers above |
+| `docs/doc-manifest.md` | [../templates/doc-manifest.md](../templates/doc-manifest.md), filled with the answers above |
 | `docs/adr/README.md` | [../templates/adr-README.md](../templates/adr-README.md); then `scripts/adr-index.sh --write` |
 | `docs/rationale/<area>.md` per declared area | [../templates/rationale-area.md](../templates/rationale-area.md) |
 | `CONTEXT.md` | [../templates/CONTEXT.md](../templates/CONTEXT.md), seeded from the domain-model doc's terms |
@@ -66,4 +66,4 @@ copy exists.
 Run `scripts/audit.sh --out <scratch>` on the adoption branch. The gap report it produces
 is the remediation backlog; hand it to plan-work ("plan the docs normalisation from
 <scratch path>") and stop. Adoption is complete when the PR is merged and
-`documentation.md` exists; remediation is its own story.
+`doc-manifest.md` exists; remediation is its own story.

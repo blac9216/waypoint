@@ -20,9 +20,9 @@ instead of recording findings.
 This runs `check-pointers.sh`, `adr-index.sh --check`, and the structural checks
 (MADR sections, header blocks, `Kind:` markers vs directories, README index coverage,
 CONTEXT.md uniqueness and domain-model term coverage, C4 headings and mermaid presence)
-against the shape in `docs/process/documentation.md`, and writes the gap report scaffold
+against the shape in `docs/doc-manifest.md`, and writes the gap report scaffold
 ([../templates/gap-report.md](../templates/gap-report.md)) with the Tier 1 findings filled
-and the Tier 2 tasks listed. If `documentation.md` is missing it stops: audit a repository
+and the Tier 2 tasks listed. If `doc-manifest.md` is missing it stops: audit a repository
 that has not adopted, and every finding is "not adopted".
 
 ## 2. Tier 2 — cross-reference (agent, cheap model is fine)
@@ -42,7 +42,7 @@ not judgement calls, so a small model with grep does them well:
   (`Amended-by:`) is still authority for everything outside the amended part — check the
   cited claim, not the number.
 - **Glossary use** — rejected synonyms from `CONTEXT.md` appearing in the design set.
-- **Standard-version gap** — anything `documentation.md` declares that the standard now
+- **Standard-version gap** — anything `doc-manifest.md` declares that the standard now
   requires differently (adopt mode's refresh case).
 
 Do not do semantic doc↔code review ("does architecture.md describe what the code does?")
