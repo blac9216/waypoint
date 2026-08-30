@@ -16,8 +16,10 @@ confirms when anything is ambiguous.
    `1.2.3`, or a non-ASCII digit such as `٢`), or that is a well-formed number greater
    than the `MAX_HOURS` sanity ceiling (`100000`), is treated like a missing estimate —
    it falls back to that issue's size default (or the `M` default if it has no
-   size) — and is reported on stderr naming the issue number and the offending
-   text, wording the fallback to match which one actually applied (`"falling
+   size) — and is reported on stderr naming the issue number, the offending
+   text, and which of the two distinct causes applies (`"an unparseable est.
+   cycle value"` vs. `"an est. cycle value … over the MAX_HOURS-hour
+   ceiling"`), wording the fallback to match which one actually applied (`"falling
    back to its size default"` when the issue has a `Size:` label, `"falling
    back to the M default (no size)"` when it doesn't); it never aborts the run. The
    ceiling exists because jq 1.6 SIGABRTs (undocumented exit `134`) when a
@@ -91,7 +93,7 @@ issues and epics, so its line count exceeds the map's totals); `placement.json` 
 |---|---|
 | `2` | Argument error — an unrecognized flag, a value-taking flag with no following value, an empty `--milestones`/`--milestone` value, or a `--defaults` value that is empty/whitespace-only or contains a part that isn't `S=<n>`, `M=<n>`, or `L=<n>` with `n` an ASCII decimal number greater than zero and no greater than the `MAX_HOURS` ceiling (`100000`) (an empty part, a trailing comma, or a non-ASCII digit such as `٢` is rejected too). |
 | `3` | A `--milestones`/`--milestone` selection was requested but matched zero open milestones. |
-| `4` | `--parallelism` was given a value that is not a positive decimal number matching `^[[:digit:]]+([.][[:digit:]]+)?$`, no greater than the `MAX_HOURS` ceiling (`100000`) (ASCII digits only, so non-ASCII digits such as `٢` are rejected too; `0`, `-1`, `abc`, `.5`, `1e2`, and leading/trailing whitespace are all rejected; `0.5` is accepted). A `parallelism.txt` file with the same defect falls back to the 1.5 default instead of erroring — see "parallelism source" above. |
+| `4` | `--parallelism` was given a value that is not a positive decimal number no greater than `100000` (the same shared sanity ceiling as `MAX_HOURS`, applied here to a parallelism factor rather than hours), matching `^[[:digit:]]+([.][[:digit:]]+)?$` (ASCII digits only, so non-ASCII digits such as `٢` are rejected too; `0`, `-1`, `abc`, `.5`, `1e2`, and leading/trailing whitespace are all rejected; `0.5` is accepted). A `parallelism.txt` file with the same defect falls back to the 1.5 default instead of erroring — see "parallelism source" above. |
 | `5` | A `blocked_by` cycle was detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is the only cause reachable from the script's own flag values — a `--defaults` value can no longer reach exit 5, since it is either rejected with exit 2 or completed from the built-in table, and a malformed or over-`MAX_HOURS` in-body `est. cycle` value can't either (both fall back instead, see above) — but `5` is jq's generic error exit, so an unexpected jq failure would surface as `5` as well. Exit `134` (jq SIGABRT) is not reachable from any input this script accepts — see #1269. |
 
 ## Flags

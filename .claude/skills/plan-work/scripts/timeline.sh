@@ -3,10 +3,11 @@
 # Usage: timeline.sh [--repo owner/name] [--milestones "A,B"] [--milestone <title>]... [--parallelism 1.3] [--history-dir <dir>] [--defaults S=2,M=6,L=16] [--out <dir>]
 # Reads each open milestone's open issues: the `## Estimate` section (Size, est. cycle hours if given) and `blocked_by` links (REST).
 # An `est. cycle` value in an issue body that isn't a plain ASCII decimal number (e.g. "1.2.3",
-# or a non-ASCII digit such as "٢") is treated like a missing estimate — it falls back to the
-# issue's size default (or the M default if it has none) — and is reported on stderr naming the
-# issue number and the offending text, wording the fallback truthfully for each case; it never
-# aborts the run (see #1271).
+# or a non-ASCII digit such as "٢"), or that is one but exceeds the MAX_HOURS ceiling, is treated
+# like a missing estimate — it falls back to the issue's size default (or the M default if it has
+# none) — and is reported on stderr naming the issue number, the offending text, and which of the
+# two causes applies ("unparseable" vs. "over the MAX_HOURS-hour ceiling"); it never aborts the
+# run (see #1271, #1269, #1328).
 # --milestones takes an exact, comma-split list of milestone titles (no substring matching); each name is
 # trimmed of leading/trailing whitespace, so a title with leading/trailing spaces can never be named this way.
 # --milestone (singular, repeatable) takes one exact, untrimmed title per flag — use it for a title
@@ -24,8 +25,9 @@
 # S=<n>/M=<n>/L=<n> with n an ASCII decimal number greater than zero and no greater than MAX_HOURS
 # (100000), so a non-ASCII digit such as "٢" is an argument error too); 3 = a
 # --milestones/--milestone selection was requested but matched zero open milestones; 4 = --parallelism
-# was given a value that is not a positive decimal number matching ^[[:digit:]]+([.][[:digit:]]+)?$, no
-# greater than MAX_HOURS (100000) (ASCII digits only, so non-ASCII digits such as "٢" are rejected too;
+# was given a value that is not a positive decimal number no greater than 100000 (the same shared
+# sanity ceiling as MAX_HOURS, applied here to a parallelism factor rather than hours), matching
+# ^[[:digit:]]+([.][[:digit:]]+)?$ (ASCII digits only, so non-ASCII digits such as "٢" are rejected too;
 # "0", "-1", "abc", ".5", "1e2" and leading/trailing whitespace are all rejected); 5 = a blocked_by cycle
 # was detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is
 # the only cause reachable from this script's own flag values -- no --defaults value can produce it any
@@ -51,7 +53,7 @@ require_value(){ [ -n "$2" ] || { echo "timeline.sh: $1 requires a non-empty val
 is_positive_number(){ [[ "$1" =~ ^[[:digit:]]+([.][[:digit:]]+)?$ ]] && awk -v v="$1" -v max="$MAX_HOURS" 'BEGIN{exit !(v>0 && v<=max)}'; }
 require_positive_number(){
   if ! is_positive_number "$2"; then
-    echo "timeline.sh: $1 \"$2\" must be a positive decimal number matching ^[[:digit:]]+([.][[:digit:]]+)?\$, no greater than $MAX_HOURS" >&2
+    echo "timeline.sh: $1 \"$2\" must be a positive decimal number no greater than $MAX_HOURS, matching ^[[:digit:]]+([.][[:digit:]]+)?\$" >&2
     exit 4
   fi
 }
@@ -149,7 +151,8 @@ while IFS= read -r ms; do
     # jq's own bug can reach (not just a --defaults typo), and letting it through as "hours" makes
     # the later per-milestone projection stage SIGABRT at undocumented exit 134 -- see #1269. A
     # malformed (present but unparseable) OR over-the-ceiling estimate falls back exactly like a
-    # missing one, and is reported on stderr below with the issue number and the offending text.
+    # missing one, and is reported on stderr below with the issue number, the offending text, and
+    # which of the two distinct causes applies -- see #1328.
     rec=$(jq -c --argjson ms "$ms" --argjson blocked "$blocked" --arg S "$defS" --arg M "$defM" --arg L "$defL" --argjson maxHours "$MAX_HOURS" '
       ([.body|capture("## Estimate\\s*\\n(?<e>[^#]*)")]|.[0].e // "") as $est |
       ([$est|capture("Size: *(?<s>[SML])")]|.[0].s // null) as $size |
@@ -163,10 +166,19 @@ while IFS= read -r ms; do
     mal=$(jq -r '.malformed_estimate // empty' <<<"$rec")
     if [ -n "$mal" ]; then
       mal_size=$(jq -r '.size // empty' <<<"$rec")
-      if [ -n "$mal_size" ]; then
-        say "timeline: issue #$n has an unparseable or over-$MAX_HOURS-hour est. cycle value \"$mal\"; falling back to its size default"
+      # A malformed est. cycle value falls into exactly one of two causes: it never matched the
+      # ASCII decimal pattern at all ("unparseable"), or it matched but exceeds MAX_HOURS
+      # ("over-ceiling"); re-test it here (mirroring the jq pattern) purely to word the stderr
+      # note precisely -- $rec and issues.jsonl are unaffected, so their bytes don't change.
+      if [[ "$mal" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v v="$mal" -v max="$MAX_HOURS" 'BEGIN{exit !(v>max)}'; then
+        reason_phrase="an est. cycle value \"$mal\" over the $MAX_HOURS-hour ceiling"
       else
-        say "timeline: issue #$n has an unparseable or over-$MAX_HOURS-hour est. cycle value \"$mal\"; falling back to the M default (no size)"
+        reason_phrase="an unparseable est. cycle value \"$mal\""
+      fi
+      if [ -n "$mal_size" ]; then
+        say "timeline: issue #$n has $reason_phrase; falling back to its size default"
+      else
+        say "timeline: issue #$n has $reason_phrase; falling back to the M default (no size)"
       fi
     fi
     printf '%s\n' "$rec" >> "$OUT/issues.jsonl"
