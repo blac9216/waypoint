@@ -770,10 +770,11 @@ object scopeBody = new
 		DiscoveredComponent discoveredSibling = new(
 			CatalogComponentKey: "vcenter", VendorIdentity: "vcenter-1202", DisplayName: "vcsa-1202.example.internal",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: vcenterProfile!.ProductVersion.VersionKey);
-		(IReadOnlyList<DiscoveredComponent> linkedSibling, IReadOnlyList<string> siblingAmbiguities) =
+		(IReadOnlyList<DiscoveredComponent> linkedSibling,
+			IReadOnlyList<Waypoint.Infrastructure.Discovery.DiscoverJobHandler.CatalogLinkageIssue> siblingIssues) =
 			await Waypoint.Infrastructure.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync(
 				_catalog, [discoveredSibling], CancellationToken.None);
-		Assert.Empty(siblingAmbiguities);
+		Assert.Empty(siblingIssues);
 		Assert.NotNull(linkedSibling.Single().CatalogComponentId);
 		await _components.UpsertDiscoveredAsync(targetId, linkedSibling, CancellationToken.None);
 
