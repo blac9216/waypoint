@@ -11,10 +11,30 @@
 # --history-dir points at the directory history.sh wrote parallelism.txt into; without it (and without
 # --parallelism) the default --out convention is assumed, and falling back to 1.5 is reported on stderr.
 # A missing, empty, or non-numeric parallelism.txt falls back to 1.5 the same way.
+# Exit codes: 2 = argument error (unknown flag, or an empty --milestones/--milestone value); 3 = a
+# --milestones/--milestone selection was requested but matched zero open milestones; 4 = --parallelism
+# was given a value that is not a positive number; 5 = a blocked_by cycle was detected while computing
+# the critical path (jq's own error exit surfaces here).
 set -euo pipefail
 REPO=""; ONLY=""; PAR=""; HISTORY_DIR=""; DEF="S=2,M=6,L=16"; OUT="${TMPDIR:-/tmp}/plan-work-timeline"; HOURS_PER_DAY=8
 MILESTONE_ARGS=()
-while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --milestones) ONLY=$2; shift 2;; --milestone) MILESTONE_ARGS+=("$2"); shift 2;; --parallelism) PAR=$2; shift 2;; --history-dir) HISTORY_DIR=$2; shift 2;; --defaults) DEF=$2; shift 2;; --out) OUT=$2; shift 2;; *) echo "unknown arg $1" >&2; exit 2;; esac; done
+require_value(){ [ -n "$2" ] || { echo "timeline.sh: $1 requires a non-empty value" >&2; exit 2; }; }
+require_positive_number(){
+  if ! [[ "$2" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v v="$2" 'BEGIN{exit !(v>0)}'; then
+    echo "timeline.sh: $1 \"$2\" is not a positive number" >&2
+    exit 4
+  fi
+}
+while [ $# -gt 0 ]; do case $1 in
+  --repo) REPO=$2; shift 2;;
+  --milestones) require_value --milestones "$2"; ONLY=$2; shift 2;;
+  --milestone) require_value --milestone "$2"; MILESTONE_ARGS+=("$2"); shift 2;;
+  --parallelism) require_positive_number --parallelism "$2"; PAR=$2; shift 2;;
+  --history-dir) HISTORY_DIR=$2; shift 2;;
+  --defaults) DEF=$2; shift 2;;
+  --out) OUT=$2; shift 2;;
+  *) echo "unknown arg $1" >&2; exit 2;;
+esac; done
 [ -n "$REPO" ] || REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 mkdir -p "$OUT"; say(){ printf '%s\n' "$*" >&2; }
 ONLY_LIST=()
