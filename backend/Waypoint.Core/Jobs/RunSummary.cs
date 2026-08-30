@@ -48,4 +48,18 @@ public sealed record RunSummary(
 	/// </summary>
 	string? CredentialName = null,
 	string? CredentialType = null,
-	string? CredentialUsername = null);
+	string? CredentialUsername = null,
+	/// <summary>
+	/// Issue #1140: true when this run's coverage is not provably complete --
+	/// mirrors <c>RunsController.GetComponentResultsSummary</c>'s own three-way
+	/// predicate exactly (no recorded scan plan, a plan-time coverage omission, or
+	/// at least one component that evaluated zero controls), computed in bulk by
+	/// <c>JobQueueRepository.RunSummaryProjectionSql</c> so <see cref="GetRunAsync"/>-
+	/// style callers and the run list/history surfaces carry the same signal the
+	/// component-results summary endpoint already exposed (PR #1139) without a
+	/// second query per run. False for a non-scan run type (no scan plan is ever
+	/// recorded for those, so this is intentionally uninformative there -- callers
+	/// gate display on <see cref="RunType"/> the same way they already do for
+	/// other compliance-only fields).
+	/// </summary>
+	bool CoverageIncomplete = false);

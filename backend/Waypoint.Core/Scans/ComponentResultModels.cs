@@ -27,7 +27,22 @@ public static class ComponentResultStatuses
 	public const string ExecutionError = "execution_error";
 	public const string Skipped = "skipped";
 
-	public static readonly IReadOnlyList<string> All = [Completed, ExecutionError, Skipped];
+	/// <summary>
+	/// Issue #1140 (migration 0081): the attempt finished (the HDF parsed) but
+	/// evaluated ZERO controls -- zero passed/open findings, with at least one
+	/// <see cref="ComponentFindingStatuses.NotReviewed"/>/<see cref="ComponentFindingStatuses.Skipped"/>/
+	/// <see cref="ComponentFindingStatuses.ExecutionError"/> finding or none at all
+	/// (exactly <see cref="ComponentResultRecord.EvaluatedZeroControls"/>'s predicate,
+	/// the same one <c>IComponentResultRepository.GetRunRollupAsync</c>'s
+	/// <c>evaluated_zero_component_count</c> FILTER already used at read time --
+	/// this is that same signal, now recorded on the row itself at write time
+	/// instead of only inferred later). A genuinely all-<see cref="ComponentFindingStatuses.NotApplicable"/>
+	/// component is never reclassified here -- N/A is a determinate outcome, not a
+	/// failure to evaluate.
+	/// </summary>
+	public const string CompletedZeroControls = "completed_zero_controls";
+
+	public static readonly IReadOnlyList<string> All = [Completed, ExecutionError, Skipped, CompletedZeroControls];
 }
 
 /// <summary>
@@ -122,6 +137,40 @@ public sealed record ComponentResultRecord(
 	/// so a component whose controls ALL errored read as all-zero on the run rollup.
 	/// </summary>
 	public int ExecutionErrorCount => Findings.Count(f => f.Status == ComponentFindingStatuses.ExecutionError);
+
+	/// <summary>
+	/// Issue #1140: true when this attempt's findings produced NO verdict -- zero
+	/// passed and zero open (failed) findings, with at least one
+	/// <see cref="ComponentFindingStatuses.NotReviewed"/>/<see cref="ComponentFindingStatuses.Skipped"/>/
+	/// <see cref="ComponentFindingStatuses.ExecutionError"/> finding or none at all.
+	/// The EXACT predicate <see cref="IComponentResultRepository.GetRunRollupAsync"/>'s
+	/// SQL <c>evaluated_zero_component_count</c> FILTER already applies at read time
+	/// (see that method's own doc comment) -- kept as one C# definition here so
+	/// <see cref="Waypoint.Infrastructure.Runs.ComponentResultRecordingService"/> can
+	/// apply it at WRITE time (<see cref="ComponentResultStatuses.CompletedZeroControls"/>)
+	/// without a second, hand-copied predicate that could drift from the read side.
+	/// Deliberately excludes a genuinely all-<see cref="ComponentFindingStatuses.NotApplicable"/>
+	/// component: N/A is a determinate outcome, not a failure to evaluate.
+	/// </summary>
+	public bool EvaluatedZeroControls => EvaluatedZeroControlsFor(Findings);
+
+	/// <summary>
+	/// The predicate <see cref="EvaluatedZeroControls"/> applies, exposed as a static
+	/// helper so <see cref="Waypoint.Infrastructure.Runs.ComponentResultRecordingService"/>
+	/// can classify a candidate finding list at write time (issue #1140) without
+	/// constructing a throwaway record first.
+	/// </summary>
+	public static bool EvaluatedZeroControlsFor(IReadOnlyList<ComponentResultFinding> findings)
+	{
+		int open = findings.Count(f => ComponentFindingStatuses.IsOpen(f.Status));
+		int passed = findings.Count(f => f.Status == ComponentFindingStatuses.Passed);
+		int notReviewed = findings.Count(f => f.Status == ComponentFindingStatuses.NotReviewed);
+		int skipped = findings.Count(f => f.Status == ComponentFindingStatuses.Skipped);
+		int executionError = findings.Count(f => f.Status == ComponentFindingStatuses.ExecutionError);
+		int notApplicable = findings.Count(f => f.Status == ComponentFindingStatuses.NotApplicable);
+
+		return open + passed == 0 && (notReviewed > 0 || skipped > 0 || executionError > 0 || notApplicable == 0);
+	}
 }
 
 /// <summary>One (priority-free) row of the run rollup: counts by component-result status, CAT totals, and coverage.</summary>

@@ -1990,10 +1990,11 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 
 		await runnerRepository.RecordAsync(record, CancellationToken.None);
 
-		// Read back through the OWNER role: the run rollup is the API's read surface
-		// (RunsController), never the runner's -- the runner role deliberately has no
-		// scan_plans SELECT, so verifying through it would demand a grant production
-		// never needs.
+		// Read back through the OWNER role: the run rollup (GetRunRollupAsync) is the
+		// API's read surface (RunsController), never the runner's -- migration 0081
+		// (issue #1140) did give both runner roles a `scan_plans` SELECT grant, but
+		// only because JobQueueRepository.GetRunAsync's shared coverage_incomplete
+		// join needs it, not because ComponentResultRepository's rollup query does.
 		ComponentResultRepository ownerRepository = new(_fixture.ConnectionString);
 		RunResultRollup rollup = await ownerRepository.GetRunRollupAsync(runId, CancellationToken.None);
 		Assert.Equal(1, Assert.Single(rollup.ByStatus).ComponentCount);

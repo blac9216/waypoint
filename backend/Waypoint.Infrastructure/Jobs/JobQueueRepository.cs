@@ -966,6 +966,23 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	/// <see cref="JobStates.Uploaded"/> cannot be typo'd out of every bucket again --
 	/// every value in <see cref="JobStates.All"/> resolves to exactly one bucket, so
 	/// the five counts always sum to <c>job_count</c>.
+	///
+	/// Issue #1140: <c>coverage_incomplete</c> is a BULK computation, not a
+	/// per-run follow-up query -- the exact same three-way predicate
+	/// <c>RunsController.GetComponentResultsSummary</c> already uses (no recorded
+	/// plan, a plan-time omission, or an execution-time zero-verdict component),
+	/// evaluated here via two more LEFT JOINs against a run-scoped subquery apiece
+	/// (<c>scan_plans</c>, at most one row per run via its own UNIQUE run_id; a
+	/// GROUP-BY-run_id aggregate over <c>component_results</c>' latest attempt per
+	/// <c>scan_plan_item_id</c>, mirroring <see cref="Waypoint.Infrastructure.Runs.ComponentResultRepository.GetRunRollupAsync"/>'s
+	/// own <c>evaluated_zero_component_count</c> FILTER predicate exactly). Both
+	/// joined sources contribute at most one row per <c>r.id</c>, so the existing
+	/// <c>jobs</c> fan-out (which can multiply rows per run) cannot corrupt the
+	/// result: wrapping the predicate in <c>bool_or(...)</c> collapses any
+	/// duplication back to the single true/false answer per run, the same way the
+	/// <c>job_count_*</c> columns already tolerate that fan-out via <c>COUNT(...)
+	/// FILTER</c>. No N+1 -- one query serves <see cref="GetRunAsync"/>,
+	/// <see cref="ListRunsAsync"/>, and <see cref="ListRunHistoryAsync"/> alike.
 	/// </summary>
 	private static readonly string RunSummaryProjectionSql = $"""
 		SELECT
@@ -979,9 +996,31 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ({JobCountStateList(JobCountBucket.Completed)})),
 			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ({JobCountStateList(JobCountBucket.Failed)})),
 			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ({JobCountStateList(JobCountBucket.Blocked)})),
-			r.credential_name, r.credential_type, r.credential_username
+			r.credential_name, r.credential_type, r.credential_username,
+			bool_or(
+				sp.id IS NULL
+				OR jsonb_array_length(sp.skips_json) > 0
+				OR coalesce(cr.evaluated_zero_component_count, 0) > 0
+			) AS coverage_incomplete
 		FROM runs r
 		LEFT JOIN jobs j ON j.run_id = r.id
+		LEFT JOIN scan_plans sp ON sp.run_id = r.id
+		LEFT JOIN (
+			SELECT
+				run_id,
+				count(*) FILTER (
+					WHERE passed_count + cat_i_open + cat_ii_open + cat_iii_open = 0
+					  AND (not_reviewed_count > 0 OR skipped_count > 0 OR execution_error_count > 0 OR not_applicable_count = 0)
+				) AS evaluated_zero_component_count
+			FROM (
+				SELECT DISTINCT ON (scan_plan_item_id)
+					run_id, passed_count, cat_i_open, cat_ii_open, cat_iii_open,
+					not_reviewed_count, skipped_count, execution_error_count, not_applicable_count
+				FROM component_results
+				ORDER BY scan_plan_item_id, attempt_number DESC
+			) latest_component_results
+			GROUP BY run_id
+		) cr ON cr.run_id = r.id
 		""";
 
 	/// <summary>Comma-separated, single-quoted SQL literal list of the <see cref="JobStates"/> values in <paramref name="bucket"/>.</summary>
@@ -1027,7 +1066,8 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		JobCountBlocked: reader.GetInt32(18),
 		CredentialName: reader.IsDBNull(19) ? null : reader.GetString(19),
 		CredentialType: reader.IsDBNull(20) ? null : reader.GetString(20),
-		CredentialUsername: reader.IsDBNull(21) ? null : reader.GetString(21));
+		CredentialUsername: reader.IsDBNull(21) ? null : reader.GetString(21),
+		CoverageIncomplete: reader.GetBoolean(22));
 
 	public async Task<RunSummary?> GetRunAsync(Guid runId, CancellationToken cancellationToken)
 	{

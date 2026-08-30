@@ -495,4 +495,99 @@ public sealed class ListRunsRepositoryTests : IAsyncLifetime
 		Assert.Single(result.Items);
 		Assert.Equal(inWindow, result.Items[0].Id);
 	}
+
+	// -- issue #1140: coverage_incomplete, bulk-computed in RunSummaryProjectionSql --
+
+	/// <summary>
+	/// Inserts a bare <c>scan_plans</c> header row directly (no <c>scan_plan_items</c>,
+	/// no catalog identity chain -- <see cref="ComponentResultRepositoryTests"/> already
+	/// pins the execution-time <c>evaluated_zero_component_count</c> branch of this same
+	/// predicate against the full catalog/component/job seed it requires; this file only
+	/// needs a plan HEADER to exercise the other two branches: "no plan recorded" and
+	/// "the plan omitted a requested component").
+	/// </summary>
+	private async Task SeedScanPlanAsync(Guid runId, string skipsJson)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO scan_plans (run_id, plan_schema_version, plan_digest, explanation, skips_json)
+			VALUES ($1, 1, 'invented-digest', 'invented explanation', $2::jsonb)
+			""", connection);
+		command.Parameters.AddWithValue(runId);
+		command.Parameters.AddWithValue(skipsJson);
+		await command.ExecuteNonQueryAsync();
+	}
+
+	[Fact]
+	public async Task GetRunAsync_NoPlanRecorded_CoverageIncompleteIsTrue()
+	{
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", null, "tester", CancellationToken.None);
+
+		RunSummary? summary = await _repository.GetRunAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(summary);
+		Assert.True(summary!.CoverageIncomplete);
+	}
+
+	[Fact]
+	public async Task GetRunAsync_PlanRecordedWithOmission_CoverageIncompleteIsTrue()
+	{
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", null, "tester", CancellationToken.None);
+		await SeedScanPlanAsync(runId, """[{"component_id": "invented", "reason": "invented_omission"}]""");
+
+		RunSummary? summary = await _repository.GetRunAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(summary);
+		Assert.True(summary!.CoverageIncomplete);
+	}
+
+	/// <summary>
+	/// AC4: a plan recorded, nothing omitted, and (since no <c>scan_plan_items</c>/
+	/// <c>component_results</c> rows exist at all for this run) no execution-time
+	/// zero-verdict component either -- the genuinely-complete case must read complete,
+	/// not merely "not yet proven incomplete".
+	/// </summary>
+	[Fact]
+	public async Task GetRunAsync_PlanRecordedNoOmissionsNoZeroVerdictComponents_CoverageIncompleteIsFalse()
+	{
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", null, "tester", CancellationToken.None);
+		await SeedScanPlanAsync(runId, "[]");
+
+		RunSummary? summary = await _repository.GetRunAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(summary);
+		Assert.False(summary!.CoverageIncomplete);
+	}
+
+	[Fact]
+	public async Task ListRunsAsync_MixOfCompleteAndIncompleteRuns_ReportsCoverageIncompletePerRun()
+	{
+		Guid incomplete = await _repository.CreateRunAsync("scan", "{}", null, "tester", CancellationToken.None);
+		// No plan recorded at all -- unknown coverage.
+
+		Guid complete = await _repository.CreateRunAsync("scan", "{}", null, "tester", CancellationToken.None);
+		await SeedScanPlanAsync(complete, "[]");
+
+		RunListResult result = await _repository.ListRunsAsync(limit: 50, offset: 0, CancellationToken.None);
+
+		Assert.True(result.Items.Single(r => r.Id == incomplete).CoverageIncomplete);
+		Assert.False(result.Items.Single(r => r.Id == complete).CoverageIncomplete);
+	}
+
+	[Fact]
+	public async Task ListRunHistoryAsync_MixOfCompleteAndIncompleteRuns_ReportsCoverageIncompletePerRun()
+	{
+		Guid incompleteOmission = await _repository.CreateRunAsync("scan", "{}", null, "tester", CancellationToken.None);
+		await SeedScanPlanAsync(incompleteOmission, """[{"component_id": "invented", "reason": "invented_omission"}]""");
+
+		Guid complete = await _repository.CreateRunAsync("scan", "{}", null, "tester", CancellationToken.None);
+		await SeedScanPlanAsync(complete, "[]");
+
+		RunHistoryPage page = await _repository.ListRunHistoryAsync(new RunHistoryQuery(null, null, null, null, null, null, 50), CancellationToken.None);
+
+		Assert.True(page.Items.Single(r => r.Id == incompleteOmission).CoverageIncomplete);
+		Assert.False(page.Items.Single(r => r.Id == complete).CoverageIncomplete);
+	}
 }

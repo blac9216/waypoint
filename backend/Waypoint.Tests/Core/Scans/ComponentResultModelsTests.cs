@@ -129,4 +129,58 @@ public sealed class ComponentResultModelsTests
 		Assert.Equal(5, row.ExecutionErrorCount);
 		Assert.True(row.EvaluatedZeroControls);
 	}
+
+	/// <summary>
+	/// Issue #1140: <see cref="ComponentResultRecord.EvaluatedZeroControls"/> (and its
+	/// static <see cref="ComponentResultRecord.EvaluatedZeroControlsFor"/> form, which
+	/// <see cref="Waypoint.Infrastructure.Runs.ComponentResultRecordingService"/> calls
+	/// at WRITE time) must apply the EXACT SAME predicate
+	/// <see cref="IComponentResultRepository.GetRunRollupAsync"/>'s SQL FILTER already
+	/// uses at read time -- one definition, not two hand-copied ones.
+	/// </summary>
+	[Theory]
+	[InlineData(ComponentFindingStatuses.NotReviewed, true)]
+	[InlineData(ComponentFindingStatuses.Skipped, true)]
+	[InlineData(ComponentFindingStatuses.ExecutionError, true)]
+	[InlineData(ComponentFindingStatuses.Passed, false)]
+	public void ComponentResultRecord_EvaluatedZeroControls_MatchesRollupPredicate(string singleFindingStatus, bool expected)
+	{
+		ComponentResultRecord record = new(
+			RunId: Guid.NewGuid(), JobId: Guid.NewGuid(), ScanPlanItemId: Guid.NewGuid(), ComponentId: Guid.NewGuid(),
+			AttemptNumber: 1, Status: ComponentResultStatuses.Completed, Detail: null,
+			Findings: [new ComponentResultFinding("SV-1", null, null, ComponentFindingSeverities.CatIII, singleFindingStatus, null)],
+			Artifacts: []);
+
+		Assert.Equal(expected, record.EvaluatedZeroControls);
+	}
+
+	/// <summary>Genuinely all-not-applicable is a determinate outcome, never reclassified as zero-evaluated -- the one carve-out both the write-time predicate and the read-time rollup FILTER share.</summary>
+	[Fact]
+	public void ComponentResultRecord_EvaluatedZeroControls_GenuineAllNotApplicable_IsFalse()
+	{
+		ComponentResultRecord record = new(
+			RunId: Guid.NewGuid(), JobId: Guid.NewGuid(), ScanPlanItemId: Guid.NewGuid(), ComponentId: Guid.NewGuid(),
+			AttemptNumber: 1, Status: ComponentResultStatuses.Completed, Detail: null,
+			Findings: [new ComponentResultFinding("SV-1", null, null, ComponentFindingSeverities.CatIII, ComponentFindingStatuses.NotApplicable, null)],
+			Artifacts: []);
+
+		Assert.False(record.EvaluatedZeroControls);
+	}
+
+	/// <summary>An execution-error finding MIXED with a not-applicable one is still zero-evaluated (issue #1144's own closed gap) -- not_applicable_count &gt; 0 alone must not mask it.</summary>
+	[Fact]
+	public void ComponentResultRecord_EvaluatedZeroControls_NotApplicableMixedWithExecutionError_IsTrue()
+	{
+		ComponentResultRecord record = new(
+			RunId: Guid.NewGuid(), JobId: Guid.NewGuid(), ScanPlanItemId: Guid.NewGuid(), ComponentId: Guid.NewGuid(),
+			AttemptNumber: 1, Status: ComponentResultStatuses.Completed, Detail: null,
+			Findings:
+			[
+				new ComponentResultFinding("SV-1", null, null, ComponentFindingSeverities.CatIII, ComponentFindingStatuses.NotApplicable, null),
+				new ComponentResultFinding("SV-2", null, null, ComponentFindingSeverities.CatIII, ComponentFindingStatuses.ExecutionError, "invented error"),
+			],
+			Artifacts: []);
+
+		Assert.True(record.EvaluatedZeroControls);
+	}
 }

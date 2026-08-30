@@ -324,8 +324,34 @@ public sealed class SchemaMigrationTests
 	/// UUID, recorded alongside the existing moref-keyed identity so identically named
 	/// VMs stay deconflictable across discovery passes -- no new runner grants (the
 	/// table's existing grants already cover the new column) --
+	/// 0080 (issue #1144, epic #726/#1177): adds
+	/// <c>component_results.execution_error_count</c> -- the sixth and final
+	/// per-finding-status count column, so a component whose controls all mapped to
+	/// <c>execution_error</c> no longer reads all-zero on the run rollup. Backfills the
+	/// column for every pre-existing row from that row's own immutable
+	/// <c>component_result_findings</c>, taking migration 0066's append-only
+	/// <c>trg_component_results_block_update</c> trigger's ONE sanctioned exception:
+	/// disabled and re-enabled around the single backfill UPDATE statement, inside this
+	/// migration's own transaction. No new runner grants (migration 0063's table-level
+	/// GRANT already covers the new column) --
+	/// 0081 (issue #1140, epic #1177): widens <c>component_results_status_check</c> to
+	/// admit <c>completed_zero_controls</c> -- a completed attempt that evaluated ZERO
+	/// controls now carries its own status instead of reading as a plain
+	/// <c>completed</c>. Backfills every pre-existing <c>completed</c> row that matches
+	/// the same zero-verdict predicate the rollup's <c>evaluated_zero_component_count</c>
+	/// FILTER already used at read time, taking migration 0080's same one-statement
+	/// disable/re-enable of <c>trg_component_results_block_update</c>. No new runner
+	/// grant for the status widening itself (a CHECK-constrained column's existing
+	/// table-level GRANT already covers every value the column may hold), but DOES add
+	/// two: <c>JobQueueRepository.RunSummaryProjectionSql</c>'s new bulk
+	/// <c>coverage_incomplete</c> join (item 2, same issue) reads <c>scan_plans</c> and
+	/// <c>component_results</c> from EVERY caller of <c>GetRunAsync</c>/<c>ListRunsAsync</c>/
+	/// <c>ListRunHistoryAsync</c>, including both runner roles -- so this migration
+	/// grants `SELECT` on <c>scan_plans</c> to both runner roles (never granted before)
+	/// and on <c>component_results</c> to <c>waypoint_download_runner</c> (already held
+	/// by <c>waypoint_compliance_runner</c> since migration 0063) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 79;
+	private const int ExpectedMigrationCount = 80;
 
 	private readonly PostgresFixture _fixture;
 
