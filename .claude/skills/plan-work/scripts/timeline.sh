@@ -11,12 +11,12 @@
 # --history-dir points at the directory history.sh wrote parallelism.txt into; without it (and without
 # --parallelism) the default --out convention is assumed, and falling back to 1.5 is reported on stderr.
 # A missing, empty, non-numeric, zero, or negative parallelism.txt falls back to 1.5 the same way.
-# Exit codes: 2 = argument error (unknown flag, a value-taking flag with no following value, or an empty
-# --milestones/--milestone value); 3 = a --milestones/--milestone selection was requested but matched
-# zero open milestones; 4 = --parallelism was given a value that is not a positive decimal number
-# matching ^[0-9]+([.][0-9]+)?$ (e.g. "0", "-1", "abc", ".5", "1e2" and leading/trailing whitespace are
-# all rejected); 5 = a blocked_by cycle was detected while computing a milestone's critical path (jq's
-# own error exit surfaces here).
+# Exit codes: 2 = argument error (unknown flag, a value-taking flag with no following value, an empty
+# --milestones/--milestone value, or a --defaults value with a part that isn't S=<n>/M=<n>/L=<n>); 3 = a
+# --milestones/--milestone selection was requested but matched zero open milestones; 4 = --parallelism
+# was given a value that is not a positive decimal number matching ^[0-9]+([.][0-9]+)?$ (e.g. "0", "-1",
+# "abc", ".5", "1e2" and leading/trailing whitespace are all rejected); 5 = a blocked_by cycle was
+# detected while computing a milestone's critical path (jq's own error exit surfaces here).
 set -euo pipefail
 REPO=""; ONLY=""; PAR=""; HISTORY_DIR=""; DEF="S=2,M=6,L=16"; OUT="${TMPDIR:-/tmp}/plan-work-timeline"; HOURS_PER_DAY=8
 MILESTONE_ARGS=()
@@ -29,13 +29,23 @@ require_positive_number(){
     exit 4
   fi
 }
+require_defaults(){
+  local raw="$2" part
+  IFS=',' read -ra parts <<<"$raw"
+  for part in "${parts[@]}"; do
+    [[ "$part" =~ ^[SML]=[0-9]+([.][0-9]+)?$ ]] || {
+      echo "timeline.sh: $1 \"$raw\" must be a comma-separated list of S=<n>,M=<n>,L=<n> (positive decimal numbers; any subset of sizes is allowed)" >&2
+      exit 2
+    }
+  done
+}
 while [ $# -gt 0 ]; do case $1 in
   --repo) require_arg "$@"; REPO=$2; shift 2;;
   --milestones) require_arg "$@"; require_value --milestones "$2"; ONLY=$2; shift 2;;
   --milestone) require_arg "$@"; require_value --milestone "$2"; MILESTONE_ARGS+=("$2"); shift 2;;
   --parallelism) require_arg "$@"; require_positive_number --parallelism "$2"; PAR=$2; shift 2;;
   --history-dir) require_arg "$@"; HISTORY_DIR=$2; shift 2;;
-  --defaults) require_arg "$@"; DEF=$2; shift 2;;
+  --defaults) require_arg "$@"; require_defaults --defaults "$2"; DEF=$2; shift 2;;
   --out) require_arg "$@"; OUT=$2; shift 2;;
   *) echo "unknown arg $1" >&2; exit 2;;
 esac; done
@@ -61,10 +71,16 @@ if [ -n "$PAR" ]; then
   : # explicit --parallelism wins
 else
   hist_dir="${HISTORY_DIR:-${OUT%/*}/plan-work-history}"
-  PAR=$(cat "$hist_dir/parallelism.txt" 2>/dev/null || true)
+  hist_file="$hist_dir/parallelism.txt"
+  PAR=$(cat "$hist_file" 2>/dev/null || true)
   if ! is_positive_number "$PAR"; then
+    bad_par="$PAR"
     PAR=1.5
-    say "parallelism: no history at $hist_dir/parallelism.txt; falling back to default $PAR (pass --history-dir to point at history.sh's --out, or --parallelism to set it explicitly)"
+    if [ -s "$hist_file" ]; then
+      say "parallelism: ignoring unusable parallelism \"$bad_par\" in $hist_file; falling back to default $PAR (pass --parallelism to set it explicitly)"
+    else
+      say "parallelism: no history at $hist_file; falling back to default $PAR (pass --history-dir to point at history.sh's --out, or --parallelism to set it explicitly)"
+    fi
   fi
 fi
 defS=$(sed -n 's/.*S=\([0-9.]*\).*/\1/p' <<<"$DEF"); defM=$(sed -n 's/.*M=\([0-9.]*\).*/\1/p' <<<"$DEF"); defL=$(sed -n 's/.*L=\([0-9.]*\).*/\1/p' <<<"$DEF")
