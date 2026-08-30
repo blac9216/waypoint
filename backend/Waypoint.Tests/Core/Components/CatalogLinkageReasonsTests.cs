@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Text.RegularExpressions;
 using Waypoint.Core.Components;
 using Xunit;
 
@@ -50,10 +51,15 @@ public sealed class CatalogLinkageReasonsTests
 	/// precedent of reading the repository's own documentation from the test:
 	/// <c>docs/api-contract.md</c>'s <c>/targets/{id}/discover</c> row publishes this
 	/// vocabulary as an explicit pipe-delimited CLOSED set, and it must be exactly
-	/// <see cref="CatalogLinkageReasons.All"/> -- same members, same order. Adding a
-	/// fifth reason in code without updating the contract (or vice versa) fails here.
-	/// The <c>/components/{id}</c> row enumerates the same set in prose; every member
-	/// must appear there too.
+	/// <see cref="CatalogLinkageReasons.All"/> -- same members, same order.
+	///
+	/// Issue #1272: both directions are guarded, which containment alone did not do.
+	/// Each published list is EXTRACTED from its row and compared with
+	/// <see cref="Assert.Equal{T}(System.Collections.Generic.IEnumerable{T}, System.Collections.Generic.IEnumerable{T})"/>,
+	/// so adding a fifth reason in code without updating the contract fails here, AND so
+	/// does adding a fifth value to either doc list that no code declares. The
+	/// <c>/components/{id}</c> row enumerates the same set in prose and is extracted and
+	/// compared the same way.
 	/// </summary>
 	[Fact]
 	public void ApiContract_PublishesExactlyTheseReasons()
@@ -61,19 +67,23 @@ public sealed class CatalogLinkageReasonsTests
 		string doc = File.ReadAllText(FindApiContractDoc());
 
 		// The discover row's literal closed-set enumeration, e.g.
-		// `no_exact_version_fact`\|`out_of_declared_scope`\|`ambiguous`\|`lookup_failed`
+		// the closed `no_exact_version_fact`\|`out_of_declared_scope`\|`ambiguous`\|`lookup_failed` set
 		// (the backslash escapes the pipe inside a Markdown table cell).
-		string expectedClosedSet = "`" + string.Join("`\\|`", CatalogLinkageReasons.All) + "`";
-		Assert.Contains(expectedClosedSet, doc, StringComparison.Ordinal);
+		Match discoverRow = Regex.Match(doc, @"closed ((?:`[a-z_]+`\\\|)*`[a-z_]+`) set", RegexOptions.None, TimeSpan.FromSeconds(5));
+		Assert.True(discoverRow.Success, "docs/api-contract.md no longer publishes a 'closed <list> set' catalog-linkage reason enumeration.");
+		Assert.Equal(
+			CatalogLinkageReasons.All,
+			discoverRow.Groups[1].Value.Split("\\|").Select(token => token.Trim('`')).ToArray());
 
-		string[] rows = doc.Split('\n')
-			.Where(line => line.Contains("no_exact_version_fact", StringComparison.Ordinal))
-			.ToArray();
-		Assert.Equal(2, rows.Length);
-		foreach (string reason in CatalogLinkageReasons.All)
-		{
-			Assert.All(rows, row => Assert.Contains($"`{reason}`", row, StringComparison.Ordinal));
-		}
+		// The /components/{id} row's prose enumeration, e.g.
+		// "... for every unlinked outcome -- `a`, `b`, `c`, `d` -- not only ...".
+		Match componentRow = Regex.Match(doc, @"unlinked outcome — (.+?) —", RegexOptions.None, TimeSpan.FromSeconds(5));
+		Assert.True(componentRow.Success, "docs/api-contract.md no longer publishes the catalog-linkage reason prose enumeration on the /components/{id} row.");
+		Assert.Equal(
+			CatalogLinkageReasons.All,
+			Regex.Matches(componentRow.Groups[1].Value, "`([a-z_]+)`", RegexOptions.None, TimeSpan.FromSeconds(5))
+				.Select(match => match.Groups[1].Value)
+				.ToArray());
 	}
 
 	private static string FindApiContractDoc()
