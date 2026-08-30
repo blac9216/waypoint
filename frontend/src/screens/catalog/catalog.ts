@@ -13,7 +13,7 @@
  * anything that moves on this screen, per the contract's explicit rule.
  */
 
-import { apiGet, apiPost } from "../../lib/api";
+import { apiGet, apiGetPaged, apiPost } from "../../lib/api";
 
 export type ArtifactStatus = "not_downloaded" | "queued" | "downloading" | "verified" | "failed";
 
@@ -153,6 +153,16 @@ export interface CatalogArtifactsQuery {
 }
 
 /**
+ * `CatalogController.ListArtifacts` binds `[FromQuery] PageRequest page`
+ * (`DefaultLimit = 50`, `MaxLimit = 200` — `Waypoint.Core.Pagination.PageRequest`),
+ * so a single unpaged request returns at most 50 of the real catalog's 1,088
+ * rows. `fetchCatalogArtifactsPage` below always requests the backend's
+ * `MaxLimit` per page to keep the page count (and therefore the fetch time)
+ * as low as the contract allows.
+ */
+const ARTIFACTS_PAGE_LIMIT = 200;
+
+/**
  * Adapts the real `CatalogController.ListArtifacts` response, which is a
  * bare `CatalogArtifactResponse[]` (`return Ok(items...)` — no envelope, no
  * `index_synced_at`, and no `search` query binding), to this module's
@@ -168,13 +178,41 @@ export interface CatalogArtifactsQuery {
  * `status` DO bind server-side (`ListArtifacts`'s query parameters) and are
  * still sent as query params.
  */
-export function fetchCatalogArtifacts(query: CatalogArtifactsQuery = {}): Promise<CatalogArtifactsResponse> {
+function fetchCatalogArtifactsPage(query: CatalogArtifactsQuery, offset: number) {
 	const params = new URLSearchParams();
 	if (query.product) params.set("product", query.product);
 	if (query.version) params.set("version", query.version);
 	if (query.status) params.set("status", query.status);
-	const qs = params.toString();
-	return apiGet<CatalogArtifact[]>(`/catalog/artifacts${qs ? `?${qs}` : ""}`).then((artifacts) => {
+	params.set("limit", String(ARTIFACTS_PAGE_LIMIT));
+	params.set("offset", String(offset));
+	return apiGetPaged<CatalogArtifact>(`/catalog/artifacts?${params.toString()}`);
+}
+
+/**
+ * Fetches every page of `/catalog/artifacts` (issue #796 finding 1: the
+ * catalog is 1,088 rows against a 50-row default / 200-row max page, and
+ * this module's grouping/counts/filters are meant to describe the whole
+ * indexed catalog, not one page of it). Pages sequentially — the endpoint
+ * has no documented concurrent-request guarantee, and this keeps `offset`
+ * math trivial — accumulating until the running total meets the
+ * `X-Total-Count` the first response reports, or a page comes back short
+ * (defensive: the total could legitimately shrink between requests if the
+ * catalog is re-indexed mid-fetch).
+ */
+export function fetchCatalogArtifacts(query: CatalogArtifactsQuery = {}): Promise<CatalogArtifactsResponse> {
+	const collected: CatalogArtifact[] = [];
+
+	async function loadFrom(offset: number): Promise<CatalogArtifact[]> {
+		const { items, totalCount } = await fetchCatalogArtifactsPage(query, offset);
+		collected.push(...items);
+		const nextOffset = offset + items.length;
+		if (items.length < ARTIFACTS_PAGE_LIMIT || nextOffset >= totalCount) {
+			return collected;
+		}
+		return loadFrom(nextOffset);
+	}
+
+	return loadFrom(0).then((artifacts) => {
 		const search = query.search?.trim().toLowerCase();
 		const filtered = search
 			? artifacts.filter((a) => a.name.toLowerCase().includes(search) || a.sha256.toLowerCase().includes(search))
