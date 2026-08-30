@@ -30,6 +30,199 @@
 
 $Script:VmwareStigDockerModulePath = $env:WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_PATH
 
+# Issue #1115: session-identity resolution helpers for the -AllLinked session set
+# Connect-StigVIServer returns. Broken out as standalone module functions (rather
+# than inlined in Invoke-WaypointDiscovery) so Pester can Mock the DNS-touching ones
+# directly -- forward/reverse DNS resolution cannot be made deterministic any other
+# way in a unit test, and a real lookup in CI would be both slow and flaky.
+#
+# ADR-0023 fail-closed rule: identity is never guessed. Every function below either
+# proves an unambiguous match or reports "no match"/"empty" -- it never falls back to
+# position (first/last session) and a DNS failure is swallowed (empty result), not
+# thrown, so a resolver outage degrades to "no match" rather than failing the job.
+
+# Normalizes a hostname/IP string for case- and trailing-dot-insensitive comparison
+# (e.g. 'VCSA-01.Example.Internal.' and 'vcsa-01.example.internal' are the same
+# identity). Returns $null for a blank/whitespace input so callers can filter it out
+# without a separate null check.
+function ConvertTo-WaypointNormalizedHost {
+	param(
+		[Parameter()]
+		[AllowNull()]
+		[string]$Value
+	)
+
+	if ([string]::IsNullOrWhiteSpace($Value)) {
+		return $null
+	}
+
+	return $Value.Trim().TrimEnd('.').ToLowerInvariant()
+}
+
+# Collects the raw (un-normalized) hostname/IP candidates a single VI session
+# exposes for identity comparison: its reported Name, plus the host component of its
+# ServiceUri when present. PowerCLI's real VIServer session type reports ServiceUri
+# as a System.Uri; test doubles may supply a plain string, so both are accepted.
+function Get-WaypointSessionHostCandidates {
+	param(
+		[Parameter()]
+		$Session
+	)
+
+	$Candidates = [System.Collections.Generic.List[string]]::new()
+
+	if ($Session -and -not [string]::IsNullOrWhiteSpace($Session.Name)) {
+		$Candidates.Add($Session.Name)
+	}
+
+	if ($Session -and $Session.ServiceUri) {
+		try {
+			$ParsedUri = $Session.ServiceUri -as [Uri]
+			if ($ParsedUri -and -not [string]::IsNullOrWhiteSpace($ParsedUri.Host)) {
+				$Candidates.Add($ParsedUri.Host)
+			}
+		} catch {
+			# Not a parseable URI -- ignore this candidate source, Name is still tried.
+		}
+	}
+
+	return $Candidates
+}
+
+# Forward-resolves a hostname (or parses an IP literal) to its address strings.
+# Never throws: an unresolvable name, or a resolver outage, is reported as "no
+# addresses" so callers degrade to "no match" rather than failing the discovery job.
+function Resolve-WaypointHostAddresses {
+	param(
+		[Parameter(Mandatory)]
+		[string]$HostNameOrAddress
+	)
+
+	try {
+		return @([System.Net.Dns]::GetHostAddresses($HostNameOrAddress) | ForEach-Object { $_.ToString() })
+	} catch {
+		return @()
+	}
+}
+
+# Reverse-resolves an IP address literal to the hostname(s) it maps to. Never
+# throws, for the same reason as Resolve-WaypointHostAddresses above. Only
+# meaningful when $IpAddress is actually an IP literal -- callers gate on that.
+function Resolve-WaypointReverseHostNames {
+	param(
+		[Parameter(Mandatory)]
+		[string]$IpAddress
+	)
+
+	try {
+		$Entry = [System.Net.Dns]::GetHostEntry($IpAddress)
+		if ($Entry -and -not [string]::IsNullOrWhiteSpace($Entry.HostName)) {
+			return @($Entry.HostName)
+		}
+		return @()
+	} catch {
+		return @()
+	}
+}
+
+# Issue #1115: does $Session identify the appliance the caller addressed as
+# -VCenter? Tries, in order, entirely without ever guessing by position:
+#   1. Direct compare: normalized $VCenter against normalized Name/ServiceUri host.
+#   2. Forward DNS: resolve both $VCenter and each session candidate to addresses;
+#      match if the address sets intersect (this is what lets an IP-addressed
+#      target match a session reporting only its FQDN, and vice versa).
+#   3. Reverse DNS: when $VCenter is itself an IP literal, resolve it to a
+#      hostname and compare against the session's normalized candidates.
+# Each step degrades to "no match" (never throws) on a DNS failure, per the two
+# resolver functions above.
+function Test-WaypointSessionMatchesVCenter {
+	param(
+		[Parameter()]
+		$Session,
+
+		[Parameter(Mandatory)]
+		[string]$VCenter
+	)
+
+	$RequestedNormalized = ConvertTo-WaypointNormalizedHost -Value $VCenter
+	if (-not $RequestedNormalized) {
+		return $false
+	}
+
+	$SessionCandidatesRaw = @(Get-WaypointSessionHostCandidates -Session $Session)
+	$SessionCandidatesNormalized = @($SessionCandidatesRaw | ForEach-Object { ConvertTo-WaypointNormalizedHost -Value $_ } | Where-Object { $_ })
+
+	if ($SessionCandidatesNormalized -contains $RequestedNormalized) {
+		return $true
+	}
+
+	if ($SessionCandidatesNormalized.Count -eq 0) {
+		return $false
+	}
+
+	$RequestedAddresses = @(Resolve-WaypointHostAddresses -HostNameOrAddress $VCenter)
+	if ($RequestedAddresses.Count -gt 0) {
+		foreach ($Candidate in $SessionCandidatesRaw) {
+			$CandidateAddresses = @(Resolve-WaypointHostAddresses -HostNameOrAddress $Candidate)
+			foreach ($Address in $CandidateAddresses) {
+				if ($RequestedAddresses -contains $Address) {
+					return $true
+				}
+			}
+		}
+	}
+
+	$ParsedIp = $null
+	if ([System.Net.IPAddress]::TryParse($VCenter, [ref]$ParsedIp)) {
+		$ReverseNames = @(Resolve-WaypointReverseHostNames -IpAddress $VCenter | ForEach-Object { ConvertTo-WaypointNormalizedHost -Value $_ } | Where-Object { $_ })
+		if ($ReverseNames.Count -gt 0) {
+			foreach ($Name in $ReverseNames) {
+				if ($SessionCandidatesNormalized -contains $Name) {
+					return $true
+				}
+			}
+		}
+	}
+
+	return $false
+}
+
+# Issue #1115: resolves the requested -VCenter to exactly one -AllLinked session, or
+# to none at all -- the fail-closed rule ADR-0023 and epic #726 section 3 require.
+# Never picks by position: the only fallback is "there was only one session in the
+# entire connection", which is unambiguous by construction rather than a guess.
+# When resolution fails (zero or more than one identity match among 2+ sessions), a
+# structured warning names the candidate count so an operator reading the job log
+# can see why the vcenter identity was withheld, without this function itself
+# deciding whether that is fatal to the run -- Invoke-WaypointDiscovery already
+# treats an absent vcenter row as a normal, non-failing outcome.
+function Resolve-WaypointPrimarySession {
+	[CmdletBinding()]
+	param(
+		[Parameter()]
+		[AllowNull()]
+		$Sessions,
+
+		[Parameter(Mandatory)]
+		[string]$VCenter
+	)
+
+	$AllSessions = @($Sessions)
+
+	if ($AllSessions.Count -eq 1) {
+		return $AllSessions[0]
+	}
+
+	$MatchedSessions = @($AllSessions | Where-Object { Test-WaypointSessionMatchesVCenter -Session $_ -VCenter $VCenter })
+
+	if ($MatchedSessions.Count -eq 1) {
+		return $MatchedSessions[0]
+	}
+
+	Write-Warning "WaypointDiscovery: could not uniquely identify the vCenter session for '$VCenter' among $($AllSessions.Count) linked session(s) ($($MatchedSessions.Count) matched by name/address) -- withholding vcenter identity for this target rather than guessing."
+	return $null
+}
+
 function Invoke-WaypointDiscovery {
 	<#
 	.SYNOPSIS
@@ -70,10 +263,14 @@ function Invoke-WaypointDiscovery {
 	    for the ONE session matching the requested -VCenter (never every AllLinked
 	    sibling, which would misattribute another vCenter's identity to this target's
 	    root), and ONLY when that session actually supplies a non-blank InstanceUuid
-	    and Name. When it cannot -- or when no session matches by name and more than
-	    one linked session makes "which one is ours" a guess -- no 'vcenter' row is
-	    emitted at all: the root stays honestly identity- and version-absent and the
-	    rest of the pass is unaffected, rather than a blank MoRef/Name failing the
+	    and Name. Issue #1115: matching is normalized name/ServiceUri comparison plus
+	    forward/reverse DNS resolution (see Resolve-WaypointPrimarySession), not exact
+	    string equality, so an IP-addressed or FQDN-vs-short-name target still
+	    resolves its own appliance. When the match cannot be made unique -- or the
+	    matched session cannot supply both fields -- no 'vcenter' row is emitted at
+	    all: the root stays honestly identity- and version-absent (with a
+	    Write-Warning naming the candidate count for an ambiguous/absent match) and
+	    the rest of the pass is unaffected, rather than a blank MoRef/Name failing the
 	    whole discovery job through TryParseItem/ParseDiscoveredItems (#618).
 	    A 'vm' row's Build is always $null -- it used to carry the VMware Tools
 	    version, which is not a product-version fact for the VM itself and would
@@ -165,18 +362,16 @@ function Invoke-WaypointDiscovery {
 	#     (which the mapper already handles: the root simply stays identity- and
 	#     version-absent, and everything else about the pass is unaffected).
 	#
-	#   * When no session matches the requested -VCenter by name (e.g. -VCenter given
-	#     as an IP while the session reports its FQDN), a single session is still
-	#     unambiguously THIS target's appliance and is used. More than one session and
-	#     no name match is a genuine ambiguity under -AllLinked -- "first session" would
-	#     be a guess at which linked vCenter is ours -- so nothing is emitted instead.
-	$PrimarySession = @($Connection.Sessions | Where-Object { $_.Name -eq $VCenter }) | Select-Object -First 1
-	if (-not $PrimarySession) {
-		$UnmatchedSessions = @($Connection.Sessions)
-		if ($UnmatchedSessions.Count -eq 1) {
-			$PrimarySession = $UnmatchedSessions[0]
-		}
-	}
+	#   * Issue #1115: exact `-eq $VCenter` name equality missed an Enhanced Linked
+	#     Mode target addressed by IP (or any non-byte-identical form: short name vs
+	#     FQDN, case difference) -- with more than one linked session, no name match
+	#     meant no vcenter row at all even though the appliance WAS one of the
+	#     sessions. Resolve-WaypointPrimarySession replaces exact-name matching with
+	#     normalized name/ServiceUri comparison plus forward/reverse DNS (see its own
+	#     comment above), while keeping the same fail-closed contract: it never picks
+	#     a session by position, and an ambiguous or absent match returns $null (a
+	#     structured Write-Warning explains why) rather than guessing.
+	$PrimarySession = Resolve-WaypointPrimarySession -Sessions $Connection.Sessions -VCenter $VCenter
 
 	if ($PrimarySession -and -not [string]::IsNullOrWhiteSpace($PrimarySession.InstanceUuid) -and -not [string]::IsNullOrWhiteSpace($PrimarySession.Name)) {
 		[pscustomobject]@{
