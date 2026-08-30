@@ -76,7 +76,7 @@ public sealed class EvidenceRetentionSweepHostedServiceTests : IAsyncLifetime
 		_candidates = new EvidenceRetentionSweepRepository(_fixture.ConnectionString);
 
 		AttestationSnapshotRepository attestationSnapshots = new(_fixture.ConnectionString);
-		_purgeService = new RunPurgeService(_jobs, _purges, attestationSnapshots, _holds, _fixture.ConnectionString);
+		_purgeService = new RunPurgeService(_jobs, _purges, attestationSnapshots, _holds, _fixture.ConnectionString, NullLogger<RunPurgeService>.Instance);
 	}
 
 	public Task DisposeAsync() => Task.CompletedTask;
