@@ -214,7 +214,18 @@ public sealed record RunResponse(
 	string? CredentialType = null,
 
 	[property: JsonPropertyName("credential_username")]
-	string? CredentialUsername = null);
+	string? CredentialUsername = null,
+
+	/// <summary>
+	/// Issue #1140: mirrors <c>RunResultRollupResponse.CoverageIncomplete</c>
+	/// (<c>GET /runs/{id}/component-results/summary</c>) so the run read and
+	/// list/history surfaces carry the same false-clean guard -- true when no scan
+	/// plan is recorded, the plan omitted a requested component, or at least one
+	/// component evaluated zero controls. Computed in bulk in the shared run
+	/// projection query, not a per-run follow-up request.
+	/// </summary>
+	[property: JsonPropertyName("coverage_incomplete")]
+	bool CoverageIncomplete = false);
 
 /// <summary>Single job row for <c>GET /api/v1/runs/{id}/jobs</c>.</summary>
 public sealed record JobResponse(

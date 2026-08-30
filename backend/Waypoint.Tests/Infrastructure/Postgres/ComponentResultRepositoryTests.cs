@@ -15,9 +15,11 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.ComplianceContent;
+using Waypoint.Core.Jobs;
 using Waypoint.Core.Scans;
 using Waypoint.Infrastructure.ComplianceContent;
 using Waypoint.Infrastructure.Data;
+using Waypoint.Infrastructure.Jobs;
 using Waypoint.Infrastructure.Runs;
 using Xunit;
 
@@ -595,5 +597,100 @@ public sealed class ComponentResultRepositoryTests : IAsyncLifetime
 		Guid runId = await SeedRunAsync();
 		(Guid componentId, Guid scanPlanItemId) = await SeedPlanItemAsync(runId, "component-lookup");
 		Assert.Equal(componentId, await _repository.GetComponentIdForPlanItemAsync(scanPlanItemId, CancellationToken.None));
+	}
+
+	// -- issue #1302 (review of PR #1300): the SHARED run projection's new bulk joins --
+
+	/// <summary>
+	/// Issue #1302: the review of PR #1300 flagged that job-count non-inflation across
+	/// <see cref="JobQueueRepository"/>'s new <c>coverage_incomplete</c> joins was argued
+	/// in prose only -- no test seeded a run with a scan plan AND component results AND
+	/// jobs together, which is the only shape in which the pre-existing <c>jobs</c>
+	/// fan-out could be multiplied by the two added LEFT JOINs. This seeds exactly that
+	/// (one plan with three items, three jobs, three recorded component results) and
+	/// asserts the <c>job_count_*</c> columns still report three, not nine.
+	///
+	/// It also exercises the EXECUTION-TIME zero-verdict branch of the three-way
+	/// <c>coverage_incomplete</c> predicate end to end through the bulk lateral join --
+	/// the branch the PR's own list tests never reached (they only covered "no plan
+	/// recorded" and "plan-time omission"). The plan here records NO skips and the run
+	/// has a plan, so the other two disjuncts are both false: the only thing that can
+	/// make this run read incomplete is the one component that evaluated zero controls.
+	/// </summary>
+	[Fact]
+	public async Task GetRunAsync_PlanAndSeveralComponentResults_JobCountsUninflatedAndZeroVerdictComponentFlagged()
+	{
+		Guid runId = await SeedRunAsync();
+		IReadOnlyList<(Guid ComponentId, Guid ScanPlanItemId)> seeded =
+			await SeedPlanItemsAsync(runId, ["bulk-evaluated-a", "bulk-evaluated-b", "bulk-zero-verdict"]);
+
+		foreach ((Guid componentId, Guid scanPlanItemId) in seeded.Take(2))
+		{
+			Guid evaluatedJobId = await SeedJobAsync(runId, scanPlanItemId);
+			await _repository.RecordAsync(
+				CompletedRecord(runId, evaluatedJobId, scanPlanItemId, componentId, attempt: 1),
+				CancellationToken.None);
+		}
+
+		(Guid zeroComponentId, Guid zeroItemId) = seeded[2];
+		Guid zeroJobId = await SeedJobAsync(runId, zeroItemId);
+		await _repository.RecordAsync(
+			new ComponentResultRecord(
+				runId, zeroJobId, zeroItemId, zeroComponentId, AttemptNumber: 1,
+				Status: ComponentResultStatuses.Completed, Detail: null,
+				Findings:
+				[
+					new ComponentResultFinding("SV-900", null, "invented control 900", ComponentFindingSeverities.CatI, ComponentFindingStatuses.NotReviewed, "invented: never evaluated"),
+				],
+				Artifacts: []),
+			CancellationToken.None);
+
+		JobQueueRepository queue = new(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
+		RunSummary? summary = await queue.GetRunAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(summary);
+
+		// Three jobs, three component results, one plan -- the joins are ≤1 row per run
+		// each, so the jobs fan-out is not multiplied.
+		Assert.Equal(3, summary!.JobCount);
+		Assert.Equal(3, summary.JobCountQueued);
+		Assert.Equal(0, summary.JobCountRunning);
+		Assert.Equal(0, summary.JobCountCompleted);
+		Assert.Equal(0, summary.JobCountFailed);
+		Assert.Equal(0, summary.JobCountBlocked);
+
+		// Execution-time branch: plan recorded, no plan-time skips -- the zero-verdict
+		// component is the only reason this can read incomplete.
+		Assert.True(summary.CoverageIncomplete);
+	}
+
+	/// <summary>
+	/// Issue #1302's negative half: the same plan + jobs + component-results shape with
+	/// EVERY component genuinely evaluated must read complete, so the assertion above is
+	/// not vacuously true of any run that happens to have component results. Job counts
+	/// are re-asserted here too -- non-inflation must hold on both sides of the branch.
+	/// </summary>
+	[Fact]
+	public async Task GetRunAsync_PlanAndSeveralEvaluatedComponentResults_CoverageCompleteAndJobCountsUninflated()
+	{
+		Guid runId = await SeedRunAsync();
+		IReadOnlyList<(Guid ComponentId, Guid ScanPlanItemId)> seeded =
+			await SeedPlanItemsAsync(runId, ["bulk-complete-a", "bulk-complete-b", "bulk-complete-c"]);
+
+		foreach ((Guid componentId, Guid scanPlanItemId) in seeded)
+		{
+			Guid jobId = await SeedJobAsync(runId, scanPlanItemId);
+			await _repository.RecordAsync(
+				CompletedRecord(runId, jobId, scanPlanItemId, componentId, attempt: 1),
+				CancellationToken.None);
+		}
+
+		JobQueueRepository queue = new(_fixture.ConnectionString, NullLogger<JobQueueRepository>.Instance);
+		RunSummary? summary = await queue.GetRunAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(summary);
+		Assert.Equal(3, summary!.JobCount);
+		Assert.Equal(3, summary.JobCountQueued);
+		Assert.False(summary.CoverageIncomplete);
 	}
 }

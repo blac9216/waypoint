@@ -1696,7 +1696,8 @@ public sealed class RunsController : ControllerBase
 			JobCountBlocked: run.JobCountBlocked,
 			CredentialName: run.CredentialName,
 			CredentialType: run.CredentialType,
-			CredentialUsername: run.CredentialUsername);
+			CredentialUsername: run.CredentialUsername,
+			CoverageIncomplete: run.CoverageIncomplete);
 	}
 
 	/// <summary>

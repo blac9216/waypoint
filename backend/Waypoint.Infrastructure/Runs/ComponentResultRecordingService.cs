@@ -95,7 +95,21 @@ public sealed partial class ComponentResultRecordingService
 			IReadOnlyList<ComponentResultFinding> findings = parseResult.Success
 				? parseResult.Findings
 				: [new ComponentResultFinding("component", null, null, ComponentFindingSeverities.CatIII, ComponentFindingStatuses.NotReviewed, parseResult.RejectionReason)];
-			string status = parseResult.Success ? ComponentResultStatuses.Completed : ComponentResultStatuses.ExecutionError;
+
+			// Issue #1140: a successfully-parsed attempt that nonetheless evaluated
+			// ZERO controls (all not_reviewed/skipped/execution_error findings, or
+			// none at all) gets its own status rather than reading as a plain
+			// "completed" -- ComponentResultRecord.EvaluatedZeroControls is the same
+			// predicate GetRunRollupAsync's evaluated_zero_component_count FILTER
+			// already applies at read time, evaluated here at write time instead.
+			// A parse FAILURE (parseResult.Success false) stays ExecutionError
+			// regardless -- that ambiguity never existed there.
+			bool evaluatedZeroControls = parseResult.Success && ComponentResultRecord.EvaluatedZeroControlsFor(findings);
+			string status = !parseResult.Success
+				? ComponentResultStatuses.ExecutionError
+				: evaluatedZeroControls
+					? ComponentResultStatuses.CompletedZeroControls
+					: ComponentResultStatuses.Completed;
 
 			if (hdfPath is { } rawFile && File.Exists(rawFile))
 			{
