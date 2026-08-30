@@ -37,7 +37,7 @@ vocabulary check, and its Expected-verdict-vs-fixture reconciliation (the analog
 `ShapeInventoryDoc.AssertExpectedVocabulary` / `AssertVerdictMatchesFixtures`, so a
 documentation-only edit cannot disarm a shape) are all asserted inside that same Pester
 run, not by `ShapeInventoryDoc` -- `ShapeInventoryDoc` only reads C# fixture classes. `scripts/parser-shape-diff.sh` still diffs this parser's corpus old-ref-vs-new-ref
-alongside the two C# parsers: see "Real-content conformance and differential checks" below
+alongside the C# corpora: see "Real-content conformance and differential checks" below
 for how the PowerShell side of that harness works.
 
 This inventory only grows when a new shape is discovered (typically via the opt-in
@@ -168,13 +168,23 @@ round-2 review recorded on issue #1077: a real-content conformance check alone w
 **not** have caught a fix that silently stopped resolving a shape no shipped manifest
 happens to use today.
 
-- **Opt-in real-content conformance** (`RealContentConformanceTests` for the two C#
-  parsers; `WaypointScan.RealContentConformance.Tests.ps1` (Pester) for
+- **Opt-in real-content conformance** (`RealContentConformanceTests` for the three C#
+  parsers `InspecManifestParser`/`StigZipReader`/`XccdfParser`;
+  `WaypointScan.RealContentConformance.Tests.ps1` (Pester) for
   `Get-WaypointProfileDeclaredInputNameSet`): walks a locally cloned vendor content
   repository at `/workspaces/git/dod-compliance-and-automation` (read-only) and
   reports, per parser, how many real artifacts it accepts versus rejects. Skips
   cleanly (no assertion, no failure -- `Set-ItResult -Skipped` on the Pester side) when
   that path does not exist, so CI never depends on vendor content.
+
+  **Gap, tracked in #1213:** the `VendorHierarchyInterpreter` leaf-manifest section
+  below has NO real-content conformance check. That interpreter consumes
+  `VendorContentEntry` rows and no C# production code builds one from disk (the
+  directory walk lives in `WaypointScan.psm1`'s
+  `Get-WaypointComplianceContentEntries`), so a conformance check there is a
+  from-scratch walker rather than a reuse of the three checks above. That dimension is
+  covered by its documented rows, invented fixtures, bidirectional completeness, and
+  the differential harness below -- but not by real content.
 - **Differential harness** (`scripts/parser-shape-diff.sh`): runs the *same* shape
   corpus defined below through an old ref's parser code and the working tree's parser
   code, and fails on any shape that resolved under the old ref but no longer does
@@ -275,12 +285,44 @@ that set (or, for the two `depends:`-adjacency rows, that a differently-named
 | `tab-block-indentation` | A raw tab character used for the `inputs:` sequence's block indentation. | Accepted; the name is a member of the declared set -- this scanner treats a raw tab as ordinary block whitespace (`\s` in its indentation regex), unlike `InspecManifestParser`'s underlying real YAML parser, which rejects the same byte sequence as invalid YAML (see that parser's `tab-block-indentation` row). The two parsers reading the SAME shape ID differently is a real, pre-existing divergence between a hand-rolled scanner and a spec-compliant parser, not a defect introduced by this guard. |
 | `crlf-line-endings` | The whole document (indented-dash-sequence shape) uses CRLF line endings throughout. | Accepted; the name is a member of the declared set -- `[System.IO.File]::ReadAllLines` normalizes CRLF, so this parser (unlike `InspecManifestParser` before PR #1084) has no CRLF gap. |
 
-## Deferred parsers (tracked as issue [#1099](https://github.com/blac9216/waypoint/issues/1099))
+## `XccdfParser` (`backend/Waypoint.Core/ComplianceContent/Xccdf/XccdfParser.cs`)
 
-The remainder of issue #1077's enumerated scope is filed as issue
-[#1099](https://github.com/blac9216/waypoint/issues/1099). `Get-WaypointProfileDeclaredInputNameSet`
-is now covered above (PR landing this row). The following parsers remain in #1077's
-scope but are not yet covered by this inventory: `XccdfParser`, and
-`VendorHierarchyInterpreter` (beyond the layout-table parity guard
-`docs/compliance-parity.md` already provides for its directory-literal dimension --
-this inventory would add the leaf-manifest/encoding dimensions on top of that).
+Shapes of a single XCCDF `Benchmark` XML document (issue #1099, extending #1077 to the
+last two of three parsers PR #1098's first slice did not cover; `XccdfParserTests`
+issue #730 already covers malformed/oversized/XXE/missing-required-field rejection --
+this section is the namespace/prefix/encoding structural-shape dimension that guard
+did not enumerate as a documented, differential-harness-tracked corpus). Every document
+here is an INVENTED miniature only shaped like public DISA XCCDF structure -- no real
+vendor/DISA content appears anywhere in this file.
+
+| Shape ID | Description | Expected |
+|---|---|---|
+| `default-namespace-declared` | The `Benchmark` root and its children declare the XCCDF 1.2 namespace as the default namespace (`xmlns="..."`, no prefix). | Accepted; one rule resolves. |
+| `prefixed-namespace-elements` | The document uses an explicit namespace prefix on every element (`<xccdf:Benchmark xmlns:xccdf="...">`, `<xccdf:title>`, `<xccdf:Rule>`, ...). | Accepted; one rule resolves -- the parser matches every element by local name only (`LocalName(element)`), never by namespace-qualified identity, so a prefix never hides a shape from it. |
+| `no-namespace-declared` | The document declares no XML namespace at all. | Accepted; one rule resolves -- the parser never requires a namespace to be present. |
+| `nested-group-within-group-rule` | A `Rule` sits two `Group` levels deep (`Group > Group > Rule`), one level deeper than the `Group > Rule` shape `XccdfParserTests`' `ValidDocument` fixture already exercises. | Accepted; one rule resolves -- `EnumerateDescendants` recurses through every intermediate element regardless of depth. |
+| `non-utf8-encoding-declaration-ignored-for-char-stream` | The XML declaration states `encoding="ISO-8859-1"` even though the document is parsed from an already-decoded .NET `string` (`XmlReader.Create` over a `StringReader`), which cannot re-decode bytes. | Accepted; one rule resolves -- a declared encoding that disagrees with the (already-Unicode) character stream is not a parse error for this entry point, only for a byte-stream reader this parser never uses. |
+| `mixed-case-title-and-version-child-elements-still-match` | The `title`/`version` child elements are spelled `TITLE`/`Version` (mixed case). | Accepted; parses without error -- `FindChildText`/`FindChildAttribute` compare local names with `OrdinalIgnoreCase`, unlike the root-element check below. |
+| `lowercase-benchmark-root-element` | The root element is spelled `benchmark` (all lowercase) instead of `Benchmark`. | Rejected as missing the top-level `Benchmark` element -- the root-element local-name check is deliberately `StringComparison.Ordinal` (case-SENSITIVE), the one place this parser's otherwise case-insensitive element matching does not apply; discovered by this guard's first extension to this parser (issue #1099), not a pre-existing documented behaviour. |
+| `byte-order-mark-before-declaration` | A literal UTF-8 BOM character (`U+FEFF`) precedes the `<?xml ...?>` declaration in the `string` handed to `TryParse`. | Rejected as not valid/safe XML ("Data at the root level is invalid") -- `XmlReader.Create` over a `StringReader` does not strip a BOM character embedded in the character stream itself (only a byte-stream reader strips a BOM from the raw bytes before decoding); discovered by this guard's first extension to this parser (issue #1099). Any caller reading XCCDF content from bytes must strip a BOM before decoding to `string`, or this shape is a hard rejection, not a silent pass-through. |
+
+## `VendorHierarchyInterpreter` leaf-manifest dimension (`backend/Waypoint.Core/ComplianceContent/SemanticImport/VendorHierarchyInterpreter.cs`)
+
+`LayoutTableParityTests` (issue #959) already guards this interpreter's PATH/layout
+dimension -- which family/component a directory shape resolves to -- against
+`docs/compliance-parity.md`'s provenance matrix. This section (issue #1099) guards the
+orthogonal dimension: how the interpreter turns an already-classified path's PARSED
+`inspec.yml` manifest and entry metadata into a `SemanticCandidate`'s fields --
+display-name fallback, aggregate-vs-leaf disposition, and pass-through/derived fields.
+No real vendor content, path, or manifest appears anywhere in this file.
+
+| Shape ID | Description | Expected |
+|---|---|---|
+| `title-present-leaf-uses-manifest-title-as-display-name` | A non-aggregate object-kind-split leaf (`vsphere/.../vcenter`) whose `inspec.yml` declares a `title:`. | Accepted; the candidate's `DisplayName` equals the manifest's `Title` verbatim. |
+| `title-missing-split-leaf-falls-back-to-tail-segment-literal` | The same object-kind-split shape, but the manifest declares no `title:`. | Accepted; `DisplayName` falls back to the leaf's own path-segment literal (`tail[0]`, e.g. `esxi`), never a synthesized string. |
+| `title-missing-whole-appliance-falls-back-to-family-name` | A whole-appliance family (`photon`) leaf whose manifest declares no `title:`. | Accepted; `DisplayName` falls back to the vendor family name (`photon`) -- the whole-appliance branch's fallback source differs from a split family's (family name vs. tail segment), and both must be exercised, not just one. |
+| `empty-tail-with-controls-directory-is-an-executable-leaf` | A whole-appliance profile found directly AT its baseline directory (empty tail) that DOES have a `controls/` directory. | Accepted; `IsAggregate` is `false` and `IsExecutableLeaf` is `true` -- a bare baseline directory with real controls is a directly executable profile, not a grouping node. |
+| `empty-tail-without-controls-directory-is-an-aggregate` | The same empty-tail shape, but with NO `controls/` directory. | Accepted; `IsAggregate` is `true` -- an empty tail alone does not make a leaf executable; the absence of a `controls/` directory is what marks it a pure grouping node. |
+| `non-empty-tail-forces-aggregate-even-with-controls-directory` | A whole-appliance profile found one segment BELOW its baseline directory (non-empty tail) that DOES have a `controls/` directory. | Accepted; `IsAggregate` is `true` regardless of the `controls/` directory's presence -- `isAggregate = tail.Length > 0 \|\| !HasControlsDirectory` is an OR, so a non-empty tail alone is sufficient and the `controls/`-directory signal is never consulted once the tail is non-empty. |
+| `inputs-supports-depends-carried-through-unchanged` | A leaf manifest declaring one `inputs:` entry, one `supports:` platform string, and one `depends:` profile string. | Accepted; the candidate's `Inputs`/`Supports`/`Depends` collections carry the manifest's values through unchanged -- the interpreter never filters, renames, or drops them on the way into `SemanticCandidate`. |
+| `content-digest-differs-when-release-key-differs-same-manifest-and-controls` | Two leaves under the SAME family/product-version, with byte-identical manifest content and control file names, but DIFFERENT release directories (`v2r3-stig` vs. `v2r4-stig`). | Accepted; the two candidates' `ContentDigest` values differ -- `ComputeDigest` folds `releaseKey` into the hash, so an otherwise-identical manifest re-published under a new release is never digest-collision-indistinguishable from the old one. |

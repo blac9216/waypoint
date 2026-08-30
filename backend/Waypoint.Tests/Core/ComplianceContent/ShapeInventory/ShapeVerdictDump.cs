@@ -24,7 +24,12 @@ namespace Waypoint.Tests.Core.ComplianceContent.ShapeInventory;
 /// <c>WAYPOINT_SHAPE_DUMP_PATH</c> is set, writes a JSON map of
 /// <c>"&lt;parser&gt;/&lt;shape-id&gt;" -&gt; resolved (bool)</c> for the full shape
 /// corpus (<see cref="InspecManifestShapeInventoryTests.ImplementedShapeIds"/>,
-/// <see cref="StigZipReaderShapeInventoryTests.ImplementedShapeIds"/>) to that path.
+/// <see cref="StigZipReaderShapeInventoryTests.ImplementedShapeIds"/>,
+/// <see cref="XccdfParserShapeInventoryTests.ImplementedShapeIds"/>,
+/// <see cref="VendorHierarchyInterpreterLeafManifestShapeInventoryTests.ImplementedShapeIds"/>)
+/// to that path. This list is hardcoded per parser, so a NEW inventory section is only
+/// reachable by the differential harness once its loop is added here as well as its doc
+/// rows and fixture class (PR #1208 round-1 review).
 /// <c>scripts/parser-shape-diff.sh</c> runs this once per ref (old and new) and diffs
 /// the two JSON files -- see that script and the "Real-content conformance and
 /// differential checks" section of <c>docs/compliance-content-shape-inventory.md</c>
@@ -66,6 +71,17 @@ public sealed class ShapeVerdictDump
 			verdicts[$"StigZipReader/{shapeId}"] = StigZipReaderShapeInventoryTests.Resolves(shapeId);
 		}
 
+		foreach (string shapeId in XccdfParserShapeInventoryTests.ImplementedShapeIds)
+		{
+			verdicts[$"XccdfParser/{shapeId}"] = XccdfParserShapeInventoryTests.Resolves(shapeId);
+		}
+
+		foreach (string shapeId in VendorHierarchyInterpreterLeafManifestShapeInventoryTests.ImplementedShapeIds)
+		{
+			verdicts[$"VendorHierarchyInterpreter/{shapeId}"] =
+				VendorHierarchyInterpreterLeafManifestShapeInventoryTests.Resolves(shapeId);
+		}
+
 		WriteJson(path, verdicts);
 
 		string? expectedPath = Environment.GetEnvironmentVariable("WAYPOINT_SHAPE_EXPECTED_DUMP_PATH");
@@ -96,6 +112,16 @@ public sealed class ShapeVerdictDump
 		foreach ((string shapeId, string? verdict) in ShapeInventoryDoc.ClassifyShapes("`Get-WaypointProfileDeclaredInputNameSet` (`WaypointScan.psm1`)"))
 		{
 			expected[$"Get-WaypointProfileDeclaredInputNameSet/{shapeId}"] = verdict;
+		}
+
+		foreach ((string shapeId, string? verdict) in ShapeInventoryDoc.ClassifyShapes("`XccdfParser` (`backend/Waypoint.Core/ComplianceContent/Xccdf/XccdfParser.cs`)"))
+		{
+			expected[$"XccdfParser/{shapeId}"] = verdict;
+		}
+
+		foreach ((string shapeId, string? verdict) in ShapeInventoryDoc.ClassifyShapes("`VendorHierarchyInterpreter` leaf-manifest dimension (`backend/Waypoint.Core/ComplianceContent/SemanticImport/VendorHierarchyInterpreter.cs`)"))
+		{
+			expected[$"VendorHierarchyInterpreter/{shapeId}"] = verdict;
 		}
 
 		WriteJson(expectedPath, expected);
