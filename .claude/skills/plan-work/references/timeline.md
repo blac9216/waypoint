@@ -55,8 +55,10 @@ reported on stderr; matching zero milestones in total is an error. An empty
 
 Each line is one open-milestone issue as read (before critical-path/effort computation).
 `projection.json`'s `sources` map and `timeline.md`'s "estimate sources" column are a
-per-milestone count grouped by `hours_source`; `placement.json` and `timeline.md` carry
-that same map through unchanged.
+per-milestone count grouped by `hours_source`, computed over **open, non-`epic`**
+records only (while `issues.jsonl` itself holds every record read, including closed
+issues and epics, so its line count exceeds the map's totals); `placement.json` and
+`timeline.md` carry that same map through unchanged.
 
 | Field | Meaning |
 |---|---|
