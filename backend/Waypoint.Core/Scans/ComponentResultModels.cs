@@ -140,7 +140,9 @@ public sealed record RunResultRollupRow(
 {
 	/// <summary>
 	/// Issue #1132: how many COMPONENTS in this status bucket produced NO verdict --
-	/// zero passed and zero open (failed) findings. Counted PER COMPONENT by
+	/// zero passed and zero open (failed) findings. This is a COMPONENT count, unlike
+	/// its neighbour <see cref="ExecutionErrorCount"/> and every other count on this
+	/// record, which sum FINDINGS. Counted PER COMPONENT by
 	/// <see cref="IComponentResultRepository.GetRunRollupAsync"/>'s <c>count(*)
 	/// FILTER</c>, never re-derived from this row's summed counts: the sums cannot
 	/// express it, because a mixed bucket (one component that evaluated nothing,
@@ -166,11 +168,16 @@ public sealed record RunResultRollupRow(
 	public int EvaluatedZeroComponentCount { get; init; } = EvaluatedZeroComponentCount;
 
 	/// <summary>
-	/// Issue #1144: how many COMPONENTS in this bucket had EVERY finding map to
-	/// <see cref="ComponentFindingStatuses.ExecutionError"/> -- the run-rollup-visible
-	/// form of the same signal <see cref="ComponentResultRecord.ExecutionErrorCount"/>
-	/// carries per attempt. Summed across the bucket's latest-attempt rows, same
-	/// convention as every other count on this record.
+	/// Issue #1144: how many FINDINGS in this bucket mapped to
+	/// <see cref="ComponentFindingStatuses.ExecutionError"/> -- the sum of
+	/// <see cref="ComponentResultRecord.ExecutionErrorCount"/> across the bucket's
+	/// latest-attempt component rows (<c>sum(execution_error_count)</c>), the same
+	/// convention as <see cref="PassedCount"/> and every other count on this record.
+	/// A FINDING count, NOT a component count: three components with one errored
+	/// control each and one component with three read the same <c>3</c> here. The
+	/// only per-COMPONENT number on this record is
+	/// <see cref="EvaluatedZeroComponentCount"/> (plus <see cref="ComponentCount"/>);
+	/// do not render this one as "N components errored".
 	/// </summary>
 	public int ExecutionErrorCount { get; init; } = ExecutionErrorCount;
 

@@ -137,7 +137,12 @@ public static class HdfFindingsParser
 			// A control with no id at all cannot be identified for any downstream
 			// view -- skip rather than fabricate an identity. This is the one case
 			// this parser silently drops a control, and only because there is no
-			// possible identity to attach a row to.
+			// possible identity to attach a row to. Issue #1144 round 2: this is the
+			// ONE place the two HDF surfaces see different control sets --
+			// HdfSeverityCounter counts every control the report describes
+			// (ControlsTotal's #1132 definition), so an id-less errored control is in
+			// controls_execution_error on GET /runs/{id}/artifacts and in nothing on
+			// the summary. Documented on both contract rows; malformed input only.
 			return null;
 		}
 

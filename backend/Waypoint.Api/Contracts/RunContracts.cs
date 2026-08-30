@@ -511,10 +511,18 @@ public sealed record RunArtifactResponse(
 	/// -- an <c>error</c> result, an unrecognized status string, or an unrecognized
 	/// mixed result shape -- null exactly when <c>counts_available</c> is false.
 	/// Reconciles this endpoint with <c>GET /runs/{id}/component-results/summary</c>'s
-	/// <c>execution_error_count</c>, and the agreement is exact by construction: both
-	/// surfaces call the one shared
+	/// <c>execution_error_count</c>, and the agreement is exact by construction FOR ANY
+	/// CONTROL BOTH SURFACES SEE: both call the one shared
 	/// <see cref="Waypoint.Core.Scans.HdfControlClassifier"/> rule, so there is no
-	/// second classification to drift. Such a control is counted here, NOT folded into
+	/// second classification to drift. One documented divergence remains, in the
+	/// control SET rather than the rule: <see cref="Waypoint.Core.Scans.HdfFindingsParser"/>
+	/// drops a control with a missing/blank <c>id</c> before classifying it (no identity
+	/// to key a persisted finding on), while
+	/// <see cref="Waypoint.Core.Scans.HdfSeverityCounter"/> counts every control the
+	/// report describes -- <c>controls_total</c>'s issue #1132 definition. So an id-less
+	/// errored control is counted here and in nothing on the summary. Malformed input
+	/// only; the same asymmetry <c>controls_total</c> already carries.
+	/// Such a control is counted here, NOT folded into
 	/// <c>cat_i_open</c>/<c>cat_ii_open</c>/<c>cat_iii_open</c> -- it never produced a
 	/// genuine compliance verdict, so it is not "open", matching
 	/// <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>'s
@@ -975,6 +983,9 @@ public sealed record RunResultRollupStatusResponse(
 	/// "open" -- matching <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>'s
 	/// <c>failed</c>-only definition, which <c>GET /runs/{id}/artifacts</c>'
 	/// <see cref="Waypoint.Core.Scans.HdfSeverityCounter"/> now agrees with as well.
+	/// A FINDING count, NOT a component count -- <c>evaluated_zero_component_count</c>
+	/// below is the only per-COMPONENT number on this row (beside
+	/// <c>component_count</c>), so do not render this one as "N components errored".
 	/// </summary>
 	[property: JsonPropertyName("execution_error_count")]
 	int ExecutionErrorCount,

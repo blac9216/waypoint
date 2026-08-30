@@ -36,7 +36,16 @@ namespace Waypoint.Core.Scans;
 /// <see cref="HdfControlClassifier"/>, the single shared rule
 /// <see cref="HdfFindingsParser"/> also uses, so a control lands in the same bucket on
 /// this preview and on the persisted <c>component_result_findings</c> rows behind
-/// <c>GET /runs/{id}/component-results/summary</c>. An errored control is NOT counted in
+/// <c>GET /runs/{id}/component-results/summary</c>. That agreement is about the RULE and
+/// holds for any control both surfaces see; the control SETS still differ in one
+/// documented way -- <see cref="HdfFindingsParser"/> drops a control with a missing/blank
+/// <c>id</c> (no identity to key a persisted finding on) while this counter counts every
+/// control the report describes, which is <see cref="ControlsTotal"/>'s issue #1132
+/// definition. An id-less errored control therefore lands in
+/// <see cref="ControlsExecutionError"/> here and in no summary column. Malformed input
+/// only, and the same asymmetry <see cref="ControlsTotal"/> already carries; do NOT
+/// "fix" it by filtering here without changing <see cref="ControlsTotal"/>'s contract.
+/// An errored control is NOT counted in
 /// <see cref="CatIOpen"/>/<see cref="CatIIOpen"/>/<see cref="CatIIIOpen"/> (it never
 /// produced a genuine compliance verdict, so it is not "open") and not counted in
 /// <see cref="ControlsEvaluated"/> either -- exactly as
