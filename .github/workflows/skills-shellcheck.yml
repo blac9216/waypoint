@@ -75,13 +75,29 @@ jobs:
             xargs -0 --no-run-if-empty -n1 bash
 
       # Soft gate (#1349): every scripts/*.sh in a skill that already has a
-      # tests/ dir must be referenced (by name) from at least one file in
+      # tests/ dir must be mentioned (by name) from at least one file in
       # that tests/ dir, so a new script can't silently ship with zero
       # coverage the way history.sh did (#1345/#1348). Deliberately scoped
       # to skills that already have a tests/ dir — configure-workflow's 8
       # scripts have no tests/ dir at all yet and are NOT retroactively
       # failed by this check; see issue #1349 for that scoping decision.
-      - name: lint — new skill scripts ship with a test
+      #
+      # Tightened by #1359 in two ways, after #1352's review found the check
+      # weaker than its step name/error text implied:
+      #  - a whole-line `#` comment mention no longer satisfies the check
+      #    (grep -v strips full-comment lines before matching) — this closes
+      #    the exact probe #1359 verified (`# mentions untested.sh only in a
+      #    comment`). A same-line trailing comment after real code still
+      #    counts as a mention; distinguishing that would need a shell
+      #    parser, not a grep, so it's accepted as a residual gap — the gate
+      #    stays a soft "is this name mentioned anywhere runnable" check, not
+      #    proof of execution or coverage, and the step name/error text below
+      #    say "mentions"/"mentioned", not "references"/"tested", to match.
+      #  - discovery is now depth-independent (no `-maxdepth 2` on the `find
+      #    ... -name tests` scan), so a skill with tests/ nested deeper than
+      #    <skill>/tests is no longer silently skipped. No such layout exists
+      #    today.
+      - name: lint — new skill scripts are mentioned in a test
         run: |
           fail=0
           while IFS= read -r -d '' tests_dir; do
@@ -90,10 +106,10 @@ jobs:
             [ -d "$scripts_dir" ] || continue
             while IFS= read -r -d '' script; do
               name="$(basename "$script")"
-              if ! grep -rlq -- "$name" "$tests_dir"/*.sh 2>/dev/null; then
-                echo "::error file=$script::no test in $tests_dir references $name (see issue #1349)"
+              if ! grep -h -v '^[[:space:]]*#' "$tests_dir"/*.sh 2>/dev/null | grep -q -- "$name"; then
+                echo "::error file=$script::no test in $tests_dir mentions $name outside a comment (see issue #1349)"
                 fail=1
               fi
             done < <(find "$scripts_dir" -maxdepth 1 -type f -name "*.sh" -print0)
-          done < <(find .claude/skills -maxdepth 2 -type d -name tests -print0)
+          done < <(find .claude/skills -type d -name tests -print0)
           exit "$fail"
