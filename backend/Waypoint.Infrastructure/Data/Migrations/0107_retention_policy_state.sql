@@ -99,10 +99,15 @@ COMMENT ON TABLE download_retained_content_state IS
 COMMENT ON COLUMN download_retained_content_state.pinned_by IS
     'Actor who pinned this content, or NULL when not pinned. Pin/unpin is a #1453 API concern; this column only carries the resulting state.';
 
--- Runner grants: deliberately NONE, same posture 0075 (run_retention_holds) and
--- 0078 (retention_policy) document. This issue introduces the model and
--- persistence only -- no sweep job (#1436) reads or writes these tables yet, and
--- when it lands it does so as an API-process-owned background service (the same
--- posture EvidenceRetentionSweepHostedService already uses for the compliance
--- domain), not as a claimed runner job. Neither waypoint_compliance_runner nor
--- waypoint_download_runner needs access to either table introduced here.
+-- Runner grants: deliberately NONE. This issue introduces the model and
+-- persistence only -- no consumer reads or writes these tables yet, so there is
+-- nothing to grant to. #1436 (the retention sweep), as filed, creates
+-- Waypoint.Infrastructure.Execution/Downloads/RetentionSweepJobHandler.cs and a
+-- job-type constant in Waypoint.DownloadRunner/DownloadRunnerJobTypes.cs -- a
+-- genuine waypoint_download_runner-claimed job, NOT an API-process-owned
+-- background service like 0075/0078's compliance-domain tables. When #1436 lands
+-- it must ship its own GRANT migration (SELECT/UPDATE on
+-- download_retained_content_state, SELECT on download_retention_policies),
+-- following the 0100/#1484 precedent: "the sync job that reads this table grants
+-- itself what it needs when it lands." Neither waypoint_compliance_runner nor
+-- waypoint_download_runner needs access to either table introduced here YET.

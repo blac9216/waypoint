@@ -63,7 +63,7 @@ public static class RetainedContentStateTransitions
 		[RetainedContentStates.Tracked] = [RetainedContentStates.Grace, RetainedContentStates.Pinned],
 		[RetainedContentStates.Grace] = [RetainedContentStates.Tracked, RetainedContentStates.Pinned, RetainedContentStates.PendingPurge],
 		[RetainedContentStates.Pinned] = [RetainedContentStates.Tracked, RetainedContentStates.Grace],
-		[RetainedContentStates.PendingPurge] = [RetainedContentStates.Purged, RetainedContentStates.Pinned],
+		[RetainedContentStates.PendingPurge] = [RetainedContentStates.Purged],
 		[RetainedContentStates.Purged] = []
 	};
 

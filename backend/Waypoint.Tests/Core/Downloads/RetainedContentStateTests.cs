@@ -34,7 +34,6 @@ public sealed class RetainedContentStateTests
 	[InlineData(RetainedContentStates.Pinned, RetainedContentStates.Tracked)]
 	[InlineData(RetainedContentStates.Pinned, RetainedContentStates.Grace)]
 	[InlineData(RetainedContentStates.PendingPurge, RetainedContentStates.Purged)]
-	[InlineData(RetainedContentStates.PendingPurge, RetainedContentStates.Pinned)]
 	public void CanTransition_LegalMoves_ReturnsTrue(string from, string to)
 	{
 		Assert.True(RetainedContentStateTransitions.CanTransition(from, to));
@@ -49,6 +48,7 @@ public sealed class RetainedContentStateTests
 	[InlineData(RetainedContentStates.Tracked, RetainedContentStates.Purged)]
 	[InlineData(RetainedContentStates.Pinned, RetainedContentStates.PendingPurge)]
 	[InlineData(RetainedContentStates.Pinned, RetainedContentStates.Purged)]
+	[InlineData(RetainedContentStates.PendingPurge, RetainedContentStates.Pinned)]
 	public void CanTransition_IllegalMoves_ReturnsFalse(string from, string to)
 	{
 		Assert.False(RetainedContentStateTransitions.CanTransition(from, to));
@@ -75,5 +75,29 @@ public sealed class RetainedContentStateTests
 	public void CanPin_FromPinnedPendingPurgeOrPurged_ReturnsFalse(string from)
 	{
 		Assert.False(RetainedContentStateTransitions.CanPin(from));
+	}
+
+	/// <summary>
+	/// Full-matrix consistency guard (PR #1621 finding 3): <c>Transitions[state]</c>
+	/// must offer <c>pinned</c> as a legal next state if and only if
+	/// <see cref="RetainedContentStateTransitions.CanPin"/> says pinning from that
+	/// state is legal. The two were caught disagreeing for <c>pending-purge</c> --
+	/// <c>Transitions</c> allowed the move while <c>CanPin</c> and every doc comment
+	/// called it illegal -- letting <c>TransitionAsync</c> bypass the <c>PinAsync</c>
+	/// guard entirely. Enumerated over every declared state (not sampled) so a future
+	/// edit to either side that reintroduces the split fails here first.
+	/// </summary>
+	[Theory]
+	[InlineData(RetainedContentStates.Tracked)]
+	[InlineData(RetainedContentStates.Grace)]
+	[InlineData(RetainedContentStates.Pinned)]
+	[InlineData(RetainedContentStates.PendingPurge)]
+	[InlineData(RetainedContentStates.Purged)]
+	public void CanTransitionToPinned_AgreesWithCanPin_ForEveryState(string from)
+	{
+		bool transitionsAllowsPin = RetainedContentStateTransitions.CanTransition(from, RetainedContentStates.Pinned);
+		bool canPinAllowsIt = RetainedContentStateTransitions.CanPin(from);
+
+		Assert.Equal(canPinAllowsIt, transitionsAllowsPin);
 	}
 }

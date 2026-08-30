@@ -366,8 +366,13 @@ public sealed class SchemaMigrationTests
 	/// (#1436), manual-download dial (#1440), or API surface (#1453). Distinct
 	/// bounded context from the unrelated compliance-domain <c>retention_policy</c>
 	/// (0078)/<c>run_retention_holds</c> (0075) -- table names prefixed
-	/// <c>download_</c> to disambiguate. No new runner grants (API-process-owned,
-	/// same posture as 0075/0078); state-transition legality is enforced in
+	/// <c>download_</c> to disambiguate. No new runner grants YET -- there is no
+	/// consumer to grant to; #1436, as filed, is a genuine
+	/// <c>waypoint_download_runner</c>-claimed job (creates
+	/// <c>RetentionSweepJobHandler</c> and a <c>DownloadRunnerJobTypes</c> constant),
+	/// not an API-process-owned service like 0075/0078, so it must ship its own
+	/// GRANT migration when it lands (0100/#1484 precedent). State-transition
+	/// legality is enforced in
 	/// <c>Waypoint.Core.Downloads.RetainedContentStateTransitions</c>, not a DB
 	/// trigger --
 	/// 0117 (pre-assigned slot, issue #1470) adds esx_acquisition_subscriptions --

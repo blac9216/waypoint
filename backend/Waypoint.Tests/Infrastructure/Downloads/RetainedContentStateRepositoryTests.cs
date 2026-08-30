@@ -59,11 +59,11 @@ public sealed class RetainedContentStateRepositoryTests : IAsyncLifetime
 		await deleteArtifacts.ExecuteNonQueryAsync();
 	}
 
-	private static async Task<Guid> InsertDepotArtifactAsync(NpgsqlConnection connection, string externalId)
+	private static async Task<Guid> InsertDepotArtifactAsync(NpgsqlConnection connection, string relativePath)
 	{
 		await using NpgsqlCommand command = new(
-			"INSERT INTO depot_artifacts (external_id) VALUES ($1) RETURNING id", connection);
-		command.Parameters.AddWithValue(externalId);
+			"INSERT INTO depot_artifacts (relative_path) VALUES ($1) RETURNING id", connection);
+		command.Parameters.AddWithValue(relativePath);
 		return (Guid)(await command.ExecuteScalarAsync())!;
 	}
 
@@ -95,6 +95,53 @@ public sealed class RetainedContentStateRepositoryTests : IAsyncLifetime
 		Guid second = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
 
 		Assert.Equal(first, second);
+	}
+
+	/// <summary>
+	/// PR #1621 finding 6: a repeat <c>EnsureTrackedAsync</c> call with no (or the
+	/// same) <c>policyId</c> must be a genuine no-op -- no write, so
+	/// <c>updated_at</c> does not move -- not merely non-throwing.
+	/// </summary>
+	[Fact]
+	public async Task EnsureTrackedAsync_CalledTwiceWithNoPolicyId_UpdatedAtDoesNotMove()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid artifactId = await InsertDepotArtifactAsync(connection, "retained-content-noop-idempotent");
+
+		Guid id = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		RetainedContentState? before = await _repository.GetAsync(id, CancellationToken.None);
+
+		await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		RetainedContentState? after = await _repository.GetAsync(id, CancellationToken.None);
+
+		Assert.Equal(before!.UpdatedAt, after!.UpdatedAt);
+	}
+
+	/// <summary>
+	/// PR #1621 finding 6: passing a differing, non-null <c>policyId</c> on a
+	/// re-evaluation call is an explicit adopt-the-new-value update (the #1436 sweep's
+	/// use case), not a silent discard.
+	/// </summary>
+	[Fact]
+	public async Task EnsureTrackedAsync_CalledWithDifferingPolicyId_UpdatesPolicyId()
+	{
+		RetentionPolicyRepository policyRepository = new(_fixture.ConnectionString);
+		Guid firstPolicyId = await policyRepository.UpsertAsync(
+			"retained-content-policy-a", 30, 0, "review", CancellationToken.None);
+		Guid secondPolicyId = await policyRepository.UpsertAsync(
+			"retained-content-policy-b", 60, 0, "review", CancellationToken.None);
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid artifactId = await InsertDepotArtifactAsync(connection, "retained-content-policy-conflict");
+
+		Guid id = await _repository.EnsureTrackedAsync(artifactId, firstPolicyId, CancellationToken.None);
+		Guid idAgain = await _repository.EnsureTrackedAsync(artifactId, secondPolicyId, CancellationToken.None);
+
+		Assert.Equal(id, idAgain);
+		RetainedContentState? state = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.Equal(secondPolicyId, state!.PolicyId);
 	}
 
 	[Fact]
@@ -162,6 +209,52 @@ public sealed class RetainedContentStateRepositoryTests : IAsyncLifetime
 
 		await Assert.ThrowsAsync<InvalidOperationException>(
 			() => _repository.PinAsync(id, "operator-1", null, CancellationToken.None));
+	}
+
+	/// <summary>
+	/// PR #1621 finding 4: <c>LoadForUpdateAsync</c> must take a real row lock so the
+	/// read-check-write in <see cref="RetainedContentStateRepository.TransitionAsync"/>
+	/// is atomic against a second concurrent caller doing the same thing (the future
+	/// #1436 sweep racing a #1453 pin/transition request is exactly this pair). Fires
+	/// two concurrent <c>TransitionAsync(id, "purged")</c> calls from the same
+	/// <c>pending-purge</c> row. Without a lock both would observe <c>pending-purge</c>
+	/// on their independent reads, both pass <c>CanTransition</c>, and both succeed --
+	/// no exception at all, which is the exact bug (a write landing on top of a state
+	/// the writer never actually observed). With <c>SELECT ... FOR UPDATE</c> inside a
+	/// transaction, the second call blocks until the first commits, re-reads the
+	/// now-<c>purged</c> row, and <c>CanTransition("purged", "purged")</c> is false
+	/// (<c>purged</c> is terminal) -- so exactly one of the two calls must throw.
+	/// </summary>
+	[Fact]
+	public async Task TransitionAsync_ConcurrentCallsFromPendingPurgeToPurged_ExactlyOneSucceeds()
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		Guid artifactId = await InsertDepotArtifactAsync(connection, "retained-content-concurrent-purge");
+		Guid id = await _repository.EnsureTrackedAsync(artifactId, null, CancellationToken.None);
+		await _repository.TransitionAsync(id, RetainedContentStates.Grace, CancellationToken.None);
+		await _repository.TransitionAsync(id, RetainedContentStates.PendingPurge, CancellationToken.None);
+
+		Task first = _repository.TransitionAsync(id, RetainedContentStates.Purged, CancellationToken.None);
+		Task second = _repository.TransitionAsync(id, RetainedContentStates.Purged, CancellationToken.None);
+
+		Task[] both = [first, second];
+		int failureCount = 0;
+		foreach (Task task in both)
+		{
+			try
+			{
+				await task;
+			}
+			catch (InvalidOperationException)
+			{
+				failureCount++;
+			}
+		}
+
+		Assert.Equal(1, failureCount);
+		RetainedContentState? state = await _repository.GetAsync(id, CancellationToken.None);
+		Assert.Equal(RetainedContentStates.Purged, state!.State);
 	}
 
 	[Fact]

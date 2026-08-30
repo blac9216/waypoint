@@ -38,11 +38,21 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 	{
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+		// Genuinely idempotent on the conflict path: the WHERE clause only fires the
+		// UPDATE (and therefore the set_updated_at trigger) when a non-null policyId
+		// actually differs from the row's current one -- a repeat call with the same
+		// (or no) policyId touches nothing and updated_at does not move. A differing
+		// non-null policyId is an explicit, documented decision to adopt it (the
+		// #1436 sweep re-evaluating with a freshly resolved policy is the caller this
+		// serves), not a silent discard.
 		await using NpgsqlCommand command = new(
 			"""
 			INSERT INTO download_retained_content_state (depot_artifact_id, policy_id, state)
 			VALUES ($1, $2, $3)
-			ON CONFLICT (depot_artifact_id) DO UPDATE SET depot_artifact_id = EXCLUDED.depot_artifact_id
+			ON CONFLICT (depot_artifact_id) DO UPDATE SET policy_id = $2
+			WHERE $2 IS NOT NULL
+			  AND download_retained_content_state.policy_id IS DISTINCT FROM $2
 			RETURNING id
 			""", connection);
 		command.Parameters.AddWithValue(depotArtifactId);
@@ -50,7 +60,20 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 		command.Parameters.AddWithValue(RetainedContentStates.Tracked);
 
 		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-		return (Guid)result!;
+		if (result is Guid insertedOrUpdatedId)
+		{
+			return insertedOrUpdatedId;
+		}
+
+		// Conflict occurred but the WHERE clause suppressed the UPDATE (idempotent
+		// no-op case) -- ON CONFLICT ... WHERE that evaluates false returns no row,
+		// so the existing row's id is fetched explicitly rather than treated as
+		// "not found".
+		await using NpgsqlCommand select = new(
+			"SELECT id FROM download_retained_content_state WHERE depot_artifact_id = $1", connection);
+		select.Parameters.AddWithValue(depotArtifactId);
+		object? existingId = await select.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+		return (Guid)existingId!;
 	}
 
 	public async Task<RetainedContentState?> GetAsync(Guid id, CancellationToken cancellationToken)
@@ -79,25 +102,30 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-		RetainedContentState current = await LoadForUpdateAsync(connection, id, cancellationToken).ConfigureAwait(false);
+		RetainedContentState current = await LoadForUpdateAsync(connection, transaction, id, cancellationToken).ConfigureAwait(false);
 		if (!RetainedContentStateTransitions.CanTransition(current.State, toState))
 		{
 			throw new InvalidOperationException(
 				$"Illegal retained-content-state transition '{current.State}' -> '{toState}' for id {id}.");
 		}
 
-		await using NpgsqlCommand command = new(
+		await using (NpgsqlCommand command = new(
 			"""
 			UPDATE download_retained_content_state SET
 				state = $1,
 				grace_started_at = CASE WHEN $1 = 'grace' THEN now() ELSE grace_started_at END,
 				purged_at = CASE WHEN $1 = 'purged' THEN now() ELSE purged_at END
 			WHERE id = $2
-			""", connection);
-		command.Parameters.AddWithValue(toState);
-		command.Parameters.AddWithValue(id);
-		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			""", connection, transaction))
+		{
+			command.Parameters.AddWithValue(toState);
+			command.Parameters.AddWithValue(id);
+			await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	public async Task PinAsync(Guid id, string pinnedBy, string? note, CancellationToken cancellationToken)
@@ -106,15 +134,16 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-		RetainedContentState current = await LoadForUpdateAsync(connection, id, cancellationToken).ConfigureAwait(false);
+		RetainedContentState current = await LoadForUpdateAsync(connection, transaction, id, cancellationToken).ConfigureAwait(false);
 		if (!RetainedContentStateTransitions.CanPin(current.State))
 		{
 			throw new InvalidOperationException(
 				$"Cannot pin retained content in state '{current.State}' for id {id}.");
 		}
 
-		await using NpgsqlCommand command = new(
+		await using (NpgsqlCommand command = new(
 			"""
 			UPDATE download_retained_content_state SET
 				state = $1,
@@ -122,12 +151,16 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 				pinned_at = now(),
 				pin_note = $3
 			WHERE id = $4
-			""", connection);
-		command.Parameters.AddWithValue(RetainedContentStates.Pinned);
-		command.Parameters.AddWithValue(pinnedBy);
-		command.Parameters.AddWithValue((object?)note ?? DBNull.Value);
-		command.Parameters.AddWithValue(id);
-		await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+			""", connection, transaction))
+		{
+			command.Parameters.AddWithValue(RetainedContentStates.Pinned);
+			command.Parameters.AddWithValue(pinnedBy);
+			command.Parameters.AddWithValue((object?)note ?? DBNull.Value);
+			command.Parameters.AddWithValue(id);
+			await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+		}
+
+		await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
 	}
 
 	public async Task<IReadOnlyList<RetainedContentState>> ListByStateAsync(string state, CancellationToken cancellationToken)
@@ -148,9 +181,21 @@ public sealed class RetainedContentStateRepository : IRetainedContentStateReposi
 		return items;
 	}
 
-	private static async Task<RetainedContentState> LoadForUpdateAsync(NpgsqlConnection connection, Guid id, CancellationToken cancellationToken)
+	/// <summary>
+	/// Loads the row identified by <paramref name="id"/> with <c>SELECT ... FOR
+	/// UPDATE</c>, taking a row-level exclusive lock that is held until
+	/// <paramref name="transaction"/> commits or rolls back. Makes the
+	/// <c>TransitionAsync</c>/<c>PinAsync</c> read-check-write sequence atomic against
+	/// a concurrent caller doing the same thing (the #1436 sweep racing a #1453 pin
+	/// request is exactly this pair): a second transaction's <c>FOR UPDATE</c> on the
+	/// same row blocks until the first commits, then observes the first's write and
+	/// re-evaluates <see cref="RetainedContentStateTransitions"/> against the
+	/// up-to-date state -- so a write can never land on top of a state the writer
+	/// never actually observed (in particular, never past <c>purged</c>).
+	/// </summary>
+	private static async Task<RetainedContentState> LoadForUpdateAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid id, CancellationToken cancellationToken)
 	{
-		await using NpgsqlCommand command = new($"{ProjectionSql} WHERE id = $1", connection);
+		await using NpgsqlCommand command = new($"{ProjectionSql} WHERE id = $1 FOR UPDATE", connection, transaction);
 		command.Parameters.AddWithValue(id);
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 		if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
