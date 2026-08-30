@@ -73,3 +73,27 @@ jobs:
           locale -a | grep -qi '^en_US\.utf8$'
           find .claude/skills -type f -path "*/tests/*.sh" -print0 | \
             xargs -0 --no-run-if-empty -n1 bash
+
+      # Soft gate (#1349): every scripts/*.sh in a skill that already has a
+      # tests/ dir must be referenced (by name) from at least one file in
+      # that tests/ dir, so a new script can't silently ship with zero
+      # coverage the way history.sh did (#1345/#1348). Deliberately scoped
+      # to skills that already have a tests/ dir — configure-workflow's 8
+      # scripts have no tests/ dir at all yet and are NOT retroactively
+      # failed by this check; see issue #1349 for that scoping decision.
+      - name: lint — new skill scripts ship with a test
+        run: |
+          fail=0
+          while IFS= read -r -d '' tests_dir; do
+            skill_dir="$(dirname "$tests_dir")"
+            scripts_dir="$skill_dir/scripts"
+            [ -d "$scripts_dir" ] || continue
+            while IFS= read -r -d '' script; do
+              name="$(basename "$script")"
+              if ! grep -rlq -- "$name" "$tests_dir"/*.sh 2>/dev/null; then
+                echo "::error file=$script::no test in $tests_dir references $name (see issue #1349)"
+                fail=1
+              fi
+            done < <(find "$scripts_dir" -maxdepth 1 -type f -name "*.sh" -print0)
+          done < <(find .claude/skills -maxdepth 2 -type d -name tests -print0)
+          exit "$fail"
