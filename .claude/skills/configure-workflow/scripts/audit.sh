@@ -7,7 +7,10 @@ while [ $# -gt 0 ]; do case $1 in --owner) OWNER=$2; shift 2;; --project) NUM=$2
 [ -n "$OWNER" ] && [ -n "$NUM" ] && [ -n "$MACHINE" ] || { say "usage: audit.sh --owner <login> --project <n> --machine <login>"; exit 2; }
 [ -n "$REPO" ] || REPO=$(repo_nwo); fail=0; ok(){ say "  ok   $*"; }; bad(){ say "  GAP  $*"; fail=1; }
 say "== labels";   "$HERE/labels.sh" --repo "$REPO" --audit >/dev/null 2>&1 && ok "canonical + area labels in sync" || bad "labels drift (run labels.sh)"
-say "== project";  "$HERE/project.sh" --owner "$OWNER" --project "$NUM" --audit >/dev/null 2>&1 && ok "fields/views/workflows match manifest" || bad "project drift (run project.sh; check UI workflows)"
+say "== project"
+if perr=$("$HERE/project.sh" --owner "$OWNER" --project "$NUM" --audit 2>&1 >/dev/null); then ok "fields/views/workflows match manifest"
+elif grep -q '^error:' <<<"$perr"; then bad "project.sh field-resolution error: $(grep -m1 '^error:' <<<"$perr")"
+else bad "project drift (run project.sh; check UI workflows)"; fi
 say "== grants";   sc=$(gh auth status 2>&1 | grep -o "scopes: .*" || true); grep -q "project" <<<"$sc" && ok "automation token has project scope" || bad "automation token lacks 'project' scope ($sc)"
 perm=$(gh api "repos/$REPO/collaborators/$MACHINE/permission" --jq .permission 2>/dev/null || echo unknown); [ "$perm" = write ] || [ "$perm" = admin ] && ok "$MACHINE has $perm on $REPO" || bad "$MACHINE permission: $perm"
 say "== ruleset";  rs=$(gh api "repos/$REPO/rules/branches/$(gh api repos/$REPO --jq .default_branch)" --jq 'map(.type)|unique|join(",")' 2>/dev/null || echo ""); grep -q pull_request <<<"$rs" && ok "default branch requires PRs ($rs)" || bad "no pull_request rule visible on the default branch (owner: rulesets.sh) — or the automation account cannot read rules"
