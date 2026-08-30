@@ -118,6 +118,9 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<Waypoint.Core.Downloads.ManagedToolOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.Downloads.ManagedToolOptions.SectionName));
 
+		services.AddOptions<Waypoint.Core.Downloads.EsxAcquisitionOptions>()
+			.Bind(configuration.GetSection(Waypoint.Core.Downloads.EsxAcquisitionOptions.SectionName));
+
 		services.AddOptions<DiscoveryOptions>()
 			.Bind(configuration.GetSection(DiscoveryOptions.SectionName));
 
@@ -218,6 +221,12 @@ public static class ServiceCollectionExtensions
 		// whether depot-fetch may run at all (connected mode + configured URL).
 		services.AddSingleton<Waypoint.Core.Downloads.IManagedToolDepotFetcher, Downloads.HttpManagedToolDepotFetcher>();
 
+		// Issue #1470: a pure filesystem/JSON read of the already-authenticated
+		// vendor catalog document -- no connection-string dependency, so it is
+		// registered unconditionally like the HTTP boundary above rather than inside
+		// the Postgres-gated block below.
+		services.AddSingleton<Waypoint.Core.Downloads.IEsxPlatformVocabularyReader, Downloads.CatalogFileEsxPlatformVocabularyReader>();
+
 		string? connectionString = configuration.GetConnectionString(ConnectionStringName);
 		if (!string.IsNullOrWhiteSpace(connectionString))
 		{
@@ -266,6 +275,8 @@ public static class ServiceCollectionExtensions
 			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
 			services.AddSingleton<ICatalogPullStateRepository>(new Catalog.CatalogPullStateRepository(connectionString));
 			services.AddSingleton<IDownloadRepository>(new DownloadRepository(connectionString));
+			services.AddSingleton<Waypoint.Core.Downloads.IEsxAcquisitionSubscriptionRepository>(
+				new Downloads.EsxAcquisitionSubscriptionRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IManagedToolInstallRepository>(new Downloads.ManagedToolInstallRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.SystemState.IApplianceStateRepository>(new ApplianceStateRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IDepotEnrollmentRepository>(new Downloads.DepotEnrollmentRepository(connectionString));

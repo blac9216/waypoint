@@ -100,6 +100,7 @@ public sealed class SchemaMigrationTests
 		"component_result_artifacts",
 		"run_retention_holds",
 		"retention_policy",
+		"esx_acquisition_subscriptions",
 		"schema_migrations"
 	];
 
@@ -347,9 +348,16 @@ public sealed class SchemaMigrationTests
 	/// <c>JobQueueRepository.RunSummaryProjectionSql</c> needs none either -- no runner
 	/// calls <c>GetRunAsync</c>/<c>ListRunsAsync</c>/<c>ListRunHistoryAsync</c> in
 	/// production (issue #1303). The CHECK widening runs BEFORE the backfill, pinned by
-	/// <see cref="Migration0081_PreExistingZeroVerdictCompletedRow_IsBackfilledAfterTheCheckWidens"/> --
+	/// <see cref="Migration0081_PreExistingZeroVerdictCompletedRow_IsBackfilledAfterTheCheckWidens"/>.
+	/// 0117 (pre-assigned slot, issue #1470) adds esx_acquisition_subscriptions --
+	/// named ESX acquisition presets selecting a subset of the
+	/// lcm.esx.supported.host.platforms vendor vocabulary, TEXT[] selection validated
+	/// by the API at write time (never a schema-level enum), disable-in-place
+	/// (enabled=false UPDATE, never a DELETE) so a preset's history survives; no new
+	/// runner grant (the sync job that reads this table, #1484, grants itself what it
+	/// needs when it lands) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 80;
+	private const int ExpectedMigrationCount = 81;
 
 	private readonly PostgresFixture _fixture;
 

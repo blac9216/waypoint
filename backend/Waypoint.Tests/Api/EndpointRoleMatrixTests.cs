@@ -196,6 +196,16 @@ public sealed class EndpointRoleMatrixTests
 		// download can run), not privileged data -- same Viewer+ floor as ListDownloads.
 		["DownloadsController.GetReadiness"] = WaypointRole.Viewer,
 
+		// EsxAcquisitionController -- issue #1470, epic #16's approved RBAC design
+		// ("Admin: subscriptions/presets ..."). The vocabulary lookup and subscription
+		// reads are Viewer+ operational chrome, matching DownloadsController's own
+		// read-endpoint floor; subscription writes are Admin-only.
+		["EsxAcquisitionController.GetPlatforms"] = WaypointRole.Viewer,
+		["EsxAcquisitionController.ListSubscriptions"] = WaypointRole.Viewer,
+		["EsxAcquisitionController.GetSubscription"] = WaypointRole.Viewer,
+		["EsxAcquisitionController.CreateSubscription"] = WaypointRole.Admin,
+		["EsxAcquisitionController.UpdateSubscription"] = WaypointRole.Admin,
+
 		// ManagedToolController -- issue #39, ADR-0015 install paths. Same Operator+
 		// floor as DownloadsController.QueueDownloads (a write that starts real work);
 		// install history read is Viewer+, matching ListDownloads/GetReadiness.
