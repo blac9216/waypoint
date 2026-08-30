@@ -224,6 +224,62 @@ public sealed class HdfSeverityCounterTests
 	}
 
 	/// <summary>
+	/// Issue #1291 / #1144 round 2's documented divergence: a control with a missing
+	/// <c>id</c> is counted by <see cref="HdfSeverityCounter"/> (every control the
+	/// report describes) but dropped by <see cref="HdfFindingsParser"/> (no identity to
+	/// key a persisted finding on) -- here the <c>error</c> shape from the caveat's own
+	/// worked example. Both surfaces are asserted on ONE document so a change that makes
+	/// either side treat the id-less control like the other fails this test.
+	/// </summary>
+	[Fact]
+	public void CountOpenFindings_IdLessErroredControl_IsCountedByCounterButDroppedByParser()
+	{
+		string idLessErrored = """{"title": "invented title", "tags": {"severity": "high"}, "results": [{"status": "error", "code_desc": "invented: undefined method on nil resource"}]}""";
+		string ordinary = ControlJson("invented-control-01", "high", [("passed", "invented ok")]);
+		string hdf = BuildHdf([ordinary, idLessErrored]);
+
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(WriteTempHdf(hdf));
+
+		Assert.NotNull(counts);
+		Assert.Equal(2, counts.ControlsTotal);
+		Assert.Equal(1, counts.ControlsEvaluated);
+		Assert.Equal(1, counts.ControlsExecutionError);
+
+		HdfParseResult parsed = HdfFindingsParser.Parse(hdf);
+		Assert.True(parsed.Success);
+		ComponentResultFinding finding = Assert.Single(parsed.Findings);
+		Assert.Equal("invented-control-01", finding.ControlId);
+	}
+
+	/// <summary>
+	/// Issue #1291: the same divergence for a <c>failed</c> id-less control -- the
+	/// caveat's general statement ("not a promise the two totals match"), not just its
+	/// errored worked example. The id-less control inflates <see cref="HdfSeverityCounts.CatIOpen"/>
+	/// and <see cref="HdfSeverityCounts.ControlsEvaluated"/> here while contributing no
+	/// finding at all to the persisted surface.
+	/// </summary>
+	[Fact]
+	public void CountOpenFindings_IdLessFailedControl_IsCountedInCatIOpenButDroppedByParser()
+	{
+		string idLessFailed = """{"title": "invented title", "tags": {"severity": "high"}, "results": [{"status": "failed", "code_desc": "invented genuine failure"}]}""";
+		string ordinary = ControlJson("invented-control-01", "low", [("passed", "invented ok")]);
+		string hdf = BuildHdf([ordinary, idLessFailed]);
+
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(WriteTempHdf(hdf));
+
+		Assert.NotNull(counts);
+		Assert.Equal(2, counts.ControlsTotal);
+		Assert.Equal(2, counts.ControlsEvaluated);
+		Assert.Equal(1, counts.CatIOpen);
+		Assert.Equal(0, counts.ControlsExecutionError);
+
+		HdfParseResult parsed = HdfFindingsParser.Parse(hdf);
+		Assert.True(parsed.Success);
+		ComponentResultFinding finding = Assert.Single(parsed.Findings);
+		Assert.Equal("invented-control-01", finding.ControlId);
+	}
+
+	/// <summary>
 	/// Issue #1144: the reconciliation stated as a property rather than three examples --
 	/// for a single-control report, the CAT preview's bucket and the persisted finding's
 	/// status are two readings of the ONE <see cref="HdfControlClassifier"/> verdict.

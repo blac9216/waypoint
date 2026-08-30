@@ -14,6 +14,7 @@
 
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -378,18 +379,30 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 	/// serializes a non-negative <c>int</c>), but this projection must still never
 	/// surface a fabricated negative count verbatim -- it must fail closed to 0 like
 	/// every other malformed shape, not pass the negative value through.
+	///
+	/// Issue #1313: asserts the emitted warning too, via <see cref="CapturingLogger{T}"/>
+	/// (<c>NullLogger</c> answers <c>IsEnabled</c> false, so the generated
+	/// <c>[LoggerMessage]</c> body never runs past its guard clause) -- deleting the
+	/// distinct <c>LogNegativeArtifactsDeleted</c> template so this falls through to
+	/// the generic "missing" warning would misdescribe the failure, and only a message
+	/// assertion, not the returned <c>0</c>, can catch that collapse.
 	/// </summary>
 	[Fact]
-	public void ReadArtifactsDeleted_NegativeValue_FailsClosedToZero()
+	public void ReadArtifactsDeleted_NegativeValue_FailsClosedToZeroAndWarnsDistinctly()
 	{
 		RunPurgeTombstone tombstone = new(
 			Id: Guid.NewGuid(), RunId: Guid.NewGuid(), RunType: "scan", PriorState: "completed",
 			Actor: "admin-tester", Outcome: "completed", DetailJson: """{"artifacts_deleted": -1}""",
 			OccurredAt: DateTimeOffset.UtcNow);
+		CapturingLogger<RunPurgeService> logger = new();
 
-		int artifactsDeleted = RunPurgeService.ReadArtifactsDeleted(tombstone, NullLogger.Instance);
+		int artifactsDeleted = RunPurgeService.ReadArtifactsDeleted(tombstone, logger);
 
 		Assert.Equal(0, artifactsDeleted);
+		CapturedLogEntry entry = logger.OnlyEntryAt(LogLevel.Warning);
+		Assert.Contains("negative", entry.Message, StringComparison.OrdinalIgnoreCase);
+		Assert.DoesNotContain("missing a numeric", entry.Message, StringComparison.OrdinalIgnoreCase);
+		Assert.DoesNotContain("not a valid 32-bit integer", entry.Message, StringComparison.OrdinalIgnoreCase);
 	}
 
 	/// <summary>
@@ -398,20 +411,58 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 	/// artifacts_deleted field" branch, which would misdescribe it) but still cannot be
 	/// read as a valid count, so it must fail closed to 0 the same as the other
 	/// malformed shapes.
+	///
+	/// Issue #1313: PR #1307 implemented AC4's message-distinctness requirement
+	/// correctly, but the pre-existing version of this test asserted only the returned
+	/// <c>0</c> -- deleting <c>LogNonIntegerArtifactsDeleted</c> so this shape fell
+	/// through to the generic "missing" warning left <c>0</c> unchanged and this test
+	/// green. Asserting the message directly, via <see cref="CapturingLogger{T}"/>
+	/// (see the negative-value test above for why <c>NullLogger</c> cannot see this),
+	/// closes that gap.
 	/// </summary>
 	[Theory]
 	[InlineData("""{"artifacts_deleted": 3.5}""")]
 	[InlineData("""{"artifacts_deleted": 99999999999}""")]
-	public void ReadArtifactsDeleted_NonIntegerNumericValue_FailsClosedToZero(string detailJson)
+	public void ReadArtifactsDeleted_NonIntegerNumericValue_FailsClosedToZeroAndWarnsDistinctly(string detailJson)
 	{
 		RunPurgeTombstone tombstone = new(
 			Id: Guid.NewGuid(), RunId: Guid.NewGuid(), RunType: "scan", PriorState: "completed",
 			Actor: "admin-tester", Outcome: "completed", DetailJson: detailJson,
 			OccurredAt: DateTimeOffset.UtcNow);
+		CapturingLogger<RunPurgeService> logger = new();
 
-		int artifactsDeleted = RunPurgeService.ReadArtifactsDeleted(tombstone, NullLogger.Instance);
+		int artifactsDeleted = RunPurgeService.ReadArtifactsDeleted(tombstone, logger);
 
 		Assert.Equal(0, artifactsDeleted);
+		CapturedLogEntry entry = logger.OnlyEntryAt(LogLevel.Warning);
+		Assert.Contains("not a valid 32-bit integer", entry.Message, StringComparison.OrdinalIgnoreCase);
+		Assert.DoesNotContain("missing a numeric", entry.Message, StringComparison.OrdinalIgnoreCase);
+		Assert.DoesNotContain("is negative", entry.Message, StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>
+	/// Issue #1313: the third of the three distinct warning templates -- the field is
+	/// genuinely absent (or the wrong JSON kind), which must read as "missing", never
+	/// as the numeric-but-invalid or negative wording the other two shapes get.
+	/// </summary>
+	[Theory]
+	[InlineData("{}")]
+	[InlineData("""{"artifacts_deleted": "not-a-number"}""")]
+	public void ReadArtifactsDeleted_MissingOrWrongTypeField_FailsClosedToZeroAndWarnsDistinctly(string detailJson)
+	{
+		RunPurgeTombstone tombstone = new(
+			Id: Guid.NewGuid(), RunId: Guid.NewGuid(), RunType: "scan", PriorState: "completed",
+			Actor: "admin-tester", Outcome: "completed", DetailJson: detailJson,
+			OccurredAt: DateTimeOffset.UtcNow);
+		CapturingLogger<RunPurgeService> logger = new();
+
+		int artifactsDeleted = RunPurgeService.ReadArtifactsDeleted(tombstone, logger);
+
+		Assert.Equal(0, artifactsDeleted);
+		CapturedLogEntry entry = logger.OnlyEntryAt(LogLevel.Warning);
+		Assert.Contains("missing a numeric", entry.Message, StringComparison.OrdinalIgnoreCase);
+		Assert.DoesNotContain("not a valid 32-bit integer", entry.Message, StringComparison.OrdinalIgnoreCase);
+		Assert.DoesNotContain("is negative", entry.Message, StringComparison.OrdinalIgnoreCase);
 	}
 
 	private async Task InsertTombstoneWithDetailAsync(Guid runId, string detailJson)

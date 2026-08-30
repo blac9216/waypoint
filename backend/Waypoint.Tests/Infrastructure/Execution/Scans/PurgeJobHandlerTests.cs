@@ -142,7 +142,49 @@ public sealed class PurgeJobHandlerTests : IDisposable
 		Assert.False(File.Exists(ScanArtifactPaths.Ckl(_artifactRoot, scanJobId)));
 		Assert.Equal(1, purges.ReportCount);
 		Assert.True(purges.LastSucceeded);
-		Assert.Equal(3, purges.LastArtifactsDeleted);
+		Assert.Equal(ScanArtifactPaths.FilesPerJob, purges.LastArtifactsDeleted);
+	}
+
+	/// <summary>
+	/// Issue #1312, tightened after PR #1320 round-1 finding 2 (the previous version
+	/// asserted <c>AllForJob(...).Length == FilesPerJob</c>, which this PR's own
+	/// definition of <c>FilesPerJob</c> makes a tautology, under a name claiming it
+	/// pinned the handler's deletion set). This exercises <see cref="PurgeJobHandler"/>
+	/// itself: every path <see cref="ScanArtifactPaths.AllForJob"/> names is seeded and
+	/// must be gone afterwards, a same-job-id decoy that <c>AllForJob</c> does NOT name
+	/// must survive (the handler deletes an enumerated set, never a glob), and the
+	/// reported count is compared against <c>AllForJob(...).Length</c> -- no literal
+	/// anywhere. Adding a path kind to <c>AllForJob</c> without the handler deleting it,
+	/// or the handler deleting anything outside that set, fails here.
+	/// </summary>
+	[Fact]
+	public async Task ExecuteAsync_DeletesExactlyTheAllForJobSet_AndNothingElse()
+	{
+		Guid scanJobId = Guid.NewGuid();
+		string[] allForJob = ScanArtifactPaths.AllForJob(_artifactRoot, scanJobId);
+		foreach (string path in allForJob)
+		{
+			File.WriteAllText(path, "seeded");
+		}
+
+		string decoy = Path.Combine(_artifactRoot, $"{scanJobId:N}.unrelated"); // same job id, not an artifact kind.
+		File.WriteAllText(decoy, "seeded");
+
+		FakeRunPurgeRepository purges = new() { RunIdForArtifactJob = Guid.NewGuid() };
+		PurgeJobHandler handler = CreateHandler(purges);
+
+		string payload = JsonSerializer.Serialize(new { job_ids = new[] { scanJobId.ToString() } });
+		JobExecutionOutcome outcome = await handler.ExecuteAsync(ContextFor(Guid.NewGuid(), payload), CancellationToken.None);
+
+		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
+		foreach (string path in allForJob)
+		{
+			Assert.False(File.Exists(path), $"PurgeJobHandler left '{path}' behind, but AllForJob names it.");
+		}
+
+		Assert.True(File.Exists(decoy), "PurgeJobHandler deleted a file outside the AllForJob set.");
+		Assert.Equal(allForJob.Length, purges.LastArtifactsDeleted);
+		Assert.Equal(ScanArtifactPaths.FilesPerJob, allForJob.Length);
 	}
 
 	/// <summary>
@@ -208,7 +250,7 @@ public sealed class PurgeJobHandlerTests : IDisposable
 
 		Assert.Equal(JobOutcomeKind.Succeeded, outcome.Kind);
 		Assert.True(purges.LastSucceeded);
-		Assert.Equal(3, purges.LastArtifactsDeleted); // deletion is "present and removed OR already absent" -- all three count as handled.
+		Assert.Equal(ScanArtifactPaths.FilesPerJob, purges.LastArtifactsDeleted); // deletion is "present and removed OR already absent" -- all count as handled.
 	}
 
 	[Fact]
