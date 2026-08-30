@@ -110,9 +110,11 @@ public sealed class ComponentResultModelsTests
 			Artifacts: []);
 
 		Assert.Equal(2, record.ExecutionErrorCount);
-		// Not folded into any other column -- an errored finding is not open, not passed.
+		// Not folded into any other column: the errored findings are counted only by
+		// ExecutionErrorCount, the genuinely-passed one only by PassedCount, the
+		// genuinely-failed one only by CatIOpen -- no double counting.
 		Assert.Equal(1, record.CatIOpen);
-		Assert.Equal(0, record.PassedCount);
+		Assert.Equal(1, record.PassedCount);
 	}
 
 	/// <summary>A component whose findings are ALL execution_error must still surface a non-zero rollup count -- issue #1144's core acceptance criterion, pinned at the model level.</summary>

@@ -325,7 +325,7 @@ public sealed class SchemaMigrationTests
 	/// VMs stay deconflictable across discovery passes -- no new runner grants (the
 	/// table's existing grants already cover the new column) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 78;
+	private const int ExpectedMigrationCount = 79;
 
 	private readonly PostgresFixture _fixture;
 
