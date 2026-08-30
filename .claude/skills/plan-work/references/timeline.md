@@ -15,7 +15,10 @@ confirms when anything is ambiguous.
    The parallelism source is either `--parallelism` (explicit), `--history-dir`
    (explicit, pointed at `history.sh`'s `--out`), or a same-run default-`--out`
    guess — that last case is reported on stderr so a mismatched `--out` doesn't
-   silently fall back to 1.5.
+   silently fall back to 1.5. Falling back to 1.5 is always reported on stderr, with
+   wording that distinguishes the cause: `parallelism.txt` missing or empty reports
+   "no history at `<path>`"; `parallelism.txt` present but failing the positive-number
+   check reports "ignoring unusable parallelism `<value>` in `<path>`" instead.
 3. Place: started milestones are **pinned** at their actual start; a milestone the owner
    is starting now begins **today** and overlaps whatever is running; unstarted
    milestones are laid out serially after the last scheduled one unless an issue
@@ -45,10 +48,10 @@ reported on stderr; matching zero milestones in total is an error. An empty
 
 | Code | Meaning |
 |---|---|
-| `2` | Argument error — an unrecognized flag, a value-taking flag with no following value, or an empty `--milestones`/`--milestone` value. |
+| `2` | Argument error — an unrecognized flag, a value-taking flag with no following value, an empty `--milestones`/`--milestone` value, or a `--defaults` value that is empty/whitespace-only or contains a part that isn't `S=<n>`, `M=<n>`, or `L=<n>` with `n` an ASCII decimal number greater than zero (an empty part, a trailing comma, or a non-ASCII digit such as `٢` is rejected too). |
 | `3` | A `--milestones`/`--milestone` selection was requested but matched zero open milestones. |
-| `4` | `--parallelism` was given a value that is not a positive decimal number matching `^[0-9]+([.][0-9]+)?$` (e.g. `0`, `-1`, `abc`, `.5`, `1e2`, and leading/trailing whitespace are all rejected; `0.5` is accepted). A `parallelism.txt` file with the same defect falls back to the 1.5 default instead of erroring. |
-| `5` | A `blocked_by` cycle was detected while computing a milestone's critical path (jq's own error exit surfaces here). |
+| `4` | `--parallelism` was given a value that is not a positive decimal number matching `^[[:digit:]]+([.][[:digit:]]+)?$` (ASCII digits only, so non-ASCII digits such as `٢` are rejected too; `0`, `-1`, `abc`, `.5`, `1e2`, and leading/trailing whitespace are all rejected; `0.5` is accepted). A `parallelism.txt` file with the same defect falls back to the 1.5 default instead of erroring — see "parallelism source" above. |
+| `5` | A `blocked_by` cycle was detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is the only cause reachable from the script's own flag values — a `--defaults` value can no longer reach exit 5, since it is either rejected with exit 2 or completed from the built-in table — but `5` is jq's generic error exit, so an unexpected jq failure would surface as `5` as well. |
 
 ## Flags
 
@@ -59,5 +62,5 @@ reported on stderr; matching zero milestones in total is an error. An empty
 | `--milestone <title>` | Repeatable, exact and untrimmed single-title selection; combines with `--milestones`. |
 | `--parallelism <n>` | Explicit parallelism factor; overrides `--history-dir`/default. |
 | `--history-dir <dir>` | Directory `history.sh` wrote `parallelism.txt` into. |
-| `--defaults S=2,M=6,L=16` | Hour defaults per T-shirt size when an issue has no `est. cycle` hours. |
+| `--defaults S=2,M=6,L=16` | Hour defaults per T-shirt size when an issue has no `est. cycle` hours (`M` is also the fallback for an issue with no size at all). Any subset of sizes may be given; an omitted size keeps its built-in default from `S=2,M=6,L=16`, and a size given twice resolves last-wins. Each value must be greater than zero; an empty value, an empty part or a trailing comma is an argument error (exit 2). |
 | `--out <dir>` | Output directory for `milestones.jsonl`, `issues.jsonl`, `projection.json`, `placement.json`, `timeline.md`. |
