@@ -12,7 +12,7 @@ while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --owner) OWNER=$2; 
 # Capture gh's own stderr alongside the named cause: the named message narrows the
 # search (bad owner/number/scope) but gh already knows which one it was, and
 # swallowing that with 2>/dev/null forced the operator to guess (#1337).
-proj_err_file=$(mktemp)
+proj_err_file=$(mktemp); trap 'rm -f "$proj_err_file"' EXIT
 proj=$(gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id viewerCanUpdate}}}' -F o="$OWNER" -F n="$NUM" 2>"$proj_err_file") || proj=""
 proj_err=$(cat "$proj_err_file" 2>/dev/null || true)
 rm -f "$proj_err_file"

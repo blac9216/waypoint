@@ -106,7 +106,8 @@ captured for the checklist; the API cannot set them.
 - Deleting a label removes it from closed issues too; that is why pruning checks open
   issues only and reports rather than deletes when a non-canonical label is still in use.
 - The `scripts/*.sh` require **bash ≥ 4** (case-folding parameter expansion, e.g.
-  `${var,,}`, is bash-4-only and parses on bash 3.2 — still the system `/bin/bash` on
-  macOS — as a syntax error, not a graceful failure). `_lib.sh` enforces this with an
+  `${var,,}`, is bash-4-only and fails at expansion time on bash 3.2 — still the system
+  `/bin/bash` on macOS — with `bash: ${acct,,}: bad substitution`, a runtime error rather
+  than a parse/syntax error or a graceful failure). `_lib.sh` enforces this with an
   explicit version check that fails with a named message before any script does real
   work.
