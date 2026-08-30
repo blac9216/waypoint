@@ -301,6 +301,28 @@ EOF
   grep -qF "POINTER_UNRESOLVED" <<<"$CP_STDOUT" || report "slash_prefix(negative): expected POINTER_UNRESOLVED, got: $CP_STDOUT"
 }
 
+# ---------------------------------------------------------------------------
+# Case: a `# why:` fixture inside .claude/skills/*/tests is excluded by
+# default (it's example/heredoc text, not repo drift), but is scanned again
+# when --include-skill-dirs is passed.
+# ---------------------------------------------------------------------------
+case_skill_dirs_excluded() {
+  local dir; dir="$(make_fixture skilldirs)"
+  mkdir -p "$dir/.claude/skills/design-docs/tests" "$dir/.claude/skills/design-docs/templates"
+  printf '# why: docs/rationale/deploy.md#does-not-exist\n' \
+    > "$dir/.claude/skills/design-docs/tests/t.sh"
+  printf '# why: docs/rationale/deploy.md#also-does-not-exist\n' \
+    > "$dir/.claude/skills/design-docs/templates/tmpl.md"
+
+  run_check "$dir"
+  [ "$CP_RC" -eq 0 ] || report "skill_dirs_excluded: expected exit 0 by default, got $CP_RC (stdout: $CP_STDOUT)"
+  [ -z "$CP_STDOUT" ] || report "skill_dirs_excluded: expected no findings by default, got: $CP_STDOUT"
+
+  run_check "$dir" --include-skill-dirs
+  [ "$CP_RC" -eq 1 ] || report "skill_dirs_excluded(--include-skill-dirs): expected exit 1, got $CP_RC"
+  grep -qF "POINTER_BAD_FILE" <<<"$CP_STDOUT" || report "skill_dirs_excluded(--include-skill-dirs): expected POINTER_BAD_FILE finding, got: $CP_STDOUT"
+}
+
 run_case case_clean
 run_case case_unresolved_slug
 run_case case_missing_file
@@ -311,11 +333,12 @@ run_case case_missing_refs
 run_case case_json_output
 run_case case_slash_prefix
 run_case case_fenced_heading
+run_case case_skill_dirs_excluded
 
 if [ "$fail" -ne 0 ]; then
   echo "test_check_pointers: FAILED" >&2
   exit 1
 fi
 
-echo "test_check_pointers: PASS (9 cases)"
+echo "test_check_pointers: PASS ($(grep -c "^run_case " "${BASH_SOURCE[0]}") cases)"
 exit 0

@@ -453,6 +453,34 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Case: a link inside an HTML comment (e.g. the template's commented-out
+# placeholder rows) is not a real link — no INDEX_DEAD_LINK even though its
+# target does not exist. Also covers a multi-line comment block.
+# ---------------------------------------------------------------------------
+case_index_dead_link_in_comment() {
+  local dir; dir="$(make_fixture index_dead_link_in_comment)"
+  write_documentation_standard "$dir"
+  write_clean_adr "$dir"
+
+  cat > "$dir/docs/README.md" <<'EOF'
+# Docs index
+
+## Tutorials
+<!-- - [Title](tutorials/file.md) — one line -->
+
+## How-to
+<!--
+- [Title](how-to/file.md) — one line
+- [Other](how-to/other.md) — another line
+-->
+EOF
+
+  run_audit "$dir"
+  grep -qF "INDEX_DEAD_LINK" <<<"$AU_STDERR" && report "index_dead_link_in_comment: expected no INDEX_DEAD_LINK finding, got: $AU_STDERR"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Case: the glossary file declared by doc-manifest.md does not exist —
 # GLOSSARY_MISSING.
 # ---------------------------------------------------------------------------
@@ -499,6 +527,96 @@ EOF
     grep -qF "$code" <<<"$AU_STDERR" || report "glossary_bad_terms: expected $code on stderr"
     grep -qF "### $code" <<<"$report_body" || report "glossary_bad_terms: expected report to group findings under '### $code'"
   done
+}
+
+# ---------------------------------------------------------------------------
+# Case: glossary term extraction from the domain-model doc only counts bold
+# text at the start of a line as a term when it is <=4 words and has none
+# of # ( ) , : — a cross-reference or a long emphasised fragment is prose,
+# not a term, and must not trigger GLOSSARY_TERM_UNLISTED. A short bold
+# term genuinely missing from CONTEXT.md still must.
+# ---------------------------------------------------------------------------
+case_glossary_term_extraction_rule() {
+  local dir; dir="$(make_fixture glossary_term_extraction_rule)"
+  write_documentation_standard "$dir"
+  write_clean_adr "$dir"
+
+  cat > "$dir/docs/explanation/domain-model.md" <<'EOF'
+# Domain model
+
+Kind: explanation
+
+**Roll-off (issue #708, epic #706)** is a cross-reference, not a term.
+
+**This bold fragment runs on for quite a few words here** is prose emphasis.
+
+**Site** is a real, unlisted term.
+EOF
+  cat > "$dir/docs/explanation/architecture.md" <<'EOF'
+# Architecture
+
+Kind: explanation
+
+## Context
+
+```mermaid
+graph TD; A-->B;
+```
+
+## Container
+
+```mermaid
+graph TD; A-->B;
+```
+
+## Component
+
+```mermaid
+graph TD; A-->B;
+```
+EOF
+  cat > "$dir/docs/reference/api-contract.md" <<'EOF'
+# API contract
+
+Kind: reference
+
+Body.
+EOF
+  cat > "$dir/CONTEXT.md" <<'EOF'
+# CONTEXT.md — glossary
+
+## Terms
+
+**Widget** — a thing.
+EOF
+  cat > "$dir/docs/rationale/backend.md" <<'EOF'
+## app.py
+
+### backend-example
+
+Line one of reasoning.
+Line two of reasoning.
+
+Refs: #1
+EOF
+  cat > "$dir/src/app.py" <<'EOF'
+# why: docs/rationale/backend.md#backend-example
+x = 1
+EOF
+  cat > "$dir/docs/README.md" <<'EOF'
+# Docs index
+
+- [Architecture](explanation/architecture.md)
+- [Domain model](explanation/domain-model.md)
+- [API contract](reference/api-contract.md)
+EOF
+
+  run_audit "$dir"
+  grep -qF "'Roll-off (issue #708, epic #706)'" <<<"$AU_STDERR" && report "glossary_term_extraction_rule: cross-reference bold must not read as a term, got: $AU_STDERR"
+  grep -qF "This bold fragment runs on for quite a few words here" <<<"$AU_STDERR" && report "glossary_term_extraction_rule: long prose bold must not read as a term, got: $AU_STDERR"
+  grep -qF "GLOSSARY_TERM_UNLISTED" <<<"$AU_STDERR" || report "glossary_term_extraction_rule: expected GLOSSARY_TERM_UNLISTED for 'Site', got: $AU_STDERR"
+  grep -qF "term 'Site'" <<<"$AU_STDERR" || report "glossary_term_extraction_rule: expected finding to name 'Site', got: $AU_STDERR"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -620,8 +738,10 @@ run_case case_all_findings
 run_case case_adr_no_date
 run_case case_doc_kind_missing
 run_case case_index_dead_link
+run_case case_index_dead_link_in_comment
 run_case case_glossary_missing
 run_case case_glossary_bad_terms
+run_case case_glossary_term_extraction_rule
 run_case case_arch_missing_level
 run_case case_arch_level_order
 run_case case_repo_name_from_origin
@@ -632,5 +752,5 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo "test_audit: PASS (13 cases)"
+echo "test_audit: PASS (15 cases)"
 exit 0

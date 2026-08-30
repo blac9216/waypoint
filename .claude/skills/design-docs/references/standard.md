@@ -162,7 +162,11 @@ glossaries.
 place every agent and the domain-modeling skill look.
 
 **Audit.** Terms unique; each bolded/headed term in the domain-model doc appears in the
-glossary; glossary entries contain no code paths or type names.
+glossary; glossary entries contain no code paths or type names. A bold span at the start
+of a line in the domain-model doc counts as a term only when it is four words or fewer
+and contains none of `#`, `(`, `)`, `,` or `:` — longer or punctuated bold text is prose
+emphasis (e.g. a cross-reference like `**Roll-off (issue #708, epic #706)**`), not a term,
+and is not required to appear in the glossary.
 
 ## Diátaxis layout
 
