@@ -2,7 +2,7 @@
 
 The reference plan-work, interrogate and github-workflow consult when a decision has been
 made and must be written into the design set. It answers three questions: *does this need
-recording*, *in which form*, and *how exactly*. Read `docs/process/documentation.md` first
+recording*, *in which form*, and *how exactly*. Read `docs/doc-manifest.md` first
 for the repository's paths.
 
 ## Does it need recording? (the ADR trigger test)
@@ -63,7 +63,7 @@ goes back to interrogate. The rejected sketch becomes a Considered Option.
 
 ## How — rationale entry
 
-1. Choose the area file from `documentation.md`; create it from the template if the area
+1. Choose the area file from `doc-manifest.md`; create it from the template if the area
    is declared but the file is missing.
 2. Section `## <source file>` (create in path order); entry `### <prefixed-slug>` — grep
    the file for the slug first; a collision means a more specific prefix, never `-2`.
@@ -98,7 +98,7 @@ need Decision Drivers, it was an ADR.
 
 Author mode writes new records to the standard even if the old ones are not there yet.
 It does not fix neighbouring ADRs, does not create design-set files that
-`documentation.md` lists but the repo lacks (a missing `CONTEXT.md` is an audit finding,
+`doc-manifest.md` lists but the repo lacks (a missing `CONTEXT.md` is an audit finding,
 `DESIGNSET_MISSING`, and a remediation issue), and does not hand-edit the ADR index —
 `adr-index.sh --write` works regardless of findings elsewhere.
 

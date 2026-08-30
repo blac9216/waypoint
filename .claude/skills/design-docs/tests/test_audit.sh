@@ -62,14 +62,12 @@ run_audit() {
 }
 
 # write_documentation_standard DIR — writes a minimally valid
-# docs/process/documentation.md into DIR, matching templates/documentation.md's
+# docs/doc-manifest.md into DIR, matching templates/doc-manifest.md's
 # shape (design set, Diátaxis dirs, ADR dir, rationale areas, glossary).
 write_documentation_standard() {
   local dir="$1"
-  cat > "$dir/docs/process/documentation.md" <<'EOF'
-# Documentation standard — as adopted here
-
-Kind: reference
+  cat > "$dir/docs/doc-manifest.md" <<'EOF'
+# Documentation manifest — as adopted here
 
 ## Design set
 - docs/explanation/architecture.md
@@ -215,7 +213,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Case: not-adopted fixture (no docs/process/documentation.md) — exit 2.
+# Case: not-adopted fixture (no docs/doc-manifest.md) — exit 2.
 # ---------------------------------------------------------------------------
 case_not_adopted() {
   local dir; dir="$(make_fixture notadopted)"
@@ -223,7 +221,7 @@ case_not_adopted() {
   [ "$AU_RC" -eq 2 ] || report "not_adopted: expected exit 2, got $AU_RC"
   grep -qF "not adopted" <<<"$AU_STDERR" || report "not_adopted: expected 'not adopted' on stderr, got: $AU_STDERR"
   [ -f "$AU_REPORT" ] || report "not_adopted: expected a minimal report to still be written"
-  grep -qiF "documentation.md" "$AU_REPORT" || report "not_adopted: expected report to mention documentation.md, got: $(cat "$AU_REPORT" 2>/dev/null)"
+  grep -qiF "doc-manifest.md" "$AU_REPORT" || report "not_adopted: expected report to mention doc-manifest.md, got: $(cat "$AU_REPORT" 2>/dev/null)"
 }
 
 # ---------------------------------------------------------------------------
@@ -455,7 +453,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Case: the glossary file declared by documentation.md does not exist —
+# Case: the glossary file declared by doc-manifest.md does not exist —
 # GLOSSARY_MISSING.
 # ---------------------------------------------------------------------------
 case_glossary_missing() {
@@ -594,7 +592,7 @@ case_repo_name_from_origin() {
 }
 
 # ---------------------------------------------------------------------------
-# Case: a documentation.md section missing (here, the Diátaxis directories
+# Case: a doc-manifest.md section missing (here, the Diátaxis directories
 # line) surfaces as a "## Skipped checks" section in the report, not buried
 # as a NOTE inside Tier 1, and the Summary line counts it.
 # ---------------------------------------------------------------------------
@@ -602,8 +600,8 @@ case_skipped_checks() {
   local dir; dir="$(make_fixture skipped)"
   write_documentation_standard "$dir"
   # Drop the "## Diátaxis directories" heading and its tutorials:/how-to:/
-  # reference:/explanation: line, leaving the rest of documentation.md intact.
-  sed -i '/^## Diátaxis directories$/,+1d' "$dir/docs/process/documentation.md"
+  # reference:/explanation: line, leaving the rest of doc-manifest.md intact.
+  sed -i '/^## Diátaxis directories$/,+1d' "$dir/docs/doc-manifest.md"
   write_clean_adr "$dir"
 
   run_audit "$dir"

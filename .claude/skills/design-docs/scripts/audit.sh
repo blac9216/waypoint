@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # audit.sh — Tier 1 (mechanical) audit of a repository's design-docs
-# adoption. Parses docs/process/documentation.md for the adopted shape,
+# adoption. Parses docs/doc-manifest.md for the adopted shape,
 # runs check-pointers.sh and adr-index.sh --check, runs the structural
 # checks defined in references/standard.md (MADR sections, Diátaxis
 # layout, index coverage, glossary, C4 architecture levels, design-set
@@ -11,7 +11,7 @@
 # Exit status:
 #   0  no Tier 1 findings
 #   1  Tier 1 findings reported
-#   2  usage error, or docs/process/documentation.md is missing (the
+#   2  usage error, or docs/doc-manifest.md is missing (the
 #      repository has not adopted the standard) — a minimal report is
 #      still written
 #
@@ -87,32 +87,32 @@ add_finding() {
   fi
 }
 
-DOC_STANDARD="$ROOT/docs/process/documentation.md"
+DOC_STANDARD="$ROOT/docs/doc-manifest.md"
 
 # ---------------------------------------------------------------------------
 # Not-adopted short circuit.
 # ---------------------------------------------------------------------------
 if [ ! -f "$DOC_STANDARD" ]; then
-  echo "not adopted: docs/process/documentation.md missing" >&2
+  echo "not adopted: docs/doc-manifest.md missing" >&2
   {
     sed -e "s#<repo>#$REPO_NAME#" -e "s#<date>#$TODAY#" "$GAP_REPORT_TEMPLATE"
-  } | awk -v msg="NOTE: not adopted — docs/process/documentation.md is missing; no checks were run." '
+  } | awk -v msg="NOTE: not adopted — docs/doc-manifest.md is missing; no checks were run." '
     /^## Summary$/ { print; getline; print "Tier 1 findings: 0 · Tier 2 findings: 0 (agent fills) · Clusters: 0 (agent fills)"; next }
     /^<!-- filled by audit.sh:/ { print; print msg; next }
     { print }
   ' > "$OUT"
   echo "$OUT"
-  echo "audit: not adopted (docs/process/documentation.md missing)"
+  echo "audit: not adopted (docs/doc-manifest.md missing)"
   exit 2
 fi
 
 # ---------------------------------------------------------------------------
-# Parse docs/process/documentation.md for the adopted shape. Tolerant of
+# Parse docs/doc-manifest.md for the adopted shape. Tolerant of
 # whitespace; missing sections are simply skipped (with a NOTE line).
 # ---------------------------------------------------------------------------
 declare -a NOTES=()
 # SKIPPED_CHECKS — entries for the report's "## Skipped checks" section: a
-# check category was skipped because a documentation.md section/line it
+# check category was skipped because a doc-manifest.md section/line it
 # depends on is missing (as opposed to a NOTES entry for a runtime
 # condition, e.g. a configured path that doesn't exist on disk).
 declare -a SKIPPED_CHECKS=()
@@ -140,8 +140,8 @@ if grep -q '^## Design set' "$DOC_STANDARD"; then
     esac
   done < <(awk '/^## Design set/{f=1;next} /^## /{f=0} f' "$DOC_STANDARD")
 else
-  NOTES+=("Design set section missing from documentation.md — design-set existence check skipped")
-  SKIPPED_CHECKS+=("Design-set existence — needs '## Design set' section in documentation.md")
+  NOTES+=("Design set section missing from doc-manifest.md — design-set existence check skipped")
+  SKIPPED_CHECKS+=("Design-set existence — needs '## Design set' section in doc-manifest.md")
 fi
 
 if [ "${#DESIGN_SET[@]}" -gt 0 ]; then
@@ -161,15 +161,15 @@ if [ -n "$diataxis_line" ]; then
   DIATAXIS_REFERENCE="$(printf '%s\n' "$diataxis_line" | sed -n -E 's/.*reference:[[:space:]]*([^ ]+).*/\1/p')"
   DIATAXIS_EXPLANATION="$(printf '%s\n' "$diataxis_line" | sed -n -E 's/.*explanation:[[:space:]]*([^ ]+).*/\1/p')"
 else
-  NOTES+=("Diátaxis directories line missing from documentation.md — Diátaxis checks skipped")
-  SKIPPED_CHECKS+=("Diátaxis layout — needs the tutorials:/how-to:/reference:/explanation: line in documentation.md")
+  NOTES+=("Diátaxis directories line missing from doc-manifest.md — Diátaxis checks skipped")
+  SKIPPED_CHECKS+=("Diátaxis layout — needs the tutorials:/how-to:/reference:/explanation: line in doc-manifest.md")
 fi
 
 index_line="$(grep -m1 -E '^Index:' "$DOC_STANDARD" || true)"
 if [ -n "$index_line" ]; then
   INDEX_PATH="$(printf '%s\n' "$index_line" | sed -n -E 's/^Index:[[:space:]]*([^[:space:]]+).*/\1/p')"
 else
-  NOTES+=("Index: line missing from documentation.md — index-coverage check skipped")
+  NOTES+=("Index: line missing from doc-manifest.md — index-coverage check skipped")
 fi
 
 if [ -z "$DIATAXIS_TUTORIALS" ] || [ -z "$INDEX_PATH" ]; then
@@ -177,7 +177,7 @@ if [ -z "$DIATAXIS_TUTORIALS" ] || [ -z "$INDEX_PATH" ]; then
   [ -z "$DIATAXIS_TUTORIALS" ] && index_missing_bits="${index_missing_bits}the tutorials:/how-to:/reference:/explanation: line, "
   [ -z "$INDEX_PATH" ] && index_missing_bits="${index_missing_bits}'Index:' line, "
   index_missing_bits="${index_missing_bits%, }"
-  SKIPPED_CHECKS+=("Index coverage — needs $index_missing_bits in documentation.md")
+  SKIPPED_CHECKS+=("Index coverage — needs $index_missing_bits in doc-manifest.md")
 fi
 
 adr_line="$(grep -m1 -E '^Directory:' "$DOC_STANDARD" || true)"
@@ -185,7 +185,7 @@ if [ -n "$adr_line" ]; then
   ADR_DIR="$(printf '%s\n' "$adr_line" | sed -n -E 's/^Directory:[[:space:]]*([^[:space:]]+).*/\1/p')"
   ADR_DIR="${ADR_DIR%/}"
 else
-  NOTES+=("ADR Directory: line missing from documentation.md — adr-index.sh will use its default")
+  NOTES+=("ADR Directory: line missing from doc-manifest.md — adr-index.sh will use its default")
   ADR_DIR="docs/adr"
 fi
 
@@ -201,27 +201,27 @@ if grep -q '^## Rationale areas' "$DOC_STANDARD"; then
     esac
   done < <(awk '/^## Rationale areas/{f=1;next} /^## /{f=0} f' "$DOC_STANDARD")
 else
-  NOTES+=("Rationale areas section missing from documentation.md")
+  NOTES+=("Rationale areas section missing from doc-manifest.md")
 fi
 
 glossary_line="$(grep -m1 -E 'CONTEXT.*\.md.*at repo root' "$DOC_STANDARD" || true)"
 if [ -n "$glossary_line" ]; then
   GLOSSARY_PATH="$(printf '%s\n' "$glossary_line" | sed -n -E 's/^([^[:space:]]+).*/\1/p')"
 else
-  NOTES+=("Glossary line missing from documentation.md — defaulting to CONTEXT.md")
+  NOTES+=("Glossary line missing from doc-manifest.md — defaulting to CONTEXT.md")
   GLOSSARY_PATH="CONTEXT.md"
 fi
 domain_line="$(grep -m1 -E 'domain model:' "$DOC_STANDARD" || true)"
 if [ -n "$domain_line" ]; then
   DOMAIN_MODEL_PATH="$(printf '%s\n' "$domain_line" | sed -n -E 's/.*domain model:[[:space:]]*([^[:space:]]+).*/\1/p')"
 else
-  NOTES+=("domain model: path missing from documentation.md — domain-model term coverage skipped")
-  SKIPPED_CHECKS+=("Domain-model term coverage — needs 'domain model:' line in documentation.md")
+  NOTES+=("domain model: path missing from doc-manifest.md — domain-model term coverage skipped")
+  SKIPPED_CHECKS+=("Domain-model term coverage — needs 'domain model:' line in doc-manifest.md")
 fi
 
 if [ -z "$ARCHITECTURE_PATH" ]; then
   NOTES+=("No architecture.md entry found in the design set — architecture (C4) check skipped")
-  SKIPPED_CHECKS+=("Architecture (C4) — needs an architecture.md path listed under '## Design set' in documentation.md")
+  SKIPPED_CHECKS+=("Architecture (C4) — needs an architecture.md path listed under '## Design set' in doc-manifest.md")
 fi
 
 # ---------------------------------------------------------------------------
@@ -290,7 +290,7 @@ if [ -n "$DIATAXIS_TUTORIALS" ] && [ -d "$ROOT/docs" ]; then
   while IFS= read -r mdfile; do
     rel="${mdfile#"$ROOT"/}"
     case "$rel" in
-      docs/adr/*|docs/rationale/*|docs/process/*|docs/images/*|docs/README.md) continue ;;
+      docs/adr/*|docs/rationale/*|docs/process/*|docs/images/*|docs/README.md|docs/doc-manifest.md) continue ;;
     esac
     in_kind_dir=""
     expected_kind=""

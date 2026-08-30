@@ -1,6 +1,4 @@
-# Documentation standard — as adopted here
-
-Kind: reference
+# Documentation manifest — as adopted here
 
 This repository follows the `design-docs` skill standard (see the skill's
 `references/standard.md`). This file records the adopted shape; the audit reads it first.

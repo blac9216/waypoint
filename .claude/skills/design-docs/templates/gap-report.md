@@ -1,7 +1,7 @@
 # design-docs gap report — <repo> — <date>
 
 Ephemeral. Lives in scratch; never committed; plan-work extracts what becomes issues.
-Standard shape read from: docs/process/documentation.md
+Standard shape read from: docs/doc-manifest.md
 
 ## Summary
 Tier 1 findings: N · Tier 2 findings: N · Clusters: N
