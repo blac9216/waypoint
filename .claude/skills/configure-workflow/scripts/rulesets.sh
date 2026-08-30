@@ -32,8 +32,15 @@ else
   live=$(gh api "repos/$REPO/rulesets/$existing")
   # signature covers every manifest-controlled ruleset parameter, not just types/checks/approvals/enforcement:
   # bypass_actors and the remaining pull_request/required_status_checks parameters (#1229 — SKILL.md's
-  # "every fixture present and exact" must hold for the ruleset too).
+  # "every fixture present and exact" must hold for the ruleset too), plus target and conditions.ref_name,
+  # and the two hardcoded (not yet manifest-driven) pull_request booleans this script itself renders
+  # (#1249 — a ruleset retargeted off the default branch previously audited as "in sync").
   sig_filter='{
+    target,
+    conditions_ref_name:{
+      include:([.conditions.ref_name.include[]?]|sort),
+      exclude:([.conditions.ref_name.exclude[]?]|sort)
+    },
     types:[.rules[].type]|sort,
     checks:([.rules[]|select(.type=="required_status_checks")|.parameters.required_status_checks[].context]|sort),
     approvals:([.rules[]|select(.type=="pull_request")|.parameters.required_approving_review_count][0]),
@@ -41,6 +48,8 @@ else
     bypass_actors:([.bypass_actors[]?|{actor_id,actor_type,bypass_mode}]|sort_by(.actor_id,.actor_type)),
     pr_dismiss_stale_reviews_on_push:([.rules[]|select(.type=="pull_request")|.parameters.dismiss_stale_reviews_on_push][0]),
     pr_require_last_push_approval:([.rules[]|select(.type=="pull_request")|.parameters.require_last_push_approval][0]),
+    pr_require_code_owner_review:([.rules[]|select(.type=="pull_request")|.parameters.require_code_owner_review][0]),
+    pr_required_review_thread_resolution:([.rules[]|select(.type=="pull_request")|.parameters.required_review_thread_resolution][0]),
     required_status_checks_strict_policy:([.rules[]|select(.type=="required_status_checks")|.parameters.strict_required_status_checks_policy][0])
   }'
   want_sig=$(jq -S "$sig_filter" <<<"$body")
