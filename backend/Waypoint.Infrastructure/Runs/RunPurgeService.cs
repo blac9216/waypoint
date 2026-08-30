@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Runs;
+using Waypoint.Core.Scans;
 using Waypoint.Infrastructure.ConfigDocs;
 
 namespace Waypoint.Infrastructure.Runs;
@@ -270,7 +271,14 @@ public sealed partial class RunPurgeService
 				Guid purgeRunId = await _jobs.CreateRunAsync("purge", "{}", credentialId: null, purgeInitiator, cancellationToken).ConfigureAwait(false);
 				JobSpec spec = new("purge", PurgePriority, Payload: payload);
 				IReadOnlyList<Guid> jobIds = await _jobs.FanOutJobsAsync(purgeRunId, [spec], purgeInitiator, cancellationToken).ConfigureAwait(false);
-				await _purges.MarkArtifactJobEnqueuedAsync(status.RunId, jobIds[0], scanJobIds.Count, cancellationToken).ConfigureAwait(false);
+				// Issue #1240: report the FILE total the artifact-purge job actually
+				// enumerates and deletes (Waypoint.Core.Scans.ScanArtifactPaths.FilesPerJob
+				// paths attempted per scan job -- PurgeJobHandler's own per-job loop), not
+				// the scan-JOB count -- the two units used to disagree, so an in-flight poll
+				// (job count) and the completed poll (file count, since #1223/#1061) reported
+				// different numbers for the exact same purge.
+				int artifactsTotal = scanJobIds.Count * ScanArtifactPaths.FilesPerJob;
+				await _purges.MarkArtifactJobEnqueuedAsync(status.RunId, jobIds[0], artifactsTotal, cancellationToken).ConfigureAwait(false);
 				return new RunPurgeResult(RunPurgeOutcome.InProgress, status with { ArtifactsPhase = "running" });
 			}
 		}
@@ -446,15 +454,34 @@ public sealed partial class RunPurgeService
 		try
 		{
 			using JsonDocument document = JsonDocument.Parse(tombstone.DetailJson);
-			if (document.RootElement.TryGetProperty("artifacts_deleted", out JsonElement value)
-				&& value.ValueKind == JsonValueKind.Number
-				&& value.TryGetInt32(out int artifactsDeleted))
+			if (!document.RootElement.TryGetProperty("artifacts_deleted", out JsonElement value)
+				|| value.ValueKind != JsonValueKind.Number)
 			{
-				return artifactsDeleted;
+				LogMissingArtifactsDeleted(logger, tombstone.RunId, tombstone.DetailJson);
+				return 0;
 			}
 
-			LogMissingArtifactsDeleted(logger, tombstone.RunId, tombstone.DetailJson);
-			return 0;
+			// Issue #1240 hardening: distinct from the "missing" case above -- the field
+			// IS present and numeric, it just is not representable as a non-negative
+			// artifact count (fractional, or outside int32 range).
+			if (!value.TryGetInt32(out int artifactsDeleted))
+			{
+				LogNonIntegerArtifactsDeleted(logger, tombstone.RunId, tombstone.DetailJson);
+				return 0;
+			}
+
+			// Issue #1240 hardening: RunPurgeRepository.CompleteAsync only ever
+			// serializes a non-negative int, so this is unreachable via the database
+			// today -- but this projection must never surface a fabricated negative
+			// count to GET /runs/{id}/purge, so fail closed the same way the other
+			// malformed shapes above do rather than passing it through verbatim.
+			if (artifactsDeleted < 0)
+			{
+				LogNegativeArtifactsDeleted(logger, tombstone.RunId, artifactsDeleted, tombstone.DetailJson);
+				return 0;
+			}
+
+			return artifactsDeleted;
 		}
 		catch (JsonException ex)
 		{
@@ -465,6 +492,12 @@ public sealed partial class RunPurgeService
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Run purge tombstone {RunId} detail is missing a numeric artifacts_deleted field; reporting 0. Detail: {Detail}")]
 	private static partial void LogMissingArtifactsDeleted(ILogger logger, Guid runId, string detail);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Run purge tombstone {RunId} detail's artifacts_deleted field is numeric but not a valid 32-bit integer (fractional or out of range); reporting 0. Detail: {Detail}")]
+	private static partial void LogNonIntegerArtifactsDeleted(ILogger logger, Guid runId, string detail);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Run purge tombstone {RunId} detail's artifacts_deleted field is negative ({ArtifactsDeleted}); reporting 0. Detail: {Detail}")]
+	private static partial void LogNegativeArtifactsDeleted(ILogger logger, Guid runId, int artifactsDeleted, string detail);
 
 	[LoggerMessage(Level = LogLevel.Warning, Message = "Run purge tombstone {RunId} detail is not valid JSON; reporting 0 artifacts_deleted. Detail: {Detail}")]
 	private static partial void LogInvalidDetailJson(ILogger logger, Exception exception, Guid runId, string detail);

@@ -27,6 +27,18 @@ namespace Waypoint.Core.Scans;
 /// </summary>
 public static class ScanArtifactPaths
 {
+	/// <summary>
+	/// Issue #1240: the fixed number of on-disk paths (<see cref="RawHdf"/>,
+	/// <see cref="AttestedHdf"/>, <see cref="Ckl"/>) this convention names per scan
+	/// job, regardless of which ones actually exist on disk -- <c>PurgeJobHandler</c>
+	/// attempts all three per job id (a missing file is a tolerated no-op, not a
+	/// skip), so this is the single source of truth for converting a scan-job count
+	/// into the artifact-**file** count the purge lifecycle reports, letting
+	/// <c>RunPurgeService</c> compute the same unit at enqueue time that the handler
+	/// enumerates and deletes.
+	/// </summary>
+	public const int FilesPerJob = 3;
+
 	/// <summary>Raw (pre-attest) HDF report path for a job.</summary>
 	public static string RawHdf(string artifactStorePath, Guid jobId) =>
 		Path.Combine(artifactStorePath, $"{jobId:N}.json");
