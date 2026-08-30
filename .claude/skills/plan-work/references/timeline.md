@@ -18,8 +18,10 @@ confirms when anything is ambiguous.
    it falls back to that issue's size default (or the `M` default if it has no
    size) — and is reported on stderr naming the issue number, the offending
    text, and which of the two distinct causes applies (`"an unparseable est.
-   cycle value"` vs. `"an est. cycle value … over the MAX_HOURS-hour
-   ceiling"`), wording the fallback to match which one actually applied (`"falling
+   cycle value"` vs. `"an est. cycle value … over the 100000-hour
+   ceiling"` — the emitted line expands the ceiling, so the literal token
+   `MAX_HOURS` never appears in it), wording the fallback to match which one
+   actually applied (`"falling
    back to its size default"` when the issue has a `Size:` label, `"falling
    back to the M default (no size)"` when it doesn't); it never aborts the run. The
    ceiling exists because jq 1.6 SIGABRTs (undocumented exit `134`) when a

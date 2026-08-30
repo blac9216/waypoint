@@ -6,7 +6,9 @@
 # or a non-ASCII digit such as "٢"), or that is one but exceeds the MAX_HOURS ceiling, is treated
 # like a missing estimate — it falls back to the issue's size default (or the M default if it has
 # none) — and is reported on stderr naming the issue number, the offending text, and which of the
-# two causes applies ("unparseable" vs. "over the MAX_HOURS-hour ceiling"); it never aborts the
+# two causes applies ("unparseable" vs. "over the 100000-hour ceiling", the expanded MAX_HOURS);
+# the cause is decided by the same jq predicate that classified the value, never re-tested in bash
+# (see the comment at the jq filter below and #1271); it never aborts the
 # run (see #1271, #1269, #1328).
 # --milestones takes an exact, comma-split list of milestone titles (no substring matching); each name is
 # trimmed of leading/trailing whitespace, so a title with leading/trailing spaces can never be named this way.
@@ -157,24 +159,29 @@ while IFS= read -r ms; do
       ([.body|capture("## Estimate\\s*\\n(?<e>[^#]*)")]|.[0].e // "") as $est |
       ([$est|capture("Size: *(?<s>[SML])")]|.[0].s // null) as $size |
       ([$est|capture("est\\. cycle:? *(?<hraw>\\S+) *h")]|.[0].hraw // null) as $hraw |
-      (if $hraw!=null and ($hraw|test("^[0-9]+([.][0-9]+)?$")) and (($hraw|tonumber) <= $maxHours) then $hraw else null end) as $h |
+      (if $hraw!=null and ($hraw|test("^[0-9]+([.][0-9]+)?$")) then $hraw else null end) as $numeric |
+      (if $numeric!=null and (($numeric|tonumber) <= $maxHours) then $numeric else null end) as $h |
       ($hraw!=null and $h==null) as $malformed |
+      (if $malformed then (if $numeric!=null then "over-ceiling" else "unparseable" end) else null end) as $reason |
       {milestone:$ms.number, milestone_title:$ms.title, issue:.number, state:.state, assignee:.assignee, epic:([.labels[]|select(.=="epic")]|length>0),
        size:$size, hours:(if $h!=null then ($h|tonumber) elif $size=="S" then ($S|tonumber) elif $size=="M" then ($M|tonumber) elif $size=="L" then ($L|tonumber) else ($M|tonumber) end),
        hours_source:(if $h!=null then "estimate" elif $malformed then (if $size!=null then "malformed-estimate-default-"+$size else "malformed-estimate-default-M" end) elif $size!=null then "size-default" else "no-estimate-default-M" end),
-       malformed_estimate:(if $malformed then $hraw else null end), blocked_by:$blocked, created:.created_at, closed:.closed_at}' <<<"$iss")
+       malformed_estimate:(if $malformed then $hraw else null end), blocked_by:$blocked, created:.created_at, closed:.closed_at}
+      + (if $malformed then {malformed_reason:$reason} else {} end)' <<<"$iss")
     mal=$(jq -r '.malformed_estimate // empty' <<<"$rec")
     if [ -n "$mal" ]; then
       mal_size=$(jq -r '.size // empty' <<<"$rec")
-      # A malformed est. cycle value falls into exactly one of two causes: it never matched the
-      # ASCII decimal pattern at all ("unparseable"), or it matched but exceeds MAX_HOURS
-      # ("over-ceiling"); re-test it here (mirroring the jq pattern) purely to word the stderr
-      # note precisely -- $rec and issues.jsonl are unaffected, so their bytes don't change.
-      if [[ "$mal" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v v="$mal" -v max="$MAX_HOURS" 'BEGIN{exit !(v>max)}'; then
-        reason_phrase="an est. cycle value \"$mal\" over the $MAX_HOURS-hour ceiling"
-      else
-        reason_phrase="an unparseable est. cycle value \"$mal\""
-      fi
+      # Which of the two causes applies is decided by the jq filter itself ($reason above), not by a
+      # second predicate here: a hand-copied bash re-test would be evaluated by a different regex
+      # engine, and bash's [[ =~ ]] treats [0-9] as a locale collation range that matches non-ASCII
+      # digits, so "٢" would be misreported as over-the-ceiling (see #1271, #1328). The reason rides
+      # on $rec only as a transient key and is stripped before the record is appended, so
+      # issues.jsonl stays byte-identical.
+      case $(jq -r '.malformed_reason' <<<"$rec") in
+        over-ceiling) reason_phrase="an est. cycle value \"$mal\" over the $MAX_HOURS-hour ceiling" ;;
+        *)            reason_phrase="an unparseable est. cycle value \"$mal\"" ;;
+      esac
+      rec=$(jq -c 'del(.malformed_reason)' <<<"$rec")
       if [ -n "$mal_size" ]; then
         say "timeline: issue #$n has $reason_phrase; falling back to its size default"
       else
