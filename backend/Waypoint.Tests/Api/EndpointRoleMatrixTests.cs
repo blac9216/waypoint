@@ -190,6 +190,9 @@ public sealed class EndpointRoleMatrixTests
 		// existing Operator+ gate (DownloadCatalogScreen), which had already drifted
 		// ahead of the stricter backend guard.
 		["DownloadsController.QueueDownloads"] = WaypointRole.Operator,
+		// Issue #1479: the connected VCFDT catalog-selection enqueue path -- same
+		// Operator+ floor as the legacy QueueDownloads it mirrors.
+		["DownloadsController.QueueBinariesDownload"] = WaypointRole.Operator,
 		["DownloadsController.ListDownloads"] = WaypointRole.Viewer,
 		["DownloadsController.CancelDownload"] = WaypointRole.Operator,
 		// Issue #560: combined readiness is operational chrome (what's missing before a

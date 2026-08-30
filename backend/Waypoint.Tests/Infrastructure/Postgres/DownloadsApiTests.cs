@@ -241,6 +241,172 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 	}
 
+	/// <summary>
+	/// Issue #1479: <c>POST /downloads/binaries</c> with explicit depot artifact ids
+	/// creates ONE run of type <c>binaries-download</c> containing one queued
+	/// <c>binaries-download</c> job per artifact (the same scan-style fanout
+	/// <see cref="PostDownloads_WithAdminRole_QueuesOneRunWithOneJobPerArtifact"/> proves
+	/// for the legacy path), distinct from that legacy <c>download</c> job type.
+	/// </summary>
+	[Fact]
+	public async Task PostBinariesDownload_WithArtifactIds_QueuesOneRunWithOneJobPerArtifact()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		Guid artifact1 = await SeedArtifactAsync($"{tag}-1");
+		Guid artifact2 = await SeedArtifactAsync($"{tag}-2");
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { depot_artifact_ids = new[] { artifact1.ToString(), artifact2.ToString() } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		string[] ids = document.RootElement.GetProperty("depot_artifact_ids").EnumerateArray().Select(e => e.GetString()!).ToArray();
+		Assert.Equal(2, ids.Length);
+		string runId = document.RootElement.GetProperty("run_id").GetString()!;
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		await using NpgsqlCommand runType = new("SELECT run_type FROM runs WHERE id = $1", connection);
+		runType.Parameters.AddWithValue(Guid.Parse(runId));
+		Assert.Equal("binaries-download", (string)(await runType.ExecuteScalarAsync())!);
+
+		await using NpgsqlCommand jobCount = new(
+			"SELECT count(*) FROM jobs WHERE run_id = $1 AND job_type = 'binaries-download' AND state = 'queued'", connection);
+		jobCount.Parameters.AddWithValue(Guid.Parse(runId));
+		Assert.Equal(2L, (long)(await jobCount.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// Issue #1479 AC: "Whole-release selection resolves to its member artifacts at
+	/// enqueue time" -- a release selector (product+version, the depot catalog's own
+	/// release identity, since it has no separate release-id entity) fans out one job
+	/// per matching artifact, and never touches a differently-versioned sibling.
+	/// </summary>
+	[Fact]
+	public async Task PostBinariesDownload_WithRelease_ResolvesMemberArtifactsAndQueuesOneJobEach()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		await SeedArtifactWithProductVersionAsync($"{tag}-a", "ESXi", "9.1.0");
+		await SeedArtifactWithProductVersionAsync($"{tag}-b", "ESXi", "9.1.0");
+		await SeedArtifactWithProductVersionAsync($"{tag}-other", "ESXi", "9.0.0");
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { release = new { product = "ESXi", version = "9.1.0" } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		string[] ids = document.RootElement.GetProperty("depot_artifact_ids").EnumerateArray().Select(e => e.GetString()!).ToArray();
+		Assert.Equal(2, ids.Length);
+
+		string runId = document.RootElement.GetProperty("run_id").GetString()!;
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand jobCount = new(
+			"SELECT count(*) FROM jobs WHERE run_id = $1 AND job_type = 'binaries-download'", connection);
+		jobCount.Parameters.AddWithValue(Guid.Parse(runId));
+		Assert.Equal(2L, (long)(await jobCount.ExecuteScalarAsync())!);
+	}
+
+	[Fact]
+	public async Task PostBinariesDownload_UnknownRelease_Returns404()
+	{
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { release = new { product = "NoSuchProduct", version = "0.0.0" } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task PostBinariesDownload_UnknownArtifactId_Returns404()
+	{
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { depot_artifact_ids = new[] { Guid.NewGuid().ToString() } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+	}
+
+	/// <summary>Neither selection mode supplied is an ambiguous, rejected request -- never a silent empty no-op run.</summary>
+	[Fact]
+	public async Task PostBinariesDownload_NeitherSelectionMode_Returns400()
+	{
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+	}
+
+	/// <summary>Both selection modes supplied together is ambiguous too -- rejected rather than silently preferring one.</summary>
+	[Fact]
+	public async Task PostBinariesDownload_BothSelectionModes_Returns400()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		Guid artifact = await SeedArtifactAsync(tag);
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new
+			{
+				depot_artifact_ids = new[] { artifact.ToString() },
+				release = new { product = "ESXi", version = "9.1.0" },
+			}),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+	}
+
+	[Theory]
+	[InlineData("Viewer")]
+	[InlineData("Cyber")]
+	public async Task PostBinariesDownload_BelowOperator_Returns403(string role)
+	{
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { depot_artifact_ids = Array.Empty<string>() }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, role);
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task PostBinariesDownload_WithoutAuth_Returns401()
+	{
+		HttpResponseMessage response = await _client.PostAsync(
+			"/api/v1/downloads/binaries", JsonBody(new { depot_artifact_ids = Array.Empty<string>() }));
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
 	[Fact]
 	public async Task GetDownloads_ReturnsQueuedRows_WithXTotalCount()
 	{
@@ -591,6 +757,15 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 	{
 		return await _artifacts.UpsertAsync(
 			new DepotArtifactUpsert(externalIdTag, "0000000000000000000000000000000000000000000000000000000000000000", "indexed", "{}"),
+			CancellationToken.None);
+	}
+
+	/// <summary>Seeds an artifact whose <c>product</c>/<c>version</c> generated columns (migration 0007) are populated, for the release-selector fanout tests.</summary>
+	private async Task<Guid> SeedArtifactWithProductVersionAsync(string externalIdTag, string product, string version)
+	{
+		string metadata = JsonSerializer.Serialize(new { product, version });
+		return await _artifacts.UpsertAsync(
+			new DepotArtifactUpsert(externalIdTag, "0000000000000000000000000000000000000000000000000000000000000000", "indexed", metadata),
 			CancellationToken.None);
 	}
 

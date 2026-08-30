@@ -219,6 +219,100 @@ public sealed class DownloadsController : ControllerBase
 		return Accepted(new DownloadsQueuedResponse(runId.ToString(), downloadIds.Select(id => id.ToString()).ToArray()));
 	}
 
+	/// <summary>
+	/// Queue a connected VCFDT binaries download for a catalog selection: either one or
+	/// more depot artifact ids, or a whole release (<see cref="ReleaseSelector"/>,
+	/// resolved to its member artifacts here at enqueue time -- grill decision R2-2).
+	/// Issue #1479 (epic #1181, split from #795): the same one-run-N-jobs scan-style
+	/// fanout <see cref="QueueDownloads"/> uses (grill decision Q18), but onto its own
+	/// <c><see cref="RunTypes.BinariesDownload"/></c> run/job type -- distinct from the
+	/// legacy <c>download</c> path above, which #1040 removes entirely. This slice only
+	/// enqueues <c>queued</c> jobs; the download-runner handler that claims and executes
+	/// them (invoking the installed tool's <c>binaries download --id ...</c>) is #1482 --
+	/// see <see cref="JobCapabilities.Download"/> and
+	/// <c>Waypoint.DownloadRunner.DownloadRunnerJobTypes</c> for why this job type is
+	/// reserved but not yet claimable by any runner. Operator+, matching
+	/// <see cref="QueueDownloads"/>'s floor.
+	///
+	/// Exactly one selection mode is required: neither, or both
+	/// <see cref="QueueBinariesDownloadRequest.DepotArtifactIds"/> and
+	/// <see cref="QueueBinariesDownloadRequest.Release"/> supplied together, is a 400 --
+	/// an ambiguous request is rejected up front rather than silently preferring one. An
+	/// unknown artifact id, or a release with zero matching artifacts, is a 404 before
+	/// any run is created (the same "validate the whole batch first, fan out atomically
+	/// after" shape <see cref="QueueDownloads"/> uses, so a bad selection can never leave
+	/// a half-created run).
+	/// </summary>
+	[HttpPost("binaries")]
+	[RequireOperatorRole]
+	[ProducesResponseType(typeof(BinariesDownloadQueuedResponse), StatusCodes.Status202Accepted)]
+	public async Task<ActionResult<BinariesDownloadQueuedResponse>> QueueBinariesDownload(
+		QueueBinariesDownloadRequest request, CancellationToken cancellationToken)
+	{
+		bool hasIds = request?.DepotArtifactIds is { Count: > 0 };
+		bool hasRelease = request?.Release is { Product.Length: > 0, Version.Length: > 0 };
+		if (hasIds == hasRelease)
+		{
+			throw ApiException.Validation(
+				"Exactly one of depot_artifact_ids or release (with product and version) is required.");
+		}
+
+		string initiatedBy = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
+
+		List<DepotArtifact> resolved;
+		if (hasRelease)
+		{
+			ReleaseSelector release = request!.Release!;
+			(IReadOnlyList<DepotArtifact> members, _) = await _artifacts
+				.ListAsync(new DepotArtifactFilter(release.Product, release.Version, null), new PageRequest { Limit = 200 }, cancellationToken)
+				.ConfigureAwait(false);
+			if (members.Count == 0)
+			{
+				throw ApiException.NotFound(
+					"Release not found.", $"No depot artifacts match product '{release.Product}' version '{release.Version}'.");
+			}
+
+			resolved = [.. members];
+		}
+		else
+		{
+			(IReadOnlyList<DepotArtifact> catalog, _) = await _artifacts
+				.ListAsync(new DepotArtifactFilter(null, null, null), new PageRequest { Limit = 200 }, cancellationToken)
+				.ConfigureAwait(false);
+			Dictionary<Guid, DepotArtifact> byId = catalog.ToDictionary(item => item.Id);
+
+			resolved = [];
+			foreach (string rawId in request!.DepotArtifactIds!)
+			{
+				if (!Guid.TryParse(rawId, out Guid artifactId) || !byId.TryGetValue(artifactId, out DepotArtifact? artifact))
+				{
+					throw ApiException.NotFound("Depot artifact not found.", $"Depot artifact '{rawId}' does not exist.");
+				}
+
+				resolved.Add(artifact);
+			}
+		}
+
+		// One run for the whole batch (ADR-0008), then one binaries-download job per
+		// artifact via the same shared FanOutJobsAsync path QueueDownloads uses.
+		Guid runId = await _jobs.CreateRunAsync(RunTypes.BinariesDownload, "{}", credentialId: null, initiatedBy, cancellationToken).ConfigureAwait(false);
+
+		List<JobSpec> specs = [];
+		foreach (DepotArtifact artifact in resolved)
+		{
+			string payload = JsonSerializer.Serialize(new
+			{
+				depot_artifact_id = artifact.Id,
+				external_id = artifact.ExternalId,
+			});
+			specs.Add(new JobSpec(RunTypes.BinariesDownload, DownloadPriority, TargetId: artifact.Id, TargetName: artifact.ExternalId, Payload: payload));
+		}
+
+		await _jobs.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);
+
+		return Accepted(new BinariesDownloadQueuedResponse(runId.ToString(), resolved.Select(artifact => artifact.Id.ToString()).ToArray()));
+	}
+
 	/// <summary>List the download queue, newest-first. Viewer+, matching <c>CatalogController.ListArtifacts</c>.</summary>
 	[HttpGet]
 	[RequireViewerRole]
