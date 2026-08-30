@@ -7,16 +7,16 @@ index are explanation by construction and have their own directories. The standa
 tree follows is recorded in [doc-manifest.md](doc-manifest.md).
 
 ## Tutorials — learning by doing
-<!-- - [Title](tutorials/file.md) — one line -->
+_(none yet)_
 
 ## How-to — task recipes
-<!-- - [Title](how-to/file.md) — one line -->
+_(none yet)_
 
 ## Reference — facts and contracts
-<!-- - [Title](reference/file.md) — one line -->
+_(none yet)_
 
 ## Explanation — why things are the way they are
-<!-- - [Title](explanation/file.md) — one line -->
+_(none yet)_
 
 ## Decisions and rationale
 - [Architecture Decision Records](adr/README.md) — read the index table first

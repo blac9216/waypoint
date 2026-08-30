@@ -347,7 +347,31 @@ if [ -n "$INDEX_PATH" ] && [ -n "$DIATAXIS_TUTORIALS" ]; then
       if [ ! -f "$candidate" ]; then
         add_finding "$INDEX_PATH" "" "INDEX_DEAD_LINK" "link target does not exist: $link"
       fi
-    done < <(grep -oE '\]\([^)]+\.md[^)]*\)' "$index_file" | sed -E 's/^\]\(([^)]+)\)$/\1/')
+    done < <(awk '
+      # Strip HTML comment blocks (possibly multi-line) before extracting
+      # links, so a commented-out placeholder link does not read as a dead
+      # link. A comment closed and reopened on the same line is handled by
+      # looping within the line.
+      {
+        line = $0
+        out = ""
+        while (1) {
+          if (in_comment) {
+            e = index(line, "-->")
+            if (e == 0) { line = ""; break }
+            line = substr(line, e + 3)
+            in_comment = 0
+            continue
+          }
+          s = index(line, "<!--")
+          if (s == 0) { out = out line; break }
+          out = out substr(line, 1, s - 1)
+          line = substr(line, s + 4)
+          in_comment = 1
+        }
+        print out
+      }
+    ' "$index_file" | grep -oE '\]\([^)]+\.md[^)]*\)' | sed -E 's/^\]\(([^)]+)\)$/\1/')
   else
     NOTES+=("Index file $INDEX_PATH does not exist — index checks skipped")
   fi
@@ -388,7 +412,15 @@ if [ -n "$GLOSSARY_PATH" ]; then
         if [ -z "${GLOSSARY_TERMS[$term]+x}" ]; then
           add_finding "$DOMAIN_MODEL_PATH" "" "GLOSSARY_TERM_UNLISTED" "term '$term' is not listed in $GLOSSARY_PATH"
         fi
-      done < <(grep -oE '^\*\*[^*]+\*\*' "$ROOT/$DOMAIN_MODEL_PATH" | sed -E 's/^\*\*([^*]+)\*\*/\1/' | sort -u)
+      done < <(grep -oE '^\*\*[^*]+\*\*' "$ROOT/$DOMAIN_MODEL_PATH" | sed -E 's/^\*\*([^*]+)\*\*/\1/' | \
+        awk -F'#|\\(|\\)|,|:' '
+          # A term is real glossary text, not prose emphasis, only when the
+          # bold text is <=4 words and contains none of # ( ) , : — a
+          # cross-reference like "**Roll-off (issue #708, epic #706)**" or a
+          # longer emphasised fragment fails this and is ignored.
+          NF > 1 { next }
+          { n = split($0, words, /[[:space:]]+/); if (n <= 4 && n > 0) print }
+        ' | sort -u)
     fi
   fi
 fi

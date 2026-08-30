@@ -6,19 +6,25 @@
 # carry a 2-6 line body plus a `Refs:` line, with slugs unique per file).
 #
 # Usage: check-pointers.sh [--root <repo-root>] [--format text|json]
-#                           [--rationale-dir docs/rationale]
+#                           [--rationale-dir docs/rationale] [--include-skill-dirs]
+#
+# By default, `.claude/skills/*/tests`, `.claude/skills/*/templates` and
+# `.claude/skills/*/references` are excluded from the pointer scan: skill
+# fixtures and reference docs routinely contain literal `# why:` example
+# text that is not repo drift. Pass --include-skill-dirs to scan them too.
 #
 # Exit status: 0 = no findings, 1 = findings reported, 2 = usage error.
 # A one-line summary (`check-pointers: N findings`) always goes to stderr.
 set -euo pipefail
 
 usage() {
-  echo "Usage: check-pointers.sh [--root <repo-root>] [--format text|json] [--rationale-dir docs/rationale]" >&2
+  echo "Usage: check-pointers.sh [--root <repo-root>] [--format text|json] [--rationale-dir docs/rationale] [--include-skill-dirs]" >&2
 }
 
 ROOT=""
 FORMAT="text"
 RATIONALE_DIR="docs/rationale"
+INCLUDE_SKILL_DIRS=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,6 +34,7 @@ while [ $# -gt 0 ]; do
     --format=*) FORMAT="${1#--format=}"; shift ;;
     --rationale-dir) RATIONALE_DIR="${2:-}"; shift 2 ;;
     --rationale-dir=*) RATIONALE_DIR="${1#--rationale-dir=}"; shift ;;
+    --include-skill-dirs) INCLUDE_SKILL_DIRS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "check-pointers: unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -72,6 +79,10 @@ SLUG_CLASS='[[:lower:][:digit:]-]+'
 POINTER_PATTERN="${RATIONALE_DIR_ESC}/[^ ]+\\.md#${SLUG_CLASS}"
 FULL_PATTERN="(#|//|<!--)[[:space:]]*why:[[:space:]]*${POINTER_PATTERN}"
 
+# Skill fixture/reference directories excluded from the scan by default
+# (see --include-skill-dirs above).
+SKILL_DIR_EXCLUDE_PATTERN='(^|/)\.claude/skills/[^/]+/(tests|templates|references)(/|$)'
+
 cd "$ROOT"
 
 # ---------------------------------------------------------------------------
@@ -98,7 +109,13 @@ while IFS= read -r matchline; do
   fi
 done < <(grep -rIn \
   --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=bin --exclude-dir=obj \
-  -E "$FULL_PATTERN" . 2>/dev/null)
+  -E "$FULL_PATTERN" . 2>/dev/null | {
+    if [ "$INCLUDE_SKILL_DIRS" -eq 1 ]; then
+      cat
+    else
+      grep -vE "$SKILL_DIR_EXCLUDE_PATTERN" || true
+    fi
+  })
 
 # ---------------------------------------------------------------------------
 # Phase 2: validate every docs/rationale/*.md file itself — slug uniqueness,
