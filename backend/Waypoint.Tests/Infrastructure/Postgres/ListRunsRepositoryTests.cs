@@ -323,6 +323,58 @@ public sealed class ListRunsRepositoryTests : IAsyncLifetime
 		Assert.Equal(0, summary.JobCountBlocked);
 	}
 
+	// -- issue #970: 'uploaded' is a terminal state distinct from 'done' (the Standard
+	// scan-job shape's ADR-0008 pipeline ends there, not 'done') that the job_count_*
+	// FILTER predicates originally omitted from every bucket. Every prior fixture in
+	// this file happened to end its jobs on 'done', so the gap went unpinned -- this
+	// fixture is deliberately the first to include an 'uploaded' job.
+	[Fact]
+	public async Task GetRunAsync_UploadedJob_CountsAsCompleted_AndBucketsSumToJobCount()
+	{
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[
+				new JobSpec("discover", 1, TargetName: "a"),
+				new JobSpec("scan", 1, TargetName: "b")
+			],
+			"tester",
+			CancellationToken.None);
+
+		await using (NpgsqlConnection connection = new(_fixture.ConnectionString))
+		{
+			await connection.OpenAsync();
+			await using NpgsqlCommand states = new(
+				"""
+				UPDATE jobs SET state = CASE id
+					WHEN $1 THEN 'done'
+					WHEN $2 THEN 'uploaded'
+					ELSE state
+				END
+				WHERE id IN ($1, $2)
+				""", connection);
+			states.Parameters.AddWithValue(jobIds[0]);
+			states.Parameters.AddWithValue(jobIds[1]);
+			await states.ExecuteNonQueryAsync();
+		}
+
+		RunSummary? summary = await _repository.GetRunAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(summary);
+		Assert.Equal(2, summary!.JobCount);
+		// Both the 'done' discover job and the 'uploaded' scan job land in
+		// job_count_completed -- neither is left out of every bucket.
+		Assert.Equal(2, summary.JobCountCompleted);
+		Assert.Equal(0, summary.JobCountQueued);
+		Assert.Equal(0, summary.JobCountRunning);
+		Assert.Equal(0, summary.JobCountFailed);
+		Assert.Equal(0, summary.JobCountBlocked);
+		Assert.Equal(
+			summary.JobCount,
+			summary.JobCountQueued + summary.JobCountRunning + summary.JobCountCompleted
+				+ summary.JobCountFailed + summary.JobCountBlocked);
+	}
+
 	[Fact]
 	public async Task GetRunAsync_UnknownRun_ReturnsNull()
 	{
