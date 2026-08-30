@@ -27,6 +27,10 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.2" />
+    <!-- Issue #1305: .ValidateDataAnnotations() on the PowerShellOptions registration
+         (DiscoveryDnsTimeoutMilliseconds's [Range] bounds a hang; an out-of-range value
+         must fail the runner at boot, not silently at the first DNS lookup). -->
+    <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" Version="8.0.0" />
     <!-- The only project in the solution that references the PowerShell SDK, by
          design; see the header comment above. -->
     <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.4.6" />

@@ -58,6 +58,20 @@ $Script:VmwareStigDockerModulePath = $env:WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_
 # credentials -- a hostname/IP is non-secret inventory) so job.log can distinguish
 # "resolver too slow" from "NXDOMAIN", both of which degrade to the same fail-closed
 # "no match" outcome.
+#
+# Bounds (issue #1305 review round 1): every -TimeoutMilliseconds/-DnsTimeoutMilliseconds
+# parameter below carries [ValidateRange(1, 60000)], so an out-of-range ceiling fails
+# loudly at parameter-bind time instead of silently at runtime. Without it the values
+# an operator is most likely to reach for defeat the very guarantee this constant
+# exists to provide: -1 is Timeout.Infinite, so Task.Wait(-1) waits forever and never
+# reaches the warning branch (the unbounded stall #1251 removed, reinstated); -2 and
+# below throw ArgumentOutOfRangeException into the resolvers' deliberate fail-open
+# `catch { return @() }`, disabling DNS matching for the whole pass with no warning;
+# and 0 makes every lookup instantly "time out". The floor is 1ms rather than the
+# 100ms floor PowerShellOptions.DiscoveryDnsTimeoutMilliseconds enforces because any
+# positive value is *safe* here (it cannot hang) and the module's own tests drive 50ms
+# ceilings to make the timeout branch fire fast; 100ms is an operator-facing sanity
+# floor, applied at the configuration layer where operators actually type numbers.
 $script:WaypointDnsTimeoutMillisecondsDefault = 3000
 
 # Normalizes a hostname/IP string for case- and trailing-dot-insensitive comparison
@@ -123,6 +137,7 @@ function Resolve-WaypointHostAddresses {
 		[string]$HostNameOrAddress,
 
 		[Parameter()]
+		[ValidateRange(1, 60000)]
 		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault,
 
 		# Issue #1297: test-only seam over the one .NET call in this function, so the
@@ -162,6 +177,7 @@ function Resolve-WaypointReverseHostNames {
 		[string]$IpAddress,
 
 		[Parameter()]
+		[ValidateRange(1, 60000)]
 		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault,
 
 		# Issue #1297: the same test-only seam as Resolve-WaypointHostAddresses above.
@@ -216,6 +232,7 @@ function Resolve-WaypointHostAddressesCached {
 		# Issue #1305: forwarded to the real resolver only; ignored (as with every
 		# other real-DNS parameter here) when -NameResolver or -Cache already answers.
 		[Parameter()]
+		[ValidateRange(1, 60000)]
 		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault
 	)
 
@@ -251,6 +268,7 @@ function Resolve-WaypointReverseHostNamesCached {
 
 		# Issue #1305: same forwarding rule as Resolve-WaypointHostAddressesCached.
 		[Parameter()]
+		[ValidateRange(1, 60000)]
 		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault
 	)
 
@@ -306,6 +324,7 @@ function Test-WaypointSessionMatchesVCenter {
 
 		# Issue #1305: forwarded to the real resolvers via the Cached wrappers above.
 		[Parameter()]
+		[ValidateRange(1, 60000)]
 		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault
 	)
 
@@ -381,6 +400,7 @@ function Resolve-WaypointPrimarySession {
 		# resolvers. Default is the module-wide ceiling; Invoke-WaypointDiscovery is
 		# the only production caller that overrides it, from operator configuration.
 		[Parameter()]
+		[ValidateRange(1, 60000)]
 		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault
 	)
 
@@ -436,7 +456,11 @@ function Invoke-WaypointDiscovery {
 	    it without editing the shipped module. A lookup that exceeds the ceiling
 	    emits a Write-Warning naming the lookup kind and host (never credentials)
 	    before degrading to the same fail-closed "no match" outcome a genuine
-	    resolution failure produces.
+	    resolution failure produces. Accepted range: 1-60000ms, enforced by
+	    [ValidateRange] at bind time (PowerShellOptions.DiscoveryDnsTimeoutMilliseconds,
+	    the operator-facing surface, narrows the floor further to 100ms) -- see the
+	    $script:WaypointDnsTimeoutMillisecondsDefault comment for why -1/-2/0 must
+	    never reach Task.Wait.
 
 	.OUTPUTS
 	    One [pscustomobject] per discovered item: Type ('vcenter'|'cluster'|'host'|'vm'),
@@ -524,7 +548,9 @@ function Invoke-WaypointDiscovery {
 		# session. DiscoverJobHandler feeds this from
 		# PowerShellOptions.DiscoveryDnsTimeoutMilliseconds; unset, it is the
 		# module's own $script:WaypointDnsTimeoutMillisecondsDefault (3000ms).
+		# [ValidateRange] rejects -1/-2/0 at bind time (see the constant's comment).
 		[Parameter()]
+		[ValidateRange(1, 60000)]
 		[int]$DnsTimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault
 	)
 

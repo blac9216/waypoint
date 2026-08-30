@@ -120,7 +120,11 @@ engine serves both products and all future features ([ADR-0008](adr/0008-job-eng
   the vCenter session identity; `DiscoverJobHandler` threads it to
   `Invoke-WaypointDiscovery -DnsTimeoutMilliseconds`, and a lookup that exceeds it
   emits a job.log warning naming the lookup kind and host rather than silently
-  degrading to "no match".
+  degrading to "no match". Accepted range 100–60000 ms, validated on start
+  (`ValidateDataAnnotations`/`ValidateOnStart`): the option's only job is to bound a
+  hang, and the values just outside that range defeat it silently — `-1` is
+  `Timeout.Infinite`, `-2` and below throw into the module's fail-open catch — so the
+  runner refuses to start rather than accept one.
 - **Concurrency**: a shared runner library reads container CPU/memory limits, combines
   them with measured handler resource profiles and operator caps, and admits work only
   within that budget. Exact weights/defaults await measurement. Queue/worker identity
