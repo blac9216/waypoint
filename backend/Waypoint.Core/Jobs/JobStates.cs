@@ -32,6 +32,20 @@ public static class JobStates
 	public const string AuthFailed = "auth-failed";
 	public const string Blocked = "blocked";
 	public const string Cancelled = "cancelled";
+
+	/// <summary>
+	/// Every value declared above, reflected rather than hand-typed a second time so
+	/// this list cannot drift from the ten <c>public const string</c> fields it mirrors
+	/// -- consumers that must enumerate the whole closed set (e.g.
+	/// <see cref="JobCountBuckets"/>, issue #970) read this instead of retyping the
+	/// literals.
+	/// </summary>
+	public static readonly IReadOnlyList<string> All = typeof(JobStates)
+		.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+		.Where(f => f.IsLiteral && f.FieldType == typeof(string))
+		.Select(f => (string)f.GetRawConstantValue()!)
+		.OrderBy(s => s, StringComparer.Ordinal)
+		.ToArray();
 }
 
 /// <summary>
@@ -63,4 +77,51 @@ public static class JobTerminalStates
 
 	/// <summary>True for the three "the job did not succeed" terminals.</summary>
 	public static bool IsFailure(string state) => Failure.Contains(state);
+}
+
+/// <summary>
+/// The <c>job_count_*</c> bucket (issue #970) that <c>GET /runs</c> and
+/// <c>GET /runs/{id}</c> sort a job into, per docs/api-contract.md's run row. Every
+/// value in <see cref="JobStates"/> resolves to exactly one bucket so
+/// <c>sum(job_count_queued, job_count_running, job_count_completed, job_count_failed,
+/// job_count_blocked) == job_count</c> always holds.
+/// </summary>
+public enum JobCountBucket
+{
+	Queued,
+	Running,
+	Completed,
+	Failed,
+	Blocked,
+}
+
+/// <summary>
+/// Resolves each <see cref="JobStates"/> value to its <see cref="JobCountBucket"/>.
+/// <see cref="JobStates.Queued"/> and <see cref="JobStates.Blocked"/> are their own
+/// buckets; <see cref="JobTerminalStates.IsSuccess"/>/<see cref="JobTerminalStates.IsFailure"/>
+/// (the existing terminal-state vocabulary) split the remaining terminals into
+/// <see cref="JobCountBucket.Completed"/>/<see cref="JobCountBucket.Failed"/>; and
+/// everything else -- <see cref="JobStates.Running"/>, <see cref="JobStates.Attesting"/>,
+/// <see cref="JobStates.Converting"/> today -- is in-flight and falls into
+/// <see cref="JobCountBucket.Running"/> by construction. Because every branch is
+/// exhaustive over <see cref="JobStates.All"/> (pinned by
+/// <c>JobCountBucketsTests.EveryJobState_MapsToExactlyOneBucket</c>), a job-state value
+/// added to the CHECK constraint without an update here still lands in a bucket
+/// instead of silently falling out of all of them -- worst case it is miscategorized
+/// as <see cref="JobCountBucket.Running"/>, never uncounted.
+/// </summary>
+public static class JobCountBuckets
+{
+	public static JobCountBucket Resolve(string state) => state switch
+	{
+		JobStates.Queued => JobCountBucket.Queued,
+		JobStates.Blocked => JobCountBucket.Blocked,
+		_ when JobTerminalStates.IsSuccess(state) => JobCountBucket.Completed,
+		_ when JobTerminalStates.IsFailure(state) => JobCountBucket.Failed,
+		_ => JobCountBucket.Running,
+	};
+
+	/// <summary>Every <see cref="JobStates"/> value that resolves to <paramref name="bucket"/>.</summary>
+	public static IReadOnlyList<string> StatesIn(JobCountBucket bucket) =>
+		JobStates.All.Where(state => Resolve(state) == bucket).ToArray();
 }

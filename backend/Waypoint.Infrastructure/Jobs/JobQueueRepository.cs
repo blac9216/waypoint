@@ -959,23 +959,34 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	/// catches, not a fake-repository test. See the Postgres integration tests for
 	/// <see cref="GetRunAsync"/>, <see cref="ListRunsAsync"/>, and
 	/// <see cref="ListRunHistoryAsync"/>, which pin this.
+	///
+	/// Issue #970: the five <c>job_count_*</c> FILTER predicates are built from
+	/// <see cref="JobCountBuckets"/> (backed by the <see cref="JobStates"/> vocabulary)
+	/// rather than hand-typed per bucket, so a terminal state such as
+	/// <see cref="JobStates.Uploaded"/> cannot be typo'd out of every bucket again --
+	/// every value in <see cref="JobStates.All"/> resolves to exactly one bucket, so
+	/// the five counts always sum to <c>job_count</c>.
 	/// </summary>
-	private const string RunSummaryProjectionSql = """
+	private static readonly string RunSummaryProjectionSql = $"""
 		SELECT
 			r.id, r.run_type, r.state, r.paused, r.blocked, r.blocked_reason,
 			r.scope::text,
 			r.credential_id, r.initiated_by, r.schedule_id,
 			r.created_at::text, r.started_at::text, r.completed_at::text,
 			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL),
-			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'queued'),
-			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'running'),
-			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'done'),
-			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ('failed', 'auth-failed')),
-			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state = 'blocked'),
+			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ({JobCountStateList(JobCountBucket.Queued)})),
+			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ({JobCountStateList(JobCountBucket.Running)})),
+			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ({JobCountStateList(JobCountBucket.Completed)})),
+			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ({JobCountStateList(JobCountBucket.Failed)})),
+			COUNT(j.id) FILTER (WHERE j.id IS NOT NULL AND j.state IN ({JobCountStateList(JobCountBucket.Blocked)})),
 			r.credential_name, r.credential_type, r.credential_username
 		FROM runs r
 		LEFT JOIN jobs j ON j.run_id = r.id
 		""";
+
+	/// <summary>Comma-separated, single-quoted SQL literal list of the <see cref="JobStates"/> values in <paramref name="bucket"/>.</summary>
+	private static string JobCountStateList(JobCountBucket bucket) =>
+		string.Join(", ", JobCountBuckets.StatesIn(bucket).Select(state => $"'{state}'"));
 
 	/// <summary>Reads one row of <see cref="RunSummaryProjectionSql"/>'s column order into a <see cref="RunSummary"/>.</summary>
 	private static RunSummary ReadRunSummary(NpgsqlDataReader reader) => new(
