@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Reflection;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
@@ -481,15 +480,13 @@ public sealed class JobQueueLeaseOwnershipTests : IAsyncLifetime
 	// ---- helpers ---------------------------------------------------------
 
 	/// <summary>
-	/// The <c>jobs.state</c> vocabulary, by reflection over <see cref="JobStates"/>'s
-	/// public string constants -- not a hand-written copy of them.
+	/// The <c>jobs.state</c> vocabulary. Issue #1292: reads <see cref="JobStates.All"/>
+	/// directly -- the same derived artifact production code
+	/// (<see cref="JobCountBuckets"/>, <c>JobQueueRepository</c>) consumes -- rather than
+	/// a private reflection over <see cref="JobStates"/> that merely happened to be
+	/// byte-identical to it.
 	/// </summary>
-	private static readonly IReadOnlyList<string> StateVocabulary = typeof(JobStates)
-		.GetFields(BindingFlags.Public | BindingFlags.Static)
-		.Where(field => field is { IsLiteral: true, IsInitOnly: false } && field.FieldType == typeof(string))
-		.Select(field => (string)field.GetRawConstantValue()!)
-		.Order(StringComparer.Ordinal)
-		.ToArray();
+	private static readonly IReadOnlyList<string> StateVocabulary = [.. JobStates.All];
 
 	private static HashSet<string> DeriveExecutingStates()
 	{

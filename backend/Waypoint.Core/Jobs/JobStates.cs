@@ -68,9 +68,22 @@ public static class JobTerminalStates
 	/// <summary>
 	/// The five terminal states, ordered. Issue #1242: this is the vocabulary
 	/// <see cref="Waypoint.Infrastructure.Jobs.JobQueueRepository.TryCompleteRunAsync"/>
-	/// builds its "remaining work" FILTER predicate from, so a state added here without
-	/// a matching schema change fails <c>jobs_state_check</c> instead of silently never
-	/// being "remaining".
+	/// builds its "remaining work" FILTER predicate from. Issue #1293: adding a state
+	/// here does NOT fail <c>jobs_state_check</c> -- the list is only interpolated into
+	/// a <c>NOT IN (...)</c> FILTER predicate, which is a valid query against any text
+	/// literal the schema has never heard of. What actually catches a spelling that
+	/// <see cref="JobStates"/> does not declare is
+	/// <c>Waypoint.Tests.Core.Jobs.JobTerminalStatesTests.TerminalStates_AreAllKnownJobStates</c>
+	/// (asserts <see cref="All"/> is a subset of <see cref="JobStates.All"/>), backstopped
+	/// by <c>Waypoint.Tests.Infrastructure.Postgres.JobsRunningRequiresLeaseTests.
+	/// JobStatesConstants_ExactlyMatchTheSchemasAllowedStates</c> one hop further out
+	/// (asserts <see cref="JobStates.All"/> itself matches <c>jobs_state_check</c>).
+	/// Neither test enforces the OTHER direction: classifying a newly added
+	/// <see cref="JobStates"/> value as terminal (adding it here) is still a human step
+	/// no test requires -- an omission just leaves the new state "remaining forever" in
+	/// <see cref="Waypoint.Infrastructure.Jobs.JobQueueRepository.TryCompleteRunAsync"/>
+	/// and files it under <see cref="JobCountBucket.Running"/> in <see cref="JobCountBuckets"/>,
+	/// silently, exactly as <see cref="JobStates.Blocked"/> does by design today.
 	/// </summary>
 	public static readonly IReadOnlyList<string> All =
 	[

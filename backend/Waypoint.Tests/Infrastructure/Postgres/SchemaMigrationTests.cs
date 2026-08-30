@@ -1585,6 +1585,118 @@ public sealed class SchemaMigrationTests
 		return (string)(await command.ExecuteScalarAsync())!;
 	}
 
+	/// <summary>
+	/// Issue #1281: migration 0080 is the first migration to borrow migration 0066's
+	/// append-only <c>trg_component_results_block_update</c> trigger's disable/re-enable
+	/// carve-out for its backfill.
+	/// <see cref="Migration0080_BackfillsExecutionErrorCountFromFindings_NotAFabricatedZero"/>
+	/// already proves <c>pg_trigger.tgenabled = 'O'</c> (the flag) is restored, but that is
+	/// not proof the trigger still WORKS -- a future migration could leave it enabled but
+	/// functionally broken (e.g. replace <c>component_results_block_mutation()</c> with a
+	/// no-op) and the flag alone would still read 'O'. This asserts the actual observable
+	/// behaviour against a fully migrated database (0080 included): an owner-role
+	/// <c>UPDATE component_results</c> still raises the append-only <c>P0001</c> exception.
+	/// <c>RunnerRoleGrantDriftTests</c> proves the compliance runner is blocked by GRANT
+	/// (42501), not the trigger; <c>ComponentResultRepositoryTests</c> L572 explicitly notes
+	/// an owner-role UPDATE is not stopped by grants and is the trigger's job alone -- this
+	/// is that missing end-to-end proof.
+	/// </summary>
+	[Fact]
+	public async Task Migration0080_TriggerStillBlocksOwnerRoleUpdate_AfterFullMigrationSet()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		Guid sourceRevisionId = await InsertSourceRevisionAsync(connection, "migration-0080-trigger-test");
+		Guid productId = await InsertProductAsync(connection, sourceRevisionId, "vmware", "migration-0080-trigger-test", "Test Product");
+		Guid versionId = await InsertProductVersionAsync(connection, productId, "9.0", "Test Product 9.0");
+		Guid catalogComponentId = await InsertComponentAsync(connection, versionId, "migration-0080-trigger-vcenter", "vCenter Server");
+		Guid releaseId = await InsertContentReleaseAsync(connection, "stig", "migration-0080-trigger-test:stig:release-1", "Test STIG Release");
+		Guid reportGroupId = await InsertReportGroupAsync(connection, "migration-0080-trigger-group", "Test Group", 2);
+		Guid executionProfileId = await InsertExecutionProfileAsync(connection, catalogComponentId, releaseId, reportGroupId, "1.0.0", "hdf");
+		Guid targetId = await InsertTargetAsync(connection, "migration-0080-trigger-target");
+		Guid componentId = await InsertDiscoveredComponentAsync(connection, targetId, catalogComponentId, "migration-0080-trigger-vcenter");
+
+		Guid runId;
+		await using (NpgsqlCommand insertRun = new("INSERT INTO runs (run_type) VALUES ('scan') RETURNING id", connection))
+		{
+			runId = (Guid)(await insertRun.ExecuteScalarAsync())!;
+		}
+
+		Guid scanPlanId;
+		await using (NpgsqlCommand insertPlan = new(
+			"""
+			INSERT INTO scan_plans (run_id, plan_schema_version, plan_digest, explanation)
+			VALUES ($1, 1, 'migration-0080-trigger-digest', '1 of 1 accepted') RETURNING id
+			""", connection))
+		{
+			insertPlan.Parameters.AddWithValue(runId);
+			scanPlanId = (Guid)(await insertPlan.ExecuteScalarAsync())!;
+		}
+
+		Guid scanPlanItemId;
+		await using (NpgsqlCommand insertPlanItem = new(
+			"""
+			INSERT INTO scan_plan_items (scan_plan_id, component_id, catalog_execution_profile_id, transport, selector_kind, report_group_key, priority, output_kind)
+			VALUES ($1, $2, $3, 'vmware', 'vcenter', 'migration-0080-trigger-group', 2, 'hdf') RETURNING id
+			""", connection))
+		{
+			insertPlanItem.Parameters.AddWithValue(scanPlanId);
+			insertPlanItem.Parameters.AddWithValue(componentId);
+			insertPlanItem.Parameters.AddWithValue(executionProfileId);
+			scanPlanItemId = (Guid)(await insertPlanItem.ExecuteScalarAsync())!;
+		}
+
+		Guid resultId = await InsertPre0080ComponentResultAsync(connection, runId, scanPlanItemId, componentId, attemptNumber: 1);
+
+		await using NpgsqlCommand update = new(
+			"UPDATE component_results SET status = 'skipped' WHERE id = $1", connection);
+		update.Parameters.AddWithValue(resultId);
+
+		PostgresException exception = await Assert.ThrowsAsync<PostgresException>(() => update.ExecuteNonQueryAsync());
+		Assert.Equal("P0001", exception.SqlState);
+		Assert.Contains("component_results is append-only", exception.MessageText, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1283: migration 0080's two <c>DO</c> blocks guard the trigger disable/
+	/// re-enable with <c>WHERE tgname = 'trg_component_results_block_update'</c>, with no
+	/// <c>tgrelid</c> filter -- <c>pg_trigger.tgname</c> is unique per TABLE, not per
+	/// database, so the guard as written answers "does ANY table anywhere have a trigger
+	/// with this name" and then unconditionally targets <c>component_results</c>. 0080 is
+	/// MERGED (its SQL semantics must not change), so this does not edit the migration --
+	/// it pins the fact that makes the name-only match safe TODAY: exactly one trigger in
+	/// the whole schema is named <c>trg_component_results_block_update</c>, and it lives on
+	/// <c>component_results</c> (created unconditionally by migration 0066, which always
+	/// runs before 0080 in the ordered migration set -- no other migration in this
+	/// directory creates a same-named trigger on any other table). If a future migration
+	/// ever reused this exact trigger name on a different table, THIS test starts failing
+	/// before 0080's guard could ever misfire, which is the earliest possible warning
+	/// short of editing 0080 itself. Unsafe-and-needs-a-migration is NOT the case here --
+	/// nothing between 0066 and 0080 creates a colliding name, and 0080 already ran.
+	/// </summary>
+	[Fact]
+	public async Task Migration0080_TriggerNameGuardIsUniquelyScopedToComponentResults()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		Assert.Equal(1L, await CountAsync(connection,
+			"SELECT count(*) FROM pg_trigger WHERE tgname = 'trg_component_results_block_update'"));
+
+		Assert.Equal(1L, await CountAsync(connection,
+			"""
+			SELECT count(*) FROM pg_trigger
+			WHERE tgname = 'trg_component_results_block_update' AND tgrelid = 'component_results'::regclass
+			"""));
+	}
+
 	/// <summary>Inserts a <c>component_results</c> row in its pre-0080 column shape (no <c>execution_error_count</c>) -- issue #1144.</summary>
 	private static async Task<Guid> InsertPre0080ComponentResultAsync(NpgsqlConnection connection, Guid runId, Guid scanPlanItemId, Guid componentId, int attemptNumber)
 	{
