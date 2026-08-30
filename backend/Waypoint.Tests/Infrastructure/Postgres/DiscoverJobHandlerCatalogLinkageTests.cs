@@ -85,8 +85,71 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 		await command.ExecuteNonQueryAsync();
 	}
 
+	/// <summary>
+	/// Issue #1263: migrations 0067/0076 (issue #1080) added a REAL, always-applied
+	/// vsphere/9.x declared-scope catalog row (component_key "esxi" included) to every
+	/// fresh container's full <c>migrator.ApplyAsync()</c> pass above -- unlike this
+	/// suite's own <see cref="ReapplySeedMigrationAsync"/> (0064+0070 ONLY), that row is
+	/// not scoped to what this class explicitly recreates, and its "N.x" family-scope
+	/// form matches ANY observed version starting with "9" -- including
+	/// <see cref="UnseededExactVersion"/> ("9.9.9"), which this suite's "stays unlinked"
+	/// assertions depend on genuinely having zero catalog coverage. Left alone, whether
+	/// those assertions hold depended on whether some OTHER Postgres-collection test
+	/// class happened to TRUNCATE catalog_* tables before this class ran (the real cause
+	/// of #1263's order-dependent 2/7 filtered-run failures -- passing in the full suite
+	/// only because a sibling class's own truncate wiped the 9.x row first, by luck of
+	/// discovery order, not because this class owns its own state).
+	///
+	/// This class already mutates catalog_product_versions/catalog_components in
+	/// <see cref="ReapplySeedMigrationAsync"/> (its own idempotent ON CONFLICT DO NOTHING
+	/// inserts), so a narrow, natural-key-scoped DELETE of exactly the vsphere scopes
+	/// this class does not itself recreate is in-kind cleanup -- never a table-wide
+	/// TRUNCATE of catalog_* (issue #1001 already documents that as racing with
+	/// concurrent Postgres-collection classes that also truncate it; this stays a keyed
+	/// DELETE against one product's non-"8.0" rows, no wider than what 0070/0076's own
+	/// merge loops already do to the same rows).
+	/// </summary>
+	private static async Task NarrowVsphereCatalogScopeAsync(NpgsqlConnection connection)
+	{
+		const string vsphereNonBaselineScope =
+			"""
+			SELECT pv.id FROM catalog_product_versions pv
+			JOIN catalog_products p ON p.id = pv.product_id
+			WHERE p.product_key = 'vsphere' AND pv.version_key <> '8.0'
+			""";
+
+		foreach (string sql in new[]
+		{
+			$"""
+			DELETE FROM catalog_benchmark_references WHERE execution_profile_id IN (
+				SELECT ep.id FROM catalog_execution_profiles ep
+				JOIN catalog_components cc ON cc.id = ep.component_id
+				WHERE cc.product_version_id IN ({vsphereNonBaselineScope}))
+			""",
+			$"""
+			DELETE FROM catalog_credential_requirements WHERE execution_profile_id IN (
+				SELECT ep.id FROM catalog_execution_profiles ep
+				JOIN catalog_components cc ON cc.id = ep.component_id
+				WHERE cc.product_version_id IN ({vsphereNonBaselineScope}))
+			""",
+			$"""
+			DELETE FROM catalog_execution_profiles WHERE component_id IN (
+				SELECT cc.id FROM catalog_components cc
+				WHERE cc.product_version_id IN ({vsphereNonBaselineScope}))
+			""",
+			$"DELETE FROM catalog_components WHERE product_version_id IN ({vsphereNonBaselineScope})",
+			$"DELETE FROM catalog_product_versions WHERE id IN ({vsphereNonBaselineScope})"
+		})
+		{
+			await using NpgsqlCommand command = new(sql, connection);
+			await command.ExecuteNonQueryAsync();
+		}
+	}
+
 	private static async Task ReapplySeedMigrationAsync(NpgsqlConnection connection)
 	{
+		await NarrowVsphereCatalogScopeAsync(connection);
+
 		// Issue #998: 0070 reconciles migration 0064's original patch-level "8.0.3" seed
 		// to the declared-scope verbatim key "8.0" -- re-apply both so this suite's real
 		// (non-ambiguity-test) scenarios exercise the real, reconciled catalog on main.

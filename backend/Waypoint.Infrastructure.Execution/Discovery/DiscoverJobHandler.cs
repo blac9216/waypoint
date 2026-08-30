@@ -417,8 +417,17 @@ public sealed class DiscoverJobHandler : IJobHandler
 			$"Components: {componentOutcome.Upserted} upserted, {componentOutcome.Reconnected} reconnected, {componentOutcome.MarkedAbsent} marked absent.{unlinkedNote}{completenessNote}");
 	}
 
+	// Issue #1273: Dictionary<TKey,TValue> enumeration order is unspecified by .NET's
+	// own contract -- reasonCounts happens to already be built via an OrderBy today
+	// (see unlinkedByReason above), but that is an accident of the caller, not a
+	// guarantee this method can rely on. Sort explicitly at render time, matching the
+	// sibling helper of the same name in ScanPlannerService.FormatReasonCounts, so the
+	// operator-facing completion note's word order can never reorder without a code
+	// change.
 	private static string FormatReasonCounts(IReadOnlyDictionary<string, int> reasonCounts) =>
-		string.Join(", ", reasonCounts.Select(kvp => $"{kvp.Value} {kvp.Key}"));
+		string.Join(", ", reasonCounts
+			.OrderBy(kvp => kvp.Key, StringComparer.Ordinal)
+			.Select(kvp => $"{kvp.Value} {kvp.Key}"));
 
 	/// <summary>
 	/// Whether the discovery boundary the module ran was complete. <see cref="IsComplete"/>
