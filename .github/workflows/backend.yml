@@ -147,7 +147,7 @@ jobs:
         shell: pwsh
         run: |
           $config = New-PesterConfiguration
-          $config.Run.Path = 'backend/Waypoint.Tests/Core/ComplianceContent/ShapeInventory'
+          $config.Run.Path = 'backend/Waypoint.Tests'
           $config.Run.PassThru = $true
           $config.Output.Verbosity = 'Detailed'
           $config.TestResult.Enabled = $true
