@@ -30,8 +30,21 @@ existing=$(jq -r --arg n "$NAME" '.[]|select(.name==$n)|.id' <<<"$list")
 if [ -z "$existing" ]; then say "create ruleset $NAME (checks: $(jq -r 'map(.context)|join(", ")' <<<"$checks"))"; [ $AUDIT = 1 ] && exit 1; run gh api -X POST "repos/$REPO/rulesets" --input - <<<"$body" --jq '.id' >/dev/null
 else
   live=$(gh api "repos/$REPO/rulesets/$existing")
-  want_sig=$(jq -S '{types:[.rules[].type]|sort, checks:([.rules[]|select(.type=="required_status_checks")|.parameters.required_status_checks[].context]|sort), approvals:([.rules[]|select(.type=="pull_request")|.parameters.required_approving_review_count][0]), enforcement}' <<<"$body")
-  live_sig=$(jq -S '{types:[.rules[].type]|sort, checks:([.rules[]|select(.type=="required_status_checks")|.parameters.required_status_checks[].context]|sort), approvals:([.rules[]|select(.type=="pull_request")|.parameters.required_approving_review_count][0]), enforcement}' <<<"$live")
+  # signature covers every manifest-controlled ruleset parameter, not just types/checks/approvals/enforcement:
+  # bypass_actors and the remaining pull_request/required_status_checks parameters (#1229 — SKILL.md's
+  # "every fixture present and exact" must hold for the ruleset too).
+  sig_filter='{
+    types:[.rules[].type]|sort,
+    checks:([.rules[]|select(.type=="required_status_checks")|.parameters.required_status_checks[].context]|sort),
+    approvals:([.rules[]|select(.type=="pull_request")|.parameters.required_approving_review_count][0]),
+    enforcement,
+    bypass_actors:([.bypass_actors[]?|{actor_id,actor_type,bypass_mode}]|sort_by(.actor_id,.actor_type)),
+    pr_dismiss_stale_reviews_on_push:([.rules[]|select(.type=="pull_request")|.parameters.dismiss_stale_reviews_on_push][0]),
+    pr_require_last_push_approval:([.rules[]|select(.type=="pull_request")|.parameters.require_last_push_approval][0]),
+    required_status_checks_strict_policy:([.rules[]|select(.type=="required_status_checks")|.parameters.strict_required_status_checks_policy][0])
+  }'
+  want_sig=$(jq -S "$sig_filter" <<<"$body")
+  live_sig=$(jq -S "$sig_filter" <<<"$live")
   if [ "$want_sig" = "$live_sig" ]; then say "ruleset $NAME: in sync"; exit 0; fi
   say "ruleset $NAME drift:"; diff <(echo "$live_sig") <(echo "$want_sig") >&2 || true
   [ $AUDIT = 1 ] && exit 1

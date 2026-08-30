@@ -11,12 +11,21 @@ for acct in $MACHINE $REVIEWER; do
   perm=$(gh api "repos/$REPO/collaborators/$acct/permission" --jq .permission 2>/dev/null || echo none)
   if [ "$perm" != write ] && [ "$perm" != admin ]; then drift=1; say "collaborator $acct: $perm -> write"; [ $AUDIT = 1 ] || run gh api -X PUT "repos/$REPO/collaborators/$acct" -f permission=push >/dev/null; fi
   uid=$(gh api "users/$acct" --jq .node_id)
-  # keep query failure distinct from an empty result: an errors payload (or a non-zero gh) means the role is unknown, not absent — never assert "missing" on it, and never let it force the ADMIN mutation
-  praw=$(gh api graphql -F id="$PID" -f query='query($id:ID!){node(id:$id){... on ProjectV2{collaborators(first:50){nodes{... on User{login} }}}}}' 2>/dev/null) || praw=""
-  if [ -z "$praw" ] || jq -e 'has("errors")' >/dev/null 2>&1 <<<"$praw"; then say "project admin $acct: unknown — query failed, see #1218"  # not drift: audit must still be able to reach clean
-  else
-    role=$(jq -r --arg a "$acct" '.data.node.collaborators.nodes[]?|select(.login==$a)|.login' <<<"$praw")
-    if [ -z "$role" ]; then drift=1; say "project admin $acct: missing"; [ $AUDIT = 1 ] || gql 'mutation($p:ID!,$u:ID!){updateProjectV2Collaborators(input:{projectId:$p,collaborators:[{userId:$u,role:ADMIN}]}){clientMutationId}}' "$(jq -n --arg p "$PID" --arg u "$uid" '{p:$p,u:$u}')" >/dev/null; fi
+  # ProjectV2 has NO queryable field for a collaborator's role: confirmed by schema
+  # introspection (`__type(name:"ProjectV2"){fields{name}}` lists no `collaborators`
+  # field; `ProjectV2Collaborator`/`ProjectV2Roles` exist only as the
+  # updateProjectV2Collaborators mutation's input types, never as query output). This
+  # is a permanent API gap, not a transient failure, so there is nothing to retry or
+  # parse here — never attempt the old query, never infer "missing" or "in sync" from
+  # it, and never let a malformed/empty response satisfy any check. Report unknown and
+  # point at the manual check every run; apply mode re-issues the ADMIN grant
+  # unconditionally (idempotent — a no-op when already ADMIN) since it cannot first
+  # read current state. See #1218 for the introspection evidence.
+  say "project admin $acct: unknown — no GraphQL/REST field exposes ProjectV2 collaborator roles (see #1218); verify manually: https://github.com/users/$OWNER/projects/$NUM/settings/access"
+  if [ $AUDIT = 0 ]; then
+    if ! gql 'mutation($p:ID!,$u:ID!){updateProjectV2Collaborators(input:{projectId:$p,collaborators:[{userId:$u,role:ADMIN}]}){clientMutationId}}' "$(jq -n --arg p "$PID" --arg u "$uid" '{p:$p,u:$u}')" >/dev/null; then
+      say "project admin $acct: ADMIN grant mutation failed — check token scopes/permissions"
+    fi
   fi
 done
 say "token scopes needed on the automation account: repo, project, read:org (check: gh auth status)"
