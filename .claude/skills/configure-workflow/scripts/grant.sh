@@ -6,7 +6,7 @@ REPO=""; OWNER=""; NUM=""; MACHINE=""; REVIEWER=""; AUDIT=0
 while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --owner) OWNER=$2; shift 2;; --project) NUM=$2; shift 2;; --machine) MACHINE=$2; shift 2;; --reviewer) REVIEWER=$2; shift 2;; --audit) AUDIT=1; shift;; *) say "unknown arg $1"; exit 2;; esac; done
 [ -n "$REPO" ] && [ -n "$OWNER" ] && [ -n "$NUM" ] && [ -n "$MACHINE" ] || { say "usage: grant.sh --repo o/n --owner <login> --project <n> --machine <login> [--reviewer <login>]"; exit 2; }
 PID=$(gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id}}}' -F o="$OWNER" -F n="$NUM" --jq '.data.user.projectV2.id')
-drift=0
+drift=0; applied=0; failed=0
 for acct in $MACHINE $REVIEWER; do
   perm=$(gh api "repos/$REPO/collaborators/$acct/permission" --jq .permission 2>/dev/null || echo none)
   if [ "$perm" != write ] && [ "$perm" != admin ]; then drift=1; say "collaborator $acct: $perm -> write"; [ $AUDIT = 1 ] || run gh api -X PUT "repos/$REPO/collaborators/$acct" -f permission=push >/dev/null; fi
@@ -26,12 +26,27 @@ for acct in $MACHINE $REVIEWER; do
   else
     # Apply mode asserts the grant, so it must say so: the operator is entitled to a record of
     # every privileged mutation, and the audit-mode "verify manually" pointer would describe a
-    # state this branch has just changed. drift=1 keeps the summary from claiming "in sync".
+    # state this branch has just changed. drift=1 keeps the summary from claiming "in sync";
+    # applied/failed keep it from claiming "applied" for a mutation that did not land — a
+    # swallowed failure here would let the numbered owner sequence in SKILL.md walk past a
+    # missing Project admin grant (see the round-2 review on #1243).
     drift=1; say "project admin $acct: unknown -> ADMIN (re-asserted unconditionally; role is unreadable, see #1218)"
-    if ! gql 'mutation($p:ID!,$u:ID!){updateProjectV2Collaborators(input:{projectId:$p,collaborators:[{userId:$u,role:ADMIN}]}){clientMutationId}}' "$(jq -n --arg p "$PID" --arg u "$uid" '{p:$p,u:$u}')" >/dev/null; then
-      say "project admin $acct: ADMIN grant mutation failed — check token scopes/permissions"
+    if gql 'mutation($p:ID!,$u:ID!){updateProjectV2Collaborators(input:{projectId:$p,collaborators:[{userId:$u,role:ADMIN}]}){clientMutationId}}' "$(jq -n --arg p "$PID" --arg u "$uid" '{p:$p,u:$u}')" >/dev/null; then
+      applied=$((applied + 1))
+    else
+      failed=$((failed + 1)); say "project admin $acct: ADMIN grant mutation FAILED — no grant landed; check token scopes/permissions"
     fi
   fi
 done
 say "token scopes needed on the automation account: repo, project, read:org (check: gh auth status)"
-[ $drift = 0 ] && say "grants: in sync" || { [ $AUDIT = 1 ] && exit 1; say "grants: applied"; }
+# Summary + exit status are conditional on what actually happened: audit mode reports drift and
+# exits 1 on it; apply mode exits nonzero if any ADMIN mutation failed and never says "applied"
+# for work that did not land. DRY_RUN says "would apply" because it mutated nothing.
+if [ $AUDIT = 1 ]; then
+  [ $drift = 0 ] && { say "grants: in sync"; exit 0; }
+  exit 1
+fi
+if [ $failed -gt 0 ]; then say "grants: $applied applied, $failed failed"; exit 1; fi
+if [ $drift = 0 ]; then say "grants: in sync"
+elif [ "$DRY" = 1 ]; then say "grants: would apply (DRY_RUN — nothing mutated)"
+else say "grants: applied"; fi
