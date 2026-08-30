@@ -12,6 +12,10 @@ confirms when anything is ambiguous.
 2. Per milestone: critical path through its own issues' dependencies using est. cycle
    days; total effort; projected duration = critical path adjusted by the observed
    parallelism (from history: median concurrent In-progress issues; default 1.5).
+   The parallelism source is either `--parallelism` (explicit), `--history-dir`
+   (explicit, pointed at `history.sh`'s `--out`), or a same-run default-`--out`
+   guess — that last case is reported on stderr so a mismatched `--out` doesn't
+   silently fall back to 1.5.
 3. Place: started milestones are **pinned** at their actual start; a milestone the owner
    is starting now begins **today** and overlaps whatever is running; unstarted
    milestones are laid out serially after the last scheduled one unless an issue
@@ -22,5 +26,7 @@ confirms when anything is ambiguous.
    used, and the sample sizes behind the numbers. Apply `due_on` where it moved by more
    than a day.
 
-`--resequence <milestones>` runs the same steps for the named milestones only, holding
-everything else fixed.
+`--milestones "A,B"` runs the same steps for the named milestones only (an exact,
+comma-split match against milestone titles — not a substring match), holding
+everything else fixed. A milestone with no open or closed issues still gets a row,
+zeroed out, rather than disappearing from the report.

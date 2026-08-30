@@ -1,20 +1,49 @@
 #!/usr/bin/env bash
 # timeline.sh — propose milestone due dates from issue-level estimates and dependencies. READ-ONLY (proposes; the agent applies).
-# Usage: timeline.sh [--repo owner/name] [--milestones "A,B"] [--parallelism 1.3] [--defaults S=2,M=6,L=16] [--out <dir>]
+# Usage: timeline.sh [--repo owner/name] [--milestones "A,B"] [--parallelism 1.3] [--history-dir <dir>] [--defaults S=2,M=6,L=16] [--out <dir>]
 # Reads each open milestone's open issues: the `## Estimate` section (Size, est. cycle hours if given) and `blocked_by` links (REST).
+# --milestones takes an exact, comma-split list of milestone titles (no substring matching).
+# --history-dir points at the directory history.sh wrote parallelism.txt into; without it (and without
+# --parallelism) the default --out convention is assumed, and falling back to 1.5 is reported on stderr.
 set -euo pipefail
-REPO=""; ONLY=""; PAR=""; DEF="S=2,M=6,L=16"; OUT="${TMPDIR:-/tmp}/plan-work-timeline"; HOURS_PER_DAY=8
-while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --milestones) ONLY=$2; shift 2;; --parallelism) PAR=$2; shift 2;; --defaults) DEF=$2; shift 2;; --out) OUT=$2; shift 2;; *) echo "unknown arg $1" >&2; exit 2;; esac; done
+REPO=""; ONLY=""; PAR=""; HISTORY_DIR=""; DEF="S=2,M=6,L=16"; OUT="${TMPDIR:-/tmp}/plan-work-timeline"; HOURS_PER_DAY=8
+while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --milestones) ONLY=$2; shift 2;; --parallelism) PAR=$2; shift 2;; --history-dir) HISTORY_DIR=$2; shift 2;; --defaults) DEF=$2; shift 2;; --out) OUT=$2; shift 2;; *) echo "unknown arg $1" >&2; exit 2;; esac; done
 [ -n "$REPO" ] || REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 mkdir -p "$OUT"; say(){ printf '%s\n' "$*" >&2; }
-[ -n "$PAR" ] || { PAR=$(cat "${OUT%/*}/plan-work-history/parallelism.txt" 2>/dev/null || echo 1.5); }
+ONLY_LIST=()
+if [ -n "$ONLY" ]; then
+  IFS=',' read -ra ONLY_LIST <<<"$ONLY"
+  for i in "${!ONLY_LIST[@]}"; do
+    want=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"${ONLY_LIST[$i]}")
+    ONLY_LIST[i]=$want
+  done
+fi
+if [ -n "$PAR" ]; then
+  : # explicit --parallelism wins
+else
+  hist_dir="${HISTORY_DIR:-${OUT%/*}/plan-work-history}"
+  if PAR=$(cat "$hist_dir/parallelism.txt" 2>/dev/null); then
+    :
+  else
+    PAR=1.5
+    say "parallelism: no history at $hist_dir/parallelism.txt; falling back to default $PAR (pass --history-dir to point at history.sh's --out, or --parallelism to set it explicitly)"
+  fi
+fi
 defS=$(sed -n 's/.*S=\([0-9.]*\).*/\1/p' <<<"$DEF"); defM=$(sed -n 's/.*M=\([0-9.]*\).*/\1/p' <<<"$DEF"); defL=$(sed -n 's/.*L=\([0-9.]*\).*/\1/p' <<<"$DEF")
 say "milestones (open) for $REPO …"
 gh api --paginate "repos/$REPO/milestones?state=open&per_page=100" --jq '.[]|{number,title,due_on,created_at}' > "$OUT/milestones.jsonl"
 : > "$OUT/issues.jsonl"
+: > "$OUT/milestones_selected.jsonl"
 while IFS= read -r ms; do
   mn=$(jq -r .number <<<"$ms"); mt=$(jq -r .title <<<"$ms")
-  if [ -n "$ONLY" ] && ! grep -qF "$mt" <<<"$ONLY"; then continue; fi
+  if [ -n "$ONLY" ]; then
+    matched=0
+    for want in "${ONLY_LIST[@]}"; do
+      if [ "$want" = "$mt" ]; then matched=1; break; fi
+    done
+    [ "$matched" = 1 ] || continue
+  fi
+  printf '%s\n' "$ms" >> "$OUT/milestones_selected.jsonl"
   gh api --paginate "repos/$REPO/issues?milestone=$mn&state=all&per_page=100" --jq '.[]|select(.pull_request==null)|{number,state,created_at,closed_at,body:(.body//""),assignee:(.assignee.login//null),labels:[.labels[].name]}' | while IFS= read -r iss; do
     n=$(jq -r .number <<<"$iss")
     blocked=$(gh api "repos/$REPO/issues/$n/dependencies/blocked_by" --jq '[.[].number]' 2>/dev/null || echo '[]')
@@ -29,18 +58,30 @@ while IFS= read -r ms; do
 done < "$OUT/milestones.jsonl"
 say "$(wc -l < "$OUT/issues.jsonl") issues read"
 # per-milestone: critical path (longest chain of hours through blocked_by within the milestone) + effort; started = any non-epic issue closed or assigned
-jq -s --argjson par "$PAR" --argjson hpd "$HOURS_PER_DAY" '
-  group_by(.milestone) | map(
-    (.[0]) as $m0 | (map(select(.epic|not))) as $iss |
+# Iterates over every selected milestone (not just ones with issues) so a milestone with zero issues
+# still gets a row, zeroed out, instead of silently disappearing from group_by.
+jq -s --argjson par "$PAR" --argjson hpd "$HOURS_PER_DAY" --slurpfile selms "$OUT/milestones_selected.jsonl" '
+  (group_by(.milestone) | map({key:(.[0].milestone|tostring), value:.}) | from_entries) as $bymilestone |
+  $selms | map(
+    .number as $mn | .title as $mt |
+    ($bymilestone[$mn|tostring] // []) as $recs |
+    ($recs|map(select(.epic|not))) as $iss |
     ($iss|map(select(.state=="open"))) as $open |
     ($open|map({key:(.issue|tostring),value:.})|from_entries) as $byn |
-    # longest path: recursive memo over blocked_by restricted to open issues in this milestone
-    def lp($n): ($byn[$n|tostring]) as $i | if $i==null then 0 else ($i.hours + ([ $i.blocked_by[] | select($byn[tostring]!=null) | lp(.) ] | max // 0)) end;
-    ($open|map(lp(.issue))|max // 0) as $cp |
+    # longest path over blocked_by, restricted to open issues in this milestone. Re-walks the graph on
+    # every call (not memoized -- the per-milestone issue counts here are small enough that this is fine);
+    # $path carries the current recursion ancestors so a blocked_by cycle raises a named error instead
+    # of recursing until jq exhausts itself.
+    def lp($n; $path):
+      if ($path|index($n)) then error("timeline: blocked_by cycle detected at issue #\($n) in milestone \($mt)") else
+      ($byn[$n|tostring]) as $i |
+      if $i==null then 0 else ($i.hours + ([ $i.blocked_by[] | select($byn[tostring]!=null) | lp(.; $path+[$n]) ] | max // 0)) end
+      end;
+    ($open|map(lp(.issue; []))|max // 0) as $cp |
     ($open|map(.hours)|add // 0) as $effort |
     ($iss|map(select(.state=="closed" or .assignee!=null))|length>0) as $started |
     ($iss|map(select(.state=="closed" or .assignee!=null)|.created)|min) as $start_hint |
-    {milestone:$m0.milestone, title:$m0.milestone_title, open:($open|length), closed:($iss|map(select(.state=="closed"))|length),
+    {milestone:$mn, title:$mt, open:($open|length), closed:($iss|map(select(.state=="closed"))|length),
      critical_path_h:$cp, effort_h:$effort, projected_h:([ $cp, ($effort/$par) ]|max), projected_days:(([ $cp, ($effort/$par) ]|max)/$hpd*10|round/10),
      started:$started, started_hint:$start_hint, sources:($open|group_by(.hours_source)|map({(.[0].hours_source):length})|add // {}),
      cross_milestone_deps:($open|map(.blocked_by[]|select($byn[tostring]==null))|length)}
