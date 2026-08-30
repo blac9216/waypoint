@@ -118,6 +118,70 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 	}
 
 	/// <summary>
+	/// Issue #1593 review, finding 1: a completed/failed download upsert
+	/// (<c>DownloadJobHandler</c>) carries no <c>SizeBytes</c> -- it only knows
+	/// status/sha256 -- so it must not silently null out the size the catalog write
+	/// path (<c>VendorProductVersionCatalogParser</c>/<c>CatalogIndexJobHandler</c>)
+	/// already recorded for the same <c>relative_path</c>. Reproduces the exact
+	/// shape of that bug: seed with a size (catalog indexing), re-upsert with
+	/// <c>SizeBytes: null</c> (download-handler-style "present" transition), and
+	/// assert the previously-recorded size survives.
+	/// </summary>
+	[Fact]
+	public async Task UpsertAsync_ReUpsertWithNullSizeBytes_DoesNotClobberPreviouslyRecordedSize()
+	{
+		string relativePath = $"vcf-artifact-{Guid.NewGuid():N}";
+
+		Guid firstId = await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "indexed", """{"product":"VCF","version":"9.0"}""", SizeBytes: 123456),
+			CancellationToken.None);
+
+		// DownloadJobHandler-style upsert on download completion: no SizeBytes known
+		// at this call site (it forwards only Sha256/Status/MetadataJson), matching
+		// DownloadJobHandler.cs's `new DepotArtifactUpsert(artifact.ExternalId,
+		// artifact.Sha256, "present", artifact.MetadataJson)` call shape exactly.
+		Guid secondId = await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "present", """{"product":"VCF","version":"9.0"}"""),
+			CancellationToken.None);
+
+		Assert.Equal(firstId, secondId);
+
+		(IReadOnlyList<DepotArtifact> items, _) = await _repository.ListAsync(
+			new DepotArtifactFilter(null, null, null), new PageRequest(), CancellationToken.None);
+
+		DepotArtifact matching = Assert.Single(items.Where(item => item.ExternalId == relativePath));
+		Assert.Equal("present", matching.Status);
+		Assert.Equal(123456, matching.SizeBytes);
+		Assert.Equal("sha-original", matching.Sha256);
+	}
+
+	/// <summary>
+	/// Same clobber class as the size test above, for <c>sha256</c>: a null incoming
+	/// hash must not erase a previously recorded one. No known real caller upserts a
+	/// null <c>Sha256</c> over a non-null one today, but the SQL guarantee should not
+	/// depend on that staying true.
+	/// </summary>
+	[Fact]
+	public async Task UpsertAsync_ReUpsertWithNullSha256_DoesNotClobberPreviouslyRecordedSha256()
+	{
+		string relativePath = $"vcf-artifact-{Guid.NewGuid():N}";
+
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "indexed", """{"product":"VCF","version":"9.0"}"""),
+			CancellationToken.None);
+
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, null, "present", """{"product":"VCF","version":"9.0"}"""),
+			CancellationToken.None);
+
+		(IReadOnlyList<DepotArtifact> items, _) = await _repository.ListAsync(
+			new DepotArtifactFilter(null, null, null), new PageRequest(), CancellationToken.None);
+
+		DepotArtifact matching = Assert.Single(items.Where(item => item.ExternalId == relativePath));
+		Assert.Equal("sha-original", matching.Sha256);
+	}
+
+	/// <summary>
 	/// Issue #1488 acceptance criterion: migration 0100's <c>external_id</c> -&gt;
 	/// <c>relative_path</c> rename must run cleanly against a fixture carrying
 	/// pre-existing <c>depot_artifacts</c> rows from BOTH legacy namespaces --

@@ -45,6 +45,16 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	/// <c>trg_depot_artifacts_updated_at</c> trigger. <c>last_verified_at</c> is
 	/// deliberately NOT written here -- deciding when a row counts as freshly
 	/// verified is presence-sweep behavior (#1503/#1512), out of this slice's scope.
+	/// <c>sha256</c>/<c>size_bytes</c> use <c>COALESCE(EXCLUDED.x, depot_artifacts.x)</c>
+	/// rather than an unconditional overwrite: <c>DownloadJobHandler</c>'s
+	/// present/failed upserts (issue #1593 review, finding 1) carry the artifact's
+	/// existing <c>Sha256</c> forward but have no size to report, so a plain
+	/// <c>EXCLUDED.size_bytes</c> would silently null out the size the catalog
+	/// write path (<see cref="VendorProductVersionCatalogParser"/>/
+	/// <c>CatalogIndexJobHandler</c>) had just recorded. A caller that does
+	/// know a new, smaller size (e.g. a corrected catalog re-index) still wins,
+	/// because <c>COALESCE</c> only falls back when the incoming value is null, not
+	/// when it is present but different.
 	/// </summary>
 	public async Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken)
 	{
@@ -59,10 +69,10 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 			INSERT INTO depot_artifacts (relative_path, sha256, status, metadata, size_bytes)
 			VALUES ($1, $2, $3, $4::jsonb, $5)
 			ON CONFLICT (relative_path) DO UPDATE SET
-				sha256 = EXCLUDED.sha256,
+				sha256 = COALESCE(EXCLUDED.sha256, depot_artifacts.sha256),
 				status = EXCLUDED.status,
 				metadata = EXCLUDED.metadata,
-				size_bytes = EXCLUDED.size_bytes
+				size_bytes = COALESCE(EXCLUDED.size_bytes, depot_artifacts.size_bytes)
 			RETURNING id
 			""", connection);
 		command.Parameters.AddWithValue(artifact.RelativePath);
