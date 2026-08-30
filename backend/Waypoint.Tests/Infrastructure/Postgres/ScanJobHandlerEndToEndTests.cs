@@ -805,6 +805,112 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #1068 / PR #1224 review round 1 finding 3: drives one full scan job to
+	/// completion for a target whose name and <c>connection.host</c> the caller chose,
+	/// and returns the stub CKL's body. The stub <c>Invoke-WaypointConvert</c> echoes
+	/// <c>hostname=/fqdn=/ip=/mac=</c> exactly so the C# half -- which is what derives
+	/// per-target asset identity -- can be asserted end to end rather than only at the
+	/// PowerShell argument-string layer.
+	/// </summary>
+	private async Task<string> RunScanAndReadStubCklAsync(string caseTag, string targetName, string connectionHost)
+	{
+		Environment.SetEnvironmentVariable("WAYPOINT_SCAN_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_ATTEST_STUB_MODE", "success");
+		Environment.SetEnvironmentVariable("WAYPOINT_CONVERT_STUB_MODE", "success");
+		(Guid targetId, Guid vsphereApiCredentialId) = await SeedVsphereTargetWithAssetFactsAsync(
+			$"invented-vsphere-api-secret-{caseTag}" /* gitleaks:allow -- invented test canary */, targetName, connectionHost);
+		Guid vcsaSshCredentialId = (await _credentials.CreateAsync(
+			$"svc-vcsa-ssh-{Guid.NewGuid():N}@example.internal", CredentialTypes.Ssh, CredentialOwners.Shared,
+			sudoEnabled: false, CancellationToken.None, "root@example.internal"))!.Value;
+		await _secretStore.StoreAsync(
+			vcsaSshCredentialId,
+			System.Text.Encoding.UTF8.GetBytes($"invented-vcsa-ssh-secret-{caseTag}" /* gitleaks:allow -- invented test canary */),
+			"test", CancellationToken.None);
+
+		(Guid executionProfileId, Guid baselineId, string _) = await SeedSshCatalogAndBaselineAsync(
+			$"vcsa-sts-{caseTag}", CatalogSelectorKinds.Service, CatalogOutputKinds.HdfAndCkl,
+			selectorName: "sts", materializeOnDisk: true);
+
+		string payload = JsonSerializer.Serialize(new
+		{
+			target_id = targetId,
+			transport = "ssh",
+			selector_kind = "service",
+			selector_name = "sts",
+			catalog_execution_profile_id = executionProfileId,
+			baseline_id = baselineId,
+			output_kind = "hdf_ckl",
+		});
+		Guid runId = await _repository.CreateRunAsync("scan", "{}", credentialId: null, "tester", CancellationToken.None);
+		IReadOnlyList<Guid> jobIds = await _repository.FanOutJobsAsync(
+			runId,
+			[new JobSpec(
+				"scan", 2, TargetId: targetId, CredentialId: vsphereApiCredentialId, Payload: payload,
+				CredentialBindings: [new JobCredentialBindingSpec(CredentialPurposes.VcsaSsh, vcsaSshCredentialId)])],
+			"tester", CancellationToken.None);
+
+		JobDispatcherHostedService dispatcher = CreateDispatcher();
+		await dispatcher.StartAsync(CancellationToken.None);
+		try
+		{
+			await PollUntilTerminalAsync(jobIds[0]);
+		}
+		finally
+		{
+			await dispatcher.StopAsync(CancellationToken.None);
+		}
+
+		Assert.Equal("uploaded", await GetJobFieldAsync(jobIds[0], "state"));
+		string cklPath = Path.Combine(_artifactDirectory, $"{jobIds[0]:N}.ckl");
+		Assert.True(File.Exists(cklPath), $"expected a CKL at '{cklPath}'.");
+		return await File.ReadAllTextAsync(cklPath);
+	}
+
+	/// <summary>
+	/// Issue #1068 AC1/AC3, the FQDN arm of the convert stage's
+	/// <c>IPAddress.TryParse</c> split: a <c>connection.host</c> that is NOT an IP
+	/// literal is stamped as the CKL's <c>--fqdn</c>, never its <c>--ip</c>, and the
+	/// target's own operator-assigned name is stamped as <c>--hostname</c>. Waypoint
+	/// holds no MAC fact (issue #1227), so <c>--mac</c> stays empty -- a missing fact,
+	/// never invented. Swapping the two branches, or dropping the Hostname line, fails
+	/// here; before this test the whole C# half was uncovered.
+	/// </summary>
+	[Fact]
+	public async Task ScanJob_FqdnConnectionHost_StampsCklHostnameAndFqdn_NeverIpOrMac()
+	{
+		const string targetName = "invented-vcsa-fqdn-target";
+		const string connectionHost = "vcsa-fqdn-01.example.internal";
+
+		string ckl = await RunScanAndReadStubCklAsync("assetfqdn", targetName, connectionHost);
+
+		Assert.Contains($"hostname={targetName}", ckl, StringComparison.Ordinal);
+		Assert.Contains($"fqdn={connectionHost}", ckl, StringComparison.Ordinal);
+		Assert.Contains("ip= ", ckl, StringComparison.Ordinal);
+		Assert.Contains("mac= ", ckl, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1068 AC1/AC3, the IP-literal arm: an RFC 5737 documentation-range
+	/// <c>connection.host</c> is stamped as the CKL's <c>--ip</c> and never its
+	/// <c>--fqdn</c>. Paired with the FQDN test above, the two targets are
+	/// distinguishable by asset identity even though they share a profile -- the whole
+	/// point of restoring these flags.
+	/// </summary>
+	[Fact]
+	public async Task ScanJob_IpLiteralConnectionHost_StampsCklHostnameAndIp_NeverFqdnOrMac()
+	{
+		const string targetName = "invented-vcsa-ip-target";
+		const string connectionHost = "198.51.100.10";
+
+		string ckl = await RunScanAndReadStubCklAsync("assetip", targetName, connectionHost);
+
+		Assert.Contains($"hostname={targetName}", ckl, StringComparison.Ordinal);
+		Assert.Contains($"ip={connectionHost}", ckl, StringComparison.Ordinal);
+		Assert.Contains("fqdn= ", ckl, StringComparison.Ordinal);
+		Assert.Contains("mac= ", ckl, StringComparison.Ordinal);
+	}
+
+	/// <summary>
 	/// Issue #744 (epic #726 Wave 4 first slice) rule-correction matrix, matched case:
 	/// a frozen benchmark revision whose one rule_id is exactly the CKL stub's
 	/// fixed existing rule id ('SV-100001r1_rule', see
@@ -3145,6 +3251,30 @@ public sealed class ScanJobHandlerEndToEndTests : IAsyncLifetime, IDisposable
 		string connectionJson = JsonSerializer.Serialize(new { host = "vcsa-01.example.internal" });
 		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
 			siteId, TargetKinds.VSphere, $"target-{Guid.NewGuid():N}", connectionJson, credentialId, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+
+		return (targetId!.Value, credentialId);
+	}
+
+	/// <summary>
+	/// Issue #1068 / PR #1224 review round 1 finding 3: same seed as
+	/// <see cref="SeedVsphereTargetAsync"/> but with the two facts the convert stage
+	/// derives CKL asset identity from under the test's control -- the target's own
+	/// name and its <c>connection.host</c> -- so both arms of the handler's
+	/// <c>IPAddress.TryParse</c> Ip-vs-Fqdn split can be exercised end to end.
+	/// </summary>
+	private async Task<(Guid TargetId, Guid CredentialId)> SeedVsphereTargetWithAssetFactsAsync(
+		string secretValue, string targetName, string connectionHost)
+	{
+		Guid siteId = (await _sites.CreateAsync($"site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
+		Guid credentialId = (await _credentials.CreateAsync(
+			$"svc-scan-{Guid.NewGuid():N}@example.internal", CredentialTypes.VCenter, CredentialOwners.Shared,
+			sudoEnabled: false, CancellationToken.None, "administrator@example.internal"))!.Value;
+		await _secretStore.StoreAsync(credentialId, System.Text.Encoding.UTF8.GetBytes(secretValue), "test", CancellationToken.None);
+
+		string connectionJson = JsonSerializer.Serialize(new { host = connectionHost });
+		(TargetWriteOutcome outcome, Guid? targetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.VSphere, targetName, connectionJson, credentialId, CancellationToken.None);
 		Assert.Equal(TargetWriteOutcome.Ok, outcome);
 
 		return (targetId!.Value, credentialId);

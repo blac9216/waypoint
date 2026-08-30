@@ -209,6 +209,10 @@ function Invoke-WaypointConvert {
 	param(
 		[Parameter(Mandatory)] [string]$ConvertInputPath,
 		[Parameter(Mandatory)] [string]$CklOutputPath,
+		[Parameter()] [AllowNull()] [string]$Hostname,
+		[Parameter()] [AllowNull()] [string]$Fqdn,
+		[Parameter()] [AllowNull()] [string]$Ip,
+		[Parameter()] [AllowNull()] [string]$Mac,
 		[Parameter()] [AllowNull()] [string]$BenchmarkId,
 		[Parameter()] [AllowNull()] [string]$Title,
 		[Parameter()] [AllowNull()] [string]$ReleaseInfo,
@@ -233,8 +237,10 @@ function Invoke-WaypointConvert {
 	# Echo every stamped STIG_INFO field the handler resolved (benchmark id/title/
 	# release/version) so an e2e test can assert exactly which benchmark identity the
 	# convert stage chose -- the frozen benchmark_revision_id when present, else the
-	# static target-kind fallback (#741 CKL benchmark identity).
-	"<CHECKLIST><!-- invented stub CKL, benchmark=$BenchmarkId title=$Title release=$ReleaseInfo version=$Version --></CHECKLIST>" | Set-Content -Path $CklOutputPath -Encoding utf8
+	# static target-kind fallback (#741 CKL benchmark identity). Issue #1068: also echo
+	# the asset-identity facts the handler threaded through, so an e2e test can assert
+	# two same-profile targets produce distinguishable CKLs.
+	"<CHECKLIST><!-- invented stub CKL, benchmark=$BenchmarkId title=$Title release=$ReleaseInfo version=$Version hostname=$Hostname fqdn=$Fqdn ip=$Ip mac=$Mac --></CHECKLIST>" | Set-Content -Path $CklOutputPath -Encoding utf8
 
 	# Issue #744: invented rule-correction simulation -- the stub's own fixed CKL always
 	# "declares" rule id 'SV-100001r1_rule' as its one Vuln entry's existing identity
