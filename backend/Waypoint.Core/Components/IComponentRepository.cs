@@ -27,10 +27,26 @@ namespace Waypoint.Core.Components;
 /// </summary>
 public interface IComponentRepository
 {
-	/// <summary>All non-retired-by-default components for a target; pass <paramref name="includeRetired"/> to include retired rows too (Configuration-screen visibility, docs/api-contract.md <c>/targets/{id}/components</c>: "every known component ... regardless of lifecycle").</summary>
+	/// <summary>
+	/// All non-retired-by-default components for a target; pass <paramref name="includeRetired"/>
+	/// to include retired rows too (Configuration-screen visibility, docs/api-contract.md
+	/// <c>/targets/{id}/components</c>: "every known component ... regardless of
+	/// lifecycle"). Issue #1202: for the closed <c>ssh</c>/<c>target</c> declared-root
+	/// shape (a <see cref="CreateDeclaredRootAsync"/> row that has since linked to an
+	/// exact catalog product version), <see cref="Component.DisplayName"/> is RE-DERIVED
+	/// at read time from that linked catalog component's own display name -- never the
+	/// stored <c>display_name</c> column, which stays the version-neutral catalog
+	/// component key from declaration. Every other component's <see cref="Component.DisplayName"/>
+	/// is the stored vendor-observed (or catalog-declared-child) value, unchanged.
+	/// </summary>
 	Task<IReadOnlyList<Component>> ListForTargetAsync(Guid targetId, bool includeRetired, CancellationToken cancellationToken);
 
-	/// <summary>Single component by id, or null when unknown.</summary>
+	/// <summary>
+	/// Single component by id, or null when unknown. Same read-time <see cref="Component.DisplayName"/>
+	/// re-derivation as <see cref="ListForTargetAsync"/>: re-derived from the linked
+	/// catalog component for the closed <c>ssh</c>/<c>target</c> declared-root shape,
+	/// the stored value otherwise.
+	/// </summary>
 	Task<Component?> GetAsync(Guid componentId, CancellationToken cancellationToken);
 
 	/// <summary>
@@ -117,8 +133,13 @@ public interface IComponentRepository
 	/// same identity case as a catalog-declared service child, at the root tier):
 	/// returns null when a root with this key already exists under the target (the
 	/// caller surfaces a 409; the existing row is never mutated).
+	///
+	/// Issue #1202/#1270: the stored <c>display_name</c> is always <paramref name="catalogComponentKey"/>
+	/// itself (version-neutral -- never one arbitrary product version's name) until
+	/// linkage supplies a real one; there is no independent display name to accept at
+	/// declaration time, so this method takes none.
 	/// </summary>
-	Task<Guid?> CreateDeclaredRootAsync(Guid targetId, string catalogComponentKey, string displayName, CancellationToken cancellationToken);
+	Task<Guid?> CreateDeclaredRootAsync(Guid targetId, string catalogComponentKey, CancellationToken cancellationToken);
 
 	/// <summary>
 	/// Moves every component under any target whose <see cref="Component.ContinuousAbsenceSince"/>

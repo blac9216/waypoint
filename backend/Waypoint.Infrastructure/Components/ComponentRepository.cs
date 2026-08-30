@@ -629,10 +629,9 @@ public sealed class ComponentRepository : IComponentRepository
 
 	/// <inheritdoc />
 	public async Task<Guid?> CreateDeclaredRootAsync(
-		Guid targetId, string catalogComponentKey, string displayName, CancellationToken cancellationToken)
+		Guid targetId, string catalogComponentKey, CancellationToken cancellationToken)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(catalogComponentKey);
-		ArgumentException.ThrowIfNullOrWhiteSpace(displayName);
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -656,7 +655,7 @@ public sealed class ComponentRepository : IComponentRepository
 			""", connection);
 		insert.Parameters.AddWithValue(targetId);
 		insert.Parameters.AddWithValue(catalogComponentKey);
-		insert.Parameters.AddWithValue(displayName);
+		insert.Parameters.AddWithValue(catalogComponentKey);
 
 		object? inserted = await insert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 		return inserted is Guid id ? id : null;
@@ -928,10 +927,25 @@ public sealed class ComponentRepository : IComponentRepository
 	/// The component-row half of the #1202 guard, applied BEFORE any catalog read so the
 	/// batched list path never queries for a row the guard would reject anyway. A
 	/// declared root (<see cref="CreateDeclaredRootAsync"/>) is by construction top-level
-	/// (<c>parent_component_id IS NULL</c>) and vendor-identity-free -- a vSphere-
-	/// discovered object always carries a vendor identity, and its
-	/// <see cref="Component.DisplayName"/> is the real vendor-observed name that must
-	/// never be replaced by a catalog-authored label.
+	/// (<c>parent_component_id IS NULL</c>) and vendor-identity-free, but this clause is
+	/// only a cheap pre-filter -- NOT a proof of declared-root-ness on its own. A
+	/// discovered top-level vCenter root can ALSO be vendor-identity-free
+	/// (<c>DiscoverJobHandler</c>'s synthetic ROOT row carries a null
+	/// <see cref="Component.VendorIdentity"/> whenever the vCenter moref is
+	/// unobservable that pass -- issue #1081/#1268), so this clause alone would let a
+	/// discovered root's real hostname be overwritten by a catalog-authored label. The
+	/// safety comes from the SECOND guard, <see cref="IsSshTargetCatalogShape"/>: it
+	/// requires the linked catalog row to be the closed <c>ssh</c>/<c>target</c> shape,
+	/// and discovery only ever links its <c>vcenter</c>/<c>esxi</c>/<c>vm</c> catalog
+	/// keys to <c>vcenter</c>/<c>esxi</c>/<c>vm</c> selector rows, never <c>target</c>
+	/// (issue #1081/#1268/#1284). No automated drift guard pins that content-side fact
+	/// today -- the vendor content's transport/selector assignment per component key is
+	/// imported data, not a value this repository (or any code in this assembly)
+	/// declares, so there is no in-process seed to assert against; a guard would have to
+	/// read the imported catalog rows themselves, which is content-import test territory,
+	/// not this class's. Declined here; left for content-import test coverage to pick up
+	/// if it wants a guard on "no vcenter/esxi/vm catalog component is ever `ssh`/`target`
+	/// shaped" (issue #1284, decision recorded rather than silently skipped).
 	/// </summary>
 	private static bool IsDeclaredRootShape(Component component) =>
 		component.CatalogComponentId is not null

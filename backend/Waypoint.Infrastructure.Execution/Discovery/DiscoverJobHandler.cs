@@ -531,9 +531,15 @@ public sealed class DiscoverJobHandler : IJobHandler
 		// here is pure defense in depth, matching the same normalization every other
 		// fact read in this method applies (issue #995's empty-string precedent). At
 		// most one such row is expected per pass; a duplicate would simply mean the
-		// last one wins, matching how nothing here specially guards against duplicate
-		// host/vm morefs either -- that is InventoryRepository/ComponentRepository's
-		// upsert-by-identity concern, not this pure mapping function's.
+		// FIRST one wins (FirstOrDefault, in module emission order), matching how
+		// nothing here specially guards against duplicate host/vm morefs either --
+		// that is InventoryRepository/ComponentRepository's upsert-by-identity concern,
+		// not this pure mapping function's. Issue #1063/#1114/#1130: every `vm`
+		// component's version derives from this same `vcenterFact` variable, so a
+		// two-root pass can never have the root component and a VM disagree about
+		// which duplicate row supplied the fact -- they read the identical value --
+		// but this comment previously said "last one wins," the opposite of what
+		// FirstOrDefault does; fixed here, no behaviour change.
 		DiscoveredInventoryItem? vcenterFact = items.FirstOrDefault(i => string.Equals(i.Type, InventoryItemTypes.VCenter, StringComparison.Ordinal));
 		string? rootVendorIdentity = vcenterFact is not null && !string.IsNullOrWhiteSpace(vcenterFact.Moref) ? vcenterFact.Moref : null;
 		string rootDisplayName = vcenterFact is not null && !string.IsNullOrWhiteSpace(vcenterFact.Name) ? vcenterFact.Name : "vCenter Server";

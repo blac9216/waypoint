@@ -149,18 +149,16 @@ public sealed class ComponentsController : ControllerBase
 					+ "Catalog support arrives through reviewed Waypoint updates; unsupported products cannot be declared.");
 		}
 
-		// Issue #1202: NOT `declared.DisplayName` -- that is one arbitrary product
-		// VERSION's name (the catalog holds one top-level component per product version
-		// sharing this key, e.g. three for `photon`), picked here only to validate the
-		// key exists at all. The row is created UNLINKED, so its stored name must be
-		// version-neutral until `exact_version` (below, or a later PUT) actually links
-		// it; the catalog component key itself is the only version-neutral, catalog-
-		// validated name available at this point. Once linked, GetAsync/ListForTargetAsync
-		// render the true linked catalog component's display name instead (see
-		// ComponentRepository.WithLinkedDisplayNameAsync) -- this stored value is only
-		// ever seen unlinked.
+		// Issue #1202/#1270: the row is created UNLINKED with its stored display name
+		// always the catalog component key itself (version-neutral -- the catalog holds
+		// one top-level component per product version sharing this key, e.g. three for
+		// `photon`, and none of them is the right name to store yet). Once linked,
+		// GetAsync/ListForTargetAsync render the true linked catalog component's display
+		// name instead (see ComponentRepository.WithLinkedDisplayNameAsync) -- this
+		// stored value is only ever seen unlinked, which is why CreateDeclaredRootAsync
+		// takes no separate displayName parameter at all.
 		Guid? componentId = await _components
-			.CreateDeclaredRootAsync(targetId, declared.ComponentKey, declared.ComponentKey, cancellationToken).ConfigureAwait(false);
+			.CreateDeclaredRootAsync(targetId, declared.ComponentKey, cancellationToken).ConfigureAwait(false);
 		if (componentId is not { } createdId)
 		{
 			throw new ApiException(
