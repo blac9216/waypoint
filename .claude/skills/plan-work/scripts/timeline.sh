@@ -5,7 +5,8 @@
 # An `est. cycle` value in an issue body that isn't a plain ASCII decimal number (e.g. "1.2.3",
 # or a non-ASCII digit such as "٢") is treated like a missing estimate — it falls back to the
 # issue's size default (or the M default if it has none) — and is reported on stderr naming the
-# issue number and the offending text; it never aborts the run (see #1271).
+# issue number and the offending text, wording the fallback truthfully for each case; it never
+# aborts the run (see #1271).
 # --milestones takes an exact, comma-split list of milestone titles (no substring matching); each name is
 # trimmed of leading/trailing whitespace, so a title with leading/trailing spaces can never be named this way.
 # --milestone (singular, repeatable) takes one exact, untrimmed title per flag — use it for a title
@@ -146,7 +147,12 @@ while IFS= read -r ms; do
        malformed_estimate:(if $malformed then $hraw else null end), blocked_by:$blocked, created:.created_at, closed:.closed_at}' <<<"$iss")
     mal=$(jq -r '.malformed_estimate // empty' <<<"$rec")
     if [ -n "$mal" ]; then
-      say "timeline: issue #$n has an unparseable est. cycle value \"$mal\"; falling back to its size default"
+      mal_size=$(jq -r '.size // empty' <<<"$rec")
+      if [ -n "$mal_size" ]; then
+        say "timeline: issue #$n has an unparseable est. cycle value \"$mal\"; falling back to its size default"
+      else
+        say "timeline: issue #$n has an unparseable est. cycle value \"$mal\"; falling back to the M default (no size)"
+      fi
     fi
     printf '%s\n' "$rec" >> "$OUT/issues.jsonl"
   done

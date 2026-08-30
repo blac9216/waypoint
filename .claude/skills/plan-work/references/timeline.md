@@ -16,7 +16,9 @@ confirms when anything is ambiguous.
    `1.2.3`, or a non-ASCII digit such as `٢`) is treated like a missing estimate —
    it falls back to that issue's size default (or the `M` default if it has no
    size) — and is reported on stderr naming the issue number and the offending
-   text; it never aborts the run.
+   text, wording the fallback to match which one actually applied (`"falling
+   back to its size default"` when the issue has a `Size:` label, `"falling
+   back to the M default (no size)"` when it doesn't); it never aborts the run.
    The parallelism source is either `--parallelism` (explicit), `--history-dir`
    (explicit, pointed at `history.sh`'s `--out`), or a same-run default-`--out`
    guess — that last case is reported on stderr so a mismatched `--out` doesn't
@@ -48,6 +50,32 @@ is requested (either flag), a requested name that matches no open milestone is
 reported on stderr; matching zero milestones in total is an error. An empty
 `--milestones ""` or `--milestone ""` value is rejected outright — it can never mean
 "select every open milestone".
+
+## `issues.jsonl` record fields
+
+Each line is one open-milestone issue as read (before critical-path/effort computation).
+`projection.json`'s `sources` map and `timeline.md`'s "estimate sources" column are a
+per-milestone count grouped by `hours_source`, computed over **open, non-`epic`**
+records only (while `issues.jsonl` itself holds every record read, including closed
+issues and epics, so its line count exceeds the map's totals); `placement.json` and
+`timeline.md` carry that same map through unchanged.
+
+| Field | Meaning |
+|---|---|
+| `size` | The `Size:` letter (`S`/`M`/`L`) parsed from the issue body's `## Estimate` section, or `null` if the issue has no `Size:` line. |
+| `hours` | The hour value actually used for critical-path/effort math: the parsed `est. cycle` value when present and well-formed, otherwise the size default (or the `M` default with no size). |
+| `hours_source` | Which of those `hours` came from — see the vocabulary below. |
+| `malformed_estimate` | The raw, unparseable `est. cycle` text (e.g. `1.2.3`, `٢`) when the issue had one, otherwise `null`. |
+
+### `hours_source` vocabulary
+
+| Value | Meaning | Emitted when |
+|---|---|---|
+| `estimate` | `hours` came from a well-formed, plain-ASCII-decimal `est. cycle` value in the issue body. | The issue has a parseable `est. cycle` value. |
+| `size-default` | `hours` came from the size's `--defaults` value (built-in `S=2,M=6,L=16` unless overridden). | The issue has no `est. cycle` value (and none was present to be malformed) but does have a `Size:` label. |
+| `no-estimate-default-M` | `hours` came from the `M` default. | The issue has neither an `est. cycle` value nor a `Size:` label. |
+| `malformed-estimate-default-S` \| `-M` \| `-L` | `hours` came from that size's default because the in-body `est. cycle` value was present but unparseable (see `malformed_estimate`). | The issue has an unparseable `est. cycle` value and a `Size:` label of `S`, `M`, or `L` respectively. |
+| `malformed-estimate-default-M` | `hours` came from the `M` default because the in-body `est. cycle` value was present but unparseable and the issue has no `Size:` label. | The issue has an unparseable `est. cycle` value and no `Size:` label. Same string as the sized `-M` case above — the malformed-with-`Size:M`-label and malformed-with-no-label paths both resolve to `M` and are not distinguishable from `hours_source` alone; `malformed_estimate` is non-null in both. |
 
 ## Exit codes
 
