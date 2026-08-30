@@ -462,6 +462,10 @@ Broadcom accepted the code. A nonzero exit is classified honestly: only genuine
 credential-rejection signals mark `auth_failing`; unreachable/unresolvable/refused/
 timed-out connectivity is a **network** failure, never `auth_failing`.
 
+Download-lane parity coverage against the sibling `vcf-docker-download`'s own
+integration runbook is tracked separately as a living matrix:
+[`docs/testing/download-parity-matrix.md`](testing/download-parity-matrix.md).
+
 ## Live integration testing: the `*.local.md` convention
 
 The live-lab validation pass described above needs facts this public repository can
