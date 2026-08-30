@@ -260,7 +260,16 @@ build if a future handler's module ships without an entry here — the guard
 exists because `WaypointComplianceContent` was once missing and silently
 failed with "term ... is not recognized".
 
-Refs: #579, #613
+download-runner preloads `WaypointLogging` first too (issue #719), for a
+different reason than compliance-runner's: the migrated
+`vcf-download-manager.common.ps1` defines its own filtered, console/file
+`Write-Log` rather than expecting one — `WaypointDownload.psm1` and
+`WaypointCatalogIndex.psm1` each re-define `Write-Log` immediately after
+dot-sourcing it, delegating to `WaypointLogging\Write-Log` so Debug/Verbose
+severities reach job.log instead of being silently dropped by the sibling
+script's own level filter.
+
+Refs: #579, #613, #719
 
 ### compose-runner-egress-topology
 
