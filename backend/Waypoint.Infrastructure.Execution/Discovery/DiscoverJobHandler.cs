@@ -206,6 +206,10 @@ public sealed class DiscoverJobHandler : IJobHandler
 				["VCenter"] = host,
 				["Username"] = credential.Username,
 				["Password"] = decrypted.Value,
+				// Issue #1305: operator-configurable ceiling for every DNS lookup
+				// Resolve-WaypointPrimarySession performs -- see PowerShellOptions'
+				// own doc comment for the default/rationale.
+				["DnsTimeoutMilliseconds"] = _powerShellOptions.Value.DiscoveryDnsTimeoutMilliseconds,
 			};
 
 			PowerShellRequest request = new(InvocationCommand, PowerShellRequestKind.Command, parameters, context.Job.Id, context.Job.RunId);

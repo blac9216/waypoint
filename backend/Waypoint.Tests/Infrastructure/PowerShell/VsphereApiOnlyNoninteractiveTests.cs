@@ -300,38 +300,37 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 	/// Issue #1252: hermetic BY DEFAULT -- every call injects
 	/// <see cref="StubNameResolverExpression"/> and poisons the module's real resolvers
 	/// (<see cref="PoisonRealDnsExpression"/>), and this helper then asserts that the
-	/// module made no real-DNS call at all during the session sweep. Real DNS is
-	/// reachable only by explicitly passing <paramref name="useRealDns"/>, which no test
-	/// does and none should: a test that resolves for real is exactly the failure mode
-	/// #1252 exists to eliminate.
+	/// module made no real-DNS call at all during the session sweep.
+	///
+	/// Issue #1306: unconditionally hermetic -- the earlier <c>useRealDns</c> opt-out
+	/// (and the four branches it gated) is gone. Every call site took the default,
+	/// its own doc comment called it something "no test does and none should", and a
+	/// genuine real-DNS integration test would need its own dedicated, explicitly
+	/// opt-in test rather than a parameter threaded through this shared helper.
 	/// </summary>
 	private static async Task<(bool Succeeded, string? FailureReason, IReadOnlyList<System.Management.Automation.PSObject> Items, IReadOnlyList<string> ResolverCalls)>
 		RunDiscoveryWithSessionsAsync(
-			PowerShellExecutor executor, string vCenter, string sessionsExpression, bool useRealDns = false)
+			PowerShellExecutor executor, string vCenter, string sessionsExpression)
 	{
-		string hermeticPrologue = useRealDns ? string.Empty : PoisonRealDnsExpression;
-		string nameResolverArgument = useRealDns ? string.Empty : $" -NameResolver {StubNameResolverExpression}";
-		string auditRow = useRealDns
-			? string.Empty
-			: $$"""
-				[pscustomobject]@{
-					Type = '{{ResolverAuditRowType}}'
-					RealDnsCalls = @($Global:WaypointRealDnsCalls)
-					ResolverCalls = @($Global:WaypointNameResolverCalls)
-				}
-				""";
+		string auditRow = $$"""
+			[pscustomobject]@{
+				Type = '{{ResolverAuditRowType}}'
+				RealDnsCalls = @($Global:WaypointRealDnsCalls)
+				ResolverCalls = @($Global:WaypointNameResolverCalls)
+			}
+			""";
 
 		PowerShellExecutionResult result = await executor.ExecuteAsync(
 			new PowerShellRequest(
 				$$"""
-				{{hermeticPrologue}}
+				{{PoisonRealDnsExpression}}
 				$Global:WaypointVsphereTransportFakeSessions = {{sessionsExpression}}
 				$Global:WaypointVsphereTransportFakeClusters = @([pscustomobject]@{
 					Name = 'cluster-alpha'
 					ExtensionData = [pscustomobject]@{ MoRef = [pscustomobject]@{ Value = 'domain-c101' } }
 				})
 				try {
-					Invoke-WaypointDiscovery -VCenter '{{vCenter}}' -Username 'administrator@example.internal' -Password 'invented-test-password'{{nameResolverArgument}}
+					Invoke-WaypointDiscovery -VCenter '{{vCenter}}' -Username 'administrator@example.internal' -Password 'invented-test-password' -NameResolver {{StubNameResolverExpression}}
 					{{auditRow}}
 				} finally {
 					$Global:WaypointVsphereTransportFakeSessions = $null
@@ -352,7 +351,7 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 		items.RemoveAll(i => auditRows.Contains(i));
 
 		IReadOnlyList<string> resolverCalls = [];
-		if (!useRealDns && result.Succeeded)
+		if (result.Succeeded)
 		{
 			// The class-level guarantee (issue #1252 round-1 review, finding 1): not
 			// merely "a stub was passed" but "the module never reached the network on

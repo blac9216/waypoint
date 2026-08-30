@@ -111,7 +111,16 @@ engine serves both products and all future features ([ADR-0008](adr/0008-job-eng
 - **Execution**: each .NET runner hosts its own PowerShell runspace pools in-process
   through `System.Management.Automation`; real objects flow between C# handlers and
   PowerShell without a network/stdout protocol. Remediation may keep child-`pwsh`
-  isolation for code that calls `Exit`.
+  isolation for code that calls `Exit`. Handler-specific runner options live in
+  `IOptions<PowerShellOptions>` (`Waypoint.Core.PowerShell.PowerShellOptions`,
+  configuration section `PowerShell`, env var prefix `PowerShell__…`) alongside the
+  general pool settings (`MaxRunspaces`, `DefaultInvocationTimeout`,
+  `StopGracePeriod`) — e.g. `DiscoveryDnsTimeoutMilliseconds` (issue #1305, default
+  3000) bounds every DNS lookup `WaypointDiscovery.psm1` performs while resolving
+  the vCenter session identity; `DiscoverJobHandler` threads it to
+  `Invoke-WaypointDiscovery -DnsTimeoutMilliseconds`, and a lookup that exceeds it
+  emits a job.log warning naming the lookup kind and host rather than silently
+  degrading to "no match".
 - **Concurrency**: a shared runner library reads container CPU/memory limits, combines
   them with measured handler resource profiles and operator caps, and admits work only
   within that budget. Exact weights/defaults await measurement. Queue/worker identity

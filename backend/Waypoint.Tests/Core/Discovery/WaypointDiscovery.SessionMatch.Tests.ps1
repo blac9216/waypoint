@@ -307,7 +307,8 @@ Describe 'Resolve-WaypointHostAddresses / Resolve-WaypointReverseHostNames (boun
 
 			$NeverCompletesInTime = { param($Name) [System.Threading.Tasks.Task]::Delay(60000) }
 			$Result = $null
-			{ $Result = Resolve-WaypointHostAddresses -HostNameOrAddress 'slow-resolver.example.internal' -TimeoutMilliseconds 50 -AddressTaskFactory $NeverCompletesInTime } | Should -Not -Throw
+			$Warnings = $null
+			{ $Result = Resolve-WaypointHostAddresses -HostNameOrAddress 'slow-resolver.example.internal' -TimeoutMilliseconds 50 -AddressTaskFactory $NeverCompletesInTime -WarningVariable Warnings -WarningAction SilentlyContinue } | Should -Not -Throw
 			$Result | Should -BeNullOrEmpty
 		}
 	}
@@ -322,8 +323,69 @@ Describe 'Resolve-WaypointHostAddresses / Resolve-WaypointReverseHostNames (boun
 
 			$NeverCompletesInTime = { param($Address) [System.Threading.Tasks.Task]::Delay(60000) }
 			$Result = $null
-			{ $Result = Resolve-WaypointReverseHostNames -IpAddress '198.51.100.10' -TimeoutMilliseconds 50 -HostEntryTaskFactory $NeverCompletesInTime } | Should -Not -Throw
+			$Warnings = $null
+			{ $Result = Resolve-WaypointReverseHostNames -IpAddress '198.51.100.10' -TimeoutMilliseconds 50 -HostEntryTaskFactory $NeverCompletesInTime -WarningVariable Warnings -WarningAction SilentlyContinue } | Should -Not -Throw
 			$Result | Should -BeNullOrEmpty
+		}
+	}
+}
+
+# Issue #1305: a DNS timeout must be observable, not just fail-closed -- these pin
+# the Write-Warning this issue adds to both resolver functions' timeout branch,
+# naming the lookup kind (forward/reverse) and the host, never a credential.
+Describe 'Resolve-WaypointHostAddresses / Resolve-WaypointReverseHostNames (timeout observability, issue #1305)' {
+	It 'Resolve-WaypointHostAddresses warns naming the host and ceiling when the lookup exceeds -TimeoutMilliseconds' {
+		InModuleScope WaypointDiscovery {
+			$NeverCompletesInTime = { param($Name) [System.Threading.Tasks.Task]::Delay(60000) }
+			$Warnings = $null
+			Resolve-WaypointHostAddresses -HostNameOrAddress 'slow-resolver.example.internal' -TimeoutMilliseconds 50 -AddressTaskFactory $NeverCompletesInTime -WarningVariable Warnings -WarningAction SilentlyContinue | Out-Null
+
+			$Warnings.Count | Should -Be 1
+			$Warnings[0].Message | Should -Match 'forward DNS'
+			$Warnings[0].Message | Should -Match 'slow-resolver\.example\.internal'
+			$Warnings[0].Message | Should -Match '50ms'
+		}
+	}
+
+	It 'Resolve-WaypointHostAddresses does not warn when the lookup completes within the ceiling' {
+		InModuleScope WaypointDiscovery {
+			$Completes = { param($Name) [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@([System.Net.IPAddress]::Parse('198.51.100.7'))) }
+			$Warnings = $null
+			Resolve-WaypointHostAddresses -HostNameOrAddress 'fast-resolver.example.internal' -TimeoutMilliseconds 5000 -AddressTaskFactory $Completes -WarningVariable Warnings -WarningAction SilentlyContinue | Out-Null
+
+			$Warnings.Count | Should -Be 0
+		}
+	}
+
+	It 'Resolve-WaypointReverseHostNames warns naming the host and ceiling when the lookup exceeds -TimeoutMilliseconds' {
+		InModuleScope WaypointDiscovery {
+			$NeverCompletesInTime = { param($Address) [System.Threading.Tasks.Task]::Delay(60000) }
+			$Warnings = $null
+			Resolve-WaypointReverseHostNames -IpAddress '198.51.100.10' -TimeoutMilliseconds 50 -HostEntryTaskFactory $NeverCompletesInTime -WarningVariable Warnings -WarningAction SilentlyContinue | Out-Null
+
+			$Warnings.Count | Should -Be 1
+			$Warnings[0].Message | Should -Match 'reverse DNS'
+			$Warnings[0].Message | Should -Match '198\.51\.100\.10'
+			$Warnings[0].Message | Should -Match '50ms'
+		}
+	}
+}
+
+# Issue #1305: the ceiling is now operator-configurable end to end -- pins that
+# Resolve-WaypointPrimarySession/Test-WaypointSessionMatchesVCenter actually forward
+# a non-default -TimeoutMilliseconds down to the real resolver call, rather than the
+# parameter existing but being silently dropped somewhere in the chain.
+Describe 'Resolve-WaypointPrimarySession -TimeoutMilliseconds threading (issue #1305)' {
+	It 'forwards a non-default -TimeoutMilliseconds to the real DNS resolver call' {
+		InModuleScope WaypointDiscovery {
+			Mock Resolve-WaypointHostAddresses { @() }
+
+			$SessionA = [pscustomobject]@{ Name = 'vcsa-g.example.internal'; ServiceUri = $null }
+			$SessionB = [pscustomobject]@{ Name = 'vcsa-h.example.internal'; ServiceUri = $null }
+
+			Resolve-WaypointPrimarySession -Sessions @($SessionA, $SessionB) -VCenter '203.0.113.99' -TimeoutMilliseconds 12345 -WarningAction SilentlyContinue | Out-Null
+
+			Should -Invoke Resolve-WaypointHostAddresses -ParameterFilter { $TimeoutMilliseconds -eq 12345 }
 		}
 	}
 }

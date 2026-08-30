@@ -45,6 +45,19 @@ $Script:VmwareStigDockerModulePath = $env:WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_
 # bounded by, named once here rather than duplicated as a literal in each resolver's
 # -TimeoutMilliseconds default. Long enough that a healthy resolver always answers
 # within it, short enough that a blackholed one cannot stall a discovery pass.
+#
+# Issue #1305 (decision recorded per #1297's carried-forward "decide" bullet): YES,
+# the ceiling is operator-configurable -- Invoke-WaypointDiscovery accepts
+# -DnsTimeoutMilliseconds (default this constant) and threads it through
+# Resolve-WaypointPrimarySession/Test-WaypointSessionMatchesVCenter down to the two
+# resolvers below. DiscoverJobHandler feeds it from
+# PowerShellOptions.DiscoveryDnsTimeoutMilliseconds (appsettings/env, the same
+# configuration path every other runner option in that class uses) rather than
+# inventing a discovery-specific settings surface. A lookup that actually exceeds the
+# ceiling now also emits a Write-Warning naming the lookup kind and host (never
+# credentials -- a hostname/IP is non-secret inventory) so job.log can distinguish
+# "resolver too slow" from "NXDOMAIN", both of which degrade to the same fail-closed
+# "no match" outcome.
 $script:WaypointDnsTimeoutMillisecondsDefault = 3000
 
 # Normalizes a hostname/IP string for case- and trailing-dot-insensitive comparison
@@ -126,6 +139,11 @@ function Resolve-WaypointHostAddresses {
 			[System.Net.Dns]::GetHostAddressesAsync($HostNameOrAddress)
 		}
 		if (-not $Task.Wait($TimeoutMilliseconds)) {
+			# Issue #1305: the host name/IP is non-secret inventory (never a
+			# credential), so it is safe to name here -- this is what lets an
+			# operator distinguish "resolver too slow" from "NXDOMAIN" in job.log,
+			# both of which otherwise degrade to the identical silent "no match".
+			Write-Warning "WaypointDiscovery: forward DNS lookup for '$HostNameOrAddress' exceeded the ${TimeoutMilliseconds}ms timeout -- treating as unresolved."
 			return @()
 		}
 		return @($Task.GetAwaiter().GetResult() | ForEach-Object { $_.ToString() })
@@ -159,6 +177,8 @@ function Resolve-WaypointReverseHostNames {
 			[System.Net.Dns]::GetHostEntryAsync($IpAddress)
 		}
 		if (-not $Task.Wait($TimeoutMilliseconds)) {
+			# Issue #1305: same non-secret-host rationale as Resolve-WaypointHostAddresses.
+			Write-Warning "WaypointDiscovery: reverse DNS lookup for '$IpAddress' exceeded the ${TimeoutMilliseconds}ms timeout -- treating as unresolved."
 			return @()
 		}
 		$Entry = $Task.GetAwaiter().GetResult()
@@ -191,7 +211,12 @@ function Resolve-WaypointHostAddressesCached {
 
 		[Parameter()]
 		[AllowNull()]
-		[hashtable]$Cache
+		[hashtable]$Cache,
+
+		# Issue #1305: forwarded to the real resolver only; ignored (as with every
+		# other real-DNS parameter here) when -NameResolver or -Cache already answers.
+		[Parameter()]
+		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault
 	)
 
 	if ($NameResolver) {
@@ -202,7 +227,7 @@ function Resolve-WaypointHostAddressesCached {
 		return $Cache[$HostNameOrAddress]
 	}
 
-	$Result = @(Resolve-WaypointHostAddresses -HostNameOrAddress $HostNameOrAddress)
+	$Result = @(Resolve-WaypointHostAddresses -HostNameOrAddress $HostNameOrAddress -TimeoutMilliseconds $TimeoutMilliseconds)
 	if ($Cache) {
 		$Cache[$HostNameOrAddress] = $Result
 	}
@@ -222,7 +247,11 @@ function Resolve-WaypointReverseHostNamesCached {
 
 		[Parameter()]
 		[AllowNull()]
-		[hashtable]$Cache
+		[hashtable]$Cache,
+
+		# Issue #1305: same forwarding rule as Resolve-WaypointHostAddressesCached.
+		[Parameter()]
+		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault
 	)
 
 	if ($NameResolver) {
@@ -233,7 +262,7 @@ function Resolve-WaypointReverseHostNamesCached {
 		return $Cache[$IpAddress]
 	}
 
-	$Result = @(Resolve-WaypointReverseHostNames -IpAddress $IpAddress)
+	$Result = @(Resolve-WaypointReverseHostNames -IpAddress $IpAddress -TimeoutMilliseconds $TimeoutMilliseconds)
 	if ($Cache) {
 		$Cache[$IpAddress] = $Result
 	}
@@ -273,7 +302,11 @@ function Test-WaypointSessionMatchesVCenter {
 
 		[Parameter()]
 		[AllowNull()]
-		[hashtable]$ReverseCache = $null
+		[hashtable]$ReverseCache = $null,
+
+		# Issue #1305: forwarded to the real resolvers via the Cached wrappers above.
+		[Parameter()]
+		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault
 	)
 
 	$RequestedNormalized = ConvertTo-WaypointNormalizedHost -Value $VCenter
@@ -292,10 +325,10 @@ function Test-WaypointSessionMatchesVCenter {
 		return $false
 	}
 
-	$RequestedAddresses = @(Resolve-WaypointHostAddressesCached -HostNameOrAddress $VCenter -NameResolver $NameResolver -Cache $ForwardCache)
+	$RequestedAddresses = @(Resolve-WaypointHostAddressesCached -HostNameOrAddress $VCenter -NameResolver $NameResolver -Cache $ForwardCache -TimeoutMilliseconds $TimeoutMilliseconds)
 	if ($RequestedAddresses.Count -gt 0) {
 		foreach ($Candidate in $SessionCandidatesRaw) {
-			$CandidateAddresses = @(Resolve-WaypointHostAddressesCached -HostNameOrAddress $Candidate -NameResolver $NameResolver -Cache $ForwardCache)
+			$CandidateAddresses = @(Resolve-WaypointHostAddressesCached -HostNameOrAddress $Candidate -NameResolver $NameResolver -Cache $ForwardCache -TimeoutMilliseconds $TimeoutMilliseconds)
 			foreach ($Address in $CandidateAddresses) {
 				if ($RequestedAddresses -contains $Address) {
 					return $true
@@ -306,7 +339,7 @@ function Test-WaypointSessionMatchesVCenter {
 
 	$ParsedIp = $null
 	if ([System.Net.IPAddress]::TryParse($VCenter, [ref]$ParsedIp)) {
-		$ReverseNames = @(Resolve-WaypointReverseHostNamesCached -IpAddress $VCenter -NameResolver $NameResolver -Cache $ReverseCache | ForEach-Object { ConvertTo-WaypointNormalizedHost -Value $_ } | Where-Object { $_ })
+		$ReverseNames = @(Resolve-WaypointReverseHostNamesCached -IpAddress $VCenter -NameResolver $NameResolver -Cache $ReverseCache -TimeoutMilliseconds $TimeoutMilliseconds | ForEach-Object { ConvertTo-WaypointNormalizedHost -Value $_ } | Where-Object { $_ })
 		if ($ReverseNames.Count -gt 0) {
 			foreach ($Name in $ReverseNames) {
 				if ($SessionCandidatesNormalized -contains $Name) {
@@ -342,7 +375,13 @@ function Resolve-WaypointPrimarySession {
 		# comment. $null (the default) means "use real DNS", unchanged from before.
 		[Parameter()]
 		[AllowNull()]
-		[scriptblock]$NameResolver = $null
+		[scriptblock]$NameResolver = $null,
+
+		# Issue #1305: propagated to Test-WaypointSessionMatchesVCenter/the real
+		# resolvers. Default is the module-wide ceiling; Invoke-WaypointDiscovery is
+		# the only production caller that overrides it, from operator configuration.
+		[Parameter()]
+		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault
 	)
 
 	$AllSessions = @($Sessions)
@@ -357,7 +396,7 @@ function Resolve-WaypointPrimarySession {
 	$ForwardCache = @{}
 	$ReverseCache = @{}
 	$MatchedSessions = @($AllSessions | Where-Object {
-		Test-WaypointSessionMatchesVCenter -Session $_ -VCenter $VCenter -NameResolver $NameResolver -ForwardCache $ForwardCache -ReverseCache $ReverseCache
+		Test-WaypointSessionMatchesVCenter -Session $_ -VCenter $VCenter -NameResolver $NameResolver -ForwardCache $ForwardCache -ReverseCache $ReverseCache -TimeoutMilliseconds $TimeoutMilliseconds
 	})
 
 	if ($MatchedSessions.Count -eq 1) {
@@ -387,6 +426,17 @@ function Invoke-WaypointDiscovery {
 	.PARAMETER VmwareStigDockerTransportPath
 	    Path to the sibling repo's unmodified module.transport.vmware.ps1, dot-sourced
 	    to bring Connect-StigVIServer into scope.
+
+	.PARAMETER DnsTimeoutMilliseconds
+	    Issue #1305: ceiling for every DNS lookup performed while resolving the
+	    vcenter session identity (see Resolve-WaypointPrimarySession). Defaults to
+	    $script:WaypointDnsTimeoutMillisecondsDefault (3000ms); DiscoverJobHandler
+	    overrides it from PowerShellOptions.DiscoveryDnsTimeoutMilliseconds
+	    (docs/architecture.md) so an operator on a genuinely slow resolver can raise
+	    it without editing the shipped module. A lookup that exceeds the ceiling
+	    emits a Write-Warning naming the lookup kind and host (never credentials)
+	    before degrading to the same fail-closed "no match" outcome a genuine
+	    resolution failure produces.
 
 	.OUTPUTS
 	    One [pscustomobject] per discovered item: Type ('vcenter'|'cluster'|'host'|'vm'),
@@ -467,7 +517,15 @@ function Invoke-WaypointDiscovery {
 		# array for "no match", matching the real resolvers' fail-closed contract).
 		[Parameter()]
 		[AllowNull()]
-		[scriptblock]$NameResolver = $null
+		[scriptblock]$NameResolver = $null,
+
+		# Issue #1305: operator-configurable ceiling for every DNS lookup
+		# Resolve-WaypointPrimarySession performs while identifying the vcenter
+		# session. DiscoverJobHandler feeds this from
+		# PowerShellOptions.DiscoveryDnsTimeoutMilliseconds; unset, it is the
+		# module's own $script:WaypointDnsTimeoutMillisecondsDefault (3000ms).
+		[Parameter()]
+		[int]$DnsTimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault
 	)
 
 	if ([string]::IsNullOrWhiteSpace($VmwareStigDockerTransportPath)) {
@@ -526,7 +584,7 @@ function Invoke-WaypointDiscovery {
 	#     comment above), while keeping the same fail-closed contract: it never picks
 	#     a session by position, and an ambiguous or absent match returns $null (a
 	#     structured Write-Warning explains why) rather than guessing.
-	$PrimarySession = Resolve-WaypointPrimarySession -Sessions $Connection.Sessions -VCenter $VCenter -NameResolver $NameResolver
+	$PrimarySession = Resolve-WaypointPrimarySession -Sessions $Connection.Sessions -VCenter $VCenter -NameResolver $NameResolver -TimeoutMilliseconds $DnsTimeoutMilliseconds
 
 	if ($PrimarySession -and -not [string]::IsNullOrWhiteSpace($PrimarySession.InstanceUuid) -and -not [string]::IsNullOrWhiteSpace($PrimarySession.Name)) {
 		[pscustomobject]@{

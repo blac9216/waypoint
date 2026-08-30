@@ -81,4 +81,19 @@ public sealed class PowerShellOptions
 	/// Stop for 5 s is exactly the hung-native-call case that cannot be waited out.
 	/// </summary>
 	public TimeSpan StopGracePeriod { get; set; } = TimeSpan.FromSeconds(5);
+
+	/// <summary>
+	/// Issue #1305: ceiling (milliseconds) <see cref="Waypoint.Infrastructure.Discovery.DiscoverJobHandler"/>
+	/// passes as <c>Invoke-WaypointDiscovery -DnsTimeoutMilliseconds</c>, bounding
+	/// every DNS lookup <c>WaypointDiscovery.psm1</c> performs while resolving the
+	/// vCenter session identity (<c>Resolve-WaypointPrimarySession</c>). Default
+	/// matches the module's own <c>$script:WaypointDnsTimeoutMillisecondsDefault</c>
+	/// (issue #1251/#1297) -- long enough that a healthy resolver always answers,
+	/// short enough that a blackholed one cannot stall a discovery pass. Raise this
+	/// only when the deployment's own resolver is genuinely slower than that; a
+	/// lookup that exceeds it emits a job.log warning naming the lookup kind and
+	/// host (see the module's own doc comment), so raising the ceiling is a
+	/// deliberate operator choice rather than a silent workaround.
+	/// </summary>
+	public int DiscoveryDnsTimeoutMilliseconds { get; set; } = 3000;
 }

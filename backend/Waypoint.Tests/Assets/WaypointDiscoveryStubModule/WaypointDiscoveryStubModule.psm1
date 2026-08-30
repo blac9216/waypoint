@@ -71,7 +71,14 @@ function Invoke-WaypointDiscovery {
 		[string]$Password,
 
 		[Parameter()]
-		[string]$VmwareStigDockerTransportPath
+		[string]$VmwareStigDockerTransportPath,
+
+		# Issue #1305: accepted (and ignored, like VmwareStigDockerTransportPath
+		# above) so DiscoverJobHandler's fixed parameter dictionary -- which now
+		# always includes this key -- binds against the stub the same way it binds
+		# against the real module.
+		[Parameter()]
+		[int]$DnsTimeoutMilliseconds
 	)
 
 	# Deliberately touches the Information stream, exactly like
