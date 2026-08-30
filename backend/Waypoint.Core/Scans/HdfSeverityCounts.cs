@@ -29,14 +29,19 @@ namespace Waypoint.Core.Scans;
 /// genuinely empty report (no controls at all, e.g. the scan stub's own fixture shape) --
 /// <see cref="NoControlsEvaluated"/> is false for it, since there is nothing to have evaluated.
 ///
-/// <b>Issue #1144</b>: <see cref="ControlsExecutionError"/> counts controls whose only
-/// non-passed/non-skipped/non-not_applicable result is <c>error</c> (InSpec's
-/// resource-raised-an-exception outcome) -- reconciled with
-/// <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>, which is
-/// <c>failed</c>-only. An errored control is NOT counted in <see cref="CatIOpen"/>/
-/// <see cref="CatIIOpen"/>/<see cref="CatIIIOpen"/> (it never produced a genuine
-/// compliance verdict, so it is not "open"), matching the persisted-findings surface
-/// exactly: both now count an errored control as execution-error, not open.
+/// <b>Issue #1144</b>: <see cref="ControlsExecutionError"/> counts controls this reader
+/// cannot turn into a genuine compliance verdict -- an <c>error</c> result (InSpec's
+/// resource-raised-an-exception outcome), an unrecognized status string, or a mixed
+/// result shape the reader does not specifically recognize. The classification is
+/// <see cref="HdfControlClassifier"/>, the single shared rule
+/// <see cref="HdfFindingsParser"/> also uses, so a control lands in the same bucket on
+/// this preview and on the persisted <c>component_result_findings</c> rows behind
+/// <c>GET /runs/{id}/component-results/summary</c>. An errored control is NOT counted in
+/// <see cref="CatIOpen"/>/<see cref="CatIIOpen"/>/<see cref="CatIIIOpen"/> (it never
+/// produced a genuine compliance verdict, so it is not "open") and not counted in
+/// <see cref="ControlsEvaluated"/> either -- exactly as
+/// <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>
+/// (<c>failed</c>-only) treats it on the persisted surface.
 /// </summary>
 public sealed record HdfSeverityCounts(int CatIOpen, int CatIIOpen, int CatIIIOpen, int ControlsTotal, int ControlsEvaluated, int ControlsExecutionError = 0)
 {
@@ -54,10 +59,10 @@ public sealed record HdfSeverityCounts(int CatIOpen, int CatIIOpen, int CatIIIOp
 /// belongs to Broadcom/MITRE), it only walks <c>profiles[].controls[]</c> for
 /// <c>tags.severity</c> (InSpec's <c>low</c>/<c>medium</c>/<c>high</c>/<c>critical</c>,
 /// mapped to CAT III/II/I/I -- the STIG severity convention) and
-/// <c>results[].status</c> (a control with at least one non-<c>passed</c>,
-/// non-<c>skipped</c> result -- i.e. <c>failed</c> or <c>error</c> -- counts as one open
-/// finding; a control whose only results are <c>passed</c>/<c>skipped</c>/
-/// <c>not_applicable</c>, or with no results at all, does not). An empty <c>controls</c>
+/// <c>results[].status</c> plus <c>impact</c>, which it hands to
+/// <see cref="HdfControlClassifier"/> (a control classified <c>failed</c> counts as one
+/// open finding; <c>execution_error</c>, <c>passed</c>, <c>skipped</c>/
+/// <c>not_applicable</c>, and a control with no results at all do not). An empty <c>controls</c>
 /// array (the scan stub's own fixture shape) is a genuine zero. A missing OR malformed
 /// file, by contrast, is <b>uncountable</b>: <see cref="CountOpenFindings"/> returns
 /// <c>null</c> (never throws, never a fabricated zero) so the caller can present "could
@@ -69,32 +74,27 @@ public sealed record HdfSeverityCounts(int CatIOpen, int CatIIOpen, int CatIIIOp
 /// could not execute) deliberately does NOT count as open here, same as it does not
 /// count as open in the findings vocabulary (<see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>)
 /// -- Not_Reviewed is "not evaluated", not "failed", so it must not inflate the CAT
-/// open counts either. This preview intentionally does not distinguish genuine
-/// not-applicable from could-not-execute (that distinction lives in
-/// <see cref="HdfFindingsParser"/>'s persisted findings, which this narrow CAT-only
-/// preview does not read); do not "fix" that here by making skipped count as open.
+/// open counts either.
 ///
-/// <b>Issue #1144</b>: a control with an <c>error</c> result (InSpec's
-/// resource-raised-an-exception outcome) likewise does NOT count as open -- it used to
-/// (any non-passed/skipped/not_applicable status counted as open, <c>error</c>
-/// included), which disagreed with <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>
-/// (<c>failed</c>-only) and made the same control read "open" here but
-/// "execution_error, not open" on the persisted-findings surface. <c>error</c> now
-/// counts toward <see cref="HdfSeverityCounts.ControlsExecutionError"/> instead,
-/// checked with the same worst-of priority <see cref="HdfFindingsParser.MapStatus"/>
-/// already uses (a control with both an <c>error</c> and a <c>failed</c> result is
-/// execution-error, not open) -- so both surfaces now classify an errored control
-/// identically.
+/// <b>Issue #1144</b>: this counter no longer carries a classification rule of its own.
+/// It reads each control's <c>results[].status</c> rows and <c>impact</c> and hands
+/// them to <see cref="HdfControlClassifier"/> -- the same call
+/// <see cref="HdfFindingsParser"/> makes -- then buckets the returned
+/// <see cref="Waypoint.Core.Scans.ComponentFindingStatuses"/> value: <c>failed</c> is
+/// open (and evaluated), <c>passed</c> is evaluated, <c>execution_error</c> is
+/// <see cref="HdfSeverityCounts.ControlsExecutionError"/>, and
+/// <c>not_applicable</c>/<c>not_reviewed</c> are present but never evaluated. Before
+/// this, the counter matched only the literal string <c>error</c> as an execution error
+/// and treated EVERY unrecognized status as open, so a <c>passed</c>+<c>skipped</c>
+/// control or an unknown status string read <c>execution_error</c> on the summary while
+/// inflating <c>cat_i/ii/iii_open</c> here. There is now one rule and no second copy to
+/// drift from -- do not reintroduce a local predicate.
 /// </summary>
 public static class HdfSeverityCounter
 {
 	private const string CriticalSeverity = "critical";
 	private const string HighSeverity = "high";
 	private const string MediumSeverity = "medium";
-	private const string PassedStatus = "passed";
-	private const string SkippedStatus = "skipped";
-	private const string NotApplicableStatus = "not_applicable";
-	private const string ErrorStatus = "error";
 
 	/// <summary>
 	/// Parses the HDF JSON at <paramref name="hdfPath"/> and returns its CAT I/II/III open
@@ -145,36 +145,38 @@ public static class HdfSeverityCounter
 			{
 				total++;
 
-				// Issue #1144: error takes priority over failed, same worst-of order
-				// HdfFindingsParser.MapStatus uses -- a control with both an error and
-				// a failed result is execution-error, not open.
-				if (HasErrorResult(control))
+				// Issue #1144 round 2: ONE classification rule, shared verbatim with
+				// HdfFindingsParser via HdfControlClassifier -- error beats failed
+				// (worst-of), and every shape this reader does not recognize is an
+				// execution error rather than an inflated CAT open count.
+				switch (HdfControlClassifier.Classify(ResultStatuses(control), Impact(control)))
 				{
-					executionError++;
-					continue;
-				}
+					case ComponentFindingStatuses.ExecutionError:
+						executionError++;
+						break;
+					case ComponentFindingStatuses.Failed:
+						evaluated++;
+						switch (Severity(control))
+						{
+							case CriticalSeverity:
+							case HighSeverity:
+								catI++;
+								break;
+							case MediumSeverity:
+								catII++;
+								break;
+							default:
+								catIII++;
+								break;
+						}
 
-				bool open = IsOpen(control);
-				if (open)
-				{
-					evaluated++;
-					switch (Severity(control))
-					{
-						case CriticalSeverity:
-						case HighSeverity:
-							catI++;
-							break;
-						case MediumSeverity:
-							catII++;
-							break;
-						default:
-							catIII++;
-							break;
-					}
-				}
-				else if (HasPassedResult(control))
-				{
-					evaluated++;
+						break;
+					case ComponentFindingStatuses.Passed:
+						evaluated++;
+						break;
+					default:
+						// not_applicable / not_reviewed -- present, but never evaluated.
+						break;
 				}
 			}
 		}
@@ -182,76 +184,44 @@ public static class HdfSeverityCounter
 		return new HdfSeverityCounts(catI, catII, catIII, total, evaluated, executionError);
 	}
 
-	/// <summary>Issue #1144: true when at least one result on this control is <c>error</c> -- checked BEFORE <see cref="IsOpen"/> so an errored control is never also counted as open.</summary>
-	private static bool HasErrorResult(JsonElement control)
-	{
-		if (!control.TryGetProperty("results", out JsonElement results) || results.ValueKind != JsonValueKind.Array)
-		{
-			return false;
-		}
-
-		foreach (JsonElement result in results.EnumerateArray())
-		{
-			if (result.TryGetProperty("status", out JsonElement statusElement)
-				&& statusElement.ValueKind == JsonValueKind.String
-				&& string.Equals(statusElement.GetString(), ErrorStatus, StringComparison.Ordinal))
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	/// <summary>Issue #1144: open means genuinely <c>failed</c> -- matches <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/> exactly. Callers check <see cref="HasErrorResult"/> first, so <c>error</c> never reaches here as "open".</summary>
-	private static bool IsOpen(JsonElement control)
-	{
-		if (!control.TryGetProperty("results", out JsonElement results) || results.ValueKind != JsonValueKind.Array)
-		{
-			return false;
-		}
-
-		foreach (JsonElement result in results.EnumerateArray())
-		{
-			string? status = result.TryGetProperty("status", out JsonElement statusElement) && statusElement.ValueKind == JsonValueKind.String
-				? statusElement.GetString()
-				: null;
-			if (status is not (PassedStatus or SkippedStatus or NotApplicableStatus or ErrorStatus) && status is not null)
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
 	/// <summary>
-	/// Issue #1132: true when at least one result on this control genuinely
-	/// <c>passed</c> -- the other half of "evaluated" alongside <see cref="IsOpen"/>
-	/// (failed/error). A control whose only results are <c>skipped</c>/
-	/// <c>not_applicable</c>, or with no results at all, contributes to neither and is
-	/// therefore counted in <see cref="HdfSeverityCounts.ControlsTotal"/> but not
-	/// <see cref="HdfSeverityCounts.ControlsEvaluated"/>.
+	/// The control's <c>results[].status</c> strings, in document order, for
+	/// <see cref="HdfControlClassifier"/>. A missing or non-array <c>results</c>
+	/// property yields an EMPTY list -- the same "never ran" shape
+	/// <see cref="HdfFindingsParser"/> feeds the classifier, which maps it to
+	/// <c>not_reviewed</c> (counted in <see cref="HdfSeverityCounts.ControlsTotal"/>,
+	/// never in <see cref="HdfSeverityCounts.ControlsEvaluated"/>). A non-string
+	/// <c>status</c> becomes a <c>null</c> entry, which the classifier treats as an
+	/// unrecognized shape -- an execution error, never a clean or an open verdict.
 	/// </summary>
-	private static bool HasPassedResult(JsonElement control)
+	private static List<string?> ResultStatuses(JsonElement control)
 	{
 		if (!control.TryGetProperty("results", out JsonElement results) || results.ValueKind != JsonValueKind.Array)
 		{
-			return false;
+			return [];
 		}
 
+		List<string?> statuses = [];
 		foreach (JsonElement result in results.EnumerateArray())
 		{
-			if (result.TryGetProperty("status", out JsonElement statusElement)
-				&& statusElement.ValueKind == JsonValueKind.String
-				&& string.Equals(statusElement.GetString(), PassedStatus, StringComparison.Ordinal))
+			if (result.ValueKind != JsonValueKind.Object)
 			{
-				return true;
+				continue;
 			}
+
+			statuses.Add(result.TryGetProperty("status", out JsonElement statusElement) && statusElement.ValueKind == JsonValueKind.String
+				? statusElement.GetString()
+				: null);
 		}
 
-		return false;
+		return statuses;
 	}
+
+	/// <summary>The control's <c>impact</c>, or <c>null</c> when absent/non-numeric -- issue #1124's all-skipped split (impact 0.0 is the profile's own not-applicable decision). Read here only so this surface feeds <see cref="HdfControlClassifier"/> exactly what <see cref="HdfFindingsParser"/> does.</summary>
+	private static double? Impact(JsonElement control) =>
+		control.TryGetProperty("impact", out JsonElement value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out double parsed)
+			? parsed
+			: null;
 
 	private static string Severity(JsonElement control)
 	{

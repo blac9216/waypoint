@@ -341,10 +341,12 @@ public sealed class ComponentResultRepositoryTests : IAsyncLifetime
 	/// Round 2 finding 1(a): a component whose controls ALL came back
 	/// <c>execution_error</c>. <c>HdfFindingsParser.MapStatus</c> maps any
 	/// <c>status: "error"</c> (and any unrecognized result shape) there, and
-	/// <c>ComponentFindingStatuses.IsOpen</c> is <c>Failed</c>-only, so such findings
-	/// land in NO count column at all (issue #1144) -- the row reads all-zero. Seeded
-	/// in a MIXED bucket alongside two components that evaluated normally, so the
-	/// summed counts look healthy and only the per-component filter can tell the truth.
+	/// <c>ComponentFindingStatuses.IsOpen</c> is <c>Failed</c>-only, so before issue
+	/// #1144 such findings landed in NO count column at all and the row read all-zero.
+	/// Migration 0080 gives them <c>execution_error_count</c>, which this test asserts
+	/// below. Seeded in a MIXED bucket alongside two components that evaluated normally,
+	/// so the SUMMED pass/open counts still look healthy and only the per-component
+	/// filter (plus the new column) can tell the truth.
 	/// </summary>
 	[Fact]
 	public async Task GetRunRollupAsync_MixedBucketAllExecutionError_FlagsTheComponentThatEvaluatedNothing()
@@ -376,8 +378,10 @@ public sealed class ComponentResultRepositoryTests : IAsyncLifetime
 		RunResultRollup rollup = await _repository.GetRunRollupAsync(runId, CancellationToken.None);
 		RunResultRollupRow row = Assert.Single(rollup.ByStatus);
 
-		// Every count column reads healthy -- the errored component contributes to none
-		// of them, so a summed-counts predicate sees a fully evaluated bucket.
+		// The pass/open counts read healthy -- the errored component contributes to none
+		// of them, so a predicate that looked only at those would see a fully evaluated
+		// bucket. Post-0080 the errored component is NOT invisible: it lands in
+		// execution_error_count, asserted at the end of this test.
 		Assert.Equal(3, row.ComponentCount);
 		Assert.Equal(2, row.PassedCount);
 		Assert.Equal(2, row.CatIOpen);
@@ -474,6 +478,62 @@ public sealed class ComponentResultRepositoryTests : IAsyncLifetime
 		Assert.Equal(2, row.NotApplicableCount);
 		Assert.Equal(0, row.EvaluatedZeroComponentCount);
 		Assert.False(row.EvaluatedZeroControls);
+	}
+
+	/// <summary>
+	/// Issue #1261 (issue #1144 review round 1): pins the <c>execution_error_count &gt; 0</c>
+	/// disjunct in <c>evaluated_zero_component_count</c>'s FILTER on its own. Every other
+	/// errored-component test in this file also has <c>not_applicable_count = 0</c>, so the
+	/// pre-existing disjunct already fires there and deleting the new term changes nothing.
+	/// This component has BOTH <c>not_applicable</c> findings (so
+	/// <c>not_applicable_count = 0</c> is FALSE) and <c>execution_error</c> findings, and no
+	/// <c>not_reviewed</c>/<c>skipped</c> ones -- so the new term is the ONLY disjunct that
+	/// can flag it. Its partner
+	/// <see cref="GetRunRollupAsync_MixedBucketGenuinelyAllNotApplicable_IsNotFlagged"/>
+	/// pins the other side of the boundary: the same shape WITHOUT an errored control stays
+	/// unflagged.
+	/// </summary>
+	[Fact]
+	public async Task GetRunRollupAsync_NotApplicableComponentWithExecutionErrors_IsFlagged()
+	{
+		Guid runId = await SeedRunAsync();
+		IReadOnlyList<(Guid ComponentId, Guid ScanPlanItemId)> seeded =
+			await SeedPlanItemsAsync(runId, ["na-plus-errored", "na-plus-errored-evaluated"]);
+
+		(Guid mixedComponentId, Guid mixedItemId) = seeded[0];
+		Guid mixedJobId = await SeedJobAsync(runId, mixedItemId);
+		await _repository.RecordAsync(
+			new ComponentResultRecord(
+				runId, mixedJobId, mixedItemId, mixedComponentId, AttemptNumber: 1,
+				Status: ComponentResultStatuses.Completed, Detail: null,
+				Findings:
+				[
+					new ComponentResultFinding("SV-400", null, "invented control 400", ComponentFindingSeverities.CatI, ComponentFindingStatuses.NotApplicable, "invented: does not apply to this component"),
+					new ComponentResultFinding("SV-401", null, "invented control 401", ComponentFindingSeverities.CatII, ComponentFindingStatuses.ExecutionError, "invented: control raised an error"),
+				],
+				Artifacts: []),
+			CancellationToken.None);
+
+		(Guid evaluatedComponentId, Guid evaluatedItemId) = seeded[1];
+		Guid evaluatedJobId = await SeedJobAsync(runId, evaluatedItemId);
+		await _repository.RecordAsync(
+			CompletedRecord(runId, evaluatedJobId, evaluatedItemId, evaluatedComponentId, attempt: 1),
+			CancellationToken.None);
+
+		RunResultRollup rollup = await _repository.GetRunRollupAsync(runId, CancellationToken.None);
+		RunResultRollupRow row = Assert.Single(rollup.ByStatus);
+
+		// The shape that makes this test non-vacuous: the flagged component has a
+		// NON-zero not_applicable_count and zero not_reviewed/skipped, so only the
+		// execution_error_count disjunct can reach it.
+		Assert.Equal(2, row.ComponentCount);
+		Assert.Equal(1, row.NotApplicableCount);
+		Assert.Equal(0, row.NotReviewedCount);
+		Assert.Equal(0, row.SkippedCount);
+		Assert.Equal(1, row.ExecutionErrorCount);
+
+		Assert.Equal(1, row.EvaluatedZeroComponentCount);
+		Assert.True(row.EvaluatedZeroControls);
 	}
 
 	/// <summary>Regression guard for the same fix: a bucket in which EVERY component genuinely evaluated must stay unflagged -- the per-component filter must not make healthy runs look incomplete.</summary>

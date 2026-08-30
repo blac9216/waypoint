@@ -182,47 +182,14 @@ public static class HdfFindingsParser
 	}
 
 	/// <summary>
-	/// A control with ANY failed/errored result is Failed/ExecutionError overall
-	/// (worst-of, matching HdfSeverityCounter's own "at least one non-passed,
-	/// non-skipped, non-not_applicable result counts as open" rule); otherwise the
-	/// first row's own status (passed/skipped/not_applicable) applies -- InSpec never
-	/// mixes passed and not_applicable rows for the same control, and a genuinely
-	/// mixed or unrecognized status string is treated as ExecutionError rather than
-	/// silently defaulting to Passed (never a fabricated clean result). An all-skipped
-	/// result set is split by <paramref name="impact"/> per issue #1124: impact 0.0 is
-	/// the profile's own not-applicable decision; anything else -- including a
-	/// missing/malformed impact, never assumed to mean "does not apply" -- is an
-	/// applicable control that could not execute.
+	/// Delegates to <see cref="HdfControlClassifier.Classify"/> -- the ONE control
+	/// classification rule in this codebase, shared verbatim with
+	/// <see cref="HdfSeverityCounter"/> so the persisted findings surface and the CAT
+	/// preview can never drift apart (issue #1144 round 2). See that type for the rule
+	/// itself.
 	/// </summary>
-	private static string MapStatus(List<(string? Status, string? Message)> rows, double? impact)
-	{
-		bool anyError = rows.Any(r => string.Equals(r.Status, "error", StringComparison.Ordinal));
-		if (anyError)
-		{
-			return ComponentFindingStatuses.ExecutionError;
-		}
-
-		bool anyFailed = rows.Any(r => string.Equals(r.Status, "failed", StringComparison.Ordinal));
-		if (anyFailed)
-		{
-			return ComponentFindingStatuses.Failed;
-		}
-
-		if (rows.All(r => string.Equals(r.Status, "passed", StringComparison.Ordinal)))
-		{
-			return ComponentFindingStatuses.Passed;
-		}
-
-		if (rows.All(r => string.Equals(r.Status, "skipped", StringComparison.Ordinal)))
-		{
-			return impact is 0.0 ? ComponentFindingStatuses.NotApplicable : ComponentFindingStatuses.NotReviewed;
-		}
-
-		// Any other shape (unknown status string, or a mix this parser does not
-		// specifically recognize) is uncountable-as-clean: report ExecutionError
-		// rather than guessing, per the "never a fabricated clean result" rule above.
-		return ComponentFindingStatuses.ExecutionError;
-	}
+	private static string MapStatus(List<(string? Status, string? Message)> rows, double? impact) =>
+		HdfControlClassifier.Classify([.. rows.Select(r => r.Status)], impact);
 
 	private static string? BuildEvidence(List<(string? Status, string? Message)> rows)
 	{

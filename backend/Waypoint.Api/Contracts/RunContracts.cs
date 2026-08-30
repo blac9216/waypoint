@@ -507,14 +507,18 @@ public sealed record RunArtifactResponse(
 	int? ControlsEvaluated,
 
 	/// <summary>
-	/// Issue #1144: controls whose only non-passed/skipped/not_applicable result is
-	/// <c>error</c>, null exactly when <c>counts_available</c> is false. Reconciles
-	/// this endpoint with <c>GET /runs/{id}/component-results/summary</c>'s
-	/// <c>execution_error_count</c>: an errored control is counted here, NOT folded
-	/// into <c>cat_i_open</c>/<c>cat_ii_open</c>/<c>cat_iii_open</c> -- it never
-	/// produced a genuine compliance verdict, so it is not "open", matching
+	/// Issue #1144: controls this reader cannot turn into a genuine compliance verdict
+	/// -- an <c>error</c> result, an unrecognized status string, or an unrecognized
+	/// mixed result shape -- null exactly when <c>counts_available</c> is false.
+	/// Reconciles this endpoint with <c>GET /runs/{id}/component-results/summary</c>'s
+	/// <c>execution_error_count</c>, and the agreement is exact by construction: both
+	/// surfaces call the one shared
+	/// <see cref="Waypoint.Core.Scans.HdfControlClassifier"/> rule, so there is no
+	/// second classification to drift. Such a control is counted here, NOT folded into
+	/// <c>cat_i_open</c>/<c>cat_ii_open</c>/<c>cat_iii_open</c> -- it never produced a
+	/// genuine compliance verdict, so it is not "open", matching
 	/// <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>'s
-	/// <c>failed</c>-only definition exactly.
+	/// <c>failed</c>-only definition. Nothing unrecognized lands in a CAT open count.
 	/// </summary>
 	[property: JsonPropertyName("controls_execution_error")]
 	int? ControlsExecutionError,

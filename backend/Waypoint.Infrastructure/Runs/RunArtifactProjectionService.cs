@@ -34,7 +34,7 @@ public sealed record RunArtifactRow(
 	int? ControlsTotal,
 	/// <summary>Issue #1132: controls that produced a real pass/fail outcome -- see <see cref="Waypoint.Core.Scans.HdfSeverityCounts.NoControlsEvaluated"/>. A Results-table reader must check this, not just the CAT counts, before reading a row as clean.</summary>
 	int? ControlsEvaluated,
-	/// <summary>Issue #1144: controls whose only non-passed/skipped/not_applicable result is <c>error</c>, null exactly when <see cref="CountsAvailable"/> is false. Not folded into the CAT open counts -- an errored control never produced a genuine compliance verdict, matching <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>'s <c>failed</c>-only definition.</summary>
+	/// <summary>Issue #1144: controls <see cref="Waypoint.Core.Scans.HdfControlClassifier"/> classifies as <c>execution_error</c> -- an <c>error</c> result, an unrecognized status string, or an unrecognized mixed result shape -- null exactly when <see cref="CountsAvailable"/> is false. Not folded into the CAT open counts: such a control never produced a genuine compliance verdict, matching <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>'s <c>failed</c>-only definition. The persisted-findings surface uses the SAME shared classifier, so the two agree by construction rather than by parallel maintenance.</summary>
 	int? ControlsExecutionError,
 	IReadOnlyList<string> ArtifactKinds,
 	string UploadStatus,

@@ -159,7 +159,11 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 	/// indistinguishable from a genuine all-<c>not_applicable</c> one, because
 	/// <c>execution_error</c> landed in no count column and the predicate could only
 	/// infer it from <c>not_applicable_count = 0</c>. <c>execution_error_count &gt; 0</c>
-	/// is now its own explicit disjunct, so that mixed shape is correctly flagged.
+	/// is now its own explicit disjunct, so that mixed shape is correctly flagged --
+	/// pinned on its own by
+	/// <c>GetRunRollupAsync_NotApplicableComponentWithExecutionErrors_IsFlagged</c>
+	/// (issue #1261), whose seeded component has a NON-zero <c>not_applicable_count</c>
+	/// so no other disjunct can reach it.
 	/// </summary>
 	public async Task<RunResultRollup> GetRunRollupAsync(Guid runId, CancellationToken cancellationToken)
 	{

@@ -1297,6 +1297,174 @@ public sealed class SchemaMigrationTests
 		Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM catalog_components WHERE product_version_id = '{canonicalVersionId}' AND component_key = 'vcenter'"));
 	}
 
+	/// <summary>
+	/// Issue #1144 (review round 1, finding 1): proves migration 0080 BACKFILLS
+	/// <c>execution_error_count</c> from the immutable <c>component_result_findings</c>
+	/// rows rather than fabricating a clean zero for every row already in the table.
+	/// Same "reconstruct the pre-migration shape, then run the real migration text"
+	/// idiom as
+	/// <see cref="Migration0071_BackfillsReasonBeforeDroppingColumn_PreservingHistoryHonestly"/>:
+	/// this drops the column 0080 added (CASCADE, taking the CHECK that references it),
+	/// seeds two pre-0080 <c>component_results</c> rows -- one whose controls ALL errored,
+	/// one with no errored finding at all -- then executes 0080's own embedded SQL text.
+	/// The errored row must come back with the DERIVED count (2), not 0; the clean row
+	/// must legitimately be 0. Re-running the same text is asserted to be a no-op, so the
+	/// backfill stays safe for the raw-replay idempotency test.
+	/// </summary>
+	[Fact]
+	public async Task Migration0080_BackfillsExecutionErrorCountFromFindings_NotAFabricatedZero()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// Reconstruct the pre-0080 shape: CASCADE also drops
+		// component_results_counts_non_negative_check, which 0080 re-adds.
+		await using (NpgsqlCommand dropColumn = new(
+			"ALTER TABLE component_results DROP COLUMN IF EXISTS execution_error_count CASCADE", connection))
+		{
+			await dropColumn.ExecuteNonQueryAsync();
+		}
+
+		Assert.False(await ColumnExistsAsync(connection, "component_results", "execution_error_count"));
+
+		Guid sourceRevisionId = await InsertSourceRevisionAsync(connection, "migration-0080-test");
+		Guid productId = await InsertProductAsync(connection, sourceRevisionId, "vmware", "migration-0080-test", "Test Product");
+		Guid versionId = await InsertProductVersionAsync(connection, productId, "9.0", "Test Product 9.0");
+		Guid catalogComponentId = await InsertComponentAsync(connection, versionId, "migration-0080-vcenter", "vCenter Server");
+		Guid releaseId = await InsertContentReleaseAsync(connection, "stig", "migration-0080-test:stig:release-1", "Test STIG Release");
+		Guid reportGroupId = await InsertReportGroupAsync(connection, "migration-0080-group", "Test Group", 2);
+		Guid executionProfileId = await InsertExecutionProfileAsync(connection, catalogComponentId, releaseId, reportGroupId, "1.0.0", "hdf");
+		Guid targetId = await InsertTargetAsync(connection, "migration-0080-target");
+		Guid componentId = await InsertDiscoveredComponentAsync(connection, targetId, catalogComponentId, "migration-0080-vcenter");
+
+		Guid runId;
+		await using (NpgsqlCommand insertRun = new("INSERT INTO runs (run_type) VALUES ('scan') RETURNING id", connection))
+		{
+			runId = (Guid)(await insertRun.ExecuteScalarAsync())!;
+		}
+
+		Guid scanPlanId;
+		await using (NpgsqlCommand insertPlan = new(
+			"""
+			INSERT INTO scan_plans (run_id, plan_schema_version, plan_digest, explanation)
+			VALUES ($1, 1, 'migration-0080-digest', '1 of 1 accepted') RETURNING id
+			""", connection))
+		{
+			insertPlan.Parameters.AddWithValue(runId);
+			scanPlanId = (Guid)(await insertPlan.ExecuteScalarAsync())!;
+		}
+
+		Guid scanPlanItemId;
+		await using (NpgsqlCommand insertPlanItem = new(
+			"""
+			INSERT INTO scan_plan_items (scan_plan_id, component_id, catalog_execution_profile_id, transport, selector_kind, report_group_key, priority, output_kind)
+			VALUES ($1, $2, $3, 'vmware', 'vcenter', 'migration-0080-group', 2, 'hdf') RETURNING id
+			""", connection))
+		{
+			insertPlanItem.Parameters.AddWithValue(scanPlanId);
+			insertPlanItem.Parameters.AddWithValue(componentId);
+			insertPlanItem.Parameters.AddWithValue(executionProfileId);
+			scanPlanItemId = (Guid)(await insertPlanItem.ExecuteScalarAsync())!;
+		}
+
+		Guid erroredResultId = await InsertPre0080ComponentResultAsync(connection, runId, scanPlanItemId, componentId, attemptNumber: 1);
+		Guid cleanResultId = await InsertPre0080ComponentResultAsync(connection, runId, scanPlanItemId, componentId, attemptNumber: 2);
+
+		// The errored attempt's controls ALL mapped to execution_error -- exactly the
+		// issue's scenario, and the row that reads all-zero without a backfill.
+		await InsertFindingAsync(connection, erroredResultId, "SV-201", "execution_error", "cat_i");
+		await InsertFindingAsync(connection, erroredResultId, "SV-202", "execution_error", "cat_ii");
+		// The clean attempt has no errored control at all -- 0 is the honest value here.
+		await InsertFindingAsync(connection, cleanResultId, "SV-203", "passed", "cat_i");
+		await InsertFindingAsync(connection, cleanResultId, "SV-204", "failed", "cat_ii");
+
+		string migration0080 = await ReadMigrationSqlAsync("0080_component_results_execution_error_count.sql");
+		await using (NpgsqlCommand applyMigration0080 = new(migration0080, connection))
+		{
+			await applyMigration0080.ExecuteNonQueryAsync();
+		}
+
+		Assert.True(await ColumnExistsAsync(connection, "component_results", "execution_error_count"));
+		Assert.Equal(2, await ReadExecutionErrorCountAsync(connection, erroredResultId));
+		Assert.Equal(0, await ReadExecutionErrorCountAsync(connection, cleanResultId));
+
+		// The backfill's append-only carve-out must not outlive the migration: migration
+		// 0066's UPDATE trigger is back on ('O' = enabled) the moment 0080 finishes.
+		Assert.Equal('O', await ReadTriggerEnabledFlagAsync(connection, "trg_component_results_block_update"));
+
+		// Replay safety: the backfill recomputes the same derived value, so a second raw
+		// re-apply is a clean no-op (the raw-replay idempotency test runs every migration
+		// text twice).
+		await using (NpgsqlCommand reapplyMigration0080 = new(migration0080, connection))
+		{
+			await reapplyMigration0080.ExecuteNonQueryAsync();
+		}
+
+		Assert.Equal(2, await ReadExecutionErrorCountAsync(connection, erroredResultId));
+		Assert.Equal(0, await ReadExecutionErrorCountAsync(connection, cleanResultId));
+	}
+
+	/// <summary>Inserts a <c>component_results</c> row in its pre-0080 column shape (no <c>execution_error_count</c>) -- issue #1144.</summary>
+	private static async Task<Guid> InsertPre0080ComponentResultAsync(NpgsqlConnection connection, Guid runId, Guid scanPlanItemId, Guid componentId, int attemptNumber)
+	{
+		Guid jobId;
+		await using (NpgsqlCommand insertJob = new(
+			"""
+			INSERT INTO jobs (run_id, job_type, priority, state, scan_plan_item_id)
+			VALUES ($1, 'scan', 1, 'queued', $2) RETURNING id
+			""", connection))
+		{
+			insertJob.Parameters.AddWithValue(runId);
+			insertJob.Parameters.AddWithValue(scanPlanItemId);
+			jobId = (Guid)(await insertJob.ExecuteScalarAsync())!;
+		}
+
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO component_results (run_id, job_id, scan_plan_item_id, component_id, attempt_number, status)
+			VALUES ($1, $2, $3, $4, $5, 'completed') RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(runId);
+		command.Parameters.AddWithValue(jobId);
+		command.Parameters.AddWithValue(scanPlanItemId);
+		command.Parameters.AddWithValue(componentId);
+		command.Parameters.AddWithValue(attemptNumber);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task InsertFindingAsync(NpgsqlConnection connection, Guid componentResultId, string controlId, string status, string severity)
+	{
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO component_result_findings (component_result_id, control_id, severity, status)
+			VALUES ($1, $2, $3, $4)
+			""", connection);
+		command.Parameters.AddWithValue(componentResultId);
+		command.Parameters.AddWithValue(controlId);
+		command.Parameters.AddWithValue(severity);
+		command.Parameters.AddWithValue(status);
+		await command.ExecuteNonQueryAsync();
+	}
+
+	/// <summary>Reads <c>pg_trigger.tgenabled</c> ('O' = enabled for origin/local writes, 'D' = disabled) -- issue #1144's proof that migration 0080's backfill re-enables the append-only guard it borrowed.</summary>
+	private static async Task<char> ReadTriggerEnabledFlagAsync(NpgsqlConnection connection, string triggerName)
+	{
+		await using NpgsqlCommand command = new("SELECT tgenabled FROM pg_trigger WHERE tgname = $1", connection);
+		command.Parameters.AddWithValue(triggerName);
+		return (char)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<int> ReadExecutionErrorCountAsync(NpgsqlConnection connection, Guid componentResultId)
+	{
+		await using NpgsqlCommand command = new(
+			"SELECT execution_error_count FROM component_results WHERE id = $1", connection);
+		command.Parameters.AddWithValue(componentResultId);
+		return (int)(await command.ExecuteScalarAsync())!;
+	}
+
 	private static async Task<Guid> InsertSourceRevisionAsync(NpgsqlConnection connection, string revisionKey)
 	{
 		await using NpgsqlCommand command = new(
