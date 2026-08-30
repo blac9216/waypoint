@@ -71,7 +71,13 @@ public sealed class ComponentRepository : IComponentRepository
 			items.Add(Map(reader));
 		}
 
-		return items;
+		List<Component> resolved = new(items.Count);
+		foreach (Component item in items)
+		{
+			resolved.Add(await WithLinkedDisplayNameAsync(item, cancellationToken).ConfigureAwait(false));
+		}
+
+		return resolved;
 	}
 
 	public async Task<Component?> GetAsync(Guid componentId, CancellationToken cancellationToken)
@@ -83,7 +89,8 @@ public sealed class ComponentRepository : IComponentRepository
 		command.Parameters.AddWithValue(componentId);
 
 		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
+		Component? found = await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? Map(reader) : null;
+		return found is null ? null : await WithLinkedDisplayNameAsync(found, cancellationToken).ConfigureAwait(false);
 	}
 
 	public async Task<ComponentUpsertOutcome> UpsertDiscoveredAsync(
@@ -869,6 +876,38 @@ public sealed class ComponentRepository : IComponentRepository
 		}
 
 		return items;
+	}
+
+	/// <summary>
+	/// Issue #1202: a declared-root row (<see cref="CreateDeclaredRootAsync"/>) is
+	/// created UNLINKED with a version-neutral display name (the catalog component
+	/// key); once <c>exact_version</c> links it to one exact catalog product version
+	/// (this write path or a later <see cref="SetConfiguredFactAsync"/> re-link), the
+	/// name a reader sees must match the ACTUAL linked catalog component -- never the
+	/// stale name captured at declaration time, and never re-derived by writing
+	/// <c>display_name</c> on every link change (this read-time derivation instead
+	/// self-heals on every read, including a re-link the write path never explicitly
+	/// visits). Scoped to the closed ssh/target declared-root shape ONLY: a vSphere-
+	/// discovered host/VM/vCenter's <see cref="Component.DisplayName"/> is the real
+	/// vendor-observed name (a hostname, not a catalog-authored label) and must never
+	/// be overwritten by the catalog component's own descriptive name.
+	/// </summary>
+	private async Task<Component> WithLinkedDisplayNameAsync(Component component, CancellationToken cancellationToken)
+	{
+		if (component.CatalogComponentId is not { } catalogComponentId)
+		{
+			return component;
+		}
+
+		CatalogComponent? linked = await _catalog.GetComponentAsync(catalogComponentId, cancellationToken).ConfigureAwait(false);
+		if (linked is null
+			|| !string.Equals(linked.Transport, CatalogTransports.Ssh, StringComparison.Ordinal)
+			|| !string.Equals(linked.SelectorKind, CatalogSelectorKinds.Target, StringComparison.Ordinal))
+		{
+			return component;
+		}
+
+		return component with { DisplayName = linked.DisplayName };
 	}
 
 	private static Component Map(NpgsqlDataReader reader)
