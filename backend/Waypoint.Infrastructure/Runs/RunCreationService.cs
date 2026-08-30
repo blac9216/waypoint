@@ -304,7 +304,9 @@ public sealed class RunCreationService
 		Dictionary<Guid, PlanTargetRequirement> planRequirementsByTarget = [];
 		if (resolvedTargetScope is not null)
 		{
-			plan = await _planner.CompileAsync(null, resolvedTargetScope.ResolvedComponentIds, cancellationToken).ConfigureAwait(false);
+			plan = await _planner
+				.CompileAsync(null, resolvedTargetScope.ResolvedComponentIds, cancellationToken, resolvedTargetScope.Omissions)
+				.ConfigureAwait(false);
 			if (!plan.IsRunnable && resolvedTargetScope.ResolvedComponentIds.Count > 0)
 			{
 				throw new ApiException(

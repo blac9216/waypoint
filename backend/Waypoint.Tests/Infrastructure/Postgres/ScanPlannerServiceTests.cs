@@ -640,6 +640,280 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		Assert.Contains("intentionally empty", plan.Explanation, StringComparison.OrdinalIgnoreCase);
 	}
 
+	/// <summary>
+	/// Issue #1082's own repro: nothing requested (empty resolved scope, no scope
+	/// omissions at all) is distinct wording from "everything requested was omitted"
+	/// below -- both start from an empty resolved-component set, but only one had an
+	/// actual request behind it.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_NothingRequested_ExplanationSaysNothingWasRequested()
+	{
+		ScanPlan plan = await _planner.CompileAsync(null, [], CancellationToken.None, scopeOmissions: []);
+
+		Assert.False(plan.IsRunnable);
+		Assert.Contains("No components were requested", plan.Explanation, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1082's exact repro: two explicitly-requested components, both omitted as
+	/// <c>catalog_incompatible</c> during scope resolution (never reaching this
+	/// planner at all -- resolvedComponentIds is empty). The explanation must say "2
+	/// requested, all omitted," never "no components were requested" -- an operator
+	/// reading only the human-facing string must be able to tell these two situations
+	/// apart.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_EverythingRequestedWasOmitted_ExplanationNamesOmissionReasonsAndCounts()
+	{
+		Guid firstOmitted = Guid.NewGuid();
+		Guid secondOmitted = Guid.NewGuid();
+		List<Waypoint.Core.Components.ScopeOmission> omissions =
+		[
+			new(firstOmitted, null, Waypoint.Core.Components.ScopeOmissionReasons.CatalogIncompatible, "detail-1"),
+			new(secondOmitted, null, Waypoint.Core.Components.ScopeOmissionReasons.CatalogIncompatible, "detail-2"),
+		];
+
+		ScanPlan plan = await _planner.CompileAsync(null, [], CancellationToken.None, omissions);
+
+		Assert.False(plan.IsRunnable);
+		Assert.DoesNotContain("No components were requested", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("2 component(s) requested", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("all 2 omitted", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("2 catalog_incompatible", plan.Explanation, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1082's third state: SOME (not all) requested components were omitted
+	/// during scope resolution, and the survivor plans normally -- the explanation
+	/// must report both the omission and the planning outcome, distinct from either
+	/// all-omitted or none-omitted.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_PartialOmission_ExplanationNamesBothOmittedAndPlannedCounts()
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+		Guid executionProfileId = await SeedExecutionProfileAsync("partial-omission", "8.0.3", withBenchmark: null);
+		await ActivateBaselineAsync(executionProfileId, "partial-omission", benchmarkRevisionId: null);
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		Guid resolvedComponent = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-8001");
+
+		Guid omittedComponent = Guid.NewGuid();
+		List<Waypoint.Core.Components.ScopeOmission> omissions =
+		[
+			new(omittedComponent, null, Waypoint.Core.Components.ScopeOmissionReasons.ComponentAbsent, "detail"),
+		];
+
+		ScanPlan plan = await _planner.CompileAsync(null, [resolvedComponent], CancellationToken.None, omissions);
+
+		Assert.True(plan.IsRunnable);
+		Assert.Contains("2 component(s) requested", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 omitted", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 component_absent", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 of 1 resolved component(s) accepted", plan.Explanation, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Round-2 finding S1 on PR #1232, and the planner-side twin of
+	/// <c>ScopeResolutionServiceTests.ResolveAsync_AllModeUnknownTargetId_IsTargetNotFoundOmission</c>:
+	/// this drives the REAL <see cref="ScopeResolutionService"/> with an unknown target
+	/// id (no hand-built omissions) and feeds its output straight into the planner. That
+	/// omission carries no <see cref="Waypoint.Core.Components.ScopeOmission.ComponentId"/>,
+	/// so it contributes nothing to the requested/omitted component counts -- but the
+	/// resulting plan must still NOT be described as "intentionally empty" while
+	/// <c>scope_omissions</c> says a requested target could not be found. That
+	/// contradiction is exactly the defect issue #1082 was filed about.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_AllModeUnknownTargetId_TargetNotFoundOmission_ExplanationIsNotIntentionallyEmpty()
+	{
+		Guid siteId = (await _sites.CreateAsync($"site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
+		Guid unknownTargetId = Guid.NewGuid();
+		ScopeResolutionService resolution = new(_targets, _components, _catalog);
+
+		Waypoint.Core.Components.ResolvedTargetScope resolved = await resolution.ResolveAsync(
+			siteId,
+			new Waypoint.Core.Jobs.TargetScopeRequest(Waypoint.Core.Jobs.TargetScopeModes.All, [unknownTargetId], null),
+			CancellationToken.None);
+
+		Waypoint.Core.Components.ScopeOmission omission = Assert.Single(resolved.Omissions);
+		Assert.Equal(Waypoint.Core.Components.ScopeOmissionReasons.TargetNotFound, omission.Reason);
+		Assert.Null(omission.ComponentId);
+
+		ScanPlan plan = await _planner.CompileAsync(
+			null, resolved.ResolvedComponentIds, CancellationToken.None, resolved.Omissions);
+
+		Assert.False(plan.IsRunnable);
+		Assert.DoesNotContain("intentionally empty", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 requested target(s) could not be resolved", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 target_not_found", plan.Explanation, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Round-2 finding S1 on PR #1232, mixed case (a): a request naming BOTH an unknown
+	/// target and a real target whose every component is <c>catalog_incompatible</c>.
+	/// Driven through the REAL <see cref="ScopeResolutionService"/> -- it appends the
+	/// <c>target_not_found</c> omission and continues to the next target, so both
+	/// omission LEVELS land in one payload. The plan is correctly unrunnable, but the
+	/// explanation must name the unresolved target too: telling the operator the whole
+	/// story is catalog incompatibility, when half of it is a target that does not
+	/// exist, is ADR-0023's "silently dropped" failure one level up.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_UnknownTargetPlusAllIncompatibleTarget_ExplanationNamesBothOmissionLevels()
+	{
+		Guid siteId = (await _sites.CreateAsync($"site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
+		(TargetWriteOutcome outcome, Guid? realTargetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.VSphere, $"target-{Guid.NewGuid():N}", "{}", null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+		// One discovery pass seeds BOTH: a second UpsertDiscoveredAsync call would mark
+		// the components missing from it absent, changing the omission reason mix.
+		await _components.UpsertDiscoveredAsync(
+			realTargetId!.Value,
+			[
+				new DiscoveredComponent("esxi", "host-s1a-1", "host-s1a-1", null, null, "9.9.9"),
+				new DiscoveredComponent("esxi", "host-s1a-2", "host-s1a-2", null, null, "9.9.9"),
+			],
+			CancellationToken.None);
+		Guid unknownTargetId = Guid.NewGuid();
+
+		ScopeResolutionService resolution = new(_targets, _components, _catalog);
+		Waypoint.Core.Components.ResolvedTargetScope resolved = await resolution.ResolveAsync(
+			siteId,
+			new Waypoint.Core.Jobs.TargetScopeRequest(
+				Waypoint.Core.Jobs.TargetScopeModes.All, [unknownTargetId, realTargetId.Value], null),
+			CancellationToken.None);
+
+		Assert.Empty(resolved.ResolvedComponentIds);
+		Assert.Equal(3, resolved.Omissions.Count);
+		Assert.Single(resolved.Omissions.Where(o => o.ComponentId is null));
+
+		ScanPlan plan = await _planner.CompileAsync(
+			null, resolved.ResolvedComponentIds, CancellationToken.None, resolved.Omissions);
+
+		Assert.False(plan.IsRunnable);
+		// Both levels named, with counts, in one string.
+		Assert.Contains("2 component(s) requested", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("all 2 omitted", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("2 catalog_incompatible", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 requested target(s) could not be resolved", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 target_not_found", plan.Explanation, StringComparison.Ordinal);
+		Assert.DoesNotContain("no gaps found", plan.Explanation, StringComparison.Ordinal);
+		Assert.DoesNotContain("intentionally empty", plan.Explanation, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Round-2 finding S1 on PR #1232, mixed case (b) -- the worse of the two: an unknown
+	/// target alongside a FULLY resolvable one. The surviving component plans cleanly, so
+	/// the plan is genuinely runnable (<see cref="ScanPlan.IsRunnable"/> is intentionally
+	/// asserted TRUE here -- a lost target must not disarm a plan that has real work in
+	/// it), but the explanation must still name the unresolved target and must NOT
+	/// certify "no gaps found" over a request that lost a whole target.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_UnknownTargetPlusResolvableTarget_IsRunnableAndStillNamesTheUnresolvedTarget()
+	{
+		Guid siteId = (await _sites.CreateAsync($"site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
+		(TargetWriteOutcome outcome, Guid? realTargetId) = await _targets.CreateAsync(
+			siteId, TargetKinds.VSphere, $"target-{Guid.NewGuid():N}", "{}", null, CancellationToken.None);
+		Assert.Equal(TargetWriteOutcome.Ok, outcome);
+
+		// The catalog version key is the vendor's declared SCOPE ("8.0"); the observed
+		// exact version below is the patch-level fact the matcher tests against it.
+		Guid executionProfileId = await SeedExecutionProfileAsync("s1b", "8.0", withBenchmark: null);
+		await ActivateBaselineAsync(executionProfileId, "s1b", benchmarkRevisionId: null);
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		await SeedComponentLinkedToAsync(realTargetId!.Value, catalogComponentId, "8.0.3", "host-s1b-1");
+		Guid unknownTargetId = Guid.NewGuid();
+
+		ScopeResolutionService resolution = new(_targets, _components, _catalog);
+		Waypoint.Core.Components.ResolvedTargetScope resolved = await resolution.ResolveAsync(
+			siteId,
+			new Waypoint.Core.Jobs.TargetScopeRequest(
+				Waypoint.Core.Jobs.TargetScopeModes.All, [unknownTargetId, realTargetId.Value], null),
+			CancellationToken.None);
+
+		Assert.Single(resolved.ResolvedComponentIds);
+		Waypoint.Core.Components.ScopeOmission omission = Assert.Single(resolved.Omissions);
+		Assert.Equal(Waypoint.Core.Components.ScopeOmissionReasons.TargetNotFound, omission.Reason);
+
+		ScanPlan plan = await _planner.CompileAsync(
+			null, resolved.ResolvedComponentIds, CancellationToken.None, resolved.Omissions);
+
+		Assert.True(plan.IsRunnable);
+		Assert.Contains("1 requested target(s) could not be resolved", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 target_not_found", plan.Explanation, StringComparison.Ordinal);
+		Assert.DoesNotContain("no gaps found", plan.Explanation, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Round-2 finding S1 on PR #1232, the exhaustiveness guard that kills the CLASS
+	/// rather than the two reported instances: over every combination of {target-level
+	/// omissions 0/1+} x {component-keyed omissions 0/1+} x {accepted components 0/1+},
+	/// the explanation must name the reason word of every omission class present, and
+	/// must speak an all-clear ("no gaps found" / "intentionally empty") only when NO
+	/// omission of either level exists. A future return path that forgets a clause fails
+	/// here regardless of which branch it is.
+	/// </summary>
+	[Theory]
+	[InlineData(false, false, false)]
+	[InlineData(false, false, true)]
+	[InlineData(false, true, false)]
+	[InlineData(false, true, true)]
+	[InlineData(true, false, false)]
+	[InlineData(true, false, true)]
+	[InlineData(true, true, false)]
+	[InlineData(true, true, true)]
+	public async Task CompileAsync_EveryOmissionCombination_ExplanationAccountsForEveryOmissionPresent(
+		bool hasTargetOmission, bool hasComponentOmission, bool hasAcceptedComponent)
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+		List<Guid> resolvedComponentIds = [];
+		if (hasAcceptedComponent)
+		{
+			Guid executionProfileId = await SeedExecutionProfileAsync("matrix", "8.0.3", withBenchmark: null);
+			await ActivateBaselineAsync(executionProfileId, "matrix", benchmarkRevisionId: null);
+			Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+			resolvedComponentIds.Add(await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-matrix-1"));
+		}
+
+		List<Waypoint.Core.Components.ScopeOmission> omissions = [];
+		if (hasComponentOmission)
+		{
+			omissions.Add(new Waypoint.Core.Components.ScopeOmission(
+				Guid.NewGuid(), targetId, Waypoint.Core.Components.ScopeOmissionReasons.ComponentAbsent, "detail"));
+		}
+
+		if (hasTargetOmission)
+		{
+			omissions.Add(new Waypoint.Core.Components.ScopeOmission(
+				null, Guid.NewGuid(), Waypoint.Core.Components.ScopeOmissionReasons.TargetNotFound, "detail"));
+		}
+
+		ScanPlan plan = await _planner.CompileAsync(null, resolvedComponentIds, CancellationToken.None, omissions);
+
+		if (hasTargetOmission)
+		{
+			Assert.Contains(Waypoint.Core.Components.ScopeOmissionReasons.TargetNotFound, plan.Explanation, StringComparison.Ordinal);
+		}
+
+		if (hasComponentOmission)
+		{
+			Assert.Contains(Waypoint.Core.Components.ScopeOmissionReasons.ComponentAbsent, plan.Explanation, StringComparison.Ordinal);
+		}
+
+		if (omissions.Count == 0)
+		{
+			Assert.Equal(hasAcceptedComponent, !plan.Explanation.Contains("intentionally empty", StringComparison.Ordinal));
+		}
+		else
+		{
+			// No all-clear may be spoken over ANY omission, on ANY branch.
+			Assert.DoesNotContain("no gaps found", plan.Explanation, StringComparison.Ordinal);
+			Assert.DoesNotContain("intentionally empty", plan.Explanation, StringComparison.Ordinal);
+		}
+	}
+
 	[Fact]
 	public async Task CompileAsync_IsDeterministic_SameDigestAcrossRepeatedCompiles()
 	{

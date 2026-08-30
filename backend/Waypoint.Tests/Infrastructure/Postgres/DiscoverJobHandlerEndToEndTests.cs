@@ -195,6 +195,28 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 		Assert.Equal("0.0.0-invented-unseeded", vm101Component.DiscoveredFact?.ExactVersion);
 		Assert.True(vm101Component.DiscoveredFact!.DerivedFromParent);
 
+		// Issue #1082: this pass's fixture is a natural mix -- host-11 links (real
+		// seeded 8.0.3), but the root vcenter and its derived vm-101 both carry a
+		// deliberately-unseeded exact version (out_of_declared_scope), and host-12
+		// reports no version at all (no_exact_version_fact). Before this issue, the
+		// discover.progress payload had no way to say so: 3 of the 4 components this
+		// pass upserted are catalog-unlinked and unscannable, and the payload/completion
+		// note must say exactly that rather than reading like a clean success.
+		JsonElement firstPassProgress = await GetDiscoverProgressPayloadAsync(firstRunId);
+		Assert.Equal(3, firstPassProgress.GetProperty("components_unlinked").GetInt32());
+		JsonElement unlinkedByReason = firstPassProgress.GetProperty("components_unlinked_by_reason");
+		Assert.Equal(2, unlinkedByReason.GetProperty("out_of_declared_scope").GetInt32());
+		Assert.Equal(1, unlinkedByReason.GetProperty("no_exact_version_fact").GetInt32());
+
+		Guid firstPassJobId = await GetJobIdForRunAsync(firstRunId);
+		string firstPassJobLog = await GetJobLogTextAsync(firstPassJobId);
+		Assert.Contains("no_exact_version_fact", firstPassJobLog, StringComparison.Ordinal);
+		Assert.Contains("out_of_declared_scope", firstPassJobLog, StringComparison.Ordinal);
+		Assert.Contains("host-12", firstPassJobLog, StringComparison.Ordinal);
+
+		string firstPassNote = await GetJobNoteAsync(firstPassJobId);
+		Assert.Contains("3 catalog-unlinked", firstPassNote, StringComparison.Ordinal);
+
 		// Re-discover with the SAME pass: same identities upsert in place, not duplicated.
 		await RunDiscoverOnceAsync(targetId);
 		await AssertInventoryCountAsync(targetId, expectedActive: 5);
@@ -289,6 +311,15 @@ public sealed class DiscoverJobHandlerEndToEndTests : IAsyncLifetime, IDisposabl
 
 		JsonElement progress = await GetDiscoverProgressPayloadAsync(runId);
 		Assert.True(progress.GetProperty("declared_services_upserted").GetInt32() > 0);
+
+		// Issue #1082's other half: a fully-successful, fully-linked pass (this
+		// fixture's only discovered component -- the root -- links) must report zero
+		// unlinked, distinguishing it from the mixed/unlinked pass covered by
+		// SyncToDispatchToHandler_PopulatesInventory_UpsertsIdempotently_AndDetectsRemovals
+		// above -- both are "done" jobs, but only one is honestly a clean success.
+		Assert.Equal(0, progress.GetProperty("components_unlinked").GetInt32());
+		string note = await GetJobNoteAsync(jobId);
+		Assert.DoesNotContain("catalog-unlinked", note, StringComparison.Ordinal);
 	}
 
 	/// <summary>

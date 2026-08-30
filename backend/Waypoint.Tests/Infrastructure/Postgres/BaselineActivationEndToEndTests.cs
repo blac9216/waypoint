@@ -267,9 +267,9 @@ public sealed class BaselineActivationEndToEndTests : IAsyncLifetime
 			CatalogComponentKey: "vcenter", VendorIdentity: "e2e-vcenter", DisplayName: "vcsa-01.example.internal",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: exactVersionKey);
 
-		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> ambiguities) =
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<Waypoint.Infrastructure.Discovery.DiscoverJobHandler.CatalogLinkageIssue> issues) =
 			await Waypoint.Infrastructure.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync(_catalog, [discovered], CancellationToken.None);
-		Assert.Empty(ambiguities);
+		Assert.Empty(issues);
 		Assert.Equal(catalogComponentId, linked.Single().CatalogComponentId);
 
 		await _components.UpsertDiscoveredAsync(targetId, linked, CancellationToken.None);
@@ -770,10 +770,11 @@ object scopeBody = new
 		DiscoveredComponent discoveredSibling = new(
 			CatalogComponentKey: "vcenter", VendorIdentity: "vcenter-1202", DisplayName: "vcsa-1202.example.internal",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: vcenterProfile!.ProductVersion.VersionKey);
-		(IReadOnlyList<DiscoveredComponent> linkedSibling, IReadOnlyList<string> siblingAmbiguities) =
+		(IReadOnlyList<DiscoveredComponent> linkedSibling,
+			IReadOnlyList<Waypoint.Infrastructure.Discovery.DiscoverJobHandler.CatalogLinkageIssue> siblingIssues) =
 			await Waypoint.Infrastructure.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync(
 				_catalog, [discoveredSibling], CancellationToken.None);
-		Assert.Empty(siblingAmbiguities);
+		Assert.Empty(siblingIssues);
 		Assert.NotNull(linkedSibling.Single().CatalogComponentId);
 		await _components.UpsertDiscoveredAsync(targetId, linkedSibling, CancellationToken.None);
 

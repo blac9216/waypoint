@@ -125,9 +125,9 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 			CatalogComponentKey: "esxi", VendorIdentity: "host-985-compatible", DisplayName: "esxi-01.example.internal",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: SeededExactVersion);
 
-		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> ambiguities) =
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<DiscoverJobHandler.CatalogLinkageIssue> issues) =
 			await DiscoverJobHandler.ResolveCatalogLinkageAsync(_catalog, [hostMapping], CancellationToken.None);
-		Assert.Empty(ambiguities);
+		Assert.Empty(issues);
 		DiscoveredComponent resolvedMapping = linked.Single();
 		Assert.NotNull(resolvedMapping.CatalogComponentId);
 
@@ -150,10 +150,14 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 
 	/// <summary>
 	/// Negative: an exact version with no seeded catalog coverage at all resolves to
-	/// null (honest "not yet covered"), never a guessed nearest match (ADR-0022).
+	/// null (honest "not yet covered"), never a guessed nearest match (ADR-0022). Issue
+	/// #1082: this fail-closed branch now reports an honest reason
+	/// (<see cref="CatalogLinkageReasons.OutOfDeclaredScope"/>) instead of staying
+	/// silent -- an out-of-scope version and an ambiguous match must both be
+	/// actionable, not just the latter.
 	/// </summary>
 	[Fact]
-	public async Task DiscoveredHost_WithNoMatchingCatalogVersion_StaysUnlinked_NoAmbiguity()
+	public async Task DiscoveredHost_WithNoMatchingCatalogVersion_StaysUnlinked_ReportsOutOfDeclaredScope()
 	{
 		await using (NpgsqlConnection seedConnection = new(_fixture.ConnectionString))
 		{
@@ -165,31 +169,37 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 			CatalogComponentKey: "esxi", VendorIdentity: "host-985-nomatch", DisplayName: "esxi-02.example.internal",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: UnseededExactVersion);
 
-		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> ambiguities) =
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<DiscoverJobHandler.CatalogLinkageIssue> issues) =
 			await DiscoverJobHandler.ResolveCatalogLinkageAsync(_catalog, [hostMapping], CancellationToken.None);
 
-		Assert.Empty(ambiguities);
 		Assert.Null(linked.Single().CatalogComponentId);
+		DiscoverJobHandler.CatalogLinkageIssue issue = Assert.Single(issues);
+		Assert.Equal(CatalogLinkageReasons.OutOfDeclaredScope, issue.Reason);
+		Assert.Contains(issue.Reason, CatalogLinkageReasons.All);
+		Assert.Contains("host-985-nomatch", issue.ComponentLabel, StringComparison.Ordinal);
 	}
 
 	/// <summary>
 	/// Negative: a component with no exact version this pass (unavailable) is never
-	/// even looked up -- stays unlinked, no ambiguity, matching
-	/// <see cref="ComponentCapabilityMatcher"/>'s own fail-closed "no configured or
-	/// discovered exact product version" gate one layer up.
+	/// even looked up -- stays unlinked, matching <see cref="ComponentCapabilityMatcher"/>'s
+	/// own fail-closed "no configured or discovered exact product version" gate one
+	/// layer up. Issue #1082: reports <see cref="CatalogLinkageReasons.NoExactVersionFact"/>
+	/// rather than staying silent.
 	/// </summary>
 	[Fact]
-	public async Task DiscoveredComponent_WithNoExactVersion_NeverLooksUp_StaysUnlinked()
+	public async Task DiscoveredComponent_WithNoExactVersion_NeverLooksUp_StaysUnlinked_ReportsNoExactVersionFact()
 	{
 		DiscoveredComponent vmMapping = new(
 			CatalogComponentKey: "vm", VendorIdentity: "vm-985-no-version", DisplayName: "vm-01",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: null);
 
-		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> ambiguities) =
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<DiscoverJobHandler.CatalogLinkageIssue> issues) =
 			await DiscoverJobHandler.ResolveCatalogLinkageAsync(_catalog, [vmMapping], CancellationToken.None);
 
-		Assert.Empty(ambiguities);
 		Assert.Null(linked.Single().CatalogComponentId);
+		DiscoverJobHandler.CatalogLinkageIssue issue = Assert.Single(issues);
+		Assert.Equal(CatalogLinkageReasons.NoExactVersionFact, issue.Reason);
+		Assert.Contains(issue.Reason, CatalogLinkageReasons.All);
 	}
 
 	/// <summary>
@@ -200,7 +210,8 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 	/// (bypassing MapToComponents entirely, as this suite's other tests already do) never
 	/// reaches <see cref="ICatalogRepository.FindTopLevelComponentsByKeyAndVersionAsync"/>
 	/// -- which throws ArgumentException on an empty/whitespace value -- and instead stays
-	/// unlinked, exactly like the already-covered null case.
+	/// unlinked, exactly like the already-covered null case (issue #1082: reporting the
+	/// same <see cref="CatalogLinkageReasons.NoExactVersionFact"/> reason too).
 	/// </summary>
 	[Fact]
 	public async Task DiscoveredComponent_WithEmptyStringExactVersion_NeverLooksUp_StaysUnlinked_NeverThrows()
@@ -209,10 +220,12 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 			CatalogComponentKey: "esxi", VendorIdentity: "host-995-empty-version", DisplayName: "esxi-05.example.internal",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: string.Empty);
 
-		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> warnings) =
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<DiscoverJobHandler.CatalogLinkageIssue> issues) =
 			await DiscoverJobHandler.ResolveCatalogLinkageAsync(_catalog, [hostMapping], CancellationToken.None);
 
-		Assert.Empty(warnings);
+		DiscoverJobHandler.CatalogLinkageIssue issue = Assert.Single(issues);
+		Assert.Equal(CatalogLinkageReasons.NoExactVersionFact, issue.Reason);
+		Assert.Contains(issue.Reason, CatalogLinkageReasons.All);
 		Assert.Null(linked.Single().CatalogComponentId);
 	}
 
@@ -224,10 +237,12 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 			CatalogComponentKey: "esxi", VendorIdentity: "host-995-whitespace-version", DisplayName: "esxi-06.example.internal",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: "   ");
 
-		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> warnings) =
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<DiscoverJobHandler.CatalogLinkageIssue> issues) =
 			await DiscoverJobHandler.ResolveCatalogLinkageAsync(_catalog, [hostMapping], CancellationToken.None);
 
-		Assert.Empty(warnings);
+		DiscoverJobHandler.CatalogLinkageIssue issue = Assert.Single(issues);
+		Assert.Equal(CatalogLinkageReasons.NoExactVersionFact, issue.Reason);
+		Assert.Contains(issue.Reason, CatalogLinkageReasons.All);
 		Assert.Null(linked.Single().CatalogComponentId);
 	}
 
@@ -255,13 +270,15 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 			CatalogComponentKey: sharedComponentKey, VendorIdentity: "component-985-ambiguous", DisplayName: "ambiguous component",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: sharedVersion);
 
-		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> ambiguities) =
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<DiscoverJobHandler.CatalogLinkageIssue> issues) =
 			await DiscoverJobHandler.ResolveCatalogLinkageAsync(_catalog, [mapping], CancellationToken.None);
 
 		Assert.Null(linked.Single().CatalogComponentId);
-		Assert.Single(ambiguities);
-		Assert.Contains(sharedComponentKey, ambiguities[0], StringComparison.Ordinal);
-		Assert.Contains(sharedVersion, ambiguities[0], StringComparison.Ordinal);
+		DiscoverJobHandler.CatalogLinkageIssue issue = Assert.Single(issues);
+		Assert.Equal(CatalogLinkageReasons.Ambiguous, issue.Reason);
+		Assert.Contains(issue.Reason, CatalogLinkageReasons.All);
+		Assert.Contains(sharedComponentKey, issue.Detail, StringComparison.Ordinal);
+		Assert.Contains(sharedVersion, issue.Detail, StringComparison.Ordinal);
 	}
 
 	/// <summary>
