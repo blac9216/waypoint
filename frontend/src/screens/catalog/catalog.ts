@@ -13,7 +13,7 @@
  * anything that moves on this screen, per the contract's explicit rule.
  */
 
-import { apiGet, apiPost } from "../../lib/api";
+import { apiGet, apiGetPaged, apiPost } from "../../lib/api";
 
 export type ArtifactStatus = "not_downloaded" | "queued" | "downloading" | "verified" | "failed";
 
@@ -29,6 +29,111 @@ export interface CatalogArtifact {
 	progress_percent?: number;
 	/** Present when `status === "failed"` — e.g. "checksum mismatch". */
 	failure_reason?: string;
+}
+
+/**
+ * Product grouping (issue #796): the real Broadcom 9.x catalog is 1,088
+ * entries dominated by the Kubernetes stack (VKR alone is 433; plus
+ * VKS_ and SUPERVISOR_SERVICE_ releases), which drowns the ~40 core-infrastructure
+ * products (VCENTER, ESX_HOST, NSX_T_MANAGER, ...) an operator actually
+ * looks for. Grouping/ordering/collapse-by-default is entirely a frontend
+ * concern — the backend's `product` field is an opaque catalog key with no
+ * type or friendly-name metadata (`VendorProductVersionCatalogParser`
+ * writes only `product`/`version`/`size_bytes`).
+ */
+export type ProductType = "core" | "kubernetes";
+
+/** Friendly names for the catalog keys named in issue #796's discovery
+ * write-up. Unrecognized keys fall back to `humanizeProductKey` below
+ * rather than silently rendering nothing — the full ~49-product catalog is
+ * not enumerated here since the backend carries no display-name field to
+ * validate a hardcoded list against. */
+const KNOWN_PRODUCT_NAMES: Record<string, string> = {
+	VCENTER: "vCenter Server",
+	ESX_HOST: "ESXi",
+	NSX_T_MANAGER: "NSX Manager",
+	SDDC_MANAGER_VCF: "SDDC Manager (VCF)",
+	VROPS: "Aria/vRealize Operations",
+	VRA: "Aria/vRealize Automation",
+	VRSLCM: "Aria/vRealize Suite Lifecycle Manager",
+	HCX: "HCX",
+	VKR: "VKR (Kubernetes Release)",
+};
+
+/** `SUPERVISOR_SERVICE_ABC` -> "Supervisor Service ABC"; short (<=3 char)
+ * segments (version numbers, acronyms) are upper-cased rather than
+ * title-cased. */
+function humanizeProductKey(key: string): string {
+	return key
+		.split("_")
+		.filter(Boolean)
+		.map((word) => (word.length <= 3 ? word.toUpperCase() : word[0] + word.slice(1).toLowerCase()))
+		.join(" ");
+}
+
+export function friendlyProductName(productKey: string): string {
+	return KNOWN_PRODUCT_NAMES[productKey] ?? humanizeProductKey(productKey);
+}
+
+/** VKR itself, every `VKS_*` release, and every `SUPERVISOR_SERVICE_*`
+ * component — the Kubernetes-stack bulk called out in issue #796. */
+export function isKubernetesProduct(productKey: string): boolean {
+	return productKey === "VKR" || productKey.startsWith("VKS_") || productKey.startsWith("SUPERVISOR_SERVICE_");
+}
+
+export function productType(productKey: string): ProductType {
+	return isKubernetesProduct(productKey) ? "kubernetes" : "core";
+}
+
+/** Core-infrastructure products named in issue #796, shown first and in
+ * this order; every other core product follows, alphabetically by friendly
+ * name, then Kubernetes-stack products last, also alphabetically. */
+const CORE_PRODUCT_PRIORITY = ["VCENTER", "ESX_HOST", "NSX_T_MANAGER", "SDDC_MANAGER_VCF", "VROPS", "VRA", "VRSLCM", "HCX"];
+
+export interface ProductGroup {
+	key: string;
+	friendlyName: string;
+	type: ProductType;
+	artifacts: CatalogArtifact[];
+	versionCount: number;
+}
+
+/** Groups artifacts by their `product` catalog key, with a per-group
+ * version count (distinct `version` values) and default ordering:
+ * `CORE_PRODUCT_PRIORITY` first, remaining core products alphabetically by
+ * friendly name, Kubernetes-stack products last, also alphabetically. */
+export function groupArtifactsByProduct(artifacts: CatalogArtifact[]): ProductGroup[] {
+	const byKey = new Map<string, CatalogArtifact[]>();
+	for (const artifact of artifacts) {
+		const list = byKey.get(artifact.product);
+		if (list) {
+			list.push(artifact);
+		} else {
+			byKey.set(artifact.product, [artifact]);
+		}
+	}
+
+	const groups: ProductGroup[] = Array.from(byKey.entries()).map(([key, groupArtifacts]) => ({
+		key,
+		friendlyName: friendlyProductName(key),
+		type: productType(key),
+		artifacts: groupArtifacts,
+		versionCount: new Set(groupArtifacts.map((a) => a.version)).size,
+	}));
+
+	return groups.sort((a, b) => {
+		if (a.type !== b.type) {
+			return a.type === "core" ? -1 : 1;
+		}
+		if (a.type === "core") {
+			const ai = CORE_PRODUCT_PRIORITY.indexOf(a.key);
+			const bi = CORE_PRODUCT_PRIORITY.indexOf(b.key);
+			if (ai !== -1 || bi !== -1) {
+				return (ai === -1 ? CORE_PRODUCT_PRIORITY.length : ai) - (bi === -1 ? CORE_PRODUCT_PRIORITY.length : bi);
+			}
+		}
+		return a.friendlyName.localeCompare(b.friendlyName);
+	});
 }
 
 export interface CatalogArtifactsResponse {
@@ -48,6 +153,16 @@ export interface CatalogArtifactsQuery {
 }
 
 /**
+ * `CatalogController.ListArtifacts` binds `[FromQuery] PageRequest page`
+ * (`DefaultLimit = 50`, `MaxLimit = 200` — `Waypoint.Core.Pagination.PageRequest`),
+ * so a single unpaged request returns at most 50 of the real catalog's 1,088
+ * rows. `fetchCatalogArtifactsPage` below always requests the backend's
+ * `MaxLimit` per page to keep the page count (and therefore the fetch time)
+ * as low as the contract allows.
+ */
+const ARTIFACTS_PAGE_LIMIT = 200;
+
+/**
  * Adapts the real `CatalogController.ListArtifacts` response, which is a
  * bare `CatalogArtifactResponse[]` (`return Ok(items...)` — no envelope, no
  * `index_synced_at`, and no `search` query binding), to this module's
@@ -63,13 +178,41 @@ export interface CatalogArtifactsQuery {
  * `status` DO bind server-side (`ListArtifacts`'s query parameters) and are
  * still sent as query params.
  */
-export function fetchCatalogArtifacts(query: CatalogArtifactsQuery = {}): Promise<CatalogArtifactsResponse> {
+function fetchCatalogArtifactsPage(query: CatalogArtifactsQuery, offset: number) {
 	const params = new URLSearchParams();
 	if (query.product) params.set("product", query.product);
 	if (query.version) params.set("version", query.version);
 	if (query.status) params.set("status", query.status);
-	const qs = params.toString();
-	return apiGet<CatalogArtifact[]>(`/catalog/artifacts${qs ? `?${qs}` : ""}`).then((artifacts) => {
+	params.set("limit", String(ARTIFACTS_PAGE_LIMIT));
+	params.set("offset", String(offset));
+	return apiGetPaged<CatalogArtifact>(`/catalog/artifacts?${params.toString()}`);
+}
+
+/**
+ * Fetches every page of `/catalog/artifacts` (issue #796 finding 1: the
+ * catalog is 1,088 rows against a 50-row default / 200-row max page, and
+ * this module's grouping/counts/filters are meant to describe the whole
+ * indexed catalog, not one page of it). Pages sequentially — the endpoint
+ * has no documented concurrent-request guarantee, and this keeps `offset`
+ * math trivial — accumulating until the running total meets the
+ * `X-Total-Count` the first response reports, or a page comes back short
+ * (defensive: the total could legitimately shrink between requests if the
+ * catalog is re-indexed mid-fetch).
+ */
+export function fetchCatalogArtifacts(query: CatalogArtifactsQuery = {}): Promise<CatalogArtifactsResponse> {
+	const collected: CatalogArtifact[] = [];
+
+	async function loadFrom(offset: number): Promise<CatalogArtifact[]> {
+		const { items, totalCount } = await fetchCatalogArtifactsPage(query, offset);
+		collected.push(...items);
+		const nextOffset = offset + items.length;
+		if (items.length < ARTIFACTS_PAGE_LIMIT || nextOffset >= totalCount) {
+			return collected;
+		}
+		return loadFrom(nextOffset);
+	}
+
+	return loadFrom(0).then((artifacts) => {
 		const search = query.search?.trim().toLowerCase();
 		const filtered = search
 			? artifacts.filter((a) => a.name.toLowerCase().includes(search) || a.sha256.toLowerCase().includes(search))

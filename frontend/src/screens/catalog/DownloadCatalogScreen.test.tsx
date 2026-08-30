@@ -67,8 +67,63 @@ const ARTIFACTS: CatalogArtifact[] = [
 	},
 ];
 
+/** A dominant-VKR fixture (issue #796's discovery case: VKR is 433 of the
+ * real catalog's 1,088 entries) — two core-infrastructure products plus a
+ * disproportionately large VKR group, to prove the Kubernetes group
+ * collapses by default while core products stay visible without scrolling
+ * past it. */
+function dominantVkrArtifacts(vkrCount: number): CatalogArtifact[] {
+	const vkr: CatalogArtifact[] = Array.from({ length: vkrCount }, (_, i) => ({
+		id: `vkr-${i}`,
+		name: `vkr-release-${i}.tar`,
+		sha256: `${"a".repeat(63)}${(i % 10).toString()}`,
+		product: "VKR",
+		version: `1.${i}.0`,
+		size_bytes: 1_000_000,
+		status: "not_downloaded" as const,
+	}));
+	return [
+		{
+			id: "art-vcenter",
+			name: "VCSA-8.0U3.iso",
+			sha256: "b".repeat(64),
+			product: "VCENTER",
+			version: "8.0U3",
+			size_bytes: 2_000_000,
+			status: "not_downloaded",
+		},
+		{
+			id: "art-esx",
+			name: "ESXi-8.0U3.zip",
+			sha256: "c".repeat(64),
+			product: "ESX_HOST",
+			version: "8.0U3",
+			size_bytes: 1_500_000,
+			status: "not_downloaded",
+		},
+		...vkr,
+	];
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+/** A paged `/catalog/artifacts` response: slices `artifacts` by the
+ * request's `limit`/`offset` query params and sets `X-Total-Count` to the
+ * full array length, mirroring the real `CatalogController.ListArtifacts`
+ * (`Waypoint.Core.Pagination.PageRequest`) — issue #796 finding 1. A mock
+ * that ignores `limit`/`offset` and always returns the whole fixture cannot
+ * catch a regression to a single unpaged fetch; this one can. */
+function pagedArtifactsResponse(url: string, artifacts: CatalogArtifact[]): Response {
+	const params = new URL(url, "http://localhost").searchParams;
+	const limit = Number(params.get("limit") ?? artifacts.length);
+	const offset = Number(params.get("offset") ?? 0);
+	const page = artifacts.slice(offset, offset + limit);
+	return new Response(JSON.stringify(page), {
+		status: 200,
+		headers: { "Content-Type": "application/json", "X-Total-Count": String(artifacts.length) },
+	});
 }
 
 const READY_PULL_STATUS: CatalogPullStatus = { ready: true };
@@ -87,7 +142,11 @@ describe("DownloadCatalogScreen", () => {
 	let pullStatus: CatalogPullStatus;
 	let pullPostResponse: { status: number; body: unknown };
 
-	function installFetchMock(role: string, initialPullStatus: CatalogPullStatus = READY_PULL_STATUS) {
+	function installFetchMock(
+		role: string,
+		initialPullStatus: CatalogPullStatus = READY_PULL_STATUS,
+		artifacts: CatalogArtifact[] = ARTIFACTS,
+	) {
 		fetchCalls = [];
 		sse = createDriveableSse();
 		pullPostCount = 0;
@@ -110,8 +169,9 @@ describe("DownloadCatalogScreen", () => {
 				// The real CatalogController.ListArtifacts returns a bare array
 				// (`return Ok(items...)`), not an envelope with index_synced_at —
 				// see catalog.ts's fetchCatalogArtifacts doc comment (issue #468
-				// found the mismatch live). Mocking the real shape here.
-				return jsonResponse(ARTIFACTS);
+				// found the mismatch live). Mocking the real shape here, paged the
+				// same way the real backend pages (issue #796 finding 1).
+				return pagedArtifactsResponse(url, artifacts);
 			}
 			if (url === "/api/v1/catalog/pull" && (!init || init.method === undefined || init.method === "GET")) {
 				return jsonResponse(pullStatus);
@@ -506,6 +566,102 @@ describe("DownloadCatalogScreen", () => {
 		);
 
 		await waitFor(() => expect(screen.getByTitle("verified")).toBeInTheDocument());
+	});
+
+	it("groups artifacts by product with friendly names, catalog keys, and version counts", async () => {
+		installFetchMock("Operator", READY_PULL_STATUS, dominantVkrArtifacts(1));
+		render(
+			<AuthProvider>
+				<SystemProvider>
+					<DownloadCatalogScreen />
+				</SystemProvider>
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("VCSA-8.0U3.iso")).toBeInTheDocument());
+
+		expect(screen.getByText("vCenter Server")).toBeInTheDocument();
+		expect(screen.getAllByText("VCENTER").length).toBeGreaterThan(0);
+		expect(screen.getByText("ESXi")).toBeInTheDocument();
+		expect(screen.getAllByText("ESX_HOST").length).toBeGreaterThan(0);
+		expect(screen.getAllByText("1 version · 1 artifact").length).toBe(3);
+	});
+
+	it("filters to just the Kubernetes-stack products via the type filter", async () => {
+		installFetchMock("Operator", READY_PULL_STATUS, dominantVkrArtifacts(3));
+		render(
+			<AuthProvider>
+				<SystemProvider>
+					<DownloadCatalogScreen />
+				</SystemProvider>
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("vCenter Server")).toBeInTheDocument());
+
+		fireEvent.change(screen.getByLabelText("Filter by type"), { target: { value: "kubernetes" } });
+
+		await waitFor(() => expect(screen.queryByText("vCenter Server")).not.toBeInTheDocument());
+		expect(screen.getByText("VKR (Kubernetes Release)")).toBeInTheDocument();
+
+		fireEvent.change(screen.getByLabelText("Filter by type"), { target: { value: "core" } });
+		await waitFor(() => expect(screen.getByText("vCenter Server")).toBeInTheDocument());
+		expect(screen.queryByText("VKR (Kubernetes Release)")).not.toBeInTheDocument();
+	});
+
+	it("dominant-product case: collapses the 433-strong VKR group by default without hiding core products", async () => {
+		installFetchMock("Operator", READY_PULL_STATUS, dominantVkrArtifacts(40));
+		render(
+			<AuthProvider>
+				<SystemProvider>
+					<DownloadCatalogScreen />
+				</SystemProvider>
+			</AuthProvider>,
+		);
+
+		// Core-infrastructure products are visible without any expand click.
+		await waitFor(() => expect(screen.getByText("VCSA-8.0U3.iso")).toBeInTheDocument());
+		expect(screen.getByText("ESXi-8.0U3.zip")).toBeInTheDocument();
+
+		// The Kubernetes group header shows its true count but its rows are
+		// not rendered until expanded.
+		const kubernetesHeader = screen.getByText("VKR (Kubernetes Release)").closest("button")!;
+		expect(within(kubernetesHeader).getByText("40 versions · 40 artifacts")).toBeInTheDocument();
+		expect(kubernetesHeader).toHaveAttribute("aria-expanded", "false");
+		expect(screen.queryByText("vkr-release-0.tar")).not.toBeInTheDocument();
+
+		fireEvent.click(kubernetesHeader);
+		await waitFor(() => expect(screen.getByText("vkr-release-0.tar")).toBeInTheDocument());
+		expect(kubernetesHeader).toHaveAttribute("aria-expanded", "true");
+	});
+
+	it("fetches every page of a >200-row catalog (issue #796 finding 1) so grouping and counts describe the whole catalog, not the first page", async () => {
+		// 302 rows total (2 core + 300 VKR) against the client's 200-row page
+		// size — this can only pass if fetchCatalogArtifacts pages past the
+		// first response instead of trusting a single GET.
+		installFetchMock("Operator", READY_PULL_STATUS, dominantVkrArtifacts(300));
+		render(
+			<AuthProvider>
+				<SystemProvider>
+					<DownloadCatalogScreen />
+				</SystemProvider>
+			</AuthProvider>,
+		);
+		await waitFor(() => expect(screen.getByText("VCSA-8.0U3.iso")).toBeInTheDocument());
+
+		// The Kubernetes group's count reflects all 300 VKR rows, not just
+		// however many landed on the first 200-row page.
+		const kubernetesHeader = await waitFor(() => screen.getByText("VKR (Kubernetes Release)").closest("button")!);
+		await waitFor(() => expect(within(kubernetesHeader).getByText("300 versions · 300 artifacts")).toBeInTheDocument());
+
+		// More than one page was actually requested, at increasing offsets,
+		// each capped at the backend's 200-row MaxLimit.
+		const artifactCalls = fetchCalls.filter((c) => c.url.startsWith("/api/v1/catalog/artifacts"));
+		const offsets = artifactCalls.map((c) => Number(new URL(c.url, "http://localhost").searchParams.get("offset")));
+		expect(artifactCalls.length).toBeGreaterThan(1);
+		expect(offsets).toContain(0);
+		expect(offsets).toContain(200);
+		for (const call of artifactCalls) {
+			expect(new URL(call.url, "http://localhost").searchParams.get("limit")).toBe("200");
+		}
 	});
 
 	it("mode-gating stub hides the screen when mode=disconnected", async () => {
