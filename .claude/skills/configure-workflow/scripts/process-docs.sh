@@ -24,14 +24,17 @@ esc(){ printf '%s' "$1" | sed -e 's/[\&|]/\\&/g'; }
 # awk_esc: escape a replacement value passed to awk's gsub(regex, replacement, …) — gsub
 # treats a bare & in the replacement as "insert the matched text", so a literal & (or \)
 # in field-table/check-name content must be backslash-escaped first, or it silently
-# expands to the matched {{MARKER}} instead of rendering literally.
+# expands to the matched {{MARKER}} instead of rendering literally. The escaped values reach
+# awk through ENVIRON, never `-v`: awk runs its own escape-sequence processing on -v
+# assignments before the program starts, which would strip exactly the backslash layer this
+# adds (`awk -v x='a\\b' 'BEGIN{print length(x)}'` prints 3, not 4). ENVIRON is verbatim.
 awk_esc(){ printf '%s' "$1" | sed -e 's/\\/\\\\/g; s/&/\\\&/g'; }
 proj_title=$(esc "$(jq -r .title <<<"$P")"); proj_url=$(esc "$(jq -r .url <<<"$P")")
 owner_e=$(esc "$OWNER"); machine_e=$(esc "$MACHINE"); num_e=$(esc "$NUM")
 worktree_root=$(esc "$(dirname "$PWD")/$(basename "$PWD")-worktrees")
 unit_cmd=$(esc "${u:-<owner>}"); lint_cmd=$(esc "${l:-<owner>}")
 ftable_e=$(awk_esc "$ftable"); checks_e=$(awk_esc "$checks")
-render(){ sed -e "s|{{PROJECT_TITLE}}|$proj_title|; s|{{PROJECT_NUMBER}}|$num_e|; s|{{PROJECT_URL}}|$proj_url|; s|{{PROJECT_OWNER}}|$owner_e|; s|{{MACHINE_ACCOUNT}}|$machine_e|; s|{{REVIEWER_IDENTITY}}|<owner: none — single account \| <login> via GH_TOKEN>|; s|{{UNIT_CMD}}|$unit_cmd|; s|{{LINT_CMD}}|$lint_cmd|; s|{{INTEGRATION_CMD}}|<owner>|; s|{{UNIT_ENV}}||; s|{{INTEGRATION_ENV}}|<owner>|; s|{{COVERAGE_CMD}}|<owner>|; s|{{COVERAGE_GATE}}|80% and no regression vs base|; s|{{SANITIZE_CMD}}|<owner>|; s|{{PENDING_LIVE_THRESHOLD}}|5|; s|{{WORKTREE_ROOT}}|$worktree_root|; s|{{SCRATCH_DIR}}|<owner>|; s|{{TEST_PREFIX}}|<owner>|; s|{{LOAD_MAX}}|<owner>|; s|{{MEM_MIN_PCT}}|10|; s|{{DISK_DELTA_GB}}|5|; s|{{SEQUENCE_RESOURCES}}|<owner: e.g. numbered migrations — or none>|; s|{{AREA_ROWS}}|<owner: rows proposed by the agent — confirm before labels.sh runs>|" | awk -v ft="$ftable_e" -v ck="$checks_e" '{gsub(/\{\{FIELD_ID_TABLE\}\}/,ft); gsub(/\{\{REQUIRED_CHECKS\}\}/,ck); print}'; }
+render(){ sed -e "s|{{PROJECT_TITLE}}|$proj_title|; s|{{PROJECT_NUMBER}}|$num_e|; s|{{PROJECT_URL}}|$proj_url|; s|{{PROJECT_OWNER}}|$owner_e|; s|{{MACHINE_ACCOUNT}}|$machine_e|; s|{{REVIEWER_IDENTITY}}|<owner: none — single account \| <login> via GH_TOKEN>|; s|{{UNIT_CMD}}|$unit_cmd|; s|{{LINT_CMD}}|$lint_cmd|; s|{{INTEGRATION_CMD}}|<owner>|; s|{{UNIT_ENV}}||; s|{{INTEGRATION_ENV}}|<owner>|; s|{{COVERAGE_CMD}}|<owner>|; s|{{COVERAGE_GATE}}|80% and no regression vs base|; s|{{SANITIZE_CMD}}|<owner>|; s|{{PENDING_LIVE_THRESHOLD}}|5|; s|{{WORKTREE_ROOT}}|$worktree_root|; s|{{SCRATCH_DIR}}|<owner>|; s|{{TEST_PREFIX}}|<owner>|; s|{{LOAD_MAX}}|<owner>|; s|{{MEM_MIN_PCT}}|10|; s|{{DISK_DELTA_GB}}|5|; s|{{SEQUENCE_RESOURCES}}|<owner: e.g. numbered migrations — or none>|; s|{{AREA_ROWS}}|<owner: rows proposed by the agent — confirm before labels.sh runs>|" | FT="$ftable_e" CK="$checks_e" awk 'BEGIN{ft=ENVIRON["FT"]; ck=ENVIRON["CK"]} {gsub(/\{\{FIELD_ID_TABLE\}\}/,ft); gsub(/\{\{REQUIRED_CHECKS\}\}/,ck); print}'; }
 for f in "$T"/*.md; do b=$(basename "$f"); out="$DIR/$b"
   if [ -e "$out" ] && [ "$FORCE" != "$b" ]; then say "keep    $out (exists)"; continue; fi
   render < "$f" > "$out"; say "wrote   $out"; done

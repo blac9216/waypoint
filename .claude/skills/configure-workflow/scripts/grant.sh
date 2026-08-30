@@ -17,12 +17,17 @@ for acct in $MACHINE $REVIEWER; do
   # updateProjectV2Collaborators mutation's input types, never as query output). This
   # is a permanent API gap, not a transient failure, so there is nothing to retry or
   # parse here — never attempt the old query, never infer "missing" or "in sync" from
-  # it, and never let a malformed/empty response satisfy any check. Report unknown and
-  # point at the manual check every run; apply mode re-issues the ADMIN grant
+  # it, and never let a malformed/empty response satisfy any check. Audit mode reports
+  # unknown and points at the manual check; apply mode re-issues the ADMIN grant
   # unconditionally (idempotent — a no-op when already ADMIN) since it cannot first
-  # read current state. See #1218 for the introspection evidence.
-  say "project admin $acct: unknown — no GraphQL/REST field exposes ProjectV2 collaborator roles (see #1218); verify manually: https://github.com/users/$OWNER/projects/$NUM/settings/access"
-  if [ $AUDIT = 0 ]; then
+  # read current state, and announces that it did. See #1218 for the introspection evidence.
+  if [ $AUDIT = 1 ]; then
+    say "project admin $acct: unknown — no GraphQL/REST field exposes ProjectV2 collaborator roles (see #1218); verify manually: https://github.com/users/$OWNER/projects/$NUM/settings/access"
+  else
+    # Apply mode asserts the grant, so it must say so: the operator is entitled to a record of
+    # every privileged mutation, and the audit-mode "verify manually" pointer would describe a
+    # state this branch has just changed. drift=1 keeps the summary from claiming "in sync".
+    drift=1; say "project admin $acct: unknown -> ADMIN (re-asserted unconditionally; role is unreadable, see #1218)"
     if ! gql 'mutation($p:ID!,$u:ID!){updateProjectV2Collaborators(input:{projectId:$p,collaborators:[{userId:$u,role:ADMIN}]}){clientMutationId}}' "$(jq -n --arg p "$PID" --arg u "$uid" '{p:$p,u:$u}')" >/dev/null; then
       say "project admin $acct: ADMIN grant mutation failed — check token scopes/permissions"
     fi
