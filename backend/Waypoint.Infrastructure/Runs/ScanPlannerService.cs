@@ -161,13 +161,18 @@ public sealed class ScanPlannerService
 	/// tries to build the job payload) is unsafe to pass to the vendor content:
 	/// <list type="bullet">
 	/// <item><description><see cref="ScanPlanSkipReasons.UnsafeSelectorName"/> -- the
-	/// DisplayName fails <see cref="ScanComponentNarrowing.IsSafeSelectorName"/>, the
-	/// single conservative allow-list (<c>[A-Za-z0-9._-]</c> only) for a value the
-	/// vendor content interpolates UNQUOTED into <c>Get-VMHost -Name #{vmhostName}</c>:
-	/// PowerCLI wildcards, PowerShell metacharacters, whitespace, control and non-ASCII
-	/// characters are all refused. Checked first and per-item, so it is unsafe
-	/// independent of any collision; the skip detail names the offending character
-	/// class.</description></item>
+	/// DisplayName fails <see cref="ScanComponentNarrowing.IsSafeSelectorName"/>, whose
+	/// rule is decided PER SELECTOR KIND because the vendor content quotes the two
+	/// kinds differently. <c>esxi</c>: the ESX baselines interpolate the value UNQUOTED
+	/// (<c>Get-VMHost -Name #{vmhostName}</c>, 740 files vs 6 quoted), so a strict
+	/// <c>[A-Za-z0-9._-]</c> allow-list applies -- wildcards, PowerShell
+	/// metacharacters, whitespace, control and non-ASCII characters are all refused.
+	/// <c>vm</c>: the vm baselines interpolate into a SINGLE-QUOTED literal
+	/// (<c>Get-VM -Name '#{vmName}'</c>, 277 files vs 0 unquoted), so spaces and
+	/// ordinary punctuation are ALLOWED and only <c>'</c>, the PowerCLI wildcards
+	/// <c>* ? [ ]</c>, control characters and non-ASCII are refused. Checked first and
+	/// per-item, so it is unsafe independent of any collision; the skip detail names
+	/// the offending character class AND the kind-specific rule.</description></item>
 	/// <item><description><see cref="ScanPlanSkipReasons.AmbiguousSelectorName"/> --
 	/// two or more of the REMAINING (already name-safe) items share the same
 	/// (parent target, selector kind, DisplayName) triple. <c>Get-VM -Name
@@ -223,16 +228,26 @@ public sealed class ScanPlannerService
 		// with no collision at all (issue #1138's second, related hazard).
 		foreach ((ScanPlanItem item, Component component) in candidates)
 		{
-			if (ScanComponentNarrowing.DescribeUnsafeSelectorName(component.DisplayName) is { } offendingClass)
+			if (ScanComponentNarrowing.DescribeUnsafeSelectorName(item.SelectorKind, component.DisplayName) is { } offendingClass)
 			{
+				// The rule sentence is kind-specific because the vendor content's
+				// quoting is (see ScanComponentNarrowing.DescribeUnsafeSelectorName):
+				// unquoted for the ESX baselines, single-quoted for the VM ones.
+				string rule = string.Equals(item.SelectorKind, CatalogSelectorKinds.Vm, StringComparison.Ordinal)
+					? "The vendor content passes this value inside a single-quoted PowerCLI -Name argument (Get-VM -Name '#{vmName}'), so spaces and ordinary "
+						+ "punctuation are fine, but a single quote would break out of the literal, a wildcard (* ? [ ]) would silently widen the scope to every "
+						+ "matching VM, and control or non-ASCII characters are refused conservatively because the encoding of the generated input file is not "
+						+ "something Waypoint can prove round-trips."
+					: "Only [A-Za-z0-9._-] is accepted for this selector kind: the vendor ESX baseline content interpolates the value UNQUOTED into its PowerCLI "
+						+ "object selector (Get-VMHost -Name #{vmhostName}), where whitespace would split the argument, a wildcard would silently widen the scope "
+						+ "and a metacharacter would break or inject into the invocation.";
 				demoted.Add(item.ComponentId);
 				skips.Add(new ScanPlanSkip(
 					item.ComponentId,
 					ScanPlanSkipReasons.UnsafeSelectorName,
 					$"Component '{item.ComponentId}' has display name '{component.DisplayName}', which contains {offendingClass}. " +
-						"Only [A-Za-z0-9._-] is accepted: the vendor content interpolates this value unquoted into its PowerCLI object selector, " +
-						"where a wildcard would silently widen the scope and a metacharacter would break or inject into the invocation; " +
-						"no scan attempt was created for this component. Rename the object in vSphere, or use a stable identity that resolves to a safe name."));
+						rule +
+						" No scan attempt was created for this component. Rename the object in vSphere, or use a stable identity that resolves to a safe name."));
 			}
 		}
 

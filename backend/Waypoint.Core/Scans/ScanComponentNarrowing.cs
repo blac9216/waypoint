@@ -92,48 +92,72 @@ public static class ScanComponentNarrowing
 
 	/// <summary>
 	/// Issue #1138: the ONE rule deciding whether a component's <c>DisplayName</c> is
-	/// safe to hand to the vendor content as a narrowed <c>esxi</c>/<c>vm</c> job's
-	/// <c>selector_name</c>. Returns <see langword="null"/> when the name is safe, or a
-	/// short human-readable phrase naming the offending CHARACTER CLASS when it is not
-	/// (used verbatim in the <c>unsafe_selector_name</c> plan-skip detail so an operator
-	/// can see WHY a name was rejected).
+	/// safe to hand to the vendor content as a narrowed job's <c>selector_name</c>.
+	/// Returns <see langword="null"/> when the name is safe for
+	/// <paramref name="selectorKind"/>, or a short human-readable phrase naming the
+	/// offending CHARACTER CLASS when it is not (used verbatim in the
+	/// <c>unsafe_selector_name</c> plan-skip detail so an operator can see WHY a name
+	/// was rejected).
 	///
-	/// The rule is a conservative ALLOW-list -- only <c>[A-Za-z0-9._-]</c> -- not a
-	/// deny-list, because the value is interpolated UNQUOTED into a PowerCLI
-	/// <c>-Name</c> argument by vendor Ruby (<c>Get-VMHost -Name #{vmhostName}</c>).
-	/// Waypoint neither controls nor can prove the quoting of any given release's
-	/// profile, so anything it cannot positively vouch for is refused:
+	/// The rule is decided PER SELECTOR KIND, because the vendored
+	/// <c>dod-compliance-and-automation</c> content quotes the two kinds differently.
+	/// Measured over the vendored content (vSphere 7.0 + 8.0, commit <c>cd6c1f0</c>):
 	/// <list type="bullet">
-	/// <item><description>PowerCLI <b>wildcards</b> (<c>*</c> <c>?</c> <c>[</c> <c>]</c>)
-	/// -- <c>-Name</c> is a wildcard-matching parameter, so a VM literally named
-	/// <c>web*</c> resolves to EVERY VM whose name starts with <c>web</c>: the same
-	/// silent widening of an explicitly narrowed scope ADR-0023 forbids, and exactly the
-	/// hazard this issue exists to close.</description></item>
-	/// <item><description>PowerShell <b>metacharacters</b> (<c>`</c> <c>$</c> <c>;</c>
-	/// <c>|</c> <c>&amp;</c> <c>(</c> <c>)</c> <c>{</c> <c>}</c> <c>&lt;</c> <c>&gt;</c>
-	/// <c>'</c> <c>"</c> <c>#</c> <c>,</c> <c>=</c> <c>^</c> <c>!</c> <c>%</c> <c>~</c>)
-	/// -- in an UNQUOTED argument <c>;</c> terminates the statement and <c>$(...)</c>
-	/// executes a subexpression, so an operator-supplied vSphere object name reaching a
-	/// shell command line is a command-injection surface.</description></item>
-	/// <item><description><b>Whitespace</b> -- splits the unquoted value into more than
-	/// one argument.</description></item>
-	/// <item><description><b>Control</b> and <b>non-ASCII</b> characters -- neither the
-	/// vendor Ruby's encoding of the generated input file nor the remote PowerShell
-	/// host's code page is something Waypoint can prove round-trips the byte
-	/// sequence.</description></item>
+	/// <item><description><c>Get-VM -Name '#{...}'</c> (SINGLE-QUOTED) -- 277 files;
+	/// unquoted <c>Get-VM -Name #{...}</c> -- 0 files.</description></item>
+	/// <item><description><c>Get-VMHost -Name #{vmhostName}</c> (UNQUOTED) -- 740 files;
+	/// quoted -- 6 files.</description></item>
 	/// </list>
-	/// A name that is empty is likewise unsafe: there is nothing to narrow to.
+	///
+	/// <b><c>esxi</c> -- strict allow-list <c>[A-Za-z0-9._-]</c>.</b> The ESX baselines
+	/// interpolate the value UNQUOTED into a PowerCLI <c>-Name</c> argument, where
+	/// <c>;</c> terminates the statement, <c>$(...)</c> executes a subexpression and
+	/// whitespace splits the value into more than one argument. Waypoint neither
+	/// controls nor can prove the quoting of any given release's profile, so anything
+	/// it cannot positively vouch for is refused. ESXi host names are FQDNs anyway, so
+	/// the allow-list costs no realistic coverage.
+	///
+	/// <b><c>vm</c> -- reject only what is hazardous inside a single-quoted string.</b>
+	/// The vm baselines interpolate the value into a PowerShell SINGLE-QUOTED literal,
+	/// in which <c>`</c> <c>$</c> <c>;</c> <c>|</c> <c>&amp;</c> <c>(</c> <c>)</c>
+	/// <c>{</c> <c>}</c> <c>&lt;</c> <c>&gt;</c> <c>"</c> <c>#</c> <c>,</c> <c>=</c>
+	/// <c>^</c> <c>!</c> <c>%</c> <c>~</c> and WHITESPACE are all literal. Rejecting
+	/// them would omit every VM whose display name contains a space -- the ordinary
+	/// shape of a Windows VM name (<c>Windows Server 2022 - test</c>) -- to defend
+	/// against a hazard the imported content does not have. So spaces and ordinary
+	/// punctuation are ALLOWED for <c>vm</c>; what stays rejected is:
+	/// <list type="bullet">
+	/// <item><description><c>'</c> -- breaks OUT of the single-quoted literal.</description></item>
+	/// <item><description>PowerCLI <b>wildcards</b> (<c>*</c> <c>?</c> <c>[</c> <c>]</c>)
+	/// -- <c>-Name</c> is a wildcard-matching parameter regardless of quoting, so a VM
+	/// literally named <c>web*</c> resolves to EVERY VM whose name starts with
+	/// <c>web</c>: the same silent widening of an explicitly narrowed scope ADR-0023
+	/// forbids, and exactly the hazard this issue exists to close.</description></item>
+	/// <item><description><b>Control</b> characters -- they do not survive an input
+	/// file as themselves.</description></item>
+	/// <item><description><b>Non-ASCII</b> characters -- rejected CONSERVATIVELY rather
+	/// than because single quoting fails: neither the vendor Ruby's encoding of the
+	/// generated input file nor the remote PowerShell host's code page is something
+	/// Waypoint can prove round-trips the byte sequence, so a name that would silently
+	/// mis-match is refused instead of scanned against the wrong object. Widening this
+	/// is tracked with the durable fix in #1137 (declared-input roles).</description></item>
+	/// </list>
+	///
+	/// Any other selector kind falls back to the strict allow-list. A name that is
+	/// empty is likewise unsafe for every kind: there is nothing to narrow to.
 	/// </summary>
-	public static string? DescribeUnsafeSelectorName(string? name)
+	public static string? DescribeUnsafeSelectorName(string? selectorKind, string? name)
 	{
 		if (string.IsNullOrEmpty(name))
 		{
 			return "an empty name";
 		}
 
+		bool singleQuotedByVendor = string.Equals(selectorKind, CatalogSelectorKinds.Vm, StringComparison.Ordinal);
+
 		foreach (char c in name)
 		{
-			if (IsSafeSelectorNameCharacter(c))
+			if (IsSafeSelectorNameCharacter(c, singleQuotedByVendor))
 			{
 				continue;
 			}
@@ -141,6 +165,7 @@ public static class ScanComponentNarrowing
 			return c switch
 			{
 				'*' or '?' or '[' or ']' => $"a PowerCLI wildcard character ('{c}')",
+				'\'' when singleQuotedByVendor => "a single quote (')",
 				'`' or '$' or ';' or '|' or '&' or '(' or ')' or '{' or '}' or '<' or '>'
 					or '\'' or '"' or '#' or ',' or '=' or '^' or '!' or '%' or '~' =>
 					$"a PowerShell metacharacter ('{c}')",
@@ -156,14 +181,33 @@ public static class ScanComponentNarrowing
 
 	/// <summary>
 	/// True when <paramref name="name"/> is safe to pass as a narrowed job's
-	/// <c>selector_name</c>. The sole gate; see
-	/// <see cref="DescribeUnsafeSelectorName"/> for the rule and its rationale.
+	/// <c>selector_name</c> for <paramref name="selectorKind"/>. The sole gate; see
+	/// <see cref="DescribeUnsafeSelectorName"/> for the per-kind rule table and its
+	/// rationale.
 	/// </summary>
-	public static bool IsSafeSelectorName(string? name) => DescribeUnsafeSelectorName(name) is null;
+	public static bool IsSafeSelectorName(string? selectorKind, string? name) =>
+		DescribeUnsafeSelectorName(selectorKind, name) is null;
 
 	/// <summary>Highest printable US-ASCII code point (<c>~</c>).</summary>
 	private const char MaxAsciiPrintable = (char)0x7E;
 
-	private static bool IsSafeSelectorNameCharacter(char c) =>
+	/// <summary>
+	/// The per-kind character table. <paramref name="singleQuotedByVendor"/> is true
+	/// only for the kinds the vendor content wraps in a PowerShell single-quoted
+	/// literal (today: <c>vm</c>), where printable ASCII other than <c>'</c> and the
+	/// PowerCLI wildcards is literal and therefore safe.
+	/// </summary>
+	private static bool IsSafeSelectorNameCharacter(char c, bool singleQuotedByVendor)
+	{
+		if (singleQuotedByVendor)
+		{
+			return c is >= ' ' and <= MaxAsciiPrintable
+				&& c is not ('\'' or '*' or '?' or '[' or ']');
+		}
+
+		return IsStrictSelectorNameCharacter(c);
+	}
+
+	private static bool IsStrictSelectorNameCharacter(char c) =>
 		c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '_' or '-';
 }

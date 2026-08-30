@@ -621,38 +621,50 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 	}
 
 	/// <summary>
-	/// Issue #1138's second, related hazard (round-1 review Spec #1/#2): the vendor ESX
-	/// baseline interpolates <c>selector_name</c> UNQUOTED into
-	/// <c>Get-VMHost -Name #{vmhostName}</c>, so anything outside
-	/// <see cref="ScanComponentNarrowing.IsSafeSelectorName"/>'s <c>[A-Za-z0-9._-]</c>
-	/// allow-list is unsafe to pass even with no collision at all. This pins one
-	/// component per rejected class that actually changes behaviour on the wire -- a
-	/// PowerCLI WILDCARD (which would silently widen <c>-Name</c> to every matching
-	/// object), a PowerShell METACHARACTER subexpression (which would execute), a
-	/// QUOTE, and WHITESPACE (which would split the argument) -- each skipped with its
-	/// own <see cref="ScanPlanSkipReasons.UnsafeSelectorName"/> reason whose detail
-	/// names the offending class.
+	/// Issue #1138's second, related hazard (round-1 review Spec #1/#2), corrected per
+	/// selector kind by the round-2 review: the vendored content quotes the two kinds
+	/// DIFFERENTLY. The ESX baselines interpolate <c>selector_name</c> UNQUOTED into
+	/// <c>Get-VMHost -Name #{vmhostName}</c> (740 files), so <c>esxi</c> keeps the
+	/// strict <c>[A-Za-z0-9._-]</c> allow-list; the VM baselines interpolate into a
+	/// SINGLE-QUOTED literal <c>Get-VM -Name '#{vmName}'</c> (277 files, 0 unquoted), so
+	/// for <c>vm</c> only what is hazardous INSIDE that literal is refused. This pins
+	/// one component per rejected class that actually changes behaviour on the wire --
+	/// a PowerCLI WILDCARD (which would silently widen <c>-Name</c> to every matching
+	/// object, either kind), a SINGLE QUOTE (which breaks out of the vm literal), and
+	/// WHITESPACE on an <c>esxi</c> name (which would split the unquoted argument) --
+	/// each skipped with its own <see cref="ScanPlanSkipReasons.UnsafeSelectorName"/>
+	/// reason whose detail names the offending class. The controls are the other half
+	/// of the rule: a SPACED VM name and a metacharacter-bearing VM name plan NORMALLY,
+	/// because inside single quotes they are literal -- rejecting them would omit every
+	/// VM with a space in its name for no gain on the wire.
 	/// </summary>
 	[Fact]
-	public async Task CreateScanRun_DisplayNameUnsafeForUnquotedSelector_SkippedWithUnsafeSelectorNameReason()
+	public async Task CreateScanRun_DisplayNameUnsafeForItsSelectorKind_SkippedWithUnsafeSelectorNameReason()
 	{
 		Guid siteId = await CreateSiteAsync("fanout-vm-unsafe-name");
 		Guid targetId = await CreateTargetAsync(siteId, "vsphere", "vcsa-01");
 		Guid vcenterCred = await SeedCredentialAsync("vcenter");
 		await SeedBindingAsync(targetId, "vsphere-api", vcenterCred);
 
+		// Rejected: whitespace in an UNQUOTED esxi argument splits it into two args.
 		Guid spacedEsxi = await SeedComponentWithRequirementsAsync(
 			targetId, "esxi-spaced", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
 			selectorKind: CatalogSelectorKinds.Esxi, displayName: "esxi host one.example.internal");
+		// Rejected: the single quote breaks OUT of Get-VM -Name '#{vmName}'.
 		Guid quotedVm = await SeedComponentWithRequirementsAsync(
 			targetId, "vm-quoted", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
 			selectorKind: CatalogSelectorKinds.Vm, displayName: "o'clock-vm.example.internal");
-		// The two classes the round-1 review found still open: a PowerCLI wildcard
-		// (Get-VM -Name web* matches EVERY vm starting with "web") and a PowerShell
-		// subexpression in an unquoted argument.
+		// Rejected for BOTH kinds: -Name is a wildcard-matching parameter regardless of
+		// quoting, so Get-VM -Name 'web*' still matches EVERY vm starting with "web".
 		Guid wildcardVm = await SeedComponentWithRequirementsAsync(
 			targetId, "vm-wildcard", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
 			selectorKind: CatalogSelectorKinds.Vm, displayName: "web*");
+		// ACCEPTED (round-2 finding #1): the ordinary shape of a Windows VM name. Inside
+		// the vendor's single-quoted literal the spaces are literal, so this must plan.
+		Guid spacedVm = await SeedComponentWithRequirementsAsync(
+			targetId, "vm-spaced", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: "Windows Server 2022 - test");
+		// ACCEPTED: a PowerShell subexpression is inert inside a single-quoted literal.
 		Guid metacharacterVm = await SeedComponentWithRequirementsAsync(
 			targetId, "vm-metacharacter", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
 			selectorKind: CatalogSelectorKinds.Vm, displayName: "vm-$(hostname)");
@@ -669,26 +681,30 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
 		Guid runId = await ReadRunIdAsync(response);
 
-		// Only the safe-named control component gets a job.
-		List<Guid> linkedComponentIds = await ReadLinkedComponentIdsAsync(runId);
-		Assert.Equal([safeControl], linkedComponentIds);
+		// The safely-named control AND the two vm names that are safe inside single
+		// quotes all get jobs; only the three genuinely hazardous names lose coverage.
+		HashSet<Guid> linkedComponentIds = [.. await ReadLinkedComponentIdsAsync(runId)];
+		Assert.Equal(new HashSet<Guid> { safeControl, spacedVm, metacharacterVm }, linkedComponentIds);
 
 		using JsonDocument plan = await GetPlanAsync(runId);
 		List<JsonElement> skips = [.. plan.RootElement.GetProperty("skips").EnumerateArray()];
-		Assert.Equal(4, skips.Count);
+		Assert.Equal(3, skips.Count);
 		Assert.All(skips, skip => Assert.Equal(ScanPlanSkipReasons.UnsafeSelectorName, skip.GetProperty("reason").GetString()));
 		HashSet<Guid> skippedComponentIds = [.. skips.Select(skip => Guid.Parse(skip.GetProperty("component_id").GetString()!))];
-		Assert.Equal(new HashSet<Guid> { spacedEsxi, quotedVm, wildcardVm, metacharacterVm }, skippedComponentIds);
+		Assert.Equal(new HashSet<Guid> { spacedEsxi, quotedVm, wildcardVm }, skippedComponentIds);
 
-		// The detail names the offending CHARACTER CLASS, so an operator can tell a
-		// scope-widening wildcard apart from a merely awkward name.
+		// The detail names the offending CHARACTER CLASS and the KIND-SPECIFIC rule, so
+		// an operator can tell a scope-widening wildcard apart from a merely awkward
+		// name -- and is never told to rename an object over an unquoted interpolation
+		// the vm baselines do not perform.
 		string DetailFor(Guid componentId) =>
 			skips.Single(skip => skip.GetProperty("component_id").GetString() == componentId.ToString())
 				.GetProperty("detail").GetString()!;
 		Assert.Contains("wildcard", DetailFor(wildcardVm), StringComparison.Ordinal);
-		Assert.Contains("metacharacter", DetailFor(metacharacterVm), StringComparison.Ordinal);
+		Assert.Contains("single-quoted", DetailFor(wildcardVm), StringComparison.Ordinal);
 		Assert.Contains("whitespace", DetailFor(spacedEsxi), StringComparison.Ordinal);
-		Assert.Contains("metacharacter", DetailFor(quotedVm), StringComparison.Ordinal);
+		Assert.Contains("UNQUOTED", DetailFor(spacedEsxi), StringComparison.Ordinal);
+		Assert.Contains("single quote", DetailFor(quotedVm), StringComparison.Ordinal);
 	}
 
 	/// <summary>
@@ -739,7 +755,11 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 	/// which preview also calls, but that placement is exactly what a future refactor
 	/// (the sibling credential post-pass lives OUTSIDE <c>CompileAsync</c>) could break
 	/// silently; this pins it, including the colliding sibling's component ids in the
-	/// detail.
+	/// detail. AC-2 (#734 AC-4) is pinned too: the preview's <c>plan_digest</c> is the
+	/// digest the created run FREEZES, so the skips the caller read before committing
+	/// are provably the same plan the run executes -- not a look-alike recompilation.
+	/// The kind-specific rule is exercised on the preview path as well: a SPACED VM
+	/// name plans, a SPACED ESXi name is skipped.
 	/// </summary>
 	[Fact]
 	public async Task PlanPreview_CollidingAndUnsafeDisplayNames_ReportsBothSkipReasonsBeforeCreation()
@@ -759,41 +779,74 @@ public sealed class ScanRunComponentFanOutTests : IAsyncLifetime
 		Guid wildcardVm = await SeedComponentWithRequirementsAsync(
 			targetId, "preview-wildcard", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
 			selectorKind: CatalogSelectorKinds.Vm, displayName: "preview-web*");
+		// The kind-specific halves of the rule, on the preview path: a spaced VM name is
+		// literal inside Get-VM -Name '#{vmName}' and must PLAN, while the same shape on
+		// an esxi name would split the vendor's UNQUOTED argument and must be SKIPPED.
+		Guid spacedVm = await SeedComponentWithRequirementsAsync(
+			targetId, "preview-spaced-vm", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Vm, displayName: "Windows Server 2022 - test");
+		Guid spacedEsxi = await SeedComponentWithRequirementsAsync(
+			targetId, "preview-spaced-esxi", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
+			selectorKind: CatalogSelectorKinds.Esxi, displayName: "preview esxi one.example.internal");
 		Guid safeControl = await SeedComponentWithRequirementsAsync(
 			targetId, "preview-safe-control", ["vsphere-api"], priority: 4, transport: CatalogTransports.VMware,
 			selectorKind: CatalogSelectorKinds.Esxi);
 
+		object scopeBody = new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all" },
+		};
+
 		HttpResponseMessage response = await SendAsync(HttpMethod.Post, "/api/v1/runs/plan-preview", "Cyber", new
 		{
-			scope = JsonSerializer.Serialize(new
-			{
-				site_id = siteId,
-				target_scope = new { mode = "all" },
-			}),
+			scope = JsonSerializer.Serialize(scopeBody),
 		});
 
 		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 		using JsonDocument preview = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 
-		// The safely-named control is the only accepted item; the three hazardous
-		// components are coverage omissions the caller sees before creating the run.
-		List<Guid> previewItemComponentIds =
+		// The safely-named control and the spaced VM are the accepted items; the four
+		// hazardous components are coverage omissions the caller sees before creating.
+		HashSet<Guid> previewItemComponentIds =
 			[.. preview.RootElement.GetProperty("items").EnumerateArray().Select(item => item.GetProperty("component_id").GetGuid())];
-		Assert.Equal([safeControl], previewItemComponentIds);
+		Assert.Equal(new HashSet<Guid> { safeControl, spacedVm }, previewItemComponentIds);
 
 		List<JsonElement> skips = [.. preview.RootElement.GetProperty("skips").EnumerateArray()];
 		Dictionary<Guid, JsonElement> skipsByComponentId = skips.ToDictionary(
 			skip => Guid.Parse(skip.GetProperty("component_id").GetString()!), skip => skip);
-		Assert.Equal(new HashSet<Guid> { vmA, vmB, wildcardVm }, skipsByComponentId.Keys.ToHashSet());
+		Assert.Equal(new HashSet<Guid> { vmA, vmB, wildcardVm, spacedEsxi }, skipsByComponentId.Keys.ToHashSet());
 
 		Assert.Equal(ScanPlanSkipReasons.AmbiguousSelectorName, skipsByComponentId[vmA].GetProperty("reason").GetString());
 		Assert.Equal(ScanPlanSkipReasons.AmbiguousSelectorName, skipsByComponentId[vmB].GetProperty("reason").GetString());
 		Assert.Equal(ScanPlanSkipReasons.UnsafeSelectorName, skipsByComponentId[wildcardVm].GetProperty("reason").GetString());
+		Assert.Equal(ScanPlanSkipReasons.UnsafeSelectorName, skipsByComponentId[spacedEsxi].GetProperty("reason").GetString());
 
 		// The sibling ids are in the preview detail, not only in the created run's plan.
 		Assert.Contains(vmB.ToString(), skipsByComponentId[vmA].GetProperty("detail").GetString());
 		Assert.Contains(vmA.ToString(), skipsByComponentId[vmB].GetProperty("detail").GetString());
 		Assert.Contains("wildcard", skipsByComponentId[wildcardVm].GetProperty("detail").GetString()!, StringComparison.Ordinal);
+		Assert.Contains("whitespace", skipsByComponentId[spacedEsxi].GetProperty("detail").GetString()!, StringComparison.Ordinal);
+
+		// #1275 AC-2 / #734 AC-4: the preview's plan_digest must be the digest the
+		// created run FREEZES, so the skips the caller just read are provably the same
+		// plan they get -- not a second, separately-compiled one that happened to look
+		// alike. Create with the EXACT SAME scope body preview was called with.
+		string previewDigest = preview.RootElement.GetProperty("plan_digest").GetString()!;
+		Assert.False(string.IsNullOrWhiteSpace(previewDigest));
+
+		HttpResponseMessage createResponse = await PostRunAsync(scopeBody);
+		Assert.Equal(HttpStatusCode.Accepted, createResponse.StatusCode);
+		Guid runId = await ReadRunIdAsync(createResponse);
+
+		ScanPlanRepository plans = new(_fixture.ConnectionString);
+		ScanPlan? persistedPlan = await plans.GetForRunAsync(runId, CancellationToken.None);
+		Assert.NotNull(persistedPlan);
+		Assert.Equal(previewDigest, persistedPlan!.PlanDigest);
+
+		// ...and the created run really did fan out only the safe components, so the
+		// matching digest is a matching PLAN, not a matching empty one.
+		Assert.Equal(new HashSet<Guid> { safeControl, spacedVm }, [.. await ReadLinkedComponentIdsAsync(runId)]);
 	}
 
 	[Fact]

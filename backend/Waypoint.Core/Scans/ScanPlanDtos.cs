@@ -186,25 +186,41 @@ public static class ScanPlanSkipReasons
 	/// <summary>
 	/// Issue #1138: a narrowable <c>esxi</c>/<c>vm</c> plan item's component
 	/// <c>DisplayName</c> fails
-	/// <see cref="ScanComponentNarrowing.IsSafeSelectorName"/> -- the conservative
-	/// ALLOW-list <c>[A-Za-z0-9._-]</c>. The vendor ESX baseline content interpolates
-	/// the name UNQUOTED into the PowerCLI selector
-	/// (<c>Get-VMHost -Name #{vmhostName}</c>), so everything outside that set is
-	/// refused: PowerCLI wildcards (<c>*</c> <c>?</c> <c>[</c> <c>]</c>), which make
+	/// <see cref="ScanComponentNarrowing.IsSafeSelectorName"/>, whose rule is decided
+	/// PER SELECTOR KIND because the vendored content quotes the two kinds
+	/// differently (measured over <c>dod-compliance-and-automation</c>, vSphere
+	/// 7.0 + 8.0):
+	/// <list type="bullet">
+	/// <item><description><c>esxi</c> -- the ESX baselines interpolate the name
+	/// UNQUOTED (<c>Get-VMHost -Name #{vmhostName}</c>, 740 files vs 6 quoted), so the
+	/// conservative ALLOW-list <c>[A-Za-z0-9._-]</c> applies and everything outside it
+	/// is refused: PowerCLI wildcards (<c>*</c> <c>?</c> <c>[</c> <c>]</c>), which make
 	/// <c>-Name</c> match MORE than the narrowed object and silently widen the scope;
 	/// PowerShell metacharacters (<c>`</c> <c>$</c> <c>;</c> <c>|</c> <c>&amp;</c>
 	/// <c>(</c> <c>)</c> <c>{</c> <c>}</c> <c>&lt;</c> <c>&gt;</c> <c>'</c> <c>"</c>
 	/// <c>#</c> <c>,</c> <c>=</c> <c>^</c> <c>!</c> <c>%</c> <c>~</c>), which terminate
 	/// the statement or execute a subexpression in an unquoted argument; whitespace,
 	/// which splits the value into more than one argument; and control/non-ASCII
-	/// characters, whose encoding through the vendor input file and the remote
-	/// PowerShell host Waypoint cannot prove. The skip <c>detail</c> names the offending
-	/// character class. This is vendor content, not Waypoint code, but it constrains
-	/// what Waypoint can safely pass as <c>selector_name</c> -- Waypoint has no way to
-	/// prove a given release's profile quotes the value, so any unsafe name is skipped
-	/// rather than risking a widened, broken or injected PowerCLI invocation.
-	/// Independent of <see cref="AmbiguousSelectorName"/>: a component can have an
-	/// unsafe name with no collision at all.
+	/// characters. ESXi host names are FQDNs anyway, so this costs no realistic
+	/// coverage.</description></item>
+	/// <item><description><c>vm</c> -- the vm baselines interpolate the name into a
+	/// PowerShell SINGLE-QUOTED literal (<c>Get-VM -Name '#{vmName}'</c>, 277 files vs
+	/// 0 unquoted), inside which metacharacters and whitespace are all LITERAL. So
+	/// spaces and ordinary punctuation are ACCEPTED -- rejecting them would omit every
+	/// VM with a space in its name (<c>Windows Server 2022 - test</c>) for no gain --
+	/// and only <c>'</c> (which breaks out of the literal), the PowerCLI wildcards
+	/// <c>*</c> <c>?</c> <c>[</c> <c>]</c> (a property of <c>-Name</c> regardless of
+	/// quoting), control characters and non-ASCII are refused. Non-ASCII is refused
+	/// CONSERVATIVELY -- not because quoting fails, but because the encoding through
+	/// the vendor input file and the remote PowerShell host is not something Waypoint
+	/// can prove round-trips; #1137's declared-input roles is the durable
+	/// fix.</description></item>
+	/// </list>
+	/// The skip <c>detail</c> names the offending character class AND the kind-specific
+	/// rule. This is vendor content, not Waypoint code, but it constrains what Waypoint
+	/// can safely pass as <c>selector_name</c>. Independent of
+	/// <see cref="AmbiguousSelectorName"/>: a component can have an unsafe name with no
+	/// collision at all.
 	/// </summary>
 	public const string UnsafeSelectorName = "unsafe_selector_name";
 
