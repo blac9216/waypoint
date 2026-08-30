@@ -363,6 +363,9 @@ function Invoke-WaypointAttest {
 # identity fields an operator configures ahead of time (ScanOptions.BenchmarkMetadata),
 # and is non-fatal exactly like the sibling repo's own correction step (a correction failure
 # still returns Success -- the raw, already-uploadable CKL was already written).
+# Issue #1068: -Hostname/-Fqdn/-Ip/-Mac carry the plan item's own target facts into
+# `saf convert hdf2ckl`'s asset-identity flags via the vendored New-CklConvertArgs --
+# a missing fact is omitted, never invented.
 # Returns [pscustomobject]: Success, CklPath, MetadataApplied, FailureReason.
 function Invoke-WaypointConvert {
 	[CmdletBinding()]
@@ -374,6 +377,27 @@ function Invoke-WaypointConvert {
 		[Parameter(Mandatory)]
 		[ValidateNotNullOrEmpty()]
 		[string]$CklOutputPath,
+
+		# Issue #1068: the plan item's own target facts, threaded into `saf convert
+		# hdf2ckl`'s --hostname/--fqdn/--ip/--mac asset-identity flags via the vendored
+		# New-CklConvertArgs (module.common.ps1, dot-sourced below) -- exactly the
+		# sibling repo's own convert-call shape. $null/empty is a genuinely missing
+		# fact, never invented: New-CklConvertArgs appends a flag only when non-empty.
+		[Parameter()]
+		[AllowNull()]
+		[string]$Hostname,
+
+		[Parameter()]
+		[AllowNull()]
+		[string]$Fqdn,
+
+		[Parameter()]
+		[AllowNull()]
+		[string]$Ip,
+
+		[Parameter()]
+		[AllowNull()]
+		[string]$Mac,
 
 		[Parameter()]
 		[AllowNull()]
@@ -426,11 +450,17 @@ function Invoke-WaypointConvert {
 	}
 
 	try {
-		# SafConvertArgs shape mirrors New-CklConvertArgs's `convert hdf2ckl -i <input>
-		# -o <output>` (host-metadata flags --hostname/--fqdn/--ip/--mac are not needed
-		# here -- STIG Manager identifies the asset from the CKL's STIG_INFO benchmark
-		# fields this function stamps below, not from host metadata).
-		$null = Invoke-ExternalCommand -Executable 'saf' -Arguments "convert hdf2ckl -i `"$ConvertInputPath`" -o `"$CklOutputPath`"" `
+		# Issue #1068: built via the vendored New-CklConvertArgs (module.common.ps1,
+		# dot-sourced above) so --hostname/--fqdn/--ip/--mac carry the plan item's own
+		# target facts, same as the sibling repo. The prior rationale here for
+		# dropping these flags was wrong: STIG_INFO's benchmark fields (stamped below)
+		# identify the BENCHMARK, not the asset -- STIG Manager/eMASS asset naming and
+		# multi-target CKL disambiguation depend on these host-metadata flags. A
+		# missing fact is omitted (New-CklConvertArgs appends a flag only when
+		# non-empty), never invented.
+		$CklArgs = New-CklConvertArgs -ConvertInputFile $ConvertInputPath -CklStagingPath $CklOutputPath `
+			-Hostname $Hostname -Fqdn $Fqdn -Ip $Ip -Mac $Mac
+		$null = Invoke-ExternalCommand -Executable 'saf' -Arguments $CklArgs `
 			-TimeoutMilliseconds ($TimeoutSeconds * 1000) -ProcessName 'SAF conversion' `
 			-AllowedExitCodes @(0) -Source 'vsphere' -SurfaceOutputOnFailure
 

@@ -1006,6 +1006,30 @@ public sealed class ScanJobHandler : IJobHandler
 			["Version"] = metadata.Version,
 			["TimeoutSeconds"] = _scanOptions.Value.SafTimeoutSeconds,
 		};
+
+		// Issue #1068: thread the plan item's own target facts into the CKL's
+		// --hostname/--fqdn/--ip/--mac asset-identity flags (sibling parity; see
+		// Invoke-WaypointConvert's doc comment). target.Name is the operator-assigned
+		// identity (docs/domain-model.md "Target"), always present, and is what
+		// disambiguates two same-profile targets. connection.host is either an FQDN or
+		// an IP literal -- classified here, never both, so nothing is invented. Waypoint
+		// has no MAC source yet (unlike the sibling's live PowerCLI/network discovery),
+		// so --mac is never populated; that is a genuinely missing fact, not an
+		// oversight.
+		parameters["Hostname"] = target.Name;
+		string? connectionHost = TryGetConnectionHost(target.ConnectionJson);
+		if (!string.IsNullOrWhiteSpace(connectionHost))
+		{
+			if (System.Net.IPAddress.TryParse(connectionHost, out _))
+			{
+				parameters["Ip"] = connectionHost;
+			}
+			else
+			{
+				parameters["Fqdn"] = connectionHost;
+			}
+		}
+
 		if (ruleCorrections.Count > 0)
 		{
 			Dictionary<string, object?> ruleCorrectionsForWire = new(StringComparer.Ordinal);
