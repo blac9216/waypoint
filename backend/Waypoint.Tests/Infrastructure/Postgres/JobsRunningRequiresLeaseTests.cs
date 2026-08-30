@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Reflection;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
@@ -222,10 +221,7 @@ public sealed class JobsRunningRequiresLeaseTests : IAsyncLifetime
 			.Matches(definition, "'([^']+)'::text", RegexOptions.None, TimeSpan.FromSeconds(5))
 			.Select(match => match.Groups[1].Value)];
 
-		HashSet<string> codeStates = [.. typeof(JobStates)
-			.GetFields(BindingFlags.Public | BindingFlags.Static)
-			.Where(field => field.IsLiteral && field.FieldType == typeof(string))
-			.Select(field => (string)field.GetRawConstantValue()!)];
+		HashSet<string> codeStates = [.. JobStates.All];
 
 		Assert.NotEmpty(schemaStates);
 		Assert.Equal(schemaStates.OrderBy(state => state, StringComparer.Ordinal), codeStates.OrderBy(state => state, StringComparer.Ordinal));
@@ -243,12 +239,8 @@ public sealed class JobsRunningRequiresLeaseTests : IAsyncLifetime
 		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
 		await connection.OpenAsync();
 
-		foreach (FieldInfo field in typeof(JobStates)
-			.GetFields(BindingFlags.Public | BindingFlags.Static)
-			.Where(field => field.IsLiteral && field.FieldType == typeof(string)))
+		foreach (string state in JobStates.All)
 		{
-			string state = (string)field.GetRawConstantValue()!;
-
 			// 'running', 'attesting', and 'converting' are the three states that may not
 			// carry a NULL lease (#107, #124) -- so they are written with one.
 			await using NpgsqlCommand insert = new(
@@ -260,7 +252,7 @@ public sealed class JobsRunningRequiresLeaseTests : IAsyncLifetime
 			insert.Parameters.AddWithValue(state);
 
 			object? id = await insert.ExecuteScalarAsync();
-			Assert.True(id is Guid, $"JobStates.{field.Name} ('{state}') was rejected by jobs_state_check.");
+			Assert.True(id is Guid, $"JobStates state '{state}' was rejected by jobs_state_check.");
 		}
 	}
 }

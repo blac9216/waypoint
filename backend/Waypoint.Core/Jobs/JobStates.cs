@@ -65,18 +65,40 @@ public static class JobStates
 /// </summary>
 public static class JobTerminalStates
 {
-	private static readonly HashSet<string> Success = new(StringComparer.Ordinal) { JobStates.Uploaded, JobStates.Done };
-	private static readonly HashSet<string> Failure = new(StringComparer.Ordinal) { JobStates.Failed, JobStates.AuthFailed, JobStates.Cancelled };
-	private static readonly HashSet<string> All = new(StringComparer.Ordinal) { JobStates.Uploaded, JobStates.Done, JobStates.Failed, JobStates.AuthFailed, JobStates.Cancelled };
+	/// <summary>
+	/// The five terminal states, ordered. Issue #1242: this is the vocabulary
+	/// <see cref="Waypoint.Infrastructure.Jobs.JobQueueRepository.TryCompleteRunAsync"/>
+	/// builds its "remaining work" FILTER predicate from, so a state added here without
+	/// a matching schema change fails <c>jobs_state_check</c> instead of silently never
+	/// being "remaining".
+	/// </summary>
+	public static readonly IReadOnlyList<string> All =
+	[
+		JobStates.Uploaded, JobStates.Done, JobStates.Failed, JobStates.AuthFailed, JobStates.Cancelled,
+	];
+
+	/// <summary>
+	/// The subset of <see cref="All"/> that mean "the job did not succeed", ordered.
+	/// Issue #1242: <see cref="Waypoint.Infrastructure.Jobs.JobQueueRepository.TryCompleteRunAsync"/>
+	/// builds its "any failure" FILTER predicate from this list.
+	/// </summary>
+	public static readonly IReadOnlyList<string> FailureStates =
+	[
+		JobStates.Failed, JobStates.AuthFailed, JobStates.Cancelled,
+	];
+
+	private static readonly HashSet<string> SuccessSet = new(StringComparer.Ordinal) { JobStates.Uploaded, JobStates.Done };
+	private static readonly HashSet<string> FailureSet = new(FailureStates, StringComparer.Ordinal);
+	private static readonly HashSet<string> AllSet = new(All, StringComparer.Ordinal);
 
 	/// <summary>True for any of the five states a job never leaves.</summary>
-	public static bool Contains(string state) => All.Contains(state);
+	public static bool Contains(string state) => AllSet.Contains(state);
 
 	/// <summary>True for the two "the job succeeded" terminals.</summary>
-	public static bool IsSuccess(string state) => Success.Contains(state);
+	public static bool IsSuccess(string state) => SuccessSet.Contains(state);
 
 	/// <summary>True for the three "the job did not succeed" terminals.</summary>
-	public static bool IsFailure(string state) => Failure.Contains(state);
+	public static bool IsFailure(string state) => FailureSet.Contains(state);
 }
 
 /// <summary>

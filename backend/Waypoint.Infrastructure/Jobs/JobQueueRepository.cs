@@ -328,10 +328,10 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		int remainingCount;
 		int failureCount;
 		await using (NpgsqlCommand counts = new(
-			"""
+			$"""
 			SELECT
-				COUNT(*) FILTER (WHERE state NOT IN ('uploaded', 'done', 'failed', 'auth-failed', 'cancelled')),
-				COUNT(*) FILTER (WHERE state IN ('failed', 'auth-failed', 'cancelled'))
+				COUNT(*) FILTER (WHERE state NOT IN ({TerminalStateList})),
+				COUNT(*) FILTER (WHERE state IN ({FailureStateList}))
 			FROM jobs WHERE run_id = $1
 			""", connection, transaction))
 		{
@@ -985,8 +985,24 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		""";
 
 	/// <summary>Comma-separated, single-quoted SQL literal list of the <see cref="JobStates"/> values in <paramref name="bucket"/>.</summary>
-	private static string JobCountStateList(JobCountBucket bucket) =>
-		string.Join(", ", JobCountBuckets.StatesIn(bucket).Select(state => $"'{state}'"));
+	private static string JobCountStateList(JobCountBucket bucket) => ToSqlLiteralList(JobCountBuckets.StatesIn(bucket));
+
+	/// <summary>
+	/// Issue #1242: <see cref="TryCompleteRunAsync"/>'s "remaining work" FILTER predicate
+	/// is built from <see cref="JobTerminalStates.All"/> rather than hand-typed, mirroring
+	/// how <see cref="RunSummaryProjectionSql"/> above builds its bucket predicates from
+	/// <see cref="JobCountBuckets"/> -- the terminal vocabulary lives in one place.
+	/// </summary>
+	private static readonly string TerminalStateList = ToSqlLiteralList(JobTerminalStates.All);
+
+	/// <summary>
+	/// Issue #1242: <see cref="TryCompleteRunAsync"/>'s "any failure" FILTER predicate,
+	/// built from <see cref="JobTerminalStates.FailureStates"/>.
+	/// </summary>
+	private static readonly string FailureStateList = ToSqlLiteralList(JobTerminalStates.FailureStates);
+
+	/// <summary>Comma-separated, single-quoted SQL literal list of <paramref name="states"/>.</summary>
+	private static string ToSqlLiteralList(IReadOnlyList<string> states) => string.Join(", ", states.Select(state => $"'{state}'"));
 
 	/// <summary>Reads one row of <see cref="RunSummaryProjectionSql"/>'s column order into a <see cref="RunSummary"/>.</summary>
 	private static RunSummary ReadRunSummary(NpgsqlDataReader reader) => new(
