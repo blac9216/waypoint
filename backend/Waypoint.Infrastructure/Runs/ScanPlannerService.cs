@@ -138,10 +138,175 @@ public sealed class ScanPlannerService
 			}
 		}
 
+		// Issue #1138: a narrowing-selector-name gap can only be detected by comparing
+		// EVERY accepted candidate's own resolved DisplayName against its siblings on
+		// the same vSphere target -- CompileOneAsync (above) plans one component at a
+		// time and has no visibility into the rest of the candidate set, so this pass
+		// runs once the full accepted-item list is known and demotes any offending
+		// item(s) from `items` to `skips` in place.
+		await ApplyNarrowingSelectorNameSkipsAsync(items, skips, cancellationToken).ConfigureAwait(false);
+
 		string digest = ScanPlanDigest.Compute(ScanPlanSchema.CurrentVersion, resolvedComponentIds, items);
 		string explanation = BuildExplanation(resolvedComponentIds.Count, items.Count, skips);
 
 		return new ScanPlan(runId, ScanPlanSchema.CurrentVersion, items, skips, digest, explanation);
+	}
+
+	/// <summary>
+	/// Issue #1138: demotes, in place, any accepted narrowable <c>esxi</c>/<c>vm</c>
+	/// <paramref name="items"/> whose narrowing scoping value (the component's own
+	/// <c>DisplayName</c> -- see <see cref="Waypoint.Infrastructure.Runs.RunCreationService"/>'s
+	/// <c>narrowingSelectorNameByComponentId</c>, which this reproduces at plan time so
+	/// the gap is visible on <c>GET /runs/{id}/plan</c>/preview, not only once fan-out
+	/// tries to build the job payload) is unsafe to pass to the vendor content:
+	/// <list type="bullet">
+	/// <item><description><see cref="ScanPlanSkipReasons.UnsafeSelectorName"/> -- the
+	/// DisplayName fails <see cref="ScanComponentNarrowing.IsSafeSelectorName"/>, whose
+	/// rule is decided PER SELECTOR KIND because the vendor content quotes the two
+	/// kinds differently. <c>esxi</c>: the ESX baselines interpolate the value UNQUOTED
+	/// (<c>Get-VMHost -Name #{vmhostName}</c>, 740 files vs 6 quoted), so a strict
+	/// <c>[A-Za-z0-9._-]</c> allow-list applies -- wildcards, PowerShell
+	/// metacharacters, whitespace, control and non-ASCII characters are all refused.
+	/// <c>vm</c>: the vm baselines interpolate into a SINGLE-QUOTED literal
+	/// (<c>Get-VM -Name '#{vmName}'</c>, 277 files vs 0 unquoted), so spaces and
+	/// ordinary punctuation are ALLOWED and only <c>'</c>, the PowerCLI wildcards
+	/// <c>* ? [ ]</c>, control characters and non-ASCII are refused. Checked first and
+	/// per-item, so it is unsafe independent of any collision; the skip detail names
+	/// the offending character class AND the kind-specific rule.</description></item>
+	/// <item><description><see cref="ScanPlanSkipReasons.AmbiguousSelectorName"/> --
+	/// two or more of the REMAINING (already name-safe) items share the same
+	/// (parent target, selector kind, DisplayName) triple. <c>Get-VM -Name
+	/// &lt;name&gt;</c>/<c>Get-VMHost -Name &lt;name&gt;</c> would resolve to every one
+	/// of them, so ALL members of the colliding group are skipped -- never a guessed
+	/// disambiguation, and never just one side of the pair.</description></item>
+	/// </list>
+	/// Grouped per parent target (vCenter), not globally: the same VM/host name under
+	/// two DIFFERENT vCenters is not ambiguous -- each vCenter resolves its own
+	/// <c>Get-VM</c>/<c>Get-VMHost</c> call independently. Grouped per SELECTOR KIND
+	/// too: an ESXi host and a VM sharing one name on one vCenter are resolved by
+	/// DIFFERENT cmdlets (<c>Get-VMHost -Name</c> vs <c>Get-VM -Name</c>) and are not
+	/// ambiguous with each other, so demoting them would be a false coverage omission.
+	/// The name is compared with <see cref="StringComparer.OrdinalIgnoreCase"/>
+	/// deliberately: vSphere object-name matching is not case-sensitive, so two names
+	/// differing only by case are the same collision hazard, not a safe pair.
+	/// </summary>
+	private async Task ApplyNarrowingSelectorNameSkipsAsync(
+		List<ScanPlanItem> items, List<ScanPlanSkip> skips, CancellationToken cancellationToken)
+	{
+		List<(ScanPlanItem Item, Component Component)> candidates = [];
+		foreach (ScanPlanItem item in items)
+		{
+			if (!string.Equals(item.Transport, CatalogTransports.VMware, StringComparison.Ordinal)
+				|| item.SelectorKind is not (CatalogSelectorKinds.Esxi or CatalogSelectorKinds.Vm))
+			{
+				continue;
+			}
+
+			Component? component = await _components.GetAsync(item.ComponentId, cancellationToken).ConfigureAwait(false);
+			// Defensive only: CompileOneAsync already loaded this exact component
+			// successfully to reach an accepted item, so a null/no-VendorIdentity
+			// result here should never happen -- but a component with no independent
+			// vendor identity has no narrowing selector at all
+			// (RunCreationService gates narrowingSelectorNameByComponentId on
+			// VendorIdentity being present), so it is not a candidate for this check.
+			if (component is null || string.IsNullOrWhiteSpace(component.VendorIdentity))
+			{
+				continue;
+			}
+
+			candidates.Add((item, component));
+		}
+
+		if (candidates.Count == 0)
+		{
+			return;
+		}
+
+		HashSet<Guid> demoted = [];
+
+		// Unsafe-name pass first and independent of collision: a name can be unsafe
+		// with no collision at all (issue #1138's second, related hazard).
+		foreach ((ScanPlanItem item, Component component) in candidates)
+		{
+			if (ScanComponentNarrowing.DescribeUnsafeSelectorName(item.SelectorKind, component.DisplayName) is { } offendingClass)
+			{
+				// The rule sentence is kind-specific because the vendor content's
+				// quoting is (see ScanComponentNarrowing.DescribeUnsafeSelectorName):
+				// unquoted for the ESX baselines, single-quoted for the VM ones.
+				string rule = string.Equals(item.SelectorKind, CatalogSelectorKinds.Vm, StringComparison.Ordinal)
+					? "The vendor content passes this value inside a single-quoted PowerCLI -Name argument (Get-VM -Name '#{vmName}'), so spaces and ordinary "
+						+ "punctuation are fine, but a single quote would break out of the literal, a wildcard (* ? [ ]) would silently widen the scope to every "
+						+ "matching VM, and control or non-ASCII characters are refused conservatively because the encoding of the generated input file is not "
+						+ "something Waypoint can prove round-trips."
+					: "Only [A-Za-z0-9._-] is accepted for this selector kind: the vendor ESX baseline content interpolates the value UNQUOTED into its PowerCLI "
+						+ "object selector (Get-VMHost -Name #{vmhostName}), where whitespace would split the argument, a wildcard would silently widen the scope "
+						+ "and a metacharacter would break or inject into the invocation.";
+				demoted.Add(item.ComponentId);
+				skips.Add(new ScanPlanSkip(
+					item.ComponentId,
+					ScanPlanSkipReasons.UnsafeSelectorName,
+					$"Component '{item.ComponentId}' has display name '{component.DisplayName}', which contains {offendingClass}. " +
+						rule +
+						" No scan attempt was created for this component. Rename the object in vSphere, or use a stable identity that resolves to a safe name."));
+			}
+		}
+
+		// Collision pass over the remaining (already name-safe) candidates, grouped by
+		// (parent target, selector kind, DisplayName) -- the same DisplayName under two
+		// DIFFERENT vCenters is not ambiguous, and neither is an ESXi host that happens
+		// to share a name with a VM (different resolving cmdlet).
+		foreach (IGrouping<(Guid ParentTargetId, string SelectorKind, string DisplayName), (ScanPlanItem Item, Component Component)> group in candidates
+			.Where(c => !demoted.Contains(c.Item.ComponentId))
+			.GroupBy(c => (c.Component.ParentTargetId, c.Item.SelectorKind ?? string.Empty, c.Component.DisplayName), SelectorNameGroupComparer.Instance))
+		{
+			List<(ScanPlanItem Item, Component Component)> colliding = [.. group];
+			if (colliding.Count < 2)
+			{
+				continue;
+			}
+
+			IReadOnlyList<Guid> componentIds = [.. colliding.Select(c => c.Item.ComponentId).OrderBy(id => id)];
+			foreach ((ScanPlanItem item, Component component) in colliding)
+			{
+				demoted.Add(item.ComponentId);
+				skips.Add(new ScanPlanSkip(
+					item.ComponentId,
+					ScanPlanSkipReasons.AmbiguousSelectorName,
+					$"Component '{item.ComponentId}' shares display name '{component.DisplayName}' with another '{item.SelectorKind}' component on the same vSphere target: " +
+						$"'{string.Join("', '", componentIds.Where(id => id != item.ComponentId))}'. The vendor content resolves this narrowing " +
+						"selector by name, and a name-based lookup would return every one of these objects, cross-attributing scan results; " +
+						"no scan attempt was created for any of them. Rename the objects in vSphere so each has a distinct name, then re-plan."));
+			}
+		}
+
+		if (demoted.Count > 0)
+		{
+			items.RemoveAll(item => demoted.Contains(item.ComponentId));
+		}
+	}
+
+	/// <summary>
+	/// Groups <see cref="ApplyNarrowingSelectorNameSkipsAsync"/>'s (parent target,
+	/// selector kind, DisplayName) candidates. Target id and selector kind compare
+	/// ordinally -- a <c>Get-VMHost -Name</c> lookup and a <c>Get-VM -Name</c> lookup
+	/// are separate name spaces, so an <c>esxi</c> and a <c>vm</c> component sharing a
+	/// name never collide -- while the NAME uses
+	/// <see cref="StringComparer.OrdinalIgnoreCase"/>, matching vSphere's own
+	/// case-insensitive object-name resolution.
+	/// </summary>
+	private sealed class SelectorNameGroupComparer : IEqualityComparer<(Guid ParentTargetId, string SelectorKind, string DisplayName)>
+	{
+		public static readonly SelectorNameGroupComparer Instance = new();
+
+		public bool Equals(
+			(Guid ParentTargetId, string SelectorKind, string DisplayName) x,
+			(Guid ParentTargetId, string SelectorKind, string DisplayName) y) =>
+			x.ParentTargetId == y.ParentTargetId
+				&& string.Equals(x.SelectorKind, y.SelectorKind, StringComparison.Ordinal)
+				&& string.Equals(x.DisplayName, y.DisplayName, StringComparison.OrdinalIgnoreCase);
+
+		public int GetHashCode((Guid ParentTargetId, string SelectorKind, string DisplayName) obj) =>
+			HashCode.Combine(obj.ParentTargetId, obj.SelectorKind, obj.DisplayName.ToUpperInvariant());
 	}
 
 	/// <summary>
