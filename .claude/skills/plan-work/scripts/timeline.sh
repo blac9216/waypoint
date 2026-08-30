@@ -16,10 +16,12 @@
 # numbers are rejected (exit 2).
 # Exit codes: 2 = argument error (unknown flag, a value-taking flag with no following value, an empty
 # --milestones/--milestone value, or a --defaults value that is empty or has a part that isn't
-# S=<n>/M=<n>/L=<n> with n greater than zero); 3 = a
+# S=<n>/M=<n>/L=<n> with n an ASCII decimal number greater than zero, so a non-ASCII digit such as
+# "٢" is an argument error too); 3 = a
 # --milestones/--milestone selection was requested but matched zero open milestones; 4 = --parallelism
-# was given a value that is not a positive decimal number matching ^[0-9]+([.][0-9]+)?$ (e.g. "0", "-1",
-# "abc", ".5", "1e2" and leading/trailing whitespace are all rejected); 5 = a blocked_by cycle was
+# was given a value that is not a positive decimal number matching ^[[:digit:]]+([.][[:digit:]]+)?$ (ASCII
+# digits only, so non-ASCII digits such as "٢" are rejected too; "0", "-1", "abc", ".5", "1e2" and
+# leading/trailing whitespace are all rejected); 5 = a blocked_by cycle was
 # detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is
 # the only cause reachable from this script's own flag values -- no --defaults value can produce it any
 # more -- but exit 5 is jq's generic error exit, so an unexpected jq failure would also surface as 5.
@@ -28,10 +30,10 @@ REPO=""; ONLY=""; PAR=""; HISTORY_DIR=""; BUILTIN_DEF="S=2,M=6,L=16"; DEF="$BUIL
 MILESTONE_ARGS=()
 require_arg(){ [ "$#" -ge 2 ] || { echo "timeline.sh: $1 requires a value" >&2; exit 2; }; }
 require_value(){ [ -n "$2" ] || { echo "timeline.sh: $1 requires a non-empty value" >&2; exit 2; }; }
-is_positive_number(){ [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v v="$1" 'BEGIN{exit !(v>0)}'; }
+is_positive_number(){ [[ "$1" =~ ^[[:digit:]]+([.][[:digit:]]+)?$ ]] && awk -v v="$1" 'BEGIN{exit !(v>0)}'; }
 require_positive_number(){
   if ! is_positive_number "$2"; then
-    echo "timeline.sh: $1 \"$2\" must be a positive decimal number matching ^[0-9]+([.][0-9]+)?\$" >&2
+    echo "timeline.sh: $1 \"$2\" must be a positive decimal number matching ^[[:digit:]]+([.][[:digit:]]+)?\$" >&2
     exit 4
   fi
 }
@@ -40,8 +42,8 @@ require_positive_number(){
 # array that the per-part loop would never iterate over). A repeated size is accepted, last one wins.
 require_defaults(){
   local raw="$2" part parts
-  [[ "$raw" =~ ^[SML]=[0-9]+([.][0-9]+)?(,[SML]=[0-9]+([.][0-9]+)?)*$ ]] || {
-    echo "timeline.sh: $1 \"$raw\" must be a comma-separated list of S=<n>,M=<n>,L=<n> (positive decimal numbers; any subset of sizes is allowed and an omitted size keeps its built-in default; an empty value, an empty part, or a trailing comma is rejected)" >&2
+  [[ "$raw" =~ ^[SML]=[[:digit:]]+([.][[:digit:]]+)?(,[SML]=[[:digit:]]+([.][[:digit:]]+)?)*$ ]] || {
+    echo "timeline.sh: $1 \"$raw\" must be a comma-separated list of S=<n>,M=<n>,L=<n> (positive ASCII decimal numbers; any subset of sizes is allowed and an omitted size keeps its built-in default; an empty value, an empty part, or a trailing comma is rejected)" >&2
     exit 2
   }
   IFS=',' read -ra parts <<<"$raw"
@@ -100,7 +102,7 @@ fi
 # ($BUILTIN_DEF) so the jq stage below always gets three numbers. Without this, an omitted size fed
 # jq an empty --arg and any issue carrying that size (or, for M, any unestimated issue) died with a
 # raw "Expected JSON value" parse error at exit 5. A repeated size resolves last-wins (greedy .*X=).
-size_default(){ local v; v=$(sed -n "s/.*$1=\([0-9.]*\).*/\1/p" <<<"$DEF"); [ -n "$v" ] || v=$(sed -n "s/.*$1=\([0-9.]*\).*/\1/p" <<<"$BUILTIN_DEF"); printf '%s' "$v"; }
+size_default(){ local v; v=$(sed -n "s/.*$1=\([[:digit:].]*\).*/\1/p" <<<"$DEF"); [ -n "$v" ] || v=$(sed -n "s/.*$1=\([[:digit:].]*\).*/\1/p" <<<"$BUILTIN_DEF"); printf '%s' "$v"; }
 defS=$(size_default S); defM=$(size_default M); defL=$(size_default L)
 say "milestones (open) for $REPO …"
 gh api --paginate "repos/$REPO/milestones?state=open&per_page=100" --jq '.[]|{number,title,due_on,created_at}' > "$OUT/milestones.jsonl"

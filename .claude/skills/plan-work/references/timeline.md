@@ -48,9 +48,9 @@ reported on stderr; matching zero milestones in total is an error. An empty
 
 | Code | Meaning |
 |---|---|
-| `2` | Argument error — an unrecognized flag, a value-taking flag with no following value, an empty `--milestones`/`--milestone` value, or a `--defaults` value that is empty/whitespace-only or contains a part that isn't `S=<n>`, `M=<n>`, or `L=<n>` with `n` greater than zero (an empty part or a trailing comma is rejected too). |
+| `2` | Argument error — an unrecognized flag, a value-taking flag with no following value, an empty `--milestones`/`--milestone` value, or a `--defaults` value that is empty/whitespace-only or contains a part that isn't `S=<n>`, `M=<n>`, or `L=<n>` with `n` an ASCII decimal number greater than zero (an empty part, a trailing comma, or a non-ASCII digit such as `٢` is rejected too). |
 | `3` | A `--milestones`/`--milestone` selection was requested but matched zero open milestones. |
-| `4` | `--parallelism` was given a value that is not a positive decimal number matching `^[0-9]+([.][0-9]+)?$` (e.g. `0`, `-1`, `abc`, `.5`, `1e2`, and leading/trailing whitespace are all rejected; `0.5` is accepted). A `parallelism.txt` file with the same defect falls back to the 1.5 default instead of erroring — see "parallelism source" above. |
+| `4` | `--parallelism` was given a value that is not a positive decimal number matching `^[[:digit:]]+([.][[:digit:]]+)?$` (ASCII digits only, so non-ASCII digits such as `٢` are rejected too; `0`, `-1`, `abc`, `.5`, `1e2`, and leading/trailing whitespace are all rejected; `0.5` is accepted). A `parallelism.txt` file with the same defect falls back to the 1.5 default instead of erroring — see "parallelism source" above. |
 | `5` | A `blocked_by` cycle was detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is the only cause reachable from the script's own flag values — a `--defaults` value can no longer reach exit 5, since it is either rejected with exit 2 or completed from the built-in table — but `5` is jq's generic error exit, so an unexpected jq failure would surface as `5` as well. |
 
 ## Flags
