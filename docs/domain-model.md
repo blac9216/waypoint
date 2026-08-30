@@ -497,9 +497,11 @@ action. A staged bundle (`OciBundle`) carries its component key, source version,
 computed target repo path, its local tar path and checksum, and a `staged` /
 `pushed` / `push_failed` status. A push-target consumer (`PushTargetConsumer`) is a
 configured destination registry (Software Depot / Harbor / Bootstrap Registry
-Appliance), extending the consumer terminology `content-library` and `mirror`
-consumers already use elsewhere in the Downloads domain, and carries a
-`write_mode_enabled` safety-flag placeholder mirroring the registry's own
+Appliance) -- the first consumer-shaped type in the Downloads domain, modeled
+standalone (no `content-library` or `mirror` consumer type exists in the codebase
+today) but named to anticipate the content-library / mirror consumers design record
+#1161 envisages, and carries a `write_mode_enabled` safety-flag placeholder mirroring
+the registry's own
 unauthenticated-write toggle -- vendor guidance is to bracket a single push between
 enabling and disabling it, since pushes are unauthenticated while it is on. See
 issue #1403 (model), #1413 (acquisition), and #1441 (the push operation and its

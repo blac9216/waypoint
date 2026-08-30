@@ -48,8 +48,14 @@ public sealed class OciBundleTests
 		Assert.Null(OciBundleComponentRepoPaths.TryGetRepoPath("SOME_FUTURE_COMPONENT"));
 	}
 
+	/// <summary>
+	/// Sanity check on the constant's own literal contents. This does NOT verify the
+	/// SQL constraint -- see <see cref="OciBundleStatusesConstraintDriftTests"/> for
+	/// the guard that parses <c>oci_bundles_status_check</c> out of the embedded
+	/// migration SQL and compares it to <see cref="OciBundleStatuses.All"/>.
+	/// </summary>
 	[Fact]
-	public void OciBundleStatuses_All_IsExactlyTheThreeStatusCheckValues()
+	public void OciBundleStatuses_All_MatchesItsOwnDocumentedLiterals()
 	{
 		Assert.Equal(["staged", "pushed", "push_failed"], OciBundleStatuses.All);
 	}
