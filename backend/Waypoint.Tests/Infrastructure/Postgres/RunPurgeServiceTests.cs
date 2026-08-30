@@ -265,6 +265,46 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 	}
 
 	/// <summary>
+	/// Issue #1240: pins the exact #1061 live scenario (12 scan jobs, 3 files each =
+	/// 36 files) reporting the SAME unit at every poll -- a mid-run poll must never
+	/// report the scan-job count (12) while the completed poll reports the file count
+	/// (36). Before #1240, <c>MarkArtifactJobEnqueuedAsync</c> was called with
+	/// <c>scanJobIds.Count</c> (12), so the in-flight poll read <c>artifacts_total: 12,
+	/// artifacts_deleted: 0</c> and only the completed poll read <c>36/36</c> -- this
+	/// test fails on that old behaviour and passes once both polls agree on 36.
+	/// </summary>
+	[Fact]
+	public async Task PurgeRunAsync_TwelveScanJobs_MidRunAndCompletedPollsAgreeOnFileUnit()
+	{
+		Guid runId = await SeedRunAsync("completed");
+		for (int i = 0; i < 12; i++)
+		{
+			await InsertScanJobAsync(runId);
+		}
+
+		RunPurgeResult inProgress = await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
+		Assert.Equal(RunPurgeOutcome.InProgress, inProgress.Outcome);
+
+		// Mid-run poll: GET /runs/{id}/purge while the artifact job is still queued.
+		RunPurgeResult? midRun = await _service.GetStatusAsync(runId, CancellationToken.None);
+		Assert.NotNull(midRun);
+		Assert.Equal(RunPurgeOutcome.InProgress, midRun!.Outcome);
+		Assert.Equal(36, midRun.Status!.ArtifactsTotal);
+		Assert.Equal(0, midRun.Status.ArtifactsDeleted);
+
+		// The runner reports the real per-file outcome (12 jobs * 3 files each).
+		await _purges.ReportArtifactOutcomeAsync(runId, succeeded: true, artifactsDeleted: 36, lastError: null, CancellationToken.None);
+		RunPurgeResult completed = await _service.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
+		Assert.Equal(RunPurgeOutcome.Completed, completed.Outcome);
+
+		// Completed poll: same run, same field, must agree with the mid-run poll's unit.
+		RunPurgeResult? completedPoll = await _service.GetStatusAsync(runId, CancellationToken.None);
+		Assert.NotNull(completedPoll);
+		Assert.Equal(36, completedPoll!.Status!.ArtifactsTotal);
+		Assert.Equal(36, completedPoll.Status.ArtifactsDeleted);
+	}
+
+	/// <summary>
 	/// Issue #1061: <c>ToStatus(tombstone)</c> reads the completed purge's artifact
 	/// count back out of the tombstone's <c>detail</c> JSON rather than hardcoding
 	/// zeros. Inserts the tombstone directly (bypassing <see cref="RunPurgeService"/>
@@ -325,6 +365,48 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		RunPurgeTombstone tombstone = new(
 			Id: Guid.NewGuid(), RunId: Guid.NewGuid(), RunType: "scan", PriorState: "completed",
 			Actor: "admin-tester", Outcome: "completed", DetailJson: "not json at all",
+			OccurredAt: DateTimeOffset.UtcNow);
+
+		int artifactsDeleted = RunPurgeService.ReadArtifactsDeleted(tombstone, NullLogger.Instance);
+
+		Assert.Equal(0, artifactsDeleted);
+	}
+
+	/// <summary>
+	/// Issue #1240 secondary hardening: a negative <c>artifacts_deleted</c> is
+	/// unreachable via <c>RunPurgeRepository.CompleteAsync</c> today (it always
+	/// serializes a non-negative <c>int</c>), but this projection must still never
+	/// surface a fabricated negative count verbatim -- it must fail closed to 0 like
+	/// every other malformed shape, not pass the negative value through.
+	/// </summary>
+	[Fact]
+	public void ReadArtifactsDeleted_NegativeValue_FailsClosedToZero()
+	{
+		RunPurgeTombstone tombstone = new(
+			Id: Guid.NewGuid(), RunId: Guid.NewGuid(), RunType: "scan", PriorState: "completed",
+			Actor: "admin-tester", Outcome: "completed", DetailJson: """{"artifacts_deleted": -1}""",
+			OccurredAt: DateTimeOffset.UtcNow);
+
+		int artifactsDeleted = RunPurgeService.ReadArtifactsDeleted(tombstone, NullLogger.Instance);
+
+		Assert.Equal(0, artifactsDeleted);
+	}
+
+	/// <summary>
+	/// Issue #1240 secondary hardening: a fractional or out-of-int32-range
+	/// <c>artifacts_deleted</c> is numeric (so it must NOT hit the "missing a numeric
+	/// artifacts_deleted field" branch, which would misdescribe it) but still cannot be
+	/// read as a valid count, so it must fail closed to 0 the same as the other
+	/// malformed shapes.
+	/// </summary>
+	[Theory]
+	[InlineData("""{"artifacts_deleted": 3.5}""")]
+	[InlineData("""{"artifacts_deleted": 99999999999}""")]
+	public void ReadArtifactsDeleted_NonIntegerNumericValue_FailsClosedToZero(string detailJson)
+	{
+		RunPurgeTombstone tombstone = new(
+			Id: Guid.NewGuid(), RunId: Guid.NewGuid(), RunType: "scan", PriorState: "completed",
+			Actor: "admin-tester", Outcome: "completed", DetailJson: detailJson,
 			OccurredAt: DateTimeOffset.UtcNow);
 
 		int artifactsDeleted = RunPurgeService.ReadArtifactsDeleted(tombstone, NullLogger.Instance);
