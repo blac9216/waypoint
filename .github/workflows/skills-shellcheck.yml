@@ -37,13 +37,10 @@ jobs:
       # Forcing the shell on the command line is the standard fix for
       # library scripts and doesn't require touching the files themselves.
       #
-      # -S error: as of #1231, .claude/skills/configure-workflow/scripts
-      # carries ~29 pre-existing info/style/warning-tier shellcheck findings
-      # (tracked, not this issue's job to fix — see PR #1220's review).
-      # Gating at error keeps this job honest about what's enforced today
-      # without silencing those findings or blocking on an unrelated
-      # in-flight cleanup. Tightening to the stricter tier once that
-      # backlog is clear is a follow-up (see issue #1231 discussion).
+      # -S warning: tightened from -S error by #1235 once the sole warning-tier
+      # finding (_lib.sh SC2034 on MANIFESTS, consumed only by sourcing scripts)
+      # was fixed with a directive. info/style-tier findings remain unenforced
+      # (tracked separately, not this issue's scope — see issue #1235).
       - name: shellcheck
         run: |
           if ! command -v shellcheck >/dev/null; then
@@ -52,4 +49,4 @@ jobs:
           fi
           shellcheck --version
           find .claude/skills -type f -name "*.sh" -print0 | \
-            xargs -0 --no-run-if-empty shellcheck --shell=bash -S error
+            xargs -0 --no-run-if-empty shellcheck --shell=bash -S warning
