@@ -349,6 +349,10 @@ public sealed class SchemaMigrationTests
 	/// calls <c>GetRunAsync</c>/<c>ListRunsAsync</c>/<c>ListRunHistoryAsync</c> in
 	/// production (issue #1303). The CHECK widening runs BEFORE the backfill, pinned by
 	/// <see cref="Migration0081_PreExistingZeroVerdictCompletedRow_IsBackfilledAfterTheCheckWidens"/>.
+	/// Migration 0099 (issue #1479, pre-assigned slot -- deliberate gap from 0081, not a
+	/// bug) reserves the <c>binaries-download</c> run/job type in both
+	/// <c>jobs_job_type_check</c> and <c>runs_run_type_check</c>; no new tables, so no
+	/// new runner grants.
 	/// 0117 (pre-assigned slot, issue #1470) adds esx_acquisition_subscriptions --
 	/// named ESX acquisition presets selecting a subset of the
 	/// lcm.esx.supported.host.platforms vendor vocabulary, TEXT[] selection validated
@@ -373,7 +377,7 @@ public sealed class SchemaMigrationTests
 	/// (SELECT/INSERT/UPDATE, no DELETE) mirroring migration 0025's existing
 	/// <c>depot_artifacts</c> grant to the same role.
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 82;
+	private const int ExpectedMigrationCount = 83;
 
 	private readonly PostgresFixture _fixture;
 

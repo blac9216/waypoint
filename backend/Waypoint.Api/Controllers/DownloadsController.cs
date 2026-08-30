@@ -219,6 +219,138 @@ public sealed class DownloadsController : ControllerBase
 		return Accepted(new DownloadsQueuedResponse(runId.ToString(), downloadIds.Select(id => id.ToString()).ToArray()));
 	}
 
+	/// <summary>
+	/// Queue a connected VCFDT binaries download for a catalog selection: either one or
+	/// more depot artifact ids, or a whole release (<see cref="ReleaseSelector"/>,
+	/// resolved to its member artifacts here at enqueue time -- grill decision R2-2).
+	/// Issue #1479 (epic #1181, split from #795): the same one-run-N-jobs scan-style
+	/// fanout <see cref="QueueDownloads"/> uses (grill decision Q18), but onto its own
+	/// <c><see cref="RunTypes.BinariesDownload"/></c> run/job type -- distinct from the
+	/// legacy <c>download</c> path above, which #1040 removes entirely. This slice only
+	/// enqueues <c>queued</c> jobs; the download-runner handler that claims and executes
+	/// them (invoking the installed tool's <c>binaries download --id ...</c>) is #1482 --
+	/// see <see cref="JobCapabilities.Download"/> and
+	/// <c>Waypoint.DownloadRunner.DownloadRunnerJobTypes</c> for why this job type is
+	/// reserved but not yet claimable by any runner. Operator+, matching
+	/// <see cref="QueueDownloads"/>'s floor.
+	///
+	/// Exactly one selection mode is required: neither, or both
+	/// <see cref="QueueBinariesDownloadRequest.DepotArtifactIds"/> and
+	/// <see cref="QueueBinariesDownloadRequest.Release"/> supplied together, is a 400 --
+	/// an ambiguous request is rejected up front rather than silently preferring one. An
+	/// unknown artifact id, or a release with zero matching artifacts, is a 404 before
+	/// any run is created (the same "validate the whole batch first, fan out atomically
+	/// after" shape <see cref="QueueDownloads"/> uses, so a bad selection can never leave
+	/// a half-created run). Both selection modes resolve the full matching set via
+	/// <see cref="ListAllArtifactsAsync"/> rather than a single capped page, and a
+	/// repeated id in <c>depot_artifact_ids</c> is deduped (first-seen order) to one
+	/// job, not fanned out as a race on the same target.
+	/// </summary>
+	[HttpPost("binaries")]
+	[RequireOperatorRole]
+	[ProducesResponseType(typeof(BinariesDownloadQueuedResponse), StatusCodes.Status202Accepted)]
+	public async Task<ActionResult<BinariesDownloadQueuedResponse>> QueueBinariesDownload(
+		QueueBinariesDownloadRequest request, CancellationToken cancellationToken)
+	{
+		bool hasIds = request?.DepotArtifactIds is { Count: > 0 };
+		bool hasRelease = request?.Release is { Product.Length: > 0, Version.Length: > 0 };
+		if (hasIds == hasRelease)
+		{
+			throw ApiException.Validation(
+				"Exactly one of depot_artifact_ids or release (with product and version) is required.");
+		}
+
+		string initiatedBy = User.FindFirstValue(ClaimTypes.Name) ?? User.Identity?.Name ?? "admin";
+
+		List<DepotArtifact> resolved;
+		if (hasRelease)
+		{
+			ReleaseSelector release = request!.Release!;
+			List<DepotArtifact> members = await ListAllArtifactsAsync(
+				new DepotArtifactFilter(release.Product, release.Version, null), cancellationToken).ConfigureAwait(false);
+			if (members.Count == 0)
+			{
+				throw ApiException.NotFound(
+					"Release not found.", $"No depot artifacts match product '{release.Product}' version '{release.Version}'.");
+			}
+
+			resolved = members;
+		}
+		else
+		{
+			List<DepotArtifact> catalog = await ListAllArtifactsAsync(
+				new DepotArtifactFilter(null, null, null), cancellationToken).ConfigureAwait(false);
+			Dictionary<Guid, DepotArtifact> byId = catalog.ToDictionary(item => item.Id);
+
+			// Dedupe by id, preserving first-seen order, so a duplicate entry in
+			// depot_artifact_ids (e.g. ["X","X"]) fans out exactly one job for that
+			// artifact rather than two jobs racing on the same TargetId.
+			resolved = [];
+			HashSet<Guid> seen = [];
+			foreach (string rawId in request!.DepotArtifactIds!)
+			{
+				if (!Guid.TryParse(rawId, out Guid artifactId) || !byId.TryGetValue(artifactId, out DepotArtifact? artifact))
+				{
+					throw ApiException.NotFound("Depot artifact not found.", $"Depot artifact '{rawId}' does not exist.");
+				}
+
+				if (seen.Add(artifactId))
+				{
+					resolved.Add(artifact);
+				}
+			}
+		}
+
+		// One run for the whole batch (ADR-0008), then one binaries-download job per
+		// artifact via the same shared FanOutJobsAsync path QueueDownloads uses.
+		Guid runId = await _jobs.CreateRunAsync(RunTypes.BinariesDownload, "{}", credentialId: null, initiatedBy, cancellationToken).ConfigureAwait(false);
+
+		List<JobSpec> specs = [];
+		foreach (DepotArtifact artifact in resolved)
+		{
+			string payload = JsonSerializer.Serialize(new
+			{
+				depot_artifact_id = artifact.Id,
+				external_id = artifact.ExternalId,
+			});
+			specs.Add(new JobSpec(RunTypes.BinariesDownload, DownloadPriority, TargetId: artifact.Id, TargetName: artifact.ExternalId, Payload: payload));
+		}
+
+		await _jobs.FanOutJobsAsync(runId, specs, initiatedBy, cancellationToken).ConfigureAwait(false);
+
+		return Accepted(new BinariesDownloadQueuedResponse(runId.ToString(), resolved.Select(artifact => artifact.Id.ToString()).ToArray()));
+	}
+
+	/// <summary>
+	/// Pages through <see cref="IDepotArtifactRepository.ListAsync"/> at <see cref="PageRequest"/>'s
+	/// <c>MaxLimit</c> (200) per call until every filtered row has been fetched, using the
+	/// method's own filtered <c>TotalCount</c> as the stopping signal rather than trusting
+	/// a single page. Used by <see cref="QueueBinariesDownload"/> so neither a whole-release
+	/// selection (AC 3: "resolves to its member artifacts at enqueue time") nor an id-list
+	/// selection against a catalog past the first page silently drops members past the
+	/// per-page cap and enqueues a partial run under a 202 as if it were complete.
+	/// </summary>
+	private async Task<List<DepotArtifact>> ListAllArtifactsAsync(DepotArtifactFilter filter, CancellationToken cancellationToken)
+	{
+		List<DepotArtifact> all = [];
+		int offset = 0;
+		while (true)
+		{
+			(IReadOnlyList<DepotArtifact> page, long totalCount) = await _artifacts
+				.ListAsync(filter, new PageRequest { Limit = 200, Offset = offset }, cancellationToken)
+				.ConfigureAwait(false);
+			all.AddRange(page);
+			if (page.Count == 0 || all.Count >= totalCount)
+			{
+				break;
+			}
+
+			offset += page.Count;
+		}
+
+		return all;
+	}
+
 	/// <summary>List the download queue, newest-first. Viewer+, matching <c>CatalogController.ListArtifacts</c>.</summary>
 	[HttpGet]
 	[RequireViewerRole]

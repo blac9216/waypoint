@@ -31,6 +31,41 @@ public sealed record DownloadsQueuedResponse(
 	IReadOnlyList<string> DownloadIds);
 
 /// <summary>
+/// Request body for <c>POST /api/v1/downloads/binaries</c> (issue #1479): the connected
+/// VCFDT catalog-selection path. Exactly one selection mode is required -- either
+/// <see cref="DepotArtifactIds"/> (one or more ad hoc catalog artifact ids) or
+/// <see cref="Release"/> (a whole release, resolved to every member artifact at enqueue
+/// time per grill decision R2-2) -- never both, never neither.
+/// </summary>
+public sealed record QueueBinariesDownloadRequest(
+	[property: JsonPropertyName("depot_artifact_ids")]
+	IReadOnlyList<string>? DepotArtifactIds,
+
+	[property: JsonPropertyName("release")]
+	ReleaseSelector? Release);
+
+/// <summary>
+/// Identifies a whole release by the same <c>product</c>/<c>version</c> pair
+/// <c>GET /catalog/artifacts</c> already filters on (migration 0007's generated
+/// columns) -- the depot catalog has no separate release-id entity, so this pair IS
+/// the release identity a "whole-release" selection resolves against.
+/// </summary>
+public sealed record ReleaseSelector(
+	[property: JsonPropertyName("product")]
+	string Product,
+
+	[property: JsonPropertyName("version")]
+	string Version);
+
+/// <summary>Response body for <c>POST /api/v1/downloads/binaries</c> (202 Accepted).</summary>
+public sealed record BinariesDownloadQueuedResponse(
+	[property: JsonPropertyName("run_id")]
+	string RunId,
+
+	[property: JsonPropertyName("depot_artifact_ids")]
+	IReadOnlyList<string> DepotArtifactIds);
+
+/// <summary>
 /// Response body for one row of <c>GET /api/v1/downloads</c>
 /// (docs/api-contract.md "Queue view: rate, ETA, retries").
 /// </summary>

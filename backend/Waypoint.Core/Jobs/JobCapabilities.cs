@@ -70,6 +70,15 @@ public static class JobCapabilities
 	/// remaining "later" types has a registered <see cref="IJobHandler"/> yet; they are
 	/// listed here so the closed <c>job_type</c> set and the closed capability sets stay
 	/// in lockstep from day one rather than drifting until each handler lands.
+	/// <c>binaries-download</c> (issue #1479, migration 0099) joins this set the same
+	/// way: reserved here but deliberately NOT in
+	/// <c>Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed</c> until its
+	/// job-handler sibling (#1482) registers a handler and adds it there in the same
+	/// change. This is the inverse of issue #619's failure mode (a handler *was*
+	/// registered there but the allowlist was never updated, so jobs queued forever
+	/// unclaimed); here no handler exists yet, so the guard is
+	/// <c>EveryRegisteredJobHandlerIsClaimableTests</c>, which fails CI immediately if
+	/// this type were allowlisted before #1482 lands.
 	/// </summary>
 	public static readonly IReadOnlySet<string> Download = new HashSet<string>(StringComparer.Ordinal)
 	{
@@ -81,7 +90,8 @@ public static class JobCapabilities
 		"update",
 		"tool-install",
 		"depot-enrollment",
-		"catalog-pull"
+		"catalog-pull",
+		"binaries-download"
 	};
 
 	/// <summary>
