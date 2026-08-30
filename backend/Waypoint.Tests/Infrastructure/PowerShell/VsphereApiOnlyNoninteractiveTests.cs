@@ -384,4 +384,85 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 		System.Management.Automation.PSObject vcenter = Assert.Single(OfType(run.Items, "vcenter"));
 		Assert.Equal("vcenter-instance-solo-0001", vcenter.Properties["MoRef"]?.Value as string);
 	}
+
+	/// <summary>
+	/// Issue #1115 (round-1 review, finding 1): the CI-enforced regression guard for the
+	/// identity-based session match, driving the SHIPPED <c>WaypointDiscovery.psm1</c>
+	/// through <c>Invoke-WaypointDiscovery</c>. Two linked sessions are connected -- so
+	/// the "exactly one session" fallback cannot carry the case -- and the requested
+	/// -VCenter differs from the session's reported name only in case and a trailing
+	/// dot. The pre-#1115 exact `$_.Name -eq $VCenter` comparison matched neither
+	/// session and emitted NO vcenter row at all; the tier-1 normalized comparison in
+	/// Resolve-WaypointPrimarySession matches vcsa-77 and only vcsa-77. Deliberately a
+	/// tier-1 (case/trailing-dot) match: it needs no DNS, so the assertion is
+	/// deterministic on any host or runner.
+	/// </summary>
+	[Fact]
+	public async Task Discovery_WhenALinkedSessionMatchesTheTargetOnlyAfterNormalization_EmitsThatSessionsIdentity()
+	{
+		PowerShellExecutor executor = CreateExecutor();
+		var run = await RunDiscoveryWithSessionsAsync(
+			executor,
+			"VCSA-77.Example.Internal.",
+			"""
+			@(
+				[pscustomobject]@{ Name = 'vcsa-77.example.internal'; InstanceUuid = 'vcenter-instance-sibling-0077'; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0077' },
+				[pscustomobject]@{ Name = 'vcsa-78.example.internal'; InstanceUuid = 'vcenter-instance-sibling-0078'; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0078' }
+			)
+			""");
+
+		Assert.True(run.Succeeded, run.FailureReason);
+		System.Management.Automation.PSObject vcenter = Assert.Single(OfType(run.Items, "vcenter"));
+		Assert.Equal("vcenter-instance-sibling-0077", vcenter.Properties["MoRef"]?.Value as string);
+		Assert.Equal("vcsa-77.example.internal", vcenter.Properties["Name"]?.Value as string);
+
+		// The sibling's identity must never be the one adopted.
+		Assert.NotEqual("vcenter-instance-sibling-0078", vcenter.Properties["MoRef"]?.Value as string);
+
+		// The rest of the pass is unaffected (the fake transport walks the cluster
+		// fixture once per linked session, so two sessions yield two cluster rows).
+		Assert.Equal(2, OfType(run.Items, "cluster").Count);
+	}
+
+	/// <summary>
+	/// The mirror of the guard above (issue #1115 round-1 review, finding 1, second
+	/// half): with two linked sessions and a -VCenter that matches NEITHER by any tier
+	/// -- normalized name, forward address, or reverse PTR -- the fail-closed contract
+	/// still holds end-to-end on the shipped module: no vcenter row, no sibling
+	/// identity adopted by position, and the operator gets a Write-Warning in the job
+	/// log naming both counts so the absence is explained rather than silent.
+	/// </summary>
+	[Fact]
+	public async Task Discovery_WhenNoLinkedSessionMatchesByIdentity_EmitsNoVcenterRow_AndWarnsWithBothCounts()
+	{
+		PowerShellExecutor executor = CreateExecutor(out RecordingLogBuffer logBuffer);
+		var run = await RunDiscoveryWithSessionsAsync(
+			executor,
+			"vcsa-01.example.internal",
+			"""
+			@(
+				[pscustomobject]@{ Name = 'vcsa-77.example.internal'; InstanceUuid = 'vcenter-instance-sibling-0077'; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0077' },
+				[pscustomobject]@{ Name = 'vcsa-78.example.internal'; InstanceUuid = 'vcenter-instance-sibling-0078'; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0078' }
+			)
+			""");
+
+		Assert.True(run.Succeeded, run.FailureReason);
+		Assert.Empty(OfType(run.Items, "vcenter"));
+		Assert.DoesNotContain(run.Items, i => (i.Properties["MoRef"]?.Value as string)?.Contains("sibling", StringComparison.Ordinal) is true);
+
+		// The absence is explained, not silent: severity 'warning', the target host,
+		// and both counts (2 linked sessions, 0 matched).
+		Assert.Contains(
+			logBuffer.Payloads,
+			payload =>
+				payload.Contains("\"severity\":\"warning\"", StringComparison.Ordinal) &&
+				payload.Contains("could not uniquely identify the vCenter session", StringComparison.Ordinal) &&
+				payload.Contains("vcsa-01.example.internal", StringComparison.Ordinal) &&
+				payload.Contains("among 2 linked session(s)", StringComparison.Ordinal) &&
+				payload.Contains("(0 matched by name/address)", StringComparison.Ordinal));
+
+		// And the pass itself survives the withheld root: inventory still arrives
+		// (one cluster row per linked session from the fake transport).
+		Assert.Equal(2, OfType(run.Items, "cluster").Count);
+	}
 }
