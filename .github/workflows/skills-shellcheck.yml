@@ -1,0 +1,55 @@
+name: skills-shellcheck
+
+# Path-filtered: only .claude/skills/**/*.sh changes (or this workflow file)
+# trigger the job. deploy.yml's own shellcheck step only searches
+# deploy/ and scripts/, so scripts under .claude/skills/ (agent-facing
+# automation, not deploy tooling) were never linted anywhere in CI — see
+# issue #1231.
+on:
+  pull_request:
+    paths:
+      - ".claude/skills/**/*.sh"
+      - ".github/workflows/skills-shellcheck.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".claude/skills/**/*.sh"
+      - ".github/workflows/skills-shellcheck.yml"
+
+concurrency:
+  group: skills-shellcheck-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck .claude/skills
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      # --shell=bash: several scripts here (e.g. configure-workflow's
+      # _lib.sh) are sourced helpers with no shebang by design, which
+      # shellcheck otherwise can't classify and flags as SC2148 (error).
+      # Forcing the shell on the command line is the standard fix for
+      # library scripts and doesn't require touching the files themselves.
+      #
+      # -S error: as of #1231, .claude/skills/configure-workflow/scripts
+      # carries ~29 pre-existing info/style/warning-tier shellcheck findings
+      # (tracked, not this issue's job to fix — see PR #1220's review).
+      # Gating at error keeps this job honest about what's enforced today
+      # without silencing those findings or blocking on an unrelated
+      # in-flight cleanup. Tightening to the stricter tier once that
+      # backlog is clear is a follow-up (see issue #1231 discussion).
+      - name: shellcheck
+        run: |
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version
+          find .claude/skills -type f -name "*.sh" -print0 | \
+            xargs -0 --no-run-if-empty shellcheck --shell=bash -S error
