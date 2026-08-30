@@ -179,6 +179,7 @@ function installFetchMock(
 		artifacts?: unknown[];
 		attestationsApplied?: unknown[] | "unavailable";
 		runList?: unknown[];
+		runDetail?: unknown;
 		componentResultsRollup?: unknown | "unavailable";
 		uploadAttempts?: unknown[] | "unavailable";
 	} = {},
@@ -187,6 +188,7 @@ function installFetchMock(
 	const artifacts = options.artifacts ?? RUN_ARTIFACTS;
 	const attestationsApplied = options.attestationsApplied ?? ATTESTATIONS_APPLIED;
 	const runList = options.runList ?? RUN_LIST;
+	const runDetail = options.runDetail ?? RUN_LIST[0];
 	const componentResultsRollup = options.componentResultsRollup ?? COMPONENT_RESULTS_ROLLUP;
 	const uploadAttempts = options.uploadAttempts ?? UPLOAD_ATTEMPTS;
 	globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -196,7 +198,7 @@ function installFetchMock(
 			return jsonResponse(runList, { "X-Total-Count": String(runList.length) });
 		}
 		if (url === "/api/v1/runs/RUN-2026-0802-0412") {
-			return jsonResponse(RUN_LIST[0]);
+			return jsonResponse(runDetail);
 		}
 		if (url === "/api/v1/runs/RUN-2026-0802-0412/jobs") {
 			return jsonResponse(RUN_JOBS);
@@ -642,6 +644,129 @@ describe("ResultsScreen", () => {
 			fireEvent.click(screen.getByText("esxi-02.example.internal", { selector: ".results__cresult-row span" }));
 
 			await waitFor(() => expect(screen.getByText("No upload attempts recorded for this component.")).toBeInTheDocument());
+		});
+	});
+
+	// --- Issue #1140/#1247: coverage incompleteness and execution errors ---
+
+	describe("Coverage incompleteness and execution errors (issue #1140/#1247)", () => {
+		it("renders no coverage-incomplete flag and the genuine evaluated denominator for a clean, fully-evaluated run", async () => {
+			installFetchMock({
+				runList: [{ ...RUN_LIST[0], coverage_incomplete: false }],
+				runDetail: { ...RUN_LIST[0], coverage_incomplete: false },
+				artifacts: [{ ...RUN_ARTIFACTS[0], controls_total: 20, controls_evaluated: 20, controls_execution_error: 0 }],
+			});
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("RUN-2026-0802-0412")).toBeInTheDocument());
+			// The genuinely-complete case renders exactly as before: no qualifier
+			// anywhere, and the denominator reads as a plain (non-warning) value.
+			expect(screen.queryByText("coverage incomplete")).not.toBeInTheDocument();
+			await waitFor(() => expect(screen.getByText("20/20")).toBeInTheDocument());
+			const denominator = screen.getByText("20/20");
+			expect(denominator.className).not.toContain("--warn");
+			expect(screen.getByText("0", { selector: ".results__exec-err" })).toBeInTheDocument();
+		});
+
+		it("flags a run-list row and the detail header with a visible qualifier when coverage_incomplete is true", async () => {
+			installFetchMock({
+				runList: [{ ...RUN_LIST[0], coverage_incomplete: true }],
+				runDetail: { ...RUN_LIST[0], coverage_incomplete: true },
+			});
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getAllByText("coverage incomplete").length).toBeGreaterThan(0));
+			const runRow = screen.getByText("RUN-2026-0802-0412", { selector: ".results__run-id" }).closest(".results__run-row");
+			expect(within(runRow as HTMLElement).getByText("coverage incomplete")).toBeInTheDocument();
+		});
+
+		it("renders the evaluated denominator next to the CAT counts, flagged when a scan evaluated fewer controls than it reported", async () => {
+			installFetchMock({
+				artifacts: [{ ...RUN_ARTIFACTS[0], controls_total: 69, controls_evaluated: 0 }],
+			});
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("0/69")).toBeInTheDocument());
+			// An all-skipped/all-errored scan reading 0/0/0 CAT open must not be
+			// mistaken for clean: the denominator itself carries the warn treatment.
+			expect(screen.getByText("0/69").className).toContain("results__evaluated--warn");
+		});
+
+		it("renders 'n/a' for the evaluated denominator when counts_available is false, never a fabricated 0/0", async () => {
+			installFetchMock({ artifacts: RUN_ARTIFACTS_UNCOUNTABLE });
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("PER-TARGET ARTIFACTS")).toBeInTheDocument());
+			expect(screen.getByTitle("Execution-error count not available (could not count).")).toHaveTextContent("n/a");
+		});
+
+		it("surfaces controls_execution_error distinctly from open findings, never merged into a CAT count", async () => {
+			installFetchMock({
+				artifacts: [{ ...RUN_ARTIFACTS[0], controls_total: 20, controls_evaluated: 17, controls_execution_error: 3 }],
+			});
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("17/20")).toBeInTheDocument());
+			const execErr = screen.getByText("3", { selector: ".results__exec-err" });
+			expect(execErr.className).toContain("results__exec-err--warn");
+			// The CAT I open pill still shows its own, separate count (1 from
+			// RUN_ARTIFACTS) -- execution errors are never folded into it.
+			expect(screen.getByTitle("CAT I open: 1")).toBeInTheDocument();
+		});
+
+		it("gives completed_zero_controls its own label and class on the component-results panel, never the --unknown fallback", async () => {
+			installFetchMock({
+				componentResultsRollup: {
+					run_id: "RUN-2026-0802-0412",
+					planned_component_count: 2,
+					by_status: [
+						{
+							status: "completed_zero_controls",
+							component_count: 1,
+							cat_i_open: 0,
+							cat_ii_open: 0,
+							cat_iii_open: 0,
+							passed_count: 0,
+							not_applicable_count: 0,
+							not_reviewed_count: 0,
+							skipped_count: 0,
+							execution_error_count: 0,
+						},
+					],
+				},
+			});
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("Completed — 0 controls evaluated")).toBeInTheDocument());
+			const bucket = screen.getByText("Completed — 0 controls evaluated").closest(".results__cresult-status");
+			expect(bucket?.className).toContain("results__cresult-status--zero-controls");
+			expect(bucket?.className).not.toContain("results__cresult-status--unknown");
+		});
+
+		it("surfaces execution_error_count on the component-results bucket, distinguished from component_count", async () => {
+			installFetchMock({
+				componentResultsRollup: {
+					run_id: "RUN-2026-0802-0412",
+					planned_component_count: 1,
+					by_status: [
+						{
+							status: "execution_error",
+							component_count: 1,
+							cat_i_open: 0,
+							cat_ii_open: 0,
+							cat_iii_open: 0,
+							passed_count: 0,
+							not_applicable_count: 0,
+							not_reviewed_count: 0,
+							skipped_count: 0,
+							execution_error_count: 5,
+						},
+					],
+				},
+			});
+			renderWithAuth();
+
+			await waitFor(() => expect(screen.getByText("5 controls errored")).toBeInTheDocument());
 		});
 	});
 });

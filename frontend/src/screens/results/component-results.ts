@@ -2,28 +2,36 @@
  * Component-results data layer (issue #745 remainder): typed clients for the
  * two backend read surfaces this slice consumes —
  *
- *   - `GET /runs/{id}/component-results/summary` (PR #952): a pure SQL
- *     GROUP BY rollup of the LATEST attempt per `scan_plan_items` row,
- *     bucketed by the six-status vocabulary
- *     (`completed`/`execution_error`/`skipped` at the component-result
- *     level; `NotReviewedCount`/`PassedCount`/etc. are per-finding sums
- *     within each bucket — see `ComponentResultRollupStatus` below for the
- *     exact shape). `planned_component_count` is the plan's total accepted
- *     item count, so coverage (planned vs. resulted, including plan
- *     omissions/skips) is `sum(by_status[].component_count)` vs. that
- *     number — a plan item with no result row at all (still queued/running,
- *     or a pre-#745 run) is coverage that is simply not yet reflected,
- *     never fabricated into any bucket.
+ *   - `GET /runs/{id}/component-results/summary` (PR #952, extended by issues
+ *     #1144/#1140): a pure SQL GROUP BY rollup of the LATEST attempt per
+ *     `scan_plan_items` row, bucketed by the component-result-level status
+ *     vocabulary — `completed`/`completed_zero_controls`/`execution_error`/
+ *     `skipped` (migration 0081 added `completed_zero_controls`, a component
+ *     that evaluated zero controls, distinguishable by status itself rather
+ *     than only by the adjacent `execution_error_count`/`evaluated_zero_controls`
+ *     read-time signal); `NotReviewedCount`/`PassedCount`/`ExecutionErrorCount`/
+ *     etc. are per-finding sums within each bucket — see
+ *     `ComponentResultRollupStatus` below for the exact shape.
+ *     `planned_component_count` is the plan's total accepted item count, so
+ *     coverage (planned vs. resulted, including plan omissions/skips) is
+ *     `sum(by_status[].component_count)` vs. that number — a plan item with
+ *     no result row at all (still queued/running, or a pre-#745 run) is
+ *     coverage that is simply not yet reflected, never fabricated into any
+ *     bucket.
  *
  *   - `GET /jobs/{id}/upload-attempts` (issue #744 remainder): the
  *     append-only STIG Manager upload-attempt history for one job
  *     (migration 0062), oldest-first.
  *
- * The six-status vocabulary rendered "honestly" per the design brief's
- * Results map: `execution_error` and `not_reviewed` are visually distinct
- * from `completed`/`failed`/`passed` — never collapsed into a single
- * pass/fail read. `component_results.status` (`completed`/`execution_error`/
- * `skipped`) answers "did the job attempt finish", while
+ * The status vocabulary is rendered "honestly" per the design brief's
+ * Results map: `execution_error`, `completed_zero_controls`, and
+ * `not_reviewed` are all visually distinct from `completed`/`failed`/
+ * `passed` — never collapsed into a single pass/fail read, and never left to
+ * fall through to the generic "unknown" treatment (issue #1140's reviewer
+ * touchpoint: an unrecognized-looking status must never read as more benign
+ * than it is). `component_results.status`
+ * (`completed`/`completed_zero_controls`/`execution_error`/`skipped`)
+ * answers "did the job attempt finish, and did it evaluate anything", while
  * `component_result_findings.status` (`passed`/`failed`/`not_applicable`/
  * `not_reviewed`/`execution_error`/`skipped`) answers "what did each control
  * resolve to" — the rollup response mixes both because CAT/passed/etc.
@@ -37,15 +45,20 @@
  */
 import { apiGet } from "../../lib/api";
 
-/** The closed component-result-attempt status vocabulary (migration 0063's
- * `component_results_status_check`, `ComponentResultStatuses` in
+/** The closed component-result-attempt status vocabulary (migration 0081
+ * widened migration 0063's `component_results_status_check` with
+ * `completed_zero_controls`; `ComponentResultStatuses` in
  * ComponentResultModels.cs). */
-export type ComponentResultStatus = "completed" | "execution_error" | "skipped";
+export type ComponentResultStatus = "completed" | "completed_zero_controls" | "execution_error" | "skipped";
 
 /** One status bucket of `GET /runs/{id}/component-results/summary`
  * (`RunResultRollupStatusResponse`, RunContracts.cs). `component_count` is a
  * count of COMPONENTS (scan_plan_items), not findings; the CAT/passed/etc.
- * fields are the SUM across those components' latest attempts' findings. */
+ * fields are the SUM across those components' latest attempts' findings.
+ * `execution_error_count` (issue #1144/#1247, migration 0080) is a FINDING
+ * count, not a component count — distinct from `component_count` and never
+ * folded into the CAT open counts, since an errored control never produced a
+ * genuine compliance verdict. */
 export interface ComponentResultRollupStatus {
 	status: ComponentResultStatus | string;
 	component_count: number;
@@ -56,6 +69,7 @@ export interface ComponentResultRollupStatus {
 	not_applicable_count: number;
 	not_reviewed_count: number;
 	skipped_count: number;
+	execution_error_count: number;
 }
 
 /** `RunResultRollupResponse` (RunContracts.cs). */
@@ -120,12 +134,18 @@ export function fetchUploadAttempts(jobId: string): Promise<UploadAttempt[]> {
 }
 
 /** Display label for a component-result status — never a bare code, and
- * `execution_error`/`skipped` never read as a plain "failed"/"done" (design
- * brief: the six-status vocabulary rendered honestly). */
+ * `execution_error`/`skipped`/`completed_zero_controls` never read as a
+ * plain "failed"/"done"/"completed" (design brief: the status vocabulary
+ * rendered honestly). `completed_zero_controls` (issue #1140 reviewer
+ * touchpoint) gets its own explicit label rather than falling through to the
+ * raw code — a component that evaluated nothing must never be mistaken for
+ * a clean `completed` bucket by a reader of the label alone. */
 export function componentResultStatusLabel(status: string): string {
 	switch (status) {
 		case "completed":
 			return "Completed";
+		case "completed_zero_controls":
+			return "Completed — 0 controls evaluated";
 		case "execution_error":
 			return "Execution error";
 		case "skipped":
@@ -136,12 +156,17 @@ export function componentResultStatusLabel(status: string): string {
 }
 
 /** CSS-suffix-safe class modifier per status — distinct visual treatment for
- * every bucket (never collapsing execution_error/skipped into the same
- * "bad"/"ok" binary as completed). */
+ * every bucket (never collapsing execution_error/skipped/completed_zero_controls
+ * into the same "bad"/"ok" binary as completed). `completed_zero_controls`
+ * (issue #1140 reviewer touchpoint) gets its own deliberate class rather than
+ * the generic `--unknown` fallback — that fallback is reserved for a
+ * genuinely unrecognized status string, not a known-but-unhandled one. */
 export function componentResultStatusClass(status: string): string {
 	switch (status) {
 		case "completed":
 			return "results__cresult-status--completed";
+		case "completed_zero_controls":
+			return "results__cresult-status--zero-controls";
 		case "execution_error":
 			return "results__cresult-status--error";
 		case "skipped":

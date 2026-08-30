@@ -38,6 +38,7 @@ const ROLLUP: ComponentResultRollup = {
 			not_applicable_count: 1,
 			not_reviewed_count: 0,
 			skipped_count: 0,
+			execution_error_count: 0,
 		},
 		{
 			status: "execution_error",
@@ -49,6 +50,7 @@ const ROLLUP: ComponentResultRollup = {
 			not_applicable_count: 0,
 			not_reviewed_count: 6,
 			skipped_count: 0,
+			execution_error_count: 6,
 		},
 	],
 };
@@ -86,16 +88,27 @@ describe("totalOpenBySeverity", () => {
 });
 
 describe("componentResultStatusLabel / componentResultStatusClass", () => {
-	it("gives each of the three closed statuses a distinct label and class", () => {
-		const statuses = ["completed", "execution_error", "skipped"];
+	it("gives each of the four closed statuses a distinct label and class", () => {
+		const statuses = ["completed", "completed_zero_controls", "execution_error", "skipped"];
 		const labels = statuses.map(componentResultStatusLabel);
 		const classes = statuses.map(componentResultStatusClass);
-		expect(new Set(labels).size).toBe(3);
-		expect(new Set(classes).size).toBe(3);
+		expect(new Set(labels).size).toBe(4);
+		expect(new Set(classes).size).toBe(4);
 		expect(labels).not.toContain("completed"); // always a human label, never the raw code
 	});
 
-	it("falls back to the raw status string/an 'unknown' class for an unrecognized value, never throwing", () => {
+	it("gives completed_zero_controls (migration 0081) its own label and class, never the --unknown fallback", () => {
+		// Issue #1140 reviewer touchpoint: this status must never render the raw
+		// code, and must never share the generic "unrecognized status" treatment
+		// with a truly unknown value -- a reader of the table alone must not
+		// mistake an evaluated-nothing component for a clean/completed one.
+		expect(componentResultStatusLabel("completed_zero_controls")).not.toBe("completed_zero_controls");
+		expect(componentResultStatusLabel("completed_zero_controls")).not.toBe(componentResultStatusLabel("completed"));
+		expect(componentResultStatusClass("completed_zero_controls")).toBe("results__cresult-status--zero-controls");
+		expect(componentResultStatusClass("completed_zero_controls")).not.toBe("results__cresult-status--unknown");
+	});
+
+	it("falls back to the raw status string/an 'unknown' class for a genuinely unrecognized value, never throwing", () => {
 		expect(componentResultStatusLabel("mystery")).toBe("mystery");
 		expect(componentResultStatusClass("mystery")).toBe("results__cresult-status--unknown");
 	});

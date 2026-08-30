@@ -341,14 +341,14 @@
 }
 
 .results__col-target {
-	width: 23%;
+	width: 20%;
 	font-size: 11.5px;
 	white-space: nowrap;
 	text-overflow: ellipsis;
 }
 
 .results__col-bench {
-	width: 21%;
+	width: 16%;
 	color: var(--txt3);
 	font-size: 10.5px;
 	white-space: nowrap;
@@ -356,20 +356,59 @@
 }
 
 .results__col-sev {
-	width: 11%;
+	width: 9%;
+	text-align: right;
+}
+
+.results__col-evaluated {
+	width: 9%;
+	text-align: right;
+}
+
+.results__col-exec-err {
+	width: 8%;
 	text-align: right;
 }
 
 .results__col-artifacts {
-	width: 12%;
+	width: 11%;
 	color: var(--acc);
 	font-size: 10.5px;
 	white-space: nowrap;
 }
 
 .results__col-stigman {
-	width: 11%;
+	width: 9%;
 	white-space: nowrap;
+}
+
+/* Evaluated-controls denominator (issue #1132/#1140) and execution-error
+   count (issue #1144/#1247) — plain mono text, not a filled pill like
+   severity/upload-status, so the numeric columns stay visually quiet unless
+   they are actually flagging something (the --warn modifier). */
+
+.results__evaluated {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--txt3);
+}
+
+.results__evaluated--warn {
+	color: var(--warn);
+}
+
+.results__exec-err {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--txt3);
+}
+
+.results__exec-err--warn {
+	color: var(--bad);
+}
+
+.results__exec-err--na {
+	color: var(--na);
 }
 
 /*
@@ -472,6 +511,21 @@
 .results__attest-target {
 	font-size: 11px;
 	color: var(--txt);
+}
+
+/* Coverage-incomplete qualifier (issue #1140) — same warn treatment as the
+   expired-attestation scope pill above: a visible qualifier, never a silent
+   drop, on an otherwise clean-looking run row or detail header. */
+.results__coverage-flag {
+	font-size: 9.5px;
+	font-family: var(--mono);
+	color: var(--warn);
+	border: 1px solid var(--warnd);
+	padding: 0 4px;
+	border-radius: 2px;
+	margin-left: 6px;
+	white-space: nowrap;
+	vertical-align: middle;
 }
 
 .results__attest-scope-pill {
@@ -600,6 +654,25 @@
 
 .results__cresult-status--unknown .results__cresult-status-count {
 	color: var(--na);
+}
+
+/* completed_zero_controls (migration 0081, issue #1140 reviewer touchpoint)
+   -- its own deliberate warn treatment, never the --unknown/--na fallback:
+   this is a recognized, closed-vocabulary status, not an unrecognized one. */
+.results__cresult-status--zero-controls {
+	border-color: var(--warnd);
+}
+
+.results__cresult-status--zero-controls .results__cresult-status-count {
+	color: var(--warn);
+}
+
+/* execution_error_count suffix (issue #1144/#1247) -- a FINDING count shown
+   under the bucket's component_count, distinguished from both that count and
+   an open (CAT) finding count. */
+.results__cresult-status-suffix {
+	font-size: 9.5px;
+	color: var(--bad);
 }
 
 .results__cresult-severity-totals {
