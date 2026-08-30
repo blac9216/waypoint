@@ -1,30 +1,44 @@
 #!/usr/bin/env bash
 # timeline.sh — propose milestone due dates from issue-level estimates and dependencies. READ-ONLY (proposes; the agent applies).
-# Usage: timeline.sh [--repo owner/name] [--milestones "A,B"] [--parallelism 1.3] [--history-dir <dir>] [--defaults S=2,M=6,L=16] [--out <dir>]
+# Usage: timeline.sh [--repo owner/name] [--milestones "A,B"] [--milestone <title>]... [--parallelism 1.3] [--history-dir <dir>] [--defaults S=2,M=6,L=16] [--out <dir>]
 # Reads each open milestone's open issues: the `## Estimate` section (Size, est. cycle hours if given) and `blocked_by` links (REST).
-# --milestones takes an exact, comma-split list of milestone titles (no substring matching).
+# --milestones takes an exact, comma-split list of milestone titles (no substring matching); each name is
+# trimmed of leading/trailing whitespace, so a title with leading/trailing spaces can never be named this way.
+# --milestone (singular, repeatable) takes one exact, untrimmed title per flag — use it for a title
+# containing a comma, or one with meaningful leading/trailing whitespace. --milestones and --milestone
+# combine into a single selection. If any selection is requested, a requested name that matches no
+# milestone is reported on stderr, and matching zero milestones in total is an error (exit 3).
 # --history-dir points at the directory history.sh wrote parallelism.txt into; without it (and without
 # --parallelism) the default --out convention is assumed, and falling back to 1.5 is reported on stderr.
+# A missing, empty, or non-numeric parallelism.txt falls back to 1.5 the same way.
 set -euo pipefail
 REPO=""; ONLY=""; PAR=""; HISTORY_DIR=""; DEF="S=2,M=6,L=16"; OUT="${TMPDIR:-/tmp}/plan-work-timeline"; HOURS_PER_DAY=8
-while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --milestones) ONLY=$2; shift 2;; --parallelism) PAR=$2; shift 2;; --history-dir) HISTORY_DIR=$2; shift 2;; --defaults) DEF=$2; shift 2;; --out) OUT=$2; shift 2;; *) echo "unknown arg $1" >&2; exit 2;; esac; done
+MILESTONE_ARGS=()
+while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --milestones) ONLY=$2; shift 2;; --milestone) MILESTONE_ARGS+=("$2"); shift 2;; --parallelism) PAR=$2; shift 2;; --history-dir) HISTORY_DIR=$2; shift 2;; --defaults) DEF=$2; shift 2;; --out) OUT=$2; shift 2;; *) echo "unknown arg $1" >&2; exit 2;; esac; done
 [ -n "$REPO" ] || REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 mkdir -p "$OUT"; say(){ printf '%s\n' "$*" >&2; }
 ONLY_LIST=()
 if [ -n "$ONLY" ]; then
-  IFS=',' read -ra ONLY_LIST <<<"$ONLY"
-  for i in "${!ONLY_LIST[@]}"; do
-    want=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"${ONLY_LIST[$i]}")
-    ONLY_LIST[i]=$want
+  IFS=',' read -ra split_names <<<"$ONLY"
+  for name in "${split_names[@]}"; do
+    ONLY_LIST+=("$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$name")")
   done
+fi
+if [ "${#MILESTONE_ARGS[@]}" -gt 0 ]; then
+  ONLY_LIST+=("${MILESTONE_ARGS[@]}")
+fi
+SELECTING=0
+[ "${#ONLY_LIST[@]}" -gt 0 ] && SELECTING=1
+MATCH_COUNT=()
+if [ "$SELECTING" = 1 ]; then
+  for i in "${!ONLY_LIST[@]}"; do MATCH_COUNT[i]=0; done
 fi
 if [ -n "$PAR" ]; then
   : # explicit --parallelism wins
 else
   hist_dir="${HISTORY_DIR:-${OUT%/*}/plan-work-history}"
-  if PAR=$(cat "$hist_dir/parallelism.txt" 2>/dev/null); then
-    :
-  else
+  PAR=$(cat "$hist_dir/parallelism.txt" 2>/dev/null || true)
+  if ! [[ "$PAR" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     PAR=1.5
     say "parallelism: no history at $hist_dir/parallelism.txt; falling back to default $PAR (pass --history-dir to point at history.sh's --out, or --parallelism to set it explicitly)"
   fi
@@ -36,10 +50,10 @@ gh api --paginate "repos/$REPO/milestones?state=open&per_page=100" --jq '.[]|{nu
 : > "$OUT/milestones_selected.jsonl"
 while IFS= read -r ms; do
   mn=$(jq -r .number <<<"$ms"); mt=$(jq -r .title <<<"$ms")
-  if [ -n "$ONLY" ]; then
+  if [ "$SELECTING" = 1 ]; then
     matched=0
-    for want in "${ONLY_LIST[@]}"; do
-      if [ "$want" = "$mt" ]; then matched=1; break; fi
+    for i in "${!ONLY_LIST[@]}"; do
+      if [ "${ONLY_LIST[$i]}" = "$mt" ]; then matched=1; MATCH_COUNT[i]=$(( MATCH_COUNT[i] + 1 )); fi
     done
     [ "$matched" = 1 ] || continue
   fi
@@ -56,6 +70,21 @@ while IFS= read -r ms; do
        hours_source:(if $h!=null then "estimate" elif $size!=null then "size-default" else "no-estimate-default-M" end), blocked_by:$blocked, created:.created_at, closed:.closed_at}' <<<"$iss" >> "$OUT/issues.jsonl"
   done
 done < "$OUT/milestones.jsonl"
+if [ "$SELECTING" = 1 ]; then
+  unmatched=0
+  for i in "${!ONLY_LIST[@]}"; do
+    if [ "${MATCH_COUNT[$i]}" = 0 ]; then
+      say "milestones: no open milestone titled \"${ONLY_LIST[$i]}\" (requested via --milestones/--milestone)"
+      unmatched=1
+    fi
+  done
+  selected_count=$(wc -l < "$OUT/milestones_selected.jsonl")
+  if [ "$selected_count" -eq 0 ]; then
+    say "milestones: none of the requested names matched an open milestone; nothing to do"
+    exit 3
+  fi
+  [ "$unmatched" = 0 ] || say "milestones: continuing with $selected_count matched milestone(s)"
+fi
 say "$(wc -l < "$OUT/issues.jsonl") issues read"
 # per-milestone: critical path (longest chain of hours through blocked_by within the milestone) + effort; started = any non-epic issue closed or assigned
 # Iterates over every selected milestone (not just ones with issues) so a milestone with zero issues

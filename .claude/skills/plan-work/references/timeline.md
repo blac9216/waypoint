@@ -28,5 +28,25 @@ confirms when anything is ambiguous.
 
 `--milestones "A,B"` runs the same steps for the named milestones only (an exact,
 comma-split match against milestone titles — not a substring match), holding
-everything else fixed. A milestone with no open or closed issues still gets a row,
-zeroed out, rather than disappearing from the report.
+everything else fixed. Each split name is trimmed of leading/trailing whitespace
+before matching, so a title with meaningful leading/trailing spaces can't be named
+this way — use `--milestone` instead. A milestone with no open or closed issues
+still gets a row, zeroed out, rather than disappearing from the report.
+
+For a title containing a comma, or one with meaningful leading/trailing whitespace,
+pass `--milestone <title>` instead (repeatable, one exact and untrimmed title per
+flag). `--milestones` and `--milestone` combine into one selection. If any selection
+is requested (either flag), a requested name that matches no open milestone is
+reported on stderr; matching zero milestones in total is an error.
+
+## Flags
+
+| Flag | Purpose |
+|---|---|
+| `--repo <owner/name>` | Target repository; defaults to the current repo. |
+| `--milestones "A,B"` | Comma-split, trimmed, exact-match milestone title selection. |
+| `--milestone <title>` | Repeatable, exact and untrimmed single-title selection; combines with `--milestones`. |
+| `--parallelism <n>` | Explicit parallelism factor; overrides `--history-dir`/default. |
+| `--history-dir <dir>` | Directory `history.sh` wrote `parallelism.txt` into. |
+| `--defaults S=2,M=6,L=16` | Hour defaults per T-shirt size when an issue has no `est. cycle` hours. |
+| `--out <dir>` | Output directory for `milestones.jsonl`, `issues.jsonl`, `projection.json`, `placement.json`, `timeline.md`. |
