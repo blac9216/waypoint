@@ -41,6 +41,12 @@ $Script:VmwareStigDockerModulePath = $env:WAYPOINT_VMWARE_STIG_DOCKER_TRANSPORT_
 # position (first/last session) and a DNS failure is swallowed (empty result), not
 # thrown, so a resolver outage degrades to "no match" rather than failing the job.
 
+# Issue #1251 (#1297): the single ceiling every real DNS lookup in this module is
+# bounded by, named once here rather than duplicated as a literal in each resolver's
+# -TimeoutMilliseconds default. Long enough that a healthy resolver always answers
+# within it, short enough that a blackholed one cannot stall a discovery pass.
+$script:WaypointDnsTimeoutMillisecondsDefault = 3000
+
 # Normalizes a hostname/IP string for case- and trailing-dot-insensitive comparison
 # (e.g. 'VCSA-01.Example.Internal.' and 'vcsa-01.example.internal' are the same
 # identity). Returns $null for a blank/whitespace input so callers can filter it out
@@ -92,14 +98,37 @@ function Get-WaypointSessionHostCandidates {
 # Forward-resolves a hostname (or parses an IP literal) to its address strings.
 # Never throws: an unresolvable name, or a resolver outage, is reported as "no
 # addresses" so callers degrade to "no match" rather than failing the discovery job.
+#
+# Issue #1251: uses the async overload with a bounded Wait() rather than the
+# synchronous GetHostAddresses -- neither synchronous DNS overload accepts a
+# timeout, so an unresponsive/blackholed resolver would otherwise run to the OS
+# default before failing. A lookup that exceeds -TimeoutMilliseconds is treated
+# exactly like a resolution failure: empty result, no throw.
 function Resolve-WaypointHostAddresses {
 	param(
 		[Parameter(Mandatory)]
-		[string]$HostNameOrAddress
+		[string]$HostNameOrAddress,
+
+		[Parameter()]
+		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault,
+
+		# Issue #1297: test-only seam over the one .NET call in this function, so the
+		# timeout branch below has a regression guard. Production callers never pass it.
+		[Parameter()]
+		[AllowNull()]
+		[scriptblock]$AddressTaskFactory
 	)
 
 	try {
-		return @([System.Net.Dns]::GetHostAddresses($HostNameOrAddress) | ForEach-Object { $_.ToString() })
+		$Task = if ($AddressTaskFactory) {
+			& $AddressTaskFactory $HostNameOrAddress
+		} else {
+			[System.Net.Dns]::GetHostAddressesAsync($HostNameOrAddress)
+		}
+		if (-not $Task.Wait($TimeoutMilliseconds)) {
+			return @()
+		}
+		return @($Task.GetAwaiter().GetResult() | ForEach-Object { $_.ToString() })
 	} catch {
 		return @()
 	}
@@ -108,14 +137,31 @@ function Resolve-WaypointHostAddresses {
 # Reverse-resolves an IP address literal to the hostname(s) it maps to. Never
 # throws, for the same reason as Resolve-WaypointHostAddresses above. Only
 # meaningful when $IpAddress is actually an IP literal -- callers gate on that.
+# Issue #1251: same bounded-async pattern as Resolve-WaypointHostAddresses.
 function Resolve-WaypointReverseHostNames {
 	param(
 		[Parameter(Mandatory)]
-		[string]$IpAddress
+		[string]$IpAddress,
+
+		[Parameter()]
+		[int]$TimeoutMilliseconds = $script:WaypointDnsTimeoutMillisecondsDefault,
+
+		# Issue #1297: the same test-only seam as Resolve-WaypointHostAddresses above.
+		[Parameter()]
+		[AllowNull()]
+		[scriptblock]$HostEntryTaskFactory
 	)
 
 	try {
-		$Entry = [System.Net.Dns]::GetHostEntry($IpAddress)
+		$Task = if ($HostEntryTaskFactory) {
+			& $HostEntryTaskFactory $IpAddress
+		} else {
+			[System.Net.Dns]::GetHostEntryAsync($IpAddress)
+		}
+		if (-not $Task.Wait($TimeoutMilliseconds)) {
+			return @()
+		}
+		$Entry = $Task.GetAwaiter().GetResult()
 		if ($Entry -and -not [string]::IsNullOrWhiteSpace($Entry.HostName)) {
 			return @($Entry.HostName)
 		}
@@ -123,6 +169,75 @@ function Resolve-WaypointReverseHostNames {
 	} catch {
 		return @()
 	}
+}
+
+# Issue #1251 (memoization) + #1252 (test hermeticity seam): resolves a
+# hostname/IP's forward addresses through, in priority order, an injected
+# -NameResolver stub, a per-Resolve-WaypointPrimarySession-call -Cache, or (only
+# when neither is available) the real DNS-touching Resolve-WaypointHostAddresses.
+# -NameResolver is a scriptblock invoked as `& $NameResolver 'Forward' $Value`;
+# tests use it to keep Test-WaypointSessionMatchesVCenter/Resolve-WaypointPrimarySession
+# fully hermetic without ever touching the network. Production callers never pass
+# -NameResolver, so the real-DNS path (with its own memoized cache, bounded by
+# -Cache to the lifetime of one Resolve-WaypointPrimarySession call) is unchanged.
+function Resolve-WaypointHostAddressesCached {
+	param(
+		[Parameter(Mandatory)]
+		[string]$HostNameOrAddress,
+
+		[Parameter()]
+		[AllowNull()]
+		[scriptblock]$NameResolver,
+
+		[Parameter()]
+		[AllowNull()]
+		[hashtable]$Cache
+	)
+
+	if ($NameResolver) {
+		return @(& $NameResolver 'Forward' $HostNameOrAddress)
+	}
+
+	if ($Cache -and $Cache.ContainsKey($HostNameOrAddress)) {
+		return $Cache[$HostNameOrAddress]
+	}
+
+	$Result = @(Resolve-WaypointHostAddresses -HostNameOrAddress $HostNameOrAddress)
+	if ($Cache) {
+		$Cache[$HostNameOrAddress] = $Result
+	}
+	return $Result
+}
+
+# The reverse-resolution counterpart to Resolve-WaypointHostAddressesCached --
+# same -NameResolver/-Cache precedence, invoked as `& $NameResolver 'Reverse' $Value`.
+function Resolve-WaypointReverseHostNamesCached {
+	param(
+		[Parameter(Mandatory)]
+		[string]$IpAddress,
+
+		[Parameter()]
+		[AllowNull()]
+		[scriptblock]$NameResolver,
+
+		[Parameter()]
+		[AllowNull()]
+		[hashtable]$Cache
+	)
+
+	if ($NameResolver) {
+		return @(& $NameResolver 'Reverse' $IpAddress)
+	}
+
+	if ($Cache -and $Cache.ContainsKey($IpAddress)) {
+		return $Cache[$IpAddress]
+	}
+
+	$Result = @(Resolve-WaypointReverseHostNames -IpAddress $IpAddress)
+	if ($Cache) {
+		$Cache[$IpAddress] = $Result
+	}
+	return $Result
 }
 
 # Issue #1115: does $Session identify the appliance the caller addressed as
@@ -141,7 +256,24 @@ function Test-WaypointSessionMatchesVCenter {
 		$Session,
 
 		[Parameter(Mandatory)]
-		[string]$VCenter
+		[string]$VCenter,
+
+		# Issue #1252: optional test seam. When set, forward/reverse resolution goes
+		# through this scriptblock (`& $NameResolver 'Forward'|'Reverse' $Value`)
+		# instead of real DNS -- production callers never set it. Issue #1251: when
+		# unset, -ForwardCache/-ReverseCache memoize real DNS lookups for the
+		# duration of one Resolve-WaypointPrimarySession sweep.
+		[Parameter()]
+		[AllowNull()]
+		[scriptblock]$NameResolver = $null,
+
+		[Parameter()]
+		[AllowNull()]
+		[hashtable]$ForwardCache = $null,
+
+		[Parameter()]
+		[AllowNull()]
+		[hashtable]$ReverseCache = $null
 	)
 
 	$RequestedNormalized = ConvertTo-WaypointNormalizedHost -Value $VCenter
@@ -160,10 +292,10 @@ function Test-WaypointSessionMatchesVCenter {
 		return $false
 	}
 
-	$RequestedAddresses = @(Resolve-WaypointHostAddresses -HostNameOrAddress $VCenter)
+	$RequestedAddresses = @(Resolve-WaypointHostAddressesCached -HostNameOrAddress $VCenter -NameResolver $NameResolver -Cache $ForwardCache)
 	if ($RequestedAddresses.Count -gt 0) {
 		foreach ($Candidate in $SessionCandidatesRaw) {
-			$CandidateAddresses = @(Resolve-WaypointHostAddresses -HostNameOrAddress $Candidate)
+			$CandidateAddresses = @(Resolve-WaypointHostAddressesCached -HostNameOrAddress $Candidate -NameResolver $NameResolver -Cache $ForwardCache)
 			foreach ($Address in $CandidateAddresses) {
 				if ($RequestedAddresses -contains $Address) {
 					return $true
@@ -174,7 +306,7 @@ function Test-WaypointSessionMatchesVCenter {
 
 	$ParsedIp = $null
 	if ([System.Net.IPAddress]::TryParse($VCenter, [ref]$ParsedIp)) {
-		$ReverseNames = @(Resolve-WaypointReverseHostNames -IpAddress $VCenter | ForEach-Object { ConvertTo-WaypointNormalizedHost -Value $_ } | Where-Object { $_ })
+		$ReverseNames = @(Resolve-WaypointReverseHostNamesCached -IpAddress $VCenter -NameResolver $NameResolver -Cache $ReverseCache | ForEach-Object { ConvertTo-WaypointNormalizedHost -Value $_ } | Where-Object { $_ })
 		if ($ReverseNames.Count -gt 0) {
 			foreach ($Name in $ReverseNames) {
 				if ($SessionCandidatesNormalized -contains $Name) {
@@ -204,7 +336,13 @@ function Resolve-WaypointPrimarySession {
 		$Sessions,
 
 		[Parameter(Mandatory)]
-		[string]$VCenter
+		[string]$VCenter,
+
+		# Issue #1252: propagated to Test-WaypointSessionMatchesVCenter -- see its
+		# comment. $null (the default) means "use real DNS", unchanged from before.
+		[Parameter()]
+		[AllowNull()]
+		[scriptblock]$NameResolver = $null
 	)
 
 	$AllSessions = @($Sessions)
@@ -213,7 +351,14 @@ function Resolve-WaypointPrimarySession {
 		return $AllSessions[0]
 	}
 
-	$MatchedSessions = @($AllSessions | Where-Object { Test-WaypointSessionMatchesVCenter -Session $_ -VCenter $VCenter })
+	# Issue #1251: one forward/reverse cache per call, shared across every session
+	# in the sweep below, so $VCenter and any repeated candidate name/address is
+	# resolved at most once instead of once per session.
+	$ForwardCache = @{}
+	$ReverseCache = @{}
+	$MatchedSessions = @($AllSessions | Where-Object {
+		Test-WaypointSessionMatchesVCenter -Session $_ -VCenter $VCenter -NameResolver $NameResolver -ForwardCache $ForwardCache -ReverseCache $ReverseCache
+	})
 
 	if ($MatchedSessions.Count -eq 1) {
 		return $MatchedSessions[0]
@@ -312,7 +457,17 @@ function Invoke-WaypointDiscovery {
 		[string]$Password,
 
 		[Parameter()]
-		[string]$VmwareStigDockerTransportPath = $Script:VmwareStigDockerModulePath
+		[string]$VmwareStigDockerTransportPath = $Script:VmwareStigDockerModulePath,
+
+		# Issue #1252: test-only seam, never set by the real compliance runner. When
+		# supplied, Resolve-WaypointPrimarySession's forward/reverse DNS resolution
+		# is routed through this scriptblock instead of real DNS, so a test driving
+		# this function with fake sessions never touches the network. Signature:
+		# `& $NameResolver 'Forward'|'Reverse' $Value` returning a string[] (empty
+		# array for "no match", matching the real resolvers' fail-closed contract).
+		[Parameter()]
+		[AllowNull()]
+		[scriptblock]$NameResolver = $null
 	)
 
 	if ([string]::IsNullOrWhiteSpace($VmwareStigDockerTransportPath)) {
@@ -371,7 +526,7 @@ function Invoke-WaypointDiscovery {
 	#     comment above), while keeping the same fail-closed contract: it never picks
 	#     a session by position, and an ambiguous or absent match returns $null (a
 	#     structured Write-Warning explains why) rather than guessing.
-	$PrimarySession = Resolve-WaypointPrimarySession -Sessions $Connection.Sessions -VCenter $VCenter
+	$PrimarySession = Resolve-WaypointPrimarySession -Sessions $Connection.Sessions -VCenter $VCenter -NameResolver $NameResolver
 
 	if ($PrimarySession -and -not [string]::IsNullOrWhiteSpace($PrimarySession.InstanceUuid) -and -not [string]::IsNullOrWhiteSpace($PrimarySession.Name)) {
 		[pscustomobject]@{

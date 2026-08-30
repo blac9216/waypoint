@@ -129,11 +129,17 @@ Describe 'Test-WaypointSessionMatchesVCenter' {
 
 	It 'does not throw and reports no match when DNS resolution genuinely fails' {
 		InModuleScope WaypointDiscovery {
-			# Deliberately unmocked: WaypointDiscovery-1115-unresolvable.invalid is not a
-			# real name and .invalid is a reserved TLD guaranteed never to resolve
-			# (RFC 2606), so this exercises the real try/catch in
-			# Resolve-WaypointHostAddresses/Resolve-WaypointReverseHostNames rather than a
-			# mock standing in for it.
+			# Issue #1252: this used to rely on 'unresolvable.invalid'/.invalid never
+			# resolving (RFC 2606) by leaving the call unmocked -- a hijacking/wildcard
+			# resolver breaks that assumption, and each failed lookup used to pay a real
+			# resolver timeout. The real try/catch in Resolve-WaypointHostAddresses /
+			# Resolve-WaypointReverseHostNames is already covered directly, unmocked, by
+			# the "unmocked failure paths" Describe block below -- this test only needs
+			# to prove Test-WaypointSessionMatchesVCenter's own no-match/no-throw
+			# contract, which the Mock below does deterministically and instantly.
+			Mock Resolve-WaypointHostAddresses { @() }
+			Mock Resolve-WaypointReverseHostNames { @() }
+
 			$Session = [pscustomobject]@{ Name = 'also-unresolvable.invalid'; ServiceUri = $null }
 
 			$Result = $null
@@ -141,8 +147,45 @@ Describe 'Test-WaypointSessionMatchesVCenter' {
 			$Result | Should -BeFalse
 		}
 	}
+
+	It 'routes forward/reverse resolution through an injected -NameResolver, recording every name it is asked to resolve' {
+		InModuleScope WaypointDiscovery {
+			# Issue #1252: proves the test-hermeticity seam itself -- the C# regression
+			# guard (VsphereApiOnlyNoninteractiveTests, CI-enforced per issue #1245,
+			# since CI does not run this Pester suite outside ShapeInventory) pins the
+			# same contract end-to-end through Invoke-WaypointDiscovery; this pins it at
+			# the unit level, directly against Test-WaypointSessionMatchesVCenter.
+			$RecordedCalls = [System.Collections.Generic.List[string]]::new()
+			$Resolver = {
+				param($Mode, $Value)
+				$RecordedCalls.Add("${Mode}:${Value}")
+				@("stub-address-for-$Value")
+			}.GetNewClosure()
+
+			$Session = [pscustomobject]@{ Name = 'vcsa-stub-session.example.internal'; ServiceUri = $null }
+			$Result = Test-WaypointSessionMatchesVCenter -Session $Session -VCenter 'vcsa-stub-target.example.internal' -NameResolver $Resolver
+
+			# Per-name-unique stub addresses never collide, so this is a "no match" --
+			# the point is that the STUB, not real DNS, produced it.
+			$Result | Should -BeFalse
+			$RecordedCalls | Should -Contain 'Forward:vcsa-stub-target.example.internal'
+			$RecordedCalls | Should -Contain 'Forward:vcsa-stub-session.example.internal'
+		}
+	}
 }
 
+# Issue #1299: these two cases are the ONLY ones in this suite that touch the real
+# resolver, and both assert "no answer" -- so they require a non-hijacking resolver
+# (a wildcard resolver that synthesizes answers for `.invalid` fails them); run this
+# suite on a resolver that does not manufacture records.
+#
+# Issue #1252: these two cases are the deliberate, documented opt-in real-DNS
+# coverage the issue's proposed changes call for -- they exercise the actual
+# try/catch in the two lowest-level resolver functions, which cannot be
+# meaningfully mocked without testing nothing at all. Both now go through the
+# bounded-async implementation (issue #1251), so a hung/blackholed resolver can
+# no longer make either case pay more than ~3s (the default -TimeoutMilliseconds)
+# instead of the OS resolver's own default timeout.
 Describe 'Resolve-WaypointHostAddresses / Resolve-WaypointReverseHostNames (unmocked failure paths)' {
 	It 'Resolve-WaypointHostAddresses returns an empty array instead of throwing for an unresolvable name' {
 		InModuleScope WaypointDiscovery {
@@ -243,6 +286,44 @@ Describe 'Resolve-WaypointPrimarySession' {
 			$Warnings.Count | Should -Be 1
 			$Warnings[0].Message | Should -Match '2 linked session'
 			$Warnings[0].Message | Should -Match '2 matched'
+		}
+	}
+}
+
+# Issue #1297: the bounded-lookup branch added for #1251 had no regression guard --
+# it can only fire against a resolver that hangs, which no real name reliably does.
+# Both cases drive the -*TaskFactory test seam: first with a task that COMPLETES (the
+# control -- without it an empty result would prove nothing, since an unresolvable
+# name returns empty too), then with one that never completes inside the deliberately
+# tiny ceiling, asserting the documented contract -- a lookup that exceeds
+# -TimeoutMilliseconds is treated exactly like a resolution failure: empty, no throw.
+# No wall-clock assertion (timing assertions are a standing flake source, issue #658).
+Describe 'Resolve-WaypointHostAddresses / Resolve-WaypointReverseHostNames (bounded timeout, issue #1251)' {
+	It 'Resolve-WaypointHostAddresses returns empty instead of throwing when the lookup exceeds -TimeoutMilliseconds' {
+		InModuleScope WaypointDiscovery {
+			$Completes = { param($Name) [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@([System.Net.IPAddress]::Parse('198.51.100.7'))) }
+			$Answered = @(Resolve-WaypointHostAddresses -HostNameOrAddress 'slow-resolver.example.internal' -TimeoutMilliseconds 5000 -AddressTaskFactory $Completes)
+			$Answered | Should -Be @('198.51.100.7')
+
+			$NeverCompletesInTime = { param($Name) [System.Threading.Tasks.Task]::Delay(60000) }
+			$Result = $null
+			{ $Result = Resolve-WaypointHostAddresses -HostNameOrAddress 'slow-resolver.example.internal' -TimeoutMilliseconds 50 -AddressTaskFactory $NeverCompletesInTime } | Should -Not -Throw
+			$Result | Should -BeNullOrEmpty
+		}
+	}
+
+	It 'Resolve-WaypointReverseHostNames returns empty instead of throwing when the lookup exceeds -TimeoutMilliseconds' {
+		InModuleScope WaypointDiscovery {
+			$Entry = [System.Net.IPHostEntry]::new()
+			$Entry.HostName = 'slow-resolver.example.internal'
+			$Completes = { param($Address) [System.Threading.Tasks.Task]::FromResult($Entry) }.GetNewClosure()
+			$Answered = @(Resolve-WaypointReverseHostNames -IpAddress '198.51.100.10' -TimeoutMilliseconds 5000 -HostEntryTaskFactory $Completes)
+			$Answered | Should -Be @('slow-resolver.example.internal')
+
+			$NeverCompletesInTime = { param($Address) [System.Threading.Tasks.Task]::Delay(60000) }
+			$Result = $null
+			{ $Result = Resolve-WaypointReverseHostNames -IpAddress '198.51.100.10' -TimeoutMilliseconds 50 -HostEntryTaskFactory $NeverCompletesInTime } | Should -Not -Throw
+			$Result | Should -BeNullOrEmpty
 		}
 	}
 }

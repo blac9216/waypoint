@@ -231,28 +231,113 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 		Assert.DoesNotContain("Get-Credential", result.FailureReason, StringComparison.Ordinal);
 	}
 	/// <summary>
+	/// Issue #1252: the deterministic stand-in for real DNS that
+	/// <c>RunDiscoveryWithSessionsAsync</c> passes as <c>Invoke-WaypointDiscovery</c>'s
+	/// <c>-NameResolver</c> BY DEFAULT, so a test driving the module with fake sessions
+	/// never resolves anything for real -- no NXDOMAIN dependency, no resolver-timeout
+	/// latency (issue #1251). It reports a synthetic, per-name-unique "address" (so the
+	/// forward-candidate loop in Test-WaypointSessionMatchesVCenter still runs, the way
+	/// a resolver that is actually answering would drive it) that never collides across
+	/// distinct names, so it never manufactures a false match; the real resolvers'
+	/// fail-closed "no addresses" contract is exercised separately by the mocked/opt-in
+	/// Pester cases. Records every (mode, value) pair it was asked to resolve into a
+	/// runspace-global list -- read back by the helper's audit row, and cleared by the
+	/// helper's <c>finally</c> -- and logs each one via <c>Write-Information</c>
+	/// (captured into job.log by the shared WaypointLogging adapter) so a test can prove
+	/// the seam -- not real DNS -- was actually exercised.
+	/// </summary>
+	private const string StubNameResolverExpression = """
+		{
+			param($Mode, $Value)
+			$Global:WaypointNameResolverCalls.Add("$($Mode):$($Value)")
+			Write-Information "NameResolverAsked:$($Mode):$($Value)"
+			@("stub-address-for-$($Value)")
+		}
+		""";
+
+	/// <summary>
+	/// Issue #1252 (round-1 review, finding 1): the class-level guarantee that no test in
+	/// this file can fall through to real DNS. Redefines the module's two lowest-level
+	/// resolver functions IN <c>WaypointDiscovery</c>'s OWN SCOPE (dot-sourcing into the
+	/// module's session state) so that any lookup the <c>-NameResolver</c> seam failed to
+	/// intercept is recorded instead of sent to the network -- which the helper below
+	/// then asserts never happened. Without this, "the stub is passed" and "no real DNS
+	/// ran" are two different claims: <c>Where-Object</c> evaluates EVERY session, so
+	/// even a test whose target matches at tier 1 (case/trailing-dot, no DNS) still
+	/// forward-resolves for the siblings that fall through -- which is exactly how
+	/// <c>…MatchesTheTargetOnlyAfterNormalization…</c> kept hitting real DNS while its
+	/// doc comment claimed it "needs no DNS".
+	/// </summary>
+	private const string PoisonRealDnsExpression = """
+		$Global:WaypointRealDnsCalls = [System.Collections.Generic.List[string]]::new()
+		$Global:WaypointNameResolverCalls = [System.Collections.Generic.List[string]]::new()
+		$WaypointDiscoveryModule = Get-Module WaypointDiscovery
+		if (-not $WaypointDiscoveryModule) { throw 'expected the WaypointDiscovery module to be preloaded in this runspace' }
+		. $WaypointDiscoveryModule {
+			function Resolve-WaypointHostAddresses {
+				param([string]$HostNameOrAddress, [int]$TimeoutMilliseconds = 0, [scriptblock]$AddressTaskFactory)
+				$Global:WaypointRealDnsCalls.Add("Forward:$HostNameOrAddress")
+				return @()
+			}
+			function Resolve-WaypointReverseHostNames {
+				param([string]$IpAddress, [int]$TimeoutMilliseconds = 0, [scriptblock]$HostEntryTaskFactory)
+				$Global:WaypointRealDnsCalls.Add("Reverse:$IpAddress")
+				return @()
+			}
+		}
+		""";
+
+	/// <summary>The audit row the helper emits after the discovery pass and strips from the returned items.</summary>
+	private const string ResolverAuditRowType = "test-name-resolver-audit";
+
+	/// <summary>
 	/// Runs the REAL <c>Invoke-WaypointDiscovery</c> with the fake transport's session
 	/// list overridden for the duration of this one pipeline, and returns the emitted
 	/// item objects. Issue #1081's emission guard can only be pinned against a session
 	/// shape a real appliance can produce, and the transport fake is where that shape
 	/// is decided.
+	///
+	/// Issue #1252: hermetic BY DEFAULT -- every call injects
+	/// <see cref="StubNameResolverExpression"/> and poisons the module's real resolvers
+	/// (<see cref="PoisonRealDnsExpression"/>), and this helper then asserts that the
+	/// module made no real-DNS call at all during the session sweep. Real DNS is
+	/// reachable only by explicitly passing <paramref name="useRealDns"/>, which no test
+	/// does and none should: a test that resolves for real is exactly the failure mode
+	/// #1252 exists to eliminate.
 	/// </summary>
-	private static async Task<(bool Succeeded, string? FailureReason, IReadOnlyList<System.Management.Automation.PSObject> Items)>
-		RunDiscoveryWithSessionsAsync(PowerShellExecutor executor, string vCenter, string sessionsExpression)
+	private static async Task<(bool Succeeded, string? FailureReason, IReadOnlyList<System.Management.Automation.PSObject> Items, IReadOnlyList<string> ResolverCalls)>
+		RunDiscoveryWithSessionsAsync(
+			PowerShellExecutor executor, string vCenter, string sessionsExpression, bool useRealDns = false)
 	{
+		string hermeticPrologue = useRealDns ? string.Empty : PoisonRealDnsExpression;
+		string nameResolverArgument = useRealDns ? string.Empty : $" -NameResolver {StubNameResolverExpression}";
+		string auditRow = useRealDns
+			? string.Empty
+			: $$"""
+				[pscustomobject]@{
+					Type = '{{ResolverAuditRowType}}'
+					RealDnsCalls = @($Global:WaypointRealDnsCalls)
+					ResolverCalls = @($Global:WaypointNameResolverCalls)
+				}
+				""";
+
 		PowerShellExecutionResult result = await executor.ExecuteAsync(
 			new PowerShellRequest(
 				$$"""
+				{{hermeticPrologue}}
 				$Global:WaypointVsphereTransportFakeSessions = {{sessionsExpression}}
 				$Global:WaypointVsphereTransportFakeClusters = @([pscustomobject]@{
 					Name = 'cluster-alpha'
 					ExtensionData = [pscustomobject]@{ MoRef = [pscustomobject]@{ Value = 'domain-c101' } }
 				})
 				try {
-					Invoke-WaypointDiscovery -VCenter '{{vCenter}}' -Username 'administrator@example.internal' -Password 'invented-test-password'
+					Invoke-WaypointDiscovery -VCenter '{{vCenter}}' -Username 'administrator@example.internal' -Password 'invented-test-password'{{nameResolverArgument}}
+					{{auditRow}}
 				} finally {
 					$Global:WaypointVsphereTransportFakeSessions = $null
 					$Global:WaypointVsphereTransportFakeClusters = $null
+					$Global:WaypointRealDnsCalls = $null
+					$Global:WaypointNameResolverCalls = $null
 				}
 				""",
 				PowerShellRequestKind.Script),
@@ -262,8 +347,32 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 			.Where(o => o is not null)
 			.Select(o => System.Management.Automation.PSObject.AsPSObject(o!))
 			.ToList();
-		return (result.Succeeded, result.FailureReason, items);
+
+		List<System.Management.Automation.PSObject> auditRows = OfType(items, ResolverAuditRowType);
+		items.RemoveAll(i => auditRows.Contains(i));
+
+		IReadOnlyList<string> resolverCalls = [];
+		if (!useRealDns && result.Succeeded)
+		{
+			// The class-level guarantee (issue #1252 round-1 review, finding 1): not
+			// merely "a stub was passed" but "the module never reached the network on
+			// this run", asserted for EVERY caller of this helper rather than test by test.
+			System.Management.Automation.PSObject audit = Assert.Single(auditRows);
+			List<string> realDnsCalls = AsStrings(audit, "RealDnsCalls");
+			Assert.True(
+				realDnsCalls.Count == 0,
+				$"expected no real-DNS lookup on a hermetic run, but WaypointDiscovery resolved: {string.Join(", ", realDnsCalls)}");
+			resolverCalls = AsStrings(audit, "ResolverCalls");
+		}
+
+		return (result.Succeeded, result.FailureReason, items, resolverCalls);
 	}
+
+	private static List<string> AsStrings(System.Management.Automation.PSObject row, string propertyName)
+		=> (row.Properties[propertyName]?.Value as System.Collections.IEnumerable)?
+			.Cast<object?>()
+			.Select(v => (v is System.Management.Automation.PSObject p ? p.BaseObject : v)?.ToString() ?? string.Empty)
+			.ToList() ?? [];
 
 	private static List<System.Management.Automation.PSObject> OfType(
 		IReadOnlyList<System.Management.Automation.PSObject> items, string type)
@@ -342,6 +451,15 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 	/// -VCenter by name, "first session" would be a GUESS at which linked appliance is
 	/// this target's -- attributing a sibling's instanceUuid to this root, exactly the
 	/// guessed-identity failure ADR-0023 forbids. Emit nothing instead.
+	///
+	/// Issue #1252: none of these three names has a tier-1 (normalized name/ServiceUri)
+	/// match, so resolution used to fall through to real forward DNS for all three --
+	/// hermetic only because the test's own resolver returns NXDOMAIN for them, which a
+	/// hijacking/wildcard resolver would not do, and which pays a real resolver-timeout
+	/// per lookup (issue #1251) even when it does. The injected <see cref="StubNameResolverExpression"/>
+	/// makes the "no match" outcome deterministic on any network and removes the
+	/// latency entirely -- and the helper's audit assertion proves the module never
+	/// reached the network on this run.
 	/// </summary>
 	[Fact]
 	public async Task Discovery_WhenNoLinkedSessionMatchesByName_EmitsNoVcenterRow_RatherThanGuessingASibling()
@@ -360,6 +478,13 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 		Assert.True(run.Succeeded, run.FailureReason);
 		Assert.Empty(OfType(run.Items, "vcenter"));
 		Assert.DoesNotContain(run.Items, i => (i.Properties["MoRef"]?.Value as string)?.Contains("sibling", StringComparison.Ordinal) is true);
+
+		// No real DNS was touched -- the helper asserts that for every run (issue #1252),
+		// so this outcome is the stub's, not the host resolver's, and it cannot pay a
+		// resolver timeout (issue #1251's "silent latency"). No wall-clock assertion:
+		// timing assertions are a standing flake source in this repo (issue #658), and the
+		// recorded resolver calls prove the same thing deterministically.
+		Assert.Contains("Forward:vcsa-01.example.internal", run.ResolverCalls);
 	}
 
 	/// <summary>
@@ -393,9 +518,18 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 	/// -VCenter differs from the session's reported name only in case and a trailing
 	/// dot. The pre-#1115 exact `$_.Name -eq $VCenter` comparison matched neither
 	/// session and emitted NO vcenter row at all; the tier-1 normalized comparison in
-	/// Resolve-WaypointPrimarySession matches vcsa-77 and only vcsa-77. Deliberately a
-	/// tier-1 (case/trailing-dot) match: it needs no DNS, so the assertion is
-	/// deterministic on any host or runner.
+	/// Resolve-WaypointPrimarySession matches vcsa-77 and only vcsa-77.
+	///
+	/// Issue #1252 (round-1 review, finding 1): this test used to claim that a tier-1
+	/// (case/trailing-dot) match "needs no DNS, so the assertion is deterministic on any
+	/// host". That premise is FALSE, and it is why this test kept resolving for real:
+	/// Resolve-WaypointPrimarySession's Where-Object evaluates EVERY session, and the
+	/// non-matching sibling vcsa-78 falls through tier 1, so Test-WaypointSessionMatchesVCenter
+	/// forward-resolves the target for real. On a wildcard/hijacking resolver both names
+	/// resolve to the same synthesized address, tier 2 then matches the sibling too, the
+	/// sweep sees 2 matches, ambiguity withholds the row, and this assertion fails. The
+	/// helper is hermetic by default now, so the stub -- never the host resolver --
+	/// answers, and the helper asserts no real lookup was made.
 	/// </summary>
 	[Fact]
 	public async Task Discovery_WhenALinkedSessionMatchesTheTargetOnlyAfterNormalization_EmitsThatSessionsIdentity()
@@ -422,6 +556,10 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 		// The rest of the pass is unaffected (the fake transport walks the cluster
 		// fixture once per linked session, so two sessions yield two cluster rows).
 		Assert.Equal(2, OfType(run.Items, "cluster").Count);
+
+		// Direct evidence for the corrected premise above: a tier-1 match still drove a
+		// forward resolution (for the sibling that fell through) -- through the stub.
+		Assert.Contains("Forward:VCSA-77.Example.Internal.", run.ResolverCalls);
 	}
 
 	/// <summary>
@@ -464,5 +602,46 @@ public sealed class VsphereApiOnlyNoninteractiveTests : IDisposable
 		// And the pass itself survives the withheld root: inventory still arrives
 		// (one cluster row per linked session from the fake transport).
 		Assert.Equal(2, OfType(run.Items, "cluster").Count);
+	}
+
+	/// <summary>
+	/// Issue #1252: the CI-enforced guard for the resolver seam itself (CI does not run
+	/// the Pester suites outside the ShapeInventory directory, issue #1245, so this
+	/// xunit test -- not <c>WaypointDiscovery.SessionMatch.Tests.ps1</c>'s Pester
+	/// equivalent -- is what actually proves the seam in the pipeline). Drives the same
+	/// "two linked siblings, no match" shape as the tests above, but asserts directly
+	/// on the stub's own recorded calls: if <c>-NameResolver</c> were silently ignored
+	/// and real DNS ran instead, nothing would ever be added to
+	/// <c>$Global:WaypointNameResolverCalls</c> and this would fail even though the
+	/// "no vcenter row" outcome looked identical.
+	/// </summary>
+	[Fact]
+	public async Task Discovery_RoutesForwardResolutionThroughTheInjectedNameResolver_NotRealDns()
+	{
+		PowerShellExecutor executor = CreateExecutor(out RecordingLogBuffer logBuffer);
+		var run = await RunDiscoveryWithSessionsAsync(
+			executor,
+			"vcsa-01.example.internal",
+			"""
+			@(
+				[pscustomobject]@{ Name = 'vcsa-77.example.internal'; InstanceUuid = 'vcenter-instance-sibling-0077'; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0077' },
+				[pscustomobject]@{ Name = 'vcsa-78.example.internal'; InstanceUuid = 'vcenter-instance-sibling-0078'; Version = '0.0.0-invented-unseeded'; Build = 'invented-build-0078' }
+			)
+			""");
+
+		Assert.True(run.Succeeded, run.FailureReason);
+		Assert.Empty(OfType(run.Items, "vcenter"));
+
+		// The stub was asked to forward-resolve the target and both candidate names --
+		// proof the seam (not real DNS) drove the "no match" outcome above.
+		Assert.Contains(logBuffer.Payloads, p => p.Contains("NameResolverAsked:Forward:vcsa-01.example.internal", StringComparison.Ordinal));
+		Assert.Contains(logBuffer.Payloads, p => p.Contains("NameResolverAsked:Forward:vcsa-77.example.internal", StringComparison.Ordinal));
+		Assert.Contains(logBuffer.Payloads, p => p.Contains("NameResolverAsked:Forward:vcsa-78.example.internal", StringComparison.Ordinal));
+
+		// The same fact off the stub's own recorded-call list (issue #1298: the list is
+		// read, not merely written, and the helper clears it after every run).
+		Assert.Equal(
+			["Forward:vcsa-01.example.internal", "Forward:vcsa-77.example.internal", "Forward:vcsa-78.example.internal"],
+			run.ResolverCalls.Distinct().OrderBy(c => c, StringComparer.Ordinal).ToArray());
 	}
 }
