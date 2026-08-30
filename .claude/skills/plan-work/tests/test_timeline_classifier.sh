@@ -38,32 +38,47 @@ REPO="test-org/test-repo"
 # ---------------------------------------------------------------------------
 # Fixture matrix: id|est_cycle_raw|size|class|expected_hours(valid rows only)
 # class: valid | unparseable | over
-# Mirrors the 20-row matrix verified by hand during the PR #1336 review
-# (round 1 comment on issue #1264), plus the non-ASCII rows #1345 requires.
+# Base values mirror the 20-row matrix verified by hand during the PR #1336
+# review (round 1 comment on issue #1264) plus the non-ASCII rows #1345
+# requires, deduplicated to one representative size per value. #1360 makes
+# the Size: axis a full cross-product (every value exercised both with and
+# without a Size: label, per #1345's original prose) via the shared
+# expand_rows generator below, rather than hand-duplicated rows.
 # ---------------------------------------------------------------------------
 NINES41="99999999999999999999999999999999999999999"
-ROWS=(
-  "1|5|M|valid|5"
-  "2|0.5|S|valid|0.5"
-  "3|100000|L|valid|100000"
-  "4|1.2.3|M|unparseable|"
-  "5|1e2|M|unparseable|"
-  "6|.5|M|unparseable|"
-  "7|hh|S|unparseable|"
-  "8|-5||unparseable|"
-  "9|+5|M|unparseable|"
-  "10|100001|M|over|"
-  "11|100000.5|L|over|"
-  "12|${NINES41}||over|"
-  "13|٢|M|unparseable|"
-  "14|２|S|unparseable|"
-  "15|०||unparseable|"
-  "16|1٢|M|unparseable|"
-  "17|1.2.3||unparseable|"
-  "18|100001||over|"
-  "19|٢||unparseable|"
-  "20|hh|L|unparseable|"
+BASE_ROWS=(
+  # est|class|expected_hours|size(used for the "with Size:" variant)
+  "5|valid|5|M"
+  "0.5|valid|0.5|S"
+  "100000|valid|100000|L"
+  "1.2.3|unparseable||M"
+  "1e2|unparseable||M"
+  ".5|unparseable||M"
+  "hh|unparseable||S"
+  "-5|unparseable||S"
+  "+5|unparseable||M"
+  "100001|over||M"
+  "100000.5|over||L"
+  "${NINES41}|over||S"
+  "٢|unparseable||M"
+  "２|unparseable||S"
+  "०|unparseable||M"
+  "1٢|unparseable||M"
 )
+
+# expand_rows: for each base value, emit two rows — one with its assigned
+# Size: label, one with no Size: label at all — so every value is covered
+# both ways instead of the axis being sampled representatively.
+expand_rows(){
+  local id=0 base est class expected size
+  ROWS=()
+  for base in "${BASE_ROWS[@]}"; do
+    IFS='|' read -r est class expected size <<<"$base"
+    id=$((id+1)); ROWS+=("$id|$est|$size|$class|$expected")
+    id=$((id+1)); ROWS+=("$id|$est||$class|$expected")
+  done
+}
+expand_rows
 
 issue_number(){ echo $(( 200 + $1 )); }
 
@@ -90,7 +105,8 @@ jq -s '.' "$WORK/issues_raw.ndjson" > "$FIXTURES/issues.json"
 # ---------------------------------------------------------------------------
 # Mock gh: serves the three endpoints timeline.sh calls, applying the real
 # --jq expression (via the real jq binary) against the fixture, exactly as
-# `gh api --jq` would against live API output.
+# `gh api --jq` would against live API output. Refuses any non-GET method,
+# including the glued -XPOST and --method=POST spellings (#1358).
 # ---------------------------------------------------------------------------
 cat > "$BIN/gh" <<'MOCKGH'
 #!/usr/bin/env bash
@@ -109,6 +125,8 @@ while [ $# -gt 0 ]; do
     --paginate) shift ;;
     --jq) jq_expr="$2"; shift 2 ;;
     -X|--method) method="$2"; shift 2 ;;
+    -X?*) method="${1#-X}"; shift ;;
+    --method=*) method="${1#--method=}"; shift ;;
     *) endpoint="$1"; shift ;;
   esac
 done

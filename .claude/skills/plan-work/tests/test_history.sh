@@ -117,8 +117,9 @@ JSON
 # Mock gh: routes by endpoint shape and trailing numeric id, applying the
 # real --jq expression (via the real jq binary) against the fixture, exactly
 # as `gh api --jq` would against live API output. Refuses any non-GET method
-# (gh api -X POST/PATCH/...) rather than silently serving a read fixture —
-# the gap flagged on PR #1347's review of #1348.
+# (gh api -X POST/PATCH/..., including the glued -XPOST and --method=POST
+# spellings — #1358) rather than silently serving a read fixture — the gap
+# flagged on PR #1347's review of #1348.
 # ---------------------------------------------------------------------------
 cat > "$BIN/gh" <<'MOCKGH'
 #!/usr/bin/env bash
@@ -137,6 +138,8 @@ while [ $# -gt 0 ]; do
     --paginate) shift ;;
     --jq) jq_expr="$2"; shift 2 ;;
     -X|--method) method="$2"; shift 2 ;;
+    -X?*) method="${1#-X}"; shift ;;
+    --method=*) method="${1#--method=}"; shift ;;
     *) endpoint="$1"; shift ;;
   esac
 done
@@ -190,8 +193,8 @@ grep -qF "unknown arg --bogus-flag" "$OUT/badflag.stderr.log" \
 # ---------------------------------------------------------------------------
 # Run history.sh under test against the fixtures. Crash-path diagnostics:
 # dump captured stdout/stderr before returning non-zero, so a crash here
-# doesn't race the (in this test, non-scratch — $OUT is not deleted on
-# exit) cleanup and lose the log, matching the pattern in
+# doesn't race the cleanup trap (`$OUT` lives under `$WORK`, which the EXIT
+# trap `rm -rf`s) and lose the log, matching the pattern in
 # test_timeline_classifier.sh (#1350).
 # ---------------------------------------------------------------------------
 run_history(){
@@ -256,13 +259,10 @@ if [ -n "$rec" ]; then
   check_eq additions     .additions     40
   check_eq deletions     .deletions     10
   check_eq net_loc       .net_loc       30
-  # history.sh's Size: extraction regex self-matches on the "S" in "Size:",
-  # so a Size: M or Size: L estimate currently yields a two-line garbage
-  # value ("S\nM") rather than the single letter — see #1351 (found while
-  # writing this test; out of scope for #1348/#1349/#1350, which cover the
-  # test harness, not history.sh's own logic). This asserts the actual
-  # current behavior; update to "M" if/when #1351 is fixed.
-  check_eq size_est      .size_est      "$(printf 'S\nM')"
+  # history.sh's Size: extraction now anchors to the trailing letter (#1351
+  # fixed the self-match on the "S" in "Size:"), so a Size: M estimate
+  # yields the single letter "M".
+  check_eq size_est      .size_est      "M"
   check_eq metrics       '.metrics.attempts' 2
   check_eq deferred      '.deferred|join(",")' 205
   check_eq era           .era           post-adoption
@@ -281,8 +281,7 @@ completeness=$(jq -c '.completeness' "$CALIBRATION_JSON")
 want_completeness='{"with_assigned_start":1,"with_estimate":1,"with_metrics":1,"with_area":1,"total":1}'
 [ "$completeness" = "$want_completeness" ] || report "calibration.json completeness: expected $want_completeness, got $completeness"
 
-# size is the #1351 garbage value "S\nM", not "M" — see the size_est comment above.
-area_row=$(jq -c --arg size "$(printf 'S\nM')" '.by_area_size[]|select(.area=="area:tests" and .size==$size)' "$CALIBRATION_JSON")
+area_row=$(jq -c --arg size "M" '.by_area_size[]|select(.area=="area:tests" and .size==$size)' "$CALIBRATION_JSON")
 [ -n "$area_row" ] || report "calibration.json: expected a by_area_size row for area:tests, got none"
 
 grep -qF "area:tests" "$CALIBRATION_MD" || report "calibration.md: expected the area:tests row in the table"
