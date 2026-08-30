@@ -68,6 +68,42 @@ public sealed record CatalogArtifactResponse(
 	}
 }
 
+/// <summary>
+/// Response body for one row of <c>GET /api/v1/catalog/unknown-files</c> (issue
+/// #1495 AC2; migration 0100, issue #1488's <c>unknown_catalog_files</c>) -- a file
+/// present on a depot share that the authenticated vendor catalog does not describe.
+/// There is deliberately no delete/dismiss endpoint for these (design decision Q11:
+/// alert instead of drop, enforced at the repository layer -- see
+/// <c>IUnknownCatalogFileRepository</c>'s own doc comment).
+/// </summary>
+public sealed record CatalogUnknownFileResponse(
+	[property: JsonPropertyName("id")]
+	string Id,
+
+	[property: JsonPropertyName("relative_path")]
+	string RelativePath,
+
+	[property: JsonPropertyName("size_bytes")]
+	long? SizeBytes,
+
+	[property: JsonPropertyName("first_seen_at")]
+	DateTimeOffset FirstSeenAt,
+
+	[property: JsonPropertyName("last_seen_at")]
+	DateTimeOffset LastSeenAt)
+{
+	public static CatalogUnknownFileResponse FromDomain(UnknownCatalogFile file)
+	{
+		ArgumentNullException.ThrowIfNull(file);
+		return new CatalogUnknownFileResponse(
+			file.Id.ToString(),
+			file.RelativePath,
+			file.SizeBytes,
+			file.FirstSeenAt,
+			file.LastSeenAt);
+	}
+}
+
 /// <summary>Response body for <c>POST /api/v1/catalog/sync</c> (202 Accepted).</summary>
 public sealed record CatalogSyncStartedResponse(
 	[property: JsonPropertyName("run_id")]

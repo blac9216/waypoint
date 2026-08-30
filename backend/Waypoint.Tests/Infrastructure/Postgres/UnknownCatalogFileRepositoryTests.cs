@@ -16,6 +16,7 @@ using System.Reflection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Catalog;
+using Waypoint.Core.Jobs;
 using Waypoint.Infrastructure.Catalog;
 using Waypoint.Infrastructure.Data;
 using Waypoint.Tests.Support;
@@ -99,6 +100,45 @@ public sealed class UnknownCatalogFileRepositoryTests : IAsyncLifetime
 
 		IReadOnlyList<UnknownCatalogFile> items = await _repository.ListAsync(CancellationToken.None);
 		Assert.Equal(2, items.Count(item => item.RelativePath.Contains(tag, StringComparison.Ordinal)));
+	}
+
+	/// <summary>
+	/// Issue #1495 AC3: a genuinely new unknown file emits exactly one
+	/// <see cref="JobEventTypes.SystemNotice"/> (appliance-wide -- job_id/run_id both
+	/// null), through the same best-effort sink pattern <c>CatalogIndexJobHandler</c>
+	/// uses for auth failures. A second <see cref="IUnknownCatalogFileRepository.RecordSeenAsync"/>
+	/// call for the same path only touches <c>last_seen_at</c> and must NOT emit again
+	/// -- this is an alert on first sighting, not a heartbeat on every re-sweep.
+	/// </summary>
+	[Fact]
+	public async Task RecordSeenAsync_NewPath_EmitsOneSystemNoticeEvent_ReSeenPath_EmitsNone()
+	{
+		RecordingJobEventPublisher events = new();
+		UnknownCatalogFileRepository repository = new(_fixture.ConnectionString, events);
+		string relativePath = $"unknown/{Guid.NewGuid():N}.iso";
+
+		await repository.RecordSeenAsync(relativePath, 4096, CancellationToken.None);
+
+		(string EventType, Guid? JobId, Guid? RunId, string PayloadJson) emitted = Assert.Single(events.Emitted);
+		Assert.Equal(JobEventTypes.SystemNotice, emitted.EventType);
+		Assert.Null(emitted.JobId);
+		Assert.Null(emitted.RunId);
+		Assert.Contains(relativePath, emitted.PayloadJson, StringComparison.Ordinal);
+
+		await repository.RecordSeenAsync(relativePath, 8192, CancellationToken.None);
+
+		Assert.Single(events.Emitted);
+	}
+
+	private sealed class RecordingJobEventPublisher : IJobEventPublisher
+	{
+		public List<(string EventType, Guid? JobId, Guid? RunId, string PayloadJson)> Emitted { get; } = [];
+
+		public Task EmitAsync(string eventType, Guid? jobId, Guid? runId, string payloadJson, CancellationToken cancellationToken)
+		{
+			Emitted.Add((eventType, jobId, runId, payloadJson));
+			return Task.CompletedTask;
+		}
 	}
 
 	private async Task ResetUnknownFilesAsync()

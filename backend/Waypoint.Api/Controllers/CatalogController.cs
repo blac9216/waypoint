@@ -61,6 +61,7 @@ public sealed class CatalogController : ControllerBase
 	private const short CatalogIndexPriority = 1;
 
 	private readonly IDepotArtifactRepository _artifacts;
+	private readonly IUnknownCatalogFileRepository _unknownFiles;
 	private readonly IJobControlRepository _jobs;
 	private readonly ICatalogPullStateRepository _pullState;
 	private readonly IDepotEnrollmentRepository _enrollment;
@@ -68,17 +69,20 @@ public sealed class CatalogController : ControllerBase
 
 	public CatalogController(
 		IDepotArtifactRepository artifacts,
+		IUnknownCatalogFileRepository unknownFiles,
 		IJobControlRepository jobs,
 		ICatalogPullStateRepository pullState,
 		IDepotEnrollmentRepository enrollment,
 		ICatalogRepository executionCatalog)
 	{
 		ArgumentNullException.ThrowIfNull(artifacts);
+		ArgumentNullException.ThrowIfNull(unknownFiles);
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(pullState);
 		ArgumentNullException.ThrowIfNull(enrollment);
 		ArgumentNullException.ThrowIfNull(executionCatalog);
 		_artifacts = artifacts;
+		_unknownFiles = unknownFiles;
 		_jobs = jobs;
 		_pullState = pullState;
 		_enrollment = enrollment;
@@ -146,6 +150,26 @@ public sealed class CatalogController : ControllerBase
 
 		Response.Headers["X-Total-Count"] = totalCount.ToString(CultureInfo.InvariantCulture);
 		return Ok(items.Select(CatalogArtifactResponse.FromDomain).ToArray());
+	}
+
+	/// <summary>
+	/// Issue #1495 AC2: files a depot share holds that the authenticated vendor
+	/// catalog does not describe (migration 0100, issue #1488's
+	/// <c>unknown_catalog_files</c>) -- visible on the API surface rather than only
+	/// logged, per decision Q11's "alert instead of drop" pattern. Viewer+, matching
+	/// <see cref="ListArtifacts"/> -- this is a read of already-recorded facts, not a
+	/// state-changing action. No filter/pagination (same "read side is small" call as
+	/// <see cref="IUnknownCatalogFileRepository.ListAsync"/>'s own doc comment) --
+	/// populated by the real presence sweep in #1503/#1512; this slice proves the
+	/// storage shape and the read contract those children will call.
+	/// </summary>
+	[HttpGet("unknown-files")]
+	[RequireViewerRole]
+	[ProducesResponseType(typeof(CatalogUnknownFileResponse[]), StatusCodes.Status200OK)]
+	public async Task<ActionResult<IReadOnlyList<CatalogUnknownFileResponse>>> ListUnknownFiles(CancellationToken cancellationToken)
+	{
+		IReadOnlyList<UnknownCatalogFile> items = await _unknownFiles.ListAsync(cancellationToken).ConfigureAwait(false);
+		return Ok(items.Select(CatalogUnknownFileResponse.FromDomain).ToArray());
 	}
 
 	/// <summary>

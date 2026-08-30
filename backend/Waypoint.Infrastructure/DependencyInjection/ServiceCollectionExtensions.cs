@@ -273,7 +273,13 @@ public static class ServiceCollectionExtensions
 
 			services.AddSingleton(new Secrets.CredentialRepository(connectionString));
 			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
-			services.AddSingleton<IUnknownCatalogFileRepository>(new UnknownCatalogFileRepository(connectionString));
+			// Issue #1495 AC3: the event publisher is resolved here (registered above,
+			// same singleton every job handler in this process uses) so a genuinely new
+			// unknown-catalog-file row raises a system.notice without this repository
+			// needing its own connection/redactor wiring.
+			services.AddSingleton<IUnknownCatalogFileRepository>(serviceProvider => new UnknownCatalogFileRepository(
+				connectionString,
+				serviceProvider.GetRequiredService<IJobEventPublisher>()));
 			services.AddSingleton<ICatalogPullStateRepository>(new Catalog.CatalogPullStateRepository(connectionString));
 			services.AddSingleton<IDownloadRepository>(new DownloadRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IEsxAcquisitionSubscriptionRepository>(
