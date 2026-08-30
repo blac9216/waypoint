@@ -377,7 +377,7 @@ public sealed class SchemaMigrationTests
 	/// (SELECT/INSERT/UPDATE, no DELETE) mirroring migration 0025's existing
 	/// <c>depot_artifacts</c> grant to the same role.
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 82;
+	private const int ExpectedMigrationCount = 83;
 
 	private readonly PostgresFixture _fixture;
 
