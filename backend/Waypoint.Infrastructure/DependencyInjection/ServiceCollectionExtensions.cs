@@ -446,7 +446,8 @@ public static class ServiceCollectionExtensions
 				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunPurgeRepository>(),
 				serviceProvider.GetRequiredService<AttestationSnapshotRepository>(),
 				serviceProvider.GetRequiredService<Waypoint.Core.Runs.IRunRetentionHoldRepository>(),
-				connectionString));
+				connectionString,
+				serviceProvider.GetRequiredService<ILogger<Runs.RunPurgeService>>()));
 
 			// Issue #592 (epic #588, last child): admin-only generic operational-history
 			// deletion, API-only (no runner-side reader/writer, unlike purge above) --

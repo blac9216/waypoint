@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Waypoint.Core.Jobs;
 using Waypoint.Core.Runs;
@@ -57,7 +58,7 @@ namespace Waypoint.Infrastructure.Runs;
 /// the tombstone (<see cref="IRunPurgeRepository.CompleteAsync"/>'s own
 /// <c>ON CONFLICT DO NOTHING</c>).
 /// </summary>
-public sealed class RunPurgeService
+public sealed partial class RunPurgeService
 {
 	/// <summary>Same low-urgency tier as an ordinary artifact download / tool-install (issue #39's <c>ToolInstallPriority</c>) -- a purge must never starve a scan.</summary>
 	private const short PurgePriority = 6;
@@ -67,25 +68,29 @@ public sealed class RunPurgeService
 	private readonly AttestationSnapshotRepository _attestationSnapshots;
 	private readonly IRunRetentionHoldRepository _retentionHolds;
 	private readonly string _connectionString;
+	private readonly ILogger<RunPurgeService> _logger;
 
 	public RunPurgeService(
 		IJobControlRepository jobs,
 		IRunPurgeRepository purges,
 		AttestationSnapshotRepository attestationSnapshots,
 		IRunRetentionHoldRepository retentionHolds,
-		string connectionString)
+		string connectionString,
+		ILogger<RunPurgeService> logger)
 	{
 		ArgumentNullException.ThrowIfNull(jobs);
 		ArgumentNullException.ThrowIfNull(purges);
 		ArgumentNullException.ThrowIfNull(attestationSnapshots);
 		ArgumentNullException.ThrowIfNull(retentionHolds);
 		ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+		ArgumentNullException.ThrowIfNull(logger);
 
 		_jobs = jobs;
 		_purges = purges;
 		_attestationSnapshots = attestationSnapshots;
 		_retentionHolds = retentionHolds;
 		_connectionString = connectionString;
+		_logger = logger;
 	}
 
 	/// <summary>
@@ -389,15 +394,78 @@ public sealed class RunPurgeService
 	private static RunPurgeOutcome ClassifyInFlight(RunPurgeStatus status) =>
 		status.ArtifactsPhase == "failed" ? RunPurgeOutcome.Failed : RunPurgeOutcome.InProgress;
 
-	private static RunPurgeStatus ToStatus(RunPurgeTombstone tombstone) => new(
-		RunId: tombstone.RunId,
-		RequestedBy: tombstone.Actor,
-		RequestedAt: tombstone.OccurredAt,
-		PriorState: tombstone.PriorState,
-		DbPhaseDone: true,
-		ArtifactsPhase: "done",
-		ArtifactsTotal: 0,
-		ArtifactsDeleted: 0,
-		LastError: null,
-		CompletedAt: tombstone.OccurredAt);
+	/// <summary>
+	/// Issue #1061: the tombstone's <c>detail</c> JSON is the durable source of the
+	/// completed purge's artifact count -- <see cref="IRunPurgeRepository.CompleteAsync"/>
+	/// writes it as <c>{"artifacts_deleted": N}</c> (see
+	/// <c>RunPurgeRepository.CompleteAsync</c>). This used to hardcode zeros instead of
+	/// reading it back, so a completed purge's status readback always under-reported
+	/// the deletion as zero even though the tombstone held the real number.
+	///
+	/// Contract note: the tombstone detail does not separately carry an
+	/// <c>artifacts_total</c> field (there is no partial-deletion count to report once
+	/// a purge has reached <c>completed</c> -- everything enumerated for deletion was
+	/// deleted), so <see cref="RunPurgeStatus.ArtifactsTotal"/> here is set equal to
+	/// <see cref="RunPurgeStatus.ArtifactsDeleted"/> rather than read from a separate
+	/// field. If the tombstone detail schema ever grows a distinct total, wire it
+	/// through here instead of mirroring.
+	///
+	/// Malformed or missing detail JSON (should not happen against a healthy
+	/// database, but this projection must never throw on a read) fails closed to 0
+	/// with a logged warning rather than surfacing a fabricated count or crashing
+	/// <c>GET /runs/{id}/purge</c>.
+	/// </summary>
+	private RunPurgeStatus ToStatus(RunPurgeTombstone tombstone)
+	{
+		int artifactsDeleted = ReadArtifactsDeleted(tombstone, _logger);
+		return new(
+			RunId: tombstone.RunId,
+			RequestedBy: tombstone.Actor,
+			RequestedAt: tombstone.OccurredAt,
+			PriorState: tombstone.PriorState,
+			DbPhaseDone: true,
+			ArtifactsPhase: "done",
+			ArtifactsTotal: artifactsDeleted,
+			ArtifactsDeleted: artifactsDeleted,
+			LastError: null,
+			CompletedAt: tombstone.OccurredAt);
+	}
+
+	/// <summary>
+	/// Internal (not private) solely so <c>Waypoint.Tests</c> (see
+	/// <see cref="System.Runtime.CompilerServices.InternalsVisibleToAttribute"/> on this
+	/// project) can pin the malformed/missing-detail fail-closed behaviour directly,
+	/// against a hand-built <see cref="RunPurgeTombstone"/>, without needing a real
+	/// Postgres-backed tombstone row to exercise it -- <c>run_purge_tombstones.detail</c>
+	/// is a genuine <c>jsonb</c> column, so a truly unparsable string can never reach
+	/// this code via the database in production; this method still fails closed rather
+	/// than trusting that constraint alone.
+	/// </summary>
+	internal static int ReadArtifactsDeleted(RunPurgeTombstone tombstone, ILogger logger)
+	{
+		try
+		{
+			using JsonDocument document = JsonDocument.Parse(tombstone.DetailJson);
+			if (document.RootElement.TryGetProperty("artifacts_deleted", out JsonElement value)
+				&& value.ValueKind == JsonValueKind.Number
+				&& value.TryGetInt32(out int artifactsDeleted))
+			{
+				return artifactsDeleted;
+			}
+
+			LogMissingArtifactsDeleted(logger, tombstone.RunId, tombstone.DetailJson);
+			return 0;
+		}
+		catch (JsonException ex)
+		{
+			LogInvalidDetailJson(logger, ex, tombstone.RunId, tombstone.DetailJson);
+			return 0;
+		}
+	}
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Run purge tombstone {RunId} detail is missing a numeric artifacts_deleted field; reporting 0. Detail: {Detail}")]
+	private static partial void LogMissingArtifactsDeleted(ILogger logger, Guid runId, string detail);
+
+	[LoggerMessage(Level = LogLevel.Warning, Message = "Run purge tombstone {RunId} detail is not valid JSON; reporting 0 artifacts_deleted. Detail: {Detail}")]
+	private static partial void LogInvalidDetailJson(ILogger logger, Exception exception, Guid runId, string detail);
 }

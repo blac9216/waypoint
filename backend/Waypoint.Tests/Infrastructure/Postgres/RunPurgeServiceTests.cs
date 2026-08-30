@@ -62,7 +62,7 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		_purges = new RunPurgeRepository(_fixture.ConnectionString);
 		_attestationSnapshots = new AttestationSnapshotRepository(_fixture.ConnectionString);
 		_retentionHolds = new RunRetentionHoldRepository(_fixture.ConnectionString);
-		_service = new RunPurgeService(_jobs, _purges, _attestationSnapshots, _retentionHolds, _fixture.ConnectionString);
+		_service = new RunPurgeService(_jobs, _purges, _attestationSnapshots, _retentionHolds, _fixture.ConnectionString, NullLogger<RunPurgeService>.Instance);
 		_holdService = new RunRetentionHoldService(_jobs, _retentionHolds, _purges);
 
 		// Issue #1013 round-2: the artifact-purge handler must run under the REAL
@@ -232,8 +232,21 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		Assert.Equal("done", completed.Status.ArtifactsPhase);
 		Assert.NotNull(completed.Status.CompletedAt);
 
+		// Issue #1061: the completed-purge status readback must surface the tombstone's
+		// real artifact count, not hardcoded zeros -- both here (the result of the
+		// finalizing PurgeRunAsync call) and via a fresh GetStatusAsync poll below (the
+		// GET /runs/{id}/purge path).
+		Assert.Equal(3, completed.Status.ArtifactsDeleted);
+		Assert.Equal(3, completed.Status.ArtifactsTotal);
+
 		// The run_purges row is gone (only the tombstone remains as the historical record).
 		Assert.Null(await _purges.GetStatusAsync(runId, CancellationToken.None));
+
+		RunPurgeResult? polled = await _service.GetStatusAsync(runId, CancellationToken.None);
+		Assert.NotNull(polled);
+		Assert.Equal(RunPurgeOutcome.Completed, polled!.Outcome);
+		Assert.Equal(3, polled.Status!.ArtifactsDeleted);
+		Assert.Equal(3, polled.Status.ArtifactsTotal);
 
 		RunPurgeTombstone? tombstone = await _purges.GetTombstoneAsync(runId, CancellationToken.None);
 		Assert.NotNull(tombstone);
@@ -249,6 +262,88 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		// (design decision: runs/jobs are retained, not deleted).
 		Assert.Equal("completed", await GetRunStateAsync(runId));
 		Assert.True(await ScanJobRowExistsAsync(scanJobId));
+	}
+
+	/// <summary>
+	/// Issue #1061: <c>ToStatus(tombstone)</c> reads the completed purge's artifact
+	/// count back out of the tombstone's <c>detail</c> JSON rather than hardcoding
+	/// zeros. Inserts the tombstone directly (bypassing <see cref="RunPurgeService"/>
+	/// entirely) so this test pins the read side alone, independent of whatever detail
+	/// shape <c>RunPurgeRepository.CompleteAsync</c> happens to write today.
+	/// </summary>
+	[Fact]
+	public async Task GetStatusAsync_TombstoneWithArtifactsDeleted_SurfacesTheRealCount()
+	{
+		Guid runId = await SeedRunAsync("completed");
+		await InsertTombstoneWithDetailAsync(runId, """{"artifacts_deleted": 36}""");
+
+		RunPurgeResult? result = await _service.GetStatusAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(result);
+		Assert.Equal(RunPurgeOutcome.Completed, result!.Outcome);
+		Assert.NotNull(result.Status);
+		Assert.Equal(36, result.Status!.ArtifactsDeleted);
+		Assert.Equal(36, result.Status.ArtifactsTotal);
+	}
+
+	/// <summary>
+	/// Issue #1061: a tombstone whose detail is missing the field entirely must fail
+	/// closed to 0 rather than throwing -- <c>GET /runs/{id}/purge</c> must never 500
+	/// on a malformed audit record. Every case here is valid JSON (the DB column is
+	/// genuinely <c>jsonb</c>, so it cannot durably hold anything else); the
+	/// not-valid-JSON-at-all case is covered separately below at the C# layer, since
+	/// that shape can never actually reach this code via the database.
+	/// </summary>
+	[Theory]
+	[InlineData("{}")]
+	[InlineData("""{"something_else": 5}""")]
+	[InlineData("""{"artifacts_deleted": "not-a-number"}""")]
+	public async Task GetStatusAsync_TombstoneWithMissingOrWrongTypeDetail_FailsClosedToZero(string detailJson)
+	{
+		Guid runId = await SeedRunAsync("completed");
+		await InsertTombstoneWithDetailAsync(runId, detailJson);
+
+		RunPurgeResult? result = await _service.GetStatusAsync(runId, CancellationToken.None);
+
+		Assert.NotNull(result);
+		Assert.Equal(RunPurgeOutcome.Completed, result!.Outcome);
+		Assert.NotNull(result.Status);
+		Assert.Equal(0, result.Status!.ArtifactsDeleted);
+		Assert.Equal(0, result.Status.ArtifactsTotal);
+	}
+
+	/// <summary>
+	/// Issue #1061: unlike the theory above, a genuinely unparsable string can never be
+	/// durably stored in <c>run_purge_tombstones.detail</c> (a real <c>jsonb</c>
+	/// column) -- so this pins <see cref="RunPurgeService.ReadArtifactsDeleted"/>'s
+	/// <see cref="System.Text.Json.JsonException"/> handling directly, against a
+	/// hand-built <see cref="RunPurgeTombstone"/>, with no database involved.
+	/// </summary>
+	[Fact]
+	public void ReadArtifactsDeleted_NotValidJson_FailsClosedToZeroWithoutThrowing()
+	{
+		RunPurgeTombstone tombstone = new(
+			Id: Guid.NewGuid(), RunId: Guid.NewGuid(), RunType: "scan", PriorState: "completed",
+			Actor: "admin-tester", Outcome: "completed", DetailJson: "not json at all",
+			OccurredAt: DateTimeOffset.UtcNow);
+
+		int artifactsDeleted = RunPurgeService.ReadArtifactsDeleted(tombstone, NullLogger.Instance);
+
+		Assert.Equal(0, artifactsDeleted);
+	}
+
+	private async Task InsertTombstoneWithDetailAsync(Guid runId, string detailJson)
+	{
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand insert = new(
+			"""
+			INSERT INTO run_purge_tombstones (run_id, run_type, prior_state, actor, outcome, detail)
+			VALUES ($1, 'scan', 'completed', 'admin-tester', 'completed', $2::jsonb)
+			""", connection);
+		insert.Parameters.AddWithValue(runId);
+		insert.Parameters.AddWithValue(detailJson);
+		await insert.ExecuteNonQueryAsync();
 	}
 
 	/// <summary>
@@ -614,7 +709,7 @@ public sealed class RunPurgeServiceTests : IAsyncLifetime, IDisposable
 		HoldLandsDuringDatabasePhaseRepository racingHolds = new(
 			_retentionHolds,
 			() => _holdService.PlaceHoldAsync(runId, "invented-legal-hold-reason", "admin-alice", CancellationToken.None));
-		RunPurgeService racingService = new(_jobs, _purges, _attestationSnapshots, racingHolds, _fixture.ConnectionString);
+		RunPurgeService racingService = new(_jobs, _purges, _attestationSnapshots, racingHolds, _fixture.ConnectionString, NullLogger<RunPurgeService>.Instance);
 
 		RunPurgeResult result = await racingService.PurgeRunAsync(runId, "admin-tester", CancellationToken.None);
 
