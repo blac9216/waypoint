@@ -307,7 +307,8 @@ Describe 'Resolve-WaypointHostAddresses / Resolve-WaypointReverseHostNames (boun
 
 			$NeverCompletesInTime = { param($Name) [System.Threading.Tasks.Task]::Delay(60000) }
 			$Result = $null
-			{ $Result = Resolve-WaypointHostAddresses -HostNameOrAddress 'slow-resolver.example.internal' -TimeoutMilliseconds 50 -AddressTaskFactory $NeverCompletesInTime } | Should -Not -Throw
+			$Warnings = $null
+			{ $Result = Resolve-WaypointHostAddresses -HostNameOrAddress 'slow-resolver.example.internal' -TimeoutMilliseconds 50 -AddressTaskFactory $NeverCompletesInTime -WarningVariable Warnings -WarningAction SilentlyContinue } | Should -Not -Throw
 			$Result | Should -BeNullOrEmpty
 		}
 	}
@@ -322,8 +323,183 @@ Describe 'Resolve-WaypointHostAddresses / Resolve-WaypointReverseHostNames (boun
 
 			$NeverCompletesInTime = { param($Address) [System.Threading.Tasks.Task]::Delay(60000) }
 			$Result = $null
-			{ $Result = Resolve-WaypointReverseHostNames -IpAddress '198.51.100.10' -TimeoutMilliseconds 50 -HostEntryTaskFactory $NeverCompletesInTime } | Should -Not -Throw
+			$Warnings = $null
+			{ $Result = Resolve-WaypointReverseHostNames -IpAddress '198.51.100.10' -TimeoutMilliseconds 50 -HostEntryTaskFactory $NeverCompletesInTime -WarningVariable Warnings -WarningAction SilentlyContinue } | Should -Not -Throw
 			$Result | Should -BeNullOrEmpty
+		}
+	}
+}
+
+# Issue #1305: a DNS timeout must be observable, not just fail-closed -- these pin
+# the Write-Warning this issue adds to both resolver functions' timeout branch,
+# naming the lookup kind (forward/reverse) and the host, never a credential.
+Describe 'Resolve-WaypointHostAddresses / Resolve-WaypointReverseHostNames (timeout observability, issue #1305)' {
+	It 'Resolve-WaypointHostAddresses warns naming the host and ceiling when the lookup exceeds -TimeoutMilliseconds' {
+		InModuleScope WaypointDiscovery {
+			$NeverCompletesInTime = { param($Name) [System.Threading.Tasks.Task]::Delay(60000) }
+			$Warnings = $null
+			Resolve-WaypointHostAddresses -HostNameOrAddress 'slow-resolver.example.internal' -TimeoutMilliseconds 50 -AddressTaskFactory $NeverCompletesInTime -WarningVariable Warnings -WarningAction SilentlyContinue | Out-Null
+
+			$Warnings.Count | Should -Be 1
+			$Warnings[0].Message | Should -Match 'forward DNS'
+			$Warnings[0].Message | Should -Match 'slow-resolver\.example\.internal'
+			$Warnings[0].Message | Should -Match '50ms'
+		}
+	}
+
+	It 'Resolve-WaypointHostAddresses does not warn when the lookup completes within the ceiling' {
+		InModuleScope WaypointDiscovery {
+			$Completes = { param($Name) [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@([System.Net.IPAddress]::Parse('198.51.100.7'))) }
+			$Warnings = $null
+			Resolve-WaypointHostAddresses -HostNameOrAddress 'fast-resolver.example.internal' -TimeoutMilliseconds 5000 -AddressTaskFactory $Completes -WarningVariable Warnings -WarningAction SilentlyContinue | Out-Null
+
+			$Warnings.Count | Should -Be 0
+		}
+	}
+
+	It 'Resolve-WaypointReverseHostNames warns naming the host and ceiling when the lookup exceeds -TimeoutMilliseconds' {
+		InModuleScope WaypointDiscovery {
+			$NeverCompletesInTime = { param($Address) [System.Threading.Tasks.Task]::Delay(60000) }
+			$Warnings = $null
+			Resolve-WaypointReverseHostNames -IpAddress '198.51.100.10' -TimeoutMilliseconds 50 -HostEntryTaskFactory $NeverCompletesInTime -WarningVariable Warnings -WarningAction SilentlyContinue | Out-Null
+
+			$Warnings.Count | Should -Be 1
+			$Warnings[0].Message | Should -Match 'reverse DNS'
+			$Warnings[0].Message | Should -Match '198\.51\.100\.10'
+			$Warnings[0].Message | Should -Match '50ms'
+		}
+	}
+}
+
+# Issue #1305: the ceiling is now operator-configurable end to end -- pins that
+# Resolve-WaypointPrimarySession/Test-WaypointSessionMatchesVCenter actually forward
+# a non-default -TimeoutMilliseconds down to the real resolver call, rather than the
+# parameter existing but being silently dropped somewhere in the chain.
+Describe 'Resolve-WaypointPrimarySession -TimeoutMilliseconds threading (issue #1305)' {
+	# Issue #1322: BOTH legs are mocked, for two reasons. (1) Hermeticity: -VCenter is an
+	# IP literal, so Resolve-WaypointPrimarySession also takes the *reverse* leg -- with
+	# only the forward resolver mocked this test performed a real PTR lookup for
+	# 203.0.113.99 against whatever resolver the test machine has, making it slow and
+	# network-dependent. (2) Coverage: the reverse leg is half the threading chain this
+	# test exists to pin, and nothing asserted it, so a -TimeoutMilliseconds dropped on
+	# the Resolve-WaypointReverseHostNamesCached call would have passed.
+	It 'forwards a non-default -TimeoutMilliseconds to both the forward and the reverse DNS resolver calls' {
+		InModuleScope WaypointDiscovery {
+			Mock Resolve-WaypointHostAddresses { @() }
+			Mock Resolve-WaypointReverseHostNames { @() }
+
+			$SessionA = [pscustomobject]@{ Name = 'vcsa-g.example.internal'; ServiceUri = $null }
+			$SessionB = [pscustomobject]@{ Name = 'vcsa-h.example.internal'; ServiceUri = $null }
+
+			Resolve-WaypointPrimarySession -Sessions @($SessionA, $SessionB) -VCenter '203.0.113.99' -TimeoutMilliseconds 12345 -WarningAction SilentlyContinue | Out-Null
+
+			Should -Invoke Resolve-WaypointHostAddresses -ParameterFilter { $TimeoutMilliseconds -eq 12345 }
+			Should -Invoke Resolve-WaypointReverseHostNames -ParameterFilter { $TimeoutMilliseconds -eq 12345 }
+		}
+	}
+}
+
+# Issue #1305 (review round 1): the ceiling became an operator-supplied number, and the
+# values an operator is most likely to reach for defeat the guarantee it exists to
+# provide -- silently. -1 is Timeout.Infinite, so Task.Wait(-1) waits for a blackholed
+# resolver forever and the timeout branch (and its warning) never runs, reinstating
+# exactly the unbounded stall #1251/#1297 removed; -2 and below throw
+# ArgumentOutOfRangeException into the resolvers' deliberate fail-open
+# `catch { return @() }`, disabling DNS matching for the whole pass with no warning at
+# all; 0 makes every lookup time out instantly. [ValidateRange(1, 60000)] turns all of
+# them into a loud bind-time failure. These cases pin that at the module boundary --
+# the outermost entry point an operator's configuration actually reaches.
+Describe 'DNS timeout bounds (issue #1305)' {
+	It 'Invoke-WaypointDiscovery rejects a <Value>ms DNS ceiling at bind time' -ForEach @(
+		@{ Value = -1 }
+		@{ Value = 0 }
+		@{ Value = -2 }
+		@{ Value = 60001 }
+	) {
+		# Bind-time validation runs before the function body, so no vCenter, credential
+		# or transport path is needed (and none is contacted) to prove the rejection.
+		{
+			Invoke-WaypointDiscovery -VCenter 'vcsa-bounds.example.internal' -Username 'svc' -Password 'unused' -DnsTimeoutMilliseconds $Value
+		} | Should -Throw -ExpectedMessage '*DnsTimeoutMilliseconds*'
+	}
+
+	It 'Resolve-WaypointPrimarySession rejects a <Value>ms ceiling at bind time' -ForEach @(
+		@{ Value = -1 }
+		@{ Value = 0 }
+	) {
+		InModuleScope WaypointDiscovery -Parameters @{ Value = $Value } {
+			param($Value)
+			{
+				Resolve-WaypointPrimarySession -Sessions @() -VCenter 'vcsa-bounds.example.internal' -TimeoutMilliseconds $Value
+			} | Should -Throw -ExpectedMessage '*TimeoutMilliseconds*'
+		}
+	}
+
+	It 'Resolve-WaypointHostAddresses rejects a <Value>ms ceiling before it can reach Task.Wait' -ForEach @(
+		@{ Value = -1 }
+		@{ Value = 0 }
+	) {
+		# The regression this pins concretely: with -1 and no validation, the measured
+		# behaviour was a full 4s wait on a 4s task with no warning emitted. The factory
+		# below would never be invoked now -- binding fails first.
+		InModuleScope WaypointDiscovery -Parameters @{ Value = $Value } {
+			param($Value)
+			$NeverCompletesInTime = { param($Name) [System.Threading.Tasks.Task]::Delay(60000) }
+			{
+				Resolve-WaypointHostAddresses -HostNameOrAddress 'slow-resolver.example.internal' -TimeoutMilliseconds $Value -AddressTaskFactory $NeverCompletesInTime
+			} | Should -Throw -ExpectedMessage '*TimeoutMilliseconds*'
+		}
+	}
+
+	It 'Resolve-WaypointReverseHostNames rejects a <Value>ms ceiling before it can reach Task.Wait' -ForEach @(
+		@{ Value = -1 }
+		@{ Value = 0 }
+	) {
+		InModuleScope WaypointDiscovery -Parameters @{ Value = $Value } {
+			param($Value)
+			$NeverCompletesInTime = { param($Ip) [System.Threading.Tasks.Task]::Delay(60000) }
+			{
+				Resolve-WaypointReverseHostNames -IpAddress '198.51.100.10' -TimeoutMilliseconds $Value -HostEntryTaskFactory $NeverCompletesInTime
+			} | Should -Throw -ExpectedMessage '*TimeoutMilliseconds*'
+		}
+	}
+
+	It 'still accepts the in-range ceilings the rest of this suite and production depend on' {
+		InModuleScope WaypointDiscovery {
+			$Completes = { param($Name) [System.Threading.Tasks.Task]::FromResult([System.Net.IPAddress[]]@([System.Net.IPAddress]::Parse('198.51.100.20'))) }
+			foreach ($InRange in @(1, 50, 3000, 60000)) {
+				$Answered = @(Resolve-WaypointHostAddresses -HostNameOrAddress 'fast-resolver.example.internal' -TimeoutMilliseconds $InRange -AddressTaskFactory $Completes)
+				$Answered | Should -Be @('198.51.100.20')
+			}
+		}
+	}
+}
+
+# Issue #1323: DiscoverJobHandler binds a single fixed parameter dictionary against
+# EITHER the real module or the Postgres end-to-end tests' stub, so a parameter added to
+# the real module is a silent break of the stub -- the handler fails at bind time, in a
+# test that looks unrelated. This PR's -DnsTimeoutMilliseconds was the second such
+# drift. Pin the containment directly, by reflecting both surfaces with Get-Command,
+# rather than rediscovering it one broken end-to-end test at a time.
+Describe 'Stub discovery module parameter-surface contract (issue #1323)' {
+	It 'the stub module accepts every parameter the real Invoke-WaypointDiscovery declares' {
+		$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path
+		$StubPath = Join-Path $RepoRoot 'backend/Waypoint.Tests/Assets/WaypointDiscoveryStubModule/WaypointDiscoveryStubModule.psm1'
+		Test-Path $StubPath | Should -BeTrue -Because 'the contract test must fail loudly if the stub module moves'
+
+		$Common = [System.Management.Automation.PSCmdlet]::CommonParameters + [System.Management.Automation.PSCmdlet]::OptionalCommonParameters
+		$RealParameters = @((Get-Command -Module WaypointDiscovery -Name Invoke-WaypointDiscovery).Parameters.Keys | Where-Object { $_ -notin $Common })
+
+		Import-Module $StubPath -Force
+		try {
+			$StubParameters = @((Get-Command -Module WaypointDiscoveryStubModule -Name Invoke-WaypointDiscovery).Parameters.Keys | Where-Object { $_ -notin $Common })
+
+			$RealParameters.Count | Should -BeGreaterThan 0
+			$Missing = @($RealParameters | Where-Object { $_ -notin $StubParameters })
+			$Missing -join ', ' | Should -BeNullOrEmpty -Because 'the stub must accept (it may ignore) every parameter DiscoverJobHandler can pass to the real module'
+		} finally {
+			Remove-Module WaypointDiscoveryStubModule -Force -ErrorAction SilentlyContinue
+			Import-Module $ModulePath -Force
 		}
 	}
 }

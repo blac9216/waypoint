@@ -71,7 +71,23 @@ function Invoke-WaypointDiscovery {
 		[string]$Password,
 
 		[Parameter()]
-		[string]$VmwareStigDockerTransportPath
+		[string]$VmwareStigDockerTransportPath,
+
+		# Issue #1323: accepted (and ignored) purely to keep this stub's parameter
+		# surface a superset of the real module's Invoke-WaypointDiscovery, which the
+		# contract test in WaypointDiscovery.SessionMatch.Tests.ps1 now pins. The real
+		# module's -NameResolver is a test-only hermeticity seam (#1252); this stub
+		# never touches DNS at all, so there is nothing here for it to redirect.
+		[Parameter()]
+		[AllowNull()]
+		[scriptblock]$NameResolver = $null,
+
+		# Issue #1305: accepted (and ignored, like VmwareStigDockerTransportPath
+		# above) so DiscoverJobHandler's fixed parameter dictionary -- which now
+		# always includes this key -- binds against the stub the same way it binds
+		# against the real module.
+		[Parameter()]
+		[int]$DnsTimeoutMilliseconds
 	)
 
 	# Deliberately touches the Information stream, exactly like

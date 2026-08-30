@@ -63,8 +63,16 @@ public static class ServiceCollectionExtensions
 		services.AddOptions<RunnerResourceOptions>()
 			.Bind(configuration.GetSection(RunnerResourceOptions.SectionName));
 
+		// Issue #1305: DiscoveryDnsTimeoutMilliseconds bounds a hang, and the values
+		// just outside its [Range] defeat that bound silently (-1 is Timeout.Infinite;
+		// -2 and below throw into the module's fail-open catch). Validating the whole
+		// section on start -- the same .ValidateDataAnnotations().ValidateOnStart()
+		// shape Program.cs uses for OidcAuthOptions -- makes a bad PowerShell__* value
+		// fail the runner loudly at boot instead of at the first slow DNS lookup.
 		services.AddOptions<PowerShellOptions>()
-			.Bind(configuration.GetSection(PowerShellOptions.SectionName));
+			.Bind(configuration.GetSection(PowerShellOptions.SectionName))
+			.ValidateDataAnnotations()
+			.ValidateOnStart();
 
 		services.AddOptions<Waypoint.Core.ComplianceContent.ComplianceContentOptions>()
 			.Bind(configuration.GetSection(Waypoint.Core.ComplianceContent.ComplianceContentOptions.SectionName));
