@@ -103,6 +103,8 @@ public sealed class SchemaMigrationTests
 		"esx_acquisition_subscriptions",
 		"download_retention_policies",
 		"download_retained_content_state",
+		"oci_bundles",
+		"push_target_consumers",
 		"schema_migrations"
 	];
 
@@ -397,9 +399,21 @@ public sealed class SchemaMigrationTests
 	/// identity, insert-or-touch-last-seen only, no delete path (design decision Q11:
 	/// alert instead of drop) -- with a new <c>waypoint_download_runner</c> grant
 	/// (SELECT/INSERT/UPDATE, no DELETE) mirroring migration 0025's existing
-	/// <c>depot_artifacts</c> grant to the same role.
+	/// <c>depot_artifacts</c> grant to the same role. --
+	/// 0118 (issue #1403, epic #1181, split from the design record #1161; slot
+	/// pre-assigned 2026-08-30 while sibling migrations 0099/0100/0107/0117 were
+	/// in-flight on other branches -- the resulting 0081-to-0118 numbering gap is
+	/// expected, not a collision, since NpgsqlSchemaMigrator orders by filename, not
+	/// contiguous numbers): adds <c>oci_bundles</c> (one staged imgpkg-shaped OCI
+	/// bundle tar and its computed depot-registry destination) and
+	/// <c>push_target_consumers</c> (a configured depot-registry push target,
+	/// carrying a <c>write_mode_enabled</c> placeholder safety flag for #1441's
+	/// enable/disable bracket) -- model-only, no acquisition (#1413) or push (#1441)
+	/// logic. No new runner grants: no runner process reads or writes either table
+	/// yet, so #1413/#1441 each add the GRANTs their own writer needs alongside the
+	/// runner-role-connects test proving them (this repo's #556 convention) --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
-	private const int ExpectedMigrationCount = 84;
+	private const int ExpectedMigrationCount = 85;
 
 	private readonly PostgresFixture _fixture;
 
