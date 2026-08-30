@@ -134,7 +134,7 @@ docker run --rm -v "${PROJECT}_compliance-profiles:/x" alpine \
 	sh -c "mkdir -p /x/vsphere /x/nsx /x/srg" >/dev/null
 
 # why: docs/rationale/deploy.md#smoke-repo-path-space
-for repo_vol in repo-umds repo-photon repo-content-libraries; do
+for repo_vol in depot repo-umds repo-photon repo-vmtools repo-vks repo-content-libraries; do
 	docker volume create "${PROJECT}_${repo_vol}" >/dev/null
 done
 docker run --rm -v "${PROJECT}_repo-umds:/x" alpine sh -c "
@@ -142,9 +142,23 @@ docker run --rm -v "${PROJECT}_repo-umds:/x" alpine sh -c "
 	printf 'umds-marker' > /x/vmware-updates/patch1.txt
 	ln -s /etc/passwd /x/vmware-updates/symlink-hostupdate
 "
+# `depot` is download-runner's real /vcf volume -- the same symlink escape
+# has to be proven here too, since this is the store the runner actually
+# writes UMDS content into today (docs/rationale/deploy.md#nginx-repo-umds-disable-symlinks).
+docker run --rm -v "${PROJECT}_depot:/x" alpine sh -c "
+	mkdir -p /x/UMDS/vmware-updates
+	printf 'depot-umds-marker' > /x/UMDS/vmware-updates/patch1.txt
+	ln -s /etc/passwd /x/UMDS/vmware-updates/symlink-hostupdate
+"
 docker run --rm -v "${PROJECT}_repo-photon:/x" alpine sh -c "
 	mkdir -p /x/photon_release_5.0_x86_64/repodata
 	printf 'photon-marker' > /x/photon_release_5.0_x86_64/repodata/marker.txt
+"
+docker run --rm -v "${PROJECT}_repo-vmtools:/x" alpine sh -c "
+	printf 'vmtools-marker' > /x/vmtools-marker.txt
+"
+docker run --rm -v "${PROJECT}_repo-vks:/x" alpine sh -c "
+	printf 'vks-marker' > /x/vks-marker.txt
 "
 docker run --rm -v "${PROJECT}_repo-content-libraries:/x" alpine sh -c "
 	printf 'ovf-content'  > /x/sample.ovf
@@ -687,16 +701,51 @@ if [[ "${UMDS_BODY}" == "umds-marker" ]]; then ok "UMDS store served through its
 
 SYMLINK_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/umds/vmware-updates/symlink-hostupdate")"
 if [[ "${SYMLINK_CODE}" != "200" ]]; then
-	ok "disable_symlinks blocks the out-of-store symlink (${SYMLINK_CODE}, not 200)"
+	ok "disable_symlinks blocks the out-of-store symlink on /repo/umds/ (${SYMLINK_CODE}, not 200)"
 else
 	bad "symlink inside the UMDS store was dereferenced through nginx (200) -- disable_symlinks not enforced"
+fi
+
+# `depot` is download-runner's real /vcf volume -- the guard has to hold
+# here too, not only on the placeholder /repo/umds/ volume.
+# why: docs/rationale/deploy.md#nginx-repo-umds-disable-symlinks
+DEPOT_BODY="$(net_curl "${NET_BASE}/repo/depot/UMDS/vmware-updates/patch1.txt")"
+if [[ "${DEPOT_BODY}" == "depot-umds-marker" ]]; then ok "depot store served through its own location"; else bad "depot store fetch failed: ${DEPOT_BODY}"; fi
+
+DEPOT_SYMLINK_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/depot/UMDS/vmware-updates/symlink-hostupdate")"
+if [[ "${DEPOT_SYMLINK_CODE}" != "200" ]]; then
+	ok "disable_symlinks blocks the out-of-store symlink on /repo/depot/ (${DEPOT_SYMLINK_CODE}, not 200)"
+else
+	bad "symlink inside the depot store was dereferenced through nginx (200) -- disable_symlinks not enforced on /repo/depot/"
 fi
 
 PHOTON_BODY="$(net_curl "${NET_BASE}/photon/photon_release_5.0_x86_64/repodata/marker.txt")"
 if [[ "${PHOTON_BODY}" == "photon-marker" ]]; then ok "lowercase /photon/ root served"; else bad "lowercase /photon/ root fetch failed: ${PHOTON_BODY}"; fi
 
-PHOTON_UPPER_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/Photon/photon_release_5.0_x86_64/repodata/marker.txt")"
-if [[ "${PHOTON_UPPER_CODE}" == "404" ]]; then ok "uppercase /Photon/ variant 404s"; else bad "uppercase /Photon/ variant returned ${PHOTON_UPPER_CODE}, expected 404"; fi
+# Case variants: only the literal lowercase spelling may serve; every other
+# capitalization must 404, not fall through to the SPA catch-all.
+# why: docs/rationale/deploy.md#nginx-repo-photon-case-sensitive-root
+for variant in Photon PHOTON PhOtOn; do
+	VARIANT_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/${variant}/photon_release_5.0_x86_64/repodata/marker.txt")"
+	if [[ "${VARIANT_CODE}" == "404" ]]; then
+		ok "/${variant}/ variant 404s"
+	else
+		bad "/${variant}/ variant returned ${VARIANT_CODE}, expected 404"
+	fi
+done
+
+VMTOOLS_BODY="$(net_curl "${NET_BASE}/repo/vmtools/vmtools-marker.txt")"
+if [[ "${VMTOOLS_BODY}" == "vmtools-marker" ]]; then ok "VMTools store served through its own location"; else bad "VMTools store fetch failed: ${VMTOOLS_BODY}"; fi
+
+VKS_BODY="$(net_curl "${NET_BASE}/repo/vks/vks-marker.txt")"
+if [[ "${VKS_BODY}" == "vks-marker" ]]; then ok "VKS store served through its own location"; else bad "VKS store fetch failed: ${VKS_BODY}"; fi
+
+VKS_LISTING="$(net_curl "${NET_BASE}/repo/vks/")"
+if [[ "${VKS_LISTING}" == *"vks-marker.txt"* ]]; then
+	ok "autoindex on /repo/vks/ lists the seeded file"
+else
+	bad "autoindex on /repo/vks/ did not list the seeded file: ${VKS_LISTING}"
+fi
 
 # VCSP MIME map: one Content-Type assertion per documented extension.
 declare -A EXT_TYPES=(

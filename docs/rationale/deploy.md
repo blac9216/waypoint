@@ -498,13 +498,16 @@ Refs: #498
 
 ### smoke-repo-path-space
 
-Repo path-space content (UMDS/Photon/content-libraries) is seeded straight
-into throwaway Docker volumes before `up`, the same trick
-smoke-seeding-preconditions already uses for `compliance-profiles` --
-nothing in this stack yet produces real repo content (that's later lanes),
-so the smoke test has to plant it itself to prove nginx serves what a
-producer will eventually write, including a symlink escaping the UMDS
-store root to prove `disable_symlinks on` is enforced, not just configured.
+Repo path-space content (depot/UMDS/Photon/VMTools/VKS/content-libraries)
+is seeded straight into throwaway Docker volumes before `up`, the same
+trick smoke-seeding-preconditions already uses for `compliance-profiles`
+-- nothing in this stack yet produces real repo content (that's later
+lanes), so the smoke test has to plant it itself to prove nginx serves
+what a producer will eventually write. The symlink escape is seeded and
+asserted on both `repo-umds` and `depot` (download-runner's real `/vcf`
+volume, where the runner actually writes UMDS content today) to prove
+`disable_symlinks on` is enforced on every store that carries a symlink,
+not just configured on one placeholder volume.
 
 Refs: #1043, #1502
 
@@ -736,10 +739,16 @@ Refs: #1043, #1502
 ### nginx-repo-photon-case-sensitive-root
 
 The Photon mirror is a literal lowercase `/photon/` root because `tdnf`
-`baseurl` matching on the consumer side is case-sensitive. A companion
-`/Photon/` location explicitly 404s rather than silently falling through
-to the SPA catch-all's `try_files ... /index.html`, which would otherwise
-answer 200 with the wrong body for a case-variant request.
+`baseurl` matching on the consumer side is case-sensitive. A single
+`/Photon/` location only caught that one spelling -- `/PHOTON/` and other
+mixed-case variants fell through to the SPA catch-all's
+`try_files ... /index.html` and answered 200 with the wrong body. The
+guard is now a case-insensitive regex location (`~* ^/photon/ { return
+404; }`) that 404s any non-lowercase variant, paired with `^~ /photon/`
+on the literal lowercase location so it wins over the regex for the one
+spelling that must serve (nginx checks regex locations only after the
+longest-prefix search, and `^~` stops that search from falling through
+to regex matching once the literal prefix matches).
 
 Refs: #1043, #1502
 
@@ -749,8 +758,14 @@ Refs: #1043, #1502
 design (VMware's own UMDS layout), and must never be dereferenced outside
 the store root through this proxy. `disable_symlinks on` costs an extra
 `stat` per path component nginx resolves, which is acceptable for a
-read-only, moderate-traffic repo location -- not worth paying on every
-other repo store that has no symlinks to worry about.
+read-only, moderate-traffic repo location. Every repo store location
+carries the guard, not only `/repo/umds/`: `depot` is download-runner's
+real `/vcf` volume, and the runner writes the actual UMDS/Photon/VKS/
+VMTools/content-library trees there today (`vcf-download-manager.common.ps1`),
+so `/repo/depot/` needs the same protection `/repo/umds/` has -- a
+symlink written into any store is reachable through more than one
+location in the interim state this PR ships, and none of them is a
+store where dereferencing outside the root is ever wanted.
 
 Refs: #1043, #1502
 
