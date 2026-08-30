@@ -31,7 +31,8 @@ the skill. See [references/process-dir.md](references/process-dir.md).
 Columns: **Triage → Backlog → Ready → In progress → In review → Done**. `Verified`:
 `n/a · pending-live · live-verified · live-failed`. Labels classify (type, severity,
 priority, `concern:*`, ≥1 `area:*`, `deferred` = filed-out-of-scope provenance,
-`backlog` = shelved); fields track state. Native mechanisms over prose: sub-issues for
+`backlog` = not released for work — "agents, don't work it" — with or without a
+milestone); fields track state. Native mechanisms over prose: sub-issues for
 hierarchy, `blocked by` dependencies for sequence, close reasons
 (`completed`/`not planned`/`duplicate`), task-list checkboxes for acceptance criteria,
 `gh issue develop` for the linked branch.
@@ -63,7 +64,10 @@ resolve target/mode/horizon (above). The log is always on, interactive or not, s
 milestone description, the target epic's body and its recent comments, the board slice
 for the target plus everything In progress / In review across the board (that is where
 collisions live). Re-derive review rounds from PR comments. Derive state from GitHub
-only.
+only. Then **re-evaluate the timeline** ([references/timeline.md](references/timeline.md)):
+milestones already started stay pinned at their actual start; anything newly started is
+placed from now; the rest shift by issue-level dependencies and per-issue estimates. This
+happens at session start only — never mid-run.
 
 **2. Claim** — take a claim id and write it to `Claimed by` on the epic (or the
 standalone issue). Refuse anything live-claimed by someone else; take over stale claims
@@ -106,7 +110,8 @@ write memory. Nothing goes to the issues — continuous state maintenance is the
 
 ## Rules that do not bend
 
-- **Issue first.** No code without an issue. Assign yourself as a courtesy; the *claim*
+- **Issue first.** No code without an issue. Assign the issue to the acting account when
+  work starts — the first `assigned` event is the estimator's start timestamp; the *claim*
   is the coordination signal.
 - **Never merge your own work.** Every non-trivial PR is approved and squash-merged by a
   fresh `github-pr-review` agent. The one exception is the fast path: ≤3 files, ≤50

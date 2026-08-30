@@ -19,8 +19,9 @@ basic labels; the filer cannot decide precedence. For each item:
   is a standalone theme. Check the target epic's child count.
 - **Sequence it**: `priority:*`; native `blocked by` links where order matters; fold
   small items into the in-flight issue whose natural home they are (say so on both).
-- **Move it**: Ready if sequenced into live work; Backlog if intentionally shelved (add the
-  `backlog` label; it carries no milestone).
+- **Move it**: Ready if the owner has released it for work; Backlog if not (add the
+  `backlog` label; a milestone may or may not be set — Backlog means "don't work it", not
+  "unplanned").
 
 Live-test blockers that gate the active epic's proof are active work by definition —
 they go straight to Ready under that epic, whatever label they arrived with.
@@ -61,7 +62,8 @@ Findings become issues or resume directives; a repeated finding becomes a
 The board is the coordination surface, so its lies are expensive. Check:
 
 - Every open issue is on the board; none is In progress / In review without a live PR or
-  agent; nothing is Done while open.
+  agent; nothing is Done while open — a reopened issue still showing Done goes back to
+  Triage (there is no reopen automation on personal-account Projects).
 - Claims: yours is current; others' are live or stale (take over per
   [claims.md](claims.md)).
 - Epics: every open epic has >1 child, is under the 100-child cap, and its parent (if any)

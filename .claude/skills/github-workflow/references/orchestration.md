@@ -23,7 +23,7 @@ dispatch; inheriting the session model has silently put implementers on the prem
 | Transition | Owner |
 |---|---|
 | Triage → Backlog / Ready; Backlog → Ready | orchestrator (during triage) |
-| → In progress | implementer or fix-round agent, at its start — in solo mode that is **you**, the moment you start implementing or fixing |
+| → In progress | implementer or fix-round agent, at its start — in solo mode that is **you**, the moment you start implementing or fixing. **Assign the issue to the acting account in the same breath**: the timeline's first `assigned` event is the durable start timestamp the estimator reads. |
 | → In review | reviewer, at its start, every round |
 | → Done | board automation on close |
 | `Verified` at merge (`n/a` / `pending-live`) | reviewer |
@@ -52,9 +52,11 @@ prompt is missing the instruction — fix the prompt, not the board.
    reviewer. Three rounds, then the reviewer escalates with `help` and you stop.
 6. **Merged** → confirm on GitHub (reviewer reports occasionally outpace it): issue
    closed, branch gone, `Verified` set. Remove the worktree, `-D` the local branch,
-   `pull --ff-only`. Post the **event comment** on the epic
-   ([templates/epic-event.md](templates/epic-event.md)) — what landed, drift from the
-   design, findings worth remembering. Re-check whether the merge invalidates any in-flight
+   `pull --ff-only`. Post the **metrics closing comment on the issue**
+   ([templates/issue-metrics.md](templates/issue-metrics.md)) — the issue's estimate next
+   to its actuals, with the machine-readable footer the estimator reads. Then post the
+   **event comment** on the epic ([templates/epic-event.md](templates/epic-event.md)) —
+   what landed, drift from the design, findings worth remembering. Re-check whether the merge invalidates any in-flight
    sibling; a conflicting PR gets a rebase directive to its author agent before review.
 7. **Epic children all closed** → the last reviewer closes the epic (name it in the
    handoff); you verify and post the closing event; rewrite the milestone's *Current

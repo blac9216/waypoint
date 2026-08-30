@@ -37,7 +37,7 @@ Only two. Every field is something a human or the orchestrator must keep honest.
 | Column | Meaning |
 |---|---|
 | Triage | Newly filed and not yet sequenced. The orchestrator drains this column. |
-| Backlog | Intentionally shelved: a record of intent, not sequenced into any milestone. |
+| Backlog | Not released for work — "agents, don't work it". May or may not carry a milestone; planning files new issues here and the owner releases them to Ready. |
 | Ready | Sequenced (milestone and/or epic) and ready to dispatch. |
 | In progress | Being worked, including fix rounds. |
 | In review | PR open; contextless review in flight. |
