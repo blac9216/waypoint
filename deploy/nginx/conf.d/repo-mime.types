@@ -1,0 +1,12 @@
+# VCSP MIME map for the repo path-space (`include`d into each repo
+# location in default.conf -- never duplicated per location).
+# why: docs/rationale/deploy.md#nginx-repo-vcsp-mime-map
+types {
+	application/json            json;
+	application/ovf+xml         ovf;
+	application/x-vmdk          vmdk;
+	application/x-iso9660-image iso;
+	application/x-x509-ca-cert  cert;
+	text/plain                  mf;
+}
+default_type application/octet-stream;

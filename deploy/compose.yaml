@@ -58,6 +58,14 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Repo path-space: `depot` IS download-runner's /vcf store root, and
+      # the runner writes every store tree inside it. One read-only mount;
+      # each location aliases its own subtree, and /repo/depot/ denies them.
+      # why: docs/rationale/deploy.md#nginx-repo-store-subtree-aliases
+      - type: volume
+        source: depot
+        target: /srv/repo
+        read_only: true
     networks:
       - edge
     healthcheck:

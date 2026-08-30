@@ -496,6 +496,27 @@ as correct product behavior, not a test failure.
 
 Refs: #498
 
+### smoke-repo-path-space
+
+Repo path-space content is seeded straight into the throwaway `depot`
+volume before `up`, at exactly the paths the runner writes (`PROD/`,
+`UMDS/`, `Photon/`, `VMTools/`, `VKS/`, `ContentLibrary/`, `Transfer/`)
+-- the same trick smoke-seeding-preconditions already uses for
+`compliance-profiles`. Nothing in this stack yet produces real repo
+content (that's later lanes), so the smoke test has to plant it itself
+to prove nginx serves what a producer will eventually write.
+
+Seeding the real layout rather than a set of separate placeholder volumes
+is what makes the isolation assertions mean anything: the stores overlap
+inside one volume (nginx-repo-store-subtree-aliases), so the test probes
+that pair -- every store subtree 404s through `/repo/depot/` while
+serving through its own location -- instead of two trivially-separate
+volumes. Symlink escapes are seeded in both absolute and relative form,
+on the store location and on `/repo/depot/`, and a hardlink is seeded to
+prove `disable_symlinks on` does not break it.
+
+Refs: #1043, #1502
+
 ### smoke-credential-owner-shared
 
 `owner` must be `'shared'` on every credential this script creates: there
@@ -697,6 +718,103 @@ the container HEALTHCHECK. Folding them would make nginx report unhealthy
 every time `backend` is legitimately recreated (self-update, `restart`).
 
 Refs: #66
+
+### nginx-repo-mtls-carve-out
+
+Repo path-space locations (depot/UMDS/Photon/VMTools/VKS/content-libraries)
+never require the client certificate app paths may eventually require.
+`ssl_verify_client optional` is left as a commented-out, explicitly-absent
+placeholder on those locations rather than configured now, so a later
+per-location auth toggle has a documented seam to attach to instead of
+guessing where mTLS would go. Amends ADR-0003: the app-path mTLS posture
+described there does not extend to these locations.
+
+Refs: #1043, #1502
+
+### nginx-repo-no-root-mount
+
+Every repo location is prefixed under `/repo/<store>/` (Photon is the one
+documented exception -- see nginx-repo-photon-case-sensitive-root) rather
+than mounted at the domain root. SDDC Manager 9.1 supports a non-root
+`basePath`; a pre-5.2 root-only consumer still works against a sub-path
+just fine, but the reverse isn't true, so the location tree must not bake
+in a root-only assumption. This is about the URL space only -- the
+filesystem side is nginx-repo-store-subtree-aliases.
+
+Refs: #1043, #1502
+
+### nginx-repo-store-subtree-aliases
+
+The six stores are six subtrees of ONE volume, not six volumes. `depot`
+is download-runner's `/vcf` and the runner writes `UMDS/`, `Photon/`,
+`VKS/`, `VMTools/`, `ContentLibrary/` (plus `VCSA/` and `Transfer/`)
+inside it (`vcf-download-manager.common.ps1`); the backend indexes the
+same share as one depot root (`CatalogOptions.DepotPath`). Splitting the
+stores onto their own volumes would mean repointing the runner's store
+paths and breaking that single-share contract, and Compose
+`volume.subpath` mounts fail closed when the subdirectory does not exist
+yet -- on a fresh stack the runner has written nothing, so nginx would
+refuse to start. So nginx mounts the one volume read-only at `/srv/repo`
+and each location `alias`es its own distinct subtree.
+
+Isolation is therefore enforced at the location layer, and it has to be
+explicit: `/repo/depot/` aliases the store root, so a regex location
+404s `/repo/depot/{UMDS,Photon,VKS,VMTools,ContentLibrary,VCSA,Transfer}`
+before the prefix search can reach it (regex locations are matched ahead
+of the settled prefix match). Without that deny, `/repo/depot/UMDS/`
+would be a second route to a store that owns its own location -- an
+acceptance-criterion failure today and a bypass of #1510's per-location
+auth toggle tomorrow. The deny list is a denylist of the runner's own
+store directory names: a store directory added to `/vcf` later must be
+added here at the same time, which is what the smoke test's cross-store
+isolation assertions exist to catch.
+
+Refs: #1043, #1502
+
+### nginx-repo-photon-case-sensitive-root
+
+The Photon mirror is a literal lowercase `/photon/` root because `tdnf`
+`baseurl` matching on the consumer side is case-sensitive. A single
+`/Photon/` location only caught that one spelling -- `/PHOTON/` and other
+mixed-case variants fell through to the SPA catch-all's
+`try_files ... /index.html` and answered 200 with the wrong body. The
+guard is now a case-insensitive regex location (`~* ^/photon/ { return
+404; }`) that 404s any non-lowercase variant, paired with `^~ /photon/`
+on the literal lowercase location so it wins over the regex for the one
+spelling that must serve (nginx checks regex locations only after the
+longest-prefix search, and `^~` stops that search from falling through
+to regex matching once the literal prefix matches).
+
+Refs: #1043, #1502
+
+### nginx-repo-umds-disable-symlinks
+
+`symlink-hostupdate` inside a UMDS repository is an absolute symlink by
+design (VMware's own UMDS layout), and must never be dereferenced outside
+the store root through this proxy. `disable_symlinks on` costs an extra
+`stat` per path component nginx resolves, which is acceptable for a
+read-only, moderate-traffic repo location. Every repo store location
+carries the guard, not only `/repo/umds/`: all six alias into the one
+runner-owned store root (nginx-repo-store-subtree-aliases), so a symlink
+written anywhere under it must be inert on whichever location reaches
+it, and `/repo/depot/` -- which aliases that root itself -- needs the
+guard most. Both absolute and relative escapes are covered; the guard is
+broader than escapes (in-store symlinks 403, symlinked directory
+components 404) and no lane creates symlinks inside a store. Hardlinks
+are unaffected, so #1490's hardlinked view trees still serve.
+
+Refs: #1043, #1502
+
+### nginx-repo-vcsp-mime-map
+
+`.ovf`/`.mf`/`.vmdk`/`.iso`/`.cert` need the content types documented in
+`vcf-docker-download`'s README for a subscribed vCenter content library to
+fetch them at all -- nginx's compiled-in default MIME table doesn't know
+any of the five. The map lives in one `include`d file rather than repeated
+per repo location, so every store shares one definition instead of five
+copies that can drift.
+
+Refs: #1043, #1502
 
 ## postgres/
 
