@@ -577,6 +577,7 @@ GitHub Actions runs four workflows — [`sanitize.yml`](../.github/workflows/san
 | `backend` | `backend/**` | `dotnet build -warnaserror`, `dotnet test` with coverage, a coverage **floor** gate |
 | `frontend` | `frontend/**` | `npm ci`, `npm run build`, the ADR-0007 air-gap asset guard **as its own explicit step**, `npm run test:coverage`, a coverage **floor** gate, `oxlint` |
 | `deploy` | `deploy/**`, `scripts/**` | `docker compose config`, `nginx -t` against the shipped `conf.d` with a throwaway generated dev cert, `shellcheck` |
+| `skills-shellcheck` | `.claude/skills/**/*.sh` (and the workflow itself) | `shellcheck --shell=bash -S error` over every `.claude/skills/**/*.sh` — added in issue #1231; severity tightening tracked in #1235 |
 
 Every job is path-filtered except `sanitize`, which is a hard gate on everything —
 a docs-only change still gets scanned, because a leaked hostname or token is just as
