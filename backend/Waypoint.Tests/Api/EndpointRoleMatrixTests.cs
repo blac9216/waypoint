@@ -80,6 +80,7 @@ public sealed class EndpointRoleMatrixTests
 		// Issue #687: connected pull mirrors the same split -- reading readiness/status
 		// is Viewer+ (PullStatus), triggering a pull is Admin (Pull), same floor as Sync.
 		["CatalogController.ListArtifacts"] = WaypointRole.Viewer,
+		["CatalogController.ListUnknownFiles"] = WaypointRole.Viewer,
 		["CatalogController.Sync"] = WaypointRole.Admin,
 		["CatalogController.PullStatus"] = WaypointRole.Viewer,
 		["CatalogController.Pull"] = WaypointRole.Admin,

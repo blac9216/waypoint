@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Text.Json;
 using Npgsql;
 using Waypoint.Core.Catalog;
+using Waypoint.Core.Jobs;
 
 namespace Waypoint.Infrastructure.Catalog;
 
@@ -21,11 +23,21 @@ namespace Waypoint.Infrastructure.Catalog;
 public sealed class UnknownCatalogFileRepository : IUnknownCatalogFileRepository
 {
 	private readonly string _connectionString;
+	private readonly IJobEventPublisher? _events;
 
-	public UnknownCatalogFileRepository(string connectionString)
+	/// <summary>
+	/// <paramref name="events"/> is optional (default null, same "best-effort
+	/// observability, not every caller needs it" convention as
+	/// <see cref="Waypoint.Infrastructure.Jobs.JobQueueRepository"/>'s own
+	/// <c>IJobEventPublisher?</c> constructor parameter) so every existing
+	/// registration/test that constructs this type with just a connection string
+	/// keeps compiling unchanged.
+	/// </summary>
+	public UnknownCatalogFileRepository(string connectionString, IJobEventPublisher? events = null)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 		_connectionString = connectionString;
+		_events = events;
 	}
 
 	/// <summary>
@@ -34,6 +46,19 @@ public sealed class UnknownCatalogFileRepository : IUnknownCatalogFileRepository
 	/// <c>last_seen_at</c> advances to now, but <c>first_seen_at</c> is left alone --
 	/// there is deliberately no statement anywhere in this type that removes a row
 	/// (design decision Q11: alert instead of drop).
+	///
+	/// Issue #1495 AC3: a genuinely new unknown file (not a re-touch of one already
+	/// on record) emits <see cref="JobEventTypes.SystemNotice"/> through the same
+	/// best-effort event sink <c>CatalogIndexJobHandler</c> uses for auth failures
+	/// (<c>jobs.note is a sink too</c>, security.md control 1) -- appliance-wide
+	/// (job_id/run_id both null, matching the type's scope doc) since no job/run
+	/// context exists at this layer. <c>(xmax = 0)</c> is the standard Postgres
+	/// "did this row just get inserted, or did the ON CONFLICT branch fire"
+	/// discriminator: a freshly inserted row's system <c>xmax</c> is still zero,
+	/// while the ON CONFLICT DO UPDATE path sets it to the current transaction's id.
+	/// This slice does not yet have a caller (the presence sweep, #1503/#1512, is
+	/// out of scope here) -- proven directly against this repository's own
+	/// unit/integration tests until that wiring lands.
 	/// </summary>
 	public async Task<Guid> RecordSeenAsync(string relativePath, long? sizeBytes, CancellationToken cancellationToken)
 	{
@@ -48,13 +73,29 @@ public sealed class UnknownCatalogFileRepository : IUnknownCatalogFileRepository
 			ON CONFLICT (relative_path) DO UPDATE SET
 				size_bytes = EXCLUDED.size_bytes,
 				last_seen_at = now()
-			RETURNING id
+			RETURNING id, (xmax = 0) AS inserted
 			""", connection);
 		command.Parameters.AddWithValue(relativePath);
 		command.Parameters.AddWithValue((object?)sizeBytes ?? DBNull.Value);
 
-		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-		return (Guid)result!;
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+		Guid id = reader.GetGuid(0);
+		bool wasNewlyInserted = reader.GetBoolean(1);
+		await reader.DisposeAsync().ConfigureAwait(false);
+
+		if (wasNewlyInserted && _events is not null)
+		{
+			string payload = JsonSerializer.Serialize(new
+			{
+				kind = "catalog.unknown_file",
+				relative_path = relativePath,
+				size_bytes = sizeBytes,
+			});
+			await _events.EmitAsync(JobEventTypes.SystemNotice, null, null, payload, cancellationToken).ConfigureAwait(false);
+		}
+
+		return id;
 	}
 
 	public async Task<IReadOnlyList<UnknownCatalogFile>> ListAsync(CancellationToken cancellationToken)

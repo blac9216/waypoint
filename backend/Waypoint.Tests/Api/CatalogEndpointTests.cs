@@ -93,6 +93,34 @@ public sealed class CatalogEndpointTests : IClassFixture<CatalogTestApiFactory>
 	}
 
 	[Fact]
+	public async Task ListUnknownFiles_WithoutAuth_Returns401()
+	{
+		HttpClient client = _factory.CreateClient();
+		HttpResponseMessage response = await client.GetAsync("/api/v1/catalog/unknown-files");
+		Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+	}
+
+	[Fact]
+	public async Task ListUnknownFiles_WithViewerRole_Returns200WithRecordedFiles()
+	{
+		_factory.UnknownFiles.Reset(
+			new UnknownCatalogFile(Guid.NewGuid(), "unknown/mystery-1.iso", 4096, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+			new UnknownCatalogFile(Guid.NewGuid(), "unknown/mystery-2.iso", null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+		HttpClient client = _factory.CreateClient();
+		HttpRequestMessage request = new(HttpMethod.Get, "/api/v1/catalog/unknown-files");
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Viewer");
+
+		HttpResponseMessage response = await client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		string body = await response.Content.ReadAsStringAsync();
+		using JsonDocument doc = JsonDocument.Parse(body);
+		Assert.Equal(2, doc.RootElement.GetArrayLength());
+		Assert.Equal("unknown/mystery-1.iso", doc.RootElement[0].GetProperty("relative_path").GetString());
+	}
+
+	[Fact]
 	public async Task Sync_WithViewerRole_Returns403()
 	{
 		HttpClient client = _factory.CreateClient();
@@ -145,6 +173,7 @@ public sealed class CatalogEndpointTests : IClassFixture<CatalogTestApiFactory>
 public sealed class CatalogTestApiFactory : WaypointApiFactory
 {
 	public FakeDepotArtifactRepository Artifacts { get; } = new();
+	public FakeUnknownCatalogFileRepository UnknownFiles { get; } = new();
 	public CatalogFakeJobQueueRepository Jobs { get; } = new();
 
 	protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -166,6 +195,7 @@ public sealed class CatalogTestApiFactory : WaypointApiFactory
 			});
 
 			ReplaceSingleton<IDepotArtifactRepository>(services, Artifacts);
+			ReplaceSingleton<IUnknownCatalogFileRepository>(services, UnknownFiles);
 			// Issue #415 split IJobQueueRepository into IJobControlRepository and
 			// IJobRunnerRepository -- CatalogController only depends on the former, but
 			// both registrations are swapped so any other controller resolved through
@@ -211,6 +241,26 @@ public sealed class FakeDepotArtifactRepository : IDepotArtifactRepository
 		LastFilter = filter;
 		LastPage = page;
 		return Task.FromResult(((IReadOnlyList<DepotArtifact>)_items, (long)_items.Length));
+	}
+}
+
+/// <summary>Minimal in-memory fake for <c>GET /catalog/unknown-files</c> controller-level tests.</summary>
+public sealed class FakeUnknownCatalogFileRepository : IUnknownCatalogFileRepository
+{
+	private UnknownCatalogFile[] _items = [];
+
+	public void Reset(params UnknownCatalogFile[] items) => _items = items;
+
+	public Task<Guid> RecordSeenAsync(string relativePath, long? sizeBytes, CancellationToken cancellationToken)
+	{
+		_ = (relativePath, sizeBytes, cancellationToken);
+		return Task.FromResult(Guid.NewGuid());
+	}
+
+	public Task<IReadOnlyList<UnknownCatalogFile>> ListAsync(CancellationToken cancellationToken)
+	{
+		_ = cancellationToken;
+		return Task.FromResult((IReadOnlyList<UnknownCatalogFile>)_items);
 	}
 }
 
