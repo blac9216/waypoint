@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Reflection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using Waypoint.Core.Catalog;
@@ -114,6 +115,154 @@ public sealed class DepotArtifactRepositoryTests : IAsyncLifetime
 		Assert.Single(page);
 		Assert.Equal(vcfTotal, pagedTotal);
 		_ = vcf90Total;
+	}
+
+	/// <summary>
+	/// Issue #1593 review, finding 1: a completed/failed download upsert
+	/// (<c>DownloadJobHandler</c>) carries no <c>SizeBytes</c> -- it only knows
+	/// status/sha256 -- so it must not silently null out the size the catalog write
+	/// path (<c>VendorProductVersionCatalogParser</c>/<c>CatalogIndexJobHandler</c>)
+	/// already recorded for the same <c>relative_path</c>. Reproduces the exact
+	/// shape of that bug: seed with a size (catalog indexing), re-upsert with
+	/// <c>SizeBytes: null</c> (download-handler-style "present" transition), and
+	/// assert the previously-recorded size survives.
+	/// </summary>
+	[Fact]
+	public async Task UpsertAsync_ReUpsertWithNullSizeBytes_DoesNotClobberPreviouslyRecordedSize()
+	{
+		string relativePath = $"vcf-artifact-{Guid.NewGuid():N}";
+
+		Guid firstId = await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "indexed", """{"product":"VCF","version":"9.0"}""", SizeBytes: 123456),
+			CancellationToken.None);
+
+		// DownloadJobHandler-style upsert on download completion: no SizeBytes known
+		// at this call site (it forwards only Sha256/Status/MetadataJson), matching
+		// DownloadJobHandler.cs's `new DepotArtifactUpsert(artifact.ExternalId,
+		// artifact.Sha256, "present", artifact.MetadataJson)` call shape exactly.
+		Guid secondId = await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "present", """{"product":"VCF","version":"9.0"}"""),
+			CancellationToken.None);
+
+		Assert.Equal(firstId, secondId);
+
+		(IReadOnlyList<DepotArtifact> items, _) = await _repository.ListAsync(
+			new DepotArtifactFilter(null, null, null), new PageRequest(), CancellationToken.None);
+
+		DepotArtifact matching = Assert.Single(items.Where(item => item.ExternalId == relativePath));
+		Assert.Equal("present", matching.Status);
+		Assert.Equal(123456, matching.SizeBytes);
+		Assert.Equal("sha-original", matching.Sha256);
+	}
+
+	/// <summary>
+	/// Same clobber class as the size test above, for <c>sha256</c>: a null incoming
+	/// hash must not erase a previously recorded one. No known real caller upserts a
+	/// null <c>Sha256</c> over a non-null one today, but the SQL guarantee should not
+	/// depend on that staying true.
+	/// </summary>
+	[Fact]
+	public async Task UpsertAsync_ReUpsertWithNullSha256_DoesNotClobberPreviouslyRecordedSha256()
+	{
+		string relativePath = $"vcf-artifact-{Guid.NewGuid():N}";
+
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, "sha-original", "indexed", """{"product":"VCF","version":"9.0"}"""),
+			CancellationToken.None);
+
+		await _repository.UpsertAsync(
+			new DepotArtifactUpsert(relativePath, null, "present", """{"product":"VCF","version":"9.0"}"""),
+			CancellationToken.None);
+
+		(IReadOnlyList<DepotArtifact> items, _) = await _repository.ListAsync(
+			new DepotArtifactFilter(null, null, null), new PageRequest(), CancellationToken.None);
+
+		DepotArtifact matching = Assert.Single(items.Where(item => item.ExternalId == relativePath));
+		Assert.Equal("sha-original", matching.Sha256);
+	}
+
+	/// <summary>
+	/// Issue #1488 acceptance criterion: migration 0100's <c>external_id</c> -&gt;
+	/// <c>relative_path</c> rename must run cleanly against a fixture carrying
+	/// pre-existing <c>depot_artifacts</c> rows from BOTH legacy namespaces --
+	/// <c>CatalogIndexJobHandler</c>'s offline disk-walk relative path and
+	/// <c>VendorProductVersionCatalogParser</c>'s connected-pull bare filename
+	/// (issue #687) -- without dropping or merging either row. Reverts the fixture's
+	/// already-migrated schema to the pre-0100 column name to reconstruct that
+	/// legacy state (same "revert, seed, reapply" idiom
+	/// <c>SchemaMigrationTests.Migration0080_...</c> uses), inserts one row per
+	/// namespace, reapplies migration 0100's own idempotent SQL, then asserts both
+	/// rows survive under the new column with their original identity strings
+	/// untouched.
+	/// </summary>
+	[Fact]
+	public async Task Migration0100_PreExistingRowsFromBothLegacyNamespaces_SurviveTheRekey()
+	{
+		string nestedLegacyPath = $"COMP/VCENTER/legacy-disk-walk-{Guid.NewGuid():N}.iso";
+		string bareLegacyFilename = $"legacy-connected-pull-{Guid.NewGuid():N}.iso";
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// Reconstruct the pre-0100 shape: rename the column back so the two rows
+		// below are inserted exactly as CatalogIndexJobHandler/VendorProductVersionCatalogParser
+		// would have written them under the OLD external_id identity column.
+		await using (NpgsqlCommand revert = new("ALTER TABLE depot_artifacts RENAME COLUMN relative_path TO external_id", connection))
+		{
+			await revert.ExecuteNonQueryAsync();
+		}
+
+		await using (NpgsqlCommand seed = new(
+			"""
+			INSERT INTO depot_artifacts (external_id, status, metadata) VALUES
+				($1, 'indexed', '{}'::jsonb),
+				($2, 'indexed', '{}'::jsonb)
+			""", connection))
+		{
+			seed.Parameters.AddWithValue(nestedLegacyPath);
+			seed.Parameters.AddWithValue(bareLegacyFilename);
+			await seed.ExecuteNonQueryAsync();
+		}
+
+		string migration0100 = await ReadMigrationSqlAsync("0100_catalog_identity_rekey.sql");
+		await using (NpgsqlCommand reapply = new(migration0100, connection))
+		{
+			await reapply.ExecuteNonQueryAsync();
+		}
+
+		await using (NpgsqlCommand verify = new(
+			"SELECT relative_path FROM depot_artifacts WHERE relative_path = ANY($1)", connection))
+		{
+			verify.Parameters.AddWithValue(new[] { nestedLegacyPath, bareLegacyFilename });
+			await using NpgsqlDataReader reader = await verify.ExecuteReaderAsync();
+			HashSet<string> found = [];
+			while (await reader.ReadAsync())
+			{
+				found.Add(reader.GetString(0));
+			}
+
+			Assert.Equal(2, found.Count);
+			Assert.Contains(nestedLegacyPath, found);
+			Assert.Contains(bareLegacyFilename, found);
+		}
+
+		// Running the migration a SECOND time (already-migrated state, matching
+		// every other migration file's re-application guarantee) must still be a
+		// no-op, not an error.
+		await using (NpgsqlCommand reapplyAgain = new(migration0100, connection))
+		{
+			await reapplyAgain.ExecuteNonQueryAsync();
+		}
+	}
+
+	private static async Task<string> ReadMigrationSqlAsync(string fileName)
+	{
+		Assembly assembly = typeof(NpgsqlSchemaMigrator).Assembly;
+		string resourceName = Assert.Single(
+			assembly.GetManifestResourceNames().Where(name => name.EndsWith(fileName, StringComparison.Ordinal)));
+		await using Stream stream = assembly.GetManifestResourceStream(resourceName)!;
+		using StreamReader reader = new(stream);
+		return await reader.ReadToEndAsync();
 	}
 
 	private async Task SeedAsync(string externalId, string status, string product, string version)

@@ -81,7 +81,7 @@ public static class VendorProductVersionCatalogParser
 						DepotArtifactUpsert? upsert = TryParseBinary(binary, component.Name, version);
 						if (upsert is not null)
 						{
-							byFileName[upsert.ExternalId] = upsert;
+							byFileName[upsert.RelativePath] = upsert;
 						}
 					}
 				}
@@ -129,6 +129,15 @@ public static class VendorProductVersionCatalogParser
 		}
 
 		string metadataJson = JsonSerializer.Serialize(metadata);
-		return new DepotArtifactUpsert(fileName, checksum, "indexed", metadataJson);
+
+		// fileName is passed as RelativePath (migration 0100, issue #1488): the
+		// vendor catalog only ever gives a flat binary filename, never a nested
+		// depot-relative path, so this remains the same string value as before --
+		// what changed is that it now travels through the same explicitly named
+		// catalog-identity field the offline disk walk uses, instead of a bare
+		// ExternalId string standing in for two different things. Reconciling a
+		// nested relative path for the connected side is presence-sweep behavior
+		// (#1503), out of this slice's scope.
+		return new DepotArtifactUpsert(fileName, checksum, "indexed", metadataJson, size);
 	}
 }

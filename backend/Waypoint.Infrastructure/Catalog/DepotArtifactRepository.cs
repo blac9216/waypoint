@@ -22,7 +22,7 @@ namespace Waypoint.Infrastructure.Catalog;
 public sealed class DepotArtifactRepository : IDepotArtifactRepository
 {
 	private const string ProjectionSql = """
-		SELECT id, external_id, sha256, status, product, version, metadata::text, indexed_at, updated_at
+		SELECT id, relative_path, sha256, status, product, version, metadata::text, indexed_at, updated_at, size_bytes, last_verified_at
 		FROM depot_artifacts
 		""";
 
@@ -35,35 +35,51 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 	}
 
 	/// <summary>
-	/// <c>external_id</c> is the table's unique idempotency key (migration 0001), so
-	/// re-syncing the same artifact is one <c>INSERT ... ON CONFLICT DO UPDATE</c> --
-	/// the newer payload always wins, matching issue #193's acceptance criterion.
-	/// <c>indexed_at</c> is deliberately left alone on conflict (it records when the
-	/// artifact first entered the catalog); <c>updated_at</c> advances via the
-	/// existing <c>trg_depot_artifacts_updated_at</c> trigger.
+	/// <c>relative_path</c> is the table's unique idempotency key (migration 0100,
+	/// issue #1488 -- renamed in place from <c>external_id</c>; migration 0001
+	/// originally established the same unique-key idiom), so re-syncing the same
+	/// artifact is one <c>INSERT ... ON CONFLICT DO UPDATE</c> -- the newer payload
+	/// always wins, matching issue #193's acceptance criterion. <c>indexed_at</c> is
+	/// deliberately left alone on conflict (it records when the artifact first
+	/// entered the catalog); <c>updated_at</c> advances via the existing
+	/// <c>trg_depot_artifacts_updated_at</c> trigger. <c>last_verified_at</c> is
+	/// deliberately NOT written here -- deciding when a row counts as freshly
+	/// verified is presence-sweep behavior (#1503/#1512), out of this slice's scope.
+	/// <c>sha256</c>/<c>size_bytes</c> use <c>COALESCE(EXCLUDED.x, depot_artifacts.x)</c>
+	/// rather than an unconditional overwrite: <c>DownloadJobHandler</c>'s
+	/// present/failed upserts (issue #1593 review, finding 1) carry the artifact's
+	/// existing <c>Sha256</c> forward but have no size to report, so a plain
+	/// <c>EXCLUDED.size_bytes</c> would silently null out the size the catalog
+	/// write path (<see cref="VendorProductVersionCatalogParser"/>/
+	/// <c>CatalogIndexJobHandler</c>) had just recorded. A caller that does
+	/// know a new, smaller size (e.g. a corrected catalog re-index) still wins,
+	/// because <c>COALESCE</c> only falls back when the incoming value is null, not
+	/// when it is present but different.
 	/// </summary>
 	public async Task<Guid> UpsertAsync(DepotArtifactUpsert artifact, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(artifact);
-		ArgumentException.ThrowIfNullOrWhiteSpace(artifact.ExternalId);
+		ArgumentException.ThrowIfNullOrWhiteSpace(artifact.RelativePath);
 		ArgumentException.ThrowIfNullOrWhiteSpace(artifact.Status);
 
 		await using NpgsqlConnection connection = new(_connectionString);
 		await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 		await using NpgsqlCommand command = new(
 			"""
-			INSERT INTO depot_artifacts (external_id, sha256, status, metadata)
-			VALUES ($1, $2, $3, $4::jsonb)
-			ON CONFLICT (external_id) DO UPDATE SET
-				sha256 = EXCLUDED.sha256,
+			INSERT INTO depot_artifacts (relative_path, sha256, status, metadata, size_bytes)
+			VALUES ($1, $2, $3, $4::jsonb, $5)
+			ON CONFLICT (relative_path) DO UPDATE SET
+				sha256 = COALESCE(EXCLUDED.sha256, depot_artifacts.sha256),
 				status = EXCLUDED.status,
-				metadata = EXCLUDED.metadata
+				metadata = EXCLUDED.metadata,
+				size_bytes = COALESCE(EXCLUDED.size_bytes, depot_artifacts.size_bytes)
 			RETURNING id
 			""", connection);
-		command.Parameters.AddWithValue(artifact.ExternalId);
+		command.Parameters.AddWithValue(artifact.RelativePath);
 		command.Parameters.AddWithValue((object?)artifact.Sha256 ?? DBNull.Value);
 		command.Parameters.AddWithValue(artifact.Status);
 		command.Parameters.AddWithValue(artifact.MetadataJson ?? "{}");
+		command.Parameters.AddWithValue((object?)artifact.SizeBytes ?? DBNull.Value);
 
 		object? result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 		return (Guid)result!;
@@ -156,6 +172,8 @@ public sealed class DepotArtifactRepository : IDepotArtifactRepository
 			reader.IsDBNull(5) ? null : reader.GetString(5),
 			reader.GetString(6),
 			reader.GetFieldValue<DateTimeOffset>(7),
-			reader.GetFieldValue<DateTimeOffset>(8));
+			reader.GetFieldValue<DateTimeOffset>(8),
+			reader.IsDBNull(9) ? null : reader.GetInt64(9),
+			reader.IsDBNull(10) ? null : reader.GetFieldValue<DateTimeOffset>(10));
 	}
 }

@@ -273,6 +273,7 @@ public static class ServiceCollectionExtensions
 
 			services.AddSingleton(new Secrets.CredentialRepository(connectionString));
 			services.AddSingleton<IDepotArtifactRepository>(new DepotArtifactRepository(connectionString));
+			services.AddSingleton<IUnknownCatalogFileRepository>(new UnknownCatalogFileRepository(connectionString));
 			services.AddSingleton<ICatalogPullStateRepository>(new Catalog.CatalogPullStateRepository(connectionString));
 			services.AddSingleton<IDownloadRepository>(new DownloadRepository(connectionString));
 			services.AddSingleton<Waypoint.Core.Downloads.IEsxAcquisitionSubscriptionRepository>(
