@@ -64,7 +64,8 @@ overhaul*. Open: *Compliance parity* and *Download & depot parity*, then
 see `docs/roadmap.md` for what's built vs. still planned. The design phase is complete:
 architecture, decisions, security model, UI prototype, and the API contract live in
 `docs/` — read `docs/architecture.md`, `docs/api-contract.md`, and the ADRs in
-`docs/adr/` before building anything, and keep them updated as decisions evolve. Do
+`docs/adr/` before building anything, and keep them updated as decisions evolve. Read
+`docs/adr/README.md`'s index table first and open only active ADRs. Do
 not contradict an accepted ADR without recording a superseding one. All work is
 issue-driven via the `github-workflow` skill.
 
@@ -121,6 +122,8 @@ written before posting it. Do not duplicate the recipe here — it drifts; go re
 
 ### Rationale index — deploy/ comment convention
 
+(repo-wide standard; only deploy/ has a rationale file today)
+
 Code comments in `deploy/` are short section markers and terse one-line
 warnings only — no issue/ADR/PR references in code. A warning needing a
 "why" points at a rationale file instead: `# why: docs/rationale/<area>.md#<kebab-slug>`.
@@ -143,6 +146,9 @@ full format and a filled example.
   adjacent guidance lives in untracked `*.local.md` files (`docs/testing.local.md`).
 - Planning-phase deliverables are docs: keep ADRs short and numbered; supersede rather
   than rewrite accepted ones (see `docs/adr/README.md` for what may be amended).
+  Design decisions follow interrogate → plan-work → `design-docs` author mode; specs
+  and plans are never committed; the docs standard is declared in
+  `docs/doc-manifest.md`.
 
 ### Labels are a closed set — never invent one
 
