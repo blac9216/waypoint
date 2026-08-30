@@ -465,6 +465,38 @@ public sealed class CatalogRepository : ICatalogRepository
 		return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? MapComponent(reader, 0) : null;
 	}
 
+	public async Task<IReadOnlyList<CatalogComponent>> ListComponentsByIdsAsync(
+		IReadOnlyCollection<Guid> componentIds, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(componentIds);
+		if (componentIds.Count == 0)
+		{
+			return [];
+		}
+
+		// One statement, one connection, for the whole id set -- `= ANY($1)` over a uuid[]
+		// parameter rather than a built-up IN list, so the plan is stable and nothing is
+		// interpolated into SQL. Duplicate ids in the input collapse naturally.
+		await using NpgsqlConnection connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+		await using NpgsqlCommand command = new(
+			$"""
+			SELECT {ComponentColumns()}
+			FROM catalog_components
+			WHERE id = ANY($1)
+			ORDER BY id
+			""", connection);
+		command.Parameters.AddWithValue(componentIds.Distinct().ToArray());
+
+		List<CatalogComponent> components = [];
+		await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+		while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+		{
+			components.Add(MapComponent(reader, 0));
+		}
+
+		return components;
+	}
+
 	public async Task<IReadOnlyList<CatalogComponent>> FindTopLevelComponentsByKeyAndVersionAsync(
 		string catalogComponentKey, string exactVersion, CancellationToken cancellationToken)
 	{

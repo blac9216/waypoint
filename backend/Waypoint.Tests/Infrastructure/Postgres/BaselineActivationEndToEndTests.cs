@@ -756,11 +756,47 @@ object scopeBody = new
 		using JsonDocument getBody = JsonDocument.Parse(await getResponse.Content.ReadAsStringAsync());
 		Assert.Equal("InSpec Profile VMware Photon OS 5.0 Appliance based deployments", getBody.RootElement.GetProperty("display_name").GetString());
 
+		// Issue #1202's Impact names the LIST surface ("an operator listing components on
+		// that target ... sees a 4.0 product label"), so prove it on a list that also
+		// holds a vendor-discovered sibling: the declared root must render its linked
+		// catalog version's name, while the discovered vCenter keeps the vendor-observed
+		// hostname discovery reported. Seeded through the repository (not an HTTP route)
+		// because no discovery pass runs in this test; the linkage itself still goes
+		// through the real resolver, exactly as the round-6 rehearsal above does.
+		CatalogPromotionOutcome vcenterPromotion = await _catalog.PromoteCandidateAsync(
+			VCenterCandidate(), VCenterPromotionRequest(), CancellationToken.None);
+		CatalogExecutionProfileDetail? vcenterProfile =
+			await _catalog.GetExecutionProfileAsync(vcenterPromotion.ExecutionProfileId!.Value, CancellationToken.None);
+		DiscoveredComponent discoveredSibling = new(
+			CatalogComponentKey: "vcenter", VendorIdentity: "vcenter-1202", DisplayName: "vcsa-1202.example.internal",
+			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: vcenterProfile!.ProductVersion.VersionKey);
+		(IReadOnlyList<DiscoveredComponent> linkedSibling, IReadOnlyList<string> siblingAmbiguities) =
+			await Waypoint.Infrastructure.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync(
+				_catalog, [discoveredSibling], CancellationToken.None);
+		Assert.Empty(siblingAmbiguities);
+		Assert.NotNull(linkedSibling.Single().CatalogComponentId);
+		await _components.UpsertDiscoveredAsync(targetId, linkedSibling, CancellationToken.None);
+
+		HttpResponseMessage listResponse = await _client.SendAsync(WithRole(HttpMethod.Get, $"/api/v1/targets/{targetId}/components", "Viewer"));
+		Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+		using JsonDocument listBody = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync());
+		Dictionary<string, string> listedNamesByKey = listBody.RootElement.EnumerateArray().ToDictionary(
+			element => element.GetProperty("catalog_component_key").GetString()!,
+			element => element.GetProperty("display_name").GetString()!,
+			StringComparer.Ordinal);
+		Assert.Equal(
+			"InSpec Profile VMware Photon OS 5.0 Appliance based deployments",
+			listedNamesByKey["photon"]);
+		Assert.Equal("vcsa-1202.example.internal", listedNamesByKey["vcenter"]);
+
 		HttpResponseMessage capabilityResponse = await _client.SendAsync(WithRole(HttpMethod.Get, $"/api/v1/components/{componentId}/capability", "Viewer"));
 		Assert.Equal(HttpStatusCode.OK, capabilityResponse.StatusCode);
 		using JsonDocument capabilityBody = JsonDocument.Parse(await capabilityResponse.Content.ReadAsStringAsync());
 		Assert.True(capabilityBody.RootElement.GetProperty("is_compatible").GetBoolean());
-		string[] compatibleProfileIds = [.. capabilityBody.RootElement.GetProperty("compatible_execution_profile_ids").EnumerateArray().Select(p => p.GetString())];
+		// `!`: a JSON array element the API contract declares as a string id -- GetString()
+		// is typed `string?` for the null-literal case that cannot occur here, and the
+		// spread into `string[]` is an error (CS8601) without the assertion.
+		string[] compatibleProfileIds = [.. capabilityBody.RootElement.GetProperty("compatible_execution_profile_ids").EnumerateArray().Select(p => p.GetString()!)];
 		Assert.Equal([fiveDotZero.ExecutionProfileId!.Value.ToString()], compatibleProfileIds);
 
 		// Re-link to 4.0 -- the same PUT /components/{id} path a later Admin correction

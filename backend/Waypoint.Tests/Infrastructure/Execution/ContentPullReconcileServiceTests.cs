@@ -289,6 +289,9 @@ public sealed class ContentPullReconcileServiceTests
 		public Task<IReadOnlyList<CatalogComponent>> ListComponentsAsync(Guid productVersionId, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CatalogComponent>>([.. _components.Values.Where(c => c.ProductVersionId == productVersionId)]);
 		public Task<CatalogComponent?> GetComponentAsync(Guid componentId, CancellationToken cancellationToken) => Task.FromResult(_components.Values.FirstOrDefault(c => c.Id == componentId));
 
+		public Task<IReadOnlyList<CatalogComponent>> ListComponentsByIdsAsync(IReadOnlyCollection<Guid> componentIds, CancellationToken cancellationToken) =>
+			Task.FromResult<IReadOnlyList<CatalogComponent>>([.. _components.Values.Where(c => componentIds.Contains(c.Id)).OrderBy(c => c.Id)]);
+
 		public Task<IReadOnlyList<CatalogComponent>> FindTopLevelComponentsByKeyAndVersionAsync(string catalogComponentKey, string exactVersion, CancellationToken cancellationToken) =>
 			Task.FromResult<IReadOnlyList<CatalogComponent>>([.. _components.Values.Where(c =>
 				c.ParentComponentId is null &&

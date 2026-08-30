@@ -71,13 +71,31 @@ public sealed class ComponentRepository : IComponentRepository
 			items.Add(Map(reader));
 		}
 
-		List<Component> resolved = new(items.Count);
-		foreach (Component item in items)
+		// Issue #1202 (round-2 review): resolve the linked catalog names for the WHOLE
+		// page in one catalog read. The per-item lookup this replaces opened one
+		// connection per linked component -- including every vSphere-discovered host/VM
+		// the declared-root shape guard rejects anyway -- and scan-scope resolution walks
+		// this method once per target, so the cost was O(targets x components). Only rows
+		// that can possibly be declared roots (IsDeclaredRootShape) contribute an id, so
+		// a target with nothing but discovered components issues NO catalog query at all.
+		Guid[] declaredRootCatalogIds = [.. items
+			.Where(IsDeclaredRootShape)
+			.Select(item => item.CatalogComponentId!.Value)
+			.Distinct()];
+		if (declaredRootCatalogIds.Length == 0)
 		{
-			resolved.Add(await WithLinkedDisplayNameAsync(item, cancellationToken).ConfigureAwait(false));
+			return items;
 		}
 
-		return resolved;
+		Dictionary<Guid, string> linkedNameByCatalogId = (await _catalog
+				.ListComponentsByIdsAsync(declaredRootCatalogIds, cancellationToken).ConfigureAwait(false))
+			.Where(IsSshTargetCatalogShape)
+			.ToDictionary(linked => linked.Id, linked => linked.DisplayName);
+
+		return [.. items.Select(item =>
+			IsDeclaredRootShape(item) && linkedNameByCatalogId.TryGetValue(item.CatalogComponentId!.Value, out string? linkedName)
+				? item with { DisplayName = linkedName }
+				: item)];
 	}
 
 	public async Task<Component?> GetAsync(Guid componentId, CancellationToken cancellationToken)
@@ -894,21 +912,40 @@ public sealed class ComponentRepository : IComponentRepository
 	/// </summary>
 	private async Task<Component> WithLinkedDisplayNameAsync(Component component, CancellationToken cancellationToken)
 	{
-		if (component.CatalogComponentId is not { } catalogComponentId)
+		if (!IsDeclaredRootShape(component))
 		{
 			return component;
 		}
 
-		CatalogComponent? linked = await _catalog.GetComponentAsync(catalogComponentId, cancellationToken).ConfigureAwait(false);
-		if (linked is null
-			|| !string.Equals(linked.Transport, CatalogTransports.Ssh, StringComparison.Ordinal)
-			|| !string.Equals(linked.SelectorKind, CatalogSelectorKinds.Target, StringComparison.Ordinal))
-		{
-			return component;
-		}
-
-		return component with { DisplayName = linked.DisplayName };
+		CatalogComponent? linked = await _catalog
+			.GetComponentAsync(component.CatalogComponentId!.Value, cancellationToken).ConfigureAwait(false);
+		return linked is not null && IsSshTargetCatalogShape(linked)
+			? component with { DisplayName = linked.DisplayName }
+			: component;
 	}
+
+	/// <summary>
+	/// The component-row half of the #1202 guard, applied BEFORE any catalog read so the
+	/// batched list path never queries for a row the guard would reject anyway. A
+	/// declared root (<see cref="CreateDeclaredRootAsync"/>) is by construction top-level
+	/// (<c>parent_component_id IS NULL</c>) and vendor-identity-free -- a vSphere-
+	/// discovered object always carries a vendor identity, and its
+	/// <see cref="Component.DisplayName"/> is the real vendor-observed name that must
+	/// never be replaced by a catalog-authored label.
+	/// </summary>
+	private static bool IsDeclaredRootShape(Component component) =>
+		component.CatalogComponentId is not null
+		&& component.ParentComponentId is null
+		&& component.VendorIdentity is null;
+
+	/// <summary>
+	/// The catalog-row half of the #1202 guard: the closed <c>ssh</c>/<c>target</c>
+	/// whole-appliance shape, expressed through the catalog's own closed transport and
+	/// selector vocabulary rather than a copied product list.
+	/// </summary>
+	private static bool IsSshTargetCatalogShape(CatalogComponent linked) =>
+		string.Equals(linked.Transport, CatalogTransports.Ssh, StringComparison.Ordinal)
+		&& string.Equals(linked.SelectorKind, CatalogSelectorKinds.Target, StringComparison.Ordinal);
 
 	private static Component Map(NpgsqlDataReader reader)
 	{
