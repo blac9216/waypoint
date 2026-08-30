@@ -36,7 +36,7 @@ namespace Waypoint.Infrastructure.Runs;
 /// where <see cref="RunCreationService.CreateScanRunAsync"/> starts writing).
 ///
 /// Digest parity (issue #734 AC-4, this issue's own required reading): preview calls the
-/// identical <see cref="ScanPlannerService.CompileAsync(Guid?, IReadOnlyList{Guid}, System.Threading.CancellationToken)"/>
+/// identical <see cref="ScanPlannerService.CompileAsync"/>
 /// entry point create uses (with <c>runId: null</c>, exactly as create does before it has
 /// a run id), so <see cref="ScanPlan.PlanDigest"/> for the same resolved component set is
 /// byte-for-byte identical between a preview call and the subsequent create call -- the

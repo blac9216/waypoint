@@ -562,7 +562,10 @@ public sealed class ScanPlannerService
 	/// non-null) count toward the requested/omitted totals here -- a
 	/// <see cref="Waypoint.Core.Components.ScopeOmissionReasons.TargetNotFound"/> row
 	/// names no component and describes a request-shape problem one layer above "how
-	/// many components were requested," not an omitted candidate.
+	/// many components were requested," not an omitted candidate -- but such rows are
+	/// still REPORTED (round-2 finding S1): when nothing component-keyed was requested
+	/// and target-level omissions exist, the plan is empty because the request could
+	/// not be resolved, never "intentionally" empty.
 	/// </summary>
 	private static string BuildExplanation(
 		int resolvedCount,
@@ -577,7 +580,20 @@ public sealed class ScanPlannerService
 
 		if (requestedCount == 0)
 		{
-			return "No components were requested; this is an intentionally empty plan.";
+			if (scopeOmissions.Count == 0)
+			{
+				return "No components were requested; this is an intentionally empty plan.";
+			}
+
+			// Issue #1082 round-2: every omission still has to be accounted for. The
+			// remaining omissions here are target-level (no ComponentId -- e.g.
+			// TargetNotFound), so they contribute nothing to the component counts, but
+			// the plan is empty because the REQUEST could not be resolved, not by
+			// intent. Calling that "intentional" is the same contradiction #1082 was
+			// filed about, one reason value over.
+			return $"No components were requested; {scopeOmissions.Count} requested target(s) could not be resolved " +
+				$"({FormatReasonCounts(scopeOmissions.Select(o => o.Reason))}); this plan is empty because the requested " +
+				"scope could not be resolved, not by intent.";
 		}
 
 		string planningClause = skips.Count == 0

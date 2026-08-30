@@ -713,6 +713,42 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		Assert.Contains("1 of 1 resolved component(s) accepted", plan.Explanation, StringComparison.Ordinal);
 	}
 
+	/// <summary>
+	/// Round-2 finding S1 on PR #1232, and the planner-side twin of
+	/// <c>ScopeResolutionServiceTests.ResolveAsync_AllModeUnknownTargetId_IsTargetNotFoundOmission</c>:
+	/// this drives the REAL <see cref="ScopeResolutionService"/> with an unknown target
+	/// id (no hand-built omissions) and feeds its output straight into the planner. That
+	/// omission carries no <see cref="Waypoint.Core.Components.ScopeOmission.ComponentId"/>,
+	/// so it contributes nothing to the requested/omitted component counts -- but the
+	/// resulting plan must still NOT be described as "intentionally empty" while
+	/// <c>scope_omissions</c> says a requested target could not be found. That
+	/// contradiction is exactly the defect issue #1082 was filed about.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_AllModeUnknownTargetId_TargetNotFoundOmission_ExplanationIsNotIntentionallyEmpty()
+	{
+		Guid siteId = (await _sites.CreateAsync($"site-{Guid.NewGuid():N}", null, null, CancellationToken.None))!.Value;
+		Guid unknownTargetId = Guid.NewGuid();
+		ScopeResolutionService resolution = new(_targets, _components, _catalog);
+
+		Waypoint.Core.Components.ResolvedTargetScope resolved = await resolution.ResolveAsync(
+			siteId,
+			new Waypoint.Core.Jobs.TargetScopeRequest(Waypoint.Core.Jobs.TargetScopeModes.All, [unknownTargetId], null),
+			CancellationToken.None);
+
+		Waypoint.Core.Components.ScopeOmission omission = Assert.Single(resolved.Omissions);
+		Assert.Equal(Waypoint.Core.Components.ScopeOmissionReasons.TargetNotFound, omission.Reason);
+		Assert.Null(omission.ComponentId);
+
+		ScanPlan plan = await _planner.CompileAsync(
+			null, resolved.ResolvedComponentIds, CancellationToken.None, resolved.Omissions);
+
+		Assert.False(plan.IsRunnable);
+		Assert.DoesNotContain("intentionally empty", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 requested target(s) could not be resolved", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 target_not_found", plan.Explanation, StringComparison.Ordinal);
+	}
+
 	[Fact]
 	public async Task CompileAsync_IsDeterministic_SameDigestAcrossRepeatedCompiles()
 	{

@@ -37,27 +37,6 @@ namespace Waypoint.Core.Components;
 /// and configured fact paths flow through this one resolver, both scope-match
 /// identically by construction.
 /// </summary>
-/// <summary>
-/// The closed set of reasons <see cref="CatalogLinkageResolver.ResolveAsync"/> leaves a
-/// component unlinked (issue #1082: every fail-closed branch reports a machine-readable
-/// reason, not just the ambiguous one -- so callers can log, count, and alert on all of
-/// them instead of only the ambiguity case).
-/// </summary>
-public static class CatalogLinkageReasons
-{
-	/// <summary>No exact version fact was available to look up at all this pass/write (a null/whitespace <c>exactVersion</c>) -- nothing to link yet, not an error.</summary>
-	public const string NoExactVersionFact = "no_exact_version_fact";
-
-	/// <summary>An exact version fact WAS available, but it falls outside every catalog component's declared version scope for this key (<see cref="ICatalogRepository.FindTopLevelComponentsByKeyAndVersionAsync"/> returned zero rows) -- honest "no catalog coverage yet," not an error.</summary>
-	public const string OutOfDeclaredScope = "out_of_declared_scope";
-
-	/// <summary>More than one catalog component across different products matched the same (key, version) -- fails closed rather than guessing a winner (ADR-0022).</summary>
-	public const string Ambiguous = "ambiguous";
-
-	/// <summary>The catalog lookup itself faulted unexpectedly; left unlinked rather than failing the caller's whole write (issue #995).</summary>
-	public const string LookupFailed = "lookup_failed";
-}
-
 public static class CatalogLinkageResolver
 {
 	/// <summary>
@@ -112,4 +91,38 @@ public static class CatalogLinkageResolver
 				$"across different products ({string.Join(", ", candidates.Select(c => c.Id))}); left unlinked rather than guessing."),
 		};
 	}
+}
+
+/// <summary>
+/// The closed set of reasons <see cref="CatalogLinkageResolver.ResolveAsync"/> leaves a
+/// component unlinked (issue #1082: every fail-closed branch reports a machine-readable
+/// reason, not just the ambiguous one -- so callers can log, count, and alert on all of
+/// them instead of only the ambiguity case).
+/// </summary>
+public static class CatalogLinkageReasons
+{
+	/// <summary>No exact version fact was available to look up at all this pass/write (a null/whitespace <c>exactVersion</c>) -- nothing to link yet, not an error.</summary>
+	public const string NoExactVersionFact = "no_exact_version_fact";
+
+	/// <summary>An exact version fact WAS available, but it falls outside every catalog component's declared version scope for this key (<see cref="ICatalogRepository.FindTopLevelComponentsByKeyAndVersionAsync"/> returned zero rows) -- honest "no catalog coverage yet," not an error.</summary>
+	public const string OutOfDeclaredScope = "out_of_declared_scope";
+
+	/// <summary>More than one catalog component across different products matched the same (key, version) -- fails closed rather than guessing a winner (ADR-0022).</summary>
+	public const string Ambiguous = "ambiguous";
+
+	/// <summary>The catalog lookup itself faulted unexpectedly; left unlinked rather than failing the caller's whole write (issue #995).</summary>
+	public const string LookupFailed = "lookup_failed";
+
+	/// <summary>
+	/// Every reason <see cref="CatalogLinkageResolver.ResolveAsync"/> can return, as a
+	/// closed set -- the drift guard <see cref="Waypoint.Core.Scans.ScanPlanSkipReasons.All"/>
+	/// and <see cref="ScopeOmissionReasons.All"/> already carry for their vocabularies.
+	/// Tests assert both that no other reason can reach a caller and that
+	/// <c>docs/api-contract.md</c> publishes exactly these values, so a fifth reason
+	/// cannot reach <c>discover.progress</c> without the contract being updated.
+	/// </summary>
+	public static readonly IReadOnlyCollection<string> All =
+	[
+		NoExactVersionFact, OutOfDeclaredScope, Ambiguous, LookupFailed,
+	];
 }

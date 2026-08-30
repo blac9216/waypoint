@@ -404,6 +404,40 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 		Assert.False(body.RootElement.GetProperty("is_runnable").GetBoolean());
 	}
 
+	/// <summary>
+	/// Round-2 finding S1 on PR #1232, proved at the ENDPOINT level through real scope
+	/// resolution (nothing hand-constructed): a preview whose only input is an unknown
+	/// target id comes back 200 with a non-empty <c>scope_omissions</c> naming
+	/// <c>target_not_found</c>, so its <c>explanation</c> must not simultaneously claim
+	/// the plan is "intentionally empty" -- the human-facing string stating the opposite
+	/// of the structured payload is issue #1082's own defect shape.
+	/// </summary>
+	[Fact]
+	public async Task Preview_AllModeUnknownTargetId_ExplanationNamesTargetNotFoundRatherThanIntentionallyEmpty()
+	{
+		Guid siteId = await CreateSiteAsync("preview-unknown-target-site");
+		Guid unknownTargetId = Guid.NewGuid();
+
+		HttpResponseMessage response = await PreviewAsync(new
+		{
+			site_id = siteId,
+			target_scope = new { mode = "all", target_ids = new[] { unknownTargetId } },
+		});
+
+		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+		using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		Assert.Empty(body.RootElement.GetProperty("resolved_component_ids").EnumerateArray());
+
+		JsonElement omission = Assert.Single(body.RootElement.GetProperty("scope_omissions").EnumerateArray().ToList());
+		Assert.Equal(Waypoint.Core.Components.ScopeOmissionReasons.TargetNotFound, omission.GetProperty("reason").GetString());
+
+		string explanation = body.RootElement.GetProperty("explanation").GetString()!;
+		Assert.DoesNotContain("intentionally empty", explanation, StringComparison.Ordinal);
+		Assert.Contains("1 requested target(s) could not be resolved", explanation, StringComparison.Ordinal);
+		Assert.Contains("1 target_not_found", explanation, StringComparison.Ordinal);
+		Assert.False(body.RootElement.GetProperty("is_runnable").GetBoolean());
+	}
+
 	[Fact]
 	public async Task Preview_SurfacesMissingCredentialBindingAsGap_AndDemotesTheItemToASkip()
 	{

@@ -175,6 +175,7 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 		Assert.Null(linked.Single().CatalogComponentId);
 		DiscoverJobHandler.CatalogLinkageIssue issue = Assert.Single(issues);
 		Assert.Equal(CatalogLinkageReasons.OutOfDeclaredScope, issue.Reason);
+		Assert.Contains(issue.Reason, CatalogLinkageReasons.All);
 		Assert.Contains("host-985-nomatch", issue.ComponentLabel, StringComparison.Ordinal);
 	}
 
@@ -198,6 +199,7 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 		Assert.Null(linked.Single().CatalogComponentId);
 		DiscoverJobHandler.CatalogLinkageIssue issue = Assert.Single(issues);
 		Assert.Equal(CatalogLinkageReasons.NoExactVersionFact, issue.Reason);
+		Assert.Contains(issue.Reason, CatalogLinkageReasons.All);
 	}
 
 	/// <summary>
@@ -223,6 +225,7 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 
 		DiscoverJobHandler.CatalogLinkageIssue issue = Assert.Single(issues);
 		Assert.Equal(CatalogLinkageReasons.NoExactVersionFact, issue.Reason);
+		Assert.Contains(issue.Reason, CatalogLinkageReasons.All);
 		Assert.Null(linked.Single().CatalogComponentId);
 	}
 
@@ -239,6 +242,7 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 
 		DiscoverJobHandler.CatalogLinkageIssue issue = Assert.Single(issues);
 		Assert.Equal(CatalogLinkageReasons.NoExactVersionFact, issue.Reason);
+		Assert.Contains(issue.Reason, CatalogLinkageReasons.All);
 		Assert.Null(linked.Single().CatalogComponentId);
 	}
 
@@ -272,6 +276,7 @@ public sealed class DiscoverJobHandlerCatalogLinkageTests : IAsyncLifetime
 		Assert.Null(linked.Single().CatalogComponentId);
 		DiscoverJobHandler.CatalogLinkageIssue issue = Assert.Single(issues);
 		Assert.Equal(CatalogLinkageReasons.Ambiguous, issue.Reason);
+		Assert.Contains(issue.Reason, CatalogLinkageReasons.All);
 		Assert.Contains(sharedComponentKey, issue.Detail, StringComparison.Ordinal);
 		Assert.Contains(sharedVersion, issue.Detail, StringComparison.Ordinal);
 	}
