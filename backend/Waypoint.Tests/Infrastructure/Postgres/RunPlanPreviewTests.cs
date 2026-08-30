@@ -220,10 +220,10 @@ public sealed class RunPlanPreviewTests : IAsyncLifetime
 			CatalogComponentKey: "esxi", VendorIdentity: "host-985-preview", DisplayName: "esxi-985-preview.example.internal",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: seededVersionKey);
 
-		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> ambiguities) =
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<Waypoint.Infrastructure.Discovery.DiscoverJobHandler.CatalogLinkageIssue> issues) =
 			await Waypoint.Infrastructure.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync(
 				new CatalogRepository(_fixture.ConnectionString), [discovered], CancellationToken.None);
-		Assert.Empty(ambiguities);
+		Assert.Empty(issues);
 		Assert.Equal(catalogComponentId, linked.Single().CatalogComponentId);
 
 		await _components.UpsertDiscoveredAsync(targetId, linked, CancellationToken.None);

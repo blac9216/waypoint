@@ -267,9 +267,9 @@ public sealed class BaselineActivationEndToEndTests : IAsyncLifetime
 			CatalogComponentKey: "vcenter", VendorIdentity: "e2e-vcenter", DisplayName: "vcsa-01.example.internal",
 			ParentVendorIdentity: null, CatalogComponentId: null, ExactVersion: exactVersionKey);
 
-		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<string> ambiguities) =
+		(IReadOnlyList<DiscoveredComponent> linked, IReadOnlyList<Waypoint.Infrastructure.Discovery.DiscoverJobHandler.CatalogLinkageIssue> issues) =
 			await Waypoint.Infrastructure.Discovery.DiscoverJobHandler.ResolveCatalogLinkageAsync(_catalog, [discovered], CancellationToken.None);
-		Assert.Empty(ambiguities);
+		Assert.Empty(issues);
 		Assert.Equal(catalogComponentId, linked.Single().CatalogComponentId);
 
 		await _components.UpsertDiscoveredAsync(targetId, linked, CancellationToken.None);

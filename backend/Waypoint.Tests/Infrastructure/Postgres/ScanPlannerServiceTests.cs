@@ -640,6 +640,79 @@ public sealed class ScanPlannerServiceTests : IAsyncLifetime
 		Assert.Contains("intentionally empty", plan.Explanation, StringComparison.OrdinalIgnoreCase);
 	}
 
+	/// <summary>
+	/// Issue #1082's own repro: nothing requested (empty resolved scope, no scope
+	/// omissions at all) is distinct wording from "everything requested was omitted"
+	/// below -- both start from an empty resolved-component set, but only one had an
+	/// actual request behind it.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_NothingRequested_ExplanationSaysNothingWasRequested()
+	{
+		ScanPlan plan = await _planner.CompileAsync(null, [], CancellationToken.None, scopeOmissions: []);
+
+		Assert.False(plan.IsRunnable);
+		Assert.Contains("No components were requested", plan.Explanation, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1082's exact repro: two explicitly-requested components, both omitted as
+	/// <c>catalog_incompatible</c> during scope resolution (never reaching this
+	/// planner at all -- resolvedComponentIds is empty). The explanation must say "2
+	/// requested, all omitted," never "no components were requested" -- an operator
+	/// reading only the human-facing string must be able to tell these two situations
+	/// apart.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_EverythingRequestedWasOmitted_ExplanationNamesOmissionReasonsAndCounts()
+	{
+		Guid firstOmitted = Guid.NewGuid();
+		Guid secondOmitted = Guid.NewGuid();
+		List<Waypoint.Core.Components.ScopeOmission> omissions =
+		[
+			new(firstOmitted, null, Waypoint.Core.Components.ScopeOmissionReasons.CatalogIncompatible, "detail-1"),
+			new(secondOmitted, null, Waypoint.Core.Components.ScopeOmissionReasons.CatalogIncompatible, "detail-2"),
+		];
+
+		ScanPlan plan = await _planner.CompileAsync(null, [], CancellationToken.None, omissions);
+
+		Assert.False(plan.IsRunnable);
+		Assert.DoesNotContain("No components were requested", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("2 component(s) requested", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("all 2 omitted", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("2 catalog_incompatible", plan.Explanation, StringComparison.Ordinal);
+	}
+
+	/// <summary>
+	/// Issue #1082's third state: SOME (not all) requested components were omitted
+	/// during scope resolution, and the survivor plans normally -- the explanation
+	/// must report both the omission and the planning outcome, distinct from either
+	/// all-omitted or none-omitted.
+	/// </summary>
+	[Fact]
+	public async Task CompileAsync_PartialOmission_ExplanationNamesBothOmittedAndPlannedCounts()
+	{
+		Guid targetId = await SeedSiteAndTargetAsync();
+		Guid executionProfileId = await SeedExecutionProfileAsync("partial-omission", "8.0.3", withBenchmark: null);
+		await ActivateBaselineAsync(executionProfileId, "partial-omission", benchmarkRevisionId: null);
+		Guid catalogComponentId = (await _catalog.GetExecutionProfileAsync(executionProfileId, CancellationToken.None))!.Component.Id;
+		Guid resolvedComponent = await SeedComponentLinkedToAsync(targetId, catalogComponentId, "8.0.3", "host-8001");
+
+		Guid omittedComponent = Guid.NewGuid();
+		List<Waypoint.Core.Components.ScopeOmission> omissions =
+		[
+			new(omittedComponent, null, Waypoint.Core.Components.ScopeOmissionReasons.ComponentAbsent, "detail"),
+		];
+
+		ScanPlan plan = await _planner.CompileAsync(null, [resolvedComponent], CancellationToken.None, omissions);
+
+		Assert.True(plan.IsRunnable);
+		Assert.Contains("2 component(s) requested", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 omitted", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 component_absent", plan.Explanation, StringComparison.Ordinal);
+		Assert.Contains("1 of 1 resolved component(s) accepted", plan.Explanation, StringComparison.Ordinal);
+	}
+
 	[Fact]
 	public async Task CompileAsync_IsDeterministic_SameDigestAcrossRepeatedCompiles()
 	{

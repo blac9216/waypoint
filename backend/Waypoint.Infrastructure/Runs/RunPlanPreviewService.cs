@@ -150,7 +150,9 @@ public sealed class RunPlanPreviewService
 		ResolvedTargetScope resolvedTargetScope =
 			await _scopeResolution.ResolveAsync(siteId, targetScopeRequest, cancellationToken).ConfigureAwait(false);
 
-		ScanPlan plan = await _planner.CompileAsync(null, resolvedTargetScope.ResolvedComponentIds, cancellationToken).ConfigureAwait(false);
+		ScanPlan plan = await _planner
+			.CompileAsync(null, resolvedTargetScope.ResolvedComponentIds, cancellationToken, resolvedTargetScope.Omissions)
+			.ConfigureAwait(false);
 
 		// Issue #736's per-plan-item purpose requirements, evaluated read-only against
 		// each item's owning target's current bindings/overrides -- the exact same

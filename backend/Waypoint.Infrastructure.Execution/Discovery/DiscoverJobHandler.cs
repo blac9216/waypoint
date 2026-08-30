@@ -297,27 +297,38 @@ public sealed class DiscoverJobHandler : IJobHandler
 		// re-links (or honestly unlinks) rather than keeping a stale id (see
 		// ResolveCatalogLinkageAsync's own doc comment for the exact-match/ambiguity
 		// rules -- ADR-0022 never guesses).
-		(IReadOnlyList<DiscoveredComponent> linkedComponentItems, IReadOnlyList<string> linkageWarnings) =
+		(IReadOnlyList<DiscoveredComponent> linkedComponentItems, IReadOnlyList<CatalogLinkageIssue> linkageIssues) =
 			await ResolveCatalogLinkageAsync(_catalog, componentItems, cancellationToken).ConfigureAwait(false);
 
 		ComponentUpsertOutcome componentOutcome = await _components
 			.UpsertDiscoveredAsync(targetId, linkedComponentItems, cancellationToken, advanceAbsence).ConfigureAwait(false);
 
-		if (linkageWarnings.Count > 0)
+		// Issue #1082: one job.log warning PER unlinked component, naming its own
+		// reason -- issue #995 widened the severity idiom to "any per-component
+		// linkage condition worth an operator's attention," but a single joined
+		// summary line still let a 100%-unlinked run's actual cause (no exact version
+		// fact, or out-of-declared-scope) hide behind one line an operator could
+		// easily skim past; only the ambiguous case got individual attention before.
+		// None of this is a job failure -- each component simply stays unlinked, its
+		// siblings unaffected -- but it must be loud, never a silent null in the
+		// components table.
+		foreach (CatalogLinkageIssue issue in linkageIssues)
 		{
-			// Same job.log severity idiom issue #865 uses for a partial-enumeration
-			// warning (PowerShellExecutor.Emit). Issue #995 widened this from
-			// "ambiguous match only" to "any per-component linkage condition worth an
-			// operator's attention" (ambiguous match, or an unexpected repository fault
-			// caught per-item below) -- neither is a job failure (this component simply
-			// stays unlinked), but both ARE actionable/loud, never a silent null in the
-			// components table.
-			string warningSummary = string.Join("; ", linkageWarnings);
-			string warningPayload = JsonSerializer.Serialize(new { severity = "warning", line = $"discover: catalog linkage warning(s) for one or more components -- left unlinked. {warningSummary}" });
+			string issuePayload = JsonSerializer.Serialize(new
+			{
+				severity = "warning",
+				line = $"discover: component '{issue.ComponentLabel}' (catalog key '{issue.CatalogComponentKey}') " +
+					$"left catalog-unlinked ({issue.Reason}): {issue.Detail}",
+			});
 			await context.Events
-				.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, warningPayload, cancellationToken)
+				.EmitAsync(JobEventTypes.JobLog, context.Job.Id, context.Job.RunId, issuePayload, cancellationToken)
 				.ConfigureAwait(false);
 		}
+
+		IReadOnlyDictionary<string, int> unlinkedByReason = linkageIssues
+			.GroupBy(i => i.Reason, StringComparer.Ordinal)
+			.OrderBy(g => g.Key, StringComparer.Ordinal)
+			.ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
 
 		// Issue #741: catalog-declared service expansion, the step MapToComponents' doc
 		// comment previously deferred ("non-inventory catalog-defined expansion ... is
@@ -363,6 +374,12 @@ public sealed class DiscoverJobHandler : IJobHandler
 			declared_services_absent = declaredOutcome.MarkedAbsent,
 			complete = completeness.IsComplete,
 			enumeration_errors = completeness.Errors,
+			// Issue #1082: a discovery run where every component is catalog-unlinked
+			// must never look identical, at this summary surface, to a fully-successful
+			// run -- components_upserted alone cannot distinguish "linked and
+			// scannable" from "upserted but unlinked and unscannable."
+			components_unlinked = linkageIssues.Count,
+			components_unlinked_by_reason = unlinkedByReason,
 		});
 		await context.Events
 			.EmitAsync(JobEventTypes.DiscoverProgress, context.Job.Id, context.Job.RunId, progressPayload, cancellationToken)
@@ -388,10 +405,20 @@ public sealed class DiscoverJobHandler : IJobHandler
 		string completenessNote = completeness.IsComplete
 			? string.Empty
 			: $" PARTIAL enumeration ({completeness.Errors.Count} subtree error(s)) -- absence NOT advanced this pass, earlier rows retained as unverified cache (ADR-0023).";
+		// Issue #1082: the completion summary line now names the unlinked count (and
+		// its reason breakdown) explicitly, so a 100%-catalog-unlinked run reads
+		// nothing like a clean success in job history -- an operator no longer has to
+		// open GET /components/{id}/capability component by component to find out.
+		string unlinkedNote = linkageIssues.Count == 0
+			? string.Empty
+			: $" {linkageIssues.Count} catalog-unlinked ({FormatReasonCounts(unlinkedByReason)}).";
 		return JobExecutionOutcome.Succeeded(
 			$"Discovered {outcome.Upserted} item(s), marked {outcome.Removed} removed. " +
-			$"Components: {componentOutcome.Upserted} upserted, {componentOutcome.Reconnected} reconnected, {componentOutcome.MarkedAbsent} marked absent.{completenessNote}");
+			$"Components: {componentOutcome.Upserted} upserted, {componentOutcome.Reconnected} reconnected, {componentOutcome.MarkedAbsent} marked absent.{unlinkedNote}{completenessNote}");
 	}
+
+	private static string FormatReasonCounts(IReadOnlyDictionary<string, int> reasonCounts) =>
+		string.Join(", ", reasonCounts.Select(kvp => $"{kvp.Value} {kvp.Key}"));
 
 	/// <summary>
 	/// Whether the discovery boundary the module ran was complete. <see cref="IsComplete"/>
@@ -719,11 +746,11 @@ public sealed class DiscoverJobHandler : IJobHandler
 	/// never an arbitrary "first match wins."</item>
 	/// </list>
 	/// </summary>
-	internal static async Task<(IReadOnlyList<DiscoveredComponent> Items, IReadOnlyList<string> Warnings)> ResolveCatalogLinkageAsync(
+	internal static async Task<(IReadOnlyList<DiscoveredComponent> Items, IReadOnlyList<CatalogLinkageIssue> Issues)> ResolveCatalogLinkageAsync(
 		ICatalogRepository catalog, IReadOnlyList<DiscoveredComponent> items, CancellationToken cancellationToken)
 	{
 		List<DiscoveredComponent> resolved = [];
-		List<string> warnings = [];
+		List<CatalogLinkageIssue> issues = [];
 
 		foreach (DiscoveredComponent item in items)
 		{
@@ -733,19 +760,35 @@ public sealed class DiscoverJobHandler : IJobHandler
 			// (ComponentRepository.SetConfiguredFactAsync) resolves linkage the identical
 			// way rather than forking its own copy. Guarding on IsNullOrWhiteSpace (issue
 			// #995) still happens inside the shared resolver.
-			(Guid? catalogComponentId, string? warning) = await CatalogLinkageResolver
+			(Guid? catalogComponentId, string? reason, string? detail) = await CatalogLinkageResolver
 				.ResolveAsync(catalog, item.CatalogComponentKey, item.ExactVersion, cancellationToken)
 				.ConfigureAwait(false);
 
 			resolved.Add(item with { CatalogComponentId = catalogComponentId });
-			if (warning is not null)
+			if (reason is not null)
 			{
-				warnings.Add(warning);
+				// Issue #1082: every fail-closed branch (no exact version fact, out of
+				// declared scope, ambiguous, lookup failed) is reported here now, not
+				// only the ambiguous case -- a 100%-unlinked discovery run must never
+				// look identical to a fully-successful one (see the caller's job.log
+				// per-component emission and the discover.progress unlinked counter).
+				issues.Add(new CatalogLinkageIssue(
+					item.VendorIdentity ?? item.DisplayName, item.CatalogComponentKey, reason, detail ?? reason));
 			}
 		}
 
-		return (resolved, warnings);
+		return (resolved, issues);
 	}
+
+	/// <summary>
+	/// One discovered component <see cref="CatalogLinkageResolver.ResolveAsync"/> left
+	/// unlinked, with the exact reason (issue #1082 -- see
+	/// <see cref="ResolveCatalogLinkageAsync"/>). <see cref="ComponentLabel"/> is the
+	/// stable vendor identity (falling back to display name only if vendor identity is
+	/// itself unavailable), never a hostname/IP alone, matching the identity discipline
+	/// epic #726 §3 requires everywhere else.
+	/// </summary>
+	internal sealed record CatalogLinkageIssue(string ComponentLabel, string CatalogComponentKey, string Reason, string Detail);
 
 	/// <summary>
 	/// Parses every row the module returned. Issue #618: a row that came back is

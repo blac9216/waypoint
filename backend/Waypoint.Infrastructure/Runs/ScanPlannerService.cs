@@ -116,9 +116,20 @@ public sealed class ScanPlannerService
 	/// eligible set <see cref="ScopeResolutionService.ResolveAsync"/> produced --
 	/// re-validating eligibility, e.g. lifecycle/fact-conflict, is that service's job,
 	/// not this one's). <paramref name="runId"/> is null for a preview call.
+	/// <paramref name="scopeOmissions"/> is the SAME <see cref="ResolvedTargetScope.Omissions"/>
+	/// list scope resolution produced for this request, if the caller has it (issue
+	/// #1082): purely additive context for <see cref="ScanPlan.Explanation"/>'s wording
+	/// -- omitted (or empty) callers get the exact previous behavior, since an empty
+	/// list means "no omission-stage context to report," never "no omissions occurred."
+	/// Without it, a request where every candidate was rejected during scope resolution
+	/// (never reaching this planner at all) is indistinguishable, from the explanation
+	/// string alone, from a legitimately empty request -- see #1082's own repro.
 	/// </summary>
 	public async Task<ScanPlan> CompileAsync(
-		Guid? runId, IReadOnlyList<Guid> resolvedComponentIds, CancellationToken cancellationToken)
+		Guid? runId,
+		IReadOnlyList<Guid> resolvedComponentIds,
+		CancellationToken cancellationToken,
+		IReadOnlyList<Waypoint.Core.Components.ScopeOmission>? scopeOmissions = null)
 	{
 		ArgumentNullException.ThrowIfNull(resolvedComponentIds);
 
@@ -147,7 +158,7 @@ public sealed class ScanPlannerService
 		await ApplyNarrowingSelectorNameSkipsAsync(items, skips, cancellationToken).ConfigureAwait(false);
 
 		string digest = ScanPlanDigest.Compute(ScanPlanSchema.CurrentVersion, resolvedComponentIds, items);
-		string explanation = BuildExplanation(resolvedComponentIds.Count, items.Count, skips);
+		string explanation = BuildExplanation(resolvedComponentIds.Count, items.Count, skips, scopeOmissions ?? []);
 
 		return new ScanPlan(runId, ScanPlanSchema.CurrentVersion, items, skips, digest, explanation);
 	}
@@ -539,24 +550,68 @@ public sealed class ScanPlannerService
 			$"Component '{componentId}' has a catalog-compatible execution profile but no active baseline; an Admin must activate one (ADR-0022)."));
 	}
 
-	private static string BuildExplanation(int candidateCount, int acceptedCount, List<ScanPlanSkip> skips)
+	/// <summary>
+	/// Issue #1082: the wording must distinguish three operator-visible situations that
+	/// all previously collapsed into the same "No components were requested" string
+	/// whenever <paramref name="resolvedCount"/> (the count this planner actually
+	/// received -- i.e. what survived scope resolution) was zero: (1) nothing was
+	/// requested at all, (2) something WAS requested but every candidate was omitted
+	/// during scope resolution before reaching this planner (<paramref name="scopeOmissions"/>
+	/// non-empty), and (3) some, but not all, requested candidates were omitted. Only
+	/// component-keyed omissions (<see cref="Waypoint.Core.Components.ScopeOmission.ComponentId"/>
+	/// non-null) count toward the requested/omitted totals here -- a
+	/// <see cref="Waypoint.Core.Components.ScopeOmissionReasons.TargetNotFound"/> row
+	/// names no component and describes a request-shape problem one layer above "how
+	/// many components were requested," not an omitted candidate.
+	/// </summary>
+	private static string BuildExplanation(
+		int resolvedCount,
+		int acceptedCount,
+		List<ScanPlanSkip> skips,
+		IReadOnlyList<Waypoint.Core.Components.ScopeOmission> scopeOmissions)
 	{
-		if (candidateCount == 0)
+		List<Waypoint.Core.Components.ScopeOmission> componentOmissions =
+			[.. scopeOmissions.Where(o => o.ComponentId is not null)];
+		int omittedCount = componentOmissions.Count;
+		int requestedCount = resolvedCount + omittedCount;
+
+		if (requestedCount == 0)
 		{
 			return "No components were requested; this is an intentionally empty plan.";
 		}
 
-		if (skips.Count == 0)
+		string planningClause = skips.Count == 0
+			? $"{acceptedCount} of {resolvedCount} resolved component(s) accepted into the plan; no gaps found."
+			: $"{acceptedCount} of {resolvedCount} resolved component(s) accepted into the plan; " +
+				$"{skips.Count} skipped ({FormatReasonCounts(skips.Select(s => s.Reason))}).";
+
+		if (omittedCount == 0)
 		{
-			return $"{acceptedCount} of {candidateCount} requested component(s) accepted into the plan; no gaps found.";
+			// No omission-stage context (or none applies): identical wording to
+			// pre-#1082 behavior, just described in terms of "requested" rather than
+			// the previous, narrower "candidate" language.
+			return $"{acceptedCount} of {requestedCount} requested component(s) accepted into the plan; " +
+				(skips.Count == 0
+					? "no gaps found."
+					: $"{skips.Count} skipped ({FormatReasonCounts(skips.Select(s => s.Reason))}).");
 		}
 
-		IEnumerable<string> reasonCounts = skips
-			.GroupBy(s => s.Reason, StringComparer.Ordinal)
-			.OrderBy(g => g.Key, StringComparer.Ordinal)
-			.Select(g => $"{g.Count()} {g.Key}");
+		if (resolvedCount == 0)
+		{
+			// Every requested component was rejected before this planner ever saw it --
+			// this is #1082's own repro: "nothing was requested" is the wrong story for
+			// this case, and it must not be told.
+			return $"{requestedCount} component(s) requested; all {omittedCount} omitted during scope resolution " +
+				$"({FormatReasonCounts(componentOmissions.Select(o => o.Reason))}); none reached the execution planner.";
+		}
 
-		return $"{acceptedCount} of {candidateCount} requested component(s) accepted into the plan; " +
-			$"{skips.Count} skipped ({string.Join(", ", reasonCounts)}).";
+		return $"{requestedCount} component(s) requested; {omittedCount} omitted during scope resolution " +
+			$"({FormatReasonCounts(componentOmissions.Select(o => o.Reason))}); {planningClause}";
 	}
+
+	private static string FormatReasonCounts(IEnumerable<string> reasons) =>
+		string.Join(", ", reasons
+			.GroupBy(r => r, StringComparer.Ordinal)
+			.OrderBy(g => g.Key, StringComparer.Ordinal)
+			.Select(g => $"{g.Count()} {g.Key}"));
 }

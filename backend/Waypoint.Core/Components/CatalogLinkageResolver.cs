@@ -37,21 +37,45 @@ namespace Waypoint.Core.Components;
 /// and configured fact paths flow through this one resolver, both scope-match
 /// identically by construction.
 /// </summary>
+/// <summary>
+/// The closed set of reasons <see cref="CatalogLinkageResolver.ResolveAsync"/> leaves a
+/// component unlinked (issue #1082: every fail-closed branch reports a machine-readable
+/// reason, not just the ambiguous one -- so callers can log, count, and alert on all of
+/// them instead of only the ambiguity case).
+/// </summary>
+public static class CatalogLinkageReasons
+{
+	/// <summary>No exact version fact was available to look up at all this pass/write (a null/whitespace <c>exactVersion</c>) -- nothing to link yet, not an error.</summary>
+	public const string NoExactVersionFact = "no_exact_version_fact";
+
+	/// <summary>An exact version fact WAS available, but it falls outside every catalog component's declared version scope for this key (<see cref="ICatalogRepository.FindTopLevelComponentsByKeyAndVersionAsync"/> returned zero rows) -- honest "no catalog coverage yet," not an error.</summary>
+	public const string OutOfDeclaredScope = "out_of_declared_scope";
+
+	/// <summary>More than one catalog component across different products matched the same (key, version) -- fails closed rather than guessing a winner (ADR-0022).</summary>
+	public const string Ambiguous = "ambiguous";
+
+	/// <summary>The catalog lookup itself faulted unexpectedly; left unlinked rather than failing the caller's whole write (issue #995).</summary>
+	public const string LookupFailed = "lookup_failed";
+}
+
 public static class CatalogLinkageResolver
 {
 	/// <summary>
 	/// Resolves <paramref name="catalogComponentKey"/> + <paramref name="exactVersion"/>
 	/// against <see cref="ICatalogRepository.FindTopLevelComponentsByKeyAndVersionAsync"/>.
 	/// A null/whitespace <paramref name="exactVersion"/> never looks up at all and
-	/// resolves to <c>(null, null)</c> (no fact this pass/write -- nothing to link,
-	/// nothing to report). Zero matches resolves to <c>(null, null)</c> (honest "no
-	/// catalog coverage yet" -- not an error). More than one match resolves to
-	/// <c>(null, warning)</c> with a human-readable ambiguity reason -- never an
-	/// arbitrary first-match-wins. A repository fault is caught here exactly as #995
-	/// hardened the discovery path: this one lookup fails closed (unlinked) with a
-	/// warning rather than throwing out of the caller's larger unit of work.
+	/// resolves to <c>(null, NoExactVersionFact, detail)</c> (no fact this pass/write --
+	/// nothing to link, but still an honest reason to report). Zero matches resolves to
+	/// <c>(null, OutOfDeclaredScope, detail)</c> (honest "no catalog coverage yet" -- not
+	/// an error, but still reported so a 100%-unlinked run is never silent, issue
+	/// #1082). More than one match resolves to <c>(null, Ambiguous, detail)</c> with a
+	/// human-readable ambiguity reason -- never an arbitrary first-match-wins. A
+	/// repository fault is caught here exactly as #995 hardened the discovery path:
+	/// this one lookup fails closed (unlinked, <c>LookupFailed</c>) rather than
+	/// throwing out of the caller's larger unit of work. <paramref name="Reason"/> is
+	/// null ONLY on a successful single match.
 	/// </summary>
-	public static async Task<(Guid? CatalogComponentId, string? Warning)> ResolveAsync(
+	public static async Task<(Guid? CatalogComponentId, string? Reason, string? Detail)> ResolveAsync(
 		ICatalogRepository catalog, string catalogComponentKey, string? exactVersion, CancellationToken cancellationToken)
 	{
 		ArgumentNullException.ThrowIfNull(catalog);
@@ -59,7 +83,8 @@ public static class CatalogLinkageResolver
 
 		if (string.IsNullOrWhiteSpace(exactVersion))
 		{
-			return (null, null);
+			return (null, CatalogLinkageReasons.NoExactVersionFact,
+				$"component key '{catalogComponentKey}' has no exact version fact (configured or discovered) this pass; nothing to link yet.");
 		}
 
 		IReadOnlyList<CatalogComponent> candidates;
@@ -71,16 +96,18 @@ public static class CatalogLinkageResolver
 		}
 		catch (Exception exception) when (exception is not OperationCanceledException)
 		{
-			return (null,
+			return (null, CatalogLinkageReasons.LookupFailed,
 				$"catalog linkage lookup for component key '{catalogComponentKey}' version '{exactVersion}' " +
 				$"failed unexpectedly ({exception.GetType().Name}: {exception.Message}); left unlinked rather than failing the whole write.");
 		}
 
 		return candidates.Count switch
 		{
-			1 => (candidates[0].Id, null),
-			0 => (null, null),
-			_ => (null,
+			1 => (candidates[0].Id, null, null),
+			0 => (null, CatalogLinkageReasons.OutOfDeclaredScope,
+				$"component key '{catalogComponentKey}' version '{exactVersion}' does not fall within any catalog component's declared " +
+				"version scope; left unlinked rather than guessing (content may not yet be staged, or this product/version is genuinely unsupported)."),
+			_ => (null, CatalogLinkageReasons.Ambiguous,
 				$"component key '{catalogComponentKey}' version '{exactVersion}' matched {candidates.Count} catalog components " +
 				$"across different products ({string.Join(", ", candidates.Select(c => c.Id))}); left unlinked rather than guessing."),
 		};

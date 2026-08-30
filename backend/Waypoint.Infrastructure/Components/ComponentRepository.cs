@@ -775,7 +775,7 @@ public sealed class ComponentRepository : IComponentRepository
 		// linked to a known catalog component" for it, same as the routine zero-match
 		// case. Discarded rather than invented a new delivery path out of scope for
 		// this issue.
-		(Guid? catalogComponentId, string? _) = await CatalogLinkageResolver
+		(Guid? catalogComponentId, string? _, string? _) = await CatalogLinkageResolver
 			.ResolveAsync(_catalog, catalogComponentKey!, effectiveVersion, cancellationToken)
 			.ConfigureAwait(false);
 
