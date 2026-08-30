@@ -7,14 +7,18 @@
 --
 -- This slice only creates queued jobs -- it does NOT add 'binaries-download' to
 -- Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed (the download-runner's actual
--- claim allowlist). That is deliberate, not an oversight: issue #619's documented
--- failure mode is a job type reserved in the schema/allowlist but never claimable
--- because no handler is registered, leaving jobs queued forever, and
+-- claim allowlist). That is deliberate, not an oversight, and it is the inverse of
+-- issue #619's documented failure mode: #619 was a handler that *was* registered
+-- (ManagedToolInstallJobHandler for 'tool-install') while the allowlist was never
+-- updated to include it, so those jobs queued successfully and then sat queued
+-- forever because no runner ever claimed them. Here no 'binaries-download' handler
+-- exists yet, so allowlisting it now -- before #1482 registers one -- would instead
+-- fail CI immediately:
 -- EveryRegisteredJobHandlerIsClaimableTests.DownloadRunnerAllowlist_NamesOnlyJobTypesWithARegisteredHandler
--- already asserts every allowlisted type has a registered handler. The job-handler
--- sibling (#1482) registers Waypoint.Core.Jobs.IJobHandler for 'binaries-download' and
--- adds it to DownloadRunnerJobTypes.Allowed in that same change, so the type only
--- becomes claimable the instant a handler exists to claim it.
+-- asserts every allowlisted type has a registered handler. The job-handler sibling
+-- (#1482) registers Waypoint.Core.Jobs.IJobHandler for 'binaries-download' and adds it
+-- to DownloadRunnerJobTypes.Allowed in that same change, so the type only becomes
+-- claimable the instant a handler exists to claim it.
 --
 -- Waypoint.Core.Jobs.JobCapabilities.Download DOES gain 'binaries-download' in this
 -- change -- that set is the closed reserved-capability list (ADR-0013 Sec 2), not the

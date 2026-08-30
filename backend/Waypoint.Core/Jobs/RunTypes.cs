@@ -16,9 +16,10 @@ namespace Waypoint.Core.Jobs;
 
 /// <summary>
 /// The exact string values of <c>runs.run_type</c>, matching the authoritative
-/// <c>runs_run_type_check</c> as of <c>0048_depot_enrollment_state.sql</c> (the latest
-/// migration to touch it -- 0001 declared 11 values, 0042 added <c>credential-test</c>,
-/// <c>tool-install</c>, and <c>purge</c>, 0048 added <c>depot-enrollment</c>, 0099 added
+/// <c>runs_run_type_check</c> as of <c>0099_binaries_download_job_type.sql</c> (the
+/// latest migration to touch it -- 0001 declared 11 values, 0042 added
+/// <c>credential-test</c>, <c>tool-install</c>, and <c>purge</c>, 0048 added
+/// <c>depot-enrollment</c>, 0049 added <c>catalog-pull</c>, 0099 added
 /// <c>binaries-download</c>) verbatim -- this is the closed set. Issue
 /// #708's <c>GET /runs/history</c> validates its <c>run_type</c> filter against this set
 /// (400 on an unknown value, same "never silently match zero rows and look like empty

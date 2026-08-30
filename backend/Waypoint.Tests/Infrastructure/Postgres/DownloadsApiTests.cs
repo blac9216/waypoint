@@ -318,6 +318,78 @@ public sealed class DownloadsApiTests : IAsyncLifetime
 		Assert.Equal(2L, (long)(await jobCount.ExecuteScalarAsync())!);
 	}
 
+	/// <summary>
+	/// Issue #1479 AC 3, PR #1596 review finding 1: <c>PageRequest.Limit</c> hard-clamps
+	/// to 200 (<c>MaxLimit</c>), so a release with more than 200 member artifacts must
+	/// not silently enqueue jobs for only the first page under a 202 as if it were
+	/// complete. Seeds 201 members and asserts all 201 are resolved and fanned out.
+	/// </summary>
+	[Fact]
+	public async Task PostBinariesDownload_ReleaseWithMoreThanPageLimitMembers_ResolvesAllMembers()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		const int MemberCount = 201;
+		for (int i = 0; i < MemberCount; i++)
+		{
+			await SeedArtifactWithProductVersionAsync($"{tag}-{i}", "ESXi", "9.2.0");
+		}
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { release = new { product = "ESXi", version = "9.2.0" } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		string[] ids = document.RootElement.GetProperty("depot_artifact_ids").EnumerateArray().Select(e => e.GetString()!).ToArray();
+		Assert.Equal(MemberCount, ids.Length);
+		Assert.Equal(MemberCount, ids.Distinct().Count());
+
+		string runId = document.RootElement.GetProperty("run_id").GetString()!;
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand jobCount = new(
+			"SELECT count(*) FROM jobs WHERE run_id = $1 AND job_type = 'binaries-download' AND state = 'queued'", connection);
+		jobCount.Parameters.AddWithValue(Guid.Parse(runId));
+		Assert.Equal((long)MemberCount, (long)(await jobCount.ExecuteScalarAsync())!);
+	}
+
+	/// <summary>
+	/// PR #1596 review finding 2: a repeated id in <c>depot_artifact_ids</c> must not
+	/// fan out two racing jobs for the same artifact. Dedupe to exactly one job.
+	/// </summary>
+	[Fact]
+	public async Task PostBinariesDownload_DuplicateArtifactId_QueuesExactlyOneJob()
+	{
+		string tag = Guid.NewGuid().ToString("N");
+		Guid artifact = await SeedArtifactAsync(tag);
+
+		HttpRequestMessage request = new(HttpMethod.Post, "/api/v1/downloads/binaries")
+		{
+			Content = JsonBody(new { depot_artifact_ids = new[] { artifact.ToString(), artifact.ToString() } }),
+		};
+		request.Headers.Add(TestAuthHandler.RoleHeaderName, "Operator");
+
+		HttpResponseMessage response = await _client.SendAsync(request);
+
+		Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+		using JsonDocument document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+		string[] ids = document.RootElement.GetProperty("depot_artifact_ids").EnumerateArray().Select(e => e.GetString()!).ToArray();
+		Assert.Single(ids);
+		Assert.Equal(artifact.ToString(), ids[0]);
+
+		string runId = document.RootElement.GetProperty("run_id").GetString()!;
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+		await using NpgsqlCommand jobCount = new(
+			"SELECT count(*) FROM jobs WHERE run_id = $1 AND job_type = 'binaries-download'", connection);
+		jobCount.Parameters.AddWithValue(Guid.Parse(runId));
+		Assert.Equal(1L, (long)(await jobCount.ExecuteScalarAsync())!);
+	}
+
 	[Fact]
 	public async Task PostBinariesDownload_UnknownRelease_Returns404()
 	{

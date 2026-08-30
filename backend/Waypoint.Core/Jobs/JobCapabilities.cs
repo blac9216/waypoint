@@ -74,7 +74,11 @@ public static class JobCapabilities
 	/// way: reserved here but deliberately NOT in
 	/// <c>Waypoint.DownloadRunner.DownloadRunnerJobTypes.Allowed</c> until its
 	/// job-handler sibling (#1482) registers a handler and adds it there in the same
-	/// change (issue #619's "reserved but unclaimable" failure mode).
+	/// change. This is the inverse of issue #619's failure mode (a handler *was*
+	/// registered there but the allowlist was never updated, so jobs queued forever
+	/// unclaimed); here no handler exists yet, so the guard is
+	/// <c>EveryRegisteredJobHandlerIsClaimableTests</c>, which fails CI immediately if
+	/// this type were allowlisted before #1482 lands.
 	/// </summary>
 	public static readonly IReadOnlySet<string> Download = new HashSet<string>(StringComparer.Ordinal)
 	{
