@@ -50,3 +50,14 @@ buffering disabled.
   if the backend gets a stable address. See
   `deploy/nginx/conf.d/default.conf` for the directive and the full reasoning, and
   `docs/rationale/deploy.md#nginx-dynamic-backend-resolution` for the porting note.
+- **Repo path-space locations carve out of app-path mTLS.** *(Appended after
+  acceptance — issue #1043 (design record), #1502, 2026-08-30. A consequence of the
+  standing decision, not a change to it.)* This ADR's Decision and Consequences above
+  describe nginx's TLS posture for the app paths (`/api/`, `/auth/`, the static
+  frontend). The read-only repo path-space (depot/UMDS/Photon/VMTools/VKS/content
+  libraries, `deploy/nginx/conf.d/default.conf`) is a distinct set of locations this
+  ADR never covered: they carry no client-certificate requirement at all, now or as a
+  reserved future toggle — `ssl_verify_client optional` is left commented out and
+  explicitly absent on every repo location, documented as the seam a later
+  per-location auth toggle attaches to. See
+  `docs/rationale/deploy.md#nginx-repo-mtls-carve-out` for the full reasoning.

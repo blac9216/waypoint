@@ -133,6 +133,27 @@ docker volume create "${PROJECT}_compliance-profiles" >/dev/null
 docker run --rm -v "${PROJECT}_compliance-profiles:/x" alpine \
 	sh -c "mkdir -p /x/vsphere /x/nsx /x/srg" >/dev/null
 
+# why: docs/rationale/deploy.md#smoke-repo-path-space
+for repo_vol in repo-umds repo-photon repo-content-libraries; do
+	docker volume create "${PROJECT}_${repo_vol}" >/dev/null
+done
+docker run --rm -v "${PROJECT}_repo-umds:/x" alpine sh -c "
+	mkdir -p /x/vmware-updates
+	printf 'umds-marker' > /x/vmware-updates/patch1.txt
+	ln -s /etc/passwd /x/vmware-updates/symlink-hostupdate
+"
+docker run --rm -v "${PROJECT}_repo-photon:/x" alpine sh -c "
+	mkdir -p /x/photon_release_5.0_x86_64/repodata
+	printf 'photon-marker' > /x/photon_release_5.0_x86_64/repodata/marker.txt
+"
+docker run --rm -v "${PROJECT}_repo-content-libraries:/x" alpine sh -c "
+	printf 'ovf-content'  > /x/sample.ovf
+	printf 'mf-content'   > /x/sample.mf
+	printf 'vmdk-content' > /x/sample.vmdk
+	printf 'iso-content'  > /x/sample.iso
+	printf 'cert-content' > /x/sample.cert
+"
+
 # --- Bring-up (real build, not cached) ----------------------------------
 
 log "docker compose config sanity (verify isolation before trusting anything)"
@@ -648,6 +669,59 @@ if [[ -n "${ADMIN_TOKEN}" ]]; then
 	if [[ "${CANARY_FOUND}" == "0" ]]; then ok "no secret canary found in DB or container logs"; fi
 else
 	bad "skipped (no admin token)"
+fi
+
+# --- 14. Repo path-space: locations, MIME map, symlink containment, ------
+#         Photon case-sensitivity, cross-store isolation
+
+log "14. Repo path-space (nginx locations, VCSP MIME map, disable_symlinks, case-sensitive Photon root)"
+
+if ! grep -rq "WAYPOINT_MODE" "${DEPLOY_DIR}/nginx/conf.d/"; then
+	ok "no mode-conditional nginx config (WAYPOINT_MODE absent from deploy/nginx/conf.d/)"
+else
+	bad "deploy/nginx/conf.d/ references WAYPOINT_MODE -- serving must be mode-independent"
+fi
+
+UMDS_BODY="$(net_curl "${NET_BASE}/repo/umds/vmware-updates/patch1.txt")"
+if [[ "${UMDS_BODY}" == "umds-marker" ]]; then ok "UMDS store served through its own location"; else bad "UMDS store fetch failed: ${UMDS_BODY}"; fi
+
+SYMLINK_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/umds/vmware-updates/symlink-hostupdate")"
+if [[ "${SYMLINK_CODE}" != "200" ]]; then
+	ok "disable_symlinks blocks the out-of-store symlink (${SYMLINK_CODE}, not 200)"
+else
+	bad "symlink inside the UMDS store was dereferenced through nginx (200) -- disable_symlinks not enforced"
+fi
+
+PHOTON_BODY="$(net_curl "${NET_BASE}/photon/photon_release_5.0_x86_64/repodata/marker.txt")"
+if [[ "${PHOTON_BODY}" == "photon-marker" ]]; then ok "lowercase /photon/ root served"; else bad "lowercase /photon/ root fetch failed: ${PHOTON_BODY}"; fi
+
+PHOTON_UPPER_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/Photon/photon_release_5.0_x86_64/repodata/marker.txt")"
+if [[ "${PHOTON_UPPER_CODE}" == "404" ]]; then ok "uppercase /Photon/ variant 404s"; else bad "uppercase /Photon/ variant returned ${PHOTON_UPPER_CODE}, expected 404"; fi
+
+# VCSP MIME map: one Content-Type assertion per documented extension.
+declare -A EXT_TYPES=(
+	[ovf]="application/ovf+xml"
+	[mf]="text/plain"
+	[vmdk]="application/x-vmdk"
+	[iso]="application/x-iso9660-image"
+	[cert]="application/x-x509-ca-cert"
+)
+for ext in "${!EXT_TYPES[@]}"; do
+	CT="$(net_curl -sI "${NET_BASE}/repo/content-libraries/sample.${ext}" | tr -d '\r' | grep -i '^content-type:' | cut -d' ' -f2)"
+	if [[ "${CT}" == "${EXT_TYPES[$ext]}"* ]]; then
+		ok "sample.${ext} served as ${EXT_TYPES[$ext]}"
+	else
+		bad "sample.${ext} served as '${CT}', expected ${EXT_TYPES[$ext]}"
+	fi
+done
+
+# Cross-store isolation: a path seeded only under the UMDS store must not
+# resolve under the content-libraries store's location/volume.
+ISOLATION_CODE="$(net_curl -o /dev/null -w '%{http_code}' "${NET_BASE}/repo/content-libraries/vmware-updates/patch1.txt")"
+if [[ "${ISOLATION_CODE}" == "404" ]]; then
+	ok "UMDS-only path does not resolve under content-libraries (404)"
+else
+	bad "UMDS-only path resolved under content-libraries (${ISOLATION_CODE}) -- stores are not isolated"
 fi
 
 # --- Summary ---------------------------------------------------------------
