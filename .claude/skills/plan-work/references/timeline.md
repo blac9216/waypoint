@@ -13,12 +13,20 @@ confirms when anything is ambiguous.
    days; total effort; projected duration = critical path adjusted by the observed
    parallelism (from history: median concurrent In-progress issues; default 1.5). An
    issue body's `est. cycle` value that isn't a plain ASCII decimal number (e.g.
-   `1.2.3`, or a non-ASCII digit such as `٢`) is treated like a missing estimate —
+   `1.2.3`, or a non-ASCII digit such as `٢`), or that is a well-formed number greater
+   than the `MAX_HOURS` sanity ceiling (`100000`), is treated like a missing estimate —
    it falls back to that issue's size default (or the `M` default if it has no
    size) — and is reported on stderr naming the issue number and the offending
    text, wording the fallback to match which one actually applied (`"falling
    back to its size default"` when the issue has a `Size:` label, `"falling
-   back to the M default (no size)"` when it doesn't); it never aborts the run.
+   back to the M default (no size)"` when it doesn't); it never aborts the run. The
+   ceiling exists because jq 1.6 SIGABRTs (undocumented exit `134`) when a
+   sufficiently large number (roughly 15+ digits) reaches the per-milestone
+   projection stage — see #1269. The same `MAX_HOURS` ceiling bounds `--defaults`
+   S/M/L values and `--parallelism` (flag or `parallelism.txt`): a flag value above
+   it is an argument error (`--defaults` exit `2`, `--parallelism` exit `4`), and a
+   `parallelism.txt` value above it falls back to the `1.5` default like any other
+   unusable file value.
    The parallelism source is either `--parallelism` (explicit), `--history-dir`
    (explicit, pointed at `history.sh`'s `--out`), or a same-run default-`--out`
    guess — that last case is reported on stderr so a mismatched `--out` doesn't
@@ -81,10 +89,10 @@ issues and epics, so its line count exceeds the map's totals); `placement.json` 
 
 | Code | Meaning |
 |---|---|
-| `2` | Argument error — an unrecognized flag, a value-taking flag with no following value, an empty `--milestones`/`--milestone` value, or a `--defaults` value that is empty/whitespace-only or contains a part that isn't `S=<n>`, `M=<n>`, or `L=<n>` with `n` an ASCII decimal number greater than zero (an empty part, a trailing comma, or a non-ASCII digit such as `٢` is rejected too). |
+| `2` | Argument error — an unrecognized flag, a value-taking flag with no following value, an empty `--milestones`/`--milestone` value, or a `--defaults` value that is empty/whitespace-only or contains a part that isn't `S=<n>`, `M=<n>`, or `L=<n>` with `n` an ASCII decimal number greater than zero and no greater than the `MAX_HOURS` ceiling (`100000`) (an empty part, a trailing comma, or a non-ASCII digit such as `٢` is rejected too). |
 | `3` | A `--milestones`/`--milestone` selection was requested but matched zero open milestones. |
-| `4` | `--parallelism` was given a value that is not a positive decimal number matching `^[[:digit:]]+([.][[:digit:]]+)?$` (ASCII digits only, so non-ASCII digits such as `٢` are rejected too; `0`, `-1`, `abc`, `.5`, `1e2`, and leading/trailing whitespace are all rejected; `0.5` is accepted). A `parallelism.txt` file with the same defect falls back to the 1.5 default instead of erroring — see "parallelism source" above. |
-| `5` | A `blocked_by` cycle was detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is the only cause reachable from the script's own flag values — a `--defaults` value can no longer reach exit 5, since it is either rejected with exit 2 or completed from the built-in table, and a malformed in-body `est. cycle` value can't either (it falls back instead, see above) — but `5` is jq's generic error exit, so an unexpected jq failure would surface as `5` as well. |
+| `4` | `--parallelism` was given a value that is not a positive decimal number matching `^[[:digit:]]+([.][[:digit:]]+)?$`, no greater than the `MAX_HOURS` ceiling (`100000`) (ASCII digits only, so non-ASCII digits such as `٢` are rejected too; `0`, `-1`, `abc`, `.5`, `1e2`, and leading/trailing whitespace are all rejected; `0.5` is accepted). A `parallelism.txt` file with the same defect falls back to the 1.5 default instead of erroring — see "parallelism source" above. |
+| `5` | A `blocked_by` cycle was detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is the only cause reachable from the script's own flag values — a `--defaults` value can no longer reach exit 5, since it is either rejected with exit 2 or completed from the built-in table, and a malformed or over-`MAX_HOURS` in-body `est. cycle` value can't either (both fall back instead, see above) — but `5` is jq's generic error exit, so an unexpected jq failure would surface as `5` as well. Exit `134` (jq SIGABRT) is not reachable from any input this script accepts — see #1269. |
 
 ## Flags
 
@@ -95,5 +103,5 @@ issues and epics, so its line count exceeds the map's totals); `placement.json` 
 | `--milestone <title>` | Repeatable, exact and untrimmed single-title selection; combines with `--milestones`. |
 | `--parallelism <n>` | Explicit parallelism factor; overrides `--history-dir`/default. |
 | `--history-dir <dir>` | Directory `history.sh` wrote `parallelism.txt` into. |
-| `--defaults S=2,M=6,L=16` | Hour defaults per T-shirt size when an issue has no `est. cycle` hours (`M` is also the fallback for an issue with no size at all). Any subset of sizes may be given; an omitted size keeps its built-in default from `S=2,M=6,L=16`, and a size given twice resolves last-wins. Each value must be greater than zero; an empty value, an empty part or a trailing comma is an argument error (exit 2). |
+| `--defaults S=2,M=6,L=16` | Hour defaults per T-shirt size when an issue has no `est. cycle` hours (`M` is also the fallback for an issue with no size at all). Any subset of sizes may be given; an omitted size keeps its built-in default from `S=2,M=6,L=16`, and a size given twice resolves last-wins. Each value must be greater than zero and no greater than the `MAX_HOURS` ceiling (`100000`); an empty value, an empty part or a trailing comma is an argument error (exit 2). |
 | `--out <dir>` | Output directory for `milestones.jsonl`, `issues.jsonl`, `projection.json`, `placement.json`, `timeline.md`. |

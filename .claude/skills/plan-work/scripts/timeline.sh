@@ -17,29 +17,41 @@
 # --parallelism) the default --out convention is assumed, and falling back to 1.5 is reported on stderr.
 # A missing, empty, non-numeric, zero, or negative parallelism.txt falls back to 1.5 the same way.
 # --defaults may name any subset of S/M/L; a size it omits keeps its built-in default (S=2, M=6, L=16),
-# and a size named twice resolves last-wins. Empty values, empty parts, trailing commas and non-positive
-# numbers are rejected (exit 2).
+# and a size named twice resolves last-wins. Empty values, empty parts, trailing commas, non-positive
+# numbers, and numbers above the MAX_HOURS sanity ceiling (100000; see #1269) are rejected (exit 2).
 # Exit codes: 2 = argument error (unknown flag, a value-taking flag with no following value, an empty
 # --milestones/--milestone value, or a --defaults value that is empty or has a part that isn't
-# S=<n>/M=<n>/L=<n> with n an ASCII decimal number greater than zero, so a non-ASCII digit such as
-# "٢" is an argument error too); 3 = a
+# S=<n>/M=<n>/L=<n> with n an ASCII decimal number greater than zero and no greater than MAX_HOURS
+# (100000), so a non-ASCII digit such as "٢" is an argument error too); 3 = a
 # --milestones/--milestone selection was requested but matched zero open milestones; 4 = --parallelism
-# was given a value that is not a positive decimal number matching ^[[:digit:]]+([.][[:digit:]]+)?$ (ASCII
-# digits only, so non-ASCII digits such as "٢" are rejected too; "0", "-1", "abc", ".5", "1e2" and
-# leading/trailing whitespace are all rejected); 5 = a blocked_by cycle was
-# detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is
+# was given a value that is not a positive decimal number matching ^[[:digit:]]+([.][[:digit:]]+)?$, no
+# greater than MAX_HOURS (100000) (ASCII digits only, so non-ASCII digits such as "٢" are rejected too;
+# "0", "-1", "abc", ".5", "1e2" and leading/trailing whitespace are all rejected); 5 = a blocked_by cycle
+# was detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is
 # the only cause reachable from this script's own flag values -- no --defaults value can produce it any
-# more, and a malformed in-body est. cycle value can't either (it falls back instead, see #1271) --
-# but exit 5 is jq's generic error exit, so an unexpected jq failure would also surface as 5.
+# more, and a malformed or over-MAX_HOURS in-body est. cycle value can't either (both fall back instead,
+# see #1271 and #1269) -- but exit 5 is jq's generic error exit, so an unexpected jq failure would also
+# surface as 5.
+# MAX_HOURS (100000) bounds every numeric magnitude this script accepts -- --defaults S/M/L values,
+# --parallelism, a history-dir parallelism.txt value, and an issue-body est. cycle value -- because
+# jq 1.6 SIGABRTs (undocumented exit 134) when a sufficiently large number (roughly 15+ digits) reaches
+# its per-milestone projection stage; see #1269. Nothing near 100000 hours (~11 years) or that much
+# parallelism is a plausible planning input, so the ceiling costs nothing real. A flag value above it is
+# an argument error (exit 2 for --defaults, exit 4 for --parallelism); a parallelism.txt value above it
+# falls back to the 1.5 default like any other unusable file value; an in-body est. cycle value above it
+# falls back to the size default like any other malformed value -- it never reaches exit 134.
 set -euo pipefail
 REPO=""; ONLY=""; PAR=""; HISTORY_DIR=""; BUILTIN_DEF="S=2,M=6,L=16"; DEF="$BUILTIN_DEF"; OUT="${TMPDIR:-/tmp}/plan-work-timeline"; HOURS_PER_DAY=8
+# Sanity ceiling on any single numeric magnitude this script accepts (--defaults S/M/L, --parallelism,
+# a history-dir parallelism.txt value, and an in-body est. cycle value); see the header comment above.
+MAX_HOURS=100000
 MILESTONE_ARGS=()
 require_arg(){ [ "$#" -ge 2 ] || { echo "timeline.sh: $1 requires a value" >&2; exit 2; }; }
 require_value(){ [ -n "$2" ] || { echo "timeline.sh: $1 requires a non-empty value" >&2; exit 2; }; }
-is_positive_number(){ [[ "$1" =~ ^[[:digit:]]+([.][[:digit:]]+)?$ ]] && awk -v v="$1" 'BEGIN{exit !(v>0)}'; }
+is_positive_number(){ [[ "$1" =~ ^[[:digit:]]+([.][[:digit:]]+)?$ ]] && awk -v v="$1" -v max="$MAX_HOURS" 'BEGIN{exit !(v>0 && v<=max)}'; }
 require_positive_number(){
   if ! is_positive_number "$2"; then
-    echo "timeline.sh: $1 \"$2\" must be a positive decimal number matching ^[[:digit:]]+([.][[:digit:]]+)?\$" >&2
+    echo "timeline.sh: $1 \"$2\" must be a positive decimal number matching ^[[:digit:]]+([.][[:digit:]]+)?\$, no greater than $MAX_HOURS" >&2
     exit 4
   fi
 }
@@ -49,13 +61,13 @@ require_positive_number(){
 require_defaults(){
   local raw="$2" part parts
   [[ "$raw" =~ ^[SML]=[[:digit:]]+([.][[:digit:]]+)?(,[SML]=[[:digit:]]+([.][[:digit:]]+)?)*$ ]] || {
-    echo "timeline.sh: $1 \"$raw\" must be a comma-separated list of S=<n>,M=<n>,L=<n> (positive ASCII decimal numbers; any subset of sizes is allowed and an omitted size keeps its built-in default; an empty value, an empty part, or a trailing comma is rejected)" >&2
+    echo "timeline.sh: $1 \"$raw\" must be a comma-separated list of S=<n>,M=<n>,L=<n> (positive ASCII decimal numbers, no greater than $MAX_HOURS; any subset of sizes is allowed and an omitted size keeps its built-in default; an empty value, an empty part, or a trailing comma is rejected)" >&2
     exit 2
   }
   IFS=',' read -ra parts <<<"$raw"
   for part in "${parts[@]}"; do
     is_positive_number "${part#*=}" || {
-      echo "timeline.sh: $1 \"$raw\" part \"$part\" must be greater than zero" >&2
+      echo "timeline.sh: $1 \"$raw\" part \"$part\" must be greater than zero and no greater than $MAX_HOURS" >&2
       exit 2
     }
   done
@@ -132,14 +144,17 @@ while IFS= read -r ms; do
     # silently mis-parsed by tonumber (which aborts the whole run at exit 5 on bad input -- #1271).
     # $h re-validates $hraw against a strict single-decimal ASCII pattern ([0-9], not [[:digit:]]:
     # jq/Oniguruma's [[:digit:]] is Unicode-aware and would accept non-ASCII digits here, unlike
-    # bash's [[ =~ ]] where [[:digit:]] is the ASCII-safe choice used elsewhere in this script).
-    # A malformed (present but unparseable) estimate falls back exactly like a missing one, and is
-    # reported on stderr below with the issue number and the offending text.
-    rec=$(jq -c --argjson ms "$ms" --argjson blocked "$blocked" --arg S "$defS" --arg M "$defM" --arg L "$defL" '
+    # bash's [[ =~ ]] where [[:digit:]] is the ASCII-safe choice used elsewhere in this script) AND
+    # no greater than $MAX_HOURS: a well-formed but huge value (15+ digits) is repository content
+    # jq's own bug can reach (not just a --defaults typo), and letting it through as "hours" makes
+    # the later per-milestone projection stage SIGABRT at undocumented exit 134 -- see #1269. A
+    # malformed (present but unparseable) OR over-the-ceiling estimate falls back exactly like a
+    # missing one, and is reported on stderr below with the issue number and the offending text.
+    rec=$(jq -c --argjson ms "$ms" --argjson blocked "$blocked" --arg S "$defS" --arg M "$defM" --arg L "$defL" --argjson maxHours "$MAX_HOURS" '
       ([.body|capture("## Estimate\\s*\\n(?<e>[^#]*)")]|.[0].e // "") as $est |
       ([$est|capture("Size: *(?<s>[SML])")]|.[0].s // null) as $size |
       ([$est|capture("est\\. cycle:? *(?<hraw>\\S+) *h")]|.[0].hraw // null) as $hraw |
-      (if $hraw!=null and ($hraw|test("^[0-9]+([.][0-9]+)?$")) then $hraw else null end) as $h |
+      (if $hraw!=null and ($hraw|test("^[0-9]+([.][0-9]+)?$")) and (($hraw|tonumber) <= $maxHours) then $hraw else null end) as $h |
       ($hraw!=null and $h==null) as $malformed |
       {milestone:$ms.number, milestone_title:$ms.title, issue:.number, state:.state, assignee:.assignee, epic:([.labels[]|select(.=="epic")]|length>0),
        size:$size, hours:(if $h!=null then ($h|tonumber) elif $size=="S" then ($S|tonumber) elif $size=="M" then ($M|tonumber) elif $size=="L" then ($L|tonumber) else ($M|tonumber) end),
@@ -149,9 +164,9 @@ while IFS= read -r ms; do
     if [ -n "$mal" ]; then
       mal_size=$(jq -r '.size // empty' <<<"$rec")
       if [ -n "$mal_size" ]; then
-        say "timeline: issue #$n has an unparseable est. cycle value \"$mal\"; falling back to its size default"
+        say "timeline: issue #$n has an unparseable or over-$MAX_HOURS-hour est. cycle value \"$mal\"; falling back to its size default"
       else
-        say "timeline: issue #$n has an unparseable est. cycle value \"$mal\"; falling back to the M default (no size)"
+        say "timeline: issue #$n has an unparseable or over-$MAX_HOURS-hour est. cycle value \"$mal\"; falling back to the M default (no size)"
       fi
     fi
     printf '%s\n' "$rec" >> "$OUT/issues.jsonl"
