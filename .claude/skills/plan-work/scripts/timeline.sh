@@ -2,6 +2,10 @@
 # timeline.sh — propose milestone due dates from issue-level estimates and dependencies. READ-ONLY (proposes; the agent applies).
 # Usage: timeline.sh [--repo owner/name] [--milestones "A,B"] [--milestone <title>]... [--parallelism 1.3] [--history-dir <dir>] [--defaults S=2,M=6,L=16] [--out <dir>]
 # Reads each open milestone's open issues: the `## Estimate` section (Size, est. cycle hours if given) and `blocked_by` links (REST).
+# An `est. cycle` value in an issue body that isn't a plain ASCII decimal number (e.g. "1.2.3",
+# or a non-ASCII digit such as "٢") is treated like a missing estimate — it falls back to the
+# issue's size default (or the M default if it has none) — and is reported on stderr naming the
+# issue number and the offending text; it never aborts the run (see #1271).
 # --milestones takes an exact, comma-split list of milestone titles (no substring matching); each name is
 # trimmed of leading/trailing whitespace, so a title with leading/trailing spaces can never be named this way.
 # --milestone (singular, repeatable) takes one exact, untrimmed title per flag — use it for a title
@@ -24,7 +28,8 @@
 # leading/trailing whitespace are all rejected); 5 = a blocked_by cycle was
 # detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is
 # the only cause reachable from this script's own flag values -- no --defaults value can produce it any
-# more -- but exit 5 is jq's generic error exit, so an unexpected jq failure would also surface as 5.
+# more, and a malformed in-body est. cycle value can't either (it falls back instead, see #1271) --
+# but exit 5 is jq's generic error exit, so an unexpected jq failure would also surface as 5.
 set -euo pipefail
 REPO=""; ONLY=""; PAR=""; HISTORY_DIR=""; BUILTIN_DEF="S=2,M=6,L=16"; DEF="$BUILTIN_DEF"; OUT="${TMPDIR:-/tmp}/plan-work-timeline"; HOURS_PER_DAY=8
 MILESTONE_ARGS=()
@@ -121,13 +126,29 @@ while IFS= read -r ms; do
   gh api --paginate "repos/$REPO/issues?milestone=$mn&state=all&per_page=100" --jq '.[]|select(.pull_request==null)|{number,state,created_at,closed_at,body:(.body//""),assignee:(.assignee.login//null),labels:[.labels[].name]}' | while IFS= read -r iss; do
     n=$(jq -r .number <<<"$iss")
     blocked=$(gh api "repos/$REPO/issues/$n/dependencies/blocked_by" --jq '[.[].number]' 2>/dev/null || echo '[]')
-    jq -c --argjson ms "$ms" --argjson blocked "$blocked" --arg S "$defS" --arg M "$defM" --arg L "$defL" '
+    # $hraw captures whatever token sits between "est. cycle:" and "h", loosely, so a malformed
+    # value (e.g. "1.2.3", or a non-ASCII digit like the Arabic-indic "٢") is detected rather than
+    # silently mis-parsed by tonumber (which aborts the whole run at exit 5 on bad input -- #1271).
+    # $h re-validates $hraw against a strict single-decimal ASCII pattern ([0-9], not [[:digit:]]:
+    # jq/Oniguruma's [[:digit:]] is Unicode-aware and would accept non-ASCII digits here, unlike
+    # bash's [[ =~ ]] where [[:digit:]] is the ASCII-safe choice used elsewhere in this script).
+    # A malformed (present but unparseable) estimate falls back exactly like a missing one, and is
+    # reported on stderr below with the issue number and the offending text.
+    rec=$(jq -c --argjson ms "$ms" --argjson blocked "$blocked" --arg S "$defS" --arg M "$defM" --arg L "$defL" '
       ([.body|capture("## Estimate\\s*\\n(?<e>[^#]*)")]|.[0].e // "") as $est |
       ([$est|capture("Size: *(?<s>[SML])")]|.[0].s // null) as $size |
-      ([$est|capture("est\\. cycle:? *(?<h>[0-9.]+) *h")]|.[0].h // null) as $h |
+      ([$est|capture("est\\. cycle:? *(?<hraw>\\S+) *h")]|.[0].hraw // null) as $hraw |
+      (if $hraw!=null and ($hraw|test("^[0-9]+([.][0-9]+)?$")) then $hraw else null end) as $h |
+      ($hraw!=null and $h==null) as $malformed |
       {milestone:$ms.number, milestone_title:$ms.title, issue:.number, state:.state, assignee:.assignee, epic:([.labels[]|select(.=="epic")]|length>0),
        size:$size, hours:(if $h!=null then ($h|tonumber) elif $size=="S" then ($S|tonumber) elif $size=="M" then ($M|tonumber) elif $size=="L" then ($L|tonumber) else ($M|tonumber) end),
-       hours_source:(if $h!=null then "estimate" elif $size!=null then "size-default" else "no-estimate-default-M" end), blocked_by:$blocked, created:.created_at, closed:.closed_at}' <<<"$iss" >> "$OUT/issues.jsonl"
+       hours_source:(if $h!=null then "estimate" elif $malformed then (if $size!=null then "malformed-estimate-default-"+$size else "malformed-estimate-default-M" end) elif $size!=null then "size-default" else "no-estimate-default-M" end),
+       malformed_estimate:(if $malformed then $hraw else null end), blocked_by:$blocked, created:.created_at, closed:.closed_at}' <<<"$iss")
+    mal=$(jq -r '.malformed_estimate // empty' <<<"$rec")
+    if [ -n "$mal" ]; then
+      say "timeline: issue #$n has an unparseable est. cycle value \"$mal\"; falling back to its size default"
+    fi
+    printf '%s\n' "$rec" >> "$OUT/issues.jsonl"
   done
 done < "$OUT/milestones.jsonl"
 if [ "$SELECTING" = 1 ]; then

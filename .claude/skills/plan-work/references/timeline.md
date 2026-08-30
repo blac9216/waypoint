@@ -11,7 +11,12 @@ confirms when anything is ambiguous.
    (any issue assigned, in progress or merged).
 2. Per milestone: critical path through its own issues' dependencies using est. cycle
    days; total effort; projected duration = critical path adjusted by the observed
-   parallelism (from history: median concurrent In-progress issues; default 1.5).
+   parallelism (from history: median concurrent In-progress issues; default 1.5). An
+   issue body's `est. cycle` value that isn't a plain ASCII decimal number (e.g.
+   `1.2.3`, or a non-ASCII digit such as `٢`) is treated like a missing estimate —
+   it falls back to that issue's size default (or the `M` default if it has no
+   size) — and is reported on stderr naming the issue number and the offending
+   text; it never aborts the run.
    The parallelism source is either `--parallelism` (explicit), `--history-dir`
    (explicit, pointed at `history.sh`'s `--out`), or a same-run default-`--out`
    guess — that last case is reported on stderr so a mismatched `--out` doesn't
@@ -51,7 +56,7 @@ reported on stderr; matching zero milestones in total is an error. An empty
 | `2` | Argument error — an unrecognized flag, a value-taking flag with no following value, an empty `--milestones`/`--milestone` value, or a `--defaults` value that is empty/whitespace-only or contains a part that isn't `S=<n>`, `M=<n>`, or `L=<n>` with `n` an ASCII decimal number greater than zero (an empty part, a trailing comma, or a non-ASCII digit such as `٢` is rejected too). |
 | `3` | A `--milestones`/`--milestone` selection was requested but matched zero open milestones. |
 | `4` | `--parallelism` was given a value that is not a positive decimal number matching `^[[:digit:]]+([.][[:digit:]]+)?$` (ASCII digits only, so non-ASCII digits such as `٢` are rejected too; `0`, `-1`, `abc`, `.5`, `1e2`, and leading/trailing whitespace are all rejected; `0.5` is accepted). A `parallelism.txt` file with the same defect falls back to the 1.5 default instead of erroring — see "parallelism source" above. |
-| `5` | A `blocked_by` cycle was detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is the only cause reachable from the script's own flag values — a `--defaults` value can no longer reach exit 5, since it is either rejected with exit 2 or completed from the built-in table — but `5` is jq's generic error exit, so an unexpected jq failure would surface as `5` as well. |
+| `5` | A `blocked_by` cycle was detected while computing a milestone's critical path (jq's own error exit surfaces here). A cycle is the only cause reachable from the script's own flag values — a `--defaults` value can no longer reach exit 5, since it is either rejected with exit 2 or completed from the built-in table, and a malformed in-body `est. cycle` value can't either (it falls back instead, see above) — but `5` is jq's generic error exit, so an unexpected jq failure would surface as `5` as well. |
 
 ## Flags
 
