@@ -788,9 +788,21 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 	/// Issue #593 (migration 0041): proves the new runs/jobs credential attribution
 	/// snapshot columns did NOT silently need a new grant -- migration 0025 already
 	/// grants both runner roles whole-table (not column-scoped) SELECT on runs and
-	/// SELECT/UPDATE on jobs, so JobQueueRepository.GetRunAsync/GetJobAsync (which
-	/// now select credential_name/credential_type/credential_username) must keep
-	/// working unchanged as either runner role. Written at authoring time, same
+	/// SELECT/UPDATE on jobs, so reading credential_name/credential_type/
+	/// credential_username off both tables must keep working unchanged as either
+	/// runner role.
+	///
+	/// Issue #1303 (review of PR #1300): the runs half used to go through
+	/// <see cref="JobQueueRepository.GetRunAsync"/>, which was fine until that method's
+	/// shared <c>RunSummaryProjectionSql</c> grew a <c>coverage_incomplete</c> join over
+	/// <c>scan_plans</c>/<c>component_results</c> -- tables no runner role has, or
+	/// should have, SELECT on. NO runner calls <c>GetRunAsync</c>/<c>ListRunsAsync</c>/
+	/// <c>ListRunHistoryAsync</c> in production (runners call
+	/// <c>ClaimJobAsync</c>/<c>AdvanceStateAsync</c>/<c>RenewLeaseAsync</c>/
+	/// <c>GetRunQueueStateAsync</c>/<c>Abort</c>|<c>Pause</c>|<c>ResumeRunAsync</c>; every
+	/// production caller of the run projection is API-side), so this test reads the runs
+	/// columns directly instead of widening production grants to keep a test green.
+	/// Written at authoring time, same
 	/// discipline as <see cref="ComplianceRunnerRole_CapacityPoolProtocol_FullLifecycleWithoutPermissionDenied"/>'s
 	/// doc comment -- this migration's own header claims no grant change was needed;
 	/// this is what proves that claim rather than asserting it in a comment only.
@@ -820,9 +832,18 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 		string connectionString = role == "waypoint_compliance_runner" ? _complianceRunnerConnectionString : _downloadRunnerConnectionString;
 		JobQueueRepository runnerRepository = new(connectionString, NullLogger<JobQueueRepository>.Instance);
 
-		RunSummary? run = await runnerRepository.GetRunAsync(runId, CancellationToken.None);
-		Assert.NotNull(run);
-		Assert.Equal("role-grant-drift-cred", run!.CredentialName);
+		await using (NpgsqlConnection runnerConnection = new(connectionString))
+		{
+			await runnerConnection.OpenAsync();
+			await using NpgsqlCommand readRun = new(
+				"SELECT credential_name, credential_type, credential_username FROM runs WHERE id = $1", runnerConnection);
+			readRun.Parameters.AddWithValue(runId);
+			await using NpgsqlDataReader reader = await readRun.ExecuteReaderAsync();
+			Assert.True(await reader.ReadAsync());
+			Assert.Equal("role-grant-drift-cred", reader.GetString(0));
+			Assert.Equal("token", reader.GetString(1));
+			Assert.Equal("svc@example.internal", reader.GetString(2));
+		}
 
 		JobSummary? job = await runnerRepository.GetJobAsync(jobId, CancellationToken.None);
 		Assert.NotNull(job);
@@ -1990,11 +2011,10 @@ public sealed class RunnerRoleGrantDriftTests : IAsyncLifetime, IDisposable
 
 		await runnerRepository.RecordAsync(record, CancellationToken.None);
 
-		// Read back through the OWNER role: the run rollup (GetRunRollupAsync) is the
-		// API's read surface (RunsController), never the runner's -- migration 0081
-		// (issue #1140) did give both runner roles a `scan_plans` SELECT grant, but
-		// only because JobQueueRepository.GetRunAsync's shared coverage_incomplete
-		// join needs it, not because ComponentResultRepository's rollup query does.
+		// Read back through the OWNER role: the run rollup is the API's read surface
+		// (RunsController), never the runner's -- the runner role deliberately has no
+		// scan_plans SELECT, so verifying through it would demand a grant production
+		// never needs.
 		ComponentResultRepository ownerRepository = new(_fixture.ConnectionString);
 		RunResultRollup rollup = await ownerRepository.GetRunRollupAsync(runId, CancellationToken.None);
 		Assert.Equal(1, Assert.Single(rollup.ByStatus).ComponentCount);

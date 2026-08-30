@@ -971,10 +971,10 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	/// per-run follow-up query -- the exact same three-way predicate
 	/// <c>RunsController.GetComponentResultsSummary</c> already uses (no recorded
 	/// plan, a plan-time omission, or an execution-time zero-verdict component),
-	/// evaluated here via two more LEFT JOINs against a run-scoped subquery apiece
+	/// evaluated here via two more LEFT JOINs against a run-scoped source apiece
 	/// (<c>scan_plans</c>, at most one row per run via its own UNIQUE run_id; a
-	/// GROUP-BY-run_id aggregate over <c>component_results</c>' latest attempt per
-	/// <c>scan_plan_item_id</c>, mirroring <see cref="Waypoint.Infrastructure.Runs.ComponentResultRepository.GetRunRollupAsync"/>'s
+	/// <c>LEFT JOIN LATERAL</c> aggregate over <c>component_results</c>' latest attempt
+	/// per <c>scan_plan_item_id</c>, mirroring <see cref="Waypoint.Infrastructure.Runs.ComponentResultRepository.GetRunRollupAsync"/>'s
 	/// own <c>evaluated_zero_component_count</c> FILTER predicate exactly). Both
 	/// joined sources contribute at most one row per <c>r.id</c>, so the existing
 	/// <c>jobs</c> fan-out (which can multiply rows per run) cannot corrupt the
@@ -983,6 +983,19 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 	/// <c>job_count_*</c> columns already tolerate that fan-out via <c>COUNT(...)
 	/// FILTER</c>. No N+1 -- one query serves <see cref="GetRunAsync"/>,
 	/// <see cref="ListRunsAsync"/>, and <see cref="ListRunHistoryAsync"/> alike.
+	///
+	/// Issue #1304 (review of PR #1300): the <c>component_results</c> side is a
+	/// <c>LEFT JOIN LATERAL</c> carrying <c>WHERE run_id = r.id</c> INSIDE the
+	/// <c>DISTINCT ON</c>, not an uncorrelated <c>GROUP BY run_id</c> derived table.
+	/// The outer <c>WHERE r.id = $1</c> cannot be pushed into a non-lateral subquery,
+	/// so the uncorrelated form sorted the whole <c>component_results</c> relation on
+	/// every <c>GET /runs/{id}</c>, <c>GET /runs</c>, <c>GET /runs/history</c> and
+	/// dashboard refresh. Correlating it mirrors <c>GetRunRollupAsync</c>, which has
+	/// carried its own <c>WHERE run_id = $1</c> inside the same <c>DISTINCT ON</c> all
+	/// along, and lets the planner use the <c>component_results(run_id)</c> access
+	/// path per run. The aggregate is unfiltered-by-group, so the lateral always
+	/// yields exactly one row (count 0 when the run has no component results) -- the
+	/// <c>coalesce(..., 0)</c> stays as a belt-and-braces guard.
 	/// </summary>
 	private static readonly string RunSummaryProjectionSql = $"""
 		SELECT
@@ -1005,22 +1018,21 @@ public sealed partial class JobQueueRepository : IJobControlRepository, IJobRunn
 		FROM runs r
 		LEFT JOIN jobs j ON j.run_id = r.id
 		LEFT JOIN scan_plans sp ON sp.run_id = r.id
-		LEFT JOIN (
+		LEFT JOIN LATERAL (
 			SELECT
-				run_id,
 				count(*) FILTER (
 					WHERE passed_count + cat_i_open + cat_ii_open + cat_iii_open = 0
 					  AND (not_reviewed_count > 0 OR skipped_count > 0 OR execution_error_count > 0 OR not_applicable_count = 0)
 				) AS evaluated_zero_component_count
 			FROM (
 				SELECT DISTINCT ON (scan_plan_item_id)
-					run_id, passed_count, cat_i_open, cat_ii_open, cat_iii_open,
+					passed_count, cat_i_open, cat_ii_open, cat_iii_open,
 					not_reviewed_count, skipped_count, execution_error_count, not_applicable_count
 				FROM component_results
+				WHERE run_id = r.id
 				ORDER BY scan_plan_item_id, attempt_number DESC
 			) latest_component_results
-			GROUP BY run_id
-		) cr ON cr.run_id = r.id
+		) cr ON true
 		""";
 
 	/// <summary>Comma-separated, single-quoted SQL literal list of the <see cref="JobStates"/> values in <paramref name="bucket"/>.</summary>

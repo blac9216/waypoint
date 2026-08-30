@@ -30,7 +30,21 @@
 -- which covers every value a CHECK-constrained column may hold, not only the ones
 -- enumerated when the grant ran (same reasoning migrations 0079/0080 already
 -- recorded for a new column; this migration adds a new value, not a new column, so
--- the point applies even more directly). Item 2's own new grants are below.
+-- the point applies even more directly).
+--
+-- NO NEW GRANTS (issue #1303, review of PR #1300): an earlier revision of this
+-- migration granted `SELECT ON scan_plans` to both runner roles and `SELECT ON
+-- component_results` to `waypoint_download_runner`, on the stated grounds that
+-- `JobDispatcherHostedService` runs `JobQueueRepository.RunSummaryProjectionSql`.
+-- It does not -- it calls only `AbortRunAsync`/`PauseRunAsync`/`ResumeRunAsync`. The
+-- projection is reached solely through `GetRunAsync`/`ListRunsAsync`/`ListRunHistoryAsync`,
+-- and every production caller of those is API-side (`RunsController`,
+-- `DashboardAggregateService`, `RunPurgeService`, `RunHistoryDeletionService`,
+-- `RunRetentionHoldService`); nothing under `Waypoint.Runner`/`Waypoint.ComplianceRunner`/
+-- `Waypoint.DownloadRunner` calls them. Granting the download runner read access to all
+-- compliance evidence purely to keep a drift test green is a least-privilege regression,
+-- so the grants are gone and `RunnerRoleGrantDriftTests` no longer runs the run
+-- projection under a runner role.
 --
 -- BACKFILL: `component_results` rows are immutable (migration 0066's append-only
 -- UPDATE trigger), so a historical `completed` row that in fact evaluated zero
@@ -49,9 +63,24 @@
 -- unchanged -- only the status label is corrected to match what the row's own
 -- immutable findings already imply.
 --
+-- ORDERING (review of PR #1300, finding F1): the CHECK widening MUST precede the
+-- backfill. Postgres CHECK constraints are never deferrable, so an `UPDATE ... SET
+-- status = 'completed_zero_controls'` run while migration 0063's narrower constraint
+-- is still in force is rejected outright, aborting this migration's single transaction
+-- and blocking application start -- and it fires only where at least one historical
+-- zero-verdict `completed` row exists, i.e. exactly the population the backfill was
+-- written for, which is never a freshly-created CI/test database. Pinned by
+-- `SchemaMigrationTests.Migration0081_PreExistingZeroVerdictCompletedRow_IsBackfilledAfterTheCheckWidens`,
+-- which restores migration 0063's narrow constraint, seeds such a row, and then runs
+-- this migration's own text.
+--
 -- Idempotent by construction (DROP/re-ADD CHECK + a backfill that only touches rows
 -- whose status differs from the derived value), matching every prior migration in
 -- this directory.
+ALTER TABLE component_results DROP CONSTRAINT IF EXISTS component_results_status_check;
+ALTER TABLE component_results ADD CONSTRAINT component_results_status_check
+    CHECK (status IN ('completed', 'execution_error', 'skipped', 'completed_zero_controls'));
+
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_component_results_block_update') THEN
@@ -71,23 +100,3 @@ BEGIN
         ALTER TABLE component_results ENABLE TRIGGER trg_component_results_block_update;
     END IF;
 END $$;
-
-ALTER TABLE component_results DROP CONSTRAINT IF EXISTS component_results_status_check;
-ALTER TABLE component_results ADD CONSTRAINT component_results_status_check
-    CHECK (status IN ('completed', 'execution_error', 'skipped', 'completed_zero_controls'));
-
--- Issue #1140 item 2: `JobQueueRepository.RunSummaryProjectionSql` (shared by
--- `GetRunAsync`/`ListRunsAsync`/`ListRunHistoryAsync`) now bulk-computes
--- `coverage_incomplete` by LEFT JOINing `scan_plans` and a `component_results`
--- aggregate -- and that ONE query is also what `JobDispatcherHostedService` and every
--- other runner-side caller runs under EITHER runner role's restricted DB grants (proven
--- by `RunnerRoleGrantDriftTests.RunnerRole_ReadsCredentialAttributionSnapshotColumns_WithoutPermissionDenied`,
--- which calls this exact method as both roles). `scan_plans` had never been granted to
--- ANY runner role before this (migration 0057 only granted its write path, API-side);
--- `component_results` was granted to `waypoint_compliance_runner` by migration 0063 but
--- never to `waypoint_download_runner`, which never touched compliance evidence before
--- this query started reading it in every run-read call. Read-only, table-level (a
--- table-level GRANT already covers a column added later, per every prior migration's
--- own reasoning in this directory).
-GRANT SELECT ON scan_plans TO waypoint_compliance_runner, waypoint_download_runner;
-GRANT SELECT ON component_results TO waypoint_download_runner;

@@ -341,15 +341,13 @@ public sealed class SchemaMigrationTests
 	/// the same zero-verdict predicate the rollup's <c>evaluated_zero_component_count</c>
 	/// FILTER already used at read time, taking migration 0080's same one-statement
 	/// disable/re-enable of <c>trg_component_results_block_update</c>. No new runner
-	/// grant for the status widening itself (a CHECK-constrained column's existing
-	/// table-level GRANT already covers every value the column may hold), but DOES add
-	/// two: <c>JobQueueRepository.RunSummaryProjectionSql</c>'s new bulk
-	/// <c>coverage_incomplete</c> join (item 2, same issue) reads <c>scan_plans</c> and
-	/// <c>component_results</c> from EVERY caller of <c>GetRunAsync</c>/<c>ListRunsAsync</c>/
-	/// <c>ListRunHistoryAsync</c>, including both runner roles -- so this migration
-	/// grants `SELECT` on <c>scan_plans</c> to both runner roles (never granted before)
-	/// and on <c>component_results</c> to <c>waypoint_download_runner</c> (already held
-	/// by <c>waypoint_compliance_runner</c> since migration 0063) --
+	/// grants at all: the status widening needs none (a CHECK-constrained column's
+	/// existing table-level GRANT already covers every value the column may hold), and
+	/// the sibling <c>coverage_incomplete</c> join in
+	/// <c>JobQueueRepository.RunSummaryProjectionSql</c> needs none either -- no runner
+	/// calls <c>GetRunAsync</c>/<c>ListRunsAsync</c>/<c>ListRunHistoryAsync</c> in
+	/// production (issue #1303). The CHECK widening runs BEFORE the backfill, pinned by
+	/// <see cref="Migration0081_PreExistingZeroVerdictCompletedRow_IsBackfilledAfterTheCheckWidens"/> --
 	/// bump this alongside adding a new <c>Data/Migrations/*.sql</c> file.</summary>
 	private const int ExpectedMigrationCount = 80;
 
@@ -1431,6 +1429,160 @@ public sealed class SchemaMigrationTests
 
 		Assert.Equal(2, await ReadExecutionErrorCountAsync(connection, erroredResultId));
 		Assert.Equal(0, await ReadExecutionErrorCountAsync(connection, cleanResultId));
+	}
+
+	/// <summary>
+	/// Issue #1140 (review of PR #1300, finding F1): migration 0081 must widen
+	/// <c>component_results_status_check</c> BEFORE its backfill writes the new
+	/// <c>completed_zero_controls</c> value. Postgres CHECK constraints are never
+	/// deferrable, so the reverse order aborts the migration's single transaction on any
+	/// database that actually HAS a historical zero-verdict <c>completed</c> row -- i.e.
+	/// exactly the population the backfill exists for -- while every freshly-created
+	/// CI/test database matches zero rows and looks fine. That is why the whole suite
+	/// passed over the broken order, and why this test exists.
+	///
+	/// Same "reconstruct the pre-migration shape, then run the real migration text" idiom
+	/// as <see cref="Migration0080_BackfillsExecutionErrorCountFromFindings_NotAFabricatedZero"/>:
+	/// restores migration 0063's NARROW constraint (which is what an unmigrated
+	/// deployment has), seeds two pre-0081 <c>completed</c> rows -- one matching the
+	/// zero-verdict predicate, one genuinely evaluated -- and then executes 0081's own
+	/// embedded SQL text. The matching row must come back <c>completed_zero_controls</c>;
+	/// the evaluated row must stay <c>completed</c>. Re-running the text is asserted to be
+	/// a no-op so raw replay (the idempotency test above) stays green.
+	/// </summary>
+	[Fact]
+	public async Task Migration0081_PreExistingZeroVerdictCompletedRow_IsBackfilledAfterTheCheckWidens()
+	{
+		NpgsqlSchemaMigrator migrator = new(_fixture.ConnectionString, NullLogger<NpgsqlSchemaMigrator>.Instance);
+		await migrator.ApplyAsync();
+
+		await using NpgsqlConnection connection = new(_fixture.ConnectionString);
+		await connection.OpenAsync();
+
+		// Reconstruct the pre-0081 shape: migration 0063's narrow status vocabulary,
+		// which is what a deployment that has not yet applied 0081 is running under.
+		await using (NpgsqlCommand narrowConstraint = new(
+			"""
+			ALTER TABLE component_results DROP CONSTRAINT IF EXISTS component_results_status_check;
+			ALTER TABLE component_results ADD CONSTRAINT component_results_status_check
+				CHECK (status IN ('completed', 'execution_error', 'skipped'));
+			""", connection))
+		{
+			await narrowConstraint.ExecuteNonQueryAsync();
+		}
+
+		Guid sourceRevisionId = await InsertSourceRevisionAsync(connection, "migration-0081-test");
+		Guid productId = await InsertProductAsync(connection, sourceRevisionId, "vmware", "migration-0081-test", "Test Product");
+		Guid versionId = await InsertProductVersionAsync(connection, productId, "9.0", "Test Product 9.0");
+		Guid catalogComponentId = await InsertComponentAsync(connection, versionId, "migration-0081-vcenter", "vCenter Server");
+		Guid releaseId = await InsertContentReleaseAsync(connection, "stig", "migration-0081-test:stig:release-1", "Test STIG Release");
+		Guid reportGroupId = await InsertReportGroupAsync(connection, "migration-0081-group", "Test Group", 2);
+		Guid executionProfileId = await InsertExecutionProfileAsync(connection, catalogComponentId, releaseId, reportGroupId, "1.0.0", "hdf");
+		Guid targetId = await InsertTargetAsync(connection, "migration-0081-target");
+		Guid componentId = await InsertDiscoveredComponentAsync(connection, targetId, catalogComponentId, "migration-0081-vcenter");
+
+		Guid runId;
+		await using (NpgsqlCommand insertRun = new("INSERT INTO runs (run_type) VALUES ('scan') RETURNING id", connection))
+		{
+			runId = (Guid)(await insertRun.ExecuteScalarAsync())!;
+		}
+
+		Guid scanPlanId;
+		await using (NpgsqlCommand insertPlan = new(
+			"""
+			INSERT INTO scan_plans (run_id, plan_schema_version, plan_digest, explanation)
+			VALUES ($1, 1, 'migration-0081-digest', '1 of 1 accepted') RETURNING id
+			""", connection))
+		{
+			insertPlan.Parameters.AddWithValue(runId);
+			scanPlanId = (Guid)(await insertPlan.ExecuteScalarAsync())!;
+		}
+
+		Guid scanPlanItemId;
+		await using (NpgsqlCommand insertPlanItem = new(
+			"""
+			INSERT INTO scan_plan_items (scan_plan_id, component_id, catalog_execution_profile_id, transport, selector_kind, report_group_key, priority, output_kind)
+			VALUES ($1, $2, $3, 'vmware', 'vcenter', 'migration-0081-group', 2, 'hdf') RETURNING id
+			""", connection))
+		{
+			insertPlanItem.Parameters.AddWithValue(scanPlanId);
+			insertPlanItem.Parameters.AddWithValue(componentId);
+			insertPlanItem.Parameters.AddWithValue(executionProfileId);
+			scanPlanItemId = (Guid)(await insertPlanItem.ExecuteScalarAsync())!;
+		}
+
+		// The historical row the backfill exists for: status 'completed', zero passed and
+		// zero open findings, and not_reviewed_count > 0 -- it evaluated nothing.
+		Guid zeroVerdictResultId = await InsertPre0081CompletedComponentResultAsync(
+			connection, runId, scanPlanItemId, componentId, attemptNumber: 1, passedCount: 0, notReviewedCount: 4, notApplicableCount: 0);
+
+		// A genuinely evaluated attempt -- must stay 'completed', so the assertion below
+		// is not vacuously true of every completed row.
+		Guid evaluatedResultId = await InsertPre0081CompletedComponentResultAsync(
+			connection, runId, scanPlanItemId, componentId, attemptNumber: 2, passedCount: 3, notReviewedCount: 0, notApplicableCount: 0);
+
+		string migration0081 = await ReadMigrationSqlAsync("0081_component_results_zero_controls_status.sql");
+		await using (NpgsqlCommand applyMigration0081 = new(migration0081, connection))
+		{
+			await applyMigration0081.ExecuteNonQueryAsync();
+		}
+
+		Assert.Equal("completed_zero_controls", await ReadComponentResultStatusAsync(connection, zeroVerdictResultId));
+		Assert.Equal("completed", await ReadComponentResultStatusAsync(connection, evaluatedResultId));
+
+		// The backfill's append-only carve-out must not outlive the migration -- migration
+		// 0066's UPDATE trigger is back on ('O' = enabled) the moment 0081 finishes.
+		Assert.Equal('O', await ReadTriggerEnabledFlagAsync(connection, "trg_component_results_block_update"));
+
+		// Replay safety: the already-converted row no longer matches `status = 'completed'`,
+		// so a second raw re-apply touches nothing (the raw-replay idempotency test above
+		// runs every migration text a second time).
+		await using (NpgsqlCommand reapplyMigration0081 = new(migration0081, connection))
+		{
+			await reapplyMigration0081.ExecuteNonQueryAsync();
+		}
+
+		Assert.Equal("completed_zero_controls", await ReadComponentResultStatusAsync(connection, zeroVerdictResultId));
+		Assert.Equal("completed", await ReadComponentResultStatusAsync(connection, evaluatedResultId));
+	}
+
+	/// <summary>Inserts a <c>completed</c> <c>component_results</c> row with explicit verdict counts -- issue #1140's migration-0081 backfill fixture.</summary>
+	private static async Task<Guid> InsertPre0081CompletedComponentResultAsync(
+		NpgsqlConnection connection, Guid runId, Guid scanPlanItemId, Guid componentId, int attemptNumber, int passedCount, int notReviewedCount, int notApplicableCount)
+	{
+		Guid jobId;
+		await using (NpgsqlCommand insertJob = new(
+			"""
+			INSERT INTO jobs (run_id, job_type, priority, state, scan_plan_item_id)
+			VALUES ($1, 'scan', 1, 'queued', $2) RETURNING id
+			""", connection))
+		{
+			insertJob.Parameters.AddWithValue(runId);
+			insertJob.Parameters.AddWithValue(scanPlanItemId);
+			jobId = (Guid)(await insertJob.ExecuteScalarAsync())!;
+		}
+
+		await using NpgsqlCommand command = new(
+			"""
+			INSERT INTO component_results (run_id, job_id, scan_plan_item_id, component_id, attempt_number, status, passed_count, not_reviewed_count, not_applicable_count)
+			VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8) RETURNING id
+			""", connection);
+		command.Parameters.AddWithValue(runId);
+		command.Parameters.AddWithValue(jobId);
+		command.Parameters.AddWithValue(scanPlanItemId);
+		command.Parameters.AddWithValue(componentId);
+		command.Parameters.AddWithValue(attemptNumber);
+		command.Parameters.AddWithValue(passedCount);
+		command.Parameters.AddWithValue(notReviewedCount);
+		command.Parameters.AddWithValue(notApplicableCount);
+		return (Guid)(await command.ExecuteScalarAsync())!;
+	}
+
+	private static async Task<string> ReadComponentResultStatusAsync(NpgsqlConnection connection, Guid componentResultId)
+	{
+		await using NpgsqlCommand command = new("SELECT status FROM component_results WHERE id = $1", connection);
+		command.Parameters.AddWithValue(componentResultId);
+		return (string)(await command.ExecuteScalarAsync())!;
 	}
 
 	/// <summary>Inserts a <c>component_results</c> row in its pre-0080 column shape (no <c>execution_error_count</c>) -- issue #1144.</summary>
