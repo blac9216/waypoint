@@ -1,4 +1,5 @@
 # shared helpers — sourced by the other scripts
+# shellcheck shell=bash
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2034 # consumed by scripts that source this file (rulesets.sh, project.sh, …), not here

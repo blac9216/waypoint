@@ -5,8 +5,17 @@ source "$(dirname "$0")/_lib.sh"
 REPO=""; OWNER=""; NUM=""; MACHINE=""; REVIEWER=""; AUDIT=0
 while [ $# -gt 0 ]; do case $1 in --repo) REPO=$2; shift 2;; --owner) OWNER=$2; shift 2;; --project) NUM=$2; shift 2;; --machine) MACHINE=$2; shift 2;; --reviewer) REVIEWER=$2; shift 2;; --audit) AUDIT=1; shift;; *) say "unknown arg $1"; exit 2;; esac; done
 [ -n "$REPO" ] && [ -n "$OWNER" ] && [ -n "$NUM" ] && [ -n "$MACHINE" ] || { say "usage: grant.sh --repo o/n --owner <login> --project <n> --machine <login> [--reviewer <login>]"; exit 2; }
-proj=$(gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id viewerCanUpdate}}}' -F o="$OWNER" -F n="$NUM")
-PID=$(jq -r '.data.user.projectV2.id' <<<"$proj")
+# Guarded the way #1326 guarded the per-account node-id lookup: a failed or empty
+# project lookup (bad owner login, nonexistent project number, missing 'project'
+# scope, transient 5xx, rate limit) must not abort before the account loop with no
+# grants: summary — it must say so, exit nonzero, and never claim "in sync" (#1331).
+proj=$(gh api graphql -f query='query($o:String!,$n:Int!){user(login:$o){projectV2(number:$n){id viewerCanUpdate}}}' -F o="$OWNER" -F n="$NUM" 2>/dev/null) || proj=""
+PID=$(jq -r '.data.user.projectV2.id // empty' <<<"${proj:-null}" 2>/dev/null) || PID=""
+if [ -z "$PID" ]; then
+  say "could not resolve project $NUM for owner $OWNER — check the owner login, the project number, and the token's 'project' scope"
+  say "grants: 0 applied, 1 failed"
+  exit 1
+fi
 VIEWER_CAN_UPDATE=$(jq -r '.data.user.projectV2.viewerCanUpdate' <<<"$proj")
 # own-account signal: viewerCanUpdate reflects the token this script is currently running as,
 # not any named account, so it only narrows the check for whichever account IS that token's
@@ -38,7 +47,9 @@ for acct in $MACHINE $REVIEWER; do
   # so both still land on "unknown" rather than a fabricated role — only the message and the
   # (audit-mode) drift signal get more specific.
   if [ $AUDIT = 1 ]; then
-    if [ -n "$VIEWER_LOGIN" ] && [ "$acct" = "$VIEWER_LOGIN" ] && [ "$VIEWER_CAN_UPDATE" = "false" ]; then
+    # GitHub logins are case-insensitive; fold both sides before comparing so a
+    # non-canonical --machine/--reviewer case still narrows correctly (#1332).
+    if [ -n "$VIEWER_LOGIN" ] && [ "${acct,,}" = "${VIEWER_LOGIN,,}" ] && [ "$VIEWER_CAN_UPDATE" = "false" ]; then
       drift=1
       say "project admin $acct: missing — viewerCanUpdate=false for this token on project $NUM (see #1218); apply the grant: rerun without --audit"
     else
@@ -56,7 +67,9 @@ for acct in $MACHINE $REVIEWER; do
       applied=$((applied + 1))
       if [ "$DRY" = 1 ]; then
         :
-      elif landed=$(jq -r --arg a "$acct" '[.data.updateProjectV2Collaborators.collaborators.nodes[]? | (.login // .slug) | select(.==$a)] | length' <<<"$resp" 2>/dev/null) && [ "$landed" -gt 0 ] 2>/dev/null; then
+      # Case-fold both sides (jq ascii_downcase) so a non-canonical --machine/--reviewer
+      # case still matches the canonical login/slug in the mutation's roster (#1332).
+      elif landed=$(jq -r --arg a "$acct" '[.data.updateProjectV2Collaborators.collaborators.nodes[]? | (.login // .slug) | ascii_downcase | select(.==($a|ascii_downcase))] | length' <<<"$resp" 2>/dev/null) && [ "$landed" -gt 0 ] 2>/dev/null; then
         say "project admin $acct: ADMIN grant applied — confirmed present in post-grant collaborator roster"
       else
         say "project admin $acct: ADMIN grant mutation succeeded but $acct not found in the returned roster — verify manually: https://github.com/users/$OWNER/projects/$NUM/settings/access"
