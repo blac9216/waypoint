@@ -3,7 +3,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; MANIFESTS="$HERE/../manifests"
 DRY=${DRY_RUN:-0}
 say(){ printf '%s\n' "$*" >&2; }
-run(){ if [ "$DRY" = 1 ]; then printf 'DRY: %q ' "$@" >&2; printf '\n' >&2; else "$@"; fi; }
+run(){ if [ "$DRY" = 1 ]; then printf 'DRY: ' >&2; printf '%q ' "$@" >&2; printf '\n' >&2; else "$@"; fi; }
 need(){ command -v "$1" >/dev/null || { say "missing: $1"; exit 3; }; }
 need gh; need jq
 repo_nwo(){ gh repo view --json nameWithOwner --jq .nameWithOwner; }
