@@ -31,11 +31,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      # --shell=bash: several scripts here (e.g. configure-workflow's
-      # _lib.sh) are sourced helpers with no shebang by design, which
-      # shellcheck otherwise can't classify and flags as SC2148 (error).
-      # Forcing the shell on the command line is the standard fix for
-      # library scripts and doesn't require touching the files themselves.
+      # No global --shell=bash: that would be a dialect override, not a
+      # shebang-gap filler — it makes shellcheck judge every file as bash
+      # regardless of its own shebang, which suppresses the whole SC3xxx
+      # "bashism in a POSIX sh script" family, exactly the class -S warning
+      # exists to catch (#1330). configure-workflow's _lib.sh is the one
+      # shebang-less sourced helper here, so it self-declares its dialect
+      # with a `# shellcheck shell=bash` directive instead; every other
+      # script carries its own shebang and needs nothing.
       #
       # -S warning: tightened from -S error by #1235 once the sole warning-tier
       # finding (_lib.sh SC2034 on MANIFESTS, consumed only by sourcing scripts)
@@ -49,4 +52,4 @@ jobs:
           fi
           shellcheck --version
           find .claude/skills -type f -name "*.sh" -print0 | \
-            xargs -0 --no-run-if-empty shellcheck --shell=bash -S warning
+            xargs -0 --no-run-if-empty shellcheck -S warning
