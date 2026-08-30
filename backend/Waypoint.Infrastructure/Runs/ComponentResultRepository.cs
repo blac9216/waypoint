@@ -67,9 +67,9 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 			INSERT INTO component_results (
 				run_id, job_id, scan_plan_item_id, component_id, attempt_number, status,
 				cat_i_open, cat_ii_open, cat_iii_open, passed_count, not_applicable_count,
-				not_reviewed_count, skipped_count, detail
+				not_reviewed_count, skipped_count, execution_error_count, detail
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			RETURNING id
 			""", connection, transaction))
 		{
@@ -86,6 +86,7 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 			header.Parameters.AddWithValue(record.NotApplicableCount);
 			header.Parameters.AddWithValue(record.NotReviewedCount);
 			header.Parameters.AddWithValue(record.SkippedCount);
+			header.Parameters.AddWithValue(record.ExecutionErrorCount);
 			header.Parameters.AddWithValue((object?)record.Detail ?? DBNull.Value);
 
 			resultId = (Guid)(await header.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
@@ -148,15 +149,21 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 	/// findings, EXCEPT when the component is genuinely, entirely
 	/// <c>not_applicable</c> -- N/A is a determinate outcome, not a failure to
 	/// evaluate. Expressed positively, a zero-verdict component is counted when it
-	/// carries a <c>not_reviewed</c> or <c>skipped</c> finding, or when it has no
-	/// <c>not_applicable</c> finding at all (which covers the all-<c>execution_error</c>
-	/// component and the zero-findings component, since <c>execution_error</c> is
-	/// counted in no column here -- issue #1144).
+	/// carries a <c>not_reviewed</c>, <c>skipped</c>, or (issue #1144, migration 0080)
+	/// <c>execution_error</c> finding, or when it has no <c>not_applicable</c> finding
+	/// at all (which covers the zero-findings component -- there is no column that can
+	/// be positive for it).
 	///
-	/// Known gap, NOT closed here: a component mixing <c>not_applicable</c> with only
-	/// <c>execution_error</c> findings is indistinguishable from a genuine
-	/// all-<c>not_applicable</c> one at this grain, because <c>execution_error</c>
-	/// findings land in no count column. Issue #1144 is the durable fix.
+	/// Issue #1144 closes the one gap this predicate used to have: a component mixing
+	/// <c>not_applicable</c> with only <c>execution_error</c> findings used to be
+	/// indistinguishable from a genuine all-<c>not_applicable</c> one, because
+	/// <c>execution_error</c> landed in no count column and the predicate could only
+	/// infer it from <c>not_applicable_count = 0</c>. <c>execution_error_count &gt; 0</c>
+	/// is now its own explicit disjunct, so that mixed shape is correctly flagged --
+	/// pinned on its own by
+	/// <c>GetRunRollupAsync_NotApplicableComponentWithExecutionErrors_IsFlagged</c>
+	/// (issue #1261), whose seeded component has a NON-zero <c>not_applicable_count</c>
+	/// so no other disjunct can reach it.
 	/// </summary>
 	public async Task<RunResultRollup> GetRunRollupAsync(Guid runId, CancellationToken cancellationToken)
 	{
@@ -181,7 +188,7 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 			WITH latest AS (
 				SELECT DISTINCT ON (scan_plan_item_id)
 					status, cat_i_open, cat_ii_open, cat_iii_open, passed_count,
-					not_applicable_count, not_reviewed_count, skipped_count
+					not_applicable_count, not_reviewed_count, skipped_count, execution_error_count
 				FROM component_results
 				WHERE run_id = $1
 				ORDER BY scan_plan_item_id, attempt_number DESC
@@ -196,9 +203,10 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 				coalesce(sum(not_applicable_count), 0),
 				coalesce(sum(not_reviewed_count), 0),
 				coalesce(sum(skipped_count), 0),
+				coalesce(sum(execution_error_count), 0),
 				count(*) FILTER (
 					WHERE passed_count + cat_i_open + cat_ii_open + cat_iii_open = 0
-					  AND (not_reviewed_count > 0 OR skipped_count > 0 OR not_applicable_count = 0)
+					  AND (not_reviewed_count > 0 OR skipped_count > 0 OR execution_error_count > 0 OR not_applicable_count = 0)
 				) AS evaluated_zero_component_count
 			FROM latest
 			GROUP BY status
@@ -219,7 +227,8 @@ public sealed class ComponentResultRepository : IComponentResultRepository
 					NotApplicableCount: (int)reader.GetInt64(6),
 					NotReviewedCount: (int)reader.GetInt64(7),
 					SkippedCount: (int)reader.GetInt64(8),
-					EvaluatedZeroComponentCount: (int)reader.GetInt64(9)));
+					ExecutionErrorCount: (int)reader.GetInt64(9),
+					EvaluatedZeroComponentCount: (int)reader.GetInt64(10)));
 			}
 		}
 

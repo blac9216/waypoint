@@ -81,6 +81,52 @@ public sealed class HdfSeverityCounterTests
 		Assert.False(counts.NoControlsEvaluated);
 	}
 
+	/// <summary>
+	/// Issue #1144: a control whose only result is <c>error</c> (InSpec's
+	/// resource-raised-an-exception outcome) must NOT count as open -- it used to
+	/// (any non-passed/skipped/not_applicable status counted as open), which
+	/// disagreed with <see cref="ComponentFindingStatuses.IsOpen"/> (<c>failed</c>-only)
+	/// and made the same control read "open" here but "execution_error" on the
+	/// persisted-findings surface. It now counts toward <see cref="HdfSeverityCounts.ControlsExecutionError"/>
+	/// and is excluded from <see cref="HdfSeverityCounts.ControlsEvaluated"/> -- an
+	/// errored control produced no genuine verdict, so it is not "evaluated" either.
+	/// </summary>
+	[Fact]
+	public void CountOpenFindings_ErroredControl_IsExecutionErrorNotOpen()
+	{
+		string hdf = BuildHdf(
+		[
+			ControlJson("invented-control-01", "critical", [("error", "invented: undefined method on nil resource")]),
+			ControlJson("invented-control-02", "high", [("failed", "invented genuine failure")]),
+		]);
+
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(WriteTempHdf(hdf));
+
+		Assert.NotNull(counts);
+		// Only the genuinely-failed control is open -- the errored one is not.
+		Assert.Equal(1, counts.CatIOpen);
+		Assert.Equal(2, counts.ControlsTotal);
+		Assert.Equal(1, counts.ControlsEvaluated);
+		Assert.Equal(1, counts.ControlsExecutionError);
+	}
+
+	/// <summary>Issue #1144: a control with BOTH an error and a failed result is execution-error, not open -- matches HdfFindingsParser.MapStatus's own worst-of priority (error beats failed).</summary>
+	[Fact]
+	public void CountOpenFindings_ControlWithBothErrorAndFailedResults_IsExecutionErrorNotOpen()
+	{
+		string hdf = BuildHdf(
+		[
+			ControlJson("invented-control-01", "high", [("error", "invented: raised mid-check"), ("failed", "invented failure after the error")]),
+		]);
+
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(WriteTempHdf(hdf));
+
+		Assert.NotNull(counts);
+		Assert.Equal(0, counts.CatIOpen);
+		Assert.Equal(1, counts.ControlsExecutionError);
+		Assert.Equal(0, counts.ControlsEvaluated);
+	}
+
 	[Fact]
 	public void CountOpenFindings_MissingFile_ReturnsNullUncountable()
 	{
@@ -93,6 +139,101 @@ public sealed class HdfSeverityCounterTests
 	{
 		Assert.Equal(0, HdfSeverityCounts.Zero.ControlsTotal);
 		Assert.False(HdfSeverityCounts.Zero.NoControlsEvaluated);
+	}
+
+	/// <summary>
+	/// Issue #1144 review round 1, finding 2 -- the reviewer's first exact shape: an
+	/// ordinary InSpec control with one <c>passed</c> and one <c>skipped</c> result (an
+	/// unsupported <c>describe</c> block). Before <see cref="HdfControlClassifier"/> this
+	/// read "evaluated, not errored" here but <c>execution_error</c> on the persisted
+	/// findings. Both surfaces are asserted together so the reconciliation cannot silently
+	/// regress on one side.
+	/// </summary>
+	[Fact]
+	public void CountOpenFindings_PassedAndSkippedMixedControl_IsExecutionErrorOnBothSurfaces()
+	{
+		string hdf = BuildHdf(
+		[
+			ControlJson("invented-control-01", "high", [("passed", "invented ok"), ("skipped", "invented: unsupported describe block")]),
+		]);
+
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(WriteTempHdf(hdf));
+
+		Assert.NotNull(counts);
+		Assert.Equal(0, counts.CatIOpen);
+		Assert.Equal(0, counts.CatIIOpen);
+		Assert.Equal(0, counts.CatIIIOpen);
+		Assert.Equal(1, counts.ControlsTotal);
+		Assert.Equal(0, counts.ControlsEvaluated);
+		Assert.Equal(1, counts.ControlsExecutionError);
+
+		AssertPersistedStatus(hdf, ComponentFindingStatuses.ExecutionError);
+	}
+
+	/// <summary>
+	/// Issue #1144 review round 1, finding 2 -- the reviewer's second exact shape: a status
+	/// string this reader does not recognize. It used to be counted into
+	/// <c>cat_i/ii/iii_open</c> (every unrecognized status was "open"), which is precisely
+	/// the inflation this issue set out to remove; it is now an execution error on both
+	/// surfaces. Nothing unrecognized may land in a CAT open count.
+	/// </summary>
+	[Fact]
+	public void CountOpenFindings_UnrecognizedStatusString_IsExecutionErrorNotOpen_OnBothSurfaces()
+	{
+		string hdf = BuildHdf(
+		[
+			ControlJson("invented-control-01", "critical", [("invented_unknown_status", "invented: a status this reader does not know")]),
+		]);
+
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(WriteTempHdf(hdf));
+
+		Assert.NotNull(counts);
+		Assert.Equal(0, counts.CatIOpen);
+		Assert.Equal(0, counts.CatIIOpen);
+		Assert.Equal(0, counts.CatIIIOpen);
+		Assert.Equal(1, counts.ControlsTotal);
+		Assert.Equal(0, counts.ControlsEvaluated);
+		Assert.Equal(1, counts.ControlsExecutionError);
+
+		AssertPersistedStatus(hdf, ComponentFindingStatuses.ExecutionError);
+	}
+
+	/// <summary>
+	/// Issue #1144 review round 1, finding 2 -- the reviewer's third exact shape:
+	/// <c>failed</c> + <c>error</c> on one control. Worst-of ordering puts error first on
+	/// both surfaces, so the control is an execution error and contributes nothing to the
+	/// CAT open counts.
+	/// </summary>
+	[Fact]
+	public void CountOpenFindings_FailedAndErrorMixedControl_IsExecutionErrorOnBothSurfaces()
+	{
+		string hdf = BuildHdf(
+		[
+			ControlJson("invented-control-01", "high", [("failed", "invented genuine failure"), ("error", "invented: raised mid-check")]),
+		]);
+
+		HdfSeverityCounts? counts = HdfSeverityCounter.CountOpenFindings(WriteTempHdf(hdf));
+
+		Assert.NotNull(counts);
+		Assert.Equal(0, counts.CatIOpen);
+		Assert.Equal(1, counts.ControlsTotal);
+		Assert.Equal(0, counts.ControlsEvaluated);
+		Assert.Equal(1, counts.ControlsExecutionError);
+
+		AssertPersistedStatus(hdf, ComponentFindingStatuses.ExecutionError);
+	}
+
+	/// <summary>
+	/// Issue #1144: the reconciliation stated as a property rather than three examples --
+	/// for a single-control report, the CAT preview's bucket and the persisted finding's
+	/// status are two readings of the ONE <see cref="HdfControlClassifier"/> verdict.
+	/// </summary>
+	private static void AssertPersistedStatus(string hdf, string expectedStatus)
+	{
+		HdfParseResult parsed = HdfFindingsParser.Parse(hdf);
+		Assert.True(parsed.Success);
+		ComponentResultFinding finding = Assert.Single(parsed.Findings);
+		Assert.Equal(expectedStatus, finding.Status);
 	}
 
 	private static string WriteTempHdf(string json)

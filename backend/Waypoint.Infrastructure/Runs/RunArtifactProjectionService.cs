@@ -34,6 +34,8 @@ public sealed record RunArtifactRow(
 	int? ControlsTotal,
 	/// <summary>Issue #1132: controls that produced a real pass/fail outcome -- see <see cref="Waypoint.Core.Scans.HdfSeverityCounts.NoControlsEvaluated"/>. A Results-table reader must check this, not just the CAT counts, before reading a row as clean.</summary>
 	int? ControlsEvaluated,
+	/// <summary>Issue #1144: controls <see cref="Waypoint.Core.Scans.HdfControlClassifier"/> classifies as <c>execution_error</c> -- an <c>error</c> result, an unrecognized status string, or an unrecognized mixed result shape -- null exactly when <see cref="CountsAvailable"/> is false. Not folded into the CAT open counts: such a control never produced a genuine compliance verdict, matching <see cref="Waypoint.Core.Scans.ComponentFindingStatuses.IsOpen"/>'s <c>failed</c>-only definition. The persisted-findings surface uses the SAME shared classifier, so the two agree by construction rather than by parallel maintenance -- for any control both surfaces see. One documented divergence remains in the control SET, not the rule: <see cref="Waypoint.Core.Scans.HdfFindingsParser"/> drops a control with a missing/blank <c>id</c> (no identity to persist a finding under) while <see cref="Waypoint.Core.Scans.HdfSeverityCounter"/> counts every control the report describes, so an id-less errored control is counted here and in nothing on <c>execution_error_count</c>. Malformed input only, and the same asymmetry <c>controls_total</c> already carries.</summary>
+	int? ControlsExecutionError,
 	IReadOnlyList<string> ArtifactKinds,
 	string UploadStatus,
 	string? UploadDetail);
@@ -135,6 +137,7 @@ public sealed class RunArtifactProjectionService
 			CatIIIOpen: counts?.CatIIIOpen,
 			ControlsTotal: counts?.ControlsTotal,
 			ControlsEvaluated: counts?.ControlsEvaluated,
+			ControlsExecutionError: counts?.ControlsExecutionError,
 			ArtifactKinds: kinds,
 			UploadStatus: StigManagerUploadStatus(job),
 			UploadDetail: job.UploadStatus is null ? null : job.UploadDetail);

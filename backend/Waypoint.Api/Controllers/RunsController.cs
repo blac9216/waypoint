@@ -1073,6 +1073,7 @@ public sealed class RunsController : ControllerBase
 				NotApplicableCount: row.NotApplicableCount,
 				NotReviewedCount: row.NotReviewedCount,
 				SkippedCount: row.SkippedCount,
+				ExecutionErrorCount: row.ExecutionErrorCount,
 				EvaluatedZeroComponentCount: row.EvaluatedZeroComponentCount,
 				EvaluatedZeroControls: row.EvaluatedZeroControls))]));
 	}
@@ -1714,6 +1715,7 @@ public sealed class RunsController : ControllerBase
 			CatIIIOpen: row.CatIIIOpen,
 			ControlsTotal: row.ControlsTotal,
 			ControlsEvaluated: row.ControlsEvaluated,
+			ControlsExecutionError: row.ControlsExecutionError,
 			ArtifactKinds: row.ArtifactKinds,
 			UploadStatus: row.UploadStatus,
 			UploadDetail: row.UploadDetail);
