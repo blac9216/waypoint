@@ -29,9 +29,9 @@ while IFS= read -r pr; do
     metrics=$(jq -r '[.[]|capture("<!-- metrics (?<m>\\{.*?\\}) -->";"s")|.m]|last//empty' <<<"$icomments" | jq -c . 2>/dev/null || true); [ -n "$metrics" ] || metrics=null
     est=$(jq -r '.body|capture("## Estimate\\s*\\n(?<e>[^#]*)")|.e' <<<"$iss" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g' || true)
     # Anchor to the trailing letter only: a naive re-scan of the "Size: <letter>"
-  # substring for [SML] also matches the "S" in "Size" itself, corrupting M/L
-  # estimates into a two-line "S\n<letter>" string — see #1351.
-  size=$(grep -oE 'Size: *[SML]' <<<"$est" | head -1 | grep -oE '[SML]$' || true)
+    # substring for [SML] also matches the "S" in "Size" itself, corrupting M/L
+    # estimates into a two-line "S\n<letter>" string — see #1351.
+    size=$(grep -oE 'Size: *[SML]' <<<"$est" | head -1 | grep -oE '[SML]$' || true)
     parent=$(gh api "repos/$REPO/issues/$i" --jq '.parent_issue_url//empty' 2>/dev/null | grep -oE '[0-9]+$' || true)
     jq -nc --argjson pr "$pr" --argjson prf "$prf" --argjson iss "$iss" --arg assigned "$assigned" --argjson xref "$xref" --argjson metrics "$metrics" --arg est "$est" --arg size "$size" --arg parent "$parent" --arg adopt "$ADOPT" --argjson rounds "$rounds" --argjson findings "$findings" --argjson i "$i" '
       ($iss.labels|map(select(startswith("area:")))) as $areas |

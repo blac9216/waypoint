@@ -4,6 +4,15 @@ The **Suggested Test Steps**, **Risk**, and **Rollback** sections are required. 
 the PR is part of an epic, reference it (`Part of #<epic>`) below the `Closes` line. Closing keywords go on their
 own line at the top — never inside prose, where they close the wrong things at merge.
 
+Closing keywords must live in the PR **body** — GitHub only links issues from keywords
+in the body, not from commit messages, even when those commits are on the PR's branch.
+For multi-issue PRs, put every `Closes #<issue>` on its own line. This matters most at
+merge: a default `gh pr merge --squash` writes its own squash commit message and can
+silently drop closing keywords that only existed in individual commits, closing fewer
+issues than intended (or none). Before merging, verify `closingIssuesReferences` on the
+PR matches every issue you intend to close, and pass the PR body explicitly via
+`--body-file` to the squash so the keywords survive.
+
 ```markdown
 Closes #<issue>
 

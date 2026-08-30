@@ -54,7 +54,7 @@ BASE_ROWS=(
   "1.2.3|unparseable||M"
   "1e2|unparseable||M"
   ".5|unparseable||M"
-  "hh|unparseable||S"
+  "hh|unparseable||L"
   "-5|unparseable||S"
   "+5|unparseable||M"
   "100001|over||M"

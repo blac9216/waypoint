@@ -41,8 +41,10 @@ Deferred items: anything you notice and do not fix — "out of scope", "pre-exis
 
 When green: push; open a PR (NOT draft) titled `<type>(<scope>): <desc>` with body per
 the pr-body template (Suggested Test Steps you ACTUALLY ran, Risk, Rollback, Verified
-expectation). `Closes #<N>` on its own line (or `Refs` + exact remainder). Mirror the
-issue labels onto the PR.
+expectation). `Closes #<N>` on its own line in the PR **body** (or `Refs` + exact
+remainder) — for multiple issues, one `Closes #<N>` line per issue; commit messages
+alone do not link issues, and a squash-merge can drop them if they aren't in the body.
+Mirror the issue labels onto the PR.
 
 Final message: PR number, summary, key decisions, test results, deferred issues filed,
 no-subagents confirmation. Do not merge. Keep the worktree.
